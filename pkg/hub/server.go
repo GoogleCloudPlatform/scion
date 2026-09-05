@@ -4068,12 +4068,17 @@ func (s *Server) registerRoutes() {
 	// Public settings endpoint (no auth required for telemetry default, etc.)
 	s.mux.HandleFunc("/api/v1/settings/public", s.guarded("/api/v1/settings/public", s.handlePublicSettings))
 
-	// GitHub App integration endpoints: declarative guard enforces hub-admin.
-	s.mux.HandleFunc("/api/v1/github-app", s.guarded("/api/v1/github-app", s.handleGitHubApp))
-	s.mux.HandleFunc("/api/v1/github-app/installations", s.guarded("/api/v1/github-app/installations", s.handleGitHubAppInstallations))
-	s.mux.HandleFunc("/api/v1/github-app/installations/", s.guarded("/api/v1/github-app/installations/", s.handleGitHubAppInstallations))
-	s.mux.HandleFunc("/api/v1/github-app/installations/discover", s.guarded("/api/v1/github-app/installations/discover", s.handleGitHubAppDiscover))
-	s.mux.HandleFunc("/api/v1/github-app/sync-permissions", s.guarded("/api/v1/github-app/sync-permissions", s.handleGitHubAppSyncPermissions))
+	// GitHub App integration endpoints: method-aware permission enforcement.
+	// Read operations use hub.github_app.read; mutations use hub.github_app.update.
+	s.mux.HandleFunc("GET /api/v1/github-app", s.guarded("GET /api/v1/github-app", s.handleGetGitHubApp))
+	s.mux.HandleFunc("PUT /api/v1/github-app", s.guarded("PUT /api/v1/github-app", s.handleUpdateGitHubApp))
+	s.mux.HandleFunc("GET /api/v1/github-app/installations", s.guarded("GET /api/v1/github-app/installations", s.handleListGitHubAppInstallations))
+	s.mux.HandleFunc("POST /api/v1/github-app/installations", s.guarded("POST /api/v1/github-app/installations", s.handleCreateGitHubAppInstallation))
+	s.mux.HandleFunc("GET /api/v1/github-app/installations/", s.guarded("GET /api/v1/github-app/installations/", s.handleGitHubAppInstallationByIDRead))
+	s.mux.HandleFunc("PUT /api/v1/github-app/installations/", s.guarded("PUT /api/v1/github-app/installations/", s.handleGitHubAppInstallationByIDWrite))
+	s.mux.HandleFunc("DELETE /api/v1/github-app/installations/", s.guarded("DELETE /api/v1/github-app/installations/", s.handleGitHubAppInstallationByIDWrite))
+	s.mux.HandleFunc("POST /api/v1/github-app/installations/discover", s.guarded("POST /api/v1/github-app/installations/discover", s.handleGitHubAppDiscover))
+	s.mux.HandleFunc("POST /api/v1/github-app/sync-permissions", s.guarded("POST /api/v1/github-app/sync-permissions", s.handleGitHubAppSyncPermissions))
 
 	// Telegram account linking endpoints
 	s.mux.HandleFunc("/api/v1/telegram/link", s.guarded("/api/v1/telegram/link", s.handleTelegramLink))

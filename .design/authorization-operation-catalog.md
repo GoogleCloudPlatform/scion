@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 93
+**Operations:** 95
 
 ## Table of Contents
 
@@ -54,6 +54,8 @@
 - [hub.integrations.read](#hubintegrationsread) — Read integration configurations
 - [hub.teamsmanifest.read](#hubteamsmanifestread) — Read Teams integration manifest
 - [hub.metrics.read](#hubmetricsread) — Read metrics dashboard data
+- [hub.githubapp.read](#hubgithubappread) — Read GitHub App configuration and installations
+- [hub.githubapp.update](#hubgithubappupdate) — Update GitHub App configuration, manage installations, discover and sync
 - [agent.read](#agentread) — Read a single agent's metadata by ID
 - [agent.list](#agentlist) — List agents within the caller's authorized project scope
 - [agent.update](#agentupdate) — Update agent configuration or metadata
@@ -1978,6 +1980,73 @@
 **Resource Resolver:** hub-scoped
 
 **Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.githubapp.read
+
+**Domain:** hub
+
+**Description:** Read GitHub App configuration and installations
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/github-app` |
+| http_route | GET | `/api/v1/github-app/installations` |
+| http_route | GET | `/api/v1/github-app/installations/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.github_app.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.githubapp.update
+
+**Domain:** hub
+
+**Description:** Update GitHub App configuration, manage installations, discover and sync
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/github-app` |
+| http_route | POST | `/api/v1/github-app/installations` |
+| http_route | PUT | `/api/v1/github-app/installations/{id}` |
+| http_route | DELETE | `/api/v1/github-app/installations/{id}` |
+| http_route | POST | `/api/v1/github-app/installations/discover` |
+| http_route | POST | `/api/v1/github-app/sync-permissions` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.github_app.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
 
 **Denial Codes:** `forbidden`
 

@@ -27,7 +27,7 @@
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import type { AccessDeniedDetail } from '../client/api.js';
-import { showAccessDeniedToast } from '../utils/access-denied.js';
+import { showAccessDeniedToast, _resetDedupState } from '../utils/access-denied.js';
 
 // Stub sl-alert.toast() so Shoelace doesn't throw in test env.
 const origCreateElement = document.createElement.bind(document);
@@ -81,6 +81,7 @@ function fireAccessDenied(detail: AccessDeniedDetail): AccessDeniedDetail {
 
 describe('app-shell access-denied handler integration', () => {
   beforeEach(() => {
+    _resetDedupState();
     window.addEventListener(
       'scion:access-denied',
       appShellHandler as EventListener
@@ -93,6 +94,7 @@ describe('app-shell access-denied handler integration', () => {
       appShellHandler as EventListener
     );
     document.querySelectorAll('sl-alert').forEach((el) => el.remove());
+    _resetDedupState();
   });
 
   it('renders two-line toast on structured access-denied event', () => {
@@ -175,6 +177,7 @@ describe('app-shell access-denied handler integration', () => {
 
 describe('chat-shell access-denied handler integration', () => {
   beforeEach(() => {
+    _resetDedupState();
     window.addEventListener(
       'scion:access-denied',
       chatShellHandler as EventListener
@@ -187,6 +190,7 @@ describe('chat-shell access-denied handler integration', () => {
       chatShellHandler as EventListener
     );
     document.querySelectorAll('sl-alert').forEach((el) => el.remove());
+    _resetDedupState();
   });
 
   it('renders two-line toast on structured access-denied event', () => {
@@ -251,6 +255,7 @@ describe('chat-shell access-denied handler integration', () => {
 
 describe('app-shell + chat-shell deduplication', () => {
   beforeEach(() => {
+    _resetDedupState();
     // app-shell handler runs first (registered first, like parent element).
     window.addEventListener(
       'scion:access-denied',
@@ -272,6 +277,7 @@ describe('app-shell + chat-shell deduplication', () => {
       chatShellHandler as EventListener
     );
     document.querySelectorAll('sl-alert').forEach((el) => el.remove());
+    _resetDedupState();
   });
 
   it('produces exactly one toast when both shells are mounted', () => {
@@ -302,6 +308,7 @@ describe('app-shell + chat-shell deduplication', () => {
 
 describe('user admin denial payloads', () => {
   beforeEach(() => {
+    _resetDedupState();
     window.addEventListener(
       'scion:access-denied',
       appShellHandler as EventListener
@@ -314,6 +321,7 @@ describe('user admin denial payloads', () => {
       appShellHandler as EventListener
     );
     document.querySelectorAll('sl-alert').forEach((el) => el.remove());
+    _resetDedupState();
   });
 
   it('renders two-line toast for promote denial on user', () => {
@@ -410,5 +418,128 @@ describe('user admin denial payloads', () => {
     expect(alerts[0].querySelector('script')).toBeNull();
     const spans = alerts[0].querySelectorAll('span');
     expect(spans[0].textContent).toContain('<script>');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Duplicate-toast suppression (cross-event dedup)
+// ---------------------------------------------------------------------------
+
+describe('duplicate-toast suppression', () => {
+  beforeEach(() => {
+    _resetDedupState();
+    window.addEventListener(
+      'scion:access-denied',
+      appShellHandler as EventListener
+    );
+  });
+
+  afterEach(() => {
+    window.removeEventListener(
+      'scion:access-denied',
+      appShellHandler as EventListener
+    );
+    document.querySelectorAll('sl-alert').forEach((el) => el.remove());
+    _resetDedupState();
+  });
+
+  it('coalesces two same-key events within the 500ms window into one toast', () => {
+    fireAccessDenied({ action: 'read', resource: 'hub' });
+    fireAccessDenied({ action: 'read', resource: 'hub' });
+
+    expect(getAlerts().length).toBe(1);
+  });
+
+  it('allows same-key event after window expires', () => {
+    // First event
+    fireAccessDenied({ action: 'read', resource: 'hub' });
+    expect(getAlerts().length).toBe(1);
+
+    // Simulate window expiry by resetting dedup state
+    _resetDedupState();
+
+    // Second event after window
+    fireAccessDenied({ action: 'read', resource: 'hub' });
+    expect(getAlerts().length).toBe(2);
+  });
+
+  it('allows distinct action+resource keys within the window', () => {
+    fireAccessDenied({ action: 'read', resource: 'hub' });
+    fireAccessDenied({ action: 'update', resource: 'hub' });
+
+    expect(getAlerts().length).toBe(2);
+  });
+
+  it('allows distinct resource with same action within the window', () => {
+    fireAccessDenied({ action: 'read', resource: 'agent' });
+    fireAccessDenied({ action: 'read', resource: 'project' });
+
+    expect(getAlerts().length).toBe(2);
+  });
+
+  it('coalesces three identical rapid events', () => {
+    fireAccessDenied({ action: 'read', resource: 'hub' });
+    fireAccessDenied({ action: 'read', resource: 'hub' });
+    fireAccessDenied({ action: 'read', resource: 'hub' });
+
+    expect(getAlerts().length).toBe(1);
+  });
+
+  it('coalesces legacy events with no action or resource', () => {
+    // Both have empty action+resource -> same key ":"
+    fireAccessDenied({ reason: 'Insufficient permissions' });
+    fireAccessDenied({ reason: 'Insufficient permissions' });
+
+    expect(getAlerts().length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dedup with both shells mounted
+// ---------------------------------------------------------------------------
+
+describe('dedup with both app-shell and chat-shell mounted', () => {
+  beforeEach(() => {
+    _resetDedupState();
+    window.addEventListener(
+      'scion:access-denied',
+      appShellHandler as EventListener
+    );
+    window.addEventListener(
+      'scion:access-denied',
+      chatShellHandler as EventListener
+    );
+  });
+
+  afterEach(() => {
+    window.removeEventListener(
+      'scion:access-denied',
+      appShellHandler as EventListener
+    );
+    window.removeEventListener(
+      'scion:access-denied',
+      chatShellHandler as EventListener
+    );
+    document.querySelectorAll('sl-alert').forEach((el) => el.remove());
+    _resetDedupState();
+  });
+
+  it('produces one toast per event with both shells mounted', () => {
+    // Single event: app-shell handles, chat-shell skips (_handled flag)
+    fireAccessDenied({ action: 'read', resource: 'hub' });
+    expect(getAlerts().length).toBe(1);
+  });
+
+  it('coalesces duplicate events with both shells mounted', () => {
+    // Two identical events: first handled by app-shell, second suppressed by dedup
+    fireAccessDenied({ action: 'read', resource: 'hub' });
+    fireAccessDenied({ action: 'read', resource: 'hub' });
+    expect(getAlerts().length).toBe(1);
+  });
+
+  it('distinct events each produce one toast with both shells', () => {
+    fireAccessDenied({ action: 'read', resource: 'agent' });
+    fireAccessDenied({ action: 'update', resource: 'project' });
+    expect(getAlerts().length).toBe(2);
   });
 });

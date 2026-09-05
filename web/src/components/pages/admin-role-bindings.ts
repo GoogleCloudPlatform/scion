@@ -45,8 +45,6 @@ import {
   formatDateTime,
   getPrincipalIcon,
 } from '../shared/role-binding-utils.js';
-import '../shared/effective-access-boundary-notice.js';
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------

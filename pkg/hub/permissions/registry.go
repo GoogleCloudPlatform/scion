@@ -204,8 +204,8 @@ var Registry = []Permission{
 	{ID: "hub.teams_manifest.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read teams manifest", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.teams_manifest.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update teams manifest", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.validate.execute", Resource: ResourceHub, Action: ActionExecute, CapabilityKind: CapabilityScope, Description: "Validate resources", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
-	{ID: "hub.github_app.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read GitHub app configuration", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
-	{ID: "hub.github_app.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update GitHub app configuration", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.github_app.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read GitHub app configuration", Enforcement: []string{"pkg/hub/route_metadata.go"}},
+	{ID: "hub.github_app.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update GitHub app configuration", Enforcement: []string{"pkg/hub/route_metadata.go"}},
 	{ID: "hub.metrics.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read metrics dashboard", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.audit.read", Resource: ResourceHub, Action: ActionManage, CapabilityKind: CapabilityNone, Description: "Explain authorization decisions for other principals (super-admin only)", NonRouteUse: []string{"audit_authz.go explain-for-other-principal gate"}},
 

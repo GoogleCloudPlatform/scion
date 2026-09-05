@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -270,4 +271,352 @@ func TestRouteGuardPermissionBasedPath(t *testing.T) {
 			t.Fatalf("hub-admin with requireAdmin fallback: got %d, want 403; body: %s", rr.Code, rr.Body.String())
 		}
 	})
+}
+
+// TestRouteGuardStructuredDenialDetails verifies that permission-declared
+// RouteHubAdmin routes emit structured denial envelopes with resource_type
+// and denied_action, and that no secrets, IDs, or internal reasons leak.
+func TestRouteGuardStructuredDenialDetails(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+
+	// Create a member user (denied by default on hub-admin routes).
+	memberUser := &store.User{
+		ID: tid("member-sd"), Email: "member-sd@test.com", DisplayName: "Member",
+		Role: "member", Status: "active",
+	}
+	if err := s.CreateUser(ctx, memberUser); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+
+	okHandler := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	// parseErrorBody extracts the error envelope from a response body.
+	parseErrorBody := func(t *testing.T, rr *httptest.ResponseRecorder) map[string]interface{} {
+		t.Helper()
+		var body map[string]interface{}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("failed to parse response body: %v; body: %s", err, rr.Body.String())
+		}
+		errObj, ok := body["error"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("missing error object in response body: %s", rr.Body.String())
+		}
+		return errObj
+	}
+
+	t.Run("denied_user_gets_structured_resource_and_action", func(t *testing.T) {
+		meta := RouteMetadata{
+			Pattern:        "/test/structured-denial",
+			RouteID:        "test.structured.denial",
+			Classification: RouteHubAdmin,
+			Permission:     "hub.settings.read",
+			Resource:       "hub",
+			Action:         "read",
+		}
+		handler := srv.routeGuard(meta, okHandler)
+
+		member := NewAuthenticatedUser(tid("member-sd"), "member-sd@test.com", "Member", "member", "api")
+		req := httptest.NewRequest(http.MethodGet, "/test/structured-denial", nil)
+		req = req.WithContext(contextWithIdentity(ctx, member))
+		rr := httptest.NewRecorder()
+		handler(rr, req)
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("got %d, want 403; body: %s", rr.Code, rr.Body.String())
+		}
+
+		errObj := parseErrorBody(t, rr)
+		details, _ := errObj["details"].(map[string]interface{})
+		if details == nil {
+			t.Fatalf("expected structured details in denial; got nil; body: %s", rr.Body.String())
+		}
+		if details["resource_type"] != "hub" {
+			t.Errorf("resource_type = %v, want %q", details["resource_type"], "hub")
+		}
+		if details["denied_action"] != "read" {
+			t.Errorf("denied_action = %v, want %q", details["denied_action"], "read")
+		}
+	})
+
+	t.Run("non_user_identity_gets_structured_resource_and_action", func(t *testing.T) {
+		meta := RouteMetadata{
+			Pattern:        "/test/structured-nonuser",
+			RouteID:        "test.structured.nonuser",
+			Classification: RouteHubAdmin,
+			Permission:     "hub.config.update",
+			Resource:       "hub",
+			Action:         "update",
+		}
+		handler := srv.routeGuard(meta, okHandler)
+
+		// Use an agent identity (non-user)
+		agent := &agentIdentityWrapper{&AgentTokenClaims{}}
+		req := httptest.NewRequest(http.MethodPut, "/test/structured-nonuser", nil)
+		req = req.WithContext(contextWithIdentity(ctx, agent))
+		rr := httptest.NewRecorder()
+		handler(rr, req)
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("got %d, want 403; body: %s", rr.Code, rr.Body.String())
+		}
+
+		errObj := parseErrorBody(t, rr)
+		details, _ := errObj["details"].(map[string]interface{})
+		if details == nil {
+			t.Fatalf("expected structured details in denial; got nil; body: %s", rr.Body.String())
+		}
+		if details["resource_type"] != "hub" {
+			t.Errorf("resource_type = %v, want %q", details["resource_type"], "hub")
+		}
+		if details["denied_action"] != "update" {
+			t.Errorf("denied_action = %v, want %q", details["denied_action"], "update")
+		}
+	})
+
+	t.Run("no_secrets_or_ids_leak_in_denial", func(t *testing.T) {
+		meta := RouteMetadata{
+			Pattern:        "/test/no-leak",
+			RouteID:        "test.no.leak",
+			Classification: RouteHubAdmin,
+			Permission:     "hub.settings.read",
+			Resource:       "hub",
+			Action:         "read",
+		}
+		handler := srv.routeGuard(meta, okHandler)
+
+		member := NewAuthenticatedUser(tid("member-sd"), "member-sd@test.com", "Member", "member", "api")
+		req := httptest.NewRequest(http.MethodGet, "/test/no-leak", nil)
+		req = req.WithContext(contextWithIdentity(ctx, member))
+		rr := httptest.NewRecorder()
+		handler(rr, req)
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("got %d, want 403; body: %s", rr.Code, rr.Body.String())
+		}
+
+		errObj := parseErrorBody(t, rr)
+		body := rr.Body.String()
+
+		// No resource IDs, user IDs, evaluator reasons, role membership, or credentials
+		details, _ := errObj["details"].(map[string]interface{})
+		for _, forbidden := range []string{"resource_id", "reason", "role", "credential", "principal_id", "evaluator"} {
+			if _, ok := details[forbidden]; ok {
+				t.Errorf("details must not contain %q; body: %s", forbidden, body)
+			}
+		}
+		// The user's ID must not appear in the response
+		if errObj["code"] != ErrCodeForbidden {
+			t.Errorf("code = %v, want %q", errObj["code"], ErrCodeForbidden)
+		}
+	})
+
+	t.Run("unauthenticated_gets_401_not_structured_denial", func(t *testing.T) {
+		meta := RouteMetadata{
+			Pattern:        "/test/unauth-401",
+			RouteID:        "test.unauth.401",
+			Classification: RouteHubAdmin,
+			Permission:     "hub.settings.read",
+			Resource:       "hub",
+			Action:         "read",
+		}
+		handler := srv.routeGuard(meta, okHandler)
+
+		req := httptest.NewRequest(http.MethodGet, "/test/unauth-401", nil)
+		req = req.WithContext(ctx)
+		rr := httptest.NewRecorder()
+		handler(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("got %d, want 401; body: %s", rr.Code, rr.Body.String())
+		}
+	})
+}
+
+// TestGitHubAppRouteMethodMatrix verifies method-aware permission enforcement
+// on all GitHub App routes: unauthenticated → 401, read authority → allowed on
+// reads but denied on writes, update authority → allowed on writes, ordinary
+// member → 403 with structured details.
+func TestGitHubAppRouteMethodMatrix(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+
+	// Create users
+	adminUser := &store.User{
+		ID: tid("admin-ga"), Email: "admin-ga@test.com", DisplayName: "Admin",
+		Role: "admin", Status: "active",
+	}
+	memberUser := &store.User{
+		ID: tid("member-ga"), Email: "member-ga@test.com", DisplayName: "Member",
+		Role: "member", Status: "active",
+	}
+	if err := s.CreateUser(ctx, adminUser); err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	if err := s.CreateUser(ctx, memberUser); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+
+	// Seed super-admin binding for adminUser
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("get super-admin role def: %v", err)
+	}
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      adminUser.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	if err != nil {
+		t.Fatalf("create super-admin binding: %v", err)
+	}
+
+	type testCase struct {
+		name       string
+		method     string
+		path       string
+		wantAdmin  int // expected status for super-admin
+		wantMember int // expected status for ordinary member
+		wantUnauth int // expected status for unauthenticated
+	}
+
+	tests := []testCase{
+		// Read operations
+		{name: "GET github-app config", method: "GET", path: "/api/v1/github-app", wantAdmin: 200, wantMember: 403, wantUnauth: 401},
+		{name: "GET installations list", method: "GET", path: "/api/v1/github-app/installations", wantAdmin: 200, wantMember: 403, wantUnauth: 401},
+		{name: "GET installation by ID", method: "GET", path: "/api/v1/github-app/installations/999", wantAdmin: 404, wantMember: 403, wantUnauth: 401},
+		// Write operations
+		{name: "POST installations create", method: "POST", path: "/api/v1/github-app/installations", wantAdmin: 400, wantMember: 403, wantUnauth: 401},
+		{name: "POST installations discover", method: "POST", path: "/api/v1/github-app/installations/discover", wantAdmin: 503, wantMember: 403, wantUnauth: 401},
+		{name: "POST sync-permissions", method: "POST", path: "/api/v1/github-app/sync-permissions", wantAdmin: 502, wantMember: 403, wantUnauth: 401},
+		{name: "DELETE installation", method: "DELETE", path: "/api/v1/github-app/installations/999", wantAdmin: 404, wantMember: 403, wantUnauth: 401},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name+"_admin", func(t *testing.T) {
+			admin := NewAuthenticatedUser(tid("admin-ga"), "admin-ga@test.com", "Admin", "admin", "api")
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set("Content-Type", "application/json")
+			req = req.WithContext(contextWithIdentity(ctx, admin))
+			rr := httptest.NewRecorder()
+			srv.mux.ServeHTTP(rr, req)
+
+			if rr.Code != tt.wantAdmin {
+				t.Fatalf("admin %s %s: got %d, want %d; body: %s", tt.method, tt.path, rr.Code, tt.wantAdmin, rr.Body.String())
+			}
+		})
+
+		t.Run(tt.name+"_member_denied_with_details", func(t *testing.T) {
+			member := NewAuthenticatedUser(tid("member-ga"), "member-ga@test.com", "Member", "member", "api")
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set("Content-Type", "application/json")
+			req = req.WithContext(contextWithIdentity(ctx, member))
+			rr := httptest.NewRecorder()
+			srv.mux.ServeHTTP(rr, req)
+
+			if rr.Code != tt.wantMember {
+				t.Fatalf("member %s %s: got %d, want %d; body: %s", tt.method, tt.path, rr.Code, tt.wantMember, rr.Body.String())
+			}
+
+			// Verify structured denial details
+			var body map[string]interface{}
+			if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+				t.Fatalf("failed to parse response: %v", err)
+			}
+			errObj, _ := body["error"].(map[string]interface{})
+			if errObj == nil {
+				t.Fatalf("missing error object; body: %s", rr.Body.String())
+			}
+			details, _ := errObj["details"].(map[string]interface{})
+			if details == nil {
+				t.Fatalf("expected structured details; got nil; body: %s", rr.Body.String())
+			}
+			if details["resource_type"] != "hub" {
+				t.Errorf("resource_type = %v, want %q", details["resource_type"], "hub")
+			}
+			action := details["denied_action"]
+			if action != "read" && action != "update" {
+				t.Errorf("denied_action = %v, want %q or %q", action, "read", "update")
+			}
+		})
+
+		t.Run(tt.name+"_unauthenticated_401", func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req = req.WithContext(ctx)
+			rr := httptest.NewRecorder()
+			srv.mux.ServeHTTP(rr, req)
+
+			if rr.Code != tt.wantUnauth {
+				t.Fatalf("unauth %s %s: got %d, want %d; body: %s", tt.method, tt.path, rr.Code, tt.wantUnauth, rr.Body.String())
+			}
+		})
+	}
+}
+
+// TestLiveEndpointStructuredDenials is a regression test for the three live
+// endpoints reported in the initial investigation: access-constraints,
+// github-app, and server-config. All must produce the structured two-line
+// envelope when denied.
+func TestLiveEndpointStructuredDenials(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+
+	memberUser := &store.User{
+		ID: tid("member-le"), Email: "member-le@test.com", DisplayName: "Member",
+		Role: "member", Status: "active",
+	}
+	if err := s.CreateUser(ctx, memberUser); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+
+	member := NewAuthenticatedUser(tid("member-le"), "member-le@test.com", "Member", "member", "api")
+
+	endpoints := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "access-constraints", method: "GET", path: "/api/v1/admin/access-constraints"},
+		{name: "github-app", method: "GET", path: "/api/v1/github-app"},
+		{name: "server-config", method: "GET", path: "/api/v1/admin/server-config"},
+	}
+
+	for _, ep := range endpoints {
+		t.Run(ep.name, func(t *testing.T) {
+			req := httptest.NewRequest(ep.method, ep.path, nil)
+			req = req.WithContext(contextWithIdentity(ctx, member))
+			rr := httptest.NewRecorder()
+			srv.mux.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("got %d, want 403; body: %s", rr.Code, rr.Body.String())
+			}
+
+			var body map[string]interface{}
+			if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+				t.Fatalf("failed to parse response: %v; body: %s", err, rr.Body.String())
+			}
+			errObj, _ := body["error"].(map[string]interface{})
+			if errObj == nil {
+				t.Fatalf("missing error object; body: %s", rr.Body.String())
+			}
+			details, _ := errObj["details"].(map[string]interface{})
+			if details == nil {
+				t.Fatalf("expected structured details for %s; got nil; body: %s", ep.name, rr.Body.String())
+			}
+			if details["resource_type"] == nil {
+				t.Errorf("missing resource_type in details for %s", ep.name)
+			}
+			if details["denied_action"] == nil {
+				t.Errorf("missing denied_action in details for %s", ep.name)
+			}
+		})
+	}
 }

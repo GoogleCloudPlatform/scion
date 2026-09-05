@@ -148,11 +148,15 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/agent/gcp-token":                   "agent-token:gcp-token",
 	"/api/v1/agent/gcp-identity-token":          "agent-token:gcp-token",
 	"/api/v1/settings/public":                   "public:settings",
-	"/api/v1/github-app":                        "hub-admin:github-app",
-	"/api/v1/github-app/installations":          "hub-admin:github-app",
-	"/api/v1/github-app/installations/":         "hub-admin:github-app",
-	"/api/v1/github-app/installations/discover": "hub-admin:github-app",
-	"/api/v1/github-app/sync-permissions":       "hub-admin:github-app",
+	"GET /api/v1/github-app":                           "hub-admin:github-app",
+	"PUT /api/v1/github-app":                           "hub-admin:github-app",
+	"GET /api/v1/github-app/installations":             "hub-admin:github-app",
+	"POST /api/v1/github-app/installations":            "hub-admin:github-app",
+	"GET /api/v1/github-app/installations/":            "hub-admin:github-app",
+	"PUT /api/v1/github-app/installations/":            "hub-admin:github-app",
+	"DELETE /api/v1/github-app/installations/":         "hub-admin:github-app",
+	"POST /api/v1/github-app/installations/discover":   "hub-admin:github-app",
+	"POST /api/v1/github-app/sync-permissions":         "hub-admin:github-app",
 	"/api/v1/telegram/link":                     "authenticated:account-link",
 	"/api/v1/telegram/link/verify":              "authenticated:account-link",
 	"/api/v1/telegram/link/status":              "authenticated:account-link",
@@ -461,8 +465,7 @@ func scopedAdminUATRouteRequest(route string) (string, string, *bytes.Reader) {
 	switch route {
 	case "/api/v1/admin/users/invite", "/api/v1/admin/users/invite/bulk",
 		"/api/v1/admin/agents/reset-auth-all", "/api/v1/admin/maintenance/check-updates",
-		"/api/v1/admin/maintenance/restart", "/api/v1/github-app/installations/discover",
-		"/api/v1/github-app/sync-permissions":
+		"/api/v1/admin/maintenance/restart":
 		method = http.MethodPost
 	case "/api/v1/admin/server-config", "/api/v1/admin/project-defaults":
 		method = http.MethodPut

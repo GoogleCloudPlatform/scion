@@ -267,8 +267,7 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"hub.federation.read":         "NonRouteUse only, no route declaration",
 		"hub.federation.update":       "NonRouteUse only, no route declaration",
 		"hub.teams_manifest.update":   "NonRouteUse only, no route declaration",
-		"hub.github_app.read":         "NonRouteUse only, no route declaration",
-		"hub.github_app.update":       "NonRouteUse only, no route declaration",
+		// hub.github_app.read and hub.github_app.update: now route-enforced via route_metadata.go
 		"hub.audit.read":              "Super-admin audit explain, NonRouteUse only",
 
 		// User/project permissions — NonRouteUse only
@@ -320,6 +319,15 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 // routeMetadataKeys reads route_metadata.go source and extracts the set of
 // pattern keys from routeMetadataTable. This avoids importing pkg/hub (which
 // would create a dependency cycle: authzop → hub).
+// stripMethodPrefix removes a leading HTTP method prefix (e.g., "GET /foo" → "/foo").
+// Returns the original string unchanged if no method prefix is present.
+func stripMethodPrefix(pattern string) string {
+	if idx := strings.Index(pattern, " /"); idx >= 0 {
+		return pattern[idx+1:]
+	}
+	return pattern
+}
+
 func routeMetadataKeys(t *testing.T) map[string]bool {
 	t.Helper()
 	repoRoot := findRepoRoot(t)
@@ -334,7 +342,7 @@ func routeMetadataKeys(t *testing.T) map[string]bool {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		// Match lines like: "/api/v1/foo": RouteMetadata{...
-		// or "/api/v1/foo": {
+		// or "GET /api/v1/foo": {
 		if !strings.HasPrefix(line, `"`) {
 			continue
 		}
@@ -343,8 +351,9 @@ func routeMetadataKeys(t *testing.T) map[string]bool {
 			continue
 		}
 		key := line[1 : end+1]
-		// Route patterns always start with "/" (or are "/healthz", etc.)
-		if !strings.HasPrefix(key, "/") {
+		// Route patterns start with "/" or with "METHOD /" for method-qualified patterns.
+		pathPart := stripMethodPrefix(key)
+		if !strings.HasPrefix(pathPart, "/") {
 			continue
 		}
 		// Verify this is a map key (followed by ":")
@@ -369,15 +378,20 @@ func catalogAndExemptionPatterns() map[string]bool {
 	for _, spec := range Catalog {
 		for _, ep := range spec.EntryPoints {
 			patterns[ep.Pattern] = true
+			// Also add method-qualified pattern for matching route-metadata
+			// keys that use "METHOD /path" format.
+			if ep.Method != "" {
+				patterns[ep.Method+" "+ep.Pattern] = true
+			}
 		}
 	}
 	for _, ex := range EntryPointExemptions {
-		// Some exemptions use "METHOD /path" format; extract the path part
+		// Store both the raw pattern and the path-only form.
+		patterns[ex.Pattern] = true
 		pat := ex.Pattern
 		if idx := strings.Index(pat, " "); idx >= 0 {
-			pat = pat[idx+1:]
+			patterns[pat[idx+1:]] = true
 		}
-		patterns[pat] = true
 	}
 	return patterns
 }
@@ -706,15 +720,21 @@ func TestGenerateCoverageReport(t *testing.T) {
 func findUncoveredRoutes(routeKeys map[string]bool, covered map[string]bool) []string {
 	var uncovered []string
 	for route := range routeKeys {
-		base, hasSuffix := normalizeTrailingSlash(route)
+		// For method-prefixed routes ("GET /api/v1/foo"), check
+		// both the full key and the path-only form.
+		pathOnly := stripMethodPrefix(route)
+
+		base, hasSuffix := normalizeTrailingSlash(pathOnly)
 		if hasSuffix {
 			found := false
-			if covered[base] {
+			// Check trailing-slash match against covered patterns.
+			if covered[base] || covered[route] {
 				found = true
 			}
 			if !found {
 				for pat := range covered {
-					if strings.HasPrefix(pat, base) {
+					patPath := stripMethodPrefix(pat)
+					if strings.HasPrefix(patPath, base) {
 						found = true
 						break
 					}
@@ -724,7 +744,7 @@ func findUncoveredRoutes(routeKeys map[string]bool, covered map[string]bool) []s
 				uncovered = append(uncovered, route)
 			}
 		} else {
-			if !covered[route] {
+			if !covered[route] && !covered[pathOnly] {
 				uncovered = append(uncovered, route)
 			}
 		}
@@ -750,6 +770,12 @@ func findStaleExemptions(exemptions []EntryPointExemption, routeKeys map[string]
 			continue
 		}
 		if routeKeys[ex.Pattern] {
+			continue
+		}
+		// Also check path-only form for method-prefixed exemptions
+		// that correspond to method-prefixed route keys.
+		pathOnly := stripMethodPrefix(ex.Pattern)
+		if pathOnly != ex.Pattern && routeKeys[pathOnly] {
 			continue
 		}
 		stale = append(stale, ex.Pattern)

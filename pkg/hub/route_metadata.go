@@ -849,27 +849,52 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: GitHub App
+	// Hub admin: GitHub App (method-aware permission enforcement)
 	// -------------------------------------------------------------------------
-	"/api/v1/github-app": {
-		Pattern: "/api/v1/github-app", RouteID: "githubApp.config",
+	"GET /api/v1/github-app": {
+		Pattern: "GET /api/v1/github-app", RouteID: "githubApp.config.read",
 		Classification: RouteHubAdmin,
+		Permission: "hub.github_app.read", Resource: "hub", Action: "read",
 	},
-	"/api/v1/github-app/installations": {
-		Pattern: "/api/v1/github-app/installations", RouteID: "githubApp.installations",
+	"PUT /api/v1/github-app": {
+		Pattern: "PUT /api/v1/github-app", RouteID: "githubApp.config.update",
 		Classification: RouteHubAdmin,
+		Permission: "hub.github_app.update", Resource: "hub", Action: "update",
 	},
-	"/api/v1/github-app/installations/": {
-		Pattern: "/api/v1/github-app/installations/", RouteID: "githubApp.installations.byId",
+	"GET /api/v1/github-app/installations": {
+		Pattern: "GET /api/v1/github-app/installations", RouteID: "githubApp.installations.list",
 		Classification: RouteHubAdmin,
+		Permission: "hub.github_app.read", Resource: "hub", Action: "read",
 	},
-	"/api/v1/github-app/installations/discover": {
-		Pattern: "/api/v1/github-app/installations/discover", RouteID: "githubApp.installations.discover",
+	"POST /api/v1/github-app/installations": {
+		Pattern: "POST /api/v1/github-app/installations", RouteID: "githubApp.installations.create",
 		Classification: RouteHubAdmin,
+		Permission: "hub.github_app.update", Resource: "hub", Action: "update",
 	},
-	"/api/v1/github-app/sync-permissions": {
-		Pattern: "/api/v1/github-app/sync-permissions", RouteID: "githubApp.syncPermissions",
+	"GET /api/v1/github-app/installations/": {
+		Pattern: "GET /api/v1/github-app/installations/", RouteID: "githubApp.installations.read",
 		Classification: RouteHubAdmin,
+		Permission: "hub.github_app.read", Resource: "hub", Action: "read",
+	},
+	"PUT /api/v1/github-app/installations/": {
+		Pattern: "PUT /api/v1/github-app/installations/", RouteID: "githubApp.installations.update",
+		Classification: RouteHubAdmin,
+		Permission: "hub.github_app.update", Resource: "hub", Action: "update",
+	},
+	"DELETE /api/v1/github-app/installations/": {
+		Pattern: "DELETE /api/v1/github-app/installations/", RouteID: "githubApp.installations.delete",
+		Classification: RouteHubAdmin,
+		Permission: "hub.github_app.update", Resource: "hub", Action: "update",
+	},
+	"POST /api/v1/github-app/installations/discover": {
+		Pattern: "POST /api/v1/github-app/installations/discover", RouteID: "githubApp.installations.discover",
+		Classification: RouteHubAdmin,
+		Permission: "hub.github_app.update", Resource: "hub", Action: "update",
+	},
+	"POST /api/v1/github-app/sync-permissions": {
+		Pattern: "POST /api/v1/github-app/sync-permissions", RouteID: "githubApp.syncPermissions",
+		Classification: RouteHubAdmin,
+		Permission: "hub.github_app.update", Resource: "hub", Action: "update",
 	},
 
 	// -------------------------------------------------------------------------
@@ -1045,7 +1070,7 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 				user, ok := identity.(UserIdentity)
 				if !ok {
 					logAuthzDenial(r, identity, Resource{Type: meta.Resource}, Action(meta.Action), "non-user identity")
-					Forbidden(w)
+					writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
 					return
 				}
 				decision := s.authzService.Decide(r.Context(), AuthzRequest{
@@ -1057,7 +1082,7 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 				})
 				if !decision.Allowed {
 					logAuthzDenial(r, identity, Resource{Type: meta.Resource, ID: "hub"}, Action(meta.Action), decision.Reason)
-					Forbidden(w)
+					writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
 					return
 				}
 				next(w, r)

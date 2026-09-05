@@ -47,7 +47,6 @@ import '../shared/env-var-list.js';
 import '../shared/secret-list.js';
 import '../shared/shared-dir-list.js';
 import '../shared/project-members-editor.js';
-import '../shared/effective-access-boundary-notice.js';
 import '../shared/gcp-service-account-list.js';
 import type { SAListChangedDetail } from '../shared/gcp-service-account-list.js';
 import '../shared/scheduled-event-list.js';
@@ -1360,11 +1359,6 @@ export class ScionPageProjectSettings extends LitElement {
         sectionTitle="Members"
         sectionDescription="Users and groups with access to this project. Adding a member creates a project-scoped role binding."
       ></scion-project-members-editor>
-      <scion-effective-access-boundary-notice
-        contextType="project"
-        contextId=${this.project.id}
-      ></scion-effective-access-boundary-notice>
-
       <scion-boundary-summary-notice
         label="Access constraints affecting this project"
         .groups=${this.boundaryGroups}

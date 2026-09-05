@@ -92,6 +92,22 @@ export function formatAccessDenied(detail: AccessDeniedDetail): {
   return { primary, secondary };
 }
 
+// ---------------------------------------------------------------------------
+// Cross-event dedup state — centralized so app-shell and chat-shell cannot
+// each maintain divergent clocks. Two events with the same action+resource
+// key within DEDUP_WINDOW_MS are coalesced into one toast.
+// ---------------------------------------------------------------------------
+
+const DEDUP_WINDOW_MS = 500;
+let _lastToastKey = '';
+let _lastToastTime = 0;
+
+/** Exported for testing — resets the internal dedup state. */
+export function _resetDedupState(): void {
+  _lastToastKey = '';
+  _lastToastTime = 0;
+}
+
 /**
  * Show a two-line access-denied toast.
  *
@@ -99,8 +115,20 @@ export function formatAccessDenied(detail: AccessDeniedDetail): {
  * The first line is the friendly primary message; the second line (when
  * present) gives the denied action/resource context on a separate line
  * in a smaller font.
+ *
+ * Repeated events with the same action+resource key within 500ms are
+ * coalesced: the first fires a toast, subsequent duplicates are suppressed.
+ * Genuinely distinct denials (different action or resource) always fire.
  */
 export function showAccessDeniedToast(detail: AccessDeniedDetail): void {
+  // Coalesce rapid duplicate 403 toasts: suppress if same key within window.
+  const key = `${detail.action ?? ''}:${detail.resource ?? ''}`;
+  const now = Date.now();
+  if (key === _lastToastKey && now - _lastToastTime < DEDUP_WINDOW_MS) {
+    return;
+  }
+  _lastToastKey = key;
+  _lastToastTime = now;
   const { primary, secondary } = formatAccessDenied(detail);
 
   if (!secondary) {

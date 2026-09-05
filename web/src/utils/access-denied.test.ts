@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import type { AccessDeniedDetail } from '../client/api.js';
-import { formatAccessDenied, showAccessDeniedToast } from './access-denied.js';
+import { formatAccessDenied, showAccessDeniedToast, _resetDedupState } from './access-denied.js';
 
 /**
  * Stub sl-alert.toast() on any sl-alert elements created during a test.
@@ -255,9 +255,14 @@ describe('formatAccessDenied', () => {
 // ---------------------------------------------------------------------------
 
 describe('showAccessDeniedToast', () => {
+  beforeEach(() => {
+    _resetDedupState();
+  });
+
   afterEach(() => {
     document.querySelectorAll('sl-alert').forEach((el) => el.remove());
     vi.restoreAllMocks();
+    _resetDedupState();
   });
 
   it('creates an sl-alert with two-line content for structured detail', () => {
@@ -318,5 +323,47 @@ describe('showAccessDeniedToast', () => {
     expect(alert!.querySelector('img')).toBeNull();
     const span = alert!.querySelector('span');
     expect(span!.textContent).toContain('<img');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// showAccessDeniedToast — dedup coalescing
+// ---------------------------------------------------------------------------
+
+describe('showAccessDeniedToast dedup', () => {
+  beforeEach(() => {
+    _resetDedupState();
+    stubAlertToast();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.querySelectorAll('sl-alert').forEach((el) => el.remove());
+    _resetDedupState();
+  });
+
+  it('suppresses duplicate same-key toast within window', () => {
+    showAccessDeniedToast({ action: 'read', resource: 'hub', reason: 'Insufficient permissions' });
+    showAccessDeniedToast({ action: 'read', resource: 'hub', reason: 'Insufficient permissions' });
+
+    const alerts = document.querySelectorAll('sl-alert');
+    expect(alerts.length).toBe(1);
+  });
+
+  it('allows distinct keys within window', () => {
+    showAccessDeniedToast({ action: 'read', resource: 'hub' });
+    showAccessDeniedToast({ action: 'update', resource: 'hub' });
+
+    const alerts = document.querySelectorAll('sl-alert');
+    expect(alerts.length).toBe(2);
+  });
+
+  it('allows same key after dedup state reset (simulating window expiry)', () => {
+    showAccessDeniedToast({ action: 'read', resource: 'hub' });
+    _resetDedupState();
+    showAccessDeniedToast({ action: 'read', resource: 'hub' });
+
+    const alerts = document.querySelectorAll('sl-alert');
+    expect(alerts.length).toBe(2);
   });
 });

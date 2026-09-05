@@ -1385,6 +1385,51 @@ var Catalog = []OperationSpec{
 	},
 
 	// =====================================================================
+	// Domain: hub — GitHub App integration (D4 route guard conversion)
+	// =====================================================================
+	{
+		ID:          "hub.githubapp.read",
+		Domain:      "hub",
+		Description: "Read GitHub App configuration and installations",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app/installations", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app/installations/{id}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.github_app.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
+		ID:          "hub.githubapp.update",
+		Domain:      "hub",
+		Description: "Update GitHub App configuration, manage installations, discover and sync",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app/installations", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app/installations/{id}", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app/installations/{id}", Method: "DELETE"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app/installations/discover", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/github-app/sync-permissions", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.github_app.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+
+	// =====================================================================
 	// Domain: agent — agent read, update, and special operations
 	// =====================================================================
 	{
@@ -2451,12 +2496,9 @@ var EntryPointExemptions = []EntryPointExemption{
 	// Webhook endpoints — signature verification
 	{Pattern: "/api/v1/webhooks/github", Kind: ExemptionInternalOnly, Reason: "GitHub webhook, signature-verified", Owner: "route_metadata.go"},
 
-	// GitHub App admin endpoints — hub-admin without declared permission
-	{Pattern: "/api/v1/github-app", Kind: ExemptionHubAdmin, Reason: "GitHub App config, hub-admin via requireAdmin fallback; no declared permission yet", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/github-app/installations", Kind: ExemptionHubAdmin, Reason: "GitHub App installations, hub-admin via requireAdmin fallback; no declared permission yet", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/github-app/installations/", Kind: ExemptionHubAdmin, Reason: "GitHub App installation by ID, hub-admin via requireAdmin fallback; no declared permission yet", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/github-app/installations/discover", Kind: ExemptionHubAdmin, Reason: "GitHub App installation discover, hub-admin via requireAdmin fallback; no declared permission yet", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/github-app/sync-permissions", Kind: ExemptionHubAdmin, Reason: "GitHub App permission sync, hub-admin via requireAdmin fallback; no declared permission yet", Owner: "route_metadata.go"},
+	// GitHub App admin endpoints — fully converted to catalog operations
+	// (hub.githubapp.read, hub.githubapp.update) with method-aware route guard
+	// enforcement. Exemptions removed; see Catalog OperationSpec entries.
 
 	// Access constraint preview endpoints — hub-admin, access_constraint.admin permission
 	{Pattern: "/api/v1/admin/access-constraint-previews", Kind: ExemptionHubAdmin, Reason: "Access constraint previews, hub-admin with access_constraint.admin; PR #1445 B5 governance", Owner: "route_metadata.go"},
