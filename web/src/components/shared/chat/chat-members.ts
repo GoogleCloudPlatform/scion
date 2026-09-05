@@ -511,7 +511,6 @@ export class ScionChatMembers extends LitElement {
         </div>
         <a
           href="/agents/${a.id}/terminal"
-          target="_blank"
           class="agent-terminal"
           title="Open terminal"
           @click=${(e: Event) => e.stopPropagation()}
