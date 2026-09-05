@@ -39,6 +39,7 @@ import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { showConfirm } from './confirm-dialog.js';
 import { getLifecycleStatus, formatDateTime } from './role-binding-utils.js';
 
 import type { RedactionNotice } from '../../shared/access-boundaries.js';
@@ -108,6 +109,13 @@ interface AccessExplainDeniedPermission {
   }>;
 }
 
+/** Minimal role definition for the add-binding role selector. */
+interface RoleDefinitionSummary {
+  id: string;
+  name: string;
+  scopeType: string;
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -156,6 +164,29 @@ export class ScionEffectiveRoleProvenance extends LitElement {
    * user never sees a toggle that will be removed moments later (R6).
    */
   @state() private _explainPreChecked = false;
+
+  // ---------------------------------------------------------------------------
+  // Mutation state: delete direct bindings / add new binding
+  // ---------------------------------------------------------------------------
+
+  /** Whether the current user can create role bindings (role_binding.create). */
+  @state() private _canCreate = false;
+  /** Whether the current user can delete role bindings (role_binding.delete). */
+  @state() private _canDelete = false;
+  /** Whether capability pre-check for create/delete has resolved. */
+  @state() private _mutationPreChecked = false;
+  /** Whether a mutation (delete/create) is currently in progress. */
+  @state() private _mutationInProgress = false;
+  /** Feedback message after a mutation attempt. */
+  @state() private _mutationFeedback: { message: string; variant: 'success' | 'danger' } | null =
+    null;
+
+  // Add-binding dialog state
+  @state() private _showAddDialog = false;
+  @state() private _addRoles: RoleDefinitionSummary[] = [];
+  @state() private _addRoleId = '';
+  @state() private _addScopeType = 'system';
+  @state() private _addScopeId = '';
 
   static override styles = [
     srOnlyStyles,
@@ -450,6 +481,81 @@ export class ScionEffectiveRoleProvenance extends LitElement {
         overflow-wrap: anywhere;
       }
 
+      /* Delete icon on role cards */
+      .role-card-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+        margin-left: 0.5rem;
+      }
+
+      .role-card-actions sl-icon-button::part(base) {
+        color: var(--sl-color-danger-600, #dc2626);
+        padding: 0.125rem;
+      }
+
+      .role-card-actions sl-icon-button::part(base):hover {
+        color: var(--sl-color-danger-700, #b91c1c);
+      }
+
+      /* Header with add button */
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      /* Mutation feedback */
+      .mutation-feedback {
+        font-size: 0.8125rem;
+        padding: 0.5rem 0.75rem;
+        border-radius: var(--scion-radius, 0.5rem);
+        margin-bottom: 0.75rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .mutation-feedback.success {
+        background: var(--sl-color-success-100, #dcfce7);
+        color: var(--sl-color-success-700, #15803d);
+      }
+
+      .mutation-feedback.danger {
+        background: var(--sl-color-danger-100, #fee2e2);
+        color: var(--sl-color-danger-700, #b91c1c);
+      }
+
+      /* Add binding dialog */
+      .add-form-group {
+        margin-bottom: 0.75rem;
+      }
+
+      .add-form-group label {
+        display: block;
+        font-size: 0.8125rem;
+        font-weight: 500;
+        color: var(--scion-text, #1e293b);
+        margin-bottom: 0.25rem;
+      }
+
+      .locked-principal {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        background: var(--scion-bg-subtle, #f8fafc);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .locked-principal sl-icon {
+        font-size: 0.875rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
       @media (forced-colors: active) {
         .section {
           border-color: ButtonText;
@@ -510,6 +616,11 @@ export class ScionEffectiveRoleProvenance extends LitElement {
 
     this.loading = true;
     this.error = null;
+    this._mutationFeedback = null;
+
+    // Pre-click capability gate: check create/delete authorization concurrently
+    // with binding load so action buttons only appear for authorized users.
+    void this.preCheckMutationAccess();
 
     // Pre-click capability gate (R6): check effective-access authorization
     // concurrently with binding load. If the current user lacks hub.audit.read,
@@ -583,6 +694,155 @@ export class ScionEffectiveRoleProvenance extends LitElement {
       // visible so the user can retry after connectivity is restored.
     } finally {
       this._explainPreChecked = true;
+    }
+  }
+
+  /**
+   * Pre-check whether the current user can create/delete role bindings.
+   * Probes the create endpoint (POST with empty body → 400 means authorized,
+   * 403 means not). Uses suppressAccessDeniedToast since this is an
+   * authorization probe.  For delete, the same role_binding permission
+   * scope governs both create and delete, so a single check suffices.
+   */
+  private async preCheckMutationAccess(): Promise<void> {
+    if (this._mutationPreChecked) return;
+    try {
+      const res = await apiFetch('/api/v1/admin/role-bindings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+        suppressAccessDeniedToast: true,
+      });
+      // 400 = authorized but invalid body → user can create/delete
+      // 403 = not authorized
+      if (res.status === 400) {
+        this._canCreate = true;
+        this._canDelete = true;
+      } else if (res.status === 403) {
+        this._canCreate = false;
+        this._canDelete = false;
+      } else {
+        // Unexpected — default to visible so user gets server feedback
+        this._canCreate = true;
+        this._canDelete = true;
+      }
+    } catch {
+      // Network error — leave buttons visible, server will reject if needed
+      this._canCreate = true;
+      this._canDelete = true;
+    } finally {
+      this._mutationPreChecked = true;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mutation actions: delete binding / add binding
+  // ---------------------------------------------------------------------------
+
+  private async deleteBinding(binding: EffectiveRoleBinding): Promise<void> {
+    const roleName = binding.roleName || binding.roleDefinitionId;
+    const confirmed = await showConfirm(
+      `Remove the "${roleName}" role assignment from this ${this.principalType}?`,
+      {
+        title: 'Remove Role Assignment',
+        confirmText: 'Remove Assignment',
+        variant: 'danger',
+      }
+    );
+    if (!confirmed) return;
+
+    this._mutationInProgress = true;
+    this._mutationFeedback = null;
+    try {
+      const res = await apiFetch(`/api/v1/admin/role-bindings/${binding.id}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) {
+        const msg = await extractApiError(res, `HTTP ${res.status}`);
+        this._mutationFeedback = { message: msg, variant: 'danger' };
+        return;
+      }
+      this._mutationFeedback = { message: `Removed "${roleName}" assignment`, variant: 'success' };
+      // Refresh the binding list
+      void this.loadEffectiveRoles();
+    } catch (err) {
+      this._mutationFeedback = {
+        message: err instanceof Error ? err.message : 'Failed to remove binding',
+        variant: 'danger',
+      };
+    } finally {
+      this._mutationInProgress = false;
+    }
+  }
+
+  private async openAddDialog(): Promise<void> {
+    // Load available roles if not yet loaded
+    if (this._addRoles.length === 0) {
+      try {
+        const res = await apiFetch('/api/v1/admin/roles');
+        if (res.ok) {
+          const data = (await res.json()) as { items?: RoleDefinitionSummary[] };
+          this._addRoles = data.items || [];
+        }
+      } catch {
+        // Roles will remain empty — the select will show "No roles available"
+      }
+    }
+    this._addRoleId = '';
+    this._addScopeType = 'system';
+    this._addScopeId = '';
+    this._showAddDialog = true;
+  }
+
+  private get _filteredAddRoles(): RoleDefinitionSummary[] {
+    return this._addRoles.filter((r) => r.scopeType === this._addScopeType);
+  }
+
+  private get _addFormValid(): boolean {
+    if (!this._addRoleId) return false;
+    if (this._addScopeType === 'project' && !this._addScopeId) return false;
+    return true;
+  }
+
+  private async createBinding(): Promise<void> {
+    this._mutationInProgress = true;
+    this._mutationFeedback = null;
+    try {
+      const body: Record<string, string> = {
+        roleDefinitionId: this._addRoleId,
+        principalType: this.principalType,
+        principalId: this.principalId,
+        scopeType: this._addScopeType,
+      };
+      if (this._addScopeType === 'project' && this._addScopeId) {
+        body.scopeId = this._addScopeId;
+      }
+
+      const res = await apiFetch('/api/v1/admin/role-bindings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const msg = await extractApiError(res, `HTTP ${res.status}`);
+        this._mutationFeedback = { message: msg, variant: 'danger' };
+        return;
+      }
+
+      const roleName =
+        this._addRoles.find((r) => r.id === this._addRoleId)?.name || this._addRoleId;
+      this._mutationFeedback = { message: `Assigned "${roleName}" role`, variant: 'success' };
+      this._showAddDialog = false;
+      // Refresh the binding list
+      void this.loadEffectiveRoles();
+    } catch (err) {
+      this._mutationFeedback = {
+        message: err instanceof Error ? err.message : 'Failed to assign role',
+        variant: 'danger',
+      };
+    } finally {
+      this._mutationInProgress = false;
     }
   }
 
@@ -703,8 +963,9 @@ export class ScionEffectiveRoleProvenance extends LitElement {
           ${this.sectionTitle}
           <span class="role-count">(${this.bindings.length})</span>
         </h2>
+        ${this.renderAddButton()}
       </div>
-      ${this.renderContent()}
+      ${this.renderMutationFeedback()} ${this.renderContent()} ${this.renderAddDialog()}
     `;
   }
 
@@ -716,8 +977,38 @@ export class ScionEffectiveRoleProvenance extends LitElement {
             ${this.sectionTitle}
             <span class="role-count">(${this.bindings.length})</span>
           </h2>
+          ${this.renderAddButton()}
         </div>
-        ${this.renderContent()}
+        ${this.renderMutationFeedback()} ${this.renderContent()} ${this.renderAddDialog()}
+      </div>
+    `;
+  }
+
+  private renderAddButton() {
+    if (!this._mutationPreChecked || !this._canCreate) return nothing;
+    return html`
+      <sl-button
+        size="small"
+        variant="primary"
+        @click=${() => this.openAddDialog()}
+        ?disabled=${this._mutationInProgress}
+      >
+        <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+        Add Binding
+      </sl-button>
+    `;
+  }
+
+  private renderMutationFeedback() {
+    if (!this._mutationFeedback) return nothing;
+    return html`
+      <div class="mutation-feedback ${this._mutationFeedback.variant}" role="status">
+        <sl-icon
+          name=${this._mutationFeedback.variant === 'success'
+            ? 'check-circle'
+            : 'exclamation-triangle'}
+        ></sl-icon>
+        ${this._mutationFeedback.message}
       </div>
     `;
   }
@@ -756,6 +1047,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
 
   private renderRoleCard(binding: EffectiveRoleBinding) {
     const status = getLifecycleStatus(binding);
+    const isDirect = binding.source === 'direct';
 
     return html`
       <div class="role-card">
@@ -767,8 +1059,8 @@ export class ScionEffectiveRoleProvenance extends LitElement {
               ? html`<span>${binding.scopeDisplayName || binding.scopeId}</span>`
               : ''}
           </div>
-          <div class="provenance ${binding.source === 'direct' ? 'direct' : 'group'}">
-            ${binding.source === 'direct'
+          <div class="provenance ${isDirect ? 'direct' : 'group'}">
+            ${isDirect
               ? html`<sl-icon name="person-check"></sl-icon> Direct`
               : html`<sl-icon name="diagram-3"></sl-icon> Via group:
                   ${binding.sourceGroupName || binding.source}`}
@@ -796,7 +1088,126 @@ export class ScionEffectiveRoleProvenance extends LitElement {
               </span>`
             : ''}
         </div>
+        ${isDirect && this._canDelete && this._mutationPreChecked
+          ? html`
+              <div class="role-card-actions">
+                <sl-icon-button
+                  name="trash"
+                  label="Remove this direct role assignment"
+                  ?disabled=${this._mutationInProgress}
+                  @click=${() => this.deleteBinding(binding)}
+                ></sl-icon-button>
+              </div>
+            `
+          : nothing}
       </div>
+    `;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Add Binding Dialog
+  // ---------------------------------------------------------------------------
+
+  private renderAddDialog() {
+    if (!this._showAddDialog) return nothing;
+
+    return html`
+      <sl-dialog
+        label="Assign Role"
+        open
+        @sl-request-close=${() => {
+          if (!this._mutationInProgress) this._showAddDialog = false;
+        }}
+      >
+        <!-- Principal (locked) -->
+        <div class="add-form-group">
+          <label>Principal</label>
+          <div class="locked-principal">
+            <sl-icon name=${this.principalType === 'user' ? 'person' : 'cpu'}></sl-icon>
+            <span>${this.principalType}: ${this.principalId}</span>
+            <sl-icon name="lock" style="margin-left: auto;"></sl-icon>
+          </div>
+        </div>
+
+        <!-- Scope -->
+        <div class="add-form-group">
+          <sl-select
+            label="Scope"
+            .value=${this._addScopeType}
+            @sl-change=${(e: Event) => {
+              this._addScopeType = (e.target as HTMLSelectElement).value;
+              // Reset role if scope type changed
+              if (
+                this._addRoleId &&
+                this._addRoles.find((r) => r.id === this._addRoleId)?.scopeType !==
+                  this._addScopeType
+              ) {
+                this._addRoleId = '';
+              }
+            }}
+          >
+            <sl-option value="system">System</sl-option>
+            <sl-option value="project">Project</sl-option>
+          </sl-select>
+        </div>
+        ${this._addScopeType === 'project'
+          ? html`
+              <div class="add-form-group">
+                <sl-input
+                  label="Project ID"
+                  placeholder="Enter project ID"
+                  .value=${this._addScopeId}
+                  @sl-input=${(e: Event) => {
+                    this._addScopeId = (e.target as HTMLInputElement).value;
+                  }}
+                  required
+                ></sl-input>
+              </div>
+            `
+          : ''}
+
+        <!-- Role -->
+        <div class="add-form-group">
+          <sl-select
+            label="Role"
+            .value=${this._addRoleId}
+            @sl-change=${(e: Event) => {
+              this._addRoleId = (e.target as HTMLSelectElement).value;
+            }}
+          >
+            ${this._filteredAddRoles.length === 0
+              ? html`<sl-option value="" disabled>No roles available for this scope</sl-option>`
+              : this._filteredAddRoles.map(
+                  (role) => html`
+                    <sl-option value=${role.id}>
+                      ${role.name}
+                      <small style="color: var(--scion-text-muted, #64748b)">
+                        (${role.scopeType})
+                      </small>
+                    </sl-option>
+                  `
+                )}
+          </sl-select>
+        </div>
+
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${this._mutationInProgress}
+          @click=${() => {
+            this._showAddDialog = false;
+          }}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="primary"
+          ?loading=${this._mutationInProgress}
+          ?disabled=${!this._addFormValid}
+          @click=${() => this.createBinding()}
+          >Assign Role</sl-button
+        >
+      </sl-dialog>
     `;
   }
 

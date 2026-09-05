@@ -496,3 +496,207 @@ describe('Pre-click capability gating for effective-access (R6)', () => {
     expect(body).toContain('nothing');
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* 9. Delete icon only on direct bindings, not group-derived                  */
+/* -------------------------------------------------------------------------- */
+
+describe('Delete icon only on direct bindings', () => {
+  const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+
+  it('renderRoleCard shows trash icon only when binding is direct AND user can delete', () => {
+    // The trash icon must be gated by both isDirect and _canDelete
+    const renderCardMatch = source.match(
+      /private renderRoleCard\(binding[\s\S]*?(?=\n\s*\/\/\s*-{5,}|\n\s*private\s)/m
+    );
+    expect(renderCardMatch).toBeTruthy();
+    const body = renderCardMatch![0];
+
+    // Must contain the trash icon
+    expect(body).toContain('name="trash"');
+    // Must be gated by isDirect
+    expect(body).toContain('isDirect');
+    // Must be gated by _canDelete
+    expect(body).toContain('_canDelete');
+    // Must be gated by _mutationPreChecked (no icon before check resolves)
+    expect(body).toContain('_mutationPreChecked');
+  });
+
+  it('group-derived bindings never render a delete icon', () => {
+    // The trash icon is inside a conditional that requires isDirect === true.
+    // isDirect is computed from binding.source === 'direct'.
+    // Group-derived bindings have source !== 'direct', so isDirect is false.
+    const renderCardMatch = source.match(
+      /private renderRoleCard\(binding[\s\S]*?(?=\n\s*\/\/\s*-{5,}|\n\s*private\s)/m
+    );
+    expect(renderCardMatch).toBeTruthy();
+    const body = renderCardMatch![0];
+
+    // isDirect must be derived from binding.source === 'direct'
+    expect(body).toMatch(/isDirect\s*=\s*binding\.source\s*===\s*'direct'/);
+
+    // The trash icon conditional must use isDirect (truthy gate)
+    // Not a negation — the icon only appears when isDirect is true
+    expect(body).not.toMatch(/!isDirect\s*&&.*trash/);
+  });
+
+  it('delete action uses showConfirm for confirmation before API call', () => {
+    expect(source).toContain('showConfirm');
+    expect(source).toContain("import { showConfirm } from './confirm-dialog.js'");
+
+    // deleteBinding method must call showConfirm before the DELETE fetch
+    const deleteMatch = source.match(
+      /async deleteBinding\(binding[\s\S]*?(?=\n\s*(?:private|public|protected)\s)/m
+    );
+    expect(deleteMatch).toBeTruthy();
+    const body = deleteMatch![0];
+    expect(body).toContain('showConfirm');
+    expect(body).toContain("method: 'DELETE'");
+
+    // Confirm must come BEFORE the DELETE call
+    const confirmIdx = body.indexOf('showConfirm');
+    const deleteIdx = body.indexOf("method: 'DELETE'");
+    expect(confirmIdx).toBeLessThan(deleteIdx);
+  });
+
+  it('delete action refreshes bindings on success', () => {
+    const deleteMatch = source.match(
+      /async deleteBinding\(binding[\s\S]*?(?=\n\s*(?:private|public|protected)\s)/m
+    );
+    expect(deleteMatch).toBeTruthy();
+    expect(deleteMatch![0]).toContain('this.loadEffectiveRoles()');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 10. Add Binding button and dialog with locked principal                    */
+/* -------------------------------------------------------------------------- */
+
+describe('Add Binding button and dialog', () => {
+  const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+
+  it('renderAddButton is gated by _mutationPreChecked and _canCreate', () => {
+    const addBtnMatch = source.match(
+      /private renderAddButton\(\)[\s\S]*?(?=\n\s*private\s)/m
+    );
+    expect(addBtnMatch).toBeTruthy();
+    const body = addBtnMatch![0];
+    expect(body).toContain('_mutationPreChecked');
+    expect(body).toContain('_canCreate');
+    expect(body).toContain('Add Binding');
+  });
+
+  it('renderAddDialog shows locked principal with lock icon', () => {
+    const addDialogMatch = source.match(
+      /private renderAddDialog\(\)[\s\S]*?(?=\n\s*\/\/\s*-{5,}|\n\s*private\s)/m
+    );
+    expect(addDialogMatch).toBeTruthy();
+    const body = addDialogMatch![0];
+
+    // Must show the principal type and ID
+    expect(body).toContain('this.principalType');
+    expect(body).toContain('this.principalId');
+    // Must show a lock icon indicating principal is preselected
+    expect(body).toContain('name="lock"');
+    // Principal must not be editable (no principal-picker, no editable input)
+    expect(body).not.toContain('scion-principal-picker');
+  });
+
+  it('renderAddDialog includes role select and scope select', () => {
+    const addDialogMatch = source.match(
+      /private renderAddDialog\(\)[\s\S]*?(?=\n\s*\/\/\s*-{5,}|\n\s*private\s)/m
+    );
+    expect(addDialogMatch).toBeTruthy();
+    const body = addDialogMatch![0];
+
+    // Role select
+    expect(body).toContain('label="Role"');
+    // Scope select
+    expect(body).toContain('label="Scope"');
+    // Assign button
+    expect(body).toContain('Assign Role');
+  });
+
+  it('createBinding sends POST with principalType and principalId from component props', () => {
+    const createMatch = source.match(
+      /async createBinding\(\)[\s\S]*?(?=\n\s*(?:private|public|protected)\s)/m
+    );
+    expect(createMatch).toBeTruthy();
+    const body = createMatch![0];
+
+    // Must use this.principalType and this.principalId (locked, not from form)
+    expect(body).toContain('principalType: this.principalType');
+    expect(body).toContain('principalId: this.principalId');
+    // Must POST to the role-bindings endpoint
+    expect(body).toContain('/api/v1/admin/role-bindings');
+    expect(body).toContain("method: 'POST'");
+  });
+
+  it('createBinding refreshes bindings on success', () => {
+    const createMatch = source.match(
+      /async createBinding\(\)[\s\S]*?(?=\n\s*(?:private|public|protected)\s)/m
+    );
+    expect(createMatch).toBeTruthy();
+    expect(createMatch![0]).toContain('this.loadEffectiveRoles()');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 11. Mutation capability pre-check                                         */
+/* -------------------------------------------------------------------------- */
+
+describe('Mutation capability pre-check', () => {
+  const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+
+  it('preCheckMutationAccess is called during loadEffectiveRoles', () => {
+    const loadMatch = source.match(
+      /async loadEffectiveRoles\(\)[\s\S]*?(?=\n\s*\/\*\*|\n\s*private\s+async\s+preCheck)/m
+    );
+    expect(loadMatch).toBeTruthy();
+    expect(loadMatch![0]).toContain('preCheckMutationAccess');
+  });
+
+  it('preCheckMutationAccess uses suppressAccessDeniedToast', () => {
+    const preCheckMatch = source.match(
+      /async preCheckMutationAccess\(\)[\s\S]*?(?=\n\s*\/\/\s*-{5,}|\n\s*(?:private|public|protected)\s)/m
+    );
+    expect(preCheckMatch).toBeTruthy();
+    expect(preCheckMatch![0]).toContain('suppressAccessDeniedToast: true');
+  });
+
+  it('preCheckMutationAccess sets _mutationPreChecked in finally block', () => {
+    const preCheckMatch = source.match(
+      /async preCheckMutationAccess\(\)[\s\S]*?(?=\n\s*\/\/\s*-{5,}|\n\s*(?:private|public|protected)\s)/m
+    );
+    expect(preCheckMatch).toBeTruthy();
+    const body = preCheckMatch![0];
+    expect(body).toContain('this._mutationPreChecked = true');
+    // Must be in a finally block
+    expect(body).toContain('finally');
+    const finallyIdx = body.lastIndexOf('finally');
+    const preCheckedIdx = body.lastIndexOf('this._mutationPreChecked = true');
+    expect(preCheckedIdx).toBeGreaterThan(finallyIdx);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 12. Provenance labels: direct vs group                                    */
+/* -------------------------------------------------------------------------- */
+
+describe('Provenance labels for direct vs group-derived bindings', () => {
+  const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+
+  it('direct bindings show "Direct" with person-check icon', () => {
+    expect(source).toContain('name="person-check"');
+    expect(source).toContain('Direct');
+  });
+
+  it('group-derived bindings show "Via group:" with diagram-3 icon', () => {
+    expect(source).toContain('name="diagram-3"');
+    expect(source).toContain('Via group:');
+  });
+
+  it('group-derived bindings display sourceGroupName when available', () => {
+    expect(source).toContain('binding.sourceGroupName || binding.source');
+  });
+});
