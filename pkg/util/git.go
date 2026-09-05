@@ -590,10 +590,7 @@ func authenticatedCloneURL(cloneURL, token string) string {
 // If the requested branch does not exist on the remote, the clone falls back to
 // the remote's default branch and creates the requested branch locally.
 func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
-	authURL := cloneURL
-	if token != "" {
-		authURL = authenticatedCloneURL(cloneURL, token)
-	}
+	authURL := authenticatedCloneURL(cloneURL, token)
 
 	args := []string{"clone"}
 	if branch != "" {
