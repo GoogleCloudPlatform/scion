@@ -326,11 +326,14 @@ func TestRS1_ScopedUAT_MutationInProject(t *testing.T) {
 	// R3-2: mint a real project:manage UAT.
 	uatKey := mintScopedUAT(t, srv, ownerID, projectID, []string{"project:manage"})
 
-	// Use the UAT to remove the member in the SAME project — should succeed.
+	// R2-2: Membership mutations now enforce a credential-kind allowlist at
+	// the service boundary. UAT credentials are rejected regardless of scope.
+	// This is the correct behavior per the R2 hardening brief: only
+	// interactive and dev human sessions may perform membership mutations.
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodDelete,
 		"/api/v1/projects/"+projectID+"/members/"+binding.ID, nil)
-	assert.Equal(t, http.StatusNoContent, rec.Code,
-		"RS1 R3-2: project:manage UAT should allow removing a member in its scoped project (got %d: %s)", rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"R2-2: UAT credential should be rejected for membership mutations (got %d: %s)", rec.Code, rec.Body.String())
 }
 
 // TestRS1_ScopedUAT_MutationCrossProjectDenied proves a project:manage UAT

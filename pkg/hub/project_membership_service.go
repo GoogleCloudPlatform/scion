@@ -342,6 +342,19 @@ func (svc *ProjectMembershipService) isActorDirectOwnerFromStore(ctx context.Con
 // Global admin authority — hub-level role-binding permission override
 // ---------------------------------------------------------------------------
 
+// hubRoleBindingPermission returns the system-scope permission ID for the
+// given membership operation, or "" for unknown operations.
+func hubRoleBindingPermission(op MembershipOp) string {
+	switch op {
+	case MembershipOpAdd, MembershipOpUpdate:
+		return "role_binding.create"
+	case MembershipOpRemove:
+		return "role_binding.delete"
+	default:
+		return ""
+	}
+}
+
 // actorHasHubRoleBindingAuthority checks whether the actor holds the hub-level
 // role_binding permission corresponding to the membership operation (create for
 // add/update, delete for remove). This allows global administrators (super-admin,
@@ -355,17 +368,17 @@ func (svc *ProjectMembershipService) isActorDirectOwnerFromStore(ctx context.Con
 // hub/system role_binding.create or role_binding.delete authority must be able
 // to manage project-scoped role bindings even when the actor is not a project
 // member."
+//
+// NOTE: This method uses the AuthzService's own store (non-transactional).
+// It is suitable for pre-transaction checks (governance gate) but NOT for
+// authoritative in-transaction decisions. Use actorHasHubRoleBindingAuthorityTx
+// for the transactional recheck that closes the TOCTOU window.
 func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthority(ctx context.Context, actorID string, op MembershipOp) bool {
 	if svc.authz == nil {
 		return false
 	}
-	var permission string
-	switch op {
-	case MembershipOpAdd, MembershipOpUpdate:
-		permission = "role_binding.create"
-	case MembershipOpRemove:
-		permission = "role_binding.delete"
-	default:
+	permission := hubRoleBindingPermission(op)
+	if permission == "" {
 		return false
 	}
 
@@ -381,6 +394,177 @@ func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthority(ctx context
 		}
 	}
 	return false
+}
+
+// actorHasHubRoleBindingAuthorityTx re-evaluates hub-level role_binding
+// authority from the provided transactional store. This MUST be called inside
+// WithTx after the project lock to close the TOCTOU window between the
+// pre-transaction governance check and the locked decision point.
+//
+// Concurrent authority removals (system grant revocation, group membership
+// removal, actor suspension, access constraint changes) that commit between
+// the pre-lock check and lock acquisition are visible through the tx store
+// because the tx reads the latest committed state of role_bindings.
+//
+// SQLite safety: this reads system-scoped bindings through the tx store
+// (same connection the tx holds), avoiding the deadlock that would occur
+// if we called svc.authz.getEffectivePermissions (which uses the outer
+// store, a separate connection attempt on the single-writer pool).
+//
+// Returns (bool, error) so callers can distinguish "no authority" from
+// "store failure" and surface 500 instead of a misleading 403.
+func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthorityTx(ctx context.Context, tx store.Store, actorID string, op MembershipOp) (bool, error) {
+	permission := hubRoleBindingPermission(op)
+	if permission == "" {
+		return false, nil
+	}
+
+	now := svc.nowFunc()
+
+	// 1. Collect principals: direct user + group-expanded.
+	principals := []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: actorID}}
+	groupIDs, err := tx.GetEffectiveGroups(ctx, actorID)
+	if err != nil {
+		// Fail closed: group resolution failure means we cannot evaluate
+		// group-derived system authority.
+		return false, fmt.Errorf("group resolution for hub authority: %w", err)
+	}
+	for _, gid := range groupIDs {
+		principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: gid})
+	}
+
+	// 2. Fetch all bindings for these principals from the tx store.
+	bindings, err := tx.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	if err != nil {
+		return false, fmt.Errorf("list bindings for hub authority: %w", err)
+	}
+
+	// 3. Filter to system-scoped, active bindings and check permissions.
+	for _, b := range bindings {
+		if b.ScopeType != store.RoleScopeSystem {
+			continue
+		}
+		// Activation window check.
+		if b.NotBefore != nil && now.Before(*b.NotBefore) {
+			continue
+		}
+		if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
+			continue
+		}
+		rd, rdErr := tx.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if rdErr != nil {
+			continue // skip unresolvable — fail closed per permission
+		}
+		for _, p := range rd.Permissions {
+			if p == permission {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+// ---------------------------------------------------------------------------
+// Credential-kind enforcement at the service boundary (R2-2)
+// ---------------------------------------------------------------------------
+
+// allowedMembershipCredentials is the closed allowlist of credential kinds
+// permitted for exported ProjectMembershipService mutations (AddMember,
+// UpdateMemberRole, RemoveMember, TransferOwnership). Only interactive
+// session JWTs and dev credentials are admitted.
+//
+// HTTP handler-level checks remain as defense-in-depth, but cannot be the
+// only enforcement — direct service callers (e.g., via admin role-binding
+// endpoints) must also be gated.
+var allowedMembershipCredentials = map[CredentialKind]bool{
+	CredentialKindInteractive: true,
+	CredentialKindDev:         true,
+}
+
+// ErrCodeMembershipCredentialInsufficient is the stable denial code for
+// membership mutations rejected due to credential kind.
+const ErrCodeMembershipCredentialInsufficient = "credential_insufficient"
+
+// systemCallerContextKey marks a context as belonging to a trusted internal
+// caller (migration, reconciliation, system recovery). Contexts carrying
+// this key bypass the credential-kind check but NOT authorization.
+//
+// Usage (narrow and explicit):
+//
+//	ctx = WithSystemCaller(ctx)
+//	svc.AddMember(ctx, req)
+type systemCallerContextKey struct{}
+
+// WithSystemCaller returns a context marked as a trusted internal system
+// caller. This bypasses credential-kind enforcement in membership mutations.
+// Only used by narrow, trusted internal paths (migrations, reconciliation).
+func WithSystemCaller(ctx context.Context) context.Context {
+	return context.WithValue(ctx, systemCallerContextKey{}, true)
+}
+
+// isSystemCaller returns true if the context is marked as an internal system
+// caller via WithSystemCaller.
+func isSystemCaller(ctx context.Context) bool {
+	v, _ := ctx.Value(systemCallerContextKey{}).(bool)
+	return v
+}
+
+// checkMembershipCredential enforces the credential-kind allowlist and
+// actor-identity binding at the service boundary. Returns a denial
+// decision if the credential is rejected; nil if accepted.
+//
+// System callers (marked via WithSystemCaller) bypass the credential
+// check but are logged.
+func (svc *ProjectMembershipService) checkMembershipCredential(ctx context.Context, actorID string) *MembershipDecision {
+	// Trusted internal callers bypass the credential gate.
+	if isSystemCaller(ctx) {
+		return nil
+	}
+
+	cred := GetCredentialContextFromContext(ctx)
+
+	// Reject missing credential context (no credential == no trust).
+	if cred.Kind == "" {
+		return &MembershipDecision{
+			Allowed:    false,
+			DenialCode: ErrCodeMembershipCredentialInsufficient,
+			Reason:     "membership mutations require an interactive session credential",
+			HTTPStatus: 403,
+		}
+	}
+
+	// Enforce closed allowlist.
+	if !allowedMembershipCredentials[cred.Kind] {
+		return &MembershipDecision{
+			Allowed:    false,
+			DenialCode: ErrCodeMembershipCredentialInsufficient,
+			Reason:     fmt.Sprintf("membership mutations require an interactive session; credential kind %q is not allowed", cred.Kind),
+			HTTPStatus: 403,
+		}
+	}
+
+	// Bind credential identity to actor ID: the context identity must
+	// match the actor specified in the request.
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		return &MembershipDecision{
+			Allowed:    false,
+			DenialCode: ErrCodeMembershipCredentialInsufficient,
+			Reason:     "membership mutations require an authenticated identity",
+			HTTPStatus: 403,
+		}
+	}
+	if identity.ID() != actorID {
+		return &MembershipDecision{
+			Allowed:    false,
+			DenialCode: ErrCodeMembershipCredentialInsufficient,
+			Reason:     "credential identity does not match the actor",
+			HTTPStatus: 403,
+		}
+	}
+
+	return nil // accepted
 }
 
 // ---------------------------------------------------------------------------
@@ -516,6 +700,11 @@ func principalEligibleForRole(principalType, roleName string) bool {
 // AddMember adds a member to a project with governance, delegation, one-binding
 // enforcement, and audit.
 func (svc *ProjectMembershipService) AddMember(ctx context.Context, req MembershipRequest) (*MembershipResult, *MembershipDecision) {
+	// R2-2: credential-kind enforcement at the service boundary.
+	if denial := svc.checkMembershipCredential(ctx, req.Actor.ID()); denial != nil {
+		return nil, denial
+	}
+
 	// Resolve target role definition.
 	roleDef, err := svc.store.GetRoleDefinition(ctx, req.RoleDefID)
 	if err != nil {
@@ -563,13 +752,6 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		}
 	}
 
-	// Pre-compute hub authority override BEFORE the transaction. This reads
-	// system-scoped bindings which are not affected by the project lock, and
-	// avoids a SQLite deadlock (svc.authz.store vs tx.store on the same DB).
-	// The result is stable across the project lock because system-scoped
-	// bindings are not mutated by project membership operations.
-	preComputedHubOverride := svc.actorHasHubRoleBindingAuthority(ctx, req.Actor.ID(), req.Op)
-
 	// R3-1 + O-1: acquire project lock and check existing bindings inside the
 	// same transaction. The lock serializes concurrent membership mutations
 	// for this project (FOR UPDATE on PostgreSQL; no-op on SQLite). The D4
@@ -578,9 +760,12 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 	//
 	// R4 O-1: the actor's effective role and direct-owner status are
 	// re-evaluated from the transactional store AFTER acquiring the lock.
-	// This closes the TOCTOU window where a concurrent demotion could change
-	// the actor's authority between the pre-lock governance check and the
-	// locked decision point.
+	//
+	// R2-1: hub-level authority is re-evaluated inside the transaction from
+	// the tx store, closing the TOCTOU window where concurrent authority
+	// revocation (system grant removal, group membership change, actor
+	// suspension, access constraint) could commit between the pre-tx
+	// governance check and the locked decision point.
 	var result *MembershipResult
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
 		// Acquire project-scoped membership lock.
@@ -601,10 +786,15 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		hubOverride := false
 		actorIsDirectOwner := false
 		if actorRole == "" {
-			// Brief §1: hub-level authority override. Pre-computed before
-			// the transaction to avoid SQLite deadlock; system-scoped
-			// bindings are stable across the project lock.
-			if preComputedHubOverride {
+			// R2-1: revalidate hub-level authority from the tx store.
+			// This reads the latest committed state of system-scoped
+			// bindings through the same transaction, closing the TOCTOU
+			// window. Fail closed on store errors.
+			hasHubAuth, hubErr := svc.actorHasHubRoleBindingAuthorityTx(ctx, tx, req.Actor.ID(), req.Op)
+			if hubErr != nil {
+				return fmt.Errorf("hub authority revalidation failed (fail-closed): %w", hubErr)
+			}
+			if hasHubAuth {
 				hubOverride = true
 			} else {
 				return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
@@ -744,6 +934,11 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 // UpdateMemberRole changes a member's role with governance, delegation,
 // last-owner guard, one-binding enforcement, and audit.
 func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req MembershipRequest) (*MembershipResult, *MembershipDecision) {
+	// R2-2: credential-kind enforcement at the service boundary.
+	if denial := svc.checkMembershipCredential(ctx, req.Actor.ID()); denial != nil {
+		return nil, denial
+	}
+
 	// Fetch existing binding.
 	existing, err := svc.store.GetRoleBinding(ctx, req.BindingID)
 	if err != nil {
@@ -814,14 +1009,12 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		}
 	}
 
-	// Pre-compute hub authority override before the transaction.
-	preComputedHubOverride := svc.actorHasHubRoleBindingAuthority(ctx, req.Actor.ID(), req.Op)
-
 	// Atomic replacement inside a transaction: create new binding, delete old
 	// binding, enforce last-owner guard, and write audit record.
 	// R3-1: acquire project lock to prevent write-skew under PostgreSQL.
 	// R2-R1: the last-owner check is inside the transaction to prevent TOCTOU.
 	// R4 O-1: re-evaluate actor authority and re-fetch target inside the lock.
+	// R2-1: hub authority is re-evaluated inside the tx to close the TOCTOU window.
 	var created *store.RoleBinding
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
 		// Acquire project-scoped membership lock.
@@ -837,7 +1030,12 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		}
 		hubOverride := false
 		if actorRole == "" {
-			if preComputedHubOverride {
+			// R2-1: revalidate hub-level authority from the tx store.
+			hasHubAuth, hubErr := svc.actorHasHubRoleBindingAuthorityTx(ctx, tx, req.Actor.ID(), req.Op)
+			if hubErr != nil {
+				return fmt.Errorf("hub authority revalidation failed (fail-closed): %w", hubErr)
+			}
+			if hasHubAuth {
 				hubOverride = true
 			} else {
 				return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
@@ -948,6 +1146,11 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 // RemoveMember removes a project member with governance, last-owner guard,
 // and audit.
 func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req MembershipRequest) (*MembershipResult, *MembershipDecision) {
+	// R2-2: credential-kind enforcement at the service boundary.
+	if denial := svc.checkMembershipCredential(ctx, req.Actor.ID()); denial != nil {
+		return nil, denial
+	}
+
 	// Fetch binding.
 	binding, err := svc.store.GetRoleBinding(ctx, req.BindingID)
 	if err != nil {
@@ -972,13 +1175,11 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		return nil, &decision
 	}
 
-	// Pre-compute hub authority override before the transaction.
-	preComputedHubOverride := svc.actorHasHubRoleBindingAuthority(ctx, req.Actor.ID(), req.Op)
-
 	// Delete the binding, enforce last-owner guard, and write audit inside a
 	// transaction. R3-1: acquire project lock to prevent write-skew.
 	// R2-R1: the last-owner check MUST be inside the transaction.
 	// R4 O-1: re-evaluate actor authority and re-fetch target inside the lock.
+	// R2-1: hub authority is re-evaluated inside the tx to close the TOCTOU window.
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
 		// Acquire project-scoped membership lock.
 		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
@@ -993,10 +1194,12 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		}
 		hubOverride := false
 		if actorRole == "" {
-			// Hub-level authority pre-computed before the transaction to
-			// avoid SQLite deadlock; system-scoped bindings are stable
-			// across the project lock.
-			if preComputedHubOverride {
+			// R2-1: revalidate hub-level authority from the tx store.
+			hasHubAuth, hubErr := svc.actorHasHubRoleBindingAuthorityTx(ctx, tx, req.Actor.ID(), req.Op)
+			if hubErr != nil {
+				return fmt.Errorf("hub authority revalidation failed (fail-closed): %w", hubErr)
+			}
+			if hasHubAuth {
 				hubOverride = true
 			} else {
 				return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
@@ -1085,6 +1288,11 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 // owner binding is downgraded to project-member. This is one atomic operation
 // with post-state owner invariant verification per CT1 D1.
 func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req MembershipRequest) (*MembershipResult, *MembershipDecision) {
+	// R2-2: credential-kind enforcement at the service boundary.
+	if denial := svc.checkMembershipCredential(ctx, req.Actor.ID()); denial != nil {
+		return nil, denial
+	}
+
 	if req.NewOwnerID == "" {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: "newOwnerId is required", HTTPStatus: 400}
 	}
