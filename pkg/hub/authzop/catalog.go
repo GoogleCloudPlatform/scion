@@ -2571,7 +2571,6 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/handlers_roles.go — generic role-binding delete with super-admin guard (R6)
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_roles.go", Function: "deleteSystemSuperAdminBinding", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Super-admin binding deletion via generic DELETE endpoint inside atomic WithTx; guarded by CanDelegate, self-lockout, checkLastSuperAdminTx with serialization lock, and transactional audit (R6)", Scope: "pkg/hub/handlers_roles.go"}},
-	{File: "pkg/hub/handlers_roles.go", Function: "deleteSystemSuperAdminBinding", Symbol: "CreateMutationAudit", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Transactional audit record for super-admin binding deletion via generic endpoint (R6)", Scope: "pkg/hub/handlers_roles.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_agents_core.go — agent lifecycle

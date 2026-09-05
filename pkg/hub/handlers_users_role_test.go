@@ -674,6 +674,58 @@ func TestAdminEffectiveAccess_FailsClosedWithoutAuthz(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// R7: HEAD short-circuit and error behavior on effective-access
+// ---------------------------------------------------------------------------
+
+// TestAdminEffectiveAccess_HeadShortCircuit verifies that a HEAD request
+// returns 200 with an empty body after authorization succeeds, without
+// loading the target user or computing any effective-access data.
+func TestAdminEffectiveAccess_HeadShortCircuit(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("head-shortcircuit"),
+		Email:       "headshort@example.com",
+		DisplayName: "Head Short",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	rec := doRequest(t, srv, http.MethodHead,
+		"/api/v1/admin/effective-access?principalType=user&principalId="+user.ID, nil)
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"HEAD should return 200 after authorization succeeds")
+	assert.Empty(t, rec.Body.Bytes(),
+		"HEAD response body must be empty — no computation should occur")
+}
+
+// TestAdminEffectiveAccess_HeadDenied verifies that a HEAD request from
+// an unauthorized user returns 403, matching the same authorization path
+// as GET.
+func TestAdminEffectiveAccess_HeadDenied(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequestNoAuth(t, srv, http.MethodHead,
+		"/api/v1/admin/effective-access?principalType=user&principalId=foo", nil)
+	assert.True(t, rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden,
+		"unauthenticated HEAD should be rejected, got %d", rec.Code)
+}
+
+// TestAdminEffectiveAccess_HeadNoTargetValidation verifies that HEAD does
+// not fail when the principalId does not exist — proving it short-circuits
+// before loading/validating the target.
+func TestAdminEffectiveAccess_HeadNoTargetValidation(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodHead,
+		"/api/v1/admin/effective-access?principalType=user&principalId=nonexistent-user-id", nil)
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"HEAD should succeed even with nonexistent principalId — no target validation")
+}
+
+// ---------------------------------------------------------------------------
 // Role mutation fails closed without authzService
 // ---------------------------------------------------------------------------
 
@@ -2239,6 +2291,214 @@ func TestConcurrentDemotion_AtMostOneSucceeds(t *testing.T) {
 	}
 	assert.GreaterOrEqual(t, activeAdminCount, 1,
 		"system must always have at least one active super-admin after concurrent demotions")
+
+	// Re-activate dev for cleanup.
+	devUser.Status = "active"
+	_ = s.UpdateUser(ctx, devUser)
+}
+
+// TestConcurrentDemoteVsBindingDelete verifies the last-SuperAdmin invariant
+// when one goroutine demotes a user (PATCH role=member) while another
+// concurrently deletes a different user's super-admin binding via the generic
+// DELETE /api/v1/admin/role-bindings/{id} endpoint. At most one operation
+// should succeed and at least one active authenticatable SuperAdmin must
+// remain.
+func TestConcurrentDemoteVsBindingDelete(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create three admins: dev (the caller, will be suspended) + admin1 + admin2.
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	admin1 := &store.User{
+		ID: tid("race-dv-admin1"), Email: "racedvadmin1@test.com",
+		DisplayName: "Race DV Admin 1", Role: "admin", Status: "active",
+	}
+	admin2 := &store.User{
+		ID: tid("race-dv-admin2"), Email: "racedvadmin2@test.com",
+		DisplayName: "Race DV Admin 2", Role: "admin", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, admin1))
+	require.NoError(t, s.CreateUser(ctx, admin2))
+	srv.ensureSuperAdminBinding(ctx, admin1.ID)
+	srv.ensureSuperAdminBinding(ctx, admin2.ID)
+
+	// Suspend dev so only admin1 and admin2 are active admins.
+	devUser.Status = "suspended"
+	require.NoError(t, s.UpdateUser(ctx, devUser))
+
+	// Get admin2's binding ID for the generic DELETE path.
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	admin2Bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, admin2.ID)
+	require.NoError(t, err)
+	var admin2BindingID string
+	for _, b := range admin2Bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+			admin2BindingID = b.ID
+			break
+		}
+	}
+	require.NotEmpty(t, admin2BindingID, "admin2 must have a super-admin binding")
+
+	// Concurrently: demote admin1 (PATCH) and delete admin2's binding (DELETE).
+	var wg sync.WaitGroup
+	results := make([]int, 2)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+admin1.ID,
+			map[string]string{"role": "member"})
+		results[0] = rec.Code
+	}()
+	go func() {
+		defer wg.Done()
+		rec := doRequest(t, srv, http.MethodDelete,
+			"/api/v1/admin/role-bindings/"+admin2BindingID, nil)
+		results[1] = rec.Code
+	}()
+	wg.Wait()
+
+	// Count successful authority-removing operations.
+	successCount := 0
+	for _, code := range results {
+		if code == http.StatusOK || code == http.StatusNoContent {
+			successCount++
+		}
+	}
+	assert.LessOrEqual(t, successCount, 1,
+		"at most one concurrent authority-removal should succeed; PATCH=%d DELETE=%d", results[0], results[1])
+
+	// Verify invariant: at least one active super-admin remains.
+	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeSystem, "")
+	require.NoError(t, err)
+	now := time.Now()
+	activeAdminCount := 0
+	for _, b := range bindings {
+		if b.RoleDefinitionID != rd.ID || b.PrincipalType != store.RoleBindingPrincipalUser {
+			continue
+		}
+		if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
+			continue
+		}
+		if b.NotBefore != nil && now.Before(*b.NotBefore) {
+			continue
+		}
+		u, err := s.GetUser(ctx, b.PrincipalID)
+		if err != nil || u.Status != "active" {
+			continue
+		}
+		activeAdminCount++
+	}
+	assert.GreaterOrEqual(t, activeAdminCount, 1,
+		"system must always have at least one active super-admin after concurrent demote/delete")
+
+	// Re-activate dev for cleanup.
+	devUser.Status = "active"
+	_ = s.UpdateUser(ctx, devUser)
+}
+
+// TestConcurrentBindingDeleteVsBindingDelete verifies the last-SuperAdmin
+// invariant when two goroutines concurrently delete different users'
+// super-admin bindings via the generic DELETE /api/v1/admin/role-bindings/{id}
+// endpoint. At most one should succeed.
+func TestConcurrentBindingDeleteVsBindingDelete(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create three admins: dev (the caller, will be suspended) + admin1 + admin2.
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	admin1 := &store.User{
+		ID: tid("race-dd-admin1"), Email: "raceddadmin1@test.com",
+		DisplayName: "Race DD Admin 1", Role: "admin", Status: "active",
+	}
+	admin2 := &store.User{
+		ID: tid("race-dd-admin2"), Email: "raceddadmin2@test.com",
+		DisplayName: "Race DD Admin 2", Role: "admin", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, admin1))
+	require.NoError(t, s.CreateUser(ctx, admin2))
+	srv.ensureSuperAdminBinding(ctx, admin1.ID)
+	srv.ensureSuperAdminBinding(ctx, admin2.ID)
+
+	// Suspend dev so only admin1 and admin2 are active admins.
+	devUser.Status = "suspended"
+	require.NoError(t, s.UpdateUser(ctx, devUser))
+
+	// Get binding IDs for both admins.
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	getBindingID := func(userID string) string {
+		bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+		require.NoError(t, err)
+		for _, b := range bindings {
+			if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+				return b.ID
+			}
+		}
+		t.Fatalf("no super-admin binding for user %s", userID)
+		return ""
+	}
+	admin1BindingID := getBindingID(admin1.ID)
+	admin2BindingID := getBindingID(admin2.ID)
+
+	// Concurrently delete both bindings.
+	var wg sync.WaitGroup
+	results := make([]int, 2)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		rec := doRequest(t, srv, http.MethodDelete,
+			"/api/v1/admin/role-bindings/"+admin1BindingID, nil)
+		results[0] = rec.Code
+	}()
+	go func() {
+		defer wg.Done()
+		rec := doRequest(t, srv, http.MethodDelete,
+			"/api/v1/admin/role-bindings/"+admin2BindingID, nil)
+		results[1] = rec.Code
+	}()
+	wg.Wait()
+
+	// Count successful deletions.
+	successCount := 0
+	for _, code := range results {
+		if code == http.StatusNoContent {
+			successCount++
+		}
+	}
+	assert.LessOrEqual(t, successCount, 1,
+		"at most one concurrent binding deletion should succeed; results: %v", results)
+
+	// Verify invariant: at least one active super-admin remains.
+	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeSystem, "")
+	require.NoError(t, err)
+	now := time.Now()
+	activeAdminCount := 0
+	for _, b := range bindings {
+		if b.RoleDefinitionID != rd.ID || b.PrincipalType != store.RoleBindingPrincipalUser {
+			continue
+		}
+		if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
+			continue
+		}
+		if b.NotBefore != nil && now.Before(*b.NotBefore) {
+			continue
+		}
+		u, err := s.GetUser(ctx, b.PrincipalID)
+		if err != nil || u.Status != "active" {
+			continue
+		}
+		activeAdminCount++
+	}
+	assert.GreaterOrEqual(t, activeAdminCount, 1,
+		"system must always have at least one active super-admin after concurrent binding deletions")
 
 	// Re-activate dev for cleanup.
 	devUser.Status = "active"

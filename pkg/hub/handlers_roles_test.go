@@ -2238,3 +2238,100 @@ func TestGenericDeleteBinding_SuperAdmin_DevAllowed(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code,
 		"dev credential should be allowed for super-admin binding deletion")
 }
+
+// TestGenericDeleteBinding_SuperAdmin_InteractiveAllowed verifies that
+// interactive session credentials CAN delete super-admin bindings.
+func TestGenericDeleteBinding_SuperAdmin_InteractiveAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	targetID := tid("ga-cred-int-ok")
+	seedRolesTestUser(t, s, targetID, "gacredintok@test.local")
+	targetBinding := createSuperAdminBindingDirect(t, s, targetID)
+
+	rec := doDeleteBindingWithCredentialKind(t, srv, devUser, CredentialKindInteractive, targetBinding.ID)
+	assert.Equal(t, http.StatusNoContent, rec.Code,
+		"interactive credential should be allowed for super-admin binding deletion")
+
+	// Verify the binding is actually gone.
+	rd, _ := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	bindings, _ := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, targetID)
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+			t.Fatal("super-admin binding should have been deleted by interactive credential")
+		}
+	}
+}
+
+// TestGenericDeleteBinding_SuperAdmin_FederationDenied verifies that
+// federation credentials cannot delete super-admin bindings via the generic
+// endpoint.
+func TestGenericDeleteBinding_SuperAdmin_FederationDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	targetID := tid("ga-cred-fed")
+	seedRolesTestUser(t, s, targetID, "gacredfed@test.local")
+	targetBinding := createSuperAdminBindingDirect(t, s, targetID)
+
+	rec := doDeleteBindingWithCredentialKind(t, srv, devUser, CredentialKindFederation, targetBinding.ID)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"federation credential should be denied for super-admin binding deletion")
+
+	// Verify binding was NOT mutated.
+	rd, _ := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	bindings, _ := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, targetID)
+	found := false
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+			found = true
+		}
+	}
+	assert.True(t, found, "super-admin binding must survive denied federation credential")
+}
+
+// TestGenericDeleteBinding_SuperAdmin_MissingCredentialDenied verifies that a
+// request with no CredentialContext set (zero-value Kind) is denied. This
+// covers legacy callers or test contexts that set only an identity.
+func TestGenericDeleteBinding_SuperAdmin_MissingCredentialDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	targetID := tid("ga-cred-none")
+	seedRolesTestUser(t, s, targetID, "gacrednone@test.local")
+	targetBinding := createSuperAdminBindingDirect(t, s, targetID)
+
+	// Build a request with identity but NO credential context.
+	path := "/api/v1/admin/role-bindings/" + targetBinding.ID
+	req := httptest.NewRequest(http.MethodDelete, path, nil)
+	reqCtx := req.Context()
+	identity := NewAuthenticatedUser(devUser.ID, devUser.Email, devUser.DisplayName, devUser.Role, "web")
+	reqCtx = contextWithIdentity(reqCtx, identity)
+	// Deliberately omit contextWithCredentialContext.
+	req = req.WithContext(reqCtx)
+
+	rec := httptest.NewRecorder()
+	srv.handleAdminRoleBindingByID(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"missing credential context should be denied for super-admin binding deletion")
+
+	// Verify binding was NOT mutated.
+	rd, _ := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	bindings, _ := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, targetID)
+	found := false
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+			found = true
+		}
+	}
+	assert.True(t, found, "super-admin binding must survive missing credential context")
+}
