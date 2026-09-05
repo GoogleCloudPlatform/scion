@@ -1005,8 +1005,8 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 	// and authorization evaluates the resolved UUID.
 	if req.ScopeType == store.RoleScopeProject && req.ScopeID != "" {
 		if gouuid.Validate(req.ScopeID) != nil {
-			// Not a valid UUID — treat as project slug.
-			project, err := s.store.GetProjectBySlug(r.Context(), req.ScopeID)
+			// Not a valid UUID — treat as project slug (case-insensitive).
+			project, err := s.store.GetProjectBySlugCaseInsensitive(r.Context(), req.ScopeID)
 			if err != nil {
 				if errors.Is(err, store.ErrNotFound) {
 					BadRequest(w, "project not found with slug: "+req.ScopeID)

@@ -449,6 +449,12 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 	if filter.Slug != "" {
 		query.Where(project.SlugEqualFold(filter.Slug))
 	}
+	if filter.Search != "" {
+		query.Where(project.Or(
+			project.NameContainsFold(filter.Search),
+			project.SlugContainsFold(filter.Search),
+		))
+	}
 	if filter.IsTemplate != nil {
 		if *filter.IsTemplate {
 			query.Where(projectLabelContains(store.LabelTemplate, "true"))

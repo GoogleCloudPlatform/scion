@@ -348,4 +348,85 @@ describe('scion-project-picker', () => {
     expect(empty).not.toBeNull();
     expect(empty?.textContent?.trim()).toContain('No projects found');
   });
+
+  it('search query changes mocked results in dropdown', async () => {
+    // Handler that returns different results based on the search query.
+    const alphaProjects = [{ id: 'proj-a', name: 'Alpha Project', slug: 'alpha' }];
+    const betaProjects = [{ id: 'proj-b', name: 'Beta Project', slug: 'beta' }];
+
+    const calls: string[] = [];
+    const handler = (url: string | URL | Request): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      calls.push(path);
+      if (path.includes('search=alpha')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ projects: alphaProjects }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      if (path.includes('search=beta')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ projects: betaProjects }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ projects: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    };
+
+    const el = await createElement(handler);
+
+    // Search for "alpha"
+    (el as Record<string, (...args: unknown[]) => void>)['handleSearchInput']({
+      target: { value: 'alpha' },
+    } as unknown as Event);
+    await new Promise((r) => setTimeout(r, 350));
+    await el.updateComplete;
+
+    const results1 = (el as Record<string, unknown>)['searchResults'] as Array<{ id: string }>;
+    expect(results1.length).toBe(1);
+    expect(results1[0].id).toBe('proj-a');
+
+    // Search for "beta" — should produce different results.
+    (el as Record<string, (...args: unknown[]) => void>)['handleSearchInput']({
+      target: { value: 'beta' },
+    } as unknown as Event);
+    await new Promise((r) => setTimeout(r, 350));
+    await el.updateComplete;
+
+    const results2 = (el as Record<string, unknown>)['searchResults'] as Array<{ id: string }>;
+    expect(results2.length).toBe(1);
+    expect(results2[0].id).toBe('proj-b');
+  });
+
+  it('selected UUID from dropdown is emitted via project-change', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createElement(handler);
+
+    const events: Array<{ projectId: string; displayLabel: string }> = [];
+    el.addEventListener('project-change', (e: Event) => {
+      events.push((e as CustomEvent).detail);
+    });
+
+    // Select a project from the dropdown — the UUID should be emitted.
+    (el as Record<string, (...args: unknown[]) => void>)['selectProject']({
+      id: 'proj-uuid-3',
+      name: 'Gamma Project',
+      slug: 'gamma-project',
+    });
+    await el.updateComplete;
+
+    expect(events.length).toBeGreaterThan(0);
+    const last = events[events.length - 1];
+    expect(last.projectId).toBe('proj-uuid-3');
+    expect(last.displayLabel).toBe('Gamma Project');
+  });
 });

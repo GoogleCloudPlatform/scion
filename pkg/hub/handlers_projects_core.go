@@ -171,12 +171,20 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sanitize optional search parameter: trim whitespace, bound length,
+	// and reject strings that are effectively empty after trimming.
+	searchRaw := strings.TrimSpace(query.Get("search"))
+	if len(searchRaw) > 200 {
+		searchRaw = searchRaw[:200]
+	}
+
 	filter := store.ProjectFilter{
 		OwnerID:   query.Get("ownerId"),
 		GitRemote: util.NormalizeGitRemote(query.Get("gitRemote")),
 		BrokerID:  query.Get("brokerId"),
 		Name:      query.Get("name"),
 		Slug:      query.Get("slug"),
+		Search:    searchRaw,
 	}
 
 	// Template filtering: default to excluding template projects.

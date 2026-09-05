@@ -983,6 +983,138 @@ func TestProjectList(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Tests: Project list search parameter (R1)
+// ---------------------------------------------------------------------------
+
+func TestProjectList_SearchByName(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Seed three projects with distinct names and slugs.
+	for _, p := range []struct{ id, name, slug string }{
+		{"search-proj-1", "Dashboard App", "dashboard-app"},
+		{"search-proj-2", "Dashboard API", "dashboard-api"},
+		{"search-proj-3", "Auth Service", "auth-svc"},
+	} {
+		require.NoError(t, s.CreateProject(ctx, &store.Project{
+			ID: tid(p.id), Name: p.name, Slug: p.slug,
+		}))
+	}
+
+	// Search by partial name — should match both Dashboard projects.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects?search=dashboard", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp ListProjectsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, 2, len(resp.Projects), "search=dashboard should match two projects")
+}
+
+func TestProjectList_SearchBySlug(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("slug-search-1"), Name: "Foo Project", Slug: "my-foo-bar",
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("slug-search-2"), Name: "Baz Project", Slug: "totally-different",
+	}))
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects?search=foo-bar", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp ListProjectsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, 1, len(resp.Projects), "search=foo-bar should match slug")
+	require.Equal(t, "my-foo-bar", resp.Projects[0].Slug)
+}
+
+func TestProjectList_SearchCaseInsensitive(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("ci-search-1"), Name: "MyCoolProject", Slug: "my-cool-project",
+	}))
+
+	// Upper-case search term should match lower-case name substring.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects?search=MYCOOL", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp ListProjectsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, 1, len(resp.Projects), "case-insensitive search should match")
+}
+
+func TestProjectList_SearchNonmatch(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("nomatch-1"), Name: "Alpha Project", Slug: "alpha-proj",
+	}))
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects?search=zzznomatch", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp ListProjectsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, 0, len(resp.Projects), "nonmatching search should return empty")
+}
+
+func TestProjectList_SearchWildcardSafe(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("wild-1"), Name: "Hello%World", Slug: "hello-world",
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("wild-2"), Name: "Hello Earth", Slug: "hello-earth",
+	}))
+
+	// Searching for literal "%" should not act as a SQL LIKE wildcard.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects?search=%25World", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp ListProjectsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, 1, len(resp.Projects), "%% in search should be literal, matching only Hello%%World")
+}
+
+func TestProjectList_SearchWhitespace(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("ws-1"), Name: "White Space", Slug: "white-space",
+	}))
+
+	// Pure whitespace search should be trimmed to empty — no filter applied,
+	// returns all projects.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects?search=++++", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp ListProjectsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.GreaterOrEqual(t, len(resp.Projects), 1, "whitespace-only search returns all projects")
+}
+
+func TestProjectList_NoSearchUnchanged(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("nosearch-1"), Name: "One", Slug: "one",
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("nosearch-2"), Name: "Two", Slug: "two",
+	}))
+
+	// Without search param, all projects should be returned.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp ListProjectsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, 2, len(resp.Projects), "no search param should return all")
+}
+
 func TestProjectRegister(t *testing.T) {
 	srv, _ := testServer(t)
 

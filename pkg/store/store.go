@@ -424,6 +424,7 @@ type ProjectFilter struct {
 	BrokerID        string // Filter by contributing broker
 	Name            string // Filter by exact name (case-insensitive)
 	Slug            string // Filter by exact slug (case-insensitive)
+	Search          string // Substring match on name and slug (case-insensitive)
 
 	// MemberOrOwnerIDs, when non-empty, restricts results to projects whose ID
 	// is in this set OR whose owner_id matches OwnerID. OwnerID and this

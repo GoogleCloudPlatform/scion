@@ -1130,6 +1130,37 @@ func TestRolesAPI_CreateRoleBinding_ProjectScope_SlugResolvesToUUID(t *testing.T
 	assert.Equal(t, projectID, binding.ScopeID, "slug scopeId should be resolved to project UUID")
 }
 
+func TestRolesAPI_CreateRoleBinding_ProjectScope_MixedCaseSlug(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	// Create project with lowercase slug.
+	projectID := tid("proj-mixcase")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "Mixed Case Project", Slug: "my-mixed-project",
+	}))
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "proj-mixcase-role",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read"},
+	})
+
+	seedRolesTestUser(t, s, tid("proj-mixcase-user"), "proj-mixcase@test.com")
+
+	// Use mixed-case slug — should resolve case-insensitively to UUID.
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      tid("proj-mixcase-user"),
+		ScopeType:        "project",
+		ScopeID:          "My-Mixed-PROJECT",
+	})
+
+	assert.Equal(t, projectID, binding.ScopeID,
+		"mixed-case slug should resolve case-insensitively to canonical UUID")
+}
+
 func TestRolesAPI_CreateRoleBinding_ProjectScope_UnknownSlug(t *testing.T) {
 	srv, _ := testServer(t)
 
