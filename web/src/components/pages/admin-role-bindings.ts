@@ -30,12 +30,14 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import type { PrincipalChangeDetail } from '../shared/principal-picker.js';
+import type { ProjectChangeDetail } from '../shared/project-picker.js';
 import type { SecurityReviewDetail } from '../shared/security-review-dialog.js';
 import {
   parseSecurityReviewResponse,
   parseLockoutResponse,
 } from '../shared/security-review-dialog.js';
 import '../shared/principal-picker.js';
+import '../shared/project-picker.js';
 import '../shared/security-review-dialog.js';
 import {
   SYSTEM_DIRECT_USER_ONLY_ROLES,
@@ -1324,15 +1326,12 @@ export class ScionPageAdminRoleBindings extends LitElement {
         ${this.formScopeType === 'project'
           ? html`
               <div class="form-group">
-                <sl-input
-                  label="Project ID"
-                  placeholder="Enter project ID"
-                  .value=${this.formScopeId}
-                  @sl-input=${(e: Event) => {
-                    this.formScopeId = (e.target as HTMLInputElement).value;
+                <scion-project-picker
+                  label="Project"
+                  @project-change=${(e: CustomEvent<ProjectChangeDetail>) => {
+                    this.formScopeId = e.detail.projectId;
                   }}
-                  required
-                ></sl-input>
+                ></scion-project-picker>
               </div>
             `
           : ''}

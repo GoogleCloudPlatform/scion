@@ -415,6 +415,151 @@ describe('admin-role-detail', () => {
 // Route / permission registration tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Add Binding form: principal picker and project picker
+// ---------------------------------------------------------------------------
+
+describe('admin-role-detail: add binding form', () => {
+  let el: HTMLElement | null = null;
+
+  afterEach(() => {
+    if (el && el.parentNode) {
+      el.parentNode.removeChild(el);
+    }
+    el = null;
+    vi.restoreAllMocks();
+  });
+
+  it('renders principal-picker in add binding form', async () => {
+    const handler = createFetchHandler({ role: CUSTOM_ROLE, bindings: BINDINGS });
+    el = await createElement(handler);
+
+    // Switch to bindings tab
+    const tabs = el.shadowRoot?.querySelectorAll('sl-tab');
+    const bindingsTab = [...(tabs ?? [])].find((t) =>
+      t.textContent?.includes('Bindings')
+    );
+    bindingsTab?.click();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Click Add Binding button
+    const addBtn = el.shadowRoot?.querySelector(
+      '.bindings-header sl-button[variant="primary"]'
+    ) as HTMLElement;
+    addBtn?.click();
+    await new Promise((r) => setTimeout(r, 50));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).updateComplete;
+
+    const picker = el.shadowRoot?.querySelector('scion-principal-picker');
+    expect(picker).not.toBeNull();
+  });
+
+  it('renders project-picker in add binding form for project-scoped role', async () => {
+    const PROJECT_ROLE = {
+      ...CUSTOM_ROLE,
+      id: 'role-project-1',
+      scopeType: 'project',
+    };
+    const handler = createFetchHandler({
+      role: PROJECT_ROLE,
+      bindings: [],
+    });
+    el = await createElement(handler, '/admin/roles/role-project-1');
+
+    // Switch to bindings tab
+    const tabs = el.shadowRoot?.querySelectorAll('sl-tab');
+    const bindingsTab = [...(tabs ?? [])].find((t) =>
+      t.textContent?.includes('Bindings')
+    );
+    bindingsTab?.click();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Click Add Binding button
+    const addBtn = el.shadowRoot?.querySelector(
+      '.bindings-header sl-button[variant="primary"]'
+    ) as HTMLElement;
+    addBtn?.click();
+    await new Promise((r) => setTimeout(r, 50));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).updateComplete;
+
+    const projectPicker = el.shadowRoot?.querySelector('scion-project-picker');
+    expect(projectPicker).not.toBeNull();
+  });
+
+  it('does not render project-picker for system-scoped role', async () => {
+    const handler = createFetchHandler({ role: CUSTOM_ROLE, bindings: BINDINGS });
+    el = await createElement(handler);
+
+    // Switch to bindings tab
+    const tabs = el.shadowRoot?.querySelectorAll('sl-tab');
+    const bindingsTab = [...(tabs ?? [])].find((t) =>
+      t.textContent?.includes('Bindings')
+    );
+    bindingsTab?.click();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Click Add Binding button
+    const addBtn = el.shadowRoot?.querySelector(
+      '.bindings-header sl-button[variant="primary"]'
+    ) as HTMLElement;
+    addBtn?.click();
+    await new Promise((r) => setTimeout(r, 50));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).updateComplete;
+
+    const projectPicker = el.shadowRoot?.querySelector('scion-project-picker');
+    expect(projectPicker).toBeNull();
+  });
+
+  it('submits UUID from principal-picker and project-picker', async () => {
+    const postCalls: Array<{ body: string }> = [];
+    const PROJECT_ROLE = {
+      ...CUSTOM_ROLE,
+      id: 'role-project-1',
+      scopeType: 'project',
+    };
+    const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (init?.method === 'POST' && path.includes('/api/v1/admin/role-bindings')) {
+        postCalls.push({ body: init.body as string });
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: 'rb-new' }), {
+            status: 201,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      // Return the fetch handler for other paths
+      return createFetchHandler({ role: PROJECT_ROLE, bindings: [] })(url, init);
+    };
+
+    el = await createElement(handler, '/admin/roles/role-project-1');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+
+    // Directly set form state and submit.
+    // addBindingScopeType must match roleData.scopeType for the scopeId to be included.
+    comp.showAddBindingForm = true;
+    comp.addBindingPrincipalType = 'user';
+    comp.addBindingPrincipalId = 'resolved-user-uuid';
+    comp.addBindingScopeType = 'project';
+    comp.addBindingScopeId = 'resolved-project-uuid';
+    comp.requestUpdate();
+    await comp.updateComplete;
+
+    await comp.createBinding();
+
+    expect(postCalls.length).toBeGreaterThan(0);
+    const body = JSON.parse(postCalls[0].body);
+    expect(body.principalId).toBe('resolved-user-uuid');
+    expect(body.scopeId).toBe('resolved-project-uuid');
+    expect(body.roleDefinitionId).toBe('role-project-1');
+  });
+});
+
 describe('admin-role-detail: route integration', () => {
   it('ROUTE_PERMISSION_MAP includes role detail entry', async () => {
     const { ROUTE_PERMISSION_MAP } = await import('../../lib/admin-permissions.js');

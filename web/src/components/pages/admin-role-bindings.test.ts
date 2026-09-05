@@ -203,3 +203,128 @@ describe('scion-page-admin-role-bindings sorting', () => {
     expect(nonSortableTexts).toContain('Actions');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Assign Role dialog: project picker integration
+// ---------------------------------------------------------------------------
+
+describe('scion-page-admin-role-bindings create dialog', () => {
+  it('renders Assign Role button', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createComponent(handler);
+
+    const btn = query(el, 'sl-button[variant="primary"]');
+    expect(btn).not.toBeNull();
+    expect(btn?.textContent?.trim()).toContain('Assign Role');
+  });
+
+  it('renders principal picker in the create dialog', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createComponent(handler);
+
+    // Open create dialog.
+    const btn = query(el, 'sl-button[variant="primary"]') as HTMLElement;
+    btn?.click();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Check for principal picker component.
+    const picker = query(el, 'scion-principal-picker');
+    expect(picker).not.toBeNull();
+  });
+
+  it('renders project picker when scope is project', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createComponent(handler);
+
+    // Open create dialog
+    const btn = query(el, 'sl-button[variant="primary"]') as HTMLElement;
+    btn?.click();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Set scope to project. Direct property access on Lit element.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+    comp.formScopeType = 'project';
+    comp.requestUpdate();
+    await comp.updateComplete;
+
+    const projectPicker = query(el, 'scion-project-picker');
+    expect(projectPicker).not.toBeNull();
+  });
+
+  it('does not render project picker when scope is system', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createComponent(handler);
+
+    // Open create dialog.
+    const btn = query(el, 'sl-button[variant="primary"]') as HTMLElement;
+    btn?.click();
+    await new Promise((r) => setTimeout(r, 50));
+
+    const projectPicker = query(el, 'scion-project-picker');
+    expect(projectPicker).toBeNull();
+  });
+
+  it('submits project UUID from project picker', async () => {
+    const fetchCalls: Array<{ path: string; body?: string }> = [];
+    const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (init?.method === 'POST') {
+        fetchCalls.push({ path, body: init.body as string });
+      }
+      if (path.includes('/api/v1/admin/role-bindings') && init?.method === 'POST') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: 'rb-new' }), {
+            status: 201,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      if (path.includes('/api/v1/admin/role-bindings')) {
+        return Promise.resolve(
+          new Response(JSON.stringify(makeBindings()), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      if (path.includes('/api/v1/admin/roles')) {
+        return Promise.resolve(
+          new Response(JSON.stringify(MOCK_ROLES), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    };
+
+    const el = await createComponent(handler);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+
+    // Set form state directly
+    comp.showCreateDialog = true;
+    comp.formPrincipalType = 'user';
+    comp.formPrincipalId = 'user-test';
+    comp.formRoleId = 'role-2'; // project-scoped
+    comp.formScopeType = 'project';
+    comp.formScopeId = 'proj-uuid-from-picker';
+    comp.requestUpdate();
+    await comp.updateComplete;
+
+    // Call createBinding directly
+    await comp.createBinding();
+
+    // Verify the submitted body contains the project UUID
+    const createCall = fetchCalls.find(
+      (c) => c.path.includes('/api/v1/admin/role-bindings') && c.body
+    );
+    expect(createCall).toBeDefined();
+    if (createCall?.body) {
+      const body = JSON.parse(createCall.body);
+      expect(body.scopeId).toBe('proj-uuid-from-picker');
+      expect(body.scopeType).toBe('project');
+    }
+  });
+});

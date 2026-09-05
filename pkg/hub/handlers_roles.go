@@ -27,6 +27,8 @@ import (
 	"strings"
 	"time"
 
+	gouuid "github.com/google/uuid"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -995,6 +997,30 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 	if req.ScopeType == store.RoleScopeProject && req.ScopeID == "" {
 		BadRequest(w, "scope_id is required when scope_type is 'project'")
 		return
+	}
+
+	// Resolve project slug to UUID for project-scoped bindings.
+	// Accepts either a UUID (passed through unchanged) or a project slug
+	// (resolved to UUID via store lookup). Storage always receives UUID,
+	// and authorization evaluates the resolved UUID.
+	if req.ScopeType == store.RoleScopeProject && req.ScopeID != "" {
+		if gouuid.Validate(req.ScopeID) != nil {
+			// Not a valid UUID — treat as project slug.
+			project, err := s.store.GetProjectBySlug(r.Context(), req.ScopeID)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					BadRequest(w, "project not found with slug: "+req.ScopeID)
+					return
+				}
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			if project == nil {
+				BadRequest(w, "project not found with slug: "+req.ScopeID)
+				return
+			}
+			req.ScopeID = project.ID
+		}
 	}
 
 	// Agents are project-bound; system-scope bindings on agents are

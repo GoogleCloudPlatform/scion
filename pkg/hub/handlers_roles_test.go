@@ -1067,6 +1067,154 @@ func TestRolesAPI_CreateRoleBinding_GroupPrincipal_NeitherUUIDNorSlug(t *testing
 }
 
 // ---------------------------------------------------------------------------
+// Tests: Project Slug Resolution in Role Bindings
+// ---------------------------------------------------------------------------
+
+func TestRolesAPI_CreateRoleBinding_ProjectScope_UUIDUnchanged(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	// Create project with a known ID and slug.
+	projectID := tid("proj-uuid-check")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "UUID Check Project", Slug: "uuid-check-proj",
+	}))
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "proj-uuid-role",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read"},
+	})
+
+	seedRolesTestUser(t, s, tid("proj-uuid-user"), "proj-uuid-user@test.com")
+
+	// Use UUID as scopeId — should be accepted unchanged.
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      tid("proj-uuid-user"),
+		ScopeType:        "project",
+		ScopeID:          projectID,
+	})
+
+	assert.Equal(t, projectID, binding.ScopeID, "UUID scopeId should be stored unchanged")
+}
+
+func TestRolesAPI_CreateRoleBinding_ProjectScope_SlugResolvesToUUID(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	// Create project with a known ID and slug.
+	projectID := tid("proj-slug-resolve")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "Slug Resolve Project", Slug: "my-slug-project",
+	}))
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "proj-slug-role",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read"},
+	})
+
+	seedRolesTestUser(t, s, tid("proj-slug-user"), "proj-slug-user@test.com")
+
+	// Use slug as scopeId — should resolve to UUID.
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      tid("proj-slug-user"),
+		ScopeType:        "project",
+		ScopeID:          "my-slug-project",
+	})
+
+	assert.Equal(t, projectID, binding.ScopeID, "slug scopeId should be resolved to project UUID")
+}
+
+func TestRolesAPI_CreateRoleBinding_ProjectScope_UnknownSlug(t *testing.T) {
+	srv, _ := testServer(t)
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "proj-unknown-slug-role",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read"},
+	})
+
+	// An unknown slug should return 400.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      "some-user",
+		ScopeType:        "project",
+		ScopeID:          "nonexistent-project-slug",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "project not found with slug")
+}
+
+func TestRolesAPI_CreateRoleBinding_ProjectScope_AuthzSeesResolvedUUID(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	// Create project.
+	projectID := tid("proj-authz-check")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "Authz Check Project", Slug: "authz-check-proj",
+	}))
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "proj-authz-role",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read"},
+	})
+
+	seedRolesTestUser(t, s, tid("proj-authz-user"), "proj-authz-user@test.com")
+
+	// Submit binding with slug; verify stored ScopeID is the UUID.
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      tid("proj-authz-user"),
+		ScopeType:        "project",
+		ScopeID:          "authz-check-proj",
+	})
+
+	assert.Equal(t, projectID, binding.ScopeID, "stored ScopeID must be UUID, not slug")
+
+	// Verify from the store directly that UUID was persisted.
+	stored, err := s.GetRoleBinding(ctx, binding.ID)
+	require.NoError(t, err)
+	assert.Equal(t, projectID, stored.ScopeID, "store record must contain resolved UUID")
+}
+
+func TestRolesAPI_CreateRoleBinding_ProjectScope_NoPartialCreateOnLookupFailure(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "proj-no-partial-role",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read"},
+	})
+
+	seedRolesTestUser(t, s, tid("proj-nopartial-user"), "proj-nopartial@test.com")
+
+	// Attempt with nonexistent slug.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      tid("proj-nopartial-user"),
+		ScopeType:        "project",
+		ScopeID:          "ghost-project-slug",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	// Verify no binding was created.
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, "user", tid("proj-nopartial-user"))
+	require.NoError(t, err)
+	assert.Empty(t, bindings, "no binding should be created when project slug lookup fails")
+}
+
+// ---------------------------------------------------------------------------
 // Tests: Update role definition with invalid permissions
 // ---------------------------------------------------------------------------
 

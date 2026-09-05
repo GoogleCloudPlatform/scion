@@ -41,6 +41,10 @@ import {
   getPrincipalIcon,
   formatDateTime,
 } from '../shared/role-binding-utils.js';
+import type { PrincipalChangeDetail } from '../shared/principal-picker.js';
+import type { ProjectChangeDetail } from '../shared/project-picker.js';
+import '../shared/principal-picker.js';
+import '../shared/project-picker.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1206,6 +1210,10 @@ export class ScionPageAdminRoleDetail extends LitElement {
     // ineffective due to credential scope/ceiling constraints.
     const agentDisabled = isSystemScope;
 
+    const addBindingValid =
+      !!this.addBindingPrincipalId.trim() &&
+      (scopeType !== 'project' || !!this.addBindingScopeId.trim());
+
     return html`
       <div class="add-binding-form">
         <h3>Add Binding</h3>
@@ -1215,6 +1223,7 @@ export class ScionPageAdminRoleDetail extends LitElement {
             value=${this.addBindingPrincipalType}
             @sl-change=${(e: Event) => {
               this.addBindingPrincipalType = (e.target as HTMLSelectElement).value;
+              this.addBindingPrincipalId = '';
             }}
           >
             <sl-option value="user">User</sl-option>
@@ -1224,31 +1233,21 @@ export class ScionPageAdminRoleDetail extends LitElement {
             <sl-option value="group">Group</sl-option>
           </sl-select>
 
-          <sl-input
-            label="Principal ID"
-            placeholder=${this.addBindingPrincipalType === 'agent'
-              ? 'Enter agent ID'
-              : this.addBindingPrincipalType === 'group'
-                ? 'Enter group ID or slug'
-                : 'Enter user ID or email'}
-            value=${this.addBindingPrincipalId}
-            @sl-input=${(e: Event) => {
-              this.addBindingPrincipalId = (e.target as HTMLInputElement).value;
+          <scion-principal-picker
+            .principalType=${this.addBindingPrincipalType as 'user' | 'agent' | 'group'}
+            @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => {
+              this.addBindingPrincipalId = e.detail.principalId;
             }}
-            required
-          ></sl-input>
+          ></scion-principal-picker>
 
           ${scopeType === 'project'
             ? html`
-                <sl-input
-                  label="Project ID"
-                  placeholder="Enter project ID"
-                  value=${this.addBindingScopeId}
-                  @sl-input=${(e: Event) => {
-                    this.addBindingScopeId = (e.target as HTMLInputElement).value;
+                <scion-project-picker
+                  label="Project"
+                  @project-change=${(e: CustomEvent<ProjectChangeDetail>) => {
+                    this.addBindingScopeId = e.detail.projectId;
                   }}
-                  required
-                ></sl-input>
+                ></scion-project-picker>
               `
             : nothing}
         </div>
@@ -1273,7 +1272,7 @@ export class ScionPageAdminRoleDetail extends LitElement {
             variant="primary"
             size="small"
             ?loading=${this.actionInProgress}
-            ?disabled=${!this.addBindingPrincipalId.trim()}
+            ?disabled=${!addBindingValid}
             @click=${() => this.createBinding()}
             >Create Binding</sl-button
           >
