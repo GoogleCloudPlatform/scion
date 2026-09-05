@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -140,6 +141,17 @@ type roleImportResponse struct {
 	Items   []roleImportResultItem `json:"items"`
 }
 
+// safeFilename replaces any characters unsafe for Content-Disposition filenames.
+var unsafeFilenameChars = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
+
+func sanitizeFilename(name string) string {
+	safe := unsafeFilenameChars.ReplaceAllString(name, "_")
+	if safe == "" {
+		safe = "role"
+	}
+	return safe
+}
+
 // ---------------------------------------------------------------------------
 // Route handlers: Role Definitions
 // ---------------------------------------------------------------------------
@@ -164,11 +176,22 @@ func (s *Server) handleAdminRoles(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAdminRoleByID handles GET / PUT / DELETE on
-// /api/v1/admin/roles/:id and POST on /api/v1/admin/roles/:id/duplicate.
+// /api/v1/admin/roles/:id, GET on /api/v1/admin/roles/:id/export,
+// and POST on /api/v1/admin/roles/:id/duplicate.
 func (s *Server) handleAdminRoleByID(w http.ResponseWriter, r *http.Request) {
 	id, action := extractAction(r, "/api/v1/admin/roles")
 	if id == "" {
 		BadRequest(w, "role definition ID is required")
+		return
+	}
+
+	// Sub-resource action: GET /api/v1/admin/roles/:id/export
+	if action == "export" {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			MethodNotAllowed(w)
+			return
+		}
+		s.exportSingleRole(w, r, id)
 		return
 	}
 
@@ -656,10 +679,11 @@ func (s *Server) duplicateRoleDefinition(w http.ResponseWriter, r *http.Request,
 // Export / Import: Role Definitions
 // ---------------------------------------------------------------------------
 
-// handleAdminRolesExport handles GET on /api/v1/admin/roles/export.
+// handleAdminRolesExport handles GET/HEAD on /api/v1/admin/roles/export.
+// Returns all custom (non-system) role definitions as a downloadable JSON file.
 // Authorization: route guard checks role.read.
 func (s *Server) handleAdminRolesExport(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		MethodNotAllowed(w)
 		return
 	}
@@ -680,8 +704,8 @@ func (s *Server) handleAdminRolesImport(w http.ResponseWriter, r *http.Request) 
 	s.importRoleDefinitions(w, r, user)
 }
 
-// exportRoleDefinitions returns all custom (non-system) role definitions in a
-// portable JSON format suitable for importing into another instance.
+// exportRoleDefinitions writes all custom (non-system) role definitions as a
+// downloadable JSON attachment in the portable envelope format.
 func (s *Server) exportRoleDefinitions(w http.ResponseWriter, r *http.Request) {
 	defs, err := s.store.ListRoleDefinitions(r.Context())
 	if err != nil {
@@ -705,11 +729,75 @@ func (s *Server) exportRoleDefinitions(w http.ResponseWriter, r *http.Request) {
 		roles = []exportedRole{}
 	}
 
-	writeJSON(w, http.StatusOK, roleExportResponse{
+	envelope := roleExportResponse{
 		Version:    "1",
 		ExportedAt: time.Now().UTC().Format(time.RFC3339),
 		Roles:      roles,
-	})
+	}
+
+	data, err := json.MarshalIndent(envelope, "", "  ")
+	if err != nil {
+		slog.Error("failed to marshal role export", "error", err)
+		writeErrorFromErr(w, fmt.Errorf("failed to serialize roles: %w", err), "")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", `attachment; filename="scion-custom-roles.json"`)
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(data)
+	}
+}
+
+// exportSingleRole writes a single custom role definition as a downloadable
+// JSON attachment. System roles are rejected with 422.
+func (s *Server) exportSingleRole(w http.ResponseWriter, r *http.Request, id string) {
+	def, err := s.store.GetRoleDefinition(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Role Definition")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if def.System {
+		writeError(w, http.StatusUnprocessableEntity, "system_role",
+			"System roles cannot be exported; only custom roles may be exported.", nil)
+		return
+	}
+
+	envelope := roleExportResponse{
+		Version:    "1",
+		ExportedAt: time.Now().UTC().Format(time.RFC3339),
+		Roles: []exportedRole{{
+			Name:        def.Name,
+			Description: def.Description,
+			ScopeType:   def.ScopeType,
+			Permissions: def.Permissions,
+		}},
+	}
+
+	data, err := json.MarshalIndent(envelope, "", "  ")
+	if err != nil {
+		slog.Error("failed to marshal role export", "error", err)
+		writeErrorFromErr(w, fmt.Errorf("failed to serialize role: %w", err), "")
+		return
+	}
+
+	filename := sanitizeFilename(def.Name)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="scion-role-%s.json"`, filename))
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(data)
+	}
 }
 
 // systemRoleNames is the set of built-in role names that cannot be imported.

@@ -297,25 +297,33 @@ function createJsonFile(content: string, name = 'roles.json'): File {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Export (roles list page)
+// Tests: Export (roles list page) — server-driven download
 // ---------------------------------------------------------------------------
 
 describe('admin-roles: export', () => {
   let el: HTMLElement | null = null;
+  let originalLocation: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    originalLocation = Object.getOwnPropertyDescriptor(window, 'location');
+  });
 
   afterEach(() => {
     if (el?.parentNode) el.parentNode.removeChild(el);
     el = null;
+    if (originalLocation) {
+      Object.defineProperty(window, 'location', originalLocation);
+    }
     vi.restoreAllMocks();
   });
 
-  it('renders Export button in the header', async () => {
+  it('renders Export Custom Roles button in the header', async () => {
     const handler = createRolesListFetchHandler();
     el = await createRolesPage(handler);
 
     const buttons = el.shadowRoot?.querySelectorAll('.header-right sl-button');
     const labels = [...(buttons ?? [])].map((b) => b.textContent?.trim());
-    expect(labels).toContain('Export');
+    expect(labels).toContain('Export Custom Roles');
   });
 
   it('renders Import button in the header', async () => {
@@ -332,96 +340,91 @@ describe('admin-roles: export', () => {
     el = await createRolesPage(handler);
 
     const buttons = el.shadowRoot?.querySelectorAll('.header-right sl-button');
-    const exportBtn = [...(buttons ?? [])].find((b) => b.textContent?.trim() === 'Export');
+    const exportBtn = [...(buttons ?? [])].find((b) =>
+      b.textContent?.trim() === 'Export Custom Roles'
+    );
     expect(exportBtn?.hasAttribute('disabled')).toBe(true);
   });
 
-  it('triggers download with correct JSON envelope on export', async () => {
+  it('list export uses direct navigation to /api/v1/admin/roles/export', async () => {
     const handler = createRolesListFetchHandler();
     el = await createRolesPage(handler);
 
-    // Capture the Blob passed to URL.createObjectURL
-    let capturedBlob: Blob | null = null;
-    let downloadFilename = '';
-    const clickSpy = vi.fn();
-
-    vi.spyOn(URL, 'createObjectURL').mockImplementation((blob: Blob) => {
-      capturedBlob = blob;
-      return 'blob:mock-url';
+    const hrefSetter = vi.fn();
+    Object.defineProperty(window, 'location', {
+      value: { href: '' },
+      writable: true,
+      configurable: true,
     });
-    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
-
-    const originalCreateElement = document.createElement.bind(document);
-    vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
-      const elem = originalCreateElement(tag);
-      if (tag === 'a') {
-        Object.defineProperty(elem, 'click', { value: clickSpy });
-        return new Proxy(elem, {
-          set(target, prop, value) {
-            if (prop === 'download') downloadFilename = value;
-            return Reflect.set(target, prop, value);
-          },
-        });
-      }
-      return elem;
+    Object.defineProperty(window.location, 'href', {
+      set: hrefSetter,
+      get: () => '',
+      configurable: true,
     });
 
-    // Click export — exportRoles() is async, wait for it
-    const buttons = el.shadowRoot?.querySelectorAll('.header-right sl-button');
-    const exportBtn = [...(buttons ?? [])].find((b) => b.textContent?.trim() === 'Export');
-    exportBtn?.click();
-    // Wait for the async export to complete
-    await new Promise((r) => setTimeout(r, 50));
-    await el.updateComplete;
+    (el as any).exportRoles();
 
-    // Verify download was triggered
-    expect(clickSpy).toHaveBeenCalled();
-    expect(downloadFilename).toMatch(/^scion-roles-export-\d{4}-\d{2}-\d{2}\.json$/);
-
-    // Verify the blob content (from backend export endpoint)
-    expect(capturedBlob).not.toBeNull();
-    const text = await capturedBlob!.text();
-    const data = JSON.parse(text);
-    expect(data.version).toBe('1');
-    expect(data.exportedAt).toBeDefined();
-    expect(data.roles).toHaveLength(2); // Only custom roles, not system
-    expect(data.roles[0].name).toBe('test-editor');
-    expect(data.roles[1].name).toBe('test-viewer');
-    // Should NOT include server-generated fields
-    expect(data.roles[0].id).toBeUndefined();
-    expect(data.roles[0].system).toBeUndefined();
-    expect(data.roles[0].createdAt).toBeUndefined();
+    expect(hrefSetter).toHaveBeenCalledWith('/api/v1/admin/roles/export');
   });
 
-  it('shows feedback when no custom roles to export', async () => {
+  it('single-role export uses direct navigation to /api/v1/admin/roles/{id}/export', async () => {
+    const handler = createRolesListFetchHandler();
+    el = await createRolesPage(handler);
+
+    const hrefSetter = vi.fn();
+    Object.defineProperty(window, 'location', {
+      value: { href: '' },
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(window.location, 'href', {
+      set: hrefSetter,
+      get: () => '',
+      configurable: true,
+    });
+
+    (el as any).exportSingleRole('test-role-uuid');
+
+    expect(hrefSetter).toHaveBeenCalledWith('/api/v1/admin/roles/test-role-uuid/export');
+  });
+
+  it('export does NOT use Blob or createObjectURL', async () => {
+    const handler = createRolesListFetchHandler();
+    el = await createRolesPage(handler);
+
+    const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL');
+
+    Object.defineProperty(window, 'location', {
+      value: { href: '' },
+      writable: true,
+      configurable: true,
+    });
+
+    (el as any).exportRoles();
+
+    expect(createObjectURLSpy).not.toHaveBeenCalled();
+    createObjectURLSpy.mockRestore();
+  });
+
+  it('custom roles render per-row export button', async () => {
+    const handler = createRolesListFetchHandler();
+    el = await createRolesPage(handler);
+
+    const exportButtons = el.shadowRoot?.querySelectorAll(
+      'sl-icon-button[label="Export role"]'
+    );
+    // Should have export buttons for each custom role (2) but not for system role
+    expect(exportButtons?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('system roles do NOT have per-row export button', async () => {
     const handler = createRolesListFetchHandler({ roles: [SYSTEM_ROLE] });
     el = await createRolesPage(handler);
 
-    // Even though button is disabled, verify internal method behavior
-    // by directly calling exportRoles
-    await (el as any).exportRoles();
-    await el.updateComplete;
-
-    const alert = el.shadowRoot?.querySelector('.feedback-alert');
-    expect(alert?.textContent).toContain('No custom roles to export');
-  });
-
-  it('shows error feedback and no success when download helper throws', async () => {
-    const handler = createRolesListFetchHandler();
-    el = await createRolesPage(handler);
-
-    // Make createObjectURL throw to simulate a download failure
-    vi.spyOn(URL, 'createObjectURL').mockImplementation(() => {
-      throw new Error('Blob URL creation failed');
-    });
-
-    await (el as any).exportRoles();
-    await el.updateComplete;
-
-    const feedback = (el as any).actionFeedback;
-    expect(feedback).not.toBeNull();
-    expect(feedback.variant).toBe('danger');
-    expect(feedback.message).toContain('Blob URL creation failed');
+    const exportButtons = el.shadowRoot?.querySelectorAll(
+      'sl-icon-button[label="Export role"]'
+    );
+    expect(exportButtons?.length ?? 0).toBe(0);
   });
 });
 
@@ -721,15 +724,23 @@ describe('admin-roles: import', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tests: Export from role detail page
+// Tests: Export from role detail page — server-driven download
 // ---------------------------------------------------------------------------
 
 describe('admin-role-detail: single role export', () => {
   let el: HTMLElement | null = null;
+  let originalLocation: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    originalLocation = Object.getOwnPropertyDescriptor(window, 'location');
+  });
 
   afterEach(() => {
     if (el?.parentNode) el.parentNode.removeChild(el);
     el = null;
+    if (originalLocation) {
+      Object.defineProperty(window, 'location', originalLocation);
+    }
     vi.restoreAllMocks();
   });
 
@@ -741,67 +752,42 @@ describe('admin-role-detail: single role export', () => {
     expect(labels).toContain('Export');
   });
 
-  it('triggers download with correct filename for single role export', async () => {
+  it('detail export navigates to /api/v1/admin/roles/{id}/export', async () => {
     el = await createRoleDetailPage();
 
-    let capturedBlob: Blob | null = null;
-    let downloadFilename = '';
-    const clickSpy = vi.fn();
-
-    vi.spyOn(URL, 'createObjectURL').mockImplementation((blob: Blob) => {
-      capturedBlob = blob;
-      return 'blob:mock-url';
+    const hrefSetter = vi.fn();
+    Object.defineProperty(window, 'location', {
+      value: { href: '' },
+      writable: true,
+      configurable: true,
     });
-    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
-
-    const originalCreateElement = document.createElement.bind(document);
-    vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
-      const elem = originalCreateElement(tag);
-      if (tag === 'a') {
-        Object.defineProperty(elem, 'click', { value: clickSpy });
-        return new Proxy(elem, {
-          set(target, prop, value) {
-            if (prop === 'download') downloadFilename = value;
-            return Reflect.set(target, prop, value);
-          },
-        });
-      }
-      return elem;
-    });
-
-    // Click Export button
-    const buttons = el.shadowRoot?.querySelectorAll('.header-actions sl-button');
-    const exportBtn = [...(buttons ?? [])].find((b) => b.textContent?.trim() === 'Export');
-    exportBtn?.click();
-    await el.updateComplete;
-
-    expect(clickSpy).toHaveBeenCalled();
-    expect(downloadFilename).toBe('scion-role-test-editor-export.json');
-
-    // Verify content
-    expect(capturedBlob).not.toBeNull();
-    const text = await capturedBlob!.text();
-    const data = JSON.parse(text);
-    expect(data.version).toBe('1');
-    expect(data.roles).toHaveLength(1);
-    expect(data.roles[0].name).toBe('test-editor');
-    expect(data.roles[0].id).toBeUndefined(); // No server fields
-  });
-
-  it('shows error feedback and no success when download helper throws', async () => {
-    el = await createRoleDetailPage();
-
-    // Make createObjectURL throw to simulate a download failure
-    vi.spyOn(URL, 'createObjectURL').mockImplementation(() => {
-      throw new Error('Download blocked');
+    Object.defineProperty(window.location, 'href', {
+      set: hrefSetter,
+      get: () => '',
+      configurable: true,
     });
 
     (el as any).exportSingleRole();
-    await el.updateComplete;
 
-    const feedback = (el as any).actionFeedback;
-    expect(feedback).not.toBeNull();
-    expect(feedback.variant).toBe('danger');
-    expect(feedback.message).toContain('Download blocked');
+    expect(hrefSetter).toHaveBeenCalledWith(
+      '/api/v1/admin/roles/role-custom-1/export'
+    );
+  });
+
+  it('detail export does NOT use Blob or createObjectURL', async () => {
+    el = await createRoleDetailPage();
+
+    const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL');
+
+    Object.defineProperty(window, 'location', {
+      value: { href: '' },
+      writable: true,
+      configurable: true,
+    });
+
+    (el as any).exportSingleRole();
+
+    expect(createObjectURLSpy).not.toHaveBeenCalled();
+    createObjectURLSpy.mockRestore();
   });
 });

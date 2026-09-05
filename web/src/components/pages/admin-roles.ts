@@ -25,7 +25,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { downloadJsonFile } from '../../client/download.js';
 import { navigateTo } from '../../client/main.js';
 
 // ---------------------------------------------------------------------------
@@ -683,61 +682,20 @@ export class ScionPageAdminRoles extends LitElement {
   // ---------------------------------------------------------------------------
 
   /**
-   * Export custom roles via the dedicated backend endpoint
-   * GET /api/v1/admin/roles/export. Falls back to client-side
-   * export if the endpoint is unavailable.
+   * Export all custom roles via server-driven download.
+   * Uses direct navigation to the attachment endpoint so the browser's
+   * native download handling (Content-Disposition: attachment) works
+   * reliably across all browsers.
    */
-  private async exportRoles(): Promise<void> {
-    const customRoles = this.roles.filter((r) => !r.system);
-    if (customRoles.length === 0) {
-      this.actionFeedback = { message: 'No custom roles to export', variant: 'danger' };
-      return;
-    }
-
-    let exportData: unknown;
-
-    try {
-      const res = await apiFetch('/api/v1/admin/roles/export');
-      if (res.ok) {
-        exportData = await res.json();
-      } else {
-        exportData = JSON.parse(this.buildClientExport(customRoles));
-      }
-    } catch {
-      exportData = JSON.parse(this.buildClientExport(customRoles));
-    }
-
-    const filename = `scion-roles-export-${new Date().toISOString().slice(0, 10)}.json`;
-
-    try {
-      downloadJsonFile(exportData, filename);
-    } catch (err) {
-      this.actionFeedback = {
-        message: err instanceof Error ? err.message : 'Failed to download export file',
-        variant: 'danger',
-      };
-      return;
-    }
-
-    this.actionFeedback = {
-      message: `Exported ${customRoles.length} custom role${customRoles.length !== 1 ? 's' : ''}`,
-      variant: 'success',
-    };
+  private exportRoles(): void {
+    window.location.href = '/api/v1/admin/roles/export';
   }
 
-  /** Client-side fallback for building the export envelope. */
-  private buildClientExport(customRoles: RoleDefinition[]): string {
-    const exportData: RoleExportEnvelope = {
-      version: '1',
-      exportedAt: new Date().toISOString(),
-      roles: customRoles.map((r) => ({
-        name: r.name,
-        description: r.description,
-        scopeType: r.scopeType,
-        permissions: [...r.permissions],
-      })),
-    };
-    return JSON.stringify(exportData, null, 2);
+  /**
+   * Export a single custom role via server-driven download.
+   */
+  private exportSingleRole(roleId: string): void {
+    window.location.href = `/api/v1/admin/roles/${roleId}/export`;
   }
 
   // ---------------------------------------------------------------------------
@@ -955,11 +913,20 @@ export class ScionPageAdminRoles extends LitElement {
           <sl-button
             variant="default"
             size="small"
-            @click=${() => this.exportRoles()}
+            href="/api/v1/admin/roles/export"
+            target="_self"
+            download="scion-custom-roles.json"
+            @click=${(e: Event) => {
+              // Use direct navigation so the browser's native download
+              // handling (Content-Disposition: attachment) works reliably
+              // across all browsers including Safari.
+              e.preventDefault();
+              this.exportRoles();
+            }}
             ?disabled=${this.loading || !!this.error || this.roles.filter((r) => !r.system).length === 0}
           >
             <sl-icon slot="prefix" name="download"></sl-icon>
-            Export
+            Export Custom Roles
           </sl-button>
           <sl-button variant="default" size="small" @click=${() => this.openImportDialog()}>
             <sl-icon slot="prefix" name="upload"></sl-icon>
@@ -1023,6 +990,7 @@ export class ScionPageAdminRoles extends LitElement {
               <th class="hide-mobile">Permissions</th>
               <th>Type</th>
               <th class="hide-mobile">Updated</th>
+              <th class="hide-mobile">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -1062,6 +1030,19 @@ export class ScionPageAdminRoles extends LitElement {
         </td>
         <td class="hide-mobile">
           <span class="perm-count">${this.formatRelativeTime(role.updatedAt)}</span>
+        </td>
+        <td class="hide-mobile">
+          ${role.system
+            ? nothing
+            : html`
+                <sl-icon-button
+                  name="download"
+                  label="Export role"
+                  @click=${() => {
+                    this.exportSingleRole(role.id);
+                  }}
+                ></sl-icon-button>
+              `}
         </td>
       </tr>
     `;

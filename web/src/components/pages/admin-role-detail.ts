@@ -34,7 +34,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { downloadJsonFile } from '../../client/download.js';
 import { navigateTo } from '../../client/main.js';
 import { setDocumentTitle } from '../../client/page-title.js';
 import {
@@ -841,39 +840,15 @@ export class ScionPageAdminRoleDetail extends LitElement {
   // ---------------------------------------------------------------------------
 
   /**
-   * Export this single custom role as a downloadable JSON file.
+   * Export this single custom role via server-driven download.
+   * Uses direct navigation to the attachment endpoint so the browser's
+   * native download handling (Content-Disposition: attachment) works
+   * reliably across all browsers.
    */
   private exportSingleRole(): void {
     const role = this.roleData;
     if (!role || role.system) return;
-
-    const exportData = {
-      version: '1' as const,
-      exportedAt: new Date().toISOString(),
-      roles: [
-        {
-          name: role.name,
-          description: role.description,
-          scopeType: role.scopeType,
-          permissions: [...role.permissions],
-        },
-      ],
-    };
-
-    try {
-      downloadJsonFile(exportData, `scion-role-${role.name}-export.json`);
-    } catch (err) {
-      this.actionFeedback = {
-        message: err instanceof Error ? err.message : 'Failed to download export file',
-        variant: 'danger',
-      };
-      return;
-    }
-
-    this.actionFeedback = {
-      message: `Exported role "${role.name}"`,
-      variant: 'success',
-    };
+    window.location.href = `/api/v1/admin/roles/${role.id}/export`;
   }
 
   // ---------------------------------------------------------------------------
