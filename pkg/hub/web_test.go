@@ -120,6 +120,12 @@ func newTestWebServer(t *testing.T, cfg WebServerConfig) *WebServer {
 
 // newDevAuthWebServer creates a web server with dev-auth enabled for testing
 // authenticated routes without requiring OAuth.
+//
+// By default a minimal authoritative store is installed containing an active
+// DevUserID record so that the suspendedUserMiddleware (which correctly fails
+// closed when ws.store is nil) passes through to the handler under test.
+// Tests that intentionally exercise nil-store or error-store paths can
+// override ws.store after this call returns.
 func newDevAuthWebServer(t *testing.T, overrides ...func(*WebServerConfig)) *WebServer {
 	t.Helper()
 	cfg := WebServerConfig{
@@ -135,6 +141,19 @@ func newDevAuthWebServer(t *testing.T, overrides ...func(*WebServerConfig)) *Web
 			"assets/main.js": &fstest.MapFile{Data: []byte("// test stub")},
 		}
 	}
+
+	// Install a minimal authoritative store with an active dev user so the
+	// suspended-user middleware does not fail closed on every authenticated
+	// request.  This mirrors production where the store is always present.
+	devStore := newProxyAuthStore()
+	devStore.users[DevUserID] = &store.User{
+		ID:     DevUserID,
+		Email:  "dev@localhost",
+		Role:   "admin",
+		Status: store.UserStatusActive,
+	}
+	ws.store = devStore
+
 	return ws
 }
 
