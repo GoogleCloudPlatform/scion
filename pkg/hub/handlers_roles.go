@@ -963,6 +963,7 @@ const maxEffectiveGroups = 200
 //   - 1 × GetGroupsByIDs                      (batch: group display names)
 //   - O(projects) × GetProject                (scope display name enrichment)
 //   - 1 × enrichBindingRoleNames              (batch: role display names)
+//
 // Total store calls = O(1) + O(distinct-project-scopes), independent of group count.
 func (s *Server) listRoleBindingsForPrincipal(w http.ResponseWriter, r *http.Request, principalType, principalID string) {
 	ctx := r.Context()

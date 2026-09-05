@@ -2690,11 +2690,11 @@ func TestRolesAPI_ListRoleBindings_PrincipalFilter(t *testing.T) {
 
 	createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: roleA.ID,
-		PrincipalType: "user", PrincipalID: userA, ScopeType: "system",
+		PrincipalType:    "user", PrincipalID: userA, ScopeType: "system",
 	})
 	createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: roleB.ID,
-		PrincipalType: "user", PrincipalID: userB, ScopeType: "system",
+		PrincipalType:    "user", PrincipalID: userB, ScopeType: "system",
 	})
 
 	// --- Unfiltered list should return both (and possibly seed data).
@@ -2769,7 +2769,7 @@ func TestRolesAPI_ListRoleBindings_PrincipalFilter_IncludeGroupDerived(t *testin
 	})
 	createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: roleGroup.ID,
-		PrincipalType: "group", PrincipalID: groupID, ScopeType: "system",
+		PrincipalType:    "group", PrincipalID: groupID, ScopeType: "system",
 	})
 
 	// Create a role and bind it directly to the user.
@@ -2778,7 +2778,7 @@ func TestRolesAPI_ListRoleBindings_PrincipalFilter_IncludeGroupDerived(t *testin
 	})
 	createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: roleDirect.ID,
-		PrincipalType: "user", PrincipalID: userID, ScopeType: "system",
+		PrincipalType:    "user", PrincipalID: userID, ScopeType: "system",
 	})
 
 	// --- Without includeGroupDerived: only the direct binding should appear.
@@ -2787,7 +2787,7 @@ func TestRolesAPI_ListRoleBindings_PrincipalFilter_IncludeGroupDerived(t *testin
 	require.Equal(t, http.StatusOK, rec.Code)
 	var directOnly struct {
 		Items []struct {
-			Source string `json:"source"`
+			Source   string `json:"source"`
 			RoleName string `json:"roleName"`
 		} `json:"items"`
 		TotalCount int `json:"totalCount"`
@@ -2872,13 +2872,13 @@ func TestRolesAPI_ListRoleBindings_PrincipalFilter_NoDuplicates(t *testing.T) {
 	})
 	directBinding := createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
-		PrincipalType: "user", PrincipalID: userID, ScopeType: "system",
+		PrincipalType:    "user", PrincipalID: userID, ScopeType: "system",
 	})
 
 	// Bind same role to the group too.
 	createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
-		PrincipalType: "group", PrincipalID: groupID, ScopeType: "system",
+		PrincipalType:    "group", PrincipalID: groupID, ScopeType: "system",
 	})
 
 	rec := doRequest(t, srv, http.MethodGet,
@@ -3040,7 +3040,7 @@ func TestRolesAPI_ListRoleBindings_BatchGroupQuery(t *testing.T) {
 		})
 		createBindingViaAPI(t, srv, createRoleBindingRequest{
 			RoleDefinitionID: role.ID,
-			PrincipalType: "group", PrincipalID: gid, ScopeType: "system",
+			PrincipalType:    "group", PrincipalID: gid, ScopeType: "system",
 		})
 	}
 
