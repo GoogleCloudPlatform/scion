@@ -1267,7 +1267,16 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			}
 			result, denial := s.membershipService.AddMember(r.Context(), mReq)
 			if denial != nil && !denial.Allowed {
-				writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, nil)
+				// Error contract: membership-service 403s surfaced through the
+				// role-binding endpoint include structured details.
+				var details map[string]interface{}
+				if denial.HTTPStatus == http.StatusForbidden {
+					details = map[string]interface{}{
+						"resource_type": "role_binding",
+						"denied_action": "create",
+					}
+				}
+				writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, details)
 				return
 			}
 			writeJSON(w, http.StatusCreated, result.Binding)
@@ -1361,7 +1370,19 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 		}
 		_, denial := s.membershipService.RemoveMember(ctx, mReq)
 		if denial != nil && !denial.Allowed {
-			writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, nil)
+			// Error contract: membership-service 403s surfaced through the
+			// role-binding endpoint must include structured details with
+			// truthful resource_type and denied_action. The stable error
+			// code (e.g. role_assignment_forbidden) stays in error.code;
+			// details carry the resource context the UI needs.
+			var details map[string]interface{}
+			if denial.HTTPStatus == http.StatusForbidden {
+				details = map[string]interface{}{
+					"resource_type": "role_binding",
+					"denied_action": "delete",
+				}
+			}
+			writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, details)
 			return
 		}
 		slog.Info("role binding deleted (via membership service)",

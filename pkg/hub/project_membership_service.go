@@ -339,15 +339,73 @@ func (svc *ProjectMembershipService) isActorDirectOwnerFromStore(ctx context.Con
 }
 
 // ---------------------------------------------------------------------------
+// Global admin authority — hub-level role-binding permission override
+// ---------------------------------------------------------------------------
+
+// actorHasHubRoleBindingAuthority checks whether the actor holds the hub-level
+// role_binding permission corresponding to the membership operation (create for
+// add/update, delete for remove). This allows global administrators (super-admin,
+// hub-admin, or any custom system-scoped role carrying these permissions) to
+// manage project-scoped role bindings even when they have no project role.
+//
+// The check uses the AuthzService's effective permission resolver, which accounts
+// for group-derived bindings, activation windows, and access constraints.
+//
+// Requirement: brief §1 — "A session-authenticated actor with effective
+// hub/system role_binding.create or role_binding.delete authority must be able
+// to manage project-scoped role bindings even when the actor is not a project
+// member."
+func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthority(ctx context.Context, actorID string, op MembershipOp) bool {
+	if svc.authz == nil {
+		return false
+	}
+	var permission string
+	switch op {
+	case MembershipOpAdd, MembershipOpUpdate:
+		permission = "role_binding.create"
+	case MembershipOpRemove:
+		permission = "role_binding.delete"
+	default:
+		return false
+	}
+
+	perms, err := svc.authz.getEffectivePermissions(ctx, "user", actorID, store.RoleScopeSystem, "")
+	if err != nil {
+		svc.logger.Warn("hub authority check failed (fail-closed)",
+			"actor_id", actorID, "op", op, "error", err)
+		return false
+	}
+	for _, p := range perms {
+		if p == permission {
+			return true
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
 // Governance check — the CT1 D5 typed governance matrix
 // ---------------------------------------------------------------------------
 
 // checkGovernance evaluates whether the actor is permitted to perform the
 // described operation on the target role. Returns a decision with a stable
 // denial code if denied.
+//
+// When the actor has no project role, a hub-level authority override is
+// checked: actors with effective hub/system role_binding.create or
+// role_binding.delete authority can manage project-scoped role bindings.
+// Global admin override bypasses the project governance matrix and
+// direct-owner requirement, but CanDelegate and last-owner invariants
+// are enforced separately by the calling mutation methods.
 func (svc *ProjectMembershipService) checkGovernance(ctx context.Context, req MembershipRequest, targetRoleName string) MembershipDecision {
 	actorRole := svc.projectEffectiveRole(ctx, req.Actor.ID(), req.ProjectID)
 	if actorRole == "" {
+		// Brief §1: hub-level role_binding authority override. Server-side
+		// re-proof — the handler-level check only gates the HTTP endpoint;
+		// the domain service re-validates at its own boundary.
+		if svc.actorHasHubRoleBindingAuthority(ctx, req.Actor.ID(), req.Op) {
+			return MembershipDecision{Allowed: true}
+		}
 		return MembershipDecision{
 			Allowed:    false,
 			DenialCode: ErrCodeRoleAssignmentForbidden,
@@ -383,6 +441,8 @@ func (svc *ProjectMembershipService) checkGovernance(ctx context.Context, req Me
 	}
 
 	// Owner-level operations require a direct owner binding, not group-derived.
+	// This check does not apply to hub-level global admins (already returned
+	// above when actorRole == "").
 	if requiresDirectOwner(targetRoleName) {
 		if !svc.isActorDirectOwner(ctx, req.Actor.ID(), req.ProjectID) {
 			return MembershipDecision{
@@ -503,6 +563,13 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		}
 	}
 
+	// Pre-compute hub authority override BEFORE the transaction. This reads
+	// system-scoped bindings which are not affected by the project lock, and
+	// avoids a SQLite deadlock (svc.authz.store vs tx.store on the same DB).
+	// The result is stable across the project lock because system-scoped
+	// bindings are not mutated by project membership operations.
+	preComputedHubOverride := svc.actorHasHubRoleBindingAuthority(ctx, req.Actor.ID(), req.Op)
+
 	// R3-1 + O-1: acquire project lock and check existing bindings inside the
 	// same transaction. The lock serializes concurrent membership mutations
 	// for this project (FOR UPDATE on PostgreSQL; no-op on SQLite). The D4
@@ -527,18 +594,34 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		if roleErr != nil {
 			return fmt.Errorf("authority lookup failed under lock: %w", roleErr)
 		}
-		actorIsDirectOwner, ownerErr := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
-		if ownerErr != nil {
-			return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
-		}
+		// hubOverride tracks whether the actor is authorized through
+		// hub-level role_binding authority rather than a project role.
+		// When true, project governance matrix and direct-owner checks
+		// are skipped, but CanDelegate and last-owner guards still apply.
+		hubOverride := false
+		actorIsDirectOwner := false
 		if actorRole == "" {
-			return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+			// Brief §1: hub-level authority override. Pre-computed before
+			// the transaction to avoid SQLite deadlock; system-scoped
+			// bindings are stable across the project lock.
+			if preComputedHubOverride {
+				hubOverride = true
+			} else {
+				return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+			}
 		}
-		if !svc.isOperationPermitted(actorRole, req.Op, roleDef.Name) {
-			return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
-		}
-		if requiresDirectOwner(roleDef.Name) && !actorIsDirectOwner {
-			return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
+		if !hubOverride {
+			var ownerErr error
+			actorIsDirectOwner, ownerErr = svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+			if ownerErr != nil {
+				return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
+			}
+			if !svc.isOperationPermitted(actorRole, req.Op, roleDef.Name) {
+				return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
+			}
+			if requiresDirectOwner(roleDef.Name) && !actorIsDirectOwner {
+				return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
+			}
 		}
 
 		// One-binding invariant (D4): re-check under lock.
@@ -564,15 +647,18 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			}
 			// Governance check for the old role (since we're replacing it).
 			// actorRole already re-evaluated under lock above.
-			if !svc.isOperationPermitted(actorRole, req.Op, oldRoleDef.Name) {
-				reason := fmt.Sprintf("actor role %q cannot %s target role %q", actorRole, req.Op, oldRoleDef.Name)
-				if isProtectedRole(oldRoleDef.Name) {
-					reason = "target role is protected: " + reason
+			// Hub-override actors bypass the project governance matrix.
+			if !hubOverride {
+				if !svc.isOperationPermitted(actorRole, req.Op, oldRoleDef.Name) {
+					reason := fmt.Sprintf("actor role %q cannot %s target role %q", actorRole, req.Op, oldRoleDef.Name)
+					if isProtectedRole(oldRoleDef.Name) {
+						reason = "target role is protected: " + reason
+					}
+					return fmt.Errorf("governance:%d:%s", 403, reason)
 				}
-				return fmt.Errorf("governance:%d:%s", 403, reason)
-			}
-			if requiresDirectOwner(oldRoleDef.Name) && !actorIsDirectOwner {
-				return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles")
+				if requiresDirectOwner(oldRoleDef.Name) && !actorIsDirectOwner {
+					return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles")
+				}
 			}
 			// Last-owner guard for demotions.
 			if oldRoleDef.Name == store.ProjectRoleOwner && roleDef.Name != store.ProjectRoleOwner {
@@ -728,6 +814,9 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		}
 	}
 
+	// Pre-compute hub authority override before the transaction.
+	preComputedHubOverride := svc.actorHasHubRoleBindingAuthority(ctx, req.Actor.ID(), req.Op)
+
 	// Atomic replacement inside a transaction: create new binding, delete old
 	// binding, enforce last-owner guard, and write audit record.
 	// R3-1: acquire project lock to prevent write-skew under PostgreSQL.
@@ -746,12 +835,13 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		if roleErr != nil {
 			return fmt.Errorf("authority lookup failed under lock: %w", roleErr)
 		}
-		actorIsDirectOwner, ownerErr := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
-		if ownerErr != nil {
-			return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
-		}
+		hubOverride := false
 		if actorRole == "" {
-			return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+			if preComputedHubOverride {
+				hubOverride = true
+			} else {
+				return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+			}
 		}
 
 		// Re-fetch the target binding under lock to detect concurrent removal.
@@ -769,19 +859,26 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		}
 
 		// Re-validate governance under lock with fresh actor role.
-		if !svc.isOperationPermitted(actorRole, req.Op, oldRoleDef.Name) {
-			return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, oldRoleDef.Name))
-		}
-		if oldRoleDef.Name != newRoleDef.Name {
-			if !svc.isOperationPermitted(actorRole, req.Op, newRoleDef.Name) {
-				return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, newRoleDef.Name))
+		// Hub-override actors bypass project governance matrix.
+		if !hubOverride {
+			actorIsDirectOwner, ownerErr := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+			if ownerErr != nil {
+				return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
 			}
-		}
-		if requiresDirectOwner(oldRoleDef.Name) && !actorIsDirectOwner {
-			return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
-		}
-		if oldRoleDef.Name != newRoleDef.Name && requiresDirectOwner(newRoleDef.Name) && !actorIsDirectOwner {
-			return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
+			if !svc.isOperationPermitted(actorRole, req.Op, oldRoleDef.Name) {
+				return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, oldRoleDef.Name))
+			}
+			if oldRoleDef.Name != newRoleDef.Name {
+				if !svc.isOperationPermitted(actorRole, req.Op, newRoleDef.Name) {
+					return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, newRoleDef.Name))
+				}
+			}
+			if requiresDirectOwner(oldRoleDef.Name) && !actorIsDirectOwner {
+				return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
+			}
+			if oldRoleDef.Name != newRoleDef.Name && requiresDirectOwner(newRoleDef.Name) && !actorIsDirectOwner {
+				return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
+			}
 		}
 
 		// Last-owner guard (inside tx for serialization).
@@ -875,6 +972,9 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		return nil, &decision
 	}
 
+	// Pre-compute hub authority override before the transaction.
+	preComputedHubOverride := svc.actorHasHubRoleBindingAuthority(ctx, req.Actor.ID(), req.Op)
+
 	// Delete the binding, enforce last-owner guard, and write audit inside a
 	// transaction. R3-1: acquire project lock to prevent write-skew.
 	// R2-R1: the last-owner check MUST be inside the transaction.
@@ -891,8 +991,16 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		if roleErr != nil {
 			return fmt.Errorf("authority lookup failed under lock: %w", roleErr)
 		}
+		hubOverride := false
 		if actorRole == "" {
-			return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+			// Hub-level authority pre-computed before the transaction to
+			// avoid SQLite deadlock; system-scoped bindings are stable
+			// across the project lock.
+			if preComputedHubOverride {
+				hubOverride = true
+			} else {
+				return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+			}
 		}
 
 		// Re-fetch the target binding under lock.
@@ -910,16 +1018,19 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		}
 
 		// Re-validate governance under lock.
-		if !svc.isOperationPermitted(actorRole, req.Op, roleDef.Name) {
-			return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
-		}
-		if requiresDirectOwner(roleDef.Name) {
-			actorIsDirectOwner, ownerErr := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
-			if ownerErr != nil {
-				return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
+		// Hub-override actors bypass project governance matrix.
+		if !hubOverride {
+			if !svc.isOperationPermitted(actorRole, req.Op, roleDef.Name) {
+				return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
 			}
-			if !actorIsDirectOwner {
-				return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
+			if requiresDirectOwner(roleDef.Name) {
+				actorIsDirectOwner, ownerErr := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+				if ownerErr != nil {
+					return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
+				}
+				if !actorIsDirectOwner {
+					return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
+				}
 			}
 		}
 
