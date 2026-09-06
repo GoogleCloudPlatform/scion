@@ -268,7 +268,7 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"hub.federation.update":       "NonRouteUse only, no route declaration",
 		"hub.teams_manifest.update":   "NonRouteUse only, no route declaration",
 		// hub.github_app.read and hub.github_app.update: now route-enforced via route_metadata.go
-		"hub.audit.read":              "Super-admin audit explain, NonRouteUse only",
+		"hub.audit.read": "Super-admin audit explain, NonRouteUse only",
 
 		// User/project permissions — NonRouteUse only
 		"user.list":     "NonRouteUse only, no route declaration",
