@@ -131,21 +131,21 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    1,
+			Revision:    2, // R2: remove agent-self and hub-level permissions
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    1,
+			Revision:    2, // R2: remove agent-self and hub-level permissions
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleMember,
 			Description: "Project member with basic project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    1,
+			Revision:    2, // R2: remove agent.stop_all, skill.create, project.create
 			Permissions: projectMemberCuratedPermissionIDs(),
 		},
 
@@ -264,22 +264,19 @@ func hubViewerPermissionIDs() []string {
 // bumped.
 func projectOwnerPermissionIDs() []string {
 	return []string{
-		// Agent lifecycle and operations
+		// Agent lifecycle and operations — human control-plane permissions.
+		// Agent-self credential permissions (status_update, log_append,
+		// token_refresh, identity_token, port_forward, notify) are excluded:
+		// those are intended for agent identities, not human project admins.
 		"agent.attach",
 		"agent.create",
 		"agent.delete",
-		"agent.identity_token",
 		"agent.list",
-		"agent.log_append",
 		"agent.message",
-		"agent.notify",
 		"agent.port_access",
-		"agent.port_forward",
 		"agent.read",
 		"agent.set_message_mode",
-		"agent.status_update",
 		"agent.stop_all",
-		"agent.token_refresh",
 		"agent.update",
 		// Harness config management
 		"harness_config.create",
@@ -287,14 +284,14 @@ func projectOwnerPermissionIDs() []string {
 		"harness_config.list",
 		"harness_config.read",
 		"harness_config.update",
-		// Project management
-		"project.clone",
-		"project.create",
+		// Project management — project.create, project.clone, and
+		// project.register are hub-level operations (enforced against hub
+		// scope, not the bound project) and are excluded from project-scoped
+		// roles.
 		"project.delete",
 		"project.list",
 		"project.manage",
 		"project.read",
-		"project.register",
 		"project.secret_read",
 		"project.update",
 		// Scheduled event management
@@ -325,37 +322,34 @@ func projectOwnerPermissionIDs() []string {
 //   - All *.delete permissions (admins cannot delete resources)
 //   - agent.set_message_mode (D7: only project owners may unseal none-mode agents)
 //
+// Agent-self credential permissions (status_update, log_append, token_refresh,
+// identity_token, port_forward, notify) and hub-level operations (project.create,
+// project.clone, project.register) are also excluded — see projectOwnerPermissionIDs
+// comments for rationale.
+//
 // A new registry permission does NOT automatically enter this role; it must be
 // added here and the role revision bumped.
 func projectAdminPermissionIDs() []string {
 	return []string{
-		// Agent lifecycle and operations (no delete, no set_message_mode)
+		// Agent lifecycle and operations (no delete, no set_message_mode,
+		// no agent-self credential permissions)
 		"agent.attach",
 		"agent.create",
-		"agent.identity_token",
 		"agent.list",
-		"agent.log_append",
 		"agent.message",
-		"agent.notify",
 		"agent.port_access",
-		"agent.port_forward",
 		"agent.read",
-		"agent.status_update",
 		"agent.stop_all",
-		"agent.token_refresh",
 		"agent.update",
 		// Harness config management (no delete)
 		"harness_config.create",
 		"harness_config.list",
 		"harness_config.read",
 		"harness_config.update",
-		// Project management (no delete)
-		"project.clone",
-		"project.create",
+		// Project management (no delete, no hub-level create/clone/register)
 		"project.list",
 		"project.manage",
 		"project.read",
-		"project.register",
 		"project.secret_read",
 		"project.update",
 		// Scheduled event management (no delete)
@@ -380,32 +374,34 @@ func projectAdminPermissionIDs() []string {
 // projectMemberCuratedPermissionIDs returns the curated permission set for the
 // project-member role. This is an explicit list — NOT derived from registry
 // iteration. Members get create, read, list, and message actions on project-
-// scoped resources, plus agent.stop_all.
+// scoped resources.
+//
+// Excluded from this role:
+//   - agent.stop_all: bulk stop is an administrative action, not basic membership
+//   - skill.create: skill creation is an admin/owner action
+//   - project.create: hub-level operation, meaningless in a project-scoped role
 //
 // A new registry permission does NOT automatically enter this role; it must be
 // added here and the role revision bumped.
 func projectMemberCuratedPermissionIDs() []string {
 	return []string{
-		// Agent operations (create, read, list, message, stop_all)
+		// Agent operations (create, read, list, message)
 		"agent.create",
 		"agent.list",
 		"agent.message",
 		"agent.read",
-		"agent.stop_all",
 		// Harness config (create, read, list)
 		"harness_config.create",
 		"harness_config.list",
 		"harness_config.read",
-		// Project (create, read, list)
-		"project.create",
+		// Project (read, list — no project.create, which is hub-level)
 		"project.list",
 		"project.read",
 		// Scheduled events (create, read, list)
 		"scheduled_event.create",
 		"scheduled_event.list",
 		"scheduled_event.read",
-		// Skills (create, read, list)
-		"skill.create",
+		// Skills (read, list — no skill.create)
 		"skill.list",
 		"skill.read",
 		// Templates (create, read, list)
