@@ -32,6 +32,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { PropertyValues } from 'lit';
 import { ACTIVITY_DISPLAY } from '../../../shared/agent-state-display.js';
+import { navigateTo } from '../../../client/main.js';
 import './chat-avatar.js';
 import '../status-badge.js';
 
@@ -511,10 +512,13 @@ export class ScionChatMembers extends LitElement {
         </div>
         <a
           href="/agents/${a.id}/terminal"
-          target="_blank"
           class="agent-terminal"
           title="Open terminal"
-          @click=${(e: Event) => e.stopPropagation()}
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            e.preventDefault();
+            navigateTo(`/agents/${a.id}/terminal`);
+          }}
         >
           <sl-icon name="terminal" style="font-size: 0.75rem;"></sl-icon>
         </a>
