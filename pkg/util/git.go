@@ -16,6 +16,7 @@ package util
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -555,6 +556,33 @@ func ExtractOrgRepo(gitURL string) (org, repo string) {
 	return parts[len(parts)-2], parts[len(parts)-1]
 }
 
+// authenticatedCloneURL embeds OAuth2 credentials in an HTTPS clone URL.
+//
+// It parses the URL rather than substituting on the scheme prefix: a remote
+// that already carries userinfo (Azure DevOps emits
+// "https://org@dev.azure.com/org/project/_git/repo") would otherwise end up
+// with two "@" separators and fail to resolve. url.UserPassword also escapes
+// tokens containing reserved characters.
+//
+// Only https remotes are rewritten. The previous implementation keyed off the
+// literal "https://" prefix, so ssh:// and git:// remotes were left alone;
+// url.Parse alone would happily inject an OAuth token into those, so the
+// scheme is checked explicitly to preserve that behaviour.
+//
+// The original URL is returned unchanged when there is no token, when it
+// cannot be parsed, and when it is not https.
+func authenticatedCloneURL(cloneURL, token string) string {
+	if token == "" {
+		return cloneURL
+	}
+	parsed, err := url.Parse(cloneURL)
+	if err != nil || parsed.Scheme != "https" {
+		return cloneURL
+	}
+	parsed.User = url.UserPassword("oauth2", token)
+	return parsed.String()
+}
+
 // CloneSharedWorkspace clones a git repository into the specified workspace path
 // for use as a shared workspace project. It configures git identity and optionally
 // uses a token for authentication.
@@ -562,10 +590,7 @@ func ExtractOrgRepo(gitURL string) (org, repo string) {
 // If the requested branch does not exist on the remote, the clone falls back to
 // the remote's default branch and creates the requested branch locally.
 func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
-	authURL := cloneURL
-	if token != "" {
-		authURL = strings.Replace(cloneURL, "https://", "https://oauth2:"+token+"@", 1)
-	}
+	authURL := authenticatedCloneURL(cloneURL, token)
 
 	args := []string{"clone"}
 	if branch != "" {
