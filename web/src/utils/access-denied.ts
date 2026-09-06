@@ -96,16 +96,40 @@ export function formatAccessDenied(detail: AccessDeniedDetail): {
 // Cross-event dedup state — centralized so app-shell and chat-shell cannot
 // each maintain divergent clocks. Two events with the same action+resource
 // key within DEDUP_WINDOW_MS are coalesced into one toast.
+//
+// A per-key Map is used rather than a single last-key so that the pattern
+// A→B→A within the window correctly suppresses the second A while still
+// rendering B.
 // ---------------------------------------------------------------------------
 
 const DEDUP_WINDOW_MS = 500;
-let _lastToastKey = '';
-let _lastToastTime = 0;
+const _recentToasts = new Map<string, number>();
 
 /** Exported for testing — resets the internal dedup state. */
 export function _resetDedupState(): void {
-  _lastToastKey = '';
-  _lastToastTime = 0;
+  _recentToasts.clear();
+}
+
+/**
+ * Returns true if this key was seen within the dedup window (i.e. the
+ * caller should suppress the toast). Prunes expired entries on each call
+ * to bound the Map size.
+ */
+function _isDuplicate(key: string, now: number): boolean {
+  // Prune expired entries first to keep the Map bounded.
+  for (const [k, ts] of _recentToasts) {
+    if (now - ts >= DEDUP_WINDOW_MS) {
+      _recentToasts.delete(k);
+    }
+  }
+
+  const prev = _recentToasts.get(key);
+  if (prev !== undefined && now - prev < DEDUP_WINDOW_MS) {
+    // Duplicate within window — suppress without extending the window.
+    return true;
+  }
+  _recentToasts.set(key, now);
+  return false;
 }
 
 /**
@@ -123,12 +147,9 @@ export function _resetDedupState(): void {
 export function showAccessDeniedToast(detail: AccessDeniedDetail): void {
   // Coalesce rapid duplicate 403 toasts: suppress if same key within window.
   const key = `${detail.action ?? ''}:${detail.resource ?? ''}`;
-  const now = Date.now();
-  if (key === _lastToastKey && now - _lastToastTime < DEDUP_WINDOW_MS) {
+  if (_isDuplicate(key, Date.now())) {
     return;
   }
-  _lastToastKey = key;
-  _lastToastTime = now;
   const { primary, secondary } = formatAccessDenied(detail);
 
   if (!secondary) {

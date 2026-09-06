@@ -492,6 +492,8 @@ func TestGitHubAppRouteMethodMatrix(t *testing.T) {
 		{name: "GET installations list", method: "GET", path: "/api/v1/github-app/installations", wantAdmin: 200, wantMember: 403, wantUnauth: 401},
 		{name: "GET installation by ID", method: "GET", path: "/api/v1/github-app/installations/999", wantAdmin: 404, wantMember: 403, wantUnauth: 401},
 		// Write operations
+		{name: "PUT github-app config", method: "PUT", path: "/api/v1/github-app", wantAdmin: 400, wantMember: 403, wantUnauth: 401},
+		{name: "PUT installation by ID", method: "PUT", path: "/api/v1/github-app/installations/999", wantAdmin: 400, wantMember: 403, wantUnauth: 401},
 		{name: "POST installations create", method: "POST", path: "/api/v1/github-app/installations", wantAdmin: 400, wantMember: 403, wantUnauth: 401},
 		{name: "POST installations discover", method: "POST", path: "/api/v1/github-app/installations/discover", wantAdmin: 503, wantMember: 403, wantUnauth: 401},
 		{name: "POST sync-permissions", method: "POST", path: "/api/v1/github-app/sync-permissions", wantAdmin: 502, wantMember: 403, wantUnauth: 401},

@@ -327,13 +327,17 @@ describe('showAccessDeniedToast', () => {
 });
 
 // ---------------------------------------------------------------------------
-// showAccessDeniedToast — dedup coalescing
+// showAccessDeniedToast — dedup coalescing with mocked Date.now
 // ---------------------------------------------------------------------------
 
 describe('showAccessDeniedToast dedup', () => {
+  let nowMs: number;
+
   beforeEach(() => {
     _resetDedupState();
     stubAlertToast();
+    nowMs = 1000;
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
   });
 
   afterEach(() => {
@@ -344,26 +348,47 @@ describe('showAccessDeniedToast dedup', () => {
 
   it('suppresses duplicate same-key toast within window', () => {
     showAccessDeniedToast({ action: 'read', resource: 'hub', reason: 'Insufficient permissions' });
+    nowMs += 100; // +100ms, still within 500ms
     showAccessDeniedToast({ action: 'read', resource: 'hub', reason: 'Insufficient permissions' });
 
-    const alerts = document.querySelectorAll('sl-alert');
-    expect(alerts.length).toBe(1);
+    expect(document.querySelectorAll('sl-alert').length).toBe(1);
+  });
+
+  it('suppresses at 499ms but allows at 501ms', () => {
+    showAccessDeniedToast({ action: 'read', resource: 'hub' });
+
+    nowMs += 499;
+    showAccessDeniedToast({ action: 'read', resource: 'hub' });
+    expect(document.querySelectorAll('sl-alert').length).toBe(1);
+
+    nowMs += 2; // total 501ms from last recorded time
+    showAccessDeniedToast({ action: 'read', resource: 'hub' });
+    expect(document.querySelectorAll('sl-alert').length).toBe(2);
   });
 
   it('allows distinct keys within window', () => {
     showAccessDeniedToast({ action: 'read', resource: 'hub' });
+    nowMs += 50;
     showAccessDeniedToast({ action: 'update', resource: 'hub' });
 
-    const alerts = document.querySelectorAll('sl-alert');
-    expect(alerts.length).toBe(2);
+    expect(document.querySelectorAll('sl-alert').length).toBe(2);
   });
 
-  it('allows same key after dedup state reset (simulating window expiry)', () => {
+  it('suppresses A→B→A interleaved within window', () => {
+    showAccessDeniedToast({ action: 'read', resource: 'hub' });   // A fires
+    nowMs += 100;
+    showAccessDeniedToast({ action: 'update', resource: 'hub' }); // B fires (distinct)
+    nowMs += 100;
+    showAccessDeniedToast({ action: 'read', resource: 'hub' });   // A again at +200ms — suppressed
+
+    expect(document.querySelectorAll('sl-alert').length).toBe(2);
+  });
+
+  it('allows same key after window expires', () => {
     showAccessDeniedToast({ action: 'read', resource: 'hub' });
-    _resetDedupState();
+    nowMs += 501;
     showAccessDeniedToast({ action: 'read', resource: 'hub' });
 
-    const alerts = document.querySelectorAll('sl-alert');
-    expect(alerts.length).toBe(2);
+    expect(document.querySelectorAll('sl-alert').length).toBe(2);
   });
 });

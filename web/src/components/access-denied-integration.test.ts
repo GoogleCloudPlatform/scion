@@ -422,12 +422,17 @@ describe('user admin denial payloads', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Duplicate-toast suppression (cross-event dedup)
+// Duplicate-toast suppression (cross-event dedup) — mocked Date.now
 // ---------------------------------------------------------------------------
 
 describe('duplicate-toast suppression', () => {
+  let nowMs: number;
+  let dateNowSpy: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
     _resetDedupState();
+    nowMs = 1000;
+    dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
     window.addEventListener(
       'scion:access-denied',
       appShellHandler as EventListener
@@ -440,31 +445,34 @@ describe('duplicate-toast suppression', () => {
       appShellHandler as EventListener
     );
     document.querySelectorAll('sl-alert').forEach((el) => el.remove());
+    dateNowSpy.mockRestore();
     _resetDedupState();
   });
 
   it('coalesces two same-key events within the 500ms window into one toast', () => {
     fireAccessDenied({ action: 'read', resource: 'hub' });
+    nowMs += 100;
     fireAccessDenied({ action: 'read', resource: 'hub' });
 
     expect(getAlerts().length).toBe(1);
   });
 
-  it('allows same-key event after window expires', () => {
-    // First event
+  it('suppresses at 499ms but allows at 501ms', () => {
     fireAccessDenied({ action: 'read', resource: 'hub' });
     expect(getAlerts().length).toBe(1);
 
-    // Simulate window expiry by resetting dedup state
-    _resetDedupState();
+    nowMs += 499;
+    fireAccessDenied({ action: 'read', resource: 'hub' });
+    expect(getAlerts().length).toBe(1);
 
-    // Second event after window
+    nowMs += 2; // total 501ms from last recorded time
     fireAccessDenied({ action: 'read', resource: 'hub' });
     expect(getAlerts().length).toBe(2);
   });
 
   it('allows distinct action+resource keys within the window', () => {
     fireAccessDenied({ action: 'read', resource: 'hub' });
+    nowMs += 50;
     fireAccessDenied({ action: 'update', resource: 'hub' });
 
     expect(getAlerts().length).toBe(2);
@@ -472,35 +480,61 @@ describe('duplicate-toast suppression', () => {
 
   it('allows distinct resource with same action within the window', () => {
     fireAccessDenied({ action: 'read', resource: 'agent' });
+    nowMs += 50;
     fireAccessDenied({ action: 'read', resource: 'project' });
+
+    expect(getAlerts().length).toBe(2);
+  });
+
+  it('suppresses A→B→A interleaved within window', () => {
+    fireAccessDenied({ action: 'read', resource: 'hub' });   // A fires
+    nowMs += 100;
+    fireAccessDenied({ action: 'update', resource: 'hub' }); // B fires (distinct)
+    nowMs += 100;
+    fireAccessDenied({ action: 'read', resource: 'hub' });   // A again at +200ms — suppressed
 
     expect(getAlerts().length).toBe(2);
   });
 
   it('coalesces three identical rapid events', () => {
     fireAccessDenied({ action: 'read', resource: 'hub' });
+    nowMs += 50;
     fireAccessDenied({ action: 'read', resource: 'hub' });
+    nowMs += 50;
     fireAccessDenied({ action: 'read', resource: 'hub' });
 
     expect(getAlerts().length).toBe(1);
   });
 
   it('coalesces legacy events with no action or resource', () => {
-    // Both have empty action+resource -> same key ":"
     fireAccessDenied({ reason: 'Insufficient permissions' });
+    nowMs += 50;
     fireAccessDenied({ reason: 'Insufficient permissions' });
 
     expect(getAlerts().length).toBe(1);
   });
+
+  it('allows same key after window expires', () => {
+    fireAccessDenied({ action: 'read', resource: 'hub' });
+    nowMs += 501;
+    fireAccessDenied({ action: 'read', resource: 'hub' });
+
+    expect(getAlerts().length).toBe(2);
+  });
 });
 
 // ---------------------------------------------------------------------------
-// Dedup with both shells mounted
+// Dedup with both shells mounted — mocked Date.now
 // ---------------------------------------------------------------------------
 
 describe('dedup with both app-shell and chat-shell mounted', () => {
+  let nowMs: number;
+  let dateNowSpy: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
     _resetDedupState();
+    nowMs = 1000;
+    dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
     window.addEventListener(
       'scion:access-denied',
       appShellHandler as EventListener
@@ -521,6 +555,7 @@ describe('dedup with both app-shell and chat-shell mounted', () => {
       chatShellHandler as EventListener
     );
     document.querySelectorAll('sl-alert').forEach((el) => el.remove());
+    dateNowSpy.mockRestore();
     _resetDedupState();
   });
 
@@ -533,13 +568,24 @@ describe('dedup with both app-shell and chat-shell mounted', () => {
   it('coalesces duplicate events with both shells mounted', () => {
     // Two identical events: first handled by app-shell, second suppressed by dedup
     fireAccessDenied({ action: 'read', resource: 'hub' });
+    nowMs += 50;
     fireAccessDenied({ action: 'read', resource: 'hub' });
     expect(getAlerts().length).toBe(1);
   });
 
   it('distinct events each produce one toast with both shells', () => {
     fireAccessDenied({ action: 'read', resource: 'agent' });
+    nowMs += 50;
     fireAccessDenied({ action: 'update', resource: 'project' });
+    expect(getAlerts().length).toBe(2);
+  });
+
+  it('suppresses A→B→A interleaved with both shells', () => {
+    fireAccessDenied({ action: 'read', resource: 'hub' });   // A fires
+    nowMs += 100;
+    fireAccessDenied({ action: 'update', resource: 'hub' }); // B fires
+    nowMs += 100;
+    fireAccessDenied({ action: 'read', resource: 'hub' });   // A at +200ms — suppressed
     expect(getAlerts().length).toBe(2);
   });
 });
