@@ -222,6 +222,69 @@ func TestGCPBackend_GetNotFoundAnywhere(t *testing.T) {
 	}
 }
 
+func TestGCPBackend_Get_DBRecordExists_GCPSMNotFound(t *testing.T) {
+	// When a DB record exists but the corresponding GCP Secret Manager secret
+	// is missing (gRPC NotFound), Get must return store.ErrNotFound — not a
+	// wrapped generic error. This is critical for MigratePluginSecrets which
+	// relies on ErrNotFound to know a secret needs migration.
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+	mock := newMockSMClient() // empty — no secrets in GCP SM
+	backend := NewGCPBackendWithClient(s, mock, "test-project", "test-hub-id")
+	ctx := context.Background()
+
+	// Seed a DB record that points to a GCP SM secret which does not exist.
+	if _, err := s.UpsertSecret(ctx, &store.Secret{
+		ID:        tid("orphan-db-record"),
+		Key:       "bot_token",
+		Scope:     store.ScopeProject,
+		ScopeID:   "proj-1",
+		SecretRef: "gcpsm:projects/test-project/secrets/nonexistent",
+	}); err != nil {
+		t.Fatalf("failed to seed DB record: %v", err)
+	}
+
+	_, err = backend.Get(ctx, "bot_token", store.ScopeProject, "proj-1")
+	if err != store.ErrNotFound {
+		t.Errorf("expected store.ErrNotFound when GCP SM secret is missing, got: %v", err)
+	}
+}
+
+func TestGCPBackend_Get_DBRecordExists_GCPSMNotFound_ComputedName(t *testing.T) {
+	// Same scenario but without a stored SecretRef — the backend computes the
+	// GCP SM name. The gRPC NotFound must still be converted to store.ErrNotFound.
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+	mock := newMockSMClient() // empty — no secrets in GCP SM
+	backend := NewGCPBackendWithClient(s, mock, "test-project", "test-hub-id")
+	ctx := context.Background()
+
+	// Seed a DB record WITHOUT a gcpsm: SecretRef — forces the computed-name path.
+	if _, err := s.UpsertSecret(ctx, &store.Secret{
+		ID:      tid("orphan-no-ref"),
+		Key:     "bot_token",
+		Scope:   store.ScopeProject,
+		ScopeID: "proj-1",
+	}); err != nil {
+		t.Fatalf("failed to seed DB record: %v", err)
+	}
+
+	_, err = backend.Get(ctx, "bot_token", store.ScopeProject, "proj-1")
+	if err != store.ErrNotFound {
+		t.Errorf("expected store.ErrNotFound when GCP SM secret is missing (computed name), got: %v", err)
+	}
+}
+
 func TestGCPBackend_SetAndGet(t *testing.T) {
 	backend, mock := createTestGCPBackend(t)
 	ctx := context.Background()
