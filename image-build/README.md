@@ -157,6 +157,38 @@ or removing a harness Dockerfile under `harnesses/<name>/`, update those
 aggregate YAMLs too. Individual harness bundles can also carry their own
 `harnesses/<name>/cloudbuild.yaml` for one-off builds.
 
+## Package Registries
+
+By default the images install npm packages from the public registry. On a network
+where `registry.npmjs.org` is unreachable, point the build at an internal mirror
+(Artifactory, Nexus, Verdaccio) with two optional environment variables:
+
+| Variable | Purpose |
+|---|---|
+| `NPM_REGISTRY` | Registry URL. Passed to `core-base` as a build-arg and exported as `NPM_CONFIG_REGISTRY`, so `scion-base`, the harness images, and agents at runtime all inherit it. |
+| `NPM_CONFIG_FILE` | Path to an `.npmrc` holding credentials for that registry. Mounted as a BuildKit secret, never written to an image layer. |
+
+```bash
+export NPM_REGISTRY=https://artifactory.example.com/artifactory/api/npm/npm-repos/
+export NPM_CONFIG_FILE="$HOME/.npmrc"
+image-build/scripts/build-images.sh --target common
+```
+
+Both are optional and independent. Unset, the build uses the public registry
+unauthenticated, exactly as before. `NPM_REGISTRY` without `NPM_CONFIG_FILE`
+works for a mirror that allows anonymous reads.
+
+Credentials go in as a BuildKit secret rather than a build-arg deliberately: a
+build-arg is recoverable from `docker history` on the resulting image, whereas a
+secret mount is available only during the `RUN` that requests it. The mounts are
+declared `required=false`, so builds without a secret are unaffected.
+
+Supported by the `local-docker` and `local-podman` builders.
+
+**Not yet covered:** pip. The `hermes` image installs Python packages from PyPI
+and has no equivalent knob, so it cannot currently be built behind a proxy that
+blocks PyPI.
+
 ## Authentication
 
 The orchestrator and builders assume the caller is already authenticated to the target registry (via `docker login`, `podman login`, `gcloud auth configure-docker`, etc.) and to any required cloud APIs. No login steps are performed inside the script.

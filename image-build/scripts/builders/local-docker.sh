@@ -104,6 +104,13 @@ builder_build() {
     cmd+=(--build-arg "${arg}")
   done
 
+  # Optional npm credentials for private or mirrored registries. Mounted as a
+  # BuildKit secret so the token is available during RUN but never written to
+  # an image layer. Unset = no secret, unauthenticated build.
+  if [[ -n "${NPM_CONFIG_FILE:-}" ]]; then
+    cmd+=(--secret "id=npmrc,src=${NPM_CONFIG_FILE}")
+  fi
+
   cmd+=(-f "${dockerfile}")
 
   if [[ "${push}" == "true" ]]; then

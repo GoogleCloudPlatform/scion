@@ -214,7 +214,11 @@ step_build_args() {
   fi
   case "$1" in
     core-base)
-      # No build-args.
+      # Optional npm mirror passthrough (see core-base/Dockerfile). Unset =
+      # public registry, i.e. no build-arg emitted and default behaviour.
+      if [[ -n "${NPM_REGISTRY:-}" ]]; then
+        echo "NPM_REGISTRY=${NPM_REGISTRY}"
+      fi
       ;;
     thick-prep)
       # No build-args — BASE_IMAGE default is in the Dockerfile ARG.

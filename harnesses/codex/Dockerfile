@@ -22,7 +22,8 @@ RUN mkdir -p /home/scion/.codex /home/scion/.codex/skills && \
   chown -R scion:scion /home/scion/.codex
 
 # install codex, expose it on standard shell PATH, and clean up
-RUN npm install -g @openai/codex@${CODEX_CLI_VERSION} \
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
+    npm install -g @openai/codex@${CODEX_CLI_VERSION} \
   && ln -sf /usr/local/share/npm-global/bin/codex /usr/local/bin/codex \
   && npm cache clean --force
 
