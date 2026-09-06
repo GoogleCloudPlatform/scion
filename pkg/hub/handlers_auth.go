@@ -1345,6 +1345,12 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			return nil, ErrUserSuspended
 		}
 
+		// Track whether we need to create or delete a super-admin
+		// RoleBinding. The actual mutation is deferred until after
+		// UpdateUser succeeds so that a failed UpdateUser cannot leave
+		// the binding state diverged from User.Role.
+		var bindingSuperAdmin string // "", "ensure", or "delete"
+
 		if user.Status == store.UserStatusInvited {
 			// Transition invited → active on first login
 			slog.Info("user activated from invited state", "email", info.Email, "user_id", user.ID)
@@ -1359,9 +1365,9 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			oldRole := user.Role
 			user.Role = s.getUserRole(info.Email, user.Role)
 			if oldRole == "admin" && user.Role != "admin" {
-				s.deleteSuperAdminBinding(ctx, user.ID)
+				bindingSuperAdmin = "delete"
 			} else if user.Role == "admin" && oldRole != "admin" {
-				s.ensureSuperAdminBinding(ctx, user.ID)
+				bindingSuperAdmin = "ensure"
 			}
 			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, info.Email, "", user.ID, info.Email, nil)
 		} else {
@@ -1384,15 +1390,22 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 				slog.Info("User role changed on login", "email", info.Email, "old_role", oldRole, "new_role", newRole)
 				user.Role = newRole
 				if oldRole == "admin" {
-					s.deleteSuperAdminBinding(ctx, user.ID)
+					bindingSuperAdmin = "delete"
 				} else if newRole == "admin" {
-					s.ensureSuperAdminBinding(ctx, user.ID)
+					bindingSuperAdmin = "ensure"
 				}
 			}
 		}
 		if err := s.store.UpdateUser(ctx, user); err != nil {
 			slog.Error("failed to update user on login", "email", info.Email, "user_id", user.ID, "error", err)
 			return nil, fmt.Errorf("update user: %w", err)
+		}
+		// Apply binding changes only after UpdateUser has succeeded.
+		switch bindingSuperAdmin {
+		case "ensure":
+			s.ensureSuperAdminBinding(ctx, user.ID)
+		case "delete":
+			s.deleteSuperAdminBinding(ctx, user.ID)
 		}
 	}
 
@@ -1762,6 +1775,12 @@ func (s *Server) ensureSuperAdminBinding(ctx context.Context, userID string) {
 		slog.Warn("ensureSuperAdminBinding: super-admin role definition not found — "+
 			"binding will be created on next restart by ReconcileSuperAdminBindings",
 			"user_id", userID, "error", err)
+		return
+	}
+	if rd == nil {
+		slog.Error("ensureSuperAdminBinding: GetRoleDefinitionByName returned nil without error — "+
+			"binding will be created on next restart by ReconcileSuperAdminBindings",
+			"user_id", userID)
 		return
 	}
 
