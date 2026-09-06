@@ -190,8 +190,14 @@ export class ScionPageAdminRoleBindings extends LitElement {
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
 
-    th.sortable { cursor: pointer; user-select: none; }
-    th.sortable:hover, th.sortable.active { color: var(--scion-text, #1e293b); }
+    th.sortable {
+      cursor: pointer;
+      user-select: none;
+    }
+    th.sortable:hover,
+    th.sortable.active {
+      color: var(--scion-text, #1e293b);
+    }
 
     td {
       padding: 0.75rem 1rem;
@@ -532,7 +538,12 @@ export class ScionPageAdminRoleBindings extends LitElement {
 
     try {
       const offset = (this.currentPage - 1) * PAGE_SIZE;
-      const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset), sort_by: this.sortBy, sort_order: this.sortOrder });
+      const params = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+        offset: String(offset),
+        sort_by: this.sortBy,
+        sort_order: this.sortOrder,
+      });
       const [bindingsRes, rolesRes] = await Promise.all([
         apiFetch(`/api/v1/admin/role-bindings?${params.toString()}`),
         apiFetch('/api/v1/admin/roles'),
@@ -574,7 +585,10 @@ export class ScionPageAdminRoleBindings extends LitElement {
 
   private toggleSort(field: SortField): void {
     if (this.sortBy === field) this.sortOrder = this.sortOrder === 'asc' ? 'desc' : 'asc';
-    else { this.sortBy = field; this.sortOrder = field === 'created' ? 'desc' : 'asc'; }
+    else {
+      this.sortBy = field;
+      this.sortOrder = field === 'created' ? 'desc' : 'asc';
+    }
     this.currentPage = 1;
     void this.loadData();
   }
@@ -664,7 +678,9 @@ export class ScionPageAdminRoleBindings extends LitElement {
     void this.updateComplete.then(() => {
       const form = this.shadowRoot?.querySelector('scion-role-binding-assignment-form');
       if (form) {
-        (form as import('../shared/role-binding-assignment-form.js').ScionRoleBindingAssignmentForm).reset();
+        type AssignmentForm =
+          import('../shared/role-binding-assignment-form.js').ScionRoleBindingAssignmentForm;
+        (form as AssignmentForm).reset();
       }
     });
   }
@@ -1061,11 +1077,26 @@ export class ScionPageAdminRoleBindings extends LitElement {
         <table>
           <thead>
             <tr>
-              <th class="sortable ${this.sortBy === 'principal' ? 'active' : ''}" @click=${() => this.toggleSort('principal')}>Principal${this.sortIndicator('principal')}</th>
-              <th class="sortable ${this.sortBy === 'role' ? 'active' : ''}" @click=${() => this.toggleSort('role')}>Role${this.sortIndicator('role')}</th>
+              <th
+                class="sortable ${this.sortBy === 'principal' ? 'active' : ''}"
+                @click=${() => this.toggleSort('principal')}
+              >
+                Principal${this.sortIndicator('principal')}
+              </th>
+              <th
+                class="sortable ${this.sortBy === 'role' ? 'active' : ''}"
+                @click=${() => this.toggleSort('role')}
+              >
+                Role${this.sortIndicator('role')}
+              </th>
               <th>Scope</th>
               <th class="hide-mobile">Status</th>
-              <th class="hide-mobile sortable ${this.sortBy === 'created' ? 'active' : ''}" @click=${() => this.toggleSort('created')}>Created${this.sortIndicator('created')}</th>
+              <th
+                class="hide-mobile sortable ${this.sortBy === 'created' ? 'active' : ''}"
+                @click=${() => this.toggleSort('created')}
+              >
+                Created${this.sortIndicator('created')}
+              </th>
               <th>Actions</th>
             </tr>
           </thead>

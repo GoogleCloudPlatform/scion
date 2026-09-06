@@ -484,18 +484,6 @@ export class ScionPageAdminRoleDetail extends LitElement {
       justify-content: flex-end;
     }
 
-    .agent-scope-note {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      margin: 0 0 0.75rem 0;
-      padding: 0.5rem 0.75rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-radius: var(--scion-radius, 0.5rem);
-    }
-
     @media (max-width: 768px) {
       .hide-mobile {
         display: none;

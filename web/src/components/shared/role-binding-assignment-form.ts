@@ -414,7 +414,7 @@ export class ScionRoleBindingAssignmentForm extends LitElement {
           }}
         ></scion-project-picker>
       </div>
-      ${this._principalType === 'agent' && !this.agentDisabled
+      ${(this.lockedPrincipalType || this._principalType) === 'agent' && !this.agentDisabled
         ? html`<p class="agent-scope-note">
             <sl-icon name="info-circle"></sl-icon>
             Agents are project-bound. This binding is effective only within the
