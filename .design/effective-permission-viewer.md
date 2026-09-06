@@ -64,7 +64,5 @@ The viewer should explain:
 ## References
 
 - Removed composition code: commit that introduced this design note.
-- `authorization-layer-stack.ts` — retained in the codebase as a
-  reference for the layered visualization pattern (currently unused).
 - `effective-access-boundary-notice.ts` — the boundary-count notice
   component, still in use.
