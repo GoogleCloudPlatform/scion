@@ -218,7 +218,7 @@ describe('scion-page-admin-role-bindings create dialog', () => {
     expect(btn?.textContent?.trim()).toContain('Assign Role');
   });
 
-  it('renders principal picker in the create dialog', async () => {
+  it('renders shared assignment form with principal picker in the create dialog', async () => {
     const { handler } = makeFetchHandler();
     const el = await createComponent(handler);
 
@@ -227,12 +227,16 @@ describe('scion-page-admin-role-bindings create dialog', () => {
     btn?.click();
     await new Promise((r) => setTimeout(r, 50));
 
-    // Check for principal picker component.
-    const picker = query(el, 'scion-principal-picker');
+    // Check for the shared assignment form component.
+    const form = query(el, 'scion-role-binding-assignment-form');
+    expect(form).not.toBeNull();
+
+    // Principal picker is inside the shared form's shadow DOM.
+    const picker = form?.shadowRoot?.querySelector('scion-principal-picker');
     expect(picker).not.toBeNull();
   });
 
-  it('renders project picker when scope is project', async () => {
+  it('renders project picker via shared form when scope is project', async () => {
     const { handler } = makeFetchHandler();
     const el = await createComponent(handler);
 
@@ -241,18 +245,20 @@ describe('scion-page-admin-role-bindings create dialog', () => {
     btn?.click();
     await new Promise((r) => setTimeout(r, 50));
 
-    // Set scope to project. Direct property access on Lit element.
+    // Set scope to project via the shared form's internal state.
+    const form = query(el, 'scion-role-binding-assignment-form') as HTMLElement;
+    expect(form).not.toBeNull();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const comp = el as any;
-    comp.formScopeType = 'project';
-    comp.requestUpdate();
-    await comp.updateComplete;
+    (form as any)._scopeType = 'project';
+    (form as any).requestUpdate();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (form as any).updateComplete;
 
-    const projectPicker = query(el, 'scion-project-picker');
+    const projectPicker = form?.shadowRoot?.querySelector('scion-project-picker');
     expect(projectPicker).not.toBeNull();
   });
 
-  it('does not render project picker when scope is system', async () => {
+  it('does not render project picker via shared form when scope is system', async () => {
     const { handler } = makeFetchHandler();
     const el = await createComponent(handler);
 
@@ -261,7 +267,10 @@ describe('scion-page-admin-role-bindings create dialog', () => {
     btn?.click();
     await new Promise((r) => setTimeout(r, 50));
 
-    const projectPicker = query(el, 'scion-project-picker');
+    const form = query(el, 'scion-role-binding-assignment-form') as HTMLElement;
+    expect(form).not.toBeNull();
+
+    const projectPicker = form?.shadowRoot?.querySelector('scion-project-picker');
     expect(projectPicker).toBeNull();
   });
 

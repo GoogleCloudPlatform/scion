@@ -29,8 +29,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import type { PrincipalChangeDetail } from '../shared/principal-picker.js';
-import type { ProjectChangeDetail } from '../shared/project-picker.js';
 import type { SecurityReviewDetail } from '../shared/security-review-dialog.js';
 import {
   parseSecurityReviewResponse,
@@ -39,6 +37,8 @@ import {
 import '../shared/principal-picker.js';
 import '../shared/project-picker.js';
 import '../shared/security-review-dialog.js';
+import type { AssignmentFormValues } from '../shared/role-binding-assignment-form.js';
+import '../shared/role-binding-assignment-form.js';
 import {
   SYSTEM_DIRECT_USER_ONLY_ROLES,
   getLifecycleStatus,
@@ -124,9 +124,6 @@ export class ScionPageAdminRoleBindings extends LitElement {
   // Action state
   @state() private actionInProgress = false;
   @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null = null;
-
-  // Validation warning (e.g. group assigned to direct-user-only role)
-  @state() private formValidationWarning = '';
 
   // Security review dialog state
   @state() private securityReviewDetail: SecurityReviewDetail | null = null;
@@ -661,8 +658,15 @@ export class ScionPageAdminRoleBindings extends LitElement {
     this.showAdvanced = false;
     this.formNotBefore = '';
     this.formExpiresAt = '';
-    this.formValidationWarning = '';
     this.showCreateDialog = true;
+
+    // Reset the shared form after it renders
+    void this.updateComplete.then(() => {
+      const form = this.shadowRoot?.querySelector('scion-role-binding-assignment-form');
+      if (form) {
+        (form as import('../shared/role-binding-assignment-form.js').ScionRoleBindingAssignmentForm).reset();
+      }
+    });
   }
 
   private openDeleteDialog(binding: RoleBinding): void {
@@ -670,42 +674,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
     this.showDeleteDialog = true;
   }
 
-  /**
-   * Roles available for the current principal type, filtered by scope type.
-   * Group principals cannot be assigned direct-user-only roles.
-   */
-  private get filteredRoles(): RoleDefinition[] {
-    let filtered = this.roles;
-
-    // Filter by scope type compatibility
-    if (this.formScopeType === 'system') {
-      filtered = filtered.filter((r) => r.scopeType === 'system');
-    } else if (this.formScopeType === 'project') {
-      filtered = filtered.filter((r) => r.scopeType === 'project');
-    }
-
-    // Groups cannot be assigned to direct-user-only roles
-    if (this.formPrincipalType === 'group') {
-      filtered = filtered.filter((r) => !SYSTEM_DIRECT_USER_ONLY_ROLES.includes(r.name));
-    }
-
-    return filtered;
-  }
-
-  /**
-   * Update validation state when principal type or role changes.
-   */
-  private updateValidation(): void {
-    if (this.formPrincipalType === 'group' && this.formRoleId) {
-      const roleName = this.roleNameMap[this.formRoleId];
-      if (roleName && SYSTEM_DIRECT_USER_ONLY_ROLES.includes(roleName)) {
-        this.formValidationWarning = `"${roleName}" can only be assigned to individual users, not groups.`;
-        this.formRoleId = '';
-        return;
-      }
-    }
-    this.formValidationWarning = '';
-  }
+  // Validation is now handled by the shared scion-role-binding-assignment-form component.
 
   // ---------------------------------------------------------------------------
   // API actions
@@ -1230,109 +1199,17 @@ export class ScionPageAdminRoleBindings extends LitElement {
           if (!this.actionInProgress) this.showCreateDialog = false;
         }}
       >
-        ${this.formValidationWarning
-          ? html`
-              <div class="validation-warning">
-                <sl-icon name="exclamation-triangle"></sl-icon>
-                ${this.formValidationWarning}
-              </div>
-            `
-          : ''}
-
-        <!-- Step 1: Select principal -->
-        <div class="form-group">
-          <sl-select
-            label="Principal Type"
-            .value=${this.formPrincipalType}
-            @sl-change=${(e: Event) => {
-              this.formPrincipalType = (e.target as HTMLSelectElement).value;
-              this.formPrincipalId = '';
-              this.updateValidation();
-            }}
-          >
-            <sl-option value="user">
-              <sl-icon slot="prefix" name="person"></sl-icon>
-              User
-            </sl-option>
-            <sl-option value="agent">
-              <sl-icon slot="prefix" name="cpu"></sl-icon>
-              Agent
-            </sl-option>
-            <sl-option value="group">
-              <sl-icon slot="prefix" name="diagram-3"></sl-icon>
-              Group
-            </sl-option>
-          </sl-select>
-        </div>
-        <div class="form-group">
-          <scion-principal-picker
-            .principalType=${this.formPrincipalType as 'user' | 'agent' | 'group'}
-            @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => {
-              this.formPrincipalId = e.detail.principalId;
-            }}
-          ></scion-principal-picker>
-        </div>
-
-        <!-- Step 2: Select role -->
-        <div class="form-group">
-          <sl-select
-            label="Role"
-            .value=${this.formRoleId}
-            @sl-change=${(e: Event) => {
-              this.formRoleId = (e.target as HTMLSelectElement).value;
-              // Auto-set scope type to match the role's scope type
-              const scopeType = this.roleScopeMap[this.formRoleId];
-              if (scopeType) {
-                this.formScopeType = scopeType;
-              }
-              this.updateValidation();
-            }}
-          >
-            ${this.filteredRoles.length === 0
-              ? html`<sl-option value="" disabled>No roles available for this scope</sl-option>`
-              : this.filteredRoles.map(
-                  (role) => html`
-                    <sl-option value=${role.id}>
-                      ${role.name}
-                      <small style="color: var(--scion-text-muted, #64748b)">
-                        (${role.scopeType})
-                      </small>
-                    </sl-option>
-                  `
-                )}
-          </sl-select>
-        </div>
-
-        <!-- Step 3: Select scope -->
-        <div class="form-group">
-          <sl-select
-            label="Scope"
-            .value=${this.formScopeType}
-            @sl-change=${(e: Event) => {
-              this.formScopeType = (e.target as HTMLSelectElement).value;
-              // Re-filter roles when scope type changes
-              if (this.formRoleId && this.roleScopeMap[this.formRoleId] !== this.formScopeType) {
-                this.formRoleId = '';
-              }
-              this.updateValidation();
-            }}
-          >
-            <sl-option value="system">System</sl-option>
-            <sl-option value="project">Project</sl-option>
-          </sl-select>
-        </div>
-        ${this.formScopeType === 'project'
-          ? html`
-              <div class="form-group">
-                <scion-project-picker
-                  label="Project"
-                  @project-change=${(e: CustomEvent<ProjectChangeDetail>) => {
-                    this.formScopeId = e.detail.projectId;
-                  }}
-                ></scion-project-picker>
-              </div>
-            `
-          : ''}
+        <scion-role-binding-assignment-form
+          .roles=${this.roles}
+          ?disabled=${this.actionInProgress}
+          @form-change=${(e: CustomEvent<AssignmentFormValues>) => {
+            this.formPrincipalType = e.detail.principalType;
+            this.formPrincipalId = e.detail.principalId;
+            this.formRoleId = e.detail.roleId;
+            this.formScopeType = e.detail.scopeType;
+            this.formScopeId = e.detail.scopeId;
+          }}
+        ></scion-role-binding-assignment-form>
 
         <!-- Advanced: Assignment lifecycle -->
         <button

@@ -430,7 +430,7 @@ describe('admin-role-detail: add binding form', () => {
     vi.restoreAllMocks();
   });
 
-  it('renders principal-picker in add binding form', async () => {
+  it('renders shared assignment form with principal-picker in add binding form', async () => {
     const handler = createFetchHandler({ role: CUSTOM_ROLE, bindings: BINDINGS });
     el = await createElement(handler);
 
@@ -451,11 +451,16 @@ describe('admin-role-detail: add binding form', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await (el as any).updateComplete;
 
-    const picker = el.shadowRoot?.querySelector('scion-principal-picker');
+    // The shared assignment form should be rendered
+    const form = el.shadowRoot?.querySelector('scion-role-binding-assignment-form');
+    expect(form).not.toBeNull();
+
+    // Principal picker is inside the shared form's shadow DOM
+    const picker = form?.shadowRoot?.querySelector('scion-principal-picker');
     expect(picker).not.toBeNull();
   });
 
-  it('renders project-picker in add binding form for project-scoped role', async () => {
+  it('renders project-picker via shared form for project-scoped role', async () => {
     const PROJECT_ROLE = {
       ...CUSTOM_ROLE,
       id: 'role-project-1',
@@ -484,11 +489,15 @@ describe('admin-role-detail: add binding form', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await (el as any).updateComplete;
 
-    const projectPicker = el.shadowRoot?.querySelector('scion-project-picker');
+    const form = el.shadowRoot?.querySelector('scion-role-binding-assignment-form');
+    expect(form).not.toBeNull();
+
+    // Project picker is inside the shared form's shadow DOM
+    const projectPicker = form?.shadowRoot?.querySelector('scion-project-picker');
     expect(projectPicker).not.toBeNull();
   });
 
-  it('does not render project-picker for system-scoped role', async () => {
+  it('does not render project-picker via shared form for system-scoped role', async () => {
     const handler = createFetchHandler({ role: CUSTOM_ROLE, bindings: BINDINGS });
     el = await createElement(handler);
 
@@ -509,7 +518,10 @@ describe('admin-role-detail: add binding form', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await (el as any).updateComplete;
 
-    const projectPicker = el.shadowRoot?.querySelector('scion-project-picker');
+    const form = el.shadowRoot?.querySelector('scion-role-binding-assignment-form');
+    expect(form).not.toBeNull();
+
+    const projectPicker = form?.shadowRoot?.querySelector('scion-project-picker');
     expect(projectPicker).toBeNull();
   });
 

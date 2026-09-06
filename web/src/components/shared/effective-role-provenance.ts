@@ -52,6 +52,9 @@ import type {
 } from './authorization-layer-stack.js';
 import './authorization-layer-stack.js';
 
+import type { AssignmentFormValues } from './role-binding-assignment-form.js';
+import './role-binding-assignment-form.js';
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -526,35 +529,8 @@ export class ScionEffectiveRoleProvenance extends LitElement {
         color: var(--sl-color-danger-700, #b91c1c);
       }
 
-      /* Add binding dialog */
-      .add-form-group {
-        margin-bottom: 0.75rem;
-      }
-
-      .add-form-group label {
-        display: block;
-        font-size: 0.8125rem;
-        font-weight: 500;
-        color: var(--scion-text, #1e293b);
-        margin-bottom: 0.25rem;
-      }
-
-      .locked-principal {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.5rem 0.75rem;
-        background: var(--scion-bg-subtle, #f8fafc);
-        border: 1px solid var(--scion-border, #e2e8f0);
-        border-radius: var(--scion-radius, 0.5rem);
-        font-size: 0.8125rem;
-        color: var(--scion-text-muted, #64748b);
-      }
-
-      .locked-principal sl-icon {
-        font-size: 0.875rem;
-        color: var(--scion-text-muted, #64748b);
-      }
+      /* Add binding dialog styles are in the shared
+         scion-role-binding-assignment-form component. */
 
       @media (forced-colors: active) {
         .section {
@@ -819,10 +795,13 @@ export class ScionEffectiveRoleProvenance extends LitElement {
     this._addScopeType = 'system';
     this._addScopeId = '';
     this._showAddDialog = true;
-  }
 
-  private get _filteredAddRoles(): RoleDefinitionSummary[] {
-    return this._addRoles.filter((r) => r.scopeType === this._addScopeType);
+    // Reset the shared form after it renders
+    await this.updateComplete;
+    const form = this.shadowRoot?.querySelector('scion-role-binding-assignment-form');
+    if (form) {
+      (form as import('./role-binding-assignment-form.js').ScionRoleBindingAssignmentForm).reset();
+    }
   }
 
   private get _addFormValid(): boolean {
@@ -1146,76 +1125,17 @@ export class ScionEffectiveRoleProvenance extends LitElement {
           if (!this._mutationInProgress) this._showAddDialog = false;
         }}
       >
-        <!-- Principal (locked) -->
-        <div class="add-form-group">
-          <label>Principal</label>
-          <div class="locked-principal">
-            <sl-icon name=${this.principalType === 'user' ? 'person' : 'cpu'}></sl-icon>
-            <span>${this.principalType}: ${this.principalId}</span>
-            <sl-icon name="lock" style="margin-left: auto;"></sl-icon>
-          </div>
-        </div>
-
-        <!-- Scope -->
-        <div class="add-form-group">
-          <sl-select
-            label="Scope"
-            .value=${this._addScopeType}
-            @sl-change=${(e: Event) => {
-              this._addScopeType = (e.target as HTMLSelectElement).value;
-              // Reset role if scope type changed
-              if (
-                this._addRoleId &&
-                this._addRoles.find((r) => r.id === this._addRoleId)?.scopeType !==
-                  this._addScopeType
-              ) {
-                this._addRoleId = '';
-              }
-            }}
-          >
-            <sl-option value="system">System</sl-option>
-            <sl-option value="project">Project</sl-option>
-          </sl-select>
-        </div>
-        ${this._addScopeType === 'project'
-          ? html`
-              <div class="add-form-group">
-                <sl-input
-                  label="Project ID"
-                  placeholder="Enter project ID"
-                  .value=${this._addScopeId}
-                  @sl-input=${(e: Event) => {
-                    this._addScopeId = (e.target as HTMLInputElement).value;
-                  }}
-                  required
-                ></sl-input>
-              </div>
-            `
-          : ''}
-
-        <!-- Role -->
-        <div class="add-form-group">
-          <sl-select
-            label="Role"
-            .value=${this._addRoleId}
-            @sl-change=${(e: Event) => {
-              this._addRoleId = (e.target as HTMLSelectElement).value;
-            }}
-          >
-            ${this._filteredAddRoles.length === 0
-              ? html`<sl-option value="" disabled>No roles available for this scope</sl-option>`
-              : this._filteredAddRoles.map(
-                  (role) => html`
-                    <sl-option value=${role.id}>
-                      ${role.name}
-                      <small style="color: var(--scion-text-muted, #64748b)">
-                        (${role.scopeType})
-                      </small>
-                    </sl-option>
-                  `
-                )}
-          </sl-select>
-        </div>
+        <scion-role-binding-assignment-form
+          .roles=${this._addRoles}
+          .lockedPrincipalType=${this.principalType}
+          .lockedPrincipalId=${this.principalId}
+          ?disabled=${this._mutationInProgress}
+          @form-change=${(e: CustomEvent<AssignmentFormValues>) => {
+            this._addRoleId = e.detail.roleId;
+            this._addScopeType = e.detail.scopeType;
+            this._addScopeId = e.detail.scopeId;
+          }}
+        ></scion-role-binding-assignment-form>
 
         <sl-button
           slot="footer"

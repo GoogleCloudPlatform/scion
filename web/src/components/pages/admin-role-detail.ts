@@ -40,10 +40,10 @@ import {
   getPrincipalIcon,
   formatDateTime,
 } from '../shared/role-binding-utils.js';
-import type { PrincipalChangeDetail } from '../shared/principal-picker.js';
-import type { ProjectChangeDetail } from '../shared/project-picker.js';
 import '../shared/principal-picker.js';
 import '../shared/project-picker.js';
+import type { AssignmentFormValues } from '../shared/role-binding-assignment-form.js';
+import '../shared/role-binding-assignment-form.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1183,46 +1183,19 @@ export class ScionPageAdminRoleDetail extends LitElement {
       <div class="add-binding-form">
         <h3>Add Binding</h3>
         <div class="add-binding-fields">
-          <sl-select
-            label="Principal Type"
-            value=${this.addBindingPrincipalType}
-            @sl-change=${(e: Event) => {
-              this.addBindingPrincipalType = (e.target as HTMLSelectElement).value;
-              this.addBindingPrincipalId = '';
-            }}
-          >
-            <sl-option value="user">User</sl-option>
-            <sl-option value="agent" ?disabled=${agentDisabled}
-              >Agent${agentDisabled ? ' (project-scoped roles only)' : ''}</sl-option
-            >
-            <sl-option value="group">Group</sl-option>
-          </sl-select>
-
-          <scion-principal-picker
-            .principalType=${this.addBindingPrincipalType as 'user' | 'agent' | 'group'}
-            @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => {
+          <scion-role-binding-assignment-form
+            .roles=${[]}
+            .lockedScopeType=${scopeType}
+            .lockedRoleId=${this.roleId}
+            ?agentDisabled=${agentDisabled}
+            ?disabled=${this.actionInProgress}
+            @form-change=${(e: CustomEvent<AssignmentFormValues>) => {
+              this.addBindingPrincipalType = e.detail.principalType;
               this.addBindingPrincipalId = e.detail.principalId;
+              this.addBindingScopeId = e.detail.scopeId;
             }}
-          ></scion-principal-picker>
-
-          ${scopeType === 'project'
-            ? html`
-                <scion-project-picker
-                  label="Project"
-                  @project-change=${(e: CustomEvent<ProjectChangeDetail>) => {
-                    this.addBindingScopeId = e.detail.projectId;
-                  }}
-                ></scion-project-picker>
-              `
-            : nothing}
+          ></scion-role-binding-assignment-form>
         </div>
-
-        ${this.addBindingPrincipalType === 'agent' && !agentDisabled
-          ? html`<p class="agent-scope-note">
-              <sl-icon name="info-circle"></sl-icon>
-              Agents are project-bound. This binding is effective only within the specified project scope.
-            </p>`
-          : nothing}
 
         <div class="add-binding-actions">
           <sl-button

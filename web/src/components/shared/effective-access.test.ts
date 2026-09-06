@@ -896,7 +896,10 @@ describe('Behavioral: create binding request payload', () => {
     const dialog = query(el, 'sl-dialog[open]');
     expect(dialog).toBeTruthy();
 
-    const lockedPrincipal = query(el, '.locked-principal');
+    // The locked principal display is now inside the shared assignment form's shadow DOM.
+    const form = query(el, 'scion-role-binding-assignment-form') as HTMLElement;
+    expect(form).toBeTruthy();
+    const lockedPrincipal = form?.shadowRoot?.querySelector('.locked-principal');
     expect(lockedPrincipal).toBeTruthy();
     expect(lockedPrincipal?.textContent).toContain('user');
     expect(lockedPrincipal?.textContent).toContain('user-1');
