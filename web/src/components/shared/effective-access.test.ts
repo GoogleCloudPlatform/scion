@@ -15,17 +15,22 @@
  */
 
 /**
- * Effective Access — Acceptance Gate Invariant Tests (R2)
+ * Effective Role Provenance — Acceptance Tests
  *
- * Tests proving the three acceptance gate invariants:
+ * Tests proving:
  *
- *   1. Overlapping boundaries are shown as "removed by both" (not "won by")
- *   2. No priority/override/winner terminology in any user-facing string
- *   3. No redaction bypass — redacted boundaries show placeholder, no
- *      secondary name-fetch occurs
+ *   1. The "Effective access composition" section has been removed — no
+ *      toggle, no layer stack, no effective-access API request fires from
+ *      this dialog.
+ *   2. The role-binding list and add/delete/provenance behavior remain
+ *      intact.
+ *   3. No redaction bypass in the boundary-notice sibling component.
+ *   4. Role cards display names, not UUIDs.
  *
- * Additionally tests all 5 DeniedPermission denial categories and the
- * _explainLoaded guard fix (R1).
+ * The authorization-layer-stack and explain-layer features were removed
+ * because the backend only returns a system-scope activeBindingCount, not
+ * a real per-permission composition.  A future standalone Effective
+ * Permission Viewer is tracked in .design/effective-permission-viewer.md.
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
@@ -36,13 +41,6 @@ import { resolve } from 'path';
 vi.mock('./confirm-dialog.js', () => ({
   showConfirm: vi.fn(() => Promise.resolve(true)),
 }));
-
-import type {
-  BoundaryLayer,
-  IntrinsicRestriction,
-  DeniedPermission,
-  PermissionDenialReason,
-} from './authorization-layer-stack.js';
 
 /* -------------------------------------------------------------------------- */
 /* Helper: extract html`` template content from a source file                 */
@@ -72,59 +70,58 @@ function extractUserFacingText(source: string): string {
 }
 
 /* -------------------------------------------------------------------------- */
-/* 1. Overlapping boundaries — "removed by both" (not "won by")               */
+/* 1. Composition section has been removed                                     */
 /* -------------------------------------------------------------------------- */
 
-describe('Invariant 1: Overlapping boundaries shown as "removed by both"', () => {
-  it('renderBoundaryRow shows overlap count with "removed by both" text', () => {
-    const source = readFileSync(resolve(__dirname, './authorization-layer-stack.ts'), 'utf-8');
+describe('Composition section removed', () => {
+  it('effective-role-provenance.ts contains no "Effective access composition" text', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
     const templates = extractTemplateContent(source);
-
-    // The overlap text MUST use "removed by both"
-    expect(templates).toContain('removed by both');
+    expect(templates).not.toContain('Effective access composition');
   });
 
-  it('overlap text does NOT use "won by" language', () => {
-    const source = readFileSync(resolve(__dirname, './authorization-layer-stack.ts'), 'utf-8');
+  it('effective-role-provenance.ts does not render scion-authorization-layer-stack', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
     const templates = extractTemplateContent(source);
-
-    expect(templates).not.toMatch(/\bwon by\b/i);
-    expect(templates).not.toMatch(/\bwins\b/i);
-    expect(templates).not.toMatch(/\bwinning\b/i);
+    expect(templates).not.toContain('scion-authorization-layer-stack');
   });
 
-  it('BoundaryLayer type includes overlapCount field', () => {
-    // Verify the type contract by constructing a valid BoundaryLayer
-    const boundary: BoundaryLayer = {
-      id: 'b1',
-      name: 'Test Boundary',
-      status: 'active',
-      removedCount: 5,
-      overlapCount: 2,
-    };
-
-    expect(boundary.overlapCount).toBe(2);
-    expect(boundary.removedCount).toBe(5);
+  it('effective-role-provenance.ts does not import authorization-layer-stack', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+    expect(source).not.toContain("from './authorization-layer-stack");
+    expect(source).not.toContain("import './authorization-layer-stack");
   });
 
-  it('overlap rendering is conditional on overlapCount > 0', () => {
-    const source = readFileSync(resolve(__dirname, './authorization-layer-stack.ts'), 'utf-8');
+  it('effective-role-provenance.ts does not contain loadExplainLayers or preCheckExplainAccess', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+    expect(source).not.toContain('loadExplainLayers');
+    expect(source).not.toContain('preCheckExplainAccess');
+  });
 
-    // Verify the guard: overlapCount > 0 before showing the overlap note
-    expect(source).toContain('overlapCount > 0');
+  it('effective-role-provenance.ts does not fetch /api/v1/admin/effective-access', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+    expect(source).not.toContain('/api/v1/admin/effective-access');
+  });
+
+  it('effective-role-provenance.ts does not contain _explainLoaded, _explainForbidden, or _explainPreChecked', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+    expect(source).not.toContain('_explainLoaded');
+    expect(source).not.toContain('_explainForbidden');
+    expect(source).not.toContain('_explainPreChecked');
+  });
+
+  it('effective-role-provenance.ts does not contain layers-toggle CSS class', () => {
+    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
+    expect(source).not.toContain('.layers-toggle');
   });
 });
 
 /* -------------------------------------------------------------------------- */
-/* 2. No priority/override/winner terminology in user-facing strings          */
+/* 2. No prohibited terminology in remaining components                        */
 /* -------------------------------------------------------------------------- */
 
-describe('Invariant 2: No priority/override/winner terminology', () => {
+describe('No priority/override/winner terminology in remaining components', () => {
   const componentsToCheck = [
-    {
-      name: 'authorization-layer-stack.ts',
-      path: './authorization-layer-stack.ts',
-    },
     {
       name: 'effective-role-provenance.ts',
       path: './effective-role-provenance.ts',
@@ -161,349 +158,66 @@ describe('Invariant 2: No priority/override/winner terminology', () => {
       });
     });
   }
-
-  it('terminology guard comments are present in all F5 components', () => {
-    for (const component of componentsToCheck) {
-      const source = readFileSync(resolve(__dirname, component.path), 'utf-8');
-
-      // Each file should have a terminology comment warning against
-      // priority/override/winner language
-      expect(source, `${component.name} should contain terminology guard comment`).toMatch(
-        /TERMINOLOGY.*never.*(?:priority|override|winner)/is
-      );
-    }
-  });
 });
 
 /* -------------------------------------------------------------------------- */
-/* 3. No redaction bypass                                                     */
+/* 3. No redaction bypass in effective-access-boundary-notice                   */
 /* -------------------------------------------------------------------------- */
 
-describe('Invariant 3: No redaction bypass', () => {
-  it('redacted boundaries render as "Access constraint (details unavailable)"', () => {
-    const source = readFileSync(resolve(__dirname, './authorization-layer-stack.ts'), 'utf-8');
-
-    // The source MUST contain the redacted placeholder text in a template
-    expect(source).toContain('Access constraint (details unavailable)');
-  });
-
-  it('redacted boundary check covers both redacted flag and null name', () => {
-    const source = readFileSync(resolve(__dirname, './authorization-layer-stack.ts'), 'utf-8');
-
-    // The guard must check both boundary.redacted and boundary.name === null
-    expect(source).toMatch(
-      /boundary\.redacted.*boundary\.name === null|boundary\.name === null.*boundary\.redacted/
-    );
-  });
-
-  it('redacted boundary does not trigger any name-fetch or link rendering', () => {
-    const source = readFileSync(resolve(__dirname, './authorization-layer-stack.ts'), 'utf-8');
-
-    // When redacted, the template should show the span.boundary-redacted
-    // and NOT render a link. Verify the structure: redacted check comes
-    // BEFORE the link rendering in a conditional (ternary).
-    expect(source).toMatch(/boundary-redacted.*Access constraint \(details unavailable\)/s);
-
-    // In the renderBoundaryRow method, the redacted branch (truthy)
-    // renders BEFORE the link branch (falsy) in the ternary. Extract
-    // just the render method to verify ordering.
-    const renderMethod = source.match(
-      /renderBoundaryRow[\s\S]*?boundary-redacted[\s\S]*?boundary-link/
-    );
-    expect(renderMethod).not.toBeNull();
-  });
-
-  it('BoundaryLayer type supports null name for redacted boundaries', () => {
-    const redactedBoundary: BoundaryLayer = {
-      id: 'b-redacted',
-      name: null,
-      status: 'active',
-      removedCount: 3,
-      overlapCount: 0,
-      redacted: { message: 'Insufficient permissions', reason: 'access_denied' },
-    };
-
-    expect(redactedBoundary.name).toBeNull();
-    expect(redactedBoundary.redacted).toBeDefined();
-    expect(redactedBoundary.redacted!.message).toBe('Insufficient permissions');
-  });
-
-  it('denial reason renderer handles null boundary names in removed_by_boundaries', () => {
-    const source = readFileSync(resolve(__dirname, './authorization-layer-stack.ts'), 'utf-8');
-
-    // The denial reason renderer must map null boundary names to the
-    // placeholder text, not attempt a fetch
-    expect(source).toMatch(/\.map\(\(n\).*n \?\? ['"]access constraint \(details unavailable\)['"]/i);
-  });
-
-  it('no secondary apiFetch call exists in authorization-layer-stack for boundary names', () => {
-    const source = readFileSync(resolve(__dirname, './authorization-layer-stack.ts'), 'utf-8');
-
-    // The layer stack component should NOT import or call apiFetch — it
-    // receives all data via properties. Any fetch here would be a
-    // redaction bypass.
-    expect(source).not.toContain('apiFetch');
-    expect(source).not.toContain('import.*api.js');
-  });
-});
-
-/* -------------------------------------------------------------------------- */
-/* 4. All 5 denial categories are represented                                 */
-/* -------------------------------------------------------------------------- */
-
-describe('All 5 DeniedPermission denial categories', () => {
-  const denialCategories: PermissionDenialReason[] = [
-    { type: 'never_granted' },
-    { type: 'inactive_grant', grantStatus: 'expired' },
-    { type: 'removed_by_boundaries', boundaryNames: ['Boundary A'] },
-    { type: 'removed_by_restriction', restrictionLabel: 'Credential scope' },
-    { type: 'evaluation_failed', correlationId: 'corr-123' },
-  ];
-
-  it('PermissionDenialReason union type covers all 5 categories', () => {
-    // Construct a DeniedPermission with all 5 reason types
-    const dp: DeniedPermission = {
-      permissionId: 'test.permission',
-      reasons: denialCategories,
-    };
-
-    expect(dp.reasons).toHaveLength(5);
-    expect(dp.reasons.map((r) => r.type)).toEqual([
-      'never_granted',
-      'inactive_grant',
-      'removed_by_boundaries',
-      'removed_by_restriction',
-      'evaluation_failed',
-    ]);
-  });
-
-  it('renderDenialReason has a case for each of the 5 categories', () => {
-    const source = readFileSync(resolve(__dirname, './authorization-layer-stack.ts'), 'utf-8');
-
-    for (const reason of denialCategories) {
-      expect(source, `Missing case for denial type '${reason.type}'`).toContain(
-        `case '${reason.type}'`
-      );
-    }
-  });
-
-  it('each denial category renders a distinct reason-tag class', () => {
-    const source = readFileSync(resolve(__dirname, './authorization-layer-stack.ts'), 'utf-8');
-
-    // Each category has a corresponding CSS class on the reason-tag
-    const expectedClasses = [
-      'reason-tag never-granted',
-      'reason-tag inactive',
-      'reason-tag boundary',
-      'reason-tag restriction',
-      'reason-tag failed',
-    ];
-
-    for (const cls of expectedClasses) {
-      expect(source, `Missing CSS class '${cls}'`).toContain(cls);
-    }
-  });
-
-  it('each denial category has user-facing label text', () => {
-    const source = readFileSync(resolve(__dirname, './authorization-layer-stack.ts'), 'utf-8');
-    const templates = extractTemplateContent(source);
-
-    // Verify each category has descriptive label text
-    expect(templates).toContain('Never granted');
-    expect(templates).toContain('Grant');
-    expect(templates).toContain('Removed by');
-    expect(templates).toContain('Evaluation failed');
-  });
-});
-
-/* -------------------------------------------------------------------------- */
-/* 5. R1 fix: _explainLoaded guard prevents re-fetch on potentialCount=0      */
-/* -------------------------------------------------------------------------- */
-
-describe('R1 fix: _explainLoaded guard', () => {
-  it('handleLayersToggle uses _explainLoaded instead of potentialCount===0', () => {
-    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
-
-    // The guard MUST use _explainLoaded, not potentialCount
-    expect(source).toContain('!this._explainLoaded');
-
-    // The old incorrect guard must NOT be present
-    expect(source).not.toMatch(/this\.potentialCount === 0/);
-  });
-
-  it('_explainLoaded is declared as a @state() field', () => {
-    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
-
-    // Must be a reactive state property
-    expect(source).toMatch(/@state\(\)\s+private\s+_explainLoaded/);
-  });
-
-  it('_explainLoaded is set to true in loadExplainLayers after data mapping', () => {
-    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
-
-    // Must be set in the try block of loadExplainLayers, after data mapping
-    // and before the catch block
-    const loadMethod = source.match(/async loadExplainLayers\(\)[\s\S]*?finally/);
-    expect(loadMethod).not.toBeNull();
-
-    const methodBody = loadMethod![0];
-    // _explainLoaded = true must appear after the data mapping and before catch
-    expect(methodBody).toContain('this._explainLoaded = true');
-
-    // Verify it appears AFTER the boundary/restriction mapping
-    const loadedIdx = methodBody.indexOf('this._explainLoaded = true');
-    const boundariesIdx = methodBody.indexOf('this.boundaries =');
-    const restrictionsIdx = methodBody.indexOf('this.restrictions =');
-
-    expect(loadedIdx).toBeGreaterThan(boundariesIdx);
-    expect(loadedIdx).toBeGreaterThan(restrictionsIdx);
-  });
-
-  it('sibling component effective-access-boundary-notice uses the same loaded-flag pattern', () => {
+describe('No redaction bypass in effective-access-boundary-notice', () => {
+  it('no secondary apiFetch call fetches boundary names by ID', () => {
     const source = readFileSync(
       resolve(__dirname, './effective-access-boundary-notice.ts'),
       'utf-8'
     );
+    // The notice component should not fetch individual boundary details
+    expect(source).not.toContain('/api/v1/admin/access-boundaries/');
+  });
 
-    // The sibling already uses the correct pattern — verify consistency
-    expect(source).toMatch(/@state\(\)\s+private\s+loaded\s*=\s*false/);
-    expect(source).toContain('this.loaded = true');
+  it('does not target nonexistent /admin/access-explain route', () => {
+    const source = readFileSync(
+      resolve(__dirname, './effective-access-boundary-notice.ts'),
+      'utf-8'
+    );
+    expect(source).not.toContain('/api/v1/admin/access-explain');
+    expect(source).not.toContain("'/admin/access-explain");
+    expect(source).not.toContain('"/admin/access-explain');
   });
 });
 
 /* -------------------------------------------------------------------------- */
-/* 6. Role card displays role name, not UUID                                   */
+/* 4. Role card displays role name, not UUID                                   */
 /* -------------------------------------------------------------------------- */
 
 describe('Role cards display role names, not UUIDs', () => {
   it('renderRoleCard uses roleName with roleDefinitionId as fallback', () => {
     const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
-
-    // The template should use roleName || roleDefinitionId as fallback
     expect(source).toContain('binding.roleName || binding.roleDefinitionId');
   });
 
   it('EffectiveRoleBinding interface includes roleName field', () => {
     const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
-
-    // The interface must include a roleName field
     expect(source).toMatch(/roleName:\s*string/);
   });
 });
 
 /* -------------------------------------------------------------------------- */
-/* 7. Composition expand calls the real effective-access endpoint               */
+/* 5. Boundary-notice loaded-flag pattern still works                          */
 /* -------------------------------------------------------------------------- */
 
-describe('Composition expand targets the real effective-access endpoint', () => {
-  it('loadExplainLayers calls /api/v1/admin/effective-access, not /admin/access-explain', () => {
-    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
-
-    expect(source).toContain('/api/v1/admin/effective-access');
-    expect(source).not.toContain('/api/v1/admin/access-explain');
-  });
-
-  it('effective-access-boundary-notice does not target /admin/access-explain', () => {
+describe('Boundary-notice loaded-flag pattern', () => {
+  it('effective-access-boundary-notice uses loaded flag', () => {
     const source = readFileSync(
       resolve(__dirname, './effective-access-boundary-notice.ts'),
       'utf-8'
     );
-
-    expect(source).not.toContain('/api/v1/admin/access-explain');
-    expect(source).not.toContain("'/admin/access-explain");
-    expect(source).not.toContain('"/admin/access-explain');
-  });
-
-  it('no file references nonexistent /admin/access-explain route', () => {
-    const files = [
-      './effective-role-provenance.ts',
-      './effective-access-boundary-notice.ts',
-      './authorization-layer-stack.ts',
-    ];
-
-    for (const file of files) {
-      const source = readFileSync(resolve(__dirname, file), 'utf-8');
-      expect(source, `${file} should not reference /admin/access-explain`).not.toContain(
-        '/admin/access-explain'
-      );
-    }
-  });
-});
-
-/* -------------------------------------------------------------------------- */
-/* 8. R6: Pre-click capability gating for effective-access composition        */
-/* -------------------------------------------------------------------------- */
-
-describe('Pre-click capability gating for effective-access (R6)', () => {
-  it('preCheckExplainAccess fires during loadEffectiveRoles, not on toggle click', () => {
-    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
-
-    // The pre-check must be called inside loadEffectiveRoles, which runs at
-    // mount time — before any user interaction.
-    expect(source).toContain('void this.preCheckExplainAccess()');
-
-    // It should be in loadEffectiveRoles, not in handleLayersToggle.
-    const loadFnMatch = source.match(
-      /async loadEffectiveRoles\(\)[\s\S]*?(?=private async|private [a-z]|^\s*\/\*\*)/m
-    );
-    expect(loadFnMatch).toBeTruthy();
-    expect(loadFnMatch![0]).toContain('preCheckExplainAccess');
-  });
-
-  it('preCheckExplainAccess uses HEAD method with suppressed 403 toast', () => {
-    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
-    // The pre-check should use HEAD to minimize data transfer.
-    expect(source).toContain("method: 'HEAD'");
-    // The 403 toast must be suppressed — this is an expected authorization
-    // probe, not an unexpected denial.
-    expect(source).toContain('suppressAccessDeniedToast: true');
-  });
-
-  it('preCheckExplainAccess sets _explainForbidden on 403 response', () => {
-    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
-    const preCheckMatch = source.match(
-      /async preCheckExplainAccess\(\)[\s\S]*?(?=\n\s*(?:private|public|protected|override|\/\*\*))/m
-    );
-    expect(preCheckMatch).toBeTruthy();
-    const body = preCheckMatch![0];
-    expect(body).toContain('res.status === 403');
-    expect(body).toContain('this._explainForbidden = true');
-  });
-
-  it('toggle is hidden until pre-check resolves (_explainPreChecked)', () => {
-    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
-    // The _explainPreChecked flag must be declared as a @state() field.
-    expect(source).toMatch(/@state\(\)\s+private\s+_explainPreChecked/);
-    // preCheckExplainAccess must set it to true in the finally block.
-    const preCheckMatch = source.match(
-      /async preCheckExplainAccess\(\)[\s\S]*?(?=\n\s*(?:private|public|protected|override|\/\*\*))/m
-    );
-    expect(preCheckMatch).toBeTruthy();
-    expect(preCheckMatch![0]).toContain('this._explainPreChecked = true');
-    // renderLayersSection must check !this._explainPreChecked.
-    const renderMatch = source.match(
-      /private renderLayersSection\(\)[\s\S]*?(?=\n\s*private\s)/m
-    );
-    expect(renderMatch).toBeTruthy();
-    expect(renderMatch![0]).toContain('_explainPreChecked');
-  });
-
-  it('renderLayersSection returns nothing when _explainForbidden is true', () => {
-    const source = readFileSync(resolve(__dirname, './effective-role-provenance.ts'), 'utf-8');
-    // The renderLayersSection method must check _explainForbidden and return
-    // `nothing` when true. Match the full method body up to the next method.
-    const renderMatch = source.match(
-      /private renderLayersSection\(\)[\s\S]*?(?=\n\s*private\s)/m
-    );
-    expect(renderMatch).toBeTruthy();
-    const body = renderMatch![0];
-    expect(body).toContain('_explainForbidden');
-    expect(body).toContain('nothing');
+    expect(source).toMatch(/@state\(\)\s+private\s+loaded\s*=\s*false/);
+    expect(source).toContain('this.loaded = true');
   });
 });
 
 /* ========================================================================== */
-/* Behavioral Component Tests (R2 correction O2)                              */
+/* Behavioral Component Tests                                                  */
 /*                                                                            */
 /* These tests mount the real component, mock fetch, and exercise rendered     */
 /* buttons/events rather than asserting on source strings.                     */
@@ -563,31 +277,17 @@ function makeBindings() {
  *
  * @param opts.createStatus  HTTP status for the POST probe (400=allowed, 403=denied)
  * @param opts.deleteStatus  HTTP status for the DELETE probe (404=allowed, 403=denied)
- * @param opts.explainStatus HTTP status for HEAD effective-access probe
  */
-function makeFetchHandler(opts?: {
-  createStatus?: number;
-  deleteStatus?: number;
-  explainStatus?: number;
-}) {
+function makeFetchHandler(opts?: { createStatus?: number; deleteStatus?: number }) {
   const createStatus = opts?.createStatus ?? 400;
   const deleteStatus = opts?.deleteStatus ?? 404;
-  const explainStatus = opts?.explainStatus ?? 200;
   const calls: { url: string; method: string; body?: string }[] = [];
 
-  const handler = async (
-    url: string | URL | Request,
-    init?: RequestInit
-  ): Promise<Response> => {
+  const handler = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
     const method = init?.method ?? 'GET';
     const body = typeof init?.body === 'string' ? init.body : undefined;
     calls.push({ url: path, method, body });
-
-    // HEAD effective-access probe
-    if (path.includes('/api/v1/admin/effective-access') && method === 'HEAD') {
-      return new Response('', { status: explainStatus });
-    }
 
     // Mutation pre-check: POST probe (create)
     if (path === '/api/v1/admin/role-bindings' && method === 'POST' && body === '{}') {
@@ -661,7 +361,77 @@ afterEach(() => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 9. Behavioral: create-only permission (can create, cannot delete)          */
+/* 6. Behavioral: composition section absent from rendered output              */
+/* -------------------------------------------------------------------------- */
+
+describe('Behavioral: composition section absent', () => {
+  it('does not render a layers-toggle element', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createEl(handler);
+
+    const toggle = query(el, '.layers-toggle');
+    expect(toggle).toBeNull();
+  });
+
+  it('does not render scion-authorization-layer-stack', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createEl(handler);
+
+    const layerStack = query(el, 'scion-authorization-layer-stack');
+    expect(layerStack).toBeNull();
+  });
+
+  it('does not contain "Effective access composition" text', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createEl(handler);
+
+    const shadow = el.shadowRoot?.innerHTML ?? '';
+    expect(shadow).not.toContain('Effective access composition');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 7. Behavioral: no effective-access API request fires                        */
+/* -------------------------------------------------------------------------- */
+
+describe('Behavioral: no effective-access API request', () => {
+  it('does not send any request to /api/v1/admin/effective-access', async () => {
+    const { handler, calls } = makeFetchHandler();
+    await createEl(handler);
+
+    const effectiveAccessCalls = calls.filter((c) =>
+      c.url.includes('/api/v1/admin/effective-access')
+    );
+    expect(effectiveAccessCalls.length).toBe(0);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 8. Behavioral: role-binding list still renders                              */
+/* -------------------------------------------------------------------------- */
+
+describe('Behavioral: role-binding list renders', () => {
+  it('renders role cards for each binding', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createEl(handler);
+
+    const cards = queryAll(el, '.role-card');
+    expect(cards.length).toBe(2);
+  });
+
+  it('displays role names on cards', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createEl(handler);
+
+    const roleNames = queryAll(el, '.role-name');
+    const names = roleNames.map((n) => n.textContent?.trim());
+    expect(names).toContain('Editor');
+    expect(names).toContain('Viewer');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 9. Behavioral: create-only permission (can create, cannot delete)           */
 /* -------------------------------------------------------------------------- */
 
 describe('Behavioral: create-only permission', () => {
@@ -681,7 +451,7 @@ describe('Behavioral: create-only permission', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 10. Behavioral: delete-only permission (can delete, cannot create)         */
+/* 10. Behavioral: delete-only permission (can delete, cannot create)          */
 /* -------------------------------------------------------------------------- */
 
 describe('Behavioral: delete-only permission', () => {
@@ -701,7 +471,7 @@ describe('Behavioral: delete-only permission', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 11. Behavioral: neither permission (cannot create, cannot delete)          */
+/* 11. Behavioral: neither permission (cannot create, cannot delete)           */
 /* -------------------------------------------------------------------------- */
 
 describe('Behavioral: neither create nor delete permission', () => {
@@ -719,7 +489,7 @@ describe('Behavioral: neither create nor delete permission', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 12. Behavioral: both permissions (can create and delete)                   */
+/* 12. Behavioral: both permissions (can create and delete)                    */
 /* -------------------------------------------------------------------------- */
 
 describe('Behavioral: both create and delete permissions', () => {
@@ -755,18 +525,14 @@ describe('Behavioral: both create and delete permissions', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 13. Behavioral: pending probes hide action controls                        */
+/* 13. Behavioral: pending probes hide action controls                         */
 /* -------------------------------------------------------------------------- */
 
 describe('Behavioral: pending probes', () => {
   it('Add Binding button and trash icons are hidden before probes resolve', async () => {
-    const neverResolve = (
-      _url: string | URL | Request,
-      init?: RequestInit
-    ): Promise<Response> => {
+    const neverResolve = (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const method = init?.method ?? 'GET';
-      const path =
-        typeof _url === 'string' ? _url : _url instanceof URL ? _url.pathname : _url.url;
+      const path = typeof _url === 'string' ? _url : _url instanceof URL ? _url.pathname : _url.url;
 
       // Binding list responds immediately so we have content
       if (path.includes('/api/v1/admin/role-bindings') && method === 'GET') {
@@ -778,11 +544,8 @@ describe('Behavioral: pending probes', () => {
         );
       }
 
-      // Mutation probes and explain probes: hang forever
-      if (
-        (method === 'POST' || method === 'DELETE' || method === 'HEAD') &&
-        (path.includes('role-bindings') || path.includes('effective-access'))
-      ) {
+      // Mutation probes: hang forever
+      if ((method === 'POST' || method === 'DELETE') && path.includes('role-bindings')) {
         return new Promise(() => {}); // never resolves
       }
 
@@ -809,7 +572,7 @@ describe('Behavioral: pending probes', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 14. Behavioral: direct vs inherited binding provenance labels              */
+/* 14. Behavioral: direct vs inherited binding provenance labels               */
 /* -------------------------------------------------------------------------- */
 
 describe('Behavioral: direct vs inherited binding provenance', () => {
@@ -832,7 +595,7 @@ describe('Behavioral: direct vs inherited binding provenance', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 15. Behavioral: delete confirmation flow                                   */
+/* 15. Behavioral: delete confirmation flow                                    */
 /* -------------------------------------------------------------------------- */
 
 describe('Behavioral: delete confirmation and request', () => {
@@ -845,9 +608,7 @@ describe('Behavioral: delete confirmation and request', () => {
     trashBtn.click();
     await tick(el, 400);
 
-    const deleteCalls = calls.filter(
-      (c) => c.method === 'DELETE' && c.url.includes('b-direct')
-    );
+    const deleteCalls = calls.filter((c) => c.method === 'DELETE' && c.url.includes('b-direct'));
     expect(deleteCalls.length).toBe(1);
   });
 
@@ -863,9 +624,7 @@ describe('Behavioral: delete confirmation and request', () => {
     await tick(el, 600);
 
     // Verify DELETE was sent for the direct binding
-    const deleteCalls = calls.filter(
-      (c) => c.method === 'DELETE' && c.url.includes('b-direct')
-    );
+    const deleteCalls = calls.filter((c) => c.method === 'DELETE' && c.url.includes('b-direct'));
     expect(deleteCalls.length).toBe(1);
 
     // Verify a refresh GET was triggered after the delete
@@ -877,7 +636,7 @@ describe('Behavioral: delete confirmation and request', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 16. Behavioral: create binding dialog with locked principal                */
+/* 16. Behavioral: create binding dialog with locked principal                 */
 /* -------------------------------------------------------------------------- */
 
 describe('Behavioral: create binding request payload', () => {
@@ -910,7 +669,7 @@ describe('Behavioral: create binding request payload', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 17. Behavioral: error feedback on failed mutation                          */
+/* 17. Behavioral: error feedback on failed mutation                           */
 /* -------------------------------------------------------------------------- */
 
 describe('Behavioral: error feedback on failed mutation', () => {
@@ -940,9 +699,6 @@ describe('Behavioral: error feedback on failed mutation', () => {
       if (path.includes('00000000') && method === 'DELETE') {
         return new Response('{}', { status: 404 });
       }
-      if (method === 'HEAD') {
-        return new Response('', { status: 200 });
-      }
       return new Response('{}', { status: 200 });
     };
 
@@ -958,7 +714,7 @@ describe('Behavioral: error feedback on failed mutation', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 18. Behavioral: successful refresh after mutation                          */
+/* 18. Behavioral: successful refresh after mutation                           */
 /* -------------------------------------------------------------------------- */
 
 describe('Behavioral: successful refresh after mutation', () => {
@@ -982,10 +738,10 @@ describe('Behavioral: successful refresh after mutation', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 19. Behavioral: independent probe results (R2 correction)                  */
+/* 19. Behavioral: independent probe results                                   */
 /* -------------------------------------------------------------------------- */
 
-describe('Behavioral: independent create/delete probes (R2)', () => {
+describe('Behavioral: independent create/delete probes', () => {
   it('probes POST and DELETE endpoints separately', async () => {
     const { handler, calls } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
     await createEl(handler);
@@ -995,9 +751,7 @@ describe('Behavioral: independent create/delete probes (R2)', () => {
     );
     expect(postProbe).toBeTruthy();
 
-    const deleteProbe = calls.find(
-      (c) => c.method === 'DELETE' && c.url.includes('00000000')
-    );
+    const deleteProbe = calls.find((c) => c.method === 'DELETE' && c.url.includes('00000000'));
     expect(deleteProbe).toBeTruthy();
   });
 

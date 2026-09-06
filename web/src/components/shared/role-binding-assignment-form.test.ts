@@ -123,9 +123,7 @@ describe('scion-role-binding-assignment-form', () => {
 
     // Must not have a raw sl-input with label="Project ID"
     const inputs = queryAll(el, 'sl-input');
-    const projectIdInput = inputs.find(
-      (inp) => inp.getAttribute('label') === 'Project ID'
-    );
+    const projectIdInput = inputs.find((inp) => inp.getAttribute('label') === 'Project ID');
     expect(projectIdInput).toBeUndefined();
   });
 
@@ -346,9 +344,7 @@ describe('scion-role-binding-assignment-form', () => {
   it('hides scope selector when scope is locked', async () => {
     const el = await createElement({ lockedScopeType: 'project' });
 
-    const scopeSelect = queryAll(el, 'sl-select').find(
-      (s) => s.getAttribute('label') === 'Scope'
-    );
+    const scopeSelect = queryAll(el, 'sl-select').find((s) => s.getAttribute('label') === 'Scope');
     expect(scopeSelect).toBeUndefined();
 
     // Project picker should still render because locked scope is project
@@ -361,9 +357,7 @@ describe('scion-role-binding-assignment-form', () => {
   it('hides role selector when role is locked', async () => {
     const el = await createElement({ lockedRoleId: 'role-sys-1' });
 
-    const roleSelect = queryAll(el, 'sl-select').find(
-      (s) => s.getAttribute('label') === 'Role'
-    );
+    const roleSelect = queryAll(el, 'sl-select').find((s) => s.getAttribute('label') === 'Role');
     expect(roleSelect).toBeUndefined();
   });
 
@@ -492,9 +486,6 @@ describe('effective-role-provenance uses shared assignment form', () => {
             )
           );
         }
-        if (path.includes('/api/v1/admin/effective-access')) {
-          return Promise.resolve(new Response('{}', { status: 403 }));
-        }
         return Promise.resolve(new Response('{}', { status: 200 }));
       })
     );
@@ -533,9 +524,6 @@ describe('effective-role-provenance uses shared assignment form', () => {
               { status: 200, headers: { 'Content-Type': 'application/json' } }
             )
           );
-        }
-        if (path.includes('/api/v1/admin/effective-access')) {
-          return Promise.resolve(new Response('{}', { status: 403 }));
         }
         return Promise.resolve(new Response('{}', { status: 200 }));
       })
@@ -594,9 +582,7 @@ describe('effective-role-provenance uses shared assignment form', () => {
     await comp.updateComplete;
 
     // Set scope to project via the shared form's internal state
-    const form = el.shadowRoot?.querySelector(
-      'scion-role-binding-assignment-form'
-    ) as HTMLElement;
+    const form = el.shadowRoot?.querySelector('scion-role-binding-assignment-form') as HTMLElement;
     expect(form).not.toBeNull();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -624,13 +610,14 @@ describe('effective-role-provenance uses shared assignment form', () => {
     await new Promise((r) => setTimeout(r, 100));
     await comp.updateComplete;
 
-    const form = el.shadowRoot?.querySelector(
-      'scion-role-binding-assignment-form'
-    ) as HTMLElement;
+    const form = el.shadowRoot?.querySelector('scion-role-binding-assignment-form') as HTMLElement;
     expect(form).not.toBeNull();
 
     // Verify locked principal props are set
-    expect(form?.getAttribute('lockedprincipaltype') || (form as Record<string, unknown>)['lockedPrincipalType']).toBeTruthy();
+    expect(
+      form?.getAttribute('lockedprincipaltype') ||
+        (form as Record<string, unknown>)['lockedPrincipalType']
+    ).toBeTruthy();
 
     // The shared form should show locked principal display
     const lockedDiv = form?.shadowRoot?.querySelector('.locked-principal');
@@ -743,18 +730,18 @@ describe('admin-role-bindings uses shared assignment form', () => {
         const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
         if (path.includes('/api/v1/admin/role-bindings')) {
           return Promise.resolve(
-            new Response(
-              JSON.stringify({ items: [], totalCount: 0 }),
-              { status: 200, headers: { 'Content-Type': 'application/json' } }
-            )
+            new Response(JSON.stringify({ items: [], totalCount: 0 }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
           );
         }
         if (path.includes('/api/v1/admin/roles')) {
           return Promise.resolve(
-            new Response(
-              JSON.stringify({ items: MOCK_ROLES }),
-              { status: 200, headers: { 'Content-Type': 'application/json' } }
-            )
+            new Response(JSON.stringify({ items: MOCK_ROLES }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
           );
         }
         return Promise.resolve(new Response('{}', { status: 200 }));
@@ -792,14 +779,10 @@ describe('admin-role-bindings uses shared assignment form', () => {
     comp.requestUpdate();
     await comp.updateComplete;
 
-    const form = el.shadowRoot?.querySelector(
-      'scion-role-binding-assignment-form'
-    ) as HTMLElement;
+    const form = el.shadowRoot?.querySelector('scion-role-binding-assignment-form') as HTMLElement;
     expect(form).not.toBeNull();
 
-    const selects = Array.from(
-      form?.shadowRoot?.querySelectorAll('sl-select') ?? []
-    );
+    const selects = Array.from(form?.shadowRoot?.querySelectorAll('sl-select') ?? []);
     const labels = selects.map((s) => s.getAttribute('label'));
 
     const scopeIdx = labels.indexOf('Scope');

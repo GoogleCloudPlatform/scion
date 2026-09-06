@@ -15,23 +15,20 @@
  */
 
 /**
- * Effective Role Provenance & Access Composition Display
+ * Effective Role Provenance Display
  *
- * Shows a principal's effective roles with provenance and layered
- * effective-access composition:
+ * Shows a principal's effective roles with provenance:
  *
- * 1. Assigned roles / Potential permissions: direct/group provenance,
- *    active/scheduled/expired assignment state, union of permissions
- *    from active grants.
- * 2. Access boundaries: named active/scheduled boundaries with membership
- *    paths and their impact.
- * 3. Intrinsic restrictions: credential scope, principal status, delegation
- *    ceiling.
- * 4. Effective permissions: final set after all layers applied.
+ * - Assigned roles: direct/group provenance, active/scheduled/expired
+ *   assignment state.
+ * - Mutation controls: add/remove direct role bindings with capability
+ *   gating (only shown when the current user has the required
+ *   permissions).
  *
- * TERMINOLOGY: layers are descriptive, not an override order. Overlapping
- * removal is "removed by both," not "won by." Never use "priority",
- * "override", or "winner."
+ * The former "Effective access composition" section was removed because
+ * the backend only returns a system-scope activeBindingCount — not a
+ * real per-permission composition.  A future standalone Effective
+ * Permission Viewer is tracked in .design/effective-permission-viewer.md.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -41,16 +38,6 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showConfirm } from './confirm-dialog.js';
 import { getLifecycleStatus, formatDateTime } from './role-binding-utils.js';
-
-import type { RedactionNotice } from '../../shared/access-boundaries.js';
-
-import type {
-  BoundaryLayer,
-  IntrinsicRestriction,
-  DeniedPermission,
-  PermissionDenialReason,
-} from './authorization-layer-stack.js';
-import './authorization-layer-stack.js';
 
 import type { AssignmentFormValues } from './role-binding-assignment-form.js';
 import './role-binding-assignment-form.js';
@@ -76,40 +63,6 @@ interface EffectiveRoleBinding {
   source: 'direct' | string;
   /** When source is not 'direct', this holds the group display name. */
   sourceGroupName?: string;
-}
-
-/** Shape of the access-explain API response. */
-interface AccessExplainResponse {
-  scopeType?: string;
-  activeBindingCount?: number;
-  boundaries?: AccessExplainBoundary[];
-  restrictions?: AccessExplainRestriction[];
-  deniedPermissions?: AccessExplainDeniedPermission[];
-  redacted?: RedactionNotice;
-}
-
-interface AccessExplainBoundary {
-  id: string;
-  name?: string | null;
-  status?: string;
-  redacted?: RedactionNotice;
-}
-
-interface AccessExplainRestriction {
-  kind?: string;
-  label?: string;
-  detail?: string;
-}
-
-interface AccessExplainDeniedPermission {
-  permissionId?: string;
-  reasons?: Array<{
-    type?: string;
-    grantStatus?: string;
-    boundaryNames?: (string | null)[];
-    restrictionLabel?: string;
-    correlationId?: string;
-  }>;
 }
 
 /** Minimal role definition for the add-binding role selector. */
@@ -140,33 +93,6 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   @state() private loading = true;
   @state() private bindings: EffectiveRoleBinding[] = [];
   @state() private error: string | null = null;
-
-  // Explain layer state
-  @state() private explainLoading = false;
-  @state() private explainError: string | null = null;
-  @state() private potentialCount = 0;
-  @state() private effectiveCount = 0;
-  @state() private boundaries: BoundaryLayer[] = [];
-  @state() private restrictions: IntrinsicRestriction[] = [];
-  @state() private deniedPermissions: DeniedPermission[] = [];
-  @state() private explainRedacted?: RedactionNotice;
-  @state() private showLayers = false;
-  /** Whether explain layers have been successfully loaded at least once. */
-  @state() private _explainLoaded = false;
-  /**
-   * Whether the effective-access endpoint returned 403 (insufficient
-   * permissions). When true, the layers toggle is hidden entirely rather
-   * than showing a dead error control. hub-admin users have
-   * role_binding.read/user.update but not hub.audit.read, so this gate
-   * prevents a confusing 403 composition control (R4-fix).
-   */
-  @state() private _explainForbidden = false;
-  /**
-   * Whether the pre-click capability check has resolved (either allowed or
-   * denied). The composition toggle is hidden until this is true, so the
-   * user never sees a toggle that will be removed moments later (R6).
-   */
-  @state() private _explainPreChecked = false;
 
   // ---------------------------------------------------------------------------
   // Mutation state: delete direct bindings / add new binding
@@ -404,67 +330,6 @@ export class ScionEffectiveRoleProvenance extends LitElement {
         gap: 0.5rem;
       }
 
-      /* Layers section */
-      .layers-toggle {
-        margin-top: 1rem;
-        padding-top: 0.75rem;
-        border-top: 1px solid var(--scion-border, #e2e8f0);
-      }
-
-      .layers-toggle-header {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        cursor: pointer;
-        user-select: none;
-        font-size: 0.8125rem;
-        font-weight: 600;
-        color: var(--sl-color-primary-600, #2563eb);
-        padding: 0.25rem 0;
-      }
-
-      .layers-toggle-header:hover {
-        color: var(--sl-color-primary-700, #1d4ed8);
-      }
-
-      .layers-toggle-header sl-icon {
-        font-size: 0.75rem;
-        transition: transform 0.2s ease;
-      }
-
-      .layers-toggle-header sl-icon.open {
-        transform: rotate(90deg);
-      }
-
-      .layers-content {
-        margin-top: 0.75rem;
-      }
-
-      .explain-error {
-        font-size: 0.8125rem;
-        color: var(--sl-color-danger-600, #dc2626);
-        padding: 0.5rem;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-      }
-
-      .explain-loading {
-        font-size: 0.8125rem;
-        color: var(--scion-text-muted, #64748b);
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.5rem;
-      }
-
-      .redaction-notice {
-        font-size: 0.75rem;
-        color: var(--scion-text-muted, #64748b);
-        font-style: italic;
-        padding: 0.375rem 0;
-      }
-
       @media (max-width: 768px) {
         .role-card {
           flex-direction: column;
@@ -548,16 +413,6 @@ export class ScionEffectiveRoleProvenance extends LitElement {
         .error-state {
           border: 1px solid ButtonText;
         }
-
-        .layers-toggle {
-          border-top-color: ButtonText;
-        }
-      }
-
-      @media (prefers-reduced-motion: reduce) {
-        .layers-toggle-header sl-icon {
-          transition: none;
-        }
       }
     `,
   ];
@@ -598,12 +453,6 @@ export class ScionEffectiveRoleProvenance extends LitElement {
     // with binding load so action buttons only appear for authorized users.
     void this.preCheckMutationAccess();
 
-    // Pre-click capability gate (R6): check effective-access authorization
-    // concurrently with binding load. If the current user lacks hub.audit.read,
-    // the composition toggle is hidden before the user ever sees it — no
-    // wasted click and no 403 after interaction.
-    void this.preCheckExplainAccess();
-
     try {
       // Fetch role bindings for this principal (direct and group-derived)
       const url = `/api/v1/admin/role-bindings?principalType=${encodeURIComponent(this.principalType)}&principalId=${encodeURIComponent(this.principalId)}&includeGroupDerived=true`;
@@ -640,36 +489,6 @@ export class ScionEffectiveRoleProvenance extends LitElement {
       this.error = err instanceof Error ? err.message : 'Failed to load effective roles';
     } finally {
       this.loading = false;
-    }
-  }
-
-  /**
-   * Pre-click capability gate for the effective-access composition toggle
-   * (R6). Fires a lightweight HEAD request to the explain endpoint. The
-   * backend short-circuits after the authorization check (no full effective-
-   * access computation). If the server responds with 403, the toggle is
-   * hidden before the user can interact with it — no wasted click and no
-   * dead error control. The 403 toast is suppressed since it's an expected
-   * authorization probe, not an unexpected denial.
-   *
-   * The toggle is rendered only after this check resolves (_explainPreChecked).
-   */
-  private async preCheckExplainAccess(): Promise<void> {
-    if (this._explainForbidden || this._explainLoaded) return;
-    try {
-      const url = `/api/v1/admin/effective-access?principalType=${encodeURIComponent(this.principalType)}&principalId=${encodeURIComponent(this.principalId)}`;
-      const res = await apiFetch(url, {
-        method: 'HEAD',
-        suppressAccessDeniedToast: true,
-      });
-      if (res.status === 403) {
-        this._explainForbidden = true;
-      }
-    } catch {
-      // Network errors are not authorization failures — leave the toggle
-      // visible so the user can retry after connectivity is restored.
-    } finally {
-      this._explainPreChecked = true;
     }
   }
 
@@ -852,105 +671,6 @@ export class ScionEffectiveRoleProvenance extends LitElement {
     }
   }
 
-  private async loadExplainLayers(): Promise<void> {
-    if (!this.principalId) return;
-
-    this.explainLoading = true;
-    this.explainError = null;
-
-    try {
-      const url = `/api/v1/admin/effective-access?principalType=${encodeURIComponent(this.principalType)}&principalId=${encodeURIComponent(this.principalId)}`;
-      const res = await apiFetch(url);
-
-      if (!res.ok) {
-        // Gate on authorization: if the endpoint requires hub.audit.read and
-        // the current user doesn't have it, silently hide the composition
-        // section instead of showing an error (R4-fix: prevents dead 403
-        // composition control for hub-admin users).
-        if (res.status === 403) {
-          this._explainForbidden = true;
-          this.showLayers = false;
-          return;
-        }
-        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
-      }
-
-      const data = (await res.json()) as AccessExplainResponse;
-
-      // The endpoint returns activeBindingCount (role bindings, not permission
-      // counts). Display it as a binding indicator — do NOT label it as
-      // "permissions" since per-permission aggregation is not computed.
-      this.potentialCount = data.activeBindingCount ?? 0;
-      // Effective count is set to the same binding count; the system-scope
-      // endpoint does not compute per-permission subtraction.  The component
-      // labels are patched to say "bindings" so this is truthful.
-      this.effectiveCount = data.activeBindingCount ?? 0;
-
-      // Map boundaries — preserve redaction. removedCount is unknown at this
-      // scope so it stays 0 (the layer-stack renders "applied" instead of a
-      // fabricated count when removedCount is 0).
-      this.boundaries = (data.boundaries ?? []).map((b): BoundaryLayer => {
-        const layer: BoundaryLayer = {
-          id: b.id,
-          name: b.redacted ? null : (b.name ?? null),
-          status: b.status ?? 'active',
-          removedCount: 0,
-          overlapCount: 0,
-        };
-        if (b.redacted !== undefined) layer.redacted = b.redacted;
-        return layer;
-      });
-
-      // Map restrictions — removedCount unknown, same treatment.
-      this.restrictions = (data.restrictions ?? []).map((r): IntrinsicRestriction => {
-        const restriction: IntrinsicRestriction = {
-          kind: r.kind ?? 'unknown',
-          label: r.label ?? r.kind ?? 'Unknown restriction',
-          removedCount: 0,
-        };
-        if (r.detail !== undefined) restriction.detail = r.detail;
-        return restriction;
-      });
-
-      // Map denied permissions with reasons
-      this.deniedPermissions = (data.deniedPermissions ?? []).map(
-        (dp): DeniedPermission => ({
-          permissionId: dp.permissionId ?? '',
-          reasons: (dp.reasons ?? []).map((r): PermissionDenialReason => {
-            switch (r.type) {
-              case 'never_granted':
-                return { type: 'never_granted' };
-              case 'inactive_grant':
-                return { type: 'inactive_grant', grantStatus: r.grantStatus ?? 'inactive' };
-              case 'removed_by_boundaries':
-                return { type: 'removed_by_boundaries', boundaryNames: r.boundaryNames ?? [] };
-              case 'removed_by_restriction':
-                return {
-                  type: 'removed_by_restriction',
-                  restrictionLabel: r.restrictionLabel ?? '',
-                };
-              case 'evaluation_failed':
-                return { type: 'evaluation_failed', correlationId: r.correlationId ?? '' };
-              default:
-                return { type: 'never_granted' };
-            }
-          }),
-        })
-      );
-
-      if (data.redacted !== undefined) {
-        this.explainRedacted = data.redacted;
-      }
-
-      this._explainLoaded = true;
-    } catch (err) {
-      console.error('Failed to load access explain:', err);
-      this.explainError = err instanceof Error ? err.message : 'Failed to load access layers';
-    } finally {
-      this.explainLoading = false;
-    }
-  }
-
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
@@ -1047,7 +767,6 @@ export class ScionEffectiveRoleProvenance extends LitElement {
 
     return html`
       <div class="role-list">${this.bindings.map((binding) => this.renderRoleCard(binding))}</div>
-      ${this.renderLayersSection()}
     `;
   }
 
@@ -1155,87 +874,6 @@ export class ScionEffectiveRoleProvenance extends LitElement {
           >Assign Role</sl-button
         >
       </sl-dialog>
-    `;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Layers section — effective-access composition
-  // ---------------------------------------------------------------------------
-
-  private renderLayersSection() {
-    // Hide the composition toggle entirely if the effective-access endpoint
-    // returned 403 — the user lacks hub.audit.read (R4-fix).
-    // Also hide until the pre-check has resolved so the user never sees a
-    // toggle that will be removed moments later (R6).
-    if (this._explainForbidden || !this._explainPreChecked) {
-      return nothing;
-    }
-
-    return html`
-      <div class="layers-toggle">
-        <div
-          class="layers-toggle-header"
-          @click=${() => this.handleLayersToggle()}
-          @keydown=${(e: KeyboardEvent) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              this.handleLayersToggle();
-            }
-          }}
-          tabindex="0"
-          role="button"
-          aria-expanded=${this.showLayers}
-        >
-          <sl-icon name="chevron-right" class=${this.showLayers ? 'open' : ''}></sl-icon>
-          Effective access composition
-        </div>
-        ${this.showLayers ? this.renderLayersContent() : nothing}
-      </div>
-    `;
-  }
-
-  private handleLayersToggle(): void {
-    this.showLayers = !this.showLayers;
-    if (this.showLayers && !this.explainLoading && !this._explainLoaded && !this.explainError) {
-      void this.loadExplainLayers();
-    }
-  }
-
-  private renderLayersContent() {
-    if (this.explainLoading) {
-      return html`
-        <div class="layers-content">
-          <div class="explain-loading"><sl-spinner></sl-spinner> Loading access layers...</div>
-        </div>
-      `;
-    }
-
-    if (this.explainError) {
-      return html`
-        <div class="layers-content">
-          <div class="explain-error" role="alert">
-            <sl-icon name="exclamation-triangle"></sl-icon>
-            ${this.explainError}
-            <sl-button size="small" @click=${() => this.loadExplainLayers()}> Retry </sl-button>
-          </div>
-        </div>
-      `;
-    }
-
-    return html`
-      <div class="layers-content">
-        ${this.explainRedacted
-          ? html`<div class="redaction-notice">${this.explainRedacted.message}</div>`
-          : nothing}
-        <scion-authorization-layer-stack
-          mode="bindings"
-          .potentialCount=${this.potentialCount}
-          .boundaries=${this.boundaries}
-          .restrictions=${this.restrictions}
-          .effectiveCount=${this.effectiveCount}
-          .deniedPermissions=${this.deniedPermissions}
-        ></scion-authorization-layer-stack>
-      </div>
     `;
   }
 }
