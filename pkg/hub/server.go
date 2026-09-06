@@ -3824,9 +3824,20 @@ func (s *Server) runMembershipMigration(ctx context.Context) error {
 		return fmt.Errorf("D4 membership index: raw DB is nil — cannot install index (fail-closed)")
 	}
 
+	// All three steps run in a single transaction so a crash between
+	// steps cannot leave the database without D4 enforcement. Both SQLite
+	// and PostgreSQL support transactional DDL (DROP INDEX, CREATE INDEX)
+	// and DML (UPDATE) within the same transaction.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("D4 membership index: begin transaction failed (fail-closed): %w", err)
+	}
+	// Rollback on any failure; Commit below replaces it on success.
+	defer func() { _ = tx.Rollback() }()
+
 	// Step 1: Drop legacy over-broad D4 index.
 	const dropLegacyIndex = `DROP INDEX IF EXISTS idx_rolebinding_one_per_principal_per_project`
-	if _, err := db.ExecContext(ctx, dropLegacyIndex); err != nil {
+	if _, err := tx.ExecContext(ctx, dropLegacyIndex); err != nil {
 		return fmt.Errorf("D4 membership index: drop legacy index failed (fail-closed): %w", err)
 	}
 
@@ -3840,7 +3851,7 @@ func (s *Server) runMembershipMigration(ctx context.Context) error {
 		`  SELECT id FROM role_definitions ` +
 		`  WHERE name IN ('project-owner', 'project-admin', 'project-member')` +
 		`)`
-	res, err := db.ExecContext(ctx, backfillDML)
+	res, err := tx.ExecContext(ctx, backfillDML)
 	if err != nil {
 		return fmt.Errorf("D4 membership index: backfill membership_kind failed (fail-closed): %w", err)
 	}
@@ -3851,12 +3862,27 @@ func (s *Server) runMembershipMigration(ctx context.Context) error {
 	// Step 3: Install the narrower partial unique index.
 	// Only constrains rows where membership_kind IS NOT NULL, allowing
 	// unlimited custom project-scoped role bindings per principal.
+	//
+	// PostgreSQL concurrency note: the application-level pre-check in
+	// CreateRoleBinding provides clean error messages for sequential callers
+	// but cannot guard against concurrent inserts. This partial unique index
+	// is the authoritative concurrency guard — PostgreSQL enforces it at the
+	// MVCC level, rejecting a second built-in membership binding even when
+	// two transactions race. SQLite tests prove the constraint semantics;
+	// see TestCreateRoleBinding_BuiltInMembership_ConcurrentRace for the
+	// closest approximation. A live PostgreSQL acceptance test exercising
+	// concurrent INSERTs against this index should be run during deployment
+	// QA to confirm production-equivalent behavior.
 	const indexDDL = `CREATE UNIQUE INDEX IF NOT EXISTS ` +
 		`idx_rolebinding_one_membership_per_principal_per_project ` +
 		`ON role_bindings (principal_type, principal_id, scope_id) ` +
 		`WHERE membership_kind IS NOT NULL AND scope_type = 'project'`
-	if _, err := db.ExecContext(ctx, indexDDL); err != nil {
+	if _, err := tx.ExecContext(ctx, indexDDL); err != nil {
 		return fmt.Errorf("D4 membership index creation failed (fail-closed): %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("D4 membership index: commit failed (fail-closed): %w", err)
 	}
 	log.Info("D4 membership-only unique index installed on role_bindings")
 

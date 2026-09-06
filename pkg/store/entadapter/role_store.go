@@ -16,7 +16,6 @@ package entadapter
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"entgo.io/ent/dialect"
@@ -483,6 +482,11 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 		membershipKind = &mk
 
 		// Check for existing built-in membership in the same project.
+		// Option B: if the existing binding has the exact same role_definition_id,
+		// fall through to Save() so the Ent unique index produces ErrAlreadyExists
+		// (preserving idempotent retry semantics for callers like
+		// createProjectOwnerRoleBinding, seed backfill, etc.). Only block when
+		// a *different* built-in membership role already exists.
 		existing, qErr := r.client.RoleBinding.Query().
 			Where(
 				rolebinding.PrincipalTypeEQ(rolebinding.PrincipalType(rb.PrincipalType)),
@@ -493,8 +497,14 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 			).
 			First(ctx)
 		if qErr == nil && existing != nil {
-			return nil, fmt.Errorf("%w: principal %s:%s already has a built-in membership in scope %s",
-				store.ErrBuiltInMembershipConflict, rb.PrincipalType, rb.PrincipalID, rb.ScopeID)
+			// Exact same role definition → idempotent retry; let Save()
+			// hit the Ent unique index and return ErrAlreadyExists.
+			if existing.RoleDefinitionID != nil && *existing.RoleDefinitionID == rdUID {
+				// Fall through — the existing binding is for the same role.
+			} else {
+				return nil, fmt.Errorf("%w: principal %s:%s already has a built-in membership in scope %s",
+					store.ErrBuiltInMembershipConflict, rb.PrincipalType, rb.PrincipalID, rb.ScopeID)
+			}
 		}
 		// ent.NotFoundError means no existing membership — proceed.
 	}
@@ -528,17 +538,16 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 
 	created, err := builder.Save(ctx)
 	if err != nil {
-		mapped := mapError(err)
-		// Translate the partial unique index violation into a domain error.
-		// When the DB rejects a second built-in membership binding, the Ent
-		// constraint error surfaces as ErrAlreadyExists from mapError. We
-		// refine it to ErrBuiltInMembershipConflict so the handler can
-		// return a specific message.
-		if membershipKind != nil && errors.Is(mapped, store.ErrAlreadyExists) {
-			return nil, fmt.Errorf("%w: principal %s:%s already has a built-in membership in scope %s",
-				store.ErrBuiltInMembershipConflict, rb.PrincipalType, rb.PrincipalID, rb.ScopeID)
-		}
-		return nil, mapped
+		// The application-level membership check (above) handles "different
+		// built-in role already exists" → ErrBuiltInMembershipConflict.
+		// When Save() fails here for a membership binding, it's either:
+		//  (a) exact duplicate (same role) that fell through the app check →
+		//      Ent unique index produces ErrAlreadyExists (idempotent path), or
+		//  (b) concurrent race where another goroutine inserted a different
+		//      built-in role between the app check and Save() → partial unique
+		//      index produces ErrAlreadyExists (correct rejection, acceptable
+		//      as a generic "already exists" since the race is rare).
+		return nil, mapError(err)
 	}
 	return entRoleBindingToStore(created), nil
 }

@@ -1226,6 +1226,60 @@ func TestCreateRoleBinding_BuiltInMembership_SecondBuiltIn_Rejected(t *testing.T
 		"expected ErrBuiltInMembershipConflict, got: %v", err)
 }
 
+func TestCreateRoleBinding_BuiltInMembership_IdempotentRetry(t *testing.T) {
+	env := newMembershipTestEnv(t)
+	ctx := context.Background()
+
+	binding := &store.RoleBinding{
+		RoleDefinitionID: env.projectRoleDef.ID, // project-member
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	}
+
+	// First creation succeeds.
+	_, err := env.roleStore.CreateRoleBinding(ctx, binding)
+	require.NoError(t, err)
+
+	// Idempotent retry with the SAME role returns ErrAlreadyExists
+	// (not ErrBuiltInMembershipConflict), preserving the contract
+	// that callers like createProjectOwnerRoleBinding rely on.
+	_, err = env.roleStore.CreateRoleBinding(ctx, binding)
+	require.Error(t, err, "duplicate binding should be rejected")
+	assert.True(t, errors.Is(err, store.ErrAlreadyExists),
+		"idempotent retry must get ErrAlreadyExists, got: %v", err)
+	assert.False(t, errors.Is(err, store.ErrBuiltInMembershipConflict),
+		"idempotent retry must NOT get ErrBuiltInMembershipConflict")
+}
+
+func TestCreateRoleBinding_BuiltInMembership_OwnerIdempotent(t *testing.T) {
+	env := newMembershipTestEnv(t)
+	ctx := context.Background()
+
+	// Regression test for production idempotent paths:
+	// createProjectOwnerRoleBinding and seed backfill catch ErrAlreadyExists
+	// and return nil. This verifies the owner role specifically.
+	binding := &store.RoleBinding{
+		RoleDefinitionID: env.projectOwnerDef.ID, // project-owner
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	}
+
+	_, err := env.roleStore.CreateRoleBinding(ctx, binding)
+	require.NoError(t, err)
+
+	// Second call should get ErrAlreadyExists, not ErrBuiltInMembershipConflict.
+	_, err = env.roleStore.CreateRoleBinding(ctx, binding)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, store.ErrAlreadyExists),
+		"owner idempotent retry must get ErrAlreadyExists, got: %v", err)
+}
+
 func TestCreateRoleBinding_CustomRole_CoexistsWithBuiltIn(t *testing.T) {
 	env := newMembershipTestEnv(t)
 	ctx := context.Background()

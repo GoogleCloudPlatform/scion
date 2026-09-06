@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1151,33 +1152,29 @@ func TestRS1_MigrateMultiRoleBindings(t *testing.T) {
 	adminRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
 	require.NoError(t, err)
 
-	// Temporarily drop the D4 membership unique index so we can simulate
-	// pre-RS1 dirty data (two bindings for same principal in same project).
-	if dbProvider, ok := s.(interface{ DB() *sql.DB }); ok {
-		if db := dbProvider.DB(); db != nil {
-			_, _ = db.ExecContext(ctx, "DROP INDEX IF EXISTS idx_rolebinding_one_membership_per_principal_per_project")
-		}
-	}
+	// Simulate pre-RS1 dirty data: two built-in membership bindings for the
+	// same principal in the same project. We must bypass both the DB index and
+	// the application-level membership check (both are post-RS1 defenses).
+	// Drop the DB index, then insert directly via raw SQL.
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok, "store must expose DB() for migration test")
+	db := dbProvider.DB()
+	require.NotNil(t, db)
 
-	// Create duplicate bindings — simulate pre-RS1 data.
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: memberRD.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      targetID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        ownerID,
-	})
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: adminRD.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      targetID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        ownerID,
-	})
-	require.NoError(t, err)
+	_, execErr := db.ExecContext(ctx, "DROP INDEX IF EXISTS idx_rolebinding_one_membership_per_principal_per_project")
+	require.NoError(t, execErr, "failed to drop D4 index for dirty data setup")
+
+	// Insert two built-in membership bindings via raw SQL (bypasses
+	// application-level membership_kind check in CreateRoleBinding).
+	const insertSQL = `INSERT INTO role_bindings ` +
+		`(id, role_definition_id, principal_type, principal_id, scope_type, scope_id, membership_kind, created_by, created) ` +
+		`VALUES (?, ?, 'user', ?, 'project', ?, 'builtin', ?, datetime('now'))`
+	_, execErr = db.ExecContext(ctx, insertSQL,
+		uuid.New().String(), memberRD.ID, targetID, projectID, ownerID)
+	require.NoError(t, execErr, "failed to insert member binding for dirty data")
+	_, execErr = db.ExecContext(ctx, insertSQL,
+		uuid.New().String(), adminRD.ID, targetID, projectID, ownerID)
+	require.NoError(t, execErr, "failed to insert admin binding for dirty data")
 
 	// Verify duplicates exist.
 	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, targetID)
@@ -1548,6 +1545,71 @@ func (s *ddlFailStore) DB() *sql.DB {
 		_, _ = s.realDB.Exec("DROP TABLE IF EXISTS role_bindings")
 	}
 	return s.realDB
+}
+
+// TestRS1_D4_CreateIndexFailure_Rollback proves that if the CREATE INDEX step
+// fails, the entire transaction rolls back. We inject conflicting data
+// (two built-in membership bindings for the same principal/project with
+// membership_kind pre-set) that violates the new unique index constraint.
+// The MigrateMultiRoleBindings step normally cleans these up, but we insert
+// them AFTER migration by using the raw store (not the full test server).
+func TestRS1_D4_CreateIndexFailure_Rollback(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, s.Migrate(context.Background()))
+	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
+
+	realDB := s.(interface{ DB() *sql.DB }).DB()
+
+	// Temporarily disable FK checks so we can insert rows with fake
+	// role_definition_id values that don't exist in role_definitions.
+	_, err = realDB.Exec(`PRAGMA foreign_keys = OFF`)
+	require.NoError(t, err)
+
+	// Insert two conflicting rows directly via raw SQL. These have
+	// membership_kind='builtin' pre-set, so the backfill won't touch them.
+	// They violate the new index's uniqueness constraint, causing CREATE
+	// INDEX to fail.
+	fakeProject := uuid.New().String()
+	fakeUser := uuid.New().String()
+	fakeRD1 := uuid.New().String()
+	fakeRD2 := uuid.New().String()
+	const insertSQL = `INSERT INTO role_bindings ` +
+		`(id, role_definition_id, principal_type, principal_id, scope_type, scope_id, membership_kind, created_by, created) ` +
+		`VALUES (?, ?, 'user', ?, 'project', ?, 'builtin', 'test', datetime('now'))`
+	_, err = realDB.Exec(insertSQL, uuid.New().String(), fakeRD1, fakeUser, fakeProject)
+	require.NoError(t, err)
+	_, err = realDB.Exec(insertSQL, uuid.New().String(), fakeRD2, fakeUser, fakeProject)
+	require.NoError(t, err)
+
+	// Re-enable FK checks.
+	_, err = realDB.Exec(`PRAGMA foreign_keys = ON`)
+	require.NoError(t, err)
+
+	// Place a sentinel index to verify rollback preserves prior state.
+	_, err = realDB.Exec(`CREATE INDEX IF NOT EXISTS idx_d4_rollback_sentinel ON role_bindings (created_by)`)
+	require.NoError(t, err)
+
+	// Start the server. MigrateMultiRoleBindings won't find these rows
+	// (they have fake role definition IDs that don't exist in role_definitions).
+	// The D4 migration's CREATE INDEX will fail on the conflicting data.
+	cfg := DefaultServerConfig()
+	cfg.DevAuthToken = testDevToken
+	cfg.DevUserConfig = DevUserConfig{
+		Username:    "dev",
+		DisplayName: "Development User",
+		Email:       "dev@localhost",
+	}
+	_, err = New(cfg, s)
+	require.Error(t, err, "NewServer must fail when CREATE INDEX fails due to conflicting data")
+	assert.Contains(t, err.Error(), "D4 membership index",
+		"error must mention D4 failure (got: %s)", err.Error())
+
+	// Verify the sentinel index still exists — proving the transaction rolled back.
+	var indexName string
+	row := realDB.QueryRow(`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_d4_rollback_sentinel'`)
+	scanErr := row.Scan(&indexName)
+	assert.NoError(t, scanErr, "sentinel index should survive transaction rollback")
 }
 
 // ---------------------------------------------------------------------------

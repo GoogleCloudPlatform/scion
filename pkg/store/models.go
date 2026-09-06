@@ -2487,10 +2487,18 @@ const (
 // on (principal_type, principal_id, scope_id) WHERE membership_kind IS NOT
 // NULL AND scope_type = 'project' enforces the D4 invariant: at most one
 // built-in membership role per principal per project.
+//
+// membership_kind is an enforcement-only persistence marker derived from
+// the role definition name at write time. It is intentionally omitted from
+// the domain/API RoleBinding model — callers never read or set it directly.
 const MembershipKindBuiltin = "builtin"
 
 // BuiltInProjectMembershipRoles is the set of role names that represent
 // built-in project membership (exactly one allowed per principal per project).
+//
+// SYNC: This list must match BUILT_IN_PROJECT_MEMBERSHIP_ROLES in
+// web/src/components/shared/role-binding-utils.ts. If a role is added or
+// removed here, update the TypeScript counterpart (and vice versa).
 var BuiltInProjectMembershipRoles = map[string]bool{
 	ProjectRoleOwner:  true,
 	ProjectRoleAdmin:  true,

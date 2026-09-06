@@ -53,6 +53,10 @@ export const PROJECT_ADMIN_ROLE_NAMES = ['project-admin', 'admin'];
  * Built-in project membership role names. The project members editor should
  * only list these roles; custom project-scoped roles are managed via the
  * admin role-bindings page.
+ *
+ * SYNC: This list must match BuiltInProjectMembershipRoles in
+ * pkg/store/models.go. If a role is added or removed here, update the Go
+ * counterpart (and vice versa).
  */
 export const BUILT_IN_PROJECT_MEMBERSHIP_ROLES = [
   'project-owner',
