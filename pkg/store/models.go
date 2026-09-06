@@ -2481,6 +2481,28 @@ const (
 	ProjectRoleMember = "project-member"
 )
 
+// MembershipKindBuiltin is the value stored in the membership_kind column
+// for built-in project membership roles (owner/admin/member). Custom
+// project-scoped roles leave membership_kind NULL. A partial unique index
+// on (principal_type, principal_id, scope_id) WHERE membership_kind IS NOT
+// NULL AND scope_type = 'project' enforces the D4 invariant: at most one
+// built-in membership role per principal per project.
+const MembershipKindBuiltin = "builtin"
+
+// BuiltInProjectMembershipRoles is the set of role names that represent
+// built-in project membership (exactly one allowed per principal per project).
+var BuiltInProjectMembershipRoles = map[string]bool{
+	ProjectRoleOwner:  true,
+	ProjectRoleAdmin:  true,
+	ProjectRoleMember: true,
+}
+
+// IsBuiltInProjectMembershipRole reports whether the given role name is
+// a built-in project membership role.
+func IsBuiltInProjectMembershipRole(roleName string) bool {
+	return BuiltInProjectMembershipRoles[roleName]
+}
+
 // Agent role definition names (matching existing AgentRole constants)
 const (
 	AgentRoleDefNone     = "agent-role-none"

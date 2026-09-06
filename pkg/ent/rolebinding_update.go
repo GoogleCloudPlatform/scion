@@ -166,6 +166,26 @@ func (_u *RoleBindingUpdate) ClearCreatedBy() *RoleBindingUpdate {
 	return _u
 }
 
+// SetMembershipKind sets the "membership_kind" field.
+func (_u *RoleBindingUpdate) SetMembershipKind(v string) *RoleBindingUpdate {
+	_u.mutation.SetMembershipKind(v)
+	return _u
+}
+
+// SetNillableMembershipKind sets the "membership_kind" field if the given value is not nil.
+func (_u *RoleBindingUpdate) SetNillableMembershipKind(v *string) *RoleBindingUpdate {
+	if v != nil {
+		_u.SetMembershipKind(*v)
+	}
+	return _u
+}
+
+// ClearMembershipKind clears the value of the "membership_kind" field.
+func (_u *RoleBindingUpdate) ClearMembershipKind() *RoleBindingUpdate {
+	_u.mutation.ClearMembershipKind()
+	return _u
+}
+
 // SetRoleDefinition sets the "role_definition" edge to the RoleDefinition entity.
 func (_u *RoleBindingUpdate) SetRoleDefinition(v *RoleDefinition) *RoleBindingUpdate {
 	return _u.SetRoleDefinitionID(v.ID)
@@ -270,6 +290,12 @@ func (_u *RoleBindingUpdate) sqlSave(ctx context.Context) (_node int, err error)
 	}
 	if _u.mutation.CreatedByCleared() {
 		_spec.ClearField(rolebinding.FieldCreatedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.MembershipKind(); ok {
+		_spec.SetField(rolebinding.FieldMembershipKind, field.TypeString, value)
+	}
+	if _u.mutation.MembershipKindCleared() {
+		_spec.ClearField(rolebinding.FieldMembershipKind, field.TypeString)
 	}
 	if _u.mutation.RoleDefinitionCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -456,6 +482,26 @@ func (_u *RoleBindingUpdateOne) ClearCreatedBy() *RoleBindingUpdateOne {
 	return _u
 }
 
+// SetMembershipKind sets the "membership_kind" field.
+func (_u *RoleBindingUpdateOne) SetMembershipKind(v string) *RoleBindingUpdateOne {
+	_u.mutation.SetMembershipKind(v)
+	return _u
+}
+
+// SetNillableMembershipKind sets the "membership_kind" field if the given value is not nil.
+func (_u *RoleBindingUpdateOne) SetNillableMembershipKind(v *string) *RoleBindingUpdateOne {
+	if v != nil {
+		_u.SetMembershipKind(*v)
+	}
+	return _u
+}
+
+// ClearMembershipKind clears the value of the "membership_kind" field.
+func (_u *RoleBindingUpdateOne) ClearMembershipKind() *RoleBindingUpdateOne {
+	_u.mutation.ClearMembershipKind()
+	return _u
+}
+
 // SetRoleDefinition sets the "role_definition" edge to the RoleDefinition entity.
 func (_u *RoleBindingUpdateOne) SetRoleDefinition(v *RoleDefinition) *RoleBindingUpdateOne {
 	return _u.SetRoleDefinitionID(v.ID)
@@ -590,6 +636,12 @@ func (_u *RoleBindingUpdateOne) sqlSave(ctx context.Context) (_node *RoleBinding
 	}
 	if _u.mutation.CreatedByCleared() {
 		_spec.ClearField(rolebinding.FieldCreatedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.MembershipKind(); ok {
+		_spec.SetField(rolebinding.FieldMembershipKind, field.TypeString, value)
+	}
+	if _u.mutation.MembershipKindCleared() {
+		_spec.ClearField(rolebinding.FieldMembershipKind, field.TypeString)
 	}
 	if _u.mutation.RoleDefinitionCleared() {
 		edge := &sqlgraph.EdgeSpec{

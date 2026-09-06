@@ -23,7 +23,7 @@ type AccessConstraint struct {
 	Name string `json:"name,omitempty"`
 	// SubjectKind holds the value of the "subject_kind" field.
 	SubjectKind accessconstraint.SubjectKind `json:"subject_kind,omitempty"`
-	// user, agent, or group — required when subject_kind=principal
+	// user or agent — required when subject_kind=principal. Legacy rows may contain 'group' (deprecated; use group_closure instead)
 	SubjectPrincipalType *string `json:"subject_principal_type,omitempty"`
 	// ID of the exact principal — required when subject_kind=principal
 	SubjectPrincipalID *string `json:"subject_principal_id,omitempty"`

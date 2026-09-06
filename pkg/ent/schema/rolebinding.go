@@ -61,6 +61,14 @@ func (RoleBinding) Fields() []ent.Field {
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),
+		// membership_kind distinguishes built-in membership bindings from
+		// custom project-scoped bindings. Set to "builtin" for project-owner,
+		// project-admin, project-member; NULL for all other roles.
+		// A partial unique index enforces at most one non-NULL row per
+		// (principal_type, principal_id, scope_id) WHERE scope_type='project'.
+		field.String("membership_kind").
+			Optional().
+			Nillable(),
 	}
 }
 

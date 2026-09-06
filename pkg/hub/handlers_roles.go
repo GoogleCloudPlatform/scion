@@ -1425,6 +1425,10 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			Conflict(w, "this role binding already exists")
 			return
 		}
+		if errors.Is(err, store.ErrBuiltInMembershipConflict) {
+			Conflict(w, "principal already has a built-in membership role in this project")
+			return
+		}
 		if errors.Is(err, store.ErrSuperAdminBindingRestricted) {
 			writeForbidden(w, "super-admin role bindings can only be created by the system reconciler")
 			return
@@ -1433,6 +1437,8 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			BadRequest(w, "role definition not found")
 			return
 		}
+		// ErrScopeMismatch, ErrDirectUserOnly, and other store errors
+		// are mapped to appropriate HTTP status codes by writeErrorFromErr.
 		writeErrorFromErr(w, err, "")
 		return
 	}

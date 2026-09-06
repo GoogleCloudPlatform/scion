@@ -1151,11 +1151,11 @@ func TestRS1_MigrateMultiRoleBindings(t *testing.T) {
 	adminRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
 	require.NoError(t, err)
 
-	// Temporarily drop the D4 partial unique index so we can simulate
+	// Temporarily drop the D4 membership unique index so we can simulate
 	// pre-RS1 dirty data (two bindings for same principal in same project).
 	if dbProvider, ok := s.(interface{ DB() *sql.DB }); ok {
 		if db := dbProvider.DB(); db != nil {
-			_, _ = db.ExecContext(ctx, "DROP INDEX IF EXISTS idx_rolebinding_one_per_principal_per_project")
+			_, _ = db.ExecContext(ctx, "DROP INDEX IF EXISTS idx_rolebinding_one_membership_per_principal_per_project")
 		}
 	}
 
@@ -1244,8 +1244,8 @@ func TestRS1_MigrateIdempotent(t *testing.T) {
 }
 
 // TestRS1_D4_PartialUniqueIndex verifies that after migration and index
-// installation, the database rejects a second project-scoped binding for the
-// same principal with a different role. This is the O-2 enforcement test.
+// installation, the database rejects a second built-in membership binding for
+// the same principal in the same project. This is the D4 enforcement test.
 func TestRS1_D4_PartialUniqueIndex(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
@@ -1263,7 +1263,7 @@ func TestRS1_D4_PartialUniqueIndex(t *testing.T) {
 	}))
 	ensureHubMembership(ctx, s, targetID)
 
-	// Assign target as member.
+	// Assign target as member (built-in membership role).
 	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
 	require.NoError(t, err)
 	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
@@ -1276,8 +1276,8 @@ func TestRS1_D4_PartialUniqueIndex(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Attempt to create a SECOND binding for the same user with admin role.
-	// The partial unique index should reject this at the database level.
+	// Attempt to create a SECOND built-in membership binding with admin role.
+	// The membership-only partial unique index should reject this.
 	adminRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
 	require.NoError(t, err)
 	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
@@ -1288,11 +1288,10 @@ func TestRS1_D4_PartialUniqueIndex(t *testing.T) {
 		ScopeID:          projectID,
 		CreatedBy:        ownerID,
 	})
-	// The index should cause this to fail with a constraint violation.
-	// If the index is not present, this succeeds (and D4 is only enforced
-	// at the application level).
 	assert.Error(t, err,
-		"RS1 O-2: partial unique index should reject second project binding for same principal")
+		"D4: membership-only unique index should reject second built-in membership for same principal")
+	assert.True(t, errors.Is(err, store.ErrBuiltInMembershipConflict),
+		"D4: error should be ErrBuiltInMembershipConflict, got: %v", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1493,8 +1492,8 @@ func TestRS1_D4_IndexInstallationFailClosed(t *testing.T) {
 	}
 	_, err = New(cfg, noDBStore)
 	require.Error(t, err, "RS1 R4-1: NewServer must fail if D4 index cannot be installed")
-	assert.Contains(t, err.Error(), "D4 partial unique index",
-		"RS1 R4-1: error must mention D4 partial unique index")
+	assert.Contains(t, err.Error(), "D4 membership index",
+		"RS1 R4-1: error must mention D4 membership index")
 }
 
 // noDBStore wraps a store.Store but does NOT expose DB(). This simulates
@@ -1528,7 +1527,7 @@ func TestRS1_D4_DDLFailurePath(t *testing.T) {
 	}
 	_, err = New(cfg, ddlFail)
 	require.Error(t, err, "RS1 R5-2: NewServer must fail when DDL ExecContext returns an error")
-	assert.Contains(t, err.Error(), "D4 partial unique index creation failed",
+	assert.Contains(t, err.Error(), "D4 membership index",
 		"RS1 R5-2: error must mention D4 DDL failure, not just missing DB (got: %s)", err.Error())
 }
 

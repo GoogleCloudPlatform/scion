@@ -37,6 +37,7 @@ import type { PrincipalChangeDetail } from './principal-picker.js';
 import { showConfirm } from './confirm-dialog.js';
 import './principal-picker.js';
 import {
+  BUILT_IN_PROJECT_MEMBERSHIP_ROLES,
   PROJECT_DIRECT_USER_ONLY_ROLES,
   PROJECT_OWNER_ROLE_NAMES,
   getPrincipalIcon,
@@ -496,10 +497,14 @@ export class ScionProjectMembersEditor extends LitElement {
         this.capabilities = null;
       }
 
-      // Load project roles for the role picker.
+      // Load project roles for the role picker — only built-in membership
+      // roles (owner/admin/member). Custom project-scoped roles are managed
+      // via the admin role-bindings page, not the project membership editor.
       if (rolesRes.ok) {
         const rolesData = (await rolesRes.json()) as { items?: ProjectRole[] };
-        this.projectRoles = (rolesData.items || []).filter((r) => r.scopeType === 'project');
+        this.projectRoles = (rolesData.items || []).filter(
+          (r) => r.scopeType === 'project' && BUILT_IN_PROJECT_MEMBERSHIP_ROLES.includes(r.name),
+        );
       }
     } catch (err) {
       console.error('Failed to load project members:', err);

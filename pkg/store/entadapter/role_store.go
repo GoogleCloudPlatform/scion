@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"entgo.io/ent/dialect"
@@ -471,12 +472,40 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 		}
 	}
 
+	// D4 enforcement: at most one built-in membership role per principal per
+	// project. This application-level check provides clean error messages for
+	// sequential callers. The database partial unique index
+	// (idx_rolebinding_one_membership_per_principal_per_project) catches
+	// concurrent races that slip past this check.
+	var membershipKind *string
+	if store.IsBuiltInProjectMembershipRole(rd.Name) {
+		mk := store.MembershipKindBuiltin
+		membershipKind = &mk
+
+		// Check for existing built-in membership in the same project.
+		existing, qErr := r.client.RoleBinding.Query().
+			Where(
+				rolebinding.PrincipalTypeEQ(rolebinding.PrincipalType(rb.PrincipalType)),
+				rolebinding.PrincipalIDEQ(rb.PrincipalID),
+				rolebinding.ScopeTypeEQ(rolebinding.ScopeTypeProject),
+				rolebinding.ScopeIDEQ(rb.ScopeID),
+				rolebinding.MembershipKindNotNil(),
+			).
+			First(ctx)
+		if qErr == nil && existing != nil {
+			return nil, fmt.Errorf("%w: principal %s:%s already has a built-in membership in scope %s",
+				store.ErrBuiltInMembershipConflict, rb.PrincipalType, rb.PrincipalID, rb.ScopeID)
+		}
+		// ent.NotFoundError means no existing membership — proceed.
+	}
+
 	builder := r.client.RoleBinding.Create().
 		SetNillableRoleDefinitionID(&rdUID).
 		SetPrincipalType(rolebinding.PrincipalType(rb.PrincipalType)).
 		SetPrincipalID(rb.PrincipalID).
 		SetScopeType(rolebinding.ScopeType(rb.ScopeType)).
-		SetScopeID(rb.ScopeID)
+		SetScopeID(rb.ScopeID).
+		SetNillableMembershipKind(membershipKind)
 
 	if rb.ID != "" {
 		uid, err := parseUUID(rb.ID)
@@ -499,7 +528,17 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 
 	created, err := builder.Save(ctx)
 	if err != nil {
-		return nil, mapError(err)
+		mapped := mapError(err)
+		// Translate the partial unique index violation into a domain error.
+		// When the DB rejects a second built-in membership binding, the Ent
+		// constraint error surfaces as ErrAlreadyExists from mapError. We
+		// refine it to ErrBuiltInMembershipConflict so the handler can
+		// return a specific message.
+		if membershipKind != nil && errors.Is(mapped, store.ErrAlreadyExists) {
+			return nil, fmt.Errorf("%w: principal %s:%s already has a built-in membership in scope %s",
+				store.ErrBuiltInMembershipConflict, rb.PrincipalType, rb.PrincipalID, rb.ScopeID)
+		}
+		return nil, mapped
 	}
 	return entRoleBindingToStore(created), nil
 }

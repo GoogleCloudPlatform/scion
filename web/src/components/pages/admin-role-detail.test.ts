@@ -525,6 +525,149 @@ describe('admin-role-detail: add binding form', () => {
     expect(projectPicker).toBeNull();
   });
 
+  it('propagates scopeType from form-change event for project-scoped role', async () => {
+    const postCalls: Array<{ body: string }> = [];
+    const PROJECT_ROLE = {
+      ...CUSTOM_ROLE,
+      id: 'role-project-1',
+      scopeType: 'project',
+    };
+    const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (init?.method === 'POST' && path.includes('/api/v1/admin/role-bindings')) {
+        postCalls.push({ body: init.body as string });
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: 'rb-new' }), {
+            status: 201,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return createFetchHandler({ role: PROJECT_ROLE, bindings: [] })(url, init);
+    };
+
+    el = await createElement(handler, '/admin/roles/role-project-1');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+    comp.showAddBindingForm = true;
+    comp.requestUpdate();
+    await comp.updateComplete;
+
+    // Simulate the form-change event as the shared assignment form would emit it
+    const form = comp.shadowRoot?.querySelector('scion-role-binding-assignment-form');
+    expect(form).not.toBeNull();
+
+    form?.dispatchEvent(
+      new CustomEvent('form-change', {
+        detail: {
+          principalType: 'user',
+          principalId: 'test-user-uuid',
+          roleId: 'role-project-1',
+          scopeType: 'project',
+          scopeId: 'test-project-uuid',
+          valid: true,
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await comp.updateComplete;
+
+    // Verify that scopeType was propagated to the component state
+    expect(comp.addBindingScopeType).toBe('project');
+    expect(comp.addBindingScopeId).toBe('test-project-uuid');
+
+    // Now submit and verify the API call sends scopeType=project
+    await comp.createBinding();
+
+    expect(postCalls.length).toBeGreaterThan(0);
+    const body = JSON.parse(postCalls[0].body);
+    expect(body.scopeType).toBe('project');
+    expect(body.scopeId).toBe('test-project-uuid');
+    expect(body.roleDefinitionId).toBe('role-project-1');
+  });
+
+  it('surfaces backend error in actionFeedback on scope mismatch', async () => {
+    const PROJECT_ROLE = {
+      ...CUSTOM_ROLE,
+      id: 'role-project-1',
+      scopeType: 'project',
+    };
+    const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (init?.method === 'POST' && path.includes('/api/v1/admin/role-bindings')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: {
+                code: 'scope_mismatch',
+                message: 'binding scope type does not match role definition scope type: role "project-template-manager" requires scope "project" but got "system"',
+              },
+            }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return createFetchHandler({ role: PROJECT_ROLE, bindings: [] })(url, init);
+    };
+
+    el = await createElement(handler, '/admin/roles/role-project-1');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+    comp.showAddBindingForm = true;
+    comp.addBindingPrincipalType = 'user';
+    comp.addBindingPrincipalId = 'test-user-uuid';
+    comp.addBindingScopeType = 'system'; // wrong scope intentionally
+    comp.addBindingScopeId = '';
+    comp.requestUpdate();
+    await comp.updateComplete;
+
+    await comp.createBinding();
+
+    // The error should be surfaced in actionFeedback
+    expect(comp.actionFeedback).not.toBeNull();
+    expect(comp.actionFeedback?.variant).toBe('danger');
+    expect(comp.actionFeedback?.message).toContain('scope');
+  });
+
+  it('surfaces backend conflict error when binding already exists', async () => {
+    const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (init?.method === 'POST' && path.includes('/api/v1/admin/role-bindings')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: {
+                code: 'conflict',
+                message: 'principal already has a built-in membership role on this project: already has role "project-member"',
+              },
+            }),
+            { status: 409, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return createFetchHandler({ role: CUSTOM_ROLE, bindings: [] })(url, init);
+    };
+
+    el = await createElement(handler);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+    comp.showAddBindingForm = true;
+    comp.addBindingPrincipalType = 'user';
+    comp.addBindingPrincipalId = 'test-user-uuid';
+    comp.requestUpdate();
+    await comp.updateComplete;
+
+    await comp.createBinding();
+
+    expect(comp.actionFeedback).not.toBeNull();
+    expect(comp.actionFeedback?.variant).toBe('danger');
+    expect(comp.actionFeedback?.message).toContain('project-member');
+  });
+
   it('submits UUID from principal-picker and project-picker', async () => {
     const postCalls: Array<{ body: string }> = [];
     const PROJECT_ROLE = {

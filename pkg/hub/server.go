@@ -3800,32 +3800,65 @@ func (s *Server) runMembershipMigration(ctx context.Context) error {
 		log.Debug("membership migration: no duplicates found")
 	}
 
-	// O-2: After migration cleans up legacy duplicates, install a partial
-	// unique index that enforces D4 (one binding per principal per project)
-	// at the database level. This prevents future duplicates from any code
-	// path, including direct store.CreateRoleBinding bypasses.
-	// Uses IF NOT EXISTS so it's idempotent across restarts.
-	// R4-1: D4 partial unique index installation is fail-closed.
-	// The index is the only D4 enforcement path for the generic role-binding
-	// endpoint (handlers_roles.go), so a silent failure would remove a
-	// security defense that other code depends on. Abort startup if the
-	// index cannot be installed (missing raw-DB capability or DDL failure).
+	// D4 membership-only unique constraint.
+	//
+	// The original D4 partial index blocked ALL second project bindings per
+	// principal, which prevented custom project-scoped roles from coexisting
+	// with built-in membership. Replace it with a narrower constraint that
+	// only enforces "at most one built-in membership role per principal per
+	// project" via the membership_kind column.
+	//
+	// Steps:
+	//  1. Drop the legacy over-broad index if it exists.
+	//  2. Backfill membership_kind='builtin' on existing built-in membership
+	//     bindings (idempotent — only updates NULL rows that match).
+	//  3. Install the new partial unique index on membership_kind IS NOT NULL.
+	//
+	// Fail-closed: abort startup on any DDL/DML failure.
 	dbProvider, ok := s.store.(interface{ DB() *sql.DB })
 	if !ok {
-		return fmt.Errorf("D4 partial unique index: store does not expose raw DB — cannot install index (fail-closed)")
+		return fmt.Errorf("D4 membership index: store does not expose raw DB — cannot install index (fail-closed)")
 	}
 	db := dbProvider.DB()
 	if db == nil {
-		return fmt.Errorf("D4 partial unique index: raw DB is nil — cannot install index (fail-closed)")
+		return fmt.Errorf("D4 membership index: raw DB is nil — cannot install index (fail-closed)")
 	}
+
+	// Step 1: Drop legacy over-broad D4 index.
+	const dropLegacyIndex = `DROP INDEX IF EXISTS idx_rolebinding_one_per_principal_per_project`
+	if _, err := db.ExecContext(ctx, dropLegacyIndex); err != nil {
+		return fmt.Errorf("D4 membership index: drop legacy index failed (fail-closed): %w", err)
+	}
+
+	// Step 2: Backfill membership_kind for existing built-in membership bindings.
+	// Uses a correlated subquery against role_definitions to find bindings whose
+	// role name is a built-in membership role. Idempotent.
+	const backfillDML = `UPDATE role_bindings SET membership_kind = 'builtin' ` +
+		`WHERE membership_kind IS NULL ` +
+		`AND scope_type = 'project' ` +
+		`AND role_definition_id IN (` +
+		`  SELECT id FROM role_definitions ` +
+		`  WHERE name IN ('project-owner', 'project-admin', 'project-member')` +
+		`)`
+	res, err := db.ExecContext(ctx, backfillDML)
+	if err != nil {
+		return fmt.Errorf("D4 membership index: backfill membership_kind failed (fail-closed): %w", err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Info("D4 membership index: backfilled membership_kind", "rows", n)
+	}
+
+	// Step 3: Install the narrower partial unique index.
+	// Only constrains rows where membership_kind IS NOT NULL, allowing
+	// unlimited custom project-scoped role bindings per principal.
 	const indexDDL = `CREATE UNIQUE INDEX IF NOT EXISTS ` +
-		`idx_rolebinding_one_per_principal_per_project ` +
-		`ON role_bindings (principal_type, principal_id, scope_type, scope_id) ` +
-		`WHERE scope_type = 'project'`
+		`idx_rolebinding_one_membership_per_principal_per_project ` +
+		`ON role_bindings (principal_type, principal_id, scope_id) ` +
+		`WHERE membership_kind IS NOT NULL AND scope_type = 'project'`
 	if _, err := db.ExecContext(ctx, indexDDL); err != nil {
-		return fmt.Errorf("D4 partial unique index creation failed (fail-closed): %w", err)
+		return fmt.Errorf("D4 membership index creation failed (fail-closed): %w", err)
 	}
-	log.Info("D4 partial unique index installed on role_bindings")
+	log.Info("D4 membership-only unique index installed on role_bindings")
 
 	return nil
 }

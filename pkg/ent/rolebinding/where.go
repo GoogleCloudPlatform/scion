@@ -91,6 +91,11 @@ func Created(v time.Time) predicate.RoleBinding {
 	return predicate.RoleBinding(sql.FieldEQ(FieldCreated, v))
 }
 
+// MembershipKind applies equality check predicate on the "membership_kind" field. It's identical to MembershipKindEQ.
+func MembershipKind(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldEQ(FieldMembershipKind, v))
+}
+
 // RoleDefinitionIDEQ applies the EQ predicate on the "role_definition_id" field.
 func RoleDefinitionIDEQ(v uuid.UUID) predicate.RoleBinding {
 	return predicate.RoleBinding(sql.FieldEQ(FieldRoleDefinitionID, v))
@@ -504,6 +509,81 @@ func CreatedLT(v time.Time) predicate.RoleBinding {
 // CreatedLTE applies the LTE predicate on the "created" field.
 func CreatedLTE(v time.Time) predicate.RoleBinding {
 	return predicate.RoleBinding(sql.FieldLTE(FieldCreated, v))
+}
+
+// MembershipKindEQ applies the EQ predicate on the "membership_kind" field.
+func MembershipKindEQ(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldEQ(FieldMembershipKind, v))
+}
+
+// MembershipKindNEQ applies the NEQ predicate on the "membership_kind" field.
+func MembershipKindNEQ(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNEQ(FieldMembershipKind, v))
+}
+
+// MembershipKindIn applies the In predicate on the "membership_kind" field.
+func MembershipKindIn(vs ...string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldIn(FieldMembershipKind, vs...))
+}
+
+// MembershipKindNotIn applies the NotIn predicate on the "membership_kind" field.
+func MembershipKindNotIn(vs ...string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNotIn(FieldMembershipKind, vs...))
+}
+
+// MembershipKindGT applies the GT predicate on the "membership_kind" field.
+func MembershipKindGT(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldGT(FieldMembershipKind, v))
+}
+
+// MembershipKindGTE applies the GTE predicate on the "membership_kind" field.
+func MembershipKindGTE(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldGTE(FieldMembershipKind, v))
+}
+
+// MembershipKindLT applies the LT predicate on the "membership_kind" field.
+func MembershipKindLT(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldLT(FieldMembershipKind, v))
+}
+
+// MembershipKindLTE applies the LTE predicate on the "membership_kind" field.
+func MembershipKindLTE(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldLTE(FieldMembershipKind, v))
+}
+
+// MembershipKindContains applies the Contains predicate on the "membership_kind" field.
+func MembershipKindContains(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldContains(FieldMembershipKind, v))
+}
+
+// MembershipKindHasPrefix applies the HasPrefix predicate on the "membership_kind" field.
+func MembershipKindHasPrefix(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldHasPrefix(FieldMembershipKind, v))
+}
+
+// MembershipKindHasSuffix applies the HasSuffix predicate on the "membership_kind" field.
+func MembershipKindHasSuffix(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldHasSuffix(FieldMembershipKind, v))
+}
+
+// MembershipKindIsNil applies the IsNil predicate on the "membership_kind" field.
+func MembershipKindIsNil() predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldIsNull(FieldMembershipKind))
+}
+
+// MembershipKindNotNil applies the NotNil predicate on the "membership_kind" field.
+func MembershipKindNotNil() predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldNotNull(FieldMembershipKind))
+}
+
+// MembershipKindEqualFold applies the EqualFold predicate on the "membership_kind" field.
+func MembershipKindEqualFold(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldEqualFold(FieldMembershipKind, v))
+}
+
+// MembershipKindContainsFold applies the ContainsFold predicate on the "membership_kind" field.
+func MembershipKindContainsFold(v string) predicate.RoleBinding {
+	return predicate.RoleBinding(sql.FieldContainsFold(FieldMembershipKind, v))
 }
 
 // HasRoleDefinition applies the HasEdge predicate on the "role_definition" edge.

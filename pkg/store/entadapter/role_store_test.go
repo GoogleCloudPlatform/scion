@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -1151,4 +1152,333 @@ func TestCreateRoleBinding_NonexistentPrincipal_Group(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, store.ErrNotFound),
 		"expected ErrNotFound for nonexistent group principal, got: %v", err)
+}
+
+// ---------------------------------------------------------------------------
+// (j) Built-in membership uniqueness — D4 enforcement via membership_kind.
+// ---------------------------------------------------------------------------
+
+// membershipTestEnv extends roleTestEnv with additional definitions needed
+// for membership uniqueness tests.
+type membershipTestEnv struct {
+	*roleTestEnv
+	projectAdminDef *store.RoleDefinition
+	customRoleDef   *store.RoleDefinition // project-scoped custom role
+	user2ID         string
+}
+
+func newMembershipTestEnv(t *testing.T) *membershipTestEnv {
+	t.Helper()
+	base := newRoleTestEnv(t)
+	ctx := context.Background()
+
+	me := &membershipTestEnv{roleTestEnv: base}
+
+	var err error
+	me.projectAdminDef, err = base.roleStore.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        store.ProjectRoleAdmin,
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"project.read", "project.write"},
+		System:      true,
+	})
+	require.NoError(t, err)
+
+	me.customRoleDef, err = base.roleStore.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "custom-viewer",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"project.read"},
+		System:      false,
+	})
+	require.NoError(t, err)
+
+	me.user2ID = base.createUser(t, "user2@example.com")
+
+	return me
+}
+
+func TestCreateRoleBinding_BuiltInMembership_SecondBuiltIn_Rejected(t *testing.T) {
+	env := newMembershipTestEnv(t)
+	ctx := context.Background()
+
+	// First built-in membership binding succeeds.
+	_, err := env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.projectRoleDef.ID, // project-member
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Second built-in membership binding (different role) is rejected.
+	_, err = env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.projectAdminDef.ID, // project-admin
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	})
+	require.Error(t, err,
+		"D4: second built-in membership role for same principal/project must be rejected")
+	assert.True(t, errors.Is(err, store.ErrBuiltInMembershipConflict),
+		"expected ErrBuiltInMembershipConflict, got: %v", err)
+}
+
+func TestCreateRoleBinding_CustomRole_CoexistsWithBuiltIn(t *testing.T) {
+	env := newMembershipTestEnv(t)
+	ctx := context.Background()
+
+	// Create built-in membership binding.
+	_, err := env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.projectRoleDef.ID, // project-member
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Custom project role SHOULD succeed alongside built-in membership.
+	customRB, err := env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.customRoleDef.ID, // custom-viewer
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err, "custom project role must coexist with built-in membership")
+	assert.NotEmpty(t, customRB.ID)
+}
+
+func TestCreateRoleBinding_MultipleCustomRoles_Coexist(t *testing.T) {
+	env := newMembershipTestEnv(t)
+	ctx := context.Background()
+
+	// Create a second custom role.
+	customRole2, err := env.roleStore.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "custom-editor",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"project.write"},
+		System:      false,
+	})
+	require.NoError(t, err)
+
+	// Both custom roles coexist for the same principal/project.
+	_, err = env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.customRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	_, err = env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: customRole2.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err, "multiple custom project roles must coexist for same principal/project")
+}
+
+func TestCreateRoleBinding_ExactDuplicate_Rejected(t *testing.T) {
+	env := newMembershipTestEnv(t)
+	ctx := context.Background()
+
+	// Create a custom role binding.
+	_, err := env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.customRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Exact duplicate is rejected (same role, same principal, same scope).
+	_, err = env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.customRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	})
+	require.Error(t, err, "exact duplicate binding must be rejected")
+	assert.True(t, errors.Is(err, store.ErrAlreadyExists),
+		"expected ErrAlreadyExists, got: %v", err)
+}
+
+func TestCreateRoleBinding_DeletionIsolation(t *testing.T) {
+	env := newMembershipTestEnv(t)
+	ctx := context.Background()
+
+	// Create built-in membership + custom role.
+	membership, err := env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.projectRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	custom, err := env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.customRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	// Delete the custom binding — membership should survive.
+	err = env.roleStore.DeleteRoleBinding(ctx, custom.ID)
+	require.NoError(t, err)
+
+	got, err := env.roleStore.GetRoleBinding(ctx, membership.ID)
+	require.NoError(t, err,
+		"deleting custom role binding must not affect built-in membership")
+	assert.Equal(t, membership.ID, got.ID)
+
+	// After deleting membership, a new built-in binding is allowed.
+	err = env.roleStore.DeleteRoleBinding(ctx, membership.ID)
+	require.NoError(t, err)
+
+	_, err = env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.projectAdminDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err,
+		"after deleting membership, new built-in binding should be allowed")
+}
+
+func TestCreateRoleBinding_BuiltInMembership_DifferentPrincipals_Allowed(t *testing.T) {
+	env := newMembershipTestEnv(t)
+	ctx := context.Background()
+
+	// Different users can each have a built-in membership in the same project.
+	_, err := env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.projectRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	_, err = env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.projectAdminDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.user2ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err,
+		"different principals should each be allowed one built-in membership")
+}
+
+func TestCreateRoleBinding_BuiltInMembership_DifferentProjects_Allowed(t *testing.T) {
+	env := newMembershipTestEnv(t)
+	ctx := context.Background()
+
+	// Create a second project.
+	project2UID := uuid.New()
+	_, err := env.client.Project.Create().
+		SetID(project2UID).
+		SetName("project-membership-2").
+		SetSlug("project-membership-2").
+		Save(ctx)
+	require.NoError(t, err)
+
+	// Same user can have built-in membership in different projects.
+	_, err = env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.projectRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          env.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	_, err = env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.projectAdminDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      env.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project2UID.String(),
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err,
+		"same user should have built-in membership in different projects")
+}
+
+func TestCreateRoleBinding_BuiltInMembership_ConcurrentRace(t *testing.T) {
+	env := newMembershipTestEnv(t)
+	ctx := context.Background()
+
+	// Install the D4 membership-only partial unique index to test concurrent
+	// enforcement. In production, server.go installs this at startup.
+	drv, ok := env.client.Driver().(*entsql.Driver)
+	require.True(t, ok, "expected ent SQL driver")
+	db := drv.DB()
+	_, err := db.ExecContext(ctx,
+		`CREATE UNIQUE INDEX IF NOT EXISTS `+
+			`idx_rolebinding_one_membership_per_principal_per_project `+
+			`ON role_bindings (principal_type, principal_id, scope_id) `+
+			`WHERE membership_kind IS NOT NULL AND scope_type = 'project'`)
+	require.NoError(t, err, "failed to install D4 membership index for test")
+
+	var wg sync.WaitGroup
+	results := make(chan error, 2)
+
+	// Race two built-in membership roles for the same principal/project.
+	for _, roleDef := range []*store.RoleDefinition{env.projectRoleDef, env.projectAdminDef} {
+		wg.Add(1)
+		go func(rd *store.RoleDefinition) {
+			defer wg.Done()
+			_, err := env.roleStore.CreateRoleBinding(ctx, &store.RoleBinding{
+				RoleDefinitionID: rd.ID,
+				PrincipalType:    store.RoleBindingPrincipalUser,
+				PrincipalID:      env.userID,
+				ScopeType:        store.RoleScopeProject,
+				ScopeID:          env.projectID,
+				CreatedBy:        "test",
+			})
+			results <- err
+		}(roleDef)
+	}
+	wg.Wait()
+	close(results)
+
+	var successes, failures int
+	for err := range results {
+		if err == nil {
+			successes++
+		} else {
+			failures++
+		}
+	}
+	assert.Equal(t, 1, successes,
+		"concurrent membership race: exactly one should succeed")
+	assert.Equal(t, 1, failures,
+		"concurrent membership race: exactly one should fail")
 }

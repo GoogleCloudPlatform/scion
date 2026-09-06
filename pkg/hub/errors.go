@@ -212,6 +212,18 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusBadRequest
 		code = ErrCodeValidationError
 		message = "Invalid input"
+	case errors.Is(err, store.ErrScopeMismatch):
+		statusCode = http.StatusBadRequest
+		code = ErrCodeScopeMismatch
+		message = "Binding scope type does not match role definition scope type"
+	case errors.Is(err, store.ErrDirectUserOnly):
+		statusCode = http.StatusBadRequest
+		code = ErrCodeValidationError
+		message = "This role requires a direct user principal"
+	case errors.Is(err, store.ErrBuiltInMembershipConflict):
+		statusCode = http.StatusConflict
+		code = ErrCodeConflict
+		message = "Principal already has a built-in membership role in this project"
 	case errors.Is(err, secret.ErrNoSecretBackend):
 		statusCode = http.StatusNotImplemented
 		code = ErrCodeUnavailable

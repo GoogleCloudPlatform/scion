@@ -1180,6 +1180,7 @@ export class ScionPageAdminRoleDetail extends LitElement {
             @form-change=${(e: CustomEvent<AssignmentFormValues>) => {
               this.addBindingPrincipalType = e.detail.principalType;
               this.addBindingPrincipalId = e.detail.principalId;
+              this.addBindingScopeType = e.detail.scopeType;
               this.addBindingScopeId = e.detail.scopeId;
             }}
           ></scion-role-binding-assignment-form>
