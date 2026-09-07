@@ -206,7 +206,12 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	if recipientID == "" && recipient == "" {
+	// DEF-152: relax the guard so that a request carrying a conversation_ref
+	// (but no explicit recipient) can reach the resolver at line ~334. The
+	// resolver derives the addressing from the conversation itself. Requests
+	// with NEITHER a recipient NOR a conversation_ref are still rejected with
+	// the original error message.
+	if recipientID == "" && recipient == "" && req.ConversationRef == "" {
 		ValidationError(w, "recipient is required — specify a user with 'user:<name>' or 'user:<email>'", nil)
 		return
 	}
@@ -551,6 +556,97 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// logging (AC-6). The handler's job is conversation resolution and
 	// authorization (P-2); persistence-time checks belong at the persistence
 	// site.
+
+	// DEF-152: when a conversation_ref resolved without an explicit recipient,
+	// derive the addressee from the resolved conversation. The resolution and
+	// authorization above (DEF-142 + DEF-138) have already run, so convResult
+	// is populated and the conversation is authorized.
+	//
+	// SECURITY: the addressee is derived from the conversation's participant
+	// set (the DM key), never from request input. For non-direct conversations
+	// (group, etc.) there is no single recipient to derive — fail closed rather
+	// than guessing.
+	if recipientID == "" && recipient == "" && convResult != nil {
+		switch convResult.Kind {
+		case "direct":
+			// Parse the DM key to identify the other participant.
+			kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(convResult.ExternalRef)
+			if parseErr != nil {
+				s.messageLog.Error("DEF-152: cannot parse DM key for addressee derivation",
+					"external_ref", convResult.ExternalRef, "error", parseErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"failed to derive addressee from direct conversation", nil)
+				return
+			}
+			// The authenticated sender is one side of the DM; the other is
+			// the addressee. authenticatedSender is called again here (it was
+			// already called for the ConversationRef resolver) because the
+			// values are not stashed in a local variable across branches.
+			derivedAuthKind, derivedAuthID := authenticatedSender(ctx)
+			var addrKind, addrID string
+			if kindA == derivedAuthKind && idA == derivedAuthID {
+				addrKind, addrID = kindB, idB
+			} else if kindB == derivedAuthKind && idB == derivedAuthID {
+				addrKind, addrID = kindA, idA
+			} else {
+				// Sender is not named in the DM key. This should not happen
+				// after the DEF-138 authorization check — fail closed.
+				s.messageLog.Error("DEF-152: authenticated sender not found in DM key",
+					"auth_kind", derivedAuthKind, "auth_id", derivedAuthID,
+					"external_ref", convResult.ExternalRef)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"failed to derive addressee: sender not found in conversation", nil)
+				return
+			}
+			if addrKind != "user" {
+				// The other participant is not a user (e.g. agent-to-agent DM).
+				// This endpoint delivers to human inboxes — fail closed.
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+					"conversation_ref resolved to a non-user addressee; "+
+						"this endpoint delivers to users only", nil)
+				return
+			}
+			u, lookupErr := s.store.GetUser(ctx, addrID)
+			if lookupErr != nil {
+				s.messageLog.Error("DEF-152: user lookup for derived addressee failed",
+					"addr_id", addrID, "error", lookupErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"failed to look up derived addressee", nil)
+				return
+			}
+			recipientID = u.ID
+			name := u.DisplayName
+			if name == "" {
+				name = u.Email
+			}
+			recipient = "user:" + name
+
+			// Patch the already-constructed message objects so the derived
+			// addressee flows through persistence and broker dispatch.
+			storeMsg.Recipient = recipient
+			storeMsg.RecipientID = recipientID
+			structuredMsg.Recipient = recipient
+			structuredMsg.RecipientID = recipientID
+
+		case "group":
+			// Group conversations may have many participants and no single
+			// addressee. Refuse rather than guessing (DEF-152 constraint:
+			// "do not default, do not guess, do not pick the first
+			// participant"). The caller must supply an explicit recipient
+			// alongside the conversation_ref for group conversations.
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				"group conversations require an explicit recipient — "+
+					"add 'user:<email>' alongside the conversation_ref", nil)
+			return
+
+		default:
+			// Unknown conversation kind with no explicit recipient — fail
+			// closed rather than guessing.
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				fmt.Sprintf("cannot derive addressee for conversation of kind %q", convResult.Kind), nil)
+			return
+		}
+	}
 
 	// DEF-138 P-3: propagate the resolved ConversationID onto structuredMsg
 	// so it survives through the broker's PublishUserMessage → deliverToUser
