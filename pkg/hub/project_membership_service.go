@@ -1491,8 +1491,12 @@ func (svc *ProjectMembershipService) ComputeCapabilities(ctx context.Context, us
 // Helpers
 // ---------------------------------------------------------------------------
 
-// findExistingDirectBindingsFromStore is like findExistingDirectBindings but
-// uses the provided store (which may be a transactional store).
+// findExistingDirectBindingsFromStore returns only the built-in membership
+// bindings for the given principal in the given project. Custom project-scoped
+// role bindings are excluded so that membership mutations (add/replace/transfer)
+// never delete additive custom roles.
+//
+// Uses the provided store (which may be a transactional store).
 // O-1: errors are propagated, not silently swallowed.
 func (svc *ProjectMembershipService) findExistingDirectBindingsFromStore(ctx context.Context, s store.Store, principalType, principalID, projectID string) ([]*store.RoleBinding, error) {
 	bindings, err := s.ListRoleBindingsForPrincipal(ctx, principalType, principalID)
@@ -1501,7 +1505,18 @@ func (svc *ProjectMembershipService) findExistingDirectBindingsFromStore(ctx con
 	}
 	var result []*store.RoleBinding
 	for _, b := range bindings {
-		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID {
+		if b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID {
+			continue
+		}
+		// Resolve the role definition to determine whether this is a
+		// built-in membership binding or a custom project-scoped role.
+		// Only built-in membership bindings participate in membership
+		// replacement; custom bindings must be preserved.
+		rd, rdErr := s.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if rdErr != nil {
+			return nil, fmt.Errorf("resolve role definition %s for binding %s: %w", b.RoleDefinitionID, b.ID, rdErr)
+		}
+		if store.IsBuiltInProjectMembershipRole(rd.Name) {
 			result = append(result, b)
 		}
 	}
