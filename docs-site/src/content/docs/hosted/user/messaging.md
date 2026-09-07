@@ -187,7 +187,7 @@ scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch
 
 ### Related Commands
 
-- **`scion broadcast`**: Send a message to all agents in the current project, or use `--all` for a global broadcast. This replaces the old `--broadcast` flag on `scion message`.
+- **`scion broadcast`**: Send a message to all agents in the current project, or use `--all` for a global broadcast. The `--broadcast` and `--all` flags on `scion message` have been removed; use this command instead.
 - **`scion keys`**: Send raw keystrokes to an agent's tmux terminal (e.g., `scion keys editor "ENTER"`). Useful for unblocking interactive prompts. This replaces the old `--raw` flag on `scion message`.
 
 ## Discord

@@ -27,9 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -38,8 +36,6 @@ import (
 )
 
 var msgInterrupt bool
-var msgBroadcast bool
-var msgAll bool
 var msgIn string
 var msgAt string
 var msgPlain bool
@@ -64,8 +60,6 @@ var deprecationReplacements = []struct {
 	Flag    string
 	Message string
 }{
-	{"broadcast", "use 'scion broadcast' instead"},
-	{"all", "use 'scion broadcast --all' instead"},
 	{"raw", "use 'scion keys' instead"},
 	{"plain", "--plain is deprecated and will be removed"},
 	{"notify", "use 'scion notifications subscribe' instead"},
@@ -103,8 +97,6 @@ Recipients:
   conv:<uuid>        Send to a conversation by ID
   #<thread>          Send to a named thread
 
-If --broadcast is used, the recipient can be omitted and the message will be sent to all running agents.
-
 Examples:
   scion message my-agent "Please review the PR"
   scion message @my-agent "Please review the PR"
@@ -123,6 +115,14 @@ Examples:
 			}
 		}
 
+		// Refuse removed flags with actionable errors.
+		if cmd.Flags().Changed("broadcast") {
+			return fmt.Errorf("--broadcast has been removed from 'scion message'; use 'scion broadcast' instead")
+		}
+		if cmd.Flags().Changed("all") {
+			return fmt.Errorf("--all has been removed from 'scion message'; use 'scion broadcast --all' instead")
+		}
+
 		// Emit deprecation warnings for any deprecated flags in use.
 		// Deprecated flags still work — they warn AND succeed.
 		emitDeprecationWarnings(cmd)
@@ -133,14 +133,9 @@ Examples:
 		var convRef *messaging.Reference // S4 conversation reference (conv:, @, #)
 		var message string
 
-		if msgBroadcast || msgAll {
-			if len(args) > 0 && messages.IsGroupRecipient(args[0]) {
-				return fmt.Errorf("group[] recipients cannot be combined with --broadcast or --all")
-			}
-			message = strings.Join(args, " ")
-		} else {
+		{
 			if len(args) < 2 {
-				return fmt.Errorf("recipient and message are required unless --broadcast is used")
+				return fmt.Errorf("recipient and message are required")
 			}
 			recipient := args[0]
 			message = strings.Join(args[1:], " ")
@@ -183,9 +178,6 @@ Examples:
 		if msgIn != "" && msgAt != "" {
 			return fmt.Errorf("--in and --at are mutually exclusive")
 		}
-		if (msgIn != "" || msgAt != "") && (msgBroadcast || msgAll) {
-			return fmt.Errorf("--in/--at cannot be combined with --broadcast or --all")
-		}
 
 		// Validate --thread-id requires --channel
 		if msgThreadID != "" && msgChannel == "" {
@@ -194,9 +186,6 @@ Examples:
 
 		// Validate --raw restrictions
 		if msgRaw {
-			if msgBroadcast || msgAll {
-				return fmt.Errorf("--raw cannot be combined with --broadcast or --all")
-			}
 			if msgPlain {
 				return fmt.Errorf("--raw and --plain are mutually exclusive")
 			}
@@ -208,19 +197,11 @@ Examples:
 			}
 		}
 
-		// Validate --notify restrictions
-		if msgNotify && (msgBroadcast || msgAll) {
-			return fmt.Errorf("--notify cannot be combined with --broadcast or --all")
-		}
-
 		// Validate --cc restrictions: parse first so empty-string values
 		// (e.g. --cc "") are handled correctly instead of triggering
 		// false-positive validation errors.
 		parsedCC := parseCCFlag(msgCC)
 		if len(parsedCC) > 0 {
-			if msgBroadcast || msgAll {
-				return fmt.Errorf("--cc cannot be combined with --broadcast or --all")
-			}
 			if msgRaw {
 				return fmt.Errorf("--cc cannot be combined with --raw")
 			}
@@ -234,9 +215,6 @@ Examples:
 
 		// Validate user-recipient restrictions
 		if userRecipient != "" {
-			if msgBroadcast || msgAll {
-				return fmt.Errorf("user recipients cannot be combined with --broadcast or --all")
-			}
 			if msgRaw {
 				return fmt.Errorf("--raw cannot be used with user recipients")
 			}
@@ -247,9 +225,6 @@ Examples:
 
 		// Validate group recipient restrictions
 		if len(groupRecipients) > 0 {
-			if msgBroadcast || msgAll {
-				return fmt.Errorf("group[] recipients cannot be combined with --broadcast or --all")
-			}
 			if msgRaw {
 				return fmt.Errorf("--raw cannot be used with group[] recipients")
 			}
@@ -263,9 +238,6 @@ Examples:
 
 		// Validate --wake restrictions
 		if msgWake {
-			if msgBroadcast || msgAll {
-				return fmt.Errorf("--wake cannot be combined with --broadcast or --all")
-			}
 			if msgIn != "" || msgAt != "" {
 				return fmt.Errorf("--wake cannot be combined with --in or --at")
 			}
@@ -315,12 +287,6 @@ Examples:
 		} else if userRecipient != "" {
 			// User recipient: skip sync (no agent involved)
 			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
-		} else if msgAll {
-			// Cross-project operation: skip sync
-			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
-		} else if msgBroadcast {
-			// Grove-scoped broadcast: no specific agent
-			hubCtx, err = CheckHubAvailability(projectPath)
 		} else {
 			// Single agent: exclude target from sync requirements
 			hubCtx, err = CheckHubAvailabilityForAgent(projectPath, agentName, true)
@@ -387,7 +353,7 @@ Examples:
 		}
 
 		if hubCtx != nil {
-			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgBroadcast, msgAll, msgNotify, msgWake)
+			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgNotify, msgWake)
 		}
 
 		// --wake requires Hub mode
@@ -416,67 +382,9 @@ Examples:
 			return mgr.MessageRaw(ctx, agentName, "", message)
 		}
 
-		var targets []string
-		if msgBroadcast || msgAll {
-			filters := map[string]string{
-				"scion.agent": "true",
-			}
-
-			if !msgAll {
-				projectDir, _ := config.GetResolvedProjectDir(projectPath)
-				if projectDir != "" {
-					filters["scion.project_path"] = projectDir
-					filters["scion.project"] = config.GetProjectName(projectDir)
-				}
-			}
-
-			agents, err := mgr.List(ctx, filters)
-			if err != nil {
-				return err
-			}
-			for _, a := range agents {
-				if a.Phase == string(state.PhaseRunning) {
-					targets = append(targets, a.Name)
-				}
-			}
-		} else {
-			targets = []string{agentName}
-		}
-
-		if len(targets) == 0 {
-			if msgBroadcast || msgAll {
-				fmt.Println("No running agents found to broadcast to.")
-				return nil
-			}
-			return fmt.Errorf("agent '%s' not found or not running", agentName)
-		}
-
-		if len(targets) > 1 {
-			fmt.Printf("Broadcasting message to %d agents...\n", len(targets))
-			var wg sync.WaitGroup
-			for _, target := range targets {
-				wg.Add(1)
-				go func(name string) {
-					defer wg.Done()
-					if err := mgr.Message(ctx, name, "", message, msgInterrupt); err != nil {
-						fmt.Printf("Warning: failed to send message to agent '%s': %s\n", name, err)
-						return
-					}
-					fmt.Printf("Message delivered to agent '%s'.\n", name)
-				}(target)
-			}
-			wg.Wait()
-		} else {
-			for _, target := range targets {
-				fmt.Printf("Sending message to agent '%s'...\n", target)
-				if err := mgr.Message(ctx, target, "", message, msgInterrupt); err != nil {
-					if msgBroadcast || msgAll {
-						fmt.Printf("Warning: failed to send message to agent '%s': %s\n", target, err)
-						continue
-					}
-					return err
-				}
-			}
+		fmt.Printf("Sending message to agent '%s'...\n", agentName)
+		if err := mgr.Message(ctx, agentName, "", message, msgInterrupt); err != nil {
+			return err
 		}
 
 		return nil
@@ -516,7 +424,6 @@ func buildStructuredMessage(sender, recipient, message string) *messages.Structu
 	msg.Plain = msgPlain
 	msg.Raw = msgRaw
 	msg.Urgent = msgInterrupt
-	msg.Broadcasted = msgBroadcast || msgAll
 	if len(msgAttach) > 0 {
 		msg.Attachments = msgAttach
 	}
@@ -528,7 +435,7 @@ func buildStructuredMessage(sender, recipient, message string) *messages.Structu
 	return msg
 }
 
-func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, broadcast bool, all bool, notify bool, wake bool) error {
+func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, notify bool, wake bool) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
@@ -541,81 +448,6 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		if err := validateChannel(hubCtx, msgChannel); err != nil {
 			return err
 		}
-	}
-
-	// Grove-scoped broadcast: send via Hub broadcast endpoint.
-	if broadcast && !all {
-		projectID, err := GetProjectID(hubCtx)
-		if err != nil {
-			return wrapHubError(err)
-		}
-		agentSvc := hubCtx.Client.ProjectAgents(projectID)
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		msg := buildStructuredMessage(sender, "", message)
-		msg.Broadcasted = true
-		// Validate through the new envelope choke point (Phase 7, AC-8).
-		if err := messaging.ValidateLegacyMessage(msg); err != nil {
-			return fmt.Errorf("message validation failed: %w", err)
-		}
-		bcastResp, err := agentSvc.BroadcastMessage(ctx, msg, interrupt)
-		if err != nil {
-			return wrapHubError(fmt.Errorf("failed to broadcast message via Hub: %w", err))
-		}
-
-		if !isJSONOutput() {
-			printBroadcastAccepted(bcastResp)
-		}
-		return nil
-	}
-
-	// Global broadcast (--all): fan-out at client level across projects.
-	// Each project doesn't have a global broadcast endpoint, so we list all
-	// running agents and send individually.
-	// TODO: upgrade to P3 model (targeting breakdown, DELIVERY_FAILED notifications)
-	// once a global broadcast endpoint exists.
-	if all {
-		agentSvc := hubCtx.Client.Agents()
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		resp, err := agentSvc.List(ctx, &hubclient.ListAgentsOptions{Phase: "running"})
-		if err != nil {
-			return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
-		}
-
-		if len(resp.Agents) == 0 {
-			fmt.Println("No running agents found to broadcast to.")
-			return nil
-		}
-
-		if !isJSONOutput() {
-			fmt.Printf("Broadcasting message to %d agents...\n", len(resp.Agents))
-		}
-
-		var wg sync.WaitGroup
-		for _, a := range resp.Agents {
-			wg.Add(1)
-			go func(name string) {
-				defer wg.Done()
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-
-				msg := buildStructuredMessage(sender, "agent:"+name, message)
-				if _, err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false, false); err != nil {
-					fmt.Printf("Warning: failed to send message to agent '%s' via Hub: %s\n", name, err)
-					return
-				}
-				if !isJSONOutput() {
-					fmt.Printf("Message delivered to agent '%s' via Hub.\n", name)
-				}
-			}(a.Name)
-		}
-		wg.Wait()
-		return nil
 	}
 
 	// Single agent: direct message
@@ -731,12 +563,13 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	}
 
 	// Human CLI context — only @agent is supported without an agent identity.
-	// @email, conv:<uuid>, and #<thread> require SCION_AGENT_NAME.
+	// @email, conv:<uuid>, and #<thread> require SCION_AGENT_NAME because the
+	// server needs a sender principal to resolve the conversation.
 	if ref.Kind == messaging.RefEmail {
-		return fmt.Errorf("sending messages to users via @<email> is only supported from within an agent container (SCION_AGENT_NAME not set)")
+		return fmt.Errorf("@<email> addressing requires an agent identity; it works inside an agent container where SCION_AGENT_NAME is set")
 	}
 	if ref.Kind != messaging.RefAgent {
-		return fmt.Errorf("sending messages via %s is only supported from within an agent container (SCION_AGENT_NAME not set)", ref.Raw)
+		return fmt.Errorf("%s addressing requires an agent identity; it works inside an agent container where SCION_AGENT_NAME is set", ref.Raw)
 	}
 
 	// @agent from human CLI: build and validate, then send via the agent
@@ -799,11 +632,11 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		}
 	}
 
-	// Determine the sending agent's name. This command is intended for use
-	// by agents running inside containers, where SCION_AGENT_NAME is set.
+	// Determine the sending agent's name. User-targeted messages require an
+	// agent identity so the server can attribute and route the message.
 	senderAgent := os.Getenv("SCION_AGENT_NAME")
 	if senderAgent == "" {
-		return fmt.Errorf("sending messages to users is only supported from within an agent container (SCION_AGENT_NAME not set)")
+		return fmt.Errorf("user messaging requires an agent identity; it works inside an agent container where SCION_AGENT_NAME is set")
 	}
 
 	projectID, err := GetProjectID(hubCtx)
@@ -1210,8 +1043,8 @@ func init() {
 	// Deprecated flags — still functional, emit warnings when used.
 	// These flags are hidden from help output to guide users toward
 	// the new subcommands, but they continue to work identically.
-	messageCmd.Flags().BoolVarP(&msgBroadcast, "broadcast", "b", false, "Deprecated: use 'scion broadcast' instead")
-	messageCmd.Flags().BoolVarP(&msgAll, "all", "a", false, "Deprecated: use 'scion broadcast --all' instead")
+	messageCmd.Flags().BoolP("broadcast", "b", false, "Removed: use 'scion broadcast' instead")
+	messageCmd.Flags().BoolP("all", "a", false, "Removed: use 'scion broadcast --all' instead")
 	messageCmd.Flags().StringVar(&msgIn, "in", "", "Deprecated: use 'scion schedule create --in' instead")
 	messageCmd.Flags().StringVar(&msgAt, "at", "", "Deprecated: use 'scion schedule create --at' instead")
 	messageCmd.Flags().BoolVar(&msgPlain, "plain", false, "Deprecated: --plain is deprecated and will be removed")
