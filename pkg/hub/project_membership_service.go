@@ -118,6 +118,14 @@ type MembershipRequest struct {
 	NotBefore     *time.Time
 	ExpiresAt     *time.Time
 
+	// CreateOnly, when true, makes AddMember atomic-create-only: if any
+	// built-in membership binding already exists for the same
+	// principal/project the call returns a 409 conflict instead of
+	// replacing. Set by the generic role-binding POST endpoint; the
+	// explicit membership endpoints leave it false so replacement
+	// semantics are preserved.
+	CreateOnly bool
+
 	// Update/Remove fields
 	BindingID string
 
@@ -830,6 +838,23 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			if rdErr != nil {
 				return fmt.Errorf("resolve existing role: %w", rdErr)
 			}
+
+			// RS3: CreateOnly enforcement — the generic role-binding POST
+			// endpoint sets CreateOnly=true so that it never mutates an
+			// existing built-in membership. The check runs inside the
+			// locked transaction, making it atomic: a concurrent create
+			// that wins the lock first will cause the loser to see the
+			// winner's binding here and correctly conflict.
+			if req.CreateOnly {
+				if oldRoleDef.Name == roleDef.Name && len(existingBindings) == 1 {
+					// Exact duplicate built-in — conflict, not false success.
+					return fmt.Errorf("governance:%d:%s", 409, "this role binding already exists")
+				}
+				// Different built-in — conflict naming the existing role.
+				return fmt.Errorf("governance:%d:%s", 409,
+					fmt.Sprintf("principal already has built-in membership role %q in this project; use the project membership endpoint to change roles", oldRoleDef.Name))
+			}
+
 			// Idempotent: same role and single binding → return existing.
 			if oldRoleDef.Name == roleDef.Name && len(existingBindings) == 1 {
 				result = &MembershipResult{Binding: primary, NewRole: roleDef.Name, Op: MembershipOpAdd, Replaced: false}
@@ -1649,6 +1674,8 @@ func isGovernanceError(err error) *MembershipDecision {
 	code := ErrCodeRoleAssignmentForbidden
 	if status == 404 {
 		code = "not_found"
+	} else if status == 409 {
+		code = "conflict"
 	}
 	return &MembershipDecision{
 		Allowed:    false,

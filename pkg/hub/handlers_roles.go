@@ -1372,6 +1372,11 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 				RoleDefID:     req.RoleDefinitionID,
 				NotBefore:     req.NotBefore,
 				ExpiresAt:     req.ExpiresAt,
+				// RS3: generic role-binding POST is create-only — an
+				// existing built-in membership must conflict (409), not
+				// be silently replaced. The explicit membership
+				// endpoints leave CreateOnly false.
+				CreateOnly: true,
 			}
 			result, denial := s.membershipService.AddMember(r.Context(), mReq)
 			if denial != nil && !denial.Allowed {
