@@ -95,6 +95,42 @@ const geminiAuthBlock = `auth:
       gcloud-adc: vertex-ai
 `
 
+// antigravityAuthBlock mirrors the production antigravity harness config.
+// default_type is oauth-token (which has no env requirements), so autodetect
+// must see GEMINI_API_KEY to select api-key instead.
+const antigravityAuthBlock = `auth:
+  default_type: oauth-token
+  types:
+    oauth-token:
+      required_files:
+        - name: AGY_TOKEN
+          type: file
+          description: "Antigravity OAuth token JSON file"
+          target_suffix: "/.gemini/antigravity-cli/antigravity-oauth-token"
+    api-key:
+      required_env:
+        - any_of: ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+    vertex-ai:
+      required_env:
+        - any_of: ["GOOGLE_CLOUD_PROJECT"]
+        - any_of: ["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"]
+      required_files:
+        - name: gcloud-adc
+          type: file
+          description: "Google Cloud ADC file for vertex-ai authentication"
+          alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
+          skipped_when_gcp_service_account_assigned: true
+          required: true
+  autodetect:
+    env:
+      GEMINI_API_KEY: api-key
+      GOOGLE_API_KEY: api-key
+      AGY_TOKEN: oauth-token
+      GOOGLE_CLOUD_PROJECT: vertex-ai
+    files:
+      gcloud-adc: vertex-ai
+`
+
 // newTestServerWithProjectPath creates a test server with a temporary project path
 // that has versioned settings with declared env vars.
 func newTestServerWithProjectPath(t *testing.T, settingsYAML string) (*Server, *envCapturingManager, string) {
@@ -2223,4 +2259,144 @@ profiles:
 			}
 		})
 	}
+}
+
+// TestEnvGather_AvailableAsNeededKeys_AutodetectAPIKey is a regression test for
+// #1447. When a harness has default_type: oauth-token (like antigravity) and
+// GEMINI_API_KEY is an as_needed hub secret, autodetect must still see the key
+// via AvailableAsNeededKeys and select api-key auth rather than falling through
+// to oauth-token (which has no env requirements and causes the agent to start
+// without credentials).
+func TestEnvGather_AvailableAsNeededKeys_AutodetectAPIKey(t *testing.T) {
+	// Use antigravity-like harness: default_type is oauth-token,
+	// autodetect.env maps GEMINI_API_KEY → api-key.
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "antigravity",
+		"harness: antigravity\nimage: test-image\nuser: scion\n"+antigravityAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  antigravity:
+    harness: antigravity
+profiles:
+  default:
+    runtime: mock
+`)
+
+	// Create template so FindTemplateInProjectPath can resolve it.
+	tplDir := filepath.Join(projectDir, "templates", "antigravity")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"),
+		[]byte("harness_config: antigravity\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Send request with GEMINI_API_KEY in availableAsNeededKeys (simulating a
+	// hub secret with injection_mode=as_needed) but NOT in resolvedEnv or
+	// resolvedSecrets.
+	body := `{
+		"name": "test-agent-asneeded-autodetect",
+		"id": "agent-uuid-asneeded",
+		"gatherEnv": true,
+		"grovePath": "` + projectDir + `",
+		"availableAsNeededKeys": ["GEMINI_API_KEY"],
+		"config": {"template": "antigravity", "profile": "default"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	// Autodetect should see GEMINI_API_KEY via AvailableAsNeededKeys and select
+	// api-key auth. GEMINI_API_KEY is not in resolvedEnv, so it should appear
+	// in the needs list (returned as 202).
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 (GEMINI_API_KEY needed), got %d: %s", w.Code, w.Body.String())
+	}
+
+	var envReqs EnvRequirementsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &envReqs); err != nil {
+		t.Fatal("failed to decode response:", err)
+	}
+
+	// GEMINI_API_KEY should be in the required/needs list because autodetect
+	// selected api-key auth (not oauth-token, which has no env requirements).
+	needsMap := make(map[string]struct{})
+	for _, k := range envReqs.Needs {
+		needsMap[k] = struct{}{}
+	}
+	requiredMap := make(map[string]struct{})
+	for _, k := range envReqs.Required {
+		requiredMap[k] = struct{}{}
+	}
+	if _, ok := requiredMap["GEMINI_API_KEY"]; !ok {
+		t.Errorf("expected GEMINI_API_KEY in required (autodetect should pick api-key), got required=%v needs=%v", envReqs.Required, envReqs.Needs)
+	}
+	if _, ok := needsMap["GEMINI_API_KEY"]; !ok {
+		t.Errorf("expected GEMINI_API_KEY in needs (not yet resolved), got needs=%v", envReqs.Needs)
+	}
+}
+
+// TestEnvGather_NoAvailableAsNeededKeys_FallsBackToDefault is a complementary
+// test for #1447: without AvailableAsNeededKeys, autodetect has no env-var
+// signals and falls back to default_type (oauth-token), which has no env
+// requirements. This demonstrates the pre-fix behavior.
+func TestEnvGather_NoAvailableAsNeededKeys_FallsBackToDefault(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "antigravity",
+		"harness: antigravity\nimage: test-image\nuser: scion\n"+antigravityAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  antigravity:
+    harness: antigravity
+profiles:
+  default:
+    runtime: mock
+`)
+
+	tplDir := filepath.Join(projectDir, "templates", "antigravity")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"),
+		[]byte("harness_config: antigravity\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same request but WITHOUT availableAsNeededKeys — autodetect has no
+	// env-var signals and falls back to default_type (oauth-token).
+	body := `{
+		"name": "test-agent-no-asneeded",
+		"id": "agent-uuid-no-asneeded",
+		"gatherEnv": true,
+		"grovePath": "` + projectDir + `",
+		"config": {"template": "antigravity", "profile": "default"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	// Without AvailableAsNeededKeys, autodetect doesn't see GEMINI_API_KEY,
+	// so it falls back to oauth-token. oauth-token only requires file secrets
+	// (AGY_TOKEN) which are file-type, not env-type. The env-gather phase
+	// sees no env keys needed and the agent should proceed past env-gather.
+	// The broker returns 202 for the AGY_TOKEN file secret requirement.
+	if w.Code == http.StatusAccepted {
+		var envReqs EnvRequirementsResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &envReqs); err != nil {
+			t.Fatal("failed to decode response:", err)
+		}
+		// GEMINI_API_KEY should NOT appear in required/needs
+		for _, k := range envReqs.Required {
+			if k == "GEMINI_API_KEY" {
+				t.Errorf("GEMINI_API_KEY should NOT be in required without AvailableAsNeededKeys, got required=%v", envReqs.Required)
+			}
+		}
+	}
+	// Either 201 (started) or 202 (needs file secret AGY_TOKEN) is acceptable —
+	// the point is that GEMINI_API_KEY is NOT required.
 }

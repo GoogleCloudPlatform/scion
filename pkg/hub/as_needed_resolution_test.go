@@ -919,7 +919,7 @@ func TestResolveSecrets_FileTypePassesThroughAsNeeded(t *testing.T) {
 		ProjectID: "project-file-test",
 	}
 
-	result, err := d.resolveSecrets(ctx, agent)
+	result, _, err := d.resolveSecrets(ctx, agent)
 	if err != nil {
 		t.Fatalf("resolveSecrets: %v", err)
 	}
