@@ -50,6 +50,9 @@ func TestFormatLegacyAsNewDelivery_WithConvInfo(t *testing.T) {
 
 	env := extractEnvelope(t, result)
 
+	if env.Conversation == nil {
+		t.Fatal("conversation is nil, want non-nil")
+	}
 	if env.Conversation.ID != "conv-legacy-1" {
 		t.Errorf("conversation.id = %q, want %q", env.Conversation.ID, "conv-legacy-1")
 	}
@@ -64,14 +67,18 @@ func TestFormatLegacyAsNewDelivery_WithConvInfo(t *testing.T) {
 	}
 }
 
-func TestFormatLegacyAsNewDelivery_NilConvInfo_SynthesizesStub(t *testing.T) {
+// TestFormatLegacyAsNewDelivery_NilConvInfo_OmitsConversation (DEF-102)
+// replaces the three synthesize tests. When no conversation context is
+// available, the "conversation" key must be absent from the JSON envelope
+// and the message body must still be delivered.
+func TestFormatLegacyAsNewDelivery_NilConvInfo_OmitsConversation(t *testing.T) {
 	old := &messages.StructuredMessage{
 		Version:   messages.Version,
 		Timestamp: "2026-08-27T10:00:00Z",
 		Sender:    "user:alice",
 		SenderID:  "user:alice",
 		Recipient: "agent:builder",
-		Msg:       "Hello",
+		Msg:       "Hello without conversation",
 		Type:      messages.TypeInstruction,
 		Channel:   "general",
 		ThreadID:  "thread-42",
@@ -79,59 +86,31 @@ func TestFormatLegacyAsNewDelivery_NilConvInfo_SynthesizesStub(t *testing.T) {
 
 	result := FormatLegacyAsNewDelivery(old, nil)
 
+	// The message body must still be delivered.
+	if !strings.Contains(result, "Hello without conversation") {
+		t.Error("body not delivered when convInfo is nil")
+	}
+	if !strings.Contains(result, beginDelimiter) {
+		t.Error("missing begin delimiter")
+	}
+
+	// The "conversation" key must be absent from the JSON.
+	jsonStr := extractJSON(t, result)
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v\n%s", err, jsonStr)
+	}
+	if _, ok := raw["conversation"]; ok {
+		t.Error("JSON contains 'conversation' key; want absent when convInfo is nil (DEF-102)")
+	}
+
+	// The structured envelope should still parse with nil Conversation.
 	env := extractEnvelope(t, result)
-
-	// Synthesized conversation ID should include channel and thread.
-	if env.Conversation.ID != "general/thread-42" {
-		t.Errorf("conversation.id = %q, want %q", env.Conversation.ID, "general/thread-42")
+	if env.Conversation != nil {
+		t.Errorf("conversation = %+v, want nil", env.Conversation)
 	}
-	if env.Conversation.Kind != "direct" {
-		t.Errorf("conversation.kind = %q, want %q", env.Conversation.Kind, "direct")
-	}
-	if env.Conversation.Surface != "native" {
-		t.Errorf("conversation.surface = %q, want %q", env.Conversation.Surface, "native")
-	}
-}
-
-func TestFormatLegacyAsNewDelivery_NilConvInfo_ChannelOnly(t *testing.T) {
-	old := &messages.StructuredMessage{
-		Version:   messages.Version,
-		Timestamp: "2026-08-27T10:00:00Z",
-		Sender:    "user:alice",
-		SenderID:  "user:alice",
-		Recipient: "agent:builder",
-		Msg:       "Hello",
-		Type:      messages.TypeInstruction,
-		Channel:   "general",
-	}
-
-	result := FormatLegacyAsNewDelivery(old, nil)
-
-	env := extractEnvelope(t, result)
-
-	if env.Conversation.ID != "general" {
-		t.Errorf("conversation.id = %q, want %q", env.Conversation.ID, "general")
-	}
-}
-
-func TestFormatLegacyAsNewDelivery_NilConvInfo_Broadcasted(t *testing.T) {
-	old := &messages.StructuredMessage{
-		Version:     messages.Version,
-		Timestamp:   "2026-08-27T10:00:00Z",
-		Sender:      "user:alice",
-		SenderID:    "user:alice",
-		Recipient:   "agent:builder",
-		Msg:         "Hello everyone",
-		Type:        messages.TypeInstruction,
-		Broadcasted: true,
-	}
-
-	result := FormatLegacyAsNewDelivery(old, nil)
-
-	env := extractEnvelope(t, result)
-
-	if env.Conversation.Kind != "group" {
-		t.Errorf("conversation.kind = %q, want %q for broadcasted message", env.Conversation.Kind, "group")
+	if env.Msg != "Hello without conversation" {
+		t.Errorf("msg = %q, want %q", env.Msg, "Hello without conversation")
 	}
 }
 
@@ -259,17 +238,19 @@ func TestFormatLegacyAsNewDelivery_NoMetadataInOutput(t *testing.T) {
 
 // TestFormatLegacyAsNewDelivery_RoundTrip verifies that a StructuredMessage
 // round-trips through FormatLegacyAsNewDelivery producing parseable JSON that
-// contains conversation.id, kind, and intent/event.
+// contains kind and intent/event. When convInfo is nil, conversation is absent.
 func TestFormatLegacyAsNewDelivery_RoundTrip(t *testing.T) {
 	tests := []struct {
 		name       string
 		old        *messages.StructuredMessage
+		conv       *ConversationInfo
 		wantKind   MessageKind
 		wantIntent *TextIntent
 		wantEvent  bool
+		wantConv   bool
 	}{
 		{
-			name: "instruction -> text/request",
+			name: "instruction with conv -> text/request",
 			old: &messages.StructuredMessage{
 				Version:   messages.Version,
 				Timestamp: "2026-08-27T10:00:00Z",
@@ -279,11 +260,13 @@ func TestFormatLegacyAsNewDelivery_RoundTrip(t *testing.T) {
 				Type:      messages.TypeInstruction,
 				Channel:   "dev",
 			},
+			conv:       &ConversationInfo{ID: "conv-rt-1", Kind: "direct", Surface: "native"},
 			wantKind:   KindText,
 			wantIntent: intentPtr(IntentRequest),
+			wantConv:   true,
 		},
 		{
-			name: "state-change -> event",
+			name: "state-change without conv -> event, no conversation key",
 			old: &messages.StructuredMessage{
 				Version:   messages.Version,
 				Timestamp: "2026-08-27T10:00:00Z",
@@ -294,11 +277,13 @@ func TestFormatLegacyAsNewDelivery_RoundTrip(t *testing.T) {
 				Status:    "RUNNING",
 				Channel:   "dev",
 			},
+			conv:      nil,
 			wantKind:  KindEvent,
 			wantEvent: true,
+			wantConv:  false,
 		},
 		{
-			name: "chat -> text/inform",
+			name: "chat with conv -> text/inform",
 			old: &messages.StructuredMessage{
 				Version:   messages.Version,
 				Timestamp: "2026-08-27T10:00:00Z",
@@ -308,14 +293,16 @@ func TestFormatLegacyAsNewDelivery_RoundTrip(t *testing.T) {
 				Type:      messages.TypeChat,
 				Channel:   "general",
 			},
+			conv:       &ConversationInfo{ID: "conv-rt-3", Kind: "group", Surface: "native"},
 			wantKind:   KindText,
 			wantIntent: intentPtr(IntentInform),
+			wantConv:   true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := FormatLegacyAsNewDelivery(tt.old, nil)
+			result := FormatLegacyAsNewDelivery(tt.old, tt.conv)
 
 			jsonStr := extractJSON(t, result)
 
@@ -325,13 +312,13 @@ func TestFormatLegacyAsNewDelivery_RoundTrip(t *testing.T) {
 				t.Fatalf("output is not valid JSON: %v\n%s", err, jsonStr)
 			}
 
-			// Must have conversation.id.
-			convRaw, ok := raw["conversation"].(map[string]any)
-			if !ok {
-				t.Fatal("missing or invalid conversation object")
+			// Check conversation presence/absence.
+			_, hasConv := raw["conversation"]
+			if tt.wantConv && !hasConv {
+				t.Error("missing conversation object, want present")
 			}
-			if _, ok := convRaw["id"]; !ok {
-				t.Error("missing conversation.id")
+			if !tt.wantConv && hasConv {
+				t.Error("has conversation object, want absent")
 			}
 
 			// Must have kind.

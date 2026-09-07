@@ -29,11 +29,11 @@ Choosing the right recipient is critical to avoid spam and ensure the message re
 - **`<agent-name>`** (legacy): Bare agent name, equivalent to `agent:<name>`. Still works but `@<agent-name>` is preferred.
 - **`user:<name>`**: Send to a user's inbox (Hub mode only).
 - **`group[a,b,...]`**: Group messaging to a specific list of recipients (Hub mode only).
-- **`conv:<uuid>`**: Address a conversation by ID. **Not yet supported — currently errors.**
-- **`#<thread>`**: Address a named thread. **Not yet supported — currently errors.**
+- **`conv:<uuid>`**: Address a conversation by ID. Use this to reply into the conversation you were addressed in — pass the `conversation` field from the inbound message envelope.
+- **`#<thread>`**: Address a named thread by its thread identifier.
 - **`coordinator`**: (Convention) Usually refers to the agent managing the project.
 
-**Anti-Pattern:** Do not use `scion broadcast` for routine communication. It sends to every agent in the project, wastes context windows, and is often ignored or causes confusion. Broadcasting is now a separate command (`scion broadcast`); the old `--broadcast` flag on `scion message` has been removed.
+**Anti-Pattern:** Do not broadcast. Broadcasting sends to every agent in the project, wastes context windows, and is often ignored or causes confusion. Broadcasting is not available in agent mode — address your recipients explicitly (e.g. `@agent-name`). The `--broadcast` and `--all` flags on `scion message` have been removed.
 
 ## Message Timing and Cadence
 
@@ -105,7 +105,7 @@ The `scion message` command provides the following flags:
 **Capabilities that moved to separate commands:**
 - **Raw keystrokes**: Use `scion keys` to send literal keystrokes to an agent's tmux terminal (replaces the old `--raw` flag).
 - **Scheduled messages**: Use `scion schedule create` to schedule messages for future delivery (replaces the old `--in` and `--at` flags). See the `scion-scheduler` skill.
-- **Broadcasting**: Use `scion broadcast` to send to all agents in a project, or `scion broadcast --all` for global broadcast (replaces the old `--broadcast` flag).
+- **Broadcasting**: The `--broadcast` and `--all` flags on `scion message` have been removed. Broadcasting is not available in agent mode — address your recipients explicitly (e.g. `@agent-name`).
 - **Notifications**: Use `scion notifications subscribe` to subscribe to agent state changes (replaces the old `--notify` flag).
 
 **Deprecated flags still accepted (with warnings):**
@@ -158,7 +158,7 @@ is addressed to you or is a notification about another agent.
 - **`group-set`** — a user @-mentioned multiple agents (not `@all`). Read and act on it like an `instruction`.
 - **`system`** — a hub-generated operational notice (e.g. scheduled event fired, port auto-exposed, message delivery failed). Read for situational awareness; no reply needed. Check `metadata.system_category` for the specific category.
 
-**Note:** The messaging system is transitioning to a conversation-based model where messages carry a `conversation_id` and are addressed to conversations rather than agents directly. During this transition, inbound messages continue to arrive with the type fields described above, and agents should continue to discriminate on the `type` field as documented. New fields such as `conversation_id` may appear in message metadata but are not yet required for correct agent behavior.
+**Conversation routing:** Inbound messages carry a `conversation` field in the delivery envelope that identifies the conversation they belong to. When replying, include this conversation identifier using `conv:<uuid>` addressing (e.g., `scion message conv:<uuid> "your reply"`) so the reply persists into the same conversation. An agent that omits the conversation field sends a proactive DM instead of a reply — this is correct for new conversations but wrong for replies, and the system will flag the mismatch. Always read the `conversation` field from the message you are replying to and route your reply into it.
 
 ### Handling `input-needed`
 
@@ -186,7 +186,7 @@ is a broadcast to subscribers, not a delivery to an addressee.
 
 ## Anti-Patterns and Red Flags
 
-- **Red Flag**: Using `scion broadcast` for routine communication (the old `--broadcast` flag on `scion message` has been removed).
+- **Red Flag**: Attempting to broadcast. Broadcasting is not available in agent mode; address recipients explicitly.
 - **Red Flag**: An agent goes silent for >30 minutes without a milestone update or "blocked" status.
 - **Anti-Pattern**: Sending "I'm still here" or other low-signal filler messages.
 - **Anti-Pattern**: Using `sleep` to wait for something; use `sciontool status blocked` instead. For external processes that emit no notification (CI, builds, deploys), pair `status blocked` with a scheduled self-callback — see the `scion-scheduler` skill → **Waiting on external processes**.

@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -247,8 +248,11 @@ func TestResolveOrCreateConversationByKey_HappyPath(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 	pid := "proj"
 
-	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+	got, err := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
 		"thread:proj:t1", "group", &pid)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -267,8 +271,11 @@ func TestResolveOrCreateConversationByKey_UpsertError(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+	got, err := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
 		"thread:proj:t1", "group", nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if got != nil {
 		t.Errorf("expected nil on upsert error, got %+v", got)
 	}
@@ -293,9 +300,12 @@ func TestResolveOrCreateConversationByKey_SinkTopicLookup_Resolves(t *testing.T)
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 	pid := "proj"
 
-	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+	got, err := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
 		"thread:proj:topicID", "group", &pid, WithKeyTopicLookup(lookup))
 
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result from topic lookup")
 	}
@@ -316,9 +326,12 @@ func TestResolveOrCreateConversationByKey_SinkTopicLookup_ErrNotFound_FallsThrou
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 	pid := "proj"
 
-	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+	got, err := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
 		"thread:proj:nonTopic", "group", &pid, WithKeyTopicLookup(lookup))
 
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result from upsert fallthrough")
 	}
@@ -340,9 +353,12 @@ func TestResolveOrCreateConversationByKey_SinkTopicLookup_InfraError_ReturnsNil(
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	pid := "proj"
 
-	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+	got, err := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
 		"thread:proj:topicID", "group", &pid, WithKeyTopicLookup(lookup))
 
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if got != nil {
 		t.Errorf("expected nil on infra error, got %+v", got)
 	}
@@ -365,9 +381,12 @@ func TestResolveOrCreateConversationByKey_SinkTopicLookup_NoConvID_ReturnsNil(t 
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	pid := "proj"
 
-	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+	got, err := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
 		"thread:proj:topicID", "group", &pid, WithKeyTopicLookup(lookup))
 
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if got != nil {
 		t.Errorf("expected nil for topic without conversation_id, got %+v", got)
 	}
@@ -387,17 +406,20 @@ func TestResolveOrCreateConversationByKey_SinkTopicLookup_MalformedThreadRef_Ref
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	pid := "proj"
 
-	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+	got, err := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
 		"thread:abc", "group", &pid, WithKeyTopicLookup(lookup))
 
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if got != nil {
 		t.Errorf("expected nil for malformed thread: ref, got %+v", got)
 	}
 	if mock.lastConv != nil {
 		t.Error("UpsertConversationByExternalRef must NOT be called for malformed thread: ref")
 	}
-	if !bytes.Contains(buf.Bytes(), []byte("malformed thread: ref")) {
-		t.Error("expected warning log for malformed thread: ref")
+	if !strings.Contains(err.Error(), "malformed thread: ref") {
+		t.Error("expected error about malformed thread: ref")
 	}
 }
 
@@ -413,9 +435,12 @@ func TestResolveOrCreateConversationByKey_SinkTopicLookup_WellFormedRef_Resolves
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 	pid := "proj"
 
-	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+	got, err := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
 		"thread:proj:topicID", "group", &pid, WithKeyTopicLookup(lookup))
 
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result from well-formed thread ref")
 	}
@@ -440,9 +465,12 @@ func TestResolveOrCreateConversationByKey_SinkTopicLookup_SkipsNonGroupKind(t *t
 	}
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+	got, err := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
 		"dm:agent:x:user:y", "direct", nil, WithKeyTopicLookup(lookup))
 
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result for direct kind")
 	}
@@ -466,9 +494,12 @@ func TestResolveOrCreateConversationByKey_SinkTopicLookup_SoftDeletedTopic_DoesN
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 	pid := "proj"
 
-	got := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+	got, err := ResolveOrCreateConversationByKey(context.Background(), mock, logger,
 		"thread:proj:deletedTopic", "group", &pid, WithKeyTopicLookup(lookup))
 
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil result for soft-deleted topic with linked conversation")
 	}
@@ -491,7 +522,7 @@ func TestResolveOrCreateConversationByKey_WithSurfaceAndParentRef(t *testing.T) 
 	pid := "proj"
 	agentID := "agent-123"
 
-	ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+	_, _ = ResolveOrCreateConversationByKey(context.Background(), mock, logger,
 		"ext-ref-1", "group", &pid,
 		WithSurface("discord"),
 		WithParentRef("parent-ref-1"),
@@ -517,7 +548,7 @@ func TestResolveOrCreateConversationByKey_DefaultSurfaceIsNative(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 	pid := "proj"
 
-	ResolveOrCreateConversationByKey(context.Background(), mock, logger,
+	_, _ = ResolveOrCreateConversationByKey(context.Background(), mock, logger,
 		"thread:proj:t1", "group", &pid)
 
 	if mock.lastConv == nil {
@@ -525,5 +556,87 @@ func TestResolveOrCreateConversationByKey_DefaultSurfaceIsNative(t *testing.T) {
 	}
 	if mock.lastConv.Surface != "native" {
 		t.Errorf("Surface: got %q, want %q", mock.lastConv.Surface, "native")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DEF-114: DeriveError cause classification
+// ---------------------------------------------------------------------------
+
+func TestDeriveConversationKey_DeriveError_CauseClassification(t *testing.T) {
+	const (
+		agentUUID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+		userUUID  = "550e8400-e29b-41d4-a716-446655440000"
+	)
+
+	tests := []struct {
+		name      string
+		input     KeyInputs
+		wantCause string
+	}{
+		{
+			name:      "dm_key_parse: malformed dm: key (wrong segment count)",
+			input:     KeyInputs{ThreadID: "dm:agent:" + agentUUID},
+			wantCause: DeriveErrDMKeyParse,
+		},
+		{
+			name:      "dm_key_parse: unknown kind in dm: key",
+			input:     KeyInputs{ThreadID: "dm:bot:" + agentUUID + ":user:" + userUUID},
+			wantCause: DeriveErrDMKeyParse,
+		},
+		{
+			name:      "dm_key_not_canonical: user before agent",
+			input:     KeyInputs{ThreadID: "dm:user:" + userUUID + ":agent:" + agentUUID},
+			wantCause: DeriveErrDMKeyCanonical,
+		},
+		{
+			name:      "thread_no_project: non-dm ThreadID with empty ProjectID",
+			input:     KeyInputs{ThreadID: "my-thread", ProjectID: ""},
+			wantCause: DeriveErrThreadNoProject,
+		},
+		{
+			name: "principal_pair: non-UUID sender",
+			input: KeyInputs{
+				SenderKind: "user", SenderID: "alice@example.com",
+				RecipientKind: "agent", RecipientID: agentUUID,
+			},
+			wantCause: DeriveErrPrincipalPair,
+		},
+		{
+			name: "principal_pair: unknown kind",
+			input: KeyInputs{
+				SenderKind: "bot", SenderID: userUUID,
+				RecipientKind: "agent", RecipientID: agentUUID,
+			},
+			wantCause: DeriveErrPrincipalPair,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, err := DeriveConversationKey(tt.input)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			var de *DeriveError
+			if !errors.As(err, &de) {
+				t.Fatalf("expected *DeriveError, got %T: %v", err, err)
+			}
+			if de.Cause != tt.wantCause {
+				t.Errorf("Cause: got %q, want %q", de.Cause, tt.wantCause)
+			}
+		})
+	}
+}
+
+// TestDeriveConversationKey_SuccessReturnsNilError ensures successful
+// derivation returns a plain nil, not a zero-valued *DeriveError.
+func TestDeriveConversationKey_SuccessReturnsNilError(t *testing.T) {
+	_, _, _, err := DeriveConversationKey(KeyInputs{
+		SenderKind: "user", SenderID: "550e8400-e29b-41d4-a716-446655440000",
+		RecipientKind: "agent", RecipientID: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
 	}
 }

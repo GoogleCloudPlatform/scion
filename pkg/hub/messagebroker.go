@@ -57,6 +57,10 @@ type MessageBrokerProxy struct {
 	// attachments. Neither can happen in the web channel spoke, because the ID
 	// does not exist until deliverToUser runs. Nil-safe.
 	webChatStore WebChatStore
+	// writeDenyEnabled returns whether the G2 write-deny switch is on.
+	// When nil or returning false, conversation resolution failures are non-fatal
+	// (B10 contract). When returning true, they deny the write (G2 contract).
+	writeDenyEnabled func() bool
 
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
@@ -459,43 +463,107 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
 	if !msg.Broadcasted {
 		var convResult *messaging.ConversationResult
-		if msg.ThreadID != "" {
+
+		// DEF-138 P-3: honour a pre-resolved ConversationID from the
+		// upstream handler instead of re-deriving. The handler resolved
+		// and stamped structuredMsg before publishing to the broker.
+		// Re-deriving here produced the inbound/outbound conversation
+		// split: the handler resolved a thread conversation, then the
+		// broker re-derived a DM because the agent's reply carries no
+		// ThreadID. Note: non-emptiness means "already resolved upstream"
+		// — it does NOT mean "the caller asserted this". Provenance is
+		// carried by ConversationAsserted (DEF-141).
+		if msg.ConversationID != "" {
+			storeMsg.ConversationID = msg.ConversationID
+			// Build a minimal ConversationResult for divergence logging.
+			// We do not re-fetch the conversation row — the handler
+			// already looked it up (explicit path) or created it
+			// (derivation path), and re-querying would add latency for
+			// information we have.
+			convResult = &messaging.ConversationResult{
+				ConversationID: msg.ConversationID,
+			}
+		} else if msg.ThreadID != "" {
 			var threadOpts []messaging.ThreadConversationOption
 			if p.webChatStore != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
 			}
-			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
+			if surface := messaging.ChannelToSurface(msg.Channel, p.log); surface != "native" {
+				threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
+			}
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
+			if convErr != nil {
+				if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("mb.user.thread")
+					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+					return
+				}
+				p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			}
 		} else if msg.SenderID != "" && msg.RecipientID != "" {
 			senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
 			recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
 			if sOK && rOK {
-				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
+				var convErr error
+				convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
+				if convErr != nil {
+					if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+						messaging.WriteDenialMetrics.Inc("mb.user.dm")
+						p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+						return
+					}
+					p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+				}
 			} else {
 				p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
 					"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
 			}
 		}
-		if convResult != nil {
+		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
-		// Always log divergence — even when convResult is nil, that is a divergence signal.
-		oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID)
-		convID := ""
-		actualRef := ""
-		if convResult != nil {
-			convID = convResult.ConversationID
-			actualRef = convResult.ExternalRef
+		// DEF-141: Classification is a three-way decision on provenance,
+		// separated from the honouring block above. Honouring is gated on
+		// non-emptiness (P-3, must not regress). Classification branches on
+		// ConversationAsserted — never on ConversationID != "".
+		switch {
+		case msg.ConversationAsserted:
+			// Caller named a conversation and the handler authorized it.
+			messaging.LogExplicitRouting(p.log, storeMsg.ID, storeMsg.ConversationID)
+
+		case msg.ConversationID != "":
+			// Handler-derived and propagated. Deliberately NOT compared:
+			// ComputeDivergenceMatch would take both sides from the same input
+			// fields in the same request, so the verdict is tautological (DEF-139,
+			// [^72]/[^73]). Counting it as a "match" would inflate the board with
+			// confirmations that confirm nothing. CheckConversationConsistency
+			// below is the independent check and runs on every path regardless.
+			messaging.LogDerivedRouting(p.log, storeMsg.ID, storeMsg.ConversationID)
+
+		default:
+			// No pre-resolved conversation — compare old-model vs new-model routing.
+			oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID)
+			convID := ""
+			actualRef := ""
+			if convResult != nil {
+				convID = convResult.ConversationID
+				actualRef = convResult.ExternalRef
+			}
+			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+			messaging.LogDivergence(p.log, messaging.DivergenceEntry{
+				MessageID:  storeMsg.ID,
+				OldRouting: oldRouting,
+				NewRouting: messaging.NewRoutingStr(convID),
+				Match:      match,
+				Reason:     reason,
+			})
 		}
-		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
-		messaging.LogDivergence(p.log, messaging.DivergenceEntry{
-			MessageID:  storeMsg.ID,
-			OldRouting: oldRouting,
-			NewRouting: messaging.NewRoutingStr(convID),
-			Match:      match,
-			Reason:     reason,
-		})
 		// DEF-3: Independent consistency check against prior messages.
-		messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, convID, msg.ThreadID, msg.SenderID, msg.RecipientID, p.log)
+		if consistent := messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, storeMsg.ConversationID, msg.ThreadID, msg.SenderID, msg.RecipientID, p.log); !consistent {
+			p.log.Warn("DEF-3: conversation consistency mismatch (user message from broker)",
+				"message_id", storeMsg.ID, "conversation_id", storeMsg.ConversationID)
+		}
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist user message from broker", "topic", topic, "error", err)
@@ -639,17 +707,40 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	}
 	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered agent messages.
 	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
+	// convResult is declared here (not inside the block) so Phase 9b(ii)
+	// rendering can read it after persistence.
+	var convResult *messaging.ConversationResult
 	if !msg.Broadcasted {
-		var convResult *messaging.ConversationResult
 		if msg.ThreadID != "" {
 			var threadOpts []messaging.ThreadConversationOption
 			if p.webChatStore != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
 			}
-			convResult = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
+			if surface := messaging.ChannelToSurface(msg.Channel, p.log); surface != "native" {
+				threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
+			}
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
+			if convErr != nil {
+				if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("mb.agent.thread")
+					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+					return
+				}
+				p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			}
 		} else if msg.SenderID != "" && agent.ID != "" {
 			if senderKind, ok := messages.PrincipalKindFromAddress(msg.Sender); ok {
-				convResult = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)
+				var convErr error
+				convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, "agent", agent.ID)
+				if convErr != nil {
+					if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+						messaging.WriteDenialMetrics.Inc("mb.agent.dm")
+						p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+						return
+					}
+					p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+				}
 			} else {
 				p.log.Warn("skipping DM conversation resolution: sender kind undetermined",
 					"sender", msg.Sender, "sender_id", msg.SenderID)
@@ -675,11 +766,27 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			Reason:     reason,
 		})
 		// DEF-3: Independent consistency check against prior messages.
-		messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, convID, msg.ThreadID, msg.SenderID, agent.ID, p.log)
+		if consistent := messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, convID, msg.ThreadID, msg.SenderID, agent.ID, p.log); !consistent {
+			p.log.Warn("DEF-3: conversation consistency mismatch (agent message from broker)",
+				"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
+		}
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist broker message to store", "agentSlug", agentSlug, "error", err)
 		return
+	}
+
+	// Phase 9b(ii): render the delivery envelope from the persisted message
+	// row and conversation result when the envelope switch is ON. The broker
+	// delivers DeliveryText verbatim; when empty, it falls back to
+	// FormatForDelivery (legacy path).
+	if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+		msg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+			MessageID:  storeMsg.ID,
+			ConvResult: convResult,
+			Msg:        msg,
+			CreatedAt:  storeMsg.CreatedAt,
+		})
 	}
 
 	// The 30s brokerCallbackTimeout is shared with pre-dispatch work above

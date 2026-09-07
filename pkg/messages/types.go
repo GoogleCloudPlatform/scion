@@ -146,10 +146,23 @@ type StructuredMessage struct {
 	ThreadID       string            `json:"thread_id,omitempty"`
 	ConversationID string            `json:"conversation_id,omitempty"`
 
+	// ConversationAsserted records that ConversationID was NAMED BY THE CALLER
+	// and authorized, rather than derived by the hub from message fields.
+	// Hub-internal provenance: it is never rendered into the agent envelope and
+	// never accepted from request JSON. Consumers must branch on this, never on
+	// ConversationID != "" — non-emptiness only means "already resolved upstream".
+	ConversationAsserted bool `json:"-"`
+
 	// Visibility controls which consumers see this message.
 	// One of VisibilityNormal, VisibilityVerbose, or VisibilityFull.
 	// Empty defaults to VisibilityNormal for backward compatibility.
 	Visibility string `json:"visibility,omitempty"`
+
+	// DeliveryText is the fully rendered agent-facing envelope, produced by
+	// the hub. When set, the broker delivers it verbatim and performs no
+	// formatting. Phase 13 deletes this field along with the rest of
+	// StructuredMessage.
+	DeliveryText string `json:"delivery_text,omitempty"`
 }
 
 // ValidateType returns an error if the message type is not in the closed enum.

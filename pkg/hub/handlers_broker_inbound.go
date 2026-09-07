@@ -237,6 +237,9 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			"external_ref requires surface to be set", nil)
 		return
 	}
+	// preDispatchConvResult is declared here so Phase 9b(ii) rendering can
+	// use it after the Phase 11 block and before dispatch.
+	var preDispatchConvResult *messaging.ConversationResult
 	if req.Surface != "" && req.ExternalRef != "" {
 		var keyOpts []messaging.ConversationByKeyOption
 		keyOpts = append(keyOpts, messaging.WithSurface(req.Surface))
@@ -253,9 +256,18 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		if wcs != nil {
 			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 		}
-		convResult := messaging.ResolveOrCreateConversationByKey(
+		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
 			r.Context(), s.store, log, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
-		if convResult != nil {
+		if convErr != nil {
+			if s.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc("broker.phase11")
+				log.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+				return
+			}
+			log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+		} else {
+			preDispatchConvResult = convResult
 			if req.Message.Metadata == nil {
 				req.Message.Metadata = make(map[string]string)
 			}
@@ -278,6 +290,93 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// when the hub received the message, not when dispatch completed (which can
 	// be up to 30s later under retry).
 	now := time.Now().UTC()
+	brokerInboundMsgID := api.NewUUID()
+
+	// DEF-135: Resolve sender and Phase 5 conversation BEFORE the render so
+	// the delivery envelope carries the conversation id. Previously these ran
+	// after dispatch, leaving the envelope without a conversation for Discord
+	// and other native-DM messages.
+	senderUserID := resolveSenderUserID(r.Context(), s.store, req.Message.SenderID, req.Message.Sender)
+
+	// Phase 5 dual-write: resolve-or-create conversation for broker-inbound
+	// messages. Skip broadcasts — they are ephemeral and do not belong to a
+	// conversation. Resolution errors under write-deny now return 409 BEFORE
+	// dispatch (DEF-135 consequence 1: fail-closed, retry-safe).
+	var convFromPhase5 *messaging.ConversationResult
+	if !req.Message.Broadcasted {
+		var convErr error
+		convFromPhase5, convErr = s.resolvePhase5Conversation(r.Context(), req.Message.ThreadID, agent.ProjectID, senderUserID, agent.ID, req.Message.Channel)
+		if convErr != nil {
+			metricKey := "broker.dm"
+			if req.Message.ThreadID != "" {
+				metricKey = "broker.thread"
+			}
+			if s.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc(metricKey)
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+				return
+			}
+			s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+		}
+	}
+
+	// DEF-135 precedence rule: Phase 11 (explicit surface + external_ref)
+	// wins over Phase 5 (inferred DM/thread) when both produce a result.
+	// A single effectiveConv is used for both the envelope and the persisted
+	// row, eliminating the prior split where they could silently disagree.
+	//
+	// F3 fix: broadcasts carry no conversation — not from Phase 5 (already
+	// skipped above) and not from Phase 11 either. A broadcast with
+	// surface + external_ref set creates the conversation row (Phase 11
+	// above) but does NOT stamp it on the envelope or the persisted message.
+	// This matches the documented invariant at handlers_agent_messaging.go:1898.
+	effectiveConv := convFromPhase5
+	if preDispatchConvResult != nil {
+		if convFromPhase5 != nil && convFromPhase5.ConversationID != preDispatchConvResult.ConversationID {
+			// OQ-135-2: Both resolutions produced a result and they disagree.
+			// Log the divergence — this is currently unexercised (no live
+			// caller sets surface + external_ref AND has a thread) but will
+			// catch latent conflicts if a plugin starts doing so.
+			log.Warn("Phase 11 / Phase 5 conversation divergence: Phase 11 wins",
+				"phase11_conv_id", preDispatchConvResult.ConversationID,
+				"phase5_conv_id", convFromPhase5.ConversationID,
+			)
+		}
+		effectiveConv = preDispatchConvResult
+	}
+	if req.Message.Broadcasted {
+		effectiveConv = nil
+	}
+
+	// F2 fix: validate the value that will actually be persisted, not just
+	// the Phase 5 result. When Phase 11 wins, effectiveConv differs from
+	// convFromPhase5, and the persisted conversation id must still pass
+	// the empty-string gate.
+	if effectiveConv != nil {
+		if err := messaging.ValidateAttributed(effectiveConv.ConversationID); err != nil {
+			if s.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc("broker.validate")
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
+				return
+			}
+			s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
+		}
+	}
+
+	// Phase 9b(ii): render the delivery envelope before dispatch when the
+	// envelope switch is ON. The message ID is pre-generated here (same UUID
+	// that will be persisted). effectiveConv may be nil for broadcasts or
+	// when resolution was skipped — the renderer correctly omits the
+	// conversation key (honest absence per §4.3).
+	if s.writeDenyEnabled() {
+		req.Message.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+			MessageID:  brokerInboundMsgID,
+			ConvResult: effectiveConv,
+			Msg:        req.Message,
+			CreatedAt:  now,
+		})
+	}
 
 	retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer retryCancel()
@@ -301,25 +400,12 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		"type", req.Message.Type,
 	)
 
-	// Resolve the sender's user ID before persisting the message. The
-	// upstream permission check already did a user lookup for "user:" senders,
-	// but req.Message.SenderID may still be empty if the originating plugin
-	// didn't populate it.  Resolving early guarantees that both the persisted
-	// storeMsg and the webChatStore calls below use a valid ID.
-	senderUserID := req.Message.SenderID
-	if senderUserID == "" && strings.HasPrefix(req.Message.Sender, "user:") {
-		senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
-		if u, err := s.store.GetUserByEmail(r.Context(), senderEmail); err == nil && u != nil {
-			senderUserID = u.ID
-		}
-	}
-
 	// F5 fix (Phase 6): Persist the inbound message and publish an SSE event
 	// so that messages from external channels (Discord, Telegram) appear in
 	// the web chat — both live and after a refresh. This mirrors the
 	// persistence + SSE pattern used by handleAgentMessage.
 	storeMsg := &store.Message{
-		ID:            api.NewUUID(),
+		ID:            brokerInboundMsgID,
 		ProjectID:     agent.ProjectID,
 		Sender:        req.Message.Sender,
 		SenderID:      senderUserID,
@@ -341,42 +427,18 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			storeMsg.GroupID = gid
 		}
 	}
-	// Phase 5 dual-write: resolve-or-create conversation for broker-inbound messages.
-	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
+	// Stamp the effectiveConv — the same value the envelope carried.
+	if effectiveConv != nil {
+		storeMsg.ConversationID = effectiveConv.ConversationID
+	}
+	// Divergence logging and consistency check.
 	if !storeMsg.Broadcasted {
-		var convResult *messaging.ConversationResult
-		if storeMsg.ThreadID != "" {
-			var threadOpts []messaging.ThreadConversationOption
-			s.mu.RLock()
-			wcs := s.webChatStore
-			s.mu.RUnlock()
-			if wcs != nil {
-				threadOpts = append(threadOpts, messaging.WithTopicLookup(wcs))
-			}
-			convResult = messaging.ResolveOrCreateThreadConversation(r.Context(), s.store, s.messageLog, storeMsg.ThreadID, agent.ProjectID, threadOpts...)
-		} else if senderUserID != "" && agent.ID != "" {
-			convResult = messaging.ResolveOrCreateDMConversation(r.Context(), s.store, s.store, s.messageLog, "user", senderUserID, "agent", agent.ID)
-		}
-		if convResult != nil {
-			storeMsg.ConversationID = convResult.ConversationID
-			// DEF-41: structural pre-placement. This check is inert
-			// while B10 holds: convResult is non-nil only when
-			// attribution succeeded, and ent.Conversation.ID is a
-			// uuid.UUID that always renders non-empty. It becomes
-			// load-bearing at Tranche G, when derivation failure
-			// becomes fatal and this call moves outside the nil guard.
-			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-				writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
-				return
-			}
-		}
-		// Always log divergence — even when convResult is nil, that is a divergence signal.
 		oldRouting := messaging.OldRoutingFromMessage(senderUserID, agent.ID, storeMsg.ThreadID)
 		convID := ""
 		actualRef := ""
-		if convResult != nil {
-			convID = convResult.ConversationID
-			actualRef = convResult.ExternalRef
+		if effectiveConv != nil {
+			convID = effectiveConv.ConversationID
+			actualRef = effectiveConv.ExternalRef
 		}
 		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
 		messaging.LogDivergence(log, messaging.DivergenceEntry{
@@ -387,13 +449,23 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			Reason:     reason,
 		})
 		// DEF-3: Independent consistency check against prior messages.
-		messaging.CheckConversationConsistency(r.Context(), s.store, storeMsg.ID, convID, storeMsg.ThreadID, senderUserID, agent.ID, log)
+		if consistent := messaging.CheckConversationConsistency(r.Context(), s.store, storeMsg.ID, convID, storeMsg.ThreadID, senderUserID, agent.ID, log); !consistent {
+			log.Warn("DEF-3: conversation consistency mismatch (inbound broker)",
+				"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
+		}
 	}
 	if err := s.store.CreateMessage(r.Context(), storeMsg); err != nil {
-		log.Error("Failed to persist inbound broker message", "error", err)
+		log.Error("Failed to persist inbound broker message",
+			"error", err,
+			"message_id", storeMsg.ID,
+			"conversation_id", storeMsg.ConversationID,
+			"agent_id", agent.ID,
+		)
 		// Non-fatal: the dispatch already succeeded, so the agent got the
-		// message. Failing the HTTP response here would mislead the caller
-		// into retrying — which would double-deliver.
+		// message. The agent now holds identifiers (message_id,
+		// conversation_id) that reference an unpersisted row. Failing the
+		// HTTP response here would mislead the caller into retrying —
+		// which would double-deliver.
 	} else {
 		s.events.PublishUserMessage(r.Context(), storeMsg)
 	}
@@ -451,4 +523,54 @@ func parseAgentMessageTopic(topic string) (projectID, agentSlug string, err erro
 		return "", "", fmt.Errorf("expected format scion.project.<projectId>.agent.<agentSlug>.messages")
 	}
 	return parsed.ProjectID, parsed.Actor, nil
+}
+
+// resolveSenderUserID resolves the sender's user ID from the message fields.
+// If senderID is already set, it is returned as-is. Otherwise, if sender has
+// a "user:" prefix, the user is looked up by email. Returns the empty string
+// when the sender cannot be resolved (non-user sender, or user not found).
+func resolveSenderUserID(ctx context.Context, st store.Store, senderID, sender string) string {
+	if senderID != "" {
+		return senderID
+	}
+	if strings.HasPrefix(sender, "user:") {
+		senderEmail := strings.TrimPrefix(sender, "user:")
+		if u, err := st.GetUserByEmail(ctx, senderEmail); err == nil && u != nil {
+			return u.ID
+		}
+	}
+	return ""
+}
+
+// resolvePhase5Conversation resolves or creates a conversation for a
+// broker-inbound message using the Phase 5 dual-write path. Thread-based
+// messages are resolved via ResolveOrCreateThreadConversation; non-thread
+// messages resolve as DM conversations between the sender and agent.
+//
+// Returns (nil, nil) when resolution is inapplicable (e.g. missing
+// senderUserID for a DM, or empty agentID).
+// Returns (result, nil) on success.
+// Returns (nil, err) when resolution fails — the caller must handle
+// write-deny semantics.
+func (s *Server) resolvePhase5Conversation(
+	ctx context.Context,
+	threadID, projectID, senderUserID, agentID, channel string,
+) (*messaging.ConversationResult, error) {
+	if threadID != "" {
+		var threadOpts []messaging.ThreadConversationOption
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		if wcs != nil {
+			threadOpts = append(threadOpts, messaging.WithTopicLookup(wcs))
+		}
+		if surface := messaging.ChannelToSurface(channel, s.messageLog); surface != "native" {
+			threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
+		}
+		return messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, threadID, projectID, threadOpts...)
+	}
+	if senderUserID != "" && agentID != "" {
+		return messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", senderUserID, "agent", agentID)
+	}
+	return nil, nil
 }

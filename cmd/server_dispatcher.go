@@ -255,23 +255,36 @@ func (d *agentDispatcherAdapter) DispatchAgentDelete(ctx context.Context, hubAge
 
 // DispatchAgentMessage implements hub.AgentDispatcher.
 // It sends a message to an agent on the runtime broker.
+//
+// Phase 9b(ii): when the hub has pre-rendered the delivery envelope
+// (DeliveryText on the StructuredMessage), deliver it verbatim.
+// FormatForDelivery is the legacy fallback (switch OFF or pre-9b caller).
 func (d *agentDispatcherAdapter) DispatchAgentMessage(ctx context.Context, hubAgent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
 	// Raw messages bypass the paste buffer and send literal bytes via send-keys
 	if structuredMsg != nil && structuredMsg.Raw {
-		deliveryText := messages.FormatForDelivery(structuredMsg)
+		deliveryText := resolveDeliveryText(structuredMsg)
 		if err := d.manager.MessageRaw(ctx, hubAgent.Name, hubAgent.ProjectID, deliveryText); err != nil {
 			return fmt.Errorf("failed to send raw message: %w", err)
 		}
 		return nil
 	}
 
-	// When a structured message is provided, format it for delivery
+	// When a structured message is provided, use pre-rendered or format for delivery.
 	deliveryText := message
 	if structuredMsg != nil {
-		deliveryText = messages.FormatForDelivery(structuredMsg)
+		deliveryText = resolveDeliveryText(structuredMsg)
 	}
 	if err := d.manager.Message(ctx, hubAgent.Name, hubAgent.ProjectID, deliveryText, interrupt); err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 	return nil
+}
+
+// resolveDeliveryText returns the pre-rendered delivery text if available,
+// or falls back to FormatForDelivery for the legacy path.
+func resolveDeliveryText(msg *messages.StructuredMessage) string {
+	if msg.DeliveryText != "" {
+		return msg.DeliveryText
+	}
+	return messages.FormatForDelivery(msg)
 }

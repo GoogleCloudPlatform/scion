@@ -1706,8 +1706,20 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	// Determine the message to deliver.
 	// Empty messages (no body) are sent as an empty string, which the agent
 	// manager delivers as a plain tmux Enter keypress to trigger confirmations.
+	//
+	// Phase 9b: when the hub has pre-rendered the delivery envelope,
+	// deliver it verbatim. The broker performs no formatting.
+	// Preference order:
+	//   1. req.DeliveryText (top-level wire field, Phase 9b(i))
+	//   2. req.StructuredMessage.DeliveryText (carrier on StructuredMessage)
+	//   3. FormatForDelivery(req.StructuredMessage) (legacy fallback)
+	//   4. req.Message (plain text fallback)
 	var deliveryText string
-	if req.StructuredMessage != nil {
+	if req.DeliveryText != "" {
+		deliveryText = req.DeliveryText
+	} else if req.StructuredMessage != nil && req.StructuredMessage.DeliveryText != "" {
+		deliveryText = req.StructuredMessage.DeliveryText
+	} else if req.StructuredMessage != nil {
 		deliveryText = messages.FormatForDelivery(req.StructuredMessage)
 	} else {
 		deliveryText = req.Message

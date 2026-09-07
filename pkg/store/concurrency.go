@@ -118,6 +118,19 @@ const (
 	// one replica runs them during multi-replica cold start.
 	LockWebchatMigration AdvisoryLockKey = 0x5C100014
 
+	// LockDataMigrations guards boot-time conversation-model data
+	// migrations (DM key re-key, message backfill) so that concurrent
+	// replicas do not duplicate work. On SQLite the lock is a no-op
+	// (single-writer), so the guarded code must also be conflict-safe
+	// on its own merits.
+	//
+	// Originally allocated 0x5C100014 on the Tranche G branch. Main
+	// independently allocated that same value to LockWebchatMigration and
+	// shipped first, so this key was renumbered to 0x5C100015 when the two
+	// lines merged. Advisory locks are ephemeral session locks — never
+	// persisted, and a no-op on SQLite — so renumbering is safe.
+	LockDataMigrations AdvisoryLockKey = 0x5C100015
+
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
 	// pg_try_advisory_lock(classid, objid), where classid is this constant

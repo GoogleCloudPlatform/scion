@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -1148,7 +1149,7 @@ func TestValidDMKey(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // setupSendTest creates a project, webchat store, and a topic for send path testing.
-func setupSendTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Project) {
+func setupSendTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Project, *sql.DB) {
 	t.Helper()
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -1169,16 +1170,55 @@ func setupSendTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Pro
 	}
 	srv.SetWebChatStore(wcs)
 
-	return srv, s, wcs, proj
+	return srv, s, wcs, proj, db
+}
+
+// setTopicConversationID creates a conversation for a topic and updates the topic's conversation_id.
+// This is required after the G2 refactor made conversation resolution fatal.
+func setTopicConversationID(t *testing.T, db *sql.DB, s store.Store, topicID, projectID string) {
+	t.Helper()
+	ctx := context.Background()
+	pid := projectID
+	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "thread:" + projectID + ":" + topicID,
+		DriftState:  "active",
+		ProjectID:   &pid,
+	})
+	if err != nil {
+		t.Fatalf("UpsertConversation: %v", err)
+	}
+	_, err = db.ExecContext(ctx, "UPDATE webchat_topic SET conversation_id = ? WHERE id = ?", conv.ID, topicID)
+	if err != nil {
+		t.Fatalf("update topic conversation_id: %v", err)
+	}
+}
+
+// setDMConversationID creates a conversation for a DM key.
+// This is required after the G2 refactor made conversation resolution fatal.
+func setDMConversationID(t *testing.T, s store.Store, dmKey, _ string) {
+	t.Helper()
+	ctx := context.Background()
+	_, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertConversation for DM: %v", err)
+	}
 }
 
 func TestChatV2_Send_NoAgent_TypeChat(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create a topic with no default_agent.
+	topicID := tid("topic-send-1")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        tid("topic-send-1"),
+		ID:        topicID,
 		ProjectID: proj.ID,
 		Name:      "chat-only",
 		CreatedBy: "dev",
@@ -1186,9 +1226,10 @@ func TestChatV2_Send_NoAgent_TypeChat(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	body := map[string]string{"content": "hello world"}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-send-1")+"/messages", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1206,7 +1247,7 @@ func TestChatV2_Send_NoAgent_TypeChat(t *testing.T) {
 }
 
 func TestChatV2_Send_DefaultAgent_Dispatched(t *testing.T) {
-	srv, s, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create an agent.
@@ -1224,8 +1265,9 @@ func TestChatV2_Send_DefaultAgent_Dispatched(t *testing.T) {
 	}
 
 	// Create a topic with default_agent set.
+	topicID := tid("topic-default-agent")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:           tid("topic-default-agent"),
+		ID:           topicID,
 		ProjectID:    proj.ID,
 		Name:         "agent-thread",
 		CreatedBy:    "dev",
@@ -1234,9 +1276,10 @@ func TestChatV2_Send_DefaultAgent_Dispatched(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	body := map[string]string{"content": "please help"}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-default-agent")+"/messages", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1252,7 +1295,7 @@ func TestChatV2_Send_DefaultAgent_Dispatched(t *testing.T) {
 }
 
 func TestChatV2_Send_Mention_AgentReceives(t *testing.T) {
-	srv, s, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create an agent.
@@ -1270,8 +1313,9 @@ func TestChatV2_Send_Mention_AgentReceives(t *testing.T) {
 	}
 
 	// Topic without default_agent.
+	topicID := tid("topic-mention")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        tid("topic-mention"),
+		ID:        topicID,
 		ProjectID: proj.ID,
 		Name:      "mention-thread",
 		CreatedBy: "dev",
@@ -1279,10 +1323,11 @@ func TestChatV2_Send_Mention_AgentReceives(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	// Send with @reviewer mention.
 	body := map[string]string{"content": "@reviewer please check this"}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-mention")+"/messages", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1302,7 +1347,7 @@ func TestChatV2_Send_Mention_AgentReceives(t *testing.T) {
 }
 
 func TestChatV2_Send_DM_AgentDM_Routed(t *testing.T) {
-	srv, s, _, proj := setupSendTest(t)
+	srv, s, _, proj, _ := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create an agent so resolveProjectFromDMKey can find the project.
@@ -1321,6 +1366,7 @@ func TestChatV2_Send_DM_AgentDM_Routed(t *testing.T) {
 
 	// Build a valid DM key: agent DM so project can be resolved.
 	dmKey := "dm:agent:" + agent.ID + ":user:" + DevUserID
+	setDMConversationID(t, s, dmKey, proj.ID)
 
 	body := map[string]string{"content": "hi there"}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages", body)
@@ -1344,12 +1390,13 @@ func TestChatV2_Send_DM_AgentDM_Routed(t *testing.T) {
 }
 
 func TestChatV2_Send_HumanToHuman_NoDispatch(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create a topic with no default_agent.
+	topicID := tid("topic-h2h")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        tid("topic-h2h"),
+		ID:        topicID,
 		ProjectID: proj.ID,
 		Name:      "human-only",
 		CreatedBy: "dev",
@@ -1357,9 +1404,10 @@ func TestChatV2_Send_HumanToHuman_NoDispatch(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	body := map[string]string{"content": "just chatting"}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-h2h")+"/messages", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1377,11 +1425,12 @@ func TestChatV2_Send_HumanToHuman_NoDispatch(t *testing.T) {
 }
 
 func TestChatV2_Send_MaxLength_Rejected(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
+	topicID := tid("topic-maxlen")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        tid("topic-maxlen"),
+		ID:        topicID,
 		ProjectID: proj.ID,
 		Name:      "maxlen-thread",
 		CreatedBy: "dev",
@@ -1389,10 +1438,11 @@ func TestChatV2_Send_MaxLength_Rejected(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	longContent := strings.Repeat("x", messages.MaxMessageLength+1)
 	body := map[string]string{"content": longContent}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-maxlen")+"/messages", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for oversized message, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1400,14 +1450,14 @@ func TestChatV2_Send_MaxLength_Rejected(t *testing.T) {
 	// Exactly at limit should succeed.
 	exactContent := strings.Repeat("y", messages.MaxMessageLength)
 	body = map[string]string{"content": exactContent}
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-maxlen")+"/messages", body)
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusCreated {
 		t.Errorf("expected 201 for exact-limit message, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestChatV2_Send_InvalidDMKey_Rejected(t *testing.T) {
-	srv, _, _, _ := setupSendTest(t)
+	srv, _, _, _, _ := setupSendTest(t)
 
 	// Malformed DM key.
 	body := map[string]string{"content": "hello"}
@@ -1447,7 +1497,7 @@ func TestChatV2_MethodNotAllowed(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChatV2_Send_AgentDM_ImplicitRouting(t *testing.T) {
-	srv, s, _, proj := setupSendTest(t)
+	srv, s, _, proj, _ := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create an agent.
@@ -1466,6 +1516,7 @@ func TestChatV2_Send_AgentDM_ImplicitRouting(t *testing.T) {
 
 	// Build a valid agent DM key.
 	dmKey := "dm:agent:" + agent.ID + ":user:" + DevUserID
+	setDMConversationID(t, s, dmKey, proj.ID)
 
 	// Send a message without any @mention — it should be implicitly
 	// routed to the agent (type:instruction), not go through human-to-human.
@@ -1486,7 +1537,7 @@ func TestChatV2_Send_AgentDM_ImplicitRouting(t *testing.T) {
 }
 
 func TestChatV2_Send_AgentDM_MentionTakesPrecedence(t *testing.T) {
-	srv, s, _, proj := setupSendTest(t)
+	srv, s, _, proj, _ := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create the DM agent.
@@ -1518,6 +1569,7 @@ func TestChatV2_Send_AgentDM_MentionTakesPrecedence(t *testing.T) {
 	}
 
 	dmKey := "dm:agent:" + dmAgent.ID + ":user:" + DevUserID
+	setDMConversationID(t, s, dmKey, proj.ID)
 
 	// Send a message with @other-agent mention — mention should take precedence
 	// over the implicit DM agent routing.
@@ -1542,11 +1594,15 @@ func TestChatV2_Send_AgentDM_MentionTakesPrecedence(t *testing.T) {
 }
 
 func TestChatV2_Send_UserDM_HumanToHuman(t *testing.T) {
-	srv, _, _, _ := setupSendTest(t)
+	srv, s, _, proj, _ := setupSendTest(t)
 
-	// Build a user-to-user DM key.
+	// Build a user-to-user DM key (canonical order via DMConversationKey).
 	peerID := tid("dm-peer-user")
-	dmKey := "dm:user:" + DevUserID + ":user:" + peerID
+	dmKey, err := messages.DMConversationKey("user", DevUserID, "user", peerID)
+	if err != nil {
+		t.Fatalf("DMConversationKey: %v", err)
+	}
+	setDMConversationID(t, s, dmKey, proj.ID)
 
 	body := map[string]string{"content": "hey there, how are you?"}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages", body)
@@ -2229,7 +2285,7 @@ func seedHistoryMessages(t *testing.T, s store.Store, projectID, threadID string
 // scrollback never advanced past the first page (#1027). Paginating twice is
 // the only way to catch that: a single-page assertion passes either way.
 func TestChatV2_History_CursorPaginatesToOlderMessages(t *testing.T) {
-	srv, s, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	topicID := tid("topic-history-paginate")
@@ -2242,6 +2298,7 @@ func TestChatV2_History_CursorPaginatesToOlderMessages(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	// More than one default page (50) so a second page must exist.
 	const total = 120
@@ -2649,11 +2706,12 @@ func TestChatV2_Delete_ContentBlankedInHistory(t *testing.T) {
 // than being allowed to fill the conversation, and the cut-off lifts as soon
 // as tokens refill (#1054).
 func TestChatV2_Send_RateLimitsFloodingHuman(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
+	topicID := tid("topic-ratelimit")
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        tid("topic-ratelimit"),
+		ID:        topicID,
 		ProjectID: proj.ID,
 		Name:      "flooded",
 		CreatedBy: "dev",
@@ -2661,13 +2719,14 @@ func TestChatV2_Send_RateLimitsFloodingHuman(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	// Production limits, test clock: the real 30/min ceiling without a real
 	// minute of waiting.
 	clock := newTestClock()
 	srv.chatSendLimiter = newChatSendLimiterWithClock(clock.Now)
 
-	path := "/api/v1/chat/conversations/" + tid("topic-ratelimit") + "/messages"
+	path := "/api/v1/chat/conversations/" + topicID + "/messages"
 	for i := range chatSendHumanRatePerMinute {
 		rec := doRequest(t, srv, http.MethodPost, path, map[string]string{"content": "flood"})
 		if rec.Code != http.StatusCreated {
@@ -2708,7 +2767,7 @@ func TestChatV2_Send_RateLimitsFloodingHuman(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChatV2_Send_IdempotencyKey_DeduplicatesSend(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	// Create a topic.
@@ -2722,6 +2781,7 @@ func TestChatV2_Send_IdempotencyKey_DeduplicatesSend(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	path := "/api/v1/chat/conversations/" + topicID + "/messages"
 	idemKey := "test-idempotency-key-123"
@@ -2758,7 +2818,7 @@ func TestChatV2_Send_IdempotencyKey_DeduplicatesSend(t *testing.T) {
 }
 
 func TestChatV2_Send_DifferentIdempotencyKeys_CreateSeparateMessages(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	topicID := tid("topic-idem-2")
@@ -2771,6 +2831,7 @@ func TestChatV2_Send_DifferentIdempotencyKeys_CreateSeparateMessages(t *testing.
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	path := "/api/v1/chat/conversations/" + topicID + "/messages"
 
@@ -2797,7 +2858,7 @@ func TestChatV2_Send_DifferentIdempotencyKeys_CreateSeparateMessages(t *testing.
 }
 
 func TestChatV2_Send_NoIdempotencyKey_AlwaysCreates(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	topicID := tid("topic-idem-3")
@@ -2810,6 +2871,7 @@ func TestChatV2_Send_NoIdempotencyKey_AlwaysCreates(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
 
 	path := "/api/v1/chat/conversations/" + topicID + "/messages"
 
@@ -2844,6 +2906,7 @@ type def31Fixture struct {
 	srv      *Server
 	store    store.Store
 	wcs      WebChatStore
+	db       *sql.DB
 	projA    *store.Project
 	projB    *store.Project
 	agentA   *store.Agent // lives in project A
@@ -2916,6 +2979,7 @@ func setupDEF31(t *testing.T) def31Fixture {
 		srv:      srv,
 		store:    s,
 		wcs:      wcs,
+		db:       db,
 		projA:    projA,
 		projB:    projB,
 		agentA:   agentA,
@@ -3259,6 +3323,7 @@ func TestDEF31_SendPath_ForeignProjectAgent_NotRouted(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, f.db, f.store, topicID, f.projA.ID)
 
 	// Send a message via the HTTP handler.
 	body := map[string]string{"content": "hello from bad row"}
@@ -3305,6 +3370,7 @@ func TestDEF31_SendPath_SoftDeletedAgent_NotRouted(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, f.db, f.store, topicID, f.projA.ID)
 
 	body := map[string]string{"content": "hello from stale row"}
 	rec := doRequest(t, f.srv, http.MethodPost,
@@ -3347,6 +3413,7 @@ func TestDEF31_SendPath_ValidAgent_StillRoutes(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, f.db, f.store, topicID, f.projA.ID)
 
 	body := map[string]string{"content": "hello from good row"}
 	rec := doRequest(t, f.srv, http.MethodPost,
@@ -3366,5 +3433,230 @@ func TestDEF31_SendPath_ValidAgent_StillRoutes(t *testing.T) {
 		t.Fatalf("expected type %q (agent-routed via default), got %q — "+
 			"the default-agent routing branch may have been removed entirely",
 			messages.TypeInstruction, resp.Type)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AC-G2-6: ConversationWriteDenySwitch integration test
+// ---------------------------------------------------------------------------
+
+// enableWriteDenySwitch configures OperationalSettings on the server with the
+// consolidated ConversationEnvelopeSwitch ON. After this call, handlers that
+// check s.writeDenyEnabled() will deny writes when conversation resolution fails.
+func enableWriteDenySwitch(t *testing.T, srv *Server) {
+	t.Helper()
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":true}`))
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("ops.Refresh failed: %v", err)
+	}
+	srv.SetOperationalSettings(ops)
+	if !srv.GetOperationalSettings().ConversationEnvelopeSwitch() {
+		t.Fatalf("enableWriteDenySwitch: ConversationEnvelopeSwitch() is still false after setup")
+	}
+}
+
+// TestG2_AC6_WriteDenySwitch_IntegrationChatV2 verifies AC-G2-6: with no
+// OperationalSettings wired (ops is nil), the write-deny gate short-circuits
+// at `ops != nil` and the message is delivered (B10 behaviour). With the
+// switch explicitly ON, the same request is denied.
+func TestG2_AC6_WriteDenySwitch_IntegrationChatV2(t *testing.T) {
+	srv, _, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	// Create a topic WITHOUT calling setTopicConversationID — conversation
+	// resolution will fail because there is no conversation_id on the topic.
+	topicID := tid("g2-ac6-topic")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "no-conv-id",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	body := map[string]string{"content": "AC-G2-6 probe"}
+
+	// --- No OperationalSettings (ops nil) ------------------------------------
+	// testServer() does not wire OperationalSettings, so ops is nil and
+	// writeDenyEnabled() short-circuits at `ops != nil` → false. The message
+	// is delivered (B10 behaviour).
+	before := messaging.WriteDenialMetrics.Total()
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("[ops nil] expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Counter must not increment when ops is nil — denials are not enforced.
+	if after := messaging.WriteDenialMetrics.Total(); after != before {
+		t.Errorf("[ops nil] WriteDenialMetrics changed from %d to %d; expected no change",
+			before, after)
+	}
+
+	// --- Switch ON ------------------------------------------------------------
+	enableWriteDenySwitch(t, srv)
+
+	before = messaging.WriteDenialMetrics.Total()
+	rec = doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("[switch ON] expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Verify the machine-readable error code matches G3's read-path shape.
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("[switch ON] unmarshal error response: %v", err)
+	}
+	if errResp.Error.Code != ErrCodeConversationNotResolved {
+		t.Errorf("[switch ON] error code = %q, want %q", errResp.Error.Code, ErrCodeConversationNotResolved)
+	}
+	// Counter must increment when switch is ON and denial fires.
+	if after := messaging.WriteDenialMetrics.Total(); after <= before {
+		t.Errorf("[switch ON] WriteDenialMetrics did not increment: before=%d after=%d",
+			before, after)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9a upgrade-cutover tests
+// ---------------------------------------------------------------------------
+
+// enableEnvelopeSwitchViaAbsentRow configures OperationalSettings on the
+// server with NO messaging section seeded. The consolidated switch takes
+// the compiled default (ON) from the absent row. The canary assertion is
+// the point of this helper — it proves the switch is ON from the default,
+// not from an explicit value. Without it, a silent failure makes the
+// upgrade-cutover tests vacuous.
+func enableEnvelopeSwitchViaAbsentRow(t *testing.T, srv *Server) {
+	t.Helper()
+	fakeStore := newFakeHubSettingStore()
+	// No messaging section seeded — absent row → compiled default → ON.
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("ops.Refresh failed: %v", err)
+	}
+	srv.SetOperationalSettings(ops)
+	// Canary: the switch must be ON from the compiled default with no row present.
+	if !srv.GetOperationalSettings().ConversationEnvelopeSwitch() {
+		t.Fatalf("enableEnvelopeSwitchViaAbsentRow: ConversationEnvelopeSwitch() is false — " +
+			"absent row did not produce compiled default ON")
+	}
+}
+
+// enableEnvelopeSwitchViaStaleKeys configures OperationalSettings on the
+// server with a messaging row containing ONLY the two stale keys, both false.
+// This is the common upgrade shape: handlePutMessaging on the old code seeded
+// both pointers unconditionally, so every hub that ever called the endpoint
+// has both keys written explicitly. The new key is absent, so the getter
+// takes the compiled default (ON).
+func enableEnvelopeSwitchViaStaleKeys(t *testing.T, srv *Server) {
+	t.Helper()
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("messaging", json.RawMessage(
+		`{"conversation_read_switch":false,"conversation_write_deny_switch":false}`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("ops.Refresh failed: %v", err)
+	}
+	srv.SetOperationalSettings(ops)
+	// Canary: stale keys only → new key absent → compiled default ON.
+	if !srv.GetOperationalSettings().ConversationEnvelopeSwitch() {
+		t.Fatalf("enableEnvelopeSwitchViaStaleKeys: ConversationEnvelopeSwitch() is false — " +
+			"stale-keys-only row did not produce compiled default ON")
+	}
+}
+
+// TestPhase9a_UpgradeCutover_WriteDenyLiveByDefault verifies that a hub
+// upgrading to the Phase 9a code with NO messaging row gets the write-deny
+// gate live by default. This is the never-configured-hub case.
+func TestPhase9a_UpgradeCutover_WriteDenyLiveByDefault(t *testing.T) {
+	srv, _, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	// Create a topic WITHOUT setTopicConversationID — resolution will fail.
+	topicID := tid("9a-absent-row")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "no-conv-id-9a",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// Wire OperationalSettings with no messaging row — absent → ON.
+	enableEnvelopeSwitchViaAbsentRow(t, srv)
+
+	body := map[string]string{"content": "Phase 9a absent-row probe"}
+	before := messaging.WriteDenialMetrics.Total()
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 (write denied), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal error response: %v", err)
+	}
+	if errResp.Error.Code != ErrCodeConversationNotResolved {
+		t.Errorf("error code = %q, want %q", errResp.Error.Code, ErrCodeConversationNotResolved)
+	}
+
+	if after := messaging.WriteDenialMetrics.Total(); after <= before {
+		t.Errorf("WriteDenialMetrics did not increment: before=%d after=%d", before, after)
+	}
+}
+
+// TestPhase9a_UpgradeCutover_StaleKeysOnly_WriteDenyLive verifies that a hub
+// whose messaging row contains ONLY the two stale keys (both false) gets the
+// write-deny gate live after upgrade with no migration. This is the COMMON
+// upgrade shape: the old handlePutMessaging seeded both pointers on every
+// write, so any hub that ever touched the endpoint has an explicit false for
+// the key its operator never set. The new key is absent, so the compiled
+// default (ON) takes effect.
+func TestPhase9a_UpgradeCutover_StaleKeysOnly_WriteDenyLive(t *testing.T) {
+	srv, _, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	// Create a topic WITHOUT setTopicConversationID — resolution will fail.
+	topicID := tid("9a-stale-keys")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "no-conv-id-9a-stale",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// Wire OperationalSettings with stale keys only — new key absent → ON.
+	enableEnvelopeSwitchViaStaleKeys(t, srv)
+
+	body := map[string]string{"content": "Phase 9a stale-keys probe"}
+	before := messaging.WriteDenialMetrics.Total()
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", body)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 (write denied), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal error response: %v", err)
+	}
+	if errResp.Error.Code != ErrCodeConversationNotResolved {
+		t.Errorf("error code = %q, want %q", errResp.Error.Code, ErrCodeConversationNotResolved)
+	}
+
+	if after := messaging.WriteDenialMetrics.Total(); after <= before {
+		t.Errorf("WriteDenialMetrics did not increment: before=%d after=%d", before, after)
 	}
 }

@@ -35,16 +35,17 @@ import (
 // notification subscriptions, stores notification records, and dispatches
 // messages to subscriber agents.
 type NotificationDispatcher struct {
-	store           store.Store
-	events          EventPublisher
-	getDispatcher   func() AgentDispatcher // lazy getter; dispatcher may be set after startup
-	log             *slog.Logger
-	messageLog      *slog.Logger        // dedicated message audit logger (nil = disabled)
-	channelRegistry *ChannelRegistry    // external notification channels (nil = disabled)
-	brokerProxy     *MessageBrokerProxy // broker plugin proxy (nil = no broker, use ChannelRegistry)
-	stopCh          chan struct{}
-	stopOnce        sync.Once
-	wg              sync.WaitGroup
+	store            store.Store
+	events           EventPublisher
+	getDispatcher    func() AgentDispatcher // lazy getter; dispatcher may be set after startup
+	log              *slog.Logger
+	messageLog       *slog.Logger        // dedicated message audit logger (nil = disabled)
+	channelRegistry  *ChannelRegistry    // external notification channels (nil = disabled)
+	brokerProxy      *MessageBrokerProxy // broker plugin proxy (nil = no broker, use ChannelRegistry)
+	writeDenyEnabled func() bool         // G2 write-deny switch callback (nil = OFF)
+	stopCh           chan struct{}
+	stopOnce         sync.Once
+	wg               sync.WaitGroup
 }
 
 // NewNotificationDispatcher creates a new NotificationDispatcher.
@@ -384,6 +385,22 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	structuredMsg.RecipientID = subscriber.ID
 	structuredMsg.Status = strings.ToUpper(notif.Status)
 
+	// Phase 9f: render delivery envelope for notification dispatches.
+	// No persisted row and no conversation exist for agent-to-agent
+	// state-change notifications, so MessageID and ConvResult are
+	// honestly absent.
+	if nd.writeDenyEnabled != nil && nd.writeDenyEnabled() {
+		var ts time.Time
+		if t, err := time.Parse(time.RFC3339, structuredMsg.Timestamp); err == nil {
+			ts = t
+		}
+		structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+			ConvResult: nil,
+			Msg:        structuredMsg,
+			CreatedAt:  ts,
+		})
+	}
+
 	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer retryCancel()
 
@@ -494,15 +511,29 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 	}
 
 	// Phase 5 dual-write: resolve-or-create DM conversation for inbox notification messages.
+	//
+	// G2 EXCEPTION — federated subscriber skip stays non-fatal.
 	// SubscriberID may be a slug or federated identity rather than a UUID;
-	// DMConversationKey requires valid UUIDs for both parties.
+	// DMConversationKey requires valid UUIDs for both parties. Denying here
+	// means federated users stop receiving notifications entirely. The
+	// federated population is counted by the G1 attribution report and blocks
+	// the flip at the OPERATOR level; it must not deny per-request.
 	if _, parseErr := uuid.Parse(sub.SubscriberID); parseErr != nil {
-		nd.log.Warn("skipping DM conversation resolution for inbox message: subscriber ID not a UUID",
+		nd.log.Warn("skipping DM conversation resolution for inbox message: subscriber ID not a UUID (federated subscriber — G2 exempt)",
 			"subscriber_id", sub.SubscriberID, "notification_id", notif.ID)
 	} else {
-		convResult := messaging.ResolveOrCreateDMConversation(ctx, nd.store, nd.store, nd.log,
+		convResult, convErr := messaging.ResolveOrCreateDMConversation(ctx, nd.store, nd.store, nd.log,
 			"agent", agent.ID, "user", sub.SubscriberID)
-		if convResult != nil {
+		if convErr != nil {
+			if nd.writeDenyEnabled != nil && nd.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc("notif.inbox")
+				nd.log.Error("conversation resolution failed for inbox notification",
+					"notification_id", notif.ID, "subscriber_id", sub.SubscriberID, "error", convErr)
+				return
+			}
+			nd.log.Warn("conversation resolution failed for inbox notification (write-deny OFF, continuing)",
+				"notification_id", notif.ID, "subscriber_id", sub.SubscriberID, "error", convErr)
+		} else {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
 	}

@@ -496,6 +496,12 @@ type MessageRequest struct {
 	// Structured message (new field, used by default).
 	StructuredMessage *messages.StructuredMessage `json:"structured_message,omitempty"`
 
+	// DeliveryText is the fully rendered agent-facing envelope, produced by
+	// the hub (Phase 9b). When set, the broker delivers it verbatim and
+	// performs no formatting. Takes precedence over StructuredMessage
+	// rendering and Message. Phase 13 deletes this field.
+	DeliveryText string `json:"delivery_text,omitempty"`
+
 	// Interrupt the harness before sending.
 	Interrupt bool `json:"interrupt,omitempty"`
 

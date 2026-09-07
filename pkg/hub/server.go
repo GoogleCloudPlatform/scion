@@ -48,6 +48,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecyclehooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -2145,6 +2146,14 @@ func (s *Server) GetOperationalSettings() *OperationalSettings {
 	return s.operationalSettings.Load()
 }
 
+// writeDenyEnabled returns whether the consolidated conversation envelope
+// switch is ON (which subsumes the former write-deny behaviour).
+// Safe for concurrent use. Returns false when operational settings are absent.
+func (s *Server) writeDenyEnabled() bool {
+	ops := s.GetOperationalSettings()
+	return ops != nil && ops.ConversationEnvelopeSwitch()
+}
+
 // logMessage logs a message dispatch event to the dedicated message logger
 // if configured, otherwise falls back to the standard subsystem message logger.
 func (s *Server) logMessage(msg string, attrs ...any) {
@@ -2476,6 +2485,10 @@ func (s *Server) StartNotificationDispatcher() {
 	nd := NewNotificationDispatcher(s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.notifications"))
 	nd.messageLog = s.dedicatedMessageLog
 	nd.channelRegistry = s.channelRegistry
+	nd.writeDenyEnabled = func() bool {
+		ops := s.GetOperationalSettings()
+		return ops != nil && ops.ConversationEnvelopeSwitch()
+	}
 	s.notificationDispatcher = nd
 	s.notificationDispatcher.Start()
 }
@@ -2536,6 +2549,10 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 	proxy.messageLog = s.dedicatedMessageLog
 	proxy.chatNotifier = s.chatNotifier // W6: wire DM notification trigger
 	proxy.webChatStore = s.webChatStore // DM watermark stamping after persist
+	proxy.writeDenyEnabled = func() bool {
+		ops := s.GetOperationalSettings()
+		return ops != nil && ops.ConversationEnvelopeSwitch()
+	}
 	s.messageBrokerProxy = proxy
 	proxy.Start()
 
@@ -2933,6 +2950,21 @@ func (s *Server) messageEventHandler() EventHandler {
 		structuredMsg.RecipientID = agent.ID
 		structuredMsg.Plain = payload.Plain
 		structuredMsg.Urgent = payload.Interrupt
+
+		// Phase 9f: render delivery envelope for scheduler messages.
+		// No persisted row and no conversation exist for scheduled
+		// deliveries, so MessageID and ConvResult are honestly absent.
+		if s.writeDenyEnabled() {
+			var ts time.Time
+			if t, err := time.Parse(time.RFC3339, structuredMsg.Timestamp); err == nil {
+				ts = t
+			}
+			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+				ConvResult: nil,
+				Msg:        structuredMsg,
+				CreatedAt:  ts,
+			})
+		}
 
 		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer retryCancel()
@@ -3855,6 +3887,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/server-config/sections/", s.guarded("/api/v1/admin/server-config/sections/", s.handleAdminServerConfigSectionReset))
 	s.mux.HandleFunc("/api/v1/admin/server-config", s.guarded("/api/v1/admin/server-config", s.handleAdminServerConfig))
 	s.mux.HandleFunc("/api/v1/admin/project-defaults", s.guarded("/api/v1/admin/project-defaults", s.handleAdminProjectDefaults))
+	s.mux.HandleFunc("/api/v1/admin/messaging", s.guarded("/api/v1/admin/messaging", s.handleAdminMessaging))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.guarded("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota))
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.guarded("/api/v1/admin/lifecycle-hooks", s.handleAdminLifecycleHooks))

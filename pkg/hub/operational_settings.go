@@ -42,6 +42,13 @@ type sectionState struct {
 	UpdatedAt time.Time
 	UpdatedBy string
 	Origin    string
+
+	// Malformed is true when Value is not valid JSON. Set once at
+	// Refresh/Update time so the parse failure is logged exactly once per
+	// ingest rather than once per getter call (DEF-92). Getters can then
+	// distinguish "validated document" from "unreadable document" without
+	// re-parsing and without swallowing errors silently.
+	Malformed bool
 }
 
 // Layer1Snapshot is an immutable merged view of all Layer-1 operational settings.
@@ -148,8 +155,9 @@ type SettingsUpdatedEvent struct {
 // OperationalSettings is the runtime component that merges file, DB, and env
 // sources into a single Layer-1 view per §3.5 of the settings-db design.
 //
-// It is owned by the Server and used only when database.driver == "postgres".
-// In file/SQLite mode the legacy reloadSettings path is used instead.
+// It is owned by the Server and used on all database drivers. Cross-replica
+// propagation (§3.6) requires a PostgresEventPublisher and is a no-op on
+// SQLite.
 type OperationalSettings struct {
 	store          store.HubSettingStore
 	bootstrapKoanf *koanf.Koanf    // Full bootstrap merge: defaults → SEED → yaml → SERVER
@@ -222,12 +230,34 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 		if !exists || prev.Revision != row.Revision {
 			changed = append(changed, row.Section)
 		}
+		malformed := !json.Valid(row.Value)
+		if malformed {
+			slog.Error("operational settings: malformed JSON in section document",
+				"section", row.Section,
+				"revision", row.Revision,
+			)
+		} else if sec := opsettings.SectionByName(row.Section); sec != nil && sec.New != nil {
+			// Syntactically valid JSON can still be semantically wrong (e.g.
+			// {"conversation_envelope_switch":"yes"} — valid JSON, but "yes"
+			// does not unmarshal into *bool). Detect at ingest so the failure
+			// is logged once per refresh, not silently swallowed per getter.
+			target := sec.New()
+			if err := json.Unmarshal(row.Value, target); err != nil {
+				malformed = true
+				slog.Error("operational settings: section document has type-incompatible fields",
+					"section", row.Section,
+					"revision", row.Revision,
+					"error", err,
+				)
+			}
+		}
 		o.cache[row.Section] = sectionState{
 			Value:     row.Value,
 			Revision:  row.Revision,
 			UpdatedAt: row.UpdatedAt,
 			UpdatedBy: row.UpdatedBy,
 			Origin:    row.Origin,
+			Malformed: malformed,
 		}
 	}
 
@@ -467,6 +497,23 @@ func (o *OperationalSettings) Update(
 	}
 
 	// Update local cache.
+	malformed := !json.Valid(result.Value)
+	if malformed {
+		slog.Error("operational settings: malformed JSON after write (should not happen)",
+			"section", section,
+			"revision", result.Revision,
+		)
+	} else if sec := opsettings.SectionByName(section); sec != nil && sec.New != nil {
+		target := sec.New()
+		if err := json.Unmarshal(result.Value, target); err != nil {
+			malformed = true
+			slog.Error("operational settings: section document has type-incompatible fields after write",
+				"section", section,
+				"revision", result.Revision,
+				"error", err,
+			)
+		}
+	}
 	o.mu.Lock()
 	o.cache[section] = sectionState{
 		Value:     result.Value,
@@ -474,6 +521,7 @@ func (o *OperationalSettings) Update(
 		UpdatedAt: result.UpdatedAt,
 		UpdatedBy: result.UpdatedBy,
 		Origin:    result.Origin,
+		Malformed: malformed,
 	}
 	o.mu.Unlock()
 
@@ -1165,27 +1213,37 @@ func (o *OperationalSettings) ProjectDefaultScratchpad() bool {
 	return true // field omitted in doc → compiled default
 }
 
-// ConversationReadSwitch returns whether the Phase 8 conversation read-switch
-// is enabled. Returns false (compiled default) when the messaging section is
-// absent from the DB. Hot-reloadable: reads from the DB-backed cache.
-func (o *OperationalSettings) ConversationReadSwitch() bool {
+// ConversationEnvelopeSwitch returns whether the consolidated conversation
+// envelope switch is enabled. This replaces ConversationReadSwitch and
+// ConversationWriteDenySwitch with a single switch that:
+//   - defaults ON when the section is absent from the DB (compiled default)
+//   - defaults ON when the section is present but the key is omitted
+//   - returns OFF when the document is malformed (fail-closed, DEF-92)
+//   - returns the explicit value when the key is present
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) ConversationEnvelopeSwitch() bool {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 
 	state, ok := o.cache["messaging"]
 	if !ok {
-		return false // compiled default: OFF
+		return true // section absent → compiled default → ON
+	}
+
+	if state.Malformed {
+		return false // unreadable → pre-refactor behaviour → OFF
 	}
 
 	var ms opsettings.MessagingSettings
 	if err := json.Unmarshal(state.Value, &ms); err != nil {
-		return false // parse error → fall back to compiled default
+		return false // parse error → fail closed → OFF
 	}
 
-	if ms.ConversationReadSwitch != nil {
-		return *ms.ConversationReadSwitch
+	if ms.ConversationEnvelopeSwitch != nil {
+		return *ms.ConversationEnvelopeSwitch
 	}
-	return false // field omitted in doc → compiled default
+	return true // field omitted in doc → compiled default → ON
 }
 
 // applySnapshotLogLevel applies the log-level portion of the snapshot.

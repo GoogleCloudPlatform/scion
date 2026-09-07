@@ -146,7 +146,8 @@ func TestCreateTopic_DualWrite_WritesConversation(t *testing.T) {
 	s, db := newTestWebChatStoreWithConversations(t)
 	defer db.Close() //nolint:errcheck
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	convID := uuid.New().String()
 	topic := WebChatTopic{
 		ID:             "topic-dw-1",
@@ -180,7 +181,8 @@ func TestCreateTopic_DualWrite_Atomicity(t *testing.T) {
 	s, db := newTestWebChatStoreWithConversations(t)
 	defer db.Close() //nolint:errcheck
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	convID := uuid.New().String()
 
 	// Insert a conversation row first to cause a duplicate ID conflict.
@@ -213,7 +215,9 @@ func TestCreateTopic_DualWrite_RequiresProjectID(t *testing.T) {
 	s, db := newTestWebChatStoreWithConversations(t)
 	defer db.Close() //nolint:errcheck
 
-	err := s.CreateTopic(context.Background(), WebChatTopic{
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := s.CreateTopic(ctx, WebChatTopic{
 		ID:             "topic-no-proj",
 		ConversationID: uuid.New().String(),
 		Name:           "test",
@@ -224,11 +228,48 @@ func TestCreateTopic_DualWrite_RequiresProjectID(t *testing.T) {
 	require.Contains(t, err.Error(), "project_id is required")
 }
 
-func TestCreateTopic_LegacyPath_NoConversationID(t *testing.T) {
+// TestCreateTopic_AutoGeneratesConversation verifies that when no
+// ConversationID is provided but the conversations table exists, CreateTopic
+// generates one and atomically creates the conversation row (DEF-89).
+func TestCreateTopic_AutoGeneratesConversation(t *testing.T) {
 	s, db := newTestWebChatStoreWithConversations(t)
 	defer db.Close() //nolint:errcheck
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
+		ID:        "topic-autogen",
+		ProjectID: "proj-1",
+		Name:      "auto-conv",
+		CreatedBy: "user-1",
+		CreatedAt: time.Now().UTC(),
+	}))
+
+	// Topic should have an auto-generated conversation_id.
+	convID := getTopicConvID(t, db, "topic-autogen")
+	require.NotEmpty(t, convID, "topic should have auto-generated conversation_id")
+
+	// Conversation row should exist with correct fields.
+	c := getConversation(t, db, convID)
+	require.NotNil(t, c, "conversations row should exist")
+	require.Equal(t, "proj-1", c.projectID)
+	require.Equal(t, "group", c.kind)
+	require.Equal(t, "native", c.surface)
+	require.Equal(t, "auto-conv", c.displayName)
+	require.Equal(t, "active", c.driftState)
+}
+
+// TestCreateTopic_NoConversationsTable_LegacyPath verifies that when the
+// conversations table does not exist, CreateTopic still works without
+// creating a conversation (the legacy path).
+func TestCreateTopic_NoConversationsTable_LegacyPath(t *testing.T) {
+	s, db := newTestWebChatStoreV2(t) // no conversations table
+	defer db.Close()                  //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
 		ID:        "topic-legacy",
 		ProjectID: "proj-1",
@@ -237,9 +278,8 @@ func TestCreateTopic_LegacyPath_NoConversationID(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 	}))
 
-	// Topic created, but no conversation.
+	// Topic created with no conversation_id.
 	require.Empty(t, getTopicConvID(t, db, "topic-legacy"))
-	require.Equal(t, 0, countConversations(t, db))
 }
 
 // ---------------------------------------------------------------------------
@@ -395,20 +435,18 @@ func TestBackfillTopicConversations_CreatesConversations(t *testing.T) {
 	s := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, s.Init())
 
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Second)
+	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339Nano)
 
-	// The Init() call already ran backfillTopicConversations, but there were
-	// no topics yet. Create topics WITHOUT conversation_id to simulate
-	// pre-existing data. Use the legacy (no ConversationID) path.
+	// Insert topics directly (bypassing CreateTopic) to simulate pre-existing
+	// data created before the conversations table existed. DEF-89 changed
+	// CreateTopic to auto-generate ConversationIDs, so raw SQL is the only
+	// way to create topics without one when the conversations table exists.
 	for _, name := range []string{"alpha", "beta", "gamma"} {
-		require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
-			ID:        "topic-" + name,
-			ProjectID: "proj-1",
-			Name:      name,
-			CreatedBy: "user-1",
-			CreatedAt: now,
-		}))
+		_, err = db.Exec(
+			`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+			 VALUES (?, 'proj-1', ?, 0, 'user-1', ?)`,
+			"topic-"+name, name, now)
+		require.NoError(t, err)
 	}
 
 	// Verify no conversation_id set yet.
@@ -449,17 +487,15 @@ func TestBackfillTopicConversations_Idempotent(t *testing.T) {
 	s := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, s.Init())
 
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Second)
+	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339Nano)
 
-	// Create a topic without conversation_id.
-	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
-		ID:        "topic-idem",
-		ProjectID: "proj-1",
-		Name:      "idempotent-test",
-		CreatedBy: "user-1",
-		CreatedAt: now,
-	}))
+	// Insert topic directly (bypassing CreateTopic) to simulate pre-existing
+	// data without a conversation_id — see DEF-89 note in the
+	// CreatesConversations sibling test.
+	_, err = db.Exec(
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+		 VALUES ('topic-idem', 'proj-1', 'idempotent-test', 0, 'user-1', ?)`, now)
+	require.NoError(t, err)
 
 	// Reset migration marker and re-run.
 	_, err = db.Exec("DELETE FROM webchat_migrations WHERE name = 'topic_conversation_backfill'")
@@ -538,12 +574,15 @@ func TestGetTopicConversationID(t *testing.T) {
 }
 
 func TestGetTopicConversationID_NoConversationID(t *testing.T) {
-	s, db := newTestWebChatStoreWithConversations(t)
+	// Use a store WITHOUT the conversations table so CreateTopic takes
+	// the legacy path and does not auto-generate a ConversationID (DEF-89).
+	s, db := newTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	// Create topic WITHOUT conversation_id.
+	// Create topic WITHOUT conversation_id (legacy path — no conversations table).
 	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
 		ID:        "topic-no-conv",
 		ProjectID: "proj-1",
@@ -627,6 +666,42 @@ func TestCreateTopic_DualWrite_UTX1_NoDeadlock(t *testing.T) {
 		CreatedAt:      time.Now().UTC(),
 	})
 	require.NoError(t, err, "CreateTopic should complete without deadlock")
+}
+
+// TestCreateTopic_AutoGen_UTX1_NoDeadlock verifies that the DEF-89
+// auto-generation path does not deadlock at MaxOpenConns=1.
+// hasConversationsTable() is called twice (auto-gen check + shouldDualWrite)
+// but both precede BeginTx, so no ambient-pool contention under the tx.
+func TestCreateTopic_AutoGen_UTX1_NoDeadlock(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	db.SetMaxOpenConns(1)
+
+	_, err = db.Exec(conversationsTableDDL)
+	require.NoError(t, err)
+
+	s := NewWebChatStore(db, "sqlite3")
+	require.NoError(t, s.Init())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// No ConversationID — exercises the DEF-89 auto-generation path.
+	err = s.CreateTopic(ctx, WebChatTopic{
+		ID:        "topic-utx1-autogen",
+		ProjectID: "proj-1",
+		Name:      "autogen-deadlock-test",
+		CreatedBy: "user-1",
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err, "CreateTopic (auto-gen) should complete without deadlock")
+
+	// Verify the conversation was actually created.
+	convID := getTopicConvID(t, db, "topic-utx1-autogen")
+	require.NotEmpty(t, convID, "auto-generated conversation_id should be set")
+	require.NotNil(t, getConversation(t, db, convID), "conversation row should exist")
 }
 
 func TestEnsureGeneralTopic_DualWrite_UTX1_NoDeadlock(t *testing.T) {

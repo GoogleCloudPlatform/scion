@@ -1161,6 +1161,9 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		CreatedAt:     now,
 	}
 	// B15 dual-write: resolve-or-create conversation for web chat user→agent messages.
+	// chatV2ConvResult is declared outside the block so Phase 9b(ii)
+	// rendering can read it after persistence.
+	var chatV2ConvResult *messaging.ConversationResult
 	{
 		var convResult *messaging.ConversationResult
 		if key != "" {
@@ -1171,23 +1174,42 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			if wcs != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(wcs))
 			}
-			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
+			if convErr != nil {
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.thread")
+					s.messageLog.Error("conversation resolution failed", "error", convErr)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+					return ""
+				}
+				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			}
 		} else if user.ID() != "" && primaryAgent.ID != "" {
-			convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", primaryAgent.ID)
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", primaryAgent.ID)
+			if convErr != nil {
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.dm")
+					s.messageLog.Error("conversation resolution failed", "error", convErr)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+					return ""
+				}
+				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			}
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
-			// DEF-41: structural pre-placement. This check is inert
-			// while B10 holds: convResult is non-nil only when
-			// attribution succeeded, and ent.Conversation.ID is a
-			// uuid.UUID that always renders non-empty. It becomes
-			// load-bearing at Tranche G, when derivation failure
-			// becomes fatal and this call moves outside the nil guard.
 			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-				ValidationError(w, err.Error(), nil)
-				return ""
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.validate")
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
+					return ""
+				}
+				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
 			}
 		}
+		chatV2ConvResult = convResult
 	}
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("Failed to persist agent-routed message", "error", err)
@@ -1232,6 +1254,17 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	}
 
 	s.events.PublishUserMessage(ctx, storeMsg)
+
+	// Phase 9b(ii): render the delivery envelope from the persisted message
+	// row and conversation result when the envelope switch is ON.
+	if s.writeDenyEnabled() {
+		msg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+			MessageID:  storeMsg.ID,
+			ConvResult: chatV2ConvResult,
+			Msg:        msg,
+			CreatedAt:  storeMsg.CreatedAt,
+		})
+	}
 
 	// Dispatch to the primary agent.
 	dispatcher := s.GetDispatcher()
@@ -1288,6 +1321,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				CreatedAt:     now,
 			}
 			// B15 dual-write: resolve-or-create conversation for web chat mention fan-out.
+			var mentionConvResult *messaging.ConversationResult
 			{
 				var convResult *messaging.ConversationResult
 				if key != "" {
@@ -1298,18 +1332,47 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 					if mentionWcs != nil {
 						threadOpts = append(threadOpts, messaging.WithTopicLookup(mentionWcs))
 					}
-					convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
+					var convErr error
+					convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
+					if convErr != nil {
+						if s.writeDenyEnabled() {
+							messaging.WriteDenialMetrics.Inc("chat_v2.mention.thread")
+							s.messageLog.Error("conversation resolution failed for mention", "slug", mentionAgent.Slug, "error", convErr)
+							continue
+						}
+						s.messageLog.Warn("conversation resolution failed for mention (write-deny OFF, continuing)", "slug", mentionAgent.Slug, "error", convErr)
+					}
 				} else if user.ID() != "" && mentionAgent.ID != "" {
-					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", mentionAgent.ID)
+					var convErr error
+					convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", mentionAgent.ID)
+					if convErr != nil {
+						if s.writeDenyEnabled() {
+							messaging.WriteDenialMetrics.Inc("chat_v2.mention.dm")
+							s.messageLog.Error("conversation resolution failed for mention", "slug", mentionAgent.Slug, "error", convErr)
+							continue
+						}
+						s.messageLog.Warn("conversation resolution failed for mention (write-deny OFF, continuing)", "slug", mentionAgent.Slug, "error", convErr)
+					}
 				}
 				if convResult != nil {
 					mentionStoreMsg.ConversationID = convResult.ConversationID
 				}
+				mentionConvResult = convResult
 			}
 			if err := s.store.CreateMessage(ctx, mentionStoreMsg); err != nil {
 				s.messageLog.Error("Failed to persist mention message", "slug", mentionAgent.Slug, "error", err)
 			} else {
 				s.events.PublishUserMessage(ctx, mentionStoreMsg)
+			}
+
+			// Phase 9b(ii): render the delivery envelope for the mention.
+			if s.writeDenyEnabled() {
+				mentionMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+					MessageID:  mentionStoreMsg.ID,
+					ConvResult: mentionConvResult,
+					Msg:        mentionMsg,
+					CreatedAt:  mentionStoreMsg.CreatedAt,
+				})
 			}
 
 			if dispatcher != nil {
@@ -1409,9 +1472,29 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 			if h2hWcs != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(h2hWcs))
 			}
-			convResult = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, msgProjectID, threadOpts...)
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, msgProjectID, threadOpts...)
+			if convErr != nil {
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("chat_v2.human.thread")
+					s.messageLog.Error("conversation resolution failed", "error", convErr)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+					return ""
+				}
+				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			}
 		} else if user.ID() != "" && recipientID != "" {
-			convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "user", recipientID)
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "user", recipientID)
+			if convErr != nil {
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("chat_v2.human.dm")
+					s.messageLog.Error("conversation resolution failed", "error", convErr)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+					return ""
+				}
+				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			}
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
@@ -1749,6 +1832,11 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	} else {
 		if wcs == nil {
+			// G3-e: switch ON + non-DM key + no webChatStore → bypass.
+			// Track before returning so the VM run can see uncovered traffic.
+			if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
+				messaging.SwitchBypassMetrics.IncWcsNil()
+			}
 			writeJSON(w, http.StatusOK, chatHistoryResponse{Messages: []store.Message{}})
 			return
 		}
@@ -1778,8 +1866,10 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 
 	// Phase 8 read-switch: when ConversationReadSwitch is ON, resolve the
 	// conversation and query by ConversationID instead of Channel+ThreadID.
+	// G3: fallback to channel+thread is REMOVED. Unresolved conversations
+	// return a typed 409 error so failures are observable, not silent.
 	var filter store.MessageFilter
-	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
 		var convResult *messaging.ConversationResult
 		if isDM {
 			// DM key format: dm:<kind>:<id>:<kind>:<id> — exactly 5 parts.
@@ -1787,29 +1877,63 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			// derivation path. A 7-part key silently deriving from the first 5
 			// would be an access path error after the S4 read-switch.
 			parts := strings.Split(key, ":")
-			if len(parts) == 5 {
-				convResult = messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
+			if len(parts) != 5 {
+				// G3 / AC-G3-4: a DM key with a part count other than 5 is
+				// a parse failure, not a cache miss. Return a distinct error.
+				slog.Warn("read-switch: DM key has invalid part count",
+					"key", key, "parts", len(parts))
+				writeError(w, http.StatusConflict, ErrCodeInvalidDMKey,
+					fmt.Sprintf("DM key must have exactly 5 colon-separated parts, got %d", len(parts)),
+					nil)
+				return
+			}
+			var resolveErr error
+			convResult, resolveErr = messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
+			if resolveErr != nil {
+				// DEF-127a: infrastructure error — return 500, not 409.
+				slog.Error("read-switch: DM conversation lookup failed",
+					"key", key, "error", resolveErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to look up conversation", nil)
+				return
 			}
 		} else {
 			// Thread key — look up the topic to get the projectID for the external_ref.
 			if wcs != nil {
 				if topic, err := wcs.GetTopic(ctx, key); err == nil && topic != nil {
-					convResult = messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, key, topic.ProjectID)
+					convResult = messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, key, topic.ProjectID,
+						messaging.WithReadTopicLookup(wcs))
 				}
 			}
 		}
 		if convResult != nil {
+			// G3-d: preserve Channel:"web" — this endpoint serves the web
+			// chat UI. Dropping the channel constraint would widen visibility
+			// to messages from Discord, telegram, etc. that share the same
+			// conversation_id. Widening is not recoverable; narrowing is.
 			filter = store.MessageFilter{
+				Channel:        "web",
 				ConversationID: convResult.ConversationID,
 			}
+		} else if isDM {
+			// DEF-127: a never-used DM is a normal first-use state, not a
+			// defect. Authorization already passed (key-based, line 1825-1832),
+			// so returning empty is safe. Emit counter + WARN for observability.
+			messaging.DMAbsentMetrics.Inc()
+			slog.Warn("read-switch: DM conversation absent, returning empty",
+				"key", key)
+			writeJSON(w, http.StatusOK, chatHistoryResponse{Messages: []store.Message{}})
+			return
 		} else {
-			// Conversation not found — fall back to old path so we don't
-			// return an empty result for data written before dual-write.
-			messaging.DivergenceMetrics.IncFallback()
-			filter = store.MessageFilter{
-				Channel:  "web",
-				ThreadID: key,
-			}
+			// G3 / AC-G3-2,5: no fallback — return typed error.
+			// Thread conversations are created by the topic system, so absence
+			// is genuine drift.
+			slog.Warn("read-switch: conversation not resolved, returning error",
+				"key", key, "is_dm", isDM)
+			writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
+				"Conversation could not be resolved for this key; the read-switch is ON but no matching conversation record exists",
+				nil)
+			return
 		}
 	} else {
 		filter = store.MessageFilter{

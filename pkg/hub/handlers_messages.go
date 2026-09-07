@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -67,14 +68,45 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// before the DM key derivation. On lookup failure, skip the conversation
 	// path WITHOUT calling IncFallback — a bad reference is not a migration
 	// gap, and mixing the two corrupts the S4 readiness metric.
-	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() && agentID != "" {
-		if resolvedAgent, lookupErr := s.store.GetAgent(r.Context(), agentID); lookupErr == nil && resolvedAgent != nil {
-			convResult := messaging.ResolveDMConversationForRead(r.Context(), s.store, s.messageLog, "agent", resolvedAgent.ID, "user", user.ID())
-			if convResult != nil {
-				filter.ConversationID = convResult.ConversationID
+	//
+	// G3: fallback REMOVED. When the agent resolves but the conversation
+	// does not, return a typed 409 error instead of silently using the old
+	// filter. Agent lookup failures still skip the block (R-9 discipline)
+	// but are now counted by SwitchBypassMetrics for coverage visibility.
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
+		if agentID != "" {
+			if resolvedAgent, lookupErr := s.store.GetAgent(r.Context(), agentID); lookupErr == nil && resolvedAgent != nil {
+				convResult, resolveErr := messaging.ResolveDMConversationForRead(r.Context(), s.store, s.messageLog, "agent", resolvedAgent.ID, "user", user.ID())
+				if resolveErr != nil {
+					// DEF-127a: infrastructure error — return 500, not 409.
+					slog.Error("read-switch: DM conversation lookup failed",
+						"agent_id", resolvedAgent.ID, "user_id", user.ID(), "error", resolveErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"Failed to look up conversation", nil)
+					return
+				}
+				if convResult != nil {
+					filter.ConversationID = convResult.ConversationID
+				} else {
+					// DEF-127: a never-used DM is normal. Return empty 200.
+					messaging.DMAbsentMetrics.Inc()
+					slog.Warn("read-switch: DM conversation absent for agent message list, returning empty",
+						"agent_id", resolvedAgent.ID, "user_id", user.ID())
+					writeJSON(w, http.StatusOK, &store.ListResult[store.Message]{Items: []store.Message{}})
+					return
+				}
 			} else {
-				messaging.DivergenceMetrics.IncFallback()
+				// G3-e: switch ON, agent lookup failed — track bypass reason.
+				// R-9 discipline: not IncFallback (readiness), but SwitchBypass (coverage).
+				if _, parseErr := uuid.Parse(agentID); parseErr != nil {
+					messaging.SwitchBypassMetrics.IncSlugParam()
+				} else {
+					messaging.SwitchBypassMetrics.IncAgentNotFound()
+				}
 			}
+		} else {
+			// G3-e: switch ON but no agent param — no DM key to derive.
+			messaging.SwitchBypassMetrics.IncNonDMKey()
 		}
 	}
 
@@ -256,25 +288,71 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 	// conversation and add ConversationID to the filter. For agent messages
 	// with a web channel, the conversation is a DM between the agent and the
 	// requesting user. For thread-scoped queries, resolve via the thread key.
-	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationReadSwitch() {
+	//
+	// G3: fallback REMOVED at both sub-paths. When the switch is ON and
+	// resolution fails, return a typed 409 error. Non-web channels still
+	// skip the block (no conversation model for external surfaces).
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
 		threadID := q.Get("thread_id")
-		if threadID != "" && agent.ProjectID != "" {
-			convResult := messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, threadID, agent.ProjectID)
+		// G3-f: threadID is the primary discriminator. A thread request must
+		// never fall through to the DM branch — that serves wrong data with a
+		// 200 and no signal. Before G3-f, threadID!="" && agent.ProjectID==""
+		// with channel="web" silently took the DM path.
+		if threadID != "" {
+			if agent.ProjectID == "" || agent.ProjectID == uuid.Nil.String() {
+				// Thread requested but agent has no project — resolution is
+				// impossible. Return a distinct 409 so the VM operator can
+				// distinguish "agent has no project" from "conversation row
+				// missing". (G3-f)
+				slog.Warn("read-switch: thread query on project-less agent",
+					"thread_id", threadID, "agent_id", agent.ID)
+				writeError(w, http.StatusConflict, ErrCodeThreadProjectRequired,
+					"Thread conversation cannot be resolved: this agent has no project",
+					nil)
+				return
+			}
+			var readOpts []messaging.ReadThreadOption
+			if s.webChatStore != nil {
+				readOpts = append(readOpts, messaging.WithReadTopicLookup(s.webChatStore))
+			}
+			convResult := messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, threadID, agent.ProjectID, readOpts...)
 			if convResult != nil {
 				filter.ConversationID = convResult.ConversationID
 			} else {
-				messaging.DivergenceMetrics.IncFallback()
+				slog.Warn("read-switch: thread conversation not resolved for agent messages",
+					"thread_id", threadID, "project_id", agent.ProjectID, "agent_id", agent.ID)
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
+					"Conversation could not be resolved for this thread; the read-switch is ON but no matching conversation record exists",
+					nil)
+				return
 			}
 		} else if channel == "web" || channel == "" {
 			// Default: DM conversation between agent and current user.
 			// R-1: Use agent.ID (UUID) not agentID (raw handler param, may be a slug).
 			// The resolved agent is already in scope from GetAgent above.
-			convResult := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, "agent", agent.ID, "user", user.ID())
+			convResult, resolveErr := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, "agent", agent.ID, "user", user.ID())
+			if resolveErr != nil {
+				// DEF-127a: infrastructure error — return 500, not 409.
+				slog.Error("read-switch: DM conversation lookup failed",
+					"agent_id", agent.ID, "user_id", user.ID(), "error", resolveErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to look up conversation", nil)
+				return
+			}
 			if convResult != nil {
 				filter.ConversationID = convResult.ConversationID
 			} else {
-				messaging.DivergenceMetrics.IncFallback()
+				// DEF-127: a never-used DM is normal. Return empty 200.
+				messaging.DMAbsentMetrics.Inc()
+				slog.Warn("read-switch: DM conversation absent for agent messages, returning empty",
+					"agent_id", agent.ID, "user_id", user.ID())
+				writeJSON(w, http.StatusOK, &store.ListResult[store.Message]{Items: []store.Message{}})
+				return
 			}
+		} else {
+			// G3-e: switch ON, non-web channel with no thread_id — conversation
+			// scoping not applied. Track for coverage visibility.
+			messaging.SwitchBypassMetrics.IncNonWebChannel()
 		}
 	}
 

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -37,10 +38,9 @@ type DMMigrationConfig struct {
 type DMMigrationResult struct {
 	TotalScanned      int      // total direct conversations examined
 	ParticipantsAdded int      // step 2: participants derived from key
-	EmptyRefMerged    int      // step 3a: empty-ref rows merged with existing
-	EmptyRefRekeyed   int      // step 3a: empty-ref rows re-keyed in place
 	EmptyRefSkipped   int      // step 3a: empty-ref rows left keyless (B14 ruling)
 	OldFormatRekeyed  int      // step 3b: old dm:X:Y rows re-keyed
+	DegeneratePairs   int      // step 3b: rows where both principals are the same ID (self-DM)
 	Unparseable       int      // rows that could not be processed
 	Ambiguous         int      // IDs found in neither or both tables
 	Errors            []string // non-fatal errors encountered
@@ -72,7 +72,7 @@ type DMMigrationStore interface {
 // categories of old rows:
 //
 //  1. Kind-encoded rows that may lack participants (listing-index rebuild)
-//  2. Empty external_ref rows (merge with existing or re-key in place)
+//  2. Empty external_ref rows (skipped — left keyless per B14 ruling)
 //  3. Old-format dm:{sorted(id1,id2)} rows without kind encoding (re-key)
 type DMMigrationService struct {
 	store DMMigrationStore
@@ -105,7 +105,7 @@ func (s *DMMigrationService) Run(ctx context.Context, cfg DMMigrationConfig) (*D
 		case convClassKindEncoded:
 			s.stepRebuildParticipants(ctx, conv, cfg.DryRun, result)
 		case convClassEmptyRef:
-			s.stepMergeOrRekeyEmptyRef(ctx, conv, cfg.DryRun, result)
+			s.stepSkipEmptyRef(ctx, conv, cfg.DryRun, result)
 		case convClassOldFormat:
 			s.stepRekeyOldFormat(ctx, conv, cfg.DryRun, result)
 		default:
@@ -260,10 +260,10 @@ func (s *DMMigrationService) countMissingParticipants(
 }
 
 // ---------------------------------------------------------------------------
-// Step 3a: Merge or re-key empty-ref rows
+// Step 3a: Skip empty-ref rows (B14 ruling — left keyless)
 // ---------------------------------------------------------------------------
 
-func (s *DMMigrationService) stepMergeOrRekeyEmptyRef(
+func (s *DMMigrationService) stepSkipEmptyRef(
 	_ context.Context,
 	_ *store.Conversation,
 	_ bool,
@@ -315,6 +315,16 @@ func (s *DMMigrationService) stepRekeyOldFormat(
 		result.Errors = append(result.Errors,
 			fmt.Sprintf("step3b: ambiguous kind resolution for conversation %s — id1=%s id2=%s (found in neither or both tables)", conv.ID, id1, id2))
 		return
+	}
+
+	// Record degenerate pairs: both principals are the same ID, producing a
+	// self-DM key. The row still rekeys normally — this counter preserves the
+	// evidence that the source row was anomalous, since a dm:user:X:user:X key
+	// is indistinguishable from a legitimate same-kind DM after migration.
+	if id1 == id2 {
+		result.DegeneratePairs++
+		slog.Warn("degenerate DM pair: both principals are the same ID",
+			"conversation_id", conv.ID, "principal_id", id1, "resolved_kind", kind1)
 	}
 
 	// Compute the kind-encoded key.

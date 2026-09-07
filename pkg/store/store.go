@@ -24,6 +24,7 @@ import (
 // Common errors returned by store implementations.
 var (
 	ErrNotFound         = errors.New("not found")
+	ErrNotSingular      = errors.New("not singular") // query matched more than one row
 	ErrAlreadyExists    = errors.New("already exists")
 	ErrVersionConflict  = errors.New("version conflict")
 	ErrInvalidInput     = errors.New("invalid input")
@@ -1316,6 +1317,29 @@ type MessageStore interface {
 	// conversation_id for the given project. When projectID is empty, counts
 	// across all projects.
 	CountUnbackfilledMessages(ctx context.Context, projectID string) (int, error)
+
+	// CountUnreachableUnbackfilledMessages returns the number of messages with
+	// a NULL conversation_id whose project_id does not reference an existing
+	// project row. These messages are permanently unattributable by the
+	// per-project backfill because ListProjects will never return their
+	// project (DEF-111: the projects table hard-deletes).
+	//
+	// This count is used to split the residual attribution report into
+	// reachable (actionable) and unreachable (expected, stable) buckets,
+	// so that a permanent non-zero count of orphaned messages does not
+	// create alarm fatigue by firing a WARN on every boot forever.
+	//
+	// DEPENDENCY: correct only because ListProjects (empty ProjectFilter)
+	// applies no unconditional filter, so it returns every row in projects
+	// and NOT EXISTS is its exact complement. An unconditional filter added
+	// to ListProjects would silently break this invariant.
+	//
+	// GATE (M7, DEF-112): TestReachableCountConsistency_DEF112 enforces
+	// this invariant by asserting the counter's reachable count equals
+	// the sum of per-project counts over ListProjects. A divergence
+	// (e.g. an unconditional filter added to ListProjects) turns that
+	// test red.
+	CountUnreachableUnbackfilledMessages(ctx context.Context) (int, error)
 }
 
 // =============================================================================

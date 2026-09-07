@@ -523,3 +523,42 @@ func (s *MessageStore) CountUnbackfilledMessages(ctx context.Context, projectID 
 	}
 	return count, nil
 }
+
+// CountUnreachableUnbackfilledMessages returns the number of messages with
+// a NULL conversation_id whose project_id does not reference an existing
+// project row. These are permanently unattributable by the per-project
+// backfill because ListProjects never returns their project (DEF-111).
+//
+// The predicate here — "unbackfilled AND project_id NOT IN (SELECT id FROM
+// projects)" — is the inverse of what the backfill can reach.
+//
+// DEPENDENCY: this count is correct only because ListProjects (with an
+// empty ProjectFilter) applies no unconditional filter — no soft-delete,
+// no archived exclusion — so it returns every row in the projects table,
+// and NOT EXISTS is its exact complement. If ListProjects ever adds an
+// unconditional filter, this counter would undercount the unreachable
+// population (some messages whose projects are filtered out of ListProjects
+// would be classified as reachable when the backfill cannot reach them),
+// relocating the alarm-fatigue bug rather than fixing it.
+//
+// GATE (M7, DEF-112): TestReachableCountConsistency_DEF112 enforces this
+// invariant. TestUnreachableCounterTableNames guards the raw SQL identifiers
+// against Ent schema renames.
+func (s *MessageStore) CountUnreachableUnbackfilledMessages(ctx context.Context) (int, error) {
+	count, err := s.client.Message.Query().
+		Where(
+			message.ConversationIDIsNil(),
+			func(sel *entsql.Selector) {
+				sel.Where(entsql.P(func(b *entsql.Builder) {
+					b.WriteString("NOT EXISTS (SELECT 1 FROM projects WHERE projects.id = ").
+						WriteString(sel.C(message.FieldProjectID)).
+						WriteString(")")
+				}))
+			},
+		).
+		Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return count, nil
+}

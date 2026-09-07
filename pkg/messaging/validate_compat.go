@@ -83,7 +83,8 @@ func ValidateLegacyMessage(msg *messages.StructuredMessage) error {
 
 	// ---- Convert to new types and validate through new choke point ----
 
-	newMsg, addrs, err := MapLegacyEnvelope(msg)
+	// Validation does not need real persisted identifiers — empty means omit.
+	newMsg, addrs, err := MapLegacyEnvelope(msg, PersistedIdentity{})
 	if err != nil {
 		return fmt.Errorf("legacy envelope conversion failed: %w", err)
 	}

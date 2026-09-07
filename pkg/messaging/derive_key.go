@@ -35,6 +35,26 @@ type KeyInputs struct {
 	RecipientID   string
 }
 
+// DeriveError is returned by DeriveConversationKey when key derivation is
+// refused. Cause provides a machine-readable category for aggregate reporting;
+// the wrapped Err provides the human-readable detail.
+type DeriveError struct {
+	Cause string
+	Err   error
+}
+
+func (e *DeriveError) Error() string { return e.Err.Error() }
+func (e *DeriveError) Unwrap() error { return e.Err }
+
+// Derive-error cause constants. These match the four refusal branches in
+// DeriveConversationKey and are stable identifiers for aggregate counters.
+const (
+	DeriveErrDMKeyParse      = "dm_key_parse"         // dm: prefix, ParseDMKey or re-derive failed
+	DeriveErrDMKeyCanonical  = "dm_key_not_canonical" // dm: prefix, parsed but not canonical
+	DeriveErrThreadNoProject = "thread_no_project"    // non-dm ThreadID, empty ProjectID
+	DeriveErrPrincipalPair   = "principal_pair"       // empty ThreadID, principal-pair derivation failed
+)
+
 // DeriveConversationKey is the ONLY function that should construct a conversation
 // external_ref (thread: or dm: key). All call sites must use this function.
 //
@@ -51,12 +71,12 @@ func DeriveConversationKey(in KeyInputs) (extRef string, kind string, projectID 
 		if parseErr != nil {
 			// DO NOT fall through to case 2 — falling through is exactly how
 			// DEF-15 produces its defective row.
-			return "", "", nil, fmt.Errorf("dm key parse failed: %w", parseErr)
+			return "", "", nil, &DeriveError{Cause: DeriveErrDMKeyParse, Err: fmt.Errorf("dm key parse failed: %w", parseErr)}
 		}
 
 		rederived, deriveErr := messages.DMConversationKey(kindA, idA, kindB, idB)
 		if deriveErr != nil {
-			return "", "", nil, fmt.Errorf("dm key re-derivation failed: %w", deriveErr)
+			return "", "", nil, &DeriveError{Cause: DeriveErrDMKeyParse, Err: fmt.Errorf("dm key re-derivation failed: %w", deriveErr)}
 		}
 
 		// We re-derive to verify canonicality (token order, UUID format, kind casing)
@@ -65,7 +85,7 @@ func DeriveConversationKey(in KeyInputs) (extRef string, kind string, projectID 
 		// authorised against — that is the read-gate normalisation refused in §2.15.4(c).
 		// Differ means error, never silent rewrite.
 		if rederived != in.ThreadID {
-			return "", "", nil, fmt.Errorf("dm key is not canonical: got %q, canonical form is %q", in.ThreadID, rederived)
+			return "", "", nil, &DeriveError{Cause: DeriveErrDMKeyCanonical, Err: fmt.Errorf("dm key is not canonical: got %q, canonical form is %q", in.ThreadID, rederived)}
 		}
 
 		return in.ThreadID, "direct", nil, nil
@@ -74,7 +94,7 @@ func DeriveConversationKey(in KeyInputs) (extRef string, kind string, projectID 
 	// Case 2: ThreadID non-empty, no "dm:" prefix — thread conversation.
 	if in.ThreadID != "" {
 		if in.ProjectID == "" {
-			return "", "", nil, fmt.Errorf("thread key requires non-empty projectID")
+			return "", "", nil, &DeriveError{Cause: DeriveErrThreadNoProject, Err: fmt.Errorf("thread key requires non-empty projectID")}
 		}
 		pid := in.ProjectID
 		return fmt.Sprintf("thread:%s:%s", in.ProjectID, in.ThreadID), "group", &pid, nil
@@ -83,7 +103,7 @@ func DeriveConversationKey(in KeyInputs) (extRef string, kind string, projectID 
 	// Case 3: ThreadID empty — derive from principal pair.
 	ref, deriveErr := messages.DMConversationKey(in.SenderKind, in.SenderID, in.RecipientKind, in.RecipientID)
 	if deriveErr != nil {
-		return "", "", nil, fmt.Errorf("dm key derivation from principals failed: %w", deriveErr)
+		return "", "", nil, &DeriveError{Cause: DeriveErrPrincipalPair, Err: fmt.Errorf("dm key derivation from principals failed: %w", deriveErr)}
 	}
 	return ref, "direct", nil, nil
 }
@@ -135,7 +155,7 @@ func ResolveOrCreateConversationByKey(
 	extRef, kind string,
 	projectID *string,
 	opts ...ConversationByKeyOption,
-) *ConversationResult {
+) (*ConversationResult, error) {
 	var cfg conversationByKeyConfig
 	cfg.surface = "native" // default
 	for _, o := range opts {
@@ -151,37 +171,29 @@ func ResolveOrCreateConversationByKey(
 		// Extract threadID from "thread:<projectID>:<threadID>"
 		parts := strings.SplitN(extRef, ":", 3)
 		if len(parts) != 3 {
-			// Malformed thread: ref — refuse, don't fall through to mint.
-			// DeriveConversationKey always produces 3-part refs, but handler
-			// sites pass extRef directly, so the guarantee is convention, not
-			// type. Treating this as a refusal closes the shape that DEF-20
-			// was opened to fix.
-			log.Warn("malformed thread: ref, refusing to resolve (non-fatal)",
-				"external_ref", extRef, "parts", len(parts))
-			return nil
+			return nil, fmt.Errorf("malformed thread: ref (external_ref=%q, parts=%d)", extRef, len(parts))
 		}
 		threadID := parts[2]
 		convID, lookupErr := cfg.topicLookup.GetTopicConversationIDIncludingDeleted(ctx, threadID)
 		if lookupErr == nil && convID != "" {
 			log.Debug("conversation resolved via topic lookup (sink-level)",
 				"external_ref", extRef, "conversation_id", convID)
-			return &ConversationResult{ConversationID: convID}
+			return &ConversationResult{
+				ConversationID: convID,
+				Kind:           kind,        // from DeriveConversationKey
+				Surface:        cfg.surface, // caller-supplied or default "native"
+			}, nil
 		}
 		if lookupErr == nil && convID == "" {
-			// Topic exists but not yet backfilled — return nil (don't mint).
-			log.Debug("topic has no conversation_id, returning unresolved (non-fatal)",
-				"external_ref", extRef)
-			return nil
+			// Topic exists but not yet backfilled — refuse to mint.
+			return nil, fmt.Errorf("topic has no conversation_id yet (external_ref=%q)", extRef)
 		}
 		if lookupErr != nil {
 			if errors.Is(lookupErr, store.ErrNotFound) {
 				// Not a native topic — fall through to upsert.
 				// This is the normal case for non-native surface threads.
 			} else {
-				// Infrastructure failure — return nil, don't mint.
-				log.Warn("topic lookup infrastructure error, returning unresolved (non-fatal)",
-					"external_ref", extRef, "error", lookupErr)
-				return nil
+				return nil, fmt.Errorf("topic lookup infrastructure error (external_ref=%q): %w", extRef, lookupErr)
 			}
 		}
 	}
@@ -202,16 +214,14 @@ func ResolveOrCreateConversationByKey(
 
 	result, err := cs.UpsertConversationByExternalRef(ctx, conv)
 	if err != nil {
-		log.Error("conversation resolution failed (non-fatal)",
-			"external_ref", extRef,
-			"kind", kind,
-			"error", err,
-		)
-		return nil
+		return nil, fmt.Errorf("conversation upsert failed (external_ref=%q, kind=%q): %w", extRef, kind, err)
 	}
 
 	return &ConversationResult{
 		ConversationID: result.ID,
 		ExternalRef:    result.ExternalRef,
-	}
+		Kind:           result.Kind,
+		Surface:        result.Surface,
+		DisplayName:    result.DisplayName,
+	}, nil
 }

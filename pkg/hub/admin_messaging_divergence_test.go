@@ -39,6 +39,11 @@ func TestHandleAdminMessagingDivergence_GET(t *testing.T) {
 	messaging.DivergenceMetrics.Inc(false) // 1 mismatch
 	messaging.DivergenceMetrics.IncFallback()
 	messaging.DivergenceMetrics.IncFallback()
+	messaging.DivergenceMetrics.IncExplicitRouting() // 1 explicit route
+	messaging.DivergenceMetrics.IncExplicitRouting() // 2 explicit routes
+	messaging.DivergenceMetrics.IncExplicitRouting() // 3 explicit routes
+	messaging.DivergenceMetrics.IncDerivedRouting()  // 1 derived route
+	messaging.DivergenceMetrics.IncDerivedRouting()  // 2 derived routes
 
 	srv := &Server{
 		startTime: time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC),
@@ -81,6 +86,25 @@ func TestHandleAdminMessagingDivergence_GET(t *testing.T) {
 	if resp.Comparisons != resp.Matches+resp.Mismatches {
 		t.Errorf("comparisons (%d) != matches (%d) + mismatches (%d)",
 			resp.Comparisons, resp.Matches, resp.Mismatches)
+	}
+
+	// Consistency check counters should be present (zero at this point since
+	// we only seeded the routing-key counters above).
+	if resp.ConsistencyChecks != 0 {
+		t.Errorf("expected consistency_checks=0, got %d", resp.ConsistencyChecks)
+	}
+	if resp.ConsistencyMismatches != 0 {
+		t.Errorf("expected consistency_mismatches=0, got %d", resp.ConsistencyMismatches)
+	}
+
+	// DEF-138: explicit routing counter.
+	if resp.ExplicitRoutes != 3 {
+		t.Errorf("expected explicit_routes=3, got %d", resp.ExplicitRoutes)
+	}
+
+	// DEF-141: derived routing counter.
+	if resp.DerivedRoutes != 2 {
+		t.Errorf("expected derived_routes=2, got %d", resp.DerivedRoutes)
 	}
 
 	// Verify identity fields.
@@ -139,10 +163,14 @@ func TestHandleAdminMessagingDivergence_CaveatKeysPresent(t *testing.T) {
 	requiredKeys := []string{
 		"scope",
 		"scope_detail",
+		"routing_key_tautology",
 		"mismatch_composition",
 		"consistency_check_fails_open",
+		"unbackfilled_blind_spot",
+		"sampling_window",
 		"not_go_no_go",
 		"counter_snapshot",
+		"explicit_routing_adoption",
 	}
 	for _, key := range requiredKeys {
 		val, present := caveats[key]

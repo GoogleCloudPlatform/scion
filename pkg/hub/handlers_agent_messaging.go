@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // OutboundMessageRequest is the request body for POST /api/v1/agents/{id}/outbound-message.
@@ -46,6 +47,18 @@ type OutboundMessageRequest struct {
 	// Visibility controls which consumers see this message.
 	// One of "normal", "verbose", "full". Empty defaults to "normal".
 	Visibility string `json:"visibility,omitempty"`
+	// ConversationID is an explicit conversation assertion from the caller.
+	// When set, the hub authorizes the agent for this conversation and
+	// persists the message into it, bypassing the DeriveConversationKey
+	// derivation. When empty, derivation from ThreadID or sender/recipient
+	// principals applies as before. See DEF-138 §3.1 rules 1-3.
+	ConversationID string `json:"conversation_id,omitempty"`
+	// ConversationRef is a human-readable conversation reference (DEF-142).
+	// Accepted forms: conv:<uuid>, @<agent-slug>, @<email>, #<thread-name>.
+	// Mutually exclusive with ConversationID — setting both is a 400.
+	// When set, the hub resolves the reference to a ConversationID via
+	// messaging.Resolve, then routes through the existing DEF-138 path.
+	ConversationRef string `json:"conversation_ref,omitempty"`
 }
 
 // handleAgentOutboundMessage handles POST /api/v1/agents/{id}/outbound-message.
@@ -138,39 +151,67 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		// Accept "user:<identifier>" or bare "<identifier>".
 		identifier := strings.TrimPrefix(recipient, "user:")
 
-		// Try email lookup first (identifier contains @).
-		if strings.Contains(identifier, "@") {
-			if u, err := s.store.GetUserByEmail(ctx, identifier); err == nil {
+		// DEF-126 P2: exact resolution only — UUID or email. Display-name
+		// substring matching is removed because display_name has no uniqueness
+		// constraint and the old LIKE query silently picked the newest row.
+		if _, parseErr := uuid.Parse(identifier); parseErr == nil {
+			// Token is a UUID — direct lookup by primary key.
+			u, err := s.store.GetUser(ctx, identifier)
+			if err == nil {
 				recipientID = u.ID
 				name := u.DisplayName
 				if name == "" {
 					name = u.Email
 				}
 				recipient = "user:" + name
+			} else if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
+					fmt.Sprintf("user:%s is not a valid addressee. No user exists with that ID.", identifier), nil)
+				return
+			} else {
+				s.messageLog.Error("user lookup by ID failed", "identifier", identifier, "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"user lookup failed due to an internal error", nil)
+				return
 			}
-		}
-
-		// Fall back to display-name search if email lookup didn't match.
-		if recipientID == "" {
-			result, err := s.store.ListUsers(ctx, store.UserFilter{Search: identifier}, store.ListOptions{Limit: 1})
-			if err == nil && len(result.Items) == 1 {
-				u := result.Items[0]
+		} else if strings.Contains(identifier, "@") {
+			// Token contains @ — exact email lookup, case-folded.
+			u, err := s.store.GetUserByEmail(ctx, identifier)
+			if err == nil {
 				recipientID = u.ID
 				name := u.DisplayName
 				if name == "" {
 					name = u.Email
 				}
 				recipient = "user:" + name
+			} else if errors.Is(err, store.ErrNotSingular) {
+				writeError(w, http.StatusBadRequest, ErrCodeAddrAmbiguous,
+					fmt.Sprintf("user:%s is not a valid addressee. Multiple users match that email; resolve the duplicate before sending.", identifier), nil)
+				return
+			} else if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
+					fmt.Sprintf("user:%s is not a valid addressee. No user exists with that email.", identifier), nil)
+				return
+			} else {
+				s.messageLog.Error("user lookup by email failed", "identifier", identifier, "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"user lookup failed due to an internal error", nil)
+				return
 			}
-		}
-
-		if recipientID == "" {
-			ValidationError(w, fmt.Sprintf("recipient %q could not be resolved to a known user", req.Recipient), nil)
+		} else {
+			// Token is neither a UUID nor an email — refuse.
+			writeError(w, http.StatusBadRequest, ErrCodeAddrMalformed,
+				fmt.Sprintf("user:%s is not a valid addressee. Address a user by exact email (user:name@example.com) or by id. Names are not unique and cannot be resolved.", identifier), nil)
 			return
 		}
 	}
 
-	if recipientID == "" && recipient == "" {
+	// DEF-152: relax the guard so that a request carrying a conversation_ref
+	// (but no explicit recipient) can reach the resolver at line ~334. The
+	// resolver derives the addressing from the conversation itself. Requests
+	// with NEITHER a recipient NOR a conversation_ref are still rejected with
+	// the original error message.
+	if recipientID == "" && recipient == "" && req.ConversationRef == "" {
 		ValidationError(w, "recipient is required — specify a user with 'user:<name>' or 'user:<email>'", nil)
 		return
 	}
@@ -255,18 +296,19 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	// Build a structured message for external dispatch paths.
 	structuredMsg := &messages.StructuredMessage{
-		Sender:      storeMsg.Sender,
-		SenderID:    storeMsg.SenderID,
-		Recipient:   storeMsg.Recipient,
-		RecipientID: storeMsg.RecipientID,
-		Msg:         storeMsg.Msg,
-		Type:        storeMsg.Type,
-		Urgent:      storeMsg.Urgent,
-		Attachments: req.Attachments,
-		Channel:     req.Channel,
-		ThreadID:    req.ThreadID,
-		Visibility:  req.Visibility,
-		Metadata:    req.Metadata,
+		Sender:         storeMsg.Sender,
+		SenderID:       storeMsg.SenderID,
+		Recipient:      storeMsg.Recipient,
+		RecipientID:    storeMsg.RecipientID,
+		Msg:            storeMsg.Msg,
+		Type:           storeMsg.Type,
+		Urgent:         storeMsg.Urgent,
+		Attachments:    req.Attachments,
+		Channel:        req.Channel,
+		ThreadID:       req.ThreadID,
+		Visibility:     req.Visibility,
+		Metadata:       req.Metadata,
+		ConversationID: req.ConversationID,
 	}
 	// Validate the assembled message through the legacy envelope choke point
 	// (Audit M2: outbound messages must not bypass validation).
@@ -277,63 +319,345 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Phase 5 dual-write: resolve-or-create conversation, stamp conversation_id.
-	// Uses DeriveConversationKey to unify thread and DM key derivation (§2.15).
-	var convResult *messaging.ConversationResult
-	extRef, kind, projID, deriveErr := messaging.DeriveConversationKey(messaging.KeyInputs{
-		ThreadID:      req.ThreadID,
-		ProjectID:     agent.ProjectID,
-		SenderKind:    "agent",
-		SenderID:      agent.ID,
-		RecipientKind: "user",
-		RecipientID:   recipientID,
-	})
-	if deriveErr != nil {
-		s.messageLog.Warn("skipping conversation resolution: key derivation refused",
-			"thread_id", req.ThreadID,
-			"agent_id", agent.ID,
-			"error", deriveErr,
-		)
-	} else {
-		var keyOpts []messaging.ConversationByKeyOption
-		s.mu.RLock()
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if wcs != nil {
-			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
-		}
-		convResult = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
+	// DEF-142 P3: mutual exclusion — both ref and id is a client error.
+	if req.ConversationRef != "" && req.ConversationID != "" {
+		ValidationError(w, "conversation_ref and conversation_id are mutually exclusive — set one or neither", nil)
+		return
 	}
-	if convResult != nil {
-		storeMsg.ConversationID = convResult.ConversationID
-		// DEF-41: structural pre-placement. This check is inert while B10
-		// holds: convResult is non-nil only when attribution succeeded, and
-		// ent.Conversation.ID is a uuid.UUID that always renders non-empty.
-		// It becomes load-bearing at Tranche G, when derivation failure
-		// becomes fatal and this call moves outside the nil guard.
-		if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-			ValidationError(w, err.Error(), nil)
+
+	// DEF-142 P3: resolve ConversationRef → ConversationID before the DEF-138
+	// routing block. The resolved ID then flows through the EXISTING explicit
+	// authorization path unchanged.
+	//
+	// ELEVATED CONSTRAINT (DEF-142 review): every field of ResolveContext
+	// comes from the authenticated caller, never from the request body.
+	// Resolve errors (including ambiguity) carry conversation UUIDs and
+	// surfaces, so rctx.ProjectID is the containment boundary for the
+	// information those errors disclose. If any rctx field came from the
+	// body, the error would become an enumeration oracle for arbitrary
+	// projects.
+	if req.ConversationRef != "" {
+		authKind, authID := authenticatedSender(ctx)
+		if authKind == "" || authID == "" {
+			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+				"authenticated identity required for conversation_ref", nil)
+			return
+		}
+		resolveResult, resolveErr := messaging.Resolve(ctx, s.store, req.ConversationRef, messaging.ResolveContext{
+			SenderPrincipalKind: authKind,
+			SenderPrincipalID:   authID,
+			ProjectID:           agent.ProjectID, // from the authenticated agent, NOT from the request
+		})
+		if resolveErr != nil {
+			var resErr *messaging.ResolutionError
+			if errors.As(resolveErr, &resErr) {
+				// DEF-142 AC-3: disclosure decision delegates to the
+				// disclosableResolutionReason allowlist (defined at EOF).
+				if disclosableResolutionReason(resErr.Reason) {
+					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+						"conversation_ref resolution failed: "+resErr.Error(), nil)
+				} else {
+					s.messageLog.Info("DEF-142: conversation_ref resolution denied",
+						"conversation_ref", req.ConversationRef,
+						"reason", resErr.Reason,
+					)
+					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+						"conversation_ref could not be resolved", nil)
+				}
+				return
+			}
+			// ParseReference returns store.ErrInvalidInput for malformed refs —
+			// that is a client error, not a server error.
+			if errors.Is(resolveErr, store.ErrInvalidInput) {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+					"conversation_ref resolution failed: "+resolveErr.Error(), nil)
+				return
+			}
+			s.messageLog.Error("DEF-142: Resolve failed for conversation_ref",
+				"conversation_ref", req.ConversationRef,
+				"error", resolveErr,
+			)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"conversation reference resolution failed", nil)
+			return
+		}
+		// Promote to ConversationID so the existing DEF-138 authorization
+		// block handles it identically to a caller-supplied UUID.
+		req.ConversationID = resolveResult.ConversationID
+	}
+
+	// DEF-138 §3.1 conversation routing rules:
+	//   Rule 1: Caller named a conversation → authorize it, then use it.
+	//   Rule 2: Caller named a thread       → derive thread:{project}:{thread}.
+	//   Rule 3: Caller named only principals → derive dm:{kind}:{id}:{kind}:{id}.
+	//   Rule 4: Otherwise                   → error. Do not guess.
+	//
+	// Rule 1 is the explicit path (req.ConversationID set). Rules 2/3 are
+	// the derivation path (existing DeriveConversationKey logic).
+	var convResult *messaging.ConversationResult
+	var asserted bool // DEF-141: true only when the caller named a conversation and it was authorized.
+	if req.ConversationID != "" {
+		// Rule 1: explicit conversation assertion from the caller.
+		//
+		// DEF-138 §3.4 AUTHORIZATION — the sending agent is asserting that
+		// its reply belongs to a specific conversation. This is a client
+		// assertion and must be authorized. The check answers: "is this
+		// conversation one the sending agent's project owns (group) or one
+		// the sending agent is a named participant of (direct)?"
+		//
+		// Compare with the sibling block in handleAgentMessage (:951-1044)
+		// which authorizes the *recipient* agent's project. Here `agent` is
+		// the SENDER (resolved from the agent token at :59-67, not from a
+		// URL path), so the group-case claim is "the conversation belongs
+		// to the sending agent's project."
+		authKind, authID := authenticatedSender(ctx)
+		if authKind == "" || authID == "" {
+			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+				"authenticated identity required for caller-supplied conversation_id", nil)
+			return
+		}
+
+		conv, convErr := s.store.GetConversation(ctx, req.ConversationID)
+		if convErr != nil {
+			if errors.Is(convErr, store.ErrNotFound) {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+					"caller-supplied conversation_id does not exist", nil)
+				return
+			}
+			s.messageLog.Error("DEF-138: GetConversation failed for caller-supplied conversation_id",
+				"conversation_id", req.ConversationID,
+				"error", convErr,
+			)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"conversation lookup failed", nil)
+			return
+		}
+		if conv == nil {
+			// Defensive: GetConversation should not return (nil, nil),
+			// but if it does, fail closed — no fallback, no repair.
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				"caller-supplied conversation_id does not exist", nil)
+			return
+		}
+
+		// Authority differs by conversation kind. The DM key IS the ACL
+		// for direct conversations; group conversations are scoped by
+		// project containment.
+		//
+		// Direction note: `agent` is the SENDER on this path. The group
+		// case asserts "the conversation belongs to the sending agent's
+		// project" — the correct check for outbound messages, distinct
+		// from the sibling handler where `agent` is the recipient.
+		switch conv.Kind {
+		case "direct":
+			if err := messages.CheckDMParticipantKey(conv.Kind, conv.ExternalRef, authKind, authID); err != nil {
+				s.messageLog.Warn("DEF-138: direct conversation authorization failed (outbound)",
+					"conversation_id", conv.ID,
+					"auth_kind", authKind,
+					"auth_id", authID,
+					"error", err,
+				)
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"authenticated sender is not a participant in the direct conversation", nil)
+				return
+			}
+		case "group":
+			// Deny when either project ID is unset (empty or zero UUID).
+			// Two unset IDs comparing equal would authorize a request
+			// that has no project context.
+			const zeroUUID = "00000000-0000-0000-0000-000000000000"
+			convProjUnset := conv.ProjectID == nil || *conv.ProjectID == "" || *conv.ProjectID == zeroUUID
+			agentProjUnset := agent.ProjectID == "" || agent.ProjectID == zeroUUID
+			if convProjUnset || agentProjUnset || *conv.ProjectID != agent.ProjectID {
+				s.messageLog.Warn("DEF-138: group conversation project mismatch or unset project (outbound)",
+					"conversation_id", conv.ID,
+					"conv_project_id", conv.ProjectID,
+					"agent_project_id", agent.ProjectID,
+				)
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"conversation does not belong to the agent's project", nil)
+				return
+			}
+		default:
+			// Unknown conversation kind — fail closed.
+			s.messageLog.Warn("DEF-138: unknown conversation kind, denying (outbound)",
+				"conversation_id", conv.ID,
+				"kind", conv.Kind,
+			)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"unsupported conversation kind", nil)
+			return
+		}
+
+		// Authorization passed — honour the caller's assertion.
+		asserted = true // DEF-141: provenance is derived from the authenticated path.
+		storeMsg.ConversationID = req.ConversationID
+		convResult = &messaging.ConversationResult{
+			ConversationID: req.ConversationID,
+			ExternalRef:    conv.ExternalRef,
+			Kind:           conv.Kind,
+			Surface:        conv.Surface,
+			DisplayName:    conv.DisplayName,
+		}
+	} else {
+		// Rules 2/3: derive conversation from the caller's own address.
+		// Uses DeriveConversationKey to unify thread and DM key derivation (§2.15).
+		extRef, kind, projID, deriveErr := messaging.DeriveConversationKey(messaging.KeyInputs{
+			ThreadID:      req.ThreadID,
+			ProjectID:     agent.ProjectID,
+			SenderKind:    "agent",
+			SenderID:      agent.ID,
+			RecipientKind: "user",
+			RecipientID:   recipientID,
+		})
+		if deriveErr != nil {
+			if s.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc("outbound.derive")
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
+					"conversation key derivation failed: "+deriveErr.Error(), nil)
+				return
+			}
+			s.messageLog.Warn("skipping conversation resolution: key derivation refused (write-deny OFF)",
+				"thread_id", req.ThreadID, "agent_id", agent.ID, "error", deriveErr)
+		} else {
+			var keyOpts []messaging.ConversationByKeyOption
+			s.mu.RLock()
+			wcs := s.webChatStore
+			s.mu.RUnlock()
+			if wcs != nil {
+				keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
+			}
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
+			if convErr != nil {
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("outbound.resolve")
+					s.messageLog.Error("conversation resolution failed", "error", convErr)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+					return
+				}
+				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			} else {
+				storeMsg.ConversationID = convResult.ConversationID
+				if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+					if s.writeDenyEnabled() {
+						messaging.WriteDenialMetrics.Inc("outbound.validate")
+						writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
+						return
+					}
+					s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
+				}
+			}
+		}
+	}
+	// DEF-138: Divergence logging and consistency checks are handled by the
+	// broker's deliverToUser callback (messagebroker.go) for the broker path,
+	// and are omitted on the non-broker direct-persist path to avoid double
+	// logging (AC-6). The handler's job is conversation resolution and
+	// authorization (P-2); persistence-time checks belong at the persistence
+	// site.
+
+	// DEF-152: when a conversation_ref resolved without an explicit recipient,
+	// derive the addressee from the resolved conversation. The resolution and
+	// authorization above (DEF-142 + DEF-138) have already run, so convResult
+	// is populated and the conversation is authorized.
+	//
+	// SECURITY: the addressee is derived from the conversation's participant
+	// set (the DM key), never from request input. For non-direct conversations
+	// (group, etc.) there is no single recipient to derive — fail closed rather
+	// than guessing.
+	if recipientID == "" && recipient == "" && convResult != nil {
+		switch convResult.Kind {
+		case "direct":
+			// Parse the DM key to identify the other participant.
+			kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(convResult.ExternalRef)
+			if parseErr != nil {
+				s.messageLog.Error("DEF-152: cannot parse DM key for addressee derivation",
+					"external_ref", convResult.ExternalRef, "error", parseErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"failed to derive addressee from direct conversation", nil)
+				return
+			}
+			// The authenticated sender is one side of the DM; the other is
+			// the addressee. authenticatedSender is called again here (it was
+			// already called for the ConversationRef resolver) because the
+			// values are not stashed in a local variable across branches.
+			derivedAuthKind, derivedAuthID := authenticatedSender(ctx)
+			var addrKind, addrID string
+			if kindA == derivedAuthKind && idA == derivedAuthID {
+				addrKind, addrID = kindB, idB
+			} else if kindB == derivedAuthKind && idB == derivedAuthID {
+				addrKind, addrID = kindA, idA
+			} else {
+				// Sender is not named in the DM key. This should not happen
+				// after the DEF-138 authorization check — fail closed.
+				s.messageLog.Error("DEF-152: authenticated sender not found in DM key",
+					"auth_kind", derivedAuthKind, "auth_id", derivedAuthID,
+					"external_ref", convResult.ExternalRef)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"failed to derive addressee: sender not found in conversation", nil)
+				return
+			}
+			if addrKind != "user" {
+				// The other participant is not a user (e.g. agent-to-agent DM).
+				// This endpoint delivers to human inboxes — fail closed.
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+					"conversation_ref resolved to a non-user addressee; "+
+						"this endpoint delivers to users only", nil)
+				return
+			}
+			u, lookupErr := s.store.GetUser(ctx, addrID)
+			if lookupErr != nil {
+				s.messageLog.Error("DEF-152: user lookup for derived addressee failed",
+					"addr_id", addrID, "error", lookupErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"failed to look up derived addressee", nil)
+				return
+			}
+			recipientID = u.ID
+			name := u.DisplayName
+			if name == "" {
+				name = u.Email
+			}
+			recipient = "user:" + name
+
+			// Patch the already-constructed message objects so the derived
+			// addressee flows through persistence and broker dispatch.
+			storeMsg.Recipient = recipient
+			storeMsg.RecipientID = recipientID
+			structuredMsg.Recipient = recipient
+			structuredMsg.RecipientID = recipientID
+
+		case "group":
+			// Group conversations may have many participants and no single
+			// addressee. Refuse rather than guessing (DEF-152 constraint:
+			// "do not default, do not guess, do not pick the first
+			// participant"). The caller must supply an explicit recipient
+			// alongside the conversation_ref for group conversations.
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				"group conversations require an explicit recipient — "+
+					"add 'user:<email>' alongside the conversation_ref", nil)
+			return
+
+		default:
+			// Unknown conversation kind with no explicit recipient — fail
+			// closed rather than guessing.
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				fmt.Sprintf("cannot derive addressee for conversation of kind %q", convResult.Kind), nil)
 			return
 		}
 	}
-	// Always log divergence — even when convResult is nil, that is a divergence signal.
-	oldRouting := messaging.OldRoutingFromMessage(agent.ID, recipientID, req.ThreadID)
-	convID := ""
-	actualRef := ""
+
+	// DEF-138 P-3: propagate the resolved ConversationID onto structuredMsg
+	// so it survives through the broker's PublishUserMessage → deliverToUser
+	// path. Without this, the handler's resolution is discarded when the
+	// broker is present (storeMsg is only persisted on the non-broker branch)
+	// and deliverToUser re-derives — producing two resolutions and the
+	// inbound/outbound conversation split this defect addresses.
 	if convResult != nil {
-		convID = convResult.ConversationID
-		actualRef = convResult.ExternalRef
+		structuredMsg.ConversationID = convResult.ConversationID
+		structuredMsg.ConversationAsserted = asserted
 	}
-	match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
-	messaging.LogDivergence(s.messageLog, messaging.DivergenceEntry{
-		MessageID:  storeMsg.ID,
-		OldRouting: oldRouting,
-		NewRouting: messaging.NewRoutingStr(convID),
-		Match:      match,
-		Reason:     reason,
-	})
-	// DEF-3: Independent consistency check against prior messages.
-	messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, req.ThreadID, agent.ID, recipientID, s.messageLog)
 
 	// Propagate recipients and group_id from metadata for group-set messages.
 	if req.Metadata != nil {
@@ -574,12 +898,14 @@ type MessageRequest struct {
 
 func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
+	messaging.RecordStep(ctx, "handle_agent_message_enter")
 
 	var req MessageRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	messaging.RecordStep(ctx, "request_parsed")
 
 	// Determine the message content and structured message to forward
 	var plainMessage string
@@ -620,6 +946,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if structuredMsg.Type == "" {
 			structuredMsg.Type = messages.TypeInstruction
 		}
+		messaging.RecordStep(ctx, "sender_identity_extracted")
 	} else if req.Message != "" {
 		plainMessage = req.Message
 		// Build a structured message from the plain text so that downstream
@@ -636,6 +963,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 		structuredMsg = messages.NewInstruction(sender, "agent:"+id, plainMessage)
 		structuredMsg.SenderID = senderID
+		messaging.RecordStep(ctx, "sender_identity_extracted")
 	} else {
 		ValidationError(w, "message or structured_message is required", nil)
 		return
@@ -649,6 +977,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		ValidationError(w, err.Error(), nil)
 		return
 	}
+	messaging.RecordStep(ctx, "message_validated")
 
 	// Validate DM key format when the thread_id looks like a DM key.
 	if structuredMsg != nil && structuredMsg.ThreadID != "" &&
@@ -674,6 +1003,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	messaging.RecordStep(ctx, "agent_loaded")
 
 	// AC-33: Cross-project mention check. Verify that all mentioned agents
 	// belong to the same project as the primary recipient before any dispatch.
@@ -721,9 +1051,17 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if wcs != nil {
 			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 		}
-		convResult := messaging.ResolveOrCreateConversationByKey(
+		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
 			ctx, s.store, s.messageLog, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
-		if convResult != nil {
+		if convErr != nil {
+			if s.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc("agent_msg.phase11")
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+				return
+			}
+			s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+		} else {
 			if structuredMsg.Metadata == nil {
 				structuredMsg.Metadata = make(map[string]string)
 			}
@@ -846,6 +1184,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Populate recipient slug and ID from the resolved agent.
 	structuredMsg.Recipient = "agent:" + agent.Slug
 	structuredMsg.RecipientID = agent.ID
+	messaging.RecordStep(ctx, "recipient_stamped")
 
 	// Default the channel to "web" for messages sent through the web UI.
 	// Only tag as "web" when the authenticated user's client type is
@@ -988,6 +1327,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			convResult = &messaging.ConversationResult{
 				ConversationID: structuredMsg.ConversationID,
 				ExternalRef:    conv.ExternalRef,
+				Kind:           conv.Kind,
+				Surface:        conv.Surface,
+				DisplayName:    conv.DisplayName,
 			}
 		} else {
 			// B5 SECURITY: derive sender identity for the conversation key
@@ -1006,11 +1348,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				RecipientID:   agent.ID,
 			})
 			if deriveErr != nil {
-				s.messageLog.Warn("skipping conversation resolution: key derivation refused",
-					"thread_id", structuredMsg.ThreadID,
-					"sender", structuredMsg.Sender,
-					"error", deriveErr,
-				)
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("agent_msg.derive")
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
+						"conversation key derivation failed: "+deriveErr.Error(), nil)
+					return
+				}
+				s.messageLog.Warn("skipping conversation resolution: key derivation refused (write-deny OFF)",
+					"thread_id", structuredMsg.ThreadID, "error", deriveErr)
 			} else {
 				var keyOpts []messaging.ConversationByKeyOption
 				s.mu.RLock()
@@ -1019,24 +1364,32 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				if wcs != nil {
 					keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 				}
-				convResult = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
+				var convErr error
+				convResult, convErr = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
+				if convErr != nil {
+					if s.writeDenyEnabled() {
+						messaging.WriteDenialMetrics.Inc("agent_msg.resolve")
+						s.messageLog.Error("conversation resolution failed", "error", convErr)
+						writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+						return
+					}
+					s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+					convResult = nil
+				}
 			}
 		}
 		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
-		// B10: ValidateAttributed rejection deliberately demoted to a log
-		// line. Converting a derivation-path empty ConversationID into a
-		// client-visible 4xx is a B10 violation — that flip belongs to
-		// Tranche G's read-switch, not to an accidental merge artifact.
-		// Keep the signal so a Tranche G operator can grep for it.
+		messaging.RecordStep(ctx, "conversation_resolved")
 		if convResult != nil {
 			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-				s.messageLog.Warn("ValidateAttributed: empty ConversationID after attribution (B10 demoted)",
-					"message_id", storeMsg.ID,
-					"conversation_id", storeMsg.ConversationID,
-					"error", err,
-				)
+				if s.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("agent_msg.validate")
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
+					return
+				}
+				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
 			}
 		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.
@@ -1058,8 +1411,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Match:      match,
 			Reason:     reason,
 		})
+		messaging.RecordStep(ctx, "divergence_logged")
 		// DEF-3: Independent consistency check against prior messages.
-		messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, structuredMsg.ThreadID, structuredMsg.SenderID, agent.ID, s.messageLog)
+		if consistent := messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, structuredMsg.ThreadID, structuredMsg.SenderID, agent.ID, s.messageLog); !consistent {
+			s.messageLog.Warn("DEF-3: conversation consistency mismatch (structured agent message)",
+				"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
+		}
 		// Propagate GroupID from metadata so CLI-originated group[] messages
 		// preserve correlation in the store.
 		if structuredMsg.Metadata != nil {
@@ -1072,6 +1429,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		} else {
 			persistedMsgID = storeMsg.ID
 		}
+		messaging.RecordStep(ctx, "message_persisted")
 		// B11/B13: only publish when persistence succeeded — publishing an
 		// unpersisted message is not legal.
 		if persistedMsgID != "" {
@@ -1079,6 +1437,18 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// per-agent conversation view in real time — mirrors the agent→user
 			// publish path in handleAgentOutboundMessage.
 			s.events.PublishUserMessage(ctx, storeMsg)
+			messaging.RecordStep(ctx, "sse_published")
+		}
+
+		// Phase 9b(ii): render the delivery envelope from the persisted row
+		// and conversation result when the envelope switch is ON.
+		if s.writeDenyEnabled() && persistedMsgID != "" {
+			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+				MessageID:  storeMsg.ID,
+				ConvResult: convResult,
+				Msg:        structuredMsg,
+				CreatedAt:  storeMsg.CreatedAt,
+			})
 		}
 	}
 
@@ -1157,6 +1527,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 		return
 	}
+	messaging.RecordStep(ctx, "broker_dispatched")
 
 	// Publish agent-to-agent messages through the broker so plugin observers
 	// (Telegram, broker-log) can see them. ObserverOnly prevents the hub's own
@@ -1319,11 +1690,20 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			var convResult *messaging.ConversationResult
 			if agent.ID != "" {
 				if authKind, authID := authenticatedSender(ctx); authID != "" {
-					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "agent", agent.ID)
+					var convErr error
+					convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "agent", agent.ID)
+					if convErr != nil {
+						if s.writeDenyEnabled() {
+							messaging.WriteDenialMetrics.Inc("group.agent_recipient")
+							s.messageLog.Error("conversation resolution failed", "error", convErr)
+							results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "conversation resolution failed"}
+							continue
+						}
+						s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+					} else {
+						storeMsg.ConversationID = convResult.ConversationID
+					}
 				}
-			}
-			if convResult != nil {
-				storeMsg.ConversationID = convResult.ConversationID
 			}
 			// Always log divergence — even when convResult is nil, that is a divergence signal.
 			oldRouting := messaging.OldRoutingFromMessage(agentMsg.SenderID, agent.ID, "")
@@ -1342,12 +1722,41 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				Reason:     reason,
 			})
 			// DEF-3: Independent consistency check against prior messages.
-			messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", agentMsg.SenderID, agent.ID, s.messageLog)
+			if consistent := messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", agentMsg.SenderID, agent.ID, s.messageLog); !consistent {
+				s.messageLog.Warn("DEF-3: conversation consistency mismatch (agent-to-agent DM)",
+					"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)
+			}
+			persisted := false
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			} else {
+				persisted = true
 				// B11/B13: only publish when persistence succeeded.
 				s.events.PublishUserMessage(ctx, storeMsg)
+			}
+
+			// Phase 9e: render the delivery envelope for group[] agent
+			// recipients. Gated on persistence success (matching the
+			// processMentions pattern, not the looser broadcastDirect one)
+			// so unpersisted messages never carry fabricated envelope data.
+			// Stamped before dispatch so the agent receives the new format.
+			//
+			// The observer copy below (`observerMsg := agentMsg`) inherits
+			// DeliveryText, which newly exposes the per-recipient DM
+			// conversation identity (id, kind, surface, display name) to
+			// project-scoped plugin observers. This is acceptable because
+			// those observers already receive the message body itself via
+			// bp.PublishMessage — conversation metadata discloses strictly
+			// less than the content they already hold. Across a group[]
+			// fan-out to N agent recipients, observers receive N envelopes,
+			// each naming a different DM conversation.
+			if s.writeDenyEnabled() && persisted {
+				agentMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+					MessageID:  storeMsg.ID,
+					ConvResult: convResult,
+					Msg:        &agentMsg,
+					CreatedAt:  storeMsg.CreatedAt,
+				})
 			}
 
 			if dispatcher == nil {
@@ -1389,34 +1798,56 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			userRecip := "user:" + recip.Name
 			userID := ""
 
-			// Try to resolve user by email or display name.
+			// DEF-126 P2: exact resolution only — UUID or email.
+			// Display-name substring matching removed (no uniqueness constraint).
+			// OQ-A2: any member that fails to resolve refuses the whole send.
 			identifier := recip.Name
-			if strings.Contains(identifier, "@") {
-				if u, err := s.store.GetUserByEmail(ctx, identifier); err == nil {
+			if _, parseErr := uuid.Parse(identifier); parseErr == nil {
+				u, lookupErr := s.store.GetUser(ctx, identifier)
+				if lookupErr == nil {
 					userID = u.ID
 					name := u.DisplayName
 					if name == "" {
 						name = u.Email
 					}
 					userRecip = "user:" + name
+				} else if errors.Is(lookupErr, store.ErrNotFound) {
+					writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
+						fmt.Sprintf("user:%s is not a valid addressee. No user exists with that ID.", identifier), nil)
+					return
+				} else {
+					s.messageLog.Error("user lookup by ID failed", "identifier", identifier, "error", lookupErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"user lookup failed due to an internal error", nil)
+					return
 				}
-			}
-			if userID == "" {
-				result, lookupErr := s.store.ListUsers(ctx, store.UserFilter{Search: identifier}, store.ListOptions{Limit: 1})
-				if lookupErr == nil && len(result.Items) == 1 {
-					u := result.Items[0]
+			} else if strings.Contains(identifier, "@") {
+				u, lookupErr := s.store.GetUserByEmail(ctx, identifier)
+				if lookupErr == nil {
 					userID = u.ID
 					name := u.DisplayName
 					if name == "" {
 						name = u.Email
 					}
 					userRecip = "user:" + name
+				} else if errors.Is(lookupErr, store.ErrNotSingular) {
+					writeError(w, http.StatusBadRequest, ErrCodeAddrAmbiguous,
+						fmt.Sprintf("user:%s is not a valid addressee. Multiple users match that email; resolve the duplicate before sending.", identifier), nil)
+					return
+				} else if errors.Is(lookupErr, store.ErrNotFound) {
+					writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
+						fmt.Sprintf("user:%s is not a valid addressee. No user exists with that email.", identifier), nil)
+					return
+				} else {
+					s.messageLog.Error("user lookup by email failed", "identifier", identifier, "error", lookupErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"user lookup failed due to an internal error", nil)
+					return
 				}
-			}
-
-			if userID == "" {
-				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "user not found: " + recip.Name}
-				continue
+			} else {
+				writeError(w, http.StatusBadRequest, ErrCodeAddrMalformed,
+					fmt.Sprintf("user:%s is not a valid addressee. Address a user by exact email (user:name@example.com) or by id. Names are not unique and cannot be resolved.", identifier), nil)
+				return
 			}
 
 			userMsg := *msg
@@ -1444,11 +1875,20 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			var convResult *messaging.ConversationResult
 			if userID != "" {
 				if authKind, authID := authenticatedSender(ctx); authID != "" {
-					convResult = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "user", userID)
+					var convErr error
+					convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "user", userID)
+					if convErr != nil {
+						if s.writeDenyEnabled() {
+							messaging.WriteDenialMetrics.Inc("group.user_recipient")
+							s.messageLog.Error("conversation resolution failed", "error", convErr)
+							results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "conversation resolution failed"}
+							continue
+						}
+						s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+					} else {
+						storeMsg.ConversationID = convResult.ConversationID
+					}
 				}
-			}
-			if convResult != nil {
-				storeMsg.ConversationID = convResult.ConversationID
 			}
 			// Always log divergence — even when convResult is nil, that is a divergence signal.
 			oldRouting := messaging.OldRoutingFromMessage(userMsg.SenderID, userID, "")
@@ -1467,7 +1907,10 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				Reason:     reason,
 			})
 			// DEF-3: Independent consistency check against prior messages.
-			messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", userMsg.SenderID, userID, s.messageLog)
+			if consistent := messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, "", userMsg.SenderID, userID, s.messageLog); !consistent {
+				s.messageLog.Warn("DEF-3: conversation consistency mismatch (user-to-agent DM)",
+					"message_id", storeMsg.ID, "conversation_id", convID)
+			}
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			} else {
@@ -1744,6 +2187,18 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			s.messageLog.Error("Failed to persist broadcast message", "agent_id", agent.ID, "error", err)
 		}
 
+		// Phase 9b(ii): render the delivery envelope for this broadcast
+		// recipient. ConvResult is nil — broadcasts deliberately skip
+		// conversation resolution (no conversation for broadcasts).
+		if s.writeDenyEnabled() {
+			agentMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+				MessageID:  storeMsg.ID,
+				ConvResult: nil,
+				Msg:        &agentMsg,
+				CreatedAt:  storeMsg.CreatedAt,
+			})
+		}
+
 		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 		dispatchErr := dispatchWithBrokerRetry(retryCtx, dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
 		retryCancel()
@@ -1892,6 +2347,27 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			s.events.PublishUserMessage(ctx, storeMsg)
 		}
 
+		// Phase 9b(ii): render the delivery envelope for this mention
+		// recipient. The parent conversation IS resolved (convResult is
+		// live in the calling handleAgentMessage scope), but it is
+		// deliberately NOT propagated here: the mention target is not
+		// necessarily a participant in the parent conversation. For a
+		// direct conversation, the mention target is by definition not a
+		// participant (invariant D-1). Stamping the parent's conversation
+		// ID onto a delivery to a non-participant would disclose the
+		// identity of a conversation that agent has no access to.
+		// The group case (where the target IS a participant) is an open
+		// question — it requires a participant check and is out of scope
+		// for Phase 9b.
+		if s.writeDenyEnabled() && persisted {
+			mentionMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+				MessageID:  storeMsg.ID,
+				ConvResult: nil,
+				Msg:        mentionMsg,
+				CreatedAt:  storeMsg.CreatedAt,
+			})
+		}
+
 		// Dispatch to the mentioned agent's runtime.
 		dispatcher := s.GetDispatcher()
 		if dispatcher == nil {
@@ -1945,4 +2421,25 @@ func authenticatedSender(ctx context.Context) (kind, id string) {
 		return "agent", agent.ID()
 	}
 	return "", ""
+}
+
+// disclosableResolutionReason reports whether a ResolutionError reason is safe
+// to return to the caller in full. This is the single artefact every reason
+// passes through; unknown reasons are collapsed by default (safe).
+//
+// DEF-142 AC-3 ALLOWLIST: only "ambiguous" and "no-shared-project" are
+// disclosed. Ambiguity candidates are group conversations scoped to the
+// caller's own project (contained by ResolveContext.ProjectID being
+// server-derived, never from request JSON), and no-shared-project is a
+// caller-side configuration error. Everything else — including any future
+// reason added to ResolutionError — collapses into one generic response.
+// A new reason is collapsed until someone deliberately decides it is safe
+// to disclose and adds it here.
+func disclosableResolutionReason(reason string) bool {
+	switch reason {
+	case "ambiguous", "no-shared-project":
+		return true
+	default:
+		return false
+	}
 }

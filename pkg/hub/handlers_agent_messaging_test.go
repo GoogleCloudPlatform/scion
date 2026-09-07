@@ -1823,4 +1823,229 @@ func TestDEF49_GroupConversation_UnsetProjectID(t *testing.T) {
 	}
 }
 
+// TestPhase9e_GroupMessage_DeliveryText_StampedWhenSwitchOn verifies that
+// handleGroupMessage stamps DeliveryText on each agent recipient's dispatched
+// StructuredMessage when the envelope switch is ON, and that the rendered
+// envelope is non-empty.
+func TestPhase9e_GroupMessage_DeliveryText_StampedWhenSwitchOn(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("9e-grp-project")
+	agentSlugA := "9e-grp-agent-a"
+	agentIDA := tid("9e-grp-agent-a")
+	agentSlugB := "9e-grp-agent-b"
+	agentIDB := tid("9e-grp-agent-b")
+	userID := DevUserID // must match the always-override sender identity
+
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "9e-grp-project", Slug: "9e-grp-project",
+	}))
+	brokerID := tid("9e-grp-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "9e-grp-broker", Slug: "9e-grp-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: projectID, BrokerID: brokerID, BrokerName: "9e-grp-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentIDA, Name: "9e-grp-agent-a", Slug: agentSlugA,
+		ProjectID: projectID, RuntimeBrokerID: brokerID,
+		Phase: "running", Visibility: store.VisibilityPrivate,
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentIDB, Name: "9e-grp-agent-b", Slug: agentSlugB,
+		ProjectID: projectID, RuntimeBrokerID: brokerID,
+		Phase: "running", Visibility: store.VisibilityPrivate,
+	}))
+	_ = s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "dev@localhost", DisplayName: "Development User",
+	})
+	_ = agentIDB // suppress unused
+
+	dispatcher := &recordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	// Enable the envelope switch.
+	enableReadSwitch(t, srv)
+
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+projectID+"/agents/"+agentSlugA+"/message",
+		MessageRequest{
+			StructuredMessage: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Sender:    "user:9e-grp",
+				SenderID:  userID,
+				Recipient: "group[agent:" + agentSlugA + ",agent:" + agentSlugB + "]",
+				Msg:       "Phase 9e group delivery text test",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"expected 200 for group[] message, got %d: %s", rec.Code, rec.Body.String())
+
+	var resp GroupMessageResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, 2, resp.Delivered, "both recipients should be delivered")
+
+	// Verify the dispatcher received both calls with non-empty DeliveryText.
+	calls := dispatcher.getCalls()
+	require.Equal(t, 2, len(calls), "expected 2 dispatch calls")
+	for i, c := range calls {
+		require.NotNil(t, c.StructuredMessage, "dispatch call %d: StructuredMessage is nil", i)
+		if c.StructuredMessage.DeliveryText == "" {
+			t.Errorf("dispatch call %d (recipient=%s): DeliveryText is empty when envelope switch is ON",
+				i, c.StructuredMessage.Recipient)
+		}
+	}
+}
+
+// TestPhase9e_GroupMessage_DeliveryText_EmptyWhenSwitchOff verifies that
+// handleGroupMessage does NOT stamp DeliveryText when the envelope switch
+// is OFF (the default), preserving the legacy format.
+func TestPhase9e_GroupMessage_DeliveryText_EmptyWhenSwitchOff(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("9e-off-project")
+	agentSlugA := "9e-off-agent-a"
+	agentIDA := tid("9e-off-agent-a")
+	agentSlugB := "9e-off-agent-b"
+	agentIDB := tid("9e-off-agent-b")
+	userID := DevUserID
+
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "9e-off-project", Slug: "9e-off-project",
+	}))
+	brokerID := tid("9e-off-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "9e-off-broker", Slug: "9e-off-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: projectID, BrokerID: brokerID, BrokerName: "9e-off-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentIDA, Name: "9e-off-agent-a", Slug: agentSlugA,
+		ProjectID: projectID, RuntimeBrokerID: brokerID,
+		Phase: "running", Visibility: store.VisibilityPrivate,
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentIDB, Name: "9e-off-agent-b", Slug: agentSlugB,
+		ProjectID: projectID, RuntimeBrokerID: brokerID,
+		Phase: "running", Visibility: store.VisibilityPrivate,
+	}))
+	_ = s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "dev@localhost", DisplayName: "Development User",
+	})
+	_ = agentIDB
+
+	dispatcher := &recordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	// Do NOT enable the envelope switch — default is OFF.
+
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+projectID+"/agents/"+agentSlugA+"/message",
+		MessageRequest{
+			StructuredMessage: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Sender:    "user:9e-off",
+				SenderID:  userID,
+				Recipient: "group[agent:" + agentSlugA + ",agent:" + agentSlugB + "]",
+				Msg:       "Phase 9e group legacy test",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"expected 200 for group[] message, got %d: %s", rec.Code, rec.Body.String())
+
+	calls := dispatcher.getCalls()
+	require.Equal(t, 2, len(calls), "expected 2 dispatch calls")
+	for i, c := range calls {
+		require.NotNil(t, c.StructuredMessage, "dispatch call %d: StructuredMessage is nil", i)
+		if c.StructuredMessage.DeliveryText != "" {
+			t.Errorf("dispatch call %d (recipient=%s): DeliveryText should be empty when envelope switch is OFF, got %q",
+				i, c.StructuredMessage.Recipient, c.StructuredMessage.DeliveryText)
+		}
+	}
+}
+
+// TestPhase9e_PreResolvedConversation_EnrichesKindSurfaceDisplayName verifies
+// that when a caller supplies a conversation_id, the ConversationResult used
+// for envelope rendering includes Kind, Surface, and DisplayName from the
+// stored conversation row — not empty strings.
+func TestPhase9e_PreResolvedConversation_EnrichesKindSurfaceDisplayName(t *testing.T) {
+	srv, s, projectID, agentSlug, agentID, userID := def11Setup(t)
+	ctx := context.Background()
+
+	// Enable the envelope switch so DeliveryText is rendered.
+	enableReadSwitch(t, srv)
+
+	// Create a conversation with known Kind, Surface, and DisplayName.
+	extRef, err := messages.DMConversationKey("user", userID, "agent", agentID)
+	require.NoError(t, err, "DMConversationKey")
+
+	conv := &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		DisplayName: "Phase9e Test Conversation",
+		ExternalRef: extRef,
+		DriftState:  "active",
+	}
+	created, err := s.UpsertConversationByExternalRef(ctx, conv)
+	require.NoError(t, err, "UpsertConversationByExternalRef")
+
+	dispatcher := &recordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+projectID+"/agents/"+agentSlug+"/message",
+		MessageRequest{
+			StructuredMessage: &messages.StructuredMessage{
+				Version:        messages.Version,
+				Timestamp:      time.Now().UTC().Format(time.RFC3339),
+				Sender:         "user:9e-enrich",
+				SenderID:       userID,
+				Recipient:      "agent:" + agentSlug,
+				Msg:            "Phase 9e enrichment test",
+				Type:           messages.TypeInstruction,
+				ConversationID: created.ID,
+			},
+		})
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"expected 200, got %d: %s", rec.Code, rec.Body.String())
+
+	calls := dispatcher.getCalls()
+	require.Equal(t, 1, len(calls), "expected 1 dispatch call")
+	require.NotNil(t, calls[0].StructuredMessage)
+
+	deliveryText := calls[0].StructuredMessage.DeliveryText
+	if deliveryText == "" {
+		t.Fatal("DeliveryText is empty — envelope switch is ON and message was persisted")
+	}
+
+	// The rendered envelope should contain the conversation metadata.
+	// Kind "direct" and Surface "native" must appear; empty strings would
+	// indicate the enrichment was missed. The JSON is pretty-printed so
+	// keys and values are separated by ": " (with a space).
+	if !strings.Contains(deliveryText, `"kind": "direct"`) {
+		t.Errorf("DeliveryText missing conversation kind; got:\n%s", deliveryText)
+	}
+	if !strings.Contains(deliveryText, `"surface": "native"`) {
+		t.Errorf("DeliveryText missing conversation surface; got:\n%s", deliveryText)
+	}
+	if !strings.Contains(deliveryText, `"name": "Phase9e Test Conversation"`) {
+		t.Errorf("DeliveryText missing conversation display name; got:\n%s", deliveryText)
+	}
+}
+
 func strPtr(s string) *string { return &s }

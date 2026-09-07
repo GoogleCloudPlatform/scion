@@ -26,27 +26,27 @@ const (
 
 // ConversationInfo is the conversation context delivered to agents.
 type ConversationInfo struct {
-	ID           string   `json:"id"`
-	Kind         string   `json:"kind"`                   // "direct" or "group"
-	Surface      string   `json:"surface"`                // "native", "discord", etc.
-	Name         string   `json:"name,omitempty"`         // human-readable
-	Participants []string `json:"participants,omitempty"` // principal refs
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`           // "direct" or "group"
+	Surface string `json:"surface"`        // "native", "discord", etc.
+	Name    string `json:"name,omitempty"` // human-readable
 }
 
 // DeliveryEnvelope is the new agent-facing message format.
 // It replaces the old deliveryMessage struct in pkg/messages/format.go.
 type DeliveryEnvelope struct {
-	Timestamp    string           `json:"timestamp"`
-	Conversation ConversationInfo `json:"conversation"`
-	From         string           `json:"from"`         // PrincipalRef
-	To           []string         `json:"to,omitempty"` // addressee PrincipalRefs
-	Kind         MessageKind      `json:"kind"`
-	Intent       *TextIntent      `json:"intent,omitempty"` // Kind == text
-	Event        *EventBody       `json:"event,omitempty"`  // Kind == event
-	Msg          string           `json:"msg"`
-	Visibility   Visibility       `json:"visibility,omitempty"`
-	Attachments  []string         `json:"attachments,omitempty"`
-	ReplyTo      *string          `json:"reply_to,omitempty"` // msg ID
+	Timestamp    string            `json:"timestamp"`
+	Conversation *ConversationInfo `json:"conversation,omitempty"`
+	From         string            `json:"from"`         // PrincipalRef
+	To           []string          `json:"to,omitempty"` // addressee PrincipalRefs
+	Kind         MessageKind       `json:"kind"`
+	Intent       *TextIntent       `json:"intent,omitempty"` // Kind == text
+	Event        *EventBody        `json:"event,omitempty"`  // Kind == event
+	Msg          string            `json:"msg"`
+	Visibility   Visibility        `json:"visibility,omitempty"`
+	Urgent       bool              `json:"urgent,omitempty"`
+	Attachments  []string          `json:"attachments,omitempty"`
+	ReplyTo      *string           `json:"reply_to,omitempty"` // msg ID
 }
 
 // DeliveryOptions captures transport-level options that are not part of the
@@ -58,11 +58,13 @@ type DeliveryOptions struct {
 
 // FormatNewDelivery formats a new-style Message with its Addressees and
 // conversation context into the delivery envelope for an agent.
+// convInfo may be nil when no conversation context is available; the
+// "conversation" key is omitted from the envelope rather than fabricated.
 // If the message has plain/raw delivery options, only the raw msg text is returned.
 func FormatNewDelivery(
 	msg *Message,
 	addrs []Addressee,
-	convInfo ConversationInfo,
+	convInfo *ConversationInfo,
 	opts DeliveryOptions,
 ) string {
 	if opts.Plain || opts.Raw {
@@ -78,6 +80,7 @@ func FormatNewDelivery(
 		Event:        msg.Event,
 		Msg:          msg.Body,
 		Visibility:   msg.Visibility,
+		Urgent:       msg.Urgent,
 		ReplyTo:      msg.ReplyToID,
 	}
 

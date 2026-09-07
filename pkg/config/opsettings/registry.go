@@ -64,6 +64,14 @@ func init() {
 			New:        func() any { return &MaintenanceSettings{} },
 		},
 		{
+			// messaging is durable via DB but has no settings.yaml representation.
+			// It is runtime/API-owned state: absent DB row = compiled defaults
+			// (both switches OFF). Seeding skips this section (KoanfPaths nil).
+			Name:       "messaging",
+			KoanfPaths: nil,
+			New:        func() any { return &MessagingSettings{} },
+		},
+		{
 			Name: "telemetry",
 			KoanfPaths: []string{
 				"telemetry.enabled",
@@ -303,6 +311,19 @@ func compileSchemas() {
 			"properties": map[string]interface{}{
 				"admin_mode":          map[string]interface{}{"type": "boolean"},
 				"maintenance_message": map[string]interface{}{"type": "string"},
+			},
+			"additionalProperties": false,
+		},
+		// messaging schema is hand-written — conversation_envelope_switch is
+		// runtime/DB state with no $defs in settings-v1.schema.json.
+		// The stale keys (conversation_read_switch, conversation_write_deny_switch)
+		// are deliberately absent: additionalProperties:false rejects them on
+		// write, and existing rows carrying them are never validated (Validate
+		// runs only on write paths). They self-clean on first PUT.
+		"messaging": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"conversation_envelope_switch": map[string]interface{}{"type": "boolean"},
 			},
 			"additionalProperties": false,
 		},
