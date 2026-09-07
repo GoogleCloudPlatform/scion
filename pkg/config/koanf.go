@@ -36,7 +36,7 @@ import (
 // detectLocalRuntimeOnce caches the result of DetectLocalRuntime so that
 // expensive external-command probes (container, podman, docker --version)
 // run at most once per process. GetDefaultSettingsDataYAML, which is called
-// on every LoadSettingsKoanf invocation, uses this wrapper.
+// on every LoadVersionedSettings invocation, uses this wrapper.
 var detectLocalRuntimeOnce = sync.OnceValues(func() (string, error) {
 	return DetectLocalRuntime()
 })
@@ -272,6 +272,13 @@ func getDefaultSettingsYAMLForRuntime(targetRuntime string) ([]byte, error) {
 // a fallback default for settings loaders; during init, DetectLocalRuntime is used
 // instead for actual runtime probing.
 func GetDefaultSettingsDataYAML() ([]byte, error) {
+	// Cloud Run Instance with sandbox launcher: use the tier-specific
+	// defaults so that LoadVersionedSettings never starts from workstation
+	// profiles that cannot work on this tier.
+	if isCloudRunSandboxEnvironment() {
+		return EmbedsFS.ReadFile("embeds/default_settings_cloudrun_sandbox.yaml")
+	}
+
 	if goruntime.GOOS != "darwin" {
 		return getDefaultSettingsYAMLForRuntime("docker")
 	}
