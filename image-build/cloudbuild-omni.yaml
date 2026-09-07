@@ -68,6 +68,8 @@ steps:
       - '-f'
       - 'Dockerfile'
       - '.'
+    env:
+      - 'DOCKER_BUILDKIT=1'
 
   # Stage 2: Build scion-base on thick-prep
   - name: 'gcr.io/cloud-builders/docker'
@@ -84,6 +86,8 @@ steps:
       - '-f'
       - 'image-build/scion-base/Dockerfile'
       - '.'
+    env:
+      - 'DOCKER_BUILDKIT=1'
 
   # Stage 3: scion-claude (from scion-base)
   - name: 'gcr.io/cloud-builders/docker'
@@ -99,6 +103,8 @@ steps:
       - '-f'
       - 'Dockerfile'
       - '.'
+    env:
+      - 'DOCKER_BUILDKIT=1'
 
   # Stage 4: scion-codex (from scion-claude)
   - name: 'gcr.io/cloud-builders/docker'
@@ -114,6 +120,8 @@ steps:
       - '-f'
       - 'Dockerfile'
       - '.'
+    env:
+      - 'DOCKER_BUILDKIT=1'
 
   # Stage 5: scion-opencode (from scion-codex)
   - name: 'gcr.io/cloud-builders/docker'
@@ -129,6 +137,8 @@ steps:
       - '-f'
       - 'Dockerfile'
       - '.'
+    env:
+      - 'DOCKER_BUILDKIT=1'
 
   # Stage 6: scion-antigravity (from scion-opencode)
   - name: 'gcr.io/cloud-builders/docker'
@@ -144,6 +154,8 @@ steps:
       - '-f'
       - 'Dockerfile'
       - '.'
+    env:
+      - 'DOCKER_BUILDKIT=1'
 
   # Stage 7: scion-grok-build (from scion-antigravity)
   - name: 'gcr.io/cloud-builders/docker'
@@ -159,6 +171,8 @@ steps:
       - '-f'
       - 'Dockerfile'
       - '.'
+    env:
+      - 'DOCKER_BUILDKIT=1'
 
   # Stage 8: scion-omni (from scion-grok-build) — the final image
   - name: 'gcr.io/cloud-builders/docker'
@@ -177,6 +191,8 @@ steps:
       - '-f'
       - 'image-build/omni/Dockerfile'
       - '.'
+    env:
+      - 'DOCKER_BUILDKIT=1'
 
 # Push only scion-omni (the final deliverable).
 images:
