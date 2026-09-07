@@ -22,3 +22,34 @@ if (typeof Element.prototype.animate !== 'function') {
     } as unknown as Animation;
   };
 }
+
+// Suppress known Shoelace/Happy DOM unhandled rejections that occur during
+// component lifecycle in the test environment. These are harmless —
+// Shoelace components still function correctly for testing purposes.
+//
+// Vitest catches unhandled rejections at the process level, so we must
+// intercept there — the browser-style globalThis.addEventListener is not
+// sufficient in a Node-based test runner.
+{
+  const origListeners = process.rawListeners(
+    'unhandledRejection',
+  ) as ((reason: unknown, promise: Promise<unknown>) => void)[];
+  process.removeAllListeners('unhandledRejection');
+
+  process.on('unhandledRejection', (reason: unknown, promise: Promise<unknown>) => {
+    const msg = String(
+      (reason as { message?: string })?.message ?? reason ?? '',
+    );
+    if (
+      msg.includes('Cannot read from private field') ||
+      msg.includes('getAnimations is not a function')
+    ) {
+      // Swallow known Shoelace / Happy DOM incompatibility
+      return;
+    }
+    // Forward any other rejection to the original Vitest handler(s)
+    for (const fn of origListeners) {
+      fn(reason, promise);
+    }
+  });
+}
