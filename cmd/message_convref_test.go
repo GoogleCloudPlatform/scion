@@ -399,7 +399,7 @@ func TestSendMessageViaConversation_EmailRef_NoAgentContext(t *testing.T) {
 
 	err = sendMessageViaConversation(hubCtx, ref, "should fail", false, false)
 	require.Error(t, err, "email ref without agent context must fail")
-	assert.Contains(t, err.Error(), "only supported from within an agent container")
+	assert.Contains(t, err.Error(), "requires an agent identity")
 
 	// Verify zero sends — no messages should be delivered.
 	assert.Len(t, *sent, 0, "no agent messages should be sent")
@@ -456,7 +456,7 @@ func TestBackwardCompat_BareAgentName(t *testing.T) {
 	}
 
 	// Send via the legacy path — bare agent name.
-	err = sendMessageViaHub(hubCtx, "old-agent-name", "hello world", false, false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "old-agent-name", "hello world", false, false, false)
 	require.NoError(t, err)
 
 	require.Len(t, *sent, 1)
@@ -531,7 +531,7 @@ func TestSendMessageViaConversation_EmailPreconditionBeforeSend(t *testing.T) {
 
 	err = sendMessageViaConversation(hubCtx, ref, "should fail before send", false, false)
 	require.Error(t, err, "email ref without agent context must fail")
-	assert.Contains(t, err.Error(), "only supported from within an agent container")
+	assert.Contains(t, err.Error(), "requires an agent identity")
 
 	// DEF-48: no messages should be sent when precondition fails.
 	assert.Len(t, *sent, 0, "no agent messages should be sent")

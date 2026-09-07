@@ -137,8 +137,6 @@ Sends a message to a running agent or user.
     - `--plain`: *(Deprecated — will be removed.)*  Mark for plain-text delivery.
     - `--channel <channel>`: *(Deprecated — use conversation addressing instead.)* Target a specific message channel (e.g., `telegram`, `gchat`, `teams`, `web`).
     - `--thread-id <id>`: *(Deprecated — use conversation addressing instead.)* Target a specific thread ID within the channel.
-    - `-b, --broadcast`: *(Deprecated — use `scion broadcast` instead.)*
-    - `-a, --all`: *(Deprecated — use `scion broadcast --all` instead.)*
     - `--raw`: *(Deprecated — use `scion keys` instead.)* Send literal bytes via tmux send-keys with no trailing Enter.
     - `--in <duration>`: *(Deprecated — use `scion schedule create --in` instead.)* Schedule message delivery after a duration.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
@@ -179,7 +177,7 @@ Sends a message to all running agents in the current project (or across all proj
 
 **Usage:** `scion broadcast <message> [flags]`
 
-This command replaces the deprecated `--broadcast` / `--all` flags on `scion message`.
+This command replaces the removed `--broadcast` / `--all` flags on `scion message`.
 
 ### `scion keys`
 
