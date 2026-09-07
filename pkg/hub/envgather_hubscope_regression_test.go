@@ -198,7 +198,7 @@ func TestResolveSecrets_HubScope_AsNeeded_Filtered(t *testing.T) {
 		},
 	})
 
-	resolved, err := d.resolveSecrets(ctx, agent)
+	resolved, asNeededKeys, err := d.resolveSecrets(ctx, agent)
 	if err != nil {
 		t.Fatalf("resolveSecrets: %v", err)
 	}
@@ -218,5 +218,17 @@ func TestResolveSecrets_HubScope_AsNeeded_Filtered(t *testing.T) {
 		t.Error("ALWAYS_HUB_SECRET (hub scope, always) should be present")
 	} else if r.Value != "always-hub-value" {
 		t.Errorf("ALWAYS_HUB_SECRET value = %q, want %q", r.Value, "always-hub-value")
+	}
+
+	// Filtered as_needed key should be returned in asNeededKeys
+	found := false
+	for _, k := range asNeededKeys {
+		if k == "GEMINI_API_KEY" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("asNeededKeys should contain GEMINI_API_KEY, got %v", asNeededKeys)
 	}
 }

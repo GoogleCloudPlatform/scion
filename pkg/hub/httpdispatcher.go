@@ -661,7 +661,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 
 	// Resolve type-aware secrets from all applicable scopes
 	if !noAuth {
-		resolvedSecrets, err := d.resolveSecrets(ctx, agent)
+		resolvedSecrets, asNeededKeys, err := d.resolveSecrets(ctx, agent)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("Failed to resolve secrets", "agent_id", agent.ID, "error", err)
@@ -691,6 +691,11 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 					}
 				}
 			}
+		}
+		// Populate as_needed env-type secret targets so the broker's
+		// autodetect can consider them when selecting auth type (#1447).
+		if len(asNeededKeys) > 0 {
+			req.AvailableAsNeededKeys = asNeededKeys
 		}
 	}
 
@@ -1908,7 +1913,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	}
 
 	// Resolve type-aware secrets and inject environment-type secrets
-	resolvedSecrets, err := d.resolveSecrets(ctx, agent)
+	resolvedSecrets, _, err := d.resolveSecrets(ctx, agent)
 	if err != nil {
 		if d.debug {
 			d.log.Warn("DispatchAgentStart: failed to resolve secrets", "error", err)
@@ -2216,7 +2221,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 
 	// Resolve type-aware secrets and inject environment-type secrets —
 	// same as DispatchAgentStart.
-	resolvedSecrets, secretErr := d.resolveSecrets(ctx, agent)
+	resolvedSecrets, _, secretErr := d.resolveSecrets(ctx, agent)
 	if secretErr != nil {
 		if d.debug {
 			d.log.Warn("DispatchAgentRestart: failed to resolve secrets", "error", secretErr)
@@ -2728,12 +2733,12 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 //
 // This matches envScopePrecedence (see above). The divergence previously
 // tracked in issue #624 was corrected in PR #1227.
-func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.Agent) ([]ResolvedSecret, error) {
+func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.Agent) ([]ResolvedSecret, []string, error) {
 	if d.secretBackend == nil {
 		if d.debug {
 			d.log.Debug("resolveSecrets: secretBackend is nil, skipping secret resolution")
 		}
-		return nil, nil
+		return nil, nil, nil
 	}
 	if d.debug {
 		d.log.Debug("resolveSecrets: querying secret backend",
@@ -2769,15 +2774,25 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 
 	resolved, err := d.secretBackend.Resolve(ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	result := make([]ResolvedSecret, 0, len(resolved))
+	var asNeededKeys []string
 	for _, sv := range resolved {
 		// Only skip as_needed environment-type secrets (handled by the
 		// two-pass env-gather flow). File-type and variable-type secrets
 		// should always be placed regardless of injection mode — the
 		// as_needed concept does not apply to them.
 		if sv.InjectionMode == store.InjectionModeAsNeeded && (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") {
+			// Collect the target key name so the broker's autodetect can
+			// consider it when selecting auth type (closes #1447).
+			target := sv.Target
+			if target == "" {
+				target = sv.Name
+			}
+			if target != "" {
+				asNeededKeys = append(asNeededKeys, target)
+			}
 			continue
 		}
 		result = append(result, ResolvedSecret{
@@ -2794,9 +2809,10 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 		for i, r := range result {
 			names[i] = r.Name
 		}
-		d.log.Debug("resolveSecrets: resolved secrets", "count", len(result), "names", names)
+		d.log.Debug("resolveSecrets: resolved secrets", "count", len(result), "names", names,
+			"asNeededKeys", asNeededKeys)
 	}
-	return result, nil
+	return result, asNeededKeys, nil
 }
 
 // classifyEnv sets the classification for an env key in the given map,

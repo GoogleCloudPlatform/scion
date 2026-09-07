@@ -523,6 +523,14 @@ type RemoteCreateAgentRequest struct {
 	// If required keys are missing, the broker returns HTTP 202 with env requirements.
 	GatherEnv bool `json:"gatherEnv,omitempty"`
 
+	// AvailableAsNeededKeys lists the target key names of as_needed
+	// environment-type secrets that the Hub filtered out of ResolvedSecrets
+	// but could resolve in a second pass if the broker reports them as needed.
+	// This lets the broker's autodetect consider these keys when selecting
+	// auth type, closing the chicken-and-egg gap where autodetect only sees
+	// already-resolved keys.
+	AvailableAsNeededKeys []string `json:"availableAsNeededKeys,omitempty"`
+
 	// RequiredSecrets contains declared secrets from the template config.
 	// Passed to the broker so it can include them in env-gather requirements.
 	RequiredSecrets []api.RequiredSecret `json:"requiredSecrets,omitempty"`

@@ -2222,6 +2222,12 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 					}
 				}
 			}
+			// Include as_needed secret targets the hub could resolve in
+			// pass 2. Without this, autodetect cannot see deferred keys
+			// and falls back to default_type, losing the credentials (#1447).
+			for _, k := range req.AvailableAsNeededKeys {
+				resolvedEnvKeys[k] = struct{}{}
+			}
 			if detected := harness.DetectAuthTypeFromEnvVarsFromConfig(authMeta, resolvedEnvKeys); detected != "" {
 				authType = detected
 			}
