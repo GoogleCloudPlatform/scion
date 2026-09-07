@@ -290,3 +290,124 @@ func TestDEF152_ConvRef_WithRecipient_StillWorks(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code,
 		"providing both recipient and conversation_ref must still work")
 }
+
+// ---------------------------------------------------------------------------
+// DEF-152 mutation coverage 1: sender on the OTHER side of the DM key.
+//
+// DMConversationKey sorts tokens lexicographically. Since "agent:" < "user:",
+// agent-user DMs always have the agent on side A. A naive implementation
+// that always picks side B (kindB/idB) as the addressee would accidentally
+// be correct for every canonical agent-user DM key.
+//
+// This test constructs a non-canonical key with the user on side A and the
+// agent on side B. The derivation logic must still identify the agent as the
+// sender and the user as the addressee. Under the mutation
+// `addrKind, addrID = kindB, idB` (always take B), this test fails because
+// the derived addressee would be the agent itself, hitting the
+// "non-user addressee" refusal.
+// ---------------------------------------------------------------------------
+
+func TestDEF152_SenderOnSideB_DerivedAddresseeStillCorrect(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	ctx := context.Background()
+
+	// Hand-craft a DM key with the user on side A and the agent on side B.
+	// This is the reverse of what DMConversationKey would produce for an
+	// agent-user pair (which always puts agent first). ParseDMKey accepts
+	// both orderings — it does not validate sort order.
+	reversedKey := "dm:user:" + user.ID + ":agent:" + agent.ID
+
+	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: reversedKey,
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+
+	_ = s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID,
+		PrincipalKind:  "agent",
+		PrincipalID:    agent.ID,
+		Role:           "member",
+	})
+	_ = s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID,
+		PrincipalKind:  "user",
+		PrincipalID:    user.ID,
+		Role:           "member",
+	})
+
+	rr := postOutboundRefOnly(t, srv, project.ID, agent.ID,
+		"hello reversed key", "conv:"+conv.ID)
+	require.Equal(t, http.StatusOK, rr.Code,
+		"sender on side B of DM key must still succeed: %s", rr.Body.String())
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, user.ID, resp["recipient_id"],
+		"derived recipient must be the USER (side A), not the agent (side B)")
+}
+
+// ---------------------------------------------------------------------------
+// DEF-152 mutation coverage 2: non-user addressee (agent-to-agent DM).
+//
+// When a conv:<uuid> resolves to a direct DM whose other participant is an
+// agent (not a user), the handler must refuse. This endpoint delivers to
+// human inboxes; delivering to an agent ID would silently misroute.
+//
+// Under the mutation `if false` (replacing `if addrKind != "user"`), this
+// test fails because the handler would attempt to look up the agent ID as
+// a user, producing a 500.
+// ---------------------------------------------------------------------------
+
+func TestDEF152_NonUserAddressee_AgentToAgentDM_Refused(t *testing.T) {
+	srv, s, project, agent, _ := def138Setup(t)
+	ctx := context.Background()
+
+	// Create a second agent in the same project for the DM.
+	otherAgent := &store.Agent{
+		ID:         tid("d152-agent-dm-target"),
+		Name:       "d152-agent-dm-target",
+		Slug:       "d152-agent-dm-target",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, otherAgent))
+
+	// Create a direct DM between the two agents.
+	dmKey, err := messages.DMConversationKey("agent", agent.ID, "agent", otherAgent.ID)
+	require.NoError(t, err)
+
+	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+
+	_ = s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID,
+		PrincipalKind:  "agent",
+		PrincipalID:    agent.ID,
+		Role:           "member",
+	})
+	_ = s.AddParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: conv.ID,
+		PrincipalKind:  "agent",
+		PrincipalID:    otherAgent.ID,
+		Role:           "member",
+	})
+
+	rr := postOutboundRefOnly(t, srv, project.ID, agent.ID,
+		"agent-to-agent via conv ref", "conv:"+conv.ID)
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"agent-to-agent DM via conv ref must be refused on this endpoint: %s",
+		rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "non-user addressee",
+		"error must mention non-user addressee")
+	assert.Contains(t, rr.Body.String(), "delivers to users only",
+		"error must explain the endpoint constraint")
+}
