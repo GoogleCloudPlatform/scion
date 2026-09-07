@@ -116,10 +116,19 @@ Examples:
 		}
 
 		// Refuse removed flags with actionable errors.
+		// In agent mode, scion broadcast is not available (not in agentAllowed),
+		// so the error must not recommend it — tell agents to address recipients
+		// explicitly instead.
 		if cmd.Flags().Changed("broadcast") {
+			if resolveMode() == ModeAgent {
+				return fmt.Errorf("--broadcast has been removed from 'scion message'; broadcasting is not available in agent mode — address your recipients explicitly (e.g. @agent-name)")
+			}
 			return fmt.Errorf("--broadcast has been removed from 'scion message'; use 'scion broadcast' instead")
 		}
 		if cmd.Flags().Changed("all") {
+			if resolveMode() == ModeAgent {
+				return fmt.Errorf("--all has been removed from 'scion message'; broadcasting is not available in agent mode — address your recipients explicitly (e.g. @agent-name)")
+			}
 			return fmt.Errorf("--all has been removed from 'scion message'; use 'scion broadcast --all' instead")
 		}
 

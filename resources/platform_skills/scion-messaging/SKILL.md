@@ -33,7 +33,7 @@ Choosing the right recipient is critical to avoid spam and ensure the message re
 - **`#<thread>`**: Address a named thread by its thread identifier.
 - **`coordinator`**: (Convention) Usually refers to the agent managing the project.
 
-**Anti-Pattern:** Do not use `scion broadcast` for routine communication. It sends to every agent in the project, wastes context windows, and is often ignored or causes confusion. Broadcasting is now a separate command (`scion broadcast`); the old `--broadcast` flag on `scion message` has been removed.
+**Anti-Pattern:** Do not broadcast. Broadcasting sends to every agent in the project, wastes context windows, and is often ignored or causes confusion. Broadcasting is not available in agent mode — address your recipients explicitly (e.g. `@agent-name`). The `--broadcast` and `--all` flags on `scion message` have been removed.
 
 ## Message Timing and Cadence
 
@@ -105,7 +105,7 @@ The `scion message` command provides the following flags:
 **Capabilities that moved to separate commands:**
 - **Raw keystrokes**: Use `scion keys` to send literal keystrokes to an agent's tmux terminal (replaces the old `--raw` flag).
 - **Scheduled messages**: Use `scion schedule create` to schedule messages for future delivery (replaces the old `--in` and `--at` flags). See the `scion-scheduler` skill.
-- **Broadcasting**: Use `scion broadcast` to send to all agents in a project, or `scion broadcast --all` for global broadcast (the `--broadcast` and `--all` flags on `scion message` have been removed).
+- **Broadcasting**: The `--broadcast` and `--all` flags on `scion message` have been removed. Broadcasting is not available in agent mode — address your recipients explicitly (e.g. `@agent-name`).
 - **Notifications**: Use `scion notifications subscribe` to subscribe to agent state changes (replaces the old `--notify` flag).
 
 **Deprecated flags still accepted (with warnings):**
@@ -186,7 +186,7 @@ is a broadcast to subscribers, not a delivery to an addressee.
 
 ## Anti-Patterns and Red Flags
 
-- **Red Flag**: Using `scion broadcast` for routine communication (the old `--broadcast` flag on `scion message` has been removed).
+- **Red Flag**: Attempting to broadcast. Broadcasting is not available in agent mode; address recipients explicitly.
 - **Red Flag**: An agent goes silent for >30 minutes without a milestone update or "blocked" status.
 - **Anti-Pattern**: Sending "I'm still here" or other low-signal filler messages.
 - **Anti-Pattern**: Using `sleep` to wait for something; use `sciontool status blocked` instead. For external processes that emit no notification (CI, builds, deploys), pair `status blocked` with a scheduled self-callback — see the `scion-scheduler` skill → **Waiting on external processes**.

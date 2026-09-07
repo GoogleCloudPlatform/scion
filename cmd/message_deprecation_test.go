@@ -176,13 +176,16 @@ func newDeprecationTestServer(t *testing.T, projectID string) (*httptest.Server,
 	return server, &sent
 }
 
-// TestDeprecatedFlag_Broadcast tests that --broadcast emits a deprecation
-// refusal error naming the replacement command.
+// TestDeprecatedFlag_Broadcast tests that --broadcast is refused in human mode
+// with an error pointing at scion broadcast.
 func TestDeprecatedFlag_Broadcast(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 	restore := resetMessageFlags()
 	defer restore()
+
+	// Ensure human mode (default)
+	t.Setenv("SCION_CLI_MODE", "")
 
 	// Simulate the flag being set via cobra
 	require.NoError(t, messageCmd.Flags().Set("broadcast", "true"))
@@ -193,12 +196,15 @@ func TestDeprecatedFlag_Broadcast(t *testing.T) {
 	assert.Contains(t, err.Error(), "scion broadcast")
 }
 
-// TestDeprecatedFlag_All tests that --all is refused with an actionable error.
+// TestDeprecatedFlag_All tests that --all is refused in human mode with an
+// error pointing at scion broadcast --all.
 func TestDeprecatedFlag_All(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 	restore := resetMessageFlags()
 	defer restore()
+
+	t.Setenv("SCION_CLI_MODE", "")
 
 	require.NoError(t, messageCmd.Flags().Set("all", "true"))
 
@@ -206,6 +212,50 @@ func TestDeprecatedFlag_All(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--all has been removed")
 	assert.Contains(t, err.Error(), "scion broadcast --all")
+}
+
+// TestDeprecatedFlag_Broadcast_AgentMode tests that --broadcast in agent mode
+// does NOT recommend scion broadcast (which is unavailable to agents) and
+// instead tells the agent to address recipients explicitly.
+func TestDeprecatedFlag_Broadcast_AgentMode(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+	restore := resetMessageFlags()
+	defer restore()
+
+	t.Setenv("SCION_CLI_MODE", "agent")
+
+	require.NoError(t, messageCmd.Flags().Set("broadcast", "true"))
+
+	err := messageCmd.RunE(messageCmd, []string{"hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--broadcast has been removed")
+	assert.Contains(t, err.Error(), "not available in agent mode")
+	assert.Contains(t, err.Error(), "address your recipients explicitly")
+	assert.NotContains(t, err.Error(), "scion broadcast",
+		"agent-mode refusal must not recommend scion broadcast (not in agentAllowed)")
+}
+
+// TestDeprecatedFlag_All_AgentMode tests that --all in agent mode does NOT
+// recommend scion broadcast --all and instead tells the agent to address
+// recipients explicitly.
+func TestDeprecatedFlag_All_AgentMode(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+	restore := resetMessageFlags()
+	defer restore()
+
+	t.Setenv("SCION_CLI_MODE", "agent")
+
+	require.NoError(t, messageCmd.Flags().Set("all", "true"))
+
+	err := messageCmd.RunE(messageCmd, []string{"hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--all has been removed")
+	assert.Contains(t, err.Error(), "not available in agent mode")
+	assert.Contains(t, err.Error(), "address your recipients explicitly")
+	assert.NotContains(t, err.Error(), "scion broadcast",
+		"agent-mode refusal must not recommend scion broadcast --all (not in agentAllowed)")
 }
 
 // TestDeprecatedFlag_Raw tests that --raw emits a deprecation warning
@@ -396,6 +446,8 @@ func TestDeprecatedFlag_BroadcastRefusedViaRunE(t *testing.T) {
 	defer orig.restore()
 	restore := resetMessageFlags()
 	defer restore()
+
+	t.Setenv("SCION_CLI_MODE", "")
 
 	require.NoError(t, messageCmd.Flags().Set("broadcast", "true"))
 
