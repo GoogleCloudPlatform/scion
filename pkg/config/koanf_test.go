@@ -931,6 +931,137 @@ func TestGetDefaultSettingsDataYAML_FallsBackToContainerOnDetectFailure(t *testi
 	}
 }
 
+func TestGetDefaultSettingsDataYAML_CloudRunSandbox(t *testing.T) {
+	// When isCloudRunSandboxEnvironment() is true (CLOUD_RUN_INSTANCE set +
+	// sandbox binary present), GetDefaultSettingsDataYAML must return the
+	// cloudrun-sandbox template — not the workstation template.
+	t.Setenv("CLOUD_RUN_INSTANCE", "test-instance-defaults")
+	origSandboxBinExists := sandboxBinExists
+	sandboxBinExists = func(path string) bool { return true }
+	defer func() { sandboxBinExists = origSandboxBinExists }()
+
+	data, err := GetDefaultSettingsDataYAML()
+	if err != nil {
+		t.Fatalf("GetDefaultSettingsDataYAML failed: %v", err)
+	}
+
+	// Must contain cloudrun-sandbox profile and runtime.
+	if !bytes.Contains(data, []byte("runtime: cloudrun-sandbox")) {
+		t.Error("expected cloudrun-sandbox runtime in defaults")
+	}
+	if !bytes.Contains(data, []byte("active_profile: default")) {
+		t.Error("expected active_profile 'default' in cloudrun-sandbox defaults")
+	}
+	// Must NOT contain workstation profiles.
+	if bytes.Contains(data, []byte("runtime: docker")) {
+		t.Error("workstation runtime 'docker' must not appear in cloudrun-sandbox defaults")
+	}
+	if bytes.Contains(data, []byte("runtime: kubernetes")) {
+		t.Error("workstation runtime 'kubernetes' must not appear in cloudrun-sandbox defaults")
+	}
+}
+
+func TestGetDefaultSettingsDataYAML_NonCloudRunSandbox(t *testing.T) {
+	// When isCloudRunSandboxEnvironment() is false, GetDefaultSettingsDataYAML
+	// must return the workstation template (not the cloudrun-sandbox template).
+	// Test three cases: no env var, env var without sandbox binary.
+
+	t.Run("no_env_var", func(t *testing.T) {
+		t.Setenv("CLOUD_RUN_INSTANCE", "")
+		origSandboxBinExists := sandboxBinExists
+		sandboxBinExists = func(path string) bool { return false }
+		defer func() { sandboxBinExists = origSandboxBinExists }()
+
+		data, err := GetDefaultSettingsDataYAML()
+		require.NoError(t, err)
+
+		// Should contain workstation profiles, not cloudrun-sandbox.
+		assert.Contains(t, string(data), "active_profile: local",
+			"workstation template should have active_profile 'local'")
+		assert.NotContains(t, string(data), "runtime: cloudrun-sandbox",
+			"cloudrun-sandbox runtime should not appear outside that tier")
+	})
+
+	t.Run("env_var_without_sandbox_binary", func(t *testing.T) {
+		t.Setenv("CLOUD_RUN_INSTANCE", "test-instance-no-bin")
+		origSandboxBinExists := sandboxBinExists
+		sandboxBinExists = func(path string) bool { return false }
+		defer func() { sandboxBinExists = origSandboxBinExists }()
+
+		data, err := GetDefaultSettingsDataYAML()
+		require.NoError(t, err)
+
+		// Without the sandbox binary, should fall back to workstation defaults.
+		assert.Contains(t, string(data), "active_profile: local",
+			"should fall back to workstation template without sandbox binary")
+		assert.NotContains(t, string(data), "runtime: cloudrun-sandbox",
+			"cloudrun-sandbox runtime should not appear without sandbox binary")
+	})
+}
+
+func TestGetDefaultSettingsDataYAML_CloudRunSandbox_ProfilesCorrect(t *testing.T) {
+	// Verify that LoadVersionedSettings on the cloudrun-sandbox tier produces
+	// exactly the "default" profile with cloudrun-sandbox runtime and no
+	// workstation profiles (local/remote).
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	// Simulate cloudrun-sandbox environment.
+	t.Setenv("CLOUD_RUN_INSTANCE", "test-instance-profiles")
+	origSandboxBinExists := sandboxBinExists
+	sandboxBinExists = func(path string) bool { return true }
+	defer func() { sandboxBinExists = origSandboxBinExists }()
+
+	// Create a minimal global settings file (like an existing sn-ready instance
+	// that has no profiles section).
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+	minimalSettings := `schema_version: "1"
+server:
+  broker:
+    broker_id: test-broker-uuid
+`
+	require.NoError(t, os.WriteFile(
+		filepath.Join(globalScionDir, "settings.yaml"),
+		[]byte(minimalSettings), 0644))
+
+	// Load settings — this merges embedded defaults (now cloudrun-sandbox
+	// template) with the minimal file above.
+	vs, err := LoadVersionedSettings(globalScionDir)
+	require.NoError(t, err)
+
+	// The effective settings must have exactly the "default" profile.
+	assert.Equal(t, "default", vs.ActiveProfile,
+		"active_profile should be 'default' on cloudrun-sandbox tier")
+
+	defaultProfile, ok := vs.Profiles["default"]
+	require.True(t, ok, "profile 'default' must exist")
+	assert.Equal(t, "cloudrun-sandbox", defaultProfile.Runtime,
+		"default profile runtime must be 'cloudrun-sandbox'")
+
+	// No workstation profiles should be present — the embedded defaults are
+	// now the cloudrun-sandbox template, which doesn't define local/remote.
+	_, hasLocal := vs.Profiles["local"]
+	assert.False(t, hasLocal,
+		"workstation profile 'local' must not exist on cloudrun-sandbox tier")
+	_, hasRemote := vs.Profiles["remote"]
+	assert.False(t, hasRemote,
+		"workstation profile 'remote' must not exist on cloudrun-sandbox tier")
+
+	// Runtimes: only cloudrun-sandbox should be defined.
+	_, hasCRS := vs.Runtimes["cloudrun-sandbox"]
+	assert.True(t, hasCRS, "runtime 'cloudrun-sandbox' must be defined")
+	_, hasK8s := vs.Runtimes["kubernetes"]
+	assert.False(t, hasK8s,
+		"workstation runtime 'kubernetes' must not exist on cloudrun-sandbox tier")
+	_, hasDocker := vs.Runtimes["docker"]
+	assert.False(t, hasDocker,
+		"workstation runtime 'docker' must not exist on cloudrun-sandbox tier")
+}
+
 func TestLoadSettingsKoanf_ExternalOverridesInRepo(t *testing.T) {
 	// Verifies that external project config settings override in-repo settings
 	// when both exist (external has highest project-level precedence).
