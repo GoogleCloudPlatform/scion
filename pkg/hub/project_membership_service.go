@@ -848,7 +848,8 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			if req.CreateOnly {
 				if oldRoleDef.Name == roleDef.Name && len(existingBindings) == 1 {
 					// Exact duplicate built-in — conflict, not false success.
-					return fmt.Errorf("governance:%d:%s", 409, "this role binding already exists")
+					return fmt.Errorf("governance:%d:%s", 409,
+						fmt.Sprintf("principal already has built-in membership role %q in this project", oldRoleDef.Name))
 				}
 				// Different built-in — conflict naming the existing role.
 				return fmt.Errorf("governance:%d:%s", 409,

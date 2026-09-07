@@ -17,9 +17,11 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -308,12 +310,11 @@ func TestRS3_ConcurrentGenericPost_AtMostOneSucceeds(t *testing.T) {
 		}
 	}
 
-	// At most one create should succeed.
-	assert.LessOrEqual(t, creates, 1,
-		"at most one concurrent generic POST should succeed (got %d creates)", creates)
-	// At least (concurrency - 1) should conflict.
-	assert.GreaterOrEqual(t, conflicts, concurrency-1,
-		"at least %d requests should conflict (got %d)", concurrency-1, conflicts)
+	// Exactly one create should succeed; the rest must conflict.
+	assert.Equal(t, 1, creates,
+		"exactly one concurrent generic POST should succeed (got %d creates)", creates)
+	assert.Equal(t, concurrency-1, conflicts,
+		"exactly %d requests should conflict (got %d)", concurrency-1, conflicts)
 	assert.Equal(t, 0, others, "no unexpected status codes")
 
 	// Verify exactly one built-in membership exists.
@@ -389,6 +390,15 @@ func TestRS3_GenericPost_ExactDuplicateBuiltIn_Conflict(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code,
 		"exact duplicate built-in via generic POST should return 409, got %d: %s",
 		rec.Code, rec.Body.String())
+
+	// Response body should name the existing role (O-3: consistent with
+	// the different-built-in branch, no leaked IDs).
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error.Message, store.ProjectRoleMember,
+		"exact-duplicate conflict message should name the existing built-in role")
+	assert.NotContains(t, errResp.Error.Message, memberRD.ID,
+		"conflict message must not leak internal role-definition ID")
 
 	// Binding unchanged.
 	assertBindingPreserved(t, s, snapshot)
@@ -588,14 +598,44 @@ func TestRS3_GenericPost_DelegationCheck(t *testing.T) {
 		rec.Code, rec.Body.String())
 }
 
+// doGenericPostWithCredential makes a POST to /api/v1/admin/role-bindings
+// with a specific CredentialContext and UserIdentity injected into the
+// request context, bypassing auth middleware. This tests that the
+// credential-kind guard in ProjectMembershipService.AddMember rejects
+// disallowed credentials when reached via the generic role-binding endpoint.
+func doGenericPostWithCredential(
+	t *testing.T, srv *Server, body createRoleBindingRequest,
+	identity UserIdentity, cred CredentialContext,
+) *httptest.ResponseRecorder {
+	t.Helper()
+
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/role-bindings",
+		bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	ctx := req.Context()
+	ctx = contextWithIdentity(ctx, identity)
+	ctx = contextWithCredentialContext(ctx, cred)
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	srv.handleAdminRoleBindings(rec, req)
+	return rec
+}
+
 // ---------------------------------------------------------------------------
 // RS3.8: Credential-kind enforcement on generic POST
 // ---------------------------------------------------------------------------
 
-// TestRS3_GenericPost_CredentialKind verifies that credential-kind
-// enforcement is applied to the generic POST path (the membership service
-// checks R2-2 credential kind before any mutation).
-func TestRS3_GenericPost_CredentialKind(t *testing.T) {
+// TestRS3_GenericPost_CredentialKind_Denied verifies that the generic POST
+// path rejects disallowed credential kinds (agent JWT, scoped UAT, broker,
+// federation) with 403. The credential-kind check in AddMember (R2-2) fires
+// before any transaction or CreateOnly logic, so a disallowed credential
+// never reaches the conflict guard.
+func TestRS3_GenericPost_CredentialKind_Denied(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -611,25 +651,43 @@ func TestRS3_GenericPost_CredentialKind(t *testing.T) {
 	}))
 	ensureHubMembership(ctx, s, targetID)
 
-	// Create a member binding for the target.
 	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
 	require.NoError(t, err)
 
-	// Normal request from owner should succeed.
-	rec := doRequestAsUser(t, srv, &store.User{
-		ID: ownerID, Email: ownerID + "@test.com",
-		DisplayName: "Owner", Role: "member",
-	}, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+	body := createRoleBindingRequest{
 		RoleDefinitionID: memberRD.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
 		PrincipalID:      targetID,
 		ScopeType:        store.RoleScopeProject,
 		ScopeID:          projectID,
-	})
+	}
 
-	// Should succeed (201) since this is the first built-in binding.
-	assert.Equal(t, http.StatusCreated, rec.Code,
-		"first built-in binding via generic POST should succeed: %s", rec.Body.String())
+	ownerIdentity := NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web")
+
+	rejectedKinds := []struct {
+		name string
+		kind CredentialKind
+	}{
+		{"agent_jwt", CredentialKindAgentJWT},
+		{"uat", CredentialKindUAT},
+		{"broker", CredentialKindBroker},
+		{"federation", CredentialKindFederation},
+	}
+
+	for _, tc := range rejectedKinds {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doGenericPostWithCredential(t, srv, body, ownerIdentity,
+				CredentialContext{Kind: tc.kind})
+			assert.Equal(t, http.StatusForbidden, rec.Code,
+				"credential kind %q should be denied on generic POST: %s",
+				tc.kind, rec.Body.String())
+		})
+	}
+
+	// Verify no binding was created.
+	bindings := listProjectBindings(t, s, targetID, projectID)
+	assert.Empty(t, bindings,
+		"no bindings should exist after all rejected credential kinds")
 }
 
 // ---------------------------------------------------------------------------
