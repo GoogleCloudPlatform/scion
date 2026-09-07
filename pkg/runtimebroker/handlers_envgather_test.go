@@ -2299,7 +2299,7 @@ profiles:
 		"name": "test-agent-asneeded-autodetect",
 		"id": "agent-uuid-asneeded",
 		"gatherEnv": true,
-		"grovePath": "` + projectDir + `",
+		"projectPath": "` + projectDir + `",
 		"availableAsNeededKeys": ["GEMINI_API_KEY"],
 		"config": {"template": "antigravity", "profile": "default"}
 	}`
@@ -2371,7 +2371,7 @@ profiles:
 		"name": "test-agent-no-asneeded",
 		"id": "agent-uuid-no-asneeded",
 		"gatherEnv": true,
-		"grovePath": "` + projectDir + `",
+		"projectPath": "` + projectDir + `",
 		"config": {"template": "antigravity", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
