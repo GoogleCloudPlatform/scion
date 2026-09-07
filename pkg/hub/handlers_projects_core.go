@@ -2855,6 +2855,10 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	// authorization composition (base permission, governance, actor status,
 	// credential ceiling, TOCTOU re-check), transactional cascades, and
 	// atomic audit. NO external effects are emitted before this call.
+	if s.deletionService == nil {
+		http.Error(w, "deletion service not configured", http.StatusInternalServerError)
+		return
+	}
 	req := ProjectDeleteRequest{
 		ProjectID: id,
 		Actor:     userIdentity,

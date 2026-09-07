@@ -295,6 +295,10 @@ func (s *Server) addProjectMember(w http.ResponseWriter, r *http.Request, projec
 
 	// RS1: Delegate to the project membership service. The service implements
 	// governance matrix, delegation checks, one-binding invariant, and audit.
+	if s.membershipService == nil {
+		http.Error(w, "membership service not configured", http.StatusInternalServerError)
+		return
+	}
 	result, decision := s.membershipService.AddMember(ctx, MembershipRequest{
 		Op:            MembershipOpAdd,
 		ProjectID:     projectID,
@@ -372,6 +376,10 @@ func (s *Server) updateProjectMemberRole(w http.ResponseWriter, r *http.Request,
 	}
 
 	// RS1: Delegate to the project membership service.
+	if s.membershipService == nil {
+		http.Error(w, "membership service not configured", http.StatusInternalServerError)
+		return
+	}
 	result, decision := s.membershipService.UpdateMemberRole(ctx, MembershipRequest{
 		Op:           MembershipOpUpdate,
 		ProjectID:    projectID,
@@ -430,6 +438,10 @@ func (s *Server) removeProjectMember(w http.ResponseWriter, r *http.Request, pro
 	}
 
 	// RS1: Delegate to the project membership service.
+	if s.membershipService == nil {
+		http.Error(w, "membership service not configured", http.StatusInternalServerError)
+		return
+	}
 	_, decision := s.membershipService.RemoveMember(ctx, MembershipRequest{
 		Op:        MembershipOpRemove,
 		ProjectID: projectID,
@@ -503,6 +515,10 @@ func (s *Server) handleTransferOwnership(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Delegate to the membership service.
+	if s.membershipService == nil {
+		http.Error(w, "membership service not configured", http.StatusInternalServerError)
+		return
+	}
 	result, decision := s.membershipService.TransferOwnership(ctx, MembershipRequest{
 		Op:         MembershipOpTransfer,
 		ProjectID:  projectID,

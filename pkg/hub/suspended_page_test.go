@@ -36,7 +36,7 @@ import (
 
 func TestSuspendedUserMiddleware_ActiveUser_PassesThrough(t *testing.T) {
 	st := newProxyAuthStore()
-	st.CreateUser(context.Background(), &store.User{
+	_ = st.CreateUser(context.Background(), &store.User{
 		ID:     "user-1",
 		Email:  "active@example.com",
 		Role:   "member",
@@ -69,7 +69,7 @@ func TestSuspendedUserMiddleware_ActiveUser_PassesThrough(t *testing.T) {
 
 func TestSuspendedUserMiddleware_SuspendedUser_ServesPage(t *testing.T) {
 	st := newProxyAuthStore()
-	st.CreateUser(context.Background(), &store.User{
+	_ = st.CreateUser(context.Background(), &store.User{
 		ID:     "user-1",
 		Email:  "suspended@example.com",
 		Role:   "member",
@@ -86,7 +86,7 @@ func TestSuspendedUserMiddleware_SuspendedUser_ServesPage(t *testing.T) {
 	// Admin suspends the user.
 	u, _ := st.GetUser(context.Background(), "user-1")
 	u.Status = "suspended"
-	st.UpdateUser(context.Background(), u)
+	_ = st.UpdateUser(context.Background(), u)
 
 	// Next browser navigation should see the suspended page.
 	req := httptest.NewRequest("GET", "/projects", nil)
@@ -108,7 +108,7 @@ func TestSuspendedUserMiddleware_SuspendedUser_ServesPage(t *testing.T) {
 
 func TestSuspendedUserMiddleware_DeletedUser_ClearsSession(t *testing.T) {
 	st := newProxyAuthStore()
-	st.CreateUser(context.Background(), &store.User{
+	_ = st.CreateUser(context.Background(), &store.User{
 		ID:     "user-1",
 		Email:  "deleted@example.com",
 		Role:   "admin",
@@ -150,7 +150,7 @@ func TestSuspendedUserMiddleware_DeletedUser_ClearsSession(t *testing.T) {
 
 func TestSuspendedUserMiddleware_APIRoutes_Unaffected(t *testing.T) {
 	st := newProxyAuthStore()
-	st.CreateUser(context.Background(), &store.User{
+	_ = st.CreateUser(context.Background(), &store.User{
 		ID:     "user-1",
 		Email:  "suspended@example.com",
 		Role:   "member",
@@ -183,7 +183,7 @@ func TestSuspendedUserMiddleware_APIRoutes_Unaffected(t *testing.T) {
 
 func TestSuspendedUserMiddleware_PublicRoutes_Accessible(t *testing.T) {
 	st := newProxyAuthStore()
-	st.CreateUser(context.Background(), &store.User{
+	_ = st.CreateUser(context.Background(), &store.User{
 		ID:     "user-1",
 		Email:  "suspended@example.com",
 		Role:   "member",
@@ -215,7 +215,7 @@ func TestSuspendedUserMiddleware_PublicRoutes_Accessible(t *testing.T) {
 
 func TestSuspendedUserMiddleware_SSE_ReturnsJSON(t *testing.T) {
 	st := newProxyAuthStore()
-	st.CreateUser(context.Background(), &store.User{
+	_ = st.CreateUser(context.Background(), &store.User{
 		ID:     "user-1",
 		Email:  "suspended@example.com",
 		Role:   "member",
@@ -259,7 +259,7 @@ func TestSuspendedPage_NoSPABootstrap(t *testing.T) {
 	// bootstrap fan-out, verified by the absence of the SPA entry module
 	// and __SCION_DATA__ in the response HTML.
 	st := newProxyAuthStore()
-	st.CreateUser(context.Background(), &store.User{
+	_ = st.CreateUser(context.Background(), &store.User{
 		ID:     "user-1",
 		Email:  "suspended@example.com",
 		Role:   "member",
@@ -427,7 +427,7 @@ func TestProxyAuth_NewLogin_SuspendedUser_ServesPage(t *testing.T) {
 
 	st := newProxyAuthStore()
 	// Pre-create the user as suspended.
-	st.CreateUser(context.Background(), &store.User{
+	_ = st.CreateUser(context.Background(), &store.User{
 		ID:          "pre-existing",
 		Email:       "proxy-user@example.com",
 		DisplayName: "Proxy User",
@@ -633,7 +633,7 @@ func TestProxyAuth_NewLogin_SuspendedUser_SSE_ReturnsJSON(t *testing.T) {
 	}
 
 	st := newProxyAuthStore()
-	st.CreateUser(context.Background(), &store.User{
+	_ = st.CreateUser(context.Background(), &store.User{
 		ID:          "pre-existing",
 		Email:       "proxy-user@example.com",
 		DisplayName: "Proxy User",
@@ -941,7 +941,7 @@ func TestSuspendedResponse_Classification(t *testing.T) {
 	// Test against OAuth/session middleware path.
 	t.Run("OAuth/session path", func(t *testing.T) {
 		st := newProxyAuthStore()
-		st.CreateUser(context.Background(), &store.User{
+		_ = st.CreateUser(context.Background(), &store.User{
 			ID:     "user-1",
 			Email:  "suspended@example.com",
 			Role:   "member",
@@ -1069,7 +1069,7 @@ func TestSuspendedResponse_Classification(t *testing.T) {
 	// Test against proxy first-login path.
 	t.Run("Proxy first-login path", func(t *testing.T) {
 		st := newProxyAuthStore()
-		st.CreateUser(context.Background(), &store.User{
+		_ = st.CreateUser(context.Background(), &store.User{
 			ID:          "pre-existing",
 			Email:       "proxy-new@example.com",
 			DisplayName: "Proxy User",
@@ -1128,7 +1128,7 @@ func TestSuspendedResponse_Classification(t *testing.T) {
 // API or non-public route may EVER return a 200 with suspended HTML content.
 func TestSuspendedResponse_Never200HTML(t *testing.T) {
 	st := newProxyAuthStore()
-	st.CreateUser(context.Background(), &store.User{
+	_ = st.CreateUser(context.Background(), &store.User{
 		ID:     "user-1",
 		Email:  "suspended@example.com",
 		Role:   "member",

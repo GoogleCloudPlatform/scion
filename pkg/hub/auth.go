@@ -416,6 +416,11 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 							"unable to verify user status", nil)
 						return
 					}
+					// NOTE: We intentionally check only for UserStatusSuspended rather
+					// than u.Status != UserStatusActive. The third status, UserStatusInvited,
+					// represents users in the onboarding flow who do not hold JWT tokens —
+					// they authenticate via the OAuth/invitation path, not the JWT path.
+					// Suspended is the only non-active state reachable with a cached JWT.
 					if uErr == nil && u.Status == store.UserStatusSuspended {
 						log.Warn("JWT auth rejected: user is suspended",
 							"user_id", claims.UserID, "email", claims.Email)

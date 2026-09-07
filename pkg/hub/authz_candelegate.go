@@ -260,6 +260,11 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 					"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", rdErr)
 				return Decision{Allowed: false, Reason: "cannot resolve role definition for group binding"}
 			}
+			if rd == nil {
+				a.logger.Warn("role definition not found for group binding",
+					"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID)
+				return Decision{Allowed: false, Reason: "role definition not found for group binding"}
+			}
 			rdCache[b.RoleDefinitionID] = rd
 		}
 		sk := scopeKey{scopeType: b.ScopeType, scopeID: b.ScopeID}

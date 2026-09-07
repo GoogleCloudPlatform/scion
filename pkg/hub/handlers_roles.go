@@ -1699,13 +1699,16 @@ func (s *Server) enrichBindingRoleNames(ctx context.Context, bindings []RoleBind
 	defs, err := s.store.GetRoleDefinitionsByIDs(ctx, ids)
 	if err == nil {
 		for _, d := range defs {
+			if d == nil {
+				continue
+			}
 			nameMap[d.ID] = d.Name
 		}
 	} else {
 		// Fallback: per-ID lookup.
 		for _, id := range ids {
 			rd, err := s.store.GetRoleDefinition(ctx, id)
-			if err == nil {
+			if err == nil && rd != nil {
 				nameMap[rd.ID] = rd.Name
 			}
 		}

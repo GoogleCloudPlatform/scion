@@ -334,6 +334,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 				"super-admin role definition not found", nil)
 			return
 		}
+		if superAdminRD == nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"super-admin role definition not found", nil)
+			return
+		}
 		preAuthBindingState, err = s.superAdminBindingStateForUser(ctx, s.store, user.ID, superAdminRD)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -948,6 +953,11 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	// Resolve super-admin role definition (needed for binding-based check).
 	superAdminRD, err := s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"super-admin role definition not found", nil)
+		return
+	}
+	if superAdminRD == nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"super-admin role definition not found", nil)
 		return

@@ -1793,6 +1793,11 @@ func (a *AuthzService) getProjectScopedPermissions(ctx context.Context, principa
 				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", rdErr)
 			continue
 		}
+		if rd == nil {
+			a.logger.Warn("role definition not found for project-scoped binding",
+				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID)
+			continue
+		}
 		for _, permID := range rd.Permissions {
 			if !seen[permID] {
 				seen[permID] = true

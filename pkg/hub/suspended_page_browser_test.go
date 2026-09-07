@@ -52,7 +52,7 @@ func TestSuspendedPage_HeadlessBrowser_ZeroFanOut(t *testing.T) {
 
 	// Set up suspended user.
 	st := newProxyAuthStore()
-	st.CreateUser(context.Background(), &store.User{
+	_ = st.CreateUser(context.Background(), &store.User{
 		ID:     "user-1",
 		Email:  "suspended@example.com",
 		Role:   "member",
@@ -200,7 +200,7 @@ func TestSuspendedPage_HeadlessBrowser_ZeroFanOut(t *testing.T) {
 // TCP requests and verify headers, status, and content.
 func TestSuspendedPage_NetworkLevel_RealHTTP(t *testing.T) {
 	st := newProxyAuthStore()
-	st.CreateUser(context.Background(), &store.User{
+	_ = st.CreateUser(context.Background(), &store.User{
 		ID:     "user-1",
 		Email:  "suspended@example.com",
 		Role:   "member",
@@ -248,7 +248,7 @@ func TestSuspendedPage_NetworkLevel_RealHTTP(t *testing.T) {
 
 			resp, err := client.Do(req)
 			require.NoError(t, err)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			assert.Equal(t, http.StatusForbidden, resp.StatusCode,
 				"suspended user should get 403")
@@ -279,7 +279,7 @@ func TestSuspendedPage_NetworkLevel_RealHTTP(t *testing.T) {
 
 			resp, err := client.Do(req)
 			require.NoError(t, err)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			assert.Equal(t, http.StatusForbidden, resp.StatusCode,
 				"protected path %s must return 403 for suspended user", path)

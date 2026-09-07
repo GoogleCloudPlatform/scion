@@ -251,7 +251,8 @@ func (s *Server) handleAdminEffectiveAccess(w http.ResponseWriter, r *http.Reque
 		case "all_principals":
 			applies = true
 		case "principal":
-			if c.SubjectPrincipalID != nil && *c.SubjectPrincipalID == principalID {
+			if c.SubjectPrincipalID != nil && *c.SubjectPrincipalID == principalID &&
+				(c.SubjectPrincipalType == nil || *c.SubjectPrincipalType == normalizedType) {
 				applies = true
 			}
 		case "group_closure":
