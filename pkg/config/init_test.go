@@ -77,6 +77,159 @@ func TestGetDefaultSettingsDataYAML_OSSpecific(t *testing.T) {
 	}
 }
 
+func TestGetDefaultSettingsData_CloudRunSandbox(t *testing.T) {
+	// When isCloudRunSandboxEnvironment() is true (CLOUD_RUN_INSTANCE set +
+	// sandbox binary present), GetDefaultSettingsData must return the
+	// cloudrun-sandbox template converted to JSON — not the workstation template.
+	t.Setenv("CLOUD_RUN_INSTANCE", "test-instance-json-defaults")
+	origSandboxBinExists := sandboxBinExists
+	sandboxBinExists = func(path string) bool { return true }
+	defer func() { sandboxBinExists = origSandboxBinExists }()
+
+	data, err := GetDefaultSettingsData()
+	if err != nil {
+		t.Fatalf("GetDefaultSettingsData failed: %v", err)
+	}
+
+	var settings Settings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("Failed to unmarshal settings JSON: %v", err)
+	}
+
+	// Must have "default" as active profile, not "local".
+	if settings.ActiveProfile != "default" {
+		t.Errorf("expected active_profile 'default', got %q", settings.ActiveProfile)
+	}
+
+	// Must have cloudrun-sandbox profile/runtime.
+	defaultProfile, ok := settings.Profiles["default"]
+	if !ok {
+		t.Fatal("profile 'default' must exist in cloudrun-sandbox defaults")
+	}
+	if defaultProfile.Runtime != "cloudrun-sandbox" {
+		t.Errorf("expected default profile runtime 'cloudrun-sandbox', got %q", defaultProfile.Runtime)
+	}
+
+	// Must NOT have workstation profiles.
+	if _, ok := settings.Profiles["local"]; ok {
+		t.Error("workstation profile 'local' must not exist in cloudrun-sandbox defaults")
+	}
+	if _, ok := settings.Profiles["remote"]; ok {
+		t.Error("workstation profile 'remote' must not exist in cloudrun-sandbox defaults")
+	}
+}
+
+func TestGetDefaultSettingsData_NonCloudRunSandbox(t *testing.T) {
+	// When isCloudRunSandboxEnvironment() is false, GetDefaultSettingsData must
+	// return the workstation template (not the cloudrun-sandbox template).
+
+	t.Run("no_env_var", func(t *testing.T) {
+		t.Setenv("CLOUD_RUN_INSTANCE", "")
+		origSandboxBinExists := sandboxBinExists
+		sandboxBinExists = func(path string) bool { return false }
+		defer func() { sandboxBinExists = origSandboxBinExists }()
+
+		data, err := GetDefaultSettingsData()
+		if err != nil {
+			t.Fatalf("GetDefaultSettingsData failed: %v", err)
+		}
+
+		var settings Settings
+		if err := json.Unmarshal(data, &settings); err != nil {
+			t.Fatalf("Failed to unmarshal settings: %v", err)
+		}
+
+		// Should have workstation profiles.
+		if _, ok := settings.Profiles["local"]; !ok {
+			t.Error("workstation profile 'local' should exist")
+		}
+		// Should not have cloudrun-sandbox runtime in the local profile.
+		if local, ok := settings.Profiles["local"]; ok && local.Runtime == "cloudrun-sandbox" {
+			t.Error("local profile runtime should not be 'cloudrun-sandbox'")
+		}
+	})
+
+	t.Run("env_var_without_sandbox_binary", func(t *testing.T) {
+		t.Setenv("CLOUD_RUN_INSTANCE", "test-instance-no-bin")
+		origSandboxBinExists := sandboxBinExists
+		sandboxBinExists = func(path string) bool { return false }
+		defer func() { sandboxBinExists = origSandboxBinExists }()
+
+		data, err := GetDefaultSettingsData()
+		if err != nil {
+			t.Fatalf("GetDefaultSettingsData failed: %v", err)
+		}
+
+		var settings Settings
+		if err := json.Unmarshal(data, &settings); err != nil {
+			t.Fatalf("Failed to unmarshal settings: %v", err)
+		}
+
+		// Without the sandbox binary, should fall back to workstation defaults.
+		if _, ok := settings.Profiles["local"]; !ok {
+			t.Error("workstation profile 'local' should exist without sandbox binary")
+		}
+	})
+}
+
+func TestGetDefaultSettingsData_CloudRunSandbox_LoadSettingsKoanf(t *testing.T) {
+	// End-to-end: verify that LoadSettingsKoanf on the cloudrun-sandbox tier
+	// uses cloudrun-sandbox defaults (not workstation defaults), confirming
+	// the fix for the Gemini HIGH review finding on PR #1481.
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	// Simulate cloudrun-sandbox environment.
+	t.Setenv("CLOUD_RUN_INSTANCE", "test-instance-koanf")
+	origSandboxBinExists := sandboxBinExists
+	sandboxBinExists = func(path string) bool { return true }
+	defer func() { sandboxBinExists = origSandboxBinExists }()
+
+	// Create a minimal global settings file.
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(globalScionDir, 0755); err != nil {
+		t.Fatalf("failed to create global scion dir: %v", err)
+	}
+	minimalSettings := `schema_version: "1"
+server:
+  broker:
+    broker_id: test-broker-uuid
+`
+	if err := os.WriteFile(
+		filepath.Join(globalScionDir, "settings.yaml"),
+		[]byte(minimalSettings), 0644); err != nil {
+		t.Fatalf("failed to write minimal settings: %v", err)
+	}
+
+	// LoadSettingsKoanf merges embedded defaults (now cloudrun-sandbox
+	// template via GetDefaultSettingsData) with the minimal file.
+	settings, err := LoadSettingsKoanf(globalScionDir)
+	if err != nil {
+		t.Fatalf("LoadSettingsKoanf failed: %v", err)
+	}
+
+	// The embedded defaults should provide cloudrun-sandbox profile.
+	if settings.ActiveProfile != "default" {
+		t.Errorf("expected active_profile 'default', got %q", settings.ActiveProfile)
+	}
+
+	defaultProfile, ok := settings.Profiles["default"]
+	if !ok {
+		t.Fatal("profile 'default' must exist when loaded via LoadSettingsKoanf on cloudrun-sandbox tier")
+	}
+	if defaultProfile.Runtime != "cloudrun-sandbox" {
+		t.Errorf("expected default profile runtime 'cloudrun-sandbox', got %q", defaultProfile.Runtime)
+	}
+
+	// No workstation profiles should leak in from embedded defaults.
+	if _, ok := settings.Profiles["local"]; ok {
+		t.Error("workstation profile 'local' must not exist on cloudrun-sandbox tier")
+	}
+}
+
 func TestGenerateProjectIDForDir_NoGitRepo(t *testing.T) {
 	// Create a non-git directory
 	tmpDir := t.TempDir()

@@ -36,7 +36,7 @@ import (
 // detectLocalRuntimeOnce caches the result of DetectLocalRuntime so that
 // expensive external-command probes (container, podman, docker --version)
 // run at most once per process. GetDefaultSettingsDataYAML, which is called
-// on every LoadSettingsKoanf invocation, uses this wrapper.
+// on every LoadVersionedSettings invocation, uses this wrapper.
 var detectLocalRuntimeOnce = sync.OnceValues(func() (string, error) {
 	return DetectLocalRuntime()
 })
