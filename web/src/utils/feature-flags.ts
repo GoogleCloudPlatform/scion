@@ -87,4 +87,3 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
  */
 export const NATIVE_CHAT_V2_FLAG = 'web.native_chat_v2';
 
-
