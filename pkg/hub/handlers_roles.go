@@ -1587,8 +1587,7 @@ func (s *Server) deleteSystemSuperAdminBinding(
 	}
 
 	// All mutations inside a single atomic transaction with serialization.
-	var txErr error
-	txErr = s.store.WithTx(ctx, func(tx store.Store) error {
+	txErr := s.store.WithTx(ctx, func(tx store.Store) error {
 		// Last-admin guard with serialization lock.
 		if err := s.checkLastSuperAdminTx(ctx, tx, binding.PrincipalID, rd); err != nil {
 			return err

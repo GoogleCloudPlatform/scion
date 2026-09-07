@@ -298,9 +298,10 @@ func (r *RoleStore) ListAllRoleBindings(ctx context.Context, opts store.RoleBind
 
 	// Determine the Ent direction helper.
 	dir := ent.Desc // default for "created"
-	if opts.SortOrder == "asc" {
+	switch opts.SortOrder {
+	case "asc":
 		dir = ent.Asc
-	} else if opts.SortOrder == "desc" {
+	case "desc":
 		dir = ent.Desc
 	}
 

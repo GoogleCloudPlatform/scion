@@ -1673,9 +1673,10 @@ func isGovernanceError(err error) *MembershipDecision {
 		status = 403
 	}
 	code := ErrCodeRoleAssignmentForbidden
-	if status == 404 {
+	switch status {
+	case 404:
 		code = "not_found"
-	} else if status == 409 {
+	case 409:
 		code = "conflict"
 	}
 	return &MembershipDecision{

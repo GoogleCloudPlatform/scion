@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -937,28 +936,3 @@ func TestRS5_ActorHasHubRoleBindingAuthority(t *testing.T) {
 // Helper: doDeleteBindingWithCredentialKind
 // (already defined in handlers_roles_test.go, re-use by calling it)
 // ---------------------------------------------------------------------------
-
-// addProjectMemberRequest mirrors the request structure used by project member
-// endpoints.
-type addProjectMemberRequestRS5 struct {
-	RoleDefinitionID string `json:"roleDefinitionId"`
-	PrincipalType    string `json:"principalType"`
-	PrincipalID      string `json:"principalId"`
-}
-
-// doDeleteAdminBinding deletes a binding through the admin endpoint using
-// a specific user identity and credential kind.
-func doDeleteAdminBinding(t *testing.T, srv *Server, user *store.User, credKind CredentialKind, bindingID string) *httptest.ResponseRecorder {
-	t.Helper()
-	path := "/api/v1/admin/role-bindings/" + bindingID
-	req := httptest.NewRequest(http.MethodDelete, path, nil)
-	ctx := req.Context()
-	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
-	ctx = contextWithIdentity(ctx, identity)
-	ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: credKind})
-	req = req.WithContext(ctx)
-
-	rec := httptest.NewRecorder()
-	srv.handleAdminRoleBindingByID(rec, req)
-	return rec
-}

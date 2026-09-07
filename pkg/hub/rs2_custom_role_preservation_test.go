@@ -259,7 +259,7 @@ func TestRS2_MembershipRemoval_PreservesCustomBindings(t *testing.T) {
 	// Parse the binding ID from the response.
 	var memberInfo projectMemberInfo
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&memberInfo))
-	memberBindingID := memberInfo.RoleBinding.ID
+	memberBindingID := memberInfo.ID
 
 	// Create custom bindings.
 	customViewer := createCustomRoleDef(t, s, "rs2-rm-custom-viewer", []string{"project.read"})
@@ -689,7 +689,7 @@ func TestRS2_PATCHUpdateRole_PreservesCustomBindings(t *testing.T) {
 
 	var info projectMemberInfo
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&info))
-	bindingID := info.RoleBinding.ID
+	bindingID := info.ID
 
 	// Add custom bindings.
 	customRole := createCustomRoleDef(t, s, "rs2-patch-custom", []string{"project.read"})

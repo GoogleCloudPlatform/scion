@@ -829,7 +829,7 @@ func TestRS3_ExplicitEndpoints_Unaffected(t *testing.T) {
 	rec = doRequestAsUser(t, srv, &store.User{
 		ID: ownerID, Email: ownerID + "@test.com",
 		DisplayName: "Owner", Role: "member",
-	}, http.MethodPatch, "/api/v1/projects/"+projectID+"/members/"+info.RoleBinding.ID,
+	}, http.MethodPatch, "/api/v1/projects/"+projectID+"/members/"+info.ID,
 		updateProjectMemberRequest{RoleDefinitionID: memberRD.ID})
 	assert.Equal(t, http.StatusOK, rec.Code,
 		"explicit PATCH should still succeed: %s", rec.Body.String())
