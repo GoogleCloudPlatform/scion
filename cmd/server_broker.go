@@ -18,7 +18,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
+
+	"cloud.google.com/go/compute/metadata"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -91,16 +94,32 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		"scion.io/broker-role": "embedded",
 	}
 
+	// Auto-detect host service account from the GCE metadata server.
+	// This works on GCE, Cloud Run, and GKE, and populates the fields
+	// that the passthrough identity gate requires.
+	var detectedSAEmail, detectedProjectID string
+	if metadata.OnGCE() {
+		if email, err := metadata.Email("default"); err == nil && email != "" {
+			detectedSAEmail = strings.ToLower(email)
+			log.Printf("Auto-detected GCP host service account: %s", detectedSAEmail)
+		}
+		if pid, err := metadata.ProjectID(); err == nil && pid != "" {
+			detectedProjectID = pid
+		}
+	}
+
 	if broker == nil {
 		broker = &store.RuntimeBroker{
-			ID:              brokerID,
-			Name:            brokerName,
-			Slug:            api.Slugify(brokerName),
-			Version:         "0.1.0",
-			Status:          store.BrokerStatusOnline,
-			ConnectionState: "connected",
-			Endpoint:        endpoint,
-			AutoProvide:     autoProvide,
+			ID:                         brokerID,
+			Name:                       brokerName,
+			Slug:                       api.Slugify(brokerName),
+			Version:                    "0.1.0",
+			Status:                     store.BrokerStatusOnline,
+			ConnectionState:            "connected",
+			Endpoint:                   endpoint,
+			AutoProvide:                autoProvide,
+			GCPHostServiceAccountEmail: detectedSAEmail,
+			GCPHostProjectID:           detectedProjectID,
 			Capabilities: &store.BrokerCapabilities{
 				WebPTY: false,
 				Sync:   true,
@@ -120,6 +139,14 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		broker.Endpoint = endpoint
 		broker.AutoProvide = autoProvide
 		broker.LastHeartbeat = time.Now()
+		// Refresh host SA from metadata on every restart so the broker
+		// record stays current when the runtime SA changes.
+		if detectedSAEmail != "" {
+			broker.GCPHostServiceAccountEmail = detectedSAEmail
+		}
+		if detectedProjectID != "" {
+			broker.GCPHostProjectID = detectedProjectID
+		}
 		// Update profiles from settings (may have changed)
 		broker.Profiles = profiles
 		// Ensure deployment-type labels are set on re-registration

@@ -39,17 +39,26 @@ func TestIsValidServiceAccountEmail(t *testing.T) {
 		email string
 		valid bool
 	}{
+		// Custom IAM SAs
 		{"agent@my-project.iam.gserviceaccount.com", true},
 		{"scion-abc@my-project.iam.gserviceaccount.com", true},
 		{"my-sa@p.iam.gserviceaccount.com", true},
 		{"sa@my-long-project-id-1234.iam.gserviceaccount.com", true},
 
+		// Default Compute Engine SAs (@developer.gserviceaccount.com)
+		{"721899303052-compute@developer.gserviceaccount.com", true},
+		{"123456789-compute@developer.gserviceaccount.com", true},
+		{"my-sa@developer.gserviceaccount.com", true},
+
+		// Invalid
 		{"", false},
 		{"not-an-email", false},
 		{"user@gmail.com", false},
 		{"@missing-name.iam.gserviceaccount.com", false},
 		{"sa@.iam.gserviceaccount.com", false},
 		{"sa@iam.gserviceaccount.com", false}, // no project id
+		{"@developer.gserviceaccount.com", false},
+		{"sa@other.gserviceaccount.com", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.email, func(t *testing.T) {
@@ -611,6 +620,79 @@ func TestPassthrough_AuditSurface_Create_Deny(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Acceptance criterion: Default Compute Engine SA (developer domain) works
+// ---------------------------------------------------------------------------
+
+func TestPassthrough_DeveloperSA_Create_Allowed(t *testing.T) {
+	// A broker whose host SA is a default Compute Engine SA
+	// (@developer.gserviceaccount.com) must be accepted by the passthrough gate
+	// when GCPHostProjectID is set explicitly (auto-detected from metadata).
+	hostSAEmail := "721899303052-compute@developer.gserviceaccount.com"
+	hostProjectID := "ptone-experiments"
+	owner := ptUser(tid("user-pt-owner-dev-sa"), "owner-devsa@test.com", store.UserRoleMember)
+	srv, _, project, _ := setupPassthroughServer(t, owner, hostSAEmail, hostProjectID)
+
+	checker := store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail)
+	enforceSAAssign(srv, checker)
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "pt-developer-sa",
+		ProjectID: project.ID,
+		Task:      "test",
+		GCPIdentity: &GCPIdentityAssignment{
+			MetadataMode: "passthrough",
+		},
+	})
+
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	require.GreaterOrEqual(t, checker.CallCount(), 1,
+		"the caller-permission checker must be consulted for developer SA")
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Agent.AppliedConfig.GCPIdentity)
+	assert.Equal(t, store.GCPMetadataModePassthrough, resp.Agent.AppliedConfig.GCPIdentity.MetadataMode)
+}
+
+func TestPassthrough_DeveloperSA_Patch_Allowed(t *testing.T) {
+	hostSAEmail := "721899303052-compute@developer.gserviceaccount.com"
+	hostProjectID := "ptone-experiments"
+	owner := ptUser(tid("user-pt-owner-dev-sa-2"), "owner-devsa2@test.com", store.UserRoleMember)
+	srv, s, project, _ := setupPassthroughServer(t, owner, hostSAEmail, hostProjectID)
+
+	agent := &store.Agent{
+		ID:              tid("agent-pt-dev-sa-patch"),
+		Slug:            "pt-dev-sa-patch",
+		Name:            "pt-dev-sa-patch",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: tid("broker-pt"),
+		Phase:           string(state.PhaseCreated),
+		CreatedBy:       owner.ID,
+		OwnerID:         owner.ID,
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), agent))
+
+	checker := store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail)
+	enforceSAAssign(srv, checker)
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+		map[string]interface{}{
+			"gcp_identity": map[string]interface{}{
+				"metadata_mode": "passthrough",
+			},
+		})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	require.GreaterOrEqual(t, checker.CallCount(), 1)
+
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	require.NotNil(t, got.AppliedConfig.GCPIdentity)
+	assert.Equal(t, store.GCPMetadataModePassthrough, got.AppliedConfig.GCPIdentity.MetadataMode)
+}
+
+// ---------------------------------------------------------------------------
 // Broker registration: host SA fields
 // ---------------------------------------------------------------------------
 
@@ -642,6 +724,35 @@ func TestBrokerUpdate_GCPHostSAFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "host@my-project.iam.gserviceaccount.com", got.GCPHostServiceAccountEmail)
 	assert.Equal(t, "my-project", got.GCPHostProjectID)
+}
+
+func TestBrokerUpdate_GCPHostSAEmail_DeveloperDomain(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	admin := addExtraUser(t, s, tid("admin-broker-devsa"), "admin-devsa@test.com", store.UserRoleAdmin)
+
+	broker := &store.RuntimeBroker{
+		ID:        tid("broker-devsa"),
+		Name:      "Developer SA Broker",
+		Slug:      "developer-sa-broker",
+		Status:    store.BrokerStatusOnline,
+		CreatedBy: admin.ID,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	// PATCH with developer.gserviceaccount.com email.
+	rec := doRequestAsUser(t, srv, admin, http.MethodPatch, "/api/v1/runtime-brokers/"+broker.ID,
+		map[string]interface{}{
+			"gcpHostServiceAccountEmail": "721899303052-compute@developer.gserviceaccount.com",
+			"gcpHostProjectId":           "ptone-experiments",
+		})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	got, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "721899303052-compute@developer.gserviceaccount.com", got.GCPHostServiceAccountEmail)
+	assert.Equal(t, "ptone-experiments", got.GCPHostProjectID)
 }
 
 func TestBrokerUpdate_GCPHostSAEmail_InvalidFormat(t *testing.T) {

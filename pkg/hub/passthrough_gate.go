@@ -36,7 +36,10 @@ const (
 )
 
 // isValidServiceAccountEmail validates that an email address looks like a
-// GCP service account email: <name>@<project>.iam.gserviceaccount.com.
+// GCP service account email. Accepted formats:
+//
+//   - Custom IAM SA:       <name>@<project>.iam.gserviceaccount.com
+//   - Default Compute SA:  <number>-compute@developer.gserviceaccount.com
 func isValidServiceAccountEmail(email string) bool {
 	at := strings.IndexByte(email, '@')
 	if at <= 0 {
@@ -51,14 +54,17 @@ func isValidServiceAccountEmail(email string) bool {
 		return false
 	}
 
-	suffix := ".iam.gserviceaccount.com"
-	if !strings.HasSuffix(domain, suffix) {
+	switch {
+	case strings.HasSuffix(domain, ".iam.gserviceaccount.com"):
+		// Custom IAM SA: project ID portion must be non-empty.
+		projectID := domain[:len(domain)-len(".iam.gserviceaccount.com")]
+		return len(projectID) > 0
+	case domain == "developer.gserviceaccount.com":
+		// Default Compute Engine SA (e.g. <project-number>-compute@developer.gserviceaccount.com).
+		return true
+	default:
 		return false
 	}
-
-	// Project ID portion must be non-empty.
-	projectID := domain[:len(domain)-len(suffix)]
-	return len(projectID) > 0
 }
 
 // authorizePassthroughIdentity gates passthrough mode for a caller against a
