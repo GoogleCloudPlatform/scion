@@ -3769,7 +3769,7 @@ func (s *Server) runMembershipMigration(ctx context.Context) error {
 		return fmt.Errorf("multi-role binding migration: %w", err)
 	}
 
-	var fixed, migErrors, nonComparable int
+	var fixed, migErrors int
 	for _, r := range results {
 		if r.Error != nil {
 			migErrors++
@@ -3777,20 +3777,17 @@ func (s *Server) runMembershipMigration(ctx context.Context) error {
 				"project_id", r.ProjectID,
 				"principal_id", r.PrincipalID,
 				"error", r.Error)
-		} else if r.NonComparable {
-			nonComparable++
 		} else if r.DeletedCount > 0 {
 			fixed++
 		}
 	}
 
-	// Fail closed on any errors or non-comparable roles that prevent
-	// deterministic migration (R2-R2 requirement).
+	// Fail closed on any errors (R2-R2 requirement). This covers orphaned
+	// role definitions (D-002) and transaction failures. Valid custom
+	// coexistence (one built-in + N custom, or zero built-in + N custom) is
+	// ignored by migration and never produces errors.
 	if migErrors > 0 {
 		return fmt.Errorf("membership migration had %d errors — resolve before accepting traffic", migErrors)
-	}
-	if nonComparable > 0 {
-		return fmt.Errorf("membership migration found %d principals with non-comparable custom roles — resolve manually before accepting traffic", nonComparable)
 	}
 
 	if fixed > 0 {

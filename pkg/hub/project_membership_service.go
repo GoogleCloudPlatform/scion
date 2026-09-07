@@ -1777,10 +1777,18 @@ type MultiRoleMigrationResult struct {
 }
 
 // MigrateMultiRoleBindings scans all project-scoped bindings and consolidates
-// any principal with more than one direct binding per project. For built-in
-// roles, the highest-authority binding is kept (using projectRoleLevel). For
-// custom or non-comparable roles, the migration fails closed (returns error)
-// to prevent data loss on unexpected role configurations.
+// any principal with more than one built-in membership binding per project. The
+// highest-authority built-in binding is kept (using projectRoleLevel); lower
+// duplicates are deleted transactionally.
+//
+// Custom (non-membership) project-scoped bindings are additive and are ignored
+// entirely — they do not participate in deduplication or conflict analysis.
+// Valid coexistence states (one built-in + N custom, or zero built-in + N
+// custom) pass through without modification (D-002).
+//
+// Bindings whose role definition cannot be resolved (orphaned/unknown) fail
+// closed: the migration returns an error result for that principal, preventing
+// startup. This ensures corruption is never silently classified as custom.
 //
 // This is idempotent: re-running on a clean database is a no-op.
 // R2-R2: paginates through all projects; no silent cap.
@@ -1834,44 +1842,58 @@ func (svc *ProjectMembershipService) MigrateMultiRoleBindings(ctx context.Contex
 				continue // no duplicate
 			}
 
-			// Resolve all roles and check for non-comparable.
+			// D-002: Classify each binding as built-in membership or
+			// custom/additive. Only built-in membership bindings participate
+			// in deduplication; custom bindings are ignored entirely.
 			type bindingRole struct {
 				binding *store.RoleBinding
 				role    string
 				level   int
 			}
-			var brs []bindingRole
-			hasNonComparable := false
+			var builtIns []bindingRole
+			var hasOrphan bool
 			for _, b := range pBindings {
 				rd, rdErr := svc.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
 				if rdErr != nil {
-					hasNonComparable = true
-					continue
+					// Cannot determine membership status for this binding.
+					// Fail closed: do not silently classify orphaned/unknown
+					// role definitions as custom (D-002 requirement).
+					hasOrphan = true
+					svc.logger.Error("migration: binding references unknown role definition",
+						"project_id", p.ID, "principal", key.Type+":"+key.ID,
+						"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID,
+						"error", rdErr)
+					break
 				}
-				level := projectRoleLevel(rd.Name)
-				if level == 0 && !validProjectRoles[rd.Name] {
-					// Custom role — cannot compare to built-in roles.
-					hasNonComparable = true
+				if store.IsBuiltInProjectMembershipRole(rd.Name) {
+					builtIns = append(builtIns, bindingRole{
+						binding: b, role: rd.Name, level: projectRoleLevel(rd.Name),
+					})
 				}
-				brs = append(brs, bindingRole{binding: b, role: rd.Name, level: level})
+				// Custom project-scoped roles are additive: ignored by
+				// membership migration (D-002).
 			}
 
-			if hasNonComparable {
-				svc.logger.Warn("migration: skipping principal with non-comparable roles",
-					"project_id", p.ID, "principal", key.Type+":"+key.ID,
-					"binding_count", len(pBindings))
+			if hasOrphan {
 				results = append(results, MultiRoleMigrationResult{
 					ProjectID:     p.ID,
 					PrincipalID:   key.ID,
 					NonComparable: true,
-					DeletedCount:  0,
+					Error:         fmt.Errorf("binding references unknown/orphaned role definition — cannot classify membership status (fail-closed)"),
 				})
 				continue
 			}
 
-			// Find the highest-authority binding.
-			best := brs[0]
-			for _, br := range brs[1:] {
+			// Only deduplicate when there are multiple built-in membership
+			// bindings. A single built-in coexisting with any number of
+			// custom bindings is the expected steady state (D-002).
+			if len(builtIns) <= 1 {
+				continue
+			}
+
+			// Find the highest-authority built-in binding.
+			best := builtIns[0]
+			for _, br := range builtIns[1:] {
 				if br.level > best.level {
 					best = br
 				}
@@ -1880,7 +1902,7 @@ func (svc *ProjectMembershipService) MigrateMultiRoleBindings(ctx context.Contex
 			// Delete all except the best, inside a transaction.
 			var deleted int
 			txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
-				for _, br := range brs {
+				for _, br := range builtIns {
 					if br.binding.ID == best.binding.ID {
 						continue
 					}
