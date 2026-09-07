@@ -577,11 +577,9 @@ func TestRS2_LastOwnerGuard_WithCustomBindings(t *testing.T) {
 			PrincipalType:    store.RoleBindingPrincipalUser,
 			PrincipalID:      ownerID,
 		})
-	// Last-owner guard should prevent this.
-	assert.NotEqual(t, http.StatusOK, rec.Code,
-		"last-owner demotion should be denied")
-	assert.NotEqual(t, http.StatusCreated, rec.Code,
-		"last-owner demotion should be denied")
+	// Last-owner guard should prevent this with 409 Conflict.
+	assert.Equal(t, http.StatusConflict, rec.Code,
+		"last-owner demotion should be denied with 409 Conflict, got %d: %s", rec.Code, rec.Body.String())
 }
 
 // ---------------------------------------------------------------------------
@@ -707,9 +705,9 @@ func TestRS2_PATCHUpdateRole_PreservesCustomBindings(t *testing.T) {
 	}, http.MethodPatch, "/api/v1/projects/"+projectID+"/members/"+bindingID,
 		updateProjectMemberRequest{RoleDefinitionID: adminRD.ID})
 
-	// PATCH should succeed (200 or similar success code).
-	require.True(t, rec.Code >= 200 && rec.Code < 300,
-		"PATCH should succeed, got %d: %s", rec.Code, rec.Body.String())
+	// PATCH should succeed with 200 OK.
+	require.Equal(t, http.StatusOK, rec.Code,
+		"PATCH should succeed with 200 OK, got %d: %s", rec.Code, rec.Body.String())
 
 	// Custom binding must still exist.
 	assertBindingPreserved(t, s, customBinding)
