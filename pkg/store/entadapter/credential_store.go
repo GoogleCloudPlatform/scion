@@ -136,6 +136,17 @@ func (s *AgentCredentialStore) UpdateAgentCredentialLastSeen(ctx context.Context
 	return nil
 }
 
+// DeleteAgentCredentialsByProject permanently removes all agent credentials for a project.
+func (s *AgentCredentialStore) DeleteAgentCredentialsByProject(ctx context.Context, projectID string) (int, error) {
+	n, err := s.client.AgentCredential.Delete().
+		Where(agentcredential.ProjectIDEQ(projectID)).
+		Exec(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
 // PurgeExpiredAgentCredentials removes expired credentials older than cutoff.
 func (s *AgentCredentialStore) PurgeExpiredAgentCredentials(ctx context.Context, cutoff time.Time) (int, error) {
 	n, err := s.client.AgentCredential.Delete().

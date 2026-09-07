@@ -333,13 +333,15 @@ func TestCreateAccessConstraint_MissingAgentReference(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-func TestCreateAccessConstraint_MissingGroupReference(t *testing.T) {
+func TestCreateAccessConstraint_GroupPrincipalTypeRejected(t *testing.T) {
 	s, _ := newTestACStore(t)
 	ctx := context.Background()
 
+	// Groups are collection resources with no identity — exact-group principal
+	// subjects are no longer accepted.
 	nonExistent := uuid.New().String()
 	c := &store.AccessConstraint{
-		Name:                 "missing-group",
+		Name:                 "rejected-group-principal",
 		SubjectKind:          store.ConstraintSubjectPrincipal,
 		SubjectPrincipalType: strPtr(store.ConstraintPrincipalTypeGroup),
 		SubjectPrincipalID:   strPtr(nonExistent),
@@ -350,7 +352,7 @@ func TestCreateAccessConstraint_MissingGroupReference(t *testing.T) {
 	}
 	_, err := s.CreateAccessConstraint(ctx, c)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, store.ErrNotFound)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
 }
 
 func TestCreateAccessConstraint_MissingGroupClosureReference(t *testing.T) {
@@ -448,47 +450,47 @@ func TestTypeCollisionIDs(t *testing.T) {
 	_, err = s.CreateAccessConstraint(ctx, c2)
 	require.NoError(t, err)
 
-	// Same ID works as group.
+	// Same ID as group_closure (groups are collection resources, not principals).
 	c3 := &store.AccessConstraint{
-		Name:                 "collision-group",
-		SubjectKind:          store.ConstraintSubjectPrincipal,
-		SubjectPrincipalType: strPtr(store.ConstraintPrincipalTypeGroup),
-		SubjectPrincipalID:   strPtr(sharedIDStr),
-		ScopeType:            "system",
-		MaximumPermissions:   []string{"agent.read"},
-		Purpose:              "test",
-		CreatedBy:            "test",
+		Name:               "collision-group-closure",
+		SubjectKind:        store.ConstraintSubjectGroupClosure,
+		SubjectGroupID:     strPtr(sharedIDStr),
+		ScopeType:          "system",
+		MaximumPermissions: []string{"agent.read"},
+		Purpose:            "test",
+		CreatedBy:          "test",
 	}
 	_, err = s.CreateAccessConstraint(ctx, c3)
 	require.NoError(t, err)
 }
 
 // ---------------------------------------------------------------------------
-// Group closure semantic distinction tests
+// Group principal type rejection and group_closure creation
 // ---------------------------------------------------------------------------
 
-func TestExactGroupVsClosure(t *testing.T) {
+func TestExactGroupRejected_ClosureAllowed(t *testing.T) {
 	s, _ := newTestACStore(t)
 	ctx := context.Background()
 
 	groupIDStr := acTestGroupID.String()
 
-	// Create an "exact principal = group" constraint.
+	// Exact-group principal subjects are no longer accepted — groups are
+	// collection resources with no identity.
 	exact := &store.AccessConstraint{
-		Name:                 "exact-group",
+		Name:                 "rejected-exact-group",
 		SubjectKind:          store.ConstraintSubjectPrincipal,
 		SubjectPrincipalType: strPtr(store.ConstraintPrincipalTypeGroup),
 		SubjectPrincipalID:   strPtr(groupIDStr),
 		ScopeType:            "system",
 		MaximumPermissions:   []string{"agent.read"},
-		Purpose:              "exact group match",
+		Purpose:              "exact group match — should be rejected",
 		CreatedBy:            "test",
 	}
-	exactCreated, err := s.CreateAccessConstraint(ctx, exact)
-	require.NoError(t, err)
-	assert.Equal(t, store.ConstraintSubjectPrincipal, exactCreated.SubjectKind)
+	_, err := s.CreateAccessConstraint(ctx, exact)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
 
-	// Create a "group_closure" constraint on same group.
+	// group_closure is the correct way to target group members.
 	closure := &store.AccessConstraint{
 		Name:               "closure-group",
 		SubjectKind:        store.ConstraintSubjectGroupClosure,
@@ -501,10 +503,6 @@ func TestExactGroupVsClosure(t *testing.T) {
 	closureCreated, err := s.CreateAccessConstraint(ctx, closure)
 	require.NoError(t, err)
 	assert.Equal(t, store.ConstraintSubjectGroupClosure, closureCreated.SubjectKind)
-
-	// The two constraints are semantically different.
-	assert.NotEqual(t, exactCreated.ID, closureCreated.ID)
-	assert.NotEqual(t, exactCreated.SubjectKind, closureCreated.SubjectKind)
 }
 
 // ---------------------------------------------------------------------------

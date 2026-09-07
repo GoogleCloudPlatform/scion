@@ -487,7 +487,7 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
     }
 
     return html`
-      <div class="timeline" role="list" aria-label="Access boundary audit timeline">
+      <div class="timeline" role="list" aria-label="Access constraint audit timeline">
         ${this.events.map((event) => this.renderEvent(event))}
       </div>
 

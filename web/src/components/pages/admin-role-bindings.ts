@@ -29,22 +29,22 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import type { PrincipalChangeDetail } from '../shared/principal-picker.js';
 import type { SecurityReviewDetail } from '../shared/security-review-dialog.js';
 import {
   parseSecurityReviewResponse,
   parseLockoutResponse,
 } from '../shared/security-review-dialog.js';
 import '../shared/principal-picker.js';
+import '../shared/project-picker.js';
 import '../shared/security-review-dialog.js';
+import type { AssignmentFormValues } from '../shared/role-binding-assignment-form.js';
+import '../shared/role-binding-assignment-form.js';
 import {
   SYSTEM_DIRECT_USER_ONLY_ROLES,
   getLifecycleStatus,
   formatDateTime,
   getPrincipalIcon,
 } from '../shared/role-binding-utils.js';
-import '../shared/effective-access-boundary-notice.js';
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -72,6 +72,9 @@ interface RoleDefinition {
   system: boolean;
 }
 
+type SortField = 'principal' | 'role' | 'created';
+type SortOrder = 'asc' | 'desc';
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -90,6 +93,8 @@ export class ScionPageAdminRoleBindings extends LitElement {
   @state() private totalCount = 0;
   @state() private currentPage = 1;
   @state() private error: string | null = null;
+  @state() private sortBy: SortField = 'created';
+  @state() private sortOrder: SortOrder = 'desc';
 
   // Role name lookup cache
   @state() private roleNameMap: Record<string, string> = {};
@@ -119,9 +124,6 @@ export class ScionPageAdminRoleBindings extends LitElement {
   // Action state
   @state() private actionInProgress = false;
   @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null = null;
-
-  // Validation warning (e.g. group assigned to direct-user-only role)
-  @state() private formValidationWarning = '';
 
   // Security review dialog state
   @state() private securityReviewDetail: SecurityReviewDetail | null = null;
@@ -186,6 +188,15 @@ export class ScionPageAdminRoleBindings extends LitElement {
       color: var(--scion-text-muted, #64748b);
       background: var(--scion-bg-subtle, #f1f5f9);
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    th.sortable {
+      cursor: pointer;
+      user-select: none;
+    }
+    th.sortable:hover,
+    th.sortable.active {
+      color: var(--scion-text, #1e293b);
     }
 
     td {
@@ -527,8 +538,14 @@ export class ScionPageAdminRoleBindings extends LitElement {
 
     try {
       const offset = (this.currentPage - 1) * PAGE_SIZE;
+      const params = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+        offset: String(offset),
+        sort_by: this.sortBy,
+        sort_order: this.sortOrder,
+      });
       const [bindingsRes, rolesRes] = await Promise.all([
-        apiFetch(`/api/v1/admin/role-bindings?limit=${PAGE_SIZE}&offset=${offset}`),
+        apiFetch(`/api/v1/admin/role-bindings?${params.toString()}`),
         apiFetch('/api/v1/admin/roles'),
       ]);
 
@@ -564,6 +581,20 @@ export class ScionPageAdminRoleBindings extends LitElement {
     } finally {
       this.loading = false;
     }
+  }
+
+  private toggleSort(field: SortField): void {
+    if (this.sortBy === field) this.sortOrder = this.sortOrder === 'asc' ? 'desc' : 'asc';
+    else {
+      this.sortBy = field;
+      this.sortOrder = field === 'created' ? 'desc' : 'asc';
+    }
+    this.currentPage = 1;
+    void this.loadData();
+  }
+
+  private sortIndicator(field: SortField): string {
+    return this.sortBy === field ? (this.sortOrder === 'asc' ? ' ▲' : ' ▼') : '';
   }
 
   /**
@@ -641,8 +672,17 @@ export class ScionPageAdminRoleBindings extends LitElement {
     this.showAdvanced = false;
     this.formNotBefore = '';
     this.formExpiresAt = '';
-    this.formValidationWarning = '';
     this.showCreateDialog = true;
+
+    // Reset the shared form after it renders
+    void this.updateComplete.then(() => {
+      const form = this.shadowRoot?.querySelector('scion-role-binding-assignment-form');
+      if (form) {
+        type AssignmentForm =
+          import('../shared/role-binding-assignment-form.js').ScionRoleBindingAssignmentForm;
+        (form as AssignmentForm).reset();
+      }
+    });
   }
 
   private openDeleteDialog(binding: RoleBinding): void {
@@ -650,42 +690,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
     this.showDeleteDialog = true;
   }
 
-  /**
-   * Roles available for the current principal type, filtered by scope type.
-   * Group principals cannot be assigned direct-user-only roles.
-   */
-  private get filteredRoles(): RoleDefinition[] {
-    let filtered = this.roles;
-
-    // Filter by scope type compatibility
-    if (this.formScopeType === 'system') {
-      filtered = filtered.filter((r) => r.scopeType === 'system');
-    } else if (this.formScopeType === 'project') {
-      filtered = filtered.filter((r) => r.scopeType === 'project');
-    }
-
-    // Groups cannot be assigned to direct-user-only roles
-    if (this.formPrincipalType === 'group') {
-      filtered = filtered.filter((r) => !SYSTEM_DIRECT_USER_ONLY_ROLES.includes(r.name));
-    }
-
-    return filtered;
-  }
-
-  /**
-   * Update validation state when principal type or role changes.
-   */
-  private updateValidation(): void {
-    if (this.formPrincipalType === 'group' && this.formRoleId) {
-      const roleName = this.roleNameMap[this.formRoleId];
-      if (roleName && SYSTEM_DIRECT_USER_ONLY_ROLES.includes(roleName)) {
-        this.formValidationWarning = `"${roleName}" can only be assigned to individual users, not groups.`;
-        this.formRoleId = '';
-        return;
-      }
-    }
-    this.formValidationWarning = '';
-  }
+  // Validation is now handled by the shared scion-role-binding-assignment-form component.
 
   // ---------------------------------------------------------------------------
   // API actions
@@ -1072,11 +1077,26 @@ export class ScionPageAdminRoleBindings extends LitElement {
         <table>
           <thead>
             <tr>
-              <th>Principal</th>
-              <th>Role</th>
+              <th
+                class="sortable ${this.sortBy === 'principal' ? 'active' : ''}"
+                @click=${() => this.toggleSort('principal')}
+              >
+                Principal${this.sortIndicator('principal')}
+              </th>
+              <th
+                class="sortable ${this.sortBy === 'role' ? 'active' : ''}"
+                @click=${() => this.toggleSort('role')}
+              >
+                Role${this.sortIndicator('role')}
+              </th>
               <th>Scope</th>
               <th class="hide-mobile">Status</th>
-              <th class="hide-mobile">Created</th>
+              <th
+                class="hide-mobile sortable ${this.sortBy === 'created' ? 'active' : ''}"
+                @click=${() => this.toggleSort('created')}
+              >
+                Created${this.sortIndicator('created')}
+              </th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -1210,112 +1230,17 @@ export class ScionPageAdminRoleBindings extends LitElement {
           if (!this.actionInProgress) this.showCreateDialog = false;
         }}
       >
-        ${this.formValidationWarning
-          ? html`
-              <div class="validation-warning">
-                <sl-icon name="exclamation-triangle"></sl-icon>
-                ${this.formValidationWarning}
-              </div>
-            `
-          : ''}
-
-        <!-- Step 1: Select principal -->
-        <div class="form-group">
-          <sl-select
-            label="Principal Type"
-            .value=${this.formPrincipalType}
-            @sl-change=${(e: Event) => {
-              this.formPrincipalType = (e.target as HTMLSelectElement).value;
-              this.formPrincipalId = '';
-              this.updateValidation();
-            }}
-          >
-            <sl-option value="user">
-              <sl-icon slot="prefix" name="person"></sl-icon>
-              User
-            </sl-option>
-            <sl-option value="agent">
-              <sl-icon slot="prefix" name="cpu"></sl-icon>
-              Agent
-            </sl-option>
-            <sl-option value="group">
-              <sl-icon slot="prefix" name="diagram-3"></sl-icon>
-              Group
-            </sl-option>
-          </sl-select>
-        </div>
-        <div class="form-group">
-          <scion-principal-picker
-            .principalType=${this.formPrincipalType as 'user' | 'agent' | 'group'}
-            @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => {
-              this.formPrincipalId = e.detail.principalId;
-            }}
-          ></scion-principal-picker>
-        </div>
-
-        <!-- Step 2: Select role -->
-        <div class="form-group">
-          <sl-select
-            label="Role"
-            .value=${this.formRoleId}
-            @sl-change=${(e: Event) => {
-              this.formRoleId = (e.target as HTMLSelectElement).value;
-              // Auto-set scope type to match the role's scope type
-              const scopeType = this.roleScopeMap[this.formRoleId];
-              if (scopeType) {
-                this.formScopeType = scopeType;
-              }
-              this.updateValidation();
-            }}
-          >
-            ${this.filteredRoles.length === 0
-              ? html`<sl-option value="" disabled>No roles available for this scope</sl-option>`
-              : this.filteredRoles.map(
-                  (role) => html`
-                    <sl-option value=${role.id}>
-                      ${role.name}
-                      <small style="color: var(--scion-text-muted, #64748b)">
-                        (${role.scopeType})
-                      </small>
-                    </sl-option>
-                  `
-                )}
-          </sl-select>
-        </div>
-
-        <!-- Step 3: Select scope -->
-        <div class="form-group">
-          <sl-select
-            label="Scope"
-            .value=${this.formScopeType}
-            @sl-change=${(e: Event) => {
-              this.formScopeType = (e.target as HTMLSelectElement).value;
-              // Re-filter roles when scope type changes
-              if (this.formRoleId && this.roleScopeMap[this.formRoleId] !== this.formScopeType) {
-                this.formRoleId = '';
-              }
-              this.updateValidation();
-            }}
-          >
-            <sl-option value="system">System</sl-option>
-            <sl-option value="project">Project</sl-option>
-          </sl-select>
-        </div>
-        ${this.formScopeType === 'project'
-          ? html`
-              <div class="form-group">
-                <sl-input
-                  label="Project ID"
-                  placeholder="Enter project ID"
-                  .value=${this.formScopeId}
-                  @sl-input=${(e: Event) => {
-                    this.formScopeId = (e.target as HTMLInputElement).value;
-                  }}
-                  required
-                ></sl-input>
-              </div>
-            `
-          : ''}
+        <scion-role-binding-assignment-form
+          .roles=${this.roles}
+          ?disabled=${this.actionInProgress}
+          @form-change=${(e: CustomEvent<AssignmentFormValues>) => {
+            this.formPrincipalType = e.detail.principalType;
+            this.formPrincipalId = e.detail.principalId;
+            this.formRoleId = e.detail.roleId;
+            this.formScopeType = e.detail.scopeType;
+            this.formScopeId = e.detail.scopeId;
+          }}
+        ></scion-role-binding-assignment-form>
 
         <!-- Advanced: Assignment lifecycle -->
         <button

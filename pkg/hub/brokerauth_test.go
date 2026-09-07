@@ -1265,8 +1265,8 @@ func TestBrokerAuthMiddleware_OnBehalfOf_SuspendedUser(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Errorf("Expected 403, got %d: %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "on-behalf-of principal is suspended") {
-		t.Errorf("Expected 'on-behalf-of principal is suspended' in response, got: %s", w.Body.String())
+	if !strings.Contains(w.Body.String(), "on-behalf-of principal is not active") {
+		t.Errorf("Expected 'on-behalf-of principal is not active' in response, got: %s", w.Body.String())
 	}
 }
 

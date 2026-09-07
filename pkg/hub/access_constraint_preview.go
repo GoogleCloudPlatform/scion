@@ -1460,6 +1460,8 @@ func (ps *PreviewService) constraintMatchesUser(ctx context.Context, c *store.Ac
 			if *c.SubjectPrincipalType == "user" && *c.SubjectPrincipalID == user.userID {
 				return true
 			}
+			// Legacy: exact-group principal constraints are deprecated but
+			// still evaluated fail-closed.
 			if *c.SubjectPrincipalType == "group" {
 				for _, gid := range user.groupIDs {
 					if gid == *c.SubjectPrincipalID {

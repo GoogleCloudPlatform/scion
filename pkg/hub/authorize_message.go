@@ -44,8 +44,10 @@ import (
 //   - targetAgent: the target agent record (freshly read from the store;
 //     mode is evaluated live per D10).
 //   - isSystemPlane: true ONLY for hub-internal system messages (sciontool
-//     self-messages, state-change notices, scheduled events). Must NEVER
-//     be derived from external request data.
+//     self-messages, state-change notices). Must NEVER be derived from
+//     external request data. Scheduled events are NOT system-plane: they
+//     are request-derived (authored by a user or agent) and must be
+//     authorized with isSystemPlane=false at both authoring and fire time.
 //
 // Returns (allowed, reason). When allowed is false, reason describes why.
 //

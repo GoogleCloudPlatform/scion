@@ -76,7 +76,7 @@ const ADMIN_SCOPEABLE_ITEMS: NavItem[] = [
   { path: '/admin/groups', label: 'Groups', icon: 'diagram-3' },
   { path: '/admin/roles', label: 'Roles', icon: 'shield-lock' },
   { path: '/admin/role-bindings', label: 'Role Bindings', icon: 'link-45deg' },
-  { path: '/admin/access-boundaries', label: 'Access Boundaries', icon: 'shield-check' },
+  { path: '/admin/access-boundaries', label: 'Access Constraints', icon: 'shield-check' },
   { path: '/admin/quotas', label: 'Quotas', icon: 'speedometer2' },
   { path: '/health', label: 'Health', icon: 'heart-pulse' },
   { path: '/admin/skill-registries', label: 'Skill Registries', icon: 'cloud-arrow-down' },

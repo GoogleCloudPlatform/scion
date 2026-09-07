@@ -120,6 +120,12 @@ func newTestWebServer(t *testing.T, cfg WebServerConfig) *WebServer {
 
 // newDevAuthWebServer creates a web server with dev-auth enabled for testing
 // authenticated routes without requiring OAuth.
+//
+// By default a minimal authoritative store is installed containing an active
+// DevUserID record so that the suspendedUserMiddleware (which correctly fails
+// closed when ws.store is nil) passes through to the handler under test.
+// Tests that intentionally exercise nil-store or error-store paths can
+// override ws.store after this call returns.
 func newDevAuthWebServer(t *testing.T, overrides ...func(*WebServerConfig)) *WebServer {
 	t.Helper()
 	cfg := WebServerConfig{
@@ -135,6 +141,19 @@ func newDevAuthWebServer(t *testing.T, overrides ...func(*WebServerConfig)) *Web
 			"assets/main.js": &fstest.MapFile{Data: []byte("// test stub")},
 		}
 	}
+
+	// Install a minimal authoritative store with an active dev user so the
+	// suspended-user middleware does not fail closed on every authenticated
+	// request.  This mirrors production where the store is always present.
+	devStore := newProxyAuthStore()
+	devStore.users[DevUserID] = &store.User{
+		ID:     DevUserID,
+		Email:  "dev@localhost",
+		Role:   "admin",
+		Status: store.UserStatusActive,
+	}
+	ws.store = devStore
+
 	return ws
 }
 
@@ -3313,6 +3332,8 @@ func TestProxyAuthMiddleware_ExistingSession_DeletedUserRejected(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrNotFound)
 
 	// Replaying the still-valid admin session cookie must now be rejected.
+	// The server clears the stale session and redirects to login rather
+	// than returning a raw 403, so the user can re-authenticate.
 	req3 := httptest.NewRequest("GET", "/projects", nil)
 	req3.Header.Set("Accept", "text/html")
 	for _, c := range adminCookies {
@@ -3321,7 +3342,8 @@ func TestProxyAuthMiddleware_ExistingSession_DeletedUserRejected(t *testing.T) {
 	rec3 := httptest.NewRecorder()
 	handler.ServeHTTP(rec3, req3)
 
-	assert.Equal(t, http.StatusForbidden, rec3.Code, "deleted user should be rejected with 403")
+	assert.Equal(t, http.StatusFound, rec3.Code, "deleted user should be redirected to login")
+	assert.Equal(t, "/login", rec3.Header().Get("Location"))
 }
 
 func TestProxyAuthMiddleware_ExistingSession_NoUpdateWhenRoleUnchanged(t *testing.T) {

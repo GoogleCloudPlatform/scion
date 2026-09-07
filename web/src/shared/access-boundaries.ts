@@ -119,19 +119,27 @@ export type ConstraintSubject =
   | { kind: 'all_principals' };
 
 /**
- * Flattened five-way subject vocabulary for pickers and filters. Maps onto
+ * Flattened subject vocabulary for pickers and filters. Maps onto
  * `ConstraintSubject` losslessly.
+ *
+ * `exact_group` was removed: groups are collection resources with no identity
+ * and cannot be targeted as individual principals. Use `group_closure` instead.
  */
 export type SubjectSelection =
   | 'exact_user'
   | 'exact_agent'
-  | 'exact_group'
   | 'group_closure'
   | 'all_principals';
 
 export function subjectSelectionOf(subject: ConstraintSubject): SubjectSelection {
   switch (subject.kind) {
     case 'principal':
+      // Legacy: exact-group principal subjects are deprecated. If encountered
+      // (from a legacy row), fall back to 'group_closure' for display. Such
+      // rows are marked degraded server-side and evaluated fail-closed.
+      if (subject.principal.type === 'group') {
+        return 'group_closure';
+      }
       return `exact_${subject.principal.type}` as SubjectSelection;
     case 'group_closure':
       return 'group_closure';

@@ -770,6 +770,16 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
 	},
+	"/api/v1/admin/roles/export": {
+		Pattern: "/api/v1/admin/roles/export", RouteID: "admin.roles.export",
+		Classification: RouteHubAdmin,
+		Permission:     "role.read", Resource: "role", Action: "read",
+	},
+	"/api/v1/admin/roles/import": {
+		Pattern: "/api/v1/admin/roles/import", RouteID: "admin.roles.import",
+		Classification: RouteHubAdmin,
+		Permission:     "role.read", Resource: "role", Action: "read",
+	},
 	"/api/v1/admin/roles/": {
 		Pattern: "/api/v1/admin/roles/", RouteID: "admin.roles.byId",
 		Classification: RouteHubAdmin,
@@ -777,13 +787,22 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/admin/role-bindings": {
 		Pattern: "/api/v1/admin/role-bindings", RouteID: "admin.roleBindings",
-		Classification: RouteHubAdmin,
-		Permission:     "role_binding.read", Resource: "role_binding", Action: "read",
+		// RouteAuthenticated: authorization is scope-aware and handled
+		// inline. GET checks role_binding.read at hub scope. POST defers
+		// to the membership service for project-scoped requests (project
+		// owners need only project.manage, not hub-level role_binding.create)
+		// and checks role_binding.create at hub scope for system-scoped
+		// requests.
+		Classification: RouteAuthenticated,
 	},
 	"/api/v1/admin/role-bindings/": {
 		Pattern: "/api/v1/admin/role-bindings/", RouteID: "admin.roleBindings.byId",
-		Classification: RouteHubAdmin,
-		Permission:     "role_binding.read", Resource: "role_binding", Action: "read",
+		// RouteAuthenticated: authorization is method-aware and handled
+		// inline, matching the collection endpoint's pattern.
+		// GET /user/{userID} checks role_binding.read inline.
+		// DELETE /{id} checks role_binding.delete inline via
+		// requireWritePermissionForRoleBinding.
+		Classification: RouteAuthenticated,
 	},
 	"/api/v1/admin/permissions": {
 		Pattern: "/api/v1/admin/permissions", RouteID: "admin.permissions",
@@ -815,6 +834,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "access_constraint.admin", Resource: "access_constraint", Action: "preview",
 	},
 
+	"/api/v1/admin/effective-access": {
+		Pattern: "/api/v1/admin/effective-access", RouteID: "admin.effectiveAccess",
+		Classification: RouteAuthenticated,
+		Permission:     "hub.audit.read", Resource: "hub", Action: "manage",
+	},
+
 	// -------------------------------------------------------------------------
 	// Authenticated: Usage self-service
 	// -------------------------------------------------------------------------
@@ -824,27 +849,52 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: GitHub App
+	// Hub admin: GitHub App (method-aware permission enforcement)
 	// -------------------------------------------------------------------------
-	"/api/v1/github-app": {
-		Pattern: "/api/v1/github-app", RouteID: "githubApp.config",
+	"GET /api/v1/github-app": {
+		Pattern: "GET /api/v1/github-app", RouteID: "githubApp.config.read",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.github_app.read", Resource: "hub", Action: "read",
 	},
-	"/api/v1/github-app/installations": {
-		Pattern: "/api/v1/github-app/installations", RouteID: "githubApp.installations",
+	"PUT /api/v1/github-app": {
+		Pattern: "PUT /api/v1/github-app", RouteID: "githubApp.config.update",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.github_app.update", Resource: "hub", Action: "update",
 	},
-	"/api/v1/github-app/installations/": {
-		Pattern: "/api/v1/github-app/installations/", RouteID: "githubApp.installations.byId",
+	"GET /api/v1/github-app/installations": {
+		Pattern: "GET /api/v1/github-app/installations", RouteID: "githubApp.installations.list",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.github_app.read", Resource: "hub", Action: "read",
 	},
-	"/api/v1/github-app/installations/discover": {
-		Pattern: "/api/v1/github-app/installations/discover", RouteID: "githubApp.installations.discover",
+	"POST /api/v1/github-app/installations": {
+		Pattern: "POST /api/v1/github-app/installations", RouteID: "githubApp.installations.create",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.github_app.update", Resource: "hub", Action: "update",
 	},
-	"/api/v1/github-app/sync-permissions": {
-		Pattern: "/api/v1/github-app/sync-permissions", RouteID: "githubApp.syncPermissions",
+	"GET /api/v1/github-app/installations/": {
+		Pattern: "GET /api/v1/github-app/installations/", RouteID: "githubApp.installations.read",
 		Classification: RouteHubAdmin,
+		Permission:     "hub.github_app.read", Resource: "hub", Action: "read",
+	},
+	"PUT /api/v1/github-app/installations/": {
+		Pattern: "PUT /api/v1/github-app/installations/", RouteID: "githubApp.installations.update",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.github_app.update", Resource: "hub", Action: "update",
+	},
+	"DELETE /api/v1/github-app/installations/": {
+		Pattern: "DELETE /api/v1/github-app/installations/", RouteID: "githubApp.installations.delete",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.github_app.update", Resource: "hub", Action: "update",
+	},
+	"POST /api/v1/github-app/installations/discover": {
+		Pattern: "POST /api/v1/github-app/installations/discover", RouteID: "githubApp.installations.discover",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.github_app.update", Resource: "hub", Action: "update",
+	},
+	"POST /api/v1/github-app/sync-permissions": {
+		Pattern: "POST /api/v1/github-app/sync-permissions", RouteID: "githubApp.syncPermissions",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.github_app.update", Resource: "hub", Action: "update",
 	},
 
 	// -------------------------------------------------------------------------
@@ -1020,7 +1070,7 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 				user, ok := identity.(UserIdentity)
 				if !ok {
 					logAuthzDenial(r, identity, Resource{Type: meta.Resource}, Action(meta.Action), "non-user identity")
-					Forbidden(w)
+					writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
 					return
 				}
 				decision := s.authzService.Decide(r.Context(), AuthzRequest{
@@ -1032,7 +1082,7 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 				})
 				if !decision.Allowed {
 					logAuthzDenial(r, identity, Resource{Type: meta.Resource, ID: "hub"}, Action(meta.Action), decision.Reason)
-					Forbidden(w)
+					writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
 					return
 				}
 				next(w, r)

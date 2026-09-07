@@ -37,6 +37,8 @@ type RoleBinding struct {
 	CreatedBy string `json:"created_by,omitempty"`
 	// Created holds the value of the "created" field.
 	Created time.Time `json:"created,omitempty"`
+	// MembershipKind holds the value of the "membership_kind" field.
+	MembershipKind *string `json:"membership_kind,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the RoleBindingQuery when eager-loading is set.
 	Edges        RoleBindingEdges `json:"edges"`
@@ -70,7 +72,7 @@ func (*RoleBinding) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case rolebinding.FieldRoleDefinitionID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case rolebinding.FieldPrincipalType, rolebinding.FieldPrincipalID, rolebinding.FieldScopeType, rolebinding.FieldScopeID, rolebinding.FieldCreatedBy:
+		case rolebinding.FieldPrincipalType, rolebinding.FieldPrincipalID, rolebinding.FieldScopeType, rolebinding.FieldScopeID, rolebinding.FieldCreatedBy, rolebinding.FieldMembershipKind:
 			values[i] = new(sql.NullString)
 		case rolebinding.FieldNotBefore, rolebinding.FieldExpiresAt, rolebinding.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -154,6 +156,13 @@ func (_m *RoleBinding) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.Created = value.Time
 			}
+		case rolebinding.FieldMembershipKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field membership_kind", values[i])
+			} else if value.Valid {
+				_m.MembershipKind = new(string)
+				*_m.MembershipKind = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -227,6 +236,11 @@ func (_m *RoleBinding) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))
+	builder.WriteString(", ")
+	if v := _m.MembershipKind; v != nil {
+		builder.WriteString("membership_kind=")
+		builder.WriteString(*v)
+	}
 	builder.WriteByte(')')
 	return builder.String()
 }

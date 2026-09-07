@@ -1043,7 +1043,8 @@ func (gs *GovernanceService) resolveScope(ctx context.Context, req CommitRequest
 }
 
 // findConstraintBearingGroupBoundaries finds all boundary IDs that reference
-// the given group as a subject (either exact group or group closure).
+// the given group as a subject (group closure, or legacy exact-group rows
+// which are deprecated but still evaluated fail-closed).
 func (gs *GovernanceService) findConstraintBearingGroupBoundaries(ctx context.Context, groupID string) ([]string, error) {
 	const pageSize = 500
 	offset := 0

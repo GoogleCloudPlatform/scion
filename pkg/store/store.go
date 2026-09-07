@@ -44,6 +44,12 @@ var (
 	// ErrScopeMismatch is returned when a role binding's scope type does not
 	// match the role definition's scope type.
 	ErrScopeMismatch = errors.New("binding scope type does not match role definition scope type")
+
+	// ErrBuiltInMembershipConflict is returned when a principal already has
+	// a built-in membership role in the same project. The caller must delete
+	// the existing membership binding before assigning a different built-in
+	// membership role (change-role = delete + create).
+	ErrBuiltInMembershipConflict = errors.New("principal already has a built-in membership role in this project")
 )
 
 // SystemReconcileCreatedBy is the CreatedBy sentinel that identifies the
@@ -63,6 +69,14 @@ func IsSuperAdminBindingAllowed(createdBy string) bool {
 	return createdBy == SystemReconcileCreatedBy || createdBy == SystemBackfillCreatedBy
 }
 
+// IsSystemCreatedBinding reports whether the given CreatedBy value identifies
+// a binding created automatically by the system (backfill or reconcile).
+// Used by cleanup routines to distinguish automatic bindings from
+// administrator-created ones.
+func IsSystemCreatedBinding(createdBy string) bool {
+	return createdBy == SystemReconcileCreatedBy || createdBy == SystemBackfillCreatedBy
+}
+
 // Store defines the interface for Hub data persistence.
 // Implementations may use SQLite, PostgreSQL, Firestore, or other backends.
 type Store interface {
@@ -74,6 +88,13 @@ type Store interface {
 
 	// Migrate applies any pending database migrations.
 	Migrate(ctx context.Context) error
+
+	// WithTx executes fn inside a database transaction. All store operations
+	// performed via the Store passed to fn participate in the same transaction.
+	// If fn returns nil the transaction is committed; otherwise it is rolled
+	// back and the error is returned to the caller. Nested calls are
+	// pass-through (the inner callback receives the same transactional store).
+	WithTx(ctx context.Context, fn func(tx Store) error) error
 
 	// Agent operations
 	AgentStore
@@ -307,6 +328,12 @@ type AgentFilter struct {
 	// reflect only the authorized set. A nil value means no authorization
 	// filtering. An empty non-nil slice means no agents are authorized.
 	AuthorizedProjectIDs []string
+
+	// ExcludedProjectIDs, when non-nil, excludes agents whose project_id is in
+	// this set from the result. RS2: used when a system-wide admin has project-
+	// scoped constraints that block the list permission for specific projects.
+	// An empty or nil slice means no exclusions.
+	ExcludedProjectIDs []string
 }
 
 // AgentHealthAggregate holds pre-computed counts and short lists used by the
@@ -391,6 +418,16 @@ type ProjectStore interface {
 
 	// ListProjects returns projects matching the filter criteria.
 	ListProjects(ctx context.Context, filter ProjectFilter, opts ListOptions) (*ListResult[Project], error)
+
+	// LockProjectForMembership acquires a project-scoped serialization lock
+	// for membership mutations. On PostgreSQL this executes SELECT ... FOR
+	// UPDATE on the project row, serializing concurrent membership
+	// transactions for the same project. On SQLite this is a plain read
+	// (SQLite already serializes writes at the database level).
+	//
+	// Must be called inside a transaction (WithTx) before any membership
+	// reads or writes. Returns ErrNotFound if the project does not exist.
+	LockProjectForMembership(ctx context.Context, projectID string) error
 }
 
 // ProjectFilter defines criteria for filtering projects.
@@ -401,6 +438,7 @@ type ProjectFilter struct {
 	BrokerID        string // Filter by contributing broker
 	Name            string // Filter by exact name (case-insensitive)
 	Slug            string // Filter by exact slug (case-insensitive)
+	Search          string // Substring match on name and slug (case-insensitive)
 
 	// MemberOrOwnerIDs, when non-empty, restricts results to projects whose ID
 	// is in this set OR whose owner_id matches OwnerID. OwnerID and this
@@ -429,6 +467,13 @@ type ProjectFilter struct {
 	// (caller has admin view or filtering is handled elsewhere). An empty non-nil
 	// slice means no projects are authorized — the query returns zero results.
 	AuthorizedProjectIDs []string
+
+	// ExcludedProjectIDs, when non-nil, excludes projects whose ID is in this
+	// set from the result. RS2: used when a system-wide admin has project-scoped
+	// constraints that block the list permission for specific projects. The
+	// exclusion composes by intersection with all other filters (including
+	// AuthorizedProjectIDs). An empty or nil slice means no exclusions.
+	ExcludedProjectIDs []string
 }
 
 // RuntimeBrokerStore defines runtime broker persistence operations.
@@ -734,6 +779,10 @@ type ProjectProviderStore interface {
 
 	// UpdateProviderStatus updates a provider's status and last seen time.
 	UpdateProviderStatus(ctx context.Context, projectID, brokerID, status string) error
+
+	// DeleteProjectProvidersByProject removes all provider relationships for a project.
+	// Returns the number of providers deleted.
+	DeleteProjectProvidersByProject(ctx context.Context, projectID string) (int, error)
 }
 
 // EnvVarStore defines environment variable persistence operations.
@@ -969,6 +1018,20 @@ type UserAccessTokenStore interface {
 
 	// CountUserAccessTokens returns the number of active (non-revoked) tokens for a user.
 	CountUserAccessTokens(ctx context.Context, userID string) (int, error)
+
+	// DeleteUserAccessTokensByProject permanently removes all tokens scoped to a project.
+	// Returns the number of tokens deleted.
+	DeleteUserAccessTokensByProject(ctx context.Context, projectID string) (int, error)
+
+	// LockUserForTokens acquires a per-user serialization lock for token
+	// mutations. On PostgreSQL this executes SELECT ... FOR UPDATE on the
+	// user row, serializing concurrent token transactions for the same user.
+	// On SQLite this is a plain read (SQLite already serializes writes at
+	// the database level).
+	//
+	// Must be called inside a transaction (WithTx) before any token count
+	// or mutation. Returns ErrNotFound if the user does not exist.
+	LockUserForTokens(ctx context.Context, userID string) error
 }
 
 // =============================================================================
@@ -1173,6 +1236,10 @@ type ScheduleStore interface {
 	// Returns ErrNotFound if the schedule doesn't exist.
 	DeleteSchedule(ctx context.Context, id string) error
 
+	// DeleteSchedulesByProject removes all schedules and their events for a project.
+	// Returns the number of schedules deleted.
+	DeleteSchedulesByProject(ctx context.Context, projectID string) (int, error)
+
 	// ListDueSchedules returns active schedules whose next_run_at has passed.
 	ListDueSchedules(ctx context.Context, now time.Time) ([]Schedule, error)
 }
@@ -1371,6 +1438,10 @@ type ProjectSyncStateStore interface {
 	// DeleteProjectSyncState removes sync state for a project and optional broker.
 	// Returns ErrNotFound if the state doesn't exist.
 	DeleteProjectSyncState(ctx context.Context, projectID, brokerID string) error
+
+	// DeleteProjectSyncStatesByProject removes all sync states for a project.
+	// Returns the number of states deleted.
+	DeleteProjectSyncStatesByProject(ctx context.Context, projectID string) (int, error)
 }
 
 // =============================================================================
@@ -1412,6 +1483,10 @@ type LifecycleHookStore interface {
 	// Called on terminal phases (stopped/error) and agent deletion to prevent
 	// unbounded growth. No error is returned if the row does not exist.
 	DeleteHookPhase(ctx context.Context, agentID string) error
+
+	// DeleteLifecycleHooksByScope removes all lifecycle hooks for a scope.
+	// Returns the number of hooks deleted.
+	DeleteLifecycleHooksByScope(ctx context.Context, scopeType string, scopeID string) (int, error)
 }
 
 // LifecycleHookFilter defines criteria for filtering lifecycle hooks.
@@ -1737,10 +1812,22 @@ type RoleStore interface {
 	// Returns ErrNotFound if the role definition doesn't exist.
 	DeleteRoleDefinition(ctx context.Context, id string) error
 
+	// LockRoleDefinitionForAdminGuard acquires a serialization lock on the
+	// given role definition row. On PostgreSQL this executes SELECT ... FOR
+	// UPDATE, serializing concurrent transactions that both try to check the
+	// last-admin count before mutating super-admin bindings. On SQLite this
+	// is a plain existence check (SQLite already serializes all writes at the
+	// database level).
+	//
+	// Must be called inside a transaction (WithTx) before checkLastSuperAdminTx
+	// to prevent the READ COMMITTED race where two concurrent demotions/deletes
+	// both observe the other admin and both commit, leaving zero super-admins.
+	// Returns ErrNotFound if the role definition doesn't exist.
+	LockRoleDefinitionForAdminGuard(ctx context.Context, roleDefinitionID string) error
+
 	// ListAllRoleBindings returns all role bindings (admin view).
-	// limit and offset control pagination. A limit of 0 defaults to 100.
-	// The maximum allowed limit is 1000.
-	ListAllRoleBindings(ctx context.Context, limit, offset int) ([]*RoleBinding, error)
+	// opts controls pagination and sort order. See RoleBindingListOptions for defaults.
+	ListAllRoleBindings(ctx context.Context, opts RoleBindingListOptions) ([]*RoleBinding, error)
 
 	// CountAllRoleBindings returns the total number of role bindings.
 	CountAllRoleBindings(ctx context.Context) (int, error)
@@ -1809,6 +1896,10 @@ type AgentCredentialStore interface {
 	// PurgeExpiredAgentCredentials removes expired credentials older than cutoff.
 	// Returns the number of credentials purged.
 	PurgeExpiredAgentCredentials(ctx context.Context, cutoff time.Time) (int, error)
+
+	// DeleteAgentCredentialsByProject permanently removes all agent credentials for a project.
+	// Returns the number of credentials deleted.
+	DeleteAgentCredentialsByProject(ctx context.Context, projectID string) (int, error)
 }
 
 // =============================================================================

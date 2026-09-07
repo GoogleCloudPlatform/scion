@@ -433,3 +433,16 @@ func (s *ProjectPreStartHookStore) ActivateHubPreStartHook(ctx context.Context, 
 func (s *ProjectPreStartHookStore) DeleteHubPreStartHook(ctx context.Context, hookID string) error {
 	return s.deleteHook(ctx, entpsh.ScopeHub, hookID, "")
 }
+
+// DeletePreStartHooksByProject hard-deletes all project-scoped hooks for a project.
+func (s *ProjectPreStartHookStore) DeletePreStartHooksByProject(ctx context.Context, projectID string) (int, error) {
+	n, err := s.client.ProjectPreStartHook.Delete().
+		Where(
+			entpsh.ScopeEQ(entpsh.ScopeProject),
+			entpsh.ProjectIDEQ(projectID),
+		).Exec(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}

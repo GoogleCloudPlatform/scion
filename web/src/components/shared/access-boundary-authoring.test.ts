@@ -73,7 +73,7 @@ describe('Invariant 1: Changing subject kind clears IDs', () => {
 
   it('clears IDs for every possible kind transition', async () => {
     const mod = await import('./access-boundary-subject-selector.js');
-    const kinds = ['exact_user', 'exact_agent', 'exact_group', 'group_closure', 'all_principals'];
+    const kinds = ['exact_user', 'exact_agent', 'group_closure', 'all_principals'];
 
     for (const from of kinds) {
       for (const to of kinds) {

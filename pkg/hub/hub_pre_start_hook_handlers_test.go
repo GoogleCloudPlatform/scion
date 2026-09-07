@@ -67,8 +67,10 @@ func createAdminUserForHubPSH(t *testing.T, s store.Store) *store.User {
 func uatTokenForUser(t *testing.T, srv *Server, s store.Store, user *store.User) string {
 	t.Helper()
 	project := createTestProjectForPSH(t, s)
+	// RS4: context must carry actor identity for audit record.
+	ctx := rs4MintContext(user.ID)
 	token, _, err := srv.uatService.CreateToken(
-		t.Context(), user.ID, "ci-token", project.ID, []string{store.UATScopeAgentManage}, nil,
+		ctx, user.ID, "ci-token", project.ID, []string{store.UATScopeAgentManage}, nil,
 	)
 	require.NoError(t, err)
 	return token

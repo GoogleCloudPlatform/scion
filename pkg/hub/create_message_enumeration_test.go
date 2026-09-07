@@ -242,22 +242,7 @@ func isCreateMessageCall(call *ast.CallExpr) bool {
 	return false
 }
 
-// enclosingFuncName returns the name of the function or method that contains
-// the given byte offset.
-func enclosingFuncName(fset *token.FileSet, f *ast.File, offset int) string {
-	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
-		}
-		start := fset.Position(fn.Body.Pos()).Offset
-		end := fset.Position(fn.Body.End()).Offset
-		if offset >= start && offset <= end {
-			return fn.Name.Name
-		}
-	}
-	return "<unknown>"
-}
+// enclosingFuncName is defined in ast_test_helpers_test.go (shared helper).
 
 // disambiguationSuffixes returns candidate suffixes for multi-call functions.
 // The mapping is hard-coded for known cases.
@@ -282,21 +267,7 @@ func disambiguationSuffixes(file, fn string, idx, total int) []string {
 	return nil
 }
 
-// findHubDir locates the pkg/hub directory relative to the test file.
-func findHubDir(t *testing.T) string {
-	t.Helper()
-	// The test runs from pkg/hub, so "." should work, but use an absolute path
-	// for robustness.
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get working directory: %v", err)
-	}
-	// Verify this looks like the hub package.
-	if _, err := os.Stat(filepath.Join(wd, "server.go")); err != nil {
-		t.Fatalf("working directory %q does not look like pkg/hub (server.go not found)", wd)
-	}
-	return wd
-}
+// findHubDir is defined in ast_test_helpers_test.go (shared helper).
 
 // itoa is a minimal int-to-string without importing strconv.
 func itoa(n int) string {

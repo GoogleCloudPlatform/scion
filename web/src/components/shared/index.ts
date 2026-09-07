@@ -60,13 +60,6 @@ export { ScionQuickMessageDialog } from './quick-message-dialog.js';
 export { ScionPrincipalPicker } from './principal-picker.js';
 export type { PrincipalChangeDetail } from './principal-picker.js';
 export { ScionEffectiveRoleProvenance } from './effective-role-provenance.js';
-export { ScionAuthorizationLayerStack } from './authorization-layer-stack.js';
-export type {
-  BoundaryLayer,
-  IntrinsicRestriction,
-  DeniedPermission,
-  PermissionDenialReason,
-} from './authorization-layer-stack.js';
 export { ScionEffectiveAccessBoundaryNotice } from './effective-access-boundary-notice.js';
 export { ScionProjectMembersEditor } from './project-members-editor.js';
 export {

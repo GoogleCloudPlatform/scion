@@ -455,6 +455,43 @@ func (s *Server) handleCreateGitHubAppInstallation(w http.ResponseWriter, r *htt
 	writeJSON(w, http.StatusCreated, installation)
 }
 
+// parseInstallationIDFromPath extracts the numeric installation ID from the
+// URL path suffix after /api/v1/github-app/installations/.
+func parseInstallationIDFromPath(r *http.Request) (int64, error) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/github-app/installations/")
+	path = strings.TrimSuffix(path, "/")
+	return strconv.ParseInt(path, 10, 64)
+}
+
+// handleGitHubAppInstallationByIDRead handles GET /api/v1/github-app/installations/{id}.
+func (s *Server) handleGitHubAppInstallationByIDRead(w http.ResponseWriter, r *http.Request) {
+	installationID, err := parseInstallationIDFromPath(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid installation ID", nil)
+		return
+	}
+	installation, err := s.store.GetGitHubInstallation(r.Context(), installationID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "installation not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get installation", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, installation)
+}
+
+// handleGitHubAppInstallationByIDWrite handles PUT and DELETE /api/v1/github-app/installations/{id}.
+func (s *Server) handleGitHubAppInstallationByIDWrite(w http.ResponseWriter, r *http.Request) {
+	installationID, err := parseInstallationIDFromPath(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid installation ID", nil)
+		return
+	}
+	s.handleGitHubAppInstallationByID(w, r, installationID)
+}
+
 func (s *Server) handleGitHubAppInstallationByID(w http.ResponseWriter, r *http.Request, installationID int64) {
 	switch r.Method {
 	case http.MethodGet:

@@ -209,6 +209,40 @@ func (s *ProjectStore) GetProject(ctx context.Context, id string) (*store.Projec
 	return sp, nil
 }
 
+// LockProjectForMembership acquires a project-scoped serialization lock
+// for membership mutations. On PostgreSQL this runs
+//
+//	SELECT id FROM projects WHERE id = $1 FOR UPDATE
+//
+// which takes a row-level write lock on the project row, serializing
+// concurrent membership transactions for the same project under READ
+// COMMITTED. On SQLite all writes are already database-serialized, so we
+// issue a plain read instead (ForUpdate is a no-op in the SQLite driver).
+func (s *ProjectStore) LockProjectForMembership(ctx context.Context, projectID string) error {
+	uid, err := parseGetID(projectID)
+	if err != nil {
+		return err
+	}
+
+	q := s.client.Project.Query().Where(project.IDEQ(uid))
+
+	// ForUpdate is only meaningful on PostgreSQL; the SQLite driver silently
+	// ignores the clause and the database-level write lock provides the same
+	// ordering guarantee.
+	if s.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+
+	exists, err := q.Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("lock project for membership: %w", mapError(err))
+	}
+	if !exists {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 // GetProjectBySlug retrieves a project by its exact (case-sensitive) slug.
 func (s *ProjectStore) GetProjectBySlug(ctx context.Context, slug string) (*store.Project, error) {
 	p, err := s.client.Project.Query().Where(project.SlugEQ(slug)).Only(ctx)
@@ -415,6 +449,12 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 	if filter.Slug != "" {
 		query.Where(project.SlugEqualFold(filter.Slug))
 	}
+	if filter.Search != "" {
+		query.Where(project.Or(
+			project.NameContainsFold(filter.Search),
+			project.SlugContainsFold(filter.Search),
+		))
+	}
 	if filter.IsTemplate != nil {
 		if *filter.IsTemplate {
 			query.Where(projectLabelContains(store.LabelTemplate, "true"))
@@ -443,6 +483,19 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 				query.Where(project.IDEQ(uuid.Nil))
 			}
 		}
+	}
+
+	// RS2: ExcludedProjectIDs — exclude specific projects from an All scope
+	// when project-scoped constraints block the list permission. Fail-closed:
+	// malformed exclusion IDs are an authorization predicate error (they
+	// represent constraint scope data that cannot be applied, which would
+	// silently widen access if skipped).
+	if len(filter.ExcludedProjectIDs) > 0 {
+		excludeIDs, err := parseUUIDsStrict(filter.ExcludedProjectIDs)
+		if err != nil {
+			return nil, fmt.Errorf("invalid authorization predicate: ExcludedProjectIDs: %w", err)
+		}
+		query.Where(project.IDNotIn(excludeIDs...))
 	}
 
 	totalCount := 0
@@ -571,6 +624,21 @@ func (s *ProjectStore) populateProjectComputed(ctx context.Context, p *store.Pro
 		p.ProjectType = store.ProjectTypeHubManaged
 	}
 	return nil
+}
+
+// parseUUIDsStrict parses a slice of string UUIDs and returns an error if any
+// fail to parse. Used for authorization predicates where silently skipping a
+// malformed ID would widen access (e.g., ExcludedProjectIDs).
+func parseUUIDsStrict(ids []string) ([]uuid.UUID, error) {
+	out := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		uid, err := uuid.Parse(id)
+		if err != nil {
+			return nil, fmt.Errorf("malformed UUID %q: %w", id, err)
+		}
+		out = append(out, uid)
+	}
+	return out, nil
 }
 
 // parseUUIDs parses a slice of string UUIDs, skipping any that fail to parse.
@@ -1381,6 +1449,36 @@ func (s *ProjectStore) ListProjectSyncStates(ctx context.Context, projectID stri
 		states = append(states, *entSyncStateToStore(row))
 	}
 	return states, nil
+}
+
+// DeleteProjectProvidersByProject removes all provider relationships for a project.
+func (s *ProjectStore) DeleteProjectProvidersByProject(ctx context.Context, projectID string) (int, error) {
+	projectUID, err := parseUUID(projectID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.client.ProjectContributor.Delete().
+		Where(projectcontributor.ProjectIDEQ(projectUID)).
+		Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// DeleteProjectSyncStatesByProject removes all sync states for a project.
+func (s *ProjectStore) DeleteProjectSyncStatesByProject(ctx context.Context, projectID string) (int, error) {
+	projectUID, err := parseUUID(projectID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.client.ProjectSyncState.Delete().
+		Where(projectsyncstate.ProjectIDEQ(projectUID)).
+		Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // DeleteProjectSyncState removes sync state for a project and optional broker.

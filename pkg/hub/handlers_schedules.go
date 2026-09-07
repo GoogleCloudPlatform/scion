@@ -28,6 +28,12 @@ import (
 )
 
 // CreateScheduleRequest is the API request for creating a recurring schedule.
+//
+// NOTE (O-R2-3): This struct has no AgentID field — message targets are
+// specified via AgentName (convenience) or raw Payload (advanced). The
+// authoring-time validation in authorizeScheduledMessageAuthoring resolves
+// the target from whichever is present. If an AgentID field is added in the
+// future, the authoring call must be updated to forward it.
 type CreateScheduleRequest struct {
 	Name      string `json:"name"`
 	CronExpr  string `json:"cronExpr"`
@@ -207,6 +213,12 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 	if req.EventType == "dispatch_agent" && !s.authorizeAgentCreate(w, r, projectID) {
 		return
 	}
+	// C1 containment: validate target agent project scope for message schedules.
+	if req.EventType == "message" {
+		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, req.Payload, "", req.AgentName) {
+			return
+		}
+	}
 
 	// Validate cron expression using standard 5-field parser
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
@@ -368,6 +380,22 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	if (schedule.EventType == "dispatch_agent" || req.EventType == "dispatch_agent") &&
 		!s.authorizeAgentCreate(w, r, projectID) {
 		return
+	}
+	// C1 containment: validate target agent project scope when the schedule
+	// is or becomes a message schedule. Check both the effective event type
+	// and the effective payload after the update is applied.
+	effectiveEventType := schedule.EventType
+	if req.EventType != "" {
+		effectiveEventType = req.EventType
+	}
+	if effectiveEventType == "message" {
+		effectivePayload := schedule.Payload
+		if req.Payload != "" {
+			effectivePayload = req.Payload
+		}
+		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, effectivePayload, "", "") {
+			return
+		}
 	}
 
 	if req.Name != "" {

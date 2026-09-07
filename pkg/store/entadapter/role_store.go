@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 
+	"entgo.io/ent/dialect"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -254,23 +255,76 @@ func (r *RoleStore) DeleteRoleDefinition(ctx context.Context, id string) error {
 	return nil
 }
 
-// ListAllRoleBindings returns all role bindings (admin view) with pagination.
-// A limit of 0 defaults to 100. The maximum allowed limit is 1000.
-func (r *RoleStore) ListAllRoleBindings(ctx context.Context, limit, offset int) ([]*store.RoleBinding, error) {
-	if limit <= 0 {
-		limit = 100
+// LockRoleDefinitionForAdminGuard acquires a serialization lock on the role
+// definition row. On PostgreSQL this runs SELECT id FROM role_definitions
+// WHERE id = $1 FOR UPDATE, serializing concurrent last-admin guard checks.
+// On SQLite all writes are database-serialized, so a plain existence check
+// provides the same ordering guarantee.
+func (r *RoleStore) LockRoleDefinitionForAdminGuard(ctx context.Context, roleDefinitionID string) error {
+	uid, err := parseGetID(roleDefinitionID)
+	if err != nil {
+		return err
 	}
-	if limit > 1000 {
-		limit = 1000
+
+	q := r.client.RoleDefinition.Query().Where(roledefinition.IDEQ(uid))
+	if r.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
 	}
-	if offset < 0 {
-		offset = 0
+
+	exists, err := q.Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("lock role definition for admin guard: %w", mapError(err))
+	}
+	if !exists {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// ListAllRoleBindings returns all role bindings (admin view) with pagination
+// and configurable sort order.  The primary sort is determined by
+// opts.SortBy (default: created); a secondary sort by scope_type then scope_id
+// is always appended, followed by a final tie-breaker on id for determinism.
+func (r *RoleStore) ListAllRoleBindings(ctx context.Context, opts store.RoleBindingListOptions) ([]*store.RoleBinding, error) {
+	if opts.Limit <= 0 {
+		opts.Limit = 100
+	}
+	if opts.Limit > 1000 {
+		opts.Limit = 1000
+	}
+	if opts.Offset < 0 {
+		opts.Offset = 0
+	}
+
+	// Determine the Ent direction helper.
+	dir := ent.Desc // default for "created"
+	switch opts.SortOrder {
+	case "asc":
+		dir = ent.Asc
+	case "desc":
+		dir = ent.Desc
+	}
+
+	// Map the primary sort field.
+	primaryField := rolebinding.FieldCreated // default
+	switch opts.SortBy {
+	case store.RoleBindingSortPrincipal:
+		primaryField = rolebinding.FieldPrincipalID
+	case store.RoleBindingSortRole:
+		primaryField = rolebinding.FieldRoleDefinitionID
+	case store.RoleBindingSortCreated:
+		primaryField = rolebinding.FieldCreated
 	}
 
 	rbs, err := r.client.RoleBinding.Query().
-		Order(ent.Desc(rolebinding.FieldCreated)).
-		Limit(limit).
-		Offset(offset).
+		Order(
+			dir(primaryField),
+			ent.Asc(rolebinding.FieldScopeType),
+			ent.Asc(rolebinding.FieldScopeID),
+			ent.Asc(rolebinding.FieldID),
+		).
+		Limit(opts.Limit).
+		Offset(opts.Offset).
 		All(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -418,12 +472,51 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 		}
 	}
 
+	// D4 enforcement: at most one built-in membership role per principal per
+	// project. This application-level check provides clean error messages for
+	// sequential callers. The database partial unique index
+	// (idx_rolebinding_one_membership_per_principal_per_project) catches
+	// concurrent races that slip past this check.
+	var membershipKind *string
+	if store.IsBuiltInProjectMembershipRole(rd.Name) {
+		mk := store.MembershipKindBuiltin
+		membershipKind = &mk
+
+		// Check for existing built-in membership in the same project.
+		// Option B: if the existing binding has the exact same role_definition_id,
+		// fall through to Save() so the Ent unique index produces ErrAlreadyExists
+		// (preserving idempotent retry semantics for callers like
+		// createProjectOwnerRoleBinding, seed backfill, etc.). Only block when
+		// a *different* built-in membership role already exists.
+		existing, qErr := r.client.RoleBinding.Query().
+			Where(
+				rolebinding.PrincipalTypeEQ(rolebinding.PrincipalType(rb.PrincipalType)),
+				rolebinding.PrincipalIDEQ(rb.PrincipalID),
+				rolebinding.ScopeTypeEQ(rolebinding.ScopeTypeProject),
+				rolebinding.ScopeIDEQ(rb.ScopeID),
+				rolebinding.MembershipKindNotNil(),
+			).
+			First(ctx)
+		if qErr == nil && existing != nil {
+			// Exact same role definition → idempotent retry; let Save()
+			// hit the Ent unique index and return ErrAlreadyExists.
+			if existing.RoleDefinitionID != nil && *existing.RoleDefinitionID == rdUID {
+				// Fall through — the existing binding is for the same role.
+			} else {
+				return nil, fmt.Errorf("%w: principal %s:%s already has a built-in membership in scope %s",
+					store.ErrBuiltInMembershipConflict, rb.PrincipalType, rb.PrincipalID, rb.ScopeID)
+			}
+		}
+		// ent.NotFoundError means no existing membership — proceed.
+	}
+
 	builder := r.client.RoleBinding.Create().
 		SetNillableRoleDefinitionID(&rdUID).
 		SetPrincipalType(rolebinding.PrincipalType(rb.PrincipalType)).
 		SetPrincipalID(rb.PrincipalID).
 		SetScopeType(rolebinding.ScopeType(rb.ScopeType)).
-		SetScopeID(rb.ScopeID)
+		SetScopeID(rb.ScopeID).
+		SetNillableMembershipKind(membershipKind)
 
 	if rb.ID != "" {
 		uid, err := parseUUID(rb.ID)
@@ -446,6 +539,15 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 
 	created, err := builder.Save(ctx)
 	if err != nil {
+		// The application-level membership check (above) handles "different
+		// built-in role already exists" → ErrBuiltInMembershipConflict.
+		// When Save() fails here for a membership binding, it's either:
+		//  (a) exact duplicate (same role) that fell through the app check →
+		//      Ent unique index produces ErrAlreadyExists (idempotent path), or
+		//  (b) concurrent race where another goroutine inserted a different
+		//      built-in role between the app check and Save() → partial unique
+		//      index produces ErrAlreadyExists (correct rejection, acceptable
+		//      as a generic "already exists" since the race is rare).
 		return nil, mapError(err)
 	}
 	return entRoleBindingToStore(created), nil

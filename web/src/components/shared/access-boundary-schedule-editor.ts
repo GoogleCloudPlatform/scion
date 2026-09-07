@@ -306,7 +306,7 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
                       value=${this.notBeforeLocal}
                       aria-describedby=${this.validationError ? 'schedule-validation-msg' : ''}
                       @sl-input=${(e: Event) => this.handleNotBeforeChange(e)}
-                      help-text="Boundary is not in effect before this time"
+                      help-text="Constraint is not in effect before this time"
                     ></sl-input>
                     ${this.notBeforeLocal
                       ? html`<div class="utc-preview" aria-label="UTC equivalent">
@@ -323,7 +323,7 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
                       value=${this.expiresAtLocal}
                       aria-describedby=${this.validationError ? 'schedule-validation-msg' : ''}
                       @sl-input=${(e: Event) => this.handleExpiresAtChange(e)}
-                      help-text="Boundary expires at this time"
+                      help-text="Constraint expires at this time"
                     ></sl-input>
                     ${this.expiresAtLocal
                       ? html`<div class="utc-preview" aria-label="UTC equivalent">

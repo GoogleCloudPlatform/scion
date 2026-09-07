@@ -32,7 +32,9 @@ import (
 type SubjectKind string
 
 const (
-	// SubjectKindPrincipal targets an exact user, agent, or group.
+	// SubjectKindPrincipal targets an exact user or agent.
+	// Groups are collection resources with no identity and cannot be targeted
+	// as individual principals. Use SubjectKindGroupClosure instead.
 	SubjectKindPrincipal SubjectKind = "principal"
 
 	// SubjectKindGroupClosure targets all effective members of a group.
@@ -71,8 +73,8 @@ func (s SubjectSelector) Validate() error {
 		if s.PrincipalType == "" {
 			return errors.New("principalType is required for principal subject")
 		}
-		if s.PrincipalType != "user" && s.PrincipalType != "agent" && s.PrincipalType != "group" {
-			return fmt.Errorf("invalid principalType %q: must be user, agent, or group", s.PrincipalType)
+		if s.PrincipalType != "user" && s.PrincipalType != "agent" {
+			return fmt.Errorf("invalid principalType %q: must be user or agent (groups are collection resources — use group_closure instead)", s.PrincipalType)
 		}
 		if s.PrincipalID == "" {
 			return errors.New("principalId is required for principal subject")
@@ -114,10 +116,13 @@ func (s SubjectSelector) Validate() error {
 // (e.g. "user:u1", "group:g1", "agent:a1").
 //
 // For SubjectKindPrincipal, the constraint's PrincipalType and PrincipalID
-// are compared against the typed closure entries — a constraint targeting
-// {principal, group, G} matches when "group:G" is in the closure. This
-// ensures consistency with the lockout guard and group-mutation gate, which
-// both honor group-targeted principal constraints.
+// are compared against the typed closure entries.
+//
+// Legacy: Rows with PrincipalType="group" are no longer created (groups are
+// collection resources with no identity), but existing rows are handled
+// fail-closed — they still match when "group:G" appears in the closure,
+// preserving any restrictions they imposed. Such rows are marked Degraded
+// by the conversion layer.
 func (s SubjectSelector) MatchesPrincipalClosure(
 	typedClosure map[string]struct{},
 ) bool {

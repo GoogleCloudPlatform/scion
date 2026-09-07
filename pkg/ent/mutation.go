@@ -42543,6 +42543,7 @@ type RoleBindingMutation struct {
 	expires_at             *time.Time
 	created_by             *string
 	created                *time.Time
+	membership_kind        *string
 	clearedFields          map[string]struct{}
 	role_definition        *uuid.UUID
 	clearedrole_definition bool
@@ -43031,6 +43032,55 @@ func (m *RoleBindingMutation) ResetCreated() {
 	m.created = nil
 }
 
+// SetMembershipKind sets the "membership_kind" field.
+func (m *RoleBindingMutation) SetMembershipKind(s string) {
+	m.membership_kind = &s
+}
+
+// MembershipKind returns the value of the "membership_kind" field in the mutation.
+func (m *RoleBindingMutation) MembershipKind() (r string, exists bool) {
+	v := m.membership_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMembershipKind returns the old "membership_kind" field's value of the RoleBinding entity.
+// If the RoleBinding object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RoleBindingMutation) OldMembershipKind(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMembershipKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMembershipKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMembershipKind: %w", err)
+	}
+	return oldValue.MembershipKind, nil
+}
+
+// ClearMembershipKind clears the value of the "membership_kind" field.
+func (m *RoleBindingMutation) ClearMembershipKind() {
+	m.membership_kind = nil
+	m.clearedFields[rolebinding.FieldMembershipKind] = struct{}{}
+}
+
+// MembershipKindCleared returns if the "membership_kind" field was cleared in this mutation.
+func (m *RoleBindingMutation) MembershipKindCleared() bool {
+	_, ok := m.clearedFields[rolebinding.FieldMembershipKind]
+	return ok
+}
+
+// ResetMembershipKind resets all changes to the "membership_kind" field.
+func (m *RoleBindingMutation) ResetMembershipKind() {
+	m.membership_kind = nil
+	delete(m.clearedFields, rolebinding.FieldMembershipKind)
+}
+
 // ClearRoleDefinition clears the "role_definition" edge to the RoleDefinition entity.
 func (m *RoleBindingMutation) ClearRoleDefinition() {
 	m.clearedrole_definition = true
@@ -43092,7 +43142,7 @@ func (m *RoleBindingMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RoleBindingMutation) Fields() []string {
-	fields := make([]string, 0, 9)
+	fields := make([]string, 0, 10)
 	if m.role_definition != nil {
 		fields = append(fields, rolebinding.FieldRoleDefinitionID)
 	}
@@ -43120,6 +43170,9 @@ func (m *RoleBindingMutation) Fields() []string {
 	if m.created != nil {
 		fields = append(fields, rolebinding.FieldCreated)
 	}
+	if m.membership_kind != nil {
+		fields = append(fields, rolebinding.FieldMembershipKind)
+	}
 	return fields
 }
 
@@ -43146,6 +43199,8 @@ func (m *RoleBindingMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatedBy()
 	case rolebinding.FieldCreated:
 		return m.Created()
+	case rolebinding.FieldMembershipKind:
+		return m.MembershipKind()
 	}
 	return nil, false
 }
@@ -43173,6 +43228,8 @@ func (m *RoleBindingMutation) OldField(ctx context.Context, name string) (ent.Va
 		return m.OldCreatedBy(ctx)
 	case rolebinding.FieldCreated:
 		return m.OldCreated(ctx)
+	case rolebinding.FieldMembershipKind:
+		return m.OldMembershipKind(ctx)
 	}
 	return nil, fmt.Errorf("unknown RoleBinding field %s", name)
 }
@@ -43245,6 +43302,13 @@ func (m *RoleBindingMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetCreated(v)
 		return nil
+	case rolebinding.FieldMembershipKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMembershipKind(v)
+		return nil
 	}
 	return fmt.Errorf("unknown RoleBinding field %s", name)
 }
@@ -43287,6 +43351,9 @@ func (m *RoleBindingMutation) ClearedFields() []string {
 	if m.FieldCleared(rolebinding.FieldCreatedBy) {
 		fields = append(fields, rolebinding.FieldCreatedBy)
 	}
+	if m.FieldCleared(rolebinding.FieldMembershipKind) {
+		fields = append(fields, rolebinding.FieldMembershipKind)
+	}
 	return fields
 }
 
@@ -43312,6 +43379,9 @@ func (m *RoleBindingMutation) ClearField(name string) error {
 		return nil
 	case rolebinding.FieldCreatedBy:
 		m.ClearCreatedBy()
+		return nil
+	case rolebinding.FieldMembershipKind:
+		m.ClearMembershipKind()
 		return nil
 	}
 	return fmt.Errorf("unknown RoleBinding nullable field %s", name)
@@ -43347,6 +43417,9 @@ func (m *RoleBindingMutation) ResetField(name string) error {
 		return nil
 	case rolebinding.FieldCreated:
 		m.ResetCreated()
+		return nil
+	case rolebinding.FieldMembershipKind:
+		m.ResetMembershipKind()
 		return nil
 	}
 	return fmt.Errorf("unknown RoleBinding field %s", name)

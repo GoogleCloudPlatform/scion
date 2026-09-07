@@ -213,12 +213,13 @@ func TestCanDelegate_GroupMembership_ScopedAdminCannotAddOwner(t *testing.T) {
 
 	member := NewAuthenticatedUser(memberID, "member@test.com", "Member", "member", "api")
 
-	// Member lacks project-admin permissions — denied.
+	// RS1 D3: project-scoped bindings are excluded from the delegation check.
+	// Group membership is governed by group roles only.
 	decision := authz.CanDelegate(ctx, member, GrantDescriptor{
 		Type:    GrantTypeGroupMembership,
 		GroupID: groupID,
 	})
-	assert.False(t, decision.Allowed, "project member should not be able to add members to group with admin-level role binding")
+	assert.True(t, decision.Allowed, "RS1 D3: project-scoped bindings excluded from delegation check")
 }
 
 func TestCanDelegate_GroupMembership_SuperAdminCanAddAnyRole(t *testing.T) {

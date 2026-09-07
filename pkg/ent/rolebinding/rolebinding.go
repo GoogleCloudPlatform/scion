@@ -34,6 +34,8 @@ const (
 	FieldCreatedBy = "created_by"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
+	// FieldMembershipKind holds the string denoting the membership_kind field in the database.
+	FieldMembershipKind = "membership_kind"
 	// EdgeRoleDefinition holds the string denoting the role_definition edge name in mutations.
 	EdgeRoleDefinition = "role_definition"
 	// Table holds the table name of the rolebinding in the database.
@@ -59,6 +61,7 @@ var Columns = []string{
 	FieldExpiresAt,
 	FieldCreatedBy,
 	FieldCreated,
+	FieldMembershipKind,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -180,6 +183,11 @@ func ByCreatedBy(opts ...sql.OrderTermOption) OrderOption {
 // ByCreated orders the results by the created field.
 func ByCreated(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCreated, opts...).ToFunc()
+}
+
+// ByMembershipKind orders the results by the membership_kind field.
+func ByMembershipKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldMembershipKind, opts...).ToFunc()
 }
 
 // ByRoleDefinitionField orders the results by role_definition field.
