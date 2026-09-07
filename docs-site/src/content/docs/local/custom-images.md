@@ -35,6 +35,32 @@ For security and compatibility across runtimes (especially Kubernetes), Scion ag
 - **UID**: The user must have UID `1000`.
 - **Permissions**: Ensure your custom images do not require root privileges at runtime and that any added files or directories are accessible by the `scion` user. Home directory structure (`/home/scion`) and environmental variables (`HOME`, `USER`, `LOGNAME`) are automatically injected by the runtime.
 
+## Building Behind a Corporate Proxy (npm Registry)
+
+Corporate networks that block `registry.npmjs.org` can point the build at an internal npm mirror (Artifactory, Nexus, Verdaccio, etc.) using two environment variables:
+
+| Variable | Purpose | Default |
+| :--- | :--- | :--- |
+| `NPM_REGISTRY` | Registry URL passed as a Docker build arg. Sets `NPM_CONFIG_REGISTRY` inside the image so that all `npm install` commands during the build — and agents at runtime — use the mirror. | `https://registry.npmjs.org/` |
+| `NPM_CONFIG_FILE` | Host path to an `.npmrc` file. Mounted as a BuildKit secret (`id=npmrc`) so authentication tokens are available during `RUN` steps but never written to an image layer. | — (unauthenticated) |
+
+```bash
+# Unauthenticated mirror
+NPM_REGISTRY=https://npm.corp.example.com/ \
+  image-build/scripts/build-images.sh --target all
+
+# Authenticated mirror (token stays out of the image)
+NPM_REGISTRY=https://npm.corp.example.com/ \
+NPM_CONFIG_FILE=~/.npmrc \
+  image-build/scripts/build-images.sh --target all --push --registry ghcr.io/myorg
+```
+
+`NPM_REGISTRY` is threaded as a build arg into the `core-base` layer and inherited by every downstream image. `NPM_CONFIG_FILE` is forwarded by the `local-docker` and `local-podman` builders; `cloud-build` does not support BuildKit secrets — use a private Artifact Registry npm repository with IAM-based auth instead.
+
+:::note[Backward compatible]
+When neither variable is set, the build uses the public npm registry with no credentials — existing workflows are unaffected.
+:::
+
 ## How the Build Tooling Is Organized
 
 A single orchestrator script — `image-build/scripts/build-images.sh` — owns the build DAG (which images depend on which, in what order, with which tags). The execution backend is selected with `--builder`. Three backends ship today:
