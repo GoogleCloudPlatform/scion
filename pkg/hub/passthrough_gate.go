@@ -40,6 +40,7 @@ const (
 //
 //   - Custom IAM SA:       <name>@<project>.iam.gserviceaccount.com
 //   - Default Compute SA:  <number>-compute@developer.gserviceaccount.com
+//   - App Engine default:  <project-id>@appspot.gserviceaccount.com
 func isValidServiceAccountEmail(email string) bool {
 	at := strings.IndexByte(email, '@')
 	if at <= 0 {
@@ -61,6 +62,9 @@ func isValidServiceAccountEmail(email string) bool {
 		return len(projectID) > 0
 	case domain == "developer.gserviceaccount.com":
 		// Default Compute Engine SA (e.g. <project-number>-compute@developer.gserviceaccount.com).
+		return true
+	case domain == "appspot.gserviceaccount.com":
+		// App Engine default SA (e.g. <project-id>@appspot.gserviceaccount.com).
 		return true
 	default:
 		return false
@@ -152,9 +156,19 @@ func (s *Server) authorizePassthroughIdentity(
 	// Synthesize a transient store.GCPServiceAccount target for the broker
 	// host SA. This is not persisted — it exists only as the target shape
 	// required by the frozen checker interface.
+	//
+	// For default Compute Engine SAs (@developer.gserviceaccount.com) and
+	// App Engine default SAs (@appspot.gserviceaccount.com), the project ID
+	// cannot be reliably extracted from the email (Compute SA emails
+	// contain the project NUMBER, not the project ID). The auto-detect
+	// path in registerGlobalProjectAndBroker sets GCPHostProjectID from
+	// the metadata server, which returns the correct project ID.
 	hostProjectID := broker.GCPHostProjectID
 	if hostProjectID == "" {
 		// Derive from the email when the operator did not set it explicitly.
+		// This only works for custom IAM SAs (<name>@<project>.iam.gserviceaccount.com).
+		// Default Compute SAs and App Engine SAs require GCPHostProjectID to be
+		// set explicitly (via auto-detection or manual configuration).
 		hostProjectID = projectIDFromServiceAccountEmail(broker.GCPHostServiceAccountEmail)
 	}
 

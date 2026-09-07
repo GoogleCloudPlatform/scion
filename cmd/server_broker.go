@@ -99,11 +99,11 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	// that the passthrough identity gate requires.
 	var detectedSAEmail, detectedProjectID string
 	if metadata.OnGCE() {
-		if email, err := metadata.Email("default"); err == nil && email != "" {
+		if email, err := metadata.EmailWithContext(ctx, "default"); err == nil && email != "" {
 			detectedSAEmail = strings.ToLower(email)
 			log.Printf("Auto-detected GCP host service account: %s", detectedSAEmail)
 		}
-		if pid, err := metadata.ProjectID(); err == nil && pid != "" {
+		if pid, err := metadata.ProjectIDWithContext(ctx); err == nil && pid != "" {
 			detectedProjectID = pid
 		}
 	}

@@ -50,6 +50,10 @@ func TestIsValidServiceAccountEmail(t *testing.T) {
 		{"123456789-compute@developer.gserviceaccount.com", true},
 		{"my-sa@developer.gserviceaccount.com", true},
 
+		// App Engine default SAs (@appspot.gserviceaccount.com)
+		{"my-project@appspot.gserviceaccount.com", true},
+		{"my-long-project-id-1234@appspot.gserviceaccount.com", true},
+
 		// Invalid
 		{"", false},
 		{"not-an-email", false},
@@ -58,6 +62,7 @@ func TestIsValidServiceAccountEmail(t *testing.T) {
 		{"sa@.iam.gserviceaccount.com", false},
 		{"sa@iam.gserviceaccount.com", false}, // no project id
 		{"@developer.gserviceaccount.com", false},
+		{"@appspot.gserviceaccount.com", false},
 		{"sa@other.gserviceaccount.com", false},
 	}
 	for _, tc := range tests {
@@ -693,6 +698,41 @@ func TestPassthrough_DeveloperSA_Patch_Allowed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Acceptance criterion: App Engine default SA (appspot domain) works
+// ---------------------------------------------------------------------------
+
+func TestPassthrough_AppspotSA_Create_Allowed(t *testing.T) {
+	// A broker whose host SA is an App Engine default SA
+	// (@appspot.gserviceaccount.com) must be accepted by the passthrough gate
+	// when GCPHostProjectID is set explicitly.
+	hostSAEmail := "my-project@appspot.gserviceaccount.com"
+	hostProjectID := "my-project"
+	owner := ptUser(tid("user-pt-owner-appspot"), "owner-appspot@test.com", store.UserRoleMember)
+	srv, _, project, _ := setupPassthroughServer(t, owner, hostSAEmail, hostProjectID)
+
+	checker := store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail)
+	enforceSAAssign(srv, checker)
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "pt-appspot-sa",
+		ProjectID: project.ID,
+		Task:      "test",
+		GCPIdentity: &GCPIdentityAssignment{
+			MetadataMode: "passthrough",
+		},
+	})
+
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	require.GreaterOrEqual(t, checker.CallCount(), 1,
+		"the caller-permission checker must be consulted for appspot SA")
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Agent.AppliedConfig.GCPIdentity)
+	assert.Equal(t, store.GCPMetadataModePassthrough, resp.Agent.AppliedConfig.GCPIdentity.MetadataMode)
+}
+
+// ---------------------------------------------------------------------------
 // Broker registration: host SA fields
 // ---------------------------------------------------------------------------
 
@@ -753,6 +793,35 @@ func TestBrokerUpdate_GCPHostSAEmail_DeveloperDomain(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "721899303052-compute@developer.gserviceaccount.com", got.GCPHostServiceAccountEmail)
 	assert.Equal(t, "ptone-experiments", got.GCPHostProjectID)
+}
+
+func TestBrokerUpdate_GCPHostSAEmail_AppspotDomain(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	admin := addExtraUser(t, s, tid("admin-broker-appspot"), "admin-appspot@test.com", store.UserRoleAdmin)
+
+	broker := &store.RuntimeBroker{
+		ID:        tid("broker-appspot"),
+		Name:      "Appspot SA Broker",
+		Slug:      "appspot-sa-broker",
+		Status:    store.BrokerStatusOnline,
+		CreatedBy: admin.ID,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	// PATCH with appspot.gserviceaccount.com email.
+	rec := doRequestAsUser(t, srv, admin, http.MethodPatch, "/api/v1/runtime-brokers/"+broker.ID,
+		map[string]interface{}{
+			"gcpHostServiceAccountEmail": "my-project@appspot.gserviceaccount.com",
+			"gcpHostProjectId":           "my-project",
+		})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	got, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "my-project@appspot.gserviceaccount.com", got.GCPHostServiceAccountEmail)
+	assert.Equal(t, "my-project", got.GCPHostProjectID)
 }
 
 func TestBrokerUpdate_GCPHostSAEmail_InvalidFormat(t *testing.T) {
