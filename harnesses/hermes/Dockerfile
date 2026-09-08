@@ -40,7 +40,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3-pip \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install Hermes Agent with Vertex AI support (google-auth for ADC)
-RUN if [ -n "${HERMES_VERSION}" ]; then \
+RUN --mount=type=secret,id=pipconf,target=/etc/pip.conf,required=false \
+    if [ -n "${HERMES_VERSION}" ]; then \
       pip install --no-cache-dir --break-system-packages "hermes-agent[vertex]==${HERMES_VERSION}"; \
     else \
       pip install --no-cache-dir --break-system-packages "hermes-agent[vertex]"; \

@@ -87,6 +87,12 @@ builder_build() {
     cmd+=(--secret "id=npmrc,src=${NPM_CONFIG_FILE}")
   fi
 
+  # Optional pip credentials, same handling as npm above: a mounted secret so
+  # an index token is available during RUN but never lands in an image layer.
+  if [[ -n "${PIP_CONFIG_FILE:-}" ]]; then
+    cmd+=(--secret "id=pipconf,src=${PIP_CONFIG_FILE}")
+  fi
+
   cmd+=(-f "${dockerfile}" "${context_dir}")
 
   echo "==> [local-podman] building ${image_name}..."
