@@ -202,10 +202,41 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 	return nil
 }
 
+// exitCopyModeCmd returns the tmux command that leaves copy-mode. Real keys
+// (interrupts, raw sequences) are dispatched through the mode's key table
+// rather than to the harness, so those paths must cancel the mode first.
+// -q is a no-op when the pane is not in a mode.
+func exitCopyModeCmd() []string {
+	return []string{"tmux", "copy-mode", "-q", "-t", "scion:0"}
+}
+
+// isExitCopyModeCmd reports whether cmd is the copy-mode exit, whose failure
+// is tolerated.
+func isExitCopyModeCmd(cmd []string) bool {
+	return len(cmd) > 1 && cmd[1] == "copy-mode"
+}
+
+// submitCmds returns the commands that submit whatever is in the harness's
+// input, without disturbing copy-mode: paste-buffer writes to the pane's pty
+// and bypasses the mode key table, so the operator's scroll position survives.
+//
+// A literal CR rather than LF, so this does not depend on paste-buffer's
+// LF->CR default. -d consumes the buffer as it is pasted: a named buffer still
+// sits on top of the operator's buffer stack, so without it their paste key
+// would fetch this CR instead of the text they copied.
+func submitCmds() [][]string {
+	return [][]string{
+		{"tmux", "set-buffer", "-b", "scion-submit", "--", "\r"},
+		{"tmux", "paste-buffer", "-d", "-b", "scion-submit", "-t", "scion:0"},
+	}
+}
+
 // MessageRaw sends literal bytes to an agent's tmux session via send-keys
 // with no trailing Enter keypresses. This bypasses the paste buffer and
 // debounce buffer, sending directly via tmux send-keys so that control
 // sequences (arrow keys, Escape, etc.) are interpreted by the terminal.
+// Leaves copy-mode first, since send-keys is dispatched through the mode's
+// key table rather than to the harness.
 func (m *AgentManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
 	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
 	if projectID != "" {
@@ -228,9 +259,17 @@ func (m *AgentManager) MessageRaw(ctx context.Context, agentID, projectID string
 		return fmt.Errorf("agent '%s' not found or not running", agentID)
 	}
 
-	cmd := []string{"tmux", "send-keys", "-t", "scion:0", "--", keys}
-	if _, err := m.Runtime.Exec(ctx, agent.ContainerID, cmd); err != nil {
-		return fmt.Errorf("failed to send raw keys to agent '%s': %w", agent.Name, err)
+	cmds := [][]string{
+		exitCopyModeCmd(),
+		{"tmux", "send-keys", "-t", "scion:0", "--", keys},
+	}
+	for _, cmd := range cmds {
+		if _, err := m.Runtime.Exec(ctx, agent.ContainerID, cmd); err != nil {
+			if isExitCopyModeCmd(cmd) {
+				continue
+			}
+			return fmt.Errorf("failed to send raw keys to agent '%s': %w", agent.Name, err)
+		}
 	}
 
 	return nil
@@ -285,6 +324,12 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	// 3. Prepare commands
 	var cmds [][]string
 
+	// Only the paths that send real KEYS need the mode cancelled; the message
+	// path submits via paste instead and leaves a reading operator alone.
+	if interrupt || message == "" {
+		cmds = append(cmds, exitCopyModeCmd())
+	}
+
 	if interrupt {
 		if seq := h.GetInterruptSequence(); len(seq) > 0 {
 			for _, key := range seq {
@@ -306,15 +351,23 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 		// CLI treats '!' as a shell-mode toggle). Bracketed paste wraps the
 		// content in escape sequences (\e[200~...\e[201~) that signal the
 		// application to treat all characters as literal pasted text.
-		cmds = append(cmds, []string{"tmux", "set-buffer", "--", message})
-		cmds = append(cmds, []string{"tmux", "paste-buffer", "-t", "scion:0", "-p"})
-		cmds = append(cmds, []string{"tmux", "send-keys", "-t", "scion:0", "Enter"})
+		// Named buffer: an unnamed set-buffer pushes onto the operator's
+		// buffer stack, so their paste key would fetch the agent's message.
+		cmds = append(cmds, []string{"tmux", "set-buffer", "-b", "scion-msg", "--", message})
+		cmds = append(cmds, []string{"tmux", "paste-buffer", "-d", "-b", "scion-msg", "-t", "scion:0", "-p"})
+		cmds = append(cmds, submitCmds()...)
 	}
 
 	// 4. Execute
 	for _, cmd := range cmds {
 		_, err := m.Runtime.Exec(ctx, agent.ContainerID, cmd)
 		if err != nil {
+			if isExitCopyModeCmd(cmd) {
+				// tmux before 3.1 has no -q. Leaving the mode is best-effort:
+				// failing the delivery over it would lose a message that older
+				// tmux would otherwise have taken.
+				continue
+			}
 			return fmt.Errorf("failed to send message to agent '%s': %w", agent.Name, err)
 		}
 	}
@@ -322,11 +375,12 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	// After sending a message, send two extra Enter keypresses with a brief delay
 	// to ensure the input is accepted by the agent.
 	if message != "" {
-		enterCmd := []string{"tmux", "send-keys", "-t", "scion:0", "Enter"}
 		for range 2 {
 			time.Sleep(300 * time.Millisecond)
-			if _, err := m.Runtime.Exec(ctx, agent.ContainerID, enterCmd); err != nil {
-				return fmt.Errorf("failed to send Enter to agent '%s': %w", agent.Name, err)
+			for _, cmd := range submitCmds() {
+				if _, err := m.Runtime.Exec(ctx, agent.ContainerID, cmd); err != nil {
+					return fmt.Errorf("failed to send Enter to agent '%s': %w", agent.Name, err)
+				}
 			}
 		}
 	}
