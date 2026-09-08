@@ -470,11 +470,17 @@ func (s *Server) getTemplateV2(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
-	// SECURITY-GATE: authorize read access to this specific template.
-	// The list endpoint filters via AuthorizeReadBatch; without this check
-	// a caller could bypass list filtering by addressing the template by ID.
-	if !s.authorize(w, r, templateResource(template), ActionRead) {
-		return
+	// Authenticated runtime brokers read templates during agent creation
+	// (template hydration). They pass HMAC auth via middleware but are not
+	// user principals, so the authorization kernel cannot evaluate them.
+	// Allow read access for brokers; the HMAC credential is the trust basis.
+	if _, isBroker := GetIdentityFromContext(ctx).(BrokerIdentity); !isBroker {
+		// SECURITY-GATE: authorize read access to this specific template.
+		// The list endpoint filters via AuthorizeReadBatch; without this check
+		// a caller could bypass list filtering by addressing the template by ID.
+		if !s.authorize(w, r, templateResource(template), ActionRead) {
+			return
+		}
 	}
 
 	resp := TemplateWithCapabilities{Template: *template}
