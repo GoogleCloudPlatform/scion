@@ -417,11 +417,17 @@ func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
-	// SECURITY-GATE: authorize read access to this specific harness config.
-	// The list endpoint filters via AuthorizeReadBatch; without this check
-	// a caller could bypass list filtering by addressing the config by ID.
-	if !s.authorize(w, r, harnessConfigResource(hc), ActionRead) {
-		return
+	// Authenticated runtime brokers read harness configs during agent creation.
+	// They pass HMAC auth via middleware but are not user principals, so the
+	// authorization kernel cannot evaluate them. Allow read access for brokers;
+	// the HMAC credential is the trust basis.
+	if GetBrokerIdentityFromContext(ctx) == nil {
+		// SECURITY-GATE: authorize read access to this specific harness config.
+		// The list endpoint filters via AuthorizeReadBatch; without this check
+		// a caller could bypass list filtering by addressing the config by ID.
+		if !s.authorize(w, r, harnessConfigResource(hc), ActionRead) {
+			return
+		}
 	}
 
 	resp := HarnessConfigWithCapabilities{HarnessConfig: *hc}
