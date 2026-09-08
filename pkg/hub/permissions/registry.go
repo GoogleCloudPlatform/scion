@@ -135,16 +135,16 @@ var Registry = []Permission{
 	{ID: "skill.list", Resource: ResourceSkill, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "skill:list", Description: "List skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 
 	{ID: "template.create", Resource: ResourceTemplate, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "template:create", Description: "Create templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
-	{ID: "template.read", Resource: ResourceTemplate, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "template:read", Description: "Read templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
+	{ID: "template.read", Resource: ResourceTemplate, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "template:read", AgentScopes: []string{"project:read"}, Description: "Read templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
 	{ID: "template.update", Resource: ResourceTemplate, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "template:update", Description: "Update templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
 	{ID: "template.delete", Resource: ResourceTemplate, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "template:delete", Description: "Delete templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
-	{ID: "template.list", Resource: ResourceTemplate, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "template:list", Description: "List templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
+	{ID: "template.list", Resource: ResourceTemplate, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "template:list", AgentScopes: []string{"project:read"}, Description: "List templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
 
 	{ID: "harness_config.create", Resource: ResourceHarnessConfig, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "harness_config:create", Description: "Create harness configs", Enforcement: []string{"pkg/hub/harness_config_handlers.go"}},
-	{ID: "harness_config.read", Resource: ResourceHarnessConfig, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "harness_config:read", Description: "Read harness configs", Enforcement: []string{"pkg/hub/harness_config_handlers.go"}},
+	{ID: "harness_config.read", Resource: ResourceHarnessConfig, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "harness_config:read", AgentScopes: []string{"project:read"}, Description: "Read harness configs", Enforcement: []string{"pkg/hub/harness_config_handlers.go"}},
 	{ID: "harness_config.update", Resource: ResourceHarnessConfig, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "harness_config:update", Description: "Update harness configs", Enforcement: []string{"pkg/hub/harness_config_handlers.go"}},
 	{ID: "harness_config.delete", Resource: ResourceHarnessConfig, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "harness_config:delete", Description: "Delete harness configs", Enforcement: []string{"pkg/hub/harness_config_handlers.go"}},
-	{ID: "harness_config.list", Resource: ResourceHarnessConfig, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "harness_config:list", Description: "List harness configs", Enforcement: []string{"pkg/hub/harness_config_handlers.go"}},
+	{ID: "harness_config.list", Resource: ResourceHarnessConfig, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "harness_config:list", AgentScopes: []string{"project:read"}, Description: "List harness configs", Enforcement: []string{"pkg/hub/harness_config_handlers.go"}},
 
 	{ID: "group.create", Resource: ResourceGroup, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "group:create", Description: "Create groups", Enforcement: []string{"pkg/hub/handlers_groups.go"}},
 	{ID: "group.read", Resource: ResourceGroup, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "group:read", Description: "Read groups", Enforcement: []string{"pkg/hub/handlers_groups.go"}},
