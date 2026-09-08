@@ -268,8 +268,16 @@ func (a *AuthzService) walkDelegationChain(
 			})
 		}
 
-		// Resolve the permission ID from the request action and resource.
-		permissionID := resolvePermissionID(req.Resource, req.Action)
+		// Resolve the permission ID. Honour an explicit request permission the
+		// way Decide does: when a caller names the permission, deriving a
+		// different one here silently denies. Agent secret resolution is the
+		// case in point - it asks for project.secret_read, while deriving from
+		// (resource="secret", action="read") produces "secret.read", which is
+		// not in the registry and maps to no agent scope.
+		permissionID := req.Permission
+		if permissionID == "" {
+			permissionID = resolvePermissionID(req.Resource, req.Action)
+		}
 
 		if edge.DelegatorType == store.DelegationPrincipalUser {
 			allowed, reason, err := a.checkUserHoldsPermission(ctx, edge.DelegatorID, permissionID, edge.ScopeType, edge.ScopeID, explain)
