@@ -219,6 +219,10 @@ step_build_args() {
       if [[ -n "${NPM_REGISTRY:-}" ]]; then
         echo "NPM_REGISTRY=${NPM_REGISTRY}"
       fi
+      # Same for the Python package index.
+      if [[ -n "${PIP_INDEX_URL:-}" ]]; then
+        echo "PIP_INDEX_URL=${PIP_INDEX_URL}"
+      fi
       ;;
     thick-prep)
       # No build-args — BASE_IMAGE default is in the Dockerfile ARG.
