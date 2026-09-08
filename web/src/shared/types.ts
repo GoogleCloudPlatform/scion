@@ -832,6 +832,26 @@ export function can(capabilities: Capabilities | undefined, action: string): boo
 }
 
 /**
+ * Whether the viewer may run agent lifecycle actions (start, stop, suspend,
+ * resume).
+ *
+ * These are authorized server-side by `authorizeAgentLifecycle`, the same gate
+ * that governs `attach` (see handlers_projects_core.go, where AgentActionStart
+ * and AgentActionStop route through it). The permission registry defines no
+ * `agent.start` and no per-agent `agent.stop` - only the scope-level
+ * `agent.stop_all` - so `ComputeCapabilities` can never emit "start" or "stop",
+ * and gating on those names hides the controls from every user including
+ * super-admins.
+ *
+ * Gating on the capability the Hub actually enforces keeps the UI truthful. If
+ * start/stop should become separately governed, that needs registry entries
+ * plus role updates, and this helper is the single place to change.
+ */
+export function canLifecycle(capabilities: Capabilities | undefined): boolean {
+  return can(capabilities, 'attach');
+}
+
+/**
  * Check whether a capability set permits any of the given actions.
  * Returns false (fail-closed) when capabilities are undefined.
  */

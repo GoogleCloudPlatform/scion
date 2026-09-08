@@ -38,6 +38,7 @@ import type {
 } from '../../shared/types.js';
 import {
   can,
+  canLifecycle,
   isTerminalAvailable,
   getAgentDisplayStatus,
   isAgentRunning,
@@ -1233,7 +1234,7 @@ export class ScionPageAgentDetail extends LitElement {
             : nothing}
           ${isAgentRunning(agent)
             ? html`
-                ${can(agent._capabilities, 'stop')
+                ${canLifecycle(agent._capabilities)
                   ? html`
                       ${agent.harnessCapabilities?.resume?.support !== 'no'
                         ? html`
@@ -1265,7 +1266,7 @@ export class ScionPageAgentDetail extends LitElement {
                   : nothing}
               `
             : agent.phase === 'suspended'
-              ? can(agent._capabilities, 'start')
+              ? canLifecycle(agent._capabilities)
                 ? html`
                     <sl-button
                       variant="success"
@@ -1279,7 +1280,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   `
                 : nothing
-              : can(agent._capabilities, 'start')
+              : canLifecycle(agent._capabilities)
                 ? html`
                     <sl-button
                       variant="success"
