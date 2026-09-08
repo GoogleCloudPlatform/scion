@@ -1,0 +1,185 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "scion.fullname" . }}
+  labels:
+    {{- include "scion.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "scion.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "scion.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "scion.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: scion
+          image: {{ include "scion.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args:
+            - "--global"
+            - "server"
+            - "start"
+            - "--foreground"
+            - "--production"
+            {{- if eq .Values.mode "hub" }}
+            - "--enable-hub"
+            - "--enable-web"
+            - "--web-port"
+            - {{ .Values.server.port | quote }}
+            {{- if .Values.broker.enabled }}
+            - "--enable-runtime-broker"
+            - "--runtime-broker-port"
+            - {{ .Values.broker.port | quote }}
+            {{- if .Values.broker.autoProvide }}
+            - "--auto-provide"
+            {{- end }}
+            {{- end }}
+            {{- with .Values.database.path }}
+            - "--db"
+            - {{ . | quote }}
+            {{- end }}
+            {{- if eq .Values.storage.provider "gcs" }}
+            {{- with .Values.storage.bucket }}
+            - "--storage-bucket"
+            - {{ . | quote }}
+            {{- end }}
+            {{- else if eq .Values.storage.provider "local" }}
+            {{- with .Values.storage.localPath }}
+            - "--storage-dir"
+            - {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.server.adminEmails }}
+            - "--admin-emails"
+            - {{ join "," .Values.server.adminEmails | quote }}
+            {{- end }}
+            {{- else }}
+            {{/* broker-only mode */}}
+            - "--enable-runtime-broker"
+            - "--runtime-broker-port"
+            - {{ .Values.broker.port | quote }}
+            {{- if .Values.broker.autoProvide }}
+            - "--auto-provide"
+            {{- end }}
+            {{- end }}
+            {{- if eq .Values.server.logLevel "debug" }}
+            - "--debug"
+            {{- end }}
+            {{- with .Values.server.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "scion.fullname" . }}
+          env:
+            {{- if and (eq .Values.mode "hub") .Values.auth.existingSecret }}
+            - name: SCION_SERVER_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.existingSecretKey }}
+            {{- end }}
+            {{- with .Values.server.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            {{- if eq .Values.mode "hub" }}
+            - name: http
+              containerPort: {{ .Values.server.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if or (eq .Values.mode "broker") .Values.broker.enabled }}
+            - name: broker
+              containerPort: {{ .Values.broker.port }}
+              protocol: TCP
+            {{- end }}
+          {{- if eq .Values.mode "hub" }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- if and (eq .Values.mode "hub") .Values.persistence.enabled }}
+            - name: data
+              mountPath: /data
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/nonroot
+            - name: settings
+              mountPath: /home/nonroot/.scion/settings.yaml
+              subPath: settings.yaml
+              readOnly: true
+      volumes:
+        {{- if and (eq .Values.mode "hub") .Values.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (include "scion.fullname" .) }}
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+        - name: home
+          emptyDir: {}
+        - name: settings
+          configMap:
+            name: {{ include "scion.fullname" . }}-settings
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

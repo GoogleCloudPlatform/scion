@@ -1,0 +1,47 @@
+{{- if eq .Values.mode "hub" }}
+Scion Hub deployed successfully!
+
+1. Access the hub:
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+   https://{{ .host }}
+{{- end }}
+{{- else }}
+   kubectl port-forward svc/{{ include "scion.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+   Then open: http://localhost:{{ .Values.service.port }}
+{{- end }}
+
+2. Check health:
+   kubectl get pods -l {{ include "scion.selectorLabels" . | replace ": " "=" | replace "\n" "," }}
+
+{{- if not .Values.auth.existingSecret }}
+
+WARNING: No session secret configured (auth.existingSecret is empty).
+Create a secret with a random session key:
+
+  kubectl create secret generic scion-session \
+    --from-literal=session-secret=$(openssl rand -hex 32)
+
+Then set auth.existingSecret=scion-session in your values.
+{{- end }}
+
+{{- if .Values.ingress.enabled }}
+
+NOTE: If using SSE (Server-Sent Events) or WebSocket connections, ensure
+your Ingress controller supports long-lived connections and has appropriate
+timeout settings (e.g., proxy-read-timeout >= 300s for nginx).
+{{- end }}
+{{- else }}
+Scion Broker deployed successfully!
+
+The broker is running on port {{ .Values.broker.port }}.
+{{- if .Values.broker.hubEndpoint }}
+Hub endpoint: {{ .Values.broker.hubEndpoint }}
+{{- else }}
+
+WARNING: No hub endpoint configured (broker.hubEndpoint is empty).
+Set broker.hubEndpoint to the hub's URL.
+{{- end }}
+{{- end }}
+
+Documentation: https://github.com/GoogleCloudPlatform/scion

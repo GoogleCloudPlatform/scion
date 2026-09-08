@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "scion.fullname" . }}-settings
+  labels:
+    {{- include "scion.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  settings.yaml: |
+    schema_version: "1"
+    {{- with .Values.imageRegistry }}
+    image_registry: {{ . | quote }}
+    {{- end }}

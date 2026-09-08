@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "scion.fullname" . }}
+  labels:
+    {{- include "scion.labels" . | nindent 4 }}
+  {{- if or .Values.service.annotations .Values.commonAnnotations }}
+  annotations:
+    {{- with .Values.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    {{- if eq .Values.mode "hub" }}
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+    {{- end }}
+    {{- if or (eq .Values.mode "broker") .Values.broker.enabled }}
+    - port: {{ .Values.broker.port }}
+      targetPort: broker
+      protocol: TCP
+      name: broker
+    {{- end }}
+  selector:
+    {{- include "scion.selectorLabels" . | nindent 4 }}
