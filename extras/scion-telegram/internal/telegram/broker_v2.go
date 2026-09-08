@@ -1961,11 +1961,23 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	}
 
 	// Check for scion identity mapping — unregistered users cannot route messages.
+	// hubSenderID carries the resolved Hub user UUID (when registered) for the
+	// outbound StructuredMessage.SenderID; senderID itself must stay the raw
+	// Telegram numeric ID since it also keys ConversationContext.TelegramUserID
+	// below. Without this split, the Hub's reply-affinity lookup
+	// (webchat_conversation_context, keyed by Hub user ID) never matches what
+	// gets recorded here, so an agent's reply falls back to whatever channel
+	// that Hub user last used elsewhere (e.g. the web dashboard) instead of
+	// routing back to Telegram.
+	hubSenderID := senderID
 	if senderID != "" {
 		mapping, err := b.store.GetUserMapping(ctx, senderID)
 		if err == nil && mapping != nil {
 			if mapping.ScionEmail != "" {
 				sender = "user:" + mapping.ScionEmail
+			}
+			if mapping.ScionUserID != "" {
+				hubSenderID = mapping.ScionUserID
 			}
 		} else if mapping == nil {
 			b.log.Debug("Unregistered user tried to mention agent", "sender_id", senderID)
@@ -2117,7 +2129,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			Version:    messages.Version,
 			Timestamp:  time.Unix(tgMsg.Date, 0).UTC().Format(time.RFC3339),
 			Sender:     sender,
-			SenderID:   senderID,
+			SenderID:   hubSenderID,
 			Recipient:  recipient,
 			Recipients: recipientsSet,
 			Msg:        msgText,
@@ -2543,8 +2555,13 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 		}
 
 		mapping, mErr := b.store.GetUserMapping(ctx, senderID)
-		if mErr == nil && mapping != nil && mapping.ScionEmail != "" {
-			sender = "user:" + mapping.ScionEmail
+		if mErr == nil && mapping != nil {
+			if mapping.ScionEmail != "" {
+				sender = "user:" + mapping.ScionEmail
+			}
+			if mapping.ScionUserID != "" {
+				senderID = mapping.ScionUserID
+			}
 		}
 	}
 
