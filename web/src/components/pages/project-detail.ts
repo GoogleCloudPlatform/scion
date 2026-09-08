@@ -34,6 +34,7 @@ import type {
 import {
   can,
   canAny,
+  canLifecycle,
   getAgentDisplayStatus,
   isAgentRunning,
   isTerminalAvailable,
@@ -2255,7 +2256,7 @@ export class ScionPageProjectDetail extends LitElement {
                 `
               : nothing}
             ${isAgentRunning(agent)
-              ? can(agent._capabilities, 'stop')
+              ? canLifecycle(agent._capabilities)
                 ? html`
                     ${agent.harnessCapabilities?.resume?.support !== 'no'
                       ? html`
@@ -2290,7 +2291,7 @@ export class ScionPageProjectDetail extends LitElement {
                   `
                 : nothing
               : agent.phase === 'suspended'
-                ? can(agent._capabilities, 'start')
+                ? canLifecycle(agent._capabilities)
                   ? html`
                       <sl-tooltip content="Resume">
                         <sl-button
@@ -2307,7 +2308,7 @@ export class ScionPageProjectDetail extends LitElement {
                       </sl-tooltip>
                     `
                   : nothing
-                : can(agent._capabilities, 'start')
+                : canLifecycle(agent._capabilities)
                   ? html`
                       <sl-tooltip content="Start">
                         <sl-button
@@ -2400,7 +2401,7 @@ export class ScionPageProjectDetail extends LitElement {
               `
             : nothing}
           ${isAgentRunning(agent)
-            ? can(agent._capabilities, 'stop')
+            ? canLifecycle(agent._capabilities)
               ? html`
                   ${agent.harnessCapabilities?.resume?.support !== 'no'
                     ? html`
@@ -2435,7 +2436,7 @@ export class ScionPageProjectDetail extends LitElement {
                 `
               : nothing
             : agent.phase === 'suspended'
-              ? can(agent._capabilities, 'start')
+              ? canLifecycle(agent._capabilities)
                 ? html`
                     <sl-tooltip content="Resume">
                       <sl-button
@@ -2452,7 +2453,7 @@ export class ScionPageProjectDetail extends LitElement {
                     </sl-tooltip>
                   `
                 : nothing
-              : can(agent._capabilities, 'start')
+              : canLifecycle(agent._capabilities)
                 ? html`
                     <sl-tooltip content="Start">
                       <sl-button
