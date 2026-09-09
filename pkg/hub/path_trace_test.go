@@ -51,9 +51,6 @@ import (
 //
 // COVERAGE BOUNDARY — paths NOT traced by this test:
 //
-//   - Agent-scoped route (/api/v1/agents/{id}/message via handleAgentAction
-//     in handlers_agents_core.go). Same handler, different authorization
-//     dispatch path.
 //   - Agent-to-agent messaging (sender is an AgentIdentity, not a
 //     UserIdentity). The identity-extraction branch differs.
 //   - Broker-inbound path (handleBrokerInbound in handlers_broker_inbound.go).
