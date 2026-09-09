@@ -2205,6 +2205,12 @@ func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, 
 	}
 	writeConv := topic.ConversationID != "" && hasConv
 
+	// DEF-157: derive the canonical external_ref for the promoted topic's
+	// conversation before BeginTx — U-TX-1.
+	extRef, err := messaging.ThreadConversationExternalRef(topic.ProjectID, topic.ID)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: derive conversation key for promoted topic %s: %w", topic.ID, err)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: begin promote tx: %w", err)
@@ -2239,8 +2245,8 @@ func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, 
 		now := topic.CreatedAt.UTC().Format(time.RFC3339Nano)
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-			 VALUES (?, ?, 'group', 'native', '', '', ?, 'active', ?, ?)`,
-			topic.ConversationID, topic.ProjectID, topic.Name, now, now)
+			 VALUES (?, ?, 'group', 'native', ?, '', ?, 'active', ?, ?)`,
+			topic.ConversationID, topic.ProjectID, extRef, topic.Name, now, now)
 		if err != nil {
 			return nil, fmt.Errorf("webchat store: create conversation in promote: %w", err)
 		}

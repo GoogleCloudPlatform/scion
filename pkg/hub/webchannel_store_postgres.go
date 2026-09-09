@@ -1696,6 +1696,12 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys
 		topic.ConversationID = uuid.New().String()
 	}
 
+	// DEF-157: derive the canonical external_ref for the promoted topic's
+	// conversation before BeginTx — U-TX-1.
+	extRef, err := messaging.ThreadConversationExternalRef(topic.ProjectID, topic.ID)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: derive conversation key for promoted topic %s: %w", topic.ID, err)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: begin promote tx: %w", err)
@@ -1730,8 +1736,8 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys
 		// index, NEVER the access authority (design doc §2.4.2.1).
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-			 VALUES ($1, $2, 'group', 'native', '', '', $3, 'active', $4, $5)`,
-			topic.ConversationID, topic.ProjectID, topic.Name, topic.CreatedAt, topic.CreatedAt)
+			 VALUES ($1, $2, 'group', 'native', $3, '', $4, 'active', $5, $6)`,
+			topic.ConversationID, topic.ProjectID, extRef, topic.Name, topic.CreatedAt, topic.CreatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("webchat store: create conversation in promote: %w", err)
 		}
