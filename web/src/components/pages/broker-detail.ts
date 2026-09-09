@@ -619,7 +619,7 @@ export class ScionPageBrokerDetail extends LitElement {
       const response = await apiFetch(`/api/v1/runtime-brokers/${this.brokerId}`, {
         method: 'DELETE',
       });
-      if (!response.ok && response.status !== 204) {
+      if (!response.ok) {
         throw new Error(await extractApiError(response, 'Failed to unregister broker'));
       }
       window.location.href = '/brokers';

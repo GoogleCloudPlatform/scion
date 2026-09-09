@@ -457,22 +457,18 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		}
 	}
 
-	// Clean up the broker's HMAC secret. The broker_secrets table has no FK
-	// cascade to runtime_brokers, so we delete explicitly. ErrNotFound is
-	// expected when the broker was never fully registered.
-	if err := s.store.DeleteBrokerSecret(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
-		slog.WarnContext(ctx, "failed to delete broker secret during deregistration", "brokerId", id, "error", err)
-	}
-
-	// Clean up any unconsumed join token for this broker. Same reasoning as
-	// above: no FK cascade, and a missing token is not an error.
-	if err := s.store.DeleteJoinToken(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
-		slog.WarnContext(ctx, "failed to delete broker join token during deregistration", "brokerId", id, "error", err)
-	}
-
 	if err := s.store.DeleteRuntimeBroker(ctx, id); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// Clean up the broker's HMAC secret (best-effort, post-delete).
+	if err := s.store.DeleteBrokerSecret(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
+		slog.WarnContext(ctx, "failed to delete broker secret during deregistration", "brokerId", id, "error", err)
+	}
+	// Clean up any unconsumed join token (best-effort, post-delete).
+	if err := s.store.DeleteJoinToken(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
+		slog.WarnContext(ctx, "failed to delete broker join token during deregistration", "brokerId", id, "error", err)
 	}
 
 	// Log the deregistration event
