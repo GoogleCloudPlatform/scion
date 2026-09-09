@@ -99,6 +99,45 @@ set the Hub admin to a human email. The deployer SA is granted IAP access
 automatically, but Hub admin is seeded from the deployer identity by default.
 :::
 
+### Instance service account
+
+Create a dedicated service account for the Instance rather than using the
+default Compute Engine SA. The default SA has overly broad permissions and
+uses a `@developer.gserviceaccount.com` email format that, while supported,
+is not recommended for production use.
+
+```bash
+export SA_NAME="scion-instance"
+
+gcloud iam service-accounts create $SA_NAME \
+  --display-name="Scion Hub Instance" \
+  --project=$PROJECT_ID
+
+export SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+```
+
+Grant the minimum roles the Instance needs:
+
+| Role | Why |
+|------|-----|
+| `roles/storage.admin` | Read/write workspace storage backends |
+| `roles/iam.serviceAccountAdmin` | Manage hub-minted service accounts for agents |
+| `roles/iam.serviceAccountTokenCreator` | Mint short-lived tokens for agent GCP identity (assign mode) |
+| `roles/aiplatform.user` | Vertex AI inference (if using Gemini-based agents) |
+
+```bash
+for ROLE in roles/storage.admin roles/iam.serviceAccountAdmin \
+            roles/iam.serviceAccountTokenCreator roles/aiplatform.user; do
+  gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:${SA_EMAIL}" \
+    --role="${ROLE}" \
+    --condition=None
+done
+```
+
+Pass the service account to the deploy command with `--service-account $SA_EMAIL`
+(see [Section 1](#1-deploy)).
+
 ### Container image
 
 The deploy requires a pre-built **omni image** — a single image containing the Hub
@@ -163,6 +202,7 @@ A single command creates the Instance, enables IAP, and verifies the perimeter:
   --name my-scion-hub \
   --project $PROJECT_ID \
   --region us-east4 \
+  --service-account $SA_EMAIL \
   --image us-central1-docker.pkg.dev/YOUR_PROJECT/scion/scion-omni:YOUR_TAG
 ```
 
@@ -194,7 +234,7 @@ Instance is open to the internet with only Hub session auth in front of it.
 | `--cpu` | `4` | CPU allocation |
 | `--memory` | `8Gi` | Memory allocation |
 | `--admin-email` | deployer's gcloud account | Override the Hub admin email |
-| `--service-account` | (default compute SA) | GCP service account for the Instance |
+| `--service-account` | (default compute SA) | GCP service account for the Instance. A [custom SA](#instance-service-account) is strongly recommended. |
 | `--image-registry` | derived from `--image` | Override the image registry the broker uses to pull agent images |
 
 ---
@@ -210,7 +250,8 @@ https://my-scion-hub-PROJECT_NUMBER.us-east4.run.app
 1. **IAP challenge** — Google sign-in. Use the email that was bound as the IAP user
    during deploy (your gcloud account, or the `--admin-email` value).
 2. **Hub access** — After sign-in you land directly in the Hub. There is no
-   second login. The deployer is automatically seeded as the first admin.
+   second login. The deployer is automatically seeded as the first admin and
+   receives the super-admin role binding needed for full admin UI access.
 
 :::tip[Granting access to other users]
 IAP access is region-scoped, not per-instance. To add another user:

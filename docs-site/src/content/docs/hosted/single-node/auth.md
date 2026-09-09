@@ -320,7 +320,14 @@ When creating an agent, you can configure its **GCP Identity Mode**:
   - The agent's `sciontool` sidecar intercepts requests to the metadata server.
   - Token requests are proxied to the Scion Hub, which uses its own broad permissions to generate a short-lived access token for the requested Service Account (via the `iam.serviceAccounts.getAccessToken` permission).
   - The token is then returned to the agent, allowing it to use standard GCP SDKs (Application Default Credentials) as that specific Service Account.
-- **Passthrough**: Requests are allowed to reach the actual host metadata server. Use with caution as this allows the agent to assume the identity of the underlying node. Security is tightened by restricting GCP identity passthrough to broker owners only.
+- **Passthrough**: Requests are allowed to reach the actual host metadata server. Use with caution as this allows the agent to assume the identity of the underlying node. Security is tightened by restricting GCP identity passthrough to broker owners and admin-role users on embedded (co-located) brokers.
+
+:::caution[Passthrough does not work in Cloud Run Sandboxes]
+GCP identity passthrough mode does not work inside Cloud Run Sandbox
+(gVisor) runtimes because the real GCE metadata server is unreachable
+from inside gVisor. Use **assign** mode instead — it works correctly on
+all runtimes including Cloud Run Sandboxes.
+:::
 
 :::note[Sandbox runtimes]
 Sandbox runtimes (such as `cloudrun-sandbox` profiles using gVisor) cannot reach the GCE metadata server at `169.254.169.254`, so passthrough mode produces no credentials. The Hub automatically translates passthrough to **assign** mode at agent creation and PATCH time, using the broker's host service account. Downstream JWT scopes, resolved environment variables, and the `gcp-token` endpoint work automatically after translation.
@@ -329,7 +336,9 @@ Sandbox runtimes (such as `cloudrun-sandbox` profiles using gVisor) cannot reach
 ### Management UI & Hub-Minted Service Accounts
 
 Administrators can manage available Service Accounts through the **Service Accounts** section in the Admin dashboard. 
-- **Registration**: Register existing GCP Service Accounts by email.
+- **Registration**: Register existing GCP Service Accounts by email. The system
+  accepts service accounts with `@<project>.iam.gserviceaccount.com`,
+  `@developer.gserviceaccount.com`, and `@appspot.gserviceaccount.com` suffixes.
 - **Hub-Minted Accounts**: The Hub can directly manage and provision (mint) GCP service accounts based on your quota dashboard and capability controls.
 - **Validation**: Scion auto-verifies that the Hub has the necessary permissions to act as the registered Service Account upon registration.
 - **Assignment & Defaults**: Service Accounts can be assigned to agents during the creation flow. Projects also support default GCP identities that are automatically applied in the agent creation form.

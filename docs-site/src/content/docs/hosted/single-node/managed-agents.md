@@ -50,6 +50,14 @@ Choose a **containerized (brokered) agent** when:
 - You need interactive terminal attach, suspend/resume, or other container-only operations
   (see [Limitations](#limitations) below).
 
+:::note[GCP identity on Cloud Run Sandboxes]
+Containerized agents running on Cloud Run Sandbox (gVisor) runtimes support
+GCP identity in **assign** mode but not **passthrough** mode — the real GCE
+metadata server is unreachable from inside gVisor. See the
+[Authentication guide](/scion/hosted/single-node/auth/#gcp-identity--metadata-emulation)
+for details.
+:::
+
 The choice between a managed agent and a brokered agent is a **deployment-time decision
 controlled by a broker profile**, not a property of the agent template. The same template can run
 on a container runtime or on a managed service depending on the profile you select at
