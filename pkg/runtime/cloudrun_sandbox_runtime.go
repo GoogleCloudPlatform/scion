@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // DefaultSandboxBin is the path to the Cloud Run sandbox launcher binary.
@@ -820,6 +821,47 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 
 	// Build environment.
 	env := envFor(cfg, paths)
+
+	// Apply resolved auth env vars and files (mirrors Docker path at
+	// common.go applyResolvedAuth). Without this, auth env vars like
+	// GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION do not reach the
+	// sandbox process.
+	if cfg.ResolvedAuth != nil {
+		for k, v := range cfg.ResolvedAuth.EnvVars {
+			env[k] = v
+		}
+
+		// Copy auth files into the agent home directory on the host side.
+		// paths.agentHome is bind-mounted into the sandbox at
+		// sandboxAgentHome (/home/scion), so files placed here are visible
+		// inside the sandbox at the expected paths.
+		//
+		// Defense-in-depth: ApplyAuthSettings (run.go) already stages auth
+		// files via auth-candidates.json before the runtime runs, so files
+		// normally reach the sandbox through that path. This block mirrors
+		// the Docker runtime's file-copy mode (common.go:820-839) for
+		// robustness in case the staging path is bypassed or incomplete.
+		for _, f := range cfg.ResolvedAuth.Files {
+			containerPath := expandTildeTarget(f.ContainerPath, sandboxAgentHome)
+			var relPath string
+			if strings.HasPrefix(containerPath, sandboxAgentHome+"/") {
+				relPath = strings.TrimPrefix(containerPath, sandboxAgentHome+"/")
+			} else {
+				relPath = strings.TrimPrefix(containerPath, "/")
+			}
+			dst := filepath.Join(paths.agentHome, relPath)
+			if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+				runtimeLog.Warn("cloudrun-sandbox: failed to create directory for auth file",
+					"dst", dst, "error", err)
+				continue
+			}
+			if err := util.CopyFile(f.SourcePath, dst); err != nil {
+				runtimeLog.Warn("cloudrun-sandbox: failed to copy auth file",
+					"src", f.SourcePath, "dst", dst, "error", err)
+				continue
+			}
+		}
+	}
 
 	// Build entrypoint command.
 	entrypoint, err := buildEntrypoint(cfg)
