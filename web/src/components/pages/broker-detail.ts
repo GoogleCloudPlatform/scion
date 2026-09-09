@@ -602,7 +602,8 @@ export class ScionPageBrokerDetail extends LitElement {
       parts.push(`remove it from ${projectCount} project${projectCount !== 1 ? 's' : ''}`);
     }
     if (agentCount > 0) {
-      parts.push(`may affect ${agentCount} running agent${agentCount !== 1 ? 's' : ''}`);
+      parts.push("affect " + agentCount + " running agent" + (agentCount !== 1 ? "s" : ""));
+    }
     }
     const consequence = parts.length > 0 ? `\n\nThis will ${parts.join(' and ')}.` : '';
     const message = `Unregister broker "${this.broker.name}"?${consequence}`;
