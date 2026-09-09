@@ -293,6 +293,9 @@ type VersionedSettings struct {
 	DefaultMaxAgentRole string `json:"default_max_agent_role,omitempty" yaml:"default_max_agent_role,omitempty" koanf:"default_max_agent_role"`
 	DefaultAgentRole    string `json:"default_agent_role,omitempty" yaml:"default_agent_role,omitempty" koanf:"default_agent_role"`
 
+	// Default runtime broker (hub-level)
+	DefaultRuntimeBroker string `json:"default_runtime_broker,omitempty" yaml:"default_runtime_broker,omitempty" koanf:"default_runtime_broker"`
+
 	// AutoInjectGcloudADC controls whether the host's gcloud Application Default
 	// Credentials file is automatically injected into agent containers in
 	// co-located (workstation) mode.

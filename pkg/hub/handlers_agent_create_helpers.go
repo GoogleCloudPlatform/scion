@@ -1063,6 +1063,25 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		return "", store.ErrNotFound
 	}
 
+	// Case 2.5: Hub-level default broker (from hub operational agent_defaults).
+	// Used when the project has no default broker set. The hub default must be a
+	// provider for this project and must be online and dispatchable.
+	if hubDefault := s.hubAgentDefaults().DefaultRuntimeBroker; hubDefault != "" {
+		for _, h := range availableBrokers {
+			if h.ID == hubDefault || h.Name == hubDefault || h.Slug == hubDefault {
+				if s.canDispatchToBroker(ctx, &h) {
+					slog.Info("Using hub-level default runtime broker",
+						"broker", h.Name, "brokerID", h.ID, "project_id", project.ID)
+					return h.ID, nil
+				}
+				break
+			}
+		}
+		// Hub default is set but not available/dispatchable for this project — fall through.
+		slog.Debug("Hub-level default broker not available for project, falling through to auto-select",
+			"hubDefault", hubDefault, "project_id", project.ID)
+	}
+
 	// Case 3: No default and no explicit broker - auto-select only when there is
 	// exactly one provider and its broker is online and dispatchable.
 	if len(allProviders) == 1 {

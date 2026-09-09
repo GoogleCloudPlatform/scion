@@ -238,6 +238,7 @@ interface ServerConfigResponse {
   default_thinking_level?: number | null;
   default_max_agent_role?: string;
   default_agent_role?: string;
+  default_runtime_broker?: string;
 
   auto_expose_ports?: { enabled?: boolean };
 
@@ -385,6 +386,7 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   default_thinking_level: 'Default Thinking Level',
   default_max_agent_role: 'Default Maximum Agent Role',
   default_agent_role: 'Default Agent Role',
+  default_runtime_broker: 'Default Runtime Broker',
   // endpoints section
   'server.hub.public_url': 'Public URL',
   image_registry: 'Image Registry',
@@ -468,6 +470,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Agent authorization
   @state() private defaultMaxAgentRole = '';
   @state() private defaultAgentRole = '';
+  @state() private defaultRuntimeBroker = '';
 
   // Agent defaults sub-tab
   @state() private agentDefaultsTab = 'general';
@@ -1455,6 +1458,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultThinkingLevel = data.default_thinking_level ?? null;
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
+    this.defaultRuntimeBroker = data.default_runtime_broker || '';
 
     // Server
     const srv = data.server;
@@ -1716,6 +1720,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('default_agent_role')) {
       payload.default_agent_role = this.defaultAgentRole || '';
     }
+    if (ok('default_runtime_broker')) {
+      payload.default_runtime_broker = this.defaultRuntimeBroker || '';
+    }
 
     const server: Record<string, unknown> = {};
 
@@ -1880,6 +1887,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     if (ok('default_agent_role')) {
       payload.default_agent_role = this.defaultAgentRole || undefined;
+    }
+    if (ok('default_runtime_broker')) {
+      payload.default_runtime_broker = this.defaultRuntimeBroker || undefined;
     }
 
     // Server
@@ -3096,6 +3106,25 @@ export class ScionPageAdminServerConfig extends LitElement {
                         <sl-option value="baseline">Baseline — Standard access</sl-option>
                         <sl-option value="full">Full — Full access</sl-option>
                       </sl-select>`
+                  )}
+                </div>
+                <div class="form-field">
+                  <label>Default Runtime Broker</label>
+                  <span class="hint"
+                    >Hub-level default broker for projects without a project-level default. Specify
+                    a broker ID, name, or slug.</span
+                  >
+                  ${this.renderFieldValue(
+                    'default_runtime_broker',
+                    this.defaultRuntimeBroker || 'None',
+                    html`${this.renderEnvBadge('default_runtime_broker')}<sl-input
+                        value=${this.defaultRuntimeBroker}
+                        placeholder="broker ID, name, or slug"
+                        clearable
+                        @sl-input=${(e: Event) => {
+                          this.defaultRuntimeBroker = (e.target as HTMLInputElement).value;
+                        }}
+                      ></sl-input>`
                   )}
                 </div>
               </div>
