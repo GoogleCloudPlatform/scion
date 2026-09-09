@@ -53,6 +53,8 @@ const (
 	DeriveErrDMKeyCanonical  = "dm_key_not_canonical" // dm: prefix, parsed but not canonical
 	DeriveErrThreadNoProject = "thread_no_project"    // non-dm ThreadID, empty ProjectID
 	DeriveErrPrincipalPair   = "principal_pair"       // empty ThreadID, principal-pair derivation failed
+	DeriveErrSurfaceUnmap    = "surface_unmap"        // channel cannot be mapped to a surface (DEF-156 P3)
+	DeriveErrSurfaceConflict = "surface_conflict"     // messages in same group disagree on channel (DEF-156 P3)
 )
 
 // DeriveConversationKey is the ONLY function that should construct a conversation

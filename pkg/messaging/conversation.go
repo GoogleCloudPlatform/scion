@@ -359,6 +359,26 @@ func ChannelToSurface(channel string, log *slog.Logger) string {
 	return "native"
 }
 
+// ChannelToSurfaceStrict maps a channel name to a valid surface enum value
+// without falling back to "native" for unknown channels. Empty channels map
+// to "native" (the zero-value convention), and known aliases are applied, but
+// any truly unmappable channel returns an error.
+//
+// This is used by the backfill (DEF-156 P3) where silently coercing an unknown
+// channel to "native" would permanently mislabel the conversation's surface.
+func ChannelToSurfaceStrict(channel string) (string, error) {
+	if channel == "" {
+		return "native", nil
+	}
+	if validSurfaces[channel] {
+		return channel, nil
+	}
+	if mapped, ok := channelToSurface[channel]; ok {
+		return mapped, nil
+	}
+	return "", fmt.Errorf("unmappable channel %q: no known surface mapping", channel)
+}
+
 // readThreadConfig holds optional parameters for ResolveThreadConversationForRead.
 type readThreadConfig struct {
 	topicLookup TopicConversationLookup
