@@ -604,7 +604,6 @@ export class ScionPageBrokerDetail extends LitElement {
     if (agentCount > 0) {
       parts.push("affect " + agentCount + " running agent" + (agentCount !== 1 ? "s" : ""));
     }
-    }
     const consequence = parts.length > 0 ? `\n\nThis will ${parts.join(' and ')}.` : '';
     const message = `Unregister broker "${this.broker.name}"?${consequence}`;
 

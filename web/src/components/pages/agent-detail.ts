@@ -845,6 +845,29 @@ export class ScionPageAgentDetail extends LitElement {
         });
 
         if (!response.ok) {
+          // If the broker is unreachable (502/503), offer a force-delete fallback.
+          if (response.status === 502 || response.status === 503) {
+            const forceConfirmed = await showConfirm(
+              'Delete failed — the broker may be unreachable. Force delete this agent? This will remove the hub record without notifying the broker.',
+              { title: 'Force Delete', confirmText: 'Force Delete', variant: 'danger' }
+            );
+            if (forceConfirmed) {
+              const forceResponse = await apiFetch(
+                `/api/v1/agents/${this.agentId}?force=true`,
+                { method: 'DELETE' }
+              );
+              if (!forceResponse.ok) {
+                throw new Error(
+                  await extractApiError(forceResponse, 'Failed to force delete agent')
+                );
+              }
+              window.location.href = this.project
+                ? `/projects/${this.project.id}`
+                : '/agents';
+              return;
+            }
+            return;
+          }
           throw new Error(await extractApiError(response, 'Failed to delete agent'));
         }
 

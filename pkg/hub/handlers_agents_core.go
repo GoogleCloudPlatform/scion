@@ -2546,9 +2546,16 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
+	// Phase-aware delete: agents in "created" phase were never provisioned on the
+	// broker — no container, no workspace, no branch. Skip broker dispatch entirely
+	// and go straight to hub-side cleanup. This prevents hanging on a stale broker
+	// for agents that never left the creation phase.
+	skipBrokerDispatch := agent.Phase == string(state.PhaseCreated)
+
 	// Verify broker is reachable before deleting to avoid orphaned containers.
 	// Force mode bypasses this check so stuck agents can always be cleaned up.
-	if !isManagedAgentRuntime(agent.Runtime) && !force && !s.checkBrokerAvailability(w, r, agent) {
+	// Created-phase agents skip this check since they have nothing on the broker.
+	if !isManagedAgentRuntime(agent.Runtime) && !skipBrokerDispatch && !force && !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
 
@@ -2557,8 +2564,9 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 
 	now := time.Now()
 
-	// If a dispatcher is available, dispatch the deletion to the runtime broker
-	if dispatcher := s.GetDispatcher(); dispatcher != nil && agent.RuntimeBrokerID != "" {
+	// If a dispatcher is available, dispatch the deletion to the runtime broker.
+	// Skip dispatch for created-phase agents — they were never provisioned.
+	if dispatcher := s.GetDispatcher(); dispatcher != nil && agent.RuntimeBrokerID != "" && !skipBrokerDispatch {
 		if err := dispatcher.DispatchAgentDelete(ctx, agent, deleteFiles, removeBranch, softDelete, now); err != nil {
 			if force {
 				// Force mode: log warning and continue with hub record deletion

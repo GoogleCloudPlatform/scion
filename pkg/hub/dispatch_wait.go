@@ -35,6 +35,12 @@ var ErrDispatchFailed = errors.New("dispatch failed: rolling timeout expired wit
 // considered failed. Single tunable per design §6.4.
 const dispatchRollingTimeout = 90 * time.Second
 
+// dispatchDeleteTimeout is a shorter rolling timeout for delete operations.
+// Deletes are lightweight broker-side operations and should not block the
+// caller for the full 90-second window — a 15-second silence is sufficient
+// to conclude the broker is unreachable.
+const dispatchDeleteTimeout = 15 * time.Second
+
 // waitForAgentTransition waits for an agent's phase to reach a terminal state,
 // using a rolling timeout that resets on ANY AgentStatusEvent (phase, activity,
 // or detail change). The caller must subscribe to the agent's status events
@@ -96,16 +102,22 @@ func waitForAgentTransition(
 // passes the channel + unsub here. On event arrival (or timeout), the row is
 // read from the store — the DB row is authoritative (design §6.3), so a missed
 // event is recoverable.
+//
+// timeoutOverride, if non-zero, replaces the default dispatchRollingTimeout.
 func waitForDispatchDone(
 	ctx context.Context,
 	events <-chan Event,
 	unsub func(),
 	st store.BrokerDispatchStore,
 	dispatchID string,
+	timeoutOverride ...time.Duration,
 ) (*store.BrokerDispatch, error) {
 	defer unsub()
 
 	timeout := dispatchRollingTimeout
+	if len(timeoutOverride) > 0 && timeoutOverride[0] > 0 {
+		timeout = timeoutOverride[0]
+	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
