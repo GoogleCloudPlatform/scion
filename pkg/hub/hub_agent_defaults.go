@@ -66,7 +66,8 @@ func agentDefaultsEqual(a, b opsettings.AgentDefaultsSettings) bool {
 		a.DefaultMaxDuration != b.DefaultMaxDuration ||
 		a.DefaultModel != b.DefaultModel ||
 		a.DefaultMaxAgentRole != b.DefaultMaxAgentRole ||
-		a.DefaultAgentRole != b.DefaultAgentRole {
+		a.DefaultAgentRole != b.DefaultAgentRole ||
+		a.DefaultRuntimeBroker != b.DefaultRuntimeBroker {
 		return false
 	}
 	if !intPtrEqual(a.DefaultThinkingLevel, b.DefaultThinkingLevel) {

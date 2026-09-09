@@ -83,6 +83,7 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private containerUser = '';
   @state() private telemetryEnabled = false;
   @state() private autoExposePortsEnabled = false;
+  @state() private hubDefaultRuntimeBroker = '';
   @state() private autoExposePortsMode = 'allowlist';
   @state() private autoExposePortsList = '';
   @state() private autoExposePortsInterval = '3s';
@@ -430,9 +431,11 @@ export class ScionPageAgentCreate extends LitElement {
         const data = (await settingsRes.json()) as {
           telemetryEnabled?: boolean;
           autoExposePortsEnabled?: boolean;
+          defaultRuntimeBroker?: string;
         };
         this.telemetryEnabled = data.telemetryEnabled ?? false;
         this.autoExposePortsEnabled = data.autoExposePortsEnabled ?? false;
+        this.hubDefaultRuntimeBroker = data.defaultRuntimeBroker ?? '';
       }
 
       if (harnessConfigsRes.ok) {
@@ -528,6 +531,21 @@ export class ScionPageAgentCreate extends LitElement {
       const defaultBroker = this.brokers.find((b) => b.id === project.defaultRuntimeBrokerId);
       if (defaultBroker) {
         this.brokerId = defaultBroker.id;
+        this.autoSelectProfile();
+        return;
+      }
+    }
+
+    // Fallback: hub-level default broker
+    if (this.hubDefaultRuntimeBroker) {
+      const hubBroker = this.brokers.find(
+        (b) =>
+          b.id === this.hubDefaultRuntimeBroker ||
+          (b.name && b.name.toLowerCase() === this.hubDefaultRuntimeBroker.toLowerCase()) ||
+          (b.slug && b.slug.toLowerCase() === this.hubDefaultRuntimeBroker.toLowerCase())
+      );
+      if (hubBroker) {
+        this.brokerId = hubBroker.id;
         this.autoSelectProfile();
         return;
       }

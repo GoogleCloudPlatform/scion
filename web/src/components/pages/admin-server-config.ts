@@ -28,6 +28,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
+import type { RuntimeBroker } from '../../shared/types.js';
 
 // ── Type definitions matching the Go API response ──
 
@@ -238,6 +239,7 @@ interface ServerConfigResponse {
   default_thinking_level?: number | null;
   default_max_agent_role?: string;
   default_agent_role?: string;
+  default_runtime_broker?: string;
 
   auto_expose_ports?: { enabled?: boolean };
 
@@ -385,6 +387,7 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   default_thinking_level: 'Default Thinking Level',
   default_max_agent_role: 'Default Maximum Agent Role',
   default_agent_role: 'Default Agent Role',
+  default_runtime_broker: 'Default Runtime Broker',
   // endpoints section
   'server.hub.public_url': 'Public URL',
   image_registry: 'Image Registry',
@@ -468,6 +471,8 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Agent authorization
   @state() private defaultMaxAgentRole = '';
   @state() private defaultAgentRole = '';
+  @state() private defaultRuntimeBroker = '';
+  @state() private runtimeBrokers: RuntimeBroker[] = [];
 
   // Agent defaults sub-tab
   @state() private agentDefaultsTab = 'general';
@@ -1331,6 +1336,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     super.connectedCallback();
     void this.loadConfig();
     void this.loadHarnessConfigs();
+    void this.loadRuntimeBrokers();
     void this.loadGitHubAppInstallations();
   }
 
@@ -1455,6 +1461,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultThinkingLevel = data.default_thinking_level ?? null;
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
+    this.defaultRuntimeBroker = data.default_runtime_broker || '';
 
     // Server
     const srv = data.server;
@@ -1602,6 +1609,31 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
   }
 
+  private async loadRuntimeBrokers(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/runtime-brokers?limit=200');
+      if (res.ok) {
+        const data = (await res.json()) as { brokers?: RuntimeBroker[] } | RuntimeBroker[];
+        this.runtimeBrokers = Array.isArray(data) ? data : data.brokers || [];
+        // Normalize: if the stored value is a name or slug, resolve it to the broker ID
+        // so the dropdown selection matches.
+        if (this.defaultRuntimeBroker && this.runtimeBrokers.length > 0) {
+          const match = this.runtimeBrokers.find(
+            (b) =>
+              b.id === this.defaultRuntimeBroker ||
+              (b.name && b.name.toLowerCase() === this.defaultRuntimeBroker.toLowerCase()) ||
+              (b.slug && b.slug.toLowerCase() === this.defaultRuntimeBroker.toLowerCase())
+          );
+          if (match && match.id !== this.defaultRuntimeBroker) {
+            this.defaultRuntimeBroker = match.id;
+          }
+        }
+      }
+    } catch {
+      // Non-critical — dropdown falls back to free-text input
+    }
+  }
+
   private syncHarnessConfigSelection(): void {
     const value = this.defaultHarnessConfig;
     if (!value) {
@@ -1715,6 +1747,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     if (ok('default_agent_role')) {
       payload.default_agent_role = this.defaultAgentRole || '';
+    }
+    if (ok('default_runtime_broker')) {
+      payload.default_runtime_broker = this.defaultRuntimeBroker || '';
     }
 
     const server: Record<string, unknown> = {};
@@ -1880,6 +1915,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     if (ok('default_agent_role')) {
       payload.default_agent_role = this.defaultAgentRole || undefined;
+    }
+    if (ok('default_runtime_broker')) {
+      payload.default_runtime_broker = this.defaultRuntimeBroker || undefined;
     }
 
     // Server
@@ -3096,6 +3134,44 @@ export class ScionPageAdminServerConfig extends LitElement {
                         <sl-option value="baseline">Baseline — Standard access</sl-option>
                         <sl-option value="full">Full — Full access</sl-option>
                       </sl-select>`
+                  )}
+                </div>
+                <div class="form-field">
+                  <label>Default Runtime Broker</label>
+                  <span class="hint"
+                    >Hub-level default broker for projects without a project-level default.</span
+                  >
+                  ${this.renderFieldValue(
+                    'default_runtime_broker',
+                    this.defaultRuntimeBroker || 'None',
+                    this.runtimeBrokers.length > 0
+                      ? html`${this.renderEnvBadge('default_runtime_broker')}<sl-select
+                            placeholder="None (auto-select)"
+                            clearable
+                            value=${this.defaultRuntimeBroker}
+                            @sl-change=${(e: Event) => {
+                              this.defaultRuntimeBroker = (
+                                e.target as HTMLSelectElement
+                              ).value;
+                            }}
+                          >
+                            ${this.runtimeBrokers.map(
+                              (b) =>
+                                html`<sl-option value=${b.id}
+                                  >${b.name} (${b.status})</sl-option
+                                >`
+                            )}
+                          </sl-select>`
+                      : html`${this.renderEnvBadge('default_runtime_broker')}<sl-input
+                            value=${this.defaultRuntimeBroker}
+                            placeholder="broker ID, name, or slug"
+                            clearable
+                            @sl-change=${(e: Event) => {
+                              this.defaultRuntimeBroker = (
+                                e.target as HTMLInputElement
+                              ).value;
+                            }}
+                          ></sl-input>`
                   )}
                 </div>
               </div>

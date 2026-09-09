@@ -68,6 +68,9 @@ type ServerConfigResponse struct {
 	DefaultMaxAgentRole string `json:"default_max_agent_role,omitempty"`
 	DefaultAgentRole    string `json:"default_agent_role,omitempty"`
 
+	// Default runtime broker (hub-level)
+	DefaultRuntimeBroker string `json:"default_runtime_broker,omitempty"`
+
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC bool `json:"auto_inject_gcloud_adc,omitempty"`
 
@@ -110,6 +113,9 @@ type ServerConfigUpdateRequest struct {
 	// Default agent authorization
 	DefaultMaxAgentRole *string `json:"default_max_agent_role,omitempty"`
 	DefaultAgentRole    *string `json:"default_agent_role,omitempty"`
+
+	// Default runtime broker (hub-level)
+	DefaultRuntimeBroker *string `json:"default_runtime_broker,omitempty"`
 
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC *bool `json:"auto_inject_gcloud_adc,omitempty"`
@@ -300,6 +306,7 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		DefaultThinkingLevel: vs.DefaultThinkingLevel,
 		DefaultMaxAgentRole:  vs.DefaultMaxAgentRole,
 		DefaultAgentRole:     vs.DefaultAgentRole,
+		DefaultRuntimeBroker: vs.DefaultRuntimeBroker,
 		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
 		AutoExposePorts:      vs.AutoExposePorts,
 	}
@@ -531,6 +538,13 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 			raw["default_agent_role"] = *req.DefaultAgentRole
 		} else {
 			delete(raw, "default_agent_role")
+		}
+	}
+	if req.DefaultRuntimeBroker != nil {
+		if *req.DefaultRuntimeBroker != "" {
+			raw["default_runtime_broker"] = *req.DefaultRuntimeBroker
+		} else {
+			delete(raw, "default_runtime_broker")
 		}
 	}
 	if req.AutoInjectGcloudADC != nil {
