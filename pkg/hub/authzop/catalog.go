@@ -2804,6 +2804,11 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/brokerauth.go", Function: "RotateBrokerSecret", Symbol: "UpdateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker secret rotation, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 
 	// -----------------------------------------------------------------------
+	// pkg/hub/handlers_runtime_brokers.go — broker deregistration cleanup
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_runtime_brokers.go", Function: "deleteRuntimeBroker", Symbol: "DeleteBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker deregistration cleanup: delete HMAC secret for removed broker", Scope: "pkg/hub/handlers_runtime_brokers.go"}},
+
+	// -----------------------------------------------------------------------
 	// pkg/hub/brokerclient.go / controlchannel_client.go / httpdispatcher.go
 	// — agent delete dispatch infrastructure
 	// -----------------------------------------------------------------------
