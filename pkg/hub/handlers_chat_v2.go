@@ -2614,7 +2614,18 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// 13. Publish SSE events (outside transaction — best-effort)
+	// 13. Provenance log — structured record tying the promoted thread back
+	// to its source DM. No schema change; the HTTP response already returns
+	// promotedFrom for the immediate caller (design §3.3).
+	slog.InfoContext(ctx, "promoted_dm",
+		"dm_key", key,
+		"topic_id", result.ID,
+		"conversation_id", result.ConversationID,
+		"actor", user.ID(),
+		"message_count", result.MessageCount,
+	)
+
+	// 14. Publish SSE events (outside transaction — best-effort)
 	s.events.PublishChatTopicEvent(ctx, projectID, "created", *result)
 	s.events.PublishDMPromotedEvent(ctx, key, *result)
 
