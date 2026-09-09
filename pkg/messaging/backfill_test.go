@@ -1712,3 +1712,96 @@ func TestBackfill_MixedFailures_AllThreeBuckets(t *testing.T) {
 	// The structural invariant must hold across all three buckets.
 	assertErrorInvariant(t, result)
 }
+
+// ---------------------------------------------------------------------------
+// DEF-156 P3: Channel-conflict refusal and unmappable channel
+// ---------------------------------------------------------------------------
+
+func TestBackfill_DEF156_ChannelConflict_GroupRefused(t *testing.T) {
+	// Two messages in the same thread disagree on channel.
+	// The group must be refused, no messages stamped, and the failure
+	// lands in BackfillResult.DeriveFailures under surface_conflict.
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	now := time.Now()
+
+	msg1 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-2*time.Minute))
+	msg1.ThreadID = "conflict-thread"
+	msg1.Channel = "web"
+
+	msg2 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-1*time.Minute))
+	msg2.ThreadID = "conflict-thread"
+	msg2.Channel = "discord" // different from msg1 — channel conflict
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg1, msg2}}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, result.TotalProcessed)
+
+	// Both messages should be refused — no conversations created, nothing stamped.
+	assert.Equal(t, 0, result.ConversationsCreated,
+		"no conversations should be created for a conflicting group")
+	assert.Equal(t, 0, result.Attributed,
+		"no messages should be attributed for a conflicting group")
+
+	// Messages must NOT be stamped.
+	unstamped1, _ := msgStore.GetMessage(ctx, msg1.ID)
+	assert.Empty(t, unstamped1.ConversationID, "msg1 must not be stamped")
+	unstamped2, _ := msgStore.GetMessage(ctx, msg2.ID)
+	assert.Empty(t, unstamped2.ConversationID, "msg2 must not be stamped")
+
+	// Failure must land in DeriveFailures under surface_conflict.
+	assert.True(t, result.DeriveFailures[DeriveErrSurfaceConflict] > 0,
+		"channel conflict must be reported in DeriveFailures[%s]", DeriveErrSurfaceConflict)
+
+	// Structural invariant must hold.
+	assertErrorInvariant(t, result)
+}
+
+func TestBackfill_DEF156_UnmappableChannel_MessageRefused(t *testing.T) {
+	// A message with an unmappable channel must be refused at derive time
+	// and land in DeriveFailures under surface_unmap.
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	now := time.Now()
+
+	msg := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now)
+	msg.ThreadID = "irc-thread"
+	msg.Channel = "irc" // not a valid surface, not in channelToSurface map
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg}}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.TotalProcessed)
+	assert.Equal(t, 0, result.ConversationsCreated,
+		"no conversations for an unmappable channel")
+	assert.Equal(t, 0, result.Attributed,
+		"no messages attributed for an unmappable channel")
+
+	// Message must NOT be stamped.
+	unstamped, _ := msgStore.GetMessage(ctx, msg.ID)
+	assert.Empty(t, unstamped.ConversationID, "unmappable message must not be stamped")
+
+	// Failure must land in DeriveFailures under surface_unmap.
+	assert.Equal(t, 1, result.DeriveFailures[DeriveErrSurfaceUnmap],
+		"unmappable channel must be reported in DeriveFailures[%s]", DeriveErrSurfaceUnmap)
+
+	// Structural invariant must hold.
+	assertErrorInvariant(t, result)
+}

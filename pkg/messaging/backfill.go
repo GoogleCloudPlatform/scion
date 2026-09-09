@@ -100,15 +100,18 @@ func (r *BackfillResult) addResolutionFailure(msg string) {
 
 // conversationGroup collects messages that belong to the same conversation.
 type conversationGroup struct {
-	key          string // canonical key used for dedup
-	kind         string // "direct" or "group"
-	projectID    string
-	participants []participant // deduplicated participants
-	agentRef     string        // agent reference for DefaultAgent resolution
-	messageIDs   []string      // message IDs to stamp
-	driftState   string        // computed drift state
-	hazardA      bool          // Hazard (a): non-UUID sender/recipient
-	hazardB      bool          // Hazard (b): slug-based agent reference
+	key             string // canonical key used for dedup
+	kind            string // "direct" or "group"
+	projectID       string
+	participants    []participant // deduplicated participants
+	agentRef        string        // agent reference for DefaultAgent resolution
+	messageIDs      []string      // message IDs to stamp
+	driftState      string        // computed drift state
+	hazardA         bool          // Hazard (a): non-UUID sender/recipient
+	hazardB         bool          // Hazard (b): slug-based agent reference
+	surface         string        // derived surface for the group (DEF-156 P3)
+	channel         string        // raw channel of first message in group (DEF-156 P3)
+	channelConflict bool          // true if messages disagree on channel (DEF-156 P3)
 }
 
 // participant represents a conversation participant extracted from a message.
@@ -265,13 +268,30 @@ func (s *BackfillService) groupForMessage(msg *store.Message, projectID string, 
 
 	g, ok := groups[key]
 	if !ok {
+		// DEF-156 P3: derive surface from the first message's channel.
+		// Subsequent messages in the same group must agree; disagreement
+		// is flagged and the group is refused in persistGroup.
+		surface, surfErr := ChannelToSurfaceStrict(msg.Channel)
+		if surfErr != nil {
+			return nil, &DeriveError{
+				Cause: DeriveErrSurfaceUnmap,
+				Err:   fmt.Errorf("message %s: channel %q cannot be mapped to a surface: %w", msg.ID, msg.Channel, surfErr),
+			}
+		}
 		g = &conversationGroup{
 			key:        key,
 			kind:       kind,
 			projectID:  projectID,
 			driftState: DriftStateActive,
+			surface:    surface,
+			channel:    msg.Channel,
 		}
 		groups[key] = g
+	} else {
+		// DEF-156 P3: check for channel disagreement within the group.
+		if msg.Channel != g.channel {
+			g.channelConflict = true
+		}
 	}
 
 	// Collect participants (deduplicated in addParticipant).
@@ -345,12 +365,23 @@ func (s *BackfillService) resolveGroup(ctx context.Context, g *conversationGroup
 
 // persistGroup creates the conversation and stamps all messages in the group.
 func (s *BackfillService) persistGroup(ctx context.Context, g *conversationGroup, result *BackfillResult) error {
+	// DEF-156 P3: refuse groups whose messages disagree on channel.
+	// Each message is recorded as a DeriveFailure under surface_conflict
+	// so the count is surfaced per message, not per group.
+	if g.channelConflict {
+		for _, msgID := range g.messageIDs {
+			result.addDeriveFailure(DeriveErrSurfaceConflict,
+				fmt.Sprintf("message %s: channel conflict in group %q (first=%q)", msgID, g.key, g.channel))
+		}
+		return nil
+	}
+
 	convID := uuid.NewString()
 
 	conv := &store.Conversation{
 		ID:          convID,
 		Kind:        g.kind,
-		Surface:     "native",
+		Surface:     g.surface,
 		ExternalRef: g.key,
 		DriftState:  g.driftState,
 	}
