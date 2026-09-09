@@ -36,6 +36,43 @@ import { navigateTo } from '../../../client/main.js';
 import './chat-avatar.js';
 import '../status-badge.js';
 
+/** Popup window geometry for a terminal. Roughly 80x24 at a comfortable size. */
+const TERMINAL_POPOUT_WIDTH = 1024;
+const TERMINAL_POPOUT_HEIGHT = 700;
+
+/**
+ * Open an agent's terminal in its own window.
+ *
+ * The window is *named per agent*, which is the whole point: clicking the same
+ * agent again focuses the window that is already open instead of spawning
+ * another one. Six agents means six windows, not one window per click - the
+ * tab pile-up that made this control painful in the first place.
+ *
+ * A terminal is also a poor fit for in-app navigation, because reaching it
+ * replaces the chat you were reading it alongside.
+ *
+ * Note the deliberate absence of `noopener`: a named window cannot be reused
+ * or focused if the opener is severed, and the target is our own same-origin
+ * route. Falls back to in-app navigation when a popup blocker intervenes, so
+ * the control always does something.
+ */
+function openTerminalPopout(agentId: string): void {
+  const features = [
+    'popup=yes',
+    `width=${TERMINAL_POPOUT_WIDTH}`,
+    `height=${TERMINAL_POPOUT_HEIGHT}`,
+    'resizable=yes',
+    'scrollbars=yes',
+  ].join(',');
+
+  const win = window.open(`/agents/${agentId}/terminal`, `scion-term-${agentId}`, features);
+  if (win) {
+    win.focus();
+    return;
+  }
+  navigateTo(`/agents/${agentId}/terminal`);
+}
+
 /**
  * Statuses that represent a settled agent. Entering one of these is the end of
  * an activity burst, so the avatar must not wobble — it would otherwise draw
@@ -513,11 +550,18 @@ export class ScionChatMembers extends LitElement {
         <a
           href="/agents/${a.id}/terminal"
           class="agent-terminal"
-          title="Open terminal"
-          @click=${(e: Event) => {
+          title="Open terminal in its own window (Ctrl/Cmd-click for a tab)"
+          @click=${(e: MouseEvent) => {
             e.stopPropagation();
+            // Leave modified and non-primary clicks to the browser so
+            // Ctrl/Cmd-click, Shift-click and middle-click behave as they do
+            // on any other link. The previous handler called preventDefault()
+            // unconditionally, which swallowed all of them.
+            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+              return;
+            }
             e.preventDefault();
-            navigateTo(`/agents/${a.id}/terminal`);
+            openTerminalPopout(a.id);
           }}
         >
           <sl-icon name="terminal" style="font-size: 0.75rem;"></sl-icon>
