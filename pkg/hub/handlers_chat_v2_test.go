@@ -2325,22 +2325,43 @@ func TestDEF96_PromoteDM_HistoryVisibleOnFirstRead(t *testing.T) {
 		t.Fatalf("ListParticipants before: %v", err)
 	}
 
-	// Seed 3 DM messages via the ent store, stamped with the direct conversation_id.
-	// DispatchState must be "dispatched" to avoid triggering the IN_FLIGHT_MESSAGES
-	// guard in the promote handler.
+	// Seed DM messages via the ent store. The fixture mirrors production:
+	//   - User messages carry thread_id = dmKey AND conversation_id = directConvID
+	//   - Agent replies carry conversation_id = directConvID but NO thread_id
+	//     (the agent messaging path takes ThreadID from the caller, and agents
+	//     replying into a DM do not supply one — 99.7% of real DM messages).
+	//
+	// A fixture that sets thread_id on every row would have passed against the
+	// old, nearly inert WHERE thread_id = dmKey predicate and proved nothing
+	// about the P0 predicate widening.
+	//
+	// DispatchState must be "dispatched" to avoid triggering the
+	// IN_FLIGHT_MESSAGES guard in the promote handler.
 	baseTime := time.Now().UTC().Add(-10 * time.Second)
-	msgContents := []string{"hello agent", "hi back from agent", "thanks"}
-	for i, content := range msgContents {
+	type msgFixture struct {
+		id, sender, senderID, recipient, threadID, content string
+	}
+	// 1 user message, 4 agent replies — agent replies dominate, matching production.
+	fixtures := []msgFixture{
+		{tid("def96-msg-0"), "user:dev@localhost", DevUserID, "agent:" + agentID, dmKey, "hello agent"},
+		{tid("def96-msg-1"), "agent:" + agentID, agentID, "user:dev@localhost", "", "hi back from agent"},
+		{tid("def96-msg-2"), "agent:" + agentID, agentID, "user:dev@localhost", "", "let me explain"},
+		{tid("def96-msg-3"), "agent:" + agentID, agentID, "user:dev@localhost", "", "here is the answer"},
+		{tid("def96-msg-4"), "user:dev@localhost", DevUserID, "agent:" + agentID, dmKey, "thanks"},
+	}
+	expectedIDs := make([]string, len(fixtures))
+	for i, f := range fixtures {
+		expectedIDs[i] = f.id
 		msg := &store.Message{
-			ID:             tid(fmt.Sprintf("def96-msg-%d", i)),
+			ID:             f.id,
 			ProjectID:      proj.ID,
-			Sender:         "user:dev@localhost",
-			SenderID:       DevUserID,
-			Recipient:      "agent:" + agentID,
-			Msg:            content,
+			Sender:         f.sender,
+			SenderID:       f.senderID,
+			Recipient:      f.recipient,
+			Msg:            f.content,
 			Type:           "chat",
 			Channel:        "web",
-			ThreadID:       dmKey,
+			ThreadID:       f.threadID,
 			ConversationID: directConv.ID,
 			DispatchState:  "dispatched",
 			CreatedAt:      baseTime.Add(time.Duration(i) * time.Second),
@@ -2348,6 +2369,27 @@ func TestDEF96_PromoteDM_HistoryVisibleOnFirstRead(t *testing.T) {
 		if err := s.CreateMessage(ctx, msg); err != nil {
 			t.Fatalf("CreateMessage[%d]: %v", i, err)
 		}
+	}
+	// Also plant an unrelated unstamped message to verify the wildcard guard:
+	// with an empty directConvID and no guard, conversation_id = '' would match
+	// every unstamped message on the hub. This message must NOT move.
+	unrelatedMsgID := tid("def96-unrelated")
+	unrelatedMsg := &store.Message{
+		ID:            unrelatedMsgID,
+		ProjectID:     proj.ID,
+		Sender:        "user:other@localhost",
+		SenderID:      tid("other-user"),
+		Recipient:     "agent:" + tid("other-agent"),
+		Msg:           "unrelated message",
+		Type:          "chat",
+		Channel:       "web",
+		ThreadID:      "some-other-thread",
+		DispatchState: "dispatched",
+		CreatedAt:     baseTime,
+		// ConversationID intentionally empty — unstamped row.
+	}
+	if err := s.CreateMessage(ctx, unrelatedMsg); err != nil {
+		t.Fatalf("CreateMessage (unrelated): %v", err)
 	}
 
 	// Register DM rows.
@@ -2372,8 +2414,8 @@ func TestDEF96_PromoteDM_HistoryVisibleOnFirstRead(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&promResp); err != nil {
 		t.Fatalf("decode promote response: %v", err)
 	}
-	if promResp.MessageCount != 3 {
-		t.Fatalf("promote messageCount = %d, want 3", promResp.MessageCount)
+	if promResp.MessageCount != len(fixtures) {
+		t.Fatalf("promote messageCount = %d, want %d", promResp.MessageCount, len(fixtures))
 	}
 
 	// --- AC-96-2: promoteResponse carries conversationId ---
@@ -2408,16 +2450,35 @@ func TestDEF96_PromoteDM_HistoryVisibleOnFirstRead(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&histResp); err != nil {
 		t.Fatalf("decode history: %v", err)
 	}
-	if len(histResp.Messages) != 3 {
-		t.Fatalf("history returned %d messages, want 3 — promoted messages are missing", len(histResp.Messages))
+	if len(histResp.Messages) != len(fixtures) {
+		t.Fatalf("history returned %d messages, want %d — promoted messages are missing", len(histResp.Messages), len(fixtures))
 	}
 
-	// Verify every re-keyed message names the group conversation.
+	// Verify every expected message appears, by id and by conversation_id.
+	gotIDs := make(map[string]bool, len(histResp.Messages))
 	for _, msg := range histResp.Messages {
+		gotIDs[msg.ID] = true
 		if msg.ConversationID != promResp.ConversationID {
 			t.Errorf("message %s conversation_id = %q, want %q",
 				msg.ID, msg.ConversationID, promResp.ConversationID)
 		}
+	}
+	for _, wantID := range expectedIDs {
+		if !gotIDs[wantID] {
+			t.Errorf("expected message %s in promoted thread history, but it was missing", wantID)
+		}
+	}
+
+	// Wildcard guard: the unrelated unstamped message must NOT have moved.
+	unrelatedFilter := store.MessageFilter{Channel: "web", ThreadID: "some-other-thread"}
+	unrelatedResult, unrelatedErr := s.ListMessages(ctx, unrelatedFilter, store.ListOptions{Limit: 10})
+	if unrelatedErr != nil {
+		t.Fatalf("ListMessages (unrelated): %v", unrelatedErr)
+	}
+	if len(unrelatedResult.Items) != 1 {
+		t.Errorf("unrelated message count = %d, want 1 — wildcard guard failed", len(unrelatedResult.Items))
+	} else if unrelatedResult.Items[0].ID != unrelatedMsgID {
+		t.Errorf("unrelated message id = %q, want %q", unrelatedResult.Items[0].ID, unrelatedMsgID)
 	}
 
 	// --- AC-96-3: direct conversation unchanged (D-1 invariant) ---

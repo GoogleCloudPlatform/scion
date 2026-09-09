@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS messages (
     recipient_id TEXT NOT NULL DEFAULT '',
     channel TEXT,
     thread_id TEXT,
+    conversation_id TEXT NOT NULL DEFAULT '',
     msg TEXT NOT NULL DEFAULT '',
     type TEXT NOT NULL DEFAULT 'chat',
     dispatch_state TEXT NOT NULL DEFAULT 'dispatched',
@@ -111,7 +112,7 @@ func TestPromoteDM_HappyPath(t *testing.T) {
 		LastActivityAt: now,
 	}
 
-	result, err := store.PromoteDM(ctx, topic, dmKey)
+	result, err := store.PromoteDM(ctx, topic, PromoteKeys{DMKey: dmKey})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, "topic-promote-1", result.ID)
@@ -186,7 +187,7 @@ func TestPromoteDM_Atomicity(t *testing.T) {
 		LastActivityAt: now,
 	}
 
-	_, err := store.PromoteDM(ctx, topic, dmKey)
+	_, err := store.PromoteDM(ctx, topic, PromoteKeys{DMKey: dmKey})
 	require.Error(t, err, "should fail due to name conflict")
 
 	// Verify: messages are NOT re-keyed (rollback worked)
@@ -230,7 +231,7 @@ func TestPromoteDM_Idempotency(t *testing.T) {
 	}
 
 	// First promotion should succeed.
-	result, err := store.PromoteDM(ctx, topic, dmKey)
+	result, err := store.PromoteDM(ctx, topic, PromoteKeys{DMKey: dmKey})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, 3, result.MessageCount)
@@ -246,7 +247,7 @@ func TestPromoteDM_Idempotency(t *testing.T) {
 		CreatedAt:      now,
 		LastActivityAt: now,
 	}
-	result2, err := store.PromoteDM(ctx, topic2, dmKey)
+	result2, err := store.PromoteDM(ctx, topic2, PromoteKeys{DMKey: dmKey})
 	require.NoError(t, err)
 	require.NotNil(t, result2)
 	require.Equal(t, 0, result2.MessageCount, "second promotion should re-key 0 messages")

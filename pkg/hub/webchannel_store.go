@@ -220,8 +220,10 @@ type WebChatStore interface {
 	// PromoteDM atomically promotes a DM conversation into a space thread.
 	// It creates the topic, re-keys messages and read state, and deletes
 	// the DM registry rows — all within a single database transaction.
-	// Returns the created topic with MessageCount populated.
-	PromoteDM(ctx context.Context, topic WebChatTopic, dmKey string) (*WebChatTopic, error)
+	// The re-key matches messages by conversation_id (modern population) OR by
+	// thread_id (legacy arm for pre-stamp rows). Returns the created topic with
+	// MessageCount populated.
+	PromoteDM(ctx context.Context, topic WebChatTopic, keys PromoteKeys) (*WebChatTopic, error)
 
 	// UpdateThreadID re-keys all messages from oldThreadID to newThreadID.
 	// Returns the number of rows affected.
@@ -290,6 +292,15 @@ type WebChatTopic struct {
 	LastActivityAt time.Time  `json:"lastActivityAt"`
 	DeletedAt      *time.Time `json:"deletedAt,omitempty"`    // nil = not deleted
 	MessageCount   int        `json:"messageCount,omitempty"` // populated by PromoteDM
+}
+
+// PromoteKeys bundles the two keys needed to identify a DM's messages during
+// promotion. A struct prevents the two adjacent string parameters from being
+// silently swapped — a swap would compile, run, and match nothing, which is the
+// exact defect DEF-96 exists to fix.
+type PromoteKeys struct {
+	DMKey                string // e.g. "dm:agent:<id>:user:<id>"
+	DirectConversationID string // "" when unresolved (pre-conversation-model hub)
 }
 
 // TopicUpdate carries optional updates for a topic.
@@ -2099,7 +2110,9 @@ func (s *sqliteWebChatStore) MigrateReadState(ctx context.Context, oldKey, newKe
 
 // PromoteDM atomically promotes a DM conversation into a space thread.
 // When ConversationID is set on topic, a linked conversations row is also created.
-func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, dmKey string) (*WebChatTopic, error) {
+func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys PromoteKeys) (*WebChatTopic, error) {
+	dmKey := keys.DMKey
+	directConvID := keys.DirectConversationID
 	// Check for conversations table BEFORE starting the transaction to avoid
 	// ambient pool access inside the tx (which deadlocks at MaxOpenConns=1).
 	// INVARIANT U-TX-1.
@@ -2156,18 +2169,34 @@ func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, 
 
 	// Step 2: Re-key all messages — set thread_id AND conversation_id in a
 	// single UPDATE so there is no window where one has moved and the other
-	// has not. C2a guard: if ConversationID is empty (hasConversationsTable()
+	// has not.
+	//
+	// The WHERE uses two arms:
+	//   1. conversation_id = directConvID (modern population — 99.7% of DM rows)
+	//   2. thread_id = dmKey (legacy arm — pre-conversation-stamp rows)
+	// The ? <> '' guard on arm 1 prevents an empty directConvID from matching
+	// every unstamped message on the hub (design §3.1 C2).
+	//
+	// C2a guard: if topic.ConversationID is empty (hasConversationsTable()
 	// returned false), set only thread_id to avoid blanking conversation_id
 	// on moved rows (design §3.1 C2a).
 	var res sql.Result
 	if topic.ConversationID != "" {
 		res, err = tx.ExecContext(ctx,
-			`UPDATE messages SET thread_id = ?, conversation_id = ? WHERE thread_id = ?`,
-			topic.ID, topic.ConversationID, dmKey)
+			`UPDATE messages SET thread_id = ?, conversation_id = ?
+			 WHERE (? <> '' AND conversation_id = ?)
+			    OR thread_id = ?`,
+			topic.ID, topic.ConversationID,
+			directConvID, directConvID,
+			dmKey)
 	} else {
 		res, err = tx.ExecContext(ctx,
-			`UPDATE messages SET thread_id = ? WHERE thread_id = ?`,
-			topic.ID, dmKey)
+			`UPDATE messages SET thread_id = ?
+			 WHERE (? <> '' AND conversation_id = ?)
+			    OR thread_id = ?`,
+			topic.ID,
+			directConvID, directConvID,
+			dmKey)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: re-key messages in promote: %w", err)

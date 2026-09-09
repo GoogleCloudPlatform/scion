@@ -367,7 +367,7 @@ VALUES
 		LastActivityAt: now,
 	}
 
-	result, err := s.PromoteDM(ctx, topic, dmKey)
+	result, err := s.PromoteDM(ctx, topic, PromoteKeys{DMKey: dmKey})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, 2, result.MessageCount)
@@ -426,7 +426,10 @@ VALUES
 		LastActivityAt: now,
 	}
 
-	result, err := s.PromoteDM(ctx, topic, dmKey)
+	result, err := s.PromoteDM(ctx, topic, PromoteKeys{
+		DMKey:                dmKey,
+		DirectConversationID: oldConvID,
+	})
 	require.NoError(t, err)
 	require.Equal(t, 2, result.MessageCount)
 
@@ -509,7 +512,7 @@ VALUES ('msg-guard-1', 'proj-1', 'user:dave', 'user-4', 'agent:helper', 'agent-4
 		CreatedAt:      now,
 		LastActivityAt: now,
 		// ConversationID intentionally empty — no conversations table.
-	}, dmKey)
+	}, PromoteKeys{DMKey: dmKey, DirectConversationID: existingConvID})
 	require.NoError(t, err)
 	require.Equal(t, 1, result.MessageCount)
 
@@ -581,7 +584,7 @@ VALUES ('msg-10', 'proj-1', 'user:bob', 'user-2', 'agent:helper', 'agent-2', 'we
 		CreatedBy:      "user-2",
 		CreatedAt:      now,
 		LastActivityAt: now,
-	}, dmKey)
+	}, PromoteKeys{DMKey: dmKey})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
@@ -949,7 +952,7 @@ CREATE TABLE IF NOT EXISTS messages (
 		CreatedBy:      "u1",
 		CreatedAt:      now,
 		LastActivityAt: now,
-	}, dmKey)
+	}, PromoteKeys{DMKey: dmKey})
 	require.NoError(t, err, "PromoteDM should complete without deadlock")
 }
 

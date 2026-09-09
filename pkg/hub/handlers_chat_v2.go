@@ -2597,8 +2597,25 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		LastActivityAt: now,
 	}
 
+	// 11b. Resolve the direct conversation for the DM key — lookup only,
+	// promotion must never CREATE a direct conversation. On ErrNotFound
+	// pass "" and let the legacy thread_id arm in PromoteDM carry it;
+	// that is a pre-conversation-model hub, not an error.
+	// INVARIANT U-TX-1: this is an ambient-pool call and MUST happen before
+	// PromoteDM's BeginTx — at MaxOpenConns=1 it would deadlock inside the tx.
+	var directConvID string
+	directConv, convErr := s.store.GetConversationByExternalRef(ctx, "native", key)
+	if convErr == nil && directConv != nil {
+		directConvID = directConv.ID
+	}
+	// ErrNotFound is fine — pre-conversation-model hub. Any other error is
+	// also tolerable: the legacy arm will still match thread_id rows.
+
 	// 12. Execute atomic promotion
-	result, err := wcs.PromoteDM(ctx, topic, key)
+	result, err := wcs.PromoteDM(ctx, topic, PromoteKeys{
+		DMKey:                key,
+		DirectConversationID: directConvID,
+	})
 	if err != nil {
 		// Check for name conflict (unique constraint violation)
 		if strings.Contains(err.Error(), "UNIQUE constraint") ||
