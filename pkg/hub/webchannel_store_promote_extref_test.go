@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
-
 package hub
 
 // DEF-157 tests: PromoteDM must write a derived external_ref via
