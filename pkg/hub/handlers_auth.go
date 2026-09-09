@@ -1783,13 +1783,32 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 // IsUnscopedLocalPlatformAdmin. Best-effort: errors are logged but do not fail
 // the login — the next startup reconciliation will clean up.
 func (s *Server) deleteSuperAdminBinding(ctx context.Context, userID string) {
-	rd, err := s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	deleteSuperAdminRoleBinding(ctx, s.store, userID)
+}
+
+// ensureSuperAdminBinding idempotently creates a system-scoped super-admin
+// RoleBinding for the given user. This closes the cold-start gap where
+// provisionUser assigns Role="admin" but ReconcileSuperAdminBindings has
+// already run against an empty user store and will not run again until the
+// next restart. Without this, AuthzService.IsSystemAdmin returns false for
+// the first admin until the hub is restarted.
+func (s *Server) ensureSuperAdminBinding(ctx context.Context, userID string) {
+	ensureSuperAdminRoleBinding(ctx, s.store, userID)
+}
+
+// deleteSuperAdminRoleBinding removes the system-scoped super-admin role binding
+// for a user, if one exists. This is a package-level function so it can be
+// called from both Server (API auth) and WebServer (browser auth) login paths.
+// Best-effort: errors are logged but do not fail the login — the next startup
+// reconciliation will clean up.
+func deleteSuperAdminRoleBinding(ctx context.Context, st store.Store, userID string) {
+	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	if err != nil {
 		slog.Warn("deleteSuperAdminBinding: super-admin role definition not found", "user_id", userID, "error", err)
 		return
 	}
 
-	bindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		slog.Warn("deleteSuperAdminBinding: failed to list bindings", "user_id", userID, "error", err)
 		return
@@ -1797,7 +1816,7 @@ func (s *Server) deleteSuperAdminBinding(ctx context.Context, userID string) {
 
 	for _, b := range bindings {
 		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
-			if err := s.store.DeleteRoleBinding(ctx, b.ID); err != nil {
+			if err := st.DeleteRoleBinding(ctx, b.ID); err != nil {
 				slog.Warn("deleteSuperAdminBinding: failed to delete binding",
 					"user_id", userID, "binding_id", b.ID, "error", err)
 			} else {
@@ -1808,14 +1827,14 @@ func (s *Server) deleteSuperAdminBinding(ctx context.Context, userID string) {
 	}
 }
 
-// ensureSuperAdminBinding idempotently creates a system-scoped super-admin
-// RoleBinding for the given user. This closes the cold-start gap where
-// provisionUser assigns Role="admin" but ReconcileSuperAdminBindings has
-// already run against an empty user store and will not run again until the
-// next restart. Without this, AuthzService.IsSystemAdmin returns false for
-// the first admin until the hub is restarted.
-func (s *Server) ensureSuperAdminBinding(ctx context.Context, userID string) {
-	rd, err := s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+// ensureSuperAdminRoleBinding idempotently creates a system-scoped super-admin
+// RoleBinding for the given user. This is a package-level function so it can be
+// called from both Server (API auth) and WebServer (browser auth) login paths.
+// It closes the cold-start gap where user provisioning assigns Role="admin" but
+// ReconcileSuperAdminBindings has already run against an empty user store and
+// will not run again until the next restart.
+func ensureSuperAdminRoleBinding(ctx context.Context, st store.Store, userID string) {
+	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	if err != nil {
 		slog.Warn("ensureSuperAdminBinding: super-admin role definition not found — "+
 			"binding will be created on next restart by ReconcileSuperAdminBindings",
@@ -1829,7 +1848,7 @@ func (s *Server) ensureSuperAdminBinding(ctx context.Context, userID string) {
 		return
 	}
 
-	_, err = s.store.CreateRoleBinding(ctx, &store.RoleBinding{
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: rd.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
 		PrincipalID:      userID,
