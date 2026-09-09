@@ -1107,8 +1107,15 @@ export class ScionPageAdminMaintenance extends LitElement {
           // A small uptime (< 120s) confirms a fresh restart rather than
           // a response from a server that never went down.
           const uptimeSeconds = this.parseGoUptimeSeconds(data.uptime);
-          if (uptimeSeconds !== null && uptimeSeconds < 120) {
-            showToast('Server restarted successfully.', 'success');
+          if (uptimeSeconds !== null) {
+            if (uptimeSeconds < 120) {
+              showToast('Server restarted successfully.', 'success');
+            } else {
+              showToast(
+                `Server responded but appears not to have restarted (uptime: ${data.uptime}).`,
+                'warning'
+              );
+            }
             this.restartLoading = false;
             return;
           }
