@@ -2613,6 +2613,156 @@ func TestDEF96_PromoteDM_Atomicity(t *testing.T) {
 	}
 }
 
+// failingConvLookupStore wraps a store.Store and makes GetConversationByExternalRef
+// return a transient error (not ErrNotFound) so we can test the refusal path.
+type failingConvLookupStore struct {
+	store.Store
+	err error
+}
+
+func (f *failingConvLookupStore) GetConversationByExternalRef(context.Context, string, string) (*store.Conversation, error) {
+	return nil, f.err
+}
+
+// TestDEF96_PromoteDM_RefusesOnLookupError verifies that a transient error from
+// GetConversationByExternalRef (not ErrNotFound) causes the promote handler to
+// refuse with 503 rather than proceeding with directConvID = "".
+//
+// Proceeding would suppress the conversation_id arm of the WHERE clause,
+// move ~0 rows via the legacy thread_id arm, delete the DM registry row,
+// commit, and return 200 — destroying the DM irrecoverably. Refusal is the
+// recoverable direction: the user retries and gets a correct promotion.
+func TestDEF96_PromoteDM_RefusesOnLookupError(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: tid("def96-refuse"), Name: "def96-refuse", Slug: "def96-refuse",
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	agentID := tid("def96-refuse-agent")
+	agent := &store.Agent{
+		ID: agentID, ProjectID: proj.ID, Name: "Refuse Bot", Slug: "refuse-bot",
+		Phase: "idle", OwnerID: DevUserID, CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	if !ok {
+		t.Fatal("store does not expose DB()")
+	}
+	rawDB := dbProvider.DB()
+	wcs := NewWebChatStore(rawDB, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init webchat store: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+	enableWriteDenySwitch(t, srv)
+
+	dmKey := "dm:agent:" + agentID + ":user:" + DevUserID
+
+	// Create the direct conversation (so we know one exists).
+	directConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "direct", Surface: "native", ExternalRef: dmKey, DriftState: "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertConversation: %v", err)
+	}
+
+	// Seed DM messages with conversation_id.
+	for i, content := range []string{"hello", "reply"} {
+		msg := &store.Message{
+			ID:        tid(fmt.Sprintf("def96-refuse-msg-%d", i)),
+			ProjectID: proj.ID, Sender: "user:dev@localhost", SenderID: DevUserID,
+			Recipient: "agent:" + agentID, Msg: content, Type: "chat", Channel: "web",
+			ThreadID: dmKey, ConversationID: directConv.ID, DispatchState: "dispatched",
+			CreatedAt: time.Now().UTC().Add(time.Duration(i) * time.Second),
+		}
+		if err := s.CreateMessage(ctx, msg); err != nil {
+			t.Fatalf("CreateMessage[%d]: %v", i, err)
+		}
+	}
+
+	// Register DM.
+	if err := wcs.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey, ParticipantID: DevUserID,
+		PeerID: agentID, PeerKind: "agent",
+	}); err != nil {
+		t.Fatalf("UpsertDM: %v", err)
+	}
+
+	// Inject a transient error — NOT ErrNotFound.
+	srv.store = &failingConvLookupStore{
+		Store: s,
+		err:   fmt.Errorf("connection reset by peer"),
+	}
+
+	// Attempt promotion — must be refused.
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+dmKey+"/promote",
+		map[string]string{"name": "Should Fail"})
+
+	if rec.Code == http.StatusCreated {
+		t.Fatal("promote returned 201 — transient lookup error was silently swallowed")
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The DM registry row must still exist — this is the row whose deletion
+	// makes the failure irrecoverable.
+	dms, err := wcs.ListDMs(ctx, DevUserID)
+	if err != nil {
+		t.Fatalf("ListDMs: %v", err)
+	}
+	dmFound := false
+	for _, dm := range dms {
+		if dm.ConversationKey == dmKey {
+			dmFound = true
+			break
+		}
+	}
+	if !dmFound {
+		t.Error("DM registry row was deleted despite lookup failure — irrecoverable data loss")
+	}
+
+	// No promoted topic should have been created. The project may already have
+	// a default "General" topic from hub setup, so count before vs after.
+	topics, err := wcs.ListTopics(ctx, proj.ID)
+	if err != nil {
+		t.Fatalf("ListTopics: %v", err)
+	}
+	for _, tp := range topics {
+		if tp.Name == "Should Fail" {
+			t.Error("promoted topic 'Should Fail' exists despite refusal")
+		}
+	}
+
+	// Messages must not have moved.
+	// Restore original store for the query.
+	srv.store = s
+	filter := store.MessageFilter{Channel: "web", ThreadID: dmKey}
+	result, err := s.ListMessages(ctx, filter, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(result.Items) != 2 {
+		t.Errorf("messages under dmKey = %d, want 2 — messages were moved despite refusal", len(result.Items))
+	}
+	for _, msg := range result.Items {
+		if msg.ConversationID != directConv.ID {
+			t.Errorf("message %s conversation_id = %q, want %q — re-keyed despite refusal",
+				msg.ID, msg.ConversationID, directConv.ID)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // History pagination (#1027)
 // ---------------------------------------------------------------------------

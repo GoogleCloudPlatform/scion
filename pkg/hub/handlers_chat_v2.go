@@ -2598,18 +2598,38 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 	}
 
 	// 11b. Resolve the direct conversation for the DM key — lookup only,
-	// promotion must never CREATE a direct conversation. On ErrNotFound
-	// pass "" and let the legacy thread_id arm in PromoteDM carry it;
-	// that is a pre-conversation-model hub, not an error.
+	// promotion must never CREATE a direct conversation.
 	// INVARIANT U-TX-1: this is an ambient-pool call and MUST happen before
 	// PromoteDM's BeginTx — at MaxOpenConns=1 it would deadlock inside the tx.
 	var directConvID string
 	directConv, convErr := s.store.GetConversationByExternalRef(ctx, "native", key)
-	if convErr == nil && directConv != nil {
+	switch {
+	case convErr == nil && directConv != nil:
 		directConvID = directConv.ID
+	case convErr == nil && directConv == nil:
+		// GetConversationByExternalRef returns (nil, ErrNotFound) on miss,
+		// never (nil, nil). If this is reached the contract changed — treat
+		// it as a lookup failure rather than silently proceeding with "".
+		slog.ErrorContext(ctx, "GetConversationByExternalRef returned nil conversation without error",
+			"dm_key", key)
+		writeError(w, http.StatusServiceUnavailable, "LOOKUP_FAILED",
+			"unable to resolve DM conversation; retry", nil)
+		return
+	case errors.Is(convErr, store.ErrNotFound):
+		// Pre-conversation-model hub — no direct conversation exists.
+		// Pass "" and let the legacy thread_id arm in PromoteDM carry it.
+	default:
+		// Transient DB error, context deadline, pool timeout, etc.
+		// Refusing is the recoverable direction: the user retries and gets
+		// a correct promotion. Proceeding with "" would suppress arm 1,
+		// move ~0 rows via arm 2, delete the DM registry, commit, and
+		// return 200 — destroying the DM irrecoverably.
+		slog.ErrorContext(ctx, "direct conversation lookup failed",
+			"dm_key", key, "error", convErr)
+		writeError(w, http.StatusServiceUnavailable, "LOOKUP_FAILED",
+			"unable to resolve DM conversation; retry", nil)
+		return
 	}
-	// ErrNotFound is fine — pre-conversation-model hub. Any other error is
-	// also tolerable: the legacy arm will still match thread_id rows.
 
 	// 12. Execute atomic promotion
 	result, err := wcs.PromoteDM(ctx, topic, PromoteKeys{
@@ -2646,7 +2666,7 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 	s.events.PublishChatTopicEvent(ctx, projectID, "created", *result)
 	s.events.PublishDMPromotedEvent(ctx, key, *result)
 
-	// 14. Return created topic
+	// 15. Return created topic
 	writeJSON(w, http.StatusCreated, promoteResponse{
 		WebChatTopic: *result,
 		PromotedFrom: key,
