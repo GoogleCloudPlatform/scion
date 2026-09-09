@@ -1211,7 +1211,7 @@ func (s *Server) findBrokerByIDOrSlug(ctx context.Context, identifier string) (*
 // config has MetadataMode set to assign or passthrough, mirroring the broker's
 // check at pkg/runtimebroker/handlers.go:2186-2187.
 func agentHasGCPIdentityAssigned(agent *store.Agent) bool {
-	if agent.AppliedConfig.GCPIdentity == nil {
+	if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
 		return false
 	}
 	mode := agent.AppliedConfig.GCPIdentity.MetadataMode
