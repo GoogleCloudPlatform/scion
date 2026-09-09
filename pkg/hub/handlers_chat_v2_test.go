@@ -2763,6 +2763,126 @@ func TestDEF96_PromoteDM_RefusesOnLookupError(t *testing.T) {
 	}
 }
 
+// TestDEF96_PromoteDM_ProceedsOnErrNotFound verifies that when
+// GetConversationByExternalRef returns store.ErrNotFound (pre-conversation-model
+// hub, no direct conversation exists), promotion proceeds via the legacy
+// thread_id arm and succeeds.
+//
+// This is the counterpart to TestDEF96_PromoteDM_RefusesOnLookupError: the
+// switch now has two arms with asymmetric failure modes, and both need coverage.
+// Without this test, a future edit that wraps ErrNotFound with %v instead of %w,
+// or returns a different sentinel on miss, would silently cause every promotion
+// on a pre-conversation-model hub to return 503 — and no test would go red.
+func TestDEF96_PromoteDM_ProceedsOnErrNotFound(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: tid("def96-notfound"), Name: "def96-notfound", Slug: "def96-notfound",
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	agentID := tid("def96-nf-agent")
+	agent := &store.Agent{
+		ID: agentID, ProjectID: proj.ID, Name: "NotFound Bot", Slug: "notfound-bot",
+		Phase: "idle", OwnerID: DevUserID, CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	if !ok {
+		t.Fatal("store does not expose DB()")
+	}
+	rawDB := dbProvider.DB()
+	wcs := NewWebChatStore(rawDB, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init webchat store: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+	enableWriteDenySwitch(t, srv)
+
+	dmKey := "dm:agent:" + agentID + ":user:" + DevUserID
+
+	// Seed DM messages — legacy style, thread_id set, no conversation_id.
+	// On a pre-conversation-model hub, thread_id is the only key.
+	baseTime := time.Now().UTC().Add(-10 * time.Second)
+	msgIDs := []string{tid("def96-nf-msg-0"), tid("def96-nf-msg-1"), tid("def96-nf-msg-2")}
+	for i, id := range msgIDs {
+		msg := &store.Message{
+			ID:            id,
+			ProjectID:     proj.ID,
+			Sender:        "user:dev@localhost",
+			SenderID:      DevUserID,
+			Recipient:     "agent:" + agentID,
+			Msg:           fmt.Sprintf("legacy msg %d", i),
+			Type:          "chat",
+			Channel:       "web",
+			ThreadID:      dmKey,
+			DispatchState: "dispatched",
+			CreatedAt:     baseTime.Add(time.Duration(i) * time.Second),
+		}
+		if err := s.CreateMessage(ctx, msg); err != nil {
+			t.Fatalf("CreateMessage[%d]: %v", i, err)
+		}
+	}
+
+	// Register DM.
+	if err := wcs.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey, ParticipantID: DevUserID,
+		PeerID: agentID, PeerKind: "agent",
+	}); err != nil {
+		t.Fatalf("UpsertDM: %v", err)
+	}
+
+	// Inject ErrNotFound — simulates pre-conversation-model hub.
+	srv.store = &failingConvLookupStore{
+		Store: s,
+		err:   store.ErrNotFound,
+	}
+
+	// Promotion must succeed.
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+dmKey+"/promote",
+		map[string]string{"name": "Legacy Promote"})
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s — ErrNotFound was not treated as proceed",
+			rec.Code, rec.Body.String())
+	}
+
+	var promResp promoteResponse
+	if err := json.NewDecoder(rec.Body).Decode(&promResp); err != nil {
+		t.Fatalf("decode promote response: %v", err)
+	}
+	if promResp.MessageCount != len(msgIDs) {
+		t.Fatalf("messageCount = %d, want %d", promResp.MessageCount, len(msgIDs))
+	}
+
+	// Verify every message moved, by id.
+	srv.store = s // restore for queries
+	topicID := promResp.ID
+	filter := store.MessageFilter{Channel: "web", ThreadID: topicID}
+	result, err := s.ListMessages(ctx, filter, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+
+	gotIDs := make(map[string]bool, len(result.Items))
+	for _, msg := range result.Items {
+		gotIDs[msg.ID] = true
+	}
+	for _, wantID := range msgIDs {
+		if !gotIDs[wantID] {
+			t.Errorf("message %s not found under promoted topic — legacy arm did not fire", wantID)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // History pagination (#1027)
 // ---------------------------------------------------------------------------
