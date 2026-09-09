@@ -1752,20 +1752,39 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			// the binding state diverged from User.Role.
 			var bindingSuperAdmin string // "", "ensure", or "delete"
 
-			// Update last login and backfill profile
-			user.LastLogin = time.Now()
-			if proxyUser.DisplayName != "" && user.DisplayName == "" {
-				user.DisplayName = proxyUser.DisplayName
-			}
-			// Re-evaluate admin status on every login (matches handleOAuthCallback / provisionUser)
-			if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe()); user.Role != newRole {
+			if user.Status == store.UserStatusInvited {
+				// Transition invited → active on first login
+				// (mirrors handleOAuthCallback's invited→active block)
+				ws.logger().Info("user activated from invited state via proxy auth", "email", proxyUser.Email, "user_id", user.ID)
+				user.Status = store.UserStatusActive
+				if proxyUser.DisplayName != "" {
+					user.DisplayName = proxyUser.DisplayName
+				}
+				user.LastLogin = time.Now()
 				oldRole := user.Role
-				ws.logger().Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", oldRole, "new_role", newRole)
-				user.Role = newRole
-				if oldRole == "admin" {
+				user.Role = determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe())
+				if oldRole == "admin" && user.Role != "admin" {
 					bindingSuperAdmin = "delete"
-				} else if newRole == "admin" {
+				} else if user.Role == "admin" {
 					bindingSuperAdmin = "ensure"
+				}
+				ws.logger().Info("invite audit: user_activated", "email", proxyUser.Email, "user_id", user.ID)
+			} else {
+				// Update last login and backfill profile
+				user.LastLogin = time.Now()
+				if proxyUser.DisplayName != "" && user.DisplayName == "" {
+					user.DisplayName = proxyUser.DisplayName
+				}
+				// Re-evaluate admin status on every login (matches handleOAuthCallback / provisionUser)
+				if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe()); user.Role != newRole {
+					oldRole := user.Role
+					ws.logger().Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", oldRole, "new_role", newRole)
+					user.Role = newRole
+					if oldRole == "admin" {
+						bindingSuperAdmin = "delete"
+					} else if newRole == "admin" {
+						bindingSuperAdmin = "ensure"
+					}
 				}
 			}
 			if err := ws.store.UpdateUser(ctx, user); err != nil {
@@ -2079,7 +2098,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			user.Role = determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe())
 			if oldRole == "admin" && user.Role != "admin" {
 				bindingSuperAdmin = "delete"
-			} else if user.Role == "admin" && oldRole != "admin" {
+			} else if user.Role == "admin" {
 				bindingSuperAdmin = "ensure"
 			}
 			// Log the activation via slog (WebServer does not have a structured
