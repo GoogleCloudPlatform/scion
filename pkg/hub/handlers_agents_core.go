@@ -1266,7 +1266,7 @@ func (s *Server) createAgentInProject(
 		agent.AppliedConfig.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough &&
 		runtimeBrokerID != "" {
 		if err := s.translatePassthroughForSandbox(ctx, agent, runtimeBrokerID); err != nil {
-			slog.Error("passthrough-to-assign translation failed",
+			slog.ErrorContext(ctx, "passthrough-to-assign translation failed",
 				"agent", agent.Name, "broker", runtimeBrokerID, "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
 				"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
@@ -2358,7 +2358,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 			// Passthrough-to-assign translation for cloudrun-sandbox runtimes
 			// (same logic as the create path — see createAgentInProject).
 			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
-				slog.Error("passthrough-to-assign translation failed (PATCH)",
+				slog.ErrorContext(ctx, "passthrough-to-assign translation failed (PATCH)",
 					"agent", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
 				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
 					"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
@@ -3182,6 +3182,10 @@ func (s *Server) translatePassthroughForSandbox(
 		return nil
 	}
 
+	if brokerID == "" {
+		return fmt.Errorf("cannot translate passthrough: no broker ID")
+	}
+
 	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	if err != nil {
 		return fmt.Errorf("load broker %s: %w", brokerID, err)
@@ -3195,7 +3199,7 @@ func (s *Server) translatePassthroughForSandbox(
 		// have caught this for explicit passthrough requests; for project-
 		// default passthrough the gate doesn't run. Log and leave as-is —
 		// the agent won't get credentials, same as the pre-fix behavior.
-		slog.Warn("cloudrun-sandbox broker has no host SA — cannot translate passthrough to assign",
+		slog.WarnContext(ctx, "cloudrun-sandbox broker has no host SA — cannot translate passthrough to assign",
 			"broker_id", broker.ID, "broker_name", broker.Name)
 		return nil
 	}
@@ -3206,7 +3210,7 @@ func (s *Server) translatePassthroughForSandbox(
 		return fmt.Errorf("ensure host SA record: %w", err)
 	}
 
-	slog.Info("translated passthrough to assign for cloudrun-sandbox",
+	slog.InfoContext(ctx, "translated passthrough to assign for cloudrun-sandbox",
 		"agent", agent.Name, "broker", broker.Name,
 		"sa_email", sa.Email, "sa_id", sa.ID)
 
@@ -3255,12 +3259,17 @@ func (s *Server) ensureHostSARecord(
 	// ScopeID is provenance for hub-scoped accounts (which hub instance
 	// registered it). Use the broker ID as provenance — more specific than
 	// the hub ID and stable across redeployments.
+	projectID := broker.GCPHostProjectID
+	if projectID == "" {
+		projectID = projectIDFromServiceAccountEmail(broker.GCPHostServiceAccountEmail)
+	}
+
 	sa := &store.GCPServiceAccount{
 		ID:      gouuid.New().String(),
 		Scope:   store.ScopeHub,
 		ScopeID: broker.ID,
 		Email:       broker.GCPHostServiceAccountEmail,
-		ProjectID:   broker.GCPHostProjectID,
+		ProjectID:   projectID,
 		DisplayName: fmt.Sprintf("Broker host SA (%s)", broker.Name),
 		DefaultScopes: []string{
 			"https://www.googleapis.com/auth/cloud-platform",
@@ -3293,7 +3302,7 @@ func (s *Server) ensureHostSARecord(
 		return nil, fmt.Errorf("create SA %s: %w", broker.GCPHostServiceAccountEmail, err)
 	}
 
-	slog.Info("created hub-scoped GCPServiceAccount for broker host SA",
+	slog.InfoContext(ctx, "created hub-scoped GCPServiceAccount for broker host SA",
 		"sa_id", sa.ID, "sa_email", sa.Email, "broker", broker.Name)
 	return sa, nil
 }
