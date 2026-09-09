@@ -848,6 +848,223 @@ func TestBrokerUpdate_GCPHostSAEmail_InvalidFormat(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Embedded broker: admin-role user passes ownership check without super-admin
+// binding when broker has the "scion.io/broker-role": "embedded" label and
+// CreatedBy is empty (single-node / co-located broker scenario).
+// ---------------------------------------------------------------------------
+
+func TestPassthrough_EmbeddedBroker_AdminRoleUser_Allowed(t *testing.T) {
+	// An admin-role user should pass the ownership gate on an embedded broker
+	// even without a super-admin role binding, because the embedded-broker
+	// relaxation treats admin-role users as broker owners.
+	hostSAEmail := "broker-host@my-project.iam.gserviceaccount.com"
+	adminUser := ptUser(tid("user-pt-embedded-admin"), "embedded-admin@test.com", store.UserRoleAdmin)
+
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Set AdminEmails so the admin user's role is recognized.
+	srv.config.AdminEmails = []string{"embedded-admin@test.com"}
+
+	require.NoError(t, s.CreateUser(ctx, adminUser))
+	ensureHubMembership(ctx, s, adminUser.ID)
+
+	project := &store.Project{
+		ID:        tid("project-pt-embedded"),
+		Name:      "Embedded Broker Project",
+		Slug:      "embedded-broker-project",
+		OwnerID:   adminUser.ID,
+		CreatedBy: adminUser.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroup(ctx, project)
+
+	// Embedded broker with NO CreatedBy (simulates registerGlobalProjectAndBroker).
+	broker := &store.RuntimeBroker{
+		ID:                         tid("broker-pt-embedded"),
+		Name:                       "Embedded Test Broker",
+		Slug:                       "embedded-test-broker",
+		Status:                     store.BrokerStatusOnline,
+		CreatedBy:                  "", // empty — the bug we're fixing
+		AutoProvide:                true,
+		GCPHostServiceAccountEmail: hostSAEmail,
+		GCPHostProjectID:           "my-project",
+		Labels: map[string]string{
+			"scion.io/broker-role": "embedded",
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+	project.DefaultRuntimeBrokerID = broker.ID
+	require.NoError(t, s.UpdateProject(ctx, project))
+	srv.SetDispatcher(disp)
+
+	// NOTE: No super-admin role binding is created — that's the point.
+	// The admin-role user should pass ownership via the embedded-broker path.
+
+	checker := store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail)
+	enforceSAAssign(srv, checker)
+
+	rec := doRequestAsUser(t, srv, adminUser, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "pt-embedded-admin",
+		ProjectID: project.ID,
+		Task:      "test",
+		GCPIdentity: &GCPIdentityAssignment{
+			MetadataMode: "passthrough",
+		},
+	})
+
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	require.GreaterOrEqual(t, checker.CallCount(), 1,
+		"actAs checker must still be consulted even for embedded broker admin")
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Agent.AppliedConfig.GCPIdentity)
+	assert.Equal(t, store.GCPMetadataModePassthrough, resp.Agent.AppliedConfig.GCPIdentity.MetadataMode)
+}
+
+func TestPassthrough_EmbeddedBroker_NonAdminUser_Denied(t *testing.T) {
+	// A non-admin user should still be denied on an embedded broker with no
+	// CreatedBy — the relaxation is only for admin-role users.
+	hostSAEmail := "broker-host@my-project.iam.gserviceaccount.com"
+	memberUser := ptUser(tid("user-pt-embedded-member"), "embedded-member@test.com", store.UserRoleMember)
+
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateUser(ctx, memberUser))
+	ensureHubMembership(ctx, s, memberUser.ID)
+
+	project := &store.Project{
+		ID:        tid("project-pt-embedded-deny"),
+		Name:      "Embedded Deny Project",
+		Slug:      "embedded-deny-project",
+		OwnerID:   memberUser.ID,
+		CreatedBy: memberUser.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroup(ctx, project)
+
+	broker := &store.RuntimeBroker{
+		ID:                         tid("broker-pt-embedded-deny"),
+		Name:                       "Embedded Deny Broker",
+		Slug:                       "embedded-deny-broker",
+		Status:                     store.BrokerStatusOnline,
+		CreatedBy:                  "", // empty
+		AutoProvide:                true,
+		GCPHostServiceAccountEmail: hostSAEmail,
+		GCPHostProjectID:           "my-project",
+		Labels: map[string]string{
+			"scion.io/broker-role": "embedded",
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+	project.DefaultRuntimeBrokerID = broker.ID
+	require.NoError(t, s.UpdateProject(ctx, project))
+	srv.SetDispatcher(disp)
+
+	checker := store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail)
+	enforceSAAssign(srv, checker)
+
+	rec := doRequestAsUser(t, srv, memberUser, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "pt-embedded-denied",
+		ProjectID: project.ID,
+		Task:      "test",
+		GCPIdentity: &GCPIdentityAssignment{
+			MetadataMode: "passthrough",
+		},
+	})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "broker ownership")
+}
+
+func TestPassthrough_NonEmbeddedBroker_AdminRoleWithoutBinding_Denied(t *testing.T) {
+	// A non-embedded broker should NOT get the relaxation. An admin-role user
+	// without a super-admin binding who is not the broker owner must be denied.
+	hostSAEmail := "broker-host@my-project.iam.gserviceaccount.com"
+	adminUser := ptUser(tid("user-pt-nonembed-admin"), "nonembed-admin@test.com", store.UserRoleAdmin)
+
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	srv.config.AdminEmails = []string{"nonembed-admin@test.com"}
+
+	require.NoError(t, s.CreateUser(ctx, adminUser))
+	ensureHubMembership(ctx, s, adminUser.ID)
+
+	project := &store.Project{
+		ID:        tid("project-pt-nonembed"),
+		Name:      "NonEmbed Project",
+		Slug:      "nonembed-project",
+		OwnerID:   adminUser.ID,
+		CreatedBy: adminUser.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroup(ctx, project)
+
+	// Non-embedded broker owned by someone else, no embedded label.
+	broker := &store.RuntimeBroker{
+		ID:                         tid("broker-pt-nonembed"),
+		Name:                       "NonEmbed Broker",
+		Slug:                       "nonembed-broker",
+		Status:                     store.BrokerStatusOnline,
+		CreatedBy:                  tid("some-other-owner"), // owned by someone else
+		AutoProvide:                true,
+		GCPHostServiceAccountEmail: hostSAEmail,
+		GCPHostProjectID:           "my-project",
+		// No embedded label
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+	project.DefaultRuntimeBrokerID = broker.ID
+	require.NoError(t, s.UpdateProject(ctx, project))
+	srv.SetDispatcher(disp)
+
+	// No super-admin binding — tests that the relaxation does NOT apply.
+	checker := store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail)
+	enforceSAAssign(srv, checker)
+
+	rec := doRequestAsUser(t, srv, adminUser, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "pt-nonembed-admin",
+		ProjectID: project.ID,
+		Task:      "test",
+		GCPIdentity: &GCPIdentityAssignment{
+			MetadataMode: "passthrough",
+		},
+	})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "broker ownership")
+}
+
+// ---------------------------------------------------------------------------
 // Project ID derivation from SA email
 // ---------------------------------------------------------------------------
 

@@ -128,6 +128,16 @@ func (s *Server) authorizePassthroughIdentity(
 		isAdmin = true
 	}
 
+	// For embedded (co-located) brokers, admin-role users are treated as
+	// broker owners. On single-node deployments the broker is registered
+	// without a CreatedBy value, so the ownership check would always fail.
+	// Relaxing to admin-role removes the dependency on the super-admin
+	// binding for passthrough on the single-node tier.
+	if !isAdmin && broker.Labels["scion.io/broker-role"] == "embedded" &&
+		userIdent.Role() == store.UserRoleAdmin {
+		isAdmin = true
+	}
+
 	if !isAdmin && broker.CreatedBy != userIdent.ID() {
 		logAuthzDenial(r, userIdent, brokerResource(broker), ActionDispatch,
 			"not broker owner or admin")
