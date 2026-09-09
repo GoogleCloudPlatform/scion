@@ -195,7 +195,10 @@ export class ScionEffectiveAccessBoundaryNotice extends LitElement {
         url = `/api/v1/admin/effective-access?principalType=${encodeURIComponent(this.contextType)}&principalId=${encodeURIComponent(this.contextId)}`;
       }
 
-      const res = await apiFetch(url);
+      // suppressAccessDeniedToast: this notice is a non-critical enhancement
+      // that renders nothing unless it loads (see render()); a 403 must stay
+      // as quiet as the catch below already is.
+      const res = await apiFetch(url, { suppressAccessDeniedToast: true });
       if (res.ok) {
         const data = (await res.json()) as BoundaryCountResponse;
         this.boundaryCount = data.count ?? data.boundaries?.length ?? 0;

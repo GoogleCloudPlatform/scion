@@ -122,7 +122,10 @@ export class ScionPageProjectCreate extends LitElement {
 
   private async checkGitHubApp(): Promise<void> {
     try {
-      const res = await apiFetch('/api/v1/github-app');
+      // suppressAccessDeniedToast: this is a speculative probe on page load.
+      // A non-admin cannot read the GitHub App config, and the section is
+      // simply not shown — the user has nothing to act on, so a toast is noise.
+      const res = await apiFetch('/api/v1/github-app', { suppressAccessDeniedToast: true });
       if (!res.ok) return;
       const data = (await res.json()) as { configured: boolean; installation_url?: string };
       if (data.configured && data.installation_url) {

@@ -893,8 +893,12 @@ export class ScionPageProjectSettings extends LitElement {
     this.boundaryError = '';
 
     try {
+      // suppressAccessDeniedToast: access constraints are admin-only. A
+      // project owner without access_constraint.read gets an empty section,
+      // which is the intended degraded state — no toast needed.
       const res = await apiFetch(
-        `/api/v1/admin/access-constraints?scopeType=project&scopeId=${encodeURIComponent(this.projectId)}`
+        `/api/v1/admin/access-constraints?scopeType=project&scopeId=${encodeURIComponent(this.projectId)}`,
+        { suppressAccessDeniedToast: true }
       );
 
       const items: AccessBoundarySummary[] = res.ok
@@ -941,7 +945,9 @@ export class ScionPageProjectSettings extends LitElement {
   private async checkGitHubAppConfigured(): Promise<void> {
     this.githubAppLoading = true;
     try {
-      const res = await apiFetch('/api/v1/github-app');
+      // suppressAccessDeniedToast: hub.github_app.read is admin-only; the
+      // section is hidden for everyone else (see the catch below).
+      const res = await apiFetch('/api/v1/github-app', { suppressAccessDeniedToast: true });
       if (res.ok) {
         const data = (await res.json()) as { configured: boolean; installation_url?: string };
         this.githubAppConfigured = data.configured;
