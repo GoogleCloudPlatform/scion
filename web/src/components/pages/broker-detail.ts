@@ -31,6 +31,8 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import { brokerTypeBadgeStyles } from '../shared/resource-styles.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
+import { showToast } from '../../utils/toast.js';
 import '../shared/status-badge.js';
 
 interface BrokerProjectInfo {
@@ -63,6 +65,9 @@ export class ScionPageBrokerDetail extends LitElement {
 
   @state()
   private error: string | null = null;
+
+  @state()
+  private unregisterLoading = false;
 
   private boundOnBrokersUpdated = this.onBrokersUpdated.bind(this);
   private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
@@ -117,6 +122,13 @@ export class ScionPageBrokerDetail extends LitElement {
         font-weight: 700;
         color: var(--scion-text, #1e293b);
         margin: 0;
+      }
+
+      .header-actions {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.5rem;
+        flex-shrink: 0;
       }
 
       .header-subtitle {
@@ -576,6 +588,49 @@ export class ScionPageBrokerDetail extends LitElement {
     }
   }
 
+  private get isAdmin(): boolean {
+    return this.pageData?.user?.role === 'admin';
+  }
+
+  private async handleUnregister(): Promise<void> {
+    if (!this.broker) return;
+
+    const projectCount = this.projects.length;
+    const agentCount = this.agents.length;
+    const parts: string[] = [];
+    if (projectCount > 0) {
+      parts.push(`remove it from ${projectCount} project${projectCount !== 1 ? 's' : ''}`);
+    }
+    if (agentCount > 0) {
+      parts.push(`may affect ${agentCount} running agent${agentCount !== 1 ? 's' : ''}`);
+    }
+    const consequence = parts.length > 0 ? `\n\nThis will ${parts.join(' and ')}.` : '';
+    const message = `Unregister broker "${this.broker.name}"?${consequence}`;
+
+    const confirmed = await showConfirm(message, {
+      title: 'Unregister Broker',
+      confirmText: 'Unregister',
+      variant: 'danger',
+    });
+    if (!confirmed) return;
+
+    this.unregisterLoading = true;
+    try {
+      const response = await apiFetch(`/api/v1/runtime-brokers/${this.brokerId}`, {
+        method: 'DELETE',
+      });
+      if (!response.ok && response.status !== 204) {
+        throw new Error(await extractApiError(response, 'Failed to unregister broker'));
+      }
+      window.location.href = '/brokers';
+    } catch (err) {
+      console.error('Failed to unregister broker:', err);
+      showToast(err instanceof Error ? err.message : 'Failed to unregister broker', 'danger');
+    } finally {
+      this.unregisterLoading = false;
+    }
+  }
+
   private getAgentsForProject(projectId: string): Agent[] {
     return this.agents.filter((a) => a.projectId === projectId);
   }
@@ -620,6 +675,22 @@ export class ScionPageBrokerDetail extends LitElement {
             ? html`<div class="header-subtitle">${subtitleParts.join(' · ')}</div>`
             : ''}
         </div>
+        ${this.isAdmin
+          ? html`
+              <div class="header-actions">
+                <sl-button
+                  variant="danger"
+                  size="small"
+                  ?loading=${this.unregisterLoading}
+                  ?disabled=${this.unregisterLoading}
+                  @click=${() => this.handleUnregister()}
+                >
+                  <sl-icon slot="prefix" name="trash"></sl-icon>
+                  Unregister
+                </sl-button>
+              </div>
+            `
+          : ''}
       </div>
 
       <div class="stats-row">
