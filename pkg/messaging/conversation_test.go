@@ -1388,6 +1388,50 @@ func TestChannelToSurface_UnknownFallsBackToNative(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// ChannelToSurfaceStrict — DEF-156 P3: refuses unmappable channels
+// ---------------------------------------------------------------------------
+
+func TestChannelToSurfaceStrict_ValidChannels(t *testing.T) {
+	tests := []struct {
+		channel string
+		want    string
+	}{
+		{"discord", "discord"},
+		{"slack", "slack"},
+		{"telegram", "telegram"},
+		{"gchat", "gchat"},
+		{"teams", "teams"},
+		{"native", "native"},
+		{"web", "native"}, // alias
+		{"", "native"},    // empty → native
+	}
+	for _, tt := range tests {
+		got, err := ChannelToSurfaceStrict(tt.channel)
+		if err != nil {
+			t.Errorf("ChannelToSurfaceStrict(%q) unexpected error: %v", tt.channel, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("ChannelToSurfaceStrict(%q) = %q, want %q", tt.channel, got, tt.want)
+		}
+	}
+}
+
+func TestChannelToSurfaceStrict_RefusesUnmappable(t *testing.T) {
+	// ChannelToSurfaceStrict must refuse unknown channels with an error,
+	// NOT coerce them to "native" as the lenient ChannelToSurface does.
+	for _, ch := range []string{"irc", "matrix", "xmpp", "unknown-channel"} {
+		surface, err := ChannelToSurfaceStrict(ch)
+		if err == nil {
+			t.Errorf("ChannelToSurfaceStrict(%q) = %q, want error", ch, surface)
+		}
+		if surface != "" {
+			t.Errorf("ChannelToSurfaceStrict(%q) returned non-empty surface %q on error", ch, surface)
+		}
+	}
+}
+
 func TestDEF140_UnknownChannelResolvesConversationSuccessfully(t *testing.T) {
 	// DEF-140/R3: A message whose channel is NOT a valid surface must still
 	// resolve a conversation successfully and land on "native". This is the

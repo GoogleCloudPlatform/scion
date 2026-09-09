@@ -359,6 +359,26 @@ func ChannelToSurface(channel string, log *slog.Logger) string {
 	return "native"
 }
 
+// ChannelToSurfaceStrict maps a channel name to a valid surface enum value
+// without falling back to "native" for unknown channels. Empty channels map
+// to "native" (the zero-value convention), and known aliases are applied, but
+// any truly unmappable channel returns an error.
+//
+// This is used by the backfill (DEF-156 P3) where silently coercing an unknown
+// channel to "native" would permanently mislabel the conversation's surface.
+func ChannelToSurfaceStrict(channel string) (string, error) {
+	if channel == "" {
+		return "native", nil
+	}
+	if validSurfaces[channel] {
+		return channel, nil
+	}
+	if mapped, ok := channelToSurface[channel]; ok {
+		return mapped, nil
+	}
+	return "", fmt.Errorf("unmappable channel %q: no known surface mapping", channel)
+}
+
 // readThreadConfig holds optional parameters for ResolveThreadConversationForRead.
 type readThreadConfig struct {
 	topicLookup TopicConversationLookup
@@ -371,8 +391,9 @@ type ReadThreadOption func(*readThreadConfig)
 // resolution path. When set, native topic threads are resolved via the
 // topic's linked conversation_id — the same intercept the write path
 // (ResolveOrCreateConversationByKey) uses. Without this option the function
-// falls through to the external_ref lookup, which fails for native topics
-// because their conversations row has external_ref = ”.
+// falls through to the external_ref lookup, which works for post-fix topics
+// (external_ref = 'thread:…') but fails for pre-fix topics (external_ref = ”).
+// The intercept handles both populations (DEF-156).
 func WithReadTopicLookup(tl TopicConversationLookup) ReadThreadOption {
 	return func(c *readThreadConfig) { c.topicLookup = tl }
 }
@@ -383,12 +404,13 @@ func WithReadTopicLookup(tl TopicConversationLookup) ReadThreadOption {
 // used by the Phase 8 read-switch to query by ConversationID.
 //
 // DEF-100: when a TopicConversationLookup is provided via WithReadTopicLookup,
-// the function intercepts "thread:" group refs and resolves via the webchat
+// the function intercepts “thread:” group refs and resolves via the webchat
 // topic's linked conversation_id — the same intercept the write path has in
 // ResolveOrCreateConversationByKey. Order: topic lookup first; only if the
 // thread is not a native topic (store.ErrNotFound), fall through to the
-// external_ref lookup. This ensures native topics (whose conversations rows
-// have external_ref = ”) resolve correctly on the read path.
+// external_ref lookup. Pre-fix topics (external_ref = ”) resolve only via
+// this intercept; post-fix topics (external_ref = 'thread:…') resolve via
+// either path (DEF-156).
 //
 // Note: the projectID empty-check is intentionally omitted from the early
 // return. DeriveConversationKey case 2 validates empty ProjectID for thread
@@ -422,9 +444,14 @@ func ResolveThreadConversationForRead(
 	// DEF-100 topic-lookup intercept: when kind is "group" and extRef has a
 	// "thread:" prefix, attempt to resolve via the webchat topic's linked
 	// conversation_id. This mirrors the write-path intercept in
-	// ResolveOrCreateConversationByKey. Native topics write external_ref = ''
-	// on the conversations row, so the external_ref lookup below will never
-	// match them — the topic lookup is the only correct resolution path.
+	// ResolveOrCreateConversationByKey.
+	//
+	// Mixed population (DEF-156): pre-fix topic conversations have
+	// external_ref = '', so the external_ref lookup below will never match
+	// them and this topic lookup is their only resolution path. Post-fix
+	// topics write external_ref = 'thread:<project>:<topicID>' and resolve
+	// via either path. This intercept stays as belt-and-braces for the
+	// pre-fix population until the switch collapse normalises them.
 	if cfg.topicLookup != nil && kind == "group" && strings.HasPrefix(extRef, "thread:") {
 		parts := strings.SplitN(extRef, ":", 3)
 		if len(parts) == 3 {
@@ -436,7 +463,7 @@ func ResolveThreadConversationForRead(
 				return &ConversationResult{
 					ConversationID: convID,
 					Kind:           kind,     // from DeriveConversationKey
-					Surface:        "native", // native topics write external_ref='' so the external_ref lookup below never matches them; this topic-lookup path is the only resolution route, and it only exists for native topics (readThreadConfig carries no surface option)
+					Surface:        "native", // this topic-lookup path resolves native topics; readThreadConfig carries no surface option. Pre-fix topics have external_ref='', post-fix topics have 'thread:…' — both resolve here when the topic link is populated (DEF-156).
 				}
 			}
 			if lookupErr == nil && convID == "" {

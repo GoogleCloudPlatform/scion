@@ -53,6 +53,8 @@ const (
 	DeriveErrDMKeyCanonical  = "dm_key_not_canonical" // dm: prefix, parsed but not canonical
 	DeriveErrThreadNoProject = "thread_no_project"    // non-dm ThreadID, empty ProjectID
 	DeriveErrPrincipalPair   = "principal_pair"       // empty ThreadID, principal-pair derivation failed
+	DeriveErrSurfaceUnmap    = "surface_unmap"        // channel cannot be mapped to a surface (DEF-156 P3)
+	DeriveErrSurfaceConflict = "surface_conflict"     // messages in same group disagree on channel (DEF-156 P3)
 )
 
 // DeriveConversationKey is the ONLY function that should construct a conversation
@@ -108,6 +110,26 @@ func DeriveConversationKey(in KeyInputs) (extRef string, kind string, projectID 
 	return ref, "direct", nil, nil
 }
 
+// ThreadConversationExternalRef returns the canonical external_ref for a
+// thread-based group conversation. This is a thin wrapper over the thread-key
+// branch of DeriveConversationKey (case 2) and MUST be used by every call site
+// that needs the "thread:<projectID>:<threadID>" string — including pkg/hub's
+// topic backfill and CreateTopic. Two independent fmt.Sprintf calls producing
+// the same format string is precisely the defect DEF-156 is fixing.
+func ThreadConversationExternalRef(projectID, threadID string) (string, error) {
+	if projectID == "" || threadID == "" {
+		return "", fmt.Errorf("ThreadConversationExternalRef: projectID and threadID must both be non-empty (projectID=%q, threadID=%q)", projectID, threadID)
+	}
+	extRef, _, _, err := DeriveConversationKey(KeyInputs{
+		ThreadID:  threadID,
+		ProjectID: projectID,
+	})
+	if err != nil {
+		return "", err
+	}
+	return extRef, nil
+}
+
 // conversationByKeyConfig holds optional parameters for ResolveOrCreateConversationByKey.
 type conversationByKeyConfig struct {
 	topicLookup    TopicConversationLookup
@@ -145,9 +167,10 @@ func WithDefaultAgentID(id *string) ConversationByKeyOption {
 //
 // When a TopicConversationLookup is provided via WithKeyTopicLookup, the function
 // intercepts "thread:" group refs and attempts to resolve via the webchat topic's
-// linked conversation_id. This is the sink-level guard that prevents all paths
-// from minting shadow conversations for native topics that already have a
-// conversation.
+// linked conversation_id. This intercept is the sole guard for pre-fix topics
+// (external_ref = ”) and belt-and-braces for post-fix topics
+// (external_ref = 'thread:…') that also converge via the partial unique index.
+// See DEF-156 §3.4 for the mixed population rationale.
 func ResolveOrCreateConversationByKey(
 	ctx context.Context,
 	cs ConversationUpserter,
@@ -164,9 +187,16 @@ func ResolveOrCreateConversationByKey(
 
 	// Topic lookup intercept: when kind is "group" and extRef has a
 	// "thread:" prefix, attempt to resolve via the webchat topic's
-	// linked conversation_id. This is the sink-level guard that
-	// prevents all paths from minting shadow conversations for
-	// native topics that already have a conversation.
+	// linked conversation_id. This intercept prevents the live write
+	// path from minting shadow conversations for native topics that
+	// already have a conversation.
+	//
+	// Mixed population (DEF-156): pre-fix topic conversations have
+	// external_ref = '' and rely on this intercept as their only guard.
+	// Post-fix topics write external_ref = 'thread:<project>:<topicID>'
+	// and converge via the partial unique index, making this intercept
+	// redundant for them. It stays as belt-and-braces for the pre-fix
+	// population until the switch collapse normalises them.
 	if cfg.topicLookup != nil && kind == "group" && strings.HasPrefix(extRef, "thread:") {
 		// Extract threadID from "thread:<projectID>:<threadID>"
 		parts := strings.SplitN(extRef, ":", 3)
