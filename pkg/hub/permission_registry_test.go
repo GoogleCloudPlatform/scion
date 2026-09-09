@@ -110,7 +110,18 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 		ScopeAgentTokenRefresh: {"agent.token_refresh"},
 		ScopeAgentPortForward:  {"agent.port_forward"},
 		ScopeIdentityToken:     {"agent.identity_token"},
-		ScopeProjectRead:       {"harness_config.list", "harness_config.read", "project.read", "template.list", "template.read"},
+		// #1494 added AgentScopes: ["project:read"] to template.read/list and
+		// harness_config.read/list without updating this map, so the guard has
+		// been failing on main since. The scope constant documents itself as
+		// covering "agents, templates, skills, harness configs, projects", so the
+		// widening is intended - it just was not recorded here.
+		ScopeProjectRead: {
+			"harness_config.list",
+			"harness_config.read",
+			"project.read",
+			"template.list",
+			"template.read",
+		},
 	}
 	for scope, wantIDs := range want {
 		gotIDs := registryPermissionIDsForAgentScope(string(scope))

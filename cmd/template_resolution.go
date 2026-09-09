@@ -22,9 +22,24 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
+
+// scopeNotVisible reports whether a template-list error means "this caller
+// cannot see this scope" rather than "the query failed".
+//
+// Resolution walks project -> user -> global, and not every caller can see
+// every scope. An agent identity has no user scope at all, so the Hub answers
+// scope=user with 401; a caller lacking template.read on a scope gets 403.
+// Neither says anything about whether the template exists somewhere else, so
+// treating either as fatal aborts resolution before the remaining scopes are
+// tried - which is how an agent asking for a global template ended up being
+// told its authentication had failed.
+func scopeNotVisible(err error) bool {
+	return apiclient.IsUnauthorizedError(err) || apiclient.IsForbiddenError(err)
+}
 
 // Template resolution flags for agent creation
 var (
@@ -171,14 +186,15 @@ func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, pro
 		}
 
 		resp, err := hubCtx.Client.Templates().List(listCtx, opts)
-		if err != nil {
+		if err != nil && !scopeNotVisible(err) {
 			return nil, err
 		}
-
-		for i := range resp.Templates {
-			t := &resp.Templates[i]
-			if t.Name == name || t.Slug == name {
-				return t, nil
+		if err == nil {
+			for i := range resp.Templates {
+				t := &resp.Templates[i]
+				if t.Name == name || t.Slug == name {
+					return t, nil
+				}
 			}
 		}
 	}
@@ -191,14 +207,15 @@ func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, pro
 	}
 
 	userResp, err := hubCtx.Client.Templates().List(listCtx, userOpts)
-	if err != nil {
+	if err != nil && !scopeNotVisible(err) {
 		return nil, err
 	}
-
-	for i := range userResp.Templates {
-		t := &userResp.Templates[i]
-		if t.Name == name || t.Slug == name {
-			return t, nil
+	if err == nil {
+		for i := range userResp.Templates {
+			t := &userResp.Templates[i]
+			if t.Name == name || t.Slug == name {
+				return t, nil
+			}
 		}
 	}
 
@@ -210,14 +227,15 @@ func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, pro
 	}
 
 	globalResp, err := hubCtx.Client.Templates().List(listCtx, globalOpts)
-	if err != nil {
+	if err != nil && !scopeNotVisible(err) {
 		return nil, err
 	}
-
-	for i := range globalResp.Templates {
-		t := &globalResp.Templates[i]
-		if t.Name == name || t.Slug == name {
-			return t, nil
+	if err == nil {
+		for i := range globalResp.Templates {
+			t := &globalResp.Templates[i]
+			if t.Name == name || t.Slug == name {
+				return t, nil
+			}
 		}
 	}
 
