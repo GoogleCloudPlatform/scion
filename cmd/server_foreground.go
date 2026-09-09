@@ -424,6 +424,38 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 		warnShadowedBrokerEnv(ctx, dispatcher)
 
+		// Initialize web chat store and attachment store. These only need a
+		// DB handle, not the message broker, so they live outside the broker
+		// gate to work on single-node instances without broker plugins.
+		var webStore hub.WebChatStore
+		if dbProvider, ok := s.(interface{ DB() *sql.DB }); ok {
+			if rawDB := dbProvider.DB(); rawDB != nil {
+				ws := hub.NewWebChatStore(rawDB, cfg.Database.Driver)
+				if err := ws.Init(); err != nil {
+					log.Printf("Warning: failed to initialize webchat store: %v", err)
+				} else {
+					webStore = ws
+					hubSrv.SetWebChatStore(webStore)
+					log.Printf("Web chat store initialized")
+
+					// W7: Initialize local-disk attachment store.
+					globalDir, err := config.GetGlobalDir()
+					if err != nil {
+						log.Printf("Warning: could not determine global dir, attachments disabled: %v", err)
+					} else {
+						attachDir := filepath.Join(globalDir, "attachments")
+						attachStore, err := hub.NewLocalDiskAttachmentStore(attachDir)
+						if err != nil {
+							log.Printf("Warning: failed to initialize attachment store: %v", err)
+						} else {
+							hubSrv.SetAttachmentStore(attachStore)
+							log.Printf("Attachment store initialized: dir=%s", attachDir)
+						}
+					}
+				}
+			}
+		}
+
 		// Initialize message broker from versioned settings.
 		// Uses FanOutBroker to support multiple simultaneous broker plugins.
 		if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil {
@@ -588,43 +620,21 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					log.Printf("Message broker spoke added: name=%s channel_id=%s observer=%v", bt, channelID, observer)
 				}
 
-				// Register the native web channel spoke. It follows the same
-				// contract as every plugin adapter: Subscribe discards the handler
-				// (F7/F8, #944), Publish does real work (webchat_* state).
-				// Observer: true so a state-write failure degrades the thread rail
-				// rather than failing the user's message.
-				if dbProvider, ok := s.(interface{ DB() *sql.DB }); ok {
-					if rawDB := dbProvider.DB(); rawDB != nil {
-						webStore := hub.NewWebChatStore(rawDB, cfg.Database.Driver)
-						if err := webStore.Init(); err != nil {
-							log.Printf("Warning: failed to initialize webchat store: %v", err)
-						} else {
-							webSpoke := hub.NewWebChannelBus(logging.Subsystem("hub.eventbus.web"), webStore)
-							namedBuses = append(namedBuses, eventbus.NamedEventBus{
-								Name:      "web",
-								ChannelID: "web",
-								Bus:       webSpoke,
-								Observer:  true,
-							})
-							hubSrv.SetWebChatStore(webStore)
-							log.Printf("Message broker spoke added: name=web channel_id=web observer=true")
-
-							// W7: Initialize local-disk attachment store.
-							globalDir, err := config.GetGlobalDir()
-							if err != nil {
-								log.Printf("Warning: could not determine global dir, attachments disabled: %v", err)
-							} else {
-								attachDir := filepath.Join(globalDir, "attachments")
-								attachStore, err := hub.NewLocalDiskAttachmentStore(attachDir)
-								if err != nil {
-									log.Printf("Warning: failed to initialize attachment store: %v", err)
-								} else {
-									hubSrv.SetAttachmentStore(attachStore)
-									log.Printf("Attachment store initialized: dir=%s", attachDir)
-								}
-							}
-						}
-					}
+				// Register the native web channel spoke if web chat store is
+				// available. The spoke follows the same contract as every plugin
+				// adapter: Subscribe discards the handler (F7/F8, #944), Publish
+				// does real work (webchat_* state). Observer: true so a
+				// state-write failure degrades the thread rail rather than
+				// failing the user's message.
+				if webStore != nil {
+					webSpoke := hub.NewWebChannelBus(logging.Subsystem("hub.eventbus.web"), webStore)
+					namedBuses = append(namedBuses, eventbus.NamedEventBus{
+						Name:      "web",
+						ChannelID: "web",
+						Bus:       webSpoke,
+						Observer:  true,
+					})
+					log.Printf("Message broker spoke added: name=web channel_id=web observer=true")
 				}
 
 				fanout := eventbus.NewFanOutEventBus(namedBuses, logging.Subsystem("hub.eventbus.fanout"))
