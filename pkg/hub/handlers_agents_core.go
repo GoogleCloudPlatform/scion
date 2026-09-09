@@ -1250,6 +1250,30 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
+	// Passthrough-to-assign translation for cloudrun-sandbox runtimes.
+	//
+	// gVisor sandboxes cannot reach the real GCE metadata server at
+	// 169.254.169.254, so passthrough mode produces no credentials. When
+	// the target broker runs a cloudrun-sandbox profile, translate
+	// passthrough to assign using the broker's host service account —
+	// semantically equivalent (same identity) and the assign machinery
+	// works inside the sandbox.
+	//
+	// The translation runs after both the explicit and project-default
+	// identity paths, so it covers every surface that sets passthrough.
+	if agent.AppliedConfig != nil &&
+		agent.AppliedConfig.GCPIdentity != nil &&
+		agent.AppliedConfig.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough &&
+		runtimeBrokerID != "" {
+		if err := s.translatePassthroughForSandbox(ctx, agent, runtimeBrokerID); err != nil {
+			slog.Error("passthrough-to-assign translation failed",
+				"agent", agent.Name, "broker", runtimeBrokerID, "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+				"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
+			return
+		}
+	}
+
 	if req.Config != nil {
 		agent.Image = req.Config.Image
 		if req.Config.Detached != nil {
@@ -2331,6 +2355,15 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModePassthrough,
 			}
+			// Passthrough-to-assign translation for cloudrun-sandbox runtimes
+			// (same logic as the create path — see createAgentInProject).
+			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
+				slog.Error("passthrough-to-assign translation failed (PATCH)",
+					"agent", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+					"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
+				return
+			}
 		case store.GCPMetadataModeAssign:
 			if updates.GCPIdentity.ServiceAccountID == "" {
 				ValidationError(w, "service_account_id is required when metadata_mode is 'assign'", nil)
@@ -3100,4 +3133,167 @@ func (s *Server) recordDelegationEdgeWithType(ctx context.Context, agentID, proj
 			"project_id", projectID,
 			"error", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Passthrough-to-assign translation for cloudrun-sandbox runtimes
+// ---------------------------------------------------------------------------
+
+// brokerHasCloudRunSandboxProfile reports whether any profile on the broker has
+// the "cloudrun-sandbox" runtime type. This indicates the broker runs gVisor
+// sandboxes that cannot reach the real GCE metadata server.
+func brokerHasCloudRunSandboxProfile(broker *store.RuntimeBroker) bool {
+	for _, p := range broker.Profiles {
+		if p.Type == "cloudrun-sandbox" {
+			return true
+		}
+	}
+	return false
+}
+
+// translatePassthroughForSandbox translates a passthrough GCP identity config
+// to assign mode when the target broker runs a cloudrun-sandbox runtime.
+//
+// Inside gVisor sandboxes the real GCE metadata server at 169.254.169.254 is
+// unreachable, so passthrough mode produces no credentials. The translation
+// uses the broker's registered host service account — semantically equivalent
+// to passthrough (same identity) — and the assign machinery (metadata
+// emulator → hub gcp-token endpoint → IAM impersonation) works inside the
+// sandbox.
+//
+// The method is a no-op when:
+//   - the agent's config is not passthrough,
+//   - the broker has no cloudrun-sandbox profile, or
+//   - the broker has no host SA registered (leaves passthrough as-is with a
+//     warning — identical to pre-fix behavior).
+//
+// On success the agent's AppliedConfig.GCPIdentity is rewritten in place to
+// assign mode with the broker's host SA, and a GCPServiceAccount record is
+// created if one does not already exist for the email.
+func (s *Server) translatePassthroughForSandbox(
+	ctx context.Context,
+	agent *store.Agent,
+	brokerID string,
+) error {
+	if agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
+		return nil
+	}
+	if agent.AppliedConfig.GCPIdentity.MetadataMode != store.GCPMetadataModePassthrough {
+		return nil
+	}
+
+	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
+	if err != nil {
+		return fmt.Errorf("load broker %s: %w", brokerID, err)
+	}
+	if !brokerHasCloudRunSandboxProfile(broker) {
+		return nil // not a sandbox runtime — passthrough works as-is
+	}
+
+	if broker.GCPHostServiceAccountEmail == "" {
+		// The broker has no host SA registered. The passthrough gate should
+		// have caught this for explicit passthrough requests; for project-
+		// default passthrough the gate doesn't run. Log and leave as-is —
+		// the agent won't get credentials, same as the pre-fix behavior.
+		slog.Warn("cloudrun-sandbox broker has no host SA — cannot translate passthrough to assign",
+			"broker_id", broker.ID, "broker_name", broker.Name)
+		return nil
+	}
+
+	// Ensure a GCPServiceAccount record exists for the broker's host SA.
+	sa, err := s.ensureHostSARecord(ctx, broker)
+	if err != nil {
+		return fmt.Errorf("ensure host SA record: %w", err)
+	}
+
+	slog.Info("translated passthrough to assign for cloudrun-sandbox",
+		"agent", agent.Name, "broker", broker.Name,
+		"sa_email", sa.Email, "sa_id", sa.ID)
+
+	agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+		MetadataMode:        store.GCPMetadataModeAssign,
+		ServiceAccountID:    sa.ID,
+		ServiceAccountEmail: sa.Email,
+		ProjectID:           sa.ProjectID,
+	}
+
+	// Mark the translation so operators and the UI can distinguish a
+	// hub-translated assign from a user-requested one.
+	if agent.Annotations == nil {
+		agent.Annotations = make(map[string]string)
+	}
+	agent.Annotations["scion.dev/gcp-identity-translated-from"] = "passthrough"
+
+	return nil
+}
+
+// ensureHostSARecord looks up or creates a hub-scoped GCPServiceAccount
+// record for the broker's host service account. This is needed so that the
+// assign flow (JWT scope minting, gcp-token endpoint) works with a real
+// ServiceAccountID foreign key.
+//
+// The record is hub-scoped because the broker's host SA is an infrastructure
+// identity, not project-specific — any project dispatching to this broker
+// should be able to use it for passthrough translation.
+func (s *Server) ensureHostSARecord(
+	ctx context.Context,
+	broker *store.RuntimeBroker,
+) (*store.GCPServiceAccount, error) {
+	// Look up by email first.
+	existing, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+		Email: broker.GCPHostServiceAccountEmail,
+		Scope: store.ScopeHub,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lookup SA by email %s: %w", broker.GCPHostServiceAccountEmail, err)
+	}
+	if len(existing) > 0 {
+		return &existing[0], nil
+	}
+
+	// Create a new hub-scoped record for the broker's host SA.
+	// ScopeID is provenance for hub-scoped accounts (which hub instance
+	// registered it). Use the broker ID as provenance — more specific than
+	// the hub ID and stable across redeployments.
+	sa := &store.GCPServiceAccount{
+		ID:      gouuid.New().String(),
+		Scope:   store.ScopeHub,
+		ScopeID: broker.ID,
+		Email:       broker.GCPHostServiceAccountEmail,
+		ProjectID:   broker.GCPHostProjectID,
+		DisplayName: fmt.Sprintf("Broker host SA (%s)", broker.Name),
+		DefaultScopes: []string{
+			"https://www.googleapis.com/auth/cloud-platform",
+		},
+		// The hub can already impersonate this SA (it's the broker's host
+		// identity), so mark as verified. The actAs check already passed
+		// in authorizePassthroughIdentity for explicit passthrough requests.
+		Verified:           true,
+		VerifiedAt:         time.Now(),
+		VerificationStatus: store.GCPVerificationVerified,
+		CreatedBy:          "system:passthrough-translation",
+		CreatedAt:          time.Now(),
+		Managed:            false, // not created by Hub SA provisioning
+	}
+
+	if err := s.store.CreateGCPServiceAccount(ctx, sa); err != nil {
+		// Race condition: another request may have created the record
+		// between our lookup and create. Try the lookup again.
+		existing, lookupErr := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+			Email: broker.GCPHostServiceAccountEmail,
+			Scope: store.ScopeHub,
+		})
+		if lookupErr != nil {
+			return nil, fmt.Errorf("create SA %s: %w (retry lookup: %v)",
+				broker.GCPHostServiceAccountEmail, err, lookupErr)
+		}
+		if len(existing) > 0 {
+			return &existing[0], nil
+		}
+		return nil, fmt.Errorf("create SA %s: %w", broker.GCPHostServiceAccountEmail, err)
+	}
+
+	slog.Info("created hub-scoped GCPServiceAccount for broker host SA",
+		"sa_id", sa.ID, "sa_email", sa.Email, "broker", broker.Name)
+	return sa, nil
 }
