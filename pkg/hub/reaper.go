@@ -35,6 +35,44 @@ const (
 	dispatchMaxRetries = 3
 )
 
+// brokerHeartbeatTimeoutHandler returns a recurring handler that marks brokers
+// as offline when their last heartbeat exceeds a 5-minute threshold. It publishes
+// status events for each affected broker so SSE subscribers are informed.
+func (s *Server) brokerHeartbeatTimeoutHandler() func(ctx context.Context) {
+	return func(ctx context.Context) {
+		// Tight timeout: fail fast if DB connections are saturated rather than
+		// holding a connection while waiting, which worsens the thundering herd.
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
+		threshold := time.Now().Add(-5 * time.Minute)
+
+		ids, err := s.store.MarkStaleBrokersOffline(ctx, threshold)
+		if err != nil {
+			slog.Error("Scheduler: broker heartbeat timeout check failed", "error", err)
+			return
+		}
+
+		for _, id := range ids {
+			providers, err := s.store.GetBrokerProjects(ctx, id)
+			if err != nil {
+				slog.Error("Scheduler: failed to get broker projects for event publishing", "brokerID", id, "error", err)
+				continue
+			}
+			projectIDs := make([]string, len(providers))
+			for i, p := range providers {
+				projectIDs[i] = p.ProjectID
+			}
+			s.events.PublishBrokerDisconnected(ctx, id, projectIDs)
+		}
+
+		if len(ids) > 0 {
+			slog.Info("Scheduler: marked stale brokers as offline",
+				"count", len(ids), "threshold", threshold)
+		}
+	}
+}
+
 // brokerAffinityReapHandler returns a recurring handler that clears stale broker
 // affinity and re-drives (or fails) stuck dispatches. Registered as a singleton
 // so at most one replica runs it per tick.

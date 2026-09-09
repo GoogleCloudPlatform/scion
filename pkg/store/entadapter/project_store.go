@@ -1193,6 +1193,55 @@ func (s *ProjectStore) ReapStaleBrokerAffinity(ctx context.Context, staleBefore 
 	return affected, nil
 }
 
+// MarkStaleBrokersOffline sets status=offline for brokers whose last_heartbeat
+// is older than threshold and whose status is not already offline. Returns the
+// IDs of affected brokers so the caller can publish SSE events.
+func (s *ProjectStore) MarkStaleBrokersOffline(ctx context.Context, threshold time.Time) ([]string, error) {
+	// Find candidate brokers — not offline, heartbeat older than threshold.
+	candidates, err := s.client.RuntimeBroker.Query().
+		Where(
+			runtimebroker.StatusNEQ(store.BrokerStatusOffline),
+			runtimebroker.LastHeartbeatLT(threshold),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	now := time.Now()
+	var ids []string
+	for _, b := range candidates {
+		affected, err := s.client.RuntimeBroker.Update().
+			Where(runtimebroker.IDEQ(b.ID), runtimebroker.LockVersionEQ(b.LockVersion)).
+			SetStatus(store.BrokerStatusOffline).
+			ClearConnectedHubID().
+			ClearConnectedSessionID().
+			ClearConnectedAt().
+			SetUpdated(now).
+			AddLockVersion(1).
+			Save(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if affected == 1 {
+			ids = append(ids, b.ID.String())
+			// Mirror the WebSocket disconnect handler: mark this broker's
+			// project contributor records offline so populateProjectComputed
+			// reports correct active-broker counts.
+			_, err = s.client.ProjectContributor.Update().
+				Where(projectcontributor.BrokerIDEQ(b.ID)).
+				SetStatus(store.BrokerStatusOffline).
+				SetLastSeen(now).
+				Save(ctx)
+			if err != nil {
+				return nil, mapError(err)
+			}
+		}
+		// affected==0 means another writer raced us — skip this broker.
+	}
+	return ids, nil
+}
+
 // =============================================================================
 // ProjectProvider (project_contributors) operations
 // =============================================================================

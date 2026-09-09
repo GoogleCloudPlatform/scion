@@ -545,6 +545,11 @@ type RuntimeBrokerStore interface {
 	// shut down are explicitly marked offline. Returns ErrNotFound if the
 	// broker doesn't exist. No-op if the broker is already offline.
 	MarkBrokerOffline(ctx context.Context, brokerID string) error
+
+	// MarkStaleBrokersOffline sets status=offline for brokers whose
+	// last_heartbeat is older than threshold and whose status is not already
+	// offline. Returns the IDs of affected brokers for event publishing.
+	MarkStaleBrokersOffline(ctx context.Context, threshold time.Time) ([]string, error)
 }
 
 // RuntimeBrokerFilter defines criteria for filtering runtime brokers.
