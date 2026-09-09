@@ -796,6 +796,92 @@ func TestEnvArgs_Sorted(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
+// ResolvedAuth application tests
+// -----------------------------------------------------------------------
+
+// TestCloudRunSandboxRuntime_Run_AppliesResolvedAuth verifies that the
+// sandbox runtime applies resolved auth env vars to the sandbox environment.
+// Without this, auth env vars like GOOGLE_CLOUD_PROJECT and
+// GOOGLE_CLOUD_LOCATION do not reach the sandbox process (the Docker
+// runtime applies them via applyResolvedAuth at common.go:289-290).
+func TestCloudRunSandboxRuntime_Run_AppliesResolvedAuth(t *testing.T) {
+	tmpDir := t.TempDir()
+	rootDir := filepath.Join(tmpDir, "scion")
+	argsFile := filepath.Join(tmpDir, "sandbox-args")
+
+	// Create a mock sandbox binary that records its args.
+	mockBin := filepath.Join(tmpDir, "sandbox")
+	script := "#!/bin/sh\nif [ \"$1\" = \"run\" ]; then\n  printf '%s\\n' \"$@\" > " + argsFile + "\nfi\necho sandbox-ok\n"
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	homeDir := filepath.Join(tmpDir, "agent-home")
+	if err := os.MkdirAll(homeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	stateFile := filepath.Join(tmpDir, "state.json")
+	rt := &CloudRunSandboxRuntime{
+		bin:          mockBin,
+		state:        newSandboxStateStore(stateFile),
+		rootDir:      rootDir,
+		watchCancels: make(map[string]context.CancelFunc),
+	}
+
+	t.Cleanup(func() {
+		rt.watchMu.Lock()
+		for _, cancel := range rt.watchCancels {
+			cancel()
+		}
+		rt.watchMu.Unlock()
+	})
+
+	cfg := RunConfig{
+		Name:      "auth-agent",
+		HomeDir:   homeDir,
+		Workspace: filepath.Join(tmpDir, "workspace"),
+		Image:     "omni-image",
+		Harness: &mockHarness{
+			command: []string{"gemini"},
+			env:     map[string]string{},
+		},
+		ResolvedAuth: &api.ResolvedAuth{
+			Method: "vertex-ai",
+			EnvVars: map[string]string{
+				"GOOGLE_CLOUD_PROJECT":  "test-project",
+				"GOOGLE_CLOUD_REGION":   "us-central1",
+				"GOOGLE_CLOUD_LOCATION": "us-central1",
+			},
+		},
+	}
+
+	_ = os.MkdirAll(cfg.Workspace, 0755)
+
+	_, err := rt.Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	// Read the recorded args and verify auth env vars are present.
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("failed to read mock binary args: %v", err)
+	}
+	args := string(argsData)
+
+	for _, wantEnv := range []string{
+		"GOOGLE_CLOUD_PROJECT=test-project",
+		"GOOGLE_CLOUD_REGION=us-central1",
+		"GOOGLE_CLOUD_LOCATION=us-central1",
+	} {
+		if !strings.Contains(args, wantEnv) {
+			t.Errorf("sandbox args missing resolved auth env %q\nfull args:\n%s", wantEnv, args)
+		}
+	}
+}
+
+// -----------------------------------------------------------------------
 // P3a behaviour-identity test (#127)
 //
 // P3a adds env classifications alongside the env map but changes nothing

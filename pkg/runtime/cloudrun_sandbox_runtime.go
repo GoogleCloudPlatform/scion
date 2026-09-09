@@ -821,6 +821,15 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	// Build environment.
 	env := envFor(cfg, paths)
 
+	// Apply resolved auth env vars (mirrors Docker path at common.go:289-290).
+	// Without this, auth env vars like GOOGLE_CLOUD_PROJECT and
+	// GOOGLE_CLOUD_LOCATION do not reach the sandbox process.
+	if cfg.ResolvedAuth != nil {
+		for k, v := range cfg.ResolvedAuth.EnvVars {
+			env[k] = v
+		}
+	}
+
 	// Build entrypoint command.
 	entrypoint, err := buildEntrypoint(cfg)
 	if err != nil {

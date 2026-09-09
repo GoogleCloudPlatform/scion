@@ -269,6 +269,7 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	}
 	if auth.GoogleCloudRegion != "" {
 		resolved.EnvVars["GOOGLE_CLOUD_REGION"] = auth.GoogleCloudRegion
+		resolved.EnvVars["GOOGLE_CLOUD_LOCATION"] = auth.GoogleCloudRegion
 	}
 
 	// Forward all config-driven auth env vars gathered from harness config
