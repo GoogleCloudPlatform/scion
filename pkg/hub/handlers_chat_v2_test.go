@@ -2470,6 +2470,9 @@ func TestDEF96_PromoteDM_HistoryVisibleOnFirstRead(t *testing.T) {
 	}
 
 	// Wildcard guard: the unrelated unstamped message must NOT have moved.
+	// NOTE: this cannot detect a wildcard — directConvID is non-empty
+	// throughout this test, so the `<> ''` guard is never exercised.
+	// Real coverage: TestPromoteDM_WildcardGuard_UnresolvedDirectConversation.
 	unrelatedFilter := store.MessageFilter{Channel: "web", ThreadID: "some-other-thread"}
 	unrelatedResult, unrelatedErr := s.ListMessages(ctx, unrelatedFilter, store.ListOptions{Limit: 10})
 	if unrelatedErr != nil {
