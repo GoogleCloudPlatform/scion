@@ -65,7 +65,11 @@ function openTerminalPopout(agentId: string): void {
     'scrollbars=yes',
   ].join(',');
 
-  const win = window.open(`/agents/${agentId}/terminal`, `scion-term-${agentId}`, features);
+  const path = `/agents/${agentId}/terminal`;
+  const base = import.meta.env.BASE_URL;
+  const url = base && base !== '/' ? base.replace(/\/$/, '') + path : path;
+
+  const win = window.open(url, `scion-term-${agentId}`, features);
   if (win) {
     win.focus();
     return;
