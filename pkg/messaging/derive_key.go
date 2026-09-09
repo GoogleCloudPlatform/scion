@@ -167,9 +167,10 @@ func WithDefaultAgentID(id *string) ConversationByKeyOption {
 //
 // When a TopicConversationLookup is provided via WithKeyTopicLookup, the function
 // intercepts "thread:" group refs and attempts to resolve via the webchat topic's
-// linked conversation_id. This is the sink-level guard that prevents all paths
-// from minting shadow conversations for native topics that already have a
-// conversation.
+// linked conversation_id. This intercept is the sole guard for pre-fix topics
+// (external_ref = '') and belt-and-braces for post-fix topics
+// (external_ref = 'thread:…') that also converge via the partial unique index.
+// See DEF-156 §3.4 for the mixed population rationale.
 func ResolveOrCreateConversationByKey(
 	ctx context.Context,
 	cs ConversationUpserter,
@@ -186,9 +187,16 @@ func ResolveOrCreateConversationByKey(
 
 	// Topic lookup intercept: when kind is "group" and extRef has a
 	// "thread:" prefix, attempt to resolve via the webchat topic's
-	// linked conversation_id. This is the sink-level guard that
-	// prevents all paths from minting shadow conversations for
-	// native topics that already have a conversation.
+	// linked conversation_id. This intercept prevents the live write
+	// path from minting shadow conversations for native topics that
+	// already have a conversation.
+	//
+	// Mixed population (DEF-156): pre-fix topic conversations have
+	// external_ref = '' and rely on this intercept as their only guard.
+	// Post-fix topics write external_ref = 'thread:<project>:<topicID>'
+	// and converge via the partial unique index, making this intercept
+	// redundant for them. It stays as belt-and-braces for the pre-fix
+	// population until the switch collapse normalises them.
 	if cfg.topicLookup != nil && kind == "group" && strings.HasPrefix(extRef, "thread:") {
 		// Extract threadID from "thread:<projectID>:<threadID>"
 		parts := strings.SplitN(extRef, ":", 3)
