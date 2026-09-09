@@ -456,13 +456,17 @@ export class ScionEffectiveRoleProvenance extends LitElement {
     try {
       // Fetch role bindings for this principal (direct and group-derived)
       const url = `/api/v1/admin/role-bindings?principalType=${encodeURIComponent(this.principalType)}&principalId=${encodeURIComponent(this.principalId)}&includeGroupDerived=true`;
-      const res = await apiFetch(url);
+      // suppressAccessDeniedToast: this component renders the failure inline
+      // ("Insufficient permissions" with a Retry button), so a global toast is
+      // a duplicate notification — the same RC-C rationale as the mutation
+      // probes below.
+      const res = await apiFetch(url, { suppressAccessDeniedToast: true });
 
       if (!res.ok) {
         // Fall back to fetching just the direct bindings without the
         // includeGroupDerived parameter (which may not be supported yet).
         const fallbackUrl = `/api/v1/admin/role-bindings?principalType=${encodeURIComponent(this.principalType)}&principalId=${encodeURIComponent(this.principalId)}`;
-        const fallbackRes = await apiFetch(fallbackUrl);
+        const fallbackRes = await apiFetch(fallbackUrl, { suppressAccessDeniedToast: true });
 
         if (!fallbackRes.ok) {
           throw new Error(await extractApiError(fallbackRes, `HTTP ${fallbackRes.status}`));

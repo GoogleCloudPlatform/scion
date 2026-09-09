@@ -265,7 +265,13 @@ export class ScionPageMetrics extends LitElement {
       const basePath = this.projectId
         ? `/api/v1/projects/${this.projectId}/metrics`
         : `/api/v1/metrics/`;
-      const response = await apiFetch(`${basePath}?view=${view}&period=${this.periodDays}`);
+      // suppressAccessDeniedToast: a failure is surfaced in this.error and
+      // rendered by the page. Each view is a separate request and the dashboard
+      // reloads on a timer, so leaving the toast on produces a stream of
+      // duplicates rather than one actionable message.
+      const response = await apiFetch(`${basePath}?view=${view}&period=${this.periodDays}`, {
+        suppressAccessDeniedToast: true,
+      });
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
