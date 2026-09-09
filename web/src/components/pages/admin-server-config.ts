@@ -1621,8 +1621,8 @@ export class ScionPageAdminServerConfig extends LitElement {
           const match = this.runtimeBrokers.find(
             (b) =>
               b.id === this.defaultRuntimeBroker ||
-              b.name === this.defaultRuntimeBroker ||
-              b.slug === this.defaultRuntimeBroker
+              (b.name && b.name.toLowerCase() === this.defaultRuntimeBroker.toLowerCase()) ||
+              (b.slug && b.slug.toLowerCase() === this.defaultRuntimeBroker.toLowerCase())
           );
           if (match && match.id !== this.defaultRuntimeBroker) {
             this.defaultRuntimeBroker = match.id;

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -1068,7 +1069,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 	// provider for this project and must be online and dispatchable.
 	if hubDefault := s.hubAgentDefaults().DefaultRuntimeBroker; hubDefault != "" {
 		for _, h := range availableBrokers {
-			if h.ID == hubDefault || h.Name == hubDefault || h.Slug == hubDefault {
+			if h.ID == hubDefault || strings.EqualFold(h.Name, hubDefault) || strings.EqualFold(h.Slug, hubDefault) {
 				if s.canDispatchToBroker(ctx, &h) {
 					slog.Info("Using hub-level default runtime broker",
 						"broker", h.Name, "brokerID", h.ID, "project_id", project.ID)

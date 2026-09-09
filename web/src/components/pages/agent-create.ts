@@ -541,8 +541,8 @@ export class ScionPageAgentCreate extends LitElement {
       const hubBroker = this.brokers.find(
         (b) =>
           b.id === this.hubDefaultRuntimeBroker ||
-          b.name === this.hubDefaultRuntimeBroker ||
-          b.slug === this.hubDefaultRuntimeBroker
+          (b.name && b.name.toLowerCase() === this.hubDefaultRuntimeBroker.toLowerCase()) ||
+          (b.slug && b.slug.toLowerCase() === this.hubDefaultRuntimeBroker.toLowerCase())
       );
       if (hubBroker) {
         this.brokerId = hubBroker.id;
