@@ -1207,6 +1207,17 @@ func (s *Server) findBrokerByIDOrSlug(ctx context.Context, identifier string) (*
 	return nil, store.ErrNotFound
 }
 
+// agentHasGCPIdentityAssigned returns true when the agent's own GCPIdentity
+// config has MetadataMode set to assign or passthrough, mirroring the broker's
+// check at pkg/runtimebroker/handlers.go:2186-2187.
+func agentHasGCPIdentityAssigned(agent *store.Agent) bool {
+	if agent.AppliedConfig.GCPIdentity == nil {
+		return false
+	}
+	mode := agent.AppliedConfig.GCPIdentity.MetadataMode
+	return mode == store.GCPMetadataModeAssign || mode == store.GCPMetadataModePassthrough
+}
+
 // hasRequiredAuthCredentials checks whether the required auth environment
 // variables and file secrets for the given harness type are available in the
 // agent's env, or in the hub's env/secret stores (user and project scopes).
@@ -1225,14 +1236,8 @@ func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Ag
 		if err != nil {
 			return false, err
 		}
-		// Also check agent's own GCP identity config (mirrors broker logic
-		// at handlers.go:2186-2187). Passthrough-to-assign translated agents
-		// have MetadataMode=assign but no project-scoped SA record.
-		if !gcpSAAssigned && agent.AppliedConfig.GCPIdentity != nil {
-			mode := agent.AppliedConfig.GCPIdentity.MetadataMode
-			if mode == store.GCPMetadataModeAssign || mode == store.GCPMetadataModePassthrough {
-				gcpSAAssigned = true
-			}
+		if !gcpSAAssigned {
+			gcpSAAssigned = agentHasGCPIdentityAssigned(agent)
 		}
 		for authType := range authMeta.Types {
 			satisfied, err := s.isAuthTypeSatisfied(ctx, agent, authMeta, authType, gcpSAAssigned)
@@ -1267,14 +1272,8 @@ func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Ag
 		if err != nil {
 			return false, err
 		}
-		// Also check agent's own GCP identity config (mirrors broker logic
-		// at handlers.go:2186-2187). Passthrough-to-assign translated agents
-		// have MetadataMode=assign but no project-scoped SA record.
-		if !gcpSAAssigned && agent.AppliedConfig.GCPIdentity != nil {
-			mode := agent.AppliedConfig.GCPIdentity.MetadataMode
-			if mode == store.GCPMetadataModeAssign || mode == store.GCPMetadataModePassthrough {
-				gcpSAAssigned = true
-			}
+		if !gcpSAAssigned {
+			gcpSAAssigned = agentHasGCPIdentityAssigned(agent)
 		}
 		fileSecrets := harness.RequiredAuthSecretsFromConfig(authMeta, agent.AppliedConfig.HarnessAuth, gcpSAAssigned)
 		for _, fs := range fileSecrets {
