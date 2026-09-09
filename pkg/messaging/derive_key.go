@@ -168,7 +168,7 @@ func WithDefaultAgentID(id *string) ConversationByKeyOption {
 // When a TopicConversationLookup is provided via WithKeyTopicLookup, the function
 // intercepts "thread:" group refs and attempts to resolve via the webchat topic's
 // linked conversation_id. This intercept is the sole guard for pre-fix topics
-// (external_ref = '') and belt-and-braces for post-fix topics
+// (external_ref = ”) and belt-and-braces for post-fix topics
 // (external_ref = 'thread:…') that also converge via the partial unique index.
 // See DEF-156 §3.4 for the mixed population rationale.
 func ResolveOrCreateConversationByKey(

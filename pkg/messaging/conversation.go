@@ -392,7 +392,7 @@ type ReadThreadOption func(*readThreadConfig)
 // topic's linked conversation_id — the same intercept the write path
 // (ResolveOrCreateConversationByKey) uses. Without this option the function
 // falls through to the external_ref lookup, which works for post-fix topics
-// (external_ref = 'thread:…') but fails for pre-fix topics (external_ref = '').
+// (external_ref = 'thread:…') but fails for pre-fix topics (external_ref = ”).
 // The intercept handles both populations (DEF-156).
 func WithReadTopicLookup(tl TopicConversationLookup) ReadThreadOption {
 	return func(c *readThreadConfig) { c.topicLookup = tl }
@@ -408,7 +408,7 @@ func WithReadTopicLookup(tl TopicConversationLookup) ReadThreadOption {
 // topic's linked conversation_id — the same intercept the write path has in
 // ResolveOrCreateConversationByKey. Order: topic lookup first; only if the
 // thread is not a native topic (store.ErrNotFound), fall through to the
-// external_ref lookup. Pre-fix topics (external_ref = '') resolve only via
+// external_ref lookup. Pre-fix topics (external_ref = ”) resolve only via
 // this intercept; post-fix topics (external_ref = 'thread:…') resolve via
 // either path (DEF-156).
 //

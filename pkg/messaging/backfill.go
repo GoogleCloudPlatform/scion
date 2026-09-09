@@ -100,18 +100,18 @@ func (r *BackfillResult) addResolutionFailure(msg string) {
 
 // conversationGroup collects messages that belong to the same conversation.
 type conversationGroup struct {
-	key          string // canonical key used for dedup
-	kind         string // "direct" or "group"
-	projectID    string
-	participants []participant // deduplicated participants
-	agentRef     string        // agent reference for DefaultAgent resolution
-	messageIDs   []string      // message IDs to stamp
-	driftState   string        // computed drift state
-	hazardA      bool          // Hazard (a): non-UUID sender/recipient
-	hazardB      bool          // Hazard (b): slug-based agent reference
-	surface      string        // derived surface for the group (DEF-156 P3)
-	channel      string        // raw channel of first message in group (DEF-156 P3)
-	channelConflict bool      // true if messages disagree on channel (DEF-156 P3)
+	key             string // canonical key used for dedup
+	kind            string // "direct" or "group"
+	projectID       string
+	participants    []participant // deduplicated participants
+	agentRef        string        // agent reference for DefaultAgent resolution
+	messageIDs      []string      // message IDs to stamp
+	driftState      string        // computed drift state
+	hazardA         bool          // Hazard (a): non-UUID sender/recipient
+	hazardB         bool          // Hazard (b): slug-based agent reference
+	surface         string        // derived surface for the group (DEF-156 P3)
+	channel         string        // raw channel of first message in group (DEF-156 P3)
+	channelConflict bool          // true if messages disagree on channel (DEF-156 P3)
 }
 
 // participant represents a conversation participant extracted from a message.
