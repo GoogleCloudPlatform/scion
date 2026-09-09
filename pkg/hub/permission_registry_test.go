@@ -104,13 +104,13 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 		ScopeAgentStatusUpdate: {"agent.status_update"},
 		ScopeAgentLogAppend:    {"agent.log_append"},
 		ScopeProjectSecretRead: {"project.secret_read"},
-		ScopeAgentCreate:       {"agent.create"},
+		ScopeAgentCreate:       {"agent.create", "gcp_service_account.assign"},
 		ScopeAgentLifecycle:    {"agent.attach", "agent.delete"},
 		ScopeAgentNotify:       {"agent.notify"},
 		ScopeAgentTokenRefresh: {"agent.token_refresh"},
 		ScopeAgentPortForward:  {"agent.port_forward"},
 		ScopeIdentityToken:     {"agent.identity_token"},
-		ScopeProjectRead:       {"project.read"},
+		ScopeProjectRead:       {"harness_config.list", "harness_config.read", "project.read", "template.list", "template.read"},
 	}
 	for scope, wantIDs := range want {
 		gotIDs := registryPermissionIDsForAgentScope(string(scope))
