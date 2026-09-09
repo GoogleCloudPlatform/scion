@@ -1732,6 +1732,12 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				return
 			}
 			ws.logger().Info("Proxy auth: created new user", "email", proxyUser.Email, "user_id", user.ID)
+			// Cold-start fix: when a new user is provisioned as admin,
+			// immediately create the system-scoped super-admin RoleBinding
+			// (mirrors provisionUser in handlers_auth.go).
+			if user.Role == "admin" {
+				ensureSuperAdminRoleBinding(ctx, ws.store, user.ID)
+			}
 		} else {
 			// Reject suspended users
 			if user.Status == "suspended" {
@@ -1739,18 +1745,58 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				ws.serveSuspendedResponse(w, r, proxyUser.Email)
 				return
 			}
-			// Update last login and backfill profile
-			user.LastLogin = time.Now()
-			if proxyUser.DisplayName != "" && user.DisplayName == "" {
-				user.DisplayName = proxyUser.DisplayName
-			}
-			// Re-evaluate admin status on every login (matches handleOAuthCallback / provisionUser)
-			if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe()); user.Role != newRole {
-				ws.logger().Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", user.Role, "new_role", newRole)
-				user.Role = newRole
+
+			// Track whether we need to create or delete a super-admin
+			// RoleBinding. The actual mutation is deferred until after
+			// UpdateUser succeeds so that a failed UpdateUser cannot leave
+			// the binding state diverged from User.Role.
+			var bindingSuperAdmin string // "", "ensure", or "delete"
+
+			if user.Status == store.UserStatusInvited {
+				// Transition invited → active on first login
+				// (mirrors handleOAuthCallback's invited→active block)
+				ws.logger().Info("user activated from invited state via proxy auth", "email", proxyUser.Email, "user_id", user.ID)
+				user.Status = store.UserStatusActive
+				if proxyUser.DisplayName != "" {
+					user.DisplayName = proxyUser.DisplayName
+				}
+				user.LastLogin = time.Now()
+				oldRole := user.Role
+				user.Role = determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe())
+				if oldRole == "admin" && user.Role != "admin" {
+					bindingSuperAdmin = "delete"
+				} else if user.Role == "admin" {
+					bindingSuperAdmin = "ensure"
+				}
+				ws.logger().Info("invite audit: user_activated", "email", proxyUser.Email, "user_id", user.ID)
+			} else {
+				// Update last login and backfill profile
+				user.LastLogin = time.Now()
+				if proxyUser.DisplayName != "" && user.DisplayName == "" {
+					user.DisplayName = proxyUser.DisplayName
+				}
+				// Re-evaluate admin status on every login (matches handleOAuthCallback / provisionUser)
+				if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe()); user.Role != newRole {
+					oldRole := user.Role
+					ws.logger().Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", oldRole, "new_role", newRole)
+					user.Role = newRole
+					if oldRole == "admin" {
+						bindingSuperAdmin = "delete"
+					} else if newRole == "admin" {
+						bindingSuperAdmin = "ensure"
+					}
+				}
 			}
 			if err := ws.store.UpdateUser(ctx, user); err != nil {
 				ws.logger().Warn("Failed to update user via proxy auth", "email", proxyUser.Email, "error", err)
+			} else {
+				// Apply binding changes only after UpdateUser has succeeded.
+				switch bindingSuperAdmin {
+				case "ensure":
+					ensureSuperAdminRoleBinding(ctx, ws.store, user.ID)
+				case "delete":
+					deleteSuperAdminRoleBinding(ctx, ws.store, user.ID)
+				}
 			}
 		}
 
@@ -2015,6 +2061,12 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			http.Redirect(w, r, "/login?error=user_create_failed", http.StatusFound)
 			return
 		}
+		// Cold-start fix: when a new user is provisioned as admin,
+		// immediately create the system-scoped super-admin RoleBinding
+		// (mirrors provisionUser in handlers_auth.go).
+		if user.Role == "admin" {
+			ensureSuperAdminRoleBinding(ctx, ws.store, user.ID)
+		}
 	} else {
 		// Reject suspended users
 		if user.Status == store.UserStatusSuspended {
@@ -2022,6 +2074,12 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			http.Redirect(w, r, "/login?error=suspended", http.StatusFound)
 			return
 		}
+
+		// Track whether we need to create or delete a super-admin
+		// RoleBinding. The actual mutation is deferred until after
+		// UpdateUser succeeds so that a failed UpdateUser cannot leave
+		// the binding state diverged from User.Role.
+		var bindingSuperAdmin string // "", "ensure", or "delete"
 
 		if user.Status == store.UserStatusInvited {
 			// Transition invited → active on first login
@@ -2036,7 +2094,13 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 				user.AvatarURL = userInfo.AvatarURL
 			}
 			user.LastLogin = time.Now()
+			oldRole := user.Role
 			user.Role = determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe())
+			if oldRole == "admin" && user.Role != "admin" {
+				bindingSuperAdmin = "delete"
+			} else if user.Role == "admin" {
+				bindingSuperAdmin = "ensure"
+			}
 			// Log the activation via slog (WebServer does not have a structured
 			// audit logger; the hub.Server audit path covers API/CLI auth).
 			ws.logger().Info("invite audit: user_activated", "email", userInfo.Email, "user_id", user.ID)
@@ -2052,12 +2116,26 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			// Re-evaluate admin status on every login
 			newRole := determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe())
 			if user.Role != newRole {
-				ws.logger().Info("User role changed on login", "email", userInfo.Email, "old_role", user.Role, "new_role", newRole)
+				oldRole := user.Role
+				ws.logger().Info("User role changed on login", "email", userInfo.Email, "old_role", oldRole, "new_role", newRole)
 				user.Role = newRole
+				if oldRole == "admin" {
+					bindingSuperAdmin = "delete"
+				} else if newRole == "admin" {
+					bindingSuperAdmin = "ensure"
+				}
 			}
 		}
 		if err := ws.store.UpdateUser(ctx, user); err != nil {
 			ws.logger().Warn("Failed to update user on login", "email", userInfo.Email, "error", err)
+		} else {
+			// Apply binding changes only after UpdateUser has succeeded.
+			switch bindingSuperAdmin {
+			case "ensure":
+				ensureSuperAdminRoleBinding(ctx, ws.store, user.ID)
+			case "delete":
+				deleteSuperAdminRoleBinding(ctx, ws.store, user.ID)
+			}
 		}
 	}
 
