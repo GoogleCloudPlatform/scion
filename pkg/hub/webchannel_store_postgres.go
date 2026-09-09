@@ -577,6 +577,29 @@ func (s *pgWebChatStore) EnsureGeneralTopic(ctx context.Context, projectID, crea
 	newID := uuid.New().String()
 	convID := uuid.New().String()
 
+	// DEF-156: derive the external_ref that will be written on the linked
+	// conversation row, using the same derivation as CreateTopic and Route 3.
+	extRef, extRefErr := messaging.ThreadConversationExternalRef(projectID, newID)
+	if extRefErr != nil {
+		return "", false, fmt.Errorf("webchat store: derive conversation key for general topic: %w", extRefErr)
+	}
+
+	// DEF-156: pre-mint lookup on the ambient pool BEFORE BeginTx.
+	// If a conversation with this derived key already exists, link to it
+	// instead of minting a new one.
+	var existingConvID string
+	needMint := true
+	lookupErr := s.db.QueryRow(
+		`SELECT id FROM conversations WHERE surface = 'native' AND external_ref = $1 AND deleted_at IS NULL`,
+		extRef).Scan(&existingConvID)
+	if lookupErr != nil && lookupErr != sql.ErrNoRows {
+		return "", false, fmt.Errorf("webchat store: pre-mint conversation lookup for general topic: %w", lookupErr)
+	}
+	if existingConvID != "" {
+		needMint = false
+		convID = existingConvID
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", false, fmt.Errorf("webchat store: begin ensure general tx: %w", err)
@@ -594,15 +617,17 @@ ON CONFLICT DO NOTHING
 	}
 
 	inserted, _ := res.RowsAffected()
-	if inserted > 0 {
+	if inserted > 0 && needMint {
+		// New topic was created and no pre-existing conversation found —
+		// create the linked conversation with the derived external_ref.
 		// DEF-36: group conversations do NOT populate the participant listing index.
 		// Group conversation participants are derived from project membership, not
 		// from an explicit participant table. The participant table is a listing
 		// index, NEVER the access authority (design doc §2.4.2.1).
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-			 VALUES ($1, $2, 'group', 'native', '', '', 'general', 'active', NOW(), NOW())`,
-			convID, projectID)
+			 VALUES ($1, $2, 'group', 'native', $3, '', 'general', 'active', NOW(), NOW())`,
+			convID, projectID, extRef)
 		if err != nil {
 			return "", false, fmt.Errorf("webchat store: create conversation for general topic: %w", err)
 		}

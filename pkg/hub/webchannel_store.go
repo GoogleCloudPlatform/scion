@@ -960,9 +960,34 @@ func (s *sqliteWebChatStore) EnsureGeneralTopic(ctx context.Context, projectID, 
 	convID := uuid.New().String()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	// INVARIANT U-TX-1: check hasConversationsTable() BEFORE BeginTx —
-	// it uses s.db.QueryRow which would deadlock inside a tx at MaxOpenConns=1.
+	// DEF-156: derive the external_ref that will be written on the linked
+	// conversation row, using the same derivation as CreateTopic and Route 3.
+	extRef, extRefErr := messaging.ThreadConversationExternalRef(projectID, newID)
+	if extRefErr != nil {
+		return "", false, fmt.Errorf("webchat store: derive conversation key for general topic: %w", extRefErr)
+	}
+
+	// INVARIANT U-TX-1: all ambient-pool queries (hasConversationsTable,
+	// pre-mint lookup) MUST complete BEFORE BeginTx. At MaxOpenConns=1
+	// a s.db call inside the tx deadlocks.
 	hasConvTable := s.hasConversationsTable()
+
+	// DEF-156: pre-mint lookup — check whether a conversation with this
+	// derived key already exists. If so, link to it instead of minting.
+	var existingConvID string
+	needMint := true
+	if hasConvTable {
+		lookupErr := s.db.QueryRow(
+			`SELECT id FROM conversations WHERE surface = 'native' AND external_ref = ? AND deleted_at IS NULL`,
+			extRef).Scan(&existingConvID)
+		if lookupErr != nil && lookupErr != sql.ErrNoRows {
+			return "", false, fmt.Errorf("webchat store: pre-mint conversation lookup for general topic: %w", lookupErr)
+		}
+		if existingConvID != "" {
+			needMint = false
+			convID = existingConvID
+		}
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -992,16 +1017,17 @@ ON CONFLICT DO NOTHING`
 	}
 
 	inserted, _ := res.RowsAffected()
-	if inserted > 0 && hasConvTable {
-		// New topic was created — also create the linked conversation.
+	if inserted > 0 && hasConvTable && needMint {
+		// New topic was created and no pre-existing conversation found —
+		// create the linked conversation with the derived external_ref.
 		// DEF-36: group conversations do NOT populate the participant listing index.
 		// Group conversation participants are derived from project membership, not
 		// from an explicit participant table. The participant table is a listing
 		// index, NEVER the access authority (design doc §2.4.2.1).
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-			 VALUES (?, ?, 'group', 'native', '', '', 'general', 'active', ?, ?)`,
-			convID, projectID, now, now)
+			 VALUES (?, ?, 'group', 'native', ?, '', 'general', 'active', ?, ?)`,
+			convID, projectID, extRef, now, now)
 		if err != nil {
 			return "", false, fmt.Errorf("webchat store: create conversation for general topic: %w", err)
 		}
