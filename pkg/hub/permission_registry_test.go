@@ -122,6 +122,9 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 			"template.list",
 			"template.read",
 		},
+		// Write access to templates within the agent's own project.
+		// Deliberately excludes template.delete - see the scope declaration.
+		ScopeProjectTemplateWrite: {"template.create", "template.update"},
 	}
 	for scope, wantIDs := range want {
 		gotIDs := registryPermissionIDsForAgentScope(string(scope))
