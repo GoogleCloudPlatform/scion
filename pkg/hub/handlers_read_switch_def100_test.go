@@ -20,13 +20,13 @@ package hub
 //
 // These tests exercise the full producer/consumer key contract: the topic
 // is created through the real CreateTopic path (production writer), which
-// writes external_ref = '' on the conversations row and stores conversation_id
-// on the webchat_topic row. The read path must resolve via the topic lookup
-// intercept, not via external_ref.
+// stores conversation_id on the webchat_topic row and writes a conversation
+// row. Post DEF-156 P2, the external_ref is 'thread:<project>:<topicID>';
+// pre-fix topics have external_ref = '' (the mixed population).
 //
-// A test that seeds its own conversation row with a well-formed external_ref
-// (like the pre-DEF-100 tests) cannot detect the mismatch that caused every
-// native web thread to return 409.
+// The read path resolves via the topic lookup intercept for both populations.
+// Post DEF-156, the external_ref lookup also works for new topics, but the
+// intercept remains as belt-and-braces for the pre-fix population.
 
 import (
 	"bytes"
@@ -61,8 +61,8 @@ func TestDEF100_T1_ProductionWriter_ReadResolver(t *testing.T) {
 	topicID := uuid.New().String()
 	projectID := "proj-def100-t1"
 
-	// Step 1: create topic via the production writer. This auto-generates a
-	// conversation_id and writes external_ref = '' on the conversations row.
+	// Step 1: create topic via the production writer. Post DEF-156 P2, this
+	// writes external_ref = 'thread:<project>:<topicID>' on the conversations row.
 	err := wcs.CreateTopic(ctx, WebChatTopic{
 		ID:        topicID,
 		ProjectID: projectID,
@@ -75,10 +75,15 @@ func TestDEF100_T1_ProductionWriter_ReadResolver(t *testing.T) {
 	}
 
 	// Verify preconditions: topic has a conversation_id, conversation row
-	// has external_ref = ''.
+	// has the derived external_ref (post DEF-156 P2).
 	convID := getTopicConvID(t, db, topicID)
 	if convID == "" {
 		t.Fatal("precondition: topic should have auto-generated conversation_id")
+	}
+
+	expectedExtRef, extRefErr := messaging.ThreadConversationExternalRef(projectID, topicID)
+	if extRefErr != nil {
+		t.Fatalf("precondition: ThreadConversationExternalRef: %v", extRefErr)
 	}
 
 	var extRef string
@@ -86,9 +91,9 @@ func TestDEF100_T1_ProductionWriter_ReadResolver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("precondition: conversations row query: %v", err)
 	}
-	if extRef != "" {
-		t.Fatalf("precondition: expected external_ref='', got %q — "+
-			"the production writer is supposed to write empty external_ref for native topics", extRef)
+	if extRef != expectedExtRef {
+		t.Fatalf("precondition: expected external_ref=%q, got %q — "+
+			"post DEF-156 P2, CreateTopic should write the derived key", expectedExtRef, extRef)
 	}
 
 	// Step 2: resolve via the read path WITH topic lookup.
@@ -110,18 +115,6 @@ func TestDEF100_T1_ProductionWriter_ReadResolver(t *testing.T) {
 	if result.ConversationID != convID {
 		t.Errorf("DEF-100: expected conversation_id %q, got %q",
 			convID, result.ConversationID)
-	}
-
-	// Step 3: verify the OLD path (without topic lookup) would FAIL.
-	// This proves the test is not vacuous.
-	resultOld := messaging.ResolveThreadConversationForRead(
-		ctx, cr, logger,
-		topicID, projectID) // no WithReadTopicLookup
-
-	if resultOld != nil {
-		t.Errorf("DEF-100 control: without topic lookup, the resolver should "+
-			"return nil (external_ref is empty), got %+v — this means the test "+
-			"is vacuous or external_ref was unexpectedly populated", resultOld)
 	}
 }
 

@@ -694,7 +694,8 @@ func (s *sqliteWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic
 
 	// DEF-89: when no ConversationID is provided and the conversations table
 	// exists, generate one so the existing dual-write branch creates the
-	// conversation atomically.
+	// conversation atomically. DEF-156 P2: the external_ref is now derived
+	// from (projectID, topicID) via ThreadConversationExternalRef, not ''.
 	if topic.ConversationID == "" && hasConvTable {
 		topic.ConversationID = uuid.New().String()
 	}
