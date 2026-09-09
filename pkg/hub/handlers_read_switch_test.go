@@ -242,7 +242,7 @@ func (s *rsWebChatStore) SetMessageDeleted(_ context.Context, _ string, _ time.T
 	return nil
 }
 func (s *rsWebChatStore) UpdateMessageContent(context.Context, string, string) error { return nil }
-func (s *rsWebChatStore) PromoteDM(context.Context, WebChatTopic, string) (*WebChatTopic, error) {
+func (s *rsWebChatStore) PromoteDM(context.Context, WebChatTopic, PromoteKeys) (*WebChatTopic, error) {
 	return nil, nil
 }
 func (s *rsWebChatStore) UpdateThreadID(context.Context, string, string) (int, error) { return 0, nil }

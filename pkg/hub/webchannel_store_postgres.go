@@ -1612,7 +1612,17 @@ func (s *pgWebChatStore) MigrateReadState(ctx context.Context, oldKey, newKey st
 
 // PromoteDM atomically promotes a DM conversation into a space thread.
 // When ConversationID is set on topic, a linked conversations row is also created.
-func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, dmKey string) (*WebChatTopic, error) {
+func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys PromoteKeys) (*WebChatTopic, error) {
+	dmKey := keys.DMKey
+	directConvID := keys.DirectConversationID
+	// DEF-96 / DEF-89 pattern: when no ConversationID is provided, generate one
+	// unconditionally. Matches pg CreateTopic at webchannel_store_postgres.go:328-330:
+	// Postgres migrations guarantee the conversations table, so the sqlite
+	// hasConversationsTable() gate is unnecessary here.
+	if topic.ConversationID == "" {
+		topic.ConversationID = uuid.New().String()
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: begin promote tx: %w", err)
@@ -1654,10 +1664,36 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, dmKe
 		}
 	}
 
-	// Step 2: Re-key all messages
-	res, err := tx.ExecContext(ctx,
-		`UPDATE messages SET thread_id = $1 WHERE thread_id = $2`,
-		topic.ID, dmKey)
+	// Step 2: Re-key all messages — set thread_id AND conversation_id in a
+	// single UPDATE so there is no window where one has moved and the other
+	// has not.
+	//
+	// The WHERE uses two arms:
+	//   1. conversation_id = directConvID (modern population — 99.7% of DM rows)
+	//   2. thread_id = dmKey (legacy arm — pre-conversation-stamp rows)
+	// The $N <> '' guard on arm 1 prevents an empty directConvID from matching
+	// every unstamped message on the hub (design §3.1 C2).
+	//
+	// C2a guard: if topic.ConversationID is empty, set only thread_id to
+	// avoid blanking conversation_id on moved rows (design §3.1 C2a).
+	var res sql.Result
+	if topic.ConversationID != "" {
+		res, err = tx.ExecContext(ctx,
+			`UPDATE messages SET thread_id = $1, conversation_id = $2
+			 WHERE ($3 <> '' AND conversation_id = $3)
+			    OR thread_id = $4`,
+			topic.ID, topic.ConversationID,
+			directConvID,
+			dmKey)
+	} else {
+		res, err = tx.ExecContext(ctx,
+			`UPDATE messages SET thread_id = $1
+			 WHERE ($2 <> '' AND conversation_id = $2)
+			    OR thread_id = $3`,
+			topic.ID,
+			directConvID,
+			dmKey)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: re-key messages in promote: %w", err)
 	}

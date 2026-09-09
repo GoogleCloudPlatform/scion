@@ -2246,6 +2246,644 @@ func TestChatV2_ClearTopicDefaultAgent(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// DEF-96: DM promotion handler-level tests
+// ---------------------------------------------------------------------------
+
+// TestDEF96_PromoteDM_HistoryVisibleOnFirstRead verifies AC-96-1: after
+// promoting a DM containing ≥2 messages, the new thread's history endpoint
+// returns exactly those messages on the first read, with no hub restart.
+//
+// Also verifies:
+//   - AC-96-2: topic.conversation_id non-empty, conversations row exists (kind=group),
+//     every re-keyed message names it.
+//   - AC-96-3: direct conversation row is unchanged after promotion (D-1).
+//   - AC-96-4: new DM to the same agent reuses the existing direct conversation (same id).
+func TestDEF96_PromoteDM_HistoryVisibleOnFirstRead(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// --- Setup: project, agent, webchat store sharing ent DB ---
+
+	proj := &store.Project{
+		ID: tid("def96-proj"), Name: "def96-proj", Slug: "def96-proj",
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	agentID := tid("def96-agent")
+	agent := &store.Agent{
+		ID:        agentID,
+		ProjectID: proj.ID,
+		Name:      "DEF96 Bot",
+		Slug:      "def96-bot",
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	// Share the ent store's underlying DB with the webchat store so
+	// PromoteDM's UPDATE on messages is visible to ListMessages.
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	if !ok {
+		t.Fatal("store does not expose DB()")
+	}
+	rawDB := dbProvider.DB()
+	if rawDB == nil {
+		t.Fatal("store DB() returned nil")
+	}
+	wcs := NewWebChatStore(rawDB, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init webchat store: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	// Enable envelope switch so history reads resolve via conversation_id.
+	enableWriteDenySwitch(t, srv)
+
+	// --- Seed DM data ---
+	dmKey := "dm:agent:" + agentID + ":user:" + DevUserID
+
+	// Create the direct conversation for the DM (simulates normal DM flow).
+	directConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertConversation (DM): %v", err)
+	}
+
+	// Record the direct conversation's participant set before promotion.
+	prePromoteParticipants, err := s.ListParticipants(ctx, directConv.ID)
+	if err != nil {
+		t.Fatalf("ListParticipants before: %v", err)
+	}
+
+	// Seed DM messages via the ent store. The fixture mirrors production:
+	//   - User messages carry thread_id = dmKey AND conversation_id = directConvID
+	//   - Agent replies carry conversation_id = directConvID but NO thread_id
+	//     (the agent messaging path takes ThreadID from the caller, and agents
+	//     replying into a DM do not supply one — 99.7% of real DM messages).
+	//
+	// A fixture that sets thread_id on every row would have passed against the
+	// old, nearly inert WHERE thread_id = dmKey predicate and proved nothing
+	// about the P0 predicate widening.
+	//
+	// DispatchState must be "dispatched" to avoid triggering the
+	// IN_FLIGHT_MESSAGES guard in the promote handler.
+	baseTime := time.Now().UTC().Add(-10 * time.Second)
+	type msgFixture struct {
+		id, sender, senderID, recipient, threadID, content string
+	}
+	// 1 user message, 4 agent replies — agent replies dominate, matching production.
+	fixtures := []msgFixture{
+		{tid("def96-msg-0"), "user:dev@localhost", DevUserID, "agent:" + agentID, dmKey, "hello agent"},
+		{tid("def96-msg-1"), "agent:" + agentID, agentID, "user:dev@localhost", "", "hi back from agent"},
+		{tid("def96-msg-2"), "agent:" + agentID, agentID, "user:dev@localhost", "", "let me explain"},
+		{tid("def96-msg-3"), "agent:" + agentID, agentID, "user:dev@localhost", "", "here is the answer"},
+		{tid("def96-msg-4"), "user:dev@localhost", DevUserID, "agent:" + agentID, dmKey, "thanks"},
+	}
+	expectedIDs := make([]string, len(fixtures))
+	for i, f := range fixtures {
+		expectedIDs[i] = f.id
+		msg := &store.Message{
+			ID:             f.id,
+			ProjectID:      proj.ID,
+			Sender:         f.sender,
+			SenderID:       f.senderID,
+			Recipient:      f.recipient,
+			Msg:            f.content,
+			Type:           "chat",
+			Channel:        "web",
+			ThreadID:       f.threadID,
+			ConversationID: directConv.ID,
+			DispatchState:  "dispatched",
+			CreatedAt:      baseTime.Add(time.Duration(i) * time.Second),
+		}
+		if err := s.CreateMessage(ctx, msg); err != nil {
+			t.Fatalf("CreateMessage[%d]: %v", i, err)
+		}
+	}
+	// Also plant an unrelated unstamped message to verify the wildcard guard:
+	// with an empty directConvID and no guard, conversation_id = '' would match
+	// every unstamped message on the hub. This message must NOT move.
+	unrelatedMsgID := tid("def96-unrelated")
+	unrelatedMsg := &store.Message{
+		ID:            unrelatedMsgID,
+		ProjectID:     proj.ID,
+		Sender:        "user:other@localhost",
+		SenderID:      tid("other-user"),
+		Recipient:     "agent:" + tid("other-agent"),
+		Msg:           "unrelated message",
+		Type:          "chat",
+		Channel:       "web",
+		ThreadID:      "some-other-thread",
+		DispatchState: "dispatched",
+		CreatedAt:     baseTime,
+		// ConversationID intentionally empty — unstamped row.
+	}
+	if err := s.CreateMessage(ctx, unrelatedMsg); err != nil {
+		t.Fatalf("CreateMessage (unrelated): %v", err)
+	}
+
+	// Register DM rows.
+	if err := wcs.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey,
+		ParticipantID:   DevUserID,
+		PeerID:          agentID,
+		PeerKind:        "agent",
+	}); err != nil {
+		t.Fatalf("UpsertDM: %v", err)
+	}
+
+	// --- Promote ---
+	promoteBody := map[string]string{"name": "DEF96 Promoted"}
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+dmKey+"/promote", promoteBody)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("promote: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var promResp promoteResponse
+	if err := json.NewDecoder(rec.Body).Decode(&promResp); err != nil {
+		t.Fatalf("decode promote response: %v", err)
+	}
+	if promResp.MessageCount != len(fixtures) {
+		t.Fatalf("promote messageCount = %d, want %d", promResp.MessageCount, len(fixtures))
+	}
+
+	// --- AC-96-2: promoteResponse carries conversationId ---
+	// Response-shape change: the returned WebChatTopic now includes
+	// ConversationID because the store mints it.
+	if promResp.ConversationID == "" {
+		t.Error("promoteResponse.ConversationID is empty — P2 minting did not fire")
+	}
+
+	// Verify the conversations row exists and is kind=group.
+	if promResp.ConversationID != "" {
+		groupConv, err := s.GetConversation(ctx, promResp.ConversationID)
+		if err != nil || groupConv == nil {
+			t.Errorf("group conversation not found: %v", err)
+		} else if groupConv.Kind != "group" {
+			t.Errorf("conversation kind = %q, want 'group'", groupConv.Kind)
+		}
+	}
+
+	// --- AC-96-1: read history on first attempt, no restart ---
+	// This is the assertion that matters for mutation testing: without
+	// minting (P2) or re-pointing (P1), the history endpoint either
+	// returns 0 messages or a non-200 status — both are a failure.
+	topicID := promResp.ID
+	histPath := "/api/v1/chat/conversations/" + topicID + "/messages"
+	rec = doRequest(t, srv, http.MethodGet, histPath, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("history: expected 200, got %d: %s — promoted thread has no visible history", rec.Code, rec.Body.String())
+	}
+
+	var histResp chatHistoryResponse
+	if err := json.NewDecoder(rec.Body).Decode(&histResp); err != nil {
+		t.Fatalf("decode history: %v", err)
+	}
+	if len(histResp.Messages) != len(fixtures) {
+		t.Fatalf("history returned %d messages, want %d — promoted messages are missing", len(histResp.Messages), len(fixtures))
+	}
+
+	// Verify every expected message appears, by id and by conversation_id.
+	gotIDs := make(map[string]bool, len(histResp.Messages))
+	for _, msg := range histResp.Messages {
+		gotIDs[msg.ID] = true
+		if msg.ConversationID != promResp.ConversationID {
+			t.Errorf("message %s conversation_id = %q, want %q",
+				msg.ID, msg.ConversationID, promResp.ConversationID)
+		}
+	}
+	for _, wantID := range expectedIDs {
+		if !gotIDs[wantID] {
+			t.Errorf("expected message %s in promoted thread history, but it was missing", wantID)
+		}
+	}
+
+	// Wildcard guard: the unrelated unstamped message must NOT have moved.
+	// NOTE: this cannot detect a wildcard — directConvID is non-empty
+	// throughout this test, so the `<> ''` guard is never exercised.
+	// Real coverage: TestPromoteDM_WildcardGuard_UnresolvedDirectConversation.
+	unrelatedFilter := store.MessageFilter{Channel: "web", ThreadID: "some-other-thread"}
+	unrelatedResult, unrelatedErr := s.ListMessages(ctx, unrelatedFilter, store.ListOptions{Limit: 10})
+	if unrelatedErr != nil {
+		t.Fatalf("ListMessages (unrelated): %v", unrelatedErr)
+	}
+	if len(unrelatedResult.Items) != 1 {
+		t.Errorf("unrelated message count = %d, want 1 — wildcard guard failed", len(unrelatedResult.Items))
+	} else if unrelatedResult.Items[0].ID != unrelatedMsgID {
+		t.Errorf("unrelated message id = %q, want %q", unrelatedResult.Items[0].ID, unrelatedMsgID)
+	}
+
+	// --- AC-96-3: direct conversation unchanged (D-1 invariant) ---
+	postConv, err := s.GetConversation(ctx, directConv.ID)
+	if err != nil || postConv == nil {
+		t.Fatalf("direct conversation disappeared: %v", err)
+	}
+	if postConv.Kind != "direct" {
+		t.Errorf("direct conversation kind changed to %q", postConv.Kind)
+	}
+	if postConv.ExternalRef != dmKey {
+		t.Errorf("direct conversation external_ref changed to %q", postConv.ExternalRef)
+	}
+	// Participant set must be identical.
+	postParticipants, err := s.ListParticipants(ctx, directConv.ID)
+	if err != nil {
+		t.Fatalf("ListParticipants after: %v", err)
+	}
+	if len(prePromoteParticipants) != len(postParticipants) {
+		t.Errorf("participant count changed: before=%d after=%d",
+			len(prePromoteParticipants), len(postParticipants))
+	}
+	for i := range prePromoteParticipants {
+		if i < len(postParticipants) && prePromoteParticipants[i].ID != postParticipants[i].ID {
+			t.Errorf("participant[%d] changed: %s → %s",
+				i, prePromoteParticipants[i].ID, postParticipants[i].ID)
+		}
+	}
+
+	// --- AC-96-4: new DM to the same agent reuses the same direct conversation ---
+	reusedConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertConversation (re-DM): %v", err)
+	}
+	if reusedConv.ID != directConv.ID {
+		t.Errorf("re-DM created new conversation %q, expected reuse of %q",
+			reusedConv.ID, directConv.ID)
+	}
+}
+
+// TestDEF96_PromoteDM_Atomicity verifies AC-96-5: forcing a failure at the
+// topic INSERT step rolls back the entire promotion — no conversation, no
+// moved messages.
+func TestDEF96_PromoteDM_Atomicity(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: tid("def96-atom"), Name: "def96-atom", Slug: "def96-atom",
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	agentID := tid("def96-atom-agent")
+	agent := &store.Agent{
+		ID: agentID, ProjectID: proj.ID, Name: "Atom Bot", Slug: "atom-bot",
+		Phase: "idle", OwnerID: DevUserID, CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	if !ok {
+		t.Fatal("store does not expose DB()")
+	}
+	rawDB := dbProvider.DB()
+	wcs := NewWebChatStore(rawDB, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	enableWriteDenySwitch(t, srv)
+
+	dmKey := "dm:agent:" + agentID + ":user:" + DevUserID
+
+	// Seed message.
+	msg := &store.Message{
+		ID: tid("def96-atom-msg"), ProjectID: proj.ID,
+		Sender: "user:dev@localhost", SenderID: DevUserID,
+		Recipient: "agent:" + agentID, Msg: "atomic test",
+		Type: "chat", Channel: "web", ThreadID: dmKey,
+		DispatchState: "dispatched",
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := s.CreateMessage(ctx, msg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	if err := wcs.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey, ParticipantID: DevUserID,
+		PeerID: agentID, PeerKind: "agent",
+	}); err != nil {
+		t.Fatalf("UpsertDM: %v", err)
+	}
+
+	// Create a conflicting topic to trigger a unique constraint violation.
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "def96-conflict", ProjectID: proj.ID, Name: "DEF96 Conflict",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic (conflict): %v", err)
+	}
+
+	// Promote with the same name → conflict.
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+dmKey+"/promote",
+		map[string]string{"name": "DEF96 Conflict"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Messages must still be under the old DM key (rollback).
+	filter := store.MessageFilter{Channel: "web", ThreadID: dmKey}
+	result, err := s.ListMessages(ctx, filter, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Errorf("messages under dmKey = %d, want 1 (rollback failed)", len(result.Items))
+	}
+}
+
+// failingConvLookupStore wraps a store.Store and makes GetConversationByExternalRef
+// return a transient error (not ErrNotFound) so we can test the refusal path.
+type failingConvLookupStore struct {
+	store.Store
+	err error
+}
+
+func (f *failingConvLookupStore) GetConversationByExternalRef(context.Context, string, string) (*store.Conversation, error) {
+	return nil, f.err
+}
+
+// TestDEF96_PromoteDM_RefusesOnLookupError verifies that a transient error from
+// GetConversationByExternalRef (not ErrNotFound) causes the promote handler to
+// refuse with 503 rather than proceeding with directConvID = "".
+//
+// Proceeding would suppress the conversation_id arm of the WHERE clause,
+// move ~0 rows via the legacy thread_id arm, delete the DM registry row,
+// commit, and return 200 — destroying the DM irrecoverably. Refusal is the
+// recoverable direction: the user retries and gets a correct promotion.
+func TestDEF96_PromoteDM_RefusesOnLookupError(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: tid("def96-refuse"), Name: "def96-refuse", Slug: "def96-refuse",
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	agentID := tid("def96-refuse-agent")
+	agent := &store.Agent{
+		ID: agentID, ProjectID: proj.ID, Name: "Refuse Bot", Slug: "refuse-bot",
+		Phase: "idle", OwnerID: DevUserID, CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	if !ok {
+		t.Fatal("store does not expose DB()")
+	}
+	rawDB := dbProvider.DB()
+	wcs := NewWebChatStore(rawDB, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init webchat store: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+	enableWriteDenySwitch(t, srv)
+
+	dmKey := "dm:agent:" + agentID + ":user:" + DevUserID
+
+	// Create the direct conversation (so we know one exists).
+	directConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "direct", Surface: "native", ExternalRef: dmKey, DriftState: "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertConversation: %v", err)
+	}
+
+	// Seed DM messages with conversation_id.
+	for i, content := range []string{"hello", "reply"} {
+		msg := &store.Message{
+			ID:        tid(fmt.Sprintf("def96-refuse-msg-%d", i)),
+			ProjectID: proj.ID, Sender: "user:dev@localhost", SenderID: DevUserID,
+			Recipient: "agent:" + agentID, Msg: content, Type: "chat", Channel: "web",
+			ThreadID: dmKey, ConversationID: directConv.ID, DispatchState: "dispatched",
+			CreatedAt: time.Now().UTC().Add(time.Duration(i) * time.Second),
+		}
+		if err := s.CreateMessage(ctx, msg); err != nil {
+			t.Fatalf("CreateMessage[%d]: %v", i, err)
+		}
+	}
+
+	// Register DM.
+	if err := wcs.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey, ParticipantID: DevUserID,
+		PeerID: agentID, PeerKind: "agent",
+	}); err != nil {
+		t.Fatalf("UpsertDM: %v", err)
+	}
+
+	// Inject a transient error — NOT ErrNotFound.
+	srv.store = &failingConvLookupStore{
+		Store: s,
+		err:   fmt.Errorf("connection reset by peer"),
+	}
+
+	// Attempt promotion — must be refused.
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+dmKey+"/promote",
+		map[string]string{"name": "Should Fail"})
+
+	if rec.Code == http.StatusCreated {
+		t.Fatal("promote returned 201 — transient lookup error was silently swallowed")
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The DM registry row must still exist — this is the row whose deletion
+	// makes the failure irrecoverable.
+	dms, err := wcs.ListDMs(ctx, DevUserID)
+	if err != nil {
+		t.Fatalf("ListDMs: %v", err)
+	}
+	dmFound := false
+	for _, dm := range dms {
+		if dm.ConversationKey == dmKey {
+			dmFound = true
+			break
+		}
+	}
+	if !dmFound {
+		t.Error("DM registry row was deleted despite lookup failure — irrecoverable data loss")
+	}
+
+	// No promoted topic should have been created. The project may already have
+	// a default "General" topic from hub setup, so count before vs after.
+	topics, err := wcs.ListTopics(ctx, proj.ID)
+	if err != nil {
+		t.Fatalf("ListTopics: %v", err)
+	}
+	for _, tp := range topics {
+		if tp.Name == "Should Fail" {
+			t.Error("promoted topic 'Should Fail' exists despite refusal")
+		}
+	}
+
+	// Messages must not have moved.
+	// Restore original store for the query.
+	srv.store = s
+	filter := store.MessageFilter{Channel: "web", ThreadID: dmKey}
+	result, err := s.ListMessages(ctx, filter, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(result.Items) != 2 {
+		t.Errorf("messages under dmKey = %d, want 2 — messages were moved despite refusal", len(result.Items))
+	}
+	for _, msg := range result.Items {
+		if msg.ConversationID != directConv.ID {
+			t.Errorf("message %s conversation_id = %q, want %q — re-keyed despite refusal",
+				msg.ID, msg.ConversationID, directConv.ID)
+		}
+	}
+}
+
+// TestDEF96_PromoteDM_ProceedsOnErrNotFound verifies that when
+// GetConversationByExternalRef returns store.ErrNotFound (pre-conversation-model
+// hub, no direct conversation exists), promotion proceeds via the legacy
+// thread_id arm and succeeds.
+//
+// This is the counterpart to TestDEF96_PromoteDM_RefusesOnLookupError: the
+// switch now has two arms with asymmetric failure modes, and both need coverage.
+// Without this test, a future edit that wraps ErrNotFound with %v instead of %w,
+// or returns a different sentinel on miss, would silently cause every promotion
+// on a pre-conversation-model hub to return 503 — and no test would go red.
+func TestDEF96_PromoteDM_ProceedsOnErrNotFound(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: tid("def96-notfound"), Name: "def96-notfound", Slug: "def96-notfound",
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	agentID := tid("def96-nf-agent")
+	agent := &store.Agent{
+		ID: agentID, ProjectID: proj.ID, Name: "NotFound Bot", Slug: "notfound-bot",
+		Phase: "idle", OwnerID: DevUserID, CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	if !ok {
+		t.Fatal("store does not expose DB()")
+	}
+	rawDB := dbProvider.DB()
+	wcs := NewWebChatStore(rawDB, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init webchat store: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+	enableWriteDenySwitch(t, srv)
+
+	dmKey := "dm:agent:" + agentID + ":user:" + DevUserID
+
+	// Seed DM messages — legacy style, thread_id set, no conversation_id.
+	// On a pre-conversation-model hub, thread_id is the only key.
+	baseTime := time.Now().UTC().Add(-10 * time.Second)
+	msgIDs := []string{tid("def96-nf-msg-0"), tid("def96-nf-msg-1"), tid("def96-nf-msg-2")}
+	for i, id := range msgIDs {
+		msg := &store.Message{
+			ID:            id,
+			ProjectID:     proj.ID,
+			Sender:        "user:dev@localhost",
+			SenderID:      DevUserID,
+			Recipient:     "agent:" + agentID,
+			Msg:           fmt.Sprintf("legacy msg %d", i),
+			Type:          "chat",
+			Channel:       "web",
+			ThreadID:      dmKey,
+			DispatchState: "dispatched",
+			CreatedAt:     baseTime.Add(time.Duration(i) * time.Second),
+		}
+		if err := s.CreateMessage(ctx, msg); err != nil {
+			t.Fatalf("CreateMessage[%d]: %v", i, err)
+		}
+	}
+
+	// Register DM.
+	if err := wcs.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey, ParticipantID: DevUserID,
+		PeerID: agentID, PeerKind: "agent",
+	}); err != nil {
+		t.Fatalf("UpsertDM: %v", err)
+	}
+
+	// Inject ErrNotFound — simulates pre-conversation-model hub.
+	srv.store = &failingConvLookupStore{
+		Store: s,
+		err:   store.ErrNotFound,
+	}
+
+	// Promotion must succeed.
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+dmKey+"/promote",
+		map[string]string{"name": "Legacy Promote"})
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s — ErrNotFound was not treated as proceed",
+			rec.Code, rec.Body.String())
+	}
+
+	var promResp promoteResponse
+	if err := json.NewDecoder(rec.Body).Decode(&promResp); err != nil {
+		t.Fatalf("decode promote response: %v", err)
+	}
+	if promResp.MessageCount != len(msgIDs) {
+		t.Fatalf("messageCount = %d, want %d", promResp.MessageCount, len(msgIDs))
+	}
+
+	// Verify every message moved, by id.
+	srv.store = s // restore for queries
+	topicID := promResp.ID
+	filter := store.MessageFilter{Channel: "web", ThreadID: topicID}
+	result, err := s.ListMessages(ctx, filter, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+
+	gotIDs := make(map[string]bool, len(result.Items))
+	for _, msg := range result.Items {
+		gotIDs[msg.ID] = true
+	}
+	for _, wantID := range msgIDs {
+		if !gotIDs[wantID] {
+			t.Errorf("message %s not found under promoted topic — legacy arm did not fire", wantID)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // History pagination (#1027)
 // ---------------------------------------------------------------------------
 

@@ -2597,8 +2597,45 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		LastActivityAt: now,
 	}
 
+	// 11b. Resolve the direct conversation for the DM key — lookup only,
+	// promotion must never CREATE a direct conversation.
+	// INVARIANT U-TX-1: this is an ambient-pool call and MUST happen before
+	// PromoteDM's BeginTx — at MaxOpenConns=1 it would deadlock inside the tx.
+	var directConvID string
+	directConv, convErr := s.store.GetConversationByExternalRef(ctx, "native", key)
+	switch {
+	case convErr == nil && directConv != nil:
+		directConvID = directConv.ID
+	case convErr == nil && directConv == nil:
+		// GetConversationByExternalRef returns (nil, ErrNotFound) on miss,
+		// never (nil, nil). If this is reached the contract changed — treat
+		// it as a lookup failure rather than silently proceeding with "".
+		slog.ErrorContext(ctx, "GetConversationByExternalRef returned nil conversation without error",
+			"dm_key", key)
+		writeError(w, http.StatusServiceUnavailable, "LOOKUP_FAILED",
+			"unable to resolve DM conversation; retry", nil)
+		return
+	case errors.Is(convErr, store.ErrNotFound):
+		// Pre-conversation-model hub — no direct conversation exists.
+		// Pass "" and let the legacy thread_id arm in PromoteDM carry it.
+	default:
+		// Transient DB error, context deadline, pool timeout, etc.
+		// Refusing is the recoverable direction: the user retries and gets
+		// a correct promotion. Proceeding with "" would suppress arm 1,
+		// move ~0 rows via arm 2, delete the DM registry, commit, and
+		// return 200 — destroying the DM irrecoverably.
+		slog.ErrorContext(ctx, "direct conversation lookup failed",
+			"dm_key", key, "error", convErr)
+		writeError(w, http.StatusServiceUnavailable, "LOOKUP_FAILED",
+			"unable to resolve DM conversation; retry", nil)
+		return
+	}
+
 	// 12. Execute atomic promotion
-	result, err := wcs.PromoteDM(ctx, topic, key)
+	result, err := wcs.PromoteDM(ctx, topic, PromoteKeys{
+		DMKey:                key,
+		DirectConversationID: directConvID,
+	})
 	if err != nil {
 		// Check for name conflict (unique constraint violation)
 		if strings.Contains(err.Error(), "UNIQUE constraint") ||
@@ -2614,11 +2651,22 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// 13. Publish SSE events (outside transaction — best-effort)
+	// 13. Provenance log — structured record tying the promoted thread back
+	// to its source DM. No schema change; the HTTP response already returns
+	// promotedFrom for the immediate caller (design §3.3).
+	slog.InfoContext(ctx, "promoted_dm",
+		"dm_key", key,
+		"topic_id", result.ID,
+		"conversation_id", result.ConversationID,
+		"actor", user.ID(),
+		"message_count", result.MessageCount,
+	)
+
+	// 14. Publish SSE events (outside transaction — best-effort)
 	s.events.PublishChatTopicEvent(ctx, projectID, "created", *result)
 	s.events.PublishDMPromotedEvent(ctx, key, *result)
 
-	// 14. Return created topic
+	// 15. Return created topic
 	writeJSON(w, http.StatusCreated, promoteResponse{
 		WebChatTopic: *result,
 		PromotedFrom: key,
