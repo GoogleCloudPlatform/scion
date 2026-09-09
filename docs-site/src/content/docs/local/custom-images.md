@@ -61,6 +61,43 @@ NPM_CONFIG_FILE=~/.npmrc \
 When neither variable is set, the build uses the public npm registry with no credentials — existing workflows are unaffected.
 :::
 
+## Building Behind a Corporate Proxy (Python Package Index)
+
+The same pattern applies to Python packages. Corporate networks that block `pypi.org` can point the build at an internal PyPI mirror (Artifactory, Nexus, devpi, etc.) using two environment variables:
+
+| Variable | Purpose | Default |
+| :--- | :--- | :--- |
+| `PIP_INDEX_URL` | Registry URL passed as a Docker build arg. Sets `PIP_INDEX_URL` inside the image so that all `pip install` commands during the build — and agents at runtime — use the mirror. | `https://pypi.org/simple` |
+| `PIP_CONFIG_FILE` | Host path to a `pip.conf` file. Mounted as a BuildKit secret (`id=pipconf`) so authentication tokens are available during `RUN` steps but never written to an image layer. | — (unauthenticated) |
+
+```bash
+# Unauthenticated mirror
+PIP_INDEX_URL=https://pypi.corp.example.com/simple/ \
+  image-build/scripts/build-images.sh --target all
+
+# Authenticated mirror (credentials stay out of the image)
+PIP_INDEX_URL=https://pypi.corp.example.com/simple/ \
+PIP_CONFIG_FILE=~/.pip/pip.conf \
+  image-build/scripts/build-images.sh --target all --push --registry ghcr.io/myorg
+```
+
+`PIP_INDEX_URL` is threaded as a build arg into the `core-base` layer and inherited by every downstream image. `PIP_CONFIG_FILE` is forwarded by the `local-docker` and `local-podman` builders; `cloud-build` does not support BuildKit secrets — use a private Artifact Registry PyPI repository with IAM-based auth instead.
+
+:::note[Backward compatible]
+When neither variable is set, the build uses the public PyPI index with no credentials — existing workflows are unaffected.
+:::
+
+:::tip[Combining npm and PyPI mirrors]
+Both sets of proxy variables can be used together:
+```bash
+NPM_REGISTRY=https://npm.corp.example.com/ \
+NPM_CONFIG_FILE=~/.npmrc \
+PIP_INDEX_URL=https://pypi.corp.example.com/simple/ \
+PIP_CONFIG_FILE=~/.pip/pip.conf \
+  image-build/scripts/build-images.sh --target all --push --registry ghcr.io/myorg
+```
+:::
+
 ## How the Build Tooling Is Organized
 
 A single orchestrator script — `image-build/scripts/build-images.sh` — owns the build DAG (which images depend on which, in what order, with which tags). The execution backend is selected with `--builder`. Three backends ship today:
