@@ -366,9 +366,14 @@ func (s *BackfillService) resolveGroup(ctx context.Context, g *conversationGroup
 // persistGroup creates the conversation and stamps all messages in the group.
 func (s *BackfillService) persistGroup(ctx context.Context, g *conversationGroup, result *BackfillResult) error {
 	// DEF-156 P3: refuse groups whose messages disagree on channel.
-	// The count is reported; the architect decides the rule.
+	// Each message is recorded as a DeriveFailure under surface_conflict
+	// so the count is surfaced per message, not per group.
 	if g.channelConflict {
-		return fmt.Errorf("channel conflict: messages in group %q disagree on channel (first=%q)", g.key, g.channel)
+		for _, msgID := range g.messageIDs {
+			result.addDeriveFailure(DeriveErrSurfaceConflict,
+				fmt.Sprintf("message %s: channel conflict in group %q (first=%q)", msgID, g.key, g.channel))
+		}
+		return nil
 	}
 
 	convID := uuid.NewString()
