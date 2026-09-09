@@ -28,6 +28,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
+import type { RuntimeBroker } from '../../shared/types.js';
 
 // ── Type definitions matching the Go API response ──
 
@@ -471,6 +472,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private defaultMaxAgentRole = '';
   @state() private defaultAgentRole = '';
   @state() private defaultRuntimeBroker = '';
+  @state() private runtimeBrokers: RuntimeBroker[] = [];
 
   // Agent defaults sub-tab
   @state() private agentDefaultsTab = 'general';
@@ -1334,6 +1336,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     super.connectedCallback();
     void this.loadConfig();
     void this.loadHarnessConfigs();
+    void this.loadRuntimeBrokers();
     void this.loadGitHubAppInstallations();
   }
 
@@ -1603,6 +1606,31 @@ export class ScionPageAdminServerConfig extends LitElement {
       }
     } catch {
       // Non-critical — dropdown falls back to hardcoded options
+    }
+  }
+
+  private async loadRuntimeBrokers(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/runtime-brokers?limit=200');
+      if (res.ok) {
+        const data = (await res.json()) as { brokers?: RuntimeBroker[] } | RuntimeBroker[];
+        this.runtimeBrokers = Array.isArray(data) ? data : data.brokers || [];
+        // Normalize: if the stored value is a name or slug, resolve it to the broker ID
+        // so the dropdown selection matches.
+        if (this.defaultRuntimeBroker && this.runtimeBrokers.length > 0) {
+          const match = this.runtimeBrokers.find(
+            (b) =>
+              b.id === this.defaultRuntimeBroker ||
+              b.name === this.defaultRuntimeBroker ||
+              b.slug === this.defaultRuntimeBroker
+          );
+          if (match && match.id !== this.defaultRuntimeBroker) {
+            this.defaultRuntimeBroker = match.id;
+          }
+        }
+      }
+    } catch {
+      // Non-critical — dropdown falls back to free-text input
     }
   }
 
@@ -3111,20 +3139,39 @@ export class ScionPageAdminServerConfig extends LitElement {
                 <div class="form-field">
                   <label>Default Runtime Broker</label>
                   <span class="hint"
-                    >Hub-level default broker for projects without a project-level default. Specify
-                    a broker ID, name, or slug.</span
+                    >Hub-level default broker for projects without a project-level default.</span
                   >
                   ${this.renderFieldValue(
                     'default_runtime_broker',
                     this.defaultRuntimeBroker || 'None',
-                    html`${this.renderEnvBadge('default_runtime_broker')}<sl-input
-                        value=${this.defaultRuntimeBroker}
-                        placeholder="broker ID, name, or slug"
-                        clearable
-                        @sl-input=${(e: Event) => {
-                          this.defaultRuntimeBroker = (e.target as HTMLInputElement).value;
-                        }}
-                      ></sl-input>`
+                    this.runtimeBrokers.length > 0
+                      ? html`${this.renderEnvBadge('default_runtime_broker')}<sl-select
+                            placeholder="None (auto-select)"
+                            clearable
+                            value=${this.defaultRuntimeBroker}
+                            @sl-change=${(e: Event) => {
+                              this.defaultRuntimeBroker = (
+                                e.target as HTMLSelectElement
+                              ).value;
+                            }}
+                          >
+                            ${this.runtimeBrokers.map(
+                              (b) =>
+                                html`<sl-option value=${b.id}
+                                  >${b.name} (${b.status})</sl-option
+                                >`
+                            )}
+                          </sl-select>`
+                      : html`${this.renderEnvBadge('default_runtime_broker')}<sl-input
+                            value=${this.defaultRuntimeBroker}
+                            placeholder="broker ID, name, or slug"
+                            clearable
+                            @sl-change=${(e: Event) => {
+                              this.defaultRuntimeBroker = (
+                                e.target as HTMLInputElement
+                              ).value;
+                            }}
+                          ></sl-input>`
                   )}
                 </div>
               </div>

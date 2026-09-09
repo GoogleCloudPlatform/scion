@@ -20,12 +20,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -827,6 +829,393 @@ func TestResumeInPlaceDecision(t *testing.T) {
 			}
 		})
 	}
+}
+
+// =============================================================================
+// resolveRuntimeBroker — hub-level default broker (Case 2.5)
+// =============================================================================
+
+// TestResolveRuntimeBroker_HubDefault is a table-driven test covering the
+// Case 2.5 (hub-level default broker) cascade step in resolveRuntimeBroker.
+//
+// Key design point: the hub default SILENTLY falls through to auto-select when
+// unavailable, unlike the project default (Case 2) which returns an error.
+// This asymmetry is intentional and pinned by these tests.
+func TestResolveRuntimeBroker_HubDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		// setup configures brokers, providers, and hub defaults and returns
+		// the project to resolve against.
+		setup func(t *testing.T, srv *Server, s store.Store) *store.Project
+		// wantBrokerID is the expected broker ID returned.
+		wantBrokerID string
+		// wantOK indicates whether resolveRuntimeBroker should succeed.
+		wantOK bool
+	}{
+		{
+			name: "hub_default_set_broker_available_and_dispatchable",
+			setup: func(t *testing.T, srv *Server, s store.Store) *store.Project {
+				ctx := context.Background()
+				broker := &store.RuntimeBroker{
+					ID:          tid("hub-def-broker-1"),
+					Name:        "Hub Default Broker",
+					Slug:        "hub-default-broker",
+					Status:      store.BrokerStatusOnline,
+					AutoProvide: true,
+				}
+				require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+				project := &store.Project{
+					ID:   tid("hub-def-project-1"),
+					Slug: "hub-def-proj-1",
+					Name: "Hub Default Project 1",
+				}
+				require.NoError(t, s.CreateProject(ctx, project))
+
+				require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+					ProjectID:  project.ID,
+					BrokerID:   broker.ID,
+					BrokerName: broker.Name,
+					Status:     store.BrokerStatusOnline,
+				}))
+
+				setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{
+					DefaultRuntimeBroker: broker.ID,
+				})
+				return project
+			},
+			wantBrokerID: tid("hub-def-broker-1"),
+			wantOK:       true,
+		},
+		{
+			name: "hub_default_set_broker_offline_falls_through",
+			setup: func(t *testing.T, srv *Server, s store.Store) *store.Project {
+				ctx := context.Background()
+				// Broker exists but is offline — won't appear in available list.
+				broker := &store.RuntimeBroker{
+					ID:          tid("hub-def-broker-2"),
+					Name:        "Hub Default Broker Offline",
+					Slug:        "hub-default-broker-off",
+					Status:      store.BrokerStatusOffline,
+					AutoProvide: true,
+				}
+				require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+				// Create a fallback online broker for auto-select.
+				fallback := &store.RuntimeBroker{
+					ID:          tid("hub-fb-broker-2"),
+					Name:        "Fallback Broker",
+					Slug:        "fallback-broker-2",
+					Status:      store.BrokerStatusOnline,
+					AutoProvide: true,
+				}
+				require.NoError(t, s.CreateRuntimeBroker(ctx, fallback))
+
+				project := &store.Project{
+					ID:   tid("hub-def-project-2"),
+					Slug: "hub-def-proj-2",
+					Name: "Hub Default Project 2",
+				}
+				require.NoError(t, s.CreateProject(ctx, project))
+
+				require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+					ProjectID:  project.ID,
+					BrokerID:   broker.ID,
+					BrokerName: broker.Name,
+					Status:     store.BrokerStatusOffline,
+				}))
+				require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+					ProjectID:  project.ID,
+					BrokerID:   fallback.ID,
+					BrokerName: fallback.Name,
+					Status:     store.BrokerStatusOnline,
+				}))
+
+				setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{
+					DefaultRuntimeBroker: broker.ID,
+				})
+				return project
+			},
+			// Hub default offline → not in availableBrokers → falls through
+			// to Case 3 (single online provider auto-select).
+			wantBrokerID: tid("hub-fb-broker-2"),
+			wantOK:       true,
+		},
+		{
+			name: "hub_default_set_broker_not_provider_for_project_falls_through",
+			setup: func(t *testing.T, srv *Server, s store.Store) *store.Project {
+				ctx := context.Background()
+				// Broker exists globally but is NOT a provider for the project.
+				notLinked := &store.RuntimeBroker{
+					ID:          tid("hub-def-broker-3"),
+					Name:        "Hub Default Broker NP",
+					Slug:        "hub-default-broker-np",
+					Status:      store.BrokerStatusOnline,
+					AutoProvide: true,
+				}
+				require.NoError(t, s.CreateRuntimeBroker(ctx, notLinked))
+
+				// This broker IS a provider.
+				linked := &store.RuntimeBroker{
+					ID:          tid("hub-prov-broker-3"),
+					Name:        "Provider Broker",
+					Slug:        "provider-broker-3",
+					Status:      store.BrokerStatusOnline,
+					AutoProvide: true,
+				}
+				require.NoError(t, s.CreateRuntimeBroker(ctx, linked))
+
+				project := &store.Project{
+					ID:   tid("hub-def-project-3"),
+					Slug: "hub-def-proj-3",
+					Name: "Hub Default Project 3",
+				}
+				require.NoError(t, s.CreateProject(ctx, project))
+
+				// Only link the provider broker.
+				require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+					ProjectID:  project.ID,
+					BrokerID:   linked.ID,
+					BrokerName: linked.Name,
+					Status:     store.BrokerStatusOnline,
+				}))
+
+				setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{
+					DefaultRuntimeBroker: notLinked.ID,
+				})
+				return project
+			},
+			// Hub default not in availableBrokers → falls through to Case 3
+			// (single provider auto-select).
+			wantBrokerID: tid("hub-prov-broker-3"),
+			wantOK:       true,
+		},
+		{
+			name: "hub_default_set_to_name_resolves_correctly",
+			setup: func(t *testing.T, srv *Server, s store.Store) *store.Project {
+				ctx := context.Background()
+				broker := &store.RuntimeBroker{
+					ID:          tid("hub-def-broker-4"),
+					Name:        "My Named Broker",
+					Slug:        "my-named-broker",
+					Status:      store.BrokerStatusOnline,
+					AutoProvide: true,
+				}
+				require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+				project := &store.Project{
+					ID:   tid("hub-def-project-4"),
+					Slug: "hub-def-proj-4",
+					Name: "Hub Default Project 4",
+				}
+				require.NoError(t, s.CreateProject(ctx, project))
+
+				require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+					ProjectID:  project.ID,
+					BrokerID:   broker.ID,
+					BrokerName: broker.Name,
+					Status:     store.BrokerStatusOnline,
+				}))
+
+				// Set hub default to the broker's NAME (not ID).
+				setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{
+					DefaultRuntimeBroker: "My Named Broker",
+				})
+				return project
+			},
+			wantBrokerID: tid("hub-def-broker-4"),
+			wantOK:       true,
+		},
+		{
+			name: "hub_default_empty_no_op_falls_through",
+			setup: func(t *testing.T, srv *Server, s store.Store) *store.Project {
+				ctx := context.Background()
+				broker := &store.RuntimeBroker{
+					ID:          tid("hub-def-broker-5"),
+					Name:        "Solo Broker",
+					Slug:        "solo-broker-5",
+					Status:      store.BrokerStatusOnline,
+					AutoProvide: true,
+				}
+				require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+				project := &store.Project{
+					ID:   tid("hub-def-project-5"),
+					Slug: "hub-def-proj-5",
+					Name: "Hub Default Project 5",
+				}
+				require.NoError(t, s.CreateProject(ctx, project))
+
+				require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+					ProjectID:  project.ID,
+					BrokerID:   broker.ID,
+					BrokerName: broker.Name,
+					Status:     store.BrokerStatusOnline,
+				}))
+
+				// Hub default is empty → Case 2.5 skipped entirely.
+				setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{
+					DefaultRuntimeBroker: "",
+				})
+				return project
+			},
+			// Empty hub default → skip Case 2.5, fall through to Case 3
+			// (single provider auto-select).
+			wantBrokerID: tid("hub-def-broker-5"),
+			wantOK:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			project := tt.setup(t, srv, s)
+
+			// Create a dev user identity for the context (admin, can dispatch).
+			devUser := NewDevUser(DevUserConfig{
+				Username:    "dev",
+				DisplayName: "Development User",
+				Email:       "dev@localhost",
+			})
+			ctx := contextWithIdentity(context.Background(), devUser)
+
+			w := httptest.NewRecorder()
+			brokerID, err := srv.resolveRuntimeBroker(ctx, w, "", project)
+
+			if tt.wantOK {
+				assert.NoError(t, err, "resolveRuntimeBroker should succeed")
+				assert.Equal(t, tt.wantBrokerID, brokerID, "unexpected broker ID")
+			} else {
+				assert.Error(t, err, "resolveRuntimeBroker should fail")
+				assert.Empty(t, brokerID, "broker ID should be empty on failure")
+			}
+		})
+	}
+}
+
+// TestResolveRuntimeBroker_HubDefaultSilentFallthrough verifies the key design
+// asymmetry: the hub default SILENTLY falls through when unavailable, while the
+// project default (Case 2) errors.
+func TestResolveRuntimeBroker_HubDefaultSilentFallthrough(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create an offline broker to set as hub default.
+	offlineBroker := &store.RuntimeBroker{
+		ID:          tid("hub-off-broker"),
+		Name:        "Offline Hub Default",
+		Slug:        "offline-hub-default",
+		Status:      store.BrokerStatusOffline,
+		AutoProvide: true,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, offlineBroker))
+
+	// Create an online fallback broker.
+	onlineBroker := &store.RuntimeBroker{
+		ID:          tid("hub-on-fallback"),
+		Name:        "Online Fallback",
+		Slug:        "online-fallback",
+		Status:      store.BrokerStatusOnline,
+		AutoProvide: true,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, onlineBroker))
+
+	project := &store.Project{
+		ID:   tid("hub-ft-project"),
+		Slug: "hub-ft-proj",
+		Name: "Hub Fallthrough Project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Link both brokers (offline one won't appear in available list).
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   offlineBroker.ID,
+		BrokerName: offlineBroker.Name,
+		Status:     store.BrokerStatusOffline,
+	}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   onlineBroker.ID,
+		BrokerName: onlineBroker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	// Set hub default to the OFFLINE broker.
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{
+		DefaultRuntimeBroker: offlineBroker.ID,
+	})
+
+	devUser := NewDevUser(DevUserConfig{
+		Username:    "dev",
+		DisplayName: "Development User",
+		Email:       "dev@localhost",
+	})
+	authedCtx := contextWithIdentity(ctx, devUser)
+
+	// Hub default is offline → SILENT fall-through → picks online broker.
+	w := httptest.NewRecorder()
+	brokerID, err := srv.resolveRuntimeBroker(authedCtx, w, "", project)
+	assert.NoError(t, err, "hub default should silently fall through, not error")
+	assert.Equal(t, onlineBroker.ID, brokerID, "should fall through to online broker")
+
+	// Now test the CONTRAST: project default ERRORS on unavailability.
+	project.DefaultRuntimeBrokerID = offlineBroker.ID
+	require.NoError(t, s.UpdateProject(ctx, project))
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{})
+
+	w2 := httptest.NewRecorder()
+	brokerID2, err2 := srv.resolveRuntimeBroker(authedCtx, w2, "", project)
+	assert.Error(t, err2, "project default should error when unavailable")
+	assert.Empty(t, brokerID2, "broker ID should be empty when project default errors")
+}
+
+// TestResolveRuntimeBroker_HubDefaultBySlug verifies that the hub default
+// broker can be specified by slug and resolved correctly.
+func TestResolveRuntimeBroker_HubDefaultBySlug(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:          tid("hub-slug-broker"),
+		Name:        "Slug Test Broker",
+		Slug:        "slug-test-broker",
+		Status:      store.BrokerStatusOnline,
+		AutoProvide: true,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	project := &store.Project{
+		ID:   tid("hub-slug-project"),
+		Slug: "hub-slug-proj",
+		Name: "Hub Slug Project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	// Set hub default by SLUG.
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{
+		DefaultRuntimeBroker: "slug-test-broker",
+	})
+
+	devUser := NewDevUser(DevUserConfig{
+		Username:    "dev",
+		DisplayName: "Development User",
+		Email:       "dev@localhost",
+	})
+	authedCtx := contextWithIdentity(ctx, devUser)
+
+	w := httptest.NewRecorder()
+	brokerID, err := srv.resolveRuntimeBroker(authedCtx, w, "", project)
+
+	assert.NoError(t, err)
+	assert.Equal(t, broker.ID, brokerID, "should resolve hub default by slug")
 }
 
 // TestHasAnyKey_ProgenySecretResolution verifies that hasAnyKey correctly finds
