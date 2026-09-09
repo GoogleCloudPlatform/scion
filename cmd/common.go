@@ -329,6 +329,12 @@ func PrintUsingHub(endpoint string) {
 // suppressed because disabling the Hub would break orchestration connectivity.
 func wrapHubError(err error) error {
 	if apiclient.IsUnauthorizedError(err) {
+		// `scion hub` is filtered out of the command tree in agent mode, so a
+		// hub-managed agent cannot run `scion hub auth login` and must not be
+		// told to. Keep the underlying error instead of discarding it.
+		if config.IsHubManagedAgent() {
+			return fmt.Errorf("hub rejected this agent's credentials: %w", err)
+		}
 		return fmt.Errorf("authentication failed, login to hub with 'scion hub auth login'")
 	}
 	if config.IsHubManagedAgent() {
