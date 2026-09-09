@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS messages (
     recipient_id TEXT NOT NULL DEFAULT '',
     channel TEXT,
     thread_id TEXT,
+    conversation_id TEXT NOT NULL DEFAULT '',
     msg TEXT NOT NULL DEFAULT '',
     type TEXT NOT NULL DEFAULT 'chat',
     dispatch_state TEXT NOT NULL DEFAULT 'dispatched',
@@ -383,7 +384,150 @@ VALUES
 	require.Equal(t, "Promoted Thread", c.displayName)
 }
 
+// ---------------------------------------------------------------------------
+// TestPromoteDM_DualWrite_RePointsConversationID — when ConversationID is
+// supplied, the re-key UPDATE must set conversation_id on every moved message.
+// ---------------------------------------------------------------------------
+
+func TestPromoteDM_DualWrite_RePointsConversationID(t *testing.T) {
+	s, db := newPromoteTestStoreWithConversations(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	dmKey := "dm:agent:agent-3:user:user-3"
+	oldConvID := "old-direct-conv-id"
+
+	// Seed messages with a pre-existing conversation_id (simulating the
+	// write-switch stamping the direct conversation's id).
+	_, err := db.Exec(`
+INSERT INTO messages (id, project_id, sender, sender_id, recipient, recipient_id, channel, thread_id, conversation_id, msg, created)
+VALUES
+    ('msg-rp-1', 'proj-1', 'user:carol', 'user-3', 'agent:bot', 'agent-3', 'web', ?, ?, 'first', '2026-08-22T10:00:00Z'),
+    ('msg-rp-2', 'proj-1', 'agent:bot', 'agent-3', 'user:carol', 'user-3', 'web', ?, ?, 'second', '2026-08-22T10:01:00Z')
+`, dmKey, oldConvID, dmKey, oldConvID)
+	require.NoError(t, err)
+
+	require.NoError(t, s.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey,
+		ParticipantID:   "user-3",
+		PeerID:          "agent-3",
+		PeerKind:        "agent",
+	}))
+
+	newConvID := uuid.New().String()
+	now := time.Now().UTC().Truncate(time.Second)
+	topic := WebChatTopic{
+		ID:             "promoted-repoint",
+		ProjectID:      "proj-1",
+		Name:           "RePoint Thread",
+		ConversationID: newConvID,
+		CreatedBy:      "user-3",
+		CreatedAt:      now,
+		LastActivityAt: now,
+	}
+
+	result, err := s.PromoteDM(ctx, topic, dmKey)
+	require.NoError(t, err)
+	require.Equal(t, 2, result.MessageCount)
+
+	// Assert: every moved message now has the NEW conversation_id.
+	rows, err := db.Query(
+		`SELECT id, conversation_id FROM messages WHERE thread_id = ? ORDER BY id`, "promoted-repoint")
+	require.NoError(t, err)
+	defer rows.Close()
+	var count int
+	for rows.Next() {
+		var msgID, cid string
+		require.NoError(t, rows.Scan(&msgID, &cid))
+		require.Equal(t, newConvID, cid, "message %s should have new conversation_id", msgID)
+		count++
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, 2, count)
+}
+
+// ---------------------------------------------------------------------------
+// TestPromoteDM_EmptyConversationID_PreservesExisting — when ConversationID
+// is empty (no conversations table), the re-key must NOT blank conversation_id
+// on moved messages. This is the C2a guard (design §3.1 C2a).
+// ---------------------------------------------------------------------------
+
+func TestPromoteDM_EmptyConversationID_PreservesExisting(t *testing.T) {
+	// Use a store WITHOUT the conversations table so ConversationID stays empty.
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	// Messages table WITH conversation_id column.
+	_, err = db.Exec(`
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL DEFAULT '',
+    sender TEXT NOT NULL,
+    sender_id TEXT NOT NULL DEFAULT '',
+    recipient TEXT NOT NULL,
+    recipient_id TEXT NOT NULL DEFAULT '',
+    channel TEXT,
+    thread_id TEXT,
+    conversation_id TEXT NOT NULL DEFAULT '',
+    msg TEXT NOT NULL DEFAULT '',
+    type TEXT NOT NULL DEFAULT 'chat',
+    dispatch_state TEXT NOT NULL DEFAULT 'dispatched',
+    created TEXT NOT NULL DEFAULT ''
+)
+`)
+	require.NoError(t, err)
+
+	// NO conversations table — hasConversationsTable() will return false.
+	s := NewWebChatStore(db, "sqlite3")
+	require.NoError(t, s.Init())
+
+	ctx := context.Background()
+	dmKey := "dm:agent:agent-4:user:user-4"
+	existingConvID := "pre-existing-conv-id"
+
+	// Seed a message that already carries a conversation_id.
+	_, err = db.Exec(`
+INSERT INTO messages (id, project_id, sender, sender_id, recipient, recipient_id, channel, thread_id, conversation_id, msg, created)
+VALUES ('msg-guard-1', 'proj-1', 'user:dave', 'user-4', 'agent:helper', 'agent-4', 'web', ?, ?, 'guarded', '2026-08-22T10:00:00Z')
+`, dmKey, existingConvID)
+	require.NoError(t, err)
+
+	require.NoError(t, s.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey,
+		ParticipantID:   "user-4",
+		PeerID:          "agent-4",
+		PeerKind:        "agent",
+	}))
+
+	now := time.Now().UTC().Truncate(time.Second)
+	result, err := s.PromoteDM(ctx, WebChatTopic{
+		ID:             "promoted-guard",
+		ProjectID:      "proj-1",
+		Name:           "Guard Thread",
+		CreatedBy:      "user-4",
+		CreatedAt:      now,
+		LastActivityAt: now,
+		// ConversationID intentionally empty — no conversations table.
+	}, dmKey)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.MessageCount)
+
+	// Assert: the message's conversation_id is PRESERVED, not blanked.
+	var cid string
+	err = db.QueryRow(
+		`SELECT conversation_id FROM messages WHERE id = 'msg-guard-1'`).Scan(&cid)
+	require.NoError(t, err)
+	require.Equal(t, existingConvID, cid,
+		"conversation_id must be preserved when ConversationID is empty (C2a guard)")
+}
+
 func TestPromoteDM_NoConversationID_SkipsDualWrite(t *testing.T) {
+	// NOTE: After P2, the empty-ConversationID case is no longer reachable
+	// from the handler — PromoteDM now mints one in the store. This test
+	// remains because the store contract is unchanged: when a caller passes
+	// an empty ConversationID AND hasConversationsTable() is false, no
+	// conversation row should be created.
 	s, db := newPromoteTestStoreWithConversations(t)
 	defer db.Close() //nolint:errcheck
 
@@ -745,6 +889,7 @@ CREATE TABLE IF NOT EXISTS messages (
     recipient_id TEXT NOT NULL DEFAULT '',
     channel TEXT,
     thread_id TEXT,
+    conversation_id TEXT NOT NULL DEFAULT '',
     msg TEXT NOT NULL DEFAULT '',
     type TEXT NOT NULL DEFAULT 'chat',
     dispatch_state TEXT NOT NULL DEFAULT 'dispatched',
