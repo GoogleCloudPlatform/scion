@@ -58,11 +58,13 @@ func TestDEF100_T1_ProductionWriter_ReadResolver(t *testing.T) {
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	cr := &stubConversationReader{}
+
+	// --- Setup: post-P2 topic (derived key) ---
 	topicID := uuid.New().String()
 	projectID := "proj-def100-t1"
 
-	// Step 1: create topic via the production writer. Post DEF-156 P2, this
-	// writes external_ref = 'thread:<project>:<topicID>' on the conversations row.
 	err := wcs.CreateTopic(ctx, WebChatTopic{
 		ID:        topicID,
 		ProjectID: projectID,
@@ -74,8 +76,6 @@ func TestDEF100_T1_ProductionWriter_ReadResolver(t *testing.T) {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 
-	// Verify preconditions: topic has a conversation_id, conversation row
-	// has the derived external_ref (post DEF-156 P2).
 	convID := getTopicConvID(t, db, topicID)
 	if convID == "" {
 		t.Fatal("precondition: topic should have auto-generated conversation_id")
@@ -96,78 +96,76 @@ func TestDEF100_T1_ProductionWriter_ReadResolver(t *testing.T) {
 			"post DEF-156 P2, CreateTopic should write the derived key", expectedExtRef, extRef)
 	}
 
-	// Step 2: resolve via the read path WITH topic lookup.
-	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
-
-	// The ConversationReader is not used when topic lookup succeeds, but
-	// we still need to pass one. Use a nil-safe stub.
-	cr := &stubConversationReader{}
-
-	result := messaging.ResolveThreadConversationForRead(
-		ctx, cr, logger,
-		topicID, projectID,
-		messaging.WithReadTopicLookup(wcs))
-
-	if result == nil {
-		t.Fatal("DEF-100: ResolveThreadConversationForRead returned nil — " +
-			"the topic lookup intercept is not working")
-	}
-	if result.ConversationID != convID {
-		t.Errorf("DEF-100: expected conversation_id %q, got %q",
-			convID, result.ConversationID)
-	}
-
-	// Step 3: verify the topic-lookup intercept is still load-bearing for the
-	// pre-fix (mixed) population. Build a legacy topic whose conversation has
-	// external_ref = '' and confirm that resolving it WITHOUT the topic lookup
-	// fails. This is the reachability proof for the intercept — if someone
-	// removes the intercept, this step goes red.
+	// --- Setup: legacy topic (external_ref = '') ---
 	legacyTopicID := uuid.New().String()
 	legacyConvID := uuid.New().String()
 	legacyNow := time.Now().UTC().Format(time.RFC3339Nano)
 
-	// Create legacy conversation with external_ref = '' (pre-fix population).
 	_, err = db.Exec(
 		`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
 		 VALUES (?, ?, 'group', 'native', '', '', 'Legacy Topic', 'active', ?, ?)`,
 		legacyConvID, projectID, legacyNow, legacyNow)
 	if err != nil {
-		t.Fatalf("Step 3 setup: insert legacy conversation: %v", err)
+		t.Fatalf("setup: insert legacy conversation: %v", err)
 	}
 
-	// Create legacy topic linked to that conversation.
 	_, err = db.Exec(
 		`INSERT INTO webchat_topic (id, project_id, name, is_general, conversation_id, created_by, created_at)
 		 VALUES (?, ?, 'Legacy Topic', 0, ?, 'test-user', ?)`,
 		legacyTopicID, projectID, legacyConvID, legacyNow)
 	if err != nil {
-		t.Fatalf("Step 3 setup: insert legacy topic: %v", err)
+		t.Fatalf("setup: insert legacy topic: %v", err)
 	}
 
-	// Resolve the legacy topic WITHOUT topic lookup — must fail.
-	resultLegacyNoIntercept := messaging.ResolveThreadConversationForRead(
-		ctx, cr, logger,
-		legacyTopicID, projectID) // no WithReadTopicLookup
+	// --- Step 2: post-P2 topic resolves WITH topic lookup ---
+	t.Run("Step2_PostP2_ResolvesWithIntercept", func(t *testing.T) {
+		result := messaging.ResolveThreadConversationForRead(
+			ctx, cr, logger,
+			topicID, projectID,
+			messaging.WithReadTopicLookup(wcs))
 
-	if resultLegacyNoIntercept != nil {
-		t.Errorf("DEF-100 control: legacy topic (external_ref='') should NOT resolve "+
-			"without the topic-lookup intercept, got %+v — the intercept is still "+
-			"load-bearing for the pre-fix population", resultLegacyNoIntercept)
-	}
+		if result == nil {
+			t.Fatal("ResolveThreadConversationForRead returned nil — " +
+				"the topic lookup intercept is not working")
+		}
+		if result.ConversationID != convID {
+			t.Errorf("expected conversation_id %q, got %q",
+				convID, result.ConversationID)
+		}
+	})
 
-	// Sanity: resolve the SAME legacy topic WITH topic lookup — must succeed.
-	resultLegacyWithIntercept := messaging.ResolveThreadConversationForRead(
-		ctx, cr, logger,
-		legacyTopicID, projectID,
-		messaging.WithReadTopicLookup(wcs))
+	// --- Step 3a: legacy topic does NOT resolve without the intercept ---
+	// This is the reachability proof: a pre-fix topic with external_ref = ''
+	// cannot be found by the external_ref lookup, so the intercept is its
+	// only resolution path. If someone removes the intercept, this goes red.
+	t.Run("Step3a_LegacyTopic_FailsWithoutIntercept", func(t *testing.T) {
+		result := messaging.ResolveThreadConversationForRead(
+			ctx, cr, logger,
+			legacyTopicID, projectID) // no WithReadTopicLookup
 
-	if resultLegacyWithIntercept == nil {
-		t.Fatal("DEF-100 control sanity: legacy topic should resolve WITH the topic-lookup intercept")
-	}
-	if resultLegacyWithIntercept.ConversationID != legacyConvID {
-		t.Errorf("DEF-100 control sanity: expected legacy conversation_id %q, got %q",
-			legacyConvID, resultLegacyWithIntercept.ConversationID)
-	}
+		if result != nil {
+			t.Errorf("legacy topic (external_ref='') should NOT resolve "+
+				"without the topic-lookup intercept, got %+v — the intercept "+
+				"is still load-bearing for the pre-fix population", result)
+		}
+	})
+
+	// --- Step 3b: legacy topic DOES resolve with the intercept ---
+	// Sanity check: the same legacy topic resolves when the intercept is present.
+	t.Run("Step3b_LegacyTopic_ResolvesWithIntercept", func(t *testing.T) {
+		result := messaging.ResolveThreadConversationForRead(
+			ctx, cr, logger,
+			legacyTopicID, projectID,
+			messaging.WithReadTopicLookup(wcs))
+
+		if result == nil {
+			t.Fatal("legacy topic should resolve WITH the topic-lookup intercept")
+		}
+		if result.ConversationID != legacyConvID {
+			t.Errorf("expected legacy conversation_id %q, got %q",
+				legacyConvID, result.ConversationID)
+		}
+	})
 }
 
 // stubConversationReader is a ConversationReader that always returns nil.
