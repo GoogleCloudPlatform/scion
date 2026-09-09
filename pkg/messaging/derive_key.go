@@ -108,6 +108,26 @@ func DeriveConversationKey(in KeyInputs) (extRef string, kind string, projectID 
 	return ref, "direct", nil, nil
 }
 
+// ThreadConversationExternalRef returns the canonical external_ref for a
+// thread-based group conversation. This is a thin wrapper over the thread-key
+// branch of DeriveConversationKey (case 2) and MUST be used by every call site
+// that needs the "thread:<projectID>:<threadID>" string — including pkg/hub's
+// topic backfill and CreateTopic. Two independent fmt.Sprintf calls producing
+// the same format string is precisely the defect DEF-156 is fixing.
+func ThreadConversationExternalRef(projectID, threadID string) (string, error) {
+	if projectID == "" || threadID == "" {
+		return "", fmt.Errorf("ThreadConversationExternalRef: projectID and threadID must both be non-empty (projectID=%q, threadID=%q)", projectID, threadID)
+	}
+	extRef, _, _, err := DeriveConversationKey(KeyInputs{
+		ThreadID:  threadID,
+		ProjectID: projectID,
+	})
+	if err != nil {
+		return "", err
+	}
+	return extRef, nil
+}
+
 // conversationByKeyConfig holds optional parameters for ResolveOrCreateConversationByKey.
 type conversationByKeyConfig struct {
 	topicLookup    TopicConversationLookup
