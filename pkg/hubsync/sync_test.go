@@ -1374,6 +1374,56 @@ func TestCreateHubClient_PrefersTokenFileOverEnv(t *testing.T) {
 	}
 }
 
+// TestCreateHubClient_HubManagedAgentUsesRealTokenOnLocalhost is the
+// createHubClient counterpart to
+// cmd.TestGetAuthInfo_HubManagedAgentUsesRealTokenOnLocalhost: a hub-managed
+// agent (SCION_AGENT_ID set) talking to a localhost Hub must authenticate
+// with its own scion-token, not get silently swapped onto dev auth, even
+// when a dev-token file is also present. Regression test for the bug where
+// every agent on a workstation-mode Hub 401'd sending an outbound message to
+// a user, because dev auth doesn't carry a specific agent identity and the
+// outbound-message endpoint requires the caller to be the agent itself.
+func TestCreateHubClient_HubManagedAgentUsesRealTokenOnLocalhost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agentToken := r.Header.Get("X-Scion-Agent-Token")
+		if agentToken != "fresh-agent-jwt" {
+			t.Errorf("expected X-Scion-Agent-Token 'fresh-agent-jwt', got %q", agentToken)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			t.Errorf("expected no Authorization bearer header when the real agent token is used, got %q", auth)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	defer server.Close()
+	// server.URL is http://127.0.0.1:<port> — exercises the localhost branch.
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("SCION_AGENT_ID", "agent-uuid-123") // Hub-managed agent context.
+	t.Setenv("SCION_AUTH_TOKEN", "")
+
+	scionDir := filepath.Join(tmpHome, ".scion")
+	_ = os.MkdirAll(scionDir, 0700)
+	// Real per-agent token, freshly issued by the broker for this Hub.
+	_ = os.WriteFile(filepath.Join(scionDir, "scion-token"), []byte("fresh-agent-jwt"), 0600)
+	// A dev token also present — must not be preferred in this context.
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_abc123")
+
+	settings := &config.Settings{}
+	client, err := createHubClient(settings, server.URL)
+	if err != nil {
+		t.Fatalf("createHubClient failed: %v", err)
+	}
+
+	_, err = client.Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health check failed: %v", err)
+	}
+}
+
 func TestCreateHubClient_PrefersOAuthOverAgentToken(t *testing.T) {
 	// When OAuth credentials exist, they should take precedence over SCION_AUTH_TOKEN.
 	// We can't easily test this because credentials.GetAccessToken uses a global store,
