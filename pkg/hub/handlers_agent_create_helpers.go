@@ -1225,6 +1225,15 @@ func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Ag
 		if err != nil {
 			return false, err
 		}
+		// Also check agent's own GCP identity config (mirrors broker logic
+		// at handlers.go:2186-2187). Passthrough-to-assign translated agents
+		// have MetadataMode=assign but no project-scoped SA record.
+		if !gcpSAAssigned && agent.AppliedConfig.GCPIdentity != nil {
+			mode := agent.AppliedConfig.GCPIdentity.MetadataMode
+			if mode == store.GCPMetadataModeAssign || mode == store.GCPMetadataModePassthrough {
+				gcpSAAssigned = true
+			}
+		}
 		for authType := range authMeta.Types {
 			satisfied, err := s.isAuthTypeSatisfied(ctx, agent, authMeta, authType, gcpSAAssigned)
 			if err != nil {
@@ -1257,6 +1266,15 @@ func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Ag
 		gcpSAAssigned, err := s.projectHasVerifiedGCPSA(ctx, agent.ProjectID)
 		if err != nil {
 			return false, err
+		}
+		// Also check agent's own GCP identity config (mirrors broker logic
+		// at handlers.go:2186-2187). Passthrough-to-assign translated agents
+		// have MetadataMode=assign but no project-scoped SA record.
+		if !gcpSAAssigned && agent.AppliedConfig.GCPIdentity != nil {
+			mode := agent.AppliedConfig.GCPIdentity.MetadataMode
+			if mode == store.GCPMetadataModeAssign || mode == store.GCPMetadataModePassthrough {
+				gcpSAAssigned = true
+			}
 		}
 		fileSecrets := harness.RequiredAuthSecretsFromConfig(authMeta, agent.AppliedConfig.HarnessAuth, gcpSAAssigned)
 		for _, fs := range fileSecrets {

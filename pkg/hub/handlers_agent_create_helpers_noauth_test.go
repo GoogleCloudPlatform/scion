@@ -174,3 +174,174 @@ func TestIsAuthTypeSatisfied_GCPServiceAccountSkipsEnvCheck(t *testing.T) {
 		}
 	})
 }
+
+// TestHasRequiredAuthCredentials_AgentGCPIdentityAutodetect verifies that when
+// an agent has a GCPIdentity config with MetadataMode=assign or passthrough
+// (e.g. from passthrough-to-assign translation on sandbox runtimes), the hub's
+// auth autodetect correctly picks vertex-ai even without a project-scoped
+// verified GCP service account record.
+//
+// This mirrors the broker-side logic at handlers.go:2186-2187.
+func TestHasRequiredAuthCredentials_AgentGCPIdentityAutodetect(t *testing.T) {
+	srv, memStore := testServer(t)
+	ctx := context.Background()
+
+	// Create a project with NO verified GCP service account.
+	projectID := tid("gcp-proj-noSA")
+	project := &store.Project{
+		ID:   projectID,
+		Name: "no-sa-project",
+		Slug: "no-sa-project",
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject failed: %v", err)
+	}
+
+	// Simulate the Claude harness config with vertex-ai and api-key auth types.
+	authMeta := &config.HarnessAuthMetadata{
+		Types: map[string]api.HarnessAuthTypeMetadata{
+			"vertex-ai": {
+				RequiredEnv: []api.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"GOOGLE_CLOUD_PROJECT"}},
+					{AnyOf: []string{"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}},
+				},
+				RequiredFiles: []api.HarnessAuthFileRequirement{
+					{
+						Name:                                 "gcloud-adc",
+						Type:                                 "file",
+						Field:                                "GoogleAppCredentials",
+						AlternativeEnvKeys:                   []string{"GOOGLE_APPLICATION_CREDENTIALS"},
+						SkippedWhenGCPServiceAccountAssigned: true,
+						Required:                             true,
+					},
+				},
+			},
+			"api-key": {
+				RequiredEnv: []api.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"ANTHROPIC_API_KEY"}},
+				},
+			},
+		},
+	}
+
+	t.Run("assign mode: autodetect picks vertex-ai without project SA", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:        tid("agent-assign-noSA"),
+			Name:      "assign-agent",
+			Slug:      "assign-agent",
+			OwnerID:   tid("user-1"),
+			ProjectID: projectID,
+			AppliedConfig: &store.AgentAppliedConfig{
+				GCPIdentity: &store.GCPIdentityConfig{
+					MetadataMode: store.GCPMetadataModeAssign,
+				},
+			},
+		}
+
+		hasCreds, err := srv.hasRequiredAuthCredentials(ctx, agent, "claude", authMeta)
+		if err != nil {
+			t.Fatalf("hasRequiredAuthCredentials failed: %v", err)
+		}
+		if !hasCreds {
+			t.Error("expected hasRequiredAuthCredentials to return true — agent has GCPIdentity with assign mode, vertex-ai should be satisfied")
+		}
+	})
+
+	t.Run("passthrough mode: autodetect picks vertex-ai without project SA", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:        tid("agent-passthrough-noSA"),
+			Name:      "passthrough-agent",
+			Slug:      "passthrough-agent",
+			OwnerID:   tid("user-1"),
+			ProjectID: projectID,
+			AppliedConfig: &store.AgentAppliedConfig{
+				GCPIdentity: &store.GCPIdentityConfig{
+					MetadataMode: store.GCPMetadataModePassthrough,
+				},
+			},
+		}
+
+		hasCreds, err := srv.hasRequiredAuthCredentials(ctx, agent, "claude", authMeta)
+		if err != nil {
+			t.Fatalf("hasRequiredAuthCredentials failed: %v", err)
+		}
+		if !hasCreds {
+			t.Error("expected hasRequiredAuthCredentials to return true — agent has GCPIdentity with passthrough mode, vertex-ai should be satisfied")
+		}
+	})
+
+	t.Run("no GCPIdentity: falls back to projectHasVerifiedGCPSA (returns false)", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:            tid("agent-no-identity"),
+			Name:          "no-identity-agent",
+			Slug:          "no-identity-agent",
+			OwnerID:       tid("user-1"),
+			ProjectID:     projectID,
+			AppliedConfig: &store.AgentAppliedConfig{},
+		}
+
+		hasCreds, err := srv.hasRequiredAuthCredentials(ctx, agent, "claude", authMeta)
+		if err != nil {
+			t.Fatalf("hasRequiredAuthCredentials failed: %v", err)
+		}
+		if hasCreds {
+			t.Error("expected hasRequiredAuthCredentials to return false — no GCPIdentity and no project SA")
+		}
+	})
+
+	t.Run("block mode: does not satisfy GCP SA check", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:        tid("agent-block-noSA"),
+			Name:      "block-agent",
+			Slug:      "block-agent",
+			OwnerID:   tid("user-1"),
+			ProjectID: projectID,
+			AppliedConfig: &store.AgentAppliedConfig{
+				GCPIdentity: &store.GCPIdentityConfig{
+					MetadataMode: store.GCPMetadataModeBlock,
+				},
+			},
+		}
+
+		hasCreds, err := srv.hasRequiredAuthCredentials(ctx, agent, "claude", authMeta)
+		if err != nil {
+			t.Fatalf("hasRequiredAuthCredentials failed: %v", err)
+		}
+		if hasCreds {
+			t.Error("expected hasRequiredAuthCredentials to return false — block mode should not satisfy GCP SA check")
+		}
+	})
+
+	t.Run("explicit auth type with assign mode: file secrets skipped", func(t *testing.T) {
+		// When an explicit auth type is set AND the agent has GCPIdentity with
+		// assign mode, the second gcpSAAssigned computation (file-secret check)
+		// should also detect the agent identity and skip the gcloud-adc file
+		// requirement. We provide env vars so the env-var check passes and the
+		// test reaches the file-secret check (fix site 2).
+		agent := &store.Agent{
+			ID:        tid("agent-explicit-assign"),
+			Name:      "explicit-assign-agent",
+			Slug:      "explicit-assign-agent",
+			OwnerID:   tid("user-1"),
+			ProjectID: projectID,
+			AppliedConfig: &store.AgentAppliedConfig{
+				HarnessAuth: "vertex-ai",
+				Env: map[string]string{
+					"GOOGLE_CLOUD_PROJECT": "my-project",
+					"GOOGLE_CLOUD_REGION":  "us-central1",
+				},
+				GCPIdentity: &store.GCPIdentityConfig{
+					MetadataMode: store.GCPMetadataModeAssign,
+				},
+			},
+		}
+
+		hasCreds, err := srv.hasRequiredAuthCredentials(ctx, agent, "claude", authMeta)
+		if err != nil {
+			t.Fatalf("hasRequiredAuthCredentials failed: %v", err)
+		}
+		if !hasCreds {
+			t.Error("expected hasRequiredAuthCredentials to return true — explicit vertex-ai with assign mode should skip file secrets")
+		}
+	})
+}
