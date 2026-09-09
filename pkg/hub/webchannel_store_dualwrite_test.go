@@ -1039,3 +1039,87 @@ func TestMigration_UniqueIndexRejectsDuplicateConversationID(t *testing.T) {
 	require.Error(t, err, "second insert with duplicate conversation_id must be rejected by unique index")
 	require.Contains(t, err.Error(), "UNIQUE constraint failed", "error should be a constraint violation")
 }
+
+// ---------------------------------------------------------------------------
+// TestPromoteDM_WildcardGuard_UnresolvedDirectConversation — AC-96-1b.
+//
+// When the direct conversation does not resolve (legacy hub, no conversation
+// stamping), directConvID is "". Without the `? <> ''` guard on the
+// conversation_id arm of the WHERE clause, `conversation_id = ''` degenerates
+// into matching every unstamped message on the hub — a single UPDATE rewrites
+// thread_id and conversation_id on unrelated data.
+//
+// This test drives that exact scenario:
+//   - directConvID = "" (unresolved)
+//   - DM messages carry thread_id = dmKey (legacy path, matched by arm 2)
+//   - An unrelated message has conversation_id = '' (genuinely unstamped)
+//   - The unrelated message must NOT move
+// ---------------------------------------------------------------------------
+
+func TestPromoteDM_WildcardGuard_UnresolvedDirectConversation(t *testing.T) {
+	s, db := newPromoteTestStoreWithConversations(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	dmKey := "dm:agent:agent-wg:user:user-wg"
+
+	// Seed two DM messages — legacy style, thread_id set, conversation_id empty.
+	_, err := db.Exec(`
+INSERT INTO messages (id, project_id, sender, sender_id, recipient, recipient_id, channel, thread_id, conversation_id, msg, created)
+VALUES
+    ('msg-wg-1', 'proj-wg', 'user:alice', 'user-wg', 'agent:bot', 'agent-wg', 'web', ?, '', 'hello', '2026-08-22T10:00:00Z'),
+    ('msg-wg-2', 'proj-wg', 'agent:bot', 'agent-wg', 'user:alice', 'user-wg', 'web', ?, '', 'reply', '2026-08-22T10:01:00Z')
+`, dmKey, dmKey)
+	require.NoError(t, err)
+
+	// Seed an unrelated unstamped message — conversation_id is genuinely empty.
+	// This is the row the wildcard guard must protect.
+	_, err = db.Exec(`
+INSERT INTO messages (id, project_id, sender, sender_id, recipient, recipient_id, channel, thread_id, conversation_id, msg, created)
+VALUES ('msg-wg-bystander', 'proj-other', 'user:bob', 'user-other', 'agent:other', 'agent-other', 'web', 'unrelated-thread', '', 'innocent bystander', '2026-08-22T09:00:00Z')
+`)
+	require.NoError(t, err)
+
+	require.NoError(t, s.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey,
+		ParticipantID:   "user-wg",
+		PeerID:          "agent-wg",
+		PeerKind:        "agent",
+	}))
+
+	now := time.Now().UTC().Truncate(time.Second)
+	topic := WebChatTopic{
+		ID:             "promoted-wg",
+		ProjectID:      "proj-wg",
+		Name:           "Wildcard Guard Thread",
+		CreatedBy:      "user-wg",
+		CreatedAt:      now,
+		LastActivityAt: now,
+	}
+
+	// DirectConversationID is empty — the unresolved case.
+	result, err := s.PromoteDM(ctx, topic, PromoteKeys{
+		DMKey:                dmKey,
+		DirectConversationID: "",
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, result.MessageCount, "should move exactly the 2 DM messages")
+
+	// The DM messages should have moved to the new topic.
+	var movedCount int
+	require.NoError(t, db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE thread_id = ?`, "promoted-wg").Scan(&movedCount))
+	require.Equal(t, 2, movedCount, "DM messages should be re-keyed to new topic")
+
+	// The bystander message must NOT have moved — its thread_id and
+	// conversation_id must be unchanged.
+	var bystanderThreadID, bystanderConvID string
+	err = db.QueryRow(
+		`SELECT thread_id, conversation_id FROM messages WHERE id = 'msg-wg-bystander'`).
+		Scan(&bystanderThreadID, &bystanderConvID)
+	require.NoError(t, err)
+	require.Equal(t, "unrelated-thread", bystanderThreadID,
+		"bystander thread_id must be unchanged — wildcard guard failed")
+	require.Equal(t, "", bystanderConvID,
+		"bystander conversation_id must be unchanged — wildcard guard failed")
+}
