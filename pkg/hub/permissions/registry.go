@@ -134,9 +134,9 @@ var Registry = []Permission{
 	{ID: "skill.delete", Resource: ResourceSkill, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "skill:delete", Description: "Delete skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.list", Resource: ResourceSkill, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "skill:list", Description: "List skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 
-	{ID: "template.create", Resource: ResourceTemplate, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "template:create", Description: "Create templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
+	{ID: "template.create", Resource: ResourceTemplate, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "template:create", AgentScopes: []string{"project:template:write"}, Description: "Create templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
 	{ID: "template.read", Resource: ResourceTemplate, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "template:read", AgentScopes: []string{"project:read"}, Description: "Read templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
-	{ID: "template.update", Resource: ResourceTemplate, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "template:update", Description: "Update templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
+	{ID: "template.update", Resource: ResourceTemplate, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "template:update", AgentScopes: []string{"project:template:write"}, Description: "Update templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
 	{ID: "template.delete", Resource: ResourceTemplate, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "template:delete", Description: "Delete templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
 	{ID: "template.list", Resource: ResourceTemplate, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "template:list", AgentScopes: []string{"project:read"}, Description: "List templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
 
