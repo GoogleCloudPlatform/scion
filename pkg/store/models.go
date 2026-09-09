@@ -2481,6 +2481,36 @@ const (
 	ProjectRoleMember = "project-member"
 )
 
+// MembershipKindBuiltin is the value stored in the membership_kind column
+// for built-in project membership roles (owner/admin/member). Custom
+// project-scoped roles leave membership_kind NULL. A partial unique index
+// on (principal_type, principal_id, scope_id) WHERE membership_kind IS NOT
+// NULL AND scope_type = 'project' enforces the D4 invariant: at most one
+// built-in membership role per principal per project.
+//
+// membership_kind is an enforcement-only persistence marker derived from
+// the role definition name at write time. It is intentionally omitted from
+// the domain/API RoleBinding model — callers never read or set it directly.
+const MembershipKindBuiltin = "builtin"
+
+// BuiltInProjectMembershipRoles is the set of role names that represent
+// built-in project membership (exactly one allowed per principal per project).
+//
+// SYNC: This list must match BUILT_IN_PROJECT_MEMBERSHIP_ROLES in
+// web/src/components/shared/role-binding-utils.ts. If a role is added or
+// removed here, update the TypeScript counterpart (and vice versa).
+var BuiltInProjectMembershipRoles = map[string]bool{
+	ProjectRoleOwner:  true,
+	ProjectRoleAdmin:  true,
+	ProjectRoleMember: true,
+}
+
+// IsBuiltInProjectMembershipRole reports whether the given role name is
+// a built-in project membership role.
+func IsBuiltInProjectMembershipRole(roleName string) bool {
+	return BuiltInProjectMembershipRoles[roleName]
+}
+
 // Agent role definition names (matching existing AgentRole constants)
 const (
 	AgentRoleDefNone     = "agent-role-none"
@@ -2495,6 +2525,32 @@ const (
 	RoleBindingPrincipalAgent = "agent"
 	RoleBindingPrincipalGroup = "group"
 )
+
+// RoleBindingSortField enumerates allowed sort fields for listing role bindings.
+type RoleBindingSortField string
+
+const (
+	RoleBindingSortPrincipal RoleBindingSortField = "principal"
+	RoleBindingSortRole      RoleBindingSortField = "role"
+	RoleBindingSortCreated   RoleBindingSortField = "created"
+)
+
+// ValidRoleBindingSortField reports whether s is a recognised sort field.
+func ValidRoleBindingSortField(s string) bool {
+	switch RoleBindingSortField(s) {
+	case RoleBindingSortPrincipal, RoleBindingSortRole, RoleBindingSortCreated:
+		return true
+	}
+	return false
+}
+
+// RoleBindingListOptions controls pagination and ordering for ListAllRoleBindings.
+type RoleBindingListOptions struct {
+	Limit     int                  // 0 → store default (100), max 1000
+	Offset    int                  // 0-based
+	SortBy    RoleBindingSortField // default: RoleBindingSortCreated
+	SortOrder string               // "asc" or "desc" (default: "desc")
+}
 
 // =============================================================================
 // Delegation Edges (Permissions Foundation Phase 1G)
@@ -2766,9 +2822,16 @@ const (
 	ConstraintSubjectAllPrincipals = "all_principals"
 )
 
-// AccessConstraint subject principal types
+// AccessConstraint subject principal types.
+// Groups are collection resources with no identity and cannot be targeted
+// as individual principals — use group_closure instead. The "group" constant
+// is retained solely for reading legacy rows.
 const (
 	ConstraintPrincipalTypeUser  = "user"
 	ConstraintPrincipalTypeAgent = "agent"
+
+	// Deprecated: ConstraintPrincipalTypeGroup is retained only for reading
+	// legacy rows. New constraints must not use principal-kind subjects with
+	// type "group". Legacy rows are marked Degraded and evaluated fail-closed.
 	ConstraintPrincipalTypeGroup = "group"
 )

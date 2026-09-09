@@ -4,14 +4,15 @@ title: Release Notes
 
 Scion release notes are published weekly.
 
-## Latest: Week of August 24 -- 30, 2026
+## Latest: Week of August 31 -- September 6, 2026
 
-This week marked a transformative period for the Scion platform, highlighted by the rollout of the Permissions Foundation refactor (Phases 1 and 2), which introduces a comprehensive, fine-grained access control system across both APIs and the Web UI. Deployments and runtimes saw major progress with the launch of the Cloud Run Instances runtime and a single-node sandbox tier, alongside significant security and credential-placement upgrades for the GKE Helm Chart. Finally, the messaging system received end-to-end per-agent authorization controls (D1–D10) as part of an ongoing multi-tranche migration to the new conversation model.
+This week completed the authorization foundation refactor, replacing the legacy dual Policy/RoleBinding grant model with a unified, positive-authority RoleBinding system and shipping end-to-end access boundaries with a full admin UI. The Cloud Run sandbox received significant hardening for the single-node tier, including a gVisor capability discovery that forced a UID strategy change. Several critical credential-management fixes landed — notably a P0 GITHUB_TOKEN injection regression and a GCP Secret Manager mapping error that caused approximately 15 hours of Discord downtime.
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-08-24/)
+[Read the full release notes for this week ->](/scion/release-notes/2026-08-31/)
 
 ## Previous Weeks
 
+- [Week of August 24 -- 30, 2026](/scion/release-notes/2026-08-24/)
 - [Week of August 17 -- 23, 2026](/scion/release-notes/2026-08-17/)
 - [Week of August 10 -- 16, 2026](/scion/release-notes/2026-08-10/)
 - [Week of August 3 -- 9, 2026](/scion/release-notes/2026-08-03/)

@@ -442,7 +442,7 @@ export class ScionAffectedPrincipalsTable extends LitElement {
       case 'no_overlapping_authority':
         return 'No overlapping authority';
       case 'already_constrained_by_other_boundary':
-        return 'Already constrained by another boundary';
+        return 'Already constrained by another constraint';
       default:
         return reason ?? '';
     }

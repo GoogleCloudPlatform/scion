@@ -557,7 +557,7 @@ export function parseSecurityReviewResponse(
   const rawBoundaries = (details.affectedBoundaries ?? []) as Array<Record<string, unknown>>;
   const boundaries: SecurityReviewBoundary[] = rawBoundaries.map((b) => ({
     boundaryId: (b.boundaryId as string) ?? '',
-    name: (b.name as string) ?? 'Unknown boundary',
+    name: (b.name as string) ?? 'Unknown constraint',
     principalCount: (b.principalCount as number) ?? 0,
     principalLabel: (b.principalLabel as string) ?? 'principals',
     permissionCount: (b.permissionCount as number) ?? 0,
@@ -595,7 +595,7 @@ export function parseLockoutResponse(errorBody: Record<string, unknown>): Lockou
     adminRecords: (details.adminRecords as string[]) ?? [],
     suggestions: (details.suggestions as string[]) ?? [
       'Retain or reactivate a direct user administrator',
-      'Adjust the access boundary to retain the full admin set',
+      'Adjust the access constraint to retain the full admin set',
       'Cancel the operation',
     ],
   };

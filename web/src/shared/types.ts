@@ -810,12 +810,45 @@ export interface Capabilities {
 }
 
 /**
+ * Membership-specific capabilities returned in the project members API
+ * `_capabilities` field. Provides granular boolean flags indicating which
+ * tiers of project membership the current user can manage.
+ */
+export interface MembershipCapabilities {
+  canManageMembers: boolean;
+  canManageAdmins: boolean;
+  canManageOwners: boolean;
+  canTransfer: boolean;
+  actions: string[];
+}
+
+/**
  * Check whether a capability set permits a specific action.
  * Returns false (fail-closed) when capabilities are undefined.
  */
 export function can(capabilities: Capabilities | undefined, action: string): boolean {
   if (!capabilities) return false;
   return capabilities.actions.includes(action);
+}
+
+/**
+ * Whether the viewer may run agent lifecycle actions (start, stop, suspend,
+ * resume).
+ *
+ * These are authorized server-side by `authorizeAgentLifecycle`, the same gate
+ * that governs `attach` (see handlers_projects_core.go, where AgentActionStart
+ * and AgentActionStop route through it). The permission registry defines no
+ * `agent.start` and no per-agent `agent.stop` - only the scope-level
+ * `agent.stop_all` - so `ComputeCapabilities` can never emit "start" or "stop",
+ * and gating on those names hides the controls from every user including
+ * super-admins.
+ *
+ * Gating on the capability the Hub actually enforces keeps the UI truthful. If
+ * start/stop should become separately governed, that needs registry entries
+ * plus role updates, and this helper is the single place to change.
+ */
+export function canLifecycle(capabilities: Capabilities | undefined): boolean {
+  return can(capabilities, 'attach');
 }
 
 /**

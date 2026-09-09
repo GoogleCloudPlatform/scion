@@ -290,19 +290,31 @@ func TestProjectDefaultGate_AgentCreatesAgent_UsesCreatingSA(t *testing.T) {
 	checker := store.NewFakeCallerPermissionChecker().AllowTarget(targetSA.Email)
 	enforceSAAssign(f.srv, checker)
 
-	// CO1: gcp_service_account.assign has no AgentScopes mapping in the
-	// permissions registry, so the agent scope restriction blocks SA assignment
-	// at the authz kernel level. Even with a role binding granting the
-	// permission, agent credentials cannot carry gcp_service_account.assign.
-	// Agent-creates-agent with project-default SA is now denied.
+	// Full-role agents carry project:agent:create scope which maps to
+	// gcp_service_account.assign via AgentScopes in the permissions registry,
+	// so the agent passes the Hub policy layer. The actAs check against the
+	// creating agent's SA is the remaining gate.
 	fullScopes := ScopesForRole(AgentRoleFull)
 	rec := f.asAgent(t, http.MethodPost,
 		"/api/v1/projects/"+f.proj.ID+"/agents",
 		CreateAgentRequest{Name: "p10-child-agent"},
 		fullScopes...)
-	require.Equal(t, http.StatusForbidden, rec.Code,
-		"CO1: agent cannot assign SA (gcp_service_account.assign has no AgentScopes mapping); got: %s",
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"full-role agent with project:agent:create scope can assign SA; got: %s",
 		rec.Body.String())
+
+	// Verify the child agent received the project-default SA configuration.
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Agent)
+
+	got, err := f.store.GetAgent(ctx, resp.Agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	require.NotNil(t, got.AppliedConfig.GCPIdentity)
+	assert.Equal(t, store.GCPMetadataModeAssign, got.AppliedConfig.GCPIdentity.MetadataMode)
+	assert.Equal(t, targetSA.ID, got.AppliedConfig.GCPIdentity.ServiceAccountID)
+	assert.Equal(t, targetSA.Email, got.AppliedConfig.GCPIdentity.ServiceAccountEmail)
 }
 
 // Agent-creates-agent denied when the creating agent has no SA (block mode).

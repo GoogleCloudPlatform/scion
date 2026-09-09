@@ -55,7 +55,7 @@ export interface BoundarySummaryGroup {
 @customElement('scion-boundary-summary-notice')
 export class ScionBoundarySummaryNotice extends LitElement {
   /** Section heading for this notice. */
-  @property() label = 'Access boundaries';
+  @property() label = 'Access constraints';
 
   /** Grouped boundary lists to display. */
   @property({ type: Array }) groups: BoundarySummaryGroup[] = [];
@@ -395,7 +395,7 @@ export class ScionBoundarySummaryNotice extends LitElement {
 
   private renderGroups() {
     if (this.groups.length === 0 || this.totalCount === 0) {
-      return html`<p class="empty-notice">No access boundaries affect this entity.</p>`;
+      return html`<p class="empty-notice">No access constraints affect this entity.</p>`;
     }
 
     return html`

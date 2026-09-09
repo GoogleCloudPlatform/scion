@@ -205,7 +205,7 @@ func TestResolveSecrets_InjectionMode(t *testing.T) {
 		},
 	})
 
-	resolved, err := d.resolveSecrets(ctx, agent)
+	resolved, _, err := d.resolveSecrets(ctx, agent)
 	if err != nil {
 		t.Fatalf("resolveSecrets: %v", err)
 	}

@@ -159,6 +159,39 @@ func authorizedListCursorBinding(endpoint string, filter any) string {
 	return base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
+// scopedCursorBinding creates a cursor binding that includes the endpoint,
+// filter (which already contains the authorized scope), and identity context.
+// This ensures cursors cannot be replayed across principals, credential kinds,
+// or authorization scope changes.
+//
+// RS2: A cursor minted before an authority, group, lifecycle, constraint,
+// suspension, or credential-scope change must not disclose data when replayed.
+// Including the identity in the binding hash ensures cross-principal and
+// cross-credential replay is rejected.
+func scopedCursorBinding(endpoint string, filter any, identity Identity) string {
+	encoded, _ := json.Marshal(filter)
+	// Build the binding input: endpoint + filter + principal context.
+	// The principal context includes the identity type and unique identifier
+	// so that cursors are not transferable between principals or credential types.
+	var identityKey string
+	if identity != nil {
+		// Include the concrete credential type to distinguish session JWT
+		// from scoped UAT (same user ID, different authority ceiling).
+		switch id := identity.(type) {
+		case *ScopedUserIdentity:
+			identityKey = fmt.Sprintf("scoped_uat:%s:%s:%s", id.ID(), id.ScopedProjectID(), id.CredentialID())
+		case AgentIdentity:
+			identityKey = fmt.Sprintf("agent_jwt:%s:%s:%s", id.ID(), id.ProjectID(), id.TokenID())
+		default:
+			identityKey = fmt.Sprintf("%s:%s", identity.Type(), identity.ID())
+		}
+	}
+	raw := append([]byte(endpoint+":"), encoded...)
+	raw = append(raw, []byte(":"+identityKey)...)
+	digest := sha256.Sum256(raw)
+	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
 func validateAuthorizedListCursor(cursor, binding string) error {
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {

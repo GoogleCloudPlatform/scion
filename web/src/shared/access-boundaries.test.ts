@@ -692,8 +692,11 @@ describe('narrowing helpers', () => {
       expect(subjectSelectionOf({ kind: 'principal', principal: { type: 'agent', id: 'a' } })).toBe(
         'exact_agent'
       );
+    });
+
+    it('maps legacy group principal to group_closure (fail-closed fallback)', () => {
       expect(subjectSelectionOf({ kind: 'principal', principal: { type: 'group', id: 'g' } })).toBe(
-        'exact_group'
+        'group_closure'
       );
     });
 

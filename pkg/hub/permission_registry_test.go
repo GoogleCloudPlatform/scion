@@ -104,13 +104,27 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 		ScopeAgentStatusUpdate: {"agent.status_update"},
 		ScopeAgentLogAppend:    {"agent.log_append"},
 		ScopeProjectSecretRead: {"project.secret_read"},
-		ScopeAgentCreate:       {"agent.create"},
+		ScopeAgentCreate:       {"agent.create", "gcp_service_account.assign"},
 		ScopeAgentLifecycle:    {"agent.attach", "agent.delete"},
 		ScopeAgentNotify:       {"agent.notify"},
 		ScopeAgentTokenRefresh: {"agent.token_refresh"},
 		ScopeAgentPortForward:  {"agent.port_forward"},
 		ScopeIdentityToken:     {"agent.identity_token"},
-		ScopeProjectRead:       {"project.read"},
+		// #1494 added AgentScopes: ["project:read"] to template.read/list and
+		// harness_config.read/list without updating this map, so the guard has
+		// been failing on main since. The scope constant documents itself as
+		// covering "agents, templates, skills, harness configs, projects", so the
+		// widening is intended - it just was not recorded here.
+		ScopeProjectRead: {
+			"harness_config.list",
+			"harness_config.read",
+			"project.read",
+			"template.list",
+			"template.read",
+		},
+		// Write access to templates within the agent's own project.
+		// Deliberately excludes template.delete - see the scope declaration.
+		ScopeProjectTemplateWrite: {"template.create", "template.update"},
 	}
 	for scope, wantIDs := range want {
 		gotIDs := registryPermissionIDsForAgentScope(string(scope))

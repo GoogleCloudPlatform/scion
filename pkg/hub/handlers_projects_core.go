@@ -136,6 +136,48 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	query := r.URL.Query()
+	identity := GetIdentityFromContext(ctx)
+
+	// RS2: Unauthenticated callers get an empty list immediately.
+	if identity == nil {
+		writeJSON(w, http.StatusOK, ListProjectsResponse{
+			Projects:     []ProjectWithCapabilities{},
+			LegacyGroves: []ProjectWithCapabilities{},
+			TotalCount:   0,
+		})
+		return
+	}
+
+	// RS2: Resolve authorization scope FIRST — before building filter or cursor
+	// binding. This is the single authoritative scope decision for the request.
+	// Resolution dependency failures fail closed with 500; None is a legitimate
+	// authorization result producing an empty list without a broad query.
+	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "project.list")
+	if err != nil {
+		slog.WarnContext(ctx, "listProjects: authorization scope resolution failed (fail-closed)",
+			"error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"unable to resolve authorization", nil)
+		return
+	}
+
+	if scopeResult.Scopes.IsNone() {
+		// Legitimate no-authority result. Return empty list without querying
+		// the store. No broad resource query is issued for None.
+		writeJSON(w, http.StatusOK, ListProjectsResponse{
+			Projects:     []ProjectWithCapabilities{},
+			LegacyGroves: []ProjectWithCapabilities{},
+			TotalCount:   0,
+		})
+		return
+	}
+
+	// Sanitize optional search parameter: trim whitespace, bound length,
+	// and reject strings that are effectively empty after trimming.
+	searchRaw := strings.TrimSpace(query.Get("search"))
+	if len(searchRaw) > 200 {
+		searchRaw = searchRaw[:200]
+	}
 
 	filter := store.ProjectFilter{
 		OwnerID:   query.Get("ownerId"),
@@ -143,6 +185,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		BrokerID:  query.Get("brokerId"),
 		Name:      query.Get("name"),
 		Slug:      query.Get("slug"),
+		Search:    searchRaw,
 	}
 
 	// Template filtering: default to excluding template projects.
@@ -160,31 +203,94 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// scope=mine: projects the current user owns
-	// scope=shared: projects where the user is a member/admin but not the owner
-	// mine=true (legacy): projects the user owns or is a member of
+	// RS2: Push the authorized project predicate into the store filter.
+	// This INTERSECTS with all other caller filters — it never replaces
+	// or unions with them. For All, AuthorizedProjectIDs remains nil (no
+	// filter restriction — the scope truly is system-wide), but project-
+	// scoped constraint exclusions still apply.
+	if !scopeResult.Scopes.IsAll() {
+		filter.AuthorizedProjectIDs = canonicalizeStringSlice(scopeResult.Scopes.ProjectIDs())
+	}
+	if len(scopeResult.ExcludedProjectIDs) > 0 {
+		filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
+	}
+
+	// RS2: scope=mine / scope=shared / mine=true — D6 Mine/Shared classification.
+	//
+	// Mine = projects with an active direct project-owner RoleBinding.
+	// Shared = projects with current effective project.read access (direct +
+	// transitive group grants) minus Mine.
+	//
+	// Classification is an INTERSECTION with authority, not an authorization
+	// bypass. A system-wide caller still gets correct Mine/Shared when
+	// explicitly requesting those scopes.
+	//
+	// Legacy Project.OwnerID and ExcludeOwnerID have no authorization or
+	// classification role (D6 frozen decision).
 	switch query.Get("scope") {
 	case "mine":
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			filter.OwnerID = userIdent.ID()
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			// RS2 Finding 6: Non-user identities (agent JWT) cannot hold direct
+			// project-owner RoleBindings. Mine is empty for them.
+			filter.MemberOrOwnerIDs = []string{"__none__"}
+		} else {
+			ownerIDs, resolveErr := s.resolveUserOwnerProjectIDsOrError(ctx, userIdent.ID())
+			if resolveErr != nil {
+				slog.WarnContext(ctx, "listProjects: owner resolution failed (fail-closed)", "error", resolveErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"unable to resolve authorization", nil)
+				return
+			}
+			if len(ownerIDs) > 0 {
+				filter.MemberOrOwnerIDs = ownerIDs
+			} else {
+				filter.MemberOrOwnerIDs = []string{"__none__"}
+			}
 		}
 	case "shared":
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
-				filter.MemberProjectIDs = projectIDs
-				filter.ExcludeOwnerID = userIdent.ID()
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			// RS2 Finding 6: Non-user identities cannot hold owner bindings,
+			// so Shared = full scope - empty Mine = full scope. For agent JWT
+			// this is the credential-caveated scope. No filter restriction needed
+			// (the authorization predicate already restricts the result set).
+		} else {
+			sharedResult, resolveErr := s.resolveSharedProjectFilter(ctx, userIdent.ID(), scopeResult)
+			if resolveErr != nil {
+				slog.WarnContext(ctx, "listProjects: shared resolution failed (fail-closed)", "error", resolveErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"unable to resolve authorization", nil)
+				return
+			}
+			if sharedResult.IsAllScope {
+				// Finding 7: System-All Shared — exclude owned projects from
+				// the full-scope query by adding them to ExcludedProjectIDs.
+				filter.ExcludedProjectIDs = append(filter.ExcludedProjectIDs, sharedResult.OwnerExcludeIDs...)
+			} else if len(sharedResult.ProjectIDs) > 0 {
+				filter.MemberProjectIDs = sharedResult.ProjectIDs
 			} else {
-				// User has no group memberships — return empty result
 				filter.MemberProjectIDs = []string{"__none__"}
 			}
 		}
 	default:
-		// Legacy mine=true support
+		// Legacy mine=true support — same semantics as scope=mine.
 		if query.Get("mine") == "true" {
-			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-				filter.OwnerID = userIdent.ID()
-				if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
-					filter.MemberOrOwnerIDs = projectIDs
+			userIdent := GetUserIdentityFromContext(ctx)
+			if userIdent == nil {
+				filter.MemberOrOwnerIDs = []string{"__none__"}
+			} else {
+				ownerIDs, resolveErr := s.resolveUserOwnerProjectIDsOrError(ctx, userIdent.ID())
+				if resolveErr != nil {
+					slog.WarnContext(ctx, "listProjects: owner resolution failed (fail-closed)", "error", resolveErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"unable to resolve authorization", nil)
+					return
+				}
+				if len(ownerIDs) > 0 {
+					filter.MemberOrOwnerIDs = ownerIDs
+				} else {
+					filter.MemberOrOwnerIDs = []string{"__none__"}
 				}
 			}
 		}
@@ -197,8 +303,24 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	identity, cursor := GetIdentityFromContext(ctx), query.Get("cursor")
-	cursorBinding := authorizedListCursorBinding("projects", filter)
+	// Finding 8: Canonicalize all set-like filter fields before hashing.
+	// ExcludedProjectIDs may have been appended to by Shared filter.
+	if len(filter.ExcludedProjectIDs) > 0 {
+		filter.ExcludedProjectIDs = canonicalizeStringSlice(filter.ExcludedProjectIDs)
+	}
+	if len(filter.MemberOrOwnerIDs) > 1 {
+		filter.MemberOrOwnerIDs = canonicalizeStringSlice(filter.MemberOrOwnerIDs)
+	}
+	if len(filter.MemberProjectIDs) > 1 {
+		filter.MemberProjectIDs = canonicalizeStringSlice(filter.MemberProjectIDs)
+	}
+
+	// RS2: Cursor binding computed AFTER authorization scope and all caller
+	// filters are set. The binding includes the authorization predicate and
+	// principal/credential context so a cursor minted before an authority,
+	// group, constraint, or credential-scope change cannot be replayed.
+	cursorBinding := scopedCursorBinding("projects", filter, identity)
+	cursor := query.Get("cursor")
 	if cursor != "" {
 		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
 			BadRequest(w, err.Error())
@@ -206,74 +328,28 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var items []store.Project
-	var nextCursor string
-	var totalCount int
-
-	// Scope-aware list authorization: resolve the caller's authorized project
-	// set from role bindings instead of using a binary admin-view check on a
-	// synthetic hub resource.
-	if identity == nil {
-		// Unauthenticated: return empty list.
-		items = []store.Project{}
-	} else {
-		scopes := s.authzService.ResolveListScopes(ctx, identity, "project.list")
-		if !scopes.IsNone() {
-			// All or explicit scope set: push authorized IDs into the store
-			// query so pagination and totals reflect only the visible set.
-			// For All, AuthorizedProjectIDs remains nil (no filter applied).
-			if !scopes.IsAll() {
-				filter.AuthorizedProjectIDs = scopes.ProjectIDs()
-			}
-			result, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
-		} else {
-			// No role bindings resolved. Fall back to per-item policy filtering
-			// for backward compatibility during the transition period before
-			// CO1 cutover completes. After cutover, all principals will have
-			// role bindings and this path will not be reached.
-			result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Project], error) {
-				page, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
-				if err != nil {
-					return authorizedCandidatePage[store.Project]{}, err
-				}
-				return authorizedCandidatePage[store.Project]{Items: page.Items, NextCursor: page.NextCursor}, nil
-			}, projectResource, func(p *store.Project) string { return authorizedListCursor(p.Created, p.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
-			if err != nil {
-				writeAuthorizedListError(w, err)
-				return
-			}
-			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
-		}
+	result, err := s.store.ListProjects(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
 	}
+	items, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
 
-	// Enrich owner display names
+	// RS2: Enrichment runs only after the authorized store result is obtained.
+	// It must not trigger lookups for filtered-out resources.
 	s.enrichProjectOwnerNames(ctx, items)
 
-	// Compute per-item and scope capabilities for authorized items
+	// Compute per-item and scope capabilities for authorized items.
 	projects := make([]ProjectWithCapabilities, 0, len(items))
-	if identity == nil {
-		for i := range items {
-			projects = append(projects, ProjectWithCapabilities{Project: items[i]})
-		}
-	} else {
-		resources := make([]Resource, len(items))
-		for i := range items {
-			resources[i] = projectResource(&items[i])
-		}
-		for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "project") {
-			projects = append(projects, ProjectWithCapabilities{Project: items[i], Cap: cap})
-		}
+	resources := make([]Resource, len(items))
+	for i := range items {
+		resources[i] = projectResource(&items[i])
+	}
+	for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "project") {
+		projects = append(projects, ProjectWithCapabilities{Project: items[i], Cap: cap})
 	}
 
-	var scopeCap *Capabilities
-	if identity != nil {
-		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "project")
-	}
+	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "project")
 
 	writeJSON(w, http.StatusOK, ListProjectsResponse{
 		Projects:     projects,
@@ -286,6 +362,12 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	// SECURITY-GATE: CheckAccess — verify project.create permission.
+	// The resource is hub-scoped because the project does not exist yet.
+	if !s.authorize(w, r, Resource{Type: "project"}, ActionCreate) {
+		return
+	}
 
 	var req CreateProjectRequest
 	if err := readJSON(r, &req); err != nil {
@@ -726,31 +808,10 @@ func (s *Server) ensureHubMembersProjectVisibility(ctx context.Context, project 
 	}
 }
 
-// countDirectOwnerBindings returns the number of direct-user project-owner
-// role bindings for a project.
-//
-// Known limitation (O3): This count includes all matching bindings regardless
-// of activation conditions (NotBefore, ExpiresAt). An expired or not-yet-active
-// binding still counts toward the minimum owner threshold. Currently moot
-// because owner bindings are created unconditionally without time bounds, but
-// this will need to filter by activation state if time-bounded ownership
-// bindings are introduced.
+// countDirectOwnerBindings delegates to the membership service's
+// countActiveDirectOwners (N-3 consolidation).
 func (s *Server) countDirectOwnerBindings(ctx context.Context, projectID string) (int, error) {
-	bindings, err := s.store.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
-	if err != nil {
-		return 0, err
-	}
-	ownerRoleDef, err := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	for _, b := range bindings {
-		if b.PrincipalType == store.RoleBindingPrincipalUser && b.RoleDefinitionID == ownerRoleDef.ID {
-			count++
-		}
-	}
-	return count, nil
+	return s.membershipService.countActiveDirectOwners(ctx, projectID)
 }
 
 const systemProjectMembersGroupAnnotation = "scion.io/project-members-group"
@@ -1297,6 +1358,13 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SECURITY-GATE: CheckAccess — verify project.create permission.
+	// Register may find an existing project or create a new one; either way
+	// the caller must be allowed to provision projects at hub scope.
+	if !s.authorize(w, r, Resource{Type: "project"}, ActionCreate) {
+		return
+	}
+
 	ctx := r.Context()
 
 	var req RegisterProjectRequest
@@ -1721,6 +1789,25 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 
 	// Parse project ID to extract UUID (supports {uuid}__{slug} format)
 	projectID := resolveProjectID(projectIDRaw)
+
+	// Check for nested /members path (PM1: project-scoped members API)
+	if strings.HasPrefix(subPath, "members") {
+		memberPath := strings.TrimPrefix(subPath, "members")
+		memberPath = strings.TrimPrefix(memberPath, "/")
+		memberPath = strings.TrimSuffix(memberPath, "/")
+		if memberPath == "" {
+			s.handleProjectMembers(w, r, projectID)
+		} else {
+			s.handleProjectMemberByID(w, r, projectID, memberPath)
+		}
+		return
+	}
+
+	// RS1: Atomic ownership transfer endpoint.
+	if subPath == "transfer-ownership" {
+		s.handleTransferOwnership(w, r, projectID)
+		return
+	}
 
 	// Check for nested /agents path
 	if strings.HasPrefix(subPath, "agents") {
@@ -2751,177 +2838,170 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
-	// Fetch the project record before deletion so we can clean up the filesystem.
-	project, err := s.store.GetProject(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
+	// Resolve the authenticated actor — only user principals admitted.
+	identity := GetIdentityFromContext(ctx)
+	userIdentity, ok := identity.(UserIdentity)
+	if !ok || userIdentity == nil {
+		Forbidden(w)
 		return
 	}
 
-	if !s.authorize(w, r, projectResource(project), ActionDelete) {
+	// RS3 R1: Pre-enumerate read-only effect inputs BEFORE authorization.
+	// No destructive effects are emitted here — only data is gathered.
+	// This ensures the handler has the information it needs to execute
+	// effects post-authorization, after the service's transactional cascade
+	// has already deleted the DB records.
+	effectInputs := s.preEnumerateDeletionEffects(ctx, id)
+
+	// RS3: Delegate to the bounded deletion service for complete
+	// authorization composition (base permission, governance, actor status,
+	// credential ceiling, TOCTOU re-check), transactional cascades, and
+	// atomic audit. NO external effects are emitted before this call.
+	if s.deletionService == nil {
+		http.Error(w, "deletion service not configured", http.StatusInternalServerError)
+		return
+	}
+	req := ProjectDeleteRequest{
+		ProjectID: id,
+		Actor:     userIdentity,
+	}
+	result, decision := s.deletionService.Delete(ctx, req)
+	if decision != nil {
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, nil)
 		return
 	}
 
-	// Dispatch agent deletions to runtime brokers so containers are stopped
-	// and agent files are cleaned up. The DB cascade will remove agent records,
-	// but we need the broker to tear down the actual resources first.
-	s.deleteProjectAgents(ctx, project)
+	// RS3: Post-authorization, post-commit external effects.
+	// All effects are best-effort (fire_and_forget, log_and_continue).
+	// Authorization is complete — the service has committed the deletion.
+	deletedProject := result.Project
+	s.executePostDeletionEffects(ctx, id, deletedProject, effectInputs)
 
-	// Clean up all groups associated with the project (agents group, members group, etc.)
-	if projectGroups, err := s.store.ListGroups(ctx, store.GroupFilter{ProjectID: id}, store.ListOptions{Limit: 100}); err == nil {
-		for _, g := range projectGroups.Items {
-			if delErr := s.store.DeleteGroup(ctx, g.ID); delErr != nil {
-				s.projectsLogger().Warn("failed to delete project group", "project_id", id, "group", g.ID, "slug", g.Slug, "error", delErr.Error())
-			}
-		}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// RS3 external effect helpers
+// ---------------------------------------------------------------------------
+
+// deletionEffectInputs holds read-only data pre-enumerated before
+// authorization for post-deletion external effects.
+type deletionEffectInputs struct {
+	agents    []store.Agent
+	templates []store.Template
+	harnesses []store.HarnessConfig
+	providers []store.ProjectProvider
+	project   *store.Project // may be nil if not found
+}
+
+// preEnumerateDeletionEffects gathers read-only data needed for post-deletion
+// external effects. This is called BEFORE authorization — no destructive
+// effects are emitted. All reads are best-effort: failures result in empty
+// data, which means the corresponding post-deletion effect is skipped.
+func (s *Server) preEnumerateDeletionEffects(ctx context.Context, projectID string) deletionEffectInputs {
+	var inputs deletionEffectInputs
+
+	// Read project record for broker cleanup decisions.
+	if p, err := s.store.GetProject(ctx, projectID); err == nil {
+		inputs.project = p
 	}
 
-	// CO1: Legacy policy cleanup removed. Policies are dead data.
-
-	// Cascade-delete all project-scoped role bindings (XL review R1).
-	// This removes all membership (owner/admin/member) bindings and the
-	// hub-members visibility binding for this project. Must run before
-	// DeleteProject so the scope reference is still valid for audit.
-	if n, err := s.store.DeleteRoleBindingsForScope(ctx, store.RoleScopeProject, id); err != nil {
-		s.projectsLogger().Warn("failed to cascade-delete project role bindings", "project_id", id, "error", err)
-	} else if n > 0 {
-		s.projectsLogger().Info("cascade-deleted project role bindings", "project_id", id, "count", n)
+	// Enumerate agents for broker dispatch.
+	if result, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{Limit: 1000}); err == nil {
+		inputs.agents = result.Items
 	}
 
-	// Clean up project-scoped env vars (best-effort).
-	// These use scope/scope_id without FK cascade.
-	if n, err := s.store.DeleteEnvVarsByScope(ctx, store.ScopeProject, id); err != nil {
-		s.projectsLogger().Warn("failed to delete project env vars", "project_id", id, "error", err)
-	} else if n > 0 {
-		s.projectsLogger().Info("deleted project env vars", "project_id", id, "count", n)
+	// Enumerate templates for storage file cleanup.
+	if result, err := s.store.ListTemplates(ctx, store.TemplateFilter{
+		Scope: store.ScopeProject, ScopeID: projectID,
+	}, store.ListOptions{Limit: 1000}); err == nil {
+		inputs.templates = result.Items
 	}
 
-	// Clean up project-scoped secrets (best-effort).
-	if n, err := s.store.DeleteSecretsByScope(ctx, store.ScopeProject, id); err != nil {
-		s.projectsLogger().Warn("failed to delete project secrets", "project_id", id, "error", err)
-	} else if n > 0 {
-		s.projectsLogger().Info("deleted project secrets", "project_id", id, "count", n)
+	// Enumerate harness configs for storage file cleanup.
+	if result, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+		Scope: store.ScopeProject, ScopeID: projectID,
+	}, store.ListOptions{Limit: 1000}); err == nil {
+		inputs.harnesses = result.Items
 	}
 
-	// Clean up project-scoped skill injections (best-effort).
-	// These use scope/scope_id without FK cascade.
-	if n, err := s.store.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeProject, id); err != nil {
-		s.projectsLogger().Warn("failed to delete project skill injections", "project_id", id, "error", err)
-	} else if n > 0 {
-		s.projectsLogger().Info("deleted project skill injections", "project_id", id, "count", n)
+	// Enumerate project providers for broker directory cleanup.
+	if providers, err := s.store.GetProjectProviders(ctx, projectID); err == nil {
+		inputs.providers = providers
 	}
 
-	// Warn about retained managed GCP service accounts (best-effort).
-	// Managed SAs are NOT deleted from GCP — only unlinked from the project.
-	s.warnManagedGCPServiceAccounts(ctx, id)
+	return inputs
+}
 
-	// Clean up project-scoped GCP service account registrations (best-effort).
-	if sas, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-		Scope:   store.ScopeProject,
-		ScopeID: id,
-	}); err == nil {
-		for _, sa := range sas {
-			if delErr := s.store.DeleteGCPServiceAccount(ctx, sa.ID); delErr != nil {
-				s.projectsLogger().Warn("failed to delete project GCP service account registration",
-					"project_id", id, "sa_id", sa.ID, "email", sa.Email, "error", delErr.Error())
-			}
-		}
-	}
+// executePostDeletionEffects runs all external effects after the deletion
+// service has committed. All effects are best-effort: fire_and_forget
+// delivery with log_and_continue on failure.
+func (s *Server) executePostDeletionEffects(ctx context.Context, projectID string, project *store.Project, inputs deletionEffectInputs) {
+	// Effect 0: GCP SA warnings (log-only, post-auth to avoid leaking
+	// target-specific info for denied requests).
+	s.warnManagedGCPServiceAccounts(ctx, projectID)
 
-	// Clean up project-scoped templates (best-effort), including storage files.
-	s.deleteProjectTemplates(ctx, id)
+	// Effect 1: Dispatch agent deletions to runtime brokers.
+	s.dispatchAgentDeletions(ctx, inputs.agents)
 
-	// Clean up project-scoped harness configs (best-effort), including storage files.
-	s.deleteProjectHarnessConfigs(ctx, id)
+	// Effect 2: Delete template storage files (GCS/local).
+	s.deleteStorageFiles(ctx, projectID, inputs.templates, inputs.harnesses)
 
-	// For hub-native and shared-workspace projects, notify provider brokers to clean up
-	// their local project directories. This must run before DeleteProject because
-	// the cascade deletes the project_providers we need to enumerate.
+	// Effect 3: Notify provider brokers to clean up local project directories.
 	if project.GitRemote == "" || project.IsSharedWorkspace() {
-		s.cleanupBrokerProjectDirectories(ctx, project)
+		s.cleanupBrokerProjectDirectoriesFromInputs(ctx, project, inputs.providers)
 	}
 
-	if err := s.store.DeleteProject(ctx, id); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Release quota reservation for the deleted project (best-effort).
+	// Effect 4: Release quota reservation.
 	if s.quotaService != nil {
-		s.quotaService.Release(ctx, "max_projects_per_user", id)
+		s.quotaService.Release(ctx, "max_projects_per_user", projectID)
 	}
 
-	// For hub-native and shared-workspace projects, remove the filesystem directory
-	// and clean up the per-project WebDAV lock store to prevent memory leaks.
+	// Effect 5: Filesystem cleanup (hub-managed projects).
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
 		if projectPath, err := s.hubManagedProjectPath(project.Slug); err == nil {
 			if err := util.RemoveAllSafe(projectPath); err != nil {
 				s.projectsLogger().Warn("failed to remove hub-managed project directory",
-					"project_id", id, "slug", project.Slug, "path", projectPath, "error", err)
+					"project_id", projectID, "slug", project.Slug, "path", projectPath, "error", err)
 			}
 		}
 	}
-	s.webdavLocks.Delete(id)
-	// Same reason, keyed by slug rather than ID: drop the once-per-project
-	// ephemeral-path warning suppression so a slug that is deleted and later
-	// recreated warns again instead of inheriting the old suppression.
-	//
-	// Order matters, and not marginally. The hubManagedProjectPath call above
-	// can re-record this slug: on gke-shared-volume it takes the legacy-local
-	// fallback and warns, and a project served from that fallback is exactly
-	// the population that has an entry here — so evicting before that call
-	// would reliably reinstate the entry it just removed, not occasionally.
-	// The invariant is about resolutions, not reads: the eviction has to
-	// follow the last hubManagedProjectPath call for this slug. The
-	// project-configs cleanup below reads the slug three times after it —
-	// its guard, the marker, and the failure log — and all three are
-	// harmless, because none of them calls hubManagedProjectPath, and only
-	// that resolution re-records.
+	s.webdavLocks.Delete(projectID)
+
+	// Effect 6: Clear ephemeral project warning suppression.
 	s.warnedEphemeralProjects.Delete(project.Slug)
 
-	// Clean up the project-configs directory (~/.scion/project-configs/<slug>__<short-uuid>/).
-	// This stores external settings, templates, and agent homes for both
-	// git-backed linked projects and non-git external projects.
+	// Effect 7: Clean up external project config directory.
 	if project.Slug != "" && project.ID != "" {
 		marker := &config.ProjectMarker{
 			ProjectID:   project.ID,
 			ProjectSlug: project.Slug,
 		}
 		if configPath, err := marker.ExternalProjectPath(); err == nil {
-			// ExternalProjectPath returns <project-configs>/<slug__uuid>/.scion —
-			// remove the parent (<slug__uuid>) directory.
 			projectConfigDir := filepath.Dir(configPath)
 			if err := config.RemoveProjectConfig(projectConfigDir); err != nil && !os.IsNotExist(err) {
 				s.projectsLogger().Warn("failed to remove project config directory",
-					"project_id", id, "slug", project.Slug, "path", projectConfigDir, "error", err)
+					"project_id", projectID, "slug", project.Slug, "path", projectConfigDir, "error", err)
 			}
 		}
 	}
 
-	s.events.PublishProjectDeleted(ctx, id)
-
-	w.WriteHeader(http.StatusNoContent)
+	// Effect 8: Publish project-deleted event.
+	s.events.PublishProjectDeleted(ctx, projectID)
 }
 
-// deleteProjectAgents dispatches deletion of all agents in a project to their
-// runtime brokers. This is best-effort: failures are logged but do not block
-// project deletion. The database cascade will remove agent records regardless.
-func (s *Server) deleteProjectAgents(ctx context.Context, project *store.Project) {
+// dispatchAgentDeletions dispatches agent deletion to runtime brokers
+// using pre-enumerated agent data. Best-effort: failures are logged.
+func (s *Server) dispatchAgentDeletions(ctx context.Context, agents []store.Agent) {
 	dispatcher := s.GetDispatcher()
-
-	result, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{Limit: 1000})
-	if err != nil {
-		s.agentLifecycleLog.Warn("failed to list agents for project deletion", "project_id", project.ID, "error", err)
-		return
-	}
-
 	now := time.Now()
-	for _, agent := range result.Items {
+	for i := range agents {
+		agent := &agents[i]
 		if !agent.DeletedAt.IsZero() {
 			continue
 		}
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
-			if err := dispatcher.DispatchAgentDelete(ctx, &agent, true, true, false, now); err != nil {
+			if err := dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, now); err != nil {
 				s.agentLifecycleLog.Warn("failed to dispatch agent delete during project deletion",
 					"agent_id", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
 			}
@@ -2930,34 +3010,72 @@ func (s *Server) deleteProjectAgents(ctx context.Context, project *store.Project
 	}
 }
 
-// deleteProjectTemplates deletes all project-scoped templates including their
-// storage files (GCS/local). This is best-effort: failures are logged but
-// do not block project deletion.
-func (s *Server) deleteProjectTemplates(ctx context.Context, projectID string) {
-	// List all project-scoped templates so we can clean up their storage files.
-	templates, err := s.store.ListTemplates(ctx, store.TemplateFilter{
-		Scope:   store.ScopeProject,
-		ScopeID: projectID,
-	}, store.ListOptions{Limit: 1000})
-	if err != nil {
-		s.projectsLogger().Warn("failed to list project templates for deletion", "project_id", projectID, "error", err)
-	} else if stor := s.GetStorage(); stor != nil {
-		for _, tmpl := range templates.Items {
-			if tmpl.StoragePath != "" {
-				if err := stor.DeletePrefix(ctx, tmpl.StoragePath); err != nil {
-					s.projectsLogger().Warn("failed to delete template storage files",
-						"project_id", projectID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
-				}
+// deleteStorageFiles deletes external storage files for templates and
+// harness configs using pre-enumerated data. Best-effort: failures are logged.
+func (s *Server) deleteStorageFiles(ctx context.Context, projectID string, templates []store.Template, harnesses []store.HarnessConfig) {
+	stor := s.GetStorage()
+	if stor == nil {
+		return
+	}
+	for _, tmpl := range templates {
+		if tmpl.StoragePath != "" {
+			if err := stor.DeletePrefix(ctx, tmpl.StoragePath); err != nil {
+				s.projectsLogger().Warn("failed to delete template storage files",
+					"project_id", projectID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
 			}
 		}
 	}
-
-	if n, err := s.store.DeleteTemplatesByScope(ctx, store.ScopeProject, projectID); err != nil {
-		s.projectsLogger().Warn("failed to delete project templates", "project_id", projectID, "error", err)
-	} else if n > 0 {
-		s.projectsLogger().Info("deleted project templates", "project_id", projectID, "count", n)
+	for _, hc := range harnesses {
+		if hc.StoragePath != "" {
+			if err := stor.DeletePrefix(ctx, hc.StoragePath); err != nil {
+				s.projectsLogger().Warn("failed to delete harness config storage files",
+					"project_id", projectID, "harnessConfig", hc.ID, "path", hc.StoragePath, "error", err)
+			}
+		}
 	}
 }
+
+// cleanupBrokerProjectDirectoriesFromInputs notifies provider brokers to
+// remove local project directories using pre-enumerated provider data.
+func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, project *store.Project, providers []store.ProjectProvider) {
+	if project.Slug == "" || len(providers) == 0 {
+		return
+	}
+
+	var client RuntimeBrokerClient
+	if disp := s.GetDispatcher(); disp != nil {
+		if httpDisp, ok := disp.(*HTTPAgentDispatcher); ok {
+			client = httpDisp.GetClient()
+		}
+	}
+	if client == nil {
+		return
+	}
+
+	for _, provider := range providers {
+		if s.isEmbeddedBroker(provider.BrokerID) {
+			continue
+		}
+		broker, err := s.store.GetRuntimeBroker(ctx, provider.BrokerID)
+		if err != nil {
+			s.projectsLogger().Warn("failed to get broker for project cleanup",
+				"project_id", project.ID, "broker", provider.BrokerID, "error", err)
+			continue
+		}
+		if err := client.CleanupProject(ctx, provider.BrokerID, broker.Endpoint, project.Slug, project.ID); err != nil {
+			s.projectsLogger().Warn("failed to cleanup project on broker",
+				"project_id", project.ID, "slug", project.Slug,
+				"broker", provider.BrokerID, "endpoint", broker.Endpoint, "error", err)
+		}
+	}
+}
+
+// NOTE: deleteProjectAgents was replaced by dispatchAgentDeletions in RS3 R1,
+// which uses pre-enumerated agent data and runs only after full authorization.
+
+// NOTE: deleteProjectTemplates was removed in RS3 R1. Template DB records
+// are now cascade-deleted transactionally by ProjectDeletionService.
+// Storage files are cleaned up by deleteStorageFiles using pre-enumerated data.
 
 // warnManagedGCPServiceAccounts logs a warning for any hub-minted GCP service
 // accounts that will be retained in GCP when a project is deleted.
@@ -2979,83 +3097,11 @@ func (s *Server) warnManagedGCPServiceAccounts(ctx context.Context, projectID st
 	}
 }
 
-// deleteProjectHarnessConfigs deletes all project-scoped harness configs including
-// their storage files (GCS/local). This is best-effort: failures are logged
-// but do not block project deletion.
-func (s *Server) deleteProjectHarnessConfigs(ctx context.Context, projectID string) {
-	// List all project-scoped harness configs so we can clean up their storage files.
-	configs, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
-		Scope:   store.ScopeProject,
-		ScopeID: projectID,
-	}, store.ListOptions{Limit: 1000})
-	if err != nil {
-		s.projectsLogger().Warn("failed to list project harness configs for deletion", "project_id", projectID, "error", err)
-	} else if stor := s.GetStorage(); stor != nil {
-		for _, hc := range configs.Items {
-			if hc.StoragePath != "" {
-				if err := stor.DeletePrefix(ctx, hc.StoragePath); err != nil {
-					s.projectsLogger().Warn("failed to delete harness config storage files",
-						"project_id", projectID, "harnessConfig", hc.ID, "path", hc.StoragePath, "error", err)
-				}
-			}
-		}
-	}
+// NOTE: deleteProjectHarnessConfigs was removed in RS3 R1. Harness config DB
+// records are now cascade-deleted transactionally by ProjectDeletionService.
+// Storage files are cleaned up by deleteStorageFiles using pre-enumerated data.
 
-	if n, err := s.store.DeleteHarnessConfigsByScope(ctx, store.ScopeProject, projectID); err != nil {
-		s.projectsLogger().Warn("failed to delete project harness configs", "project_id", projectID, "error", err)
-	} else if n > 0 {
-		s.projectsLogger().Info("deleted project harness configs", "project_id", projectID, "count", n)
-	}
-}
-
-// cleanupBrokerProjectDirectories notifies provider brokers to remove their local
-// copies of a hub-managed project directory. This is best-effort: failures are
-// logged but do not block project deletion. The embedded broker is skipped
-// because the hub already cleans up its own filesystem copy.
-func (s *Server) cleanupBrokerProjectDirectories(ctx context.Context, project *store.Project) {
-	if project.Slug == "" {
-		return
-	}
-
-	providers, err := s.store.GetProjectProviders(ctx, project.ID)
-	if err != nil {
-		s.projectsLogger().Warn("failed to get project providers for cleanup", "project_id", project.ID, "error", err)
-		return
-	}
-
-	if len(providers) == 0 {
-		return
-	}
-
-	// Get the RuntimeBrokerClient from the dispatcher.
-	var client RuntimeBrokerClient
-	if disp := s.GetDispatcher(); disp != nil {
-		if httpDisp, ok := disp.(*HTTPAgentDispatcher); ok {
-			client = httpDisp.GetClient()
-		}
-	}
-	if client == nil {
-		s.projectsLogger().Warn("no RuntimeBrokerClient available for project cleanup dispatch", "project_id", project.ID)
-		return
-	}
-
-	for _, provider := range providers {
-		// Skip the embedded broker — the hub already cleans up its own copy.
-		if s.isEmbeddedBroker(provider.BrokerID) {
-			continue
-		}
-
-		broker, err := s.store.GetRuntimeBroker(ctx, provider.BrokerID)
-		if err != nil {
-			s.projectsLogger().Warn("failed to get broker for project cleanup",
-				"project_id", project.ID, "broker", provider.BrokerID, "error", err)
-			continue
-		}
-
-		if err := client.CleanupProject(ctx, provider.BrokerID, broker.Endpoint, project.Slug, project.ID); err != nil {
-			s.projectsLogger().Warn("failed to cleanup project on broker",
-				"project_id", project.ID, "slug", project.Slug,
-				"broker", provider.BrokerID, "endpoint", broker.Endpoint, "error", err)
-		}
-	}
-}
+// NOTE: deleteProjectTemplateStorageFiles, deleteProjectHarnessConfigStorageFiles,
+// and cleanupBrokerProjectDirectories were refactored in RS3 R1 into
+// preEnumerateDeletionEffects + executePostDeletionEffects to ensure no
+// destructive external effects execute before complete authorization.

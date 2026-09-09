@@ -124,6 +124,7 @@ export const ROUTE_PERMISSION_MAP: Record<string, string[]> = {
   'scion-page-admin-groups': ['group.read', 'group.list'],
   'scion-page-admin-group-detail': ['group.read', 'group.list'],
   'scion-page-admin-roles': ['role.read'],
+  'scion-page-admin-role-detail': ['role.read'],
   'scion-page-admin-role-bindings': ['role_binding.read'],
   'scion-page-admin-access-boundaries': ['access_constraint.read', 'access_constraint.admin'],
   'scion-page-admin-access-boundary-detail': ['access_constraint.read', 'access_constraint.admin'],

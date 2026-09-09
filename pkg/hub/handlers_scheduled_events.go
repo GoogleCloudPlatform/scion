@@ -215,6 +215,15 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 	if req.EventType == "dispatch_agent" && !s.authorizeAgentCreate(w, r, projectID) {
 		return
 	}
+	// C1 containment: for message events, validate the target agent belongs to
+	// this project and the caller is authorized to message it. Scheduled messages
+	// are request-derived (not system-plane) and must pass the same authorization
+	// as direct sends — both at authoring and again at fire time.
+	if req.EventType == "message" {
+		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, req.Payload, req.AgentID, req.AgentName) {
+			return
+		}
+	}
 
 	// Validate fire time: exactly one of FireAt or FireIn must be provided
 	if req.FireAt == "" && req.FireIn == "" {

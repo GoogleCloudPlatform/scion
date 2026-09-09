@@ -631,6 +631,19 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 		}
 	}
 
+	// RS2: ExcludedProjectIDs — exclude agents from specific projects when
+	// project-scoped constraints block the list permission. Fail-closed:
+	// malformed exclusion IDs are an authorization predicate error (they
+	// represent constraint scope data that cannot be applied, which would
+	// silently widen access if skipped).
+	if len(filter.ExcludedProjectIDs) > 0 {
+		excludeIDs, err := parseUUIDsStrict(filter.ExcludedProjectIDs)
+		if err != nil {
+			return nil, fmt.Errorf("invalid authorization predicate: ExcludedProjectIDs: %w", err)
+		}
+		preds = append(preds, agent.ProjectIDNotIn(excludeIDs...))
+	}
+
 	// Exclude soft-deleted agents unless explicitly requested.
 	if !filter.IncludeDeleted {
 		preds = append(preds, agent.DeletedAtIsNil())

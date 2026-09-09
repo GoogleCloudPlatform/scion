@@ -49,7 +49,7 @@ import type {
   PageToken,
 } from '../../shared/access-boundaries.js';
 import { canAccessBoundary } from '../../shared/access-boundaries.js';
-import { isFeatureEnabled, ACCESS_BOUNDARIES_AUTHORING_FLAG } from '../../utils/feature-flags.js';
+
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -811,7 +811,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    setDocumentTitle('Access Boundaries');
+    setDocumentTitle('Access Constraints');
     this.readFiltersFromURL();
     resetAllSequences();
     void this.loadData();
@@ -909,7 +909,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
       if (err instanceof DOMException && err.name === 'AbortError') {
         return;
       }
-      console.error('Failed to load access boundaries:', err);
+      console.error('Failed to load access constraints:', err);
       if (err instanceof AccessBoundaryAPIError) {
         if (err.httpStatus === 403) {
           this.permissionDenied = true;
@@ -918,7 +918,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
           this.error = err.message || `HTTP ${err.httpStatus}`;
         }
       } else {
-        this.error = err instanceof Error ? err.message : 'Failed to load access boundaries';
+        this.error = err instanceof Error ? err.message : 'Failed to load access constraints';
       }
     } finally {
       this.loading = false;
@@ -1238,8 +1238,6 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
   }
 
   private get canCreate(): boolean {
-    // Visible only when authoring flag is enabled AND list-level capabilities include previewCreate
-    if (!isFeatureEnabled(ACCESS_BOUNDARIES_AUTHORING_FLAG)) return false;
     return canAccessBoundary(this.listCapabilities ?? undefined, 'previewCreate');
   }
 
@@ -1262,13 +1260,13 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
   override render() {
     return html`
       <div class="header">
-        <h1>Access Boundaries</h1>
+        <h1>Access Constraints</h1>
         <div class="header-actions">
           ${this.canCreate
             ? html`
                 <sl-button variant="primary" size="small" @click=${() => this.navigateToCreate()}>
                   <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-                  Create boundary
+                  Create constraint
                 </sl-button>
               `
             : nothing}
@@ -1282,7 +1280,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
       <div class="result-count-live" role="status" aria-live="polite" aria-atomic="true">
         ${!this.loading && this.items.length > 0
           ? html`${this.totalCountExact ? this.totalCount : `${this.totalCount}+`}
-            ${this.totalCount === 1 ? 'boundary' : 'boundaries'}${this.hasActiveFilters
+            ${this.totalCount === 1 ? 'constraint' : 'constraints'}${this.hasActiveFilters
               ? ' matching filters'
               : ''}`
           : nothing}
@@ -1342,7 +1340,6 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
         >
           <sl-option value="exact_user">User</sl-option>
           <sl-option value="exact_agent">Agent</sl-option>
-          <sl-option value="exact_group">Exact group</sl-option>
           <sl-option value="group_closure">Group closure</sl-option>
           <sl-option value="all_principals">All principals</sl-option>
         </sl-select>
@@ -1406,7 +1403,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
       <div
         class="skeleton-table"
         role="status"
-        aria-label="Loading access boundaries"
+        aria-label="Loading access constraints"
         aria-live="polite"
       >
         ${Array.from(
@@ -1435,7 +1432,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
     return html`
       <div class="error-state" role="alert">
         <sl-icon name="exclamation-triangle"></sl-icon>
-        <h2>Failed to Load Access Boundaries</h2>
+        <h2>Failed to Load Access Constraints</h2>
         <p>There was a problem connecting to the API.</p>
         <div class="error-details">${this.error}</div>
         <sl-button variant="primary" @click=${() => this.loadData()}>
@@ -1481,14 +1478,14 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
     return html`
       <div class="empty-state">
         <sl-icon name="shield-lock"></sl-icon>
-        <h2>No Access Boundaries</h2>
+        <h2>No Access Constraints</h2>
         <p>
-          Access boundaries limit the maximum permissions available to principals across all their
+          Access constraints limit the maximum permissions available to principals across all their
           role assignments. They do not grant access — roles and role bindings are the positive
           authority surfaces.
         </p>
         <p>
-          Create a boundary to cap what permissions a user, agent, group, or all principals can
+          Create a constraint to cap what permissions a user, agent, group, or all principals can
           hold.
         </p>
         ${this.canCreate
@@ -1530,11 +1527,11 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
           class="table-scroll"
           tabindex="0"
           role="region"
-          aria-label="Access boundaries table, scrollable"
+          aria-label="Access constraints table, scrollable"
         >
-          <table role="table" aria-label="Access boundaries">
+          <table role="table" aria-label="Access constraints">
             <caption class="sr-only">
-              List of access boundaries showing name, scope, subject, schedule, retained
+              List of access constraints showing name, scope, subject, schedule, retained
               permissions, affected principals, and last updated time.
             </caption>
             <thead>
@@ -1606,7 +1603,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
         class="clickable-row"
         tabindex="0"
         role="link"
-        aria-label="View boundary: ${item.name}"
+        aria-label="View constraint: ${item.name}"
         @click=${() => this.navigateToBoundary(item.id)}
         @keydown=${(e: KeyboardEvent) => {
           if (e.key === 'Enter' || e.key === ' ') {
@@ -1703,7 +1700,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
 
   private renderCards() {
     return html`
-      <div role="list" aria-label="Access boundaries">
+      <div role="list" aria-label="Access constraints">
         ${this.items.map((item) => {
           const expanded = this.expandedCardIds.has(item.id);
           return html`
@@ -1711,7 +1708,7 @@ export class ScionPageAdminAccessBoundaries extends LitElement {
               class="mobile-card"
               role="listitem"
               tabindex="0"
-              aria-label="View boundary: ${item.name}"
+              aria-label="View constraint: ${item.name}"
               @click=${() => this.navigateToBoundary(item.id)}
               @keydown=${(e: KeyboardEvent) => {
                 if (e.key === 'Enter' || e.key === ' ') {

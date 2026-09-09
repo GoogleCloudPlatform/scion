@@ -510,6 +510,14 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		}
 	}()
 
+	// If the handler returned an error or panicked, record the event as
+	// failed rather than fired. The atomic claim (when available) already
+	// transitioned pending→fired for dedup; this final write transitions
+	// fired→failed so the persisted status reflects the actual outcome.
+	if errMsg != "" {
+		status = store.ScheduledEventFailed
+	}
+
 	now := time.Now()
 	if s.store != nil {
 		_ = s.store.UpdateScheduledEventStatus(ctx, evt.ID, status, &now, errMsg)

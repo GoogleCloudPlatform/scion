@@ -44,6 +44,28 @@ func OverrideIsGitRepo(fn func() bool) func() {
 //go:embed all:embeds/*
 var EmbedsFS embed.FS
 
+// defaultSettingsYAMLToJSON reads an embedded YAML settings template and
+// converts it to the legacy JSON format consumed by LoadSettingsKoanf.
+// Versioned (v1+) templates are round-tripped through convertVersionedToLegacy;
+// legacy templates are marshalled directly.
+func defaultSettingsYAMLToJSON(yamlData []byte) ([]byte, error) {
+	version, _ := DetectSettingsFormat(yamlData)
+	if version != "" {
+		var vs VersionedSettings
+		if err := yaml.Unmarshal(yamlData, &vs); err != nil {
+			return nil, err
+		}
+		legacy := convertVersionedToLegacy(&vs)
+		return json.MarshalIndent(legacy, "", "  ")
+	}
+
+	var settings Settings
+	if err := yaml.Unmarshal(yamlData, &settings); err != nil {
+		return nil, err
+	}
+	return json.MarshalIndent(settings, "", "  ")
+}
+
 // getDefaultSettingsDataForRuntime generates default settings JSON with the
 // specified runtime for the local profile. Handles both versioned and legacy formats.
 func getDefaultSettingsDataForRuntime(targetRuntime string) ([]byte, error) {
@@ -82,6 +104,17 @@ func getDefaultSettingsDataForRuntime(targetRuntime string) ([]byte, error) {
 // a fallback default for settings loaders; during init, DetectLocalRuntime is used
 // instead for actual runtime probing.
 func GetDefaultSettingsData() ([]byte, error) {
+	// Cloud Run Instance with sandbox launcher: use the tier-specific
+	// defaults so that LoadSettingsKoanf never starts from workstation
+	// profiles that cannot work on this tier.
+	if isCloudRunSandboxEnvironment() {
+		data, err := EmbedsFS.ReadFile("embeds/default_settings_cloudrun_sandbox.yaml")
+		if err != nil {
+			return nil, fmt.Errorf("failed to read Cloud Run sandbox settings template: %w", err)
+		}
+		return defaultSettingsYAMLToJSON(data)
+	}
+
 	targetRuntime := "docker"
 	if runtime.GOOS == "darwin" {
 		targetRuntime = "container"

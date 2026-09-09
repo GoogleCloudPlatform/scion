@@ -901,9 +901,12 @@ func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Req
 		return nil, http.StatusForbidden, fmt.Errorf("on-behalf-of principal not found")
 	}
 
-	// Check if user is suspended
-	if user.Status == "suspended" {
-		return nil, http.StatusForbidden, fmt.Errorf("on-behalf-of principal is suspended")
+	// C2b containment: fail closed on any non-active status. The original
+	// check compared against the string literal "suspended"; this version
+	// uses the store constant and inverts the test so that any future
+	// non-active status (e.g. "invited", "deactivated") also fails closed.
+	if user.Status != store.UserStatusActive {
+		return nil, http.StatusForbidden, fmt.Errorf("on-behalf-of principal is not active (status: %s)", user.Status)
 	}
 
 	// Construct an AuthenticatedUser with "integration" client type,

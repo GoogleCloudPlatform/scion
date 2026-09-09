@@ -17,12 +17,15 @@
 /**
  * Access Boundary Subject Selector (Step 2)
  *
- * Radio card selection for the five subject kinds:
+ * Radio card selection for the four subject kinds:
  * - Exact user (search autocomplete)
  * - Exact agent (search autocomplete)
- * - Exact group (search autocomplete, group identity only)
  * - Group closure (search autocomplete, direct and nested members)
  * - All principals (no search needed)
+ *
+ * Groups are collection resources with no identity and cannot be targeted as
+ * individual principals. The removed "exact group" option was semantically
+ * invalid — use group closure instead.
  *
  * Changing subject kind MUST clear any previously selected ID.
  * Always shows a visible summary sentence of the current selection.
@@ -70,14 +73,6 @@ const SUBJECT_OPTIONS: SubjectOption[] = [
     icon: 'robot',
     needsSearch: true,
     searchType: 'agent',
-  },
-  {
-    value: 'exact_group',
-    label: 'Exact group',
-    description: 'Group identity only. Members are not included.',
-    icon: 'people',
-    needsSearch: true,
-    searchType: 'group',
   },
   {
     value: 'group_closure',
@@ -282,10 +277,6 @@ export class ScionAccessBoundarySubjectSelector extends LitElement {
         return this.selectedId
           ? { kind: 'principal', principal: { type: 'agent', id: this.selectedId } }
           : null;
-      case 'exact_group':
-        return this.selectedId
-          ? { kind: 'principal', principal: { type: 'group', id: this.selectedId } }
-          : null;
       case 'group_closure':
         return this.selectedId ? { kind: 'group_closure', groupId: this.selectedId } : null;
       case 'all_principals':
@@ -313,23 +304,21 @@ export class ScionAccessBoundarySubjectSelector extends LitElement {
     if (!option) return '';
 
     if (this.selection === 'all_principals') {
-      return 'This access boundary will apply to all principals in the selected scope.';
+      return 'This access constraint will apply to all principals in the selected scope.';
     }
 
     if (!this.selectedId) {
-      return `Select ${option.label === 'Group closure' ? 'a group' : option.label === 'Exact group' ? 'a group' : option.label === 'Exact user' ? 'a user' : 'an agent'} to continue.`;
+      return `Select ${option.label === 'Group closure' ? 'a group' : option.label === 'Exact user' ? 'a user' : 'an agent'} to continue.`;
     }
 
     const label = this.selectedLabel || this.selectedId;
     switch (this.selection) {
       case 'exact_user':
-        return `This access boundary will apply to user "${label}".`;
+        return `This access constraint will apply to user "${label}".`;
       case 'exact_agent':
-        return `This access boundary will apply to agent "${label}".`;
-      case 'exact_group':
-        return `This access boundary will apply to group "${label}" (identity only, not members).`;
+        return `This access constraint will apply to agent "${label}".`;
       case 'group_closure':
-        return `This access boundary will apply to all direct and nested members of group "${label}".`;
+        return `This access constraint will apply to all direct and nested members of group "${label}".`;
       default:
         return '';
     }
@@ -395,7 +384,7 @@ export class ScionAccessBoundarySubjectSelector extends LitElement {
           ? html`
               <sl-alert variant="warning" open class="warning">
                 <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-                <strong>System-wide all-principals boundary.</strong> This will constrain
+                <strong>System-wide all-principals constraint.</strong> This will constrain
                 permissions for every principal across the entire system. This configuration
                 requires heightened review before it can be committed.
               </sl-alert>

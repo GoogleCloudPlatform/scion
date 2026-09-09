@@ -157,6 +157,56 @@ or removing a harness Dockerfile under `harnesses/<name>/`, update those
 aggregate YAMLs too. Individual harness bundles can also carry their own
 `harnesses/<name>/cloudbuild.yaml` for one-off builds.
 
+## Package Registries
+
+By default the images install packages from the public npm registry and PyPI. On
+a network where `registry.npmjs.org` or `pypi.org` is unreachable, point the
+build at internal mirrors (Artifactory, Nexus, Verdaccio, devpi) with four
+optional environment variables:
+
+| Variable | Purpose |
+|---|---|
+| `NPM_REGISTRY` | npm registry URL. Passed to `core-base` as a build-arg and exported as `NPM_CONFIG_REGISTRY`, so `scion-base`, the harness images, and agents at runtime all inherit it. |
+| `NPM_CONFIG_FILE` | Path to an `.npmrc` holding credentials for that registry. Mounted as a BuildKit secret, never written to an image layer. |
+| `PIP_INDEX_URL` | Python package index URL. Same handling: a `core-base` build-arg, exported as `PIP_INDEX_URL` and inherited the same way. Used by the `hermes` image, and by anything an agent pip-installs at runtime. |
+| `PIP_CONFIG_FILE` | Path to a `pip.conf` holding credentials for that index. Mounted as a BuildKit secret at `/etc/pip.conf`. |
+
+```bash
+export NPM_REGISTRY=https://artifactory.example.com/artifactory/api/npm/npm-repos/
+export NPM_CONFIG_FILE="$HOME/.npmrc"
+export PIP_INDEX_URL=https://artifactory.example.com/artifactory/api/pypi/pypi-repos/simple
+export PIP_CONFIG_FILE="$HOME/.config/pip/pip.conf"
+image-build/scripts/build-images.sh --target common
+```
+
+A minimal `pip.conf` for an index requiring basic auth:
+
+```ini
+[global]
+index-url = https://USER:TOKEN@artifactory.example.com/artifactory/api/pypi/pypi-repos/simple
+```
+
+All four are optional and independent. Unset, the build uses the public
+registries unauthenticated, exactly as before. `NPM_REGISTRY` or
+`PIP_INDEX_URL` without its credentials file works for a mirror that allows
+anonymous reads.
+
+Put credentials in the secret file rather than in `PIP_INDEX_URL`: that variable
+is baked into the image as `ENV`, so a token embedded in the URL would persist
+in the image and show up in `docker inspect`.
+
+Credentials go in as a BuildKit secret rather than a build-arg deliberately: a
+build-arg is recoverable from `docker history` on the resulting image, whereas a
+secret mount is available only during the `RUN` that requests it. The mounts are
+declared `required=false`, so builds without a secret are unaffected.
+
+Supported by the `local-docker` and `local-podman` builders.
+
+**Still not covered:** apt. The `hermes` image installs Node.js from
+`deb.nodesource.com` via an apt source, which no build-arg here redirects. A host
+that blocks that domain will fail on that layer regardless of the index settings
+above.
+
 ## Authentication
 
 The orchestrator and builders assume the caller is already authenticated to the target registry (via `docker login`, `podman login`, `gcloud auth configure-docker`, etc.) and to any required cloud APIs. No login steps are performed inside the script.

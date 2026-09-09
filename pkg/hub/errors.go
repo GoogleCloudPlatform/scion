@@ -173,6 +173,27 @@ const (
 	// ErrCodeRecoveryDisabledImmutable is returned when a mutation targets a
 	// recovery-disabled constraint, which cannot be modified via HTTP.
 	ErrCodeRecoveryDisabledImmutable = "recovery_disabled_immutable"
+
+	// C0-CONTAINMENT: Stable membership governance denial codes.
+	// These replace raw evaluator/permission details in 403 responses for
+	// project membership operations. Internal provenance is retained in
+	// structured logs.
+	//
+	// Contract decision to relax: Phase 1 stable denial code vocabulary.
+
+	// ErrCodeRoleAssignmentForbidden indicates the actor lacks the authority
+	// to manage project membership (e.g., not a project owner).
+	ErrCodeRoleAssignmentForbidden = "role_assignment_forbidden"
+
+	// ErrCodeTargetRoleProtected indicates the actor cannot assign or modify
+	// the target role due to governance restrictions (e.g., an admin trying
+	// to mint an owner binding).
+	ErrCodeTargetRoleProtected = "target_role_protected"
+
+	// ErrCodeLastOwner indicates an operation was rejected because it would
+	// remove the last direct-user project-owner binding.
+	// D7: normalized from SCREAMING_SNAKE to lower_snake_case (approved breaking change).
+	ErrCodeLastOwner = "last_owner"
 )
 
 // writeError writes a JSON error response.
@@ -228,6 +249,18 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusBadRequest
 		code = ErrCodeValidationError
 		message = "Invalid input"
+	case errors.Is(err, store.ErrScopeMismatch):
+		statusCode = http.StatusBadRequest
+		code = ErrCodeScopeMismatch
+		message = "Binding scope type does not match role definition scope type"
+	case errors.Is(err, store.ErrDirectUserOnly):
+		statusCode = http.StatusBadRequest
+		code = ErrCodeValidationError
+		message = "This role requires a direct user principal"
+	case errors.Is(err, store.ErrBuiltInMembershipConflict):
+		statusCode = http.StatusConflict
+		code = ErrCodeConflict
+		message = "Principal already has a built-in membership role in this project"
 	case errors.Is(err, secret.ErrNoSecretBackend):
 		statusCode = http.StatusNotImplemented
 		code = ErrCodeUnavailable

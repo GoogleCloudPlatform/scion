@@ -54,11 +54,31 @@ func (m *mockProxyAuthenticator) Name() string { return "mock" }
 // proxyAuthStore is a minimal store that supports the proxy auth user provisioning path.
 type proxyAuthStore struct {
 	store.Store // embed interface to satisfy all methods
-	users       map[string]*store.User
+	users          map[string]*store.User
+	roleBindings   map[string]*store.RoleBinding
+	roleDefinitions map[string]*store.RoleDefinition
 }
 
 func newProxyAuthStore() *proxyAuthStore {
-	return &proxyAuthStore{users: make(map[string]*store.User)}
+	return &proxyAuthStore{
+		users:          make(map[string]*store.User),
+		roleBindings:   make(map[string]*store.RoleBinding),
+		roleDefinitions: make(map[string]*store.RoleDefinition),
+	}
+}
+
+// newProxyAuthStoreWithRoles returns a proxyAuthStore pre-seeded with the
+// super-admin role definition so that ensureSuperAdminRoleBinding /
+// deleteSuperAdminRoleBinding can create and remove bindings.
+func newProxyAuthStoreWithRoles() *proxyAuthStore {
+	s := newProxyAuthStore()
+	s.roleDefinitions["rd-super-admin"] = &store.RoleDefinition{
+		ID:        "rd-super-admin",
+		Name:      store.SystemRoleSuperAdmin,
+		ScopeType: store.RoleScopeSystem,
+		System:    true,
+	}
+	return s
 }
 
 func (s *proxyAuthStore) GetUserByEmail(_ context.Context, email string) (*store.User, error) {
@@ -95,6 +115,66 @@ func (s *proxyAuthStore) GetUser(_ context.Context, id string) (*store.User, err
 	return nil, store.ErrNotFound
 }
 
+func (s *proxyAuthStore) GetRoleDefinitionByName(_ context.Context, name string, scopeType string) (*store.RoleDefinition, error) {
+	for _, rd := range s.roleDefinitions {
+		if rd.Name == name && rd.ScopeType == scopeType {
+			return rd, nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+func (s *proxyAuthStore) CreateRoleBinding(_ context.Context, rb *store.RoleBinding) (*store.RoleBinding, error) {
+	// Check for duplicate (same role definition + principal + scope)
+	for _, existing := range s.roleBindings {
+		if existing.RoleDefinitionID == rb.RoleDefinitionID &&
+			existing.PrincipalType == rb.PrincipalType &&
+			existing.PrincipalID == rb.PrincipalID &&
+			existing.ScopeType == rb.ScopeType &&
+			existing.ScopeID == rb.ScopeID {
+			return nil, store.ErrAlreadyExists
+		}
+	}
+	id := generateID()
+	rb.ID = id
+	s.roleBindings[id] = rb
+	return rb, nil
+}
+
+func (s *proxyAuthStore) ListRoleBindingsForPrincipal(_ context.Context, principalType, principalID string) ([]*store.RoleBinding, error) {
+	var result []*store.RoleBinding
+	for _, rb := range s.roleBindings {
+		if rb.PrincipalType == principalType && rb.PrincipalID == principalID {
+			result = append(result, rb)
+		}
+	}
+	return result, nil
+}
+
+func (s *proxyAuthStore) DeleteRoleBinding(_ context.Context, id string) error {
+	if _, ok := s.roleBindings[id]; !ok {
+		return store.ErrNotFound
+	}
+	delete(s.roleBindings, id)
+	return nil
+}
+
+// hasSuperAdminBinding returns true if the store contains a system-scoped
+// super-admin role binding for the given user.
+func (s *proxyAuthStore) hasSuperAdminBinding(userID string) bool {
+	for _, rb := range s.roleBindings {
+		if rb.PrincipalType == store.RoleBindingPrincipalUser &&
+			rb.PrincipalID == userID &&
+			rb.ScopeType == store.RoleScopeSystem {
+			// Check if this binding references the super-admin role definition
+			if rd, ok := s.roleDefinitions[rb.RoleDefinitionID]; ok && rd.Name == store.SystemRoleSuperAdmin {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // staticAccessSettings is a test implementation of AccessSettingsProvider
 // with mutable fields for simulating live config changes in tests.
 type staticAccessSettings struct {
@@ -120,6 +200,12 @@ func newTestWebServer(t *testing.T, cfg WebServerConfig) *WebServer {
 
 // newDevAuthWebServer creates a web server with dev-auth enabled for testing
 // authenticated routes without requiring OAuth.
+//
+// By default a minimal authoritative store is installed containing an active
+// DevUserID record so that the suspendedUserMiddleware (which correctly fails
+// closed when ws.store is nil) passes through to the handler under test.
+// Tests that intentionally exercise nil-store or error-store paths can
+// override ws.store after this call returns.
 func newDevAuthWebServer(t *testing.T, overrides ...func(*WebServerConfig)) *WebServer {
 	t.Helper()
 	cfg := WebServerConfig{
@@ -135,6 +221,19 @@ func newDevAuthWebServer(t *testing.T, overrides ...func(*WebServerConfig)) *Web
 			"assets/main.js": &fstest.MapFile{Data: []byte("// test stub")},
 		}
 	}
+
+	// Install a minimal authoritative store with an active dev user so the
+	// suspended-user middleware does not fail closed on every authenticated
+	// request.  This mirrors production where the store is always present.
+	devStore := newProxyAuthStore()
+	devStore.users[DevUserID] = &store.User{
+		ID:     DevUserID,
+		Email:  "dev@localhost",
+		Role:   "admin",
+		Status: store.UserStatusActive,
+	}
+	ws.store = devStore
+
 	return ws
 }
 
@@ -3313,6 +3412,8 @@ func TestProxyAuthMiddleware_ExistingSession_DeletedUserRejected(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrNotFound)
 
 	// Replaying the still-valid admin session cookie must now be rejected.
+	// The server clears the stale session and redirects to login rather
+	// than returning a raw 403, so the user can re-authenticate.
 	req3 := httptest.NewRequest("GET", "/projects", nil)
 	req3.Header.Set("Accept", "text/html")
 	for _, c := range adminCookies {
@@ -3321,7 +3422,8 @@ func TestProxyAuthMiddleware_ExistingSession_DeletedUserRejected(t *testing.T) {
 	rec3 := httptest.NewRecorder()
 	handler.ServeHTTP(rec3, req3)
 
-	assert.Equal(t, http.StatusForbidden, rec3.Code, "deleted user should be rejected with 403")
+	assert.Equal(t, http.StatusFound, rec3.Code, "deleted user should be redirected to login")
+	assert.Equal(t, "/login", rec3.Header().Get("Location"))
 }
 
 func TestProxyAuthMiddleware_ExistingSession_NoUpdateWhenRoleUnchanged(t *testing.T) {
@@ -3374,6 +3476,547 @@ func TestProxyAuthMiddleware_ExistingSession_NoUpdateWhenRoleUnchanged(t *testin
 		}
 	}
 	assert.False(t, sessionReSet, "session cookie should NOT be re-set when role is unchanged")
+}
+
+// ---------------------------------------------------------------------------
+// Super-admin RoleBinding management in WebServer login paths
+// ---------------------------------------------------------------------------
+
+func TestProxyAuthMiddleware_NewAdminUser_GetsSuperAdminBinding(t *testing.T) {
+	// When a new user is provisioned as admin via proxy auth, a system-scoped
+	// super-admin RoleBinding must be created (cold-start fix).
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject:     "sa-1",
+			Email:       "admin@example.com",
+			DisplayName: "Admin User",
+			Domain:      "example.com",
+		},
+	}
+
+	st := newProxyAuthStoreWithRoles()
+
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+	})
+	ws.SetAccessSettingsProvider(&staticAccessSettings{
+		adminEmails: []string{"admin@example.com"},
+	})
+	ws.SetStore(st)
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(rec, req)
+
+	// Verify user was created as admin
+	user, err := st.GetUserByEmail(context.Background(), "admin@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "admin", user.Role)
+
+	// Verify super-admin binding was created
+	assert.True(t, st.hasSuperAdminBinding(user.ID),
+		"new admin user provisioned via proxy auth must get a super-admin RoleBinding")
+}
+
+func TestProxyAuthMiddleware_NewMemberUser_NoSuperAdminBinding(t *testing.T) {
+	// A non-admin user provisioned via proxy auth must NOT get a super-admin binding.
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "sa-2",
+			Email:   "member@example.com",
+			Domain:  "example.com",
+		},
+	}
+
+	st := newProxyAuthStoreWithRoles()
+
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+	})
+	ws.SetAccessSettingsProvider(&staticAccessSettings{
+		adminEmails: []string{"other-admin@example.com"},
+	})
+	ws.SetStore(st)
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(rec, req)
+
+	user, err := st.GetUserByEmail(context.Background(), "member@example.com")
+	require.NoError(t, err)
+	assert.NotEqual(t, "admin", user.Role)
+	assert.False(t, st.hasSuperAdminBinding(user.ID),
+		"non-admin user must NOT get a super-admin RoleBinding")
+}
+
+func TestProxyAuthMiddleware_Promotion_CreatesSuperAdminBinding(t *testing.T) {
+	// An existing member promoted to admin on proxy login must get a super-admin binding.
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "sa-3",
+			Email:   "promoted@example.com",
+			Domain:  "example.com",
+		},
+	}
+
+	st := newProxyAuthStoreWithRoles()
+	_ = st.CreateUser(context.Background(), &store.User{
+		ID:      "u-promote",
+		Email:   "promoted@example.com",
+		Role:    "member",
+		Status:  "active",
+		Created: time.Now(),
+	})
+
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+	})
+	ws.SetAccessSettingsProvider(&staticAccessSettings{
+		adminEmails: []string{"promoted@example.com"},
+	})
+	ws.SetStore(st)
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(rec, req)
+
+	user, err := st.GetUserByEmail(context.Background(), "promoted@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "admin", user.Role)
+	assert.True(t, st.hasSuperAdminBinding(user.ID),
+		"member promoted to admin via proxy auth must get a super-admin RoleBinding")
+}
+
+func TestProxyAuthMiddleware_Demotion_DeletesSuperAdminBinding(t *testing.T) {
+	// An existing admin demoted on proxy login must have the super-admin binding removed.
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "sa-4",
+			Email:   "demoted@example.com",
+			Domain:  "example.com",
+		},
+	}
+
+	st := newProxyAuthStoreWithRoles()
+	_ = st.CreateUser(context.Background(), &store.User{
+		ID:      "u-demote",
+		Email:   "demoted@example.com",
+		Role:    "admin",
+		Status:  "active",
+		Created: time.Now(),
+	})
+	// Pre-create the super-admin binding
+	_, _ = st.CreateRoleBinding(context.Background(), &store.RoleBinding{
+		RoleDefinitionID: "rd-super-admin",
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      "u-demote",
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.True(t, st.hasSuperAdminBinding("u-demote"), "precondition: binding must exist")
+
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+	})
+	// AdminEmails does NOT include demoted@example.com
+	ws.SetAccessSettingsProvider(&staticAccessSettings{
+		adminEmails: []string{"other@example.com"},
+	})
+	ws.SetStore(st)
+	var safe atomic.Bool
+	safe.Store(true)
+	ws.SetDemotionSafe(&safe)
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(rec, req)
+
+	user, err := st.GetUserByEmail(context.Background(), "demoted@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "member", user.Role)
+	assert.False(t, st.hasSuperAdminBinding("u-demote"),
+		"admin demoted via proxy auth must have super-admin RoleBinding removed")
+}
+
+func TestOAuthCallback_NewAdminUser_GetsSuperAdminBinding(t *testing.T) {
+	// When a new user is provisioned as admin via OAuth callback, a
+	// super-admin RoleBinding must be created.
+	const secret = "test-session-secret-for-binding-test-1234567890"
+	adminEmail := "oauth-admin@example.com"
+
+	ws := newTestWebServer(t, WebServerConfig{
+		SessionSecret: secret,
+		BaseURL:       "http://localhost:8080",
+	})
+
+	ws.oauthService = NewOAuthService(OAuthConfig{
+		Web: OAuthClientConfig{
+			Google: OAuthProviderConfig{
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+	}, nil)
+	ws.oauthService.httpClient = &http.Client{
+		Transport: &mockOAuthTransport{
+			tokenJSON:    `{"access_token":"mock-token","token_type":"Bearer","expires_in":3600}`,
+			userinfoJSON: `{"id":"new-admin-id","email":"` + adminEmail + `","verified_email":true,"name":"OAuth Admin"}`,
+		},
+	}
+
+	st := newProxyAuthStoreWithRoles()
+	ws.store = st
+	ws.SetAccessSettingsProvider(&staticAccessSettings{
+		adminEmails: []string{adminEmail},
+	})
+
+	// Pre-seed session with valid OAuth state
+	reqSetup := httptest.NewRequest(http.MethodGet, "/auth/login/google", nil)
+	recSetup := httptest.NewRecorder()
+	sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
+	require.NoError(t, err)
+	oauthState := "test-state-binding"
+	sess.Values[sessKeyOAuthState] = oauthState
+	require.NoError(t, sess.Save(reqSetup, recSetup))
+	cookies := recSetup.Result().Cookies()
+	require.NotEmpty(t, cookies)
+
+	// Make the OAuth callback request
+	callbackURL := "/auth/callback/google?code=test-code&state=" + oauthState
+	reqCallback := httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	for _, c := range cookies {
+		reqCallback.AddCookie(c)
+	}
+	recCallback := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(recCallback, reqCallback)
+
+	resp := recCallback.Result()
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.Equal(t, "/", resp.Header.Get("Location"),
+		"OAuth callback must redirect to '/' on success")
+
+	// Verify user was created as admin with a super-admin binding
+	user, err := st.GetUserByEmail(context.Background(), adminEmail)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", user.Role)
+	assert.True(t, st.hasSuperAdminBinding(user.ID),
+		"new admin user provisioned via OAuth must get a super-admin RoleBinding")
+}
+
+func TestOAuthCallback_ExistingUser_Promotion_CreatesSuperAdminBinding(t *testing.T) {
+	// An existing member promoted to admin during OAuth login must get a binding.
+	const secret = "test-session-secret-for-promotion-test-123456789"
+	memberEmail := "promoted-via-oauth@example.com"
+
+	ws := newTestWebServer(t, WebServerConfig{
+		SessionSecret: secret,
+		BaseURL:       "http://localhost:8080",
+	})
+
+	ws.oauthService = NewOAuthService(OAuthConfig{
+		Web: OAuthClientConfig{
+			Google: OAuthProviderConfig{
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+	}, nil)
+	ws.oauthService.httpClient = &http.Client{
+		Transport: &mockOAuthTransport{
+			tokenJSON:    `{"access_token":"mock-token","token_type":"Bearer","expires_in":3600}`,
+			userinfoJSON: `{"id":"promo-id","email":"` + memberEmail + `","verified_email":true,"name":"Promoted User"}`,
+		},
+	}
+
+	st := newProxyAuthStoreWithRoles()
+	_ = st.CreateUser(context.Background(), &store.User{
+		ID:      "u-oauth-promote",
+		Email:   memberEmail,
+		Role:    "member",
+		Status:  "active",
+		Created: time.Now(),
+	})
+	ws.store = st
+	ws.SetAccessSettingsProvider(&staticAccessSettings{
+		adminEmails: []string{memberEmail},
+	})
+
+	// Pre-seed session
+	reqSetup := httptest.NewRequest(http.MethodGet, "/auth/login/google", nil)
+	recSetup := httptest.NewRecorder()
+	sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
+	require.NoError(t, err)
+	oauthState := "test-state-promote"
+	sess.Values[sessKeyOAuthState] = oauthState
+	require.NoError(t, sess.Save(reqSetup, recSetup))
+	cookies := recSetup.Result().Cookies()
+	require.NotEmpty(t, cookies)
+
+	callbackURL := "/auth/callback/google?code=test-code&state=" + oauthState
+	reqCallback := httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	for _, c := range cookies {
+		reqCallback.AddCookie(c)
+	}
+	recCallback := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(recCallback, reqCallback)
+
+	resp := recCallback.Result()
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	user, err := st.GetUserByEmail(context.Background(), memberEmail)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", user.Role)
+	assert.True(t, st.hasSuperAdminBinding(user.ID),
+		"member promoted to admin via OAuth must get a super-admin RoleBinding")
+}
+
+func TestOAuthCallback_InvitedUser_PromotedToAdmin_GetsSuperAdminBinding(t *testing.T) {
+	// An invited user who transitions to active with admin role must get a binding.
+	const secret = "test-session-secret-for-invited-test-1234567890"
+	invitedEmail := "invited-admin@example.com"
+
+	ws := newTestWebServer(t, WebServerConfig{
+		SessionSecret: secret,
+		BaseURL:       "http://localhost:8080",
+	})
+
+	ws.oauthService = NewOAuthService(OAuthConfig{
+		Web: OAuthClientConfig{
+			Google: OAuthProviderConfig{
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+	}, nil)
+	ws.oauthService.httpClient = &http.Client{
+		Transport: &mockOAuthTransport{
+			tokenJSON:    `{"access_token":"mock-token","token_type":"Bearer","expires_in":3600}`,
+			userinfoJSON: `{"id":"invited-id","email":"` + invitedEmail + `","verified_email":true,"name":"Invited Admin"}`,
+		},
+	}
+
+	st := newProxyAuthStoreWithRoles()
+	// Pre-create user as invited member (not admin yet)
+	_ = st.CreateUser(context.Background(), &store.User{
+		ID:      "u-invited",
+		Email:   invitedEmail,
+		Role:    "member",
+		Status:  store.UserStatusInvited,
+		Created: time.Now(),
+	})
+	ws.store = st
+	ws.SetAccessSettingsProvider(&staticAccessSettings{
+		adminEmails: []string{invitedEmail},
+	})
+
+	// Pre-seed session
+	reqSetup := httptest.NewRequest(http.MethodGet, "/auth/login/google", nil)
+	recSetup := httptest.NewRecorder()
+	sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
+	require.NoError(t, err)
+	oauthState := "test-state-invited"
+	sess.Values[sessKeyOAuthState] = oauthState
+	require.NoError(t, sess.Save(reqSetup, recSetup))
+	cookies := recSetup.Result().Cookies()
+	require.NotEmpty(t, cookies)
+
+	callbackURL := "/auth/callback/google?code=test-code&state=" + oauthState
+	reqCallback := httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	for _, c := range cookies {
+		reqCallback.AddCookie(c)
+	}
+	recCallback := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(recCallback, reqCallback)
+
+	resp := recCallback.Result()
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	user, err := st.GetUserByEmail(context.Background(), invitedEmail)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", user.Role)
+	assert.Equal(t, store.UserStatusActive, user.Status,
+		"invited user must transition to active")
+	assert.True(t, st.hasSuperAdminBinding(user.ID),
+		"invited user promoted to admin on first login must get a super-admin RoleBinding")
+}
+
+func TestOAuthCallback_InvitedAdmin_AlreadyAdmin_GetsSuperAdminBinding(t *testing.T) {
+	// An invited user who ALREADY has role "admin" (set at invite time) must
+	// still get a super-admin RoleBinding on first login, even though the role
+	// doesn't change during the invited→active transition.
+	const secret = "test-session-secret-for-invited-admin-test-123456"
+	invitedEmail := "invited-already-admin@example.com"
+
+	ws := newTestWebServer(t, WebServerConfig{
+		SessionSecret: secret,
+		BaseURL:       "http://localhost:8080",
+	})
+
+	ws.oauthService = NewOAuthService(OAuthConfig{
+		Web: OAuthClientConfig{
+			Google: OAuthProviderConfig{
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+	}, nil)
+	ws.oauthService.httpClient = &http.Client{
+		Transport: &mockOAuthTransport{
+			tokenJSON:    `{"access_token":"mock-token","token_type":"Bearer","expires_in":3600}`,
+			userinfoJSON: `{"id":"invited-admin-id","email":"` + invitedEmail + `","verified_email":true,"name":"Already Admin"}`,
+		},
+	}
+
+	st := newProxyAuthStoreWithRoles()
+	// Pre-create user as invited with admin role already assigned
+	_ = st.CreateUser(context.Background(), &store.User{
+		ID:      "u-invited-admin",
+		Email:   invitedEmail,
+		Role:    "admin",
+		Status:  store.UserStatusInvited,
+		Created: time.Now(),
+	})
+	ws.store = st
+	ws.SetAccessSettingsProvider(&staticAccessSettings{
+		adminEmails: []string{invitedEmail},
+	})
+
+	// Pre-seed session with OAuth state
+	reqSetup := httptest.NewRequest(http.MethodGet, "/auth/login/google", nil)
+	recSetup := httptest.NewRecorder()
+	sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
+	require.NoError(t, err)
+	oauthState := "test-state-invited-admin"
+	sess.Values[sessKeyOAuthState] = oauthState
+	require.NoError(t, sess.Save(reqSetup, recSetup))
+	cookies := recSetup.Result().Cookies()
+	require.NotEmpty(t, cookies)
+
+	callbackURL := "/auth/callback/google?code=test-code&state=" + oauthState
+	reqCallback := httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	for _, c := range cookies {
+		reqCallback.AddCookie(c)
+	}
+	recCallback := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(recCallback, reqCallback)
+
+	resp := recCallback.Result()
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	user, err := st.GetUserByEmail(context.Background(), invitedEmail)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", user.Role)
+	assert.Equal(t, store.UserStatusActive, user.Status,
+		"invited user must transition to active")
+	assert.True(t, st.hasSuperAdminBinding(user.ID),
+		"invited user who already has admin role must get super-admin RoleBinding on first login")
+}
+
+func TestProxyAuthMiddleware_InvitedUser_TransitionsToActive(t *testing.T) {
+	// An invited user logging in via proxy auth must transition from
+	// "invited" to "active" status.
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject:     "sa-invited-1",
+			Email:       "invited-proxy@example.com",
+			DisplayName: "Invited Proxy User",
+			Domain:      "example.com",
+		},
+	}
+
+	st := newProxyAuthStoreWithRoles()
+	_ = st.CreateUser(context.Background(), &store.User{
+		ID:      "u-invited-proxy",
+		Email:   "invited-proxy@example.com",
+		Role:    "member",
+		Status:  store.UserStatusInvited,
+		Created: time.Now(),
+	})
+
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+	})
+	ws.SetAccessSettingsProvider(&staticAccessSettings{
+		adminEmails: []string{"other@example.com"},
+	})
+	ws.SetStore(st)
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(rec, req)
+
+	user, err := st.GetUserByEmail(context.Background(), "invited-proxy@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusActive, user.Status,
+		"invited user must transition to active via proxy auth")
+	assert.Equal(t, "Invited Proxy User", user.DisplayName,
+		"display name should be populated from proxy identity on activation")
+}
+
+func TestProxyAuthMiddleware_InvitedAdmin_AlreadyAdmin_GetsSuperAdminBinding(t *testing.T) {
+	// An invited user who already has role "admin" must get a super-admin
+	// RoleBinding when transitioning from invited to active via proxy auth,
+	// even though the role doesn't change.
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject:     "sa-invited-admin",
+			Email:       "invited-admin-proxy@example.com",
+			DisplayName: "Invited Admin",
+			Domain:      "example.com",
+		},
+	}
+
+	st := newProxyAuthStoreWithRoles()
+	_ = st.CreateUser(context.Background(), &store.User{
+		ID:      "u-invited-admin-proxy",
+		Email:   "invited-admin-proxy@example.com",
+		Role:    "admin",
+		Status:  store.UserStatusInvited,
+		Created: time.Now(),
+	})
+
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+	})
+	ws.SetAccessSettingsProvider(&staticAccessSettings{
+		adminEmails: []string{"invited-admin-proxy@example.com"},
+	})
+	ws.SetStore(st)
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(rec, req)
+
+	user, err := st.GetUserByEmail(context.Background(), "invited-admin-proxy@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "admin", user.Role)
+	assert.Equal(t, store.UserStatusActive, user.Status,
+		"invited user must transition to active via proxy auth")
+	assert.True(t, st.hasSuperAdminBinding(user.ID),
+		"invited user who already has admin role must get super-admin RoleBinding via proxy auth")
 }
 
 // Live operational settings propagation — regression tests for issue #1270

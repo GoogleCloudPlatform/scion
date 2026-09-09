@@ -672,6 +672,24 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// requireSessionCredential enforces the A1 credential caveat: only interactive
+// session or dev credentials may perform token-management operations.
+//
+// The guard uses the CredentialContext recorded by authentication middleware
+// (not identity type), so broker-on-behalf-of, federation, UAT, and agent JWT
+// credentials are all rejected even when they present a valid UserIdentity.
+// An empty or unknown credential kind is also rejected (fail closed).
+func requireSessionCredential(ctx context.Context) error {
+	credential := GetCredentialContextFromContext(ctx)
+	switch credential.Kind {
+	case CredentialKindInteractive, CredentialKindDev:
+		return nil
+	default:
+		// Fail closed: empty, unknown, UAT, agent_jwt, federation, broker.
+		return ErrUATCredentialDenied
+	}
+}
+
 // handleTokens routes user access token requests.
 func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -726,6 +744,12 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
+	if err := requireSessionCredential(r.Context()); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
 	tokens, err := s.uatService.ListTokens(r.Context(), user.ID())
 	if err != nil {
 		InternalError(w)
@@ -748,10 +772,9 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Prevent UAT-creates-UAT: reject if authenticated with a UAT
-	if _, ok := user.(*ScopedUserIdentity); ok {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"access tokens cannot create other access tokens", nil)
+	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
+	if err := requireSessionCredential(r.Context()); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
 		return
 	}
 
@@ -770,10 +793,18 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 			ValidationError(w, err.Error(), nil)
 		case errors.Is(err, ErrUATExpiryTooLong):
 			ValidationError(w, err.Error(), nil)
-		case strings.Contains(err.Error(), "required"):
+		case errors.Is(err, ErrUATExpiryPast):
 			ValidationError(w, err.Error(), nil)
-		case strings.Contains(err.Error(), "project not found"):
+		case errors.Is(err, ErrUATNameRequired):
 			ValidationError(w, err.Error(), nil)
+		case errors.Is(err, ErrUATProjectIDEmpty):
+			ValidationError(w, err.Error(), nil)
+		case errors.Is(err, ErrUATScopeEmpty):
+			ValidationError(w, err.Error(), nil)
+		case errors.Is(err, ErrUATScopeViolation):
+			writeError(w, http.StatusForbidden, "scope_violation", err.Error(), nil)
+		case errors.Is(err, ErrUATProjectForbidden):
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
 		default:
 			InternalError(w)
 		}
@@ -791,6 +822,12 @@ func (s *Server) handleGetToken(w http.ResponseWriter, r *http.Request, id strin
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Unauthorized(w)
+		return
+	}
+
+	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
+	if err := requireSessionCredential(r.Context()); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
 		return
 	}
 
@@ -812,17 +849,18 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
+	if err := requireSessionCredential(r.Context()); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
 	if err := s.uatService.RevokeToken(r.Context(), user.ID(), id); err != nil {
 		NotFound(w, "access token")
 		return
 	}
 
-	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
-		MutationType: "credential_revoke",
-		TargetType:   "user_access_token",
-		TargetID:     id,
-	})
-
+	// Audit is now atomic inside the service (B3/G4).
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -834,11 +872,18 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
+	if err := requireSessionCredential(r.Context()); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
 	if err := s.uatService.DeleteToken(r.Context(), user.ID(), id); err != nil {
 		NotFound(w, "access token")
 		return
 	}
 
+	// Audit is now atomic inside the service (B3/G4).
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1331,12 +1376,25 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 		if err := s.store.CreateUser(ctx, user); err != nil {
 			return nil, fmt.Errorf("create user: %w", err)
 		}
+		// Cold-start fix: when a new user is provisioned as admin,
+		// immediately create the system-scoped super-admin RoleBinding.
+		// ReconcileSuperAdminBindings already ran at startup against an
+		// empty store and won't run again until the next restart.
+		if user.Role == "admin" {
+			s.ensureSuperAdminBinding(ctx, user.ID)
+		}
 	} else {
 		// Reject suspended users (covers both OAuth and proxy auth paths)
 		if user.Status == "suspended" {
 			slog.Warn("login rejected: user is suspended", "email", info.Email, "user_id", user.ID)
 			return nil, ErrUserSuspended
 		}
+
+		// Track whether we need to create or delete a super-admin
+		// RoleBinding. The actual mutation is deferred until after
+		// UpdateUser succeeds so that a failed UpdateUser cannot leave
+		// the binding state diverged from User.Role.
+		var bindingSuperAdmin string // "", "ensure", or "delete"
 
 		if user.Status == store.UserStatusInvited {
 			// Transition invited → active on first login
@@ -1352,7 +1410,9 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			oldRole := user.Role
 			user.Role = s.getUserRole(info.Email, user.Role)
 			if oldRole == "admin" && user.Role != "admin" {
-				s.deleteSuperAdminBinding(ctx, user.ID)
+				bindingSuperAdmin = "delete"
+			} else if user.Role == "admin" && oldRole != "admin" {
+				bindingSuperAdmin = "ensure"
 			}
 			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, info.Email, "", user.ID, info.Email, nil)
 		} else {
@@ -1375,13 +1435,22 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 				slog.Info("User role changed on login", "email", info.Email, "old_role", oldRole, "new_role", newRole)
 				user.Role = newRole
 				if oldRole == "admin" {
-					s.deleteSuperAdminBinding(ctx, user.ID)
+					bindingSuperAdmin = "delete"
+				} else if newRole == "admin" {
+					bindingSuperAdmin = "ensure"
 				}
 			}
 		}
 		if err := s.store.UpdateUser(ctx, user); err != nil {
 			slog.Error("failed to update user on login", "email", info.Email, "user_id", user.ID, "error", err)
 			return nil, fmt.Errorf("update user: %w", err)
+		}
+		// Apply binding changes only after UpdateUser has succeeded.
+		switch bindingSuperAdmin {
+		case "ensure":
+			s.ensureSuperAdminBinding(ctx, user.ID)
+		case "delete":
+			s.deleteSuperAdminBinding(ctx, user.ID)
 		}
 	}
 
@@ -1714,13 +1783,32 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 // IsUnscopedLocalPlatformAdmin. Best-effort: errors are logged but do not fail
 // the login — the next startup reconciliation will clean up.
 func (s *Server) deleteSuperAdminBinding(ctx context.Context, userID string) {
-	rd, err := s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	deleteSuperAdminRoleBinding(ctx, s.store, userID)
+}
+
+// ensureSuperAdminBinding idempotently creates a system-scoped super-admin
+// RoleBinding for the given user. This closes the cold-start gap where
+// provisionUser assigns Role="admin" but ReconcileSuperAdminBindings has
+// already run against an empty user store and will not run again until the
+// next restart. Without this, AuthzService.IsSystemAdmin returns false for
+// the first admin until the hub is restarted.
+func (s *Server) ensureSuperAdminBinding(ctx context.Context, userID string) {
+	ensureSuperAdminRoleBinding(ctx, s.store, userID)
+}
+
+// deleteSuperAdminRoleBinding removes the system-scoped super-admin role binding
+// for a user, if one exists. This is a package-level function so it can be
+// called from both Server (API auth) and WebServer (browser auth) login paths.
+// Best-effort: errors are logged but do not fail the login — the next startup
+// reconciliation will clean up.
+func deleteSuperAdminRoleBinding(ctx context.Context, st store.Store, userID string) {
+	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	if err != nil {
 		slog.Warn("deleteSuperAdminBinding: super-admin role definition not found", "user_id", userID, "error", err)
 		return
 	}
 
-	bindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		slog.Warn("deleteSuperAdminBinding: failed to list bindings", "user_id", userID, "error", err)
 		return
@@ -1728,7 +1816,7 @@ func (s *Server) deleteSuperAdminBinding(ctx context.Context, userID string) {
 
 	for _, b := range bindings {
 		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
-			if err := s.store.DeleteRoleBinding(ctx, b.ID); err != nil {
+			if err := st.DeleteRoleBinding(ctx, b.ID); err != nil {
 				slog.Warn("deleteSuperAdminBinding: failed to delete binding",
 					"user_id", userID, "binding_id", b.ID, "error", err)
 			} else {
@@ -1736,5 +1824,43 @@ func (s *Server) deleteSuperAdminBinding(ctx context.Context, userID string) {
 					"user_id", userID, "binding_id", b.ID)
 			}
 		}
+	}
+}
+
+// ensureSuperAdminRoleBinding idempotently creates a system-scoped super-admin
+// RoleBinding for the given user. This is a package-level function so it can be
+// called from both Server (API auth) and WebServer (browser auth) login paths.
+// It closes the cold-start gap where user provisioning assigns Role="admin" but
+// ReconcileSuperAdminBindings has already run against an empty user store and
+// will not run again until the next restart.
+func ensureSuperAdminRoleBinding(ctx context.Context, st store.Store, userID string) {
+	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		slog.Warn("ensureSuperAdminBinding: super-admin role definition not found — "+
+			"binding will be created on next restart by ReconcileSuperAdminBindings",
+			"user_id", userID, "error", err)
+		return
+	}
+	if rd == nil {
+		slog.Error("ensureSuperAdminBinding: GetRoleDefinitionByName returned nil without error — "+
+			"binding will be created on next restart by ReconcileSuperAdminBindings",
+			"user_id", userID)
+		return
+	}
+
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		slog.Error("ensureSuperAdminBinding: failed to create super-admin binding",
+			"user_id", userID, "error", err)
+	} else if err == nil {
+		slog.Info("created super-admin binding at login-time provisioning",
+			"user_id", userID)
 	}
 }

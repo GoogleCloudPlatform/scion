@@ -47,7 +47,6 @@ import '../shared/env-var-list.js';
 import '../shared/secret-list.js';
 import '../shared/shared-dir-list.js';
 import '../shared/project-members-editor.js';
-import '../shared/effective-access-boundary-notice.js';
 import '../shared/gcp-service-account-list.js';
 import type { SAListChangedDetail } from '../shared/gcp-service-account-list.js';
 import '../shared/scheduled-event-list.js';
@@ -894,8 +893,12 @@ export class ScionPageProjectSettings extends LitElement {
     this.boundaryError = '';
 
     try {
+      // suppressAccessDeniedToast: access constraints are admin-only. A
+      // project owner without access_constraint.read gets an empty section,
+      // which is the intended degraded state — no toast needed.
       const res = await apiFetch(
-        `/api/v1/admin/access-constraints?scopeType=project&scopeId=${encodeURIComponent(this.projectId)}`
+        `/api/v1/admin/access-constraints?scopeType=project&scopeId=${encodeURIComponent(this.projectId)}`,
+        { suppressAccessDeniedToast: true }
       );
 
       const items: AccessBoundarySummary[] = res.ok
@@ -911,7 +914,7 @@ export class ScionPageProjectSettings extends LitElement {
       ];
     } catch (err) {
       console.error('Failed to load boundaries for project:', err);
-      this.boundaryError = err instanceof Error ? err.message : 'Failed to load access boundaries';
+      this.boundaryError = err instanceof Error ? err.message : 'Failed to load access constraints';
     } finally {
       this.boundaryLoading = false;
     }
@@ -942,7 +945,9 @@ export class ScionPageProjectSettings extends LitElement {
   private async checkGitHubAppConfigured(): Promise<void> {
     this.githubAppLoading = true;
     try {
-      const res = await apiFetch('/api/v1/github-app');
+      // suppressAccessDeniedToast: hub.github_app.read is admin-only; the
+      // section is hidden for everyone else (see the catch below).
+      const res = await apiFetch('/api/v1/github-app', { suppressAccessDeniedToast: true });
       if (res.ok) {
         const data = (await res.json()) as { configured: boolean; installation_url?: string };
         this.githubAppConfigured = data.configured;
@@ -1360,13 +1365,8 @@ export class ScionPageProjectSettings extends LitElement {
         sectionTitle="Members"
         sectionDescription="Users and groups with access to this project. Adding a member creates a project-scoped role binding."
       ></scion-project-members-editor>
-      <scion-effective-access-boundary-notice
-        contextType="project"
-        contextId=${this.project.id}
-      ></scion-effective-access-boundary-notice>
-
       <scion-boundary-summary-notice
-        label="Access boundaries affecting this project"
+        label="Access constraints affecting this project"
         .groups=${this.boundaryGroups}
         ?loading=${this.boundaryLoading}
         error=${this.boundaryError}

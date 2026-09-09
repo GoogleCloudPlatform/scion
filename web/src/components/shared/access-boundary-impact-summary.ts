@@ -321,7 +321,7 @@ export class ScionAccessBoundaryImpactSummary extends LitElement {
           <span>
             Lockout check: safe
             ${this.lockout.remainingActiveDirectAdmins !== null
-              ? ` — ${this.lockout.remainingActiveDirectAdmins} active direct access boundary administrator${this.lockout.remainingActiveDirectAdmins === 1 ? '' : 's'} remain`
+              ? ` — ${this.lockout.remainingActiveDirectAdmins} active direct access constraint administrator${this.lockout.remainingActiveDirectAdmins === 1 ? '' : 's'} remain`
               : ''}
           </span>
         </div>

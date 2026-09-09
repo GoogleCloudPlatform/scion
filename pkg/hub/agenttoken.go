@@ -67,6 +67,15 @@ const (
 	// ScopeProjectRead grants read access to project resources (agents, templates,
 	// skills, harness configs, projects). Enforced by checkAgentReadScope().
 	ScopeProjectRead AgentTokenScope = "project:read"
+	// ScopeProjectTemplateWrite allows the agent to create and update templates
+	// within its own project. Deliberately excludes deletion: publishing a
+	// template is recoverable, removing one another agent depends on is not.
+	//
+	// Granted only to agent-role-full, whose holders can already create agents.
+	// An agent that can spawn progeny can already determine what those agents
+	// do; being able to publish the template it spawns them from is the same
+	// authority expressed once instead of per-agent.
+	ScopeProjectTemplateWrite AgentTokenScope = "project:template:write"
 	// ScopeGCPTokenPrefix is the prefix for GCP token scopes.
 	// Full scope format: "project:gcp:token:<sa-id>"
 	ScopeGCPTokenPrefix = "project:gcp:token:"

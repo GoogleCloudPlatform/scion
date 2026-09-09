@@ -267,7 +267,7 @@ export class ScionGroupDeleteDialog extends LitElement {
 
     return html`
       <sl-dialog
-        label="This group is protected by access boundaries"
+        label="This group is protected by access constraints"
         ?open=${this.open}
         @sl-request-close=${() => {
           this.open = false;
@@ -275,14 +275,14 @@ export class ScionGroupDeleteDialog extends LitElement {
       >
         <div class="constraint-gate-body">
           <p>
-            "${groupName}" is the subject of one or more access boundaries. Deleting it would relax
-            those boundaries, so it requires access-boundary administration permission, which you do
+            "${groupName}" is the subject of one or more access constraints. Deleting it would relax
+            those constraints, so it requires access-constraint administration permission, which you do
             not hold.
           </p>
         </div>
 
         <a href=${boundaryUrl} slot="footer">
-          <sl-button variant="default"> View its access boundaries </sl-button>
+          <sl-button variant="default"> View its access constraints </sl-button>
         </a>
         <sl-button
           slot="footer"

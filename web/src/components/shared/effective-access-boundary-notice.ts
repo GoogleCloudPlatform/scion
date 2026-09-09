@@ -24,9 +24,10 @@
  * - Project detail/settings (link to boundaries affecting this project)
  * - Role bindings page (summary outside binding rows)
  *
- * Fetches the count of applicable boundaries from the explain API and
- * displays a notice with a link to the explain view. Handles redacted
- * boundaries by showing "Access boundary (details unavailable)" with reason.
+ * Fetches the count of applicable boundaries from the effective-access API
+ * and displays a notice with a link to the access boundaries view. Handles
+ * redacted boundaries by showing "Access boundary (details unavailable)"
+ * with reason.
  *
  * TERMINOLOGY: layers are descriptive. Never "priority", "override", "winner".
  */
@@ -49,6 +50,8 @@ interface BoundaryCountResponse {
     status?: string;
     redacted?: { message?: string; reason?: string };
   }>;
+  // Fields from the admin effective-access endpoint (system scope).
+  activeBindingCount?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,10 +192,13 @@ export class ScionEffectiveAccessBoundaryNotice extends LitElement {
       if (this.contextType === 'project') {
         url = `/api/v1/admin/access-constraints?scopeType=project&scopeId=${encodeURIComponent(this.contextId)}&pageSize=0`;
       } else {
-        url = `/api/v1/admin/access-explain?principalType=${encodeURIComponent(this.contextType)}&principalId=${encodeURIComponent(this.contextId)}&summary=true`;
+        url = `/api/v1/admin/effective-access?principalType=${encodeURIComponent(this.contextType)}&principalId=${encodeURIComponent(this.contextId)}`;
       }
 
-      const res = await apiFetch(url);
+      // suppressAccessDeniedToast: this notice is a non-critical enhancement
+      // that renders nothing unless it loads (see render()); a 403 must stay
+      // as quiet as the catch below already is.
+      const res = await apiFetch(url, { suppressAccessDeniedToast: true });
       if (res.ok) {
         const data = (await res.json()) as BoundaryCountResponse;
         this.boundaryCount = data.count ?? data.boundaries?.length ?? 0;
@@ -221,7 +227,7 @@ export class ScionEffectiveAccessBoundaryNotice extends LitElement {
         <sl-icon name="shield-exclamation"></sl-icon>
         <span class="notice-text">
           Effective access may be reduced by ${this.boundaryCount} access
-          ${this.boundaryCount === 1 ? 'boundary' : 'boundaries'}
+          ${this.boundaryCount === 1 ? 'constraint' : 'constraints'}
         </span>
         ${explainHref ? html`<a class="notice-link" href=${explainHref}>View details</a>` : nothing}
       </div>
@@ -232,7 +238,7 @@ export class ScionEffectiveAccessBoundaryNotice extends LitElement {
     if (this.contextType === 'project') {
       return `/admin/access-boundaries?scopeType=project&scopeId=${encodeURIComponent(this.contextId)}`;
     }
-    return `/admin/access-explain?principalType=${encodeURIComponent(this.contextType)}&principalId=${encodeURIComponent(this.contextId)}`;
+    return `/admin/access-boundaries?principalType=${encodeURIComponent(this.contextType)}&principalId=${encodeURIComponent(this.contextId)}`;
   }
 }
 

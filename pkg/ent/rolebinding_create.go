@@ -127,6 +127,20 @@ func (_c *RoleBindingCreate) SetNillableCreated(v *time.Time) *RoleBindingCreate
 	return _c
 }
 
+// SetMembershipKind sets the "membership_kind" field.
+func (_c *RoleBindingCreate) SetMembershipKind(v string) *RoleBindingCreate {
+	_c.mutation.SetMembershipKind(v)
+	return _c
+}
+
+// SetNillableMembershipKind sets the "membership_kind" field if the given value is not nil.
+func (_c *RoleBindingCreate) SetNillableMembershipKind(v *string) *RoleBindingCreate {
+	if v != nil {
+		_c.SetMembershipKind(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *RoleBindingCreate) SetID(v uuid.UUID) *RoleBindingCreate {
 	_c.mutation.SetID(v)
@@ -294,6 +308,10 @@ func (_c *RoleBindingCreate) createSpec() (*RoleBinding, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(rolebinding.FieldCreated, field.TypeTime, value)
 		_node.Created = value
+	}
+	if value, ok := _c.mutation.MembershipKind(); ok {
+		_spec.SetField(rolebinding.FieldMembershipKind, field.TypeString, value)
+		_node.MembershipKind = &value
 	}
 	if nodes := _c.mutation.RoleDefinitionIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -481,6 +499,24 @@ func (u *RoleBindingUpsert) UpdateCreatedBy() *RoleBindingUpsert {
 // ClearCreatedBy clears the value of the "created_by" field.
 func (u *RoleBindingUpsert) ClearCreatedBy() *RoleBindingUpsert {
 	u.SetNull(rolebinding.FieldCreatedBy)
+	return u
+}
+
+// SetMembershipKind sets the "membership_kind" field.
+func (u *RoleBindingUpsert) SetMembershipKind(v string) *RoleBindingUpsert {
+	u.Set(rolebinding.FieldMembershipKind, v)
+	return u
+}
+
+// UpdateMembershipKind sets the "membership_kind" field to the value that was provided on create.
+func (u *RoleBindingUpsert) UpdateMembershipKind() *RoleBindingUpsert {
+	u.SetExcluded(rolebinding.FieldMembershipKind)
+	return u
+}
+
+// ClearMembershipKind clears the value of the "membership_kind" field.
+func (u *RoleBindingUpsert) ClearMembershipKind() *RoleBindingUpsert {
+	u.SetNull(rolebinding.FieldMembershipKind)
 	return u
 }
 
@@ -672,6 +708,27 @@ func (u *RoleBindingUpsertOne) UpdateCreatedBy() *RoleBindingUpsertOne {
 func (u *RoleBindingUpsertOne) ClearCreatedBy() *RoleBindingUpsertOne {
 	return u.Update(func(s *RoleBindingUpsert) {
 		s.ClearCreatedBy()
+	})
+}
+
+// SetMembershipKind sets the "membership_kind" field.
+func (u *RoleBindingUpsertOne) SetMembershipKind(v string) *RoleBindingUpsertOne {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.SetMembershipKind(v)
+	})
+}
+
+// UpdateMembershipKind sets the "membership_kind" field to the value that was provided on create.
+func (u *RoleBindingUpsertOne) UpdateMembershipKind() *RoleBindingUpsertOne {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.UpdateMembershipKind()
+	})
+}
+
+// ClearMembershipKind clears the value of the "membership_kind" field.
+func (u *RoleBindingUpsertOne) ClearMembershipKind() *RoleBindingUpsertOne {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.ClearMembershipKind()
 	})
 }
 
@@ -1030,6 +1087,27 @@ func (u *RoleBindingUpsertBulk) UpdateCreatedBy() *RoleBindingUpsertBulk {
 func (u *RoleBindingUpsertBulk) ClearCreatedBy() *RoleBindingUpsertBulk {
 	return u.Update(func(s *RoleBindingUpsert) {
 		s.ClearCreatedBy()
+	})
+}
+
+// SetMembershipKind sets the "membership_kind" field.
+func (u *RoleBindingUpsertBulk) SetMembershipKind(v string) *RoleBindingUpsertBulk {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.SetMembershipKind(v)
+	})
+}
+
+// UpdateMembershipKind sets the "membership_kind" field to the value that was provided on create.
+func (u *RoleBindingUpsertBulk) UpdateMembershipKind() *RoleBindingUpsertBulk {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.UpdateMembershipKind()
+	})
+}
+
+// ClearMembershipKind clears the value of the "membership_kind" field.
+func (u *RoleBindingUpsertBulk) ClearMembershipKind() *RoleBindingUpsertBulk {
+	return u.Update(func(s *RoleBindingUpsert) {
+		s.ClearMembershipKind()
 	})
 }
 

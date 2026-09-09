@@ -315,6 +315,14 @@ type CreateAgentRequest struct {
 	// instead of starting the agent, allowing the caller to gather and submit the missing values.
 	GatherEnv bool `json:"gatherEnv,omitempty"`
 
+	// AvailableAsNeededKeys lists the target key names of as_needed
+	// environment-type secrets that the Hub filtered out of ResolvedSecrets
+	// but could resolve in a second pass if the broker reports them as needed.
+	// This lets the broker's autodetect consider these keys when selecting
+	// auth type, closing the chicken-and-egg gap where autodetect only sees
+	// already-resolved keys.
+	AvailableAsNeededKeys []string `json:"availableAsNeededKeys,omitempty"`
+
 	// RequiredSecrets contains declared secrets from the template config.
 	// Passed by the Hub so the broker can include them in env-gather requirements.
 	RequiredSecrets []api.RequiredSecret `json:"requiredSecrets,omitempty"`

@@ -51,12 +51,13 @@ func TestSubjectSelector_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "valid principal group",
+			name: "principal group rejected — groups are collection resources",
 			subject: SubjectSelector{
 				Kind:          SubjectKindPrincipal,
 				PrincipalType: "group",
 				PrincipalID:   "group1",
 			},
+			wantErr: true,
 		},
 		{
 			name: "valid group closure",
@@ -390,7 +391,7 @@ func TestSubjectSelector_MatchesPrincipalClosure(t *testing.T) {
 			match: true,
 		},
 		{
-			name: "principal type mismatch rejects same ID",
+			name: "legacy exact-group: type mismatch rejects same ID",
 			subject: SubjectSelector{
 				Kind:          SubjectKindPrincipal,
 				PrincipalType: "group",
@@ -399,7 +400,7 @@ func TestSubjectSelector_MatchesPrincipalClosure(t *testing.T) {
 			match: false,
 		},
 		{
-			name: "principal targeting group matches group in closure",
+			name: "legacy exact-group: matches group in closure (fail-closed)",
 			subject: SubjectSelector{
 				Kind:          SubjectKindPrincipal,
 				PrincipalType: "group",
@@ -1245,7 +1246,7 @@ func TestConstraint_UserBlockedByConstraints(t *testing.T) {
 			blocked: false,
 		},
 		{
-			name: "principal targeting group in user's closure",
+			name: "legacy exact-group: principal targeting group in user's closure (fail-closed)",
 			user: adminUserInfo{userID: "user1", groupIDs: []string{"admins-group"}},
 			constraints: []*store.AccessConstraint{
 				{
@@ -1477,14 +1478,14 @@ func TestConstraint_StoreAllowsPermission(t *testing.T) {
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// Fix 1: Exact-principal matching — group-targeted constraints must match
+// Fix 1: Legacy exact-group matching — deprecated but evaluated fail-closed
 // ---------------------------------------------------------------------------
 
-func TestMatchesPrincipalClosure_GroupTargetedPrincipalConstraint(t *testing.T) {
-	// A constraint {kind:principal, principalType:"group", principalID:"g1"}
-	// must match when "group:g1" is in the typed closure.
-	// Previously this never matched because the comparison was against the
-	// requester's type ("user"/"agent"), never "group".
+func TestMatchesPrincipalClosure_LegacyGroupTargetedPrincipalConstraint(t *testing.T) {
+	// Legacy: a constraint {kind:principal, principalType:"group", principalID:"g1"}
+	// is no longer created (groups are collection resources with no identity),
+	// but existing rows must still match fail-closed when "group:g1" is in the
+	// typed closure.
 
 	typedClosure := closureOf("user:u1", "group:g1", "group:g2")
 
@@ -1495,13 +1496,13 @@ func TestMatchesPrincipalClosure_GroupTargetedPrincipalConstraint(t *testing.T) 
 	}
 
 	if !s.MatchesPrincipalClosure(typedClosure) {
-		t.Fatal("principal constraint targeting group g1 should match when group:g1 is in closure")
+		t.Fatal("legacy exact-group constraint should still match when group:g1 is in closure (fail-closed)")
 	}
 
 	// Same constraint but g1 not in closure.
 	noGroupClosure := closureOf("user:u1", "group:g2")
 	if s.MatchesPrincipalClosure(noGroupClosure) {
-		t.Fatal("principal constraint targeting group g1 should NOT match when g1 is absent")
+		t.Fatal("legacy exact-group constraint should NOT match when g1 is absent")
 	}
 }
 
@@ -1529,7 +1530,7 @@ func TestMatchesPrincipalClosure_AllPrincipalTypes(t *testing.T) {
 			wantMatch:     true,
 		},
 		{
-			name:          "group match",
+			name:          "legacy group match (fail-closed)",
 			closure:       closureOf("group:g1"),
 			principalType: "group",
 			principalID:   "g1",
@@ -1664,13 +1665,14 @@ func TestFilterApplicableConstraints_NoBareidOvermatch(t *testing.T) {
 // Fix 1+5 combined: dev/federated principals with group constraints
 // ---------------------------------------------------------------------------
 
-func TestFilterApplicableConstraints_DevPrincipalWithGroupConstraint(t *testing.T) {
-	// A constraint targeting group:g1 should match a dev principal whose
-	// normalized closure includes group:g1.
+func TestFilterApplicableConstraints_LegacyGroupConstraintStillMatchesDevPrincipal(t *testing.T) {
+	// Legacy: a constraint targeting group:g1 (no longer created) should still
+	// match a dev principal whose normalized closure includes group:g1
+	// (fail-closed evaluation).
 
 	constraint := &AccessConstraint{
 		ID:   "c1",
-		Name: "group-constraint",
+		Name: "legacy-group-constraint",
 		Subject: SubjectSelector{
 			Kind:          SubjectKindPrincipal,
 			PrincipalType: "group",
@@ -1688,24 +1690,22 @@ func TestFilterApplicableConstraints_DevPrincipalWithGroupConstraint(t *testing.
 	)
 
 	if len(applicable) != 1 {
-		t.Fatal("group-targeted principal constraint should match when group:g1 is in normalized closure")
+		t.Fatal("legacy group-targeted principal constraint should match when group:g1 is in normalized closure (fail-closed)")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Exact-group subject vs group-closure subject distinction
+// Legacy exact-group subject vs group-closure subject — fail-closed evaluation
 // ---------------------------------------------------------------------------
 
-func TestFilterApplicableConstraints_ExactGroupVsGroupClosure(t *testing.T) {
-	// An exact-group constraint {principal, group, G} targets the group
-	// principal itself. A group_closure constraint {group_closure, G}
-	// targets all effective members of G.
-	// Both should match when group:G is in the closure, but they mean
-	// different things semantically.
+func TestFilterApplicableConstraints_LegacyExactGroupVsGroupClosure(t *testing.T) {
+	// Legacy: an exact-group constraint {principal, group, G} is no longer
+	// created (groups have no identity), but existing rows must still be
+	// evaluated fail-closed alongside group_closure constraints.
 
-	exactGroupConstraint := &AccessConstraint{
-		ID:   "exact",
-		Name: "exact-group",
+	legacyExactGroupConstraint := &AccessConstraint{
+		ID:   "legacy-exact",
+		Name: "legacy-exact-group",
 		Subject: SubjectSelector{
 			Kind:          SubjectKindPrincipal,
 			PrincipalType: "group",
@@ -1726,21 +1726,21 @@ func TestFilterApplicableConstraints_ExactGroupVsGroupClosure(t *testing.T) {
 		MaximumPermissions: []string{"agent.read"},
 	}
 
-	// User in group g1: both should match.
+	// User in group g1: both should match (legacy rows evaluated fail-closed).
 	userInGroup := closureOf("user:u1", "group:g1")
 	applicable := FilterApplicableConstraints(
-		[]*AccessConstraint{exactGroupConstraint, groupClosureConstraint},
+		[]*AccessConstraint{legacyExactGroupConstraint, groupClosureConstraint},
 		userInGroup, ScopeTypeSystem, "",
 	)
 
 	if len(applicable) != 2 {
-		t.Fatalf("both exact-group and group-closure constraints should match, got %d", len(applicable))
+		t.Fatalf("both legacy exact-group and group-closure constraints should match (fail-closed), got %d", len(applicable))
 	}
 
 	// User NOT in group g1: neither should match.
 	userNotInGroup := closureOf("user:u1", "group:g2")
 	applicable = FilterApplicableConstraints(
-		[]*AccessConstraint{exactGroupConstraint, groupClosureConstraint},
+		[]*AccessConstraint{legacyExactGroupConstraint, groupClosureConstraint},
 		userNotInGroup, ScopeTypeSystem, "",
 	)
 
@@ -1840,18 +1840,18 @@ func TestNormalizeClosureTypes(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Consistency: lockout guard and evaluator agree on group-targeted constraints
+// Consistency: lockout guard and evaluator agree on legacy group-targeted constraints
 // ---------------------------------------------------------------------------
 
-func TestGroupTargetedConstraint_LockoutAndEvaluatorConsistency(t *testing.T) {
-	// The lockout guard (userBlockedByConstraints) and the evaluator
-	// (MatchesPrincipalClosure) must both match a {principal, group, G}
-	// constraint when G is in the user's closure.
+func TestLegacyGroupTargetedConstraint_LockoutAndEvaluatorConsistency(t *testing.T) {
+	// Legacy: a {principal, group, G} constraint is no longer created, but
+	// the lockout guard and evaluator must still agree on matching behavior
+	// for existing rows (fail-closed).
 
 	ptrS := func(s string) *string { return &s }
 	s := &Server{}
 
-	// Store-level constraint for lockout check.
+	// Store-level legacy constraint for lockout check.
 	storeConstraint := &store.AccessConstraint{
 		SubjectKind:          store.ConstraintSubjectPrincipal,
 		SubjectPrincipalType: ptrS("group"),
@@ -1861,10 +1861,10 @@ func TestGroupTargetedConstraint_LockoutAndEvaluatorConsistency(t *testing.T) {
 
 	user := adminUserInfo{userID: "u1", groupIDs: []string{"admin-group"}}
 
-	// Lockout guard says blocked.
+	// Lockout guard says blocked (fail-closed).
 	lockoutBlocked := s.userBlockedByConstraints(context.TODO(), user, []*store.AccessConstraint{storeConstraint})
 	if !lockoutBlocked {
-		t.Fatal("lockout guard should detect that user is blocked by group-targeted constraint")
+		t.Fatal("lockout guard should detect that user is blocked by legacy group-targeted constraint")
 	}
 
 	// Evaluator (hub-level) should also match.
@@ -1876,7 +1876,7 @@ func TestGroupTargetedConstraint_LockoutAndEvaluatorConsistency(t *testing.T) {
 	typedClosure := closureOf("user:u1", "group:admin-group")
 	evaluatorMatches := hubSelector.MatchesPrincipalClosure(typedClosure)
 	if !evaluatorMatches {
-		t.Fatal("evaluator should also match the group-targeted constraint")
+		t.Fatal("evaluator should also match the legacy group-targeted constraint (fail-closed)")
 	}
 
 	// Both agree: consistency check passes.

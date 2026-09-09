@@ -236,11 +236,69 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	query := r.URL.Query()
+	identity := GetIdentityFromContext(ctx)
 
+	// RS2: Unauthenticated callers get an empty list immediately.
+	if identity == nil {
+		writeJSON(w, http.StatusOK, ListAgentsResponse{
+			Agents:     []AgentWithCapabilities{},
+			TotalCount: 0,
+			ServerTime: time.Now().UTC(),
+		})
+		return
+	}
+
+	// RS2: Resolve authorization scope FIRST — before building filter or cursor
+	// binding. This is the single authoritative scope decision for the request.
+	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
+	if err != nil {
+		slog.WarnContext(ctx, "listAgents: authorization scope resolution failed (fail-closed)",
+			"error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"unable to resolve authorization", nil)
+		return
+	}
+
+	if scopeResult.Scopes.IsNone() {
+		// Legitimate no-authority result. Return empty list without querying
+		// the store. No broad resource query is issued for None.
+		writeJSON(w, http.StatusOK, ListAgentsResponse{
+			Agents:     []AgentWithCapabilities{},
+			TotalCount: 0,
+			ServerTime: time.Now().UTC(),
+		})
+		return
+	}
+
+	// RS2: Slug-to-ID resolution for projectId filter.
+	// If projectId looks like a slug (not a UUID), resolve it to a project ID.
+	// The resolution must not become a cross-scope existence oracle: nonexistent
+	// and unauthorized slugs are externally indistinguishable — both silently
+	// produce an unmatched filter that returns zero results.
 	projectID := query.Get("projectId")
 	if projectID != "" && gouuid.Validate(projectID) != nil {
-		if project, err := s.store.GetProjectBySlug(ctx, projectID); err == nil && project != nil {
+		// Looks like a slug. Resolve within the authorized scope to prevent
+		// the slug lookup from disclosing projects outside the caller's authority.
+		project, lookupErr := s.store.GetProjectBySlug(ctx, projectID)
+		if lookupErr != nil || project == nil {
+			// Slug not found — indistinguishable from unauthorized.
+			projectID = ""
+		} else if !scopeResult.Scopes.Contains(project.ID) {
+			// Project exists but is outside the caller's authorized scope.
+			// Treat identically to "not found" to prevent an existence oracle.
+			projectID = ""
+		} else {
 			projectID = project.ID
+		}
+		// When slug resolution fails (not found or unauthorized), leave
+		// projectID empty. The store filter will return all authorized agents
+		// (no project restriction), which is correct: it prevents the caller
+		// from distinguishing "slug doesn't exist" from "slug exists but I
+		// can't see it".
+		if projectID == "" {
+			// Force empty result: filter to an impossible project ID so the
+			// caller cannot infer slug existence from result count changes.
+			projectID = "00000000-0000-0000-0000-000000000000"
 		}
 	}
 
@@ -260,30 +318,94 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		filter.Labels = parsed
 	}
 
-	// scope=mine: agents the current user created
-	// scope=shared: agents in projects the user is a member of, but not created by them
-	// mine=true (legacy): agents the user created or in projects they own/are a member of
+	// RS2: Push the authorized project predicate into the store filter.
+	// This INTERSECTS with all other caller filters — it never replaces
+	// or unions with them. For All, AuthorizedProjectIDs remains nil, but
+	// project-scoped constraint exclusions still apply.
+	if !scopeResult.Scopes.IsAll() {
+		filter.AuthorizedProjectIDs = canonicalizeStringSlice(scopeResult.Scopes.ProjectIDs())
+	}
+	if len(scopeResult.ExcludedProjectIDs) > 0 {
+		filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
+	}
+
+	// RS2: scope=mine / scope=shared / mine=true — D6 Mine/Shared classification.
+	//
+	// Agent Mine = agents in Mine projects (active direct project-owner
+	// RoleBinding). Agent creator/OwnerID metadata must NOT expand either set.
+	// mine=true is preserved only as an exact alias of scope=mine.
+	//
+	// Agent Shared = agents in Shared projects (effective project.read access
+	// minus Mine projects).
+	//
+	// Classification is an intersection with authority, not an authorization bypass.
 	switch query.Get("scope") {
 	case "mine":
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			filter.OwnerID = userIdent.ID()
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			// RS2 Finding 6: Non-user identities (agent JWT) cannot hold direct
+			// project-owner RoleBindings. Mine is empty for them.
+			filter.MemberOrOwnerProjectIDs = []string{"__none__"}
+		} else {
+			ownerIDs, resolveErr := s.resolveUserOwnerProjectIDsOrError(ctx, userIdent.ID())
+			if resolveErr != nil {
+				slog.WarnContext(ctx, "listAgents: owner resolution failed (fail-closed)", "error", resolveErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"unable to resolve authorization", nil)
+				return
+			}
+			if len(ownerIDs) > 0 {
+				filter.MemberOrOwnerProjectIDs = ownerIDs
+			} else {
+				filter.MemberOrOwnerProjectIDs = []string{"__none__"}
+			}
+			// RS2: Do NOT set filter.OwnerID. Agent creator ownership must
+			// not expand the Mine set beyond owned projects (D6 decision).
 		}
 	case "shared":
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
-				filter.MemberProjectIDs = projectIDs
-				filter.ExcludeOwnerID = userIdent.ID()
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			// RS2 Finding 6: Non-user identities cannot hold owner bindings,
+			// so Shared = full scope - empty Mine = full scope. No filter needed.
+		} else {
+			sharedResult, resolveErr := s.resolveSharedProjectFilter(ctx, userIdent.ID(), scopeResult)
+			if resolveErr != nil {
+				slog.WarnContext(ctx, "listAgents: shared resolution failed (fail-closed)", "error", resolveErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"unable to resolve authorization", nil)
+				return
+			}
+			if sharedResult.IsAllScope {
+				// Finding 7: System-All Shared — exclude agents from owned
+				// projects by adding owner project IDs to ExcludedProjectIDs.
+				filter.ExcludedProjectIDs = append(filter.ExcludedProjectIDs, sharedResult.OwnerExcludeIDs...)
+			} else if len(sharedResult.ProjectIDs) > 0 {
+				filter.MemberProjectIDs = sharedResult.ProjectIDs
 			} else {
 				filter.MemberProjectIDs = []string{"__none__"}
 			}
+			// RS2: Do NOT set filter.ExcludeOwnerID. Agent creator metadata
+			// has no classification role (D6 decision).
 		}
 	default:
 		if query.Get("mine") == "true" {
-			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-				filter.OwnerID = userIdent.ID()
-				if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
-					filter.MemberOrOwnerProjectIDs = projectIDs
+			userIdent := GetUserIdentityFromContext(ctx)
+			if userIdent == nil {
+				filter.MemberOrOwnerProjectIDs = []string{"__none__"}
+			} else {
+				ownerIDs, resolveErr := s.resolveUserOwnerProjectIDsOrError(ctx, userIdent.ID())
+				if resolveErr != nil {
+					slog.WarnContext(ctx, "listAgents: owner resolution failed (fail-closed)", "error", resolveErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"unable to resolve authorization", nil)
+					return
 				}
+				if len(ownerIDs) > 0 {
+					filter.MemberOrOwnerProjectIDs = ownerIDs
+				} else {
+					filter.MemberOrOwnerProjectIDs = []string{"__none__"}
+				}
+				// RS2: Do NOT set filter.OwnerID (same as scope=mine).
 			}
 		}
 	}
@@ -295,8 +417,23 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	identity, cursor := GetIdentityFromContext(ctx), query.Get("cursor")
-	cursorBinding := authorizedListCursorBinding("agents", filter)
+	// Finding 8: Canonicalize all set-like filter fields before hashing.
+	if len(filter.ExcludedProjectIDs) > 0 {
+		filter.ExcludedProjectIDs = canonicalizeStringSlice(filter.ExcludedProjectIDs)
+	}
+	if len(filter.MemberOrOwnerProjectIDs) > 1 {
+		filter.MemberOrOwnerProjectIDs = canonicalizeStringSlice(filter.MemberOrOwnerProjectIDs)
+	}
+	if len(filter.MemberProjectIDs) > 1 {
+		filter.MemberProjectIDs = canonicalizeStringSlice(filter.MemberProjectIDs)
+	}
+
+	// RS2: Cursor binding computed AFTER authorization scope and all caller
+	// filters are set. The binding includes the authorization predicate and
+	// principal/credential context so a cursor minted before an authority,
+	// group, constraint, or credential-scope change cannot be replayed.
+	cursorBinding := scopedCursorBinding("agents", filter, identity)
+	cursor := query.Get("cursor")
 	if cursor != "" {
 		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
 			BadRequest(w, err.Error())
@@ -304,81 +441,32 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var items []store.Agent
-	var nextCursor string
-	var totalCount int
-
-	// Scope-aware list authorization: resolve the caller's authorized project
-	// set from role bindings instead of using a binary admin-view check on a
-	// synthetic hub resource.
-	if identity == nil {
-		// Unauthenticated: return empty list.
-		items = []store.Agent{}
-	} else {
-		scopes := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
-		if !scopes.IsNone() {
-			// All or explicit scope set: push authorized IDs into the store
-			// query so pagination and totals reflect only the visible set.
-			// For All, AuthorizedProjectIDs remains nil (no filter applied).
-			if !scopes.IsAll() {
-				filter.AuthorizedProjectIDs = scopes.ProjectIDs()
-			}
-			result, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
-		} else {
-			// No role bindings resolved. Fall back to per-item policy filtering
-			// for backward compatibility during the transition period before
-			// CO1 cutover completes. After cutover, all principals will have
-			// role bindings and this path will not be reached.
-			result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Agent], error) {
-				page, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
-				if err != nil {
-					return authorizedCandidatePage[store.Agent]{}, err
-				}
-				return authorizedCandidatePage[store.Agent]{Items: page.Items, NextCursor: page.NextCursor}, nil
-			}, agentResource, func(a *store.Agent) string { return authorizedListCursor(a.Created, a.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
-			if err != nil {
-				writeAuthorizedListError(w, err)
-				return
-			}
-			items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
-		}
+	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
 	}
+	items, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
 
-	// Enrich agents with project and broker names
+	// RS2: Enrichment runs only after the authorized store result is obtained.
 	s.enrichAgents(ctx, items)
 
-	// Compute per-item and scope capabilities for authorized items
+	// Compute per-item and scope capabilities for authorized items.
 	agents := make([]AgentWithCapabilities, 0, len(items))
-	if identity == nil {
-		for i := range items {
-			agents = append(agents, AgentWithCapabilities{Agent: items[i]})
-		}
-	} else {
-		resources := make([]Resource, len(items))
-		for i := range items {
-			resources[i] = agentResource(&items[i])
-		}
-		for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent") {
-			agents = append(agents, AgentWithCapabilities{Agent: items[i], Cap: cap})
-		}
+	resources := make([]Resource, len(items))
+	for i := range items {
+		resources[i] = agentResource(&items[i])
+	}
+	for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent") {
+		agents = append(agents, AgentWithCapabilities{Agent: items[i], Cap: cap})
 	}
 
 	// Compute messageability for each agent relative to the viewer.
-	if identity != nil {
-		for i := range agents {
-			agents[i].Messageability = s.ComputeMessageability(ctx, identity, &agents[i].Agent)
-		}
+	for i := range agents {
+		agents[i].Messageability = s.ComputeMessageability(ctx, identity, &agents[i].Agent)
 	}
 
-	var scopeCap *Capabilities
-	if identity != nil {
-		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
-	}
+	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
 
 	writeJSON(w, http.StatusOK, ListAgentsResponse{
 		Agents:       agents,
@@ -1160,6 +1248,30 @@ func (s *Server) createAgentInProject(
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModeBlock,
 			}
+		}
+	}
+
+	// Passthrough-to-assign translation for cloudrun-sandbox runtimes.
+	//
+	// gVisor sandboxes cannot reach the real GCE metadata server at
+	// 169.254.169.254, so passthrough mode produces no credentials. When
+	// the target broker runs a cloudrun-sandbox profile, translate
+	// passthrough to assign using the broker's host service account —
+	// semantically equivalent (same identity) and the assign machinery
+	// works inside the sandbox.
+	//
+	// The translation runs after both the explicit and project-default
+	// identity paths, so it covers every surface that sets passthrough.
+	if agent.AppliedConfig != nil &&
+		agent.AppliedConfig.GCPIdentity != nil &&
+		agent.AppliedConfig.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough &&
+		runtimeBrokerID != "" {
+		if err := s.translatePassthroughForSandbox(ctx, agent, runtimeBrokerID); err != nil {
+			slog.ErrorContext(ctx, "passthrough-to-assign translation failed",
+				"agent", agent.Name, "broker", runtimeBrokerID, "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+				"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
+			return
 		}
 	}
 
@@ -2244,6 +2356,15 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModePassthrough,
 			}
+			// Passthrough-to-assign translation for cloudrun-sandbox runtimes
+			// (same logic as the create path — see createAgentInProject).
+			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
+				slog.ErrorContext(ctx, "passthrough-to-assign translation failed (PATCH)",
+					"agent", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+					"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
+				return
+			}
 		case store.GCPMetadataModeAssign:
 			if updates.GCPIdentity.ServiceAccountID == "" {
 				ValidationError(w, "service_account_id is required when metadata_mode is 'assign'", nil)
@@ -3014,4 +3135,176 @@ func (s *Server) recordDelegationEdgeWithType(ctx context.Context, agentID, proj
 			"project_id", projectID,
 			"error", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Passthrough-to-assign translation for cloudrun-sandbox runtimes
+// ---------------------------------------------------------------------------
+
+// brokerHasCloudRunSandboxProfile reports whether any profile on the broker has
+// the "cloudrun-sandbox" runtime type. This indicates the broker runs gVisor
+// sandboxes that cannot reach the real GCE metadata server.
+func brokerHasCloudRunSandboxProfile(broker *store.RuntimeBroker) bool {
+	for _, p := range broker.Profiles {
+		if p.Type == "cloudrun-sandbox" {
+			return true
+		}
+	}
+	return false
+}
+
+// translatePassthroughForSandbox translates a passthrough GCP identity config
+// to assign mode when the target broker runs a cloudrun-sandbox runtime.
+//
+// Inside gVisor sandboxes the real GCE metadata server at 169.254.169.254 is
+// unreachable, so passthrough mode produces no credentials. The translation
+// uses the broker's registered host service account — semantically equivalent
+// to passthrough (same identity) — and the assign machinery (metadata
+// emulator → hub gcp-token endpoint → IAM impersonation) works inside the
+// sandbox.
+//
+// The method is a no-op when:
+//   - the agent's config is not passthrough,
+//   - the broker has no cloudrun-sandbox profile, or
+//   - the broker has no host SA registered (leaves passthrough as-is with a
+//     warning — identical to pre-fix behavior).
+//
+// On success the agent's AppliedConfig.GCPIdentity is rewritten in place to
+// assign mode with the broker's host SA, and a GCPServiceAccount record is
+// created if one does not already exist for the email.
+func (s *Server) translatePassthroughForSandbox(
+	ctx context.Context,
+	agent *store.Agent,
+	brokerID string,
+) error {
+	if agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
+		return nil
+	}
+	if agent.AppliedConfig.GCPIdentity.MetadataMode != store.GCPMetadataModePassthrough {
+		return nil
+	}
+
+	if brokerID == "" {
+		return fmt.Errorf("cannot translate passthrough: no broker ID")
+	}
+
+	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
+	if err != nil {
+		return fmt.Errorf("load broker %s: %w", brokerID, err)
+	}
+	if !brokerHasCloudRunSandboxProfile(broker) {
+		return nil // not a sandbox runtime — passthrough works as-is
+	}
+
+	if broker.GCPHostServiceAccountEmail == "" {
+		// The broker has no host SA registered. The passthrough gate should
+		// have caught this for explicit passthrough requests; for project-
+		// default passthrough the gate doesn't run. Log and leave as-is —
+		// the agent won't get credentials, same as the pre-fix behavior.
+		slog.WarnContext(ctx, "cloudrun-sandbox broker has no host SA — cannot translate passthrough to assign",
+			"broker_id", broker.ID, "broker_name", broker.Name)
+		return nil
+	}
+
+	// Ensure a GCPServiceAccount record exists for the broker's host SA.
+	sa, err := s.ensureHostSARecord(ctx, broker)
+	if err != nil {
+		return fmt.Errorf("ensure host SA record: %w", err)
+	}
+
+	slog.InfoContext(ctx, "translated passthrough to assign for cloudrun-sandbox",
+		"agent", agent.Name, "broker", broker.Name,
+		"sa_email", sa.Email, "sa_id", sa.ID)
+
+	agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+		MetadataMode:        store.GCPMetadataModeAssign,
+		ServiceAccountID:    sa.ID,
+		ServiceAccountEmail: sa.Email,
+		ProjectID:           sa.ProjectID,
+	}
+
+	// Mark the translation so operators and the UI can distinguish a
+	// hub-translated assign from a user-requested one.
+	if agent.Annotations == nil {
+		agent.Annotations = make(map[string]string)
+	}
+	agent.Annotations["scion.dev/gcp-identity-translated-from"] = "passthrough"
+
+	return nil
+}
+
+// ensureHostSARecord looks up or creates a hub-scoped GCPServiceAccount
+// record for the broker's host service account. This is needed so that the
+// assign flow (JWT scope minting, gcp-token endpoint) works with a real
+// ServiceAccountID foreign key.
+//
+// The record is hub-scoped because the broker's host SA is an infrastructure
+// identity, not project-specific — any project dispatching to this broker
+// should be able to use it for passthrough translation.
+func (s *Server) ensureHostSARecord(
+	ctx context.Context,
+	broker *store.RuntimeBroker,
+) (*store.GCPServiceAccount, error) {
+	// Look up by email first.
+	existing, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+		Email: broker.GCPHostServiceAccountEmail,
+		Scope: store.ScopeHub,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lookup SA by email %s: %w", broker.GCPHostServiceAccountEmail, err)
+	}
+	if len(existing) > 0 {
+		return &existing[0], nil
+	}
+
+	// Create a new hub-scoped record for the broker's host SA.
+	// ScopeID is provenance for hub-scoped accounts (which hub instance
+	// registered it). Use the broker ID as provenance — more specific than
+	// the hub ID and stable across redeployments.
+	projectID := broker.GCPHostProjectID
+	if projectID == "" {
+		projectID = projectIDFromServiceAccountEmail(broker.GCPHostServiceAccountEmail)
+	}
+
+	sa := &store.GCPServiceAccount{
+		ID:      gouuid.New().String(),
+		Scope:   store.ScopeHub,
+		ScopeID: broker.ID,
+		Email:       broker.GCPHostServiceAccountEmail,
+		ProjectID:   projectID,
+		DisplayName: fmt.Sprintf("Broker host SA (%s)", broker.Name),
+		DefaultScopes: []string{
+			"https://www.googleapis.com/auth/cloud-platform",
+		},
+		// The hub can already impersonate this SA (it's the broker's host
+		// identity), so mark as verified. The actAs check already passed
+		// in authorizePassthroughIdentity for explicit passthrough requests.
+		Verified:           true,
+		VerifiedAt:         time.Now(),
+		VerificationStatus: store.GCPVerificationVerified,
+		CreatedBy:          "system:passthrough-translation",
+		CreatedAt:          time.Now(),
+		Managed:            false, // not created by Hub SA provisioning
+	}
+
+	if err := s.store.CreateGCPServiceAccount(ctx, sa); err != nil {
+		// Race condition: another request may have created the record
+		// between our lookup and create. Try the lookup again.
+		existing, lookupErr := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+			Email: broker.GCPHostServiceAccountEmail,
+			Scope: store.ScopeHub,
+		})
+		if lookupErr != nil {
+			return nil, fmt.Errorf("create SA %s: %w (retry lookup: %v)",
+				broker.GCPHostServiceAccountEmail, err, lookupErr)
+		}
+		if len(existing) > 0 {
+			return &existing[0], nil
+		}
+		return nil, fmt.Errorf("create SA %s: %w", broker.GCPHostServiceAccountEmail, err)
+	}
+
+	slog.InfoContext(ctx, "created hub-scoped GCPServiceAccount for broker host SA",
+		"sa_id", sa.ID, "sa_email", sa.Email, "broker", broker.Name)
+	return sa, nil
 }

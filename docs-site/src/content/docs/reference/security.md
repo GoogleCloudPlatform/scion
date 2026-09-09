@@ -43,7 +43,7 @@ Agents running inside containers must report status back to the Hub without poss
 - **Role-Based Scopes**: Instead of raw template scopes (which are deprecated), an agent's scopes are governed by its assigned **Tiered Agent Role** (`none`, `readonly`, `baseline`, or `full`). An empty or unspecified agent role is securely enforced to resolve to the least-privilege role (`AgentRoleNone`) across all authorization paths. Scheduled dispatch children automatically persist this explicit role, and dispatches lacking a creator are refused.
     - `project:read` (Readonly): Allows reading project state (agents, templates, etc.).
     - `agent:status:update`, `agent:token:refresh`, `project:agent:notify`, `agent:port:forward` (Baseline): Standard operational scopes allowing the agent to report progress, refresh its token, and hold port tunnels.
-    - `project:agent:create`, `project:agent:lifecycle`, `project:secret:read` (Full): Complete programmatic control allowing the agent to spawn sub-agents, manage their phases, and retrieve project secrets dynamically.
+    - `project:agent:create`, `project:agent:lifecycle`, `project:secret:read`, `project:template:write` (Full): Complete programmatic control allowing the agent to spawn sub-agents, manage their phases, retrieve project secrets dynamically, and create or update templates within the project.
 - **Transmission**: The token is injected into the container via the `SCION_HUB_TOKEN` environment variable and is used by `sciontool` for all API calls.
 
 ### 1.4 Runtime Broker Authentication (HMAC)

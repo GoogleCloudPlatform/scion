@@ -1296,10 +1296,11 @@ func TestResolveListScopes_AccessConstraintExcludesListPermission(t *testing.T) 
 	user := NewAuthenticatedUser(userID, "c2list@test.com", "C2 List User", "member", "api")
 
 	// Without constraint: user should see the project.
-	scopes := authz.ResolveListScopes(ctx, user, "project.list")
-	assert.False(t, scopes.IsNone(),
+	result, err := authz.ResolveListScopes(ctx, user, "project.list")
+	require.NoError(t, err)
+	assert.False(t, result.Scopes.IsNone(),
 		"without constraint, user with project-member binding should have list visibility")
-	assert.True(t, scopes.Contains(projectID),
+	assert.True(t, result.Scopes.Contains(projectID),
 		"user should see their project")
 
 	// Create an AccessConstraint that excludes project.list for all principals.
@@ -1316,7 +1317,8 @@ func TestResolveListScopes_AccessConstraintExcludesListPermission(t *testing.T) 
 
 	// With constraint: user should get ScopeSetNone because the constraint
 	// excludes project.list at system scope.
-	scopes = authz.ResolveListScopes(ctx, user, "project.list")
-	assert.True(t, scopes.IsNone(),
+	result, err = authz.ResolveListScopes(ctx, user, "project.list")
+	require.NoError(t, err)
+	assert.True(t, result.Scopes.IsNone(),
 		"C-2 fix: active boundary excluding project.list must return empty list scope")
 }

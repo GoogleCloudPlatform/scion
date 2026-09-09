@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -72,6 +73,7 @@ RUN chmod +x /usr/local/bin/init-firewall.sh && \
 # RUN curl -fsSL https://claude.ai/install.sh | bash
 # ENV PATH=/home/scion/.local/bin:$PATH
 
-RUN npm cache clean --force \
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
+    npm cache clean --force \
   && npm install -g @anthropic-ai/claude-code@latest \
   && npm cache clean --force

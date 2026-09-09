@@ -151,6 +151,21 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		// C2a containment: require active status before constructing an
+		// AuthenticatedUser from broker-supplied sender data. This identity
+		// is synthesized below the auth middleware, which normally enforces
+		// suspension. Without this check, a suspended or otherwise non-active
+		// user can be impersonated through the broker inbound path.
+		if senderUser.Status != store.UserStatusActive {
+			log.Warn("broker inbound sender is not active",
+				"sender", req.Message.Sender, "status", senderUser.Status)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"sender identity is not active", map[string]interface{}{
+					"sender": req.Message.Sender,
+					"status": senderUser.Status,
+				})
+			return
+		}
 		// Cache the resolved user ID so downstream DM-ownership and
 		// persistence blocks can reuse it without redundant DB lookups.
 		req.Message.SenderID = senderUser.ID

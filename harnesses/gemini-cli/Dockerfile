@@ -25,7 +25,8 @@ RUN mkdir -p /home/scion/.gemini /home/scion/.gemini/skills && \
   chown -R scion:scion /home/scion/.gemini
 
 # Install gemini-cli and clean up
-RUN npm install -g @google/gemini-cli@${GEMINI_CLI_VERSION} \
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
+    npm install -g @google/gemini-cli@${GEMINI_CLI_VERSION} \
   && npm cache clean --force
 
 # Default entrypoint when none specified
