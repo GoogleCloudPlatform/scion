@@ -1225,6 +1225,17 @@ func (s *ProjectStore) MarkStaleBrokersOffline(ctx context.Context, threshold ti
 		}
 		if affected == 1 {
 			ids = append(ids, b.ID.String())
+			// Mirror the WebSocket disconnect handler: mark this broker's
+			// project contributor records offline so populateProjectComputed
+			// reports correct active-broker counts.
+			_, err = s.client.ProjectContributor.Update().
+				Where(projectcontributor.BrokerIDEQ(b.ID)).
+				SetStatus(store.BrokerStatusOffline).
+				SetLastSeen(now).
+				Save(ctx)
+			if err != nil {
+				return nil, mapError(err)
+			}
 		}
 		// affected==0 means another writer raced us — skip this broker.
 	}

@@ -54,7 +54,16 @@ func (s *Server) brokerHeartbeatTimeoutHandler() func(ctx context.Context) {
 		}
 
 		for _, id := range ids {
-			s.events.PublishBrokerStatus(ctx, id, "offline")
+			providers, err := s.store.GetBrokerProjects(ctx, id)
+			if err != nil {
+				slog.Error("Scheduler: failed to get broker projects for event publishing", "brokerID", id, "error", err)
+				continue
+			}
+			projectIDs := make([]string, len(providers))
+			for i, p := range providers {
+				projectIDs[i] = p.ProjectID
+			}
+			s.events.PublishBrokerDisconnected(ctx, id, projectIDs)
 		}
 
 		if len(ids) > 0 {
