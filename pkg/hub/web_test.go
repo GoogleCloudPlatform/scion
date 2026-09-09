@@ -53,16 +53,16 @@ func (m *mockProxyAuthenticator) Name() string { return "mock" }
 
 // proxyAuthStore is a minimal store that supports the proxy auth user provisioning path.
 type proxyAuthStore struct {
-	store.Store // embed interface to satisfy all methods
-	users          map[string]*store.User
-	roleBindings   map[string]*store.RoleBinding
+	store.Store     // embed interface to satisfy all methods
+	users           map[string]*store.User
+	roleBindings    map[string]*store.RoleBinding
 	roleDefinitions map[string]*store.RoleDefinition
 }
 
 func newProxyAuthStore() *proxyAuthStore {
 	return &proxyAuthStore{
-		users:          make(map[string]*store.User),
-		roleBindings:   make(map[string]*store.RoleBinding),
+		users:           make(map[string]*store.User),
+		roleBindings:    make(map[string]*store.RoleBinding),
 		roleDefinitions: make(map[string]*store.RoleDefinition),
 	}
 }
