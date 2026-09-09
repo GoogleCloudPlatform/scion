@@ -583,7 +583,6 @@ export class ScionPageAgents extends LitElement {
               this.backgroundRefresh();
               return;
             }
-            return;
           }
           throw new Error(await extractApiError(response, 'Failed to delete agent'));
         }

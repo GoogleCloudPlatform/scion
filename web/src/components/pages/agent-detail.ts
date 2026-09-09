@@ -866,7 +866,6 @@ export class ScionPageAgentDetail extends LitElement {
                 : '/agents';
               return;
             }
-            return;
           }
           throw new Error(await extractApiError(response, 'Failed to delete agent'));
         }
