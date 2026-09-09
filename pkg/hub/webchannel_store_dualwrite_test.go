@@ -523,18 +523,44 @@ VALUES ('msg-guard-1', 'proj-1', 'user:dave', 'user-4', 'agent:helper', 'agent-4
 }
 
 func TestPromoteDM_NoConversationID_SkipsDualWrite(t *testing.T) {
-	// NOTE: After P2, the empty-ConversationID case is no longer reachable
-	// from the handler — PromoteDM now mints one in the store. This test
-	// remains because the store contract is unchanged: when a caller passes
-	// an empty ConversationID AND hasConversationsTable() is false, no
-	// conversation row should be created.
-	s, db := newPromoteTestStoreWithConversations(t)
+	// NOTE: After P2 (DEF-96), the empty-ConversationID case is no longer
+	// reachable from the handler — PromoteDM now mints a ConversationID in
+	// the store when hasConversationsTable() is true (DEF-89 pattern). This
+	// test pins the store contract for the remaining case: when the
+	// conversations table is ABSENT, ConversationID stays empty and no
+	// conversation row is created. A future reader should not infer that
+	// production takes this path.
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
+
+	// Messages table only — NO conversations table.
+	_, err = db.Exec(`
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL DEFAULT '',
+    sender TEXT NOT NULL,
+    sender_id TEXT NOT NULL DEFAULT '',
+    recipient TEXT NOT NULL,
+    recipient_id TEXT NOT NULL DEFAULT '',
+    channel TEXT,
+    thread_id TEXT,
+    conversation_id TEXT NOT NULL DEFAULT '',
+    msg TEXT NOT NULL DEFAULT '',
+    type TEXT NOT NULL DEFAULT 'chat',
+    dispatch_state TEXT NOT NULL DEFAULT 'dispatched',
+    created TEXT NOT NULL DEFAULT ''
+)
+`)
+	require.NoError(t, err)
+
+	s := NewWebChatStore(db, "sqlite3")
+	require.NoError(t, s.Init())
 
 	ctx := context.Background()
 	dmKey := "dm:agent:agent-2:user:user-2"
 
-	_, err := db.Exec(`
+	_, err = db.Exec(`
 INSERT INTO messages (id, project_id, sender, sender_id, recipient, recipient_id, channel, thread_id, msg, created)
 VALUES ('msg-10', 'proj-1', 'user:bob', 'user-2', 'agent:helper', 'agent-2', 'web', ?, 'test', '2026-08-22T10:00:00Z')
 `, dmKey)
@@ -559,8 +585,9 @@ VALUES ('msg-10', 'proj-1', 'user:bob', 'user-2', 'agent:helper', 'agent-2', 'we
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	// No conversation should be created when ConversationID is empty.
-	require.Equal(t, 0, countConversations(t, db))
+	// ConversationID should remain empty — no conversations table.
+	require.Empty(t, result.ConversationID,
+		"ConversationID should stay empty when conversations table is absent")
 }
 
 // ---------------------------------------------------------------------------

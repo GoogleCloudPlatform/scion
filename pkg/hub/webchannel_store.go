@@ -2103,7 +2103,15 @@ func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, 
 	// Check for conversations table BEFORE starting the transaction to avoid
 	// ambient pool access inside the tx (which deadlocks at MaxOpenConns=1).
 	// INVARIANT U-TX-1.
-	writeConv := topic.ConversationID != "" && s.hasConversationsTable()
+	hasConv := s.hasConversationsTable()
+
+	// DEF-96 / DEF-89 pattern: when no ConversationID is provided and the
+	// conversations table exists, generate one so the conversation is created
+	// atomically with the topic. Mirrors CreateTopic at webchannel_store.go:695-698.
+	if topic.ConversationID == "" && hasConv {
+		topic.ConversationID = uuid.New().String()
+	}
+	writeConv := topic.ConversationID != "" && hasConv
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

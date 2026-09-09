@@ -1613,6 +1613,14 @@ func (s *pgWebChatStore) MigrateReadState(ctx context.Context, oldKey, newKey st
 // PromoteDM atomically promotes a DM conversation into a space thread.
 // When ConversationID is set on topic, a linked conversations row is also created.
 func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, dmKey string) (*WebChatTopic, error) {
+	// DEF-96 / DEF-89 pattern: when no ConversationID is provided, generate one
+	// unconditionally. Matches pg CreateTopic at webchannel_store_postgres.go:328-330:
+	// Postgres migrations guarantee the conversations table, so the sqlite
+	// hasConversationsTable() gate is unnecessary here.
+	if topic.ConversationID == "" {
+		topic.ConversationID = uuid.New().String()
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: begin promote tx: %w", err)

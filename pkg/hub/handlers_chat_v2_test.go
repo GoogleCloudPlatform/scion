@@ -2246,6 +2246,306 @@ func TestChatV2_ClearTopicDefaultAgent(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// DEF-96: DM promotion handler-level tests
+// ---------------------------------------------------------------------------
+
+// TestDEF96_PromoteDM_HistoryVisibleOnFirstRead verifies AC-96-1: after
+// promoting a DM containing ≥2 messages, the new thread's history endpoint
+// returns exactly those messages on the first read, with no hub restart.
+//
+// Also verifies:
+//   - AC-96-2: topic.conversation_id non-empty, conversations row exists (kind=group),
+//     every re-keyed message names it.
+//   - AC-96-3: direct conversation row is unchanged after promotion (D-1).
+//   - AC-96-4: new DM to the same agent reuses the existing direct conversation (same id).
+func TestDEF96_PromoteDM_HistoryVisibleOnFirstRead(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// --- Setup: project, agent, webchat store sharing ent DB ---
+
+	proj := &store.Project{
+		ID: tid("def96-proj"), Name: "def96-proj", Slug: "def96-proj",
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	agentID := tid("def96-agent")
+	agent := &store.Agent{
+		ID:        agentID,
+		ProjectID: proj.ID,
+		Name:      "DEF96 Bot",
+		Slug:      "def96-bot",
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	// Share the ent store's underlying DB with the webchat store so
+	// PromoteDM's UPDATE on messages is visible to ListMessages.
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	if !ok {
+		t.Fatal("store does not expose DB()")
+	}
+	rawDB := dbProvider.DB()
+	if rawDB == nil {
+		t.Fatal("store DB() returned nil")
+	}
+	wcs := NewWebChatStore(rawDB, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init webchat store: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	// Enable envelope switch so history reads resolve via conversation_id.
+	enableWriteDenySwitch(t, srv)
+
+	// --- Seed DM data ---
+	dmKey := "dm:agent:" + agentID + ":user:" + DevUserID
+
+	// Create the direct conversation for the DM (simulates normal DM flow).
+	directConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertConversation (DM): %v", err)
+	}
+
+	// Record the direct conversation's participant set before promotion.
+	prePromoteParticipants, err := s.ListParticipants(ctx, directConv.ID)
+	if err != nil {
+		t.Fatalf("ListParticipants before: %v", err)
+	}
+
+	// Seed 3 DM messages via the ent store, stamped with the direct conversation_id.
+	// DispatchState must be "dispatched" to avoid triggering the IN_FLIGHT_MESSAGES
+	// guard in the promote handler.
+	baseTime := time.Now().UTC().Add(-10 * time.Second)
+	msgContents := []string{"hello agent", "hi back from agent", "thanks"}
+	for i, content := range msgContents {
+		msg := &store.Message{
+			ID:             tid(fmt.Sprintf("def96-msg-%d", i)),
+			ProjectID:      proj.ID,
+			Sender:         "user:dev@localhost",
+			SenderID:       DevUserID,
+			Recipient:      "agent:" + agentID,
+			Msg:            content,
+			Type:           "chat",
+			Channel:        "web",
+			ThreadID:       dmKey,
+			ConversationID: directConv.ID,
+			DispatchState:  "dispatched",
+			CreatedAt:      baseTime.Add(time.Duration(i) * time.Second),
+		}
+		if err := s.CreateMessage(ctx, msg); err != nil {
+			t.Fatalf("CreateMessage[%d]: %v", i, err)
+		}
+	}
+
+	// Register DM rows.
+	if err := wcs.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey,
+		ParticipantID:   DevUserID,
+		PeerID:          agentID,
+		PeerKind:        "agent",
+	}); err != nil {
+		t.Fatalf("UpsertDM: %v", err)
+	}
+
+	// --- Promote ---
+	promoteBody := map[string]string{"name": "DEF96 Promoted"}
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+dmKey+"/promote", promoteBody)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("promote: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var promResp promoteResponse
+	if err := json.NewDecoder(rec.Body).Decode(&promResp); err != nil {
+		t.Fatalf("decode promote response: %v", err)
+	}
+	if promResp.MessageCount != 3 {
+		t.Fatalf("promote messageCount = %d, want 3", promResp.MessageCount)
+	}
+
+	// --- AC-96-2: promoteResponse carries conversationId ---
+	// Response-shape change: the returned WebChatTopic now includes
+	// ConversationID because the store mints it.
+	if promResp.ConversationID == "" {
+		t.Fatal("promoteResponse.ConversationID is empty — P2 minting did not fire")
+	}
+
+	// Verify the conversations row exists and is kind=group.
+	groupConv, err := s.GetConversation(ctx, promResp.ConversationID)
+	if err != nil || groupConv == nil {
+		t.Fatalf("group conversation not found: %v", err)
+	}
+	if groupConv.Kind != "group" {
+		t.Errorf("conversation kind = %q, want 'group'", groupConv.Kind)
+	}
+
+	// --- AC-96-1: read history on first attempt, no restart ---
+	topicID := promResp.ID
+	histPath := "/api/v1/chat/conversations/" + topicID + "/messages"
+	rec = doRequest(t, srv, http.MethodGet, histPath, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("history: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var histResp chatHistoryResponse
+	if err := json.NewDecoder(rec.Body).Decode(&histResp); err != nil {
+		t.Fatalf("decode history: %v", err)
+	}
+	if len(histResp.Messages) != 3 {
+		t.Fatalf("history returned %d messages, want 3", len(histResp.Messages))
+	}
+
+	// Verify every re-keyed message names the group conversation.
+	for _, msg := range histResp.Messages {
+		if msg.ConversationID != promResp.ConversationID {
+			t.Errorf("message %s conversation_id = %q, want %q",
+				msg.ID, msg.ConversationID, promResp.ConversationID)
+		}
+	}
+
+	// --- AC-96-3: direct conversation unchanged (D-1 invariant) ---
+	postConv, err := s.GetConversation(ctx, directConv.ID)
+	if err != nil || postConv == nil {
+		t.Fatalf("direct conversation disappeared: %v", err)
+	}
+	if postConv.Kind != "direct" {
+		t.Errorf("direct conversation kind changed to %q", postConv.Kind)
+	}
+	if postConv.ExternalRef != dmKey {
+		t.Errorf("direct conversation external_ref changed to %q", postConv.ExternalRef)
+	}
+	// Participant set must be identical.
+	postParticipants, err := s.ListParticipants(ctx, directConv.ID)
+	if err != nil {
+		t.Fatalf("ListParticipants after: %v", err)
+	}
+	if len(prePromoteParticipants) != len(postParticipants) {
+		t.Errorf("participant count changed: before=%d after=%d",
+			len(prePromoteParticipants), len(postParticipants))
+	}
+	for i := range prePromoteParticipants {
+		if i < len(postParticipants) && prePromoteParticipants[i].ID != postParticipants[i].ID {
+			t.Errorf("participant[%d] changed: %s → %s",
+				i, prePromoteParticipants[i].ID, postParticipants[i].ID)
+		}
+	}
+
+	// --- AC-96-4: new DM to the same agent reuses the same direct conversation ---
+	reusedConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertConversation (re-DM): %v", err)
+	}
+	if reusedConv.ID != directConv.ID {
+		t.Errorf("re-DM created new conversation %q, expected reuse of %q",
+			reusedConv.ID, directConv.ID)
+	}
+}
+
+// TestDEF96_PromoteDM_Atomicity verifies AC-96-5: forcing a failure at the
+// topic INSERT step rolls back the entire promotion — no conversation, no
+// moved messages.
+func TestDEF96_PromoteDM_Atomicity(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: tid("def96-atom"), Name: "def96-atom", Slug: "def96-atom",
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	agentID := tid("def96-atom-agent")
+	agent := &store.Agent{
+		ID: agentID, ProjectID: proj.ID, Name: "Atom Bot", Slug: "atom-bot",
+		Phase: "idle", OwnerID: DevUserID, CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	if !ok {
+		t.Fatal("store does not expose DB()")
+	}
+	rawDB := dbProvider.DB()
+	wcs := NewWebChatStore(rawDB, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	enableWriteDenySwitch(t, srv)
+
+	dmKey := "dm:agent:" + agentID + ":user:" + DevUserID
+
+	// Seed message.
+	msg := &store.Message{
+		ID: tid("def96-atom-msg"), ProjectID: proj.ID,
+		Sender: "user:dev@localhost", SenderID: DevUserID,
+		Recipient: "agent:" + agentID, Msg: "atomic test",
+		Type: "chat", Channel: "web", ThreadID: dmKey,
+		DispatchState: "dispatched",
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := s.CreateMessage(ctx, msg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	if err := wcs.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey, ParticipantID: DevUserID,
+		PeerID: agentID, PeerKind: "agent",
+	}); err != nil {
+		t.Fatalf("UpsertDM: %v", err)
+	}
+
+	// Create a conflicting topic to trigger a unique constraint violation.
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "def96-conflict", ProjectID: proj.ID, Name: "DEF96 Conflict",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic (conflict): %v", err)
+	}
+
+	// Promote with the same name → conflict.
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/chat/conversations/"+dmKey+"/promote",
+		map[string]string{"name": "DEF96 Conflict"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Messages must still be under the old DM key (rollback).
+	filter := store.MessageFilter{Channel: "web", ThreadID: dmKey}
+	result, err := s.ListMessages(ctx, filter, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Errorf("messages under dmKey = %d, want 1 (rollback failed)", len(result.Items))
+	}
+}
+
+// ---------------------------------------------------------------------------
 // History pagination (#1027)
 // ---------------------------------------------------------------------------
 
