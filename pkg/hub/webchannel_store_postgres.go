@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -317,8 +318,7 @@ func (s *pgWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic) er
 	// DEF-89: Postgres migrations guarantee the conversations table exists,
 	// so generate ConversationID unconditionally when empty — unlike the
 	// SQLite store, which gates on hasConversationsTable() for environments
-	// where the Ent-managed table may not exist yet. The external_ref
-	// derivation (empty string) matches backfillTopicConversations.
+	// where the Ent-managed table may not exist yet.
 	//
 	// Because generation is unconditional, the legacy no-linkage INSERT
 	// path that the SQLite store retains is dead code here and is removed.
@@ -336,6 +336,28 @@ func (s *pgWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic) er
 	// handler always provides ProjectID.
 	if topic.ConversationID != "" && topic.ProjectID == "" {
 		return fmt.Errorf("webchat store: project_id is required for topic conversations")
+	}
+
+	// DEF-156 P1/P2: derive the canonical external_ref for this topic's
+	// conversation so both backfills converge on the same key.
+	extRef, extRefErr := messaging.ThreadConversationExternalRef(topic.ProjectID, topic.ID)
+	if extRefErr != nil {
+		return fmt.Errorf("webchat store: derive conversation key for topic %s: %w", topic.ID, extRefErr)
+	}
+
+	// DEF-156 P2: look up (native, extRef) BEFORE BeginTx. If a
+	// conversation already exists on this key (e.g. the message backfill
+	// minted it first), link the topic to it instead of minting.
+	var existingConvID string
+	lookupErr := s.db.QueryRowContext(ctx,
+		`SELECT id FROM conversations WHERE surface = 'native' AND external_ref = $1 AND deleted_at IS NULL`,
+		extRef).Scan(&existingConvID)
+	if lookupErr != nil && lookupErr != sql.ErrNoRows {
+		return fmt.Errorf("webchat store: lookup existing conversation for topic %s: %w", topic.ID, lookupErr)
+	}
+	needMint := existingConvID == ""
+	if !needMint {
+		topic.ConversationID = existingConvID
 	}
 
 	var defaultAgent interface{}
@@ -363,16 +385,18 @@ func (s *pgWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic) er
 		return fmt.Errorf("webchat store: create topic: %w", err)
 	}
 
-	// DEF-36: group conversations do NOT populate the participant listing index.
-	// Group conversation participants are derived from project membership, not
-	// from an explicit participant table. The participant table is a listing
-	// index, NEVER the access authority (design doc §2.4.2.1).
-	_, err = tx.ExecContext(ctx,
-		`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-		 VALUES ($1, $2, 'group', 'native', '', '', $3, 'active', $4, $5)`,
-		topic.ConversationID, topic.ProjectID, topic.Name, topic.CreatedAt, topic.CreatedAt)
-	if err != nil {
-		return fmt.Errorf("webchat store: create conversation for topic: %w", err)
+	if needMint {
+		// DEF-36: group conversations do NOT populate the participant listing index.
+		// Group conversation participants are derived from project membership, not
+		// from an explicit participant table. The participant table is a listing
+		// index, NEVER the access authority (design doc §2.4.2.1).
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
+			 VALUES ($1, $2, 'group', 'native', $3, '', $4, 'active', $5, $6)`,
+			topic.ConversationID, topic.ProjectID, extRef, topic.Name, topic.CreatedAt, topic.CreatedAt)
+		if err != nil {
+			return fmt.Errorf("webchat store: create conversation for topic: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1127,7 +1151,29 @@ func (s *pgWebChatStore) backfillTopicConversations() error {
 	// Backfill each topic atomically.
 	for _, t := range topics {
 		if err := func() error {
-			convID := uuid.New().String()
+			// DEF-156 P1/P2: derive the canonical external_ref for this
+			// topic's conversation so both backfills converge on the same key.
+			extRef, extRefErr := messaging.ThreadConversationExternalRef(t.projectID, t.id)
+			if extRefErr != nil {
+				return fmt.Errorf("derive conversation key for topic %s: %w", t.id, extRefErr)
+			}
+
+			// DEF-156 P2: look up (native, extRef) BEFORE BeginTx. If the
+			// message backfill (Route 3) already minted a conversation on
+			// this key, link the topic to it rather than minting.
+			var existingConvID string
+			lookupErr := s.db.QueryRow(
+				`SELECT id FROM conversations WHERE surface = 'native' AND external_ref = $1 AND deleted_at IS NULL`,
+				extRef).Scan(&existingConvID)
+			if lookupErr != nil && lookupErr != sql.ErrNoRows {
+				return fmt.Errorf("lookup existing conversation for topic %s: %w", t.id, lookupErr)
+			}
+
+			convID := existingConvID
+			needMint := convID == ""
+			if needMint {
+				convID = uuid.New().String()
+			}
 
 			tx, err := s.db.BeginTx(context.Background(), nil)
 			if err != nil {
@@ -1138,16 +1184,18 @@ func (s *pgWebChatStore) backfillTopicConversations() error {
 			// which previously leaked the transaction (deadlock at MaxOpenConns=1).
 			defer tx.Rollback() //nolint:errcheck
 
-			// DEF-36: group conversations do NOT populate the participant listing index.
-			// Group conversation participants are derived from project membership, not
-			// from an explicit participant table. The participant table is a listing
-			// index, NEVER the access authority (design doc §2.4.2.1).
-			_, err = tx.Exec(
-				`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-				 VALUES ($1, $2, 'group', 'native', '', '', $3, 'active', NOW(), NOW())`,
-				convID, t.projectID, t.name)
-			if err != nil {
-				return fmt.Errorf("insert conversation for topic %s: %w", t.id, err)
+			if needMint {
+				// DEF-36: group conversations do NOT populate the participant listing index.
+				// Group conversation participants are derived from project membership, not
+				// from an explicit participant table. The participant table is a listing
+				// index, NEVER the access authority (design doc §2.4.2.1).
+				_, err = tx.Exec(
+					`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
+					 VALUES ($1, $2, 'group', 'native', $3, '', $4, 'active', NOW(), NOW())`,
+					convID, t.projectID, extRef, t.name)
+				if err != nil {
+					return fmt.Errorf("insert conversation for topic %s: %w", t.id, err)
+				}
 			}
 
 			// UPDATE the topic — WHERE conversation_id IS NULL makes this safe
