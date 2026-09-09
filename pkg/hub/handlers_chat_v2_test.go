@@ -2380,24 +2380,28 @@ func TestDEF96_PromoteDM_HistoryVisibleOnFirstRead(t *testing.T) {
 	// Response-shape change: the returned WebChatTopic now includes
 	// ConversationID because the store mints it.
 	if promResp.ConversationID == "" {
-		t.Fatal("promoteResponse.ConversationID is empty — P2 minting did not fire")
+		t.Error("promoteResponse.ConversationID is empty — P2 minting did not fire")
 	}
 
 	// Verify the conversations row exists and is kind=group.
-	groupConv, err := s.GetConversation(ctx, promResp.ConversationID)
-	if err != nil || groupConv == nil {
-		t.Fatalf("group conversation not found: %v", err)
-	}
-	if groupConv.Kind != "group" {
-		t.Errorf("conversation kind = %q, want 'group'", groupConv.Kind)
+	if promResp.ConversationID != "" {
+		groupConv, err := s.GetConversation(ctx, promResp.ConversationID)
+		if err != nil || groupConv == nil {
+			t.Errorf("group conversation not found: %v", err)
+		} else if groupConv.Kind != "group" {
+			t.Errorf("conversation kind = %q, want 'group'", groupConv.Kind)
+		}
 	}
 
 	// --- AC-96-1: read history on first attempt, no restart ---
+	// This is the assertion that matters for mutation testing: without
+	// minting (P2) or re-pointing (P1), the history endpoint either
+	// returns 0 messages or a non-200 status — both are a failure.
 	topicID := promResp.ID
 	histPath := "/api/v1/chat/conversations/" + topicID + "/messages"
 	rec = doRequest(t, srv, http.MethodGet, histPath, nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("history: expected 200, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("history: expected 200, got %d: %s — promoted thread has no visible history", rec.Code, rec.Body.String())
 	}
 
 	var histResp chatHistoryResponse
@@ -2405,7 +2409,7 @@ func TestDEF96_PromoteDM_HistoryVisibleOnFirstRead(t *testing.T) {
 		t.Fatalf("decode history: %v", err)
 	}
 	if len(histResp.Messages) != 3 {
-		t.Fatalf("history returned %d messages, want 3", len(histResp.Messages))
+		t.Fatalf("history returned %d messages, want 3 — promoted messages are missing", len(histResp.Messages))
 	}
 
 	// Verify every re-keyed message names the group conversation.
