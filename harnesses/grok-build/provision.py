@@ -546,6 +546,10 @@ _GROK_HOOK_EVENTS = [
     "PostToolUseFailure",
     "SubagentStop",
     "Notification",
+    "PermissionDenied",
+    "SubagentStart",
+    "PreCompact",
+    "PostCompact",
 ]
 
 
@@ -561,14 +565,19 @@ def _write_hooks(home: str) -> None:
     """
     hooks: dict[str, list[dict[str, Any]]] = {}
     for event in _GROK_HOOK_EVENTS:
-        if event in _ECHO_EVENTS:
+        if event == "SessionStart":
             cmd = (
-                f"echo '{{\"hookEventName\": \"{event}\"}}' "
-                f"| sciontool hook --dialect=grok-build"
+                "echo '{\"hookEventName\": \"SessionStart\", \"source\": \"new\"}' "
+                "| sciontool hook --dialect=grok-build"
+            )
+        elif event == "SessionEnd":
+            cmd = (
+                "echo '{\"hookEventName\": \"SessionEnd\", \"reason\": \"end_turn\"}' "
+                "| sciontool hook --dialect=grok-build"
             )
         else:
             cmd = "cat | sciontool hook --dialect=grok-build"
-        timeout = 10 if event == "Stop" else 5
+        timeout = 60 if event in ("Stop", "SubagentStop") else 5
         hooks[event] = [
             {
                 "hooks": [
