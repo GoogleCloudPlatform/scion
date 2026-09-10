@@ -111,6 +111,7 @@ interface V1SecretsConfig {
   backend?: string;
   gcp_project_id?: string;
   gcp_credentials?: string;
+  gcp_replication_locations?: string[];
 }
 
 interface V1NotificationChannelConfig {
@@ -529,6 +530,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Secrets
   @state() private secretsBackend = '';
   @state() private secretsGCPProjectId = '';
+  @state() private secretsGCPReplicationLocations = '';
 
   // Auto-expose ports
   @state() private autoExposePortsEnabled = false;
@@ -1523,6 +1525,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (srv.secrets) {
         this.secretsBackend = srv.secrets.backend || '';
         this.secretsGCPProjectId = srv.secrets.gcp_project_id || '';
+        this.secretsGCPReplicationLocations = (srv.secrets.gcp_replication_locations || []).join(', ');
       }
 
       // Message Broker
@@ -2007,6 +2010,12 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.secrets.backend') && this.secretsBackend) secrets.backend = this.secretsBackend;
     if (ok('server.secrets.gcp_project_id') && this.secretsGCPProjectId)
       secrets.gcp_project_id = this.secretsGCPProjectId;
+    secrets.gcp_replication_locations = this.secretsGCPReplicationLocations
+      ? this.secretsGCPReplicationLocations
+          .split(',')
+          .map(s => s.trim())
+          .filter(Boolean)
+      : [];
     server.secrets = secrets;
 
     // Message Broker
@@ -4517,6 +4526,25 @@ export class ScionPageAdminServerConfig extends LitElement {
               ></sl-input>`
             )}
           </div>
+          ${this.secretsBackend === 'gcpsm'
+            ? html`<div class="form-field full-width">
+                <label>GCP Replication Locations</label>
+                <span class="hint"
+                  >Comma-separated GCP regions for Secret Manager replication. Leave empty for
+                  automatic (global) replication. Required when org policy
+                  constraints/gcp.resourceLocations restricts global resources.</span
+                >
+                <sl-input
+                  value=${this.secretsGCPReplicationLocations}
+                  placeholder="e.g. northamerica-northeast1, us-east1"
+                  @sl-input=${(e: Event) => {
+                    this.secretsGCPReplicationLocations = (
+                      e.target as HTMLInputElement
+                    ).value;
+                  }}
+                ></sl-input>
+              </div>`
+            : ''}
         </div>
       </div>
     `;

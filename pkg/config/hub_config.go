@@ -499,6 +499,10 @@ type SecretsConfig struct {
 	GCPProjectID string `json:"gcpProjectId" yaml:"gcpProjectId" koanf:"gcpProjectId"`
 	// GCPCredentials is the path to GCP credentials JSON or the JSON itself.
 	GCPCredentials string `json:"gcpCredentials" yaml:"gcpCredentials" koanf:"gcpCredentials"`
+	// GCPReplicationLocations, if non-empty, switches Secret Manager from automatic
+	// (global) to user-managed regional replication. Required when org policy
+	// constraints/gcp.resourceLocations restricts global resources.
+	GCPReplicationLocations []string `json:"gcpReplicationLocations" yaml:"gcpReplicationLocations" koanf:"gcpReplicationLocations"`
 }
 
 // StorageConfig holds storage settings.
