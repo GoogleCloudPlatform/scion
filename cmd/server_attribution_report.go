@@ -119,13 +119,14 @@ func runServerAttributionReport(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
-	// Reuse the same store-opening logic as the backfill command.
+	// Reuse the same store-opening logic as the backfill command,
+	// but open in read-only mode (skip AutoMigrate).
 	// Override the --db flag if provided.
 	savedDB := backfillDB
 	if attrReportDB != "" {
 		backfillDB = attrReportDB
 	}
-	s, err := openBackfillStore(ctx)
+	s, err := openBackfillStore(ctx, true) // true = readOnly
 	backfillDB = savedDB
 	if err != nil {
 		return err

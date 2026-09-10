@@ -157,7 +157,11 @@ func runBackfillWithStore(ctx context.Context, s store.Store, cfg messaging.Back
 
 // openBackfillStore resolves the database DSN and returns a CompositeStore.
 // Precedence: --db flag > config file (via LoadGlobalConfig).
-func openBackfillStore(ctx context.Context) (*entadapter.CompositeStore, error) {
+// By default, runs AutoMigrate to ensure the schema is up to date.
+// Pass readOnly=true to skip migrations (for read-only commands).
+func openBackfillStore(ctx context.Context, readOnly ...bool) (*entadapter.CompositeStore, error) {
+	skipMigrations := len(readOnly) > 0 && readOnly[0]
+
 	cfg, err := config.LoadGlobalConfig(serverConfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
@@ -195,9 +199,11 @@ func openBackfillStore(ctx context.Context) (*entadapter.CompositeStore, error) 
 		if err != nil {
 			return nil, fmt.Errorf("opening sqlite: %w", err)
 		}
-		if err := entc.AutoMigrate(ctx, client); err != nil {
-			_ = client.Close()
-			return nil, fmt.Errorf("running migrations: %w", err)
+		if !skipMigrations {
+			if err := entc.AutoMigrate(ctx, client); err != nil {
+				_ = client.Close()
+				return nil, fmt.Errorf("running migrations: %w", err)
+			}
 		}
 		s = entadapter.NewCompositeStore(client)
 
@@ -206,9 +212,11 @@ func openBackfillStore(ctx context.Context) (*entadapter.CompositeStore, error) 
 		if err != nil {
 			return nil, fmt.Errorf("opening postgres (verify DSN and network connectivity): %w", err)
 		}
-		if err := entc.AutoMigrate(ctx, client); err != nil {
-			_ = client.Close()
-			return nil, fmt.Errorf("running migrations: %w", err)
+		if !skipMigrations {
+			if err := entc.AutoMigrate(ctx, client); err != nil {
+				_ = client.Close()
+				return nil, fmt.Errorf("running migrations: %w", err)
+			}
 		}
 		s = entadapter.NewCompositeStore(client)
 

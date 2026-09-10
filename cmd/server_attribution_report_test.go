@@ -27,8 +27,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -556,6 +558,85 @@ func TestAttributionReport_MultiProject(t *testing.T) {
 	assert.Equal(t, 1, total.BroadcastNotBackfillable)
 	assert.Equal(t, 1, total.NonUUIDPrincipal)
 	assert.Equal(t, 0, total.Unresolvable)
+}
+
+// --------------------------------------------------------------------------
+// AC-1496: Read-only store opening (no AutoMigrate)
+// --------------------------------------------------------------------------
+
+// TestAttributionReport_ReadOnlyStoreOpening verifies that the attribution
+// report can open a database without running schema migrations.
+func TestAttributionReport_ReadOnlyStoreOpening(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a temporary SQLite database with a known schema.
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	// Open the database normally (with AutoMigrate) and seed data.
+	client, err := entc.OpenSQLite("file:"+dbPath+"?cache=shared", entc.PoolConfig{})
+	require.NoError(t, err)
+	require.NoError(t, entc.AutoMigrate(ctx, client))
+	seedStore := entadapter.NewCompositeStore(client)
+
+	projectID := seedBackfillProject(t, ctx, seedStore)
+	senderID := uuid.NewString()
+	recipientID := uuid.NewString()
+	seedDMMessage(t, ctx, seedStore, projectID, senderID, recipientID, time.Now())
+
+	// Close the seeded store.
+	require.NoError(t, seedStore.Close())
+
+	// Now open the database in read-only mode by calling openBackfillStore
+	// with readOnly=true. This simulates what the attribution-report command does.
+	// Set backfillDB to point to our test database.
+	savedDB := backfillDB
+	backfillDB = dbPath
+	t.Cleanup(func() { backfillDB = savedDB })
+
+	// Call openBackfillStore with readOnly=true.
+	readOnlyStore, err := openBackfillStore(ctx, true)
+	require.NoError(t, err, "opening database in read-only mode should succeed")
+	require.NotNil(t, readOnlyStore)
+	defer func() { _ = readOnlyStore.Close() }()
+
+	// Verify the store works for reads.
+	messages, err := readOnlyStore.ListMessages(ctx, store.MessageFilter{
+		ProjectID: projectID,
+	}, store.ListOptions{Limit: 100})
+	require.NoError(t, err)
+	assert.Len(t, messages.Items, 1, "should be able to read messages")
+
+	// Verify the project exists.
+	project, err := readOnlyStore.GetProject(ctx, projectID)
+	require.NoError(t, err)
+	assert.Equal(t, projectID, project.ID)
+}
+
+// TestAttributionReport_OpenBackfillStoreDefaultRunsMigrations verifies that
+// openBackfillStore without the readOnly parameter (the backfill command's
+// path) still runs AutoMigrate as before.
+func TestAttributionReport_OpenBackfillStoreDefaultRunsMigrations(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	// Open with default behavior (should run migrations).
+	savedDB := backfillDB
+	backfillDB = dbPath
+	t.Cleanup(func() { backfillDB = savedDB })
+
+	s, err := openBackfillStore(ctx) // no readOnly parameter
+	require.NoError(t, err, "opening database with default behavior should succeed")
+	require.NotNil(t, s)
+	defer func() { _ = s.Close() }()
+
+	// Verify the store is usable (schema was created by AutoMigrate).
+	projectID := seedBackfillProject(t, ctx, s)
+	project, err := s.GetProject(ctx, projectID)
+	require.NoError(t, err)
+	assert.Equal(t, projectID, project.ID)
 }
 
 // --------------------------------------------------------------------------
