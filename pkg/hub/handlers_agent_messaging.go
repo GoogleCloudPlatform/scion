@@ -126,12 +126,13 @@ type routingResult struct {
 // and select the dispatch path, or an error with an HTTP status code.
 //
 // Encapsulates stages S1-S6 from the original inline implementation:
-//   S1: Recipient resolution (UUID/email lookup)
-//   S2: Channel affinity + validation
-//   S3: ConversationRef resolution (DEF-142)
-//   S4: Conversation authorization (DEF-138)
-//   S5: Addressee derivation (DEF-152)
-//   S6: Group/direct routing fixups (DEF-160/161/158)
+//
+//	S1: Recipient resolution (UUID/email lookup)
+//	S2: Channel affinity + validation
+//	S3: ConversationRef resolution (DEF-142)
+//	S4: Conversation authorization (DEF-138)
+//	S5: Addressee derivation (DEF-152)
+//	S6: Group/direct routing fixups (DEF-160/161/158)
 func (s *Server) resolveOutboundRouting(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -240,7 +241,7 @@ func (s *Server) resolveOutboundRouting(
 	s.mu.RLock()
 	wcsAffinity := s.webChatStore
 	s.mu.RUnlock()
-	if req.Channel == "" && recipientID != "" && wcsAffinity != nil && s.GetMessageBrokerProxy() != nil {
+	if req.Channel == "" && req.ConversationRef == "" && recipientID != "" && wcsAffinity != nil && s.GetMessageBrokerProxy() != nil {
 		if lastCh, err := wcsAffinity.GetLastChannel(ctx, recipientID, agent.ProjectID, agent.ID); err != nil {
 			s.messageLog.Error("Failed to look up reply affinity",
 				"recipient_id", recipientID, "agent_id", agent.ID, "error", err)
@@ -652,29 +653,13 @@ func (s *Server) resolveOutboundRouting(
 					}
 				}
 
-				// DEF-158: Channel/ThreadID backfill for conv-ref path.
-				// Re-run affinity with the derived recipientID (for agent-to-agent,
-				// this is already set above).
-				if req.Channel == "" && recipientID != "" {
-					s.mu.RLock()
-					wcs := s.webChatStore
-					s.mu.RUnlock()
-					if wcs != nil && s.GetMessageBrokerProxy() != nil {
-						if lastCh, err := wcs.GetLastChannel(ctx, recipientID, agent.ProjectID, agent.ID); err != nil {
-							s.messageLog.Error("DEF-158: failed to look up affinity for derived recipient",
-								"recipient_id", recipientID, "error", err)
-							// Non-fatal: fall through to surface mapping.
-						} else if lastCh != "" {
-							// Validate the affinity-derived channel.
-							if !s.validateChannelRegistered(w, lastCh) {
-								return nil, fmt.Errorf("affinity channel validation failed")
-							}
-							req.Channel = lastCh
-						}
-					}
-				}
+				// DEF-168: The affinity re-run that was here (DEF-158) has been
+				// removed. When a conv-ref is resolved, the conversation's own
+				// surface is authoritative — affinity can disagree and cause
+				// misrouting (live bug: native DM routed to discord because
+				// affinity said "discord" for an unrelated context).
 
-				// Fall back to surface → channel mapping when affinity missed.
+				// Fall back to surface → channel mapping.
 				if req.Channel == "" {
 					derivedCh, derivErr := messaging.SurfaceToChannel(convResult.Surface)
 					if derivErr != nil {
@@ -846,21 +831,21 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 
 	structuredMsg := &messages.StructuredMessage{
-		Sender:                 storeMsg.Sender,
-		SenderID:               storeMsg.SenderID,
-		Recipient:              storeMsg.Recipient,
-		RecipientID:            storeMsg.RecipientID,
-		Msg:                    storeMsg.Msg,
-		Type:                   storeMsg.Type,
-		Urgent:                 storeMsg.Urgent,
-		Attachments:            req.Attachments,
-		Channel:                result.Channel,
-		ThreadID:               result.ThreadID,
-		Visibility:             req.Visibility,
-		Metadata:               req.Metadata,
-		ConversationID:         result.ConversationID,
-		ConversationAsserted:   result.Asserted,
-		Recipients:             result.Recipients,
+		Sender:               storeMsg.Sender,
+		SenderID:             storeMsg.SenderID,
+		Recipient:            storeMsg.Recipient,
+		RecipientID:          storeMsg.RecipientID,
+		Msg:                  storeMsg.Msg,
+		Type:                 storeMsg.Type,
+		Urgent:               storeMsg.Urgent,
+		Attachments:          req.Attachments,
+		Channel:              result.Channel,
+		ThreadID:             result.ThreadID,
+		Visibility:           req.Visibility,
+		Metadata:             req.Metadata,
+		ConversationID:       result.ConversationID,
+		ConversationAsserted: result.Asserted,
+		Recipients:           result.Recipients,
 	}
 
 	// Process attachments.

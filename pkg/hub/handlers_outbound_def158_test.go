@@ -364,24 +364,36 @@ func TestDEF158_AC4_InvalidChannel_Rejected_ConvRefPath(t *testing.T) {
 	require.NoError(t, wcs.RecordChannel(ctx, user.ID, project.ID, agent.ID, "nonexistent-spoke", time.Now()))
 
 	rr := postConvRefNoRecipient(t, srv, project.ID, agent.ID,
-		"should fail validation", "conv:"+dmConv.ID)
+		"should succeed via surface", "conv:"+dmConv.ID)
 
-	// The channel affinity re-run should pick up "nonexistent-spoke",
-	// and the validation re-run should reject it.
-	require.Equal(t, http.StatusBadRequest, rr.Code,
-		"AC-4: unregistered channel from affinity must be rejected; body: %s", rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "nonexistent-spoke")
+	// DEF-168: the affinity re-run in the conv-ref direct path has been
+	// removed. When a conv-ref is present, the conversation's own surface
+	// is authoritative — the stale/invalid affinity channel is never
+	// consulted. SurfaceToChannel derives the correct channel ("web" for
+	// surface "native"), and the message succeeds.
+	require.Equal(t, http.StatusOK, rr.Code,
+		"AC-4 (updated DEF-168): conv-ref path should use surface, not affinity; body: %s", rr.Body.String())
 
-	// Verify no message was persisted.
-	msgs, err := s.ListMessages(ctx, store.MessageFilter{
-		ConversationID: dmConv.ID,
-	}, store.ListOptions{Limit: 10})
-	require.NoError(t, err)
-	for _, m := range msgs.Items {
-		if m.Msg == "should fail validation" {
-			t.Fatal("AC-4: message must NOT be persisted when channel validation fails")
+	// Verify the message was persisted with the surface-derived channel.
+	var stored *store.Message
+	require.Eventually(t, func() bool {
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{
+			ConversationID: dmConv.ID,
+		}, store.ListOptions{Limit: 10})
+		if err != nil || len(msgs.Items) == 0 {
+			return false
 		}
-	}
+		for i := range msgs.Items {
+			if msgs.Items[i].Msg == "should succeed via surface" {
+				stored = &msgs.Items[i]
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 50*time.Millisecond, "message not persisted within timeout")
+
+	assert.Equal(t, "web", stored.Channel,
+		"AC-4 (updated DEF-168): channel must be derived from surface, not affinity")
 }
 
 // ---------------------------------------------------------------------------
