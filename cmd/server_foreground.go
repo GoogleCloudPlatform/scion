@@ -115,6 +115,14 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if err := config.UpdateDefaultTemplates(true, harness.EmbedOnlyHarnesses()); err != nil {
 			log.Printf("Warning: failed to refresh default templates: %v", err)
 		}
+	} else {
+		// In hosted mode, materialize any missing harness configs from the
+		// binary's embedded catalog. This ensures newly added harness configs
+		// from binary updates are available on disk without a full InitGlobal.
+		// Force=false preserves any operator-customized configs.
+		if err := config.MaterializeBundledHarnessConfigs(globalDir, config.MaterializeOptions{Force: false}); err != nil {
+			log.Printf("Warning: failed to materialize missing harness configs: %v", err)
+		}
 	}
 
 	// When --global is set, change to the home directory so the server
@@ -1283,8 +1291,8 @@ func migrateStore(ctx context.Context, cfg *config.GlobalConfig, s *entadapter.C
 // safe because all guarded boot migrations are idempotent: each one checks
 // whether its work has already been done (e.g. MigrateStorageOnFirstBoot
 // checks for existing namespaced objects, BootstrapBundledResources uses
-// SkipIfAnyExist, secretmigration.MigratePluginSecrets checks for existing
-// secret values)
+// per-resource OverwritePolicy checks, secretmigration.MigratePluginSecrets
+// checks for existing secret values)
 // and no-ops if so. The winning replica does the work; the others skip it
 // here and will see the completed state on their next access.
 func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryLockKey, label string, fn func()) {
@@ -1885,7 +1893,6 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			if err := hubSrv.BootstrapBundledResources(ctx, hub.BootstrapOptions{
 				RepairStorage:   true,
 				OverwritePolicy: hub.OverwriteBuiltinManaged,
-				SkipIfAnyExist:  true,
 			}); err != nil {
 				log.Printf("Warning: bundled resource bootstrap failed: %v", err)
 			}
