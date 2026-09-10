@@ -219,6 +219,9 @@ func (s *Server) resolveOutboundRouting(
 	// Ownership check: verify the DM key IDs match the actual sender (agent)
 	// and recipient (user). Only validate when recipientID is known — when
 	// addressee derivation (S5) is needed, recipientID is still empty here.
+	// F4: Guard added intentionally — when recipientID is empty (conv-ref path),
+	// the ownership check would erroneously fail. S5 derives the recipient later
+	// and ParseDMKey in S5 validates the key.
 	if req.ThreadID != "" && strings.HasPrefix(req.ThreadID, "dm:") && recipientID != "" {
 		dmAgentID, dmUserID := parseDMKeyIDs(req.ThreadID)
 		if dmAgentID != agent.ID || dmUserID != recipientID {
@@ -548,9 +551,11 @@ func (s *Server) resolveOutboundRouting(
 			// Group conversations have no single recipient. Fall through to S6
 			// which will set up thread-based addressing.
 		default:
-			// Unknown kind when we expected addressee derivation.
-			s.messageLog.Warn("DEF-152: cannot derive addressee from conversation kind",
-				"kind", convResult.Kind, "conversation_id", convResult.ConversationID)
+			// Unknown conversation kind with no explicit recipient — fail
+			// closed rather than guessing.
+			err := fmt.Errorf("cannot derive addressee for conversation of kind %q", convResult.Kind)
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return nil, err
 		}
 	}
 
@@ -581,10 +586,21 @@ func (s *Server) resolveOutboundRouting(
 						"conversation has unparseable external_ref", nil)
 					return nil, parseErr
 				}
+
+				// DEF-161 (group half): if caller supplied a user recipient, log and
+				// discard it. The thread key is the address, not a user.
+				if recipient != "" || recipientID != "" {
+					s.messageLog.Info("DEF-161: discarding caller-supplied recipient on group conv-ref — thread key is the address",
+						"supplied_recipient", recipient, "supplied_recipient_id", recipientID,
+						"thread_key", threadID, "conversation_id", convResult.ConversationID)
+				}
+
 				// Overwrite recipient with the thread key.
 				recipient = "thread:" + threadID
 				recipientID = threadID
-				req.ThreadID = threadID
+				if req.ThreadID == "" {
+					req.ThreadID = threadID
+				}
 
 				// Derive channel from surface when empty (DEF-158).
 				if req.Channel == "" {
@@ -592,8 +608,8 @@ func (s *Server) resolveOutboundRouting(
 					if derivErr != nil {
 						s.messageLog.Error("DEF-158: cannot map surface to channel",
 							"surface", convResult.Surface, "error", derivErr)
-						writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError,
-							"cannot determine channel for conversation surface", nil)
+						writeError(w, http.StatusServiceUnavailable, "channel_derivation_failed",
+							"cannot determine delivery channel: conversation surface is unknown or empty", nil)
 						return nil, derivErr
 					}
 					req.Channel = derivedCh
@@ -601,34 +617,37 @@ func (s *Server) resolveOutboundRouting(
 
 			case "direct":
 				// DEF-158: backfill ThreadID with the DM key for direct conversations.
+				// F5: validDMKey guard intentionally removed — ParseDMKey in S5 already
+				// validated the key format. The DM key cannot reach this point unparsed.
 				if req.ThreadID == "" {
 					req.ThreadID = convResult.ExternalRef
 				}
 
-				// DEF-161: direct conv-ref recipient validation.
-				// If the caller supplied an explicit recipient AND a conversation_ref,
-				// verify the recipient matches one of the DM key participants.
-				// This prevents addressing to a different user via conv-ref hijacking.
+				// DEF-161 (direct half): when the caller supplied an explicit recipient
+				// alongside a direct conv-ref, validate that the recipient is actually
+				// named in the DM key. For direct conversations the DM key IS the ACL
+				// and is derivable — a mismatch is an authorization-shaped error, not a
+				// shape mismatch. Do NOT silently overwrite (contrast with the group half
+				// above where overwriting is the correct action).
 				if (req.Recipient != "" || req.RecipientID != "") && !def152DerivedRecipient {
 					// The recipient was explicitly supplied (not derived in S5).
 					// Verify it matches the DM key.
-					kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(convResult.ExternalRef)
+					_, idA, _, idB, parseErr := messages.ParseDMKey(convResult.ExternalRef)
 					if parseErr != nil {
-						s.messageLog.Error("DEF-161: cannot parse DM key for validation",
-							"external_ref", convResult.ExternalRef, "error", parseErr)
+						s.messageLog.Error("DEF-161: cannot parse DM key for recipient validation",
+							"external_ref", convResult.ExternalRef, "conversation_id", convResult.ConversationID, "error", parseErr)
 						writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-							"cannot validate recipient against conversation", nil)
+							"conversation has an invalid DM key; cannot validate recipient", nil)
 						return nil, parseErr
 					}
-					// Check if the recipient is one of the DM participants.
-					matched := false
-					if (kindA == "user" && idA == recipientID) || (kindB == "user" && idB == recipientID) {
-						matched = true
-					}
-					if !matched {
+					// The supplied recipientID must match one of the two participants.
+					if recipientID != idA && recipientID != idB {
+						s.messageLog.Warn("DEF-161: supplied recipient does not match DM key participants",
+							"recipient_id", recipientID, "dm_key_idA", idA, "dm_key_idB", idB,
+							"external_ref", convResult.ExternalRef)
 						writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-							"the supplied recipient is not a participant in this conversation; "+
-								"to send to this conversation, remove the recipient field and let the hub derive it from the conversation", nil)
+							"a recipient may not be supplied with a direct conversation reference — "+
+								"the conversation is the address; remove the recipient and retry", nil)
 						return nil, fmt.Errorf("recipient not in DM key")
 					}
 				}
@@ -661,8 +680,8 @@ func (s *Server) resolveOutboundRouting(
 					if derivErr != nil {
 						s.messageLog.Error("DEF-158: cannot map surface to channel",
 							"surface", convResult.Surface, "error", derivErr)
-						writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError,
-							"cannot determine channel for conversation surface", nil)
+						writeError(w, http.StatusServiceUnavailable, "channel_derivation_failed",
+							"cannot determine delivery channel: conversation surface is unknown or empty", nil)
 						return nil, derivErr
 					}
 					req.Channel = derivedCh
@@ -886,9 +905,13 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 
 		// Publish observer message for agent-to-agent visibility.
+		// F6: The pre-refactor DEF-164 path exited before ConversationAsserted
+		// was set, so observer messages always had ConversationAsserted = false.
+		// Restore that behavior to avoid changing the observer envelope shape.
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
 			observerMsg := *structuredMsg
 			observerMsg.ObserverOnly = true
+			observerMsg.ConversationAsserted = false
 			if err := bp.PublishMessage(ctx, result.TargetAgent.ProjectID, &observerMsg); err != nil {
 				s.messageLog.Error("DEF-164: observer publish failed",
 					"agent_id", result.TargetAgent.ID, "error", err)
