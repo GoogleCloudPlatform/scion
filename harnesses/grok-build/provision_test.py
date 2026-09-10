@@ -981,6 +981,86 @@ class VertexAIAuthTest(unittest.TestCase):
                 content,
             )
 
+    def test_vertex_global_region_uses_plain_hostname(self) -> None:
+        """When GOOGLE_CLOUD_REGION is set to 'global', the base_url must use
+        the plain hostname (aiplatform.googleapis.com), NOT
+        'global-aiplatform.googleapis.com'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            project_path = os.path.join(tmp, "project-id")
+            with open(project_path, "w") as f:
+                f.write("my-gcp-project")
+            region_path = os.path.join(tmp, "region")
+            with open(region_path, "w") as f:
+                f.write("global")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": project_path,
+                        "GOOGLE_CLOUD_REGION": region_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            with temporary_home(tmp):
+                provision._configure_vertex_ai(ctx, env)
+                config_path = os.path.join(tmp, ".grok", "config.toml")
+                with open(config_path) as f:
+                    content = f.read()
+            # Must use the global endpoint (plain hostname), not region-prefixed.
+            self.assertIn(
+                "https://aiplatform.googleapis.com"
+                "/v1beta1/projects/my-gcp-project/locations/global/endpoints/openapi",
+                content,
+            )
+            # Must NOT contain the invalid region-prefixed hostname.
+            self.assertNotIn("global-aiplatform.googleapis.com", content)
+
+    def test_vertex_global_location_uses_plain_hostname(self) -> None:
+        """When GOOGLE_CLOUD_LOCATION is set to 'global', the base_url must use
+        the plain hostname — same fix applies regardless of which env var
+        provides the region."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            project_path = os.path.join(tmp, "project-id")
+            with open(project_path, "w") as f:
+                f.write("my-gcp-project")
+            location_path = os.path.join(tmp, "location")
+            with open(location_path, "w") as f:
+                f.write("global")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": [
+                        "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION",
+                    ],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": project_path,
+                        "GOOGLE_CLOUD_LOCATION": location_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            with temporary_home(tmp):
+                provision._configure_vertex_ai(ctx, env)
+                config_path = os.path.join(tmp, ".grok", "config.toml")
+                with open(config_path) as f:
+                    content = f.read()
+            self.assertIn(
+                "https://aiplatform.googleapis.com"
+                "/v1beta1/projects/my-gcp-project/locations/global/endpoints/openapi",
+                content,
+            )
+            self.assertNotIn("global-aiplatform.googleapis.com", content)
+
     def test_vertex_adc_placed_when_staged(self) -> None:
         """When gcloud-adc file secret is staged, it is written to
         ~/.config/gcloud/application_default_credentials.json and
