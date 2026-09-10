@@ -215,7 +215,7 @@ func TestBootstrapBundledResources_SeedsNewConfigsWhenExistingPresent(t *testing
 		Name:       "pre-seeded-config",
 		Harness:    "generic",
 		Scope:      store.HarnessConfigScopeGlobal,
-		SourceURL:  "builtin://scion/harness-config/pre-seeded-config",
+		SourceURL:  "",
 		Visibility: "public",
 		Status:     store.HarnessConfigStatusActive,
 		Created:    now,
