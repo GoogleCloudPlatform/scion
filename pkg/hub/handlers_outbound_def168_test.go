@@ -271,3 +271,71 @@ func TestDEF168_AffinityStillAppliesWhenNoConvRef(t *testing.T) {
 	assert.Equal(t, "discord", stored.Channel,
 		"DEF-168: affinity must still apply when no conv-ref is present")
 }
+
+// ---------------------------------------------------------------------------
+// TestDEF168_Site1_ConvRefWithExplicitRecipient: proves Site 1's guard is
+// the ONLY protection when a caller supplies both a conv-ref AND an explicit
+// recipient.
+//
+// Without Site 1's req.ConversationRef == "" guard, the sequence is:
+//   S1: recipientID resolved from explicit recipient → non-empty
+//   Site 1: req.Channel == "" && recipientID != "" → affinity fires,
+//           sets req.Channel = "discord"
+//   Line ~253: validateChannelRegistered("discord") → passes (registered)
+//   S3-S6: req.Channel is already "discord"
+//   Site 2 (SurfaceToChannel fallback): if req.Channel == "" → FALSE,
+//           SurfaceToChannel never runs
+//   Result: message routed to "discord" — the exact live bug
+//
+// Site 2's fix cannot rescue this path. Site 1 is the only fix here.
+// ---------------------------------------------------------------------------
+
+func TestDEF168_Site1_ConvRefWithExplicitRecipient(t *testing.T) {
+	srv, s, _, project, agent, user, dmConv, _ := def168Setup(t)
+	ctx := context.Background()
+
+	// Send with BOTH a conv-ref AND an explicit recipient that matches the
+	// DM key (so DEF-161 validation passes). No explicit channel.
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Msg:             "def168 site1 recipient test",
+		ConversationRef: "conv:" + dmConv.ID,
+		Recipient:       "user:" + user.Email,
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+	require.Equal(t, http.StatusOK, rr.Code,
+		"conv-ref + explicit recipient must succeed; body: %s", rr.Body.String())
+
+	var stored *store.Message
+	require.Eventually(t, func() bool {
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{
+			ConversationID: dmConv.ID,
+		}, store.ListOptions{Limit: 10})
+		if err != nil || len(msgs.Items) == 0 {
+			return false
+		}
+		for i := range msgs.Items {
+			if msgs.Items[i].Msg == "def168 site1 recipient test" {
+				stored = &msgs.Items[i]
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 50*time.Millisecond, "message not persisted within timeout")
+
+	// CRITICAL: channel must be "web" (surface-derived), NOT "discord" (affinity).
+	// Site 1's req.ConversationRef == "" guard prevented affinity from poisoning
+	// req.Channel, so it stayed empty through to SurfaceToChannel.
+	assert.Equal(t, "web", stored.Channel,
+		"DEF-168 Site 1: conv-ref + explicit recipient must route via surface ('web'), not affinity ('discord')")
+	assert.NotEqual(t, "discord", stored.Channel,
+		"DEF-168 Site 1: affinity must not override conv-ref even when explicit recipient is present")
+}
