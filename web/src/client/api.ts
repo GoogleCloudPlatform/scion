@@ -177,11 +177,31 @@ export async function apiFetchAllPages<T>(
         // First page failed — throw so callers can show error
         throw new Error(`Failed to fetch: ${res.status} ${res.statusText}`);
       }
-      // Subsequent pages — return what we have so far
+      // Subsequent page failed — log warning, return what we have
+      console.warn(
+        `apiFetchAllPages: page ${page + 1} failed (${res.status}), returning ${allItems.length} items from previous pages`
+      );
       break;
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const data = (await res.json()) as Record<string, any>;
+    let data: Record<string, any>;
+    try {
+      data = (await res.json()) as Record<string, any>;
+    } catch {
+      if (allItems.length === 0) {
+        throw new Error(`Failed to parse response from ${baseUrl}`);
+      }
+      console.warn(
+        `apiFetchAllPages: failed to parse page ${page + 1} response, returning ${allItems.length} items from previous pages`
+      );
+      break;
+    }
+    if (!data || typeof data !== 'object') {
+      if (allItems.length === 0) {
+        throw new Error(`Invalid response format from ${baseUrl}`);
+      }
+      break;
+    }
     const items = data[key];
     if (Array.isArray(items)) {
       allItems.push(...(items as T[]));
