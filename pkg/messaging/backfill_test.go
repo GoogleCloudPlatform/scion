@@ -1766,6 +1766,100 @@ func TestBackfill_DEF156_ChannelConflict_GroupRefused(t *testing.T) {
 	assertErrorInvariant(t, result)
 }
 
+// ---------------------------------------------------------------------------
+// #1493: Mixed empty/web channels must not produce a surface conflict
+// ---------------------------------------------------------------------------
+
+func TestBackfill_1493_MixedEmptyAndWebChannel_NoConflict(t *testing.T) {
+	// Two messages for the same UUID principal pair: one with Channel=""
+	// and one with Channel="web". Both map to surface "native" via
+	// ChannelToSurfaceStrict. After #1493, the backfill normalizes
+	// channels to surfaces before comparing, so these must NOT conflict.
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	now := time.Now()
+
+	msg1 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-2*time.Minute))
+	msg1.Channel = "" // maps to "native"
+
+	msg2 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-1*time.Minute))
+	msg2.Channel = "web" // also maps to "native"
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg1, msg2}}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, result.TotalProcessed)
+	assert.Equal(t, 2, result.Attributed,
+		"both messages must be attributed (same native surface)")
+	assert.Equal(t, 1, result.ConversationsCreated,
+		"both messages belong to one conversation")
+	assert.Equal(t, 0, result.DeriveFailures[DeriveErrSurfaceConflict],
+		"no surface conflict for same-surface messages")
+
+	// Both messages must be stamped with the same conversation ID.
+	stamped1, _ := msgStore.GetMessage(ctx, msg1.ID)
+	stamped2, _ := msgStore.GetMessage(ctx, msg2.ID)
+	assert.NotEmpty(t, stamped1.ConversationID)
+	assert.Equal(t, stamped1.ConversationID, stamped2.ConversationID,
+		"empty-channel and web-channel messages must share a conversation")
+
+	// Structural invariant.
+	assertErrorInvariant(t, result)
+}
+
+func TestBackfill_1493_GenuineSurfaceConflict_StillDetected(t *testing.T) {
+	// Two messages for the same thread: one with Channel="" (native) and
+	// one with Channel="discord". These are genuinely different surfaces
+	// and must still produce a surface conflict after #1493.
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	now := time.Now()
+
+	msg1 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-2*time.Minute))
+	msg1.ThreadID = "mixed-surface-thread"
+	msg1.Channel = "" // maps to "native"
+
+	msg2 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-1*time.Minute))
+	msg2.ThreadID = "mixed-surface-thread"
+	msg2.Channel = "discord" // maps to "discord"
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg1, msg2}}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, result.TotalProcessed)
+	assert.Equal(t, 0, result.Attributed,
+		"no messages attributed when surfaces genuinely conflict")
+	assert.Equal(t, 0, result.ConversationsCreated,
+		"no conversation created for conflicting surfaces")
+	assert.True(t, result.DeriveFailures[DeriveErrSurfaceConflict] > 0,
+		"genuine surface conflict must be detected")
+
+	// Messages must NOT be stamped.
+	unstamped1, _ := msgStore.GetMessage(ctx, msg1.ID)
+	unstamped2, _ := msgStore.GetMessage(ctx, msg2.ID)
+	assert.Empty(t, unstamped1.ConversationID)
+	assert.Empty(t, unstamped2.ConversationID)
+
+	// Structural invariant.
+	assertErrorInvariant(t, result)
+}
+
 func TestBackfill_DEF156_UnmappableChannel_MessageRefused(t *testing.T) {
 	// A message with an unmappable channel must be refused at derive time
 	// and land in DeriveFailures under surface_unmap.

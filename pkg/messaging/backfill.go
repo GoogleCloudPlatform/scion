@@ -288,8 +288,17 @@ func (s *BackfillService) groupForMessage(msg *store.Message, projectID string, 
 		}
 		groups[key] = g
 	} else {
-		// DEF-156 P3: check for channel disagreement within the group.
-		if msg.Channel != g.channel {
+		// DEF-156 P3 / #1493: normalize channel to surface before
+		// conflict detection. "" and "web" both map to "native" and
+		// must not conflict.
+		msgSurface, surfErr := ChannelToSurfaceStrict(msg.Channel)
+		if surfErr != nil {
+			return nil, &DeriveError{
+				Cause: DeriveErrSurfaceUnmap,
+				Err:   fmt.Errorf("message %s: channel %q cannot be mapped to a surface: %w", msg.ID, msg.Channel, surfErr),
+			}
+		}
+		if msgSurface != g.surface {
 			g.channelConflict = true
 		}
 	}
