@@ -100,9 +100,22 @@ When you register your machine as a broker:
 *   **Safe Secrets**: Sensitive API keys and environment variables managed in the Hub are injected directly into the agent container's memory at runtime. They are not saved to your local disk.
 *   **Mutual Authentication**: All communication over the Control Channel uses HMAC-SHA256 signatures, ensuring that only the authorized Hub can send commands to your machine.
 
+## Broker Health Monitoring
+
+The Hub monitors broker health via a recurring heartbeat timeout scheduler. If a broker's WebSocket control channel disconnects and the disconnect event is not received (for example, due to a Hub crash or network partition), the Hub automatically marks the broker as **offline** after approximately five minutes of missed heartbeats. This mirrors the existing agent heartbeat timeout pattern and ensures the broker selection cascade does not dispatch work to unreachable brokers.
+
+## Unregistering a Broker
+
+To permanently remove a broker from the Hub, use the **Unregister** button on the broker detail page in the Web Dashboard. Unregistering a broker:
+
+- Removes the broker's registration from the Hub.
+- Cleans up associated HMAC secrets and join tokens.
+
+Unregistration is an admin-gated action and requires confirmation. After unregistering, the broker can no longer receive agent dispatch commands. Re-registration via `scion broker register` is required to reconnect.
+
 ## Stopping the Broker
 
-If you want to stop accepting agent workloads from the Hub, you can simply stop the broker daemon:
+If you want to stop accepting agent workloads from the Hub temporarily, you can stop the broker daemon:
 
 ```bash
 scion broker stop

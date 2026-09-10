@@ -171,6 +171,7 @@ To streamline management of complex environments, the **General** settings tab i
 2. **Agent Defaults Card** (with dedicated sub-tabs):
    - Configures default resource constraints (`max_turns`, `max_duration`, limits). These fields can be cleared to blank in the UI, which persists them as `null` in the Hub settings database instead of preserving their previous values, allowing administrators to remove default constraints entirely.
    - Introduces **Default Model** (`default_model`), **Default Thinking Level** (`default_thinking_level`), and **Default Agent Role** (`default_agent_role`) fields directly into the agent default pipeline (with the default agent role updated from `baseline` to `full` for usability).
+   - Introduces **Default Runtime Broker** (`default_runtime_broker`), a hub-level default that participates in the broker resolution cascade (see below). When a project has no default broker and no broker is explicitly requested, the hub-level default is used if the broker is online and dispatchable.
    - Houses the **Telemetry Toggle**, which has been moved to this card to keep telemetry configuration closely aligned with operational defaults.
 3. **Project Default Settings Card**: Configures platform-level default annotations and behaviors for newly created projects.
 
