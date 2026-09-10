@@ -212,7 +212,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// with NEITHER a recipient NOR a conversation_ref are still rejected with
 	// the original error message.
 	if recipientID == "" && recipient == "" && req.ConversationRef == "" {
-		ValidationError(w, "recipient is required — specify a user with 'user:<name>' or 'user:<email>'", nil)
+		ValidationError(w, "recipient is required — use 'user:<email>' or 'user:<id>' for a user, '@<agent>' for an agent, or 'conv:<id>' for a conversation", nil)
 		return
 	}
 

@@ -191,6 +191,11 @@ func TestParseGroupRecipient_Errors(t *testing.T) {
 			wantErr: "nested group[]",
 		},
 		{
+			name:    "conv prefix rejected with guidance",
+			input:   "group[conv:abc-123,agent:a]",
+			wantErr: "conv: addresses a conversation directly and cannot be wrapped in group[]",
+		},
+		{
 			name:    "unknown prefix",
 			input:   "group[foo:bar,agent:a]",
 			wantErr: "unknown recipient prefix",

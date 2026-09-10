@@ -221,8 +221,24 @@ func TestDEF152_NoRecipient_NoConvRef_Still400(t *testing.T) {
 		"should be rejected")
 	require.Equal(t, http.StatusBadRequest, rr.Code,
 		"no recipient and no conversation_ref must still be rejected")
-	assert.Contains(t, rr.Body.String(), "recipient is required",
-		"error message must be unchanged from the original guard")
+	// Decode the JSON to get the unescaped message (Go's JSON encoder
+	// escapes angle brackets as < / > in the raw body).
+	var errResp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp),
+		"response must be valid JSON")
+	msg := errResp.Error.Message
+	assert.Contains(t, msg, "recipient is required",
+		"error message must mention that recipient is required")
+	assert.Contains(t, msg, "conv:<id>",
+		"error message must mention conv:<id> as accepted address form")
+	assert.Contains(t, msg, "user:<email>",
+		"error message must mention user:<email> as accepted address form")
+	assert.Contains(t, msg, "@<agent>",
+		"error message must mention @<agent> as accepted address form")
 }
 
 // ---------------------------------------------------------------------------
