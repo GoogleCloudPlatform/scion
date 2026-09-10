@@ -248,33 +248,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// Validate channel against registered channels.
 	// Fail closed: if broker proxy is unavailable, reject the message rather than
 	// silently skipping validation.
-	if req.Channel != "" {
-		bp := s.GetMessageBrokerProxy()
-		if bp == nil {
-			writeError(w, http.StatusServiceUnavailable, "broker_unavailable",
-				"cannot validate channel: message broker is not available", nil)
-			return
-		}
-		channels := bp.ListChannels()
-		found := false
-		for _, ch := range channels {
-			if ch.Name == req.Channel {
-				found = true
-				break
-			}
-		}
-		if !found {
-			available := make([]string, len(channels))
-			for i, ch := range channels {
-				available[i] = ch.Name
-			}
-			if len(available) == 0 {
-				ValidationError(w, fmt.Sprintf("channel %q is not registered; no channels are currently available", req.Channel), nil)
-			} else {
-				ValidationError(w, fmt.Sprintf("channel %q is not registered; available channels: %s", req.Channel, strings.Join(available, ", ")), nil)
-			}
-			return
-		}
+	if !s.validateChannelRegistered(w, req.Channel) {
+		return
 	}
 
 	storeMsg := &store.Message{
@@ -566,6 +541,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// set (the DM key), never from request input. For non-direct conversations
 	// (group, etc.) there is no single recipient to derive — fail closed rather
 	// than guessing.
+	def152DerivedRecipient := false
 	if recipientID == "" && recipient == "" && convResult != nil {
 		switch convResult.Kind {
 		case "direct":
@@ -627,6 +603,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			storeMsg.RecipientID = recipientID
 			structuredMsg.Recipient = recipient
 			structuredMsg.RecipientID = recipientID
+			def152DerivedRecipient = true
 
 		case "group":
 			// Group conversations may have many participants and no single
@@ -657,6 +634,122 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if convResult != nil {
 		structuredMsg.ConversationID = convResult.ConversationID
 		structuredMsg.ConversationAsserted = asserted
+	}
+
+	// DEF-158: Channel + ThreadID backfill for the conv-ref path.
+	//
+	// Scoped to the conv-ref path only: def152DerivedRecipient is true
+	// exactly when the DEF-152 block above derived a recipient from the DM
+	// key (recipientID was "" at the initial affinity block :238, Channel
+	// stayed ""). We re-run affinity with the now-known recipientID and
+	// fall back to the conversation's surface when no affinity row exists.
+	//
+	// The normal path (explicit recipient) is NOT covered here. On that
+	// path, empty Channel may be intentional fan-out — the broker plugin's
+	// spoke selection is outside this repo and the semantics are unverified.
+	// DEF-159 tracks the normal-path fix; FACT 2 in the architect's review
+	// is the open question blocking it.
+	//
+	// ThreadID is also empty on the conv-ref path because the CLI does not
+	// pass it. The reverse direction (user→agent, sendAgentRouted at
+	// handlers_chat_v2.go:1059) writes Channel:"web" and ThreadID:key
+	// together; this makes the agent→user conv-ref path write the same
+	// shape, which is a consistency fix, not an invention.
+	//
+	// Ordering (R2): Channel is set here (last), validated immediately
+	// after. No exit path carries an unvalidated Channel.
+	if def152DerivedRecipient {
+		// --- ThreadID backfill (C1: validate before writing) ---
+		if req.ThreadID == "" {
+			dmKey := convResult.ExternalRef
+			if !validDMKey(dmKey) {
+				// C1: the DM key is the ACL — a wrong key is worse than
+				// no key. Refuse; do not fall back, do not repair.
+				s.messageLog.Error("DEF-158: convResult.ExternalRef is not a valid DM key, refusing ThreadID backfill",
+					"external_ref", dmKey, "conversation_id", convResult.ConversationID)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"conversation has an invalid DM key; cannot derive thread", nil)
+				return
+			}
+			req.ThreadID = dmKey
+			storeMsg.ThreadID = dmKey
+			structuredMsg.ThreadID = dmKey
+		}
+
+		// --- Channel: affinity re-run → surface fallback → validation ---
+		//
+		// Order: (1) try affinity, (2) on miss or error fall back to the
+		// conversation's surface, (3) validate the result. A real fallback
+		// beats a 503: on affinity error we still know the surface, so we
+		// can route correctly. The error is logged (F-B: must not be
+		// silent) but is non-fatal because the surface fallback is
+		// deterministic.
+		affinityHit := false
+		if req.Channel == "" {
+			if wcsAffinity != nil && s.GetMessageBrokerProxy() != nil {
+				if lastCh, err := wcsAffinity.GetLastChannel(ctx, recipientID, agent.ProjectID, agent.ID); err != nil {
+					// Non-fatal: log at Error (F-B), fall through to
+					// surface fallback. The surface is deterministic so
+					// an affinity miss does not prevent routing.
+					s.messageLog.Error("DEF-158: reply-affinity lookup failed, falling back to surface",
+						"recipient_id", recipientID, "agent_id", agent.ID, "error", err)
+				} else if lastCh != "" {
+					req.Channel = lastCh
+					storeMsg.Channel = lastCh
+					structuredMsg.Channel = lastCh
+					affinityHit = true
+				}
+			}
+
+			// Surface fallback: derive channel from the conversation's
+			// surface. Precedent: sendAgentRouted (handlers_chat_v2.go:1059)
+			// writes Channel:"web" for native-surface conversations. The
+			// inverse map (SurfaceToChannel) is computed from the same data
+			// as ChannelToSurface — they cannot disagree.
+			if !affinityHit {
+				derivedCh, surfErr := messaging.SurfaceToChannel(convResult.Surface)
+				if surfErr != nil {
+					s.messageLog.Error("DEF-158: cannot derive channel from conversation surface",
+						"surface", convResult.Surface, "conversation_id", convResult.ConversationID, "error", surfErr)
+					writeError(w, http.StatusServiceUnavailable, "channel_derivation_failed",
+						"cannot determine delivery channel: conversation surface is unknown or empty", nil)
+					return
+				}
+				req.Channel = derivedCh
+				storeMsg.Channel = derivedCh
+				structuredMsg.Channel = derivedCh
+			}
+		}
+
+		// --- Channel validation (R2, refined) ---
+		//
+		// Three cases for Channel at this point:
+		//
+		// 1. Caller-supplied (req.Channel != "" on entry): validated at
+		//    :251 before reaching this block. Untrusted input, must be
+		//    validated. ✓ already done.
+		//
+		// 2. Affinity-supplied (affinityHit == true): a stored value
+		//    that could name a spoke since removed. Validate it — the
+		//    pre-fix code validated affinity values at :251 because
+		//    affinity ran before the first validation site.
+		//
+		// 3. Surface-derived (!affinityHit): produced by
+		//    SurfaceToChannel, a total function over a closed enum that
+		//    already refuses anything it cannot map. Provably one of
+		//    six known channel names. Validating it is a liveness check
+		//    on a spoke, and failing a persist because a spoke is down
+		//    is a different policy decision — and a 503 on every hub
+		//    that runs without a broker plugin (a supported
+		//    configuration, see notifications.go:44).
+		//
+		// R2 refined: no externally-sourced channel reaches send
+		// unvalidated.
+		if affinityHit {
+			if !s.validateChannelRegistered(w, req.Channel) {
+				return
+			}
+		}
 	}
 
 	// Propagate recipients and group_id from metadata for group-set messages.
@@ -2442,4 +2535,42 @@ func disclosableResolutionReason(reason string) bool {
 	default:
 		return false
 	}
+}
+
+// validateChannelRegistered checks that `channel` is registered with the
+// message broker. It writes an HTTP error and returns false when:
+//   - channel is empty (no-op, returns true — caller decides whether empty is OK)
+//   - the broker proxy is unavailable (503)
+//   - the channel is not in the broker's registered list (422)
+//
+// Extracted from the inline validation at the original call site so the
+// DEF-158 post-affinity re-run uses the same rule (DRY). Both call sites
+// must remain — the original guards the happy path; the DEF-158 site guards
+// the conv-ref path where Channel is set after the first check.
+func (s *Server) validateChannelRegistered(w http.ResponseWriter, channel string) bool {
+	if channel == "" {
+		return true
+	}
+	bp := s.GetMessageBrokerProxy()
+	if bp == nil {
+		writeError(w, http.StatusServiceUnavailable, "broker_unavailable",
+			"cannot validate channel: message broker is not available", nil)
+		return false
+	}
+	channels := bp.ListChannels()
+	for _, ch := range channels {
+		if ch.Name == channel {
+			return true
+		}
+	}
+	available := make([]string, len(channels))
+	for i, ch := range channels {
+		available[i] = ch.Name
+	}
+	if len(available) == 0 {
+		ValidationError(w, fmt.Sprintf("channel %q is not registered; no channels are currently available", channel), nil)
+	} else {
+		ValidationError(w, fmt.Sprintf("channel %q is not registered; available channels: %s", channel, strings.Join(available, ", ")), nil)
+	}
+	return false
 }

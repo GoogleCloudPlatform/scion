@@ -1432,6 +1432,88 @@ func TestChannelToSurfaceStrict_RefusesUnmappable(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// SurfaceToChannel — the inverse of ChannelToSurface.
+// ---------------------------------------------------------------------------
+
+func TestSurfaceToChannel_NativeMapsToWeb(t *testing.T) {
+	// The "web" channel maps to surface "native" (channelToSurface).
+	// The inverse must produce "web" for surface "native".
+	// Precedent: sendAgentRouted (handlers_chat_v2.go:1059) writes
+	// Channel:"web" for native-surface conversations.
+	ch, err := SurfaceToChannel("native")
+	if err != nil {
+		t.Fatalf("SurfaceToChannel(\"native\") error: %v", err)
+	}
+	if ch != "web" {
+		t.Errorf("SurfaceToChannel(\"native\") = %q, want \"web\"", ch)
+	}
+}
+
+func TestSurfaceToChannel_IdentitySurfaces(t *testing.T) {
+	// Surfaces that are also valid channel names pass through as themselves.
+	for _, surface := range []string{"discord", "slack", "telegram", "gchat", "teams"} {
+		ch, err := SurfaceToChannel(surface)
+		if err != nil {
+			t.Errorf("SurfaceToChannel(%q) error: %v", surface, err)
+			continue
+		}
+		if ch != surface {
+			t.Errorf("SurfaceToChannel(%q) = %q, want %q", surface, ch, surface)
+		}
+	}
+}
+
+func TestSurfaceToChannel_EmptyRefused(t *testing.T) {
+	_, err := SurfaceToChannel("")
+	if err == nil {
+		t.Error("SurfaceToChannel(\"\") must return an error, not a default")
+	}
+}
+
+func TestSurfaceToChannel_UnknownRefused(t *testing.T) {
+	for _, surface := range []string{"irc", "matrix", "xmpp", "unknown"} {
+		ch, err := SurfaceToChannel(surface)
+		if err == nil {
+			t.Errorf("SurfaceToChannel(%q) = %q, want error", surface, ch)
+		}
+	}
+}
+
+func TestInvertChannelMap_CollidingMap_ReturnsError(t *testing.T) {
+	// Two channels mapping to the same surface must produce an error that
+	// names both channels. This exercises the guard that init() relies on.
+	colliding := map[string]string{
+		"web":     "native",
+		"webchat": "native",
+	}
+	inv, err := invertChannelMap(colliding)
+	if err == nil {
+		t.Fatalf("invertChannelMap should error on collision, got %v", inv)
+	}
+	// The error must name both channels so the developer sees the conflict.
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "web") || !strings.Contains(errMsg, "webchat") {
+		t.Errorf("error should name both colliding channels, got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "native") {
+		t.Errorf("error should name the colliding surface, got: %s", errMsg)
+	}
+}
+
+func TestInvertChannelMap_RealMap_NoCollision(t *testing.T) {
+	// The production channelToSurface map must invert without collision.
+	// This calls the same function that init() calls — if the guard is
+	// ever deleted from init(), this test catches the regression.
+	inv, err := invertChannelMap(channelToSurface)
+	if err != nil {
+		t.Fatalf("invertChannelMap(channelToSurface) error: %v", err)
+	}
+	if len(inv) != len(channelToSurface) {
+		t.Errorf("inverse has %d entries, want %d", len(inv), len(channelToSurface))
+	}
+}
+
 func TestDEF140_UnknownChannelResolvesConversationSuccessfully(t *testing.T) {
 	// DEF-140/R3: A message whose channel is NOT a valid surface must still
 	// resolve a conversation successfully and land on "native". This is the
