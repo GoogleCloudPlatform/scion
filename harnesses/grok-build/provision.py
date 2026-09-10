@@ -220,11 +220,20 @@ def _configure_vertex_ai(
         if not isinstance(aliases, dict):
             aliases = {}
         if raw_model.lower() in aliases:
-            # Scion alias (small, medium, large) — use default Vertex model.
+            # Scion size alias (small, medium, large) — use default Vertex model.
             model_id = _VERTEX_MODEL_ID
             ctx.info(f"vertex-ai: resolved alias '{raw_model}' to {_VERTEX_MODEL_ID}")
+        elif "/" not in raw_model:
+            # Pre-resolved model name without publisher prefix (e.g., "grok-4"
+            # from broker alias resolution). Not a valid Vertex AI model ID —
+            # Vertex requires <publisher>/<model> format.
+            model_id = _VERTEX_MODEL_ID
+            ctx.info(
+                f"vertex-ai: model '{raw_model}' lacks publisher prefix, "
+                f"using default {_VERTEX_MODEL_ID}"
+            )
         else:
-            # Explicit model ID (e.g., "xai/grok-4.2") — use as-is.
+            # Fully-qualified model ID with publisher prefix (e.g., "xai/grok-4.2").
             model_id = raw_model
     else:
         model_id = _VERTEX_MODEL_ID
