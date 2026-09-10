@@ -1679,3 +1679,176 @@ func TestValidSurfaces_MatchesSchemaEnum(t *testing.T) {
 			vsKeys, len(vsKeys), svKeys, len(svKeys))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// WithReadSurface tests — surface-aware thread read resolution (#1494)
+// ---------------------------------------------------------------------------
+
+// TestReadSurface_DiscordThreadNotFoundWithoutOption verifies that a thread
+// conversation created on surface "discord" is NOT found by the default
+// (native) read path.
+func TestReadSurface_DiscordThreadNotFoundWithoutOption(t *testing.T) {
+	cs := &mockConversationStore{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	// Seed a discord-surface thread conversation directly in the store.
+	projID := "proj-discord-1"
+	extRef := "thread:proj-discord-1:disc-thread-001"
+	cs.conversations = append(cs.conversations, store.Conversation{
+		ID:          "conv-discord-1",
+		ProjectID:   &projID,
+		Kind:        "group",
+		Surface:     "discord",
+		ExternalRef: extRef,
+	})
+
+	// Read WITHOUT WithReadSurface — defaults to "native".
+	result := ResolveThreadConversationForRead(
+		context.Background(), cs, logger, "disc-thread-001", projID)
+	if result != nil {
+		t.Fatalf("expected nil result when reading discord thread without WithReadSurface, got ConversationID=%q", result.ConversationID)
+	}
+}
+
+// TestReadSurface_DiscordThreadFoundWithOption verifies that a thread
+// conversation created on surface "discord" IS found when WithReadSurface("discord")
+// is passed.
+func TestReadSurface_DiscordThreadFoundWithOption(t *testing.T) {
+	cs := &mockConversationStore{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	projID := "proj-discord-2"
+	extRef := "thread:proj-discord-2:disc-thread-002"
+	cs.conversations = append(cs.conversations, store.Conversation{
+		ID:          "conv-discord-2",
+		ProjectID:   &projID,
+		Kind:        "group",
+		Surface:     "discord",
+		ExternalRef: extRef,
+	})
+
+	// Read WITH WithReadSurface("discord") — should find the conversation.
+	result := ResolveThreadConversationForRead(
+		context.Background(), cs, logger, "disc-thread-002", projID,
+		WithReadSurface("discord"))
+	if result == nil {
+		t.Fatal("expected non-nil result when reading discord thread with WithReadSurface(\"discord\")")
+	}
+	if result.ConversationID != "conv-discord-2" {
+		t.Errorf("expected ConversationID conv-discord-2, got %q", result.ConversationID)
+	}
+	if result.Surface != "discord" {
+		t.Errorf("expected Surface discord, got %q", result.Surface)
+	}
+}
+
+// TestReadSurface_NativeThreadDefaultBehavior verifies that native-surface
+// threads are still found with the default behavior (no WithReadSurface option).
+func TestReadSurface_NativeThreadDefaultBehavior(t *testing.T) {
+	cs := &mockConversationStore{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	// Write a native thread via the normal write path.
+	writeResult, err := ResolveOrCreateThreadConversation(
+		context.Background(), cs, logger, "native-thread-001", "proj-native-1")
+	if err != nil {
+		t.Fatalf("write: unexpected error: %v", err)
+	}
+	if writeResult == nil {
+		t.Fatal("write: expected non-nil result")
+	}
+
+	// Read without WithReadSurface — should find native conversation.
+	readResult := ResolveThreadConversationForRead(
+		context.Background(), cs, logger, "native-thread-001", "proj-native-1")
+	if readResult == nil {
+		t.Fatal("read: expected non-nil result for native thread without WithReadSurface")
+	}
+	if readResult.ConversationID != writeResult.ConversationID {
+		t.Errorf("ConversationID mismatch: write=%q, read=%q",
+			writeResult.ConversationID, readResult.ConversationID)
+	}
+}
+
+// TestReadSurface_SameExtRefDifferentSurfaces verifies that when both a native
+// and discord conversation exist with the same external_ref, the correct one is
+// returned based on the surface option.
+func TestReadSurface_SameExtRefDifferentSurfaces(t *testing.T) {
+	cs := &mockConversationStore{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	projID := "proj-multi-1"
+	extRef := "thread:proj-multi-1:shared-thread"
+
+	// Seed both native and discord conversations with the same external_ref.
+	cs.conversations = append(cs.conversations, store.Conversation{
+		ID:          "conv-native-multi",
+		ProjectID:   &projID,
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: extRef,
+	})
+	cs.conversations = append(cs.conversations, store.Conversation{
+		ID:          "conv-discord-multi",
+		ProjectID:   &projID,
+		Kind:        "group",
+		Surface:     "discord",
+		ExternalRef: extRef,
+	})
+
+	// Default (no option) → native conversation.
+	nativeResult := ResolveThreadConversationForRead(
+		context.Background(), cs, logger, "shared-thread", projID)
+	if nativeResult == nil {
+		t.Fatal("expected non-nil result for default (native) lookup")
+	}
+	if nativeResult.ConversationID != "conv-native-multi" {
+		t.Errorf("default lookup: expected conv-native-multi, got %q", nativeResult.ConversationID)
+	}
+
+	// WithReadSurface("discord") → discord conversation.
+	discordResult := ResolveThreadConversationForRead(
+		context.Background(), cs, logger, "shared-thread", projID,
+		WithReadSurface("discord"))
+	if discordResult == nil {
+		t.Fatal("expected non-nil result for discord lookup")
+	}
+	if discordResult.ConversationID != "conv-discord-multi" {
+		t.Errorf("discord lookup: expected conv-discord-multi, got %q", discordResult.ConversationID)
+	}
+}
+
+// TestReadSurface_SlackSurface verifies that Slack-surface threads resolve
+// correctly with WithReadSurface("slack").
+func TestReadSurface_SlackSurface(t *testing.T) {
+	cs := &mockConversationStore{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	projID := "proj-slack-1"
+	extRef := "thread:proj-slack-1:slack-thread-001"
+	cs.conversations = append(cs.conversations, store.Conversation{
+		ID:          "conv-slack-1",
+		ProjectID:   &projID,
+		Kind:        "group",
+		Surface:     "slack",
+		ExternalRef: extRef,
+	})
+
+	// Without WithReadSurface → not found.
+	result := ResolveThreadConversationForRead(
+		context.Background(), cs, logger, "slack-thread-001", projID)
+	if result != nil {
+		t.Fatalf("expected nil for slack thread without WithReadSurface, got ConversationID=%q", result.ConversationID)
+	}
+
+	// With WithReadSurface("slack") → found.
+	result = ResolveThreadConversationForRead(
+		context.Background(), cs, logger, "slack-thread-001", projID,
+		WithReadSurface("slack"))
+	if result == nil {
+		t.Fatal("expected non-nil result for slack thread with WithReadSurface(\"slack\")")
+	}
+	if result.ConversationID != "conv-slack-1" {
+		t.Errorf("expected conv-slack-1, got %q", result.ConversationID)
+	}
+}

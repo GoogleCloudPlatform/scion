@@ -441,6 +441,7 @@ func SurfaceToChannel(surface string) (string, error) {
 // readThreadConfig holds optional parameters for ResolveThreadConversationForRead.
 type readThreadConfig struct {
 	topicLookup TopicConversationLookup
+	surface     string // override surface for lookup; empty keeps "native"
 }
 
 // ReadThreadOption is a functional option for ResolveThreadConversationForRead.
@@ -455,6 +456,13 @@ type ReadThreadOption func(*readThreadConfig)
 // The intercept handles both populations (DEF-156).
 func WithReadTopicLookup(tl TopicConversationLookup) ReadThreadOption {
 	return func(c *readThreadConfig) { c.topicLookup = tl }
+}
+
+// WithReadSurface overrides the surface used for the external_ref
+// lookup. The default is "native". Callers should pass the value
+// from ChannelToSurface — raw channel strings must not be passed.
+func WithReadSurface(s string) ReadThreadOption {
+	return func(c *readThreadConfig) { c.surface = s }
 }
 
 // ResolveThreadConversationForRead looks up a thread conversation without
@@ -542,7 +550,12 @@ func ResolveThreadConversationForRead(
 		}
 	}
 
-	conv, lookupErr := cr.GetConversationByExternalRef(ctx, "native", extRef)
+	// Determine lookup surface: configured or default "native".
+	lookupSurface := "native"
+	if cfg.surface != "" {
+		lookupSurface = cfg.surface
+	}
+	conv, lookupErr := cr.GetConversationByExternalRef(ctx, lookupSurface, extRef)
 	if lookupErr != nil {
 		log.Debug("read-switch: thread conversation lookup returned no result",
 			"external_ref", extRef, "error", lookupErr)

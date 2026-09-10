@@ -315,6 +315,9 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 			if s.webChatStore != nil {
 				readOpts = append(readOpts, messaging.WithReadTopicLookup(s.webChatStore))
 			}
+			if channel != "" {
+				readOpts = append(readOpts, messaging.WithReadSurface(messaging.ChannelToSurface(channel, s.messageLog)))
+			}
 			convResult := messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, threadID, agent.ProjectID, readOpts...)
 			if convResult != nil {
 				filter.ConversationID = convResult.ConversationID
