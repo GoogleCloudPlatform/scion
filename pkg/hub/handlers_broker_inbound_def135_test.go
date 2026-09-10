@@ -148,7 +148,6 @@ func setupDEF135(t *testing.T) def135Fixture {
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 	srv.createProjectMembersGroup(ctx, project)
-	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 	agent := &store.Agent{
 		ID:           tid("agent-def135"),
@@ -501,7 +500,6 @@ func TestDEF135_AC5_WriteDeny409_DispatcherNeverCalled(t *testing.T) {
 	}
 	require.NoError(t, s2.CreateProject(ctx, project2))
 	srv2.createProjectMembersGroup(ctx, project2)
-	msgAuthzAddProjectMember(t, s2, user2.ID, project2.ID, project2.Slug, store.GroupMemberRoleMember)
 
 	agent2 := &store.Agent{
 		ID:           tid("agent-def135-ac5"),
