@@ -322,6 +322,10 @@ When creating an agent, you can configure its **GCP Identity Mode**:
   - The token is then returned to the agent, allowing it to use standard GCP SDKs (Application Default Credentials) as that specific Service Account.
 - **Passthrough**: Requests are allowed to reach the actual host metadata server. Use with caution as this allows the agent to assume the identity of the underlying node. Security is tightened by restricting GCP identity passthrough to broker owners only.
 
+:::note[Sandbox runtimes]
+Sandbox runtimes (such as `cloudrun-sandbox` profiles using gVisor) cannot reach the GCE metadata server at `169.254.169.254`, so passthrough mode produces no credentials. The Hub automatically translates passthrough to **assign** mode at agent creation and PATCH time, using the broker's host service account. Downstream JWT scopes, resolved environment variables, and the `gcp-token` endpoint work automatically after translation.
+:::
+
 ### Management UI & Hub-Minted Service Accounts
 
 Administrators can manage available Service Accounts through the **Service Accounts** section in the Admin dashboard. 

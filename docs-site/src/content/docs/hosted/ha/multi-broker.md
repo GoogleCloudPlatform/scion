@@ -40,7 +40,15 @@ Repeat for each machine. See [Runtime Broker](/scion/hosted/ha/runtime-broker/) 
 
 ## Broker Selection
 
-When starting an agent, the Hub selects an available broker automatically. You can override this:
+When starting an agent, the Hub resolves a broker through a priority cascade:
+
+| Priority | Source | Condition |
+| :--- | :--- | :--- |
+| 1 | **Explicit `--broker` flag** | The named broker must be a provider for the project (auto-linked if not). |
+| 2 | **Project default broker** | Set in project settings; must be online. |
+| 3 | **Hub-level default broker** | Set in [Agent Defaults](/scion/reference/admin-settings/#layout-structure) (`default_runtime_broker`); used when the project has no default. Must be a provider, online, and dispatchable. |
+| 4 | **Single-provider auto-select** | If exactly one broker provides the project and it is online, it is used automatically. |
+| 5 | **Error** | Multiple eligible brokers require explicit selection; no providers is an error. |
 
 - **Target a specific broker** with the `--broker` flag:
   ```bash
