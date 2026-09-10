@@ -684,8 +684,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		// can route correctly. The error is logged (F-B: must not be
 		// silent) but is non-fatal because the surface fallback is
 		// deterministic.
+		affinityHit := false
 		if req.Channel == "" {
-			affinityHit := false
 			if wcsAffinity != nil && s.GetMessageBrokerProxy() != nil {
 				if lastCh, err := wcsAffinity.GetLastChannel(ctx, recipientID, agent.ProjectID, agent.ID); err != nil {
 					// Non-fatal: log at Error (F-B), fall through to
@@ -721,9 +721,34 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			}
 		}
 
-		// --- Channel validation (R2: downstream of the final Channel set) ---
-		if !s.validateChannelRegistered(w, req.Channel) {
-			return
+		// --- Channel validation (R2, refined) ---
+		//
+		// Three cases for Channel at this point:
+		//
+		// 1. Caller-supplied (req.Channel != "" on entry): validated at
+		//    :251 before reaching this block. Untrusted input, must be
+		//    validated. ✓ already done.
+		//
+		// 2. Affinity-supplied (affinityHit == true): a stored value
+		//    that could name a spoke since removed. Validate it — the
+		//    pre-fix code validated affinity values at :251 because
+		//    affinity ran before the first validation site.
+		//
+		// 3. Surface-derived (!affinityHit): produced by
+		//    SurfaceToChannel, a total function over a closed enum that
+		//    already refuses anything it cannot map. Provably one of
+		//    six known channel names. Validating it is a liveness check
+		//    on a spoke, and failing a persist because a spoke is down
+		//    is a different policy decision — and a 503 on every hub
+		//    that runs without a broker plugin (a supported
+		//    configuration, see notifications.go:44).
+		//
+		// R2 refined: no externally-sourced channel reaches send
+		// unvalidated.
+		if affinityHit {
+			if !s.validateChannelRegistered(w, req.Channel) {
+				return
+			}
 		}
 	}
 
