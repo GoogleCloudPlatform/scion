@@ -145,6 +145,43 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
 }
 
 /**
+ * Fetch all pages of a cursor-paginated API endpoint.
+ *
+ * Follows `nextCursor` values returned by the server until every page has been
+ * retrieved. The caller provides a `key` that names the array property in the
+ * JSON response (e.g. `"templates"`, `"harnessConfigs"`).
+ *
+ * The helper is intentionally simple: it concatenates all items into a single
+ * array and discards per-page metadata (totalCount, capabilities, …).
+ * This makes it suitable for "fetch everything" use-cases like dropdowns and
+ * selector lists.
+ */
+export async function apiFetchAllPages<T>(
+  baseUrl: string,
+  key: string,
+  options?: ApiFetchOptions
+): Promise<T[]> {
+  const allItems: T[] = [];
+  let cursor = '';
+
+  do {
+    const sep = baseUrl.includes('?') ? '&' : '?';
+    const url = cursor ? `${baseUrl}${sep}cursor=${encodeURIComponent(cursor)}` : baseUrl;
+    const res = await apiFetch(url, options);
+    if (!res.ok) break;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data = (await res.json()) as Record<string, any>;
+    const items = data[key];
+    if (Array.isArray(items)) {
+      allItems.push(...(items as T[]));
+    }
+    cursor = (typeof data.nextCursor === 'string' && data.nextCursor) || '';
+  } while (cursor);
+
+  return allItems;
+}
+
+/**
  * Extract a human-readable error message from an API error response.
  *
  * The backend returns errors in the format: `{"error": {"code": "...", "message": "..."}}`.
