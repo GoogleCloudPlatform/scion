@@ -145,6 +145,75 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
 }
 
 /**
+ * Fetch all pages of a cursor-paginated API endpoint.
+ *
+ * Follows `nextCursor` values returned by the server until every page has been
+ * retrieved. The caller provides a `key` that names the array property in the
+ * JSON response (e.g. `"templates"`, `"harnessConfigs"`).
+ *
+ * The helper is intentionally simple: it concatenates all items into a single
+ * array and discards per-page metadata (totalCount, capabilities, …).
+ * This makes it suitable for "fetch everything" use-cases like dropdowns and
+ * selector lists.
+ */
+/** Safety bound to prevent infinite pagination loops (e.g. server returning the same cursor). */
+const MAX_PAGES = 50;
+
+export async function apiFetchAllPages<T>(
+  baseUrl: string,
+  key: string,
+  options?: ApiFetchOptions
+): Promise<T[]> {
+  const allItems: T[] = [];
+  let cursor = '';
+  let page = 0;
+
+  do {
+    const sep = baseUrl.includes('?') ? '&' : '?';
+    const url = cursor ? `${baseUrl}${sep}cursor=${encodeURIComponent(cursor)}` : baseUrl;
+    const res = await apiFetch(url, options);
+    if (!res.ok) {
+      if (allItems.length === 0) {
+        // First page failed — throw so callers can show error
+        throw new Error(`Failed to fetch: ${res.status} ${res.statusText}`);
+      }
+      // Subsequent page failed — log warning, return what we have
+      console.warn(
+        `apiFetchAllPages: page ${page + 1} failed (${res.status}), returning ${allItems.length} items from previous pages`
+      );
+      break;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let data: Record<string, any>;
+    try {
+      data = (await res.json()) as Record<string, any>;
+    } catch {
+      if (allItems.length === 0) {
+        throw new Error(`Failed to parse response from ${baseUrl}`);
+      }
+      console.warn(
+        `apiFetchAllPages: failed to parse page ${page + 1} response, returning ${allItems.length} items from previous pages`
+      );
+      break;
+    }
+    if (!data || typeof data !== 'object') {
+      if (allItems.length === 0) {
+        throw new Error(`Invalid response format from ${baseUrl}`);
+      }
+      break;
+    }
+    const items = data[key];
+    if (Array.isArray(items)) {
+      allItems.push(...(items as T[]));
+    }
+    cursor = (typeof data.nextCursor === 'string' && data.nextCursor) || '';
+    page++;
+  } while (cursor && page < MAX_PAGES);
+
+  return allItems;
+}
+
+/**
  * Extract a human-readable error message from an API error response.
  *
  * The backend returns errors in the format: `{"error": {"code": "...", "message": "..."}}`.
