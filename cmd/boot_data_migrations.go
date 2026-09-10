@@ -310,6 +310,24 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 			continue
 		}
 
+		// #1491: Do not record completion for projects with transient
+		// write failures. These messages were not stamped and should be
+		// retried on the next boot. Derive failures (deterministic
+		// refusals) still allow completion -- retrying them is pointless.
+		//
+		// This check is BEFORE the accumulator updates. If we accumulated
+		// first and then continued, a later project's save would bake the
+		// skipped project's measurements into the marker. On next boot
+		// resume, the retried project's measurements would be re-added —
+		// double-counting.
+		if result.WriteFailures > 0 {
+			slog.Warn("Message backfill: project has write failures; will NOT record as done, retrying next boot",
+				"project", pid,
+				"write_failures", result.WriteFailures,
+			)
+			continue
+		}
+
 		// The pass completed. Row-level refusals are a terminal outcome.
 		residuals := len(result.Errors)
 		totalResiduals += residuals
@@ -336,20 +354,6 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 		// Never subtracted from the measurement (design §4.8 second correction).
 		projectTransient := result.WriteFailures + result.ResolutionFailures
 		transientFailures += projectTransient
-
-		// #1491: Do not record completion for projects with transient
-		// write failures. These messages were not stamped and should be
-		// retried on the next boot. Derive failures (deterministic
-		// refusals) still allow completion -- retrying them is pointless.
-		if result.WriteFailures > 0 {
-			slog.Warn("Message backfill: project has write failures; will NOT record as done, retrying next boot",
-				"project", pid,
-				"write_failures", result.WriteFailures,
-			)
-			// Still accumulate permanent residual and transient counts
-			// for accurate reporting, but skip marking done.
-			continue
-		}
 
 		// M9 / DEF-114: log two identities so a reader can verify each
 		// from the log without touching the database:
