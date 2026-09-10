@@ -156,6 +156,9 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
  * This makes it suitable for "fetch everything" use-cases like dropdowns and
  * selector lists.
  */
+/** Safety bound to prevent infinite pagination loops (e.g. server returning the same cursor). */
+const MAX_PAGES = 50;
+
 export async function apiFetchAllPages<T>(
   baseUrl: string,
   key: string,
@@ -163,12 +166,20 @@ export async function apiFetchAllPages<T>(
 ): Promise<T[]> {
   const allItems: T[] = [];
   let cursor = '';
+  let page = 0;
 
   do {
     const sep = baseUrl.includes('?') ? '&' : '?';
     const url = cursor ? `${baseUrl}${sep}cursor=${encodeURIComponent(cursor)}` : baseUrl;
     const res = await apiFetch(url, options);
-    if (!res.ok) break;
+    if (!res.ok) {
+      if (allItems.length === 0) {
+        // First page failed — throw so callers can show error
+        throw new Error(`Failed to fetch: ${res.status} ${res.statusText}`);
+      }
+      // Subsequent pages — return what we have so far
+      break;
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const data = (await res.json()) as Record<string, any>;
     const items = data[key];
@@ -176,7 +187,8 @@ export async function apiFetchAllPages<T>(
       allItems.push(...(items as T[]));
     }
     cursor = (typeof data.nextCursor === 'string' && data.nextCursor) || '';
-  } while (cursor);
+    page++;
+  } while (cursor && page < MAX_PAGES);
 
   return allItems;
 }
