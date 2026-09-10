@@ -184,6 +184,12 @@ def _configure_vertex_ai(
             env[key] = val
             break
 
+    # Normalize "global" to empty — the global Vertex AI endpoint uses the
+    # plain hostname (aiplatform.googleapis.com), not a region-prefixed one.
+    region = region.strip()
+    if region.lower() == "global":
+        region = ""
+
     # Construct Vertex AI base URL.
     if region:
         base_url = (
