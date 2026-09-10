@@ -712,14 +712,37 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	}
 
-	// DEF-161 (direct half): deferred. The design calls for validating
-	// a supplied recipient against ParseDMKey on the direct conv-ref path
-	// and rejecting on mismatch (400). Implementation is deferred because
-	// TestDEF142_AC6_ResolveOrCreate_FlowsThroughDEF138Auth sends
-	// @agent-slug (resolves to agent-to-agent DM) with a user recipient,
-	// which is a legitimate test of the resolve-or-create path that would
-	// trip the validation. The design notes this half "stays open" (§4.3).
-	// See report for the finding and recommended sequencing.
+	// DEF-161 (direct half): when the caller supplied an explicit recipient
+	// alongside a direct conv-ref, validate that the recipient is actually
+	// named in the DM key. For direct conversations the DM key IS the ACL
+	// and is derivable — a mismatch is an authorization-shaped error, not a
+	// shape mismatch. Do NOT silently overwrite (contrast with the group half
+	// above where overwriting is the correct action).
+	//
+	// The validation fires on the resolved conversation uniformly, regardless
+	// of the syntax used to name it (conv:, @slug, #thread). The defect is a
+	// property of the resolved conversation, not of the naming syntax.
+	if convResult != nil && convResult.Kind == "direct" && !def152DerivedRecipient &&
+		(recipient != "" || recipientID != "") {
+		kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(convResult.ExternalRef)
+		if parseErr != nil {
+			s.messageLog.Error("DEF-161: cannot parse DM key for recipient validation",
+				"external_ref", convResult.ExternalRef, "conversation_id", convResult.ConversationID, "error", parseErr)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"conversation has an invalid DM key; cannot validate recipient", nil)
+			return
+		}
+		// The supplied recipientID must match one of the two participants.
+		if recipientID != idA && recipientID != idB {
+			s.messageLog.Warn("DEF-161: supplied recipient does not match DM key participants",
+				"recipient_id", recipientID, "dm_key_idA", idA, "dm_key_idB", idB,
+				"external_ref", convResult.ExternalRef)
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				fmt.Sprintf("supplied recipient does not match the direct conversation participants — "+
+					"the conversation key names %s:%s and %s:%s", kindA, idA, kindB, idB), nil)
+			return
+		}
+	}
 
 	// DEF-158: Channel + ThreadID backfill for the conv-ref path.
 	//

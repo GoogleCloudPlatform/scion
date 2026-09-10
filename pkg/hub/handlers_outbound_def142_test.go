@@ -448,38 +448,36 @@ func TestDEF142_AC3_KnownReason_CollapsedEndToEnd(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // DEF-142 AC-6: A reference that resolves to a NEWLY CREATED conversation
-// (@agent resolve-or-create) must still pass through the DEF-138
-// authorization block. Resolve exempts Created==true from its own
-// post-resolution check, so the DEF-138 block is the only gate.
+// (resolve-or-create) must still pass through the DEF-138 authorization
+// block. Resolve exempts Created==true from its own post-resolution
+// check, so the DEF-138 block is the only gate.
+//
+// History: the original fixture used @agent-slug, which creates an
+// agent↔agent DM. It masked the DEF-152 non-user guard by supplying a
+// non-participant user recipient — exactly the DEF-161 defect shape.
+// DEF-160/161 fixed the fixture: use @email, which creates an agent↔user
+// DM that flows cleanly through DEF-152 (other participant IS a user).
+// The resolve-or-create + DEF-138 path is identical for both syntaxes.
 // ---------------------------------------------------------------------------
 
 func TestDEF142_AC6_ResolveOrCreate_FlowsThroughDEF138Auth(t *testing.T) {
-	srv, s, project, agent, user := def141BrokerSetup(t)
-	ctx := context.Background()
-
-	// Create a second agent in the same project that the sending agent can
-	// DM via @slug.
-	targetAgent := &store.Agent{
-		ID:         tid("d142-ac6-target"),
-		Name:       "d142-ac6-target",
-		Slug:       "d142-ac6-target",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
-	}
-	require.NoError(t, s.CreateAgent(ctx, targetAgent))
+	srv, _, project, agent, user := def141BrokerSetup(t)
 
 	// Snapshot counters. The DEF-138 block sets asserted=true, which the
 	// broker routes through the explicit path.
 	explicitBefore := messaging.DivergenceMetrics.ExplicitRoutes()
 
-	// Send via @agent-slug — Resolve creates a new DM (Created==true),
-	// skips its own post-resolution auth, promotes to req.ConversationID,
-	// and the DEF-138 block authorizes + sets asserted=true.
-	rr := postOutboundWithRef(t, srv, project.ID, agent.ID, user.Email,
-		"hello via agent ref", "@"+targetAgent.Slug)
+	// Send via @email with NO explicit recipient — the conversation IS
+	// the address (DEF-160 ruling). Resolve creates a new agent↔user DM
+	// (Created==true), skips its own post-resolution auth, promotes to
+	// req.ConversationID, and the DEF-138 block authorizes + sets
+	// asserted=true. DEF-152 derives the recipient from the DM key
+	// (the other participant is a user → passes).
+	rr := postOutboundRefOnly(t, srv, project.ID, agent.ID,
+		"hello via email ref", "@"+user.Email)
 	require.Equal(t, http.StatusOK, rr.Code,
-		"@agent-slug reference should resolve-or-create and authorize")
+		"@email reference should resolve-or-create and authorize: %s",
+		rr.Body.String())
 
 	// Give async broker delivery time to complete.
 	time.Sleep(200 * time.Millisecond)
