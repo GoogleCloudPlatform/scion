@@ -379,28 +379,36 @@ func ChannelToSurfaceStrict(channel string) (string, error) {
 	return "", fmt.Errorf("unmappable channel %q: no known surface mapping", channel)
 }
 
+// invertChannelMap computes the inverse of a channel→surface map. If two
+// channels map to the same surface the inverse is ambiguous — Go randomises
+// map iteration order, so the winner would differ between process starts.
+// This function returns an error naming both channels so the caller can
+// panic at init time or fail a test.
+func invertChannelMap(m map[string]string) (map[string]string, error) {
+	inv := make(map[string]string, len(m))
+	for ch, surf := range m {
+		if existing, ok := inv[surf]; ok {
+			return nil, fmt.Errorf(
+				"surfaceToChannel collision: surface %q mapped by both %q and %q",
+				surf, existing, ch,
+			)
+		}
+		inv[surf] = ch
+	}
+	return inv, nil
+}
+
 // surfaceToChannel is the computed inverse of channelToSurface. For every
 // (channel → surface) alias, this records (surface → channel). It is built
 // once at init time so the two maps cannot drift.
 var surfaceToChannel map[string]string
 
 func init() {
-	surfaceToChannel = make(map[string]string, len(channelToSurface))
-	for ch, surf := range channelToSurface {
-		if existing, ok := surfaceToChannel[surf]; ok {
-			// Two channels map to the same surface. The inverse is
-			// ambiguous and would produce nondeterministic routing
-			// (Go randomises map iteration order). This is a
-			// programming error — detect it at startup, not at
-			// runtime when a message silently routes to the wrong
-			// channel.
-			panic(fmt.Sprintf(
-				"surfaceToChannel collision: surface %q mapped by both %q and %q",
-				surf, existing, ch,
-			))
-		}
-		surfaceToChannel[surf] = ch
+	inv, err := invertChannelMap(channelToSurface)
+	if err != nil {
+		panic(err)
 	}
+	surfaceToChannel = inv
 }
 
 // SurfaceToChannel maps a conversation surface back to the channel name that

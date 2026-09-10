@@ -1480,18 +1480,37 @@ func TestSurfaceToChannel_UnknownRefused(t *testing.T) {
 	}
 }
 
-func TestSurfaceToChannel_InverseIsInjective(t *testing.T) {
-	// The channelToSurface map must be injective (no two channels map to
-	// the same surface). If it is not, the init() panic fires first — but
-	// this test documents the invariant as a test rather than relying
-	// solely on the init-time guard, proving the panic is reachable.
-	seen := make(map[string]string, len(channelToSurface))
-	for ch, surf := range channelToSurface {
-		if existing, ok := seen[surf]; ok {
-			t.Fatalf("channelToSurface is not injective: surface %q mapped by both %q and %q",
-				surf, existing, ch)
-		}
-		seen[surf] = ch
+func TestInvertChannelMap_CollidingMap_ReturnsError(t *testing.T) {
+	// Two channels mapping to the same surface must produce an error that
+	// names both channels. This exercises the guard that init() relies on.
+	colliding := map[string]string{
+		"web":     "native",
+		"webchat": "native",
+	}
+	inv, err := invertChannelMap(colliding)
+	if err == nil {
+		t.Fatalf("invertChannelMap should error on collision, got %v", inv)
+	}
+	// The error must name both channels so the developer sees the conflict.
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "web") || !strings.Contains(errMsg, "webchat") {
+		t.Errorf("error should name both colliding channels, got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "native") {
+		t.Errorf("error should name the colliding surface, got: %s", errMsg)
+	}
+}
+
+func TestInvertChannelMap_RealMap_NoCollision(t *testing.T) {
+	// The production channelToSurface map must invert without collision.
+	// This calls the same function that init() calls — if the guard is
+	// ever deleted from init(), this test catches the regression.
+	inv, err := invertChannelMap(channelToSurface)
+	if err != nil {
+		t.Fatalf("invertChannelMap(channelToSurface) error: %v", err)
+	}
+	if len(inv) != len(channelToSurface) {
+		t.Errorf("inverse has %d entries, want %d", len(inv), len(channelToSurface))
 	}
 }
 
