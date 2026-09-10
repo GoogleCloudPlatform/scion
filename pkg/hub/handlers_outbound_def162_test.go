@@ -200,7 +200,7 @@ func TestDEF162_AC3_MentionFixtureIsUnambiguous(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AC-1: agent posts to group with @mention → notification exists
+// AC-1: agent posts to group with @mention -> notification exists
 // ---------------------------------------------------------------------------
 
 func TestDEF162_AC1_AgentMention_CreatesNotification(t *testing.T) {
@@ -211,7 +211,7 @@ func TestDEF162_AC1_AgentMention_CreatesNotification(t *testing.T) {
 		"Hey @UniqueHuman162 check this out", "conv:"+convID)
 	require.Equal(t, http.StatusOK, rr.Code, "send must succeed: %s", rr.Body.String())
 
-	// The mention fires in a goroutine — poll for the notification.
+	// The mention fires in a goroutine -- poll for the notification.
 	notif := waitForMentionNotification(t, s, human.ID, 5*time.Second)
 	require.NotNil(t, notif, "AC-1: mention notification must exist for the mentioned user")
 	assert.Equal(t, ChatNotificationMention, notif.Status)
@@ -222,7 +222,7 @@ func TestDEF162_AC1_AgentMention_CreatesNotification(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AC-2: muted conversation → no notification
+// AC-2: muted conversation -> no notification
 // ---------------------------------------------------------------------------
 
 func TestDEF162_AC2_AgentMention_MutedConversation_NoNotification(t *testing.T) {
@@ -241,13 +241,13 @@ func TestDEF162_AC2_AgentMention_MutedConversation_NoNotification(t *testing.T) 
 		"Hey @UniqueHuman162 muted test", "conv:"+convID)
 	require.Equal(t, http.StatusOK, rr.Code)
 
-	// Wait briefly — no notification should appear.
+	// Wait briefly -- no notification should appear.
 	notif := waitForMentionNotification(t, s, human.ID, 1*time.Second)
 	assert.Nil(t, notif, "AC-2: no notification when conversation is muted")
 }
 
 // ---------------------------------------------------------------------------
-// AC-4: no mention token → no notification
+// AC-4: no mention token -> no notification
 // ---------------------------------------------------------------------------
 
 func TestDEF162_AC4_NoMentionToken_NoNotification(t *testing.T) {
@@ -263,7 +263,7 @@ func TestDEF162_AC4_NoMentionToken_NoNotification(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AC-5: agent slug mention → no human notification (pin existing behaviour)
+// AC-5: agent slug mention -> no human notification (pin existing behaviour)
 // ---------------------------------------------------------------------------
 
 func TestDEF162_AC5_AgentSlugMention_NoHumanNotification(t *testing.T) {
@@ -278,7 +278,7 @@ func TestDEF162_AC5_AgentSlugMention_NoHumanNotification(t *testing.T) {
 	notif := waitForMentionNotification(t, s, agent.ID, 1*time.Second)
 	assert.Nil(t, notif, "AC-5: agent slug mention must not create human notification")
 
-	// Also no notification for the human — the human was not mentioned.
+	// Also no notification for the human -- the human was not mentioned.
 	humanNotif := waitForMentionNotification(t, s, human.ID, 500*time.Millisecond)
 	assert.Nil(t, humanNotif, "human should not be notified when only agent slug was mentioned")
 }
@@ -310,7 +310,7 @@ func TestDEF162_AC6_SenderLabel_IsAgentName_NotUUID(t *testing.T) {
 func TestDEF162_AC6_SenderLabel_FallsBackToSlug(t *testing.T) {
 	// The ent schema enforces Agent.Name NotEmpty(), so we test the slug
 	// fallback by calling fireHumanMentionNotifications directly with an
-	// empty senderName replaced by slug — mirroring the production logic.
+	// empty senderName replaced by slug -- mirroring the production logic.
 	srv, s, project, _, human, topicID := def162Setup(t)
 	ctx := context.Background()
 
@@ -326,8 +326,8 @@ func TestDEF162_AC6_SenderLabel_FallsBackToSlug(t *testing.T) {
 	srv.fireHumanMentionNotifications(ctx,
 		[]string{"UniqueHuman162"},
 		project.ID,
-		topicID,    // conversationKey — the topic we created
-		"",         // senderUserID — empty for agents
+		topicID,    // conversationKey -- the topic we created
+		"",         // senderUserID -- empty for agents
 		senderName, // slug fallback
 		"Hey @UniqueHuman162 slug fallback",
 	)
@@ -342,43 +342,40 @@ func TestDEF162_AC6_SenderLabel_FallsBackToSlug(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AC-7: DM with mention → only DM notification, not also a mention notification
+// AC-7: DM with mention -> only DM notification, not also a mention notification
+//
+// Driven through the handler on the conv-ref DM backfill path
+// (handlers_agent_messaging.go:773-786). When a direct conversation is
+// resolved via ConversationRef with no ThreadID, the handler backfills
+// req.ThreadID from convResult.ExternalRef -- a dm:-prefixed key. The
+// mention guard at :934 must exclude it.
 // ---------------------------------------------------------------------------
 
 func TestDEF162_AC7_DM_WithMention_OnlyDMNotification(t *testing.T) {
 	srv, s, project, agent, human, _ := def162Setup(t)
 	ctx := context.Background()
 
-	// Build a dm: key for this agent→human pair.
-	dmKey := "dm:agent:" + agent.ID + ":user:" + human.ID
+	// Build a canonical dm: key for this agent->human pair.
+	dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", human.ID)
+	require.NoError(t, err)
 
-	// Call fireHumanMentionNotifications directly with a dm:-prefixed key
-	// to verify the production guard at handlers_agent_messaging.go:934
-	// would exclude it. This is the case where a caller sends a message
-	// with thread_id=dm:... (e.g. via conv-ref DM backfill at :784).
-	//
-	// Step 1: Verify the guard excludes dm: prefix.
-	guardPasses := dmKey != "" &&
-		!hasPrefix(dmKey, "dm:") &&
-		!hasPrefix(dmKey, "agent:")
-	assert.False(t, guardPasses,
-		"dm:-prefixed ThreadID must be excluded by the mention guard")
+	// Create a direct conversation whose ExternalRef is the DM key.
+	conv := &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+	}
+	created, err := s.UpsertConversationByExternalRef(ctx, conv)
+	require.NoError(t, err)
 
-	// Step 2: Also test that a plain DM (no ThreadID, just Recipient) does
-	// not produce mention notifications.
-	body, _ := json.Marshal(OutboundMessageRequest{
-		Recipient: "user:" + human.Email,
-		Msg:       "Hey @UniqueHuman162 this is a DM",
-	})
-	req := httptest.NewRequest(http.MethodPost,
-		"/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agent.ID},
-		ProjectID: project.ID,
-	}}))
-	rr := httptest.NewRecorder()
-	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+	// POST with ConversationRef and NO ThreadID. The handler hits the
+	// def152DerivedRecipient path (handlers_agent_messaging.go:547-608)
+	// and then the ThreadID backfill at :773-784, setting req.ThreadID to
+	// the dm:-prefixed ExternalRef. The mention guard at :934 must then
+	// exclude it.
+	rr := postOutboundConvRef(t, srv, project.ID, agent.ID,
+		"Hey @UniqueHuman162 this is a DM via conv-ref", "conv:"+created.ID)
 	require.Equal(t, http.StatusOK, rr.Code, "DM send must succeed: %s", rr.Body.String())
 
 	// Wait for any notifications to settle.
@@ -387,7 +384,7 @@ func TestDEF162_AC7_DM_WithMention_OnlyDMNotification(t *testing.T) {
 	notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, human.ID, false)
 	require.NoError(t, err)
 
-	// Count mention-type notifications — there should be zero.
+	// Count mention-type notifications -- there should be zero.
 	mentionCount := 0
 	for _, n := range notifs {
 		if n.Status == ChatNotificationMention {
@@ -473,57 +470,100 @@ func TestDEF162_AC8_Broker_MentionFires(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Guard: agent:-prefixed ThreadID must not fire mentions
+// AC-9: agent:-prefixed ThreadID must not fire mentions
+//
+// Driven through the handler. ThreadID is caller-settable
+// (OutboundMessageRequest, thread_id at :45). An agent:-prefixed ThreadID
+// is a legacy agent thread, not a topic; the mention guard at
+// handlers_agent_messaging.go:934 must exclude it
+// (mirrors messagebroker.go:591).
 // ---------------------------------------------------------------------------
 
-func TestDEF162_AgentPrefixThreadID_NoMention(t *testing.T) {
-	// An agent:-prefixed ThreadID is a legacy agent thread, not a topic.
-	// The mention guard must exclude it (mirrors messagebroker.go:591).
-	// Tested at the fireHumanMentionNotifications level because the full
-	// handler requires channel validation infra that is orthogonal.
+func TestDEF162_AC9_AgentPrefixThreadID_NoMention(t *testing.T) {
 	srv, s, project, agent, human, _ := def162Setup(t)
 	ctx := context.Background()
 
-	// Call fireHumanMentionNotifications with an agent:-prefixed key.
-	// The production guard at handlers_agent_messaging.go:934 would skip this
-	// call entirely; we verify that if someone removed the guard, the mention
-	// would fire — but with the guard it does not.
-	//
-	// Step 1: Verify the guard excludes agent: prefix.
-	threadID := "agent:" + agent.ID
-	guardPasses := threadID != "" &&
-		!hasPrefix(threadID, "dm:") &&
-		!hasPrefix(threadID, "agent:")
-	assert.False(t, guardPasses,
-		"agent:-prefixed ThreadID must be excluded by the mention guard")
+	// Wire a broker proxy so that Channel:"web" passes
+	// validateChannelRegistered (handlers_agent_messaging.go:2686-2712).
+	// ValidateLegacyMessage (validate_compat.go:42) requires Channel when
+	// ThreadID is set, and validateChannelRegistered requires a broker when
+	// Channel is non-empty.
+	inproc := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = inproc.Close() })
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: inproc},
+		{Name: "web", Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	proxy := NewMessageBrokerProxy(fanout, s, events,
+		func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+	srv.mu.RLock()
+	proxy.chatNotifier = srv.chatNotifier
+	proxy.webChatStore = srv.webChatStore
+	srv.mu.RUnlock()
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	srv.SetMessageBrokerProxy(proxy)
 
-	// Step 2: Verify no notification fires even if we call fire directly with
-	// this key — GetTopic will return nil, but notifications would still fire
-	// with an empty room name.
+	// POST with an explicit agent:-prefixed ThreadID, a user recipient,
+	// and Channel:"web". The handler derives a "group" conversation via
+	// DeriveConversationKey (Rules 2/3 at :482) and proceeds to the mention
+	// guard at :934, which must exclude the agent:-prefixed ThreadID.
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:" + human.Email,
+		Msg:       "Hey @UniqueHuman162 via agent thread",
+		ThreadID:  "agent:" + agent.ID,
+		Channel:   "web",
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+	require.Equal(t, http.StatusOK, rr.Code, "agent-thread send must succeed: %s", rr.Body.String())
+
+	// Wait for any notifications to settle.
+	time.Sleep(500 * time.Millisecond)
+
+	notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, human.ID, false)
+	require.NoError(t, err)
+
+	// Count mention-type notifications -- there should be zero.
+	mentionCount := 0
+	for _, n := range notifs {
+		if n.Status == ChatNotificationMention {
+			mentionCount++
+		}
+	}
+	assert.Equal(t, 0, mentionCount,
+		"AC-9: agent:-prefixed ThreadID must NOT produce a mention notification")
+
+	// Verify the guard is load-bearing: call fireHumanMentionNotifications
+	// directly with an agent:-prefixed key. It DOES fire a notification,
+	// proving the handler-level guard is necessary (the underlying function
+	// does not guard on key prefix).
 	srv.fireHumanMentionNotifications(ctx,
 		[]string{"UniqueHuman162"},
 		project.ID,
-		threadID, // agent:-prefixed — not a topic
+		"agent:"+agent.ID,
 		"",
 		agent.Name,
-		"Hey @UniqueHuman162 legacy thread",
+		"Hey @UniqueHuman162 direct-call proof",
 	)
-
-	// The notification DOES fire (fireHumanMentionNotifications does not guard
-	// on key prefix). This proves the handler-level guard is load-bearing.
-	notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, human.ID, false)
+	directNotifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, human.ID, false)
 	require.NoError(t, err)
-	// If a notification was created, it proves the guard is necessary.
-	// (This is the mutation direction: removing the guard lets this through.)
-	if len(notifs) > 0 {
-		t.Log("confirmed: without the handler guard, agent:-prefixed ThreadIDs " +
-			"reach fireHumanMentionNotifications and produce notifications " +
-			"with blank room names — the guard is load-bearing")
+	directMentions := 0
+	for _, n := range directNotifs {
+		if n.Status == ChatNotificationMention {
+			directMentions++
+		}
 	}
-}
-
-// hasPrefix is a test-local wrapper matching strings.HasPrefix, used in the
-// guard assertion to avoid importing strings just for one assertion.
-func hasPrefix(s, prefix string) bool {
-	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+	require.Greater(t, directMentions, 0,
+		"fireHumanMentionNotifications with agent:-prefixed key must fire -- "+
+			"this proves the handler guard is load-bearing")
 }
