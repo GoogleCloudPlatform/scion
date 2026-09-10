@@ -917,6 +917,32 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// W6-mention: mention notifications for agent → group messages.
+	// Fires on BOTH broker and non-broker paths from this single call site.
+	//
+	// Unlike the DM notification below (which is gated on bp == nil because its
+	// broker counterpart lives in deliverToUser at messagebroker.go:606), this
+	// fires on acceptance, not on persistence. On the broker path a subsequent
+	// persist failure in deliverToUser (messagebroker.go:568) leaves a mention
+	// notification for a message that was never stored — a narrow window that
+	// only opens during an event that is already data loss and already logged.
+	//
+	// This asymmetry with the DM notification is deliberate: MessageBrokerProxy
+	// has no *Server reference and cannot reach fireHumanMentionNotifications or
+	// resolveProjectHumanMembers, so the handler is the only site that can fire
+	// on both topologies without duplicating resolution logic.
+	if req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:") {
+		names := messages.ExtractMentions(req.Msg)
+		if len(names) > 0 {
+			senderName := agent.Name
+			if senderName == "" {
+				senderName = agent.Slug
+			}
+			go s.fireHumanMentionNotifications(context.Background(), names, agent.ProjectID,
+				req.ThreadID, "", senderName, req.Msg)
+		}
+	}
+
 	// W6: DM notification for agent → human replies (non-broker path only).
 	// The broker path fires notifications from deliverToUser in messagebroker.go.
 	if bp := s.GetMessageBrokerProxy(); bp == nil {
