@@ -162,7 +162,9 @@ func TestDEF158_AC1_AC2_DirectConv_NoRecipient_ChannelSetAndVisible(t *testing.T
 		"conv-ref direct with no recipient must succeed; body: %s", rr.Body.String())
 
 	// Decode the response to get the message ID.
-	var resp struct{ MessageID string `json:"message_id"` }
+	var resp struct {
+		MessageID string `json:"message_id"`
+	}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	require.NotEmpty(t, resp.MessageID)
 
