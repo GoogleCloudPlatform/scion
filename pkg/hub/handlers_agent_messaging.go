@@ -2495,6 +2495,23 @@ func authenticatedSender(ctx context.Context) (kind, id string) {
 // to return to the caller in full. This is the single artefact every reason
 // passes through; unknown reasons are collapsed by default (safe).
 //
+// DEF-142 AC-3 ALLOWLIST: only "ambiguous" and "no-shared-project" are
+// disclosed. Ambiguity candidates are group conversations scoped to the
+// caller's own project (contained by ResolveContext.ProjectID being
+// server-derived, never from request JSON), and no-shared-project is a
+// caller-side configuration error. Everything else — including any future
+// reason added to ResolutionError — collapses into one generic response.
+// A new reason is collapsed until someone deliberately decides it is safe
+// to disclose and adds it here.
+func disclosableResolutionReason(reason string) bool {
+	switch reason {
+	case "ambiguous", "no-shared-project":
+		return true
+	default:
+		return false
+	}
+}
+
 // validateChannelRegistered checks that `channel` is registered with the
 // message broker. It writes an HTTP error and returns false when:
 //   - channel is empty (no-op, returns true — caller decides whether empty is OK)
@@ -2531,21 +2548,4 @@ func (s *Server) validateChannelRegistered(w http.ResponseWriter, channel string
 		ValidationError(w, fmt.Sprintf("channel %q is not registered; available channels: %s", channel, strings.Join(available, ", ")), nil)
 	}
 	return false
-}
-
-// DEF-142 AC-3 ALLOWLIST: only "ambiguous" and "no-shared-project" are
-// disclosed. Ambiguity candidates are group conversations scoped to the
-// caller's own project (contained by ResolveContext.ProjectID being
-// server-derived, never from request JSON), and no-shared-project is a
-// caller-side configuration error. Everything else — including any future
-// reason added to ResolutionError — collapses into one generic response.
-// A new reason is collapsed until someone deliberately decides it is safe
-// to disclose and adds it here.
-func disclosableResolutionReason(reason string) bool {
-	switch reason {
-	case "ambiguous", "no-shared-project":
-		return true
-	default:
-		return false
-	}
 }

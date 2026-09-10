@@ -387,6 +387,18 @@ var surfaceToChannel map[string]string
 func init() {
 	surfaceToChannel = make(map[string]string, len(channelToSurface))
 	for ch, surf := range channelToSurface {
+		if existing, ok := surfaceToChannel[surf]; ok {
+			// Two channels map to the same surface. The inverse is
+			// ambiguous and would produce nondeterministic routing
+			// (Go randomises map iteration order). This is a
+			// programming error — detect it at startup, not at
+			// runtime when a message silently routes to the wrong
+			// channel.
+			panic(fmt.Sprintf(
+				"surfaceToChannel collision: surface %q mapped by both %q and %q",
+				surf, existing, ch,
+			))
+		}
 		surfaceToChannel[surf] = ch
 	}
 }

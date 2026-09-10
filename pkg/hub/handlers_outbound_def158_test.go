@@ -587,15 +587,16 @@ func TestDEF159_KnownDefect_NormalPathLeavesChannelAndThreadIDEmpty(t *testing.T
 	dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
 	require.NoError(t, err)
 	code, histResp := readConversationHistoryAsUser(t, srv, user, dmKey)
-	if code == http.StatusOK {
-		found := false
-		for _, m := range histResp.Messages {
-			if m.Msg == "def159 known defect probe" {
-				found = true
-				break
-			}
+	require.Equal(t, http.StatusOK, code,
+		"DEF-159: history read must succeed so visibility assertion runs")
+	found := false
+	for _, m := range histResp.Messages {
+		if m.Msg == "def159 known defect probe" {
+			found = true
+			break
 		}
-		assert.False(t, found,
-			"DEF-159 known defect: message with empty Channel must NOT appear in history (Channel:'web' filter)")
 	}
+	// When DEF-159 is fixed, invert: assert.True(t, found, ...).
+	assert.False(t, found,
+		"DEF-159 known defect: message with empty Channel must NOT appear in history (Channel:'web' filter)")
 }
