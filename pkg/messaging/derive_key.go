@@ -130,6 +130,43 @@ func ThreadConversationExternalRef(projectID, threadID string) (string, error) {
 	return extRef, nil
 }
 
+// ParseThreadConversationExternalRef is the inverse of ThreadConversationExternalRef.
+// It decomposes a "thread:<projectID>:<threadID>" external_ref into its components.
+//
+// This function MUST be used by every call site that needs to recover the
+// projectID or threadID from a stored thread external_ref. An ad-hoc
+// strings.TrimPrefix at the call site is the mirror image of the defect DEF-156
+// fixed: the forward helper centralises construction, and this helper
+// centralises decomposition, so neither can drift from the other.
+//
+// Returns an error if:
+//   - ref does not start with "thread:"
+//   - ref does not have exactly three colon-separated parts
+//   - projectID or threadID is empty
+//   - threadID starts with "dm:" (a dm: key must never round-trip through the
+//     thread path — mirrored from ThreadConversationExternalRef's own refusal)
+func ParseThreadConversationExternalRef(ref string) (projectID, threadID string, err error) {
+	if !strings.HasPrefix(ref, "thread:") {
+		return "", "", fmt.Errorf("ParseThreadConversationExternalRef: ref must start with \"thread:\" (got %q)", ref)
+	}
+	parts := strings.SplitN(ref, ":", 3)
+	if len(parts) != 3 {
+		return "", "", fmt.Errorf("ParseThreadConversationExternalRef: expected 3 colon-separated parts, got %d (ref=%q)", len(parts), ref)
+	}
+	projectID = parts[1]
+	threadID = parts[2]
+	if projectID == "" {
+		return "", "", fmt.Errorf("ParseThreadConversationExternalRef: projectID is empty (ref=%q)", ref)
+	}
+	if threadID == "" {
+		return "", "", fmt.Errorf("ParseThreadConversationExternalRef: threadID is empty (ref=%q)", ref)
+	}
+	if strings.HasPrefix(threadID, "dm:") {
+		return "", "", fmt.Errorf("ParseThreadConversationExternalRef: threadID must not have \"dm:\" prefix — a dm: key must not round-trip through the thread path (ref=%q)", ref)
+	}
+	return projectID, threadID, nil
+}
+
 // conversationByKeyConfig holds optional parameters for ResolveOrCreateConversationByKey.
 type conversationByKeyConfig struct {
 	topicLookup    TopicConversationLookup

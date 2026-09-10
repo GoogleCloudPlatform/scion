@@ -642,47 +642,56 @@ func TestDeriveConversationKey_SuccessReturnsNilError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ThreadConversationExternalRef tests (DEF-156 P1)
+// ThreadConversationExternalRef + ParseThreadConversationExternalRef (DEF-156, DEF-160)
 // ---------------------------------------------------------------------------
+
+// threadRefGoldenVector is the shared vector table for
+// ThreadConversationExternalRef (forward) and ParseThreadConversationExternalRef
+// (inverse). Both directions are asserted against literal expected strings from
+// this single table, so the pair cannot drift — a format change that updates one
+// helper without the other turns at least one row red.
+//
+// AC-7a: one shared table, never a separate table for each direction.
+type threadRefGoldenVector struct {
+	name      string
+	projectID string
+	threadID  string
+	wantRef   string
+}
+
+var threadRefGoldenVectors = []threadRefGoldenVector{
+	{
+		name:      "simple IDs",
+		projectID: "proj-42",
+		threadID:  "my-thread-123",
+		wantRef:   "thread:proj-42:my-thread-123",
+	},
+	{
+		name:      "UUID-shaped topic ID",
+		projectID: "550e8400-e29b-41d4-a716-446655440000",
+		threadID:  "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+		wantRef:   "thread:550e8400-e29b-41d4-a716-446655440000:6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+	},
+	{
+		name:      "short slug IDs",
+		projectID: "p1",
+		threadID:  "t1",
+		wantRef:   "thread:p1:t1",
+	},
+	{
+		name:      "IDs with dots and underscores",
+		projectID: "org.team.proj",
+		threadID:  "topic_2024_01",
+		wantRef:   "thread:org.team.proj:topic_2024_01",
+	},
+}
 
 // TestThreadConversationExternalRef_GoldenVectors verifies that the exported
 // helper produces byte-identical output to DeriveConversationKey for the same
 // inputs. Each vector asserts against a literal expected string — not against
 // DeriveConversationKey's output — so two functions drifting together is caught.
 func TestThreadConversationExternalRef_GoldenVectors(t *testing.T) {
-	tests := []struct {
-		name      string
-		projectID string
-		threadID  string
-		wantRef   string
-	}{
-		{
-			name:      "simple IDs",
-			projectID: "proj-42",
-			threadID:  "my-thread-123",
-			wantRef:   "thread:proj-42:my-thread-123",
-		},
-		{
-			name:      "UUID-shaped topic ID",
-			projectID: "550e8400-e29b-41d4-a716-446655440000",
-			threadID:  "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-			wantRef:   "thread:550e8400-e29b-41d4-a716-446655440000:6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-		},
-		{
-			name:      "short slug IDs",
-			projectID: "p1",
-			threadID:  "t1",
-			wantRef:   "thread:p1:t1",
-		},
-		{
-			name:      "IDs with dots and underscores",
-			projectID: "org.team.proj",
-			threadID:  "topic_2024_01",
-			wantRef:   "thread:org.team.proj:topic_2024_01",
-		},
-	}
-
-	for _, tt := range tests {
+	for _, tt := range threadRefGoldenVectors {
 		t.Run(tt.name, func(t *testing.T) {
 			// Assert helper against literal expected string.
 			got, err := ThreadConversationExternalRef(tt.projectID, tt.threadID)
@@ -707,6 +716,103 @@ func TestThreadConversationExternalRef_GoldenVectors(t *testing.T) {
 				t.Errorf("DeriveConversationKey = %q, want %q", dkRef, tt.wantRef)
 			}
 		})
+	}
+}
+
+// TestParseThreadConversationExternalRef_GoldenVectors verifies the inverse
+// helper against the same shared vector table as the forward helper. Each vector
+// round-trips: forward(projectID, threadID) == wantRef, and
+// inverse(wantRef) == (projectID, threadID).
+func TestParseThreadConversationExternalRef_GoldenVectors(t *testing.T) {
+	for _, tt := range threadRefGoldenVectors {
+		t.Run(tt.name, func(t *testing.T) {
+			gotProject, gotThread, err := ParseThreadConversationExternalRef(tt.wantRef)
+			if err != nil {
+				t.Fatalf("ParseThreadConversationExternalRef(%q) unexpected error: %v",
+					tt.wantRef, err)
+			}
+			if gotProject != tt.projectID {
+				t.Errorf("projectID: got %q, want %q", gotProject, tt.projectID)
+			}
+			if gotThread != tt.threadID {
+				t.Errorf("threadID: got %q, want %q", gotThread, tt.threadID)
+			}
+		})
+	}
+}
+
+// TestParseThreadConversationExternalRef_RoundTrip verifies that every golden
+// vector round-trips through both directions: forward then inverse, and inverse
+// then forward.
+func TestParseThreadConversationExternalRef_RoundTrip(t *testing.T) {
+	for _, tt := range threadRefGoldenVectors {
+		t.Run(tt.name+"/forward-then-inverse", func(t *testing.T) {
+			ref, err := ThreadConversationExternalRef(tt.projectID, tt.threadID)
+			if err != nil {
+				t.Fatalf("forward: %v", err)
+			}
+			gotProject, gotThread, parseErr := ParseThreadConversationExternalRef(ref)
+			if parseErr != nil {
+				t.Fatalf("inverse: %v", parseErr)
+			}
+			if gotProject != tt.projectID || gotThread != tt.threadID {
+				t.Errorf("round-trip mismatch: got (%q, %q), want (%q, %q)",
+					gotProject, gotThread, tt.projectID, tt.threadID)
+			}
+		})
+		t.Run(tt.name+"/inverse-then-forward", func(t *testing.T) {
+			project, thread, err := ParseThreadConversationExternalRef(tt.wantRef)
+			if err != nil {
+				t.Fatalf("inverse: %v", err)
+			}
+			ref, fwdErr := ThreadConversationExternalRef(project, thread)
+			if fwdErr != nil {
+				t.Fatalf("forward: %v", fwdErr)
+			}
+			if ref != tt.wantRef {
+				t.Errorf("round-trip mismatch: got %q, want %q", ref, tt.wantRef)
+			}
+		})
+	}
+}
+
+// TestParseThreadConversationExternalRef_ErrorCases verifies all refusal paths.
+func TestParseThreadConversationExternalRef_ErrorCases(t *testing.T) {
+	tests := []struct {
+		name string
+		ref  string
+	}{
+		{name: "no thread: prefix", ref: "dm:agent:x:user:y"},
+		{name: "empty string", ref: ""},
+		{name: "thread: only", ref: "thread:"},
+		{name: "thread: with one part (no threadID)", ref: "thread:proj"},
+		{name: "thread: with empty projectID", ref: "thread::threadID"},
+		{name: "thread: with empty threadID", ref: "thread:proj:"},
+		{name: "thread: with all empty", ref: "thread::"},
+		{name: "dm:-prefixed threadID", ref: "thread:proj:dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := ParseThreadConversationExternalRef(tt.ref)
+			if err == nil {
+				t.Fatalf("expected error for ref=%q, got nil", tt.ref)
+			}
+		})
+	}
+}
+
+// TestParseThreadConversationExternalRef_DMPrefixRefused mirrors
+// TestThreadConversationExternalRef_DMPrefixRefused (derive_key_test.go:738):
+// a dm: key must never round-trip through the thread path.
+func TestParseThreadConversationExternalRef_DMPrefixRefused(t *testing.T) {
+	dmRef := "thread:proj:dm:agent:6ba7b810-9dad-11d1-80b4-00c04fd430c8:user:550e8400-e29b-41d4-a716-446655440000"
+	_, _, err := ParseThreadConversationExternalRef(dmRef)
+	if err == nil {
+		t.Fatal("expected error for dm:-prefixed threadID, got nil")
+	}
+	if !strings.Contains(err.Error(), "dm:") {
+		t.Errorf("error should mention dm: prefix, got: %v", err)
 	}
 }
 
