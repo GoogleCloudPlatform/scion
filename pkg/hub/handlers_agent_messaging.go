@@ -615,12 +615,12 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 					}
 				} else if dispatcher := s.GetDispatcher(); dispatcher != nil && targetAgent.RuntimeBrokerID != "" {
 					retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
-					defer retryCancel()
 					if err := dispatchWithBrokerRetry(retryCtx, dispatcher, targetAgent, req.Msg, req.Urgent, structuredMsg); err != nil {
 						s.messageLog.Error("DEF-164: broker dispatch failed",
 							"agent_id", targetAgent.ID, "error", err)
 						// Message is persisted; dispatch failure is non-fatal.
 					}
+					retryCancel()
 				}
 
 				// Publish observer message for agent-to-agent visibility.

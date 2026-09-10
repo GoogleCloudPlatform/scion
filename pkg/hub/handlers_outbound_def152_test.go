@@ -376,18 +376,18 @@ func TestDEF152_SenderOnSideB_DerivedAddresseeStillCorrect(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// DEF-152 mutation coverage 2: non-user addressee (agent-to-agent DM).
+// DEF-152 / DEF-164: agent-to-agent DM delivery via outbound endpoint.
 //
-// When a conv:<uuid> resolves to a direct DM whose other participant is an
-// agent (not a user), the handler must refuse. This endpoint delivers to
-// human inboxes; delivering to an agent ID would silently misroute.
+// DEF-164 enabled agent-to-agent delivery on the outbound endpoint: when
+// a conv:<uuid> (or @agent-slug) resolves to a direct DM whose other
+// participant is an agent, the handler now looks up the target agent and
+// delivers through the agent message path (persist + broker dispatch).
 //
-// Under the mutation `if false` (replacing `if addrKind != "user"`), this
-// test fails because the handler would attempt to look up the agent ID as
-// a user, producing a 500.
+// This test verifies that agent-to-agent DMs via conv:<uuid> succeed with
+// correct sender/recipient in the persisted message.
 // ---------------------------------------------------------------------------
 
-func TestDEF152_NonUserAddressee_AgentToAgentDM_Refused(t *testing.T) {
+func TestDEF152_AgentToAgentDM_DeliversViaOutbound(t *testing.T) {
 	srv, s, project, agent, _ := def138Setup(t)
 	ctx := context.Background()
 
@@ -429,11 +429,28 @@ func TestDEF152_NonUserAddressee_AgentToAgentDM_Refused(t *testing.T) {
 
 	rr := postOutboundRefOnly(t, srv, project.ID, agent.ID,
 		"agent-to-agent via conv ref", "conv:"+conv.ID)
-	require.Equal(t, http.StatusBadRequest, rr.Code,
-		"agent-to-agent DM via conv ref must be refused on this endpoint: %s",
+	require.Equal(t, http.StatusOK, rr.Code,
+		"DEF-164: agent-to-agent DM via conv ref must succeed: %s",
 		rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "non-user addressee",
-		"error must mention non-user addressee")
-	assert.Contains(t, rr.Body.String(), "delivers to users only",
-		"error must explain the endpoint constraint")
+
+	// Verify the response contains a message_id and correct recipient.
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp["message_id"], "response must include message_id")
+	require.Equal(t, "agent:"+otherAgent.Slug, resp["recipient"],
+		"recipient must be the target agent")
+
+	// Verify the message was persisted with correct sender/recipient.
+	msgID, ok := resp["message_id"].(string)
+	require.True(t, ok, "message_id must be a string")
+	storedMsg, err := s.GetMessage(ctx, msgID)
+	require.NoError(t, err, "persisted message must be retrievable")
+	assert.Equal(t, "agent:"+agent.Slug, storedMsg.Sender,
+		"sender must be the sending agent")
+	assert.Equal(t, "agent:"+otherAgent.Slug, storedMsg.Recipient,
+		"recipient must be the target agent")
+	assert.Equal(t, otherAgent.ID, storedMsg.RecipientID,
+		"recipient_id must be the target agent's ID")
+	assert.NotEmpty(t, storedMsg.ConversationID,
+		"message must be attributed to a conversation")
 }
