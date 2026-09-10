@@ -212,6 +212,104 @@ func TestDEF158_AC1_AC2_DirectConv_NoRecipient_ChannelSetAndVisible(t *testing.T
 }
 
 // ---------------------------------------------------------------------------
+// Surface fallback: conv:<uuid> direct, no recipient, NO affinity row.
+// The channel must still be derived from the conversation surface ("native"
+// → "web" via SurfaceToChannel), not left empty (the pre-fix defect).
+// This is the primary fix target — the affinity-hit case is a bonus.
+// ---------------------------------------------------------------------------
+
+func TestDEF158_SurfaceFallback_NoAffinity_ChannelDerivedFromSurface(t *testing.T) {
+	// Same as def158BrokerSetup but WITHOUT seeding reply-affinity.
+	// The surface fallback must be the sole source of Channel.
+	srv, s, project, agent, user := def138Setup(t)
+	ctx := context.Background()
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	wcs := NewWebChatStore(db, "sqlite3")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+
+	inprocessBus := eventbus.NewInProcessEventBus(slog.Default())
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: inprocessBus},
+		{Name: "web", Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	proxy := NewMessageBrokerProxy(fanout, s, events,
+		func() AgentDispatcher { return nil }, slog.Default())
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	srv.SetMessageBrokerProxy(proxy)
+	srv.mu.RLock()
+	proxy.webChatStore = srv.webChatStore
+	proxy.chatNotifier = srv.chatNotifier
+	srv.mu.RUnlock()
+	proxy.subscribeProjectUserMessages(project.ID)
+
+	enableReadSwitch(t, srv)
+
+	dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
+	require.NoError(t, err)
+	dmConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+
+	// NO RecordChannel call — affinity is empty.
+
+	rr := postConvRefNoRecipient(t, srv, project.ID, agent.ID,
+		"hello no affinity", "conv:"+dmConv.ID)
+	require.Equal(t, http.StatusOK, rr.Code,
+		"surface fallback must succeed; body: %s", rr.Body.String())
+
+	// Wait for broker to persist.
+	var stored *store.Message
+	require.Eventually(t, func() bool {
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{
+			ConversationID: dmConv.ID,
+		}, store.ListOptions{Limit: 10})
+		if err != nil || len(msgs.Items) == 0 {
+			return false
+		}
+		for i := range msgs.Items {
+			if msgs.Items[i].Msg == "hello no affinity" {
+				stored = &msgs.Items[i]
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 50*time.Millisecond, "message not persisted within timeout")
+
+	// Channel must be "web" — derived from Surface:"native" via SurfaceToChannel.
+	// Precedent: sendAgentRouted (handlers_chat_v2.go:1059) writes Channel:"web"
+	// for native-surface conversations.
+	assert.Equal(t, "web", stored.Channel,
+		"surface fallback: Channel must be 'web' for native-surface conversation")
+	assert.Equal(t, dmKey, stored.ThreadID,
+		"surface fallback: ThreadID must still be the DM key")
+
+	// Visible on read path (Channel:"web" matches the filter).
+	code, histResp := readConversationHistoryAsUser(t, srv, user, dmKey)
+	require.Equal(t, http.StatusOK, code)
+	found := false
+	for _, m := range histResp.Messages {
+		if m.Msg == "hello no affinity" {
+			found = true
+			assert.Equal(t, "web", m.Channel)
+			break
+		}
+	}
+	require.True(t, found,
+		"surface fallback: message must be visible in history via Channel:'web' filter")
+}
+
+// ---------------------------------------------------------------------------
 // AC-3: conv:<uuid> group, no recipient → 400 unchanged.
 // ---------------------------------------------------------------------------
 
@@ -376,4 +474,128 @@ func TestDEF158_AC7_OriginalValidation_StillRejects(t *testing.T) {
 		"AC-7: original validation site must still reject unregistered channels; body: %s",
 		rr.Body.String())
 	assert.Contains(t, rr.Body.String(), "nonexistent-spoke")
+}
+
+// ---------------------------------------------------------------------------
+// DEF-159 pinning test: KNOWN DEFECT on the normal path.
+//
+// This test pins a KNOWN DEFECT, not expected behaviour.
+//
+// On the normal path (explicit recipient via user:<email>, no conv-ref), when
+// no affinity row exists, Channel and ThreadID are both empty. The message is
+// persisted successfully (HTTP 200) but is invisible to the user through three
+// independent gates:
+//   (1) Channel="" — the history endpoint filters Channel:"web", so the
+//       message is absent from every read path.
+//   (2) ThreadID="" — TouchDMActivity (messagebroker.go:583) is gated on
+//       storeMsg.ThreadID != "", so no unread-dot watermark fires.
+//   (3) ThreadID="" — NotifyDMReceived (messagebroker.go:606) is gated on
+//       storeMsg.ThreadID != "", so no notification fires.
+// There is no single suppression point; the lived experience is "invisible."
+//
+// Correct behaviour: Channel and ThreadID should be populated so the message
+// is visible in history, generates a watermark, and produces a notification —
+// the same shape sendAgentRouted writes for user→agent DMs
+// (handlers_chat_v2.go:1059).
+//
+// The fix is NOT applied here because of FACT 2 (architect review): the
+// comment at :233 claims empty Channel fans out to all spokes, but spoke
+// selection lives in the broker plugin, outside this repo, and the claim is
+// unverified. Narrowing Channel blind risks removing delivery for a
+// multi-spoke user who is reached today. DEF-159 tracks this fix once the
+// broker plugin's semantics are confirmed.
+//
+// When DEF-159 is fixed, this test gets INVERTED (assert non-empty, assert
+// visible), not deleted.
+// ---------------------------------------------------------------------------
+
+func TestDEF159_KnownDefect_NormalPathLeavesChannelAndThreadIDEmpty(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	ctx := context.Background()
+
+	// Broker with "web" spoke — needed for the affinity guard at :238.
+	inprocessBus := eventbus.NewInProcessEventBus(slog.Default())
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: inprocessBus},
+		{Name: "web", Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	proxy := NewMessageBrokerProxy(fanout, s, events,
+		func() AgentDispatcher { return nil }, slog.Default())
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	srv.SetMessageBrokerProxy(proxy)
+	proxy.subscribeProjectUserMessages(project.ID)
+
+	// WebChatStore for affinity lookups — but do NOT seed any affinity.
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	wcs := NewWebChatStore(db, "sqlite3")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+
+	// Enable read-switch.
+	enableReadSwitch(t, srv)
+
+	// Normal path: explicit recipient, no conv-ref.
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:" + user.Email,
+		Msg:       "def159 known defect probe",
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+	require.Equal(t, http.StatusOK, rr.Code,
+		"normal path must succeed; body: %s", rr.Body.String())
+
+	// Wait for broker to persist.
+	var stored *store.Message
+	require.Eventually(t, func() bool {
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID},
+			store.ListOptions{Limit: 10})
+		if err != nil || len(msgs.Items) == 0 {
+			return false
+		}
+		for i := range msgs.Items {
+			if msgs.Items[i].Msg == "def159 known defect probe" {
+				stored = &msgs.Items[i]
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 50*time.Millisecond, "message not persisted")
+
+	// DEF-159 KNOWN DEFECT: Channel and ThreadID are both empty.
+	// When DEF-159 is fixed, invert these assertions.
+	assert.Empty(t, stored.Channel,
+		"DEF-159 known defect: on normal path with no affinity, Channel is empty")
+	assert.Empty(t, stored.ThreadID,
+		"DEF-159 known defect: on normal path, ThreadID is empty (no backfill outside conv-ref scope)")
+
+	// Read-path visibility: the message is NOT visible in history because
+	// the filter is Channel:"web" and the stored Channel is "".
+	// When DEF-159 is fixed, invert this assertion (message SHOULD be visible).
+	dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
+	require.NoError(t, err)
+	code, histResp := readConversationHistoryAsUser(t, srv, user, dmKey)
+	if code == http.StatusOK {
+		found := false
+		for _, m := range histResp.Messages {
+			if m.Msg == "def159 known defect probe" {
+				found = true
+				break
+			}
+		}
+		assert.False(t, found,
+			"DEF-159 known defect: message with empty Channel must NOT appear in history (Channel:'web' filter)")
+	}
 }

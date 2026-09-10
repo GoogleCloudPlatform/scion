@@ -541,6 +541,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// set (the DM key), never from request input. For non-direct conversations
 	// (group, etc.) there is no single recipient to derive — fail closed rather
 	// than guessing.
+	def152DerivedRecipient := false
 	if recipientID == "" && recipient == "" && convResult != nil {
 		switch convResult.Kind {
 		case "direct":
@@ -602,6 +603,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			storeMsg.RecipientID = recipientID
 			structuredMsg.Recipient = recipient
 			structuredMsg.RecipientID = recipientID
+			def152DerivedRecipient = true
 
 		case "group":
 			// Group conversations may have many participants and no single
@@ -636,20 +638,27 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	// DEF-158: Channel + ThreadID backfill for the conv-ref path.
 	//
-	// When a conv:<uuid> request carries no explicit recipient, recipientID
-	// is empty at the affinity block (:238) and Channel stays "". The
-	// DEF-152 block above derived recipientID from the DM key — re-run
-	// affinity now so the message gets a Channel the read path can match.
+	// Scoped to the conv-ref path only: def152DerivedRecipient is true
+	// exactly when the DEF-152 block above derived a recipient from the DM
+	// key (recipientID was "" at the initial affinity block :238, Channel
+	// stayed ""). We re-run affinity with the now-known recipientID and
+	// fall back to the conversation's surface when no affinity row exists.
 	//
-	// ThreadID is also empty on this path because the CLI does not pass it.
-	// The reverse direction (user→agent, sendAgentRouted at
-	// handlers_chat_v2.go:1060) writes Channel:"web" and ThreadID:key
+	// The normal path (explicit recipient) is NOT covered here. On that
+	// path, empty Channel may be intentional fan-out — the broker plugin's
+	// spoke selection is outside this repo and the semantics are unverified.
+	// DEF-159 tracks the normal-path fix; FACT 2 in the architect's review
+	// is the open question blocking it.
+	//
+	// ThreadID is also empty on the conv-ref path because the CLI does not
+	// pass it. The reverse direction (user→agent, sendAgentRouted at
+	// handlers_chat_v2.go:1059) writes Channel:"web" and ThreadID:key
 	// together; this makes the agent→user conv-ref path write the same
 	// shape, which is a consistency fix, not an invention.
 	//
 	// Ordering (R2): Channel is set here (last), validated immediately
 	// after. No exit path carries an unvalidated Channel.
-	if convResult != nil && convResult.Kind == "direct" && recipientID != "" {
+	if def152DerivedRecipient {
 		// --- ThreadID backfill (C1: validate before writing) ---
 		if req.ThreadID == "" {
 			dmKey := convResult.ExternalRef
@@ -667,17 +676,48 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			structuredMsg.ThreadID = dmKey
 		}
 
-		// --- Channel affinity re-run ---
-		if req.Channel == "" && wcsAffinity != nil && s.GetMessageBrokerProxy() != nil {
-			if lastCh, err := wcsAffinity.GetLastChannel(ctx, recipientID, agent.ProjectID, agent.ID); err != nil {
-				s.messageLog.Error("DEF-158: reply-affinity lookup failed (post-DEF-152)",
-					"recipient_id", recipientID, "agent_id", agent.ID, "error", err)
-				// Non-fatal: fall through — the broker's deliverToUser will
-				// default to "web" for web-client contexts.
-			} else if lastCh != "" {
-				req.Channel = lastCh
-				storeMsg.Channel = lastCh
-				structuredMsg.Channel = lastCh
+		// --- Channel: affinity re-run → surface fallback → validation ---
+		//
+		// Order: (1) try affinity, (2) on miss or error fall back to the
+		// conversation's surface, (3) validate the result. A real fallback
+		// beats a 503: on affinity error we still know the surface, so we
+		// can route correctly. The error is logged (F-B: must not be
+		// silent) but is non-fatal because the surface fallback is
+		// deterministic.
+		if req.Channel == "" {
+			affinityHit := false
+			if wcsAffinity != nil && s.GetMessageBrokerProxy() != nil {
+				if lastCh, err := wcsAffinity.GetLastChannel(ctx, recipientID, agent.ProjectID, agent.ID); err != nil {
+					// Non-fatal: log at Error (F-B), fall through to
+					// surface fallback. The surface is deterministic so
+					// an affinity miss does not prevent routing.
+					s.messageLog.Error("DEF-158: reply-affinity lookup failed, falling back to surface",
+						"recipient_id", recipientID, "agent_id", agent.ID, "error", err)
+				} else if lastCh != "" {
+					req.Channel = lastCh
+					storeMsg.Channel = lastCh
+					structuredMsg.Channel = lastCh
+					affinityHit = true
+				}
+			}
+
+			// Surface fallback: derive channel from the conversation's
+			// surface. Precedent: sendAgentRouted (handlers_chat_v2.go:1059)
+			// writes Channel:"web" for native-surface conversations. The
+			// inverse map (SurfaceToChannel) is computed from the same data
+			// as ChannelToSurface — they cannot disagree.
+			if !affinityHit {
+				derivedCh, surfErr := messaging.SurfaceToChannel(convResult.Surface)
+				if surfErr != nil {
+					s.messageLog.Error("DEF-158: cannot derive channel from conversation surface",
+						"surface", convResult.Surface, "conversation_id", convResult.ConversationID, "error", surfErr)
+					writeError(w, http.StatusServiceUnavailable, "channel_derivation_failed",
+						"cannot determine delivery channel: conversation surface is unknown or empty", nil)
+					return
+				}
+				req.Channel = derivedCh
+				storeMsg.Channel = derivedCh
+				structuredMsg.Channel = derivedCh
 			}
 		}
 

@@ -379,6 +379,45 @@ func ChannelToSurfaceStrict(channel string) (string, error) {
 	return "", fmt.Errorf("unmappable channel %q: no known surface mapping", channel)
 }
 
+// surfaceToChannel is the computed inverse of channelToSurface. For every
+// (channel → surface) alias, this records (surface → channel). It is built
+// once at init time so the two maps cannot drift.
+var surfaceToChannel map[string]string
+
+func init() {
+	surfaceToChannel = make(map[string]string, len(channelToSurface))
+	for ch, surf := range channelToSurface {
+		surfaceToChannel[surf] = ch
+	}
+}
+
+// SurfaceToChannel maps a conversation surface back to the channel name that
+// the read path filters on. This is the inverse of ChannelToSurface and is
+// derived from the same data (channelToSurface + validSurfaces) so the two
+// cannot disagree.
+//
+// Surfaces that have a channelToSurface alias (e.g. "native" → "web") use
+// the alias. Surfaces that are also valid channel names (e.g. "slack") pass
+// through as themselves. Unknown or empty surfaces return an error — the
+// caller must refuse, never default.
+//
+// Precedent: sendAgentRouted (handlers_chat_v2.go:1059) writes Channel:"web"
+// for native-surface conversations. This function produces the same value.
+func SurfaceToChannel(surface string) (string, error) {
+	if surface == "" {
+		return "", fmt.Errorf("empty surface: cannot derive channel")
+	}
+	// Reverse alias — e.g. "native" → "web".
+	if ch, ok := surfaceToChannel[surface]; ok {
+		return ch, nil
+	}
+	// Identity — surface IS a valid channel name (e.g. "slack").
+	if validSurfaces[surface] {
+		return surface, nil
+	}
+	return "", fmt.Errorf("unknown surface %q: cannot derive channel", surface)
+}
+
 // readThreadConfig holds optional parameters for ResolveThreadConversationForRead.
 type readThreadConfig struct {
 	topicLookup TopicConversationLookup
