@@ -453,9 +453,8 @@ func TestDEF142_AC3_KnownReason_CollapsedEndToEnd(t *testing.T) {
 // check, so the DEF-138 block is the only gate.
 //
 // Uses @email (not @agent-slug) because @agent-slug creates an
-// agent↔agent DM, and the outbound endpoint correctly refuses to deliver
-// into non-user DMs (DEF-152 :579 "non-user addressee"). See the
-// companion test TestDEF164_AtAgentSlug_NonUserAddressee_Refused below
+// agent↔agent DM which routes through the DEF-164 agent delivery path.
+// See the companion test TestDEF164_AtAgentSlug_DeliversToAgent below
 // for @agent-slug coverage.
 // ---------------------------------------------------------------------------
 
@@ -490,23 +489,16 @@ func TestDEF142_AC6_ResolveOrCreate_EmailRef_FlowsThroughDEF138Auth(t *testing.T
 }
 
 // ---------------------------------------------------------------------------
-// DEF-164 (pinned behaviour): @agent-slug resolves via resolveAgentDM and
-// creates an agent↔agent DM, but the outbound endpoint delivers to users
-// only. DEF-152 :579 refuses with "non-user addressee" when no recipient
-// is supplied, and DEF-161 refuses any supplied user recipient as a
-// DM-key mismatch. So @agent-slug is a dead syntax on this endpoint.
+// DEF-164: @agent-slug resolves via resolveAgentDM and creates an
+// agent↔agent DM. The outbound endpoint now delivers agent-to-agent
+// messages through the agent message path (persist + broker dispatch),
+// instead of rejecting with "non-user addressee".
 //
-// This test pins the current 400 so that:
-//   - the resolution path (resolveAgentDM) stays exercised,
-//   - the refusal reason is visible in code, not just the tracker, and
-//   - the DEF-164 fixer knows exactly which assertion to flip.
-//
-// NOTE: resolveAgentDM upserts a conversation and two participant rows
-// BEFORE the guard runs. No rollback. Each attempt leaves orphan rows.
-// DEF-164 tracks the fix; do not attempt it here.
+// This test verifies that @agent-slug on the outbound endpoint succeeds
+// and the message is persisted with the correct sender/recipient.
 // ---------------------------------------------------------------------------
 
-func TestDEF164_AtAgentSlug_NonUserAddressee_Refused(t *testing.T) {
+func TestDEF164_AtAgentSlug_DeliversToAgent(t *testing.T) {
 	srv, s, project, agent, _ := def141BrokerSetup(t)
 	ctx := context.Background()
 
@@ -521,14 +513,94 @@ func TestDEF164_AtAgentSlug_NonUserAddressee_Refused(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, targetAgent))
 
 	// @agent-slug with no recipient → resolveAgentDM → agent↔agent DM →
-	// DEF-152 refuses "non-user addressee".
+	// DEF-164 routes to agent delivery path → 200 OK.
 	rr := postOutboundRefOnly(t, srv, project.ID, agent.ID,
-		"should be refused", "@"+targetAgent.Slug)
-	require.Equal(t, http.StatusBadRequest, rr.Code,
-		"DEF-164: @agent-slug on outbound endpoint must be refused: %s",
+		"hello agent", "@"+targetAgent.Slug)
+	require.Equal(t, http.StatusOK, rr.Code,
+		"DEF-164: @agent-slug on outbound endpoint must succeed: %s",
 		rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "non-user addressee",
-		"DEF-164: refusal must name the non-user reason")
+
+	// Verify the response contains a message_id and correct recipient.
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp["message_id"], "response must include message_id")
+	require.Equal(t, "agent:"+targetAgent.Slug, resp["recipient"],
+		"recipient must be the target agent")
+
+	// Verify the message was persisted with correct sender/recipient.
+	msgID, ok := resp["message_id"].(string)
+	require.True(t, ok, "message_id must be a string")
+	storedMsg, err := s.GetMessage(ctx, msgID)
+	require.NoError(t, err, "persisted message must be retrievable")
+	assert.Equal(t, "agent:"+agent.Slug, storedMsg.Sender,
+		"sender must be the sending agent")
+	assert.Equal(t, "agent:"+targetAgent.Slug, storedMsg.Recipient,
+		"recipient must be the target agent")
+	assert.Equal(t, targetAgent.ID, storedMsg.RecipientID,
+		"recipient_id must be the target agent's ID")
+	assert.NotEmpty(t, storedMsg.ConversationID,
+		"message must be attributed to a conversation")
+}
+
+// ---------------------------------------------------------------------------
+// DEF-164: agent-to-agent DM conversation is created with correct DM key
+// format and both participants exist.
+// ---------------------------------------------------------------------------
+
+func TestDEF164_AtAgentSlug_DMConversationCreated(t *testing.T) {
+	srv, s, project, agent, _ := def141BrokerSetup(t)
+	ctx := context.Background()
+
+	targetAgent := &store.Agent{
+		ID:         tid("d164-dm-target"),
+		Name:       "d164-dm-target",
+		Slug:       "d164-dm-target",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, targetAgent))
+
+	rr := postOutboundRefOnly(t, srv, project.ID, agent.ID,
+		"dm conv test", "@"+targetAgent.Slug)
+	require.Equal(t, http.StatusOK, rr.Code,
+		"delivery must succeed: %s", rr.Body.String())
+
+	// Verify the DM conversation was created with correct key format.
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	msgID := resp["message_id"].(string)
+	storedMsg, err := s.GetMessage(ctx, msgID)
+	require.NoError(t, err)
+
+	// The conversation must exist and have the correct DM key.
+	require.NotEmpty(t, storedMsg.ConversationID, "message must have a conversation_id")
+	conv, err := s.GetConversation(ctx, storedMsg.ConversationID)
+	require.NoError(t, err, "conversation must exist")
+	assert.Equal(t, "direct", conv.Kind, "agent-to-agent DM must be kind=direct")
+	assert.Contains(t, conv.ExternalRef, "dm:agent:",
+		"DM key must use the dm:agent: format")
+
+	// Both agent IDs must appear in the DM key.
+	assert.Contains(t, conv.ExternalRef, agent.ID,
+		"DM key must contain the sender agent ID")
+	assert.Contains(t, conv.ExternalRef, targetAgent.ID,
+		"DM key must contain the target agent ID")
+}
+
+// ---------------------------------------------------------------------------
+// DEF-164: non-existent target agent returns appropriate error.
+// ---------------------------------------------------------------------------
+
+func TestDEF164_AtAgentSlug_NonExistentTarget(t *testing.T) {
+	srv, _, project, agent, _ := def138Setup(t)
+
+	// @nonexistent-agent → resolveAgentDM fails to find the agent →
+	// resolution error.
+	rr := postOutboundRefOnly(t, srv, project.ID, agent.ID,
+		"hello ghost", "@nonexistent-agent-xyz")
+	require.NotEqual(t, http.StatusOK, rr.Code,
+		"non-existent target agent must not succeed")
 }
 
 // ---------------------------------------------------------------------------

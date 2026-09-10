@@ -535,6 +535,27 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	// ref inline (P3) and routes through the existing DEF-138 auth block.
 	senderAgent := os.Getenv("SCION_AGENT_NAME")
 	if senderAgent != "" {
+		// DEF-164: agent-to-agent messages use the structured message
+		// endpoint, not the outbound (user-only) endpoint. The outbound
+		// handler's resolveAgentDM creates conversation/participant rows
+		// before the DEF-152 addressee derivation rejects non-user DMs —
+		// routing through SendStructuredMessage avoids both the rejection
+		// and the orphan rows.
+		if ref.Kind == messaging.RefAgent {
+			sender := "agent:" + senderAgent
+			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message)
+			if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
+				return fmt.Errorf("message validation failed: %w", err)
+			}
+			if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
+				return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
+			}
+			if !isJSONOutput() {
+				fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
+			}
+			return nil
+		}
+
 		outMsg := &hubclient.OutboundMessageRequest{
 			Msg:             message,
 			Type:            "instruction",

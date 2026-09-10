@@ -576,9 +576,79 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 					"failed to derive addressee: sender not found in conversation", nil)
 				return
 			}
-			if addrKind != "user" {
-				// The other participant is not a user (e.g. agent-to-agent DM).
-				// This endpoint delivers to human inboxes — fail closed.
+			if addrKind == "agent" {
+				// DEF-164: agent-to-agent delivery through the outbound
+				// endpoint. The DM key names two agents — look up the
+				// target and deliver through the agent message path
+				// (persist + broker dispatch), mirroring handleAgentMessage.
+				targetAgent, agentLookupErr := s.store.GetAgent(ctx, addrID)
+				if agentLookupErr != nil {
+					s.messageLog.Error("DEF-164: target agent lookup failed",
+						"addr_id", addrID, "error", agentLookupErr)
+					writeErrorFromErr(w, agentLookupErr, "")
+					return
+				}
+
+				// Patch recipient fields for agent-to-agent delivery.
+				storeMsg.Recipient = "agent:" + targetAgent.Slug
+				storeMsg.RecipientID = targetAgent.ID
+				structuredMsg.Recipient = "agent:" + targetAgent.Slug
+				structuredMsg.RecipientID = targetAgent.ID
+
+				// Persist the message.
+				if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
+					s.messageLog.Error("DEF-164: failed to persist agent-to-agent message", "error", err)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"Failed to persist message", nil)
+					return
+				}
+
+				// Publish SSE event.
+				s.events.PublishUserMessage(ctx, storeMsg)
+
+				// Dispatch to the target agent's runtime broker when available.
+				if isManagedAgentRuntime(targetAgent.Runtime) {
+					if err := s.managedAgentMessage(ctx, targetAgent, req.Msg, req.Urgent); err != nil {
+						s.messageLog.Error("DEF-164: managed agent dispatch failed",
+							"agent_id", targetAgent.ID, "error", err)
+						// Message is persisted; dispatch failure is non-fatal.
+					}
+				} else if dispatcher := s.GetDispatcher(); dispatcher != nil && targetAgent.RuntimeBrokerID != "" {
+					retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+					defer retryCancel()
+					if err := dispatchWithBrokerRetry(retryCtx, dispatcher, targetAgent, req.Msg, req.Urgent, structuredMsg); err != nil {
+						s.messageLog.Error("DEF-164: broker dispatch failed",
+							"agent_id", targetAgent.ID, "error", err)
+						// Message is persisted; dispatch failure is non-fatal.
+					}
+				}
+
+				// Publish observer message for agent-to-agent visibility.
+				if bp := s.GetMessageBrokerProxy(); bp != nil {
+					observerMsg := *structuredMsg
+					observerMsg.ObserverOnly = true
+					if err := bp.PublishMessage(ctx, targetAgent.ProjectID, &observerMsg); err != nil {
+						s.messageLog.Error("DEF-164: observer publish failed",
+							"agent_id", targetAgent.ID, "error", err)
+					}
+				}
+
+				s.logMessage("DEF-164: agent-to-agent outbound message sent",
+					"agent_id", agent.ID,
+					"target_agent_id", targetAgent.ID,
+					"project_id", agent.ProjectID,
+				)
+
+				writeJSON(w, http.StatusOK, map[string]interface{}{
+					"message_id":   storeMsg.ID,
+					"status":       "sent",
+					"recipient":    storeMsg.Recipient,
+					"recipient_id": storeMsg.RecipientID,
+				})
+				return
+			} else if addrKind != "user" {
+				// The other participant is neither a user nor an agent —
+				// fail closed.
 				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 					"conversation_ref resolved to a non-user addressee; "+
 						"this endpoint delivers to users only", nil)
