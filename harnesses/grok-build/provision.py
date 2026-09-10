@@ -530,9 +530,6 @@ def _build_telemetry_env(telemetry: dict[str, Any], env: dict[str, str] | None) 
 # Hooks – sciontool event bridge
 # ---------------------------------------------------------------------------
 
-# Events that send synthetic echo payloads (no stdin from grok).
-_ECHO_EVENTS = {"SessionStart", "SessionEnd"}
-
 # All hook events.
 _GROK_HOOK_EVENTS = [
     "SessionStart",
