@@ -337,6 +337,20 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 		projectTransient := result.WriteFailures + result.ResolutionFailures
 		transientFailures += projectTransient
 
+		// #1491: Do not record completion for projects with transient
+		// write failures. These messages were not stamped and should be
+		// retried on the next boot. Derive failures (deterministic
+		// refusals) still allow completion -- retrying them is pointless.
+		if result.WriteFailures > 0 {
+			slog.Warn("Message backfill: project has write failures; will NOT record as done, retrying next boot",
+				"project", pid,
+				"write_failures", result.WriteFailures,
+			)
+			// Still accumulate permanent residual and transient counts
+			// for accurate reporting, but skip marking done.
+			continue
+		}
+
 		// M9 / DEF-114: log two identities so a reader can verify each
 		// from the log without touching the database:
 		//

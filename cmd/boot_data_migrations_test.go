@@ -930,3 +930,275 @@ func TestUnreachableCounterTableNames(t *testing.T) {
 		"raw SQL assumes messages FK column is 'project_id'; if Ent renamed it, "+
 			"update the raw SQL in CountUnreachableUnbackfilledMessages")
 }
+
+// ---------------------------------------------------------------------------
+// #1491: Write failures prevent project completion
+// ---------------------------------------------------------------------------
+
+// setMessageFailStore wraps a real store.Store and returns an error from
+// SetMessageConversationID for a specific message ID, simulating a transient
+// DB failure. All other methods pass through to the real store.
+type setMessageFailStore struct {
+	store.Store
+	failMessageID string
+	failErr       error
+}
+
+func (s *setMessageFailStore) SetMessageConversationID(ctx context.Context, messageID, conversationID string) error {
+	if messageID == s.failMessageID {
+		return s.failErr
+	}
+	return s.Store.SetMessageConversationID(ctx, messageID, conversationID)
+}
+
+// TestBootBackfill_1491_WriteFailure_ProjectNotRecordedAsDone verifies that
+// when SetMessageConversationID fails for a message (transient DB error),
+// the project is NOT recorded as done in the backfill marker. This ensures
+// the project is retried on the next boot.
+func TestBootBackfill_1491_WriteFailure_ProjectNotRecordedAsDone(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// Seed a project with two attributable messages.
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	err := s.CreateProject(ctx, &store.Project{
+		ID:   projectID,
+		Name: "write-fail-project",
+		Slug: "wf-" + projectID[:8],
+	})
+	require.NoError(t, err)
+
+	err = s.CreateUser(ctx, &store.User{
+		ID:    userID,
+		Email: "wf-user@example.com",
+		Role:  "member",
+	})
+	require.NoError(t, err)
+
+	err = s.CreateAgent(ctx, &store.Agent{
+		ID:        agentID,
+		Name:      "wf-agent",
+		Slug:      "wf-agent-" + agentID[:8],
+		ProjectID: projectID,
+	})
+	require.NoError(t, err)
+
+	// Message 1: will succeed.
+	msg1ID := uuid.NewString()
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:          msg1ID,
+		ProjectID:   projectID,
+		Msg:         "message 1 (will succeed)",
+		Sender:      "user:" + userID,
+		SenderID:    userID,
+		Recipient:   "agent:" + agentID,
+		RecipientID: agentID,
+	})
+	require.NoError(t, err)
+
+	// Message 2: SetMessageConversationID will fail for this one.
+	msg2ID := uuid.NewString()
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:          msg2ID,
+		ProjectID:   projectID,
+		Msg:         "message 2 (will fail to stamp)",
+		Sender:      "user:" + userID,
+		SenderID:    userID,
+		Recipient:   "agent:" + agentID,
+		RecipientID: agentID,
+	})
+	require.NoError(t, err)
+
+	// Wrap the store to fail SetMessageConversationID for msg2.
+	failStore := &setMessageFailStore{
+		Store:         s,
+		failMessageID: msg2ID,
+		failErr:       fmt.Errorf("injected: transient DB error"),
+	}
+
+	// Run the boot backfill with the failing store.
+	runMessageBackfill(ctx, failStore)
+
+	// The project must NOT be recorded as done because of the write failure.
+	marker, err := loadBackfillMarker(ctx, s)
+	require.NoError(t, err)
+
+	// Check that the project is NOT in projects_done.
+	for _, pid := range marker.ProjectsDone {
+		assert.NotEqual(t, projectID, pid,
+			"#1491: project with write failures must NOT be recorded as done")
+	}
+
+	// The backfill must NOT be marked as fully complete.
+	assert.Nil(t, marker.CompletedAt,
+		"#1491: backfill must not be marked complete when a project has write failures")
+}
+
+// TestBootBackfill_1491_WriteFailure_RetriedOnNextBoot verifies the full
+// retry cycle: first boot has a transient write failure (project not done),
+// second boot with a healthy store repairs the message.
+func TestBootBackfill_1491_WriteFailure_RetriedOnNextBoot(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// Seed a project with one attributable message.
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	err := s.CreateProject(ctx, &store.Project{
+		ID:   projectID,
+		Name: "retry-project",
+		Slug: "retry-" + projectID[:8],
+	})
+	require.NoError(t, err)
+
+	err = s.CreateUser(ctx, &store.User{
+		ID:    userID,
+		Email: "retry-user@example.com",
+		Role:  "member",
+	})
+	require.NoError(t, err)
+
+	err = s.CreateAgent(ctx, &store.Agent{
+		ID:        agentID,
+		Name:      "retry-agent",
+		Slug:      "retry-agent-" + agentID[:8],
+		ProjectID: projectID,
+	})
+	require.NoError(t, err)
+
+	msgID := uuid.NewString()
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:          msgID,
+		ProjectID:   projectID,
+		Msg:         "message that fails then succeeds",
+		Sender:      "user:" + userID,
+		SenderID:    userID,
+		Recipient:   "agent:" + agentID,
+		RecipientID: agentID,
+	})
+	require.NoError(t, err)
+
+	// First boot: SetMessageConversationID fails for this message.
+	failStore := &setMessageFailStore{
+		Store:         s,
+		failMessageID: msgID,
+		failErr:       fmt.Errorf("injected: transient DB error"),
+	}
+	runMessageBackfill(ctx, failStore)
+
+	// Verify message is NOT stamped.
+	msg, err := s.GetMessage(ctx, msgID)
+	require.NoError(t, err)
+	assert.Empty(t, msg.ConversationID,
+		"message must not be stamped after failed first boot")
+
+	// Second boot: healthy store, no failures.
+	runMessageBackfill(ctx, s)
+
+	// Verify the message IS now stamped.
+	msg, err = s.GetMessage(ctx, msgID)
+	require.NoError(t, err)
+	assert.NotEmpty(t, msg.ConversationID,
+		"#1491: message must be stamped after healthy second boot")
+
+	// Verify the project is now recorded as done.
+	marker, err := loadBackfillMarker(ctx, s)
+	require.NoError(t, err)
+
+	projectDone := false
+	for _, pid := range marker.ProjectsDone {
+		if pid == projectID {
+			projectDone = true
+			break
+		}
+	}
+	// The marker might be fully completed (CompletedAt set, ProjectsDone cleared).
+	if marker.CompletedAt != nil {
+		projectDone = true
+	}
+	assert.True(t, projectDone,
+		"#1491: project must be recorded as done after successful second boot")
+}
+
+// TestBootBackfill_1491_DeriveFailure_StillAllowsCompletion verifies that
+// derive failures (permanent, deterministic) do NOT block project completion.
+// Only write failures (transient) should block.
+func TestBootBackfill_1491_DeriveFailure_StillAllowsCompletion(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// Seed a project with one message that will fail derivation (non-UUID
+	// principal) and one that will succeed.
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	err := s.CreateProject(ctx, &store.Project{
+		ID:   projectID,
+		Name: "derive-fail-project",
+		Slug: "df-" + projectID[:8],
+	})
+	require.NoError(t, err)
+
+	err = s.CreateUser(ctx, &store.User{
+		ID:    userID,
+		Email: "df-user@example.com",
+		Role:  "member",
+	})
+	require.NoError(t, err)
+
+	err = s.CreateAgent(ctx, &store.Agent{
+		ID:        agentID,
+		Name:      "df-agent",
+		Slug:      "df-agent-" + agentID[:8],
+		ProjectID: projectID,
+	})
+	require.NoError(t, err)
+
+	// Message 1: derivable (UUID principals).
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:          uuid.NewString(),
+		ProjectID:   projectID,
+		Msg:         "derivable message",
+		Sender:      "user:" + userID,
+		SenderID:    userID,
+		Recipient:   "agent:" + agentID,
+		RecipientID: agentID,
+	})
+	require.NoError(t, err)
+
+	// Message 2: non-derivable (non-UUID principal → DeriveErrPrincipalPair).
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:        uuid.NewString(),
+		ProjectID: projectID,
+		Msg:       "non-derivable message",
+		Sender:    "user:alice@example.com",
+		Recipient: "agent:some-bot",
+	})
+	require.NoError(t, err)
+
+	// Run the boot backfill — should complete the project despite derive failure.
+	runMessageBackfill(ctx, s)
+
+	// The backfill should be complete (or project should be done).
+	marker, err := loadBackfillMarker(ctx, s)
+	require.NoError(t, err)
+
+	// Either completed (all projects done) or project is in ProjectsDone.
+	projectDone := marker.CompletedAt != nil
+	if !projectDone {
+		for _, pid := range marker.ProjectsDone {
+			if pid == projectID {
+				projectDone = true
+				break
+			}
+		}
+	}
+	assert.True(t, projectDone,
+		"#1491: derive failures (permanent) must NOT block project completion")
+}
