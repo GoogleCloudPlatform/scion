@@ -1766,6 +1766,52 @@ func TestBackfill_DEF156_ChannelConflict_GroupRefused(t *testing.T) {
 	assertErrorInvariant(t, result)
 }
 
+// TestBackfill_DEF156_ChannelConflict_DryRun verifies that dry-run mode also
+// detects and reports channel conflicts, matching the behavior of the real
+// (non-dry-run) path. Before the #1495 fix, dry-run skipped channel-conflict
+// detection and counted conflicting groups as Attributed/Inferred.
+func TestBackfill_DEF156_ChannelConflict_DryRun(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	now := time.Now()
+
+	msg1 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-2*time.Minute))
+	msg1.ThreadID = "dryrun-conflict-thread"
+	msg1.Channel = "web" // maps to "native"
+
+	msg2 := newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(-1*time.Minute))
+	msg2.ThreadID = "dryrun-conflict-thread"
+	msg2.Channel = "discord" // maps to "discord" — conflicts with "native"
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg1, msg2}}
+	convStore := &mockConversationStore{}
+	agents := &mockAgentLookup{}
+
+	svc := NewBackfillService(convStore, msgStore, agents)
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID, DryRun: true})
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, result.TotalProcessed)
+
+	// Dry-run must NOT count conflicting messages as Attributed or Inferred.
+	assert.Equal(t, 0, result.Attributed,
+		"dry-run must not count channel-conflict messages as attributed")
+	assert.Equal(t, 0, result.Inferred,
+		"dry-run must not count channel-conflict messages as inferred")
+	assert.Equal(t, 0, result.ConversationsCreated,
+		"dry-run must not count conversations for conflicting groups")
+
+	// Both messages must be reported as DeriveFailures under surface_conflict.
+	assert.Equal(t, 2, result.DeriveFailures[DeriveErrSurfaceConflict],
+		"dry-run must report channel conflicts in DeriveFailures[%s]", DeriveErrSurfaceConflict)
+
+	// Structural invariant must hold.
+	assertErrorInvariant(t, result)
+}
+
 // ---------------------------------------------------------------------------
 // #1493: Mixed empty/web channels must not produce a surface conflict
 // ---------------------------------------------------------------------------

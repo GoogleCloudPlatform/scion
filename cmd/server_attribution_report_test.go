@@ -237,7 +237,7 @@ func TestAttributionReport_BucketClassification(t *testing.T) {
 
 	// Verify the buckets are distinct and sum correctly.
 	unattributed := report.Backfillable + report.BroadcastNotBackfillable +
-		report.NonUUIDPrincipal + report.Unresolvable
+		report.NonUUIDPrincipal + report.SurfaceConflict + report.Unresolvable
 	assert.Equal(t, report.Total-report.Attributed, unattributed,
 		"unattributed buckets must sum to total minus attributed")
 }
@@ -507,7 +507,7 @@ func TestAttributionReport_ReconciliationMatch(t *testing.T) {
 	require.NoError(t, err)
 
 	reportUnattributed := report.Backfillable + report.BroadcastNotBackfillable +
-		report.NonUUIDPrincipal + report.Unresolvable
+		report.NonUUIDPrincipal + report.SurfaceConflict + report.Unresolvable
 
 	globalCount, err := s.CountUnbackfilledMessages(ctx, "")
 	require.NoError(t, err)
@@ -755,4 +755,340 @@ func TestAttributionReport_DerivationBehavioral(t *testing.T) {
 		"all principals are valid UUIDs")
 	assert.Equal(t, 0, report.BroadcastNotBackfillable,
 		"no broadcasts in this test")
+}
+
+// --------------------------------------------------------------------------
+// Divergence 1: Thread messages with non-UUID principals (#1495)
+// --------------------------------------------------------------------------
+
+// TestAttributionReport_ThreadMessageNonUUIDPrincipal verifies that a thread
+// message whose principals are non-UUID is classified as Backfillable (via
+// thread identity / Case 2 of DeriveConversationKey), not as NonUUIDPrincipal.
+//
+// Before the fix, the report checked !senderIsUUID || !recipientIsUUID BEFORE
+// attempting DeriveConversationKey, rejecting thread messages with non-UUID
+// principals as permanently unattributable. The production backfill, however,
+// successfully stamps them through thread key derivation.
+func TestAttributionReport_ThreadMessageNonUUIDPrincipal(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	projectID := seedBackfillProject(t, ctx, s)
+
+	federatedSender := "https://accounts.google.com:subject123"
+	recipientID := uuid.NewString()
+	threadID := "some-thread-id" // non-dm: thread → Case 2 in DeriveConversationKey
+
+	// Verify ground truth: DeriveConversationKey succeeds for this input
+	// via Case 2 (thread key), despite non-UUID sender.
+	_, _, _, err := messaging.DeriveConversationKey(messaging.KeyInputs{
+		ThreadID:      threadID,
+		ProjectID:     projectID,
+		SenderKind:    "user",
+		SenderID:      federatedSender,
+		RecipientKind: "agent",
+		RecipientID:   recipientID,
+	})
+	require.NoError(t, err, "ground truth: thread message with non-UUID principal must succeed derivation")
+
+	// Seed the thread message with non-UUID sender.
+	msgID := uuid.NewString()
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:          msgID,
+		ProjectID:   projectID,
+		Sender:      "user:" + federatedSender,
+		SenderID:    federatedSender,
+		Recipient:   "agent:" + recipientID,
+		RecipientID: recipientID,
+		Msg:         "thread message with federated sender",
+		Type:        "instruction",
+		ThreadID:    threadID,
+		CreatedAt:   time.Now(),
+	})
+	require.NoError(t, err)
+
+	report, err := runAttributionReportForProject(ctx, s, projectID)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, report.Total, "total")
+	assert.Equal(t, 0, report.Attributed, "attributed")
+	assert.Equal(t, 1, report.Backfillable,
+		"thread message with non-UUID principal must be backfillable via thread identity")
+	assert.Equal(t, 0, report.NonUUIDPrincipal,
+		"thread message must NOT be classified as NonUUIDPrincipal — it is backfillable through thread identity")
+	assert.Equal(t, 0, report.Unresolvable, "unresolvable")
+	assert.Equal(t, 0, report.SurfaceConflict, "surface conflict")
+
+	// Verify no misleading examples.
+	assert.Empty(t, report.NonUUIDExamples,
+		"thread message with non-UUID principal must not appear as a NonUUIDExample")
+}
+
+// TestAttributionReport_ThreadlessNonUUIDPrincipal verifies that a threadless
+// message with non-UUID principals is still classified as NonUUIDPrincipal
+// (DeriveConversationKey Case 3 / principal-pair fails for non-UUIDs).
+func TestAttributionReport_ThreadlessNonUUIDPrincipal(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	projectID := seedBackfillProject(t, ctx, s)
+
+	// Seed a threadless message with federated sender (no ThreadID).
+	seedFederatedMessage(t, ctx, s, projectID)
+
+	report, err := runAttributionReportForProject(ctx, s, projectID)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, report.Total, "total")
+	assert.Equal(t, 0, report.Backfillable, "backfillable")
+	assert.Equal(t, 1, report.NonUUIDPrincipal,
+		"threadless message with non-UUID principal must be NonUUIDPrincipal")
+}
+
+// --------------------------------------------------------------------------
+// Divergence 2: Surface conflict modeling (#1495 / #1493)
+// --------------------------------------------------------------------------
+
+// TestAttributionReport_SurfaceConflict verifies that messages in the same
+// conversation group that disagree on channel are NOT counted as Backfillable.
+// The production backfill refuses such groups (DEF-156 P3 / #1493).
+func TestAttributionReport_SurfaceConflict(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	projectID := seedBackfillProject(t, ctx, s)
+
+	senderID := uuid.NewString()
+	recipientID := uuid.NewString()
+	threadID := "conflict-thread"
+
+	// Seed two messages in the same thread but with different channels.
+	// Channel "" maps to surface "native"; channel "discord" maps to "discord".
+	// These conflict, and the backfill would refuse the entire group.
+	err := s.CreateMessage(ctx, &store.Message{
+		ID:          uuid.NewString(),
+		ProjectID:   projectID,
+		Sender:      "user:" + senderID,
+		SenderID:    senderID,
+		Recipient:   "agent:" + recipientID,
+		RecipientID: recipientID,
+		Msg:         "message 1 native channel",
+		Type:        "instruction",
+		ThreadID:    threadID,
+		Channel:     "",        // maps to "native"
+		CreatedAt:   time.Now(),
+	})
+	require.NoError(t, err)
+
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:          uuid.NewString(),
+		ProjectID:   projectID,
+		Sender:      "user:" + senderID,
+		SenderID:    senderID,
+		Recipient:   "agent:" + recipientID,
+		RecipientID: recipientID,
+		Msg:         "message 2 discord channel",
+		Type:        "instruction",
+		ThreadID:    threadID,
+		Channel:     "discord", // maps to "discord" — conflicts with "native"
+		CreatedAt:   time.Now().Add(time.Second),
+	})
+	require.NoError(t, err)
+
+	report, err := runAttributionReportForProject(ctx, s, projectID)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, report.Total, "total")
+	assert.Equal(t, 0, report.Backfillable,
+		"surface-conflict messages must NOT be counted as backfillable")
+	assert.Equal(t, 2, report.SurfaceConflict,
+		"both messages in the conflicting group must be counted as surface conflicts")
+	assert.Equal(t, 0, report.Unresolvable, "unresolvable")
+	assert.Equal(t, 0, report.NonUUIDPrincipal, "non-UUID principal")
+}
+
+// TestAttributionReport_SameChannelNoConflict verifies that messages in the
+// same group with compatible channels (e.g. "" and "web" both map to "native")
+// are correctly counted as Backfillable.
+func TestAttributionReport_SameChannelNoConflict(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	projectID := seedBackfillProject(t, ctx, s)
+
+	senderID := uuid.NewString()
+	recipientID := uuid.NewString()
+	threadID := "compat-thread"
+
+	// "" and "web" both map to surface "native" — should not conflict.
+	err := s.CreateMessage(ctx, &store.Message{
+		ID:          uuid.NewString(),
+		ProjectID:   projectID,
+		Sender:      "user:" + senderID,
+		SenderID:    senderID,
+		Recipient:   "agent:" + recipientID,
+		RecipientID: recipientID,
+		Msg:         "message 1 empty channel",
+		Type:        "instruction",
+		ThreadID:    threadID,
+		Channel:     "", // maps to "native"
+		CreatedAt:   time.Now(),
+	})
+	require.NoError(t, err)
+
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:          uuid.NewString(),
+		ProjectID:   projectID,
+		Sender:      "user:" + senderID,
+		SenderID:    senderID,
+		Recipient:   "agent:" + recipientID,
+		RecipientID: recipientID,
+		Msg:         "message 2 web channel",
+		Type:        "instruction",
+		ThreadID:    threadID,
+		Channel:     "web", // also maps to "native"
+		CreatedAt:   time.Now().Add(time.Second),
+	})
+	require.NoError(t, err)
+
+	report, err := runAttributionReportForProject(ctx, s, projectID)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, report.Total, "total")
+	assert.Equal(t, 2, report.Backfillable,
+		"compatible channels must be counted as backfillable")
+	assert.Equal(t, 0, report.SurfaceConflict,
+		"compatible channels must not be surface conflicts")
+}
+
+// --------------------------------------------------------------------------
+// Dry-run parity: report buckets match execute outcomes (#1495)
+// --------------------------------------------------------------------------
+
+// TestAttributionReport_DryRunParity verifies that the report's Backfillable
+// count matches what BackfillService.Run(DryRun:true) produces. This is the
+// acceptance criterion: "share a non-mutating classification/planning path
+// with the production backfill."
+func TestAttributionReport_DryRunParity(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	projectID := seedBackfillProject(t, ctx, s)
+
+	senderID := uuid.NewString()
+	recipientID := uuid.NewString()
+	now := time.Now()
+
+	// Seed a diverse population:
+	// 1. Backfillable DM (UUID principals, no thread).
+	seedDMMessage(t, ctx, s, projectID, senderID, recipientID, now)
+
+	// 2. Thread message with non-UUID principal (backfillable via thread key).
+	err := s.CreateMessage(ctx, &store.Message{
+		ID:          uuid.NewString(),
+		ProjectID:   projectID,
+		Sender:      "user:federated@example.com",
+		SenderID:    "federated@example.com",
+		Recipient:   "agent:" + recipientID,
+		RecipientID: recipientID,
+		Msg:         "thread with federated sender",
+		Type:        "instruction",
+		ThreadID:    "parity-thread",
+		CreatedAt:   now.Add(time.Second),
+	})
+	require.NoError(t, err)
+
+	// 3. Threadless message with non-UUID principal (not backfillable).
+	seedFederatedMessage(t, ctx, s, projectID)
+
+	// 4. Broadcast (skipped by backfill).
+	seedBroadcastMessage(t, ctx, s, projectID)
+
+	// 5. Attributed message.
+	seedAttributedMessage(t, ctx, s, projectID)
+
+	// Run the report.
+	report, err := runAttributionReportForProject(ctx, s, projectID)
+	require.NoError(t, err)
+
+	// Run a separate dry-run backfill for comparison.
+	svc := messaging.NewBackfillService(s, s, s)
+	dryRun, err := svc.Run(ctx, messaging.BackfillConfig{
+		ProjectID: projectID,
+		DryRun:    true,
+	})
+	require.NoError(t, err)
+
+	// Report's Backfillable must match dry-run's Attributed + Inferred.
+	assert.Equal(t, dryRun.Attributed+dryRun.Inferred, report.Backfillable,
+		"report Backfillable must match dry-run Attributed + Inferred")
+
+	// Verify the population breakdown.
+	assert.Equal(t, 5, report.Total, "total")
+	assert.Equal(t, 1, report.Attributed, "attributed")
+	assert.Equal(t, 2, report.Backfillable,
+		"DM + thread-with-non-UUID should be backfillable")
+	assert.Equal(t, 1, report.NonUUIDPrincipal,
+		"threadless federated message should be NonUUIDPrincipal")
+	assert.Equal(t, 1, report.BroadcastNotBackfillable, "broadcasts")
+	assert.Equal(t, 0, report.Unresolvable, "unresolvable")
+	assert.Equal(t, 0, report.SurfaceConflict, "surface conflict")
+
+	// Verify buckets sum correctly.
+	unattributed := report.Backfillable + report.BroadcastNotBackfillable +
+		report.NonUUIDPrincipal + report.SurfaceConflict + report.Unresolvable
+	assert.Equal(t, report.Total-report.Attributed, unattributed,
+		"unattributed buckets must sum to total minus attributed")
+}
+
+// TestAttributionReport_SurfaceConflictFlipBlocking verifies that the surface
+// conflict bucket produces flip-blocking output.
+func TestAttributionReport_SurfaceConflictFlipBlocking(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	projectID := seedBackfillProject(t, ctx, s)
+
+	senderID := uuid.NewString()
+	recipientID := uuid.NewString()
+	threadID := "conflict-output-thread"
+
+	// Seed two messages with conflicting channels.
+	err := s.CreateMessage(ctx, &store.Message{
+		ID:          uuid.NewString(),
+		ProjectID:   projectID,
+		Sender:      "user:" + senderID,
+		SenderID:    senderID,
+		Recipient:   "agent:" + recipientID,
+		RecipientID: recipientID,
+		Msg:         "native msg",
+		Type:        "instruction",
+		ThreadID:    threadID,
+		Channel:     "",
+		CreatedAt:   time.Now(),
+	})
+	require.NoError(t, err)
+
+	err = s.CreateMessage(ctx, &store.Message{
+		ID:          uuid.NewString(),
+		ProjectID:   projectID,
+		Sender:      "user:" + senderID,
+		SenderID:    senderID,
+		Recipient:   "agent:" + recipientID,
+		RecipientID: recipientID,
+		Msg:         "slack msg",
+		Type:        "instruction",
+		ThreadID:    threadID,
+		Channel:     "slack",
+		CreatedAt:   time.Now().Add(time.Second),
+	})
+	require.NoError(t, err)
+
+	report, err := runAttributionReportForProject(ctx, s, projectID)
+	require.NoError(t, err)
+
+	require.Equal(t, 2, report.SurfaceConflict)
+
+	var buf bytes.Buffer
+	printAttributionReport(&buf, report, projectID)
+	output := buf.String()
+
+	assert.Contains(t, output, "surface conflict", "output must name the surface conflict bucket")
+	assert.Contains(t, output, "BLOCKS FLIP", "surface conflict must be flip-blocking")
+	assert.Contains(t, output, "FLIP BLOCKED", "surface conflict must trigger flip blocked warning")
+	assert.Contains(t, output, "channel conflicts", "output must explain channel conflicts")
 }

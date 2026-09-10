@@ -64,14 +64,14 @@ type AttributionReport struct {
 	Total int
 	// Attributed is the count of messages with a non-empty conversation_id.
 	Attributed int
-	// Backfillable is the count of unattributed messages whose sender and
-	// recipient IDs are both valid UUIDs — these can be attributed by the
-	// backfill command.
+	// Backfillable is the count of unattributed messages that the production
+	// backfill would successfully stamp — including messages attributed via
+	// thread identity (non-UUID principals with a valid ThreadID).
 	Backfillable int
 	// NonUUIDPrincipal is the count of unattributed messages where at least
-	// one principal ID is not a valid UUID (e.g. federated identities,
-	// slugs). Backfill cannot ever repair these rows because the information
-	// needed to derive a DM key does not exist in the database.
+	// one principal ID is not a valid UUID AND key derivation fails (no
+	// thread identity fallback). These are permanently unattributable
+	// without a federated identity link table (DEF-32).
 	NonUUIDPrincipal int
 	// BroadcastNotBackfillable is the count of unattributed messages with
 	// Broadcasted=true. The backfill service (backfill.go:127) skips
@@ -83,6 +83,11 @@ type AttributionReport struct {
 	// broadcast with NULL conversation_id becomes invisible at the flip.
 	// No existing tool repairs them. Flip-blocking.
 	BroadcastNotBackfillable int
+	// SurfaceConflict is the count of unattributed messages where key
+	// derivation succeeds but the production backfill would refuse them
+	// because messages in the same conversation group disagree on channel
+	// (surface conflict, DEF-156 P3 / #1493).
+	SurfaceConflict int
 	// Unresolvable is the count of unattributed messages whose principal IDs
 	// are valid UUIDs but key derivation still fails or the row lacks the
 	// inputs to derive at all.
@@ -178,7 +183,7 @@ func runServerAttributionReport(cmd *cobra.Command, _ []string) error {
 	var globalUnbackfilled, reportUnattributed int
 	if attrReportProject == "" {
 		reportUnattributed = total.Backfillable + total.BroadcastNotBackfillable +
-			total.NonUUIDPrincipal + total.Unresolvable
+			total.NonUUIDPrincipal + total.SurfaceConflict + total.Unresolvable
 		var err error
 		globalUnbackfilled, err = s.CountUnbackfilledMessages(ctx, "")
 		if err != nil {
@@ -217,12 +222,27 @@ func runServerAttributionReport(cmd *cobra.Command, _ []string) error {
 //
 // It is strictly read-only: it queries messages and attempts key derivation
 // using the production DeriveConversationKey function, but never writes.
+//
+// Classification uses two passes to share the production backfill's code path:
+//
+//  1. A pre-scan counts Total, Attributed, BroadcastNotBackfillable, and
+//     collects diagnostic examples using DeriveConversationKey (with thread-key
+//     precedence over UUID checks).
+//  2. A dry-run backfill (BackfillService.Run with DryRun:true) computes the
+//     accurate Backfillable count, including group-level channel-conflict
+//     refusals that single-message classification cannot model.
+//
+// The remaining counts (NonUUIDPrincipal, SurfaceConflict, Unresolvable) are
+// derived from the pre-scan and dry-run results.
 func runAttributionReportForProject(ctx context.Context, s store.Store, projectID string) (*AttributionReport, error) {
 	report := &AttributionReport{}
 
 	const batchSize = 500
-	cursor := ""
 
+	// ---------------------------------------------------------------
+	// Pass 1: Pre-scan for totals, broadcasts, and diagnostic examples.
+	// ---------------------------------------------------------------
+	cursor := ""
 	for {
 		page, err := s.ListMessages(ctx, store.MessageFilter{
 			ProjectID: projectID,
@@ -238,14 +258,19 @@ func runAttributionReportForProject(ctx context.Context, s store.Store, projectI
 			msg := &page.Items[i]
 			report.Total++
 
-			// Already attributed — nothing to classify.
 			if msg.ConversationID != "" {
 				report.Attributed++
 				continue
 			}
 
-			// Unattributed: classify into sub-buckets.
-			classifyUnattributedMessage(report, msg, projectID)
+			if msg.Broadcasted {
+				report.BroadcastNotBackfillable++
+				continue
+			}
+
+			// Collect diagnostic examples using DeriveConversationKey
+			// (thread-key precedence handles Divergence 1).
+			collectDiagnosticExample(report, msg, projectID)
 		}
 
 		if page.NextCursor == "" {
@@ -254,32 +279,82 @@ func runAttributionReportForProject(ctx context.Context, s store.Store, projectI
 		cursor = page.NextCursor
 	}
 
+	// ---------------------------------------------------------------
+	// Pass 2: Dry-run backfill for accurate classification.
+	// ---------------------------------------------------------------
+	// The dry-run shares the production backfill's code path, including
+	// DeriveConversationKey (thread precedence), surface normalization,
+	// and group-level channel-conflict refusals.
+	svc := messaging.NewBackfillService(s, s, s)
+	result, err := svc.Run(ctx, messaging.BackfillConfig{
+		ProjectID: projectID,
+		DryRun:    true,
+		BatchSize: batchSize,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("dry-run backfill: %w", err)
+	}
+
+	// Map dry-run results to report buckets.
+	report.Backfillable = result.Attributed + result.Inferred
+
+	// Surface conflicts: messages in groups where channel disagrees.
+	if result.DeriveFailures != nil {
+		report.SurfaceConflict = result.DeriveFailures[messaging.DeriveErrSurfaceConflict]
+	}
+
+	// Remaining unattributed non-broadcast messages are either
+	// NonUUIDPrincipal or Unresolvable. The pre-scan already classified
+	// NonUUIDPrincipal using DeriveConversationKey with thread precedence.
+	// Unresolvable is the remainder.
+	totalUnattributedNonBroadcast := report.Total - report.Attributed - report.BroadcastNotBackfillable
+	report.Unresolvable = totalUnattributedNonBroadcast - report.Backfillable -
+		report.NonUUIDPrincipal - report.SurfaceConflict
+
 	return report, nil
 }
 
-// classifyUnattributedMessage determines which unattributed bucket a message
-// belongs to, using the production key-derivation functions.
-func classifyUnattributedMessage(report *AttributionReport, msg *store.Message, projectID string) {
-	// Broadcasts are skipped by the backfill service (backfill.go:127),
-	// so they will never gain a conversation_id through that tool.
-	// Under the read switch they become invisible — no separate read path
-	// exists for broadcasts. Separate bucket, flip-blocking.
-	if msg.Broadcasted {
-		report.BroadcastNotBackfillable++
-		return
-	}
-
-	// Extract principal kind and ID, same as the backfill service.
+// collectDiagnosticExample attempts key derivation on an unattributed,
+// non-broadcast message and collects diagnostic examples. It also counts
+// NonUUIDPrincipal messages (those where derivation fails AND at least one
+// principal is not a valid UUID).
+//
+// Thread-key precedence is handled by DeriveConversationKey: thread messages
+// (non-empty ThreadID) derive via Case 2 (thread key) regardless of principal
+// UUIDs, so they succeed derivation and are NOT counted as NonUUIDPrincipal.
+//
+// The Backfillable, SurfaceConflict, and Unresolvable counts are populated
+// from the dry-run backfill result in runAttributionReportForProject, not here.
+func collectDiagnosticExample(report *AttributionReport, msg *store.Message, projectID string) {
 	senderKind, senderID := parsePrincipalForReport(msg.Sender, msg.SenderID)
 	recipientKind, recipientID := parsePrincipalForReport(msg.Recipient, msg.RecipientID)
 
-	// Check whether both principal IDs are valid UUIDs.
-	// A non-UUID principal means this message can NEVER be attributed by
-	// backfill — DMConversationKey requires UUIDs on both sides.
+	// Attempt key derivation using the production function. Thread-key
+	// precedence (Case 2) means thread messages succeed regardless of
+	// principal UUID status.
+	_, _, _, deriveErr := messaging.DeriveConversationKey(messaging.KeyInputs{
+		ThreadID:      msg.ThreadID,
+		ProjectID:     projectID,
+		SenderKind:    senderKind,
+		SenderID:      senderID,
+		RecipientKind: recipientKind,
+		RecipientID:   recipientID,
+	})
+
+	if deriveErr == nil {
+		// Derivation succeeded — this message will be counted as
+		// Backfillable (or SurfaceConflict) by the dry-run pass.
+		return
+	}
+
+	// Derivation failed. Check if the failure is due to non-UUID principals.
 	senderIsUUID := isUUID(senderID)
 	recipientIsUUID := isUUID(recipientID)
 
 	if !senderIsUUID || !recipientIsUUID {
+		// Non-UUID principal caused (or contributed to) the derivation
+		// failure. This message is permanently unattributable without an
+		// identity link table.
 		report.NonUUIDPrincipal++
 		if len(report.NonUUIDExamples) < 10 {
 			report.NonUUIDExamples = append(report.NonUUIDExamples, NonUUIDExample{
@@ -291,24 +366,9 @@ func classifyUnattributedMessage(report *AttributionReport, msg *store.Message, 
 		return
 	}
 
-	// Both principals are UUIDs. Attempt key derivation using the production
-	// function to see if it would succeed.
-	_, _, _, deriveErr := messaging.DeriveConversationKey(messaging.KeyInputs{
-		ThreadID:      msg.ThreadID,
-		ProjectID:     projectID,
-		SenderKind:    senderKind,
-		SenderID:      senderID,
-		RecipientKind: recipientKind,
-		RecipientID:   recipientID,
-	})
-
-	if deriveErr == nil {
-		report.Backfillable++
-		return
-	}
-
-	// Derivation failed despite valid UUIDs — unresolvable.
-	report.Unresolvable++
+	// Valid UUIDs but derivation still failed — unresolvable.
+	// Collect example for diagnosis. The Unresolvable count itself is
+	// derived in runAttributionReportForProject from the dry-run result.
 	if len(report.UnresolvableExamples) < 10 {
 		report.UnresolvableExamples = append(report.UnresolvableExamples, AttributionExample{
 			MessageID:   msg.ID,
@@ -366,6 +426,7 @@ func mergeAttributionReport(dst, src *AttributionReport) {
 	dst.Backfillable += src.Backfillable
 	dst.BroadcastNotBackfillable += src.BroadcastNotBackfillable
 	dst.NonUUIDPrincipal += src.NonUUIDPrincipal
+	dst.SurfaceConflict += src.SurfaceConflict
 	dst.Unresolvable += src.Unresolvable
 	dst.NonUUIDExamples = append(dst.NonUUIDExamples, src.NonUUIDExamples...)
 	if len(dst.NonUUIDExamples) > 10 {
@@ -393,6 +454,11 @@ func printAttributionReport(out io.Writer, r *AttributionReport, projectLabel st
 		_, _ = fmt.Fprint(out, "   -> BLOCKS FLIP (DEF-32)")
 	}
 	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "  unattributed — surface conflict       %d", r.SurfaceConflict)
+	if r.SurfaceConflict > 0 {
+		_, _ = fmt.Fprint(out, "   -> BLOCKS FLIP (backfill refuses channel conflicts)")
+	}
+	_, _ = fmt.Fprintln(out)
 	_, _ = fmt.Fprintf(out, "  unattributed — unresolvable           %d", r.Unresolvable)
 	if r.Unresolvable > 0 {
 		_, _ = fmt.Fprint(out, "   -> BLOCKS FLIP, examples below")
@@ -400,7 +466,7 @@ func printAttributionReport(out io.Writer, r *AttributionReport, projectLabel st
 	_, _ = fmt.Fprintln(out)
 
 	// Flip-blocking summary.
-	if r.BroadcastNotBackfillable > 0 || r.NonUUIDPrincipal > 0 || r.Unresolvable > 0 {
+	if r.BroadcastNotBackfillable > 0 || r.NonUUIDPrincipal > 0 || r.SurfaceConflict > 0 || r.Unresolvable > 0 {
 		_, _ = fmt.Fprintln(out)
 		_, _ = fmt.Fprintln(out, "*** FLIP BLOCKED ***")
 		if r.BroadcastNotBackfillable > 0 {
@@ -410,6 +476,10 @@ func printAttributionReport(out io.Writer, r *AttributionReport, projectLabel st
 		if r.NonUUIDPrincipal > 0 {
 			_, _ = fmt.Fprintf(out, "  %d message(s) have non-UUID principal IDs and cannot be attributed.\n", r.NonUUIDPrincipal)
 			_, _ = fmt.Fprintln(out, "  These are permanently unattributable without a federated identity link table (DEF-32).")
+		}
+		if r.SurfaceConflict > 0 {
+			_, _ = fmt.Fprintf(out, "  %d message(s) have channel conflicts within their conversation group.\n", r.SurfaceConflict)
+			_, _ = fmt.Fprintln(out, "  The backfill refuses groups whose messages disagree on channel (DEF-156 P3).")
 		}
 		if r.Unresolvable > 0 {
 			_, _ = fmt.Fprintf(out, "  %d message(s) have valid UUID principals but key derivation fails.\n", r.Unresolvable)

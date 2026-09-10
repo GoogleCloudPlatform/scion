@@ -222,6 +222,15 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 	// In dry-run mode, compute statistics and return without persisting.
 	if cfg.DryRun {
 		for _, g := range groups {
+			// DEF-156 P3: model channel-conflict refusals in dry-run,
+			// matching the persistGroup check in the real path.
+			if g.channelConflict {
+				for _, msgID := range g.messageIDs {
+					result.addDeriveFailure(DeriveErrSurfaceConflict,
+						fmt.Sprintf("message %s: channel conflict in group %q (first=%q)", msgID, g.key, g.channel))
+				}
+				continue
+			}
 			if g.hazardA {
 				result.Inferred += len(g.messageIDs)
 			} else {
