@@ -724,7 +724,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// property of the resolved conversation, not of the naming syntax.
 	if convResult != nil && convResult.Kind == "direct" && !def152DerivedRecipient &&
 		(recipient != "" || recipientID != "") {
-		kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(convResult.ExternalRef)
+		_, idA, _, idB, parseErr := messages.ParseDMKey(convResult.ExternalRef)
 		if parseErr != nil {
 			s.messageLog.Error("DEF-161: cannot parse DM key for recipient validation",
 				"external_ref", convResult.ExternalRef, "conversation_id", convResult.ConversationID, "error", parseErr)
@@ -734,12 +734,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 		// The supplied recipientID must match one of the two participants.
 		if recipientID != idA && recipientID != idB {
+			// Full detail in the log (not caller-visible); the caller-facing
+			// message names the remediation, not the participants (R4-A).
 			s.messageLog.Warn("DEF-161: supplied recipient does not match DM key participants",
 				"recipient_id", recipientID, "dm_key_idA", idA, "dm_key_idB", idB,
 				"external_ref", convResult.ExternalRef)
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-				fmt.Sprintf("supplied recipient does not match the direct conversation participants — "+
-					"the conversation key names %s:%s and %s:%s", kindA, idA, kindB, idB), nil)
+				"a recipient may not be supplied with a direct conversation reference — "+
+					"the conversation is the address; remove the recipient and retry", nil)
 			return
 		}
 	}

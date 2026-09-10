@@ -301,8 +301,18 @@ func TestDEF161_AC6_DirectConvRef_RecipientNotInDMKey_Rejected(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rr.Code,
 		"DEF-161 AC-6: recipient not in DM key must be rejected 400: %s",
 		rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "does not match",
-		"error must state the mismatch")
+	body := rr.Body.String()
+	assert.Contains(t, body, "remove the recipient",
+		"error must name the remediation")
+
+	// R4-A: the response must NOT enumerate the DM participants.
+	// The log.Warn has the detail; the caller-visible body must not.
+	assert.NotContains(t, body, agent.ID,
+		"R4-A: response must not contain sender participant ID")
+	assert.NotContains(t, body, otherUser.ID,
+		"R4-A: response must not contain other participant ID")
+	assert.NotContains(t, body, user.ID,
+		"R4-A: response must not contain the supplied recipient ID")
 }
 
 // ---------------------------------------------------------------------------
