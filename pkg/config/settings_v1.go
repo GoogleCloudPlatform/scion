@@ -747,9 +747,10 @@ func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 
 // V1SecretsConfig holds secrets backend settings.
 type V1SecretsConfig struct {
-	Backend        string `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"`
-	GCPProjectID   string `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty" koanf:"gcp_project_id"`
-	GCPCredentials string `json:"gcp_credentials,omitempty" yaml:"gcp_credentials,omitempty" koanf:"gcp_credentials"`
+	Backend                 string   `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"`
+	GCPProjectID            string   `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty" koanf:"gcp_project_id"`
+	GCPCredentials          string   `json:"gcp_credentials,omitempty" yaml:"gcp_credentials,omitempty" koanf:"gcp_credentials"`
+	GCPReplicationLocations []string `json:"gcp_replication_locations,omitempty" yaml:"gcp_replication_locations,omitempty" koanf:"gcp_replication_locations"`
 }
 
 // V1CORSConfig holds CORS settings for server endpoints.
@@ -1656,6 +1657,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Secrets.GCPCredentials != "" {
 			gc.Secrets.GCPCredentials = v1.Secrets.GCPCredentials
 		}
+		if len(v1.Secrets.GCPReplicationLocations) > 0 {
+			gc.Secrets.GCPReplicationLocations = v1.Secrets.GCPReplicationLocations
+		}
 	}
 
 	// Workspace storage — thread into GlobalConfig so the hub can read it.
@@ -1865,9 +1869,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Secrets config
 	v1.Secrets = &V1SecretsConfig{
-		Backend:        gc.Secrets.Backend,
-		GCPProjectID:   gc.Secrets.GCPProjectID,
-		GCPCredentials: gc.Secrets.GCPCredentials,
+		Backend:                 gc.Secrets.Backend,
+		GCPProjectID:            gc.Secrets.GCPProjectID,
+		GCPCredentials:          gc.Secrets.GCPCredentials,
+		GCPReplicationLocations: gc.Secrets.GCPReplicationLocations,
 	}
 
 	// GitHub App config
