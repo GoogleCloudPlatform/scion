@@ -452,15 +452,14 @@ func TestDEF142_AC3_KnownReason_CollapsedEndToEnd(t *testing.T) {
 // block. Resolve exempts Created==true from its own post-resolution
 // check, so the DEF-138 block is the only gate.
 //
-// History: the original fixture used @agent-slug, which creates an
-// agent↔agent DM. It masked the DEF-152 non-user guard by supplying a
-// non-participant user recipient — exactly the DEF-161 defect shape.
-// DEF-160/161 fixed the fixture: use @email, which creates an agent↔user
-// DM that flows cleanly through DEF-152 (other participant IS a user).
-// The resolve-or-create + DEF-138 path is identical for both syntaxes.
+// Uses @email (not @agent-slug) because @agent-slug creates an
+// agent↔agent DM, and the outbound endpoint correctly refuses to deliver
+// into non-user DMs (DEF-152 :579 "non-user addressee"). See the
+// companion test TestDEF164_AtAgentSlug_NonUserAddressee_Refused below
+// for @agent-slug coverage.
 // ---------------------------------------------------------------------------
 
-func TestDEF142_AC6_ResolveOrCreate_FlowsThroughDEF138Auth(t *testing.T) {
+func TestDEF142_AC6_ResolveOrCreate_EmailRef_FlowsThroughDEF138Auth(t *testing.T) {
 	srv, _, project, agent, user := def141BrokerSetup(t)
 
 	// Snapshot counters. The DEF-138 block sets asserted=true, which the
@@ -476,7 +475,7 @@ func TestDEF142_AC6_ResolveOrCreate_FlowsThroughDEF138Auth(t *testing.T) {
 	rr := postOutboundRefOnly(t, srv, project.ID, agent.ID,
 		"hello via email ref", "@"+user.Email)
 	require.Equal(t, http.StatusOK, rr.Code,
-		"@email reference should resolve-or-create and authorize: %s",
+		"AC-6: @email resolve-or-create should authorize and deliver: %s",
 		rr.Body.String())
 
 	// Give async broker delivery time to complete.
@@ -486,8 +485,50 @@ func TestDEF142_AC6_ResolveOrCreate_FlowsThroughDEF138Auth(t *testing.T) {
 	// the DEF-138 authorization block with asserted=true.
 	explicitAfter := messaging.DivergenceMetrics.ExplicitRoutes()
 	require.Greater(t, explicitAfter, explicitBefore,
-		"AC-6: @agent resolve-or-create must flow through DEF-138 auth "+
+		"AC-6: @email resolve-or-create must flow through DEF-138 auth "+
 			"(explicit_routes should increment)")
+}
+
+// ---------------------------------------------------------------------------
+// DEF-164 (pinned behaviour): @agent-slug resolves via resolveAgentDM and
+// creates an agent↔agent DM, but the outbound endpoint delivers to users
+// only. DEF-152 :579 refuses with "non-user addressee" when no recipient
+// is supplied, and DEF-161 refuses any supplied user recipient as a
+// DM-key mismatch. So @agent-slug is a dead syntax on this endpoint.
+//
+// This test pins the current 400 so that:
+//   - the resolution path (resolveAgentDM) stays exercised,
+//   - the refusal reason is visible in code, not just the tracker, and
+//   - the DEF-164 fixer knows exactly which assertion to flip.
+//
+// NOTE: resolveAgentDM upserts a conversation and two participant rows
+// BEFORE the guard runs. No rollback. Each attempt leaves orphan rows.
+// DEF-164 tracks the fix; do not attempt it here.
+// ---------------------------------------------------------------------------
+
+func TestDEF164_AtAgentSlug_NonUserAddressee_Refused(t *testing.T) {
+	srv, s, project, agent, _ := def141BrokerSetup(t)
+	ctx := context.Background()
+
+	targetAgent := &store.Agent{
+		ID:         tid("d164-target-agent"),
+		Name:       "d164-target-agent",
+		Slug:       "d164-target-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, targetAgent))
+
+	// @agent-slug with no recipient → resolveAgentDM → agent↔agent DM →
+	// DEF-152 refuses "non-user addressee".
+	rr := postOutboundRefOnly(t, srv, project.ID, agent.ID,
+		"should be refused", "@"+targetAgent.Slug)
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"DEF-164: @agent-slug on outbound endpoint must be refused: %s",
+		rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "non-user addressee",
+		"DEF-164: refusal must name the non-user reason")
 }
 
 // ---------------------------------------------------------------------------
