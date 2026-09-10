@@ -315,7 +315,15 @@ func TestDEF158_SurfaceFallback_NoAffinity_ChannelDerivedFromSurface(t *testing.
 // AC-3: conv:<uuid> group, no recipient → 400 unchanged.
 // ---------------------------------------------------------------------------
 
-func TestDEF158_AC3_GroupConv_NoRecipient_StillRejected(t *testing.T) {
+func TestDEF158_AC3_GroupConv_NoRecipient_NowSucceeds(t *testing.T) {
+	// DEF-160: group conversations no longer require an explicit recipient.
+	// The conv-ref path now derives the thread key as the recipient and sets
+	// Channel + ThreadID. This test verifies the handler returns 200.
+	//
+	// Note: this test uses def158BrokerSetup (broker present), so the message
+	// is dispatched through the broker rather than directly persisted. We
+	// verify the HTTP response and the response body, which carry the
+	// derived recipient.
 	srv, s, _, project, agent, _, _, _ := def158BrokerSetup(t)
 	ctx := context.Background()
 
@@ -330,10 +338,18 @@ func TestDEF158_AC3_GroupConv_NoRecipient_StillRejected(t *testing.T) {
 	require.NoError(t, err)
 
 	rr := postConvRefNoRecipient(t, srv, project.ID, agent.ID,
-		"should fail", "conv:"+conv.ID)
-	require.Equal(t, http.StatusBadRequest, rr.Code,
-		"AC-3: group conv with no explicit recipient must be rejected")
-	assert.Contains(t, rr.Body.String(), "group conversations require an explicit recipient")
+		"should succeed", "conv:"+conv.ID)
+	require.Equal(t, http.StatusOK, rr.Code,
+		"DEF-160: group conv with no explicit recipient should now succeed: %s",
+		rr.Body.String())
+
+	// Verify the response includes the derived recipient (thread key).
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "thread:d158-group-ac3", resp["recipient"],
+		"DEF-160: response recipient must be thread:<key>")
+	assert.Equal(t, "d158-group-ac3", resp["recipient_id"],
+		"DEF-160: response recipient_id must be the topic key")
 }
 
 // ---------------------------------------------------------------------------

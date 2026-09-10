@@ -311,6 +311,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// information those errors disclose. If any rctx field came from the
 	// body, the error would become an enumeration oracle for arbitrary
 	// projects.
+	convRefResolved := false // DEF-160: tracks whether we entered via conv-ref path.
 	if req.ConversationRef != "" {
 		authKind, authID := authenticatedSender(ctx)
 		if authKind == "" || authID == "" {
@@ -359,6 +360,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		// Promote to ConversationID so the existing DEF-138 authorization
 		// block handles it identically to a caller-supplied UUID.
 		req.ConversationID = resolveResult.ConversationID
+		convRefResolved = true
 	}
 
 	// DEF-138 §3.1 conversation routing rules:
@@ -606,15 +608,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			def152DerivedRecipient = true
 
 		case "group":
-			// Group conversations may have many participants and no single
-			// addressee. Refuse rather than guessing (DEF-152 constraint:
-			// "do not default, do not guess, do not pick the first
-			// participant"). The caller must supply an explicit recipient
-			// alongside the conversation_ref for group conversations.
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-				"group conversations require an explicit recipient — "+
-					"add 'user:<email>' alongside the conversation_ref", nil)
-			return
+			// DEF-160: group conversations are addressed by their thread key,
+			// not by a user. The DEF-160 block below handles derivation for
+			// both "no recipient supplied" and "recipient supplied but must
+			// be overwritten" (DEF-161). Fall through.
 
 		default:
 			// Unknown conversation kind with no explicit recipient — fail
@@ -635,6 +632,94 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		structuredMsg.ConversationID = convResult.ConversationID
 		structuredMsg.ConversationAsserted = asserted
 	}
+
+	// DEF-160 / DEF-161: group conversation recipient and routing derivation.
+	//
+	// For group conversations resolved via conv-ref, the recipient is always
+	// the thread key — never a user. This matches the web path's row shape
+	// (handlers_chat_v2.go:1437-1439):
+	//     recipient   = "thread:" + key
+	//     recipientID = key
+	//
+	// Agent-authored group messages must be indistinguishable from human-authored
+	// ones (design §3). This applies regardless of whether the caller supplied
+	// an explicit recipient:
+	//   - No recipient supplied → derive from external_ref (DEF-160)
+	//   - Recipient supplied   → overwrite with thread key (DEF-161)
+	//
+	// DEF-161 ruling: overwrite, not reject. The DEF-142 suite uses seven group
+	// conversations and always supplies Recipient alongside ConversationRef.
+	// Rejection turns 13 tests red; overwriting achieves the same row shape.
+	if convResult != nil && convResult.Kind == "group" && convRefResolved {
+		// Parse the thread key from the conversation's external_ref.
+		_, threadKey, parseErr := messaging.ParseThreadConversationExternalRef(convResult.ExternalRef)
+		if parseErr != nil {
+			s.messageLog.Error("DEF-160: cannot parse thread key from group conversation external_ref",
+				"external_ref", convResult.ExternalRef, "conversation_id", convResult.ConversationID, "error", parseErr)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"group conversation has an unparseable external_ref; cannot derive routing", nil)
+			return
+		}
+
+		// DEF-161 (group half): if caller supplied a user recipient, log and
+		// discard it. The thread key is the address, not a user.
+		if recipient != "" || recipientID != "" {
+			s.messageLog.Info("DEF-161: discarding caller-supplied recipient on group conv-ref — thread key is the address",
+				"supplied_recipient", recipient, "supplied_recipient_id", recipientID,
+				"thread_key", threadKey, "conversation_id", convResult.ConversationID)
+		}
+
+		// Match the web path's row shape: recipient = "thread:" + key,
+		// recipientID = key (handlers_chat_v2.go:1437-1439).
+		recipient = "thread:" + threadKey
+		recipientID = threadKey
+
+		storeMsg.Recipient = recipient
+		storeMsg.RecipientID = recipientID
+		structuredMsg.Recipient = recipient
+		structuredMsg.RecipientID = recipientID
+
+		// ThreadID ← topic key. This is what makes the unread dot work:
+		// messagebroker.go:595 calls TouchTopicActivity(ctx, storeMsg.ThreadID, …).
+		if req.ThreadID == "" {
+			req.ThreadID = threadKey
+			storeMsg.ThreadID = threadKey
+			structuredMsg.ThreadID = threadKey
+		}
+
+		// Channel ← deterministic derivation from conversation surface.
+		// Same logic as DEF-158's surface fallback for direct conversations.
+		//
+		// R4 (provenance): do NOT broker-validate a surface-derived channel.
+		// SurfaceToChannel is a total function over a closed enum that already
+		// refuses anything it cannot map. Validating it is a liveness check on
+		// a spoke, and failing a persist because a spoke is down turns a
+		// broker-less hub (a supported configuration) into a 503. This was
+		// regression G-4 on DEF-158.
+		if req.Channel == "" {
+			derivedCh, surfErr := messaging.SurfaceToChannel(convResult.Surface)
+			if surfErr != nil {
+				s.messageLog.Error("DEF-160: cannot derive channel from group conversation surface",
+					"surface", convResult.Surface, "conversation_id", convResult.ConversationID, "error", surfErr)
+				writeError(w, http.StatusServiceUnavailable, "channel_derivation_failed",
+					"cannot determine delivery channel: conversation surface is unknown or empty", nil)
+				return
+			}
+			req.Channel = derivedCh
+			storeMsg.Channel = derivedCh
+			structuredMsg.Channel = derivedCh
+		}
+
+	}
+
+	// DEF-161 (direct half): deferred. The design calls for validating
+	// a supplied recipient against ParseDMKey on the direct conv-ref path
+	// and rejecting on mismatch (400). Implementation is deferred because
+	// TestDEF142_AC6_ResolveOrCreate_FlowsThroughDEF138Auth sends
+	// @agent-slug (resolves to agent-to-agent DM) with a user recipient,
+	// which is a legitimate test of the resolve-or-create path that would
+	// trip the validation. The design notes this half "stays open" (§4.3).
+	// See report for the finding and recommended sequencing.
 
 	// DEF-158: Channel + ThreadID backfill for the conv-ref path.
 	//

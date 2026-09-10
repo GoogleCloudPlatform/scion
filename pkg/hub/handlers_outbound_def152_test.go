@@ -147,6 +147,9 @@ func TestDEF152_ConvRef_NoRecipient_DirectDM(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF152_ThreadRef_NoRecipient_GroupConv(t *testing.T) {
+	// DEF-160: group conversations no longer require an explicit recipient.
+	// The thread key IS the address. This test now verifies that the message
+	// is delivered successfully with the thread key as the recipient.
 	srv, s, project, agent, _ := def138Setup(t)
 	ctx := context.Background()
 
@@ -159,17 +162,24 @@ func TestDEF152_ThreadRef_NoRecipient_GroupConv(t *testing.T) {
 		DriftState:  "active",
 		DisplayName: "d152-thread-norecip",
 	}
-	_, err := s.UpsertConversationByExternalRef(ctx, conv)
+	created, err := s.UpsertConversationByExternalRef(ctx, conv)
 	require.NoError(t, err)
 
 	// Post with conversation_ref only — NO recipient.
 	rr := postOutboundRefOnly(t, srv, project.ID, agent.ID,
 		"hello via thread ref no recipient", "#d152-thread-norecip")
-	require.Equal(t, http.StatusBadRequest, rr.Code,
-		"#thread with no recipient for a group conversation must be refused (DEF-152): %s",
+	require.Equal(t, http.StatusOK, rr.Code,
+		"DEF-160: #thread with no recipient should succeed for group conversations: %s",
 		rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "group conversations require an explicit recipient",
-		"error must clearly explain that group conversations need an explicit recipient")
+
+	// The stored message must have recipientID = threadKey (not a user).
+	result, err := s.ListMessages(ctx, store.MessageFilter{ConversationID: created.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1, "exactly one message should be stored")
+	assert.Equal(t, "d152-thread-norecip", result.Items[0].RecipientID,
+		"DEF-160 AC-3: recipientID must be the topic key")
+	assert.Equal(t, "thread:d152-thread-norecip", result.Items[0].Recipient,
+		"DEF-160 AC-3: recipient must be thread:<key>")
 }
 
 // ---------------------------------------------------------------------------
