@@ -750,7 +750,7 @@ type V1SecretsConfig struct {
 	Backend                 string   `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"`
 	GCPProjectID            string   `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty" koanf:"gcp_project_id"`
 	GCPCredentials          string   `json:"gcp_credentials,omitempty" yaml:"gcp_credentials,omitempty" koanf:"gcp_credentials"`
-	GCPReplicationLocations []string `json:"gcp_replication_locations,omitempty" yaml:"gcp_replication_locations" koanf:"gcp_replication_locations"`
+	GCPReplicationLocations []string `json:"gcp_replication_locations,omitempty" yaml:"gcp_replication_locations,omitempty" koanf:"gcp_replication_locations"`
 }
 
 // V1CORSConfig holds CORS settings for server endpoints.

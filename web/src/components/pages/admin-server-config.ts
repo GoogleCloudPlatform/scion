@@ -2010,12 +2010,14 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.secrets.backend') && this.secretsBackend) secrets.backend = this.secretsBackend;
     if (ok('server.secrets.gcp_project_id') && this.secretsGCPProjectId)
       secrets.gcp_project_id = this.secretsGCPProjectId;
-    secrets.gcp_replication_locations = this.secretsGCPReplicationLocations
-      ? this.secretsGCPReplicationLocations
-          .split(',')
-          .map(s => s.trim())
-          .filter(Boolean)
-      : [];
+    if (ok('server.secrets.gcp_replication_locations')) {
+      secrets.gcp_replication_locations = this.secretsGCPReplicationLocations
+        ? this.secretsGCPReplicationLocations
+            .split(',')
+            .map(s => s.trim())
+            .filter(Boolean)
+        : [];
+    }
     server.secrets = secrets;
 
     // Message Broker
