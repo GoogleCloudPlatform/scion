@@ -70,6 +70,7 @@ func runBootDataMigrations(ctx context.Context, s store.Store) {
 		// for containment.
 		runMigrationSafe(ctx, s, "DM key migration", runDMKeyMigration)  // §4.4
 		runMigrationSafe(ctx, s, "Message backfill", runMessageBackfill) // §4.5
+		runMigrationSafe(ctx, s, "Group ref repair", runGroupRefRepair)  // DEF-166
 	})
 
 	// Split the residual report into reachable/unreachable (M6, §4.6).
