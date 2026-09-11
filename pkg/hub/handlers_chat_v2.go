@@ -1805,7 +1805,6 @@ func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, aft
 // Query params:
 //   - limit: page size (default 50, max 200)
 //   - cursor: keyset pagination cursor from the previous page's nextCursor (optional)
-//   - visibility: repeatable visibility filter (optional)
 func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Request, key string) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
@@ -1941,11 +1940,6 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			ThreadID: key,
 		}
 	}
-	// Support visibility filter.
-	if vis := q["visibility"]; len(vis) > 0 {
-		filter.Visibility = vis
-	}
-
 	opts := store.ListOptions{
 		Limit: limit,
 		// Keyset pagination cursor. The client sends the opaque `nextCursor`

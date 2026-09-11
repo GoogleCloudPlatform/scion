@@ -456,7 +456,6 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		AgentID:     agentID,
 		Channel:     msg.Channel,
 		ThreadID:    msg.ThreadID,
-		Visibility:  msg.Visibility,
 		CreatedAt:   time.Now(),
 	}
 	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered user messages.

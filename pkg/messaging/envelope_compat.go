@@ -166,9 +166,6 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 		attachments = append(attachments, AttachmentRef{Path: path})
 	}
 
-	// Map visibility.
-	vis := mapLegacyVisibility(old.Visibility)
-
 	// Use real identifiers from the persisted row. Empty means omit.
 	var replyToID *string
 	if ident.ReplyToID != "" {
@@ -185,7 +182,6 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 		Event:       event,
 		Body:        old.Msg,
 		Attachments: attachments,
-		Visibility:  vis,
 		Urgent:      old.Urgent,
 		CreatedAt:   createdAt,
 	}
@@ -289,18 +285,6 @@ func buildAddressees(old *messages.StructuredMessage, msgID string) []Addressee 
 	return addrs
 }
 
-// mapLegacyVisibility converts a legacy visibility string to the new Visibility type.
-func mapLegacyVisibility(old string) Visibility {
-	switch old {
-	case messages.VisibilityVerbose:
-		return VisibilityVerbose
-	case messages.VisibilityFull:
-		return VisibilityFull
-	default:
-		return VisibilityNormal
-	}
-}
-
 // NewEnvelopeToLegacy converts a new Message and its Addressees back to the
 // old StructuredMessage format. This supports backward compatibility during the
 // transition period for code that still reads the old format.
@@ -326,12 +310,6 @@ func NewEnvelopeToLegacy(msg *Message, addrs []Addressee) *messages.StructuredMe
 
 	// Map kind/intent/event back to old type.
 	old.Type = mapNewTypeToLegacy(msg)
-
-	// Map visibility.
-	old.Visibility = string(msg.Visibility)
-	if old.Visibility == string(VisibilityNormal) {
-		old.Visibility = "" // old format uses empty for normal
-	}
 
 	// Map attachments.
 	for _, a := range msg.Attachments {

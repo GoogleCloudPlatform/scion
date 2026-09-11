@@ -272,9 +272,6 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 	if channel != "" {
 		filter.Channel = channel
 	}
-	if visParams := q["visibility"]; len(visParams) > 0 {
-		filter.Visibility = visParams
-	}
 	// Intentionally ignore parse errors on "before" — an invalid value is
 	// silently dropped, matching the convention used by "limit" above and
 	// other query params in the codebase.

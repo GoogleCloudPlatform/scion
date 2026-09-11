@@ -432,7 +432,6 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		AgentID:       agent.ID,
 		Channel:       req.Message.Channel,
 		ThreadID:      req.Message.ThreadID,
-		Visibility:    req.Message.Visibility,
 		Broadcasted:   req.Message.Broadcasted,
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     now,

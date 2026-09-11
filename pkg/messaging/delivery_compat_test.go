@@ -187,29 +187,6 @@ func TestFormatLegacyAsNewDelivery_EventStatusDelivered(t *testing.T) {
 	}
 }
 
-// TestFormatLegacyAsNewDelivery_VisibilityDelivered verifies that visibility,
-// which was previously dropped by the old format, is now delivered.
-func TestFormatLegacyAsNewDelivery_VisibilityDelivered(t *testing.T) {
-	old := &messages.StructuredMessage{
-		Version:    messages.Version,
-		Timestamp:  "2026-08-27T10:00:00Z",
-		Sender:     "agent:builder",
-		SenderID:   "agent:builder",
-		Recipient:  "agent:coordinator",
-		Msg:        "Verbose output here",
-		Type:       messages.TypeAssistantReply,
-		Visibility: messages.VisibilityVerbose,
-	}
-
-	result := FormatLegacyAsNewDelivery(old, nil)
-
-	env := extractEnvelope(t, result)
-
-	if env.Visibility != VisibilityVerbose {
-		t.Errorf("visibility = %q, want %q", env.Visibility, VisibilityVerbose)
-	}
-}
-
 // TestFormatLegacyAsNewDelivery_NoMetadataInOutput verifies that the
 // metadata allowlist is not used in the new format.
 func TestFormatLegacyAsNewDelivery_NoMetadataInOutput(t *testing.T) {

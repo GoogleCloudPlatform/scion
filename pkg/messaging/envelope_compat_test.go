@@ -437,36 +437,6 @@ func TestMapLegacyEnvelope_Attachments(t *testing.T) {
 	}
 }
 
-func TestMapLegacyEnvelope_Visibility(t *testing.T) {
-	tests := []struct {
-		oldVis string
-		want   Visibility
-	}{
-		{"", VisibilityNormal},
-		{messages.VisibilityNormal, VisibilityNormal},
-		{messages.VisibilityVerbose, VisibilityVerbose},
-		{messages.VisibilityFull, VisibilityFull},
-	}
-	for _, tc := range tests {
-		old := &messages.StructuredMessage{
-			Version:    1,
-			Timestamp:  "2026-08-27T10:00:00Z",
-			Sender:     "user:alice",
-			Recipient:  "agent:builder",
-			Msg:        "Hello",
-			Type:       messages.TypeInstruction,
-			Visibility: tc.oldVis,
-		}
-		msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
-		if err != nil {
-			t.Fatalf("unexpected error for vis=%q: %v", tc.oldVis, err)
-		}
-		if msg.Visibility != tc.want {
-			t.Errorf("visibility %q: got %q, want %q", tc.oldVis, msg.Visibility, tc.want)
-		}
-	}
-}
-
 // ---------- Urgent mapping (OQ-1b) ----------
 
 // TestMapLegacyEnvelope_UrgentMapped verifies that old.Urgent is mapped to
@@ -865,33 +835,6 @@ func TestNewEnvelopeToLegacy_Attachments(t *testing.T) {
 	}
 }
 
-func TestNewEnvelopeToLegacy_Visibility(t *testing.T) {
-	tests := []struct {
-		vis     Visibility
-		wantOld string
-	}{
-		{VisibilityNormal, ""},
-		{VisibilityVerbose, "verbose"},
-		{VisibilityFull, "full"},
-	}
-	for _, tc := range tests {
-		intent := IntentInform
-		msg := &Message{
-			ID:         "msg-1",
-			From:       "user:alice",
-			Kind:       KindText,
-			Intent:     &intent,
-			Body:       "Hello",
-			Visibility: tc.vis,
-			CreatedAt:  time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
-		}
-		old := NewEnvelopeToLegacy(msg, nil)
-		if old.Visibility != tc.wantOld {
-			t.Errorf("vis=%q: old.Visibility got %q, want %q", tc.vis, old.Visibility, tc.wantOld)
-		}
-	}
-}
-
 // ---------- Round-trip tests ----------
 
 func TestRoundTrip_OldToNewToOld(t *testing.T) {
@@ -1038,7 +981,6 @@ func TestRoundTrip_NewToOldToNew(t *testing.T) {
 		Intent:         &intent,
 		Body:           "Build it",
 		Attachments:    []AttachmentRef{{Path: "/tmp/a.go", Name: "a.go"}},
-		Visibility:     VisibilityVerbose,
 		Urgent:         true,
 		CreatedAt:      time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
@@ -1083,9 +1025,6 @@ func TestRoundTrip_NewToOldToNew(t *testing.T) {
 	}
 	if restored.Attachments[0].Path != original.Attachments[0].Path {
 		t.Errorf("attachment path: got %q, want %q", restored.Attachments[0].Path, original.Attachments[0].Path)
-	}
-	if restored.Visibility != original.Visibility {
-		t.Errorf("visibility: got %q, want %q", restored.Visibility, original.Visibility)
 	}
 	if restored.Urgent != original.Urgent {
 		t.Errorf("urgent: got %v, want %v", restored.Urgent, original.Urgent)

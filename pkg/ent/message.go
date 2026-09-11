@@ -54,8 +54,6 @@ type Message struct {
 	ThreadID string `json:"thread_id,omitempty"`
 	// ConversationID holds the value of the "conversation_id" field.
 	ConversationID *uuid.UUID `json:"conversation_id,omitempty"`
-	// Visibility holds the value of the "visibility" field.
-	Visibility string `json:"visibility,omitempty"`
 	// Created holds the value of the "created" field.
 	Created      time.Time `json:"created,omitempty"`
 	selectValues sql.SelectValues
@@ -70,7 +68,7 @@ func (*Message) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case message.FieldUrgent, message.FieldBroadcasted, message.FieldRead:
 			values[i] = new(sql.NullBool)
-		case message.FieldSender, message.FieldSenderID, message.FieldRecipient, message.FieldRecipientID, message.FieldMsg, message.FieldType, message.FieldAgentID, message.FieldGroupID, message.FieldDispatchState, message.FieldDispatchFailureReason, message.FieldChannel, message.FieldThreadID, message.FieldVisibility:
+		case message.FieldSender, message.FieldSenderID, message.FieldRecipient, message.FieldRecipientID, message.FieldMsg, message.FieldType, message.FieldAgentID, message.FieldGroupID, message.FieldDispatchState, message.FieldDispatchFailureReason, message.FieldChannel, message.FieldThreadID:
 			values[i] = new(sql.NullString)
 		case message.FieldDispatchedAt, message.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -208,12 +206,6 @@ func (_m *Message) assignValues(columns []string, values []any) error {
 				_m.ConversationID = new(uuid.UUID)
 				*_m.ConversationID = *value.S.(*uuid.UUID)
 			}
-		case message.FieldVisibility:
-			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field visibility", values[i])
-			} else if value.Valid {
-				_m.Visibility = value.String
-			}
 		case message.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
@@ -315,9 +307,6 @@ func (_m *Message) String() string {
 		builder.WriteString("conversation_id=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
-	builder.WriteString(", ")
-	builder.WriteString("visibility=")
-	builder.WriteString(_m.Visibility)
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))

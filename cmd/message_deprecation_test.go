@@ -33,22 +33,21 @@ import (
 // and returns a restore function.
 func resetMessageFlags() func() {
 	orig := struct {
-		interrupt  bool
-		in         string
-		at         string
-		plain      bool
-		raw        bool
-		attach     []string
-		notify     bool
-		wake       bool
-		channel    string
-		threadID   string
-		cc         []string
-		visibility string
+		interrupt bool
+		in        string
+		at        string
+		plain     bool
+		raw       bool
+		attach    []string
+		notify    bool
+		wake      bool
+		channel   string
+		threadID  string
+		cc        []string
 	}{
 		msgInterrupt, msgIn, msgAt, msgPlain,
 		msgRaw, msgAttach, msgNotify, msgWake, msgChannel, msgThreadID,
-		msgCC, msgVisibility,
+		msgCC,
 	}
 
 	// Save cobra Changed state for removed flags (broadcast/all are registered
@@ -68,7 +67,6 @@ func resetMessageFlags() func() {
 	msgChannel = ""
 	msgThreadID = ""
 	msgCC = nil
-	msgVisibility = ""
 	messageCmd.Flags().Lookup("broadcast").Changed = false
 	messageCmd.Flags().Lookup("all").Changed = false
 
@@ -84,7 +82,6 @@ func resetMessageFlags() func() {
 		msgChannel = orig.channel
 		msgThreadID = orig.threadID
 		msgCC = orig.cc
-		msgVisibility = orig.visibility
 		messageCmd.Flags().Lookup("broadcast").Changed = bcastChanged
 		messageCmd.Flags().Lookup("all").Changed = allChanged
 	}
@@ -573,7 +570,7 @@ func TestDeprecatedFlag_ChannelStillSucceeds(t *testing.T) {
 }
 
 // TestDeprecatedFlags_NoWarningForRetainedFlags verifies that retained
-// flags (--interrupt, --wake, --attach, --visibility) do NOT emit
+// flags (--interrupt, --wake, --attach) do NOT emit
 // deprecation warnings.
 func TestDeprecatedFlags_NoWarningForRetainedFlags(t *testing.T) {
 	orig := saveMessageTestState()
@@ -649,7 +646,7 @@ func TestDeprecatedFlags_Hidden(t *testing.T) {
 // TestRetainedFlags_NotHidden verifies that retained flags are NOT hidden.
 func TestRetainedFlags_NotHidden(t *testing.T) {
 	retainedFlags := []string{
-		"interrupt", "wake", "attach", "visibility",
+		"interrupt", "wake", "attach",
 	}
 	for _, name := range retainedFlags {
 		f := messageCmd.Flags().Lookup(name)

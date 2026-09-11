@@ -1731,7 +1731,6 @@ type Message struct {
 	Channel        string    `json:"channel,omitempty"`
 	ThreadID       string    `json:"threadId,omitempty"`
 	ConversationID string    `json:"conversationId,omitempty"`
-	Visibility     string    `json:"visibility,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
 	// DispatchState tracks cross-node delivery of the message to the broker:
 	// pending|dispatched|failed. The message row is its own durable dispatch
@@ -1796,7 +1795,6 @@ type MessageFilter struct {
 	Channel        string    // Filter by channel (e.g. "web", "discord")
 	ThreadID       string    // Filter by thread_id (wave-2 conversation key)
 	ConversationID string    // Filter by conversation_id (S4 conversation model)
-	Visibility     []string  // Filter to listed visibility levels
 	Before         time.Time // Upper bound for created_at (exclusive)
 	After          time.Time // Lower bound for created_at (exclusive)
 }

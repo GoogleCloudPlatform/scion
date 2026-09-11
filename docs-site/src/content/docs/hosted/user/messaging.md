@@ -92,16 +92,6 @@ The web composer features a security-hardened, developer-friendly file upload sy
 - **Idempotency Keys**: Client-side idempotency keys eliminate duplicate messages during transient connection drops or retry states.
 - **Cursor-Based Scrollback Pagination**: Solved previous scroll-jump issues and cursor-mismatches. Scrollback pagination and scroll-to-bottom locks operate smoothly as history loads.
 
-### Three-State Visibility Filtering
-
-To prevent notification noise from overwhelming your conversation, the chat thread supports three distinct visibility filters:
-
-1. **Conversation**: The cleanest view. Displays only direct human instructions and agent replies.
-2. **Verbose**: Adds CCs, explicit `@-mentions`, and user-directed warnings.
-3. **Full**: Displays every message, including background agent-to-agent operations, state-change notifications, and system warnings.
-
-The visibility filter is processed **server-side** for efficiency, and your filter preferences are persisted **per-agent** so your preferred density level is remembered when you return to a thread. Dispatched messages feature real-time delivery state indicators, showing a success checkmark or a failure icon with a detailed tooltip (e.g. for delivery-failed notices).
-
 ### Interactive @-Mentions & Autocomplete
 
 When writing instructions, you can easily pull other agents into the thread:
@@ -149,9 +139,6 @@ scion message agent:tech-lead "Please review the auth module."
 
 # Attach a file
 scion message @tech-lead "See the test results." --attach ./results.json
-
-# Set message visibility
-scion message @tech-lead "Debug trace attached." --visibility verbose
 ```
 
 ### Message Formatting

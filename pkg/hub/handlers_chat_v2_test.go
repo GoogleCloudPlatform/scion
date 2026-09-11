@@ -1703,7 +1703,6 @@ CREATE TABLE IF NOT EXISTS messages (
     type TEXT NOT NULL DEFAULT 'instruction',
     channel TEXT,
     thread_id TEXT,
-    visibility TEXT DEFAULT 'normal',
     created TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages (created);

@@ -166,32 +166,6 @@ func TestFormatNewDelivery_EventWithStatus(t *testing.T) {
 	}
 }
 
-func TestFormatNewDelivery_VisibilityDelivered(t *testing.T) {
-	intent := IntentInform
-	msg := &Message{
-		ID:         "msg-004",
-		From:       PrincipalRef("agent:builder"),
-		Kind:       KindText,
-		Intent:     &intent,
-		Body:       "Verbose output",
-		Visibility: VisibilityVerbose,
-		CreatedAt:  time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
-	}
-	conv := &ConversationInfo{
-		ID:      "conv-100",
-		Kind:    "direct",
-		Surface: "native",
-	}
-
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
-
-	env := extractEnvelope(t, result)
-
-	if env.Visibility != VisibilityVerbose {
-		t.Errorf("visibility = %q, want %q", env.Visibility, VisibilityVerbose)
-	}
-}
-
 func TestFormatNewDelivery_NoMetadata(t *testing.T) {
 	intent := IntentRequest
 	msg := &Message{

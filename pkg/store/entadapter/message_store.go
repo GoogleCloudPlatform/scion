@@ -24,7 +24,6 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -67,18 +66,6 @@ func (s *MessageStore) WithPublisher(p MessagePublisher) *MessageStore {
 }
 
 func entMessageToStore(e *ent.Message) *store.Message {
-	// Read-time visibility backfill (design §4.6):
-	// Old rows have empty visibility. Normalise so every consumer sees a
-	// consistent value without requiring a data migration.
-	vis := e.Visibility
-	if vis == "" {
-		if e.Type == "assistant-reply" {
-			vis = "verbose"
-		} else {
-			vis = "normal"
-		}
-	}
-
 	var conversationID string
 	if e.ConversationID != nil {
 		conversationID = e.ConversationID.String()
@@ -101,7 +88,6 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		Channel:               e.Channel,
 		ThreadID:              e.ThreadID,
 		ConversationID:        conversationID,
-		Visibility:            vis,
 		CreatedAt:             e.Created,
 		DispatchState:         e.DispatchState,
 		DispatchedAt:          e.DispatchedAt,
@@ -151,10 +137,6 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 		}
 		create.SetConversationID(cid)
 	}
-	if msg.Visibility != "" {
-		create.SetVisibility(msg.Visibility)
-	}
-
 	if msg.Type == "" {
 		create.SetType("instruction")
 	}
@@ -342,43 +324,6 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 			return nil, fmt.Errorf("invalid conversation_id filter: %w", err)
 		}
 		query.Where(message.ConversationIDEQ(cid))
-	}
-	// Visibility filter with NULL backfill awareness (review R1 fix):
-	// Old rows have NULL visibility. The read-time backfill in entMessageToStore
-	// normalises after fetch, but a simple IN predicate drops NULL rows before
-	// they reach the Go layer. We expand the predicate to mirror the backfill
-	// logic: NULL + type != "assistant-reply" → normal; NULL + type = "assistant-reply" → verbose.
-	if len(filter.Visibility) > 0 {
-		var preds []predicate.Message
-		for _, v := range filter.Visibility {
-			switch v {
-			case "normal":
-				preds = append(preds,
-					message.VisibilityEQ("normal"),
-					message.And(
-						message.Or(
-							message.VisibilityIsNil(),
-							message.VisibilityEQ(""),
-						),
-						message.TypeNEQ("assistant-reply"),
-					),
-				)
-			case "verbose":
-				preds = append(preds,
-					message.VisibilityEQ("verbose"),
-					message.And(
-						message.Or(
-							message.VisibilityIsNil(),
-							message.VisibilityEQ(""),
-						),
-						message.TypeEQ("assistant-reply"),
-					),
-				)
-			default: // "full" or future values
-				preds = append(preds, message.VisibilityEQ(v))
-			}
-		}
-		query.Where(message.Or(preds...))
 	}
 	if !filter.Before.IsZero() {
 		query.Where(message.CreatedLT(filter.Before))

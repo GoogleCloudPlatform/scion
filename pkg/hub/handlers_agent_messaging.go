@@ -44,9 +44,6 @@ type OutboundMessageRequest struct {
 	Channel     string            `json:"channel,omitempty"`
 	ThreadID    string            `json:"thread_id,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
-	// Visibility controls which consumers see this message.
-	// One of "normal", "verbose", "full". Empty defaults to "normal".
-	Visibility string `json:"visibility,omitempty"`
 	// ConversationID is an explicit conversation assertion from the caller.
 	// When set, the hub authorizes the agent for this conversation and
 	// persists the message into it, bypassing the DeriveConversationKey
@@ -270,7 +267,6 @@ func (s *Server) resolveOutboundRouting(
 		Attachments:    req.Attachments,
 		Channel:        req.Channel,
 		ThreadID:       req.ThreadID,
-		Visibility:     req.Visibility,
 		Metadata:       req.Metadata,
 		ConversationID: req.ConversationID,
 	}
@@ -773,17 +769,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Validate and default visibility.
-	switch req.Visibility {
-	case "":
-		req.Visibility = messages.VisibilityNormal
-	case messages.VisibilityNormal, messages.VisibilityVerbose, messages.VisibilityFull:
-		// valid
-	default:
-		ValidationError(w, fmt.Sprintf("invalid visibility %q; must be one of: normal, verbose, full", req.Visibility), nil)
-		return
-	}
-
 	// Validate DM key format when the thread_id looks like a DM key.
 	// Non-DM thread IDs (topic UUIDs, etc.) pass through as-is.
 	if req.ThreadID != "" && strings.HasPrefix(req.ThreadID, "dm:") && !validDMKey(req.ThreadID) {
@@ -824,7 +809,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		AgentID:        agent.ID,
 		Channel:        result.Channel,
 		ThreadID:       result.ThreadID,
-		Visibility:     req.Visibility,
 		ConversationID: result.ConversationID,
 		GroupID:        result.GroupID,
 		CreatedAt:      time.Now(),
@@ -841,7 +825,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Attachments:          req.Attachments,
 		Channel:              result.Channel,
 		ThreadID:             result.ThreadID,
-		Visibility:           req.Visibility,
 		Metadata:             req.Metadata,
 		ConversationID:       result.ConversationID,
 		ConversationAsserted: result.Asserted,
