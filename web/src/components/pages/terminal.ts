@@ -869,21 +869,32 @@ export class ScionPageTerminal extends LitElement {
     const preflightUrl = `/api/v1/agents/${this.agentId}/pty`;
     try {
       const resp = await fetch(preflightUrl, { credentials: 'include' });
-      if (resp.status === 403) {
-        this.error = 'You do not have permission to attach to this agent.';
+      if (!resp.ok) {
+        // Surface specific messages for common auth errors; fall back to
+        // the server's error body for everything else (422 no broker,
+        // 503 broker unavailable, etc.).
+        if (resp.status === 403) {
+          this.error = 'You do not have permission to attach to this agent.';
+        } else if (resp.status === 401) {
+          this.error = 'Authentication required to access this terminal.';
+        } else if (resp.status === 404) {
+          this.error = 'Agent not found.';
+        } else {
+          const message = await extractApiError(
+            resp,
+            `Terminal connection failed: ${resp.statusText}`
+          );
+          this.error = message;
+        }
         return;
       }
-      if (resp.status === 401) {
-        this.error = 'Authentication required to access this terminal.';
-        return;
-      }
-      if (resp.status === 404) {
-        this.error = 'Agent not found.';
-        return;
-      }
-    } catch {
-      // Network error — fall through to WebSocket attempt, which will
-      // surface its own error.
+    } catch (err) {
+      // Network error during preflight.
+      this.error =
+        err instanceof Error
+          ? `Could not connect to terminal: ${err.message}`
+          : 'A network error occurred while connecting to the terminal.';
+      return;
     }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
