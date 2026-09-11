@@ -66,11 +66,8 @@ func TestFormatNewDelivery_TextRequest(t *testing.T) {
 	if len(env.To) != 1 || env.To[0] != "agent:deployer" {
 		t.Errorf("to = %v, want [agent:deployer]", env.To)
 	}
-	if env.Kind != KindText {
-		t.Errorf("kind = %q, want %q", env.Kind, KindText)
-	}
-	if env.Intent == nil || *env.Intent != IntentRequest {
-		t.Errorf("intent = %v, want request", env.Intent)
+	if env.Type != "message" {
+		t.Errorf("type = %q, want %q", env.Type, "message")
 	}
 	if env.Msg != "Please deploy the service" {
 		t.Errorf("msg = %q, want %q", env.Msg, "Please deploy the service")
@@ -101,11 +98,8 @@ func TestFormatNewDelivery_TextInform_NoTo(t *testing.T) {
 	if len(env.To) != 0 {
 		t.Errorf("to = %v, want empty (informational message)", env.To)
 	}
-	if env.Kind != KindText {
-		t.Errorf("kind = %q, want %q", env.Kind, KindText)
-	}
-	if env.Intent == nil || *env.Intent != IntentInform {
-		t.Errorf("intent = %v, want inform", env.Intent)
+	if env.Type != "message" {
+		t.Errorf("type = %q, want %q", env.Type, "message")
 	}
 }
 
@@ -135,8 +129,8 @@ func TestFormatNewDelivery_EventWithStatus(t *testing.T) {
 
 	env := extractEnvelope(t, result)
 
-	if env.Kind != KindEvent {
-		t.Fatalf("kind = %q, want %q", env.Kind, KindEvent)
+	if env.Type != "event" {
+		t.Fatalf("type = %q, want %q", env.Type, "event")
 	}
 	if env.Event == nil {
 		t.Fatal("event is nil, want non-nil EventBody")
@@ -456,6 +450,144 @@ func TestFormatNewDelivery_NilConversation_OmitsKey(t *testing.T) {
 	}
 	if env.Msg != "Message without conversation context" {
 		t.Errorf("msg = %q, want %q", env.Msg, "Message without conversation context")
+	}
+}
+
+// TestFormatNewDelivery_TextMessage_NoKindOrIntentKeys (AC-1) verifies that
+// a text message of each intent renders "type":"message" and does not
+// include "kind" or "intent" keys in the delivered JSON.
+func TestFormatNewDelivery_TextMessage_NoKindOrIntentKeys(t *testing.T) {
+	for _, intent := range []TextIntent{IntentInform, IntentRequest, IntentQuestion} {
+		t.Run(string(intent), func(t *testing.T) {
+			i := intent
+			msg := &Message{
+				ID:        "msg-ac1",
+				From:      PrincipalRef("user:alice"),
+				Kind:      KindText,
+				Intent:    &i,
+				Body:      "test body",
+				CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+			}
+			conv := &ConversationInfo{ID: "conv-ac1", Kind: "direct", Surface: "native"}
+
+			result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+
+			// Structured: Type must be "message".
+			env := extractEnvelope(t, result)
+			if env.Type != "message" {
+				t.Errorf("type = %q, want %q", env.Type, "message")
+			}
+
+			// Raw JSON: "kind" and "intent" keys must be absent.
+			jsonStr := extractJSON(t, result)
+			var raw map[string]any
+			if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+				t.Fatalf("failed to unmarshal JSON: %v", err)
+			}
+			if _, ok := raw["kind"]; ok {
+				t.Error("JSON contains 'kind' key; want absent (AC-1)")
+			}
+			if _, ok := raw["intent"]; ok {
+				t.Error("JSON contains 'intent' key; want absent (AC-1)")
+			}
+			if typ, ok := raw["type"]; !ok || typ != "message" {
+				t.Errorf("type = %v, want %q", typ, "message")
+			}
+		})
+	}
+}
+
+// TestFormatNewDelivery_Event_NoKindOrIntentKeys (AC-2) verifies that
+// an event message renders "type":"event" with the "event" object intact,
+// and does not include "kind" or "intent" keys.
+func TestFormatNewDelivery_Event_NoKindOrIntentKeys(t *testing.T) {
+	msg := &Message{
+		ID:   "msg-ac2",
+		From: PrincipalRef("system:lifecycle"),
+		Kind: KindEvent,
+		Event: &EventBody{
+			Type:    EventAgentStateChanged,
+			Subject: "agent:worker",
+			Status:  "RUNNING",
+		},
+		Body:      "Agent worker is running",
+		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+	}
+	conv := &ConversationInfo{ID: "conv-ac2", Kind: "direct", Surface: "native"}
+
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+
+	env := extractEnvelope(t, result)
+	if env.Type != "event" {
+		t.Errorf("type = %q, want %q", env.Type, "event")
+	}
+	if env.Event == nil {
+		t.Fatal("event is nil, want non-nil")
+	}
+	if env.Event.Type != EventAgentStateChanged {
+		t.Errorf("event.type = %q, want %q", env.Event.Type, EventAgentStateChanged)
+	}
+
+	jsonStr := extractJSON(t, result)
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+	if _, ok := raw["kind"]; ok {
+		t.Error("JSON contains 'kind' key; want absent (AC-2)")
+	}
+	if _, ok := raw["intent"]; ok {
+		t.Error("JSON contains 'intent' key; want absent (AC-2)")
+	}
+	if typ, ok := raw["type"]; !ok || typ != "event" {
+		t.Errorf("type = %v, want %q", typ, "event")
+	}
+	if _, ok := raw["event"]; !ok {
+		t.Error("JSON missing 'event' key; want present (AC-2)")
+	}
+}
+
+// TestFormatNewDelivery_ConversationKindUnaffected (AC-3) explicitly verifies
+// that ConversationInfo.Kind ("direct"/"group") is not affected by the
+// envelope type collapse — it's a different field on a different struct.
+func TestFormatNewDelivery_ConversationKindUnaffected(t *testing.T) {
+	for _, convKind := range []string{"direct", "group"} {
+		t.Run(convKind, func(t *testing.T) {
+			intent := IntentRequest
+			msg := &Message{
+				ID:        "msg-ac3",
+				From:      PrincipalRef("user:alice"),
+				Kind:      KindText,
+				Intent:    &intent,
+				Body:      "test",
+				CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+			}
+			conv := &ConversationInfo{ID: "conv-ac3", Kind: convKind, Surface: "native"}
+
+			result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+
+			env := extractEnvelope(t, result)
+			if env.Conversation == nil {
+				t.Fatal("conversation is nil")
+			}
+			if env.Conversation.Kind != convKind {
+				t.Errorf("conversation.kind = %q, want %q", env.Conversation.Kind, convKind)
+			}
+
+			// Also verify via raw JSON that conversation.kind is preserved.
+			jsonStr := extractJSON(t, result)
+			var raw map[string]any
+			if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+				t.Fatalf("failed to unmarshal JSON: %v", err)
+			}
+			convObj, ok := raw["conversation"].(map[string]any)
+			if !ok {
+				t.Fatal("conversation is not a JSON object")
+			}
+			if ck, ok := convObj["kind"]; !ok || ck != convKind {
+				t.Errorf("raw conversation.kind = %v, want %q", ck, convKind)
+			}
+		})
 	}
 }
 

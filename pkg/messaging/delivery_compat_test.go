@@ -56,11 +56,8 @@ func TestFormatLegacyAsNewDelivery_WithConvInfo(t *testing.T) {
 	if env.Conversation.ID != "conv-legacy-1" {
 		t.Errorf("conversation.id = %q, want %q", env.Conversation.ID, "conv-legacy-1")
 	}
-	if env.Kind != KindText {
-		t.Errorf("kind = %q, want %q", env.Kind, KindText)
-	}
-	if env.Intent == nil || *env.Intent != IntentRequest {
-		t.Errorf("intent = %v, want request", env.Intent)
+	if env.Type != "message" {
+		t.Errorf("type = %q, want %q", env.Type, "message")
 	}
 	if env.Msg != "Build the project" {
 		t.Errorf("msg = %q, want %q", env.Msg, "Build the project")
@@ -176,8 +173,8 @@ func TestFormatLegacyAsNewDelivery_EventStatusDelivered(t *testing.T) {
 
 	env := extractEnvelope(t, result)
 
-	if env.Kind != KindEvent {
-		t.Fatalf("kind = %q, want %q", env.Kind, KindEvent)
+	if env.Type != "event" {
+		t.Fatalf("type = %q, want %q", env.Type, "event")
 	}
 	if env.Event == nil {
 		t.Fatal("event is nil, want non-nil EventBody")
@@ -215,19 +212,18 @@ func TestFormatLegacyAsNewDelivery_NoMetadataInOutput(t *testing.T) {
 
 // TestFormatLegacyAsNewDelivery_RoundTrip verifies that a StructuredMessage
 // round-trips through FormatLegacyAsNewDelivery producing parseable JSON that
-// contains kind and intent/event. When convInfo is nil, conversation is absent.
+// contains "type" (not "kind"/"intent"). When convInfo is nil, conversation is absent.
 func TestFormatLegacyAsNewDelivery_RoundTrip(t *testing.T) {
 	tests := []struct {
-		name       string
-		old        *messages.StructuredMessage
-		conv       *ConversationInfo
-		wantKind   MessageKind
-		wantIntent *TextIntent
-		wantEvent  bool
-		wantConv   bool
+		name      string
+		old       *messages.StructuredMessage
+		conv      *ConversationInfo
+		wantType  string // "message" or "event"
+		wantEvent bool
+		wantConv  bool
 	}{
 		{
-			name: "instruction with conv -> text/request",
+			name: "instruction with conv -> message",
 			old: &messages.StructuredMessage{
 				Version:   messages.Version,
 				Timestamp: "2026-08-27T10:00:00Z",
@@ -237,10 +233,9 @@ func TestFormatLegacyAsNewDelivery_RoundTrip(t *testing.T) {
 				Type:      messages.TypeInstruction,
 				Channel:   "dev",
 			},
-			conv:       &ConversationInfo{ID: "conv-rt-1", Kind: "direct", Surface: "native"},
-			wantKind:   KindText,
-			wantIntent: intentPtr(IntentRequest),
-			wantConv:   true,
+			conv:     &ConversationInfo{ID: "conv-rt-1", Kind: "direct", Surface: "native"},
+			wantType: "message",
+			wantConv: true,
 		},
 		{
 			name: "state-change without conv -> event, no conversation key",
@@ -255,12 +250,12 @@ func TestFormatLegacyAsNewDelivery_RoundTrip(t *testing.T) {
 				Channel:   "dev",
 			},
 			conv:      nil,
-			wantKind:  KindEvent,
+			wantType:  "event",
 			wantEvent: true,
 			wantConv:  false,
 		},
 		{
-			name: "chat with conv -> text/inform",
+			name: "chat with conv -> message",
 			old: &messages.StructuredMessage{
 				Version:   messages.Version,
 				Timestamp: "2026-08-27T10:00:00Z",
@@ -270,10 +265,9 @@ func TestFormatLegacyAsNewDelivery_RoundTrip(t *testing.T) {
 				Type:      messages.TypeChat,
 				Channel:   "general",
 			},
-			conv:       &ConversationInfo{ID: "conv-rt-3", Kind: "group", Surface: "native"},
-			wantKind:   KindText,
-			wantIntent: intentPtr(IntentInform),
-			wantConv:   true,
+			conv:     &ConversationInfo{ID: "conv-rt-3", Kind: "group", Surface: "native"},
+			wantType: "message",
+			wantConv: true,
 		},
 	}
 
@@ -298,25 +292,24 @@ func TestFormatLegacyAsNewDelivery_RoundTrip(t *testing.T) {
 				t.Error("has conversation object, want absent")
 			}
 
-			// Must have kind.
-			kindRaw, ok := raw["kind"].(string)
+			// Must have type, not kind/intent.
+			typeRaw, ok := raw["type"].(string)
 			if !ok {
-				t.Fatal("missing or invalid kind")
+				t.Fatal("missing or invalid type")
 			}
-			if MessageKind(kindRaw) != tt.wantKind {
-				t.Errorf("kind = %q, want %q", kindRaw, tt.wantKind)
+			if typeRaw != tt.wantType {
+				t.Errorf("type = %q, want %q", typeRaw, tt.wantType)
 			}
 
-			// Check intent or event.
-			if tt.wantIntent != nil {
-				intentRaw, ok := raw["intent"].(string)
-				if !ok {
-					t.Fatal("missing or invalid intent")
-				}
-				if TextIntent(intentRaw) != *tt.wantIntent {
-					t.Errorf("intent = %q, want %q", intentRaw, *tt.wantIntent)
-				}
+			// "kind" and "intent" must be absent.
+			if _, ok := raw["kind"]; ok {
+				t.Error("JSON contains 'kind' key; want absent after type collapse")
 			}
+			if _, ok := raw["intent"]; ok {
+				t.Error("JSON contains 'intent' key; want absent after type collapse")
+			}
+
+			// Check event body presence.
 			if tt.wantEvent {
 				if _, ok := raw["event"]; !ok {
 					t.Error("missing event object")
@@ -324,9 +317,4 @@ func TestFormatLegacyAsNewDelivery_RoundTrip(t *testing.T) {
 			}
 		})
 	}
-}
-
-// intentPtr is a helper to create a pointer to a TextIntent.
-func intentPtr(i TextIntent) *TextIntent {
-	return &i
 }

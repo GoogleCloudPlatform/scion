@@ -37,11 +37,10 @@ type ConversationInfo struct {
 type DeliveryEnvelope struct {
 	Timestamp    string            `json:"timestamp"`
 	Conversation *ConversationInfo `json:"conversation,omitempty"`
-	From         string            `json:"from"`         // PrincipalRef
-	To           []string          `json:"to,omitempty"` // addressee PrincipalRefs
-	Kind         MessageKind       `json:"kind"`
-	Intent       *TextIntent       `json:"intent,omitempty"` // Kind == text
-	Event        *EventBody        `json:"event,omitempty"`  // Kind == event
+	From         string            `json:"from"`            // PrincipalRef
+	To           []string          `json:"to,omitempty"`    // addressee PrincipalRefs
+	Type         string            `json:"type"`            // "message" | "event"
+	Event        *EventBody        `json:"event,omitempty"` // Type == "event"
 	Msg          string            `json:"msg"`
 	Urgent       bool              `json:"urgent,omitempty"`
 	Attachments  []string          `json:"attachments,omitempty"`
@@ -74,8 +73,7 @@ func FormatNewDelivery(
 		Timestamp:    msg.CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		Conversation: convInfo,
 		From:         string(msg.From),
-		Kind:         msg.Kind,
-		Intent:       msg.Intent,
+		Type:         typeString(msg.Kind),
 		Event:        msg.Event,
 		Msg:          msg.Body,
 		Urgent:       msg.Urgent,
@@ -99,4 +97,13 @@ func FormatNewDelivery(
 	}
 
 	return deliveryIntro + "\n\n" + beginDelimiter + "\n" + string(jsonBytes) + "\n" + endDelimiter
+}
+
+// typeString maps internal MessageKind to the two-value wire type.
+// KindEvent → "event"; everything else (KindText with any intent) → "message".
+func typeString(k MessageKind) string {
+	if k == KindEvent {
+		return "event"
+	}
+	return "message"
 }
