@@ -46,6 +46,36 @@ assert scion_harness.INTERFACE_VERSION >= 2, (
 
 SETTINGS_FILE = "~/.config/muse/settings.json"
 
+# All hook events that the muse-code harness requires wired to sciontool.
+_HOOK_EVENTS = (
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PreLLMCall",
+    "PostLLMCall",
+    "PermissionRequest",
+    "PreCompact",
+    "PostCompact",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
+)
+
+_DEFAULT_HOOK_ENTRY: list[dict[str, Any]] = [
+    {
+        "matcher": "*",
+        "hooks": [
+            {
+                "name": "scion-hook",
+                "type": "command",
+                "command": "sciontool hook --dialect=muse-code",
+            }
+        ],
+    }
+]
+
 AUTH = scion_harness.AuthSpec(
     "muse-code",
     [
@@ -114,6 +144,13 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     if "schema_version" not in settings:
         settings["schema_version"] = 1
+
+    # Ensure all hook events are wired, even on cold start when the seed
+    # file has not been copied yet (or the copy failed).
+    hooks = settings.setdefault("hooks", {})
+    for event in _HOOK_EVENTS:
+        if event not in hooks:
+            hooks[event] = _DEFAULT_HOOK_ENTRY
 
     _write_settings(ctx.home, settings)
 

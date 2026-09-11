@@ -496,7 +496,10 @@ class MuseCodeProvisionTest(unittest.TestCase):
             self.assertEqual(server["url"], "https://sse.example.com/events")
 
     def test_provision_cold_start_no_settings(self) -> None:
-        """Provision succeeds when no settings.json exists (cold start)."""
+        """Provision succeeds when no settings.json exists (cold start).
+
+        All 13 hook events must be populated even without a seed file.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
             os.makedirs(home)
@@ -513,6 +516,25 @@ class MuseCodeProvisionTest(unittest.TestCase):
             self.assertTrue(os.path.isfile(settings_path))
             settings = _read_json(settings_path)
             self.assertEqual(settings.get("schema_version"), 1)
+
+            # All 13 hook events must be populated on cold start.
+            hooks = settings.get("hooks", {})
+            expected_events = [
+                "SessionStart", "SessionEnd", "UserPromptSubmit",
+                "PreToolUse", "PostToolUse", "PreLLMCall", "PostLLMCall",
+                "PermissionRequest", "PreCompact", "PostCompact",
+                "SubagentStart", "SubagentStop", "Stop",
+            ]
+            self.assertEqual(len(expected_events), 13)
+            for event in expected_events:
+                self.assertIn(
+                    event, hooks,
+                    f"Hook event {event} missing on cold start (no seed file)",
+                )
+                hook_list = hooks[event]
+                self.assertTrue(len(hook_list) > 0)
+                cmd = hook_list[0]["hooks"][0]["command"]
+                self.assertIn("sciontool hook --dialect=muse-code", cmd)
 
             # Auth should fall back to none.
             auth_json = _read_json(
