@@ -373,7 +373,7 @@ func projectAdminPermissionIDs() []string {
 
 // projectMemberCuratedPermissionIDs returns the curated permission set for the
 // project-member role. This is an explicit list — NOT derived from registry
-// iteration. Members get create, read, list, and message actions on project-
+// iteration. Members get create, read, and list actions on project-
 // scoped resources.
 //
 // Excluded from this role:
@@ -385,10 +385,9 @@ func projectAdminPermissionIDs() []string {
 // added here and the role revision bumped.
 func projectMemberCuratedPermissionIDs() []string {
 	return []string{
-		// Agent operations (create, read, list, message)
+		// Agent operations (create, read, list)
 		"agent.create",
 		"agent.list",
-		"agent.message",
 		"agent.read",
 		// Harness config (create, read, list)
 		"harness_config.create",
