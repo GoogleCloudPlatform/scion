@@ -63,7 +63,7 @@ func TestAgentListTemplates_GlobalVisibility(t *testing.T) {
 
 	found := false
 	for _, tmpl := range resp.Templates {
-		if tmpl.Template.ID == tid("tmpl-agent-global") {
+		if tmpl.ID == tid("tmpl-agent-global") {
 			found = true
 			break
 		}
@@ -145,7 +145,7 @@ func TestAgentListHarnessConfigs_GlobalVisibility(t *testing.T) {
 
 	found := false
 	for _, hc := range resp.HarnessConfigs {
-		if hc.HarnessConfig.ID == tid("hc-agent-global") {
+		if hc.ID == tid("hc-agent-global") {
 			found = true
 			break
 		}
