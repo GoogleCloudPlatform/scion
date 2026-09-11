@@ -145,7 +145,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleMember,
 			Description: "Project member with basic project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    2, // R2: remove agent.stop_all, skill.create, project.create
+			Revision:    3, // R3: remove agent.message (policy alignment with agent.attach)
 			Permissions: projectMemberCuratedPermissionIDs(),
 		},
 
@@ -373,10 +373,11 @@ func projectAdminPermissionIDs() []string {
 
 // projectMemberCuratedPermissionIDs returns the curated permission set for the
 // project-member role. This is an explicit list — NOT derived from registry
-// iteration. Members get create, read, list, and message actions on project-
+// iteration. Members get create, read, and list actions on project-
 // scoped resources.
 //
 // Excluded from this role:
+//   - agent.message: messaging requires owner/admin role or ancestry
 //   - agent.stop_all: bulk stop is an administrative action, not basic membership
 //   - skill.create: skill creation is an admin/owner action
 //   - project.create: hub-level operation, meaningless in a project-scoped role
@@ -385,10 +386,9 @@ func projectAdminPermissionIDs() []string {
 // added here and the role revision bumped.
 func projectMemberCuratedPermissionIDs() []string {
 	return []string{
-		// Agent operations (create, read, list, message)
+		// Agent operations (create, read, list)
 		"agent.create",
 		"agent.list",
-		"agent.message",
 		"agent.read",
 		// Harness config (create, read, list)
 		"harness_config.create",
@@ -825,10 +825,9 @@ func projectPermissionIDsExcluding(excludeAction string) []string {
 // project member gets: create agents, read/list most things.
 func projectMemberPermissionIDs() []string {
 	memberActions := map[string]bool{
-		"create":  true,
-		"read":    true,
-		"list":    true,
-		"message": true,
+		"create": true,
+		"read":   true,
+		"list":   true,
 	}
 	projectResources := map[string]bool{
 		permissions.ResourceAgent:          true,

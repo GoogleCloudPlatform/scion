@@ -200,11 +200,11 @@ func TestAuthorizeAgentMessage_BaselineProjectMode_NoLifecycleScope(t *testing.T
 		t.Fatalf("baseline project-mode agent should be allowed to message: %s", reason)
 	}
 
-	// A project member (user) with agent.message but NOT agent.attach can message.
+	// A project member (user) without agent.message cannot message (removed from member role).
 	memberIdent := msgAuthzUserIdentity(member.ID)
-	allowed, reason = srv.authorizeAgentMessage(ctx, memberIdent, target, false)
-	if !allowed {
-		t.Fatalf("project member should be allowed to message project-mode agent: %s", reason)
+	allowed, _ = srv.authorizeAgentMessage(ctx, memberIdent, target, false)
+	if allowed {
+		t.Fatal("project member without agent.message should be denied messaging project-mode agent")
 	}
 }
 
@@ -252,8 +252,8 @@ func TestAuthorizeAgentMessage_ModeNone_DeniedExceptSuperAdmin(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: Project member without agent.attach messages a project-mode agent;
-// still cannot attach (D1)
+// Test 3: Project member without agent.message or agent.attach cannot message
+// or attach to a project-mode agent (D1)
 // ---------------------------------------------------------------------------
 
 func TestAuthorizeAgentMessage_MemberWithoutAttach(t *testing.T) {
@@ -263,14 +263,14 @@ func TestAuthorizeAgentMessage_MemberWithoutAttach(t *testing.T) {
 	target := msgAuthzAgent(t, s, "msg-only-target", projectID, store.MessageModeProject,
 		[]string{owner.ID})
 
-	// Member can message (has agent.message via project membership)
+	// Member cannot message (agent.message removed from member role)
 	memberIdent := msgAuthzUserIdentity(member.ID)
-	allowed, reason := srv.authorizeAgentMessage(ctx, memberIdent, target, false)
-	if !allowed {
-		t.Fatalf("member should be allowed to message project-mode agent: %s", reason)
+	allowed, _ := srv.authorizeAgentMessage(ctx, memberIdent, target, false)
+	if allowed {
+		t.Fatal("member without agent.message should be denied messaging project-mode agent")
 	}
 
-	// Verify the member cannot attach (separate permission axis)
+	// Verify the member also cannot attach (separate permission axis)
 	resource := agentResource(target)
 	decision := srv.authzService.CheckAccess(ctx, memberIdent, resource, ActionAttach)
 	if decision.Allowed {
@@ -791,8 +791,8 @@ func TestAuthorizeAgentMessage_IngressParity(t *testing.T) {
 		// Owner → none mode agent: denied (none sealed to non-super-admin)
 		{"owner→none", ownerIdent, noneAgent, false, false},
 
-		// Member → project mode agent: allowed (agent.message permission)
-		{"member→project", memberIdent, projectAgent, false, true},
+		// Member → project mode agent: denied (agent.message removed from member role)
+		{"member→project", memberIdent, projectAgent, false, false},
 		// Member → lineage mode agent: denied (not in ancestry, not project owner)
 		{"member→lineage", memberIdent, lineageAgent, false, false},
 		// Member → branch mode agent: denied (not in ancestry, not project owner)

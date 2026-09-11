@@ -515,15 +515,21 @@ func TestSetMessageMode_LiveEffect(t *testing.T) {
 	agent := smmAgent(t, s, "smm-live-effect", projectID, store.MessageModeProject,
 		[]string{owner.ID})
 
-	// Verify member can message a project-mode agent.
+	// Member cannot message project-mode agent (agent.message removed from member role).
 	memberIdent := msgAuthzUserIdentity(member.ID)
-	allowed, reason := srv.authorizeAgentMessage(ctx, memberIdent, agent, false)
+	allowed, _ := srv.authorizeAgentMessage(ctx, memberIdent, agent, false)
+	if allowed {
+		t.Fatal("member without agent.message should be denied messaging project-mode agent")
+	}
+
+	// Owner CAN message project-mode agent (has agent.message via owner role).
+	ownerIdent := msgAuthzUserIdentity(owner.ID)
+	allowed, reason := srv.authorizeAgentMessage(ctx, ownerIdent, agent, false)
 	if !allowed {
-		t.Fatalf("member should message project-mode agent: %s", reason)
+		t.Fatalf("owner should message project-mode agent: %s", reason)
 	}
 
 	// Owner changes mode to none.
-	ownerIdent := msgAuthzUserIdentity(owner.ID)
 	rr := smmDoRequest(t, srv, agent.ID, SetMessageModeRequest{Mode: "none"}, ownerIdent)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -535,10 +541,10 @@ func TestSetMessageMode_LiveEffect(t *testing.T) {
 		t.Fatalf("failed to get agent: %v", err)
 	}
 
-	// Same message attempt -> DENIED (live effect).
-	allowed, _ = srv.authorizeAgentMessage(ctx, memberIdent, updatedAgent, false)
+	// Owner's message attempt -> DENIED after mode change to none (live effect).
+	allowed, _ = srv.authorizeAgentMessage(ctx, ownerIdent, updatedAgent, false)
 	if allowed {
-		t.Fatal("after mode change to none, message should be denied")
+		t.Fatal("after mode change to none, message should be denied even for owner")
 	}
 }
 
