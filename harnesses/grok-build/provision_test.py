@@ -470,9 +470,9 @@ class ModelResolutionTest(unittest.TestCase):
                 "instructions_file": "AGENTS.md",
                 "model_aliases": {
                     "small": "grok-3-mini",
-                    "medium": "grok-3",
-                    "large": "grok-4",
-                    "extra-large": "grok-4",
+                    "medium": "grok-4.5",
+                    "large": "grok-4.6",
+                    "extra-large": "grok-4.6",
                 },
             },
         })
@@ -483,14 +483,14 @@ class ModelResolutionTest(unittest.TestCase):
     def test_small_alias_resolves_to_grok_3_mini(self) -> None:
         self.assertEqual(self._resolve("small"), "grok-3-mini")
 
-    def test_medium_alias_resolves_to_grok_3(self) -> None:
-        self.assertEqual(self._resolve("medium"), "grok-3")
+    def test_medium_alias_resolves_to_grok_4_5(self) -> None:
+        self.assertEqual(self._resolve("medium"), "grok-4.5")
 
-    def test_large_alias_resolves_to_grok_4(self) -> None:
-        self.assertEqual(self._resolve("large"), "grok-4")
+    def test_large_alias_resolves_to_grok_4_6(self) -> None:
+        self.assertEqual(self._resolve("large"), "grok-4.6")
 
-    def test_extra_large_alias_resolves_to_grok_4(self) -> None:
-        self.assertEqual(self._resolve("extra-large"), "grok-4")
+    def test_extra_large_alias_resolves_to_grok_4_6(self) -> None:
+        self.assertEqual(self._resolve("extra-large"), "grok-4.6")
 
     def test_raw_model_name_passes_through(self) -> None:
         self.assertEqual(self._resolve("grok-4-turbo"), "grok-4-turbo")
@@ -500,7 +500,7 @@ class ModelResolutionTest(unittest.TestCase):
 
     def test_alias_is_case_insensitive(self) -> None:
         self.assertEqual(self._resolve("SMALL"), "grok-3-mini")
-        self.assertEqual(self._resolve("Large"), "grok-4")
+        self.assertEqual(self._resolve("Large"), "grok-4.6")
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +523,7 @@ class HookWriteTest(unittest.TestCase):
             for event in provision._GROK_HOOK_EVENTS:
                 self.assertIn(event, hooks, f"missing hook event: {event}")
 
-    def test_session_start_uses_echo(self) -> None:
+    def test_session_start_uses_echo_with_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             provision._write_hooks(tmp)
             hooks_path = os.path.join(tmp, ".grok", "hooks", "scion.json")
@@ -533,9 +533,10 @@ class HookWriteTest(unittest.TestCase):
             cmd = session_start[0]["hooks"][0]["command"]
             self.assertIn("echo", cmd)
             self.assertIn("SessionStart", cmd)
+            self.assertIn("source", cmd)
             self.assertIn("sciontool hook --dialect=grok-build", cmd)
 
-    def test_session_end_uses_echo(self) -> None:
+    def test_session_end_uses_echo_with_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             provision._write_hooks(tmp)
             hooks_path = os.path.join(tmp, ".grok", "hooks", "scion.json")
@@ -545,6 +546,7 @@ class HookWriteTest(unittest.TestCase):
             cmd = session_end[0]["hooks"][0]["command"]
             self.assertIn("echo", cmd)
             self.assertIn("SessionEnd", cmd)
+            self.assertIn("reason", cmd)
 
     def test_pre_tool_use_uses_cat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -565,7 +567,17 @@ class HookWriteTest(unittest.TestCase):
                 data = json.load(f)
             stop = data["hooks"]["Stop"]
             timeout = stop[0]["hooks"][0]["timeout"]
-            self.assertEqual(timeout, 10)
+            self.assertEqual(timeout, 60)
+
+    def test_subagent_stop_has_longer_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            provision._write_hooks(tmp)
+            hooks_path = os.path.join(tmp, ".grok", "hooks", "scion.json")
+            with open(hooks_path) as f:
+                data = json.load(f)
+            subagent_stop = data["hooks"]["SubagentStop"]
+            timeout = subagent_stop[0]["hooks"][0]["timeout"]
+            self.assertEqual(timeout, 60)
 
 
 # ---------------------------------------------------------------------------
@@ -1227,9 +1239,9 @@ class VertexAIAuthTest(unittest.TestCase):
                     "instructions_file": "AGENTS.md",
                     "model_aliases": {
                         "small": "grok-3-mini",
-                        "medium": "grok-3",
-                        "large": "grok-4",
-                        "extra-large": "grok-4",
+                        "medium": "grok-4.5",
+                        "large": "grok-4.6",
+                        "extra-large": "grok-4.6",
                     },
                 },
             })
@@ -1273,9 +1285,9 @@ class VertexAIAuthTest(unittest.TestCase):
                     "instructions_file": "AGENTS.md",
                     "model_aliases": {
                         "small": "grok-3-mini",
-                        "medium": "grok-3",
-                        "large": "grok-4",
-                        "extra-large": "grok-4",
+                        "medium": "grok-4.5",
+                        "large": "grok-4.6",
+                        "extra-large": "grok-4.6",
                     },
                 },
             })
