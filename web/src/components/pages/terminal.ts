@@ -612,7 +612,7 @@ export class ScionPageTerminal extends LitElement {
       // Wait for render, then initialize terminal
       await this.updateComplete;
       await this.initTerminal();
-      this.connectWebSocket();
+      void this.connectWebSocket();
     } catch (err) {
       console.error('Failed to load agent:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load agent';
@@ -859,8 +859,32 @@ export class ScionPageTerminal extends LitElement {
     };
   }
 
-  private connectWebSocket(): void {
+  private async connectWebSocket(): Promise<void> {
     if (!this.terminal) return;
+
+    // Preflight auth check — the browser WebSocket API hides HTTP error
+    // codes on failed upgrades (always returns close code 1006), so we
+    // cannot distinguish "permission denied" from "network error" after
+    // the fact. A preflight fetch surfaces the real HTTP status.
+    const preflightUrl = `/api/v1/agents/${this.agentId}/pty`;
+    try {
+      const resp = await fetch(preflightUrl, { credentials: 'include' });
+      if (resp.status === 403) {
+        this.error = 'You do not have permission to attach to this agent.';
+        return;
+      }
+      if (resp.status === 401) {
+        this.error = 'Authentication required to access this terminal.';
+        return;
+      }
+      if (resp.status === 404) {
+        this.error = 'Agent not found.';
+        return;
+      }
+    } catch {
+      // Network error — fall through to WebSocket attempt, which will
+      // surface its own error.
+    }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${protocol}//${window.location.host}/api/v1/agents/${this.agentId}/pty?cols=${this.terminal.cols}&rows=${this.terminal.rows}`;
