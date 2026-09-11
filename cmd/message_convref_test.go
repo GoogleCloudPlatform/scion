@@ -215,9 +215,11 @@ func TestSendMessageViaConversation_AgentRef(t *testing.T) {
 }
 
 // TestSendMessageViaConversation_AgentRef_AgentContext verifies that @agent
-// from an agent context (SCION_AGENT_NAME set) sends via the outbound endpoint
-// with conversation_ref. DEF-142 P5: the agent path uses conversation_ref
-// instead of the two-step resolve-then-send.
+// from an agent context (SCION_AGENT_NAME set) sends via the structured
+// message endpoint. DEF-164: agent-to-agent messages route through
+// SendStructuredMessage to avoid the outbound handler's resolveAgentDM
+// creating orphan conversation/participant rows before DEF-152 addressee
+// derivation rejects non-user DMs.
 func TestSendMessageViaConversation_AgentRef_AgentContext(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
@@ -246,12 +248,15 @@ func TestSendMessageViaConversation_AgentRef_AgentContext(t *testing.T) {
 	err = sendMessageViaConversation(hubCtx, ref, "please review", false, false)
 	require.NoError(t, err)
 
-	// Agent context: message goes via outbound with conversation_ref.
-	assert.Len(t, *sent, 0, "agent context should use outbound path, not agent message path")
-	require.Len(t, *outbound, 1)
-	assert.Equal(t, "test-sender-agent", (*outbound)[0].AgentName)
-	assert.Equal(t, "@builder", (*outbound)[0].ConversationRef)
-	assert.Equal(t, "please review", (*outbound)[0].Message)
+	// DEF-164: agent-to-agent messages now route through SendStructuredMessage,
+	// not the outbound endpoint.
+	assert.Len(t, *outbound, 0, "agent-to-agent should not use outbound path")
+	require.Len(t, *sent, 1)
+	assert.Equal(t, "builder", (*sent)[0].AgentName)
+	require.NotNil(t, (*sent)[0].StructuredMsg, "structured message should be present")
+	assert.Equal(t, "agent:test-sender-agent", (*sent)[0].StructuredMsg.Sender)
+	assert.Equal(t, "agent:builder", (*sent)[0].StructuredMsg.Recipient)
+	assert.Equal(t, "please review", (*sent)[0].StructuredMsg.Msg)
 }
 
 // TestConvRef_ThreadRefAccepted verifies that #<thread> references are
