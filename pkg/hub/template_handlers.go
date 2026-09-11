@@ -219,6 +219,17 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 			Permission: "template.list",
 		}).Allowed
 	}
+	// Agents with project:read scope can discover all templates.
+	// Global templates are parentless resources that cannot match
+	// project-scoped agent bindings in AuthorizeReadBatch, so agents
+	// would see zero results without this bypass. The agent's read
+	// access was already verified by checkAgentReadScope above.
+	// Individual template GET is separately gated (PR #1494).
+	if !hasAdminView {
+		if agentIdent, ok := identity.(AgentIdentity); ok && agentIdent.HasScope(ScopeProjectRead) {
+			hasAdminView = true
+		}
+	}
 	if identity != nil && !hasAdminView {
 		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Template], error) {
 			page, err := s.store.ListTemplates(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
