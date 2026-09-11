@@ -1205,6 +1205,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			senderSlug := agentIdent.ID() // fallback to UUID
 			if senderAgent, err := s.store.GetAgent(ctx, agentIdent.ID()); err == nil {
 				senderSlug = senderAgent.Slug
+			} else {
+				s.messageLog.Warn("failed to resolve agent slug for sender, using UUID fallback",
+					"agent_id", agentIdent.ID(), "error", err)
 			}
 			structuredMsg.Sender = "agent:" + senderSlug
 		}
@@ -2296,6 +2299,9 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		senderSlug := agentIdent.ID() // fallback to UUID
 		if senderAgent, err := s.store.GetAgent(ctx, agentIdent.ID()); err == nil {
 			senderSlug = senderAgent.Slug
+		} else {
+			s.messageLog.Warn("failed to resolve agent slug for sender, using UUID fallback",
+				"agent_id", agentIdent.ID(), "error", err)
 		}
 		req.StructuredMessage.Sender = "agent:" + senderSlug
 	}
