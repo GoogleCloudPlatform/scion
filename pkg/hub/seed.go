@@ -825,10 +825,9 @@ func projectPermissionIDsExcluding(excludeAction string) []string {
 // project member gets: create agents, read/list most things.
 func projectMemberPermissionIDs() []string {
 	memberActions := map[string]bool{
-		"create":  true,
-		"read":    true,
-		"list":    true,
-		"message": true,
+		"create": true,
+		"read":   true,
+		"list":   true,
 	}
 	projectResources := map[string]bool{
 		permissions.ResourceAgent:          true,
