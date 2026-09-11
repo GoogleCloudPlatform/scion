@@ -55,5 +55,5 @@ func FormatLegacyAsNewDelivery(
 
 	// Pass the pointer straight through. Nil means no conversation key
 	// in the envelope (DEF-102: omit, never synthesise).
-	return FormatNewDelivery(newMsg, addrs, convInfo, opts)
+	return FormatNewDelivery(newMsg, addrs, convInfo, opts, false)
 }

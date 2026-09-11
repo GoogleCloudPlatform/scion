@@ -1257,13 +1257,21 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message
 	// row and conversation result when the envelope switch is ON.
+	// DEF-169: when this send is mention-routed, pass IsMention and the full
+	// set of co-addressees so the envelope gets type:"mention" and the
+	// complete "to" list — identical across primary and fan-out recipients.
 	if s.writeDenyEnabled() {
-		msg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+		renderInput := messaging.RenderDeliveryInput{
 			MessageID:  storeMsg.ID,
 			ConvResult: chatV2ConvResult,
 			Msg:        msg,
 			CreatedAt:  storeMsg.CreatedAt,
-		})
+		}
+		if mentionResults != nil {
+			renderInput.IsMention = true
+			renderInput.CoAddressees = mentionCoAddressees(agents)
+		}
+		msg.DeliveryText = messaging.RenderDeliveryText(renderInput)
 	}
 
 	// Dispatch to the primary agent.
@@ -1366,12 +1374,17 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			}
 
 			// Phase 9b(ii): render the delivery envelope for the mention.
+			// DEF-169: fan-out recipients get the same IsMention/CoAddressees
+			// as the primary — every mentioned agent sees the identical "to"
+			// set and type:"mention".
 			if s.writeDenyEnabled() {
 				mentionMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-					MessageID:  mentionStoreMsg.ID,
-					ConvResult: mentionConvResult,
-					Msg:        mentionMsg,
-					CreatedAt:  mentionStoreMsg.CreatedAt,
+					MessageID:    mentionStoreMsg.ID,
+					ConvResult:   mentionConvResult,
+					Msg:          mentionMsg,
+					CreatedAt:    mentionStoreMsg.CreatedAt,
+					IsMention:    true,
+					CoAddressees: mentionCoAddressees(agents),
 				})
 			}
 
@@ -1406,6 +1419,23 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		Attachments: attachmentRefs,
 	})
 	return storeMsg.ID
+}
+
+// mentionCoAddressees builds the CoAddressees slice for mention-routed
+// envelopes: one Addressee per mentioned agent, with Via: ViaBodyMention.
+// Every mentioned agent's envelope receives the same list, so primary and
+// fan-out recipients see identical "to" arrays (DEF-169).
+func mentionCoAddressees(agents []*store.Agent) []messaging.Addressee {
+	addrs := make([]messaging.Addressee, 0, len(agents))
+	for _, ag := range agents {
+		addrs = append(addrs, messaging.Addressee{
+			PrincipalKind: "agent",
+			PrincipalID:   ag.ID,
+			Via:           messaging.ViaBodyMention,
+			DeliveryState: messaging.DeliveryPending,
+		})
+	}
+	return addrs
 }
 
 // sendHumanToHuman persists a type:chat message for human-to-human communication.

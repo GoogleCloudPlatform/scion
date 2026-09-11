@@ -59,11 +59,17 @@ type DeliveryOptions struct {
 // convInfo may be nil when no conversation context is available; the
 // "conversation" key is omitted from the envelope rather than fabricated.
 // If the message has plain/raw delivery options, only the raw msg text is returned.
+//
+// isMention, when true, sets the envelope's type to "mention" (instead of
+// "message") and forces the "to" field to be present even for a single
+// addressee. Both are set explicitly by the routing call site that knows
+// whether the message was @-mention-routed.
 func FormatNewDelivery(
 	msg *Message,
 	addrs []Addressee,
 	convInfo *ConversationInfo,
 	opts DeliveryOptions,
+	isMention bool,
 ) string {
 	if opts.Plain || opts.Raw {
 		return msg.Body
@@ -73,7 +79,7 @@ func FormatNewDelivery(
 		Timestamp:    msg.CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		Conversation: convInfo,
 		From:         string(msg.From),
-		Type:         typeString(msg.Kind),
+		Type:         typeString(msg.Kind, isMention),
 		Event:        msg.Event,
 		Msg:          msg.Body,
 		Urgent:       msg.Urgent,
@@ -81,10 +87,13 @@ func FormatNewDelivery(
 	}
 
 	// Build addressee principal refs for the "to" field.
-	// For single-recipient (direct) messages the recipient is implicit —
-	// omit "to" to reduce envelope noise. Multi-recipient (group) messages
-	// still list every addressee so agents know who else received the message.
-	if len(addrs) > 1 {
+	// For non-mention single-recipient (direct) messages the recipient is
+	// implicit — omit "to" to reduce envelope noise. Multi-recipient (group)
+	// messages still list every addressee so agents know who else received.
+	// Mention-routed messages always include "to" regardless of count — a
+	// single mentioned agent sees "to" naming itself, confirming no one else
+	// was mentioned.
+	if len(addrs) > 1 || isMention {
 		for _, a := range addrs {
 			env.To = append(env.To, a.PrincipalKind+":"+a.PrincipalID)
 		}
@@ -104,11 +113,15 @@ func FormatNewDelivery(
 	return deliveryIntro + "\n\n" + beginDelimiter + "\n" + string(jsonBytes) + "\n" + endDelimiter
 }
 
-// typeString maps internal MessageKind to the two-value wire type.
-// KindEvent → "event"; everything else (KindText with any intent) → "message".
-func typeString(k MessageKind) string {
+// typeString maps internal MessageKind and the explicit mention flag to the
+// three-value wire type: "event", "mention", or "message".
+// KindEvent → "event"; isMention → "mention"; everything else → "message".
+func typeString(k MessageKind, isMention bool) string {
 	if k == KindEvent {
 		return "event"
+	}
+	if isMention {
+		return "mention"
 	}
 	return "message"
 }

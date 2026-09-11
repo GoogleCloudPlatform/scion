@@ -44,6 +44,19 @@ type RenderDeliveryInput struct {
 	// CreatedAt is the message timestamp. When zero, time.Now().UTC() is
 	// used — but callers should supply the persisted row's CreatedAt.
 	CreatedAt time.Time
+
+	// IsMention, when true, overrides the Kind-based type computation:
+	// the rendered envelope's "type" is "mention" rather than "message".
+	// Set explicitly by the caller that made the routing decision — never
+	// inferred from Msg.Type.
+	IsMention bool
+
+	// CoAddressees, when non-empty, overrides the single-recipient
+	// inference in buildAddressees for the "to" field: it lists every
+	// agent mentioned in this message (including the recipient this
+	// envelope is being rendered for). Only meaningful when IsMention
+	// is true.
+	CoAddressees []Addressee
 }
 
 // RenderDeliveryText is the single shared rendering entry point for all hub
@@ -100,12 +113,18 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 		}
 	}
 
+	// If caller supplied explicit CoAddressees (mention routing), use
+	// those instead of the legacy-inferred addrs from MapLegacyEnvelope.
+	if len(in.CoAddressees) > 0 {
+		addrs = in.CoAddressees
+	}
+
 	// FormatNewDelivery handles the envelope framing.
 	opts := DeliveryOptions{
 		Plain: in.Msg.Plain,
 		Raw:   in.Msg.Raw,
 	}
-	return FormatNewDelivery(msg, addrs, convInfo, opts)
+	return FormatNewDelivery(msg, addrs, convInfo, opts, in.IsMention)
 }
 
 // ConversationGetter is the minimal interface for looking up a conversation

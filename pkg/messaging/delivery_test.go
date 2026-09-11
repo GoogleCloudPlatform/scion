@@ -46,7 +46,7 @@ func TestFormatNewDelivery_TextRequest(t *testing.T) {
 		Surface: "native",
 	}
 
-	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{}, false)
 
 	// Parse the JSON out of the delimiters.
 	env := extractEnvelope(t, result)
@@ -92,7 +92,7 @@ func TestFormatNewDelivery_TextInform_NoTo(t *testing.T) {
 	}
 
 	// No addressees for informational messages.
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	env := extractEnvelope(t, result)
 
@@ -126,7 +126,7 @@ func TestFormatNewDelivery_EventWithStatus(t *testing.T) {
 		Surface: "native",
 	}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	env := extractEnvelope(t, result)
 
@@ -177,7 +177,7 @@ func TestFormatNewDelivery_NoMetadata(t *testing.T) {
 		Surface: "native",
 	}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	jsonStr := extractJSON(t, result)
 	if strings.Contains(jsonStr, `"metadata"`) {
@@ -201,7 +201,7 @@ func TestFormatNewDelivery_NoBroadcasted(t *testing.T) {
 		Surface: "native",
 	}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	jsonStr := extractJSON(t, result)
 	if strings.Contains(jsonStr, `"broadcasted"`) {
@@ -220,7 +220,7 @@ func TestFormatNewDelivery_PlainReturnsRawText(t *testing.T) {
 		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
 
-	result := FormatNewDelivery(msg, nil, nil, DeliveryOptions{Plain: true})
+	result := FormatNewDelivery(msg, nil, nil, DeliveryOptions{Plain: true}, false)
 
 	if result != "raw text content" {
 		t.Errorf("plain delivery = %q, want %q", result, "raw text content")
@@ -238,7 +238,7 @@ func TestFormatNewDelivery_RawReturnsRawText(t *testing.T) {
 		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
 
-	result := FormatNewDelivery(msg, nil, nil, DeliveryOptions{Raw: true})
+	result := FormatNewDelivery(msg, nil, nil, DeliveryOptions{Raw: true}, false)
 
 	if result != "keystroke content" {
 		t.Errorf("raw delivery = %q, want %q", result, "keystroke content")
@@ -257,7 +257,7 @@ func TestFormatNewDelivery_Delimiters(t *testing.T) {
 	}
 	conv := &ConversationInfo{ID: "conv-500", Kind: "direct", Surface: "native"}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	expectedPrefix := "You are receiving a message from the orchestration system:\n\n---BEGIN SCION MESSAGE---\n"
 	if !strings.HasPrefix(result, expectedPrefix) {
@@ -284,7 +284,7 @@ func TestFormatNewDelivery_Attachments(t *testing.T) {
 	}
 	conv := &ConversationInfo{ID: "conv-600", Kind: "direct", Surface: "native"}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	env := extractEnvelope(t, result)
 	if len(env.Attachments) != 2 {
@@ -309,7 +309,7 @@ func TestFormatNewDelivery_ReplyTo(t *testing.T) {
 	}
 	conv := &ConversationInfo{ID: "conv-700", Kind: "direct", Surface: "native"}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	env := extractEnvelope(t, result)
 	if env.ReplyTo == nil || *env.ReplyTo != "msg-000" {
@@ -333,7 +333,7 @@ func TestFormatNewDelivery_MultipleAddressees(t *testing.T) {
 	}
 	conv := &ConversationInfo{ID: "conv-900", Kind: "group", Surface: "native"}
 
-	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{}, false)
 
 	env := extractEnvelope(t, result)
 	if len(env.To) != 2 {
@@ -365,7 +365,7 @@ func TestFormatNewDelivery_SingleAddressee_OmitsToKey(t *testing.T) {
 	}
 	conv := &ConversationInfo{ID: "conv-single", Kind: "direct", Surface: "native"}
 
-	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{}, false)
 
 	// Structured: To must be empty.
 	env := extractEnvelope(t, result)
@@ -404,7 +404,7 @@ func TestFormatNewDelivery_MultipleAddressees_IncludesToKey(t *testing.T) {
 	}
 	conv := &ConversationInfo{ID: "conv-multi", Kind: "group", Surface: "native"}
 
-	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{}, false)
 
 	// Structured: To must list all three recipients.
 	env := extractEnvelope(t, result)
@@ -446,7 +446,7 @@ func TestFormatNewDelivery_Urgent(t *testing.T) {
 	}
 	conv := &ConversationInfo{ID: "conv-1000", Kind: "direct", Surface: "native"}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	env := extractEnvelope(t, result)
 	if !env.Urgent {
@@ -483,7 +483,7 @@ func TestFormatNewDelivery_NotUrgent_OmitsKey(t *testing.T) {
 	}
 	conv := &ConversationInfo{ID: "conv-1001", Kind: "direct", Surface: "native"}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	jsonStr := extractJSON(t, result)
 	if strings.Contains(jsonStr, `"urgent"`) {
@@ -506,7 +506,7 @@ func TestFormatNewDelivery_NilConversation_OmitsKey(t *testing.T) {
 		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
 
-	result := FormatNewDelivery(msg, nil, nil, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, nil, DeliveryOptions{}, false)
 
 	// The message body must still be delivered.
 	if !strings.Contains(result, "Message without conversation context") {
@@ -553,7 +553,7 @@ func TestFormatNewDelivery_TextMessage_NoKindOrIntentKeys(t *testing.T) {
 			}
 			conv := &ConversationInfo{ID: "conv-ac1", Kind: "direct", Surface: "native"}
 
-			result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+			result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 			// Structured: Type must be "message".
 			env := extractEnvelope(t, result)
@@ -598,7 +598,7 @@ func TestFormatNewDelivery_Event_NoKindOrIntentKeys(t *testing.T) {
 	}
 	conv := &ConversationInfo{ID: "conv-ac2", Kind: "direct", Surface: "native"}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	env := extractEnvelope(t, result)
 	if env.Type != "event" {
@@ -647,7 +647,7 @@ func TestFormatNewDelivery_ConversationKindUnaffected(t *testing.T) {
 			}
 			conv := &ConversationInfo{ID: "conv-ac3", Kind: convKind, Surface: "native"}
 
-			result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+			result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 			env := extractEnvelope(t, result)
 			if env.Conversation == nil {
