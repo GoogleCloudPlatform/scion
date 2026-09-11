@@ -831,6 +831,41 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Recipients:           result.Recipients,
 	}
 
+	// Backfill native-chat side-effects for agent→user DM messages.
+	// When DeriveConversationKey produced a dm: key from the principal pair
+	// (Case 3: caller supplied no ThreadID), stamp the fields and registry
+	// rows the native-chat subsystem needs to display the message in the
+	// DM channel. Without this, the message is persisted but invisible to
+	// native-chat (missing Channel/ThreadID, no webchat_dm rows, no SSE
+	// DM fan-out, no broker watermark update).
+	if result.ConvResult != nil && strings.HasPrefix(result.ConvResult.ExternalRef, "dm:") && storeMsg.ThreadID == "" {
+		extRef := result.ConvResult.ExternalRef
+		storeMsg.ThreadID = extRef
+		structuredMsg.ThreadID = extRef
+		// Backfill req.ThreadID so the W6 DM notification guard fires
+		// on the non-broker path (line ~997).
+		req.ThreadID = extRef
+
+		// Default Channel to "web" only when no channel was determined
+		// by reply affinity or the caller. When affinity has already
+		// routed to a different channel (e.g. "discord"), respect that
+		// decision — the ThreadID backfill alone is sufficient for the
+		// broker's DM registration and watermark paths.
+		if storeMsg.Channel == "" {
+			storeMsg.Channel = "web"
+			structuredMsg.Channel = "web"
+		}
+
+		// Create webchat_dm registry rows so the DM appears in the
+		// native-chat rail listing (ListDMs query).
+		s.mu.RLock()
+		dmWcs := s.webChatStore
+		s.mu.RUnlock()
+		if dmWcs != nil {
+			registerDMParticipants(ctx, dmWcs, extRef)
+		}
+	}
+
 	// Process attachments.
 	attachmentRefs := s.ingestAgentAttachments(ctx, agent.ProjectID, agent.ID, req.Attachments)
 	if encoded, ok := attachmentRefsMetadata(attachmentRefs); ok {

@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -2049,3 +2050,261 @@ func TestPhase9e_PreResolvedConversation_EnrichesKindSurfaceDisplayName(t *testi
 }
 
 func strPtr(s string) *string { return &s }
+
+// ---------------------------------------------------------------------------
+// Native-chat DM sync: agent→user outbound message side-effects
+// ---------------------------------------------------------------------------
+
+// TestHandleAgentOutboundMessage_DMSyncBackfill verifies that an agent→user
+// outbound message (scion message user:<email> "text") correctly populates the
+// native-chat side-effects:
+//   - Channel = "web" on the persisted message
+//   - ThreadID = dm:agent:<uuid>:user:<uuid> on the persisted message
+//   - webchat_dm registry rows created for both participants
+//   - (Implicitly) the SSE fan-out guard fires because Channel="web" and
+//     ThreadID starts with "dm:"
+func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Set up a WebChatStore so registerDMParticipants can write webchat_dm rows.
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	// Use t.Cleanup instead of defer so that db.Close runs after the W6
+	// notification goroutine (go cn.NotifyDMReceived) has finished — the
+	// backfill now populates req.ThreadID, which makes the non-broker
+	// notification path fire.
+	t.Cleanup(func() { _ = db.Close() })
+	wcs := NewWebChatStore(db, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init WebChatStore: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "dm-sync-project",
+		Slug: "dm-sync-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	user := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "human@example.com",
+		DisplayName: "Human",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "dm-sync-agent",
+		Slug:       "dm-sync-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Send an outbound message (no explicit channel or thread_id).
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:" + user.Email,
+		Msg:       "hello from agent",
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+	require.Equal(t, http.StatusOK, rr.Code, "handler response: %s", rr.Body.String())
+
+	// Extract the message_id from the response.
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	msgID, ok := resp["message_id"].(string)
+	require.True(t, ok && msgID != "", "expected non-empty message_id in response")
+
+	// Build the expected DM key.
+	expectedKey, err := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
+	require.NoError(t, err)
+
+	// 1. Verify the persisted message has Channel="web" and the correct ThreadID.
+	storedMsg, err := s.GetMessage(ctx, msgID)
+	require.NoError(t, err)
+	require.Equal(t, "web", storedMsg.Channel,
+		"persisted message must have Channel='web' for native-chat visibility")
+	require.Equal(t, expectedKey, storedMsg.ThreadID,
+		"persisted message must have ThreadID set to the derived dm: key")
+
+	// 2. Verify webchat_dm rows were created for both participants.
+	agentDMs, err := wcs.ListDMs(ctx, agent.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, agentDMs, "expected webchat_dm row for agent participant")
+
+	var agentDM *WebChatDM
+	for i := range agentDMs {
+		if agentDMs[i].ConversationKey == expectedKey {
+			agentDM = &agentDMs[i]
+			break
+		}
+	}
+	require.NotNil(t, agentDM, "expected webchat_dm row with correct conversation key for agent")
+	require.Equal(t, user.ID, agentDM.PeerID, "agent's DM row should have user as peer")
+
+	userDMs, err := wcs.ListDMs(ctx, user.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, userDMs, "expected webchat_dm row for user participant")
+
+	var userDM *WebChatDM
+	for i := range userDMs {
+		if userDMs[i].ConversationKey == expectedKey {
+			userDM = &userDMs[i]
+			break
+		}
+	}
+	require.NotNil(t, userDM, "expected webchat_dm row with correct conversation key for user")
+	require.Equal(t, agent.ID, userDM.PeerID, "user's DM row should have agent as peer")
+
+	// 3. Verify the SSE fan-out guard would fire: Channel="web" and ThreadID
+	//    starts with "dm:". This is a structural assertion — if both fields
+	//    are correctly set, the condition at events.go:768 evaluates true.
+	require.Equal(t, "web", storedMsg.Channel)
+	require.True(t, strings.HasPrefix(storedMsg.ThreadID, "dm:"),
+		"ThreadID must start with 'dm:' for SSE DM fan-out")
+
+	// Allow the W6 notification goroutine (go cn.NotifyDMReceived) to
+	// complete before t.Cleanup closes the database. The goroutine checks
+	// IsConversationMuted which hits the WebChatStore's SQLite DB.
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestHandleAgentOutboundMessage_DMSyncBrokerPath verifies that when the broker
+// is available, the structuredMsg passed to PublishUserMessage also carries the
+// backfilled ThreadID and Channel, so the broker's existing DM registration and
+// watermark code (messagebroker.go:583-600) fires correctly.
+func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Set up a WebChatStore.
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	// Register db.Close as a t.Cleanup BEFORE proxy.Stop so that LIFO
+	// ordering guarantees proxy.Stop runs first — draining in-flight
+	// deliverToUser callbacks (including TouchDMActivity) before the
+	// database handle is closed.
+	t.Cleanup(func() { _ = db.Close() })
+	wcs := NewWebChatStore(db, "sqlite3")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "dm-sync-broker-project",
+		Slug: "dm-sync-broker-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	user := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "human-broker@example.com",
+		DisplayName: "Human Broker",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	agent := &store.Agent{
+		ID:              api.NewUUID(),
+		Name:            "dm-sync-broker-agent",
+		Slug:            "dm-sync-broker-agent",
+		ProjectID:       project.ID,
+		Phase:           "running",
+		Visibility:      store.VisibilityPrivate,
+		RuntimeBrokerID: "test-broker",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Set up a broker proxy so the handler takes the broker path.
+	inproc := eventbus.NewInProcessEventBus(slog.Default())
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: inproc},
+		{Name: "web", Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	proxy := NewMessageBrokerProxy(fanout, s, events,
+		func() AgentDispatcher { return noopDispatcher{} }, slog.Default())
+	proxy.webChatStore = wcs
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	srv.SetMessageBrokerProxy(proxy)
+
+	// Subscribe to the project's user message topic so PublishUserMessage can deliver.
+	proxy.subscribeProjectUserMessages(project.ID)
+
+	// Send an outbound message.
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:" + user.Email,
+		Msg:       "hello via broker",
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+	require.Equal(t, http.StatusOK, rr.Code, "handler response: %s", rr.Body.String())
+
+	// Build the expected DM key.
+	expectedKey, err := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
+	require.NoError(t, err)
+
+	// Wait briefly for the async broker delivery to complete.
+	deadline := time.Now().Add(3 * time.Second)
+	var agentDMs []WebChatDM
+	for time.Now().Before(deadline) {
+		agentDMs, err = wcs.ListDMs(ctx, agent.ID)
+		if err == nil && len(agentDMs) > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// The handler backfills the DM rows directly (before broker), AND the
+	// broker path also calls registerDMParticipants when ThreadID is set.
+	// Either way, rows must exist.
+	require.NotEmpty(t, agentDMs,
+		"expected webchat_dm rows after broker delivery (ThreadID backfill enables broker DM registration)")
+
+	var found bool
+	for _, dm := range agentDMs {
+		if dm.ConversationKey == expectedKey {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "expected webchat_dm row with key %s", expectedKey)
+
+	// Also check the user's side.
+	userDMs, err := wcs.ListDMs(ctx, user.ID)
+	require.NoError(t, err)
+	var userFound bool
+	for _, dm := range userDMs {
+		if dm.ConversationKey == expectedKey {
+			userFound = true
+			break
+		}
+	}
+	require.True(t, userFound, "expected webchat_dm row for user with key %s", expectedKey)
+}
