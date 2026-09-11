@@ -145,7 +145,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleMember,
 			Description: "Project member with basic project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    2, // R2: remove agent.stop_all, skill.create, project.create
+			Revision:    3, // R3: remove agent.message (policy alignment with agent.attach)
 			Permissions: projectMemberCuratedPermissionIDs(),
 		},
 
@@ -377,6 +377,7 @@ func projectAdminPermissionIDs() []string {
 // scoped resources.
 //
 // Excluded from this role:
+//   - agent.message: messaging requires owner/admin role or ancestry
 //   - agent.stop_all: bulk stop is an administrative action, not basic membership
 //   - skill.create: skill creation is an admin/owner action
 //   - project.create: hub-level operation, meaningless in a project-scoped role
