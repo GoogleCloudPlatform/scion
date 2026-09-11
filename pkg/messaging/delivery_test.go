@@ -63,8 +63,9 @@ func TestFormatNewDelivery_TextRequest(t *testing.T) {
 	if env.From != "user:alice" {
 		t.Errorf("from = %q, want %q", env.From, "user:alice")
 	}
-	if len(env.To) != 1 || env.To[0] != "agent:deployer" {
-		t.Errorf("to = %v, want [agent:deployer]", env.To)
+	// Single-recipient direct messages omit "to" — the recipient is implicit.
+	if len(env.To) != 0 {
+		t.Errorf("to = %v, want empty (single-recipient direct message)", env.To)
 	}
 	if env.Type != "message" {
 		t.Errorf("type = %q, want %q", env.Type, "message")
@@ -343,6 +344,88 @@ func TestFormatNewDelivery_MultipleAddressees(t *testing.T) {
 	}
 	if env.To[1] != "agent:tester" {
 		t.Errorf("to[1] = %q, want %q", env.To[1], "agent:tester")
+	}
+}
+
+// TestFormatNewDelivery_SingleAddressee_OmitsToKey verifies that a direct
+// message (exactly one addressee) omits the "to" key entirely from the
+// delivered JSON. The recipient is implicit for single-recipient messages.
+func TestFormatNewDelivery_SingleAddressee_OmitsToKey(t *testing.T) {
+	intent := IntentRequest
+	msg := &Message{
+		ID:        "msg-single-to",
+		From:      PrincipalRef("user:alice"),
+		Kind:      KindText,
+		Intent:    &intent,
+		Body:      "Direct message",
+		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+	}
+	addrs := []Addressee{
+		{MessageID: "msg-single-to", PrincipalKind: "agent", PrincipalID: "bot", Via: ViaExplicit, DeliveryState: DeliveryPending},
+	}
+	conv := &ConversationInfo{ID: "conv-single", Kind: "direct", Surface: "native"}
+
+	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{})
+
+	// Structured: To must be empty.
+	env := extractEnvelope(t, result)
+	if len(env.To) != 0 {
+		t.Errorf("to = %v, want empty (single-recipient)", env.To)
+	}
+
+	// Raw JSON: "to" key must be absent (not just an empty array).
+	jsonStr := extractJSON(t, result)
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+	if _, ok := raw["to"]; ok {
+		t.Error("JSON contains 'to' key; want absent for single-recipient direct message")
+	}
+}
+
+// TestFormatNewDelivery_MultipleAddressees_IncludesToKey verifies that a
+// group message (multiple addressees) still includes the "to" key with all
+// recipient principal refs.
+func TestFormatNewDelivery_MultipleAddressees_IncludesToKey(t *testing.T) {
+	intent := IntentRequest
+	msg := &Message{
+		ID:        "msg-multi-to",
+		From:      PrincipalRef("user:alice"),
+		Kind:      KindText,
+		Intent:    &intent,
+		Body:      "Group message",
+		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+	}
+	addrs := []Addressee{
+		{MessageID: "msg-multi-to", PrincipalKind: "agent", PrincipalID: "deployer", Via: ViaExplicit, DeliveryState: DeliveryPending},
+		{MessageID: "msg-multi-to", PrincipalKind: "agent", PrincipalID: "tester", Via: ViaExplicit, DeliveryState: DeliveryPending},
+		{MessageID: "msg-multi-to", PrincipalKind: "user", PrincipalID: "bob", Via: ViaExplicit, DeliveryState: DeliveryPending},
+	}
+	conv := &ConversationInfo{ID: "conv-multi", Kind: "group", Surface: "native"}
+
+	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{})
+
+	// Structured: To must list all three recipients.
+	env := extractEnvelope(t, result)
+	if len(env.To) != 3 {
+		t.Fatalf("to length = %d, want 3", len(env.To))
+	}
+	want := []string{"agent:deployer", "agent:tester", "user:bob"}
+	for i, w := range want {
+		if env.To[i] != w {
+			t.Errorf("to[%d] = %q, want %q", i, env.To[i], w)
+		}
+	}
+
+	// Raw JSON: "to" key must be present.
+	jsonStr := extractJSON(t, result)
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+	if _, ok := raw["to"]; !ok {
+		t.Error("JSON missing 'to' key; want present for multi-recipient group message")
 	}
 }
 

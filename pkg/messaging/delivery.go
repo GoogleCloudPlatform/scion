@@ -81,8 +81,13 @@ func FormatNewDelivery(
 	}
 
 	// Build addressee principal refs for the "to" field.
-	for _, a := range addrs {
-		env.To = append(env.To, a.PrincipalKind+":"+a.PrincipalID)
+	// For single-recipient (direct) messages the recipient is implicit —
+	// omit "to" to reduce envelope noise. Multi-recipient (group) messages
+	// still list every addressee so agents know who else received the message.
+	if len(addrs) > 1 {
+		for _, a := range addrs {
+			env.To = append(env.To, a.PrincipalKind+":"+a.PrincipalID)
+		}
 	}
 
 	// Map attachments to plain paths.
