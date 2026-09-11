@@ -62,7 +62,7 @@ capabilities:
     vertex_ai: { support: "no", reason: "Meta model, not available on Vertex AI" }
   mcp:
     stdio: { support: "yes" }
-    sse: { support: "no", reason: "Only streamable_http documented; SSE mapped to streamable_http as fallback" }
+    sse: { support: "partial", reason: "SSE mapped to streamable_http" }
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Project-scoped MCP not implemented; entries demoted to global" }
   resume: { support: "partial", reason: "Interactive slash command only, no CLI flag" }

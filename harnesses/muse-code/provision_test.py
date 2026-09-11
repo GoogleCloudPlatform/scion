@@ -38,19 +38,19 @@ MANAGED_END = "<!-- END SCION MANAGED -->"
 SEED_SETTINGS = {
     "schema_version": 1,
     "hooks": {
-        "SessionStart": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "SessionEnd": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "UserPromptSubmit": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PreLLMCall": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PostLLMCall": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PermissionRequest": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PreCompact": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "PostCompact": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "SubagentStart": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "SubagentStop": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
-        "Stop": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+        "SessionStart": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+        "SessionEnd": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+        "UserPromptSubmit": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+        "PreToolUse": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+        "PostToolUse": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+        "PreLLMCall": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+        "PostLLMCall": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+        "PermissionRequest": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+        "PreCompact": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+        "PostCompact": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+        "SubagentStart": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+        "SubagentStop": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+        "Stop": [{"matcher": "*", "hooks": [{"name": "scion-hook", "type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
     },
 }
 
@@ -464,6 +464,61 @@ class MuseCodeProvisionTest(unittest.TestCase):
                 os.path.join(tmp, "bundle", "outputs", "env.json")
             )
             self.assertEqual(env_json, {})
+
+    def test_mcp_sse_mapped_to_streamable_http(self) -> None:
+        """SSE transport servers are mapped to streamable_http."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            os.makedirs(home)
+            _write_seed_settings(home)
+
+            mcp_servers = {
+                "sse-server": {
+                    "transport": "sse",
+                    "url": "https://sse.example.com/events",
+                    "headers": {"Authorization": "Bearer tok"},
+                },
+            }
+            manifest = _make_bundle(tmp, home, mcp_servers=mcp_servers)
+
+            with temporary_home(home), temporary_env("SCION_MODEL", ""):
+                ctx = scion_harness.ProvisionContext("muse-code", manifest)
+                provision.provision(ctx)
+
+            settings_path = os.path.join(home, ".config", "muse", "settings.json")
+            settings = _read_json(settings_path)
+
+            self.assertIn("mcp_servers", settings)
+            self.assertIn("sse-server", settings["mcp_servers"])
+            server = settings["mcp_servers"]["sse-server"]
+            # SSE must be mapped to streamable_http per transport_map.
+            self.assertEqual(server["transport"], "streamable_http")
+            self.assertEqual(server["url"], "https://sse.example.com/events")
+
+    def test_provision_cold_start_no_settings(self) -> None:
+        """Provision succeeds when no settings.json exists (cold start)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            os.makedirs(home)
+            # Deliberately do NOT call _write_seed_settings(home).
+
+            manifest = _make_bundle(tmp, home)
+
+            with temporary_home(home), temporary_env("SCION_MODEL", ""):
+                ctx = scion_harness.ProvisionContext("muse-code", manifest)
+                provision.provision(ctx)
+
+            # settings.json should be created with schema_version.
+            settings_path = os.path.join(home, ".config", "muse", "settings.json")
+            self.assertTrue(os.path.isfile(settings_path))
+            settings = _read_json(settings_path)
+            self.assertEqual(settings.get("schema_version"), 1)
+
+            # Auth should fall back to none.
+            auth_json = _read_json(
+                os.path.join(tmp, "bundle", "outputs", "resolved-auth.json")
+            )
+            self.assertEqual(auth_json["method"], "none")
 
     def test_provision_idempotent(self) -> None:
         """Running provision twice produces the same result."""

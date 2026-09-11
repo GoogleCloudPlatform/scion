@@ -16,10 +16,16 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-# Install Muse Code CLI
+# Version-pinning ARG (defaulting to latest; enables version-locked CI builds).
+# Note: The install script may not support version pinning directly yet.
+ARG MUSE_VERSION=latest
+
+# Install Muse Code CLI (copy pattern — matches grok-build)
 RUN MUSE_NO_MODIFY_PATH=1 \
     curl -fsSL https://dev.meta.ai/install.sh | sh && \
-    ln -sf /home/scion/.local/bin/muse /usr/local/bin/muse
+    cp -fL /root/.local/bin/muse /usr/local/bin/muse && \
+    chmod +x /usr/local/bin/muse && \
+    rm -rf /root/.local/bin/muse
 
 # Create config and data directories owned by agent user
 RUN mkdir -p /home/scion/.config/muse \

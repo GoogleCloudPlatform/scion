@@ -23,10 +23,9 @@ Muse-Code-native concerns handled here:
   - MCP servers are merged into settings.json under mcp_servers using
     the declarative apply_mcp_servers_simple mapping.
   - Instructions project to AGENTS.md (configurable via instructions_file).
-  - Model is resolved from SCION_MODEL env var via model_aliases and
-    written to the env overlay.
-  - settings.json is read, runtime values merged (model), and written
-    back preserving the static hook wiring from the seed file.
+  - Model is passed via the host-side --model CLI flag.
+  - settings.json is read, schema_version ensured, and written back
+    preserving the static hook wiring from the seed file.
 """
 
 from __future__ import annotations
@@ -46,7 +45,6 @@ assert scion_harness.INTERFACE_VERSION >= 2, (
 )
 
 SETTINGS_FILE = "~/.config/muse/settings.json"
-DEFAULT_MODEL = "muse-spark-1.2"
 
 AUTH = scion_harness.AuthSpec(
     "muse-code",
@@ -59,22 +57,6 @@ AUTH = scion_harness.AuthSpec(
     ],
     fallback_to_none_on_error=True,
 )
-
-
-# --- Auth helpers -----------------------------------------------------------
-
-
-def _read_env_secret(ctx: scion_harness.ProvisionContext, name: str) -> str:
-    """Read an env secret, expanding $HOME in the staged path."""
-    path = ctx.env_secret_files.get(name, "")
-    if not path:
-        return ""
-    path = scion_harness.expand_path(path)
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read().rstrip("\r\n")
-    except OSError:
-        return ""
 
 
 # --- Settings.json management -----------------------------------------------
@@ -111,7 +93,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     env: dict[str, str] = {}
 
     if resolved.method == "api-key" and resolved.env_key:
-        api_key = _read_env_secret(ctx, resolved.env_key)
+        api_key = ctx.read_secret(resolved.env_key)
         if not api_key:
             raise scion_harness.ProvisionError(
                 f"chose api-key ({resolved.env_key}) but no secret value "
@@ -120,22 +102,18 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         env["META_API_KEY"] = api_key
 
     # --- Model resolution -----------------------------------------------------
+    # Model is passed via the host-side --model CLI flag; no env overlay needed.
     raw_model = os.environ.get("SCION_MODEL", "").strip()
     aliases = ctx.harness_config.get("model_aliases") or {}
-    model = aliases.get(raw_model.lower(), raw_model) if raw_model else DEFAULT_MODEL
+    model = aliases.get(raw_model.lower(), raw_model) if raw_model else ""
 
     # --- Settings.json merge ---------------------------------------------------
     # Read the existing settings.json (seed file provides hooks + schema_version).
-    # Merge in runtime values and write back.
+    # Ensure schema_version is present and write back.
     settings = _read_settings(ctx.home)
 
-    # Ensure schema_version is present.
     if "schema_version" not in settings:
         settings["schema_version"] = 1
-
-    # Write the resolved model for reference (not a native setting key,
-    # but useful for debugging; the actual model is passed via env).
-    # We set the model via env overlay since --model flag is added by the host.
 
     _write_settings(ctx.home, settings)
 
