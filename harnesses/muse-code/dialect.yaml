@@ -1,0 +1,85 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Scion data-driven dialect spec for Meta Muse Code hook events.
+# Staged to $HOME/.scion/harness/dialect.yaml at agent start.
+dialect: muse-code
+
+event_name_fields:
+  - hook_event_name
+  - type
+  - event
+
+mappings:
+  # Session lifecycle.
+  SessionStart:
+    event: session-start
+  SessionEnd:
+    event: session-end
+
+  # Prompt lifecycle.
+  UserPromptSubmit:
+    event: prompt-submit
+    fields:
+      prompt: prompt
+      session_id: session_id
+
+  # Tool lifecycle.
+  PreToolUse:
+    event: tool-start
+    fields:
+      tool_name: tool_name
+      tool_input: tool_input
+  PostToolUse:
+    event: tool-end
+    fields:
+      tool_name: tool_name
+      tool_output: tool_output
+      success: success
+      error: error
+
+  # Model lifecycle (enables max_model_calls enforcement).
+  PreLLMCall:
+    event: model-start
+  PostLLMCall:
+    event: model-end
+    fields:
+      input_tokens: input_tokens
+      output_tokens: output_tokens
+      cached_tokens: cached_tokens
+
+  # Permission events.
+  PermissionRequest:
+    event: notification
+    fields:
+      tool_name: tool_name
+
+  # Context compaction.
+  PreCompact:
+    event: notification
+  PostCompact:
+    event: notification
+
+  # Subagent lifecycle.
+  SubagentStart:
+    event: notification
+  SubagentStop:
+    event: subagent-end
+
+  # Agent completion.
+  Stop:
+    event: agent-end
+    fields:
+      assistant_text: assistant_text
+      message: message

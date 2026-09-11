@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "hooks": {
+    "SessionStart": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+    "SessionEnd": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+    "UserPromptSubmit": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+    "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+    "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+    "PreLLMCall": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+    "PostLLMCall": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+    "PermissionRequest": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+    "PreCompact": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+    "PostCompact": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+    "SubagentStart": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+    "SubagentStop": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}],
+    "Stop": [{"matcher": "*", "hooks": [{"type": "command", "command": "sciontool hook --dialect=muse-code"}]}]
+  }
+}
