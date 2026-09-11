@@ -1051,34 +1051,103 @@ func TestRoundTrip_NewToOldToNew(t *testing.T) {
 
 // ---------- buildPrincipalRef ----------
 
-func TestBuildPrincipalRef_RawUUIDWithPrefixedName(t *testing.T) {
-	// When SenderID is a raw UUID (no colon), the kind should be derived
-	// from the Sender name field.
-	ref := buildPrincipalRef("user:alice", "be67fbc9-c869-5d43-b15d-c28ca3e8d355")
-	if ref != "user:be67fbc9-c869-5d43-b15d-c28ca3e8d355" {
-		t.Fatalf("expected user-prefixed ref, got %q", ref)
+func TestBuildPrincipalRef_PreferSlugOverUUID(t *testing.T) {
+	// When name is a valid PrincipalRef (kind:value), prefer it over the
+	// raw UUID in the id parameter. This keeps human-readable slugs and
+	// emails in the delivery envelope.
+	tests := []struct {
+		name string
+		n    string // name parameter
+		id   string // id parameter
+		want PrincipalRef
+	}{
+		{
+			name: "agent slug preferred over UUID",
+			n:    "agent:my-slug",
+			id:   "814b7c0b-1a15-43a2-a3f1-2aa3b1548c94",
+			want: "agent:my-slug",
+		},
+		{
+			name: "user email preferred over UUID",
+			n:    "user:alice@example.com",
+			id:   "be67fbc9-c869-5d43-b15d-c28ca3e8d355",
+			want: "user:alice@example.com",
+		},
+		{
+			name: "system ref preferred over UUID",
+			n:    "system:scheduler",
+			id:   "some-uuid",
+			want: "system:scheduler",
+		},
 	}
-	// Must pass PrincipalRef validation.
-	if err := ValidatePrincipalRef(ref); err != nil {
-		t.Fatalf("expected valid PrincipalRef, got error: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := buildPrincipalRef(tc.n, tc.id)
+			if ref != tc.want {
+				t.Errorf("got %q, want %q", ref, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildPrincipalRef_FallbackToID(t *testing.T) {
+	// When name is absent, empty, or not a valid PrincipalRef, fall back
+	// to constructing from the id parameter.
+	tests := []struct {
+		name string
+		n    string // name parameter
+		id   string // id parameter
+		want PrincipalRef
+	}{
+		{
+			name: "empty name falls back to kind from name (trailing colon)",
+			n:    "user:",
+			id:   "be67fbc9-c869-5d43-b15d-c28ca3e8d355",
+			want: "user:be67fbc9-c869-5d43-b15d-c28ca3e8d355",
+		},
+		{
+			name: "no name at all falls back to system",
+			n:    "",
+			id:   "some-uuid",
+			want: "system:some-uuid",
+		},
+		{
+			name: "name without colon falls back to system",
+			n:    "alice",
+			id:   "some-uuid",
+			want: "system:some-uuid",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := buildPrincipalRef(tc.n, tc.id)
+			if ref != tc.want {
+				t.Errorf("got %q, want %q", ref, tc.want)
+			}
+		})
 	}
 }
 
 func TestBuildPrincipalRef_PrefixedID(t *testing.T) {
-	// When SenderID already has a colon, use it directly.
-	ref := buildPrincipalRef("user:alice", "user:alice-uuid")
+	// When name is absent and id already has a colon, use id directly.
+	ref := buildPrincipalRef("", "user:alice-uuid")
 	if ref != "user:alice-uuid" {
 		t.Fatalf("expected prefixed id used directly, got %q", ref)
 	}
 }
 
-func TestBuildPrincipalRef_AgentKindDerived(t *testing.T) {
-	ref := buildPrincipalRef("agent:builder", "814b7c0b-1a15-43a2-a3f1-2aa3b1548c94")
-	if ref != "agent:814b7c0b-1a15-43a2-a3f1-2aa3b1548c94" {
-		t.Fatalf("expected agent-prefixed ref, got %q", ref)
+func TestBuildPrincipalRef_NameOnlyNoID(t *testing.T) {
+	// When id is empty and name is a valid PrincipalRef, use name directly.
+	ref := buildPrincipalRef("agent:builder", "")
+	if ref != "agent:builder" {
+		t.Fatalf("expected name used directly, got %q", ref)
 	}
-	if err := ValidatePrincipalRef(ref); err != nil {
-		t.Fatalf("expected valid PrincipalRef, got error: %v", err)
+}
+
+func TestBuildPrincipalRef_BothEmpty(t *testing.T) {
+	ref := buildPrincipalRef("", "")
+	if ref != "system:unknown" {
+		t.Fatalf("expected system:unknown, got %q", ref)
 	}
 }
 

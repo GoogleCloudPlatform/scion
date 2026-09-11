@@ -1202,7 +1202,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			}
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			structuredMsg.SenderID = agentIdent.ID()
-			structuredMsg.Sender = "agent:" + agentIdent.ID()
+			senderSlug := agentIdent.ID() // fallback to UUID
+			if senderAgent, err := s.store.GetAgent(ctx, agentIdent.ID()); err == nil {
+				senderSlug = senderAgent.Slug
+			}
+			structuredMsg.Sender = "agent:" + senderSlug
 		}
 		// Default version, timestamp and type when the client omits them
 		// (e.g. the web UI sends a minimal structured_message).
@@ -2289,7 +2293,11 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		}
 	} else if agentIdent != nil {
 		req.StructuredMessage.SenderID = agentIdent.ID()
-		req.StructuredMessage.Sender = "agent:" + agentIdent.ID()
+		senderSlug := agentIdent.ID() // fallback to UUID
+		if senderAgent, err := s.store.GetAgent(ctx, agentIdent.ID()); err == nil {
+			senderSlug = senderAgent.Slug
+		}
+		req.StructuredMessage.Sender = "agent:" + senderSlug
 	}
 
 	// B5 SECURITY FIX: force Broadcasted = true server-side. The client

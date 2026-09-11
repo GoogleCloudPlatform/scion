@@ -194,9 +194,17 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 
 // buildPrincipalRef constructs a PrincipalRef from old sender/senderID fields.
 // The old format has name (e.g. "user:alice", "agent:builder") and id (a raw
-// UUID or a prefixed ref). When id is a raw identifier without a colon, the
-// kind prefix is derived from name so the result is a valid PrincipalRef.
+// UUID or a prefixed ref). When name is already a valid PrincipalRef (has a
+// "kind:" prefix with a non-empty id part), it is preferred over the raw id so
+// that human-readable slugs and emails are preserved in the delivery envelope.
+// The id parameter is used only as a fallback when name is absent or invalid.
 func buildPrincipalRef(name, id string) PrincipalRef {
+	// Prefer name when it is already a valid PrincipalRef (kind:value with
+	// non-empty value after the colon).
+	if idx := strings.IndexByte(name, ':'); idx > 0 && idx < len(name)-1 {
+		return PrincipalRef(name)
+	}
+
 	if id != "" {
 		// If id is already a valid PrincipalRef (contains colon), use directly.
 		if strings.Contains(id, ":") {
