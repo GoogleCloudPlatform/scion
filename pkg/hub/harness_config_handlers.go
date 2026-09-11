@@ -198,6 +198,16 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 			Permission: "harness_config.list",
 		}).Allowed
 	}
+	// Agents with project:read scope can discover all harness configs.
+	// Global harness configs are parentless resources that cannot match
+	// project-scoped agent bindings in AuthorizeReadBatch, so agents
+	// would see zero results without this bypass. The agent's read
+	// access was already verified by checkAgentReadScope above.
+	if !hasAdminView {
+		if agentIdent, ok := identity.(AgentIdentity); ok && agentIdent.HasScope(ScopeProjectRead) {
+			hasAdminView = true
+		}
+	}
 	if identity != nil && !hasAdminView {
 		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.HarnessConfig], error) {
 			page, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
