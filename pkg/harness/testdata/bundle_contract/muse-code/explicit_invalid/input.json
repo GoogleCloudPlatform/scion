@@ -1,0 +1,10 @@
+{
+  "auth_candidates": {
+    "schema_version": 1,
+    "explicit_type": "nonexistent-method",
+    "env_vars": [],
+    "env_secret_files": {},
+    "files": []
+  },
+  "harness_config": {}
+}
