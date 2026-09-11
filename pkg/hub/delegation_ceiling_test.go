@@ -776,9 +776,9 @@ func TestDelegationCeiling_MintAndAssignFailClosed(t *testing.T) {
 	assert.False(t, decision.Allowed, "ActionCreate must fail closed when delegator not found")
 }
 
-// --- Test 5: Post-backfill, no-edge agent is DENIED (not grandfathered) ---
+// --- Test 5: Post-backfill, no-edge agent: reads allowed, writes blocked ---
 
-func TestDelegationCeiling_PostBackfillNoEdgeDenied(t *testing.T) {
+func TestDelegationCeiling_PostBackfillNoEdge_ReadAllowed_WriteBlocked(t *testing.T) {
 	authz, s := setupDelegationCeilingTest(t)
 	ctx := context.Background()
 
@@ -793,15 +793,22 @@ func TestDelegationCeiling_PostBackfillNoEdgeDenied(t *testing.T) {
 		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
 	require.NoError(t, err, "should be able to set backfill marker")
 
-	// No delegation edge — post-backfill, this should be DENIED
+	// No delegation edge — post-backfill. Read-only operations should be
+	// allowed (fail-open for hub-attested local agents), while write
+	// operations remain ceiling-capped.
 	// CO1: Use project resource — agent.read has no AgentScopes. With project
 	// resource the kernel allows, so the denial comes from the delegation
 	// ceiling (post-backfill, no edge), which is the intended test target.
 	agent := dcAgentIdentity(agentID, projectID, AgentRoleFull)
 	resource := Resource{Type: "project", ID: projectID}
 
+	// Read-only operations are allowed despite missing edge (fail-open).
 	decision := authz.CheckAccess(ctx, agent, resource, ActionRead)
-	assert.False(t, decision.Allowed, "post-backfill agent with no edge must be denied (no grandfathering)")
+	assert.True(t, decision.Allowed, "post-backfill read-only should be allowed despite missing edge")
+
+	// Write operations are still denied (ceiling-capped).
+	decision = authz.CheckAccess(ctx, agent, resource, ActionCreate)
+	assert.False(t, decision.Allowed, "post-backfill write operation must be denied without delegation edge")
 }
 
 // --- Test 8e: Duplicate active edges → fail closed for minting ---
