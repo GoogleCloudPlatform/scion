@@ -528,18 +528,13 @@ func TestDEF158_AC7_OriginalValidation_StillRejects(t *testing.T) {
 // the same shape sendAgentRouted writes for user→agent DMs
 // (handlers_chat_v2.go:1059).
 //
-// The fix is NOT applied here because of FACT 2 (architect review): the
-// comment at :233 claims empty Channel fans out to all spokes, but spoke
-// selection lives in the broker plugin, outside this repo, and the claim is
-// unverified. Narrowing Channel blind risks removing delivery for a
-// multi-spoke user who is reached today. DEF-159 tracks this fix once the
-// broker plugin's semantics are confirmed.
-//
-// When DEF-159 is fixed, this test gets INVERTED (assert non-empty, assert
-// visible), not deleted.
+// DEF-159 is now fixed: the DM-sync backfill populates Channel and
+// ThreadID on the normal outbound path (explicit recipient, no conv-ref,
+// no affinity). This test verifies the backfill produces the correct
+// values and that the message is visible in conversation history.
 // ---------------------------------------------------------------------------
 
-func TestDEF159_KnownDefect_NormalPathLeavesChannelAndThreadIDEmpty(t *testing.T) {
+func TestDEF159_Fixed_NormalPathBackfillsChannelAndThreadID(t *testing.T) {
 	srv, s, project, agent, user := def138Setup(t)
 	ctx := context.Background()
 
@@ -604,18 +599,18 @@ func TestDEF159_KnownDefect_NormalPathLeavesChannelAndThreadIDEmpty(t *testing.T
 		return false
 	}, 5*time.Second, 50*time.Millisecond, "message not persisted")
 
-	// DEF-159 KNOWN DEFECT: Channel and ThreadID are both empty.
-	// When DEF-159 is fixed, invert these assertions.
-	assert.Empty(t, stored.Channel,
-		"DEF-159 known defect: on normal path with no affinity, Channel is empty")
-	assert.Empty(t, stored.ThreadID,
-		"DEF-159 known defect: on normal path, ThreadID is empty (no backfill outside conv-ref scope)")
-
-	// Read-path visibility: the message is NOT visible in history because
-	// the filter is Channel:"web" and the stored Channel is "".
-	// When DEF-159 is fixed, invert this assertion (message SHOULD be visible).
+	// Derive the expected DM conversation key for ThreadID assertion.
 	dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
 	require.NoError(t, err)
+
+	// DEF-159 fixed: backfill sets Channel and ThreadID on the normal path.
+	assert.Equal(t, "web", stored.Channel,
+		"DEF-159 fixed: on normal path with no affinity, Channel is backfilled to 'web'")
+	assert.Equal(t, dmKey, stored.ThreadID,
+		"DEF-159 fixed: on normal path, ThreadID is backfilled to the DM conversation key")
+
+	// Read-path visibility: the message IS visible in history now that
+	// Channel is backfilled to "web" (matching the history filter).
 	code, histResp := readConversationHistoryAsUser(t, srv, user, dmKey)
 	require.Equal(t, http.StatusOK, code,
 		"DEF-159: history read must succeed so visibility assertion runs")
@@ -626,7 +621,6 @@ func TestDEF159_KnownDefect_NormalPathLeavesChannelAndThreadIDEmpty(t *testing.T
 			break
 		}
 	}
-	// When DEF-159 is fixed, invert: assert.True(t, found, ...).
-	assert.False(t, found,
-		"DEF-159 known defect: message with empty Channel must NOT appear in history (Channel:'web' filter)")
+	assert.True(t, found,
+		"DEF-159 fixed: message with backfilled Channel='web' MUST appear in history")
 }
