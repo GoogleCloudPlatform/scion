@@ -100,8 +100,6 @@ The `scion message` command provides the following flags:
 - **`--wake`**: Resumes a suspended agent before delivering the message.
 - **`--interrupt`**: Interrupts the target agent's harness before sending the message (use with caution).
 - **`--attach <file>`**: Attaches one or more file paths to the message. Repeatable.
-- **`--visibility <level>`**: Sets message visibility: `normal`, `verbose`, or `full`. Controls how the message appears in conversation views with different density filters.
-
 **Capabilities that moved to separate commands:**
 - **Raw keystrokes**: Use `scion keys` to send literal keystrokes to an agent's tmux terminal (replaces the old `--raw` flag).
 - **Scheduled messages**: Use `scion schedule create` to schedule messages for future delivery (replaces the old `--in` and `--at` flags). See the `scion-scheduler` skill.
