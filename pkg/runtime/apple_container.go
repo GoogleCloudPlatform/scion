@@ -321,8 +321,11 @@ func (r *AppleContainerRuntime) RemoveImage(ctx context.Context, image string) e
 }
 
 func (r *AppleContainerRuntime) PullImage(ctx context.Context, image string) error {
-	_, err := runSimpleCommand(ctx, r.Command, "image", "pull", image)
-	return err
+	out, err := runSimpleCommand(ctx, r.Command, "image", "pull", image)
+	if err != nil {
+		return fmt.Errorf("pull %q: %w\n%s", image, err, strings.TrimSpace(out))
+	}
+	return nil
 }
 
 func (r *AppleContainerRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {
