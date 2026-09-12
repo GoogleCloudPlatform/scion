@@ -1428,9 +1428,13 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 func mentionCoAddressees(agents []*store.Agent) []messaging.Addressee {
 	addrs := make([]messaging.Addressee, 0, len(agents))
 	for _, ag := range agents {
+		principalID := ag.ID // fallback to UUID
+		if ag.Slug != "" {
+			principalID = ag.Slug
+		}
 		addrs = append(addrs, messaging.Addressee{
 			PrincipalKind: "agent",
-			PrincipalID:   ag.ID,
+			PrincipalID:   principalID,
 			Via:           messaging.ViaBodyMention,
 			DeliveryState: messaging.DeliveryPending,
 		})

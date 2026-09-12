@@ -184,8 +184,10 @@ func TestDEF169_Integration_MultiMention_EnvelopeTypeAndTo(t *testing.T) {
 		}
 	}
 
-	// Both agents must see the same "to" list containing both agents' IDs.
-	wantTo := []string{"agent:" + agentA.ID, "agent:" + agentB.ID}
+	// Both agents must see the same "to" list containing both agents'
+	// slugs (DEF-172: mention "to" entries must use the agent slug, not
+	// the raw UUID).
+	wantTo := []string{"agent:" + agentA.Slug, "agent:" + agentB.Slug}
 	sort.Strings(wantTo)
 
 	for _, slug := range []string{"agent-alpha", "agent-beta"} {
@@ -281,7 +283,9 @@ func TestDEF169_Integration_SingleMention_EnvelopeTypeAndTo(t *testing.T) {
 	if len(env.To) != 1 {
 		t.Fatalf("to length = %d, want 1", len(env.To))
 	}
-	wantTo := "agent:" + agent.ID
+	// DEF-172: "to" must name the agent by slug, not raw UUID, even in its
+	// own envelope (a single mentioned agent seeing itself named).
+	wantTo := "agent:" + agent.Slug
 	if env.To[0] != wantTo {
 		t.Errorf("to[0] = %q, want %q", env.To[0], wantTo)
 	}
