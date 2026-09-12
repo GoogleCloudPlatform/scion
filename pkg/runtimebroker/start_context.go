@@ -163,7 +163,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 				// external config dir was cleaned up (project was deleted and
 				// recreated with the same name — miller79/scion#28).
 				if in.ProjectID != "" && marker.ProjectID != in.ProjectID {
-					if isStaleExternalDir(marker.ExternalProjectPath) {
+					extPath, _ := marker.ExternalProjectPath()
+					if isStaleExternalDir(extPath) {
 						slug := marker.ProjectSlug
 						if in.ProjectSlug != "" {
 							slug = in.ProjectSlug
@@ -204,7 +205,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 					// recreated — miller79/scion#28). When the dir still exists
 					// this is a first-link scenario; preserve the local ID.
 					extDir, extErr := config.GetGitProjectExternalConfigDir(scionPath)
-					shouldWrite = extErr != nil || extDir == "" || isStaleExternalDir(func() (string, error) { return extDir, nil })
+					shouldWrite = extErr != nil || extDir == "" || isStaleExternalDir(extDir)
 				}
 				if shouldWrite {
 					oldID := existingID
@@ -993,18 +994,14 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 }
 
 // isStaleExternalDir returns true if the external project config directory
-// referenced by the marker no longer exists on disk. This indicates the project
-// was deleted (which cleans up external config) and recreated with a new ID
-// (miller79/scion#28). The pathFunc parameter matches ProjectMarker.ExternalProjectPath.
-func isStaleExternalDir(pathFunc func() (string, error)) bool {
-	extPath, err := pathFunc()
-	if err != nil {
-		return true // can't resolve → treat as stale
-	}
-	if extPath == "" {
+// no longer exists on disk. This indicates the project was deleted (which
+// cleans up external config) and recreated with a new ID
+// (miller79/scion#28). An empty extDir is treated as stale.
+func isStaleExternalDir(extDir string) bool {
+	if extDir == "" {
 		return true
 	}
-	_, statErr := os.Stat(extPath)
+	_, statErr := os.Stat(extDir)
 	return os.IsNotExist(statErr)
 }
 
