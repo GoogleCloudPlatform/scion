@@ -1030,12 +1030,12 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string
 
 // AgentSetSecretRequest is the request body for agent-initiated secret creation.
 type AgentSetSecretRequest struct {
-	Value        string `json:"value"`                  // Secret value (base64-encoded by default; use Encoding:"raw" for literal text)
-	Encoding     string `json:"encoding,omitempty"`     // "base64" (default) or "raw" (value is literal text, no decoding)
-	Type         string `json:"type,omitempty"`         // environment (default), variable, file
-	Target       string `json:"target,omitempty"`       // Injection target path
-	Force        bool   `json:"force,omitempty"`        // Overwrite existing secret
-	Scope        string `json:"scope,omitempty"`        // "project" (default) or "user"
+	Value    string `json:"value"`              // Secret value (base64-encoded by default; use Encoding:"raw" for literal text)
+	Encoding string `json:"encoding,omitempty"` // "base64" (default) or "raw" (value is literal text, no decoding)
+	Type     string `json:"type,omitempty"`     // environment (default), variable, file
+	Target   string `json:"target,omitempty"`   // Injection target path
+	Force    bool   `json:"force,omitempty"`    // Overwrite existing secret
+	Scope    string `json:"scope,omitempty"`    // "project" (default) or "user"
 	// AllowProgeny opts the secret in to progeny inheritance (user scope only).
 	// A pointer so an unset field is distinguishable from an explicit false;
 	// unset resolves to false (opt-in, per design doc §5.1).
