@@ -67,10 +67,22 @@ docker volume create my-data
 docker run -v my-data:/data my-image
 ```
 
-### Use Docker-Managed Paths When Bind-Mounting
+### Use `--mount` Instead of `-v` for Bind Mounts
 
-If you must use bind mounts, the source path must exist **on the host**. Paths
-that are valid inside your container are generally not valid as host paths.
+If you must use bind mounts, prefer the `--mount` flag over `-v`. Unlike `-v`,
+`--mount type=bind` **errors** when the source path does not exist on the host
+instead of silently creating an empty directory:
+
+```bash
+# Safer — fails loudly if /host/path does not exist
+docker run --mount type=bind,source=/host/path,target=/data my-image
+
+# Risky — silently creates an empty /host/path if it is absent
+docker run -v /host/path:/data my-image
+```
+
+The source path must exist **on the host**. Paths that are valid inside your
+container are generally not valid as host paths.
 
 ### Copy Data via Docker Commands
 
@@ -95,6 +107,11 @@ docker run -v /var/run/docker.sock:/var/run/docker.sock my-image
 
 This works because the socket path is the same on the host and in your
 container (it was bind-mounted into yours the same way).
+
+> **Note:** The Docker socket is not always at `/var/run/docker.sock`. Other
+> common locations include `/run/docker.sock` and paths set via the
+> `DOCKER_HOST` environment variable. Check which path is mounted into your
+> container and use that path when forwarding the socket.
 
 ## Quick Reference
 

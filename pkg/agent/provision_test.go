@@ -2441,6 +2441,11 @@ func TestHasDockerSocket(t *testing.T) {
 			true,
 		},
 		{
+			"relative docker.sock in source",
+			[]api.VolumeMount{{Source: "docker.sock", Target: "/var/run/docker.sock"}},
+			true,
+		},
+		{
 			"no docker socket",
 			[]api.VolumeMount{{Source: "/workspace", Target: "/workspace"}},
 			false,

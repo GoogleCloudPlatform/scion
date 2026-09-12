@@ -1533,7 +1533,8 @@ func hasDockerSocket(volumes []api.VolumeMount) bool {
 func isDockerSocketPath(p string) bool {
 	switch p {
 	case "/var/run/docker.sock",
-		"/run/docker.sock":
+		"/run/docker.sock",
+		"docker.sock":
 		return true
 	}
 	return strings.HasSuffix(p, "/docker.sock")
