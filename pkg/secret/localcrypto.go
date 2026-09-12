@@ -24,29 +24,29 @@ import (
 	"io"
 )
 
-// encryptedPrefix is prepended to every AES-256-GCM ciphertext stored by the
+// EncryptedPrefix is prepended to every AES-256-GCM ciphertext stored by the
 // local backend. Its presence distinguishes encrypted values from legacy
 // plaintext, enabling transparent migration: if a stored value does not start
 // with this prefix it is treated as unencrypted plaintext.
-const encryptedPrefix = "enc:v1:"
+const EncryptedPrefix = "enc:v1:"
 
-// deriveLocalEncryptionKey deterministically derives a 32-byte AES-256 key
+// DeriveLocalEncryptionKey deterministically derives a 32-byte AES-256 key
 // from the deployment-wide shared signing secret using SHA-256 with a
 // domain-specific prefix. This parallels the derivation used for JWT signing
 // keys in pkg/hub/server.go (deriveSharedSigningKey) but uses a distinct
 // domain separator to ensure cryptographic independence.
-func deriveLocalEncryptionKey(sharedSecret string) []byte {
+func DeriveLocalEncryptionKey(sharedSecret string) []byte {
 	sum := sha256.Sum256([]byte("scion-hub-local-secret-encryption:" + sharedSecret))
 	return sum[:]
 }
 
-// encryptValue encrypts plaintext using AES-256-GCM and returns a string
+// EncryptValue encrypts plaintext using AES-256-GCM and returns a string
 // suitable for storage in the encrypted_value column. The format is:
 //
 //	enc:v1:<base64(nonce + ciphertext)>
 //
 // The nonce is a 12-byte random value prepended to the ciphertext.
-func encryptValue(plaintext string, key []byte) (string, error) {
+func EncryptValue(plaintext string, key []byte) (string, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", fmt.Errorf("aes.NewCipher: %w", err)
@@ -62,20 +62,20 @@ func encryptValue(plaintext string, key []byte) (string, error) {
 	}
 
 	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
-	return encryptedPrefix + base64.StdEncoding.EncodeToString(ciphertext), nil
+	return EncryptedPrefix + base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// decryptValue decrypts a value produced by encryptValue. If the value does
+// DecryptValue decrypts a value produced by EncryptValue. If the value does
 // not carry the enc:v1: prefix it is assumed to be legacy plaintext and
 // returned as-is (with isLegacy = true) so that callers can re-encrypt on
 // the next write.
-func decryptValue(stored string, key []byte) (plaintext string, isLegacy bool, err error) {
-	if len(stored) <= len(encryptedPrefix) || stored[:len(encryptedPrefix)] != encryptedPrefix {
+func DecryptValue(stored string, key []byte) (plaintext string, isLegacy bool, err error) {
+	if len(stored) <= len(EncryptedPrefix) || stored[:len(EncryptedPrefix)] != EncryptedPrefix {
 		// Legacy plaintext — return as-is.
 		return stored, true, nil
 	}
 
-	data, err := base64.StdEncoding.DecodeString(stored[len(encryptedPrefix):])
+	data, err := base64.StdEncoding.DecodeString(stored[len(EncryptedPrefix):])
 	if err != nil {
 		return "", false, fmt.Errorf("base64 decode: %w", err)
 	}
