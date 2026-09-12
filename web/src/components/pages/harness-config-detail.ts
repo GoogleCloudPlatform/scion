@@ -922,7 +922,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
                 </sl-button>
               `
             : nothing}
-          ${st?.registry?.exists !== false
+          ${st?.registry?.exists === true
             ? html`
                 <sl-button
                   size="small"
@@ -1094,7 +1094,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
             <tr class="broker-detail-row">
               <td colspan="4">
                 <div class="broker-actions">
-                  ${st?.registry?.exists !== false
+                  ${st?.registry?.exists === true
                     ? html`
                         <sl-button
                           size="small"
