@@ -153,13 +153,37 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// This block also handles the case where the createAgent handler already
 	// resolved ProjectPath (for env-gather) before calling buildStartContext,
 	// which would skip the resolution block above.
-	if in.ProjectSlug != "" && in.ProjectPath != "" {
+	if in.ProjectPath != "" && (in.ProjectSlug != "" || in.ProjectID != "") {
 		scionPath := filepath.Join(in.ProjectPath, config.DotScion)
 
 		if config.IsProjectMarkerFile(scionPath) {
 			// .scion is a marker file — project-id is already recorded.
-			// Ensure external split storage directories exist.
 			if marker, err := config.ReadProjectMarker(scionPath); err == nil && marker.ProjectID != "" {
+				// Detect stale marker: hub's project ID differs and the old
+				// external config dir was cleaned up (project was deleted and
+				// recreated with the same name — miller79/scion#28).
+				if in.ProjectID != "" && marker.ProjectID != in.ProjectID {
+					if isStaleExternalDir(marker.ExternalProjectPath) {
+						slug := marker.ProjectSlug
+						if in.ProjectSlug != "" {
+							slug = in.ProjectSlug
+						}
+						updated := &config.ProjectMarker{
+							ProjectID:   in.ProjectID,
+							ProjectName: slug,
+							ProjectSlug: slug,
+						}
+						if wErr := config.WriteProjectMarker(scionPath, updated); wErr != nil {
+							s.agentLifecycleLog.Warn("Failed to update stale .scion marker",
+								"agent_id", in.AgentID, "old_id", marker.ProjectID, "new_id", in.ProjectID, "error", wErr)
+						} else {
+							s.agentLifecycleLog.Info("Updated stale .scion marker with current project ID",
+								"agent_id", in.AgentID, "old_id", marker.ProjectID, "new_id", in.ProjectID, "path", scionPath)
+							marker = updated
+						}
+					}
+				}
+				// Ensure external split storage directories exist.
 				if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
 					_ = os.MkdirAll(extPath, 0755)
 					_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
@@ -172,11 +196,26 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		} else if info, statErr := os.Stat(scionPath); statErr == nil && info.IsDir() {
 			// .scion is a directory (git project) — use file-based project-id
 			if in.ProjectID != "" {
-				if existingID, err := config.ReadProjectID(scionPath); err != nil || existingID == "" {
+				existingID, readErr := config.ReadProjectID(scionPath)
+				shouldWrite := readErr != nil || existingID == ""
+				if !shouldWrite && existingID != in.ProjectID {
+					// Existing ID differs from hub's — overwrite only if the old
+					// external config dir was cleaned up (project deleted and
+					// recreated — miller79/scion#28). When the dir still exists
+					// this is a first-link scenario; preserve the local ID.
+					extDir, extErr := config.GetGitProjectExternalConfigDir(scionPath)
+					shouldWrite = extErr != nil || extDir == "" || isStaleExternalDir(func() (string, error) { return extDir, nil })
+				}
+				if shouldWrite {
+					oldID := existingID
 					if wErr := config.WriteProjectID(scionPath, in.ProjectID); wErr != nil {
 						s.agentLifecycleLog.Warn("Failed to write project-id for hub-managed project",
 							"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
 					} else {
+						if oldID != "" && oldID != in.ProjectID {
+							s.agentLifecycleLog.Info("Updated stale project-id with current project ID",
+								"agent_id", in.AgentID, "old_id", oldID, "new_id", in.ProjectID, "path", scionPath)
+						}
 						if extAgents, err := config.GetGitProjectExternalAgentsDir(scionPath); err == nil && extAgents != "" {
 							_ = os.MkdirAll(extAgents, 0755)
 						}
@@ -951,6 +990,22 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 		WorktreePath: worktreePath,
 		ProjectRoot:  resolved.HostPath,
 	}
+}
+
+// isStaleExternalDir returns true if the external project config directory
+// referenced by the marker no longer exists on disk. This indicates the project
+// was deleted (which cleans up external config) and recreated with a new ID
+// (miller79/scion#28). The pathFunc parameter matches ProjectMarker.ExternalProjectPath.
+func isStaleExternalDir(pathFunc func() (string, error)) bool {
+	extPath, err := pathFunc()
+	if err != nil {
+		return true // can't resolve → treat as stale
+	}
+	if extPath == "" {
+		return true
+	}
+	_, statErr := os.Stat(extPath)
+	return os.IsNotExist(statErr)
 }
 
 // hasWorkspaceContent returns true if dir exists and contains meaningful

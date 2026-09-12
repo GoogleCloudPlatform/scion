@@ -506,78 +506,224 @@ func TestBuildStartContext_HubManagedProjectSlugResolution(t *testing.T) {
 }
 
 func TestBuildStartContext_HubManagedProjectPreservesExistingProjectID(t *testing.T) {
+	t.Run("preserves when external config dir exists", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		// Pre-create .scion as a directory with an existing project-id (git project)
+		projectPath := filepath.Join(t.TempDir(), "existing-grove")
+		scionDir := filepath.Join(projectPath, ".scion")
+		if err := os.MkdirAll(scionDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		existingID := "existing-id-1234-5678"
+		if err := config.WriteProjectID(scionDir, existingID); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create the external config dir so it looks like a live project (not stale).
+		extDir, err := config.GetGitProjectExternalConfigDir(scionDir)
+		if err != nil {
+			t.Fatalf("failed to get external config dir: %v", err)
+		}
+		if err := os.MkdirAll(extDir, 0755); err != nil {
+			t.Fatalf("failed to create external config dir: %v", err)
+		}
+
+		_, err = srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-1",
+			ProjectSlug: "existing-grove",
+			ProjectPath: projectPath,
+			ProjectID:   "new-id-from-hub",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify existing project-id was NOT overwritten (external dir exists → not stale)
+		projectID, err := config.ReadProjectID(scionDir)
+		if err != nil {
+			t.Fatalf("failed to read project-id: %v", err)
+		}
+		if projectID != existingID {
+			t.Errorf("expected existing project-id %q to be preserved, got %q", existingID, projectID)
+		}
+	})
+
+	t.Run("overwrites when external config dir missing (stale)", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		// Pre-create .scion as a directory with an existing project-id (git project)
+		projectPath := filepath.Join(t.TempDir(), "existing-grove")
+		scionDir := filepath.Join(projectPath, ".scion")
+		if err := os.MkdirAll(scionDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		existingID := "existing-id-1234-5678"
+		if err := config.WriteProjectID(scionDir, existingID); err != nil {
+			t.Fatal(err)
+		}
+		// Do NOT create the external config dir → simulates project deletion.
+
+		newID := "new-id-from-hub"
+		_, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-1",
+			ProjectSlug: "existing-grove",
+			ProjectPath: projectPath,
+			ProjectID:   newID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify stale project-id was overwritten with the hub's new ID.
+		projectID, err := config.ReadProjectID(scionDir)
+		if err != nil {
+			t.Fatalf("failed to read project-id: %v", err)
+		}
+		if projectID != newID {
+			t.Errorf("expected stale project-id to be overwritten with %q, got %q", newID, projectID)
+		}
+	})
+}
+
+func TestBuildStartContext_HubManagedProjectPreservesExistingMarker(t *testing.T) {
+	t.Run("preserves when external config dir exists", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		// Pre-create .scion as a marker file (hub-managed project)
+		projectPath := filepath.Join(t.TempDir(), "existing-grove")
+		if err := os.MkdirAll(projectPath, 0755); err != nil {
+			t.Fatal(err)
+		}
+		existingID := "existing-id-1234-5678"
+		scionPath := filepath.Join(projectPath, ".scion")
+		existingMarker := &config.ProjectMarker{
+			ProjectID:   existingID,
+			ProjectName: "existing-grove",
+			ProjectSlug: "existing-grove",
+		}
+		if err := config.WriteProjectMarker(scionPath, existingMarker); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create the external config dir so it looks like a live project (not stale).
+		extPath, err := existingMarker.ExternalProjectPath()
+		if err != nil {
+			t.Fatalf("failed to get external project path: %v", err)
+		}
+		if err := os.MkdirAll(extPath, 0755); err != nil {
+			t.Fatalf("failed to create external config dir: %v", err)
+		}
+
+		_, err = srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-1",
+			ProjectSlug: "existing-grove",
+			ProjectPath: projectPath,
+			ProjectID:   "new-id-from-hub",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify existing marker was NOT overwritten (external dir exists → not stale)
+		marker, err := config.ReadProjectMarker(scionPath)
+		if err != nil {
+			t.Fatalf("failed to read marker: %v", err)
+		}
+		if marker.ProjectID != existingID {
+			t.Errorf("expected existing project-id %q to be preserved, got %q", existingID, marker.ProjectID)
+		}
+	})
+
+	t.Run("overwrites when external config dir missing (stale)", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		// Pre-create .scion as a marker file (hub-managed project)
+		projectPath := filepath.Join(t.TempDir(), "existing-grove")
+		if err := os.MkdirAll(projectPath, 0755); err != nil {
+			t.Fatal(err)
+		}
+		existingID := "existing-id-1234-5678"
+		scionPath := filepath.Join(projectPath, ".scion")
+		if err := config.WriteProjectMarker(scionPath, &config.ProjectMarker{
+			ProjectID:   existingID,
+			ProjectName: "existing-grove",
+			ProjectSlug: "existing-grove",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// Do NOT create the external config dir → simulates project deletion.
+
+		newID := "new-id-from-hub"
+		_, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-1",
+			ProjectSlug: "existing-grove",
+			ProjectPath: projectPath,
+			ProjectID:   newID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify stale marker was overwritten with the hub's new ID.
+		marker, err := config.ReadProjectMarker(scionPath)
+		if err != nil {
+			t.Fatalf("failed to read marker: %v", err)
+		}
+		if marker.ProjectID != newID {
+			t.Errorf("expected stale marker project-id to be overwritten with %q, got %q", newID, marker.ProjectID)
+		}
+	})
+}
+
+// TestBuildStartContext_LinkedGitProjectUpdatesStaleProjectID verifies that for
+// linked git projects (where ProjectSlug is empty but ProjectID and ProjectPath
+// are set), a stale on-disk project-id is overwritten when the external config
+// dir was cleaned up. This is the primary regression test for miller79/scion#28.
+func TestBuildStartContext_LinkedGitProjectUpdatesStaleProjectID(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
-	// Pre-create .scion as a directory with an existing project-id (git project)
-	projectPath := filepath.Join(t.TempDir(), "existing-grove")
+	// Simulate a linked git project workspace with a stale .scion/project-id.
+	projectPath := filepath.Join(t.TempDir(), "my-repo")
 	scionDir := filepath.Join(projectPath, ".scion")
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	existingID := "existing-id-1234-5678"
-	if err := config.WriteProjectID(scionDir, existingID); err != nil {
+	staleID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	if err := config.WriteProjectID(scionDir, staleID); err != nil {
 		t.Fatal(err)
 	}
+	// No external config dir created → the old project was deleted.
 
+	newID := "11111111-2222-3333-4444-555555555555"
 	_, err := srv.buildStartContext(context.Background(), startContextInputs{
 		Name:        "agent-1",
-		ProjectSlug: "existing-grove",
 		ProjectPath: projectPath,
-		ProjectID:   "new-id-from-hub",
+		ProjectID:   newID,
+		// ProjectSlug intentionally empty — linked git project path
+		// (hub dispatcher omits slug when provider has LocalPath).
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Verify existing project-id was NOT overwritten (directory-based path)
+	// Verify the stale project-id was overwritten with the hub's new ID.
 	projectID, err := config.ReadProjectID(scionDir)
 	if err != nil {
 		t.Fatalf("failed to read project-id: %v", err)
 	}
-	if projectID != existingID {
-		t.Errorf("expected existing project-id %q to be preserved, got %q", existingID, projectID)
-	}
-}
-
-func TestBuildStartContext_HubManagedProjectPreservesExistingMarker(t *testing.T) {
-	cfg := DefaultServerConfig()
-	cfg.StateDir = t.TempDir()
-	srv := newTestServerForStartContext(t, cfg)
-
-	// Pre-create .scion as a marker file (hub-managed project)
-	projectPath := filepath.Join(t.TempDir(), "existing-grove")
-	if err := os.MkdirAll(projectPath, 0755); err != nil {
-		t.Fatal(err)
-	}
-	existingID := "existing-id-1234-5678"
-	scionPath := filepath.Join(projectPath, ".scion")
-	if err := config.WriteProjectMarker(scionPath, &config.ProjectMarker{
-		ProjectID:   existingID,
-		ProjectName: "existing-grove",
-		ProjectSlug: "existing-grove",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := srv.buildStartContext(context.Background(), startContextInputs{
-		Name:        "agent-1",
-		ProjectSlug: "existing-grove",
-		ProjectPath: projectPath,
-		ProjectID:   "new-id-from-hub",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify existing marker was NOT overwritten (marker file path)
-	marker, err := config.ReadProjectMarker(scionPath)
-	if err != nil {
-		t.Fatalf("failed to read marker: %v", err)
-	}
-	if marker.ProjectID != existingID {
-		t.Errorf("expected existing project-id %q to be preserved, got %q", existingID, marker.ProjectID)
+	if projectID != newID {
+		t.Errorf("expected stale project-id to be overwritten with %q, got %q", newID, projectID)
 	}
 }
 
