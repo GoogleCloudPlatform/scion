@@ -133,12 +133,13 @@ func main() {
 	h2cHandler := h2c.NewHandler(mux, h2s)
 
 	server := &http.Server{
-		Addr:         ":" + port,
-		Handler:      h2cHandler,
-		ReadTimeout:  30 * time.Minute,
-		WriteTimeout: 30 * time.Minute,
-		IdleTimeout:  120 * time.Second,
-	}
+		Addr:              ":" + port,
+		Handler:           h2cHandler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Minute,
+		WriteTimeout:      30 * time.Minute,
+		IdleTimeout:       120 * time.Second,
+		}
 
 	log.Printf("Proxy server active with H2C support on :%s", port)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
