@@ -413,6 +413,7 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 			ScopeID:       scopeID,
 			Description:   req.Description,
 			InjectionMode: req.InjectionMode,
+			AllowProgeny:  req.AllowProgeny,
 			CreatedBy:     createdBy,
 			UpdatedBy:     createdBy,
 		}
@@ -821,7 +822,10 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	// allowProgeny is only valid on user-scoped secrets
+	// allowProgeny is only valid on user-scoped secrets.
+	// Unlike env vars, secrets do NOT require injectionMode=always when
+	// allowProgeny is set — the secret dispatch flow supports as_needed
+	// progeny secrets (design doc §5.7).
 	if req.AllowProgeny && scope != store.ScopeUser {
 		ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
 			"field": "allowProgeny",
@@ -946,7 +950,10 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// allowProgeny is only valid on user-scoped secrets
+	// allowProgeny is only valid on user-scoped secrets.
+	// Unlike env vars, secrets do NOT require injectionMode=always when
+	// allowProgeny is set — the secret dispatch flow supports as_needed
+	// progeny secrets (design doc §5.7).
 	if req.AllowProgeny != nil && *req.AllowProgeny && scope != store.ScopeUser {
 		ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
 			"field": "allowProgeny",
@@ -1177,6 +1184,9 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	// allowProgeny is only valid on user-scoped secrets. Only an explicit
 	// true is rejected; unset on a project-scoped write is fine and simply
 	// resolves to false below.
+	// Unlike env vars, secrets do NOT require injectionMode=always when
+	// allowProgeny is set — the secret dispatch flow supports as_needed
+	// progeny secrets (design doc §5.7).
 	if req.AllowProgeny != nil && *req.AllowProgeny && scope != store.ScopeUser {
 		ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
 			"field": "allowProgeny",
