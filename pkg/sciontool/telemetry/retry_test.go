@@ -13,6 +13,8 @@ import (
 
 	"google.golang.org/api/googleapi"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -520,5 +522,155 @@ func TestFlushMetricBuffer_SuccessAfterRetry(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("expected 2 export calls, got %d", calls)
+	}
+}
+
+// --- gRPC error classification tests ---
+
+func TestClassifyError_GRPCUnauthenticated(t *testing.T) {
+	err := grpcstatus.Error(codes.Unauthenticated, "invalid credentials")
+	got := classifyError(err)
+	if got != "auth" {
+		t.Errorf("classifyError(Unauthenticated) = %q, want %q", got, "auth")
+	}
+}
+
+func TestClassifyError_GRPCPermissionDenied(t *testing.T) {
+	err := grpcstatus.Error(codes.PermissionDenied, "caller lacks permission")
+	got := classifyError(err)
+	if got != "auth" {
+		t.Errorf("classifyError(PermissionDenied) = %q, want %q", got, "auth")
+	}
+}
+
+func TestClassifyError_GRPCResourceExhausted(t *testing.T) {
+	err := grpcstatus.Error(codes.ResourceExhausted, "quota exceeded")
+	got := classifyError(err)
+	if got != "quota" {
+		t.Errorf("classifyError(ResourceExhausted) = %q, want %q", got, "quota")
+	}
+}
+
+func TestClassifyError_GRPCDeadlineExceeded(t *testing.T) {
+	err := grpcstatus.Error(codes.DeadlineExceeded, "RPC timed out")
+	got := classifyError(err)
+	if got != "timeout" {
+		t.Errorf("classifyError(DeadlineExceeded gRPC) = %q, want %q", got, "timeout")
+	}
+}
+
+func TestIsRetryable_GRPCAuth(t *testing.T) {
+	tests := []struct {
+		name      string
+		code      codes.Code
+		retryable bool
+	}{
+		{"Unauthenticated", codes.Unauthenticated, false},
+		{"PermissionDenied", codes.PermissionDenied, false},
+		{"ResourceExhausted", codes.ResourceExhausted, true},
+		{"Unavailable", codes.Unavailable, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := grpcstatus.Error(tt.code, "test error")
+			got := isRetryable(err)
+			if got != tt.retryable {
+				t.Errorf("isRetryable(gRPC %s) = %v, want %v", tt.name, got, tt.retryable)
+			}
+		})
+	}
+}
+
+// --- Consecutive flush failure bounding tests ---
+
+func TestFlushMetricBuffer_StopsRebufferAfterConsecutiveFailures(t *testing.T) {
+	metricClient := &mockMetricClient{
+		exportFunc: func(_ context.Context, _ *colmetricpb.ExportMetricsServiceRequest, _ ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
+			return nil, errors.New("persistent backend failure")
+		},
+	}
+
+	p := newTestPipelineWithExporter(nil, metricClient, nil)
+	p.retryConfig = fastRetryConfig()
+
+	// Simulate maxConsecutiveFlushFailures flush cycles
+	for i := 0; i < maxConsecutiveFlushFailures+1; i++ {
+		p.metricBufMu.Lock()
+		p.metricBuf = []*metricpb.ResourceMetrics{
+			{ScopeMetrics: []*metricpb.ScopeMetrics{{Metrics: []*metricpb.Metric{{Name: fmt.Sprintf("test.%d", i)}}}}},
+		}
+		p.metricBufMu.Unlock()
+		p.flushMetricBuffer(context.Background(), true)
+	}
+
+	p.metricBufMu.Lock()
+	stopped := p.metricRebufferStopped
+	bufLen := len(p.metricBuf)
+	p.metricBufMu.Unlock()
+
+	if !stopped {
+		t.Error("expected metricRebufferStopped to be true after max consecutive failures")
+	}
+	// After stopping, the buffer should be empty because the last flush
+	// did not re-buffer the failed metrics
+	if bufLen != 0 {
+		t.Errorf("expected empty buffer after re-buffer stopped, got %d", bufLen)
+	}
+}
+
+func TestFlushMetricBuffer_ResetsFailureCountOnSuccess(t *testing.T) {
+	// Track flush-level calls (each flush may have up to 4 export attempts
+	// due to retryExport). Use a counter per flush to control behavior.
+	flushNum := 0
+	metricClient := &mockMetricClient{
+		exportFunc: func(_ context.Context, _ *colmetricpb.ExportMetricsServiceRequest, _ ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
+			// Flushes 1-3: always fail. Flush 4+: succeed.
+			if flushNum <= 3 {
+				return nil, errors.New("persistent failure")
+			}
+			return &colmetricpb.ExportMetricsServiceResponse{}, nil
+		},
+	}
+
+	p := newTestPipelineWithExporter(nil, metricClient, nil)
+	p.retryConfig = fastRetryConfig()
+
+	// Run 3 failing flushes
+	for i := 0; i < 3; i++ {
+		flushNum = i + 1
+		p.metricBufMu.Lock()
+		p.metricBuf = []*metricpb.ResourceMetrics{
+			{ScopeMetrics: []*metricpb.ScopeMetrics{{Metrics: []*metricpb.Metric{{Name: fmt.Sprintf("test.%d", i)}}}}},
+		}
+		p.metricBufMu.Unlock()
+		p.flushMetricBuffer(context.Background(), true)
+	}
+
+	p.metricBufMu.Lock()
+	failCount := p.metricConsecFailures
+	p.metricBufMu.Unlock()
+	if failCount != 3 {
+		t.Errorf("expected 3 consecutive failures, got %d", failCount)
+	}
+
+	// Now run a successful flush
+	flushNum = 4
+	p.metricBufMu.Lock()
+	p.metricBuf = []*metricpb.ResourceMetrics{
+		{ScopeMetrics: []*metricpb.ScopeMetrics{{Metrics: []*metricpb.Metric{{Name: "success"}}}}},
+	}
+	p.metricBufMu.Unlock()
+	p.flushMetricBuffer(context.Background(), true)
+
+	p.metricBufMu.Lock()
+	failCount = p.metricConsecFailures
+	stopped := p.metricRebufferStopped
+	p.metricBufMu.Unlock()
+
+	if failCount != 0 {
+		t.Errorf("expected failure count reset to 0 after success, got %d", failCount)
+	}
+	if stopped {
+		t.Error("expected metricRebufferStopped to be false after successful flush")
 	}
 }

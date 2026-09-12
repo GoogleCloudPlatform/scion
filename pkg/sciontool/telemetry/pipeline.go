@@ -25,6 +25,8 @@ import (
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/api/googleapi"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // metricFlushInterval is the minimum interval between metric exports to Cloud
@@ -37,6 +39,12 @@ const metricFlushInterval = 15 * time.Second
 // prevents unbounded memory growth — it allows roughly 2x the normal inflow
 // between flush intervals to accumulate before older entries are discarded.
 const maxMetricBufCap = 100
+
+// maxConsecutiveFlushFailures is the maximum number of consecutive metric
+// flush failures before the pipeline stops re-buffering failed metrics.
+// This prevents an indefinite retry loop when the backend is persistently
+// unreachable (e.g. missing credentials or project ID).
+const maxConsecutiveFlushFailures = 5
 
 // Pipeline orchestrates the telemetry collection and forwarding.
 type Pipeline struct {
@@ -55,12 +63,14 @@ type Pipeline struct {
 	logsDropWarned    sync.Once
 	spansDropWarned   sync.Once
 
-	metricBuf       []*metricpb.ResourceMetrics
-	metricBufMu     sync.Mutex
-	metricFlushCtx  context.Context
-	metricFlushCnl  context.CancelFunc
-	metricLastFlush time.Time
-	metricFlushWg   sync.WaitGroup
+	metricBuf              []*metricpb.ResourceMetrics
+	metricBufMu            sync.Mutex
+	metricFlushCtx         context.Context
+	metricFlushCnl         context.CancelFunc
+	metricLastFlush        time.Time
+	metricFlushWg          sync.WaitGroup
+	metricConsecFailures   int  // consecutive flush failures
+	metricRebufferStopped  bool // true when re-buffering is disabled due to too many failures
 }
 
 // New creates a new telemetry pipeline.
@@ -127,6 +137,24 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 	// Create cloud exporter if configured
 	if p.config.IsCloudConfigured() {
+		// Warn about shaky prerequisites that may lead to export failures.
+		var warnings []string
+		if p.config.IsGCP() && p.config.GCPCredentialsFile == "" {
+			warnings = append(warnings, "no explicit credentials file (relying on ADC)")
+		}
+		if p.config.IsGCP() && p.config.GCPCredentialsFile != "" {
+			if envVal := os.Getenv(EnvGCPCredentials); envVal == "" {
+				warnings = append(warnings, "credentials loaded from well-known path fallback, not environment")
+			}
+		}
+		if len(warnings) > 0 {
+			slog.Warn("telemetry cloud export enabled with incomplete prerequisites",
+				"warnings", warnings,
+				"project_id", p.config.ProjectID,
+				"provider", p.config.CloudProvider,
+			)
+		}
+
 		exporter, err := NewCloudExporter(ctx, p.config)
 		if err != nil {
 			log.Error("Failed to create cloud exporter: %v", err)
@@ -143,11 +171,19 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			log.Info("Cloud exporter initialized (%s, project: %s)", mode, p.config.ProjectID)
 		}
 	} else {
-		slog.Warn("telemetry cloud export not configured",
-			"reason", "no credentials or endpoint",
-			"env_checked", EnvGCPCredentials,
-			"well_known_path", WellKnownGCPCredentialsPath,
-		)
+		if p.config.CloudEnabled && p.config.CloudProvider == "gcp" && p.config.ProjectID == "" {
+			slog.Warn("telemetry cloud export disabled — GCP mode requires a project ID",
+				"hint", "set SCION_GCP_PROJECT_ID or ensure credentials file contains project_id",
+				"env_checked", EnvProjectID,
+				"credentials_file", p.config.GCPCredentialsFile,
+			)
+		} else {
+			slog.Warn("telemetry cloud export not configured",
+				"reason", "no credentials or endpoint",
+				"env_checked", EnvGCPCredentials,
+				"well_known_path", WellKnownGCPCredentialsPath,
+			)
+		}
 	}
 
 	// Create receiver with span and metric handlers
@@ -421,9 +457,24 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) {
 		p.recordExportError(ctx, "metrics", err)
 		log.Error("Failed to export %d buffered metrics to cloud: %v", metricCount, err)
 
+		p.metricBufMu.Lock()
+		p.metricConsecFailures++
+		if p.metricConsecFailures >= maxConsecutiveFlushFailures {
+			if !p.metricRebufferStopped {
+				p.metricRebufferStopped = true
+				failures := p.metricConsecFailures
+				p.metricBufMu.Unlock()
+				slog.Warn("cloud telemetry metric export has failed repeatedly — stopping metric re-buffering until export succeeds",
+					"consecutive_failures", failures,
+					"hint", "check that SCION_GCP_PROJECT_ID is set and credentials are valid",
+				)
+			} else {
+				p.metricBufMu.Unlock()
+			}
+			return
+		}
 		// Re-buffer failed metrics so they can be retried on the next flush
 		// cycle. Cap the buffer to maxMetricBufCap to avoid unbounded growth.
-		p.metricBufMu.Lock()
 		// Prepend the failed metrics so they remain the oldest in the buffer,
 		// and newly accumulated metrics remain the newest.
 		p.metricBuf = append(deduped, p.metricBuf...)
@@ -440,6 +491,8 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) {
 		return
 	}
 	p.metricBufMu.Lock()
+	p.metricConsecFailures = 0
+	p.metricRebufferStopped = false
 	p.metricLastFlush = time.Now()
 	p.metricBufMu.Unlock()
 	log.Debug("Exported %d buffered metrics to cloud", metricCount)
@@ -730,6 +783,19 @@ func classifyError(err error) string {
 			return "auth"
 		case 429:
 			return "quota"
+		}
+	}
+
+	// Structured gRPC status check — GCP-native SDKs (Cloud Trace,
+	// Monitoring, Logging) return gRPC status errors, not googleapi.Error.
+	if st, ok := status.FromError(err); ok {
+		switch st.Code() {
+		case codes.Unauthenticated, codes.PermissionDenied:
+			return "auth"
+		case codes.ResourceExhausted:
+			return "quota"
+		case codes.DeadlineExceeded:
+			return "timeout"
 		}
 	}
 
