@@ -196,27 +196,6 @@ func TestValidateDeliveryState(t *testing.T) {
 	}
 }
 
-// ---------- Visibility ----------
-
-func TestValidateVisibility(t *testing.T) {
-	tests := []struct {
-		vis     Visibility
-		wantErr bool
-	}{
-		{VisibilityNormal, false},
-		{VisibilityVerbose, false},
-		{VisibilityFull, false},
-		{"", false}, // empty defaults to normal
-		{"unknown", true},
-	}
-	for _, tc := range tests {
-		err := ValidateVisibility(tc.vis)
-		if (err != nil) != tc.wantErr {
-			t.Errorf("ValidateVisibility(%q): got err=%v, wantErr=%v", tc.vis, err, tc.wantErr)
-		}
-	}
-}
-
 // ---------- Message.Validate ----------
 
 func TestMessageValidate_TextMessage(t *testing.T) {
@@ -344,21 +323,6 @@ func TestMessageValidate_InvalidKind(t *testing.T) {
 	}
 	if err := msg.Validate(); err == nil {
 		t.Fatal("message with invalid kind should fail validation")
-	}
-}
-
-func TestMessageValidate_InvalidVisibility(t *testing.T) {
-	intent := IntentInform
-	msg := &Message{
-		ID:         "msg-1",
-		From:       "user:alice",
-		Kind:       KindText,
-		Intent:     &intent,
-		Body:       "Hello",
-		Visibility: "secret",
-	}
-	if err := msg.Validate(); err == nil {
-		t.Fatal("message with invalid visibility should fail validation")
 	}
 }
 

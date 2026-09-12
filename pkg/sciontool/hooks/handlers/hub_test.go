@@ -753,11 +753,10 @@ func TestTruncateAssistantText(t *testing.T) {
 	})
 }
 
-// TestHubHandler_AssistantTextVisibilityTagging tests that automatic
-// assistant-reply messages are tagged with "verbose" visibility and
-// include content classification metadata.
-func TestHubHandler_AssistantTextVisibilityTagging(t *testing.T) {
-	t.Run("tags outbound message with verbose visibility", func(t *testing.T) {
+// TestHubHandler_AssistantTextMetadataTagging tests that automatic
+// assistant-reply messages include content classification metadata.
+func TestHubHandler_AssistantTextMetadataTagging(t *testing.T) {
+	t.Run("tags outbound message with metadata", func(t *testing.T) {
 		tmpHome := t.TempDir()
 		t.Setenv("HOME", tmpHome)
 
@@ -805,8 +804,9 @@ func TestHubHandler_AssistantTextVisibilityTagging(t *testing.T) {
 		if outboundPayload == nil {
 			t.Fatal("Expected outbound message to be sent")
 		}
-		if outboundPayload["visibility"] != "verbose" {
-			t.Errorf("Expected visibility 'verbose', got %v", outboundPayload["visibility"])
+		// visibility field has been removed from outbound messages
+		if _, hasVis := outboundPayload["visibility"]; hasVis {
+			t.Errorf("Expected visibility field to be absent, got %v", outboundPayload["visibility"])
 		}
 		metadata, ok := outboundPayload["metadata"].(map[string]interface{})
 		if !ok {

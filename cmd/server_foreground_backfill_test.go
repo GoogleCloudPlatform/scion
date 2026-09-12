@@ -49,7 +49,9 @@ func captureWarnLogs(t *testing.T) (*bytes.Buffer, func()) {
 }
 
 // AC-12-1 positive: when unbackfilled messages exist, a warning IS logged with
-// count and remediation command.
+// count. The remediation string ("scion server backfill --execute") was removed
+// by M6 — auto-run made it stale advice. The assertion that it must NOT appear
+// is in TestMaybeWarnUnbackfilledMessages_NoRemediationString below.
 func TestMaybeWarnUnbackfilledMessages_Positive(t *testing.T) {
 	buf, cleanup := captureWarnLogs(t)
 	defer cleanup()
@@ -64,8 +66,23 @@ func TestMaybeWarnUnbackfilledMessages_Positive(t *testing.T) {
 	if !strings.Contains(out, "42") {
 		t.Fatalf("expected count=42 in warning, got: %s", out)
 	}
-	if !strings.Contains(out, "scion server backfill") {
-		t.Fatalf("expected remediation command in warning, got: %s", out)
+}
+
+// TestMaybeWarnUnbackfilledMessages_NoRemediationString verifies that
+// the remediation string "scion server backfill --execute" does not appear
+// in the warning. M6 removed it because auto-run made it stale advice.
+// This replaces the old assertion that the string MUST appear — that
+// assertion's precondition expired because M6 deleted the string.
+func TestMaybeWarnUnbackfilledMessages_NoRemediationString(t *testing.T) {
+	buf, cleanup := captureWarnLogs(t)
+	defer cleanup()
+
+	stub := &backfillStubStore{count: 42}
+	maybeWarnUnbackfilledMessages(context.Background(), stub)
+
+	out := buf.String()
+	if strings.Contains(out, "scion server backfill") {
+		t.Fatalf("remediation string must not appear (M6 removed it); got: %s", out)
 	}
 }
 

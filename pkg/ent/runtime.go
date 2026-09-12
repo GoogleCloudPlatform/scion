@@ -1039,12 +1039,8 @@ func init() {
 	messageDescThreadID := messageFields[17].Descriptor()
 	// message.ThreadIDValidator is a validator for the "thread_id" field. It is called by the builders before save.
 	message.ThreadIDValidator = messageDescThreadID.Validators[0].(func(string) error)
-	// messageDescVisibility is the schema descriptor for visibility field.
-	messageDescVisibility := messageFields[19].Descriptor()
-	// message.VisibilityValidator is a validator for the "visibility" field. It is called by the builders before save.
-	message.VisibilityValidator = messageDescVisibility.Validators[0].(func(string) error)
 	// messageDescCreated is the schema descriptor for created field.
-	messageDescCreated := messageFields[20].Descriptor()
+	messageDescCreated := messageFields[19].Descriptor()
 	// message.DefaultCreated holds the default value on creation for the created field.
 	message.DefaultCreated = messageDescCreated.Default.(func() time.Time)
 	// messageDescID is the schema descriptor for id field.

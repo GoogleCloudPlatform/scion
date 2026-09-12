@@ -26,27 +26,25 @@ const (
 
 // ConversationInfo is the conversation context delivered to agents.
 type ConversationInfo struct {
-	ID           string   `json:"id"`
-	Kind         string   `json:"kind"`                   // "direct" or "group"
-	Surface      string   `json:"surface"`                // "native", "discord", etc.
-	Name         string   `json:"name,omitempty"`         // human-readable
-	Participants []string `json:"participants,omitempty"` // principal refs
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`           // "direct" or "group"
+	Surface string `json:"surface"`        // "native", "discord", etc.
+	Name    string `json:"name,omitempty"` // human-readable
 }
 
 // DeliveryEnvelope is the new agent-facing message format.
 // It replaces the old deliveryMessage struct in pkg/messages/format.go.
 type DeliveryEnvelope struct {
-	Timestamp    string           `json:"timestamp"`
-	Conversation ConversationInfo `json:"conversation"`
-	From         string           `json:"from"`         // PrincipalRef
-	To           []string         `json:"to,omitempty"` // addressee PrincipalRefs
-	Kind         MessageKind      `json:"kind"`
-	Intent       *TextIntent      `json:"intent,omitempty"` // Kind == text
-	Event        *EventBody       `json:"event,omitempty"`  // Kind == event
-	Msg          string           `json:"msg"`
-	Visibility   Visibility       `json:"visibility,omitempty"`
-	Attachments  []string         `json:"attachments,omitempty"`
-	ReplyTo      *string          `json:"reply_to,omitempty"` // msg ID
+	Timestamp    string            `json:"timestamp"`
+	Conversation *ConversationInfo `json:"conversation,omitempty"`
+	From         string            `json:"from"`            // PrincipalRef
+	To           []string          `json:"to,omitempty"`    // addressee PrincipalRefs
+	Type         string            `json:"type"`            // "message" | "event"
+	Event        *EventBody        `json:"event,omitempty"` // Type == "event"
+	Msg          string            `json:"msg"`
+	Urgent       bool              `json:"urgent,omitempty"`
+	Attachments  []string          `json:"attachments,omitempty"`
+	ReplyTo      *string           `json:"reply_to,omitempty"` // msg ID
 }
 
 // DeliveryOptions captures transport-level options that are not part of the
@@ -58,12 +56,20 @@ type DeliveryOptions struct {
 
 // FormatNewDelivery formats a new-style Message with its Addressees and
 // conversation context into the delivery envelope for an agent.
+// convInfo may be nil when no conversation context is available; the
+// "conversation" key is omitted from the envelope rather than fabricated.
 // If the message has plain/raw delivery options, only the raw msg text is returned.
+//
+// isMention, when true, sets the envelope's type to "mention" (instead of
+// "message") and forces the "to" field to be present even for a single
+// addressee. Both are set explicitly by the routing call site that knows
+// whether the message was @-mention-routed.
 func FormatNewDelivery(
 	msg *Message,
 	addrs []Addressee,
-	convInfo ConversationInfo,
+	convInfo *ConversationInfo,
 	opts DeliveryOptions,
+	isMention bool,
 ) string {
 	if opts.Plain || opts.Raw {
 		return msg.Body
@@ -73,17 +79,24 @@ func FormatNewDelivery(
 		Timestamp:    msg.CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		Conversation: convInfo,
 		From:         string(msg.From),
-		Kind:         msg.Kind,
-		Intent:       msg.Intent,
+		Type:         typeString(msg.Kind, isMention),
 		Event:        msg.Event,
 		Msg:          msg.Body,
-		Visibility:   msg.Visibility,
+		Urgent:       msg.Urgent,
 		ReplyTo:      msg.ReplyToID,
 	}
 
 	// Build addressee principal refs for the "to" field.
-	for _, a := range addrs {
-		env.To = append(env.To, a.PrincipalKind+":"+a.PrincipalID)
+	// For non-mention single-recipient (direct) messages the recipient is
+	// implicit — omit "to" to reduce envelope noise. Multi-recipient (group)
+	// messages still list every addressee so agents know who else received.
+	// Mention-routed messages always include "to" regardless of count — a
+	// single mentioned agent sees "to" naming itself, confirming no one else
+	// was mentioned.
+	if len(addrs) > 1 || isMention {
+		for _, a := range addrs {
+			env.To = append(env.To, a.PrincipalKind+":"+a.PrincipalID)
+		}
 	}
 
 	// Map attachments to plain paths.
@@ -98,4 +111,17 @@ func FormatNewDelivery(
 	}
 
 	return deliveryIntro + "\n\n" + beginDelimiter + "\n" + string(jsonBytes) + "\n" + endDelimiter
+}
+
+// typeString maps internal MessageKind and the explicit mention flag to the
+// three-value wire type: "event", "mention", or "message".
+// KindEvent → "event"; isMention → "mention"; everything else → "message".
+func typeString(k MessageKind, isMention bool) string {
+	if k == KindEvent {
+		return "event"
+	}
+	if isMention {
+		return "mention"
+	}
+	return "message"
 }

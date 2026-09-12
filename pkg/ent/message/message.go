@@ -50,8 +50,6 @@ const (
 	FieldThreadID = "thread_id"
 	// FieldConversationID holds the string denoting the conversation_id field in the database.
 	FieldConversationID = "conversation_id"
-	// FieldVisibility holds the string denoting the visibility field in the database.
-	FieldVisibility = "visibility"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// Table holds the table name of the message in the database.
@@ -79,7 +77,6 @@ var Columns = []string{
 	FieldChannel,
 	FieldThreadID,
 	FieldConversationID,
-	FieldVisibility,
 	FieldCreated,
 }
 
@@ -114,8 +111,6 @@ var (
 	ChannelValidator func(string) error
 	// ThreadIDValidator is a validator for the "thread_id" field. It is called by the builders before save.
 	ThreadIDValidator func(string) error
-	// VisibilityValidator is a validator for the "visibility" field. It is called by the builders before save.
-	VisibilityValidator func(string) error
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -218,11 +213,6 @@ func ByThreadID(opts ...sql.OrderTermOption) OrderOption {
 // ByConversationID orders the results by the conversation_id field.
 func ByConversationID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldConversationID, opts...).ToFunc()
-}
-
-// ByVisibility orders the results by the visibility field.
-func ByVisibility(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldVisibility, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

@@ -40,17 +40,20 @@ func TestFormatNewDelivery_TextRequest(t *testing.T) {
 			DeliveryState: DeliveryPending,
 		},
 	}
-	conv := ConversationInfo{
+	conv := &ConversationInfo{
 		ID:      "conv-123",
 		Kind:    "direct",
 		Surface: "native",
 	}
 
-	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{}, false)
 
 	// Parse the JSON out of the delimiters.
 	env := extractEnvelope(t, result)
 
+	if env.Conversation == nil {
+		t.Fatal("conversation is nil, want non-nil")
+	}
 	if env.Conversation.ID != "conv-123" {
 		t.Errorf("conversation.id = %q, want %q", env.Conversation.ID, "conv-123")
 	}
@@ -60,14 +63,12 @@ func TestFormatNewDelivery_TextRequest(t *testing.T) {
 	if env.From != "user:alice" {
 		t.Errorf("from = %q, want %q", env.From, "user:alice")
 	}
-	if len(env.To) != 1 || env.To[0] != "agent:deployer" {
-		t.Errorf("to = %v, want [agent:deployer]", env.To)
+	// Single-recipient direct messages omit "to" — the recipient is implicit.
+	if len(env.To) != 0 {
+		t.Errorf("to = %v, want empty (single-recipient direct message)", env.To)
 	}
-	if env.Kind != KindText {
-		t.Errorf("kind = %q, want %q", env.Kind, KindText)
-	}
-	if env.Intent == nil || *env.Intent != IntentRequest {
-		t.Errorf("intent = %v, want request", env.Intent)
+	if env.Type != "message" {
+		t.Errorf("type = %q, want %q", env.Type, "message")
 	}
 	if env.Msg != "Please deploy the service" {
 		t.Errorf("msg = %q, want %q", env.Msg, "Please deploy the service")
@@ -84,25 +85,22 @@ func TestFormatNewDelivery_TextInform_NoTo(t *testing.T) {
 		Body:      "Build completed successfully",
 		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
-	conv := ConversationInfo{
+	conv := &ConversationInfo{
 		ID:      "conv-456",
 		Kind:    "group",
 		Surface: "native",
 	}
 
 	// No addressees for informational messages.
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	env := extractEnvelope(t, result)
 
 	if len(env.To) != 0 {
 		t.Errorf("to = %v, want empty (informational message)", env.To)
 	}
-	if env.Kind != KindText {
-		t.Errorf("kind = %q, want %q", env.Kind, KindText)
-	}
-	if env.Intent == nil || *env.Intent != IntentInform {
-		t.Errorf("intent = %v, want inform", env.Intent)
+	if env.Type != "message" {
+		t.Errorf("type = %q, want %q", env.Type, "message")
 	}
 }
 
@@ -122,18 +120,18 @@ func TestFormatNewDelivery_EventWithStatus(t *testing.T) {
 		Body:      "Agent builder has completed",
 		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
-	conv := ConversationInfo{
+	conv := &ConversationInfo{
 		ID:      "conv-789",
 		Kind:    "direct",
 		Surface: "native",
 	}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	env := extractEnvelope(t, result)
 
-	if env.Kind != KindEvent {
-		t.Fatalf("kind = %q, want %q", env.Kind, KindEvent)
+	if env.Type != "event" {
+		t.Fatalf("type = %q, want %q", env.Type, "event")
 	}
 	if env.Event == nil {
 		t.Fatal("event is nil, want non-nil EventBody")
@@ -163,32 +161,6 @@ func TestFormatNewDelivery_EventWithStatus(t *testing.T) {
 	}
 }
 
-func TestFormatNewDelivery_VisibilityDelivered(t *testing.T) {
-	intent := IntentInform
-	msg := &Message{
-		ID:         "msg-004",
-		From:       PrincipalRef("agent:builder"),
-		Kind:       KindText,
-		Intent:     &intent,
-		Body:       "Verbose output",
-		Visibility: VisibilityVerbose,
-		CreatedAt:  time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
-	}
-	conv := ConversationInfo{
-		ID:      "conv-100",
-		Kind:    "direct",
-		Surface: "native",
-	}
-
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
-
-	env := extractEnvelope(t, result)
-
-	if env.Visibility != VisibilityVerbose {
-		t.Errorf("visibility = %q, want %q", env.Visibility, VisibilityVerbose)
-	}
-}
-
 func TestFormatNewDelivery_NoMetadata(t *testing.T) {
 	intent := IntentRequest
 	msg := &Message{
@@ -199,13 +171,13 @@ func TestFormatNewDelivery_NoMetadata(t *testing.T) {
 		Body:      "Hello",
 		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
-	conv := ConversationInfo{
+	conv := &ConversationInfo{
 		ID:      "conv-200",
 		Kind:    "direct",
 		Surface: "native",
 	}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	jsonStr := extractJSON(t, result)
 	if strings.Contains(jsonStr, `"metadata"`) {
@@ -223,13 +195,13 @@ func TestFormatNewDelivery_NoBroadcasted(t *testing.T) {
 		Body:      "Hello",
 		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
-	conv := ConversationInfo{
+	conv := &ConversationInfo{
 		ID:      "conv-200",
 		Kind:    "group",
 		Surface: "native",
 	}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	jsonStr := extractJSON(t, result)
 	if strings.Contains(jsonStr, `"broadcasted"`) {
@@ -247,9 +219,8 @@ func TestFormatNewDelivery_PlainReturnsRawText(t *testing.T) {
 		Body:      "raw text content",
 		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
-	conv := ConversationInfo{ID: "conv-300", Kind: "direct", Surface: "native"}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{Plain: true})
+	result := FormatNewDelivery(msg, nil, nil, DeliveryOptions{Plain: true}, false)
 
 	if result != "raw text content" {
 		t.Errorf("plain delivery = %q, want %q", result, "raw text content")
@@ -266,9 +237,8 @@ func TestFormatNewDelivery_RawReturnsRawText(t *testing.T) {
 		Body:      "keystroke content",
 		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
-	conv := ConversationInfo{ID: "conv-400", Kind: "direct", Surface: "native"}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{Raw: true})
+	result := FormatNewDelivery(msg, nil, nil, DeliveryOptions{Raw: true}, false)
 
 	if result != "keystroke content" {
 		t.Errorf("raw delivery = %q, want %q", result, "keystroke content")
@@ -285,9 +255,9 @@ func TestFormatNewDelivery_Delimiters(t *testing.T) {
 		Body:      "Test",
 		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
-	conv := ConversationInfo{ID: "conv-500", Kind: "direct", Surface: "native"}
+	conv := &ConversationInfo{ID: "conv-500", Kind: "direct", Surface: "native"}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	expectedPrefix := "You are receiving a message from the orchestration system:\n\n---BEGIN SCION MESSAGE---\n"
 	if !strings.HasPrefix(result, expectedPrefix) {
@@ -312,9 +282,9 @@ func TestFormatNewDelivery_Attachments(t *testing.T) {
 		},
 		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
-	conv := ConversationInfo{ID: "conv-600", Kind: "direct", Surface: "native"}
+	conv := &ConversationInfo{ID: "conv-600", Kind: "direct", Surface: "native"}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	env := extractEnvelope(t, result)
 	if len(env.Attachments) != 2 {
@@ -337,45 +307,13 @@ func TestFormatNewDelivery_ReplyTo(t *testing.T) {
 		ReplyToID: &replyTo,
 		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
 	}
-	conv := ConversationInfo{ID: "conv-700", Kind: "direct", Surface: "native"}
+	conv := &ConversationInfo{ID: "conv-700", Kind: "direct", Surface: "native"}
 
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
 
 	env := extractEnvelope(t, result)
 	if env.ReplyTo == nil || *env.ReplyTo != "msg-000" {
 		t.Errorf("reply_to = %v, want %q", env.ReplyTo, "msg-000")
-	}
-}
-
-func TestFormatNewDelivery_ConversationParticipants(t *testing.T) {
-	intent := IntentInform
-	msg := &Message{
-		ID:        "msg-012",
-		From:      PrincipalRef("agent:builder"),
-		Kind:      KindText,
-		Intent:    &intent,
-		Body:      "Status update",
-		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
-	}
-	conv := ConversationInfo{
-		ID:           "conv-800",
-		Kind:         "group",
-		Surface:      "discord",
-		Name:         "build-channel",
-		Participants: []string{"user:alice", "agent:builder", "agent:tester"},
-	}
-
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{})
-
-	env := extractEnvelope(t, result)
-	if env.Conversation.Name != "build-channel" {
-		t.Errorf("conversation.name = %q, want %q", env.Conversation.Name, "build-channel")
-	}
-	if env.Conversation.Surface != "discord" {
-		t.Errorf("conversation.surface = %q, want %q", env.Conversation.Surface, "discord")
-	}
-	if len(env.Conversation.Participants) != 3 {
-		t.Errorf("conversation.participants length = %d, want 3", len(env.Conversation.Participants))
 	}
 }
 
@@ -393,9 +331,9 @@ func TestFormatNewDelivery_MultipleAddressees(t *testing.T) {
 		{MessageID: "msg-013", PrincipalKind: "agent", PrincipalID: "deployer", Via: ViaExplicit, DeliveryState: DeliveryPending},
 		{MessageID: "msg-013", PrincipalKind: "agent", PrincipalID: "tester", Via: ViaBodyMention, DeliveryState: DeliveryPending},
 	}
-	conv := ConversationInfo{ID: "conv-900", Kind: "group", Surface: "native"}
+	conv := &ConversationInfo{ID: "conv-900", Kind: "group", Surface: "native"}
 
-	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{})
+	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{}, false)
 
 	env := extractEnvelope(t, result)
 	if len(env.To) != 2 {
@@ -406,6 +344,333 @@ func TestFormatNewDelivery_MultipleAddressees(t *testing.T) {
 	}
 	if env.To[1] != "agent:tester" {
 		t.Errorf("to[1] = %q, want %q", env.To[1], "agent:tester")
+	}
+}
+
+// TestFormatNewDelivery_SingleAddressee_OmitsToKey verifies that a direct
+// message (exactly one addressee) omits the "to" key entirely from the
+// delivered JSON. The recipient is implicit for single-recipient messages.
+func TestFormatNewDelivery_SingleAddressee_OmitsToKey(t *testing.T) {
+	intent := IntentRequest
+	msg := &Message{
+		ID:        "msg-single-to",
+		From:      PrincipalRef("user:alice"),
+		Kind:      KindText,
+		Intent:    &intent,
+		Body:      "Direct message",
+		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+	}
+	addrs := []Addressee{
+		{MessageID: "msg-single-to", PrincipalKind: "agent", PrincipalID: "bot", Via: ViaExplicit, DeliveryState: DeliveryPending},
+	}
+	conv := &ConversationInfo{ID: "conv-single", Kind: "direct", Surface: "native"}
+
+	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{}, false)
+
+	// Structured: To must be empty.
+	env := extractEnvelope(t, result)
+	if len(env.To) != 0 {
+		t.Errorf("to = %v, want empty (single-recipient)", env.To)
+	}
+
+	// Raw JSON: "to" key must be absent (not just an empty array).
+	jsonStr := extractJSON(t, result)
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+	if _, ok := raw["to"]; ok {
+		t.Error("JSON contains 'to' key; want absent for single-recipient direct message")
+	}
+}
+
+// TestFormatNewDelivery_MultipleAddressees_IncludesToKey verifies that a
+// group message (multiple addressees) still includes the "to" key with all
+// recipient principal refs.
+func TestFormatNewDelivery_MultipleAddressees_IncludesToKey(t *testing.T) {
+	intent := IntentRequest
+	msg := &Message{
+		ID:        "msg-multi-to",
+		From:      PrincipalRef("user:alice"),
+		Kind:      KindText,
+		Intent:    &intent,
+		Body:      "Group message",
+		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+	}
+	addrs := []Addressee{
+		{MessageID: "msg-multi-to", PrincipalKind: "agent", PrincipalID: "deployer", Via: ViaExplicit, DeliveryState: DeliveryPending},
+		{MessageID: "msg-multi-to", PrincipalKind: "agent", PrincipalID: "tester", Via: ViaExplicit, DeliveryState: DeliveryPending},
+		{MessageID: "msg-multi-to", PrincipalKind: "user", PrincipalID: "bob", Via: ViaExplicit, DeliveryState: DeliveryPending},
+	}
+	conv := &ConversationInfo{ID: "conv-multi", Kind: "group", Surface: "native"}
+
+	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{}, false)
+
+	// Structured: To must list all three recipients.
+	env := extractEnvelope(t, result)
+	if len(env.To) != 3 {
+		t.Fatalf("to length = %d, want 3", len(env.To))
+	}
+	want := []string{"agent:deployer", "agent:tester", "user:bob"}
+	for i, w := range want {
+		if env.To[i] != w {
+			t.Errorf("to[%d] = %q, want %q", i, env.To[i], w)
+		}
+	}
+
+	// Raw JSON: "to" key must be present.
+	jsonStr := extractJSON(t, result)
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+	if _, ok := raw["to"]; !ok {
+		t.Error("JSON missing 'to' key; want present for multi-recipient group message")
+	}
+}
+
+// TestFormatNewDelivery_Urgent (AC-9-10a) verifies that an urgent message
+// produces "urgent": true in the delivered envelope. This pins the urgent
+// semantics on the new envelope so drift between the new renderer and the
+// legacy renderer (pkg/messages/format.go) is caught.
+func TestFormatNewDelivery_Urgent(t *testing.T) {
+	intent := IntentRequest
+	msg := &Message{
+		ID:        "msg-015",
+		From:      PrincipalRef("user:alice"),
+		Kind:      KindText,
+		Intent:    &intent,
+		Body:      "Urgent request",
+		Urgent:    true,
+		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+	}
+	conv := &ConversationInfo{ID: "conv-1000", Kind: "direct", Surface: "native"}
+
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
+
+	env := extractEnvelope(t, result)
+	if !env.Urgent {
+		t.Error("urgent = false, want true")
+	}
+
+	// Also verify via raw JSON that "urgent": true appears.
+	jsonStr := extractJSON(t, result)
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+	urgentVal, ok := raw["urgent"]
+	if !ok {
+		t.Fatal("missing 'urgent' key in JSON")
+	}
+	if urgentVal != true {
+		t.Errorf("urgent = %v, want true", urgentVal)
+	}
+}
+
+// TestFormatNewDelivery_NotUrgent_OmitsKey verifies that a non-urgent message
+// does not include "urgent" in the JSON (omitempty).
+func TestFormatNewDelivery_NotUrgent_OmitsKey(t *testing.T) {
+	intent := IntentRequest
+	msg := &Message{
+		ID:        "msg-016",
+		From:      PrincipalRef("user:alice"),
+		Kind:      KindText,
+		Intent:    &intent,
+		Body:      "Normal request",
+		Urgent:    false,
+		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+	}
+	conv := &ConversationInfo{ID: "conv-1001", Kind: "direct", Surface: "native"}
+
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
+
+	jsonStr := extractJSON(t, result)
+	if strings.Contains(jsonStr, `"urgent"`) {
+		t.Error("JSON contains 'urgent' key for non-urgent message; want omitted")
+	}
+}
+
+// TestFormatNewDelivery_NilConversation_OmitsKey (DEF-102, AC-9-4) verifies
+// that when no conversation context is available, the "conversation" key is
+// absent from the JSON envelope (not fabricated), and the message body is
+// still delivered.
+func TestFormatNewDelivery_NilConversation_OmitsKey(t *testing.T) {
+	intent := IntentRequest
+	msg := &Message{
+		ID:        "msg-014",
+		From:      PrincipalRef("user:alice"),
+		Kind:      KindText,
+		Intent:    &intent,
+		Body:      "Message without conversation context",
+		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+	}
+
+	result := FormatNewDelivery(msg, nil, nil, DeliveryOptions{}, false)
+
+	// The message body must still be delivered.
+	if !strings.Contains(result, "Message without conversation context") {
+		t.Error("body not delivered when conversation is nil")
+	}
+	if !strings.Contains(result, beginDelimiter) {
+		t.Error("missing begin delimiter — message not wrapped")
+	}
+
+	// The "conversation" key must be absent from the JSON.
+	jsonStr := extractJSON(t, result)
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v\n%s", err, jsonStr)
+	}
+	if _, ok := raw["conversation"]; ok {
+		t.Error("JSON contains 'conversation' key; want absent when convInfo is nil (DEF-102)")
+	}
+
+	// The structured envelope should still parse (with nil Conversation).
+	env := extractEnvelope(t, result)
+	if env.Conversation != nil {
+		t.Errorf("conversation = %+v, want nil", env.Conversation)
+	}
+	if env.Msg != "Message without conversation context" {
+		t.Errorf("msg = %q, want %q", env.Msg, "Message without conversation context")
+	}
+}
+
+// TestFormatNewDelivery_TextMessage_NoKindOrIntentKeys (AC-1) verifies that
+// a text message of each intent renders "type":"message" and does not
+// include "kind" or "intent" keys in the delivered JSON.
+func TestFormatNewDelivery_TextMessage_NoKindOrIntentKeys(t *testing.T) {
+	for _, intent := range []TextIntent{IntentInform, IntentRequest, IntentQuestion} {
+		t.Run(string(intent), func(t *testing.T) {
+			i := intent
+			msg := &Message{
+				ID:        "msg-ac1",
+				From:      PrincipalRef("user:alice"),
+				Kind:      KindText,
+				Intent:    &i,
+				Body:      "test body",
+				CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+			}
+			conv := &ConversationInfo{ID: "conv-ac1", Kind: "direct", Surface: "native"}
+
+			result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
+
+			// Structured: Type must be "message".
+			env := extractEnvelope(t, result)
+			if env.Type != "message" {
+				t.Errorf("type = %q, want %q", env.Type, "message")
+			}
+
+			// Raw JSON: "kind" and "intent" keys must be absent.
+			jsonStr := extractJSON(t, result)
+			var raw map[string]any
+			if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+				t.Fatalf("failed to unmarshal JSON: %v", err)
+			}
+			if _, ok := raw["kind"]; ok {
+				t.Error("JSON contains 'kind' key; want absent (AC-1)")
+			}
+			if _, ok := raw["intent"]; ok {
+				t.Error("JSON contains 'intent' key; want absent (AC-1)")
+			}
+			if typ, ok := raw["type"]; !ok || typ != "message" {
+				t.Errorf("type = %v, want %q", typ, "message")
+			}
+		})
+	}
+}
+
+// TestFormatNewDelivery_Event_NoKindOrIntentKeys (AC-2) verifies that
+// an event message renders "type":"event" with the "event" object intact,
+// and does not include "kind" or "intent" keys.
+func TestFormatNewDelivery_Event_NoKindOrIntentKeys(t *testing.T) {
+	msg := &Message{
+		ID:   "msg-ac2",
+		From: PrincipalRef("system:lifecycle"),
+		Kind: KindEvent,
+		Event: &EventBody{
+			Type:    EventAgentStateChanged,
+			Subject: "agent:worker",
+			Status:  "RUNNING",
+		},
+		Body:      "Agent worker is running",
+		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+	}
+	conv := &ConversationInfo{ID: "conv-ac2", Kind: "direct", Surface: "native"}
+
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
+
+	env := extractEnvelope(t, result)
+	if env.Type != "event" {
+		t.Errorf("type = %q, want %q", env.Type, "event")
+	}
+	if env.Event == nil {
+		t.Fatal("event is nil, want non-nil")
+	}
+	if env.Event.Type != EventAgentStateChanged {
+		t.Errorf("event.type = %q, want %q", env.Event.Type, EventAgentStateChanged)
+	}
+
+	jsonStr := extractJSON(t, result)
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+	if _, ok := raw["kind"]; ok {
+		t.Error("JSON contains 'kind' key; want absent (AC-2)")
+	}
+	if _, ok := raw["intent"]; ok {
+		t.Error("JSON contains 'intent' key; want absent (AC-2)")
+	}
+	if typ, ok := raw["type"]; !ok || typ != "event" {
+		t.Errorf("type = %v, want %q", typ, "event")
+	}
+	if _, ok := raw["event"]; !ok {
+		t.Error("JSON missing 'event' key; want present (AC-2)")
+	}
+}
+
+// TestFormatNewDelivery_ConversationKindUnaffected (AC-3) explicitly verifies
+// that ConversationInfo.Kind ("direct"/"group") is not affected by the
+// envelope type collapse — it's a different field on a different struct.
+func TestFormatNewDelivery_ConversationKindUnaffected(t *testing.T) {
+	for _, convKind := range []string{"direct", "group"} {
+		t.Run(convKind, func(t *testing.T) {
+			intent := IntentRequest
+			msg := &Message{
+				ID:        "msg-ac3",
+				From:      PrincipalRef("user:alice"),
+				Kind:      KindText,
+				Intent:    &intent,
+				Body:      "test",
+				CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+			}
+			conv := &ConversationInfo{ID: "conv-ac3", Kind: convKind, Surface: "native"}
+
+			result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
+
+			env := extractEnvelope(t, result)
+			if env.Conversation == nil {
+				t.Fatal("conversation is nil")
+			}
+			if env.Conversation.Kind != convKind {
+				t.Errorf("conversation.kind = %q, want %q", env.Conversation.Kind, convKind)
+			}
+
+			// Also verify via raw JSON that conversation.kind is preserved.
+			jsonStr := extractJSON(t, result)
+			var raw map[string]any
+			if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+				t.Fatalf("failed to unmarshal JSON: %v", err)
+			}
+			convObj, ok := raw["conversation"].(map[string]any)
+			if !ok {
+				t.Fatal("conversation is not a JSON object")
+			}
+			if ck, ok := convObj["kind"]; !ok || ck != convKind {
+				t.Errorf("raw conversation.kind = %v, want %q", ck, convKind)
+			}
+		})
 	}
 }
 

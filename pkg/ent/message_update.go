@@ -335,26 +335,6 @@ func (_u *MessageUpdate) ClearConversationID() *MessageUpdate {
 	return _u
 }
 
-// SetVisibility sets the "visibility" field.
-func (_u *MessageUpdate) SetVisibility(v string) *MessageUpdate {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *MessageUpdate) SetNillableVisibility(v *string) *MessageUpdate {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
-	return _u
-}
-
-// ClearVisibility clears the value of the "visibility" field.
-func (_u *MessageUpdate) ClearVisibility() *MessageUpdate {
-	_u.mutation.ClearVisibility()
-	return _u
-}
-
 // Mutation returns the MessageMutation object of the builder.
 func (_u *MessageUpdate) Mutation() *MessageMutation {
 	return _u.mutation
@@ -412,11 +392,6 @@ func (_u *MessageUpdate) check() error {
 	if v, ok := _u.mutation.ThreadID(); ok {
 		if err := message.ThreadIDValidator(v); err != nil {
 			return &ValidationError{Name: "thread_id", err: fmt.Errorf(`ent: validator failed for field "Message.thread_id": %w`, err)}
-		}
-	}
-	if v, ok := _u.mutation.Visibility(); ok {
-		if err := message.VisibilityValidator(v); err != nil {
-			return &ValidationError{Name: "visibility", err: fmt.Errorf(`ent: validator failed for field "Message.visibility": %w`, err)}
 		}
 	}
 	return nil
@@ -514,12 +489,6 @@ func (_u *MessageUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.ConversationIDCleared() {
 		_spec.ClearField(message.FieldConversationID, field.TypeUUID)
-	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(message.FieldVisibility, field.TypeString, value)
-	}
-	if _u.mutation.VisibilityCleared() {
-		_spec.ClearField(message.FieldVisibility, field.TypeString)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -847,26 +816,6 @@ func (_u *MessageUpdateOne) ClearConversationID() *MessageUpdateOne {
 	return _u
 }
 
-// SetVisibility sets the "visibility" field.
-func (_u *MessageUpdateOne) SetVisibility(v string) *MessageUpdateOne {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *MessageUpdateOne) SetNillableVisibility(v *string) *MessageUpdateOne {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
-	return _u
-}
-
-// ClearVisibility clears the value of the "visibility" field.
-func (_u *MessageUpdateOne) ClearVisibility() *MessageUpdateOne {
-	_u.mutation.ClearVisibility()
-	return _u
-}
-
 // Mutation returns the MessageMutation object of the builder.
 func (_u *MessageUpdateOne) Mutation() *MessageMutation {
 	return _u.mutation
@@ -937,11 +886,6 @@ func (_u *MessageUpdateOne) check() error {
 	if v, ok := _u.mutation.ThreadID(); ok {
 		if err := message.ThreadIDValidator(v); err != nil {
 			return &ValidationError{Name: "thread_id", err: fmt.Errorf(`ent: validator failed for field "Message.thread_id": %w`, err)}
-		}
-	}
-	if v, ok := _u.mutation.Visibility(); ok {
-		if err := message.VisibilityValidator(v); err != nil {
-			return &ValidationError{Name: "visibility", err: fmt.Errorf(`ent: validator failed for field "Message.visibility": %w`, err)}
 		}
 	}
 	return nil
@@ -1056,12 +1000,6 @@ func (_u *MessageUpdateOne) sqlSave(ctx context.Context) (_node *Message, err er
 	}
 	if _u.mutation.ConversationIDCleared() {
 		_spec.ClearField(message.FieldConversationID, field.TypeUUID)
-	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(message.FieldVisibility, field.TypeString, value)
-	}
-	if _u.mutation.VisibilityCleared() {
-		_spec.ClearField(message.FieldVisibility, field.TypeString)
 	}
 	_node = &Message{config: _u.config}
 	_spec.Assign = _node.assignValues

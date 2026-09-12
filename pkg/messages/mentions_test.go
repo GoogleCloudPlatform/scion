@@ -50,6 +50,32 @@ func TestExtractMentions(t *testing.T) {
 	}
 }
 
+func TestIsLeadingMention(t *testing.T) {
+	tests := []struct {
+		name             string
+		text             string
+		firstMentionName string
+		want             bool
+	}{
+		{name: "leading mention", text: "@agent-a hello", firstMentionName: "agent-a", want: true},
+		{name: "non-leading mention", text: "hello @agent-a", firstMentionName: "agent-a", want: false},
+		{name: "case insensitive", text: "@AGENT-A hello", firstMentionName: "agent-a", want: true},
+		{name: "name mismatch", text: "@typo hello", firstMentionName: "agent-a", want: false},
+		{name: "empty name after trim", text: "@ hello", firstMentionName: "agent-a", want: false},
+		{name: "trailing punct stripped", text: "@agent-a, hello", firstMentionName: "agent-a", want: true},
+		{name: "empty text", text: "", firstMentionName: "agent-a", want: false},
+		{name: "leading whitespace", text: "  @agent-a hello", firstMentionName: "agent-a", want: true},
+		{name: "all-punct name", text: "@!!! hello", firstMentionName: "agent-a", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsLeadingMention(tc.text, tc.firstMentionName)
+			assert.Equal(t, tc.want, got, "IsLeadingMention(%q, %q)", tc.text, tc.firstMentionName)
+		})
+	}
+}
+
 func TestParseCCFlag(t *testing.T) {
 	tests := []struct {
 		name string

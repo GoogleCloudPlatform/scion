@@ -1257,24 +1257,27 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	// Get project agents (with cache refresh).
 	agents := b.getProjectAgents(ctx, link.ProjectID)
 
-	// Three-tier @-mention routing.
-	targets, isAll := resolveTargetAgents(m, botUserID, link.DefaultAgent, agents)
-
-	// Fallback: reply-to-bot message — extract agent from webhook username.
-	if len(targets) == 0 && m.ReferencedMessage != nil {
-		slug := agentFromReply(m.ReferencedMessage, botUserID)
-		if slug != "" {
-			targets = []string{slug}
-		}
-	}
-
 	// Resolve effective default — thread override first, then channel fallback.
+	// Computed before resolveTargetAgents so the additive model uses the
+	// correct implicit primary (thread-level override when present).
 	effectiveDefault := link.DefaultAgent
 	if parentID, isThread := b.resolveThreadParent(channelID); isThread {
 		if threadDefault, err := store.GetThreadDefault(ctx, parentID, channelID); err != nil {
 			b.log.Error("Failed to get thread default", "error", err)
 		} else if threadDefault != "" {
 			effectiveDefault = threadDefault
+		}
+	}
+
+	// Three-tier @-mention routing (additive model: effectiveDefault is
+	// included as implicit primary when explicit agent mentions are present).
+	targets, isAll := resolveTargetAgents(m, botUserID, effectiveDefault, agents)
+
+	// Fallback: reply-to-bot message — extract agent from webhook username.
+	if len(targets) == 0 && m.ReferencedMessage != nil {
+		slug := agentFromReply(m.ReferencedMessage, botUserID)
+		if slug != "" {
+			targets = []string{slug}
 		}
 	}
 
@@ -1409,6 +1412,37 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		}
 	}
 
+	// Additive mention routing: ensure the implicit primary (effectiveDefault)
+	// is present at position 0 in targets when mentioned agents exist.
+	// The start-mention filter above may have removed it because the default
+	// agent was not explicitly @-mentioned. Re-inserting here mirrors the
+	// native chat additive model (handlers_chat_v2.go:958-1001).
+	if !isAll && effectiveDefault != "" && len(targets) > 0 {
+		hasDefault := false
+		hasOther := false
+		for _, t := range targets {
+			if strings.EqualFold(t, effectiveDefault) {
+				hasDefault = true
+			} else {
+				hasOther = true
+			}
+		}
+		if hasOther && !hasDefault {
+			// Default agent was filtered out — re-insert at position 0.
+			targets = append([]string{effectiveDefault}, targets...)
+		} else if hasOther && hasDefault && !strings.EqualFold(targets[0], effectiveDefault) {
+			// Default agent exists but not at position 0 — move it to front.
+			reordered := make([]string, 0, len(targets))
+			reordered = append(reordered, effectiveDefault)
+			for _, t := range targets {
+				if !strings.EqualFold(t, effectiveDefault) {
+					reordered = append(reordered, t)
+				}
+			}
+			targets = reordered
+		}
+	}
+
 	// Strip bot and start-mention agent mentions from message text.
 	// Body-mention agents remain visible in the delivered text.
 	cleanText := stripMentions(m.Content, botUserID, stripSlugs)
@@ -1440,20 +1474,26 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		return
 	}
 
-	// Determine message type and recipients for multi-agent routing.
-	msgType := messages.TypeInstruction
-	var groupRecipients string
+	// --- Additive mention routing delivery ---
+	//
+	// Delivery model (mirroring native chat's additive model):
+	//   - targets[0] is the implicit primary (default agent) → TypeInstruction
+	//   - targets[1:] are explicitly mentioned agents → TypeMention
+	//   - @all broadcasts: all targets get TypeInstruction (unchanged)
+	//   - Body-mentioned agents (not in targets): TypeMention
+	//
+	// Co-addressees metadata enables the hub's broker inbound handler to
+	// produce the "to" field on the delivery envelope.
+
+	// Build co-addressees metadata for multi-agent routing.
+	var coAddresseesMeta string
 	if len(targets) > 1 && !isAll {
-		msgType = messages.TypeGroupSet
-		recipientIDs := make([]string, len(targets))
-		for i, slug := range targets {
-			recipientIDs[i] = "agent:" + slug
-		}
-		groupRecipients = messages.FormatGroupRecipients(sender, recipientIDs)
+		slugsJSON, _ := json.Marshal(targets)
+		coAddresseesMeta = string(slugsJSON)
 	}
 
-	// Deliver to each target agent.
-	for _, agentSlug := range targets {
+	// saveConversationContext records conversation context for each target.
+	saveConversationContext := func(agentSlug string) {
 		cc := &ConversationContext{
 			DiscordUserID: senderID,
 			ProjectID:     link.ProjectID,
@@ -1464,28 +1504,60 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		if err := store.SetConversationContext(ctx, cc); err != nil {
 			b.log.Warn("Failed to save conversation context", "error", err)
 		}
+	}
+
+	// buildDiscordMeta returns the standard Discord metadata map.
+	buildDiscordMeta := func() map[string]string {
+		meta := map[string]string{
+			"discord_channel_id": channelID,
+			"discord_message_id": m.ID,
+			"discord_guild_id":   m.GuildID,
+			"project_id":         link.ProjectID,
+		}
+		if coAddresseesMeta != "" {
+			meta["mention_co_addressees"] = coAddresseesMeta
+		}
+		return meta
+	}
+
+	// Deliver to each target.
+	for i, agentSlug := range targets {
+		saveConversationContext(agentSlug)
 
 		topic := projectcompat.AgentTopic(link.ProjectID, agentSlug)
 		recipient := "agent:" + agentSlug
 
-		msg := &messages.StructuredMessage{
-			Version:     messages.Version,
-			Timestamp:   m.Timestamp.UTC().Format(time.RFC3339),
-			Channel:     "discord",
-			ThreadID:    channelID,
-			Sender:      sender,
-			SenderID:    senderID,
-			Recipient:   recipient,
-			Recipients:  groupRecipients,
-			Msg:         cleanText,
-			Type:        msgType,
-			Attachments: attachmentPaths,
-			Metadata: map[string]string{
-				"discord_channel_id": channelID,
-				"discord_message_id": m.ID,
-				"discord_guild_id":   m.GuildID,
-				"project_id":         link.ProjectID,
-			},
+		var msg *messages.StructuredMessage
+
+		if isAll || i == 0 {
+			// Primary target (or @all broadcast): TypeInstruction.
+			msg = &messages.StructuredMessage{
+				Version:     messages.Version,
+				Timestamp:   m.Timestamp.UTC().Format(time.RFC3339),
+				Channel:     "discord",
+				ThreadID:    channelID,
+				Sender:      sender,
+				SenderID:    senderID,
+				Recipient:   recipient,
+				Msg:         cleanText,
+				Type:        messages.TypeInstruction,
+				Attachments: attachmentPaths,
+				Metadata:    buildDiscordMeta(),
+			}
+		} else {
+			// Secondary target: TypeMention — mirrors the native chat fan-out
+			// path (handlers_chat_v2.go:1346).
+			mentionSource := "agent:" + targets[0]
+			msg = messages.NewMention(sender, recipient, cleanText, mentionSource)
+			msg.SenderID = senderID
+			msg.Channel = "discord"
+			msg.ThreadID = channelID
+			for k, v := range buildDiscordMeta() {
+				msg.Metadata[k] = v
+			}
+			if len(attachmentPaths) > 0 {
+				msg.Attachments = attachmentPaths
+			}
 		}
 
 		if isEcho(msg) {
@@ -1494,7 +1566,8 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		}
 
 		b.log.Debug("Delivering inbound message",
-			"topic", topic, "sender", sender, "agent", agentSlug)
+			"topic", topic, "sender", sender, "agent", agentSlug,
+			"type", msg.Type)
 
 		if he := b.deliverInbound(topic, msg); he != nil {
 			s.ChannelMessageSend(channelID, he.userFacingMessage())
@@ -1502,25 +1575,20 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	}
 
 	// Deliver TypeMention notifications for body mentions.
+	// Agents already in the targets list (primary or secondary) are skipped.
 	if !isAll && len(classified.BodyMentions) > 0 {
 		targetSet := make(map[string]bool, len(targets))
 		for _, slug := range targets {
 			targetSet[strings.ToLower(slug)] = true
 		}
 
-		// Build the mention source: who the primary message was addressed to.
-		var mentionSource string
-		if groupRecipients != "" {
-			mentionSource = groupRecipients
-		} else if len(targets) == 1 {
-			mentionSource = "agent:" + targets[0]
-		}
+		mentionSource := "agent:" + targets[0]
 
 		for _, bm := range classified.BodyMentions {
 			if bm.Kind != "agent" {
 				continue
 			}
-			// Skip agents already receiving the primary message.
+			// Skip agents already receiving a primary or secondary message.
 			if targetSet[strings.ToLower(bm.Name)] {
 				continue
 			}
@@ -1529,10 +1597,9 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 			mentionMsg.SenderID = senderID
 			mentionMsg.Channel = "discord"
 			mentionMsg.ThreadID = channelID
-			mentionMsg.Metadata["discord_channel_id"] = channelID
-			mentionMsg.Metadata["discord_message_id"] = m.ID
-			mentionMsg.Metadata["discord_guild_id"] = m.GuildID
-			mentionMsg.Metadata["project_id"] = link.ProjectID
+			for k, v := range buildDiscordMeta() {
+				mentionMsg.Metadata[k] = v
+			}
 			if len(attachmentPaths) > 0 {
 				mentionMsg.Attachments = attachmentPaths
 			}
@@ -1623,6 +1690,14 @@ func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMes
 
 // getProjectAgents returns the cached agent slugs for a project, refreshing
 // from the Hub API if the cache is stale.
+//
+// Known limitation: the cache has a 30s TTL (defaultAgentCacheTTL). If an agent
+// is created or renamed after the last refresh, it won't appear in the slug list
+// until the cache expires. During that window, @-mentions of the new agent are
+// silently treated as unrecognized text, falling through to default-agent routing
+// instead of being delivered to the mentioned agent. This is a known transient
+// gap, not addressed here — the centralized mention-routing design (Phase 4)
+// will replace this Discord-side resolution entirely.
 func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID string) []string {
 	b.mu.RLock()
 	store := b.store

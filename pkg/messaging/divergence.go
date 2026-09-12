@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -47,6 +48,26 @@ type DivergenceCounter struct {
 	matches    atomic.Int64
 	mismatches atomic.Int64
 	fallbacks  atomic.Int64
+
+	// DEF-138: explicit routing events — messages whose ConversationID was
+	// supplied by the caller and authorized by P-2.  These bypass
+	// ComputeDivergenceMatch entirely because there is no old-model routing
+	// key to compare against (the conversation was named, not derived).
+	explicitRoutes atomic.Int64
+
+	// DEF-141: derived routing events — messages whose ConversationID was
+	// derived by the hub from message fields (DeriveConversationKey) and
+	// propagated onto StructuredMessage by P-3. These are NOT caller
+	// assertions and must not be counted as explicit routes.
+	derivedRoutes atomic.Int64
+
+	// Consistency check counters (CheckConversationConsistency).
+	// These track the independent, non-tautological consistency check that
+	// queries prior persisted messages — unlike the routing-key comparison
+	// (matches/mismatches above) which compares values derived from the same
+	// input fields and cannot disagree under normal conditions.
+	consistencyChecks     atomic.Int64 // total invocations that reached comparison
+	consistencyMismatches atomic.Int64 // invocations where prior messages disagree
 }
 
 // Inc increments the appropriate counter.
@@ -75,9 +96,176 @@ func (c *DivergenceCounter) IncFallback() { c.fallbacks.Add(1) }
 // Fallbacks returns the total number of read-path fallbacks recorded.
 func (c *DivergenceCounter) Fallbacks() int64 { return c.fallbacks.Load() }
 
+// IncExplicitRouting increments the explicit-routing counter.
+// An explicit route is a message whose ConversationID was supplied by the
+// caller and authorized by P-2 — no derivation or old-model comparison
+// was performed.
+func (c *DivergenceCounter) IncExplicitRouting() { c.explicitRoutes.Add(1) }
+
+// ExplicitRoutes returns the total number of explicitly-routed messages.
+func (c *DivergenceCounter) ExplicitRoutes() int64 { return c.explicitRoutes.Load() }
+
+// IncDerivedRouting increments the derived-routing counter.
+// A derived route is a message whose ConversationID was derived by the hub
+// from message fields and propagated onto StructuredMessage — the caller
+// did not assert a conversation identity.
+func (c *DivergenceCounter) IncDerivedRouting() { c.derivedRoutes.Add(1) }
+
+// DerivedRoutes returns the total number of derived-routed messages.
+func (c *DivergenceCounter) DerivedRoutes() int64 { return c.derivedRoutes.Load() }
+
+// IncConsistency increments the consistency check counter and, when
+// consistent is false, also increments the consistency mismatch counter.
+func (c *DivergenceCounter) IncConsistency(consistent bool) {
+	c.consistencyChecks.Add(1)
+	if !consistent {
+		c.consistencyMismatches.Add(1)
+	}
+}
+
+// ConsistencyChecks returns the total consistency check invocations
+// that reached comparison (excludes fail-open early returns).
+func (c *DivergenceCounter) ConsistencyChecks() int64 { return c.consistencyChecks.Load() }
+
+// ConsistencyMismatches returns the total consistency check mismatches.
+func (c *DivergenceCounter) ConsistencyMismatches() int64 { return c.consistencyMismatches.Load() }
+
 // DivergenceMetrics is the package-level counter for divergence events.
 // Exported so that metrics collectors can read it.
 var DivergenceMetrics = &DivergenceCounter{}
+
+// ---------------------------------------------------------------------------
+// Switch bypass tracking (G3-e — switch coverage, not migration readiness)
+// ---------------------------------------------------------------------------
+
+// SwitchBypassCounter tracks cases where the ConversationReadSwitch is ON
+// but conversation scoping was not applied at a read site. Unlike the
+// DivergenceCounter (which measures migration readiness via IncFallback),
+// this counter measures switch *coverage*: how much traffic actually entered
+// the conversation-scoped path vs. silently bypassed it.
+//
+// A high bypass count on the VM run means the switch was ON but most traffic
+// never entered the new path — a negative test result that looks clean but
+// proves nothing. Safe for concurrent use.
+type SwitchBypassCounter struct {
+	slugParam     atomic.Int64 // S2: agent param is a slug (uuid.Parse fails)
+	agentNotFound atomic.Int64 // S2: agent param is a valid UUID but not in store
+	wcsNil        atomic.Int64 // S1: webChatStore nil for non-DM key (early return)
+	nonWebChannel atomic.Int64 // S3: channel is not "web"/"" and no thread_id
+	nonDMKey      atomic.Int64 // S2: no agent param → no DM key to derive
+}
+
+// IncSlugParam records a bypass because the agent query param was a slug.
+func (c *SwitchBypassCounter) IncSlugParam() { c.slugParam.Add(1) }
+
+// IncAgentNotFound records a bypass because the agent UUID was not in the store.
+func (c *SwitchBypassCounter) IncAgentNotFound() { c.agentNotFound.Add(1) }
+
+// IncWcsNil records a bypass because webChatStore was nil for a non-DM key.
+func (c *SwitchBypassCounter) IncWcsNil() { c.wcsNil.Add(1) }
+
+// IncNonWebChannel records a bypass because the channel was not web/"".
+func (c *SwitchBypassCounter) IncNonWebChannel() { c.nonWebChannel.Add(1) }
+
+// IncNonDMKey records a bypass because no agent param was provided (no DM key).
+func (c *SwitchBypassCounter) IncNonDMKey() { c.nonDMKey.Add(1) }
+
+// SlugParam returns the total slug-param bypasses.
+func (c *SwitchBypassCounter) SlugParam() int64 { return c.slugParam.Load() }
+
+// AgentNotFound returns the total agent-not-found bypasses.
+func (c *SwitchBypassCounter) AgentNotFound() int64 { return c.agentNotFound.Load() }
+
+// WcsNil returns the total wcs-nil bypasses.
+func (c *SwitchBypassCounter) WcsNil() int64 { return c.wcsNil.Load() }
+
+// NonWebChannel returns the total non-web-channel bypasses.
+func (c *SwitchBypassCounter) NonWebChannel() int64 { return c.nonWebChannel.Load() }
+
+// NonDMKey returns the total non-dm-key bypasses.
+func (c *SwitchBypassCounter) NonDMKey() int64 { return c.nonDMKey.Load() }
+
+// Total returns the total bypass count across all reasons.
+func (c *SwitchBypassCounter) Total() int64 {
+	return c.slugParam.Load() + c.agentNotFound.Load() +
+		c.wcsNil.Load() + c.nonWebChannel.Load() + c.nonDMKey.Load()
+}
+
+// SwitchBypassMetrics is the package-level counter for switch bypass events.
+var SwitchBypassMetrics = &SwitchBypassCounter{}
+
+// ---------------------------------------------------------------------------
+// DEF-127: DM-absent-on-read tracking
+// ---------------------------------------------------------------------------
+
+// DMAbsentCounter counts read-path requests that found no conversation row
+// for a DM key. These are normal first-use states, not defects, but the
+// counter preserves the observability that the former 409 provided. Each
+// site that returns empty-200 for an absent DM increments this counter so
+// that drift (if it happens) is still visible in metrics.
+type DMAbsentCounter struct {
+	count atomic.Int64
+}
+
+// Inc records one DM-absent-on-read event.
+func (c *DMAbsentCounter) Inc() { c.count.Add(1) }
+
+// Count returns the total DM-absent events recorded.
+func (c *DMAbsentCounter) Count() int64 { return c.count.Load() }
+
+// DMAbsentMetrics is the package-level counter for DM-absent-on-read events.
+var DMAbsentMetrics = &DMAbsentCounter{}
+
+// ---------------------------------------------------------------------------
+// Write-denial tracking (G2 — write-path enforcement)
+// ---------------------------------------------------------------------------
+
+// WriteDenialCounter tracks write-path conversation resolution denials,
+// partitioned by denial site. Safe for concurrent use.
+type WriteDenialCounter struct {
+	counts sync.Map // site string → *atomic.Int64
+}
+
+// Inc increments the counter for the given site.
+func (c *WriteDenialCounter) Inc(site string) {
+	v, _ := c.counts.LoadOrStore(site, &atomic.Int64{})
+	v.(*atomic.Int64).Add(1)
+}
+
+// Get returns the count for a given site.
+func (c *WriteDenialCounter) Get(site string) int64 {
+	v, ok := c.counts.Load(site)
+	if !ok {
+		return 0
+	}
+	return v.(*atomic.Int64).Load()
+}
+
+// Total returns the sum of all denial counts across all sites.
+func (c *WriteDenialCounter) Total() int64 {
+	var total int64
+	c.counts.Range(func(_, v any) bool {
+		total += v.(*atomic.Int64).Load()
+		return true
+	})
+	return total
+}
+
+// Sites returns a snapshot of all site names and their counts.
+func (c *WriteDenialCounter) Sites() map[string]int64 {
+	result := make(map[string]int64)
+	c.counts.Range(func(k, v any) bool {
+		result[k.(string)] = v.(*atomic.Int64).Load()
+		return true
+	})
+	return result
+}
+
+// WriteDenialMetrics is the package-level counter for write-path denials.
+// Exported so that metrics collectors can read it. Separate from
+// DivergenceMetrics: divergence measures read-path coverage,
+// write denials measure G2 enforcement.
+var WriteDenialMetrics = &WriteDenialCounter{}
 
 // LogDivergence logs a DivergenceEntry to the provided logger and increments
 // the global divergence counter. Fallback entries increment only the fallback
@@ -110,6 +298,40 @@ func LogDivergence(log *slog.Logger, entry DivergenceEntry) {
 	}
 }
 
+// LogExplicitRouting records that a message was routed via an explicit,
+// caller-supplied ConversationID that was authorized by the upstream handler
+// (DEF-138 P-2). No ComputeDivergenceMatch comparison is performed because
+// there is no old-model routing key to compare against — the conversation
+// identity was asserted, not derived.
+//
+// This replaces the former code path that built a minimal ConversationResult
+// with an empty ExternalRef and fed it to ComputeDivergenceMatch, which
+// produced a false routing-type-mismatch on every correctly-routed message.
+func LogExplicitRouting(log *slog.Logger, messageID, convID string) {
+	DivergenceMetrics.IncExplicitRouting()
+	log.Info("conversation routing check: explicit-routing",
+		"message_id", messageID,
+		"conversation_id", convID,
+		"explicit_route_count", DivergenceMetrics.ExplicitRoutes(),
+	)
+}
+
+// LogDerivedRouting records that a message was routed via a hub-derived
+// ConversationID — the caller sent no conversation_id in the request, and
+// the hub derived one from message fields (DeriveConversationKey) and
+// propagated it onto StructuredMessage via P-3. No ComputeDivergenceMatch
+// comparison is performed because the comparison would be tautological:
+// both sides would be derived from the same input fields in the same request
+// (DEF-139, [^72]/[^73]).
+func LogDerivedRouting(log *slog.Logger, messageID, convID string) {
+	DivergenceMetrics.IncDerivedRouting()
+	log.Info("conversation routing check: derived-routing",
+		"message_id", messageID,
+		"conversation_id", convID,
+		"derived_route_count", DivergenceMetrics.DerivedRoutes(),
+	)
+}
+
 // NewRoutingStr formats a conversation ID for the divergence log's NewRouting
 // field. Returns "conv:{id}" when convID is non-empty, "none" otherwise.
 func NewRoutingStr(convID string) string {
@@ -140,10 +362,21 @@ func directMessageExternalRef(idA, idB string) string {
 	return fmt.Sprintf("dm:%s:%s", pair[0], pair[1])
 }
 
-// ComputeDivergenceMatch compares old-model routing against the ACTUAL
-// external_ref of the conversation the new model resolved. The comparison
-// is non-tautological: actualExternalRef comes from the database, not from
-// reconstructing inputs.
+// ComputeDivergenceMatch compares old-model routing keys against the
+// external_ref of the conversation the new model resolved. CAVEAT: both
+// sides are derived from the same input fields within the same request —
+// oldRouting is built from the message's sender/recipient/thread_id, and
+// actualExternalRef is the external_ref that the resolver just upserted
+// from those same fields. The comparison therefore cannot disagree under
+// normal conditions and its "match" verdicts carry no independent signal.
+//
+// The one residual path to a genuine mismatch is when
+// ResolveOrCreateThreadConversation with WithTopicLookup remaps a thread
+// onto a pre-existing conversation whose external_ref differs from what
+// the thread_id alone would produce.
+//
+// For the independent, non-tautological divergence check, see
+// CheckConversationConsistency, which queries prior persisted messages.
 //
 // Parameters:
 //   - oldRouting: the old-model routing key (from OldRoutingFromMessage)
@@ -317,10 +550,11 @@ func CheckConversationConsistency(
 				"prior_conv_id", msg.ConversationID,
 				"thread_id", threadID,
 			)
-			DivergenceMetrics.Inc(false)
+			DivergenceMetrics.IncConsistency(false)
 			return false
 		}
 	}
 
+	DivergenceMetrics.IncConsistency(true)
 	return true
 }

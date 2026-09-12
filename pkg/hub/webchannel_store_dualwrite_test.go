@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS messages (
     recipient_id TEXT NOT NULL DEFAULT '',
     channel TEXT,
     thread_id TEXT,
+    conversation_id TEXT NOT NULL DEFAULT '',
     msg TEXT NOT NULL DEFAULT '',
     type TEXT NOT NULL DEFAULT 'chat',
     dispatch_state TEXT NOT NULL DEFAULT 'dispatched',
@@ -146,7 +147,8 @@ func TestCreateTopic_DualWrite_WritesConversation(t *testing.T) {
 	s, db := newTestWebChatStoreWithConversations(t)
 	defer db.Close() //nolint:errcheck
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	convID := uuid.New().String()
 	topic := WebChatTopic{
 		ID:             "topic-dw-1",
@@ -180,7 +182,8 @@ func TestCreateTopic_DualWrite_Atomicity(t *testing.T) {
 	s, db := newTestWebChatStoreWithConversations(t)
 	defer db.Close() //nolint:errcheck
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	convID := uuid.New().String()
 
 	// Insert a conversation row first to cause a duplicate ID conflict.
@@ -213,7 +216,9 @@ func TestCreateTopic_DualWrite_RequiresProjectID(t *testing.T) {
 	s, db := newTestWebChatStoreWithConversations(t)
 	defer db.Close() //nolint:errcheck
 
-	err := s.CreateTopic(context.Background(), WebChatTopic{
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := s.CreateTopic(ctx, WebChatTopic{
 		ID:             "topic-no-proj",
 		ConversationID: uuid.New().String(),
 		Name:           "test",
@@ -224,11 +229,48 @@ func TestCreateTopic_DualWrite_RequiresProjectID(t *testing.T) {
 	require.Contains(t, err.Error(), "project_id is required")
 }
 
-func TestCreateTopic_LegacyPath_NoConversationID(t *testing.T) {
+// TestCreateTopic_AutoGeneratesConversation verifies that when no
+// ConversationID is provided but the conversations table exists, CreateTopic
+// generates one and atomically creates the conversation row (DEF-89).
+func TestCreateTopic_AutoGeneratesConversation(t *testing.T) {
 	s, db := newTestWebChatStoreWithConversations(t)
 	defer db.Close() //nolint:errcheck
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
+		ID:        "topic-autogen",
+		ProjectID: "proj-1",
+		Name:      "auto-conv",
+		CreatedBy: "user-1",
+		CreatedAt: time.Now().UTC(),
+	}))
+
+	// Topic should have an auto-generated conversation_id.
+	convID := getTopicConvID(t, db, "topic-autogen")
+	require.NotEmpty(t, convID, "topic should have auto-generated conversation_id")
+
+	// Conversation row should exist with correct fields.
+	c := getConversation(t, db, convID)
+	require.NotNil(t, c, "conversations row should exist")
+	require.Equal(t, "proj-1", c.projectID)
+	require.Equal(t, "group", c.kind)
+	require.Equal(t, "native", c.surface)
+	require.Equal(t, "auto-conv", c.displayName)
+	require.Equal(t, "active", c.driftState)
+}
+
+// TestCreateTopic_NoConversationsTable_LegacyPath verifies that when the
+// conversations table does not exist, CreateTopic still works without
+// creating a conversation (the legacy path).
+func TestCreateTopic_NoConversationsTable_LegacyPath(t *testing.T) {
+	s, db := newTestWebChatStoreV2(t) // no conversations table
+	defer db.Close()                  //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
 		ID:        "topic-legacy",
 		ProjectID: "proj-1",
@@ -237,9 +279,8 @@ func TestCreateTopic_LegacyPath_NoConversationID(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 	}))
 
-	// Topic created, but no conversation.
+	// Topic created with no conversation_id.
 	require.Empty(t, getTopicConvID(t, db, "topic-legacy"))
-	require.Equal(t, 0, countConversations(t, db))
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +367,7 @@ VALUES
 		LastActivityAt: now,
 	}
 
-	result, err := s.PromoteDM(ctx, topic, dmKey)
+	result, err := s.PromoteDM(ctx, topic, PromoteKeys{DMKey: dmKey})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, 2, result.MessageCount)
@@ -343,14 +384,186 @@ VALUES
 	require.Equal(t, "Promoted Thread", c.displayName)
 }
 
-func TestPromoteDM_NoConversationID_SkipsDualWrite(t *testing.T) {
+// ---------------------------------------------------------------------------
+// TestPromoteDM_DualWrite_RePointsConversationID — when ConversationID is
+// supplied, the re-key UPDATE must set conversation_id on every moved message.
+// ---------------------------------------------------------------------------
+
+func TestPromoteDM_DualWrite_RePointsConversationID(t *testing.T) {
 	s, db := newPromoteTestStoreWithConversations(t)
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
+	dmKey := "dm:agent:agent-3:user:user-3"
+	oldConvID := "old-direct-conv-id"
+
+	// Seed messages with a pre-existing conversation_id (simulating the
+	// write-switch stamping the direct conversation's id).
+	_, err := db.Exec(`
+INSERT INTO messages (id, project_id, sender, sender_id, recipient, recipient_id, channel, thread_id, conversation_id, msg, created)
+VALUES
+    ('msg-rp-1', 'proj-1', 'user:carol', 'user-3', 'agent:bot', 'agent-3', 'web', ?, ?, 'first', '2026-08-22T10:00:00Z'),
+    ('msg-rp-2', 'proj-1', 'agent:bot', 'agent-3', 'user:carol', 'user-3', 'web', ?, ?, 'second', '2026-08-22T10:01:00Z')
+`, dmKey, oldConvID, dmKey, oldConvID)
+	require.NoError(t, err)
+
+	require.NoError(t, s.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey,
+		ParticipantID:   "user-3",
+		PeerID:          "agent-3",
+		PeerKind:        "agent",
+	}))
+
+	newConvID := uuid.New().String()
+	now := time.Now().UTC().Truncate(time.Second)
+	topic := WebChatTopic{
+		ID:             "promoted-repoint",
+		ProjectID:      "proj-1",
+		Name:           "RePoint Thread",
+		ConversationID: newConvID,
+		CreatedBy:      "user-3",
+		CreatedAt:      now,
+		LastActivityAt: now,
+	}
+
+	result, err := s.PromoteDM(ctx, topic, PromoteKeys{
+		DMKey:                dmKey,
+		DirectConversationID: oldConvID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, result.MessageCount)
+
+	// Assert: every moved message now has the NEW conversation_id.
+	rows, err := db.Query(
+		`SELECT id, conversation_id FROM messages WHERE thread_id = ? ORDER BY id`, "promoted-repoint")
+	require.NoError(t, err)
+	defer rows.Close()
+	var count int
+	for rows.Next() {
+		var msgID, cid string
+		require.NoError(t, rows.Scan(&msgID, &cid))
+		require.Equal(t, newConvID, cid, "message %s should have new conversation_id", msgID)
+		count++
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, 2, count)
+}
+
+// ---------------------------------------------------------------------------
+// TestPromoteDM_EmptyConversationID_PreservesExisting — when ConversationID
+// is empty (no conversations table), the re-key must NOT blank conversation_id
+// on moved messages. This is the C2a guard (design §3.1 C2a).
+// ---------------------------------------------------------------------------
+
+func TestPromoteDM_EmptyConversationID_PreservesExisting(t *testing.T) {
+	// Use a store WITHOUT the conversations table so ConversationID stays empty.
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	// Messages table WITH conversation_id column.
+	_, err = db.Exec(`
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL DEFAULT '',
+    sender TEXT NOT NULL,
+    sender_id TEXT NOT NULL DEFAULT '',
+    recipient TEXT NOT NULL,
+    recipient_id TEXT NOT NULL DEFAULT '',
+    channel TEXT,
+    thread_id TEXT,
+    conversation_id TEXT NOT NULL DEFAULT '',
+    msg TEXT NOT NULL DEFAULT '',
+    type TEXT NOT NULL DEFAULT 'chat',
+    dispatch_state TEXT NOT NULL DEFAULT 'dispatched',
+    created TEXT NOT NULL DEFAULT ''
+)
+`)
+	require.NoError(t, err)
+
+	// NO conversations table — hasConversationsTable() will return false.
+	s := NewWebChatStore(db, "sqlite3")
+	require.NoError(t, s.Init())
+
+	ctx := context.Background()
+	dmKey := "dm:agent:agent-4:user:user-4"
+	existingConvID := "pre-existing-conv-id"
+
+	// Seed a message that already carries a conversation_id.
+	_, err = db.Exec(`
+INSERT INTO messages (id, project_id, sender, sender_id, recipient, recipient_id, channel, thread_id, conversation_id, msg, created)
+VALUES ('msg-guard-1', 'proj-1', 'user:dave', 'user-4', 'agent:helper', 'agent-4', 'web', ?, ?, 'guarded', '2026-08-22T10:00:00Z')
+`, dmKey, existingConvID)
+	require.NoError(t, err)
+
+	require.NoError(t, s.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey,
+		ParticipantID:   "user-4",
+		PeerID:          "agent-4",
+		PeerKind:        "agent",
+	}))
+
+	now := time.Now().UTC().Truncate(time.Second)
+	result, err := s.PromoteDM(ctx, WebChatTopic{
+		ID:             "promoted-guard",
+		ProjectID:      "proj-1",
+		Name:           "Guard Thread",
+		CreatedBy:      "user-4",
+		CreatedAt:      now,
+		LastActivityAt: now,
+		// ConversationID intentionally empty — no conversations table.
+	}, PromoteKeys{DMKey: dmKey, DirectConversationID: existingConvID})
+	require.NoError(t, err)
+	require.Equal(t, 1, result.MessageCount)
+
+	// Assert: the message's conversation_id is PRESERVED, not blanked.
+	var cid string
+	err = db.QueryRow(
+		`SELECT conversation_id FROM messages WHERE id = 'msg-guard-1'`).Scan(&cid)
+	require.NoError(t, err)
+	require.Equal(t, existingConvID, cid,
+		"conversation_id must be preserved when ConversationID is empty (C2a guard)")
+}
+
+func TestPromoteDM_NoConversationID_SkipsDualWrite(t *testing.T) {
+	// NOTE: After P2 (DEF-96), the empty-ConversationID case is no longer
+	// reachable from the handler — PromoteDM now mints a ConversationID in
+	// the store when hasConversationsTable() is true (DEF-89 pattern). This
+	// test pins the store contract for the remaining case: when the
+	// conversations table is ABSENT, ConversationID stays empty and no
+	// conversation row is created. A future reader should not infer that
+	// production takes this path.
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	// Messages table only — NO conversations table.
+	_, err = db.Exec(`
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL DEFAULT '',
+    sender TEXT NOT NULL,
+    sender_id TEXT NOT NULL DEFAULT '',
+    recipient TEXT NOT NULL,
+    recipient_id TEXT NOT NULL DEFAULT '',
+    channel TEXT,
+    thread_id TEXT,
+    conversation_id TEXT NOT NULL DEFAULT '',
+    msg TEXT NOT NULL DEFAULT '',
+    type TEXT NOT NULL DEFAULT 'chat',
+    dispatch_state TEXT NOT NULL DEFAULT 'dispatched',
+    created TEXT NOT NULL DEFAULT ''
+)
+`)
+	require.NoError(t, err)
+
+	s := NewWebChatStore(db, "sqlite3")
+	require.NoError(t, s.Init())
+
+	ctx := context.Background()
 	dmKey := "dm:agent:agent-2:user:user-2"
 
-	_, err := db.Exec(`
+	_, err = db.Exec(`
 INSERT INTO messages (id, project_id, sender, sender_id, recipient, recipient_id, channel, thread_id, msg, created)
 VALUES ('msg-10', 'proj-1', 'user:bob', 'user-2', 'agent:helper', 'agent-2', 'web', ?, 'test', '2026-08-22T10:00:00Z')
 `, dmKey)
@@ -371,12 +584,13 @@ VALUES ('msg-10', 'proj-1', 'user:bob', 'user-2', 'agent:helper', 'agent-2', 'we
 		CreatedBy:      "user-2",
 		CreatedAt:      now,
 		LastActivityAt: now,
-	}, dmKey)
+	}, PromoteKeys{DMKey: dmKey})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	// No conversation should be created when ConversationID is empty.
-	require.Equal(t, 0, countConversations(t, db))
+	// ConversationID should remain empty — no conversations table.
+	require.Empty(t, result.ConversationID,
+		"ConversationID should stay empty when conversations table is absent")
 }
 
 // ---------------------------------------------------------------------------
@@ -395,20 +609,18 @@ func TestBackfillTopicConversations_CreatesConversations(t *testing.T) {
 	s := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, s.Init())
 
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Second)
+	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339Nano)
 
-	// The Init() call already ran backfillTopicConversations, but there were
-	// no topics yet. Create topics WITHOUT conversation_id to simulate
-	// pre-existing data. Use the legacy (no ConversationID) path.
+	// Insert topics directly (bypassing CreateTopic) to simulate pre-existing
+	// data created before the conversations table existed. DEF-89 changed
+	// CreateTopic to auto-generate ConversationIDs, so raw SQL is the only
+	// way to create topics without one when the conversations table exists.
 	for _, name := range []string{"alpha", "beta", "gamma"} {
-		require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
-			ID:        "topic-" + name,
-			ProjectID: "proj-1",
-			Name:      name,
-			CreatedBy: "user-1",
-			CreatedAt: now,
-		}))
+		_, err = db.Exec(
+			`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+			 VALUES (?, 'proj-1', ?, 0, 'user-1', ?)`,
+			"topic-"+name, name, now)
+		require.NoError(t, err)
 	}
 
 	// Verify no conversation_id set yet.
@@ -449,17 +661,15 @@ func TestBackfillTopicConversations_Idempotent(t *testing.T) {
 	s := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, s.Init())
 
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Second)
+	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339Nano)
 
-	// Create a topic without conversation_id.
-	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
-		ID:        "topic-idem",
-		ProjectID: "proj-1",
-		Name:      "idempotent-test",
-		CreatedBy: "user-1",
-		CreatedAt: now,
-	}))
+	// Insert topic directly (bypassing CreateTopic) to simulate pre-existing
+	// data without a conversation_id — see DEF-89 note in the
+	// CreatesConversations sibling test.
+	_, err = db.Exec(
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+		 VALUES ('topic-idem', 'proj-1', 'idempotent-test', 0, 'user-1', ?)`, now)
+	require.NoError(t, err)
 
 	// Reset migration marker and re-run.
 	_, err = db.Exec("DELETE FROM webchat_migrations WHERE name = 'topic_conversation_backfill'")
@@ -538,12 +748,15 @@ func TestGetTopicConversationID(t *testing.T) {
 }
 
 func TestGetTopicConversationID_NoConversationID(t *testing.T) {
-	s, db := newTestWebChatStoreWithConversations(t)
+	// Use a store WITHOUT the conversations table so CreateTopic takes
+	// the legacy path and does not auto-generate a ConversationID (DEF-89).
+	s, db := newTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	// Create topic WITHOUT conversation_id.
+	// Create topic WITHOUT conversation_id (legacy path — no conversations table).
 	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
 		ID:        "topic-no-conv",
 		ProjectID: "proj-1",
@@ -629,6 +842,42 @@ func TestCreateTopic_DualWrite_UTX1_NoDeadlock(t *testing.T) {
 	require.NoError(t, err, "CreateTopic should complete without deadlock")
 }
 
+// TestCreateTopic_AutoGen_UTX1_NoDeadlock verifies that the DEF-89
+// auto-generation path does not deadlock at MaxOpenConns=1.
+// hasConversationsTable() is called twice (auto-gen check + shouldDualWrite)
+// but both precede BeginTx, so no ambient-pool contention under the tx.
+func TestCreateTopic_AutoGen_UTX1_NoDeadlock(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	db.SetMaxOpenConns(1)
+
+	_, err = db.Exec(conversationsTableDDL)
+	require.NoError(t, err)
+
+	s := NewWebChatStore(db, "sqlite3")
+	require.NoError(t, s.Init())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// No ConversationID — exercises the DEF-89 auto-generation path.
+	err = s.CreateTopic(ctx, WebChatTopic{
+		ID:        "topic-utx1-autogen",
+		ProjectID: "proj-1",
+		Name:      "autogen-deadlock-test",
+		CreatedBy: "user-1",
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err, "CreateTopic (auto-gen) should complete without deadlock")
+
+	// Verify the conversation was actually created.
+	convID := getTopicConvID(t, db, "topic-utx1-autogen")
+	require.NotEmpty(t, convID, "auto-generated conversation_id should be set")
+	require.NotNil(t, getConversation(t, db, convID), "conversation row should exist")
+}
+
 func TestEnsureGeneralTopic_DualWrite_UTX1_NoDeadlock(t *testing.T) {
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
@@ -670,6 +919,7 @@ CREATE TABLE IF NOT EXISTS messages (
     recipient_id TEXT NOT NULL DEFAULT '',
     channel TEXT,
     thread_id TEXT,
+    conversation_id TEXT NOT NULL DEFAULT '',
     msg TEXT NOT NULL DEFAULT '',
     type TEXT NOT NULL DEFAULT 'chat',
     dispatch_state TEXT NOT NULL DEFAULT 'dispatched',
@@ -702,7 +952,7 @@ CREATE TABLE IF NOT EXISTS messages (
 		CreatedBy:      "u1",
 		CreatedAt:      now,
 		LastActivityAt: now,
-	}, dmKey)
+	}, PromoteKeys{DMKey: dmKey})
 	require.NoError(t, err, "PromoteDM should complete without deadlock")
 }
 
@@ -788,4 +1038,88 @@ func TestMigration_UniqueIndexRejectsDuplicateConversationID(t *testing.T) {
 		"topic-b", "proj-dup", "Topic B", sharedConvID, "user-1", now, now)
 	require.Error(t, err, "second insert with duplicate conversation_id must be rejected by unique index")
 	require.Contains(t, err.Error(), "UNIQUE constraint failed", "error should be a constraint violation")
+}
+
+// ---------------------------------------------------------------------------
+// TestPromoteDM_WildcardGuard_UnresolvedDirectConversation — AC-96-1b.
+//
+// When the direct conversation does not resolve (legacy hub, no conversation
+// stamping), directConvID is "". Without the `? <> ''` guard on the
+// conversation_id arm of the WHERE clause, `conversation_id = ''` degenerates
+// into matching every unstamped message on the hub — a single UPDATE rewrites
+// thread_id and conversation_id on unrelated data.
+//
+// This test drives that exact scenario:
+//   - directConvID = "" (unresolved)
+//   - DM messages carry thread_id = dmKey (legacy path, matched by arm 2)
+//   - An unrelated message has conversation_id = '' (genuinely unstamped)
+//   - The unrelated message must NOT move
+// ---------------------------------------------------------------------------
+
+func TestPromoteDM_WildcardGuard_UnresolvedDirectConversation(t *testing.T) {
+	s, db := newPromoteTestStoreWithConversations(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	dmKey := "dm:agent:agent-wg:user:user-wg"
+
+	// Seed two DM messages — legacy style, thread_id set, conversation_id empty.
+	_, err := db.Exec(`
+INSERT INTO messages (id, project_id, sender, sender_id, recipient, recipient_id, channel, thread_id, conversation_id, msg, created)
+VALUES
+    ('msg-wg-1', 'proj-wg', 'user:alice', 'user-wg', 'agent:bot', 'agent-wg', 'web', ?, '', 'hello', '2026-08-22T10:00:00Z'),
+    ('msg-wg-2', 'proj-wg', 'agent:bot', 'agent-wg', 'user:alice', 'user-wg', 'web', ?, '', 'reply', '2026-08-22T10:01:00Z')
+`, dmKey, dmKey)
+	require.NoError(t, err)
+
+	// Seed an unrelated unstamped message — conversation_id is genuinely empty.
+	// This is the row the wildcard guard must protect.
+	_, err = db.Exec(`
+INSERT INTO messages (id, project_id, sender, sender_id, recipient, recipient_id, channel, thread_id, conversation_id, msg, created)
+VALUES ('msg-wg-bystander', 'proj-other', 'user:bob', 'user-other', 'agent:other', 'agent-other', 'web', 'unrelated-thread', '', 'innocent bystander', '2026-08-22T09:00:00Z')
+`)
+	require.NoError(t, err)
+
+	require.NoError(t, s.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey,
+		ParticipantID:   "user-wg",
+		PeerID:          "agent-wg",
+		PeerKind:        "agent",
+	}))
+
+	now := time.Now().UTC().Truncate(time.Second)
+	topic := WebChatTopic{
+		ID:             "promoted-wg",
+		ProjectID:      "proj-wg",
+		Name:           "Wildcard Guard Thread",
+		CreatedBy:      "user-wg",
+		CreatedAt:      now,
+		LastActivityAt: now,
+	}
+
+	// DirectConversationID is empty — the unresolved case.
+	result, err := s.PromoteDM(ctx, topic, PromoteKeys{
+		DMKey:                dmKey,
+		DirectConversationID: "",
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, result.MessageCount, "should move exactly the 2 DM messages")
+
+	// The DM messages should have moved to the new topic.
+	var movedCount int
+	require.NoError(t, db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE thread_id = ?`, "promoted-wg").Scan(&movedCount))
+	require.Equal(t, 2, movedCount, "DM messages should be re-keyed to new topic")
+
+	// The bystander message must NOT have moved — its thread_id and
+	// conversation_id must be unchanged.
+	var bystanderThreadID, bystanderConvID string
+	err = db.QueryRow(
+		`SELECT thread_id, conversation_id FROM messages WHERE id = 'msg-wg-bystander'`).
+		Scan(&bystanderThreadID, &bystanderConvID)
+	require.NoError(t, err)
+	require.Equal(t, "unrelated-thread", bystanderThreadID,
+		"bystander thread_id must be unchanged — wildcard guard failed")
+	require.Equal(t, "", bystanderConvID,
+		"bystander conversation_id must be unchanged — wildcard guard failed")
 }

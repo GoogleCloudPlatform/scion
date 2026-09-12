@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 95
+**Operations:** 96
 
 ## Table of Contents
 
@@ -42,6 +42,7 @@
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.config.read](#hubconfigread) — Read server configuration and schema
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections
+- [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
 - [hub.maintenance.execute](#hubmaintenanceexecute) — Execute maintenance operations including migrations and restarts
 - [hub.adminmode.update](#hubadminmodeupdate) — Toggle admin/maintenance mode
 - [hub.allowlist.update](#huballowlistupdate) — Manage the platform email allow list
@@ -1602,6 +1603,37 @@
 **Credentials:** `session_jwt`
 
 **Base Permission:** `hub.config.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.messaging.update
+
+**Domain:** hub
+
+**Description:** Read and update messaging configuration switches
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/messaging` |
+| http_route | PUT | `/api/v1/admin/messaging` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.messaging.update`
 
 **Resource Resolver:** hub-scoped
 

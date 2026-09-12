@@ -256,6 +256,10 @@ func (c *ControlChannelBrokerClient) MessageAgent(ctx context.Context, brokerID,
 	}
 	if structuredMsg != nil {
 		reqBody["structured_message"] = structuredMsg
+		// Phase 9b(i): promote DeliveryText to the top-level wire field.
+		if structuredMsg.DeliveryText != "" {
+			reqBody["delivery_text"] = structuredMsg.DeliveryText
+		}
 	} else {
 		reqBody["message"] = message
 	}

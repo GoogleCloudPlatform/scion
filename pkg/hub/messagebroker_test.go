@@ -356,7 +356,7 @@ func TestMessageBrokerProxy_InterruptPrefixPersistence(t *testing.T) {
 	proxy.subscribeAgent(projectID, "persist-agent")
 
 	msg := messages.NewInstruction("user:alice", "agent:persist-agent", "!urgent task")
-	msg.SenderID = "user-alice-id"
+	msg.SenderID = tid("user-alice")
 	msg.RecipientID = agent.ID
 	if err := proxy.PublishMessage(context.Background(), projectID, msg); err != nil {
 		t.Fatal(err)
@@ -515,7 +515,7 @@ func TestMessageBrokerProxy_DeliverToAgentPersistence(t *testing.T) {
 	proxy.subscribeAgent(projectID, "persist-agent")
 
 	msg := messages.NewInstruction("user:alice", "agent:persist-agent", "persist this")
-	msg.SenderID = "user-alice-id"
+	msg.SenderID = tid("user-alice")
 	msg.RecipientID = agent.ID
 	if err := proxy.PublishMessage(context.Background(), projectID, msg); err != nil {
 		t.Fatal(err)
@@ -566,13 +566,13 @@ func TestMessageBrokerProxy_UserMessageDelivery(t *testing.T) {
 	// Subscribe to user messages for this project (as EnsureProjectSubscriptions would do)
 	proxy.subscribeProjectUserMessages(projectID)
 
+	userID := tid("user-bob")
 	// Subscribe to SSE user.message events to verify delivery
-	sseEvents, unsub := events.Subscribe("user.user-bob-id.message", "project.*.user.message")
+	sseEvents, unsub := events.Subscribe("user."+userID+".message", "project.*.user.message")
 	defer unsub()
 
-	userID := "user-bob-id"
 	msg := messages.NewInstruction("agent:sending-agent", "user:bob", "question for you")
-	msg.SenderID = "agent-uuid-123"
+	msg.SenderID = tid("agent-sending")
 	msg.RecipientID = userID
 
 	if err := proxy.PublishUserMessage(context.Background(), projectID, userID, msg); err != nil {
@@ -630,7 +630,7 @@ func TestMessageBrokerProxy_EnsureProjectSubscriptionsIncludesUserMessages(t *te
 		t.Fatal(err)
 	}
 
-	userID := "user-carol-id"
+	userID := tid("user-carol")
 	msg := messages.NewInstruction("agent:some-agent", "user:carol", "auto-subscribed?")
 	msg.RecipientID = userID
 
@@ -802,8 +802,9 @@ func TestMessageBrokerProxy_StartBootstrapsExistingProjects(t *testing.T) {
 
 	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
 
+	userID := tid("user-dave")
 	// Subscribe to SSE events before Start() so we can verify delivery
-	sseEvents, unsub := events.Subscribe("user.user-dave-id.message", "project.*.user.message")
+	sseEvents, unsub := events.Subscribe("user."+userID+".message", "project.*.user.message")
 	defer unsub()
 
 	// Start() should bootstrap subscriptions for the pre-existing project
@@ -812,9 +813,8 @@ func TestMessageBrokerProxy_StartBootstrapsExistingProjects(t *testing.T) {
 
 	// Publish a user message — should be received because Start() bootstrapped
 	// the project's user message subscription
-	userID := "user-dave-id"
 	msg := messages.NewInstruction("agent:pre-existing-agent", "user:dave", "bootstrap test")
-	msg.SenderID = "agent-uuid"
+	msg.SenderID = tid("agent-pre-existing")
 	msg.RecipientID = userID
 
 	if err := proxy.PublishUserMessage(context.Background(), projectID, userID, msg); err != nil {
@@ -870,7 +870,7 @@ func TestMessageBrokerProxy_ProjectSubscriptionDedup(t *testing.T) {
 	}
 
 	// Publish a user message — should be received exactly once
-	userID := "user-dedup-id"
+	userID := tid("user-dedup")
 	msg := messages.NewInstruction("agent:dedup-agent", "user:dedup", "dedup test")
 	msg.RecipientID = userID
 
@@ -1003,7 +1003,7 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 		Filename:   "shot.png",
 		MimeType:   "image/png",
 		Size:       12,
-		UploadedBy: "agent-uuid-123",
+		UploadedBy: tid("agent-sending"),
 		CreatedAt:  time.Now().UTC(),
 	}
 	if err := wcs.CreateAttachment(ctx, meta); err != nil {
@@ -1025,13 +1025,13 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 	proxy.webChatStore = wcs
 
 	msg := messages.NewInstruction("agent:sending-agent", "user:bob", "here is the screenshot")
-	msg.SenderID = "agent-uuid-123"
-	msg.RecipientID = "user-bob-id"
+	msg.SenderID = tid("agent-sending")
+	msg.RecipientID = tid("user-bob")
 	msg.Metadata = map[string]string{attachmentsMetadataKey: encoded}
 
 	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg)
 
-	result, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: "user-bob-id"}, store.ListOptions{})
+	result, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: tid("user-bob")}, store.ListOptions{})
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}

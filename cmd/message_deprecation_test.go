@@ -33,29 +33,30 @@ import (
 // and returns a restore function.
 func resetMessageFlags() func() {
 	orig := struct {
-		interrupt  bool
-		broadcast  bool
-		all        bool
-		in         string
-		at         string
-		plain      bool
-		raw        bool
-		attach     []string
-		notify     bool
-		wake       bool
-		channel    string
-		threadID   string
-		cc         []string
-		visibility string
+		interrupt bool
+		in        string
+		at        string
+		plain     bool
+		raw       bool
+		attach    []string
+		notify    bool
+		wake      bool
+		channel   string
+		threadID  string
+		cc        []string
 	}{
-		msgInterrupt, msgBroadcast, msgAll, msgIn, msgAt, msgPlain,
+		msgInterrupt, msgIn, msgAt, msgPlain,
 		msgRaw, msgAttach, msgNotify, msgWake, msgChannel, msgThreadID,
-		msgCC, msgVisibility,
+		msgCC,
 	}
+
+	// Save cobra Changed state for removed flags (broadcast/all are registered
+	// but no longer bound to Go variables).
+	bcastChanged := messageCmd.Flags().Lookup("broadcast").Changed
+	allChanged := messageCmd.Flags().Lookup("all").Changed
+
 	// Reset all
 	msgInterrupt = false
-	msgBroadcast = false
-	msgAll = false
 	msgIn = ""
 	msgAt = ""
 	msgPlain = false
@@ -66,12 +67,11 @@ func resetMessageFlags() func() {
 	msgChannel = ""
 	msgThreadID = ""
 	msgCC = nil
-	msgVisibility = ""
+	messageCmd.Flags().Lookup("broadcast").Changed = false
+	messageCmd.Flags().Lookup("all").Changed = false
 
 	return func() {
 		msgInterrupt = orig.interrupt
-		msgBroadcast = orig.broadcast
-		msgAll = orig.all
 		msgIn = orig.in
 		msgAt = orig.at
 		msgPlain = orig.plain
@@ -82,7 +82,8 @@ func resetMessageFlags() func() {
 		msgChannel = orig.channel
 		msgThreadID = orig.threadID
 		msgCC = orig.cc
-		msgVisibility = orig.visibility
+		messageCmd.Flags().Lookup("broadcast").Changed = bcastChanged
+		messageCmd.Flags().Lookup("all").Changed = allChanged
 	}
 }
 
@@ -172,70 +173,86 @@ func newDeprecationTestServer(t *testing.T, projectID string) (*httptest.Server,
 	return server, &sent
 }
 
-// TestDeprecatedFlag_Broadcast tests that --broadcast emits a deprecation
-// warning on stderr and still succeeds identically.
+// TestDeprecatedFlag_Broadcast tests that --broadcast is refused in human mode
+// with an error pointing at scion broadcast.
 func TestDeprecatedFlag_Broadcast(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 	restore := resetMessageFlags()
 	defer restore()
 
-	projectID := "proj-depr-bcast"
-	server, sent := newDeprecationTestServer(t, projectID)
-	defer server.Close()
-
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-
-	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
-		ProjectID: projectID,
-	}
+	// Ensure human mode (default)
+	t.Setenv("SCION_CLI_MODE", "")
 
 	// Simulate the flag being set via cobra
-	msgBroadcast = true
 	require.NoError(t, messageCmd.Flags().Set("broadcast", "true"))
 
-	stderr := captureStderr(t, func() {
-		err = sendMessageViaHub(hubCtx, "", "broadcast test", false, true, false, false, false)
-	})
-
-	// Verify the warning was emitted
-	// (emitDeprecationWarnings is called in RunE, but sendMessageViaHub doesn't call it;
-	// we test it separately via the command execution path below)
-	_ = stderr
-
-	// Verify the command still succeeded
-	require.NoError(t, err)
-	require.Len(t, *sent, 1)
-	assert.Equal(t, "broadcast test", (*sent)[0].Message)
-
-	// Now test through the RunE to verify deprecation warnings
-	*sent = nil
-	stderr = captureStderr(t, func() {
-		emitDeprecationWarnings(messageCmd)
-	})
-	assert.Contains(t, stderr, "Warning: --broadcast is deprecated")
-	assert.Contains(t, stderr, "scion broadcast")
+	err := messageCmd.RunE(messageCmd, []string{"hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--broadcast has been removed")
+	assert.Contains(t, err.Error(), "scion broadcast")
 }
 
-// TestDeprecatedFlag_All tests that --all emits a deprecation warning
-// and still succeeds.
+// TestDeprecatedFlag_All tests that --all is refused in human mode with an
+// error pointing at scion broadcast --all.
 func TestDeprecatedFlag_All(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 	restore := resetMessageFlags()
 	defer restore()
 
-	msgAll = true
+	t.Setenv("SCION_CLI_MODE", "")
+
 	require.NoError(t, messageCmd.Flags().Set("all", "true"))
 
-	stderr := captureStderr(t, func() {
-		emitDeprecationWarnings(messageCmd)
-	})
-	assert.Contains(t, stderr, "Warning: --all is deprecated")
-	assert.Contains(t, stderr, "scion broadcast --all")
+	err := messageCmd.RunE(messageCmd, []string{"hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--all has been removed")
+	assert.Contains(t, err.Error(), "scion broadcast --all")
+}
+
+// TestDeprecatedFlag_Broadcast_AgentMode tests that --broadcast in agent mode
+// does NOT recommend scion broadcast (which is unavailable to agents) and
+// instead tells the agent to address recipients explicitly.
+func TestDeprecatedFlag_Broadcast_AgentMode(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+	restore := resetMessageFlags()
+	defer restore()
+
+	t.Setenv("SCION_CLI_MODE", "agent")
+
+	require.NoError(t, messageCmd.Flags().Set("broadcast", "true"))
+
+	err := messageCmd.RunE(messageCmd, []string{"hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--broadcast has been removed")
+	assert.Contains(t, err.Error(), "not available in agent mode")
+	assert.Contains(t, err.Error(), "address your recipients explicitly")
+	assert.NotContains(t, err.Error(), "scion broadcast",
+		"agent-mode refusal must not recommend scion broadcast (not in agentAllowed)")
+}
+
+// TestDeprecatedFlag_All_AgentMode tests that --all in agent mode does NOT
+// recommend scion broadcast --all and instead tells the agent to address
+// recipients explicitly.
+func TestDeprecatedFlag_All_AgentMode(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+	restore := resetMessageFlags()
+	defer restore()
+
+	t.Setenv("SCION_CLI_MODE", "agent")
+
+	require.NoError(t, messageCmd.Flags().Set("all", "true"))
+
+	err := messageCmd.RunE(messageCmd, []string{"hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--all has been removed")
+	assert.Contains(t, err.Error(), "not available in agent mode")
+	assert.Contains(t, err.Error(), "address your recipients explicitly")
+	assert.NotContains(t, err.Error(), "scion broadcast",
+		"agent-mode refusal must not recommend scion broadcast --all (not in agentAllowed)")
 }
 
 // TestDeprecatedFlag_Raw tests that --raw emits a deprecation warning
@@ -418,34 +435,24 @@ func TestDeprecatedFlag_CC(t *testing.T) {
 	assert.Contains(t, stderr, "deprecated and will be removed")
 }
 
-// TestDeprecatedFlag_BroadcastStillSucceeds verifies that using the
-// deprecated --broadcast flag on `scion message` still delivers the
-// message successfully (AC-15 requirement: warn AND succeed).
-func TestDeprecatedFlag_BroadcastStillSucceeds(t *testing.T) {
+// TestDeprecatedFlag_BroadcastRefusedViaRunE verifies that --broadcast
+// is refused early in RunE with an actionable error, regardless of Hub
+// availability.
+func TestDeprecatedFlag_BroadcastRefusedViaRunE(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 	restore := resetMessageFlags()
 	defer restore()
 
-	projectID := "proj-depr-bcast-works"
-	server, sent := newDeprecationTestServer(t, projectID)
-	defer server.Close()
+	t.Setenv("SCION_CLI_MODE", "")
 
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
+	require.NoError(t, messageCmd.Flags().Set("broadcast", "true"))
 
-	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
-		ProjectID: projectID,
-	}
-
-	msgBroadcast = true
-
-	err = sendMessageViaHub(hubCtx, "", "broadcast still works", false, true, false, false, false)
-	require.NoError(t, err, "deprecated --broadcast must still succeed")
-	require.True(t, len(*sent) > 0, "message must be delivered")
-	assert.Equal(t, "broadcast still works", (*sent)[0].Message)
+	// Even with a valid recipient, --broadcast must be refused.
+	err := messageCmd.RunE(messageCmd, []string{"agent1", "hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--broadcast has been removed")
+	assert.Contains(t, err.Error(), "scion broadcast")
 }
 
 // TestDeprecatedFlag_NotifyStillSucceeds verifies that using the
@@ -492,7 +499,7 @@ func TestDeprecatedFlag_NotifyStillSucceeds(t *testing.T) {
 
 	msgNotify = true
 
-	err = sendMessageViaHub(hubCtx, "test-agent", "hello", false, false, false, true, false)
+	err = sendMessageViaHub(hubCtx, "test-agent", "hello", false, true, false)
 	require.NoError(t, err, "deprecated --notify must still succeed")
 
 	mu.Lock()
@@ -523,7 +530,7 @@ func TestDeprecatedFlag_PlainStillSucceeds(t *testing.T) {
 
 	msgPlain = true
 
-	err = sendMessageViaHub(hubCtx, "test-agent", "plain message", false, false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "test-agent", "plain message", false, false, false)
 	require.NoError(t, err, "deprecated --plain must still succeed")
 
 	require.Len(t, *sent, 1)
@@ -554,7 +561,7 @@ func TestDeprecatedFlag_ChannelStillSucceeds(t *testing.T) {
 
 	msgChannel = "test-channel"
 
-	err = sendMessageViaHub(hubCtx, "test-agent", "channeled message", false, false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "test-agent", "channeled message", false, false, false)
 	require.NoError(t, err, "deprecated --channel must still succeed")
 
 	require.Len(t, *sent, 1)
@@ -563,7 +570,7 @@ func TestDeprecatedFlag_ChannelStillSucceeds(t *testing.T) {
 }
 
 // TestDeprecatedFlags_NoWarningForRetainedFlags verifies that retained
-// flags (--interrupt, --wake, --attach, --visibility) do NOT emit
+// flags (--interrupt, --wake, --attach) do NOT emit
 // deprecation warnings.
 func TestDeprecatedFlags_NoWarningForRetainedFlags(t *testing.T) {
 	orig := saveMessageTestState()
@@ -575,7 +582,7 @@ func TestDeprecatedFlags_NoWarningForRetainedFlags(t *testing.T) {
 	// set by earlier tests in this package (cobra flags are process-level
 	// singletons and their Changed bit persists across tests).
 	deprecatedNames := []string{
-		"broadcast", "all", "raw", "plain", "notify",
+		"raw", "plain", "notify",
 		"in", "at", "channel", "thread-id", "cc",
 	}
 	for _, name := range deprecatedNames {
@@ -609,23 +616,24 @@ func TestDeprecatedFlags_MultipleWarnings(t *testing.T) {
 	restore := resetMessageFlags()
 	defer restore()
 
-	require.NoError(t, messageCmd.Flags().Set("broadcast", "true"))
+	require.NoError(t, messageCmd.Flags().Set("raw", "true"))
 	require.NoError(t, messageCmd.Flags().Set("plain", "true"))
-	msgBroadcast = true
+	msgRaw = true
 	msgPlain = true
 
 	stderr := captureStderr(t, func() {
 		emitDeprecationWarnings(messageCmd)
 	})
-	assert.Contains(t, stderr, "Warning: --broadcast is deprecated")
+	assert.Contains(t, stderr, "Warning: --raw is deprecated")
 	assert.Contains(t, stderr, "Warning: --plain is deprecated")
 }
 
-// TestDeprecatedFlags_Hidden verifies that deprecated flags are hidden
-// from help output.
+// TestDeprecatedFlags_Hidden verifies that deprecated and removed flags
+// are hidden from help output.
 func TestDeprecatedFlags_Hidden(t *testing.T) {
 	deprecatedFlags := []string{
-		"broadcast", "all", "in", "at", "plain", "raw",
+		"broadcast", "all", // removed, still registered to avoid "unknown flag" errors
+		"in", "at", "plain", "raw",
 		"notify", "channel", "thread-id", "cc",
 	}
 	for _, name := range deprecatedFlags {
@@ -638,7 +646,7 @@ func TestDeprecatedFlags_Hidden(t *testing.T) {
 // TestRetainedFlags_NotHidden verifies that retained flags are NOT hidden.
 func TestRetainedFlags_NotHidden(t *testing.T) {
 	retainedFlags := []string{
-		"interrupt", "wake", "attach", "visibility",
+		"interrupt", "wake", "attach",
 	}
 	for _, name := range retainedFlags {
 		f := messageCmd.Flags().Lookup(name)
@@ -735,7 +743,7 @@ func TestDeprecationWarnings_ReplacementsExist(t *testing.T) {
 	restore := resetMessageFlags()
 	defer restore()
 
-	deprecatedFlags := []string{"broadcast", "all", "raw", "plain", "notify", "in", "at", "channel", "thread-id", "cc"}
+	deprecatedFlags := []string{"raw", "plain", "notify", "in", "at", "channel", "thread-id", "cc"}
 	for _, name := range deprecatedFlags {
 		f := messageCmd.Flags().Lookup(name)
 		require.NotNil(t, f, "deprecated flag --%s must be registered", name)
@@ -758,10 +766,11 @@ func TestDeprecationWarnings_ReplacementsExist(t *testing.T) {
 	for _, p := range problems {
 		t.Error(p)
 	}
-	// Six of the ten warnings name a 'scion ...' command; assert a floor.
+	// Four of the eight warnings name a 'scion ...' command; assert a floor.
+	// (broadcast and all were removed, not deprecated — their warnings no longer fire.)
 	// Raise this floor when adding replacement references; never lower it.
-	require.GreaterOrEqual(t, checked, 6,
-		"expected at least 6 replacement references in deprecation warnings; got %d — "+
+	require.GreaterOrEqual(t, checked, 4,
+		"expected at least 4 replacement references in deprecation warnings; got %d — "+
 			"the extractor may be broken or warnings were removed", checked)
 
 	// Rule 10: prove findReplacementProblems catches bad replacements.
