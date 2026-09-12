@@ -933,7 +933,7 @@
           "description": "Role assigned to new users not in admin_emails. Values: 'member' (default), 'viewer'. 'admin' is blocked.",
           "enum": ["member", "viewer"],
           "default": "member",
-          "x-env-var": "SCION_SERVER_AUTH_DEFAULTUSERROLE",
+          "x-env-var": "SCION_SERVER_AUTH_DEFAULT_USER_ROLE",
           "x-since": "1"
         }
       }

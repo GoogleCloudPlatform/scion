@@ -281,7 +281,7 @@ func compileSchemas() {
 			"properties": map[string]interface{}{
 				"admin_emails":       getSchemaProperty(root, "server", "hub", "admin_emails"),
 				"user_access_mode":   getSchemaProperty(root, "server", "auth", "user_access_mode"),
-				"default_user_role":  map[string]interface{}{"type": "string", "enum": []string{"member", "viewer"}},
+				"default_user_role":  getSchemaProperty(root, "server", "auth", "default_user_role"),
 				"authorized_domains": getSchemaProperty(root, "server", "auth", "authorized_domains"),
 			},
 			"additionalProperties": false,
