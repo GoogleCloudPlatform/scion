@@ -2330,15 +2330,9 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 
 	// Phase 2: Settings-based empty-value env key extraction
 	if settings != nil {
-		// Get profile env keys
+		// Get profile harness override env keys
 		if profileName != "" && settings.Profiles != nil {
 			if profile, ok := settings.Profiles[profileName]; ok {
-				for k, v := range profile.Env {
-					if v == "" {
-						required[k] = struct{}{}
-					}
-				}
-				// Check harness overrides within the profile
 				for _, override := range profile.HarnessOverrides {
 					for k, v := range override.Env {
 						if v == "" {

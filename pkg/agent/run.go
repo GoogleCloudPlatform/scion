@@ -1371,10 +1371,9 @@ func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSet
 	// finalScionCfg.Env (provision.go:1098-1115, ungated). The gate therefore
 	// bought no isolation, it only blinded auth resolution. See design §0.2.
 	//
-	// Profile env is no longer a source here — this reads the harness config
-	// only. Note this does NOT retire profile env: ResolveHarnessConfig still
-	// merges profile.Env into its result (settings_v1.go:54-55), and
-	// provision.go:1098 feeds it to the container regardless. See design §0.3.
+	// Profile env is fully retired — profiles.<p>.env was removed from both
+	// the struct and the JSON schema (G3-full). This reads the harness config
+	// only. See design §0.3.
 	if settings != nil && harnessConfigName != "" {
 		if hcEntry, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil && len(hcEntry.Env) > 0 {
 			if opts.Env == nil {

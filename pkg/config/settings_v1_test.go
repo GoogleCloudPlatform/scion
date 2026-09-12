@@ -1152,7 +1152,6 @@ func TestResolveHarnessConfig_WithProfileOverrides(t *testing.T) {
 		Profiles: map[string]V1ProfileConfig{
 			"staging": {
 				Runtime: "docker",
-				Env:     map[string]string{"PROFILE_KEY": "profile_value"},
 				Volumes: []api.VolumeMount{{Source: "/profile/vol", Target: "/mnt/vol"}},
 				HarnessOverrides: map[string]V1HarnessOverride{
 					"gemini": {
@@ -1169,50 +1168,21 @@ func TestResolveHarnessConfig_WithProfileOverrides(t *testing.T) {
 	assert.Equal(t, "example.com/gemini:staging", hc.Image, "image should be overridden by profile")
 	assert.Equal(t, "scion", hc.User, "user should remain from base config")
 	assert.Equal(t, "base_value", hc.Env["BASE_KEY"], "base env should be preserved")
-	// G3-full: profiles.<p>.env is no longer merged. The fixture still SETS
-	// PROFILE_KEY above — leave it there, it is the injected value whose absence
-	// this asserts. Before G3-full this line read
-	//   assert.Equal(t, "profile_value", hc.Env["PROFILE_KEY"], "profile env should be merged")
-	// and the removal is a breaking change, not a correction of a wrong expectation.
-	assert.NotContains(t, hc.Env, "PROFILE_KEY", "G3-full: profile env is no longer an injection point")
-	// harness_overrides env SURVIVES G3-full — unchanged, and deliberately so.
+	// harness_overrides env SURVIVES the profile env removal — unchanged.
 	assert.Equal(t, "override_value", hc.Env["OVERRIDE_KEY"], "override env should be merged")
 	assert.Len(t, hc.Volumes, 1, "profile volume should be appended")
 	assert.Equal(t, "/mnt/vol", hc.Volumes[0].Target)
 }
 
-// TestResolveHarnessConfig_ProfileEnvNotMerged pins the G3-full removal: the
-// profiles.<p>.env injection point no longer exists in ResolveHarnessConfig.
+// TestResolveHarnessConfig_ProfileEnvFieldRemoved verifies that the Env field
+// no longer exists on V1ProfileConfig. profiles.<p>.env was removed from the
+// struct and the JSON schema as the final step of the G3-full removal — config
+// files that still declare it will now fail schema validation with an
+// additionalProperties error.
 //
-// Read the fixture carefully before changing it; three separate traps apply.
-//
-//  1. EXISTENCE CONTROL. An "env key is absent" assertion passes for free if the
-//     profile was never located at all — ResolveHarnessConfig returns baseConfig
-//     early when vs.Profiles[profileName] is missing, and an empty profileName
-//     falls back to ActiveProfile. So this test asserts the profile's VOLUME is
-//     appended. That merge sits in the same block the deleted env merge sat in,
-//     and it proves the profile was found and applied. Without it the absence
-//     below measures nothing.
-//
-//  2. THE HARNESS OVERRIDE IS DELIBERATELY POPULATED, AND ONLY FOR ONE KEY.
-//     profiles.<p>.harness_overrides.<hc>.env is merged AFTER profile env and
-//     therefore OUTRANKS it, so it can mask this deletion — but Env is a
-//     per-key map and mergeMaps overlays key by key, so it masks ONLY the keys
-//     it itself sets. PROFILE_ONLY_KEY is set by the profile and NOT by the
-//     override, which is what keeps the deletion observable.
-//
-//     Leaving the override unset entirely would also work, but this fixture is
-//     strictly better: it additionally pins that harness_overrides SURVIVES
-//     G3-full, and it exercises the both-populated state, which is the real
-//     configuration users are left in after the migration.
-//
-//  3. SHARED_KEY is NOT asserting "harness-config env replaces profile env".
-//     That claim was in the findings matrix, it was backwards, and it was
-//     retracted: before G3-full the profile value WON this key. The assertion
-//     below says the base value is left undisturbed because the merge that used
-//     to overwrite it is gone. Nothing remains to be replaced, so the removal
-//     does not vindicate the old claim — it makes it vacuous.
-func TestResolveHarnessConfig_ProfileEnvNotMerged(t *testing.T) {
+// This test remains as a regression guard: profile volumes and
+// harness_overrides must still be merged correctly despite the removal.
+func TestResolveHarnessConfig_ProfileEnvFieldRemoved(t *testing.T) {
 	vs := &VersionedSettings{
 		ActiveProfile: "dev",
 		HarnessConfigs: map[string]HarnessConfigEntry{
@@ -1227,11 +1197,6 @@ func TestResolveHarnessConfig_ProfileEnvNotMerged(t *testing.T) {
 		Profiles: map[string]V1ProfileConfig{
 			"dev": {
 				Runtime: "docker",
-				Env: map[string]string{
-					"SHARED_KEY":       "from-profile",
-					"PROFILE_ONLY_KEY": "from-profile",
-				},
-				// Populated, but NOT for PROFILE_ONLY_KEY — see trap 2 above.
 				HarnessOverrides: map[string]V1HarnessOverride{
 					"gemini": {Env: map[string]string{"OVERLAP_KEY": "from-override"}},
 				},
@@ -1240,31 +1205,18 @@ func TestResolveHarnessConfig_ProfileEnvNotMerged(t *testing.T) {
 		},
 	}
 
-	// profileName passed explicitly rather than relying on ActiveProfile.
 	hc, err := vs.ResolveHarnessConfig("dev", "gemini")
 	require.NoError(t, err)
 
-	// Existence control — must come first. If this fails, every env assertion
-	// below is vacuous and the test result means nothing.
+	// Existence control: profile volumes must still be merged.
 	require.Len(t, hc.Volumes, 1, "existence control: the profile must have been found and merged")
 	require.Equal(t, "/mnt/profile", hc.Volumes[0].Target, "existence control: the merged volume must be the profile's")
 
-	// The removal itself: a key that ONLY profile env supplied is gone.
-	assert.NotContains(t, hc.Env, "PROFILE_ONLY_KEY",
-		"G3-full: profiles.<p>.env is no longer an injection point, so a profile-only key must not appear")
-
-	// The base value survives untouched. See trap 3 — this is not a claim that
-	// harness-config env outranks profile env.
-	assert.Equal(t, "from-harness-config", hc.Env["SHARED_KEY"],
-		"harness_configs.<hc>.env must be left undisturbed now that the profile merge is gone")
-
-	// The two surviving env sources, pinned here so this test distinguishes
-	// "G3-full removed a rank" from "G3-full removed the tier". Without these a
-	// change that wiped out all settings env would still pass the assertion above.
+	// The two surviving env sources still work.
 	assert.Equal(t, "from-override", hc.Env["OVERLAP_KEY"],
-		"profiles.<p>.harness_overrides.<hc>.env SURVIVES G3-full")
-	assert.Contains(t, hc.Env, "SHARED_KEY",
-		"harness_configs.<hc>.env SURVIVES G3-full — it is the migration path for the removed profile env")
+		"profiles.<p>.harness_overrides.<hc>.env must survive the profile env removal")
+	assert.Equal(t, "from-harness-config", hc.Env["SHARED_KEY"],
+		"harness_configs.<hc>.env must survive — it is the migration path for the removed profile env")
 }
 
 func TestResolveHarnessConfig_NotFound(t *testing.T) {
@@ -1383,7 +1335,10 @@ func TestResolveRuntime_TypeFromKey(t *testing.T) {
 	assert.Equal(t, "docker", runtimeType, "should fall back to map key name when Type is empty")
 }
 
-func TestResolveRuntime_ProfileEnvMerge(t *testing.T) {
+// TestResolveRuntime_ProfileEnvNotMerged verifies that ResolveRuntime no longer
+// merges profiles.<p>.env into the runtime config. The Env field was removed
+// from V1ProfileConfig as part of the G3-full removal.
+func TestResolveRuntime_ProfileEnvNotMerged(t *testing.T) {
 	vs := &VersionedSettings{
 		ActiveProfile: "local",
 		Runtimes: map[string]V1RuntimeConfig{
@@ -1395,7 +1350,6 @@ func TestResolveRuntime_ProfileEnvMerge(t *testing.T) {
 		Profiles: map[string]V1ProfileConfig{
 			"local": {
 				Runtime: "docker",
-				Env:     map[string]string{"PROFILE_KEY": "profile_value"},
 			},
 		},
 	}
@@ -1403,7 +1357,7 @@ func TestResolveRuntime_ProfileEnvMerge(t *testing.T) {
 	rtConfig, _, err := vs.ResolveRuntime("")
 	require.NoError(t, err)
 	assert.Equal(t, "runtime_value", rtConfig.Env["RUNTIME_KEY"], "runtime env should be preserved")
-	assert.Equal(t, "profile_value", rtConfig.Env["PROFILE_KEY"], "profile env should be merged")
+	assert.Len(t, rtConfig.Env, 1, "only runtime env should be present — profile env is no longer merged")
 }
 
 func TestResolveRuntime_ProfileNotFound(t *testing.T) {
@@ -1689,7 +1643,6 @@ func TestLegacyAndVersionedResolution_SameResult(t *testing.T) {
 		Profiles: map[string]ProfileConfig{
 			"local": {
 				Runtime: "docker",
-				Env:     map[string]string{"PROFILE_KEY": "profile_val"},
 				HarnessOverrides: map[string]HarnessOverride{
 					"gemini": {
 						Env: map[string]string{"OVERRIDE_KEY": "override_val"},
@@ -1712,7 +1665,6 @@ func TestLegacyAndVersionedResolution_SameResult(t *testing.T) {
 	assert.Equal(t, legacyHC.Image, versionedHC.Image, "image should match")
 	assert.Equal(t, legacyHC.User, versionedHC.User, "user should match")
 	assert.Equal(t, legacyHC.Env["KEY1"], versionedHC.Env["KEY1"], "base env should match")
-	assert.Equal(t, legacyHC.Env["PROFILE_KEY"], versionedHC.Env["PROFILE_KEY"], "profile env should match")
 	assert.Equal(t, legacyHC.Env["OVERRIDE_KEY"], versionedHC.Env["OVERRIDE_KEY"], "override env should match")
 	assert.Equal(t, len(legacyHC.Volumes), len(versionedHC.Volumes), "volume count should match")
 }
@@ -2882,11 +2834,6 @@ profiles:
     local:
         runtime: container
         tmux: true
-        env:
-            GIT_AUTHOR_EMAIL: dev@example.com
-            GIT_AUTHOR_NAME: Test User
-            GIT_COMMITTER_EMAIL: dev@example.com
-            GIT_COMMITTER_NAME: Test User
         volumes:
             - source: ${GOPATH}/pkg
               target: /home/scion/go/pkg
@@ -2958,7 +2905,6 @@ profiles:
 	assert.Len(t, vs.Profiles, 2)
 	assert.Equal(t, "container", vs.Profiles["local"].Runtime)
 	assert.Equal(t, "kubernetes", vs.Profiles["remote"].Runtime)
-	assert.Equal(t, "dev@example.com", vs.Profiles["local"].Env["GIT_AUTHOR_EMAIL"])
 	assert.Len(t, vs.Profiles["local"].Volumes, 2)
 
 	// Check deprecation warnings

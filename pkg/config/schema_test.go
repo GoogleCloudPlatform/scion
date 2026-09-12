@@ -428,8 +428,6 @@ profiles:
     runtime: docker
     default_template: gemini
     default_harness_config: gemini
-    env:
-      ENV: staging
     resources:
       requests:
         cpu: "500m"
@@ -770,8 +768,6 @@ profiles:
     runtime: container
     default_template: gemini
     default_harness_config: gemini
-    env:
-      ENV: local
     volumes:
       - source: /tmp/scion
         target: /workspace/tmp

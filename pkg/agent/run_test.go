@@ -2904,8 +2904,8 @@ profiles:
 // See design §0.2.
 
 // g3TestSettings builds settings with one harness config and one profile,
-// each declaring env, so tests can tell the two sources apart.
-func g3TestSettings(hcEnv, profileEnv map[string]string) *config.VersionedSettings {
+// so tests can tell the two sources apart.
+func g3TestSettings(hcEnv map[string]string) *config.VersionedSettings {
 	return &config.VersionedSettings{
 		SchemaVersion: "1",
 		ActiveProfile: "vertex",
@@ -2913,7 +2913,7 @@ func g3TestSettings(hcEnv, profileEnv map[string]string) *config.VersionedSettin
 			"claude-cfg": {Harness: "claude", Env: hcEnv},
 		},
 		Profiles: map[string]config.V1ProfileConfig{
-			"vertex": {Runtime: "docker", Env: profileEnv},
+			"vertex": {Runtime: "docker"},
 		},
 	}
 }
@@ -2926,7 +2926,7 @@ func TestStart_BrokerMode_HarnessConfigEnv_VisibleToAuthOverlay(t *testing.T) {
 	settings := g3TestSettings(map[string]string{
 		"GOOGLE_CLOUD_PROJECT": "hc-project",
 		"GOOGLE_CLOUD_REGION":  "us-central1",
-	}, nil)
+	})
 
 	opts := api.StartOptions{
 		Name:       "test-agent",
@@ -2956,7 +2956,7 @@ func TestStart_BrokerMode_HubEnvNotClobberedByHarnessConfigEnv(t *testing.T) {
 	settings := g3TestSettings(map[string]string{
 		"GOOGLE_CLOUD_PROJECT": "hc-project",
 		"HC_ONLY":              "hc-value",
-	}, nil)
+	})
 
 	opts := api.StartOptions{
 		Name:       "test-agent",
@@ -2984,55 +2984,27 @@ func TestStart_BrokerMode_HubEnvNotClobberedByHarnessConfigEnv(t *testing.T) {
 	}
 }
 
-// TestResolveAuthEnvOverlay_ProfileEnvAloneNotInjectedWithoutHarnessConfig
-// locks in the G3-narrow branch delete: with no harness config named, nothing
-// is injected.
-//
-// This comment used to add that profile env was NOT thereby retired, because
-// ResolveHarnessConfig still merged it when a harness config WAS named. G3-full
-// has since deleted that merge, so the qualification is now vacuous rather than
-// wrong — there is no remaining path for it to describe. Its citation of
-// settings_v1.go:54-55 was correct and unambiguous when written; those lines are
-// deleted, so it is replaced by a symbol reference rather than corrected.
-// See ResolveHarnessConfig in pkg/config/settings_v1.go and design §0.3.
-func TestResolveAuthEnvOverlay_ProfileEnvAloneNotInjectedWithoutHarnessConfig(t *testing.T) {
-	settings := g3TestSettings(nil, map[string]string{"PROFILE_ONLY": "profile-value"})
+// TestResolveAuthEnvOverlay_NoHarnessConfigMeansNoInjection verifies that
+// with no harness config named, nothing is injected into the auth overlay.
+// profiles.<p>.env has been fully removed from the struct, so there is no
+// remaining path for profile env to reach the overlay.
+func TestResolveAuthEnvOverlay_NoHarnessConfigMeansNoInjection(t *testing.T) {
+	settings := g3TestSettings(nil)
 
 	opts := api.StartOptions{Name: "test-agent", BrokerMode: true}
 
 	overlay := resolveAuthEnvOverlay(&opts, settings, "vertex", "" /* no harness config */)
 
-	if got, ok := overlay["PROFILE_ONLY"]; ok {
-		t.Errorf("auth overlay PROFILE_ONLY = %q, want absent "+
-			"(profile env is no longer a direct source)", got)
+	if len(overlay) != 0 {
+		t.Errorf("auth overlay = %v, want empty (with no harness config named, nothing should be injected)", overlay)
 	}
 }
 
-// TestResolveAuthEnvOverlay_ProfileEnvStillArrivesViaHarnessConfig is the
-// pkg/agent-side pin for the G3-full removal: naming a harness config no longer
-// carries profile env into the auth overlay.
-//
-// This test is the INVERSION of one I added in the G3-narrow commit, which was
-// then called TestResolveAuthEnvOverlay_ProfileEnvStillArrivesViaHarnessConfig
-// and asserted the opposite. Its contract was "profile env keeps flowing
-// whenever a harness config is named" — precisely the behaviour G3-full removes,
-// so the test could not survive the change. It is renamed rather than deleted so
-// the reversal stays visible in history.
-//
-// The fixture supplies profile env and NO harness_overrides for the key, which
-// matters: G3-full removes a rank that is not the top of its ladder, and a
-// middle-rank removal is invisible whenever a higher rank is populated. Setting
-// harness_overrides here would make this pass before and after while measuring
-// nothing.
-//
-// Existence control: the harness-config env key must still arrive. Without it,
-// an absent PROFILE_ONLY is equally consistent with the overlay never having
-// been populated at all.
-func TestResolveAuthEnvOverlay_ProfileEnvNoLongerArrivesViaHarnessConfig(t *testing.T) {
-	settings := g3TestSettings(
-		map[string]string{"HC_ONLY": "hc-value"},
-		map[string]string{"PROFILE_ONLY": "profile-value"},
-	)
+// TestResolveAuthEnvOverlay_OnlyHarnessConfigEnvArrives verifies that the auth
+// overlay receives only harness-config env. profiles.<p>.env has been fully
+// removed from V1ProfileConfig, so there is no profile env to arrive.
+func TestResolveAuthEnvOverlay_OnlyHarnessConfigEnvArrives(t *testing.T) {
+	settings := g3TestSettings(map[string]string{"HC_ONLY": "hc-value"})
 
 	opts := api.StartOptions{Name: "test-agent", BrokerMode: true}
 
@@ -3040,13 +3012,8 @@ func TestResolveAuthEnvOverlay_ProfileEnvNoLongerArrivesViaHarnessConfig(t *test
 
 	if got := overlay["HC_ONLY"]; got != "hc-value" {
 		t.Fatalf("existence control failed: auth overlay HC_ONLY = %q, want %q — "+
-			"the harness config was not resolved, so the assertion below would be vacuous",
+			"the harness config was not resolved",
 			got, "hc-value")
-	}
-
-	if got, ok := overlay["PROFILE_ONLY"]; ok {
-		t.Errorf("auth overlay PROFILE_ONLY = %q, want absent "+
-			"(G3-full: ResolveHarnessConfig no longer merges profiles.<p>.env)", got)
 	}
 }
 
@@ -3233,7 +3200,7 @@ func TestLocalMode_HarnessConfigEnvOutranksTemplateEnv(t *testing.T) {
 func TestResolveAuthEnvOverlay_MutatesCallerOptsEnv(t *testing.T) {
 	settings := g3TestSettings(map[string]string{
 		"GOOGLE_CLOUD_PROJECT": "hc-project",
-	}, nil)
+	})
 
 	// Pins the injection contract. NOTE this subtest does NOT detect a value
 	// receiver — see the comment above. It is here for the contract, not as

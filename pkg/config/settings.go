@@ -58,7 +58,6 @@ type HarnessOverride struct {
 
 type ProfileConfig struct {
 	Runtime          string                     `json:"runtime" yaml:"runtime" koanf:"runtime"`
-	Env              map[string]string          `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
 	Volumes          []api.VolumeMount          `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
 	Resources        *api.ResourceSpec          `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
 	HarnessOverrides map[string]HarnessOverride `json:"harness_overrides,omitempty" yaml:"harness_overrides,omitempty" koanf:"harness_overrides"`
@@ -168,11 +167,6 @@ func (s *Settings) ResolveRuntime(profileName string) (RuntimeConfig, string, er
 	runtime, ok := s.Runtimes[profile.Runtime]
 	if !ok {
 		return RuntimeConfig{}, "", fmt.Errorf("runtime %q not found for profile %q", profile.Runtime, profileName)
-	}
-
-	// Merge profile-level env into runtime config
-	if profile.Env != nil {
-		runtime.Env = mergeMaps(runtime.Env, profile.Env)
 	}
 
 	return runtime, profile.Runtime, nil
@@ -443,9 +437,6 @@ func MergeSettings(base *Settings, data []byte) error {
 			existing := base.Profiles[k]
 			if v.Runtime != "" {
 				existing.Runtime = v.Runtime
-			}
-			if v.Env != nil {
-				existing.Env = mergeMaps(existing.Env, expandEnvMap(v.Env))
 			}
 			if v.Volumes != nil {
 				existing.Volumes = append(existing.Volumes, expandVolumeMounts(v.Volumes)...)

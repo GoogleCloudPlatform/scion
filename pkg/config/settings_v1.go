@@ -138,11 +138,6 @@ func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig
 		runtimeType = profile.Runtime
 	}
 
-	// Merge profile-level env into runtime config
-	if profile.Env != nil {
-		rtConfig.Env = mergeMaps(rtConfig.Env, profile.Env)
-	}
-
 	return rtConfig, runtimeType, nil
 }
 
@@ -1038,7 +1033,6 @@ type V1ProfileConfig struct {
 	DefaultTemplate      string                       `json:"default_template,omitempty" yaml:"default_template,omitempty" koanf:"default_template"`
 	DefaultHarnessConfig string                       `json:"default_harness_config,omitempty" yaml:"default_harness_config,omitempty" koanf:"default_harness_config"`
 	ImageRegistry        string                       `json:"image_registry,omitempty" yaml:"image_registry,omitempty" koanf:"image_registry"`
-	Env                  map[string]string            `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
 	Volumes              []api.VolumeMount            `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
 	Resources            *api.ResourceSpec            `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
 	HarnessOverrides     map[string]V1HarnessOverride `json:"harness_overrides,omitempty" yaml:"harness_overrides,omitempty" koanf:"harness_overrides"`
@@ -2034,7 +2028,6 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 		for name, pc := range legacy.Profiles {
 			profile := V1ProfileConfig{
 				Runtime:   pc.Runtime,
-				Env:       pc.Env,
 				Volumes:   pc.Volumes,
 				Resources: pc.Resources,
 			}
@@ -2140,7 +2133,6 @@ func convertVersionedToLegacy(vs *VersionedSettings) *Settings {
 		for name, pc := range vs.Profiles {
 			profile := ProfileConfig{
 				Runtime:   pc.Runtime,
-				Env:       pc.Env,
 				Volumes:   pc.Volumes,
 				Resources: pc.Resources,
 			}
