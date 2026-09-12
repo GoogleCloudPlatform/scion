@@ -137,22 +137,19 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 	// Create cloud exporter if configured
 	if p.config.IsCloudConfigured() {
-		// Warn about shaky prerequisites that may lead to export failures.
-		var warnings []string
-		if p.config.IsGCP() && p.config.GCPCredentialsFile == "" {
-			warnings = append(warnings, "no explicit credentials file (relying on ADC)")
-		}
+		// Log credential source for diagnostics. ADC (Application Default
+		// Credentials) is the standard GCP best practice, so we don't warn
+		// about it. We only warn when credentials are resolved via the
+		// well-known file path fallback, which is less reliable than an
+		// explicit environment variable.
 		if p.config.IsGCP() && p.config.GCPCredentialsFile != "" {
 			if envVal := os.Getenv(EnvGCPCredentials); envVal == "" {
-				warnings = append(warnings, "credentials loaded from well-known path fallback, not environment")
+				slog.Warn("telemetry credentials loaded from well-known path fallback, not environment variable",
+					"credentials_file", p.config.GCPCredentialsFile,
+					"project_id", p.config.ProjectID,
+					"hint", fmt.Sprintf("set %s to make credential source explicit", EnvGCPCredentials),
+				)
 			}
-		}
-		if len(warnings) > 0 {
-			slog.Warn("telemetry cloud export enabled with incomplete prerequisites",
-				"warnings", warnings,
-				"project_id", p.config.ProjectID,
-				"provider", p.config.CloudProvider,
-			)
 		}
 
 		exporter, err := NewCloudExporter(ctx, p.config)
