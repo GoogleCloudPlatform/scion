@@ -96,7 +96,9 @@ func TestSuspendedPage_HeadlessBrowser_ZeroFanOut(t *testing.T) {
 	defer cancel()
 
 	// Set a timeout for the entire browser operation.
-	ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+	// Use 90s to account for slow CI runners where Chrome startup alone can
+	// take 15-25s; must exceed the 60s WSURLReadTimeout above.
+	ctx, cancel = context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
 	// Listen for network request events to capture all URLs.
