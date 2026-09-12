@@ -610,7 +610,10 @@ authDone:
 	if opts.NoAuth {
 		// Clean up stale auth-candidates from a prior run so the
 		// provisioner sees no candidates and runs in no-auth mode.
-		_ = os.Remove(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+		authCandidatesPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json")
+		if err := os.Remove(authCandidatesPath); err != nil && !os.IsNotExist(err) {
+			util.Debugf("Start: failed to remove stale auth-candidates: %v", err)
+		}
 	}
 
 	// Unconditionally clear corrupted opts.HarnessAuth. This runs even when
