@@ -890,6 +890,19 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		// Publish SSE event.
 		s.events.PublishUserMessage(ctx, storeMsg)
 
+		// Phase 9b(ii): render the delivery envelope for the agent-to-agent
+		// DM path (DEF-171). Persistence is guaranteed at this point (early
+		// return on CreateMessage failure above), matching the broadcast
+		// guard convention at :2476.
+		if s.writeDenyEnabled() {
+			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+				MessageID:  storeMsg.ID,
+				ConvResult: result.ConvResult,
+				Msg:        structuredMsg,
+				CreatedAt:  storeMsg.CreatedAt,
+			})
+		}
+
 		// Dispatch to the target agent's runtime broker when available.
 		if isManagedAgentRuntime(result.TargetAgent.Runtime) {
 			if err := s.managedAgentMessage(ctx, result.TargetAgent, req.Msg, req.Urgent); err != nil {
