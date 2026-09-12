@@ -626,6 +626,7 @@ const ADMIN_ROUTES = new Set([
   'scion-page-admin-skill-registry-detail',
   'scion-page-diagnostics',
   'scion-page-health-dashboard',
+  'scion-page-metrics',
 ]);
 
 // ---------------------------------------------------------------------------

@@ -57,7 +57,6 @@ const NAV_SECTIONS: NavSection[] = [
       { path: '/agents', label: 'Agents', icon: 'cpu' },
       { path: '/brokers', label: 'Brokers', icon: 'hdd-rack' },
       { path: '/skills', label: 'Skills', icon: 'lightning-charge' },
-      { path: '/metrics', label: 'Metrics', icon: 'graph-up' },
     ],
   },
 ];
@@ -79,6 +78,7 @@ const ADMIN_SCOPEABLE_ITEMS: NavItem[] = [
   { path: '/admin/access-boundaries', label: 'Access Constraints', icon: 'shield-check' },
   { path: '/admin/quotas', label: 'Quotas', icon: 'speedometer2' },
   { path: '/health', label: 'Health', icon: 'heart-pulse' },
+  { path: '/metrics', label: 'Metrics', icon: 'graph-up' },
   { path: '/admin/skill-registries', label: 'Skill Registries', icon: 'cloud-arrow-down' },
 ];
 

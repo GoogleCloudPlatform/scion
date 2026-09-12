@@ -102,6 +102,7 @@ export const NAV_PERMISSION_MAP: Record<string, string[]> = {
   '/admin/access-boundaries': ['access_constraint.read', 'access_constraint.admin'],
   '/admin/quotas': ['quota.read'],
   '/health': ['hub.health.read'],
+  '/metrics': ['hub.metrics.read'],
   '/admin/skill-registries': ['skill.register'],
 };
 
@@ -131,6 +132,7 @@ export const ROUTE_PERMISSION_MAP: Record<string, string[]> = {
   'scion-page-admin-access-boundary-editor': ['access_constraint.admin'],
   'scion-page-admin-quotas': ['quota.read'],
   'scion-page-health-dashboard': ['hub.health.read'],
+  'scion-page-metrics': ['hub.metrics.read'],
   'scion-page-admin-skill-registries': ['skill.register'],
   'scion-page-admin-skill-registry-detail': ['skill.register'],
 };
