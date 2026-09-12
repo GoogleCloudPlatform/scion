@@ -118,19 +118,18 @@ func TestReExecIntegration(t *testing.T) {
 	// eyJmaWxlX3NlY3JldHMiOltdLCJ2YXJpYWJsZV9zZWNyZXRzIjp7fX0=
 	stagedPayload := "eyJmaWxlX3NlY3JldHMiOltdLCJ2YXJpYWJsZV9zZWNyZXRzIjp7fX0="
 
-	// The child command reads /proc/$PPID/environ and checks for the secret var.
-	// After re-exec, PPID should be the re-exec'd sciontool init (PID 1 in a
-	// container, but not in test). We check the parent's environ via /proc.
-	//
-	// However, in a test environment sciontool doesn't run as PID 1 and the
-	// child's PPID might be the test process. Instead, we use a child script
-	// that reads /proc/self/environ of the init process by its PID.
-	//
-	// For simplicity, check that the child process itself does NOT inherit
-	// SCION_STAGED_SECRETS in its own environment. This was already blocked
-	// by os.Unsetenv, but also exercises the code path through re-exec.
+	// Two checks in the child script:
+	// 1. env — verifies the child does not inherit SCION_STAGED_SECRETS
+	//    (already blocked by os.Unsetenv, but exercises the code path).
+	// 2. /proc/$PPID/environ — verifies the re-exec actually purged the
+	//    secret from the parent's kernel-level environ, which is the
+	//    primary goal of the fix (os.Unsetenv alone does not clear /proc).
 	cmd := buildTestInitCmd(binPath, tmpHome, stagedPayload,
-		"sh", "-c", "env | grep SCION_STAGED_SECRETS && echo LEAKED || echo CLEAN")
+		"sh", "-c",
+		"env | grep SCION_STAGED_SECRETS && echo ENV_LEAKED || echo ENV_CLEAN; "+
+			"if [ -r /proc/$PPID/environ ]; then "+
+			"tr '\\0' '\\n' < /proc/$PPID/environ | grep -q SCION_STAGED_SECRETS && echo PROC_LEAKED || echo PROC_CLEAN; "+
+			"else echo PROC_SKIP; fi")
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -140,12 +139,21 @@ func TestReExecIntegration(t *testing.T) {
 	}
 
 	outStr := string(output)
-	if strings.Contains(outStr, "LEAKED") {
+	if strings.Contains(outStr, "ENV_LEAKED") {
 		t.Error("SCION_STAGED_SECRETS leaked to child process environment")
 	}
-	if !strings.Contains(outStr, "CLEAN") {
+	if !strings.Contains(outStr, "ENV_CLEAN") {
 		t.Logf("Output:\n%s", outStr)
-		t.Error("expected CLEAN in output, child may not have run correctly")
+		t.Error("expected ENV_CLEAN in output, child may not have run correctly")
+	}
+	// Verify the re-exec actually purged /proc/<pid>/environ (the primary
+	// goal of the fix — os.Unsetenv alone does not clear /proc).
+	if strings.Contains(outStr, "PROC_LEAKED") {
+		t.Error("SCION_STAGED_SECRETS persists in parent's /proc/<pid>/environ after re-exec")
+	} else if strings.Contains(outStr, "PROC_CLEAN") {
+		t.Logf("Confirmed: SCION_STAGED_SECRETS purged from parent's /proc/<pid>/environ")
+	} else if strings.Contains(outStr, "PROC_SKIP") {
+		t.Log("Could not read parent's /proc environ; /proc purge not verified in this run")
 	}
 }
 
