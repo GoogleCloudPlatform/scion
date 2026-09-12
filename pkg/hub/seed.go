@@ -981,12 +981,40 @@ func backfillUserRoleBindings(ctx context.Context, s store.Store) error {
 // reconcileViewerHubMemberships removes viewer-role users from the hub-members
 // group. Earlier code unconditionally added every user on login; this startup
 // reconciliation cleans up stale memberships so viewer restrictions take effect.
+//
+// To avoid an N+1 query pattern (GetUser per group member), we first collect
+// all viewer-role user IDs via ListUsers, then iterate group members and remove
+// only those whose IDs appear in the viewer set.
 func reconcileViewerHubMemberships(ctx context.Context, s store.Store) error {
 	group, err := s.GetGroupBySlug(ctx, "hub-members")
 	if err != nil {
 		// Group doesn't exist yet — nothing to reconcile.
 		slog.Debug("hub-members group not found, skipping viewer reconciliation", "error", err)
 		return nil
+	}
+
+	// Collect all viewer-role user IDs in a single paginated query.
+	viewerIDs := make(map[string]struct{})
+	var cursor string
+	for {
+		viewers, err := s.ListUsers(ctx, store.UserFilter{Role: store.UserRoleViewer}, store.ListOptions{
+			Limit:  200,
+			Cursor: cursor,
+		})
+		if err != nil {
+			return fmt.Errorf("list viewer-role users: %w", err)
+		}
+		for i := range viewers.Items {
+			viewerIDs[viewers.Items[i].ID] = struct{}{}
+		}
+		if viewers.NextCursor == "" {
+			break
+		}
+		cursor = viewers.NextCursor
+	}
+
+	if len(viewerIDs) == 0 {
+		return nil // no viewers — nothing to remove
 	}
 
 	members, err := s.GetGroupMembers(ctx, group.ID)
@@ -999,18 +1027,14 @@ func reconcileViewerHubMemberships(ctx context.Context, s store.Store) error {
 		if m.MemberType != store.GroupMemberTypeUser {
 			continue
 		}
-		user, err := s.GetUser(ctx, m.MemberID)
-		if err != nil {
-			slog.Debug("failed to look up hub-members group member", "memberID", m.MemberID, "error", err)
+		if _, isViewer := viewerIDs[m.MemberID]; !isViewer {
 			continue
 		}
-		if user.Role == "viewer" {
-			if err := s.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, user.ID); err != nil {
-				slog.Warn("failed to remove viewer from hub-members group", "userID", user.ID, "error", err)
-				continue
-			}
-			removed++
+		if err := s.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, m.MemberID); err != nil {
+			slog.Warn("failed to remove viewer from hub-members group", "userID", m.MemberID, "error", err)
+			continue
 		}
+		removed++
 	}
 
 	if removed > 0 {
