@@ -345,6 +345,30 @@ export SCION_SERVER_SECRETS_GCP_PROJECT_ID=my-gcp-project
 export SCION_SERVER_SECRETS_GCP_CREDENTIALS=/path/to/service-account.json
 ```
 
+#### User-Managed Replication Locations
+
+By default, GCP Secret Manager uses automatic (global) replication. Organizations that enforce the `constraints/gcp.resourceLocations` org policy — which restricts or prohibits global resources — will see secret creation fail with this default.
+
+To comply, set `gcp_replication_locations` to a list of GCP regions where secret replicas should be stored:
+
+```yaml
+server:
+  secrets:
+    backend: gcpsm
+    gcp_project_id: "my-gcp-project"
+    gcp_replication_locations:
+      - us-east1
+      - europe-west1
+```
+
+Or via the environment variable:
+
+```bash
+export SCION_SERVER_SECRETS_GCPREPLICATIONLOCATIONS=us-east1,europe-west1
+```
+
+When this field is non-empty, Scion creates secrets with **user-managed** replication restricted to the specified regions instead of automatic global replication. When empty or omitted, the default automatic replication behavior is preserved. This field is also editable through the admin settings UI and is stored in the HA postgres config store in database mode.
+
 When GCP Secret Manager is configured, Scion uses a **hybrid storage** model:
 - **Metadata** (name, type, scope) is stored in the Hub database.
 - **Secret values** are stored in GCP Secret Manager with automatic versioning.
