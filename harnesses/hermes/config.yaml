@@ -46,7 +46,6 @@ model_aliases:
 
 command:
   base: ["hermes", "chat", "--yolo"]
-  task_flag: "-q"
   resume_flag: "-c"
   task_position: after_base_args
 
@@ -71,6 +70,7 @@ capabilities:
     sse: { support: "yes" }
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Not yet implemented" }
+  resume: { support: "yes" }
 
 no_auth:
   behavior: drop-to-shell
