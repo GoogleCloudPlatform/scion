@@ -809,6 +809,24 @@ func TestDetermineUserRole_DefaultUserRole(t *testing.T) {
 			defaultRole: "viewer",
 			expected:    "admin",
 		},
+		{
+			// Demoted admin with default_user_role=viewer gets viewer, not member.
+			name:        "demoted admin with default_user_role=viewer gets viewer",
+			email:       "former@example.com",
+			adminEmails: []string{"real-admin@example.com"},
+			currentRole: "admin",
+			defaultRole: "viewer",
+			expected:    "viewer",
+		},
+		{
+			// Demoted admin with default_user_role=member gets member (unchanged).
+			name:        "demoted admin with default_user_role=member gets member",
+			email:       "former@example.com",
+			adminEmails: []string{"real-admin@example.com"},
+			currentRole: "admin",
+			defaultRole: "member",
+			expected:    "member",
+		},
 	}
 
 	for _, tc := range tests {
