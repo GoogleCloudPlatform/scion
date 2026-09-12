@@ -81,6 +81,9 @@ func BuiltinHarnessConfigs() []BundledResource {
 			continue
 		}
 		name := e.Name()
+		if _, err := fs.Stat(harnesses.FS, name+"/config.yaml"); err != nil {
+			continue
+		}
 		sub, err := fs.Sub(harnesses.FS, name)
 		if err != nil {
 			panic(fmt.Sprintf("resources: sub harness FS %q: %v", name, err))
@@ -107,9 +110,14 @@ func BuiltinHarnessConfigNames() []string {
 	}
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() {
-			names = append(names, e.Name())
+		if !e.IsDir() {
+			continue
 		}
+		name := e.Name()
+		if _, err := fs.Stat(harnesses.FS, name+"/config.yaml"); err != nil {
+			continue
+		}
+		names = append(names, name)
 	}
 	return names
 }
