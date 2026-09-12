@@ -241,6 +241,13 @@ def _configure_vertex_ai(
     # Write Vertex AI model config to config.toml.
     _write_vertex_config(ctx, base_url, model_id)
 
+    # Create a model config block matching the raw SCION_MODEL name so that
+    # --model <name> on the command line (injected by the Go side) routes
+    # through vertex-ai instead of falling back to the direct xAI API.
+    if raw_model and raw_model != _VERTEX_MODEL_CONFIG_NAME:
+        _write_vertex_model_alias(ctx, base_url, model_id, raw_model)
+        ctx.info(f"vertex-ai: created model alias '{raw_model}' -> vertex endpoint")
+
     # Set GROK_DEFAULT_MODEL so grok uses the vertex-grok config block.
     # This is belt-and-suspenders alongside [models] default in config.toml —
     # the env var cannot be overwritten by grok's /model command at runtime.
@@ -295,6 +302,47 @@ default = "{_VERTEX_MODEL_CONFIG_NAME}"'''
         content += "\n\n"
     content += vertex_toml + "\n"
 
+    scion_harness.atomic_write_text(config_path, content)
+
+
+def _write_vertex_model_alias(
+    ctx: scion_harness.ProvisionContext,
+    base_url: str,
+    model_id: str,
+    alias_name: str,
+) -> None:
+    """Add a model config block that aliases a raw model name to vertex-ai.
+
+    When the Go side injects --model <name> on the command line, grok looks
+    for [model.<name>] in config.toml. Without this block, grok falls back to
+    the direct xAI API and gets a 401 when vertex-ai auth is in use.
+    """
+    config_path = os.path.join(ctx.home, ".grok", "config.toml")
+    if not os.path.isfile(config_path):
+        return  # _write_vertex_config should have created it
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Strip any existing block with this alias name to avoid duplicates.
+    escaped_alias = scion_harness.toml_escape(alias_name)
+    content = scion_harness.strip_toml_sections(
+        content,
+        lambda line: (
+            line == f'[model."{alias_name}"]'
+            or line == f"[model.{alias_name}]"
+        ),
+    )
+
+    # Append the alias block.  Use quoted key so dots in the model name
+    # (e.g. "grok-4.6") are treated as a single key, not a TOML path.
+    alias_toml = f'''
+[model."{escaped_alias}"]
+model = "{scion_harness.toml_escape(model_id)}"
+base_url = "{scion_harness.toml_escape(base_url)}"
+auth_provider = "{_VERTEX_AUTH_PROVIDER_NAME}"'''
+
+    content = content.rstrip("\n") + "\n" + alias_toml + "\n"
     scion_harness.atomic_write_text(config_path, content)
 
 
