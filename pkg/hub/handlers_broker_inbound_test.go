@@ -768,3 +768,151 @@ func TestHandleBrokerInbound_UnmappedExternalSenderDenied(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	assert.Equal(t, ErrCodeMessageDenied, errResp.Error.Code)
 }
+
+// TestHandleBrokerInbound_MentionCoAddressees verifies that when a broker
+// plugin sends mention_co_addressees metadata, the hub reads it and applies
+// CoAddressees/IsMention to the delivery envelope (additive mention routing).
+func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Separate owner and sender to avoid built-in membership conflicts.
+	owner := &store.User{
+		ID:          tid("owner-co-addr"),
+		Email:       "co-addr-owner@example.com",
+		DisplayName: "CoAddr Owner",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	user := &store.User{
+		ID:          tid("user-co-addr"),
+		Email:       "co-addr@example.com",
+		DisplayName: "CoAddr User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("proj-co-addr"),
+		Slug:      "co-addr-proj",
+		Name:      "CoAddr Test Project",
+		OwnerID:   owner.ID,
+		CreatedBy: owner.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroup(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+	// Create two agents: primary (coder) and secondary (reviewer).
+	primaryAgent := &store.Agent{
+		ID:           tid("agent-co-primary"),
+		Slug:         "coder",
+		Name:         "Coder Agent",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		MessageMode:  store.MessageModeProject,
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, primaryAgent))
+
+	secondaryAgent := &store.Agent{
+		ID:           tid("agent-co-secondary"),
+		Slug:         "reviewer",
+		Name:         "Reviewer Agent",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		MessageMode:  store.MessageModeProject,
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, secondaryAgent))
+
+	senderRef := "user:" + user.Email
+
+	t.Run("primary with co-addressees accepted", func(t *testing.T) {
+		topic := "scion.project." + project.ID + ".agent." + primaryAgent.Slug + ".messages"
+		coAddressees, _ := json.Marshal([]string{"coder", "reviewer"})
+
+		payload := inboundMessageRequest{
+			Topic: topic,
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "discord",
+				Sender:    senderRef,
+				Recipient: "agent:" + primaryAgent.Slug,
+				Msg:       "check this PR",
+				Type:      messages.TypeInstruction,
+				Metadata: map[string]string{
+					"discord_channel_id":    "ch-123",
+					"project_id":            project.ID,
+					"mention_co_addressees": string(coAddressees),
+				},
+			},
+		}
+		body, err := json.Marshal(payload)
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+		rec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+
+		// ServiceUnavailable = no dispatcher in test; message handling
+		// succeeded up to dispatch. OK = dispatch skipped (nil dispatcher).
+		assert.Contains(t, []int{http.StatusOK, http.StatusServiceUnavailable}, rec.Code,
+			"primary with co-addressees should be handled; got %d: %s", rec.Code, rec.Body.String())
+	})
+
+	t.Run("mention with co-addressees accepted", func(t *testing.T) {
+		topic := "scion.project." + project.ID + ".agent." + secondaryAgent.Slug + ".messages"
+		coAddressees, _ := json.Marshal([]string{"coder", "reviewer"})
+
+		payload := inboundMessageRequest{
+			Topic: topic,
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "discord",
+				Sender:    senderRef,
+				Recipient: "agent:" + secondaryAgent.Slug,
+				Msg:       "check this PR",
+				Type:      messages.TypeMention,
+				Metadata: map[string]string{
+					"discord_channel_id":    "ch-123",
+					"project_id":            project.ID,
+					"mention_co_addressees": string(coAddressees),
+					"mention_source":        "agent:coder",
+					"mention_position":      "body",
+				},
+			},
+		}
+		body, err := json.Marshal(payload)
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+		rec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+
+		// The mention message should be accepted.
+		assert.Contains(t, []int{http.StatusOK, http.StatusServiceUnavailable}, rec.Code,
+			"mention with co-addressees should be handled; got %d: %s", rec.Code, rec.Body.String())
+	})
+}

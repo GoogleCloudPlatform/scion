@@ -33,7 +33,12 @@ func resolveTargetAgents(msg *discordgo.MessageCreate, botUserID string, default
 	seen := make(map[string]bool)
 	var result []string
 
-	if botMentioned && defaultAgent != "" {
+	// Additive mention routing: include the default agent as the implicit
+	// primary when the bot is @-mentioned OR when explicit agent @-mentions
+	// are present. This mirrors the native chat additive model
+	// (handlers_chat_v2.go:958-1001) where the implicit primary always
+	// receives the message alongside mentioned agents.
+	if defaultAgent != "" && (botMentioned || len(agentMentions) > 0) {
 		seen[defaultAgent] = true
 		result = append(result, defaultAgent)
 	}
