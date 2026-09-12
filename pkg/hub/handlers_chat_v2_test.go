@@ -1336,9 +1336,10 @@ func TestChatV2_Send_Mention_AgentReceives(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// With a resolved @mention, message should be type "mention" (not "instruction").
-	if resp.Type != messages.TypeMention {
-		t.Errorf("expected type %q (mention-routed), got %q", messages.TypeMention, resp.Type)
+	// Additive model: the primary (sole mention, no default agent) gets
+	// TypeInstruction — it is the primary recipient, not a mention recipient.
+	if resp.Type != messages.TypeInstruction {
+		t.Errorf("expected type %q (primary, additive model), got %q", messages.TypeInstruction, resp.Type)
 	}
 	// Mentions should be populated.
 	if len(resp.Mentions) == 0 {
@@ -1571,8 +1572,9 @@ func TestChatV2_Send_AgentDM_MentionTakesPrecedence(t *testing.T) {
 	dmKey := "dm:agent:" + dmAgent.ID + ":user:" + DevUserID
 	setDMConversationID(t, s, dmKey, proj.ID)
 
-	// Send a message with @other-agent mention — mention should take precedence
-	// over the implicit DM agent routing.
+	// Send a message with @other-agent mention — additive model dispatches to
+	// both: DM implicit agent (primary, type:instruction) and mentioned agent
+	// (secondary). The response type reflects the primary's persisted type.
 	body := map[string]string{"content": "@other-agent please review this"}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages", body)
 	if rec.Code != http.StatusCreated {
@@ -1583,9 +1585,9 @@ func TestChatV2_Send_AgentDM_MentionTakesPrecedence(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// Should be type:mention (agent-routed via @mention).
-	if resp.Type != messages.TypeMention {
-		t.Errorf("mention-takes-precedence: expected type %q, got %q", messages.TypeMention, resp.Type)
+	// Additive model: the primary (DM implicit agent) gets TypeInstruction.
+	if resp.Type != messages.TypeInstruction {
+		t.Errorf("dm-plus-mention: expected type %q (primary, additive model), got %q", messages.TypeInstruction, resp.Type)
 	}
 	// Mentions should include the mentioned agent.
 	if len(resp.Mentions) == 0 {

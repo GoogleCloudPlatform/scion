@@ -172,15 +172,22 @@ func TestDEF169_Integration_MultiMention_EnvelopeTypeAndTo(t *testing.T) {
 		envelopes[d.agentSlug] = parseDEF169Envelope(t, d.structured.DeliveryText)
 	}
 
-	// Both agents must have type "mention".
-	for _, slug := range []string{"agent-alpha", "agent-beta"} {
-		env, ok := envelopes[slug]
+	// Additive model: agents[0] (first-mentioned, no default agent) is the
+	// primary and gets type:"message"; agents[1:] get type:"mention".
+	{
+		env, ok := envelopes["agent-alpha"]
 		if !ok {
-			t.Errorf("no envelope found for %s", slug)
-			continue
+			t.Error("no envelope found for agent-alpha")
+		} else if env.Type != "message" {
+			t.Errorf("agent-alpha (primary): type = %q, want %q", env.Type, "message")
 		}
-		if env.Type != "mention" {
-			t.Errorf("%s: type = %q, want %q", slug, env.Type, "mention")
+	}
+	{
+		env, ok := envelopes["agent-beta"]
+		if !ok {
+			t.Error("no envelope found for agent-beta")
+		} else if env.Type != "mention" {
+			t.Errorf("agent-beta (secondary): type = %q, want %q", env.Type, "mention")
 		}
 	}
 
@@ -224,8 +231,11 @@ func TestDEF169_Integration_MultiMention_EnvelopeTypeAndTo(t *testing.T) {
 }
 
 // TestDEF169_Integration_SingleMention_EnvelopeTypeAndTo verifies that when
-// a message mentioning exactly 1 agent goes through the real handler, the
-// dispatched DeliveryText contains type:"mention" and "to" naming itself.
+// a message mentioning exactly 1 agent goes through the real handler (with
+// no default agent), the dispatched DeliveryText contains type:"message"
+// (sole recipient is the primary) and no "to" field (single-recipient).
+// This is a consequence of the additive model: a sole recipient has no
+// secondary role, so type is "message", not "mention".
 func TestDEF169_Integration_SingleMention_EnvelopeTypeAndTo(t *testing.T) {
 	srv, s, wcs, proj, db := setupSendTest(t)
 	enableEnvelopeSwitch(t, srv, s)
@@ -277,17 +287,22 @@ func TestDEF169_Integration_SingleMention_EnvelopeTypeAndTo(t *testing.T) {
 	}
 
 	env := parseDEF169Envelope(t, d.structured.DeliveryText)
-	if env.Type != "mention" {
-		t.Errorf("type = %q, want %q", env.Type, "mention")
+	// Additive model: single mention with no default → sole recipient is
+	// primary, type:"message", no "to" field.
+	if env.Type != "message" {
+		t.Errorf("type = %q, want %q (sole recipient is primary)", env.Type, "message")
 	}
-	if len(env.To) != 1 {
-		t.Fatalf("to length = %d, want 1", len(env.To))
+	if len(env.To) != 0 {
+		t.Errorf("to = %v, want empty (single-recipient, no secondaries)", env.To)
 	}
-	// DEF-172: "to" must name the agent by slug, not raw UUID, even in its
-	// own envelope (a single mentioned agent seeing itself named).
-	wantTo := "agent:" + agent.Slug
-	if env.To[0] != wantTo {
-		t.Errorf("to[0] = %q, want %q", env.To[0], wantTo)
+	// Also verify via raw JSON that "to" key is absent.
+	rawJSON := extractDEF169JSON(t, d.structured.DeliveryText)
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(rawJSON), &raw); err != nil {
+		t.Fatalf("unmarshal raw JSON: %v", err)
+	}
+	if _, ok := raw["to"]; ok {
+		t.Error("JSON contains 'to' key; want absent for single-mention-no-default routing")
 	}
 }
 

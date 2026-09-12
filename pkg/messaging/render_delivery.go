@@ -53,9 +53,9 @@ type RenderDeliveryInput struct {
 
 	// CoAddressees, when non-empty, overrides the single-recipient
 	// inference in buildAddressees for the "to" field: it lists every
-	// agent mentioned in this message (including the recipient this
-	// envelope is being rendered for). Only meaningful when IsMention
-	// is true.
+	// agent engaged in this message (including the recipient this
+	// envelope is being rendered for). Used for both mention and
+	// group-primary envelopes when multiple agents are engaged.
 	CoAddressees []Addressee
 }
 

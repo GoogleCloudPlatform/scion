@@ -955,8 +955,53 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	// Step 3: Determine routing.
 	if len(mentionedAgents) > 0 {
-		// --- Agent-routed: explicit mentions ---
-		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, mentionedAgents, mentionNames, mentionResults, attachmentRefs, now, body.ReplyToID)
+		// --- Agent-routed: explicit mentions (additive model) ---
+		// Resolve the thread's implicit primary agent (default for topics,
+		// DM-implicit for DMs) so it receives dispatch alongside mentions.
+		var implicitPrimary *store.Agent
+		if isDM {
+			if agentID := parseAgentDMKey(key); agentID != "" {
+				if dmAgent, err := s.store.GetAgent(ctx, agentID); err == nil && dmAgent != nil {
+					implicitPrimary = dmAgent
+				}
+			}
+		} else if projectID != "" {
+			topic, topicErr := wcs.GetTopic(ctx, key)
+			if topicErr == nil && topic != nil && topic.DefaultAgent != "" {
+				defaultAgent, daErr := s.store.GetAgentBySlug(ctx, projectID, topic.DefaultAgent)
+				if daErr != nil || defaultAgent == nil {
+					// Fall back to lookup by ID in case the value is a UUID.
+					defaultAgent, daErr = s.store.GetAgent(ctx, topic.DefaultAgent)
+					// Scope the fallback: reject agents from other projects or
+					// soft-deleted agents. GetAgent is a bare primary-key fetch
+					// with no project or deletion filter, so without this guard
+					// a UUID naming an agent in another project (or a deleted
+					// agent) would bind successfully — DEF-31.
+					if daErr == nil && defaultAgent != nil {
+						if defaultAgent.ProjectID != projectID || !defaultAgent.DeletedAt.IsZero() {
+							defaultAgent = nil
+						}
+					}
+				}
+				if daErr == nil && defaultAgent != nil {
+					implicitPrimary = defaultAgent
+				}
+			}
+		}
+
+		agents := mentionedAgents
+		if implicitPrimary != nil {
+			// Dedup: remove implicit primary from mentions if also @-mentioned.
+			deduped := make([]*store.Agent, 0, len(mentionedAgents))
+			for _, a := range mentionedAgents {
+				if a.ID != implicitPrimary.ID {
+					deduped = append(deduped, a)
+				}
+			}
+			agents = append([]*store.Agent{implicitPrimary}, deduped...)
+		}
+
+		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, agents, mentionNames, mentionResults, attachmentRefs, now, body.ReplyToID)
 		if msgID == "" {
 			return // error response already written by sendAgentRouted
 		}
@@ -1041,13 +1086,11 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 
 	primaryAgent := agents[0]
 
-	// Determine message type: explicit @mentions use type:mention so every
-	// mentioned agent receives the same type. Default-agent and DM-implicit
-	// routing (mentionResults == nil) keeps type:instruction.
+	// The primary agent (agents[0]) always gets TypeInstruction. Secondaries
+	// (agents[1:]) get TypeMention via the fan-out path. The primary is the
+	// thread's implicit agent or the first-mentioned agent — it is never a
+	// "mention" recipient regardless of how the list was assembled.
 	msgType := messages.TypeInstruction
-	if mentionResults != nil {
-		msgType = messages.TypeMention
-	}
 
 	// Build the structured message for the primary agent.
 	msg := &messages.StructuredMessage{
@@ -1063,14 +1106,8 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		ThreadID:    key,
 	}
 
-	// For @-mention routing, add mention metadata so the agent sees the same
-	// envelope shape as fan-out recipients.
-	if mentionResults != nil {
-		msg.Metadata = map[string]string{
-			"mention_source":   "user:" + senderLabel,
-			"mention_position": "body",
-		}
-	}
+	// The primary is NOT a mention recipient — it should not carry mention
+	// metadata. Fan-out messages get their own metadata via messages.NewMention.
 
 	// W7: Add attachment metadata and file paths for agent dispatch.
 	if len(attachmentRefs) > 0 {
@@ -1260,9 +1297,9 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message
 	// row and conversation result when the envelope switch is ON.
-	// DEF-169: when this send is mention-routed, pass IsMention and the full
-	// set of co-addressees so the envelope gets type:"mention" and the
-	// complete "to" list — identical across primary and fan-out recipients.
+	// Additive model: the primary always gets IsMention=false (type:"message").
+	// When multiple agents are engaged, CoAddressees lists all of them so
+	// the primary's envelope includes a "to" field naming the full group.
 	if s.writeDenyEnabled() {
 		renderInput := messaging.RenderDeliveryInput{
 			MessageID:  storeMsg.ID,
@@ -1270,9 +1307,8 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			Msg:        msg,
 			CreatedAt:  storeMsg.CreatedAt,
 		}
-		if mentionResults != nil {
-			renderInput.IsMention = true
-			renderInput.CoAddressees = mentionCoAddressees(agents)
+		if len(agents) > 1 {
+			renderInput.CoAddressees = groupCoAddressees(agents)
 		}
 		msg.DeliveryText = messaging.RenderDeliveryText(renderInput)
 	}
@@ -1377,9 +1413,9 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			}
 
 			// Phase 9b(ii): render the delivery envelope for the mention.
-			// DEF-169: fan-out recipients get the same IsMention/CoAddressees
-			// as the primary — every mentioned agent sees the identical "to"
-			// set and type:"mention".
+			// Additive model: fan-out recipients get IsMention=true (type:"mention")
+			// and the same CoAddressees as the primary, so every agent sees the
+			// identical "to" list naming the full group.
 			if s.writeDenyEnabled() {
 				mentionMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 					MessageID:    mentionStoreMsg.ID,
@@ -1387,7 +1423,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 					Msg:          mentionMsg,
 					CreatedAt:    mentionStoreMsg.CreatedAt,
 					IsMention:    true,
-					CoAddressees: mentionCoAddressees(agents),
+					CoAddressees: groupCoAddressees(agents),
 				})
 			}
 
@@ -1424,11 +1460,11 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	return storeMsg.ID
 }
 
-// mentionCoAddressees builds the CoAddressees slice for mention-routed
-// envelopes: one Addressee per mentioned agent, with Via: ViaBodyMention.
-// Every mentioned agent's envelope receives the same list, so primary and
-// fan-out recipients see identical "to" arrays (DEF-169).
-func mentionCoAddressees(agents []*store.Agent) []messaging.Addressee {
+// groupCoAddressees builds the CoAddressees slice for group-routed envelopes
+// (primary + secondaries): one Addressee per agent, with Via: ViaBodyMention.
+// Every recipient's envelope receives the same list, so primary and fan-out
+// recipients see identical "to" arrays.
+func groupCoAddressees(agents []*store.Agent) []messaging.Addressee {
 	addrs := make([]messaging.Addressee, 0, len(agents))
 	for _, ag := range agents {
 		principalID := ag.ID // fallback to UUID

@@ -14,11 +14,11 @@
 
 package hub
 
-// DEF-172: mentionCoAddressees must populate Addressee.PrincipalID with the
+// DEF-172: groupCoAddressees must populate Addressee.PrincipalID with the
 // mentioned agent's slug, not its raw UUID (the same "prefer human-readable
 // identity" convention slugify established for the "from" field via
 // buildPrincipalRef, but never connected to this separate "to"-field
-// construction path). These are direct unit tests of mentionCoAddressees
+// construction path). These are direct unit tests of groupCoAddressees
 // itself (pkg/hub/handlers_chat_v2.go:1428), independent of the
 // integration-level DEF-169 tests in handlers_chat_v2_def169_test.go which
 // exercise the same fix through the real HTTP handler.
@@ -30,7 +30,7 @@ import (
 )
 
 // TestMentionCoAddressees_UsesSlugNotUUID is also the DEF-172 mutation test:
-// reverting mentionCoAddressees's PrincipalID assignment back to ag.ID (the
+// reverting groupCoAddressees's PrincipalID assignment back to ag.ID (the
 // pre-fix state) makes this test fail with PrincipalID == "uuid-alpha" /
 // "uuid-beta" instead of the slug — exactly the raw-UUID symptom ptone
 // reported ("to": ["agent:<uuid>"]) — proving the assertion actually checks
@@ -41,7 +41,7 @@ func TestMentionCoAddressees_UsesSlugNotUUID(t *testing.T) {
 		{ID: "uuid-beta", Slug: "agent-beta"},
 	}
 
-	addrs := mentionCoAddressees(agents)
+	addrs := groupCoAddressees(agents)
 
 	if len(addrs) != 2 {
 		t.Fatalf("len(addrs) = %d, want 2", len(addrs))
@@ -75,7 +75,7 @@ func TestMentionCoAddressees_EmptySlugFallsBackToUUID(t *testing.T) {
 		{ID: "uuid-no-slug", Slug: ""},
 	}
 
-	addrs := mentionCoAddressees(agents)
+	addrs := groupCoAddressees(agents)
 
 	if len(addrs) != 1 {
 		t.Fatalf("len(addrs) = %d, want 1", len(addrs))
