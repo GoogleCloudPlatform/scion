@@ -750,10 +750,16 @@ func (s *Server) executeRoleTransition(
 		// !wantsBinding && !txState.HasAny: nothing to do.
 	}
 
-	// Ensure canonical hub-member group membership for members (demotion path).
-	if !wantsBinding {
+	// Manage hub-members group membership based on the target role.
+	// Members get added; viewers (and other non-admin, non-member roles) get removed.
+	switch {
+	case newRole == "member":
 		if err := s.ensureHubMembershipTx(ctx, tx, user.ID); err != nil {
 			return bindingMutationNone, fmt.Errorf("ensure hub-member group membership: %w", err)
+		}
+	case newRole == "viewer":
+		if err := s.removeHubMembershipTx(ctx, tx, user.ID); err != nil {
+			return bindingMutationNone, fmt.Errorf("remove hub-member group membership: %w", err)
 		}
 	}
 
@@ -901,6 +907,28 @@ func (s *Server) ensureHubMembershipTx(ctx context.Context, tx store.Store, user
 	})
 	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		return fmt.Errorf("add user to hub-members group: %w", err)
+	}
+	return nil
+}
+
+// removeHubMembershipTx removes the given user from the canonical Hub Members
+// group within the provided transaction. This is the counterpart to
+// ensureHubMembershipTx — used when a user's role changes to viewer so they
+// no longer carry hub-member permissions.
+// A missing group or membership is not an error (idempotent).
+func (s *Server) removeHubMembershipTx(ctx context.Context, tx store.Store, userID string) error {
+	group, err := tx.GetGroupBySlug(ctx, "hub-members")
+	if err != nil {
+		// Group doesn't exist yet — nothing to remove.
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("hub-members group lookup: %w", err)
+	}
+
+	err = tx.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, userID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("remove user from hub-members group: %w", err)
 	}
 	return nil
 }

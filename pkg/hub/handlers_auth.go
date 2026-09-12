@@ -1454,8 +1454,10 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 		}
 	}
 
-	// Ensure user is a member of the hub-members group
-	ensureHubMembership(ctx, s.store, user.ID)
+	// Only members (not viewers) get hub-members group membership.
+	if user.Role == "member" {
+		ensureHubMembership(ctx, s.store, user.ID)
+	}
 
 	return user, nil
 }

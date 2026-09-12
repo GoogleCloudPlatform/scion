@@ -882,6 +882,12 @@ func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 		return fmt.Errorf("backfill user role bindings: %w", err)
 	}
 
+	// Remove viewers from hub-members group. Older code paths added all users
+	// (including viewers) unconditionally; this reconciles existing state.
+	if err := reconcileViewerHubMemberships(ctx, s); err != nil {
+		return fmt.Errorf("reconcile viewer hub memberships: %w", err)
+	}
+
 	// Backfill project-owner role bindings from Project.CreatedBy.
 	// Pre-existing projects (created before project-scoped RoleBindings were
 	// introduced) have a legacy CreatedBy/OwnerID but no project-owner
@@ -968,6 +974,47 @@ func backfillUserRoleBindings(ctx context.Context, s store.Store) error {
 	}
 	if createdMemberships > 0 {
 		slog.Info("backfilled hub-member group memberships", "ensured", createdMemberships)
+	}
+	return nil
+}
+
+// reconcileViewerHubMemberships removes viewer-role users from the hub-members
+// group. Earlier code unconditionally added every user on login; this startup
+// reconciliation cleans up stale memberships so viewer restrictions take effect.
+func reconcileViewerHubMemberships(ctx context.Context, s store.Store) error {
+	group, err := s.GetGroupBySlug(ctx, "hub-members")
+	if err != nil {
+		// Group doesn't exist yet — nothing to reconcile.
+		slog.Debug("hub-members group not found, skipping viewer reconciliation", "error", err)
+		return nil
+	}
+
+	members, err := s.GetGroupMembers(ctx, group.ID)
+	if err != nil {
+		return fmt.Errorf("list hub-members group members: %w", err)
+	}
+
+	var removed int
+	for _, m := range members {
+		if m.MemberType != store.GroupMemberTypeUser {
+			continue
+		}
+		user, err := s.GetUser(ctx, m.MemberID)
+		if err != nil {
+			slog.Debug("failed to look up hub-members group member", "memberID", m.MemberID, "error", err)
+			continue
+		}
+		if user.Role == "viewer" {
+			if err := s.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, user.ID); err != nil {
+				slog.Warn("failed to remove viewer from hub-members group", "userID", user.ID, "error", err)
+				continue
+			}
+			removed++
+		}
+	}
+
+	if removed > 0 {
+		slog.Info("removed viewers from hub-members group", "removed", removed)
 	}
 	return nil
 }

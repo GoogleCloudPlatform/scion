@@ -144,7 +144,10 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ensureHubMembership(ctx, ws.store, user.ID)
+	// Only members (not viewers) get hub-members group membership.
+	if user.Role == "member" {
+		ensureHubMembership(ctx, ws.store, user.ID)
+	}
 
 	// Generate tokens
 	accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
