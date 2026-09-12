@@ -1690,6 +1690,14 @@ func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMes
 
 // getProjectAgents returns the cached agent slugs for a project, refreshing
 // from the Hub API if the cache is stale.
+//
+// Known limitation: the cache has a 30s TTL (defaultAgentCacheTTL). If an agent
+// is created or renamed after the last refresh, it won't appear in the slug list
+// until the cache expires. During that window, @-mentions of the new agent are
+// silently treated as unrecognized text, falling through to default-agent routing
+// instead of being delivered to the mentioned agent. This is a known transient
+// gap, not addressed here — the centralized mention-routing design (Phase 4)
+// will replace this Discord-side resolution entirely.
 func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID string) []string {
 	b.mu.RLock()
 	store := b.store
