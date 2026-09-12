@@ -1516,13 +1516,11 @@ func parseAdminEmails(cfg *config.GlobalConfig) []string {
 }
 
 // resolveHubIDFromEnv resolves the hub instance ID from environment variables,
-// falling back to the persisted hostname-derived default. This is used
-// during early logging init before the full config is loaded.
+// falling back to the environment-aware default (K_SERVICE on Cloud Run,
+// persisted hostname-derived ID on workstations). This is used during early
+// logging init before the full config is loaded.
 func resolveHubIDFromEnv() string {
-	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
-		return v
-	}
-	return config.PersistentHubID()
+	return config.ResolveHubIDFromEnv()
 }
 
 // resolveHubNameFromEnv resolves the hub display name from environment variables,

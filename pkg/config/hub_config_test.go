@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -935,5 +936,72 @@ func TestPersistentHubID_EmptyFileRecomputes(t *testing.T) {
 	got := strings.TrimSpace(string(data))
 	if got != expected {
 		t.Errorf("persisted hub-id after empty file = %q, want %q", got, expected)
+	}
+}
+
+// --- ResolveHubIDFromEnv tests (Gemini review fix) ---
+
+func TestResolveHubIDFromEnv_ExplicitEnvVar(t *testing.T) {
+	// SCION_SERVER_HUB_HUBID should take precedence over everything.
+	t.Setenv("SCION_SERVER_HUB_HUBID", "explicit-hub-id")
+	// Even if K_SERVICE is set, explicit env var wins.
+	t.Setenv("K_SERVICE", "my-cloud-run-service")
+
+	id := ResolveHubIDFromEnv()
+	if id != "explicit-hub-id" {
+		t.Errorf("ResolveHubIDFromEnv() = %q, want %q", id, "explicit-hub-id")
+	}
+}
+
+func TestResolveHubIDFromEnv_CloudRunKService(t *testing.T) {
+	// On Cloud Run (K_SERVICE set), should derive from service name, NOT
+	// hostname, and should NOT attempt to persist to disk.
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("K_SERVICE", "my-cloud-run-service")
+	// Ensure no explicit hub ID env var.
+	t.Setenv("SCION_SERVER_HUB_HUBID", "")
+
+	// Reset the sync.Once to allow re-computation.
+	resolvedHubIDOnce = sync.Once{}
+	resolvedHubIDValue = ""
+
+	id := ResolveHubIDFromEnv()
+
+	// Should NOT be the hostname-derived ID.
+	hostnameID := DefaultHubID()
+	if id == hostnameID {
+		t.Errorf("ResolveHubIDFromEnv() on Cloud Run returned hostname-derived ID %q; should derive from K_SERVICE", id)
+	}
+
+	// Should be 12 hex chars derived from "my-cloud-run-service".
+	if len(id) != 12 {
+		t.Errorf("ResolveHubIDFromEnv() = %q, want 12-char hex string", id)
+	}
+
+	// hub-id file should NOT have been created (Cloud Run has read-only FS).
+	filePath := filepath.Join(tmpDir, ".scion", "hub-id")
+	if _, err := os.Stat(filePath); err == nil {
+		t.Errorf("hub-id file should not be created on Cloud Run (K_SERVICE path)")
+	}
+}
+
+func TestResolveHubIDFromEnv_WorkstationFallback(t *testing.T) {
+	// Without K_SERVICE or explicit env var, should fall back to PersistentHubID.
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("K_SERVICE", "")
+	t.Setenv("SCION_SERVER_HUB_HUBID", "")
+
+	// Reset the sync.Once to allow re-computation.
+	resolvedHubIDOnce = sync.Once{}
+	resolvedHubIDValue = ""
+
+	id := ResolveHubIDFromEnv()
+
+	// Should match PersistentHubID / DefaultHubID on first boot.
+	expected := DefaultHubID()
+	if id != expected {
+		t.Errorf("ResolveHubIDFromEnv() = %q on workstation, want %q", id, expected)
 	}
 }

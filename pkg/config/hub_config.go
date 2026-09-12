@@ -190,24 +190,31 @@ func PersistentHubID() string {
 }
 
 // resolvedHubIDOnce guards the one-time computation of the fallback hub ID
-// (from K_SERVICE or hostname). The result is cached because ResolveHubID is
-// called multiple times during startup and the inputs (hostname, K_SERVICE)
+// (from K_SERVICE or hostname). The result is cached because ResolveHubIDFromEnv
+// is called multiple times during startup and the inputs (hostname, K_SERVICE)
 // do not change within a process lifetime.
 var (
 	resolvedHubIDOnce  sync.Once
 	resolvedHubIDValue string
 )
 
-// ResolveHubID returns the configured HubID if set. On Cloud Run (K_SERVICE
-// env var present) it derives a stable ID from the service name instead of
-// the hostname, which changes per instance/revision. Falls back to the
-// hostname-based DefaultHubID for local/workstation use.
+// ResolveHubIDFromEnv resolves the hub instance ID from environment variables
+// without requiring a loaded config struct. It checks, in order:
+//  1. SCION_SERVER_HUB_HUBID env var (explicit override)
+//  2. K_SERVICE env var (Cloud Run — derives a stable ID from the service name
+//     instead of the hostname, which changes per instance/revision)
+//  3. PersistentHubID() fallback (workstation — hostname-derived, persisted to disk)
 //
-// The derived fallback is cached after first computation to avoid redundant
-// os.Hostname() + SHA256 calls on repeated invocations during startup.
-func (c *HubServerConfig) ResolveHubID() string {
-	if c.HubID != "" {
-		return c.HubID
+// The derived fallback (steps 2–3) is cached after first computation to avoid
+// redundant os.Hostname() + SHA256 calls on repeated invocations during startup.
+//
+// This function is safe to call during early startup before the full config is
+// loaded. For post-config resolution, use HubServerConfig.ResolveHubID() which
+// additionally checks the struct-level HubID field.
+func ResolveHubIDFromEnv() string {
+	// Explicit env var takes precedence and is not cached (it's a cheap lookup).
+	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
+		return v
 	}
 	resolvedHubIDOnce.Do(func() {
 		if kService := os.Getenv("K_SERVICE"); kService != "" {
@@ -220,6 +227,16 @@ func (c *HubServerConfig) ResolveHubID() string {
 		}
 	})
 	return resolvedHubIDValue
+}
+
+// ResolveHubID returns the configured HubID if set, otherwise delegates to
+// ResolveHubIDFromEnv for environment-aware fallback (K_SERVICE on Cloud Run,
+// PersistentHubID on workstations).
+func (c *HubServerConfig) ResolveHubID() string {
+	if c.HubID != "" {
+		return c.HubID
+	}
+	return ResolveHubIDFromEnv()
 }
 
 // IsHubIDUnconfigured returns true when hub_id was not explicitly set in
