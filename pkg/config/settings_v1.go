@@ -579,6 +579,7 @@ type V1AuthConfig struct {
 	DevTokenFile      string             `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
 	AuthorizedDomains []string           `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
 	UserAccessMode    string             `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
+	DefaultUserRole   string             `json:"default_user_role,omitempty" yaml:"default_user_role,omitempty" koanf:"default_user_role"`
 	Proxy             *V1ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
 	Transport         *V1TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
 	Username          string             `json:"username,omitempty" yaml:"username,omitempty" koanf:"username"`
@@ -1561,6 +1562,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if v1.Auth.UserAccessMode != "" {
 			gc.Auth.UserAccessMode = v1.Auth.UserAccessMode
+		}
+		if v1.Auth.DefaultUserRole != "" {
+			gc.Auth.DefaultUserRole = v1.Auth.DefaultUserRole
 		}
 		if v1.Auth.Proxy != nil {
 			gc.Auth.Proxy = &ProxyAuthConfig{

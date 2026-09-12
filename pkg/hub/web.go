@@ -132,6 +132,9 @@ type AccessSettingsProvider interface {
 	// UserAccessMode returns the current login-time access mode
 	// ("open", "domain_restricted", "invite_only").
 	UserAccessMode() string
+	// DefaultUserRole returns the configured default role for new users
+	// ("member" or "viewer"). Returns "member" when unconfigured.
+	DefaultUserRole() string
 }
 
 // WebServerConfig holds configuration for the web frontend server.
@@ -640,6 +643,15 @@ func (ws *WebServer) userAccessMode() string {
 		return ""
 	}
 	return ws.accessSettings.UserAccessMode()
+}
+
+// defaultUserRole returns the live default user role from the access settings
+// provider. Returns "member" when no provider is configured.
+func (ws *WebServer) defaultUserRole() string {
+	if ws.accessSettings == nil {
+		return "member"
+	}
+	return ws.accessSettings.DefaultUserRole()
 }
 
 // SetAccessSettingsProvider sets the live operational access settings provider.
@@ -1639,7 +1651,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				if storedRole == "admin" && ws.store != nil {
 					uiPromoted = hasUIPromotedBinding(r.Context(), ws.store, uid)
 				}
-				expectedRole := determineUserRole(email, ws.adminEmails(), storedRole, ws.isDemotionSafe(), uiPromoted)
+				expectedRole := determineUserRole(email, ws.adminEmails(), storedRole, ws.isDemotionSafe(), uiPromoted, ws.defaultUserRole())
 				if currentRole == expectedRole {
 					// Role unchanged — inject user into context and proceed
 					// without saving session (avoids redundant write).
@@ -1726,7 +1738,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		}
 		if err != nil {
 			// User not found — create new user
-			role := determineUserRole(proxyUser.Email, ws.adminEmails(), "", ws.isDemotionSafe(), false)
+			role := determineUserRole(proxyUser.Email, ws.adminEmails(), "", ws.isDemotionSafe(), false, ws.defaultUserRole())
 			user = &store.User{
 				ID:          generateID(),
 				Email:       proxyUser.Email,
@@ -1774,7 +1786,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				user.LastLogin = time.Now()
 				oldRole := user.Role
 				proxyUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
-				user.Role = determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), proxyUIPromoted)
+				user.Role = determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), proxyUIPromoted, ws.defaultUserRole())
 				if oldRole == "admin" && user.Role != "admin" {
 					bindingSuperAdmin = "delete"
 				} else if user.Role == "admin" {
@@ -1789,7 +1801,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				}
 				// Re-evaluate admin status on every login (matches handleOAuthCallback / provisionUser)
 				proxyUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
-				if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), proxyUIPromoted); user.Role != newRole {
+				if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), proxyUIPromoted, ws.defaultUserRole()); user.Role != newRole {
 					oldRole := user.Role
 					ws.logger().Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", oldRole, "new_role", newRole)
 					user.Role = newRole
@@ -2099,7 +2111,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		// Create new user (only reachable in open/domain_restricted modes;
 		// in invite_only mode, checkUserAuthorized already confirmed a User record exists)
-		role := determineUserRole(userInfo.Email, ws.adminEmails(), "", ws.isDemotionSafe(), false)
+		role := determineUserRole(userInfo.Email, ws.adminEmails(), "", ws.isDemotionSafe(), false, ws.defaultUserRole())
 		user = &store.User{
 			ID:          generateID(),
 			Email:       userInfo.Email,
@@ -2150,7 +2162,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			user.LastLogin = time.Now()
 			oldRole := user.Role
 			oauthUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
-			user.Role = determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), oauthUIPromoted)
+			user.Role = determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), oauthUIPromoted, ws.defaultUserRole())
 			if oldRole == "admin" && user.Role != "admin" {
 				bindingSuperAdmin = "delete"
 			} else if user.Role == "admin" {
@@ -2170,7 +2182,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			}
 			// Re-evaluate admin status on every login
 			oauthUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
-			newRole := determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), oauthUIPromoted)
+			newRole := determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), oauthUIPromoted, ws.defaultUserRole())
 			if user.Role != newRole {
 				oldRole := user.Role
 				ws.logger().Info("User role changed on login", "email", userInfo.Email, "old_role", oldRole, "new_role", newRole)
