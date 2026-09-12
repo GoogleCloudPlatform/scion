@@ -103,11 +103,15 @@ func ParseHarnessConfigYAML(data []byte) (HarnessConfigEntry, error) {
 // subdirectories are checked first (highest precedence), per the harness-agnostic
 // template design (§3.4).
 func FindHarnessConfigDir(name string, projectPath string, templatePaths ...string) (*HarnessConfigDir, error) {
+	// Track which directories were searched so the error message is actionable.
+	var searched []string
+
 	// Check template-level first (highest precedence).
 	// If the directory exists but is invalid (e.g. missing config.yaml),
 	// fall through to project/global rather than returning an error.
 	for _, tplPath := range templatePaths {
 		tplHarnessConfigDir := filepath.Join(tplPath, harnessConfigsDirName, name)
+		searched = append(searched, tplHarnessConfigDir)
 		if info, err := os.Stat(tplHarnessConfigDir); err == nil && info.IsDir() {
 			if hcDir, err := LoadHarnessConfigDir(tplHarnessConfigDir); err == nil {
 				return hcDir, nil
@@ -118,6 +122,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	// Check project-level
 	if projectPath != "" {
 		projectHarnessConfigDir := filepath.Join(projectPath, harnessConfigsDirName, name)
+		searched = append(searched, projectHarnessConfigDir)
 		if info, err := os.Stat(projectHarnessConfigDir); err == nil && info.IsDir() {
 			if hcDir, err := LoadHarnessConfigDir(projectHarnessConfigDir); err == nil {
 				return hcDir, nil
@@ -129,6 +134,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	globalDir, err := GetGlobalDir()
 	if err == nil {
 		globalHarnessConfigDir := filepath.Join(globalDir, harnessConfigsDirName, name)
+		searched = append(searched, globalHarnessConfigDir)
 		if info, err := os.Stat(globalHarnessConfigDir); err == nil && info.IsDir() {
 			if hcDir, err := LoadHarnessConfigDir(globalHarnessConfigDir); err == nil {
 				return hcDir, nil
@@ -146,7 +152,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 		}, nil
 	}
 
-	return nil, fmt.Errorf("harness-config %q not found", name)
+	return nil, fmt.Errorf("harness-config %q not found (searched: %s)", name, strings.Join(searched, ", "))
 }
 
 // ListHarnessConfigDirs lists all available harness-configs.
