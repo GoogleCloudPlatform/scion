@@ -670,3 +670,11 @@ export class ScionPageMetrics extends LitElement {
     return dates.map((d) => map.get(d) ?? 0);
   }
 }
+
+/**
+ * Project-scoped metrics page, registered under a separate tag so the
+ * client-side router can distinguish project-level from hub-level metrics.
+ * Behaviour is identical — the base class already reads projectId from the URL.
+ */
+@customElement('scion-page-project-metrics')
+export class ScionPageProjectMetrics extends ScionPageMetrics {}
