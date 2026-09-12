@@ -503,7 +503,7 @@ const ROUTES: RouteConfig[] = [
   },
   {
     pattern: /^\/projects\/[^/]+\/metrics$/,
-    tag: 'scion-page-metrics',
+    tag: 'scion-page-project-metrics',
     load: () => import('../components/pages/metrics-dashboard.js'),
   },
   {
