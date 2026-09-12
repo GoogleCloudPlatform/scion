@@ -83,7 +83,7 @@ type SetSecretRequest struct {
 	InjectionMode string `json:"injectionMode,omitempty"` // "always" or "as_needed" (default: as_needed)
 	Type          string `json:"type,omitempty"`          // Secret type: environment (default), variable, file
 	Target        string `json:"target,omitempty"`        // Projection target (defaults to key)
-	AllowProgeny  bool   `json:"allowProgeny,omitempty"`  // Allow creator's progeny agents to access (user scope only)
+	AllowProgeny  *bool  `json:"allowProgeny,omitempty"`   // Allow creator's progeny agents to access (user scope only)
 }
 
 // SetSecretResponse is the response from setting a secret.
@@ -95,11 +95,12 @@ type SetSecretResponse struct {
 // AgentSetSecretRequest is the request for setting a secret via the agent-scoped endpoint.
 // Scope defaults to "project" (derived from JWT); set to "user" for personal credentials.
 type AgentSetSecretRequest struct {
-	Value  string `json:"value"`            // Required: base64-encoded secret value
-	Type   string `json:"type,omitempty"`   // Secret type: environment (default), variable, file
-	Target string `json:"target,omitempty"` // Projection target (defaults to key)
-	Force  bool   `json:"force,omitempty"`  // Overwrite existing secret
-	Scope  string `json:"scope,omitempty"`  // "project" (default) or "user"
+	Value        string `json:"value"`                    // Required: base64-encoded secret value
+	Type         string `json:"type,omitempty"`           // Secret type: environment (default), variable, file
+	Target       string `json:"target,omitempty"`         // Projection target (defaults to key)
+	Force        bool   `json:"force,omitempty"`          // Overwrite existing secret
+	Scope        string `json:"scope,omitempty"`          // "project" (default) or "user"
+	AllowProgeny *bool  `json:"allowProgeny,omitempty"`   // Allow creator's progeny agents to access (user scope only)
 }
 
 // AgentSetSecretResponse is the response from the agent-scoped set endpoint.

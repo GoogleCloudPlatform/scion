@@ -32,6 +32,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func boolPtr(b bool) *bool { return &b }
+
 // makeJWTWithExpiry builds an unsigned JWT-shaped token whose payload carries the
 // given expiry. ParseTokenExpiry only base64-decodes the payload (it does not
 // verify the signature), so this is enough to drive the refresh loop's
@@ -1420,7 +1422,8 @@ func TestClient_SetSecret_Created(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
-	resp, err := client.SetSecret(context.Background(), "MY_KEY", "c2VjcmV0", "file", "~/.config/auth.json", "", false, false)
+	apFalse := boolPtr(false)
+	resp, err := client.SetSecret(context.Background(), "MY_KEY", "c2VjcmV0", "file", "~/.config/auth.json", "", false, apFalse)
 
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodPut, receivedMethod)
@@ -1430,7 +1433,8 @@ func TestClient_SetSecret_Created(t *testing.T) {
 	assert.Equal(t, "file", receivedReq.Type)
 	assert.Equal(t, "~/.config/auth.json", receivedReq.Target)
 	assert.False(t, receivedReq.Force)
-	assert.False(t, receivedReq.AllowProgeny)
+	require.NotNil(t, receivedReq.AllowProgeny)
+	assert.False(t, *receivedReq.AllowProgeny)
 
 	require.NotNil(t, resp)
 	assert.Equal(t, "MY_KEY", resp.Key)
@@ -1457,13 +1461,15 @@ func TestClient_SetSecret_AllowProgeny(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
-	resp, err := client.SetSecret(context.Background(), "MY_SECRET", "c2VjcmV0", "environment", "", "user", false, true)
+	apTrue := boolPtr(true)
+	resp, err := client.SetSecret(context.Background(), "MY_SECRET", "c2VjcmV0", "environment", "", "user", false, apTrue)
 
 	require.NoError(t, err)
 	assert.Equal(t, "c2VjcmV0", receivedReq.Value)
 	assert.Equal(t, "environment", receivedReq.Type)
 	assert.Equal(t, "user", receivedReq.Scope)
-	assert.True(t, receivedReq.AllowProgeny, "allowProgeny should be true in the serialized request")
+	require.NotNil(t, receivedReq.AllowProgeny)
+	assert.True(t, *receivedReq.AllowProgeny, "allowProgeny should be true in the serialized request")
 	assert.False(t, receivedReq.Force)
 
 	require.NotNil(t, resp)
@@ -1479,7 +1485,7 @@ func TestClient_SetSecret_NoContent(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
-	resp, err := client.SetSecret(context.Background(), "MY_KEY", "dmFsdWU=", "", "", "", true, false)
+	resp, err := client.SetSecret(context.Background(), "MY_KEY", "dmFsdWU=", "", "", "", true, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -1495,7 +1501,7 @@ func TestClient_SetSecret_Conflict(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
-	_, err := client.SetSecret(context.Background(), "MY_KEY", "dmFsdWU=", "", "", "", false, false)
+	_, err := client.SetSecret(context.Background(), "MY_KEY", "dmFsdWU=", "", "", "", false, nil)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
@@ -1503,7 +1509,7 @@ func TestClient_SetSecret_Conflict(t *testing.T) {
 
 func TestClient_SetSecret_NotConfigured(t *testing.T) {
 	client := &Client{}
-	_, err := client.SetSecret(context.Background(), "KEY", "VAL", "", "", "", false, false)
+	_, err := client.SetSecret(context.Background(), "KEY", "VAL", "", "", "", false, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not configured")
 }
@@ -1584,7 +1590,7 @@ func TestClient_SetSecret_ServerError(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
-	_, err := client.SetSecret(context.Background(), "KEY", "dmFsdWU=", "", "", "", false, false)
+	_, err := client.SetSecret(context.Background(), "KEY", "dmFsdWU=", "", "", "", false, nil)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
