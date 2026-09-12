@@ -752,12 +752,12 @@ func (s *Server) executeRoleTransition(
 
 	// Manage hub-members group membership based on the target role.
 	// Members get added; viewers (and other non-admin, non-member roles) get removed.
-	switch {
-	case newRole == "member":
+	switch newRole {
+	case "member":
 		if err := s.ensureHubMembershipTx(ctx, tx, user.ID); err != nil {
 			return bindingMutationNone, fmt.Errorf("ensure hub-member group membership: %w", err)
 		}
-	case newRole == "viewer":
+	case "viewer":
 		if err := s.removeHubMembershipTx(ctx, tx, user.ID); err != nil {
 			return bindingMutationNone, fmt.Errorf("remove hub-member group membership: %w", err)
 		}
