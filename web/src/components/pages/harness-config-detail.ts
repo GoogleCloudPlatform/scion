@@ -922,15 +922,19 @@ export class ScionPageHarnessConfigDetail extends LitElement {
                 </sl-button>
               `
             : nothing}
-          <sl-button
-            size="small"
-            variant="default"
-            @click=${() => this.pullLatestImage(broker.broker_id)}
-            ?disabled=${this.imageActionRunning}
-          >
-            <sl-icon slot="prefix" name="cloud-download"></sl-icon>
-            Pull Latest
-          </sl-button>
+          ${st?.registry?.exists !== false
+            ? html`
+                <sl-button
+                  size="small"
+                  variant="default"
+                  @click=${() => this.pullLatestImage(broker.broker_id)}
+                  ?disabled=${this.imageActionRunning}
+                >
+                  <sl-icon slot="prefix" name="cloud-download"></sl-icon>
+                  Pull Latest
+                </sl-button>
+              `
+            : nothing}
           ${broker.local_short?.exists
             ? html`
                 <sl-button
@@ -1090,18 +1094,22 @@ export class ScionPageHarnessConfigDetail extends LitElement {
             <tr class="broker-detail-row">
               <td colspan="4">
                 <div class="broker-actions">
-                  <sl-button
-                    size="small"
-                    variant="default"
-                    @click=${(e: Event) => {
-                      e.stopPropagation();
-                      void this.pullLatestImage(broker.broker_id);
-                    }}
-                    ?disabled=${this.imageActionRunning}
-                  >
-                    <sl-icon slot="prefix" name="cloud-download"></sl-icon>
-                    Pull Latest
-                  </sl-button>
+                  ${st?.registry?.exists !== false
+                    ? html`
+                        <sl-button
+                          size="small"
+                          variant="default"
+                          @click=${(e: Event) => {
+                            e.stopPropagation();
+                            void this.pullLatestImage(broker.broker_id);
+                          }}
+                          ?disabled=${this.imageActionRunning}
+                        >
+                          <sl-icon slot="prefix" name="cloud-download"></sl-icon>
+                          Pull Latest
+                        </sl-button>
+                      `
+                    : nothing}
                   ${broker.local_short?.exists
                     ? html`
                         <sl-button

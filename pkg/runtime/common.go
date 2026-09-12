@@ -562,7 +562,7 @@ func runSimpleCommand(ctx context.Context, command string, args ...string) (stri
 	elapsed := time.Since(start)
 	if err != nil {
 		runtimeLog.Debug("Command failed", "cmd", command, "argc", len(args), "duration", elapsed, "output", strings.TrimSpace(string(out)))
-		return string(out), fmt.Errorf("%s failed: %w", command, err)
+		return string(out), fmt.Errorf("%s failed (%w): %s", command, err, strings.TrimSpace(string(out)))
 	}
 	runtimeLog.Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
 	return strings.TrimSpace(string(out)), nil
