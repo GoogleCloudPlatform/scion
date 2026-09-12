@@ -246,7 +246,6 @@ def _configure_vertex_ai(
     # through vertex-ai instead of falling back to the direct xAI API.
     if raw_model and raw_model != _VERTEX_MODEL_CONFIG_NAME:
         _write_vertex_model_alias(ctx, base_url, model_id, raw_model)
-        ctx.info(f"vertex-ai: created model alias '{raw_model}' -> vertex endpoint")
 
     # Set GROK_DEFAULT_MODEL so grok uses the vertex-grok config block.
     # This is belt-and-suspenders alongside [models] default in config.toml —
@@ -329,7 +328,7 @@ def _write_vertex_model_alias(
     content = scion_harness.strip_toml_sections(
         content,
         lambda line: (
-            line == f'[model."{alias_name}"]'
+            line == f'[model."{escaped_alias}"]'
             or line == f"[model.{alias_name}]"
         ),
     )
@@ -344,6 +343,7 @@ auth_provider = "{_VERTEX_AUTH_PROVIDER_NAME}"'''
 
     content = content.rstrip("\n") + "\n" + alias_toml + "\n"
     scion_harness.atomic_write_text(config_path, content)
+    ctx.info(f"vertex-ai: created model alias '{alias_name}' -> vertex endpoint")
 
 
 # ---------------------------------------------------------------------------
