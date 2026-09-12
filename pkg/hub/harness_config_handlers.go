@@ -173,8 +173,11 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 		Search:      query.Get("search"),
 	}
 
-	// Default to active harness configs only
-	if filter.Status == "" {
+	// Default to active harness configs only; "all" returns every status.
+	switch filter.Status {
+	case "all":
+		filter.Status = "" // empty means no status filter in the store layer
+	case "":
 		filter.Status = store.HarnessConfigStatusActive
 	}
 
@@ -496,14 +499,46 @@ func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	if !applyResourceMetadataPatch(w, r, resourceMetadataFields{
-		Name:        &existing.Name,
-		Slug:        &existing.Slug,
-		DisplayName: &existing.DisplayName,
-		Description: &existing.Description,
-		Visibility:  &existing.Visibility,
-	}) {
+	var updates struct {
+		Name        string `json:"name,omitempty"`
+		Slug        string `json:"slug,omitempty"`
+		DisplayName string `json:"displayName,omitempty"`
+		Description string `json:"description,omitempty"`
+		Visibility  string `json:"visibility,omitempty"`
+		Status      string `json:"status,omitempty"`
+	}
+
+	if err := readJSON(r, &updates); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
 		return
+	}
+
+	if updates.Name != "" {
+		existing.Name = updates.Name
+		if updates.Slug == "" {
+			existing.Slug = api.Slugify(updates.Name)
+		}
+	}
+	if updates.Slug != "" {
+		existing.Slug = updates.Slug
+	}
+	if updates.DisplayName != "" {
+		existing.DisplayName = updates.DisplayName
+	}
+	if updates.Description != "" {
+		existing.Description = updates.Description
+	}
+	if updates.Visibility != "" {
+		existing.Visibility = updates.Visibility
+	}
+	if updates.Status != "" {
+		switch updates.Status {
+		case store.HarnessConfigStatusActive, store.HarnessConfigStatusArchived:
+			existing.Status = updates.Status
+		default:
+			BadRequest(w, fmt.Sprintf("Invalid status %q: must be %q or %q", updates.Status, store.HarnessConfigStatusActive, store.HarnessConfigStatusArchived))
+			return
+		}
 	}
 
 	if err := s.store.UpdateHarnessConfig(ctx, existing); err != nil {
