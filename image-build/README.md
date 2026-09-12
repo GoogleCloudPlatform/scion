@@ -83,7 +83,7 @@ image-build/scripts/build-images.sh --target all
 # Build locally, auto-detecting the registry from SCION_IMAGE_REGISTRY so
 # images are tagged with the prefix the hub expects (e.g., scion-local/scion-claude:latest).
 # No --registry flag needed when the env var is already set.
-image-build/scripts/build-images.sh --target all
+SCION_IMAGE_REGISTRY=scion-local image-build/scripts/build-images.sh --target all
 
 # Same, with Podman
 image-build/scripts/build-images.sh --builder local-podman --target all
