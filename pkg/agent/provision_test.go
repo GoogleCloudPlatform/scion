@@ -2365,6 +2365,72 @@ func TestInjectPlatformSkills(t *testing.T) {
 	})
 }
 
+// TestProvisionAgent_GitWorkspaceSkillInjectedInContainer verifies that
+// platform skills gated by inject_when: git_workspace are still injected
+// when SCION_HOST_UID is set (inside an agent container). This is a
+// regression test for miller79/scion#29 where the isGit override for
+// worktree prevention was inadvertently leaking into skill injection.
+func TestProvisionAgent_GitWorkspaceSkillInjectedInContainer(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	// Mock HOME
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	// Simulate being inside an agent container
+	originalHostUID := os.Getenv("SCION_HOST_UID")
+	_ = os.Setenv("SCION_HOST_UID", "1000")
+	defer func() {
+		if originalHostUID == "" {
+			_ = os.Unsetenv("SCION_HOST_UID")
+		} else {
+			_ = os.Setenv("SCION_HOST_UID", originalHostUID)
+		}
+	}()
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
+
+	// Create a claude harness-config (provides skills_dir)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir := filepath.Join(globalTemplatesDir, "claude")
+	_ = os.MkdirAll(tplDir, 0755)
+	tplConfig := `{"default_harness_config": "claude"}`
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	// Create a project directory that IS a git repo (must be a real repo
+	// for util.IsGitRepoDir to detect it via git rev-parse)
+	projectDir := filepath.Join(tmpDir, "project")
+	_ = os.MkdirAll(projectDir, 0755)
+	gitInit := exec.Command("git", "init", projectDir)
+	if out, err := gitInit.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/\n"), 0644)
+
+	agentName := "container-git-agent"
+	agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "claude", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+
+	// The git-sandbox skill uses inject_when: git_workspace. Before the fix,
+	// SCION_HOST_UID being set would force isGit=false, preventing injection.
+	gitSandboxSkill := filepath.Join(agentHome, ".claude", "skills", "git-sandbox", "SKILL.md")
+	if _, err := os.Stat(gitSandboxSkill); os.IsNotExist(err) {
+		t.Errorf("expected git-sandbox skill to be injected in a git workspace inside a container, but it was not found at %s", gitSandboxSkill)
+	}
+}
+
 func TestLoadMandatoryPreamble(t *testing.T) {
 	t.Run("nil FS returns nil without panic", func(t *testing.T) {
 		result, err := loadMandatoryPreamble(nil)
