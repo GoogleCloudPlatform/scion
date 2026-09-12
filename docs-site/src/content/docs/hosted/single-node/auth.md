@@ -81,6 +81,16 @@ For enterprise SSO setups, Scion supports authenticating Web UI users via an ext
 - **Dynamic Login Button**: When enabled, the Web Dashboard dynamically renders a custom login button using your configured `display_name` alongside any active Google or GitHub OAuth buttons.
 - **Public Client Support**: For OIDC public clients (like Keycloak public clients), the Hub allows the `client_secret` to be left empty or omitted, removing client secret validation from the token exchange workflow.
 
+#### Redirect URI
+
+When registering Scion as a client in your identity provider, set the **redirect URI** (sometimes called "callback URL") to:
+
+```
+https://<your-hub-domain>/auth/callback/oidc
+```
+
+Replace `<your-hub-domain>` with the public hostname of your Scion Hub (the value of `SCION_BASE_URL`). This is the endpoint the IdP redirects users to after authentication.
+
 #### Configuration
 
 To enable the external OIDC login provider, add the `oidc_login` section to your Hub's static `settings.yaml` bootstrap file:
@@ -102,6 +112,10 @@ Alternatively, you can configure these settings via environment variables at sta
 - `SCION_SERVER_OIDC_LOGIN_CLIENT_ID="scion-client"`
 - `SCION_SERVER_OIDC_LOGIN_CLIENT_SECRET="secret-value"`
 - `SCION_SERVER_OIDC_LOGIN_SCOPES="openid,email,profile"`
+
+:::tip[Troubleshooting: `invalid redirect_uri`]
+If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `https://<your-hub-domain>/auth/callback/oidc` exactly — including the scheme, hostname, and path. The value must match `SCION_BASE_URL` plus `/auth/callback/oidc`.
+:::
 
 ## Domain Authorization
 
