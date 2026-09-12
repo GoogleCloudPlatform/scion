@@ -87,7 +87,7 @@ The steps above assume a public-facing VM with an external IP and public DNS. If
 
 | Step | Script | Skip? |
 |------|--------|-------|
-| 1. Provision the VM | `gce-demo-provision.sh` | **Partial** — the script creates firewall rules for inbound HTTP/HTTPS (tcp:80, tcp:443). These are unnecessary if the VM is not publicly reachable; your network team manages internal firewall rules instead. |
+| 1. Provision the VM | `gce-demo-provision.sh` | **No** — run the script as-is. It creates firewall rules for inbound HTTP/HTTPS (tcp:80, tcp:443) that are unnecessary if the VM is not publicly reachable; you can remove them afterward or let your network team manage internal firewall rules instead. |
 | 4. Configure TLS | `gce-certs.sh` | **Yes** — this script fetches the VM's external IP, creates public Cloud DNS records, and obtains Let's Encrypt certificates via DNS challenge. All of this requires a public IP and will fail without one. |
 
 Steps 2, 3, 5, and 6 work without modification.
