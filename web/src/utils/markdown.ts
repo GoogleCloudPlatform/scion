@@ -52,6 +52,20 @@ export async function getMarkdownRenderer(): Promise<MarkdownRenderer> {
         }
       });
 
+      // Escape raw HTML tokens so angle-bracket text like <template> is
+      // rendered as visible text instead of being interpreted as real HTML
+      // elements (which can truncate content — see miller79/scion#10).
+      marked.use({
+        renderer: {
+          html({ text }: { text: string }): string {
+            return text
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;');
+          },
+        },
+      });
+
       return {
         render(markdown: string): string {
           const rawHtml = marked.parse(markdown, { async: false }) as string;
