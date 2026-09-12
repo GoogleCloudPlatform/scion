@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -385,12 +386,39 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// when resolution was skipped — the renderer correctly omits the
 	// conversation key (honest absence per §4.3).
 	if s.writeDenyEnabled() {
-		req.Message.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+		renderInput := messaging.RenderDeliveryInput{
 			MessageID:  brokerInboundMsgID,
 			ConvResult: effectiveConv,
 			Msg:        req.Message,
 			CreatedAt:  now,
-		})
+		}
+		// Additive mention routing: read co-addressees from broker metadata
+		// so the delivery envelope includes the "to" field listing all
+		// engaged agents. This mirrors what handlers_chat_v2.go:1304-1313
+		// and :1420-1427 do for native chat.
+		if req.Message.Metadata != nil {
+			if coAddrJSON, ok := req.Message.Metadata["mention_co_addressees"]; ok {
+				var slugs []string
+				if json.Unmarshal([]byte(coAddrJSON), &slugs) == nil && len(slugs) > 0 {
+					addrs := make([]messaging.Addressee, 0, len(slugs))
+					for _, slug := range slugs {
+						addrs = append(addrs, messaging.Addressee{
+							PrincipalKind: "agent",
+							PrincipalID:   slug,
+							Via:           messaging.ViaBodyMention,
+							DeliveryState: messaging.DeliveryPending,
+						})
+					}
+					renderInput.CoAddressees = addrs
+				}
+			}
+		}
+		// Set IsMention for mention-type messages (secondary recipients
+		// in the additive model).
+		if req.Message.Type == messages.TypeMention {
+			renderInput.IsMention = true
+		}
+		req.Message.DeliveryText = messaging.RenderDeliveryText(renderInput)
 	}
 
 	retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
