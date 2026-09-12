@@ -892,10 +892,14 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 			// re-fetching the stored message, because the client already received
 			// the full 201 response on the original send. This response only
 			// signals "your message was already accepted."
+			senderRef := "user:" + user.ID()
+			if email := user.Email(); email != "" {
+				senderRef = "user:" + email
+			}
 			writeJSON(w, http.StatusOK, chatMessageResponse{
 				ID:      existingID,
 				Content: content,
-				Sender:  "user:" + user.DisplayName(),
+				Sender:  senderRef,
 			})
 			return
 		}
@@ -903,10 +907,9 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	// --- Resolve routing per design §3 ---
 	senderEmail := user.Email()
-	senderName := user.DisplayName()
 	senderLabel := senderEmail
-	if senderName != "" {
-		senderLabel = senderName
+	if senderLabel == "" {
+		senderLabel = user.ID()
 	}
 
 	// Resolve which project we're working in for agent resolution.

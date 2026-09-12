@@ -4297,3 +4297,125 @@ func TestPhase9a_UpgradeCutover_StaleKeysOnly_WriteDenyLive(t *testing.T) {
 		t.Errorf("WriteDenialMetrics did not increment: before=%d after=%d", before, after)
 	}
 }
+
+// TestChatV2_Send_SenderUsesEmailNotDisplayName verifies that the chat-v2
+// message send path constructs user: sender refs from email (not display
+// name). This covers the senderLabel derivation and the agent-routed
+// (sendAgentRouted) sender field.
+func TestChatV2_Send_SenderUsesEmailNotDisplayName(t *testing.T) {
+	srv, s, wcs, proj, db := setupSendTest(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		Email:       "ptone@google.com",
+		DisplayName: "Preston Holmes",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	if err := s.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	// Grant the user hub membership and project access so the authz
+	// middleware doesn't reject the request.
+	ensureHubMembership(ctx, s, user.ID)
+	srv.createProjectMembersGroup(ctx, proj)
+	addProjectMemberWithRole(t, s, proj, user.ID, store.GroupMemberRoleMember)
+
+	// --- Subtest 1: human-to-human (no agent, type:chat) path ---
+	t.Run("human_to_human", func(t *testing.T) {
+		topicID := "cccccccc-0001-0001-0001-000000000001"
+		if err := wcs.CreateTopic(ctx, WebChatTopic{
+			ID:        topicID,
+			ProjectID: proj.ID,
+			Name:      "email-sender-test",
+			CreatedBy: user.ID,
+			CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		setTopicConversationID(t, db, s, topicID, proj.ID)
+
+		body := map[string]string{"content": "hello from email sender test"}
+		rec := doRequestAsUser(t, srv, user, http.MethodPost,
+			"/api/v1/chat/conversations/"+topicID+"/messages", body)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		// Read stored messages and assert Sender uses email.
+		result, err := s.ListMessages(ctx, store.MessageFilter{
+			SenderID: user.ID,
+		}, store.ListOptions{Limit: 10})
+		if err != nil {
+			t.Fatalf("ListMessages: %v", err)
+		}
+		if len(result.Items) == 0 {
+			t.Fatal("expected at least one stored message")
+		}
+		for _, m := range result.Items {
+			if m.Sender != "user:"+user.Email {
+				t.Errorf("Sender = %q, want %q", m.Sender, "user:"+user.Email)
+			}
+			if strings.Contains(m.Sender, user.DisplayName) {
+				t.Errorf("Sender %q must not contain display name %q", m.Sender, user.DisplayName)
+			}
+		}
+	})
+
+	// --- Subtest 2: agent-routed (sendAgentRouted) path ---
+	t.Run("agent_routed", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:        "cccccccc-0002-0002-0002-000000000002",
+			ProjectID: proj.ID,
+			Name:      "Email Sender Bot",
+			Slug:      "email-sender-bot",
+			Phase:     "idle",
+			OwnerID:   user.ID,
+			CreatedBy: user.ID,
+		}
+		if err := s.CreateAgent(ctx, agent); err != nil {
+			t.Fatalf("CreateAgent: %v", err)
+		}
+
+		topicID := "cccccccc-0003-0003-0003-000000000003"
+		if err := wcs.CreateTopic(ctx, WebChatTopic{
+			ID:           topicID,
+			ProjectID:    proj.ID,
+			Name:         "agent-routed-email-test",
+			CreatedBy:    user.ID,
+			CreatedAt:    time.Now().UTC(),
+			DefaultAgent: agent.ID,
+		}); err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		setTopicConversationID(t, db, s, topicID, proj.ID)
+
+		body := map[string]string{"content": "please help with email test"}
+		rec := doRequestAsUser(t, srv, user, http.MethodPost,
+			"/api/v1/chat/conversations/"+topicID+"/messages", body)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		// Read stored messages for this agent and assert Sender uses email.
+		result, err := s.ListMessages(ctx, store.MessageFilter{
+			AgentID: agent.ID,
+		}, store.ListOptions{Limit: 10})
+		if err != nil {
+			t.Fatalf("ListMessages: %v", err)
+		}
+		if len(result.Items) == 0 {
+			t.Fatal("expected at least one stored message")
+		}
+		for _, m := range result.Items {
+			if m.Sender != "user:"+user.Email {
+				t.Errorf("Sender = %q, want %q", m.Sender, "user:"+user.Email)
+			}
+			if strings.Contains(m.Sender, user.DisplayName) {
+				t.Errorf("Sender %q must not contain display name %q", m.Sender, user.DisplayName)
+			}
+		}
+	})
+}

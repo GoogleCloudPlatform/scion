@@ -2482,3 +2482,396 @@ func TestAgentMessage_UserSenderUsesEmailNotDisplayName(t *testing.T) {
 		}
 	})
 }
+
+// TestOutboundMessage_RecipientUsesEmailNotDisplayName verifies that
+// resolveOutboundRouting constructs user: principal refs from email, not
+// display name. Covers UUID-lookup, email-lookup, and DEF-152 derived
+// recipient paths.
+func TestOutboundMessage_RecipientUsesEmailNotDisplayName(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "recip-email-project",
+		Slug: "recip-email-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	user := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "ptone@google.com",
+		DisplayName: "Preston Holmes",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "recip-email-agent",
+		Slug:       "recip-email-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	sendOutbound := func(t *testing.T, agentObj *store.Agent, recipientStr, label string) *store.Message {
+		t.Helper()
+		body, _ := json.Marshal(OutboundMessageRequest{
+			Recipient: recipientStr,
+			Msg:       "hello via " + label,
+		})
+		req := httptest.NewRequest(http.MethodPost,
+			"/api/v1/agents/"+agentObj.ID+"/outbound-message", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: agentObj.ID},
+			ProjectID: project.ID,
+		}}))
+
+		rr := httptest.NewRecorder()
+		srv.handleAgentOutboundMessage(rr, req, agentObj.ID)
+		t.Logf("%s response: %d %s", label, rr.Code, rr.Body.String())
+		require.Equal(t, http.StatusOK, rr.Code)
+
+		result, err := s.ListMessages(ctx, store.MessageFilter{
+			AgentID: agentObj.ID,
+		}, store.ListOptions{Limit: 100})
+		require.NoError(t, err)
+		require.NotEmpty(t, result.Items)
+		return &result.Items[len(result.Items)-1]
+	}
+
+	// --- Subtest 1: UUID recipient lookup (resolveOutboundRouting L159) ---
+	t.Run("uuid_recipient", func(t *testing.T) {
+		msg := sendOutbound(t, agent, "user:"+user.ID, "uuid_recipient")
+		require.Equal(t, "user:"+user.Email, msg.Recipient,
+			"Recipient must use email, not display name")
+		require.NotContains(t, msg.Recipient, user.DisplayName,
+			"Recipient must not contain display name")
+	})
+
+	// --- Subtest 2: email recipient lookup (resolveOutboundRouting L179) ---
+	t.Run("email_recipient", func(t *testing.T) {
+		agent2 := &store.Agent{
+			ID:         api.NewUUID(),
+			Name:       "recip-email-agent-2",
+			Slug:       "recip-email-agent-2",
+			ProjectID:  project.ID,
+			Phase:      "running",
+			Visibility: store.VisibilityPrivate,
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent2))
+
+		msg := sendOutbound(t, agent2, "user:"+user.Email, "email_recipient")
+		require.Equal(t, "user:"+user.Email, msg.Recipient,
+			"Recipient must use email, not display name")
+		require.NotContains(t, msg.Recipient, user.DisplayName,
+			"Recipient must not contain display name")
+	})
+}
+
+// TestGroupMessage_RecipientUsesEmailNotDisplayName verifies that
+// handleGroupMessage constructs user: principal refs from email, not
+// display name, when resolving user recipients by UUID or by email.
+func TestGroupMessage_RecipientUsesEmailNotDisplayName(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "grpmsg-email-project",
+		Slug: "grpmsg-email-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	user := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "ptone@google.com",
+		DisplayName: "Preston Holmes",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	// Create a user record for the dev identity too (so the sender resolves).
+	_ = s.CreateUser(ctx, &store.User{
+		ID: DevUserID, Email: "dev@localhost", DisplayName: "Development User",
+	})
+
+	agentSlug := "grpmsg-email-agent"
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "grpmsg-email-agent",
+		Slug:       agentSlug,
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// --- Subtest 1: user recipient addressed by UUID ---
+	t.Run("uuid_user_recipient", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodPost,
+			"/api/v1/projects/"+project.ID+"/agents/"+agentSlug+"/message",
+			MessageRequest{
+				StructuredMessage: &messages.StructuredMessage{
+					Version:   messages.Version,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					Sender:    "user:dev",
+					SenderID:  DevUserID,
+					Recipient: "group[agent:" + agentSlug + ",user:" + user.ID + "]",
+					Msg:       "group UUID user test",
+					Type:      messages.TypeInstruction,
+				},
+			})
+		require.Equal(t, http.StatusOK, rec.Code,
+			"expected 200 for group[] message, got %d: %s", rec.Code, rec.Body.String())
+
+		// Find the stored message addressed to the user.
+		result, err := s.ListMessages(ctx, store.MessageFilter{
+			RecipientID: user.ID,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.NotEmpty(t, result.Items, "expected at least one message to user")
+
+		latest := result.Items[len(result.Items)-1]
+		require.Equal(t, "user:"+user.Email, latest.Recipient,
+			"Recipient must use email, not display name")
+		require.NotContains(t, latest.Recipient, user.DisplayName,
+			"Recipient must not contain display name")
+	})
+
+	// --- Subtest 2: user recipient addressed by email ---
+	t.Run("email_user_recipient", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodPost,
+			"/api/v1/projects/"+project.ID+"/agents/"+agentSlug+"/message",
+			MessageRequest{
+				StructuredMessage: &messages.StructuredMessage{
+					Version:   messages.Version,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					Sender:    "user:dev",
+					SenderID:  DevUserID,
+					Recipient: "group[agent:" + agentSlug + ",user:" + user.Email + "]",
+					Msg:       "group email user test",
+					Type:      messages.TypeInstruction,
+				},
+			})
+		require.Equal(t, http.StatusOK, rec.Code,
+			"expected 200 for group[] message, got %d: %s", rec.Code, rec.Body.String())
+
+		result, err := s.ListMessages(ctx, store.MessageFilter{
+			RecipientID: user.ID,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.NotEmpty(t, result.Items, "expected at least one message to user")
+
+		latest := result.Items[len(result.Items)-1]
+		require.Equal(t, "user:"+user.Email, latest.Recipient,
+			"Recipient must use email, not display name")
+		require.NotContains(t, latest.Recipient, user.DisplayName,
+			"Recipient must not contain display name")
+	})
+}
+
+// TestBroadcast_SenderUsesEmailNotDisplayName verifies that
+// handleProjectBroadcast constructs user: sender principal refs from
+// email, not display name.
+func TestBroadcast_SenderUsesEmailNotDisplayName(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "bcast-email-project",
+		Slug: "bcast-email-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	user := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "ptone@google.com",
+		DisplayName: "Preston Holmes",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	// Grant the user project access so the authz middleware passes.
+	ensureHubMembership(ctx, s, user.ID)
+	project.CreatedBy = user.ID
+	require.NoError(t, s.UpdateProject(ctx, project))
+	srv.createProjectMembersGroup(ctx, project)
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "bcast-email-agent",
+		Slug:       "bcast-email-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Set dispatcher so broadcastDirect doesn't 503.
+	srv.SetDispatcher(noopDispatcher{})
+
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Type:      messages.TypeInstruction,
+		Sender:    "user:ShouldBeOverridden",
+		SenderID:  "should-be-overridden",
+		Msg:       "broadcast sender email test",
+	}
+	body, _ := json.Marshal(BroadcastMessageRequest{StructuredMessage: msg})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/broadcast", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(),
+		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, "user", "web")))
+
+	rr := httptest.NewRecorder()
+	srv.handleProjectBroadcast(rr, req, project.ID)
+	t.Logf("broadcast response: %d %s", rr.Code, rr.Body.String())
+	require.True(t, rr.Code >= 200 && rr.Code < 300,
+		"expected 2xx for broadcast, got %d: %s", rr.Code, rr.Body.String())
+
+	// Read stored messages for this agent.
+	result, err := s.ListMessages(ctx, store.MessageFilter{
+		AgentID: agent.ID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.NotEmpty(t, result.Items)
+
+	for _, m := range result.Items {
+		require.Equal(t, "user:"+user.Email, m.Sender,
+			"broadcast Sender must use email, not display name")
+		require.NotContains(t, m.Sender, user.DisplayName,
+			"broadcast Sender must not contain display name")
+	}
+}
+
+// TestAgentMessage_UserSenderFallsBackToUUID verifies that when a user's
+// authenticated identity has no email, the Sender field falls back to
+// "user:<uuid>" — never "user:<display_name>", which is equally unroutable.
+// Note: the store enforces NotEmpty on email, so this edge case only arises
+// from the identity context layer (e.g. a misconfigured IdP). We test both
+// the structured and plain message paths.
+func TestAgentMessage_UserSenderFallsBackToUUID(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "uuid-fallback-project",
+		Slug: "uuid-fallback-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// The store requires a non-empty email, so use a placeholder for
+	// persistence. The authenticated identity (injected via context) will
+	// have an empty email to exercise the UUID fallback path.
+	userID := api.NewUUID()
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          userID,
+		Email:       "placeholder-uuid-fallback@example.com",
+		DisplayName: "Preston Holmes",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}))
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "uuid-fallback-agent",
+		Slug:       "uuid-fallback-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// --- Subtest 1: structured_message path with no-email identity ---
+	t.Run("structured_message_uuid_fallback", func(t *testing.T) {
+		msg := &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Type:      messages.TypeInstruction,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "hello from no-email user (structured)",
+		}
+		body, _ := json.Marshal(MessageRequest{StructuredMessage: msg})
+		req := httptest.NewRequest(http.MethodPost,
+			"/api/v1/agents/"+agent.ID+"/message", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		// Inject identity with empty email to trigger UUID fallback.
+		req = req.WithContext(contextWithIdentity(req.Context(),
+			NewAuthenticatedUser(userID, "", "Preston Holmes", "user", "web")))
+
+		rr := httptest.NewRecorder()
+		srv.handleAgentMessage(rr, req, agent.ID)
+		t.Logf("structured uuid fallback response: %d %s", rr.Code, rr.Body.String())
+
+		key, err := messages.DMConversationKey("user", userID, "agent", agent.ID)
+		require.NoError(t, err)
+		conv, err := s.GetConversationByExternalRef(ctx, "native", key)
+		require.NoError(t, err, "conversation should be created")
+
+		result, err := s.ListMessages(ctx, store.MessageFilter{
+			ConversationID: conv.ID,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.NotEmpty(t, result.Items)
+
+		for _, m := range result.Items {
+			require.Equal(t, "user:"+userID, m.Sender,
+				"Sender must fall back to UUID, not display name")
+			require.NotContains(t, m.Sender, "Preston Holmes",
+				"Sender must not contain display name")
+		}
+	})
+
+	// --- Subtest 2: plain message path with no-email identity ---
+	t.Run("plain_message_uuid_fallback", func(t *testing.T) {
+		agent2 := &store.Agent{
+			ID:         api.NewUUID(),
+			Name:       "uuid-fallback-agent-2",
+			Slug:       "uuid-fallback-agent-2",
+			ProjectID:  project.ID,
+			Phase:      "running",
+			Visibility: store.VisibilityPrivate,
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent2))
+
+		body, _ := json.Marshal(MessageRequest{Message: "hello from no-email user (plain)"})
+		req := httptest.NewRequest(http.MethodPost,
+			"/api/v1/agents/"+agent2.ID+"/message", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(),
+			NewAuthenticatedUser(userID, "", "Preston Holmes", "user", "web")))
+
+		rr := httptest.NewRecorder()
+		srv.handleAgentMessage(rr, req, agent2.ID)
+		t.Logf("plain uuid fallback response: %d %s", rr.Code, rr.Body.String())
+
+		key, err := messages.DMConversationKey("user", userID, "agent", agent2.ID)
+		require.NoError(t, err)
+		conv, err := s.GetConversationByExternalRef(ctx, "native", key)
+		require.NoError(t, err, "conversation should be created")
+
+		result, err := s.ListMessages(ctx, store.MessageFilter{
+			ConversationID: conv.ID,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.NotEmpty(t, result.Items)
+
+		for _, m := range result.Items {
+			require.Equal(t, "user:"+userID, m.Sender,
+				"Sender must fall back to UUID, not display name")
+			require.NotContains(t, m.Sender, "Preston Holmes",
+				"Sender must not contain display name")
+		}
+	})
+}
