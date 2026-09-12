@@ -34,6 +34,7 @@ ALLOWED_BUILDERS=(local-docker local-podman cloud-build)
 
 BUILDER="local-docker"
 REGISTRY=""
+REGISTRY_EXPLICIT="false"
 TARGET="common"
 TAG="latest"
 PLATFORM=""
@@ -96,7 +97,7 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --builder)  BUILDER="$2"; shift 2 ;;
-    --registry) REGISTRY="$2"; shift 2 ;;
+    --registry) REGISTRY="$2"; REGISTRY_EXPLICIT="true"; shift 2 ;;
     --target)   TARGET="$2"; shift 2 ;;
     --tag)      TAG="$2"; shift 2 ;;
     --platform) PLATFORM="$2"; PLATFORM_EXPLICIT="true"; shift 2 ;;
@@ -109,8 +110,9 @@ done
 
 # Default REGISTRY from SCION_IMAGE_REGISTRY when --registry was not passed.
 # This ensures locally-built images match the hub's configured registry prefix
-# without requiring --registry on every invocation.
-if [[ -z "${REGISTRY}" && -n "${SCION_IMAGE_REGISTRY:-}" ]]; then
+# without requiring --registry on every invocation. When --registry was
+# explicitly passed (even as empty), the env var is not consulted.
+if [[ "${REGISTRY_EXPLICIT}" != "true" && -n "${SCION_IMAGE_REGISTRY:-}" ]]; then
   REGISTRY="${SCION_IMAGE_REGISTRY}"
   echo "Note: Using SCION_IMAGE_REGISTRY (${REGISTRY}) as default registry."
 fi
@@ -348,9 +350,10 @@ else
       echo ""
       echo "To configure scion to use these images, run:"
       echo "  scion config set image_registry ${REGISTRY}"
-    elif [[ -n "${SCION_IMAGE_REGISTRY:-}" ]]; then
-      # REGISTRY is empty but SCION_IMAGE_REGISTRY is set — this shouldn't
-      # happen after the default-from-env logic above, but warn just in case.
+    elif [[ "${REGISTRY_EXPLICIT}" != "true" && -n "${SCION_IMAGE_REGISTRY:-}" ]]; then
+      # REGISTRY is empty and --registry was not explicitly passed, yet
+      # SCION_IMAGE_REGISTRY is set. This shouldn't happen after the
+      # default-from-env logic above, but warn just in case.
       echo ""
       echo "Warning: SCION_IMAGE_REGISTRY is set to '${SCION_IMAGE_REGISTRY}'"
       echo "but images were tagged without a registry prefix. The hub will look"
