@@ -63,14 +63,14 @@ type Pipeline struct {
 	logsDropWarned    sync.Once
 	spansDropWarned   sync.Once
 
-	metricBuf              []*metricpb.ResourceMetrics
-	metricBufMu            sync.Mutex
-	metricFlushCtx         context.Context
-	metricFlushCnl         context.CancelFunc
-	metricLastFlush        time.Time
-	metricFlushWg          sync.WaitGroup
-	metricConsecFailures   int  // consecutive flush failures
-	metricRebufferStopped  bool // true when re-buffering is disabled due to too many failures
+	metricBuf             []*metricpb.ResourceMetrics
+	metricBufMu           sync.Mutex
+	metricFlushCtx        context.Context
+	metricFlushCnl        context.CancelFunc
+	metricLastFlush       time.Time
+	metricFlushWg         sync.WaitGroup
+	metricConsecFailures  int  // consecutive flush failures
+	metricRebufferStopped bool // true when re-buffering is disabled due to too many failures
 }
 
 // New creates a new telemetry pipeline.
