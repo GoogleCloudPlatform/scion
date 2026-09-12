@@ -492,9 +492,8 @@ func IsGitURL(s string) bool {
 	return false
 }
 
-// ToHTTPSCloneURL converts any git URL to HTTPS clone form with a .git suffix.
-// SSH shorthand and ssh:// URLs are converted; HTTPS URLs are passed through
-// (with .git appended if missing).
+// ToHTTPSCloneURL converts any git URL to HTTPS clone form.
+// SSH shorthand and ssh:// URLs are converted; HTTPS URLs are passed through.
 func ToHTTPSCloneURL(gitURL string) string {
 	if gitURL == "" {
 		return ""
@@ -524,13 +523,8 @@ func ToHTTPSCloneURL(gitURL string) string {
 		}
 	}
 
-	// Strip trailing slashes before adding .git suffix
+	// Strip trailing slashes
 	result = strings.TrimRight(result, "/")
-
-	// Ensure .git suffix
-	if !strings.HasSuffix(result, ".git") {
-		result += ".git"
-	}
 
 	return "https://" + result
 }

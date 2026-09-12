@@ -591,12 +591,15 @@ export class ScionPageProjectCreate extends LitElement {
       if (this.mode === 'git') {
         const trimmedUrl = this.gitRemote.trim();
         // Build an HTTPS clone URL from whatever the user entered.
-        // Strip known schemes/prefixes, then re-add https:// and .git.
-        let cloneUrl = trimmedUrl
-          .replace(/^(https?:\/\/|ssh:\/\/|git:\/\/|git@)/, '')
-          .replace(':', '/') // git@host:org/repo → host/org/repo
-          .replace(/\.git$/, '');
-        cloneUrl = `https://${cloneUrl}.git`;
+        // Strip known schemes/prefixes, then re-add https://.
+        let cloneUrl = trimmedUrl;
+        const hadGitAt = cloneUrl.startsWith('git@');
+        cloneUrl = cloneUrl
+          .replace(/^(https?:\/\/|ssh:\/\/|git:\/\/|git@)/, '');
+        if (hadGitAt) {
+          cloneUrl = cloneUrl.replace(':', '/'); // git@host:org/repo → host/org/repo
+        }
+        cloneUrl = `https://${cloneUrl}`;
         body.gitRemote = trimmedUrl;
         const labels: Record<string, string> = {
           'scion.dev/default-branch': this.branch.trim() || 'main',

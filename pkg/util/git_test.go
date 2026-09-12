@@ -424,21 +424,24 @@ func TestToHTTPSCloneURL(t *testing.T) {
 	}{
 		// SSH shorthand → HTTPS
 		{"git@github.com:org/repo.git", "https://github.com/org/repo.git"},
-		{"git@github.com:org/repo", "https://github.com/org/repo.git"},
+		{"git@github.com:org/repo", "https://github.com/org/repo"},
 
 		// ssh:// → HTTPS
-		{"ssh://git@github.com/org/repo", "https://github.com/org/repo.git"},
+		{"ssh://git@github.com/org/repo", "https://github.com/org/repo"},
 		{"ssh://git@github.com/org/repo.git", "https://github.com/org/repo.git"},
 
 		// HTTPS passthrough
 		{"https://github.com/org/repo.git", "https://github.com/org/repo.git"},
-		{"https://github.com/org/repo", "https://github.com/org/repo.git"},
+		{"https://github.com/org/repo", "https://github.com/org/repo"},
 
 		// git:// → HTTPS
 		{"git://github.com/org/repo.git", "https://github.com/org/repo.git"},
 
 		// http:// → HTTPS
 		{"http://github.com/org/repo.git", "https://github.com/org/repo.git"},
+
+		// Azure DevOps — must NOT append .git
+		{"https://dev.azure.com/org/project/_git/repo", "https://dev.azure.com/org/project/_git/repo"},
 
 		// Empty
 		{"", ""},
