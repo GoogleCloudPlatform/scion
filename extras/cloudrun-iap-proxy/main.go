@@ -139,7 +139,7 @@ func main() {
 		ReadTimeout:       30 * time.Minute,
 		WriteTimeout:      30 * time.Minute,
 		IdleTimeout:       120 * time.Second,
-		}
+	}
 
 	log.Printf("Proxy server active with H2C support on :%s", port)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
