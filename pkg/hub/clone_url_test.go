@@ -32,7 +32,7 @@ func TestNormalizeCloneURLLabel(t *testing.T) {
 		{
 			name:  "normalizes schemeless remote",
 			input: "github.com/example/repo",
-			want:  "https://github.com/example/repo",
+			want:  "https://github.com/example/repo.git",
 		},
 		{
 			name:  "preserves explicit http override",

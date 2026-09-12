@@ -1980,8 +1980,8 @@ func TestCreateAgent_GitProjectSchemelessCloneURL(t *testing.T) {
 	require.NotNil(t, persisted.AppliedConfig, "AppliedConfig should be set")
 	require.NotNil(t, persisted.AppliedConfig.GitClone, "GitClone should be populated")
 
-	assert.Equal(t, "https://github.com/example/schemeless-repo", persisted.AppliedConfig.GitClone.URL,
-		"schemeless clone-url label should be normalized to https:// without .git suffix")
+	assert.Equal(t, "https://github.com/example/schemeless-repo.git", persisted.AppliedConfig.GitClone.URL,
+		"schemeless clone-url label should be normalized to https:// with .git suffix")
 	assert.Equal(t, "main", persisted.AppliedConfig.GitClone.Branch)
 	assert.Equal(t, intPtr(1), persisted.AppliedConfig.GitClone.Depth)
 }

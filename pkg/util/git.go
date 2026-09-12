@@ -492,8 +492,12 @@ func IsGitURL(s string) bool {
 	return false
 }
 
-// ToHTTPSCloneURL converts any git URL to HTTPS clone form.
-// SSH shorthand and ssh:// URLs are converted; HTTPS URLs are passed through.
+// ToHTTPSCloneURL converts any git URL to HTTPS clone form with a .git suffix.
+// SSH shorthand and ssh:// URLs are converted; HTTPS URLs are passed through
+// (with .git appended if missing). Azure DevOps URLs (dev.azure.com,
+// visualstudio.com, or paths containing /_git/) are an exception: .git is
+// never appended and is stripped if already present, because ADO encodes the
+// repository via the /_git/<repo> path segment.
 func ToHTTPSCloneURL(gitURL string) string {
 	if gitURL == "" {
 		return ""
@@ -526,7 +530,38 @@ func ToHTTPSCloneURL(gitURL string) string {
 	// Strip trailing slashes
 	result = strings.TrimRight(result, "/")
 
+	// Azure DevOps URLs use /_git/ in the path to identify the repo;
+	// appending .git would break them. For ADO we strip any erroneous
+	// .git suffix. For every other host we ensure the .git suffix is present.
+	if isAzureDevOpsURL(result) {
+		result = strings.TrimSuffix(result, ".git")
+	} else if !strings.HasSuffix(result, ".git") {
+		result += ".git"
+	}
+
 	return "https://" + result
+}
+
+// isAzureDevOpsURL reports whether hostAndPath (without scheme) looks like an
+// Azure DevOps clone URL. It matches dev.azure.com, *.visualstudio.com hosts,
+// and any path containing the /_git/ segment that ADO uses.
+func isAzureDevOpsURL(hostAndPath string) bool {
+	lower := strings.ToLower(hostAndPath)
+	if strings.HasPrefix(lower, "dev.azure.com/") {
+		return true
+	}
+	// <org>.visualstudio.com/...
+	if dotIdx := strings.Index(lower, "."); dotIdx > 0 {
+		rest := lower[dotIdx:]
+		if strings.HasPrefix(rest, ".visualstudio.com/") || rest == ".visualstudio.com" {
+			return true
+		}
+	}
+	// Catch-all: any URL with the /_git/ path segment is ADO-style.
+	if strings.Contains(lower, "/_git/") {
+		return true
+	}
+	return false
 }
 
 // ExtractOrgRepo extracts the organization and repository name from a git URL.

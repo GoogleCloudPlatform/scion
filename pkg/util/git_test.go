@@ -424,15 +424,15 @@ func TestToHTTPSCloneURL(t *testing.T) {
 	}{
 		// SSH shorthand → HTTPS
 		{"git@github.com:org/repo.git", "https://github.com/org/repo.git"},
-		{"git@github.com:org/repo", "https://github.com/org/repo"},
+		{"git@github.com:org/repo", "https://github.com/org/repo.git"},
 
 		// ssh:// → HTTPS
-		{"ssh://git@github.com/org/repo", "https://github.com/org/repo"},
+		{"ssh://git@github.com/org/repo", "https://github.com/org/repo.git"},
 		{"ssh://git@github.com/org/repo.git", "https://github.com/org/repo.git"},
 
 		// HTTPS passthrough
 		{"https://github.com/org/repo.git", "https://github.com/org/repo.git"},
-		{"https://github.com/org/repo", "https://github.com/org/repo"},
+		{"https://github.com/org/repo", "https://github.com/org/repo.git"},
 
 		// git:// → HTTPS
 		{"git://github.com/org/repo.git", "https://github.com/org/repo.git"},
@@ -442,6 +442,10 @@ func TestToHTTPSCloneURL(t *testing.T) {
 
 		// Azure DevOps — must NOT append .git
 		{"https://dev.azure.com/org/project/_git/repo", "https://dev.azure.com/org/project/_git/repo"},
+		// ADO with erroneous .git suffix — must be stripped
+		{"https://dev.azure.com/org/project/_git/repo.git", "https://dev.azure.com/org/project/_git/repo"},
+		// ADO via visualstudio.com
+		{"https://myorg.visualstudio.com/project/_git/repo", "https://myorg.visualstudio.com/project/_git/repo"},
 
 		// Empty
 		{"", ""},

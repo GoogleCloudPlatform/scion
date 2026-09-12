@@ -591,13 +591,24 @@ export class ScionPageProjectCreate extends LitElement {
       if (this.mode === 'git') {
         const trimmedUrl = this.gitRemote.trim();
         // Build an HTTPS clone URL from whatever the user entered.
-        // Strip known schemes/prefixes, then re-add https://.
+        // Strip known schemes/prefixes, then re-add https:// and .git
+        // (except for Azure DevOps URLs where .git would break the path).
         let cloneUrl = trimmedUrl;
         const hadGitAt = cloneUrl.startsWith('git@');
         cloneUrl = cloneUrl
           .replace(/^(https?:\/\/|ssh:\/\/|git:\/\/|git@)/, '');
         if (hadGitAt) {
           cloneUrl = cloneUrl.replace(':', '/'); // git@host:org/repo → host/org/repo
+        }
+        const lowerUrl = cloneUrl.toLowerCase();
+        const isADO =
+          lowerUrl.startsWith('dev.azure.com/') ||
+          /^[^.]+\.visualstudio\.com(\/|$)/.test(lowerUrl) ||
+          lowerUrl.includes('/_git/');
+        if (isADO) {
+          cloneUrl = cloneUrl.replace(/\.git$/, '');
+        } else if (!cloneUrl.endsWith('.git')) {
+          cloneUrl += '.git';
         }
         cloneUrl = `https://${cloneUrl}`;
         body.gitRemote = trimmedUrl;
