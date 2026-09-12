@@ -485,6 +485,11 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
+	// SECURITY-GATE: authorize update access to this specific harness config.
+	if !s.authorize(w, r, harnessConfigResource(existing), ActionUpdate) {
+		return
+	}
+
 	var hc store.HarnessConfig
 	if err := readJSON(r, &hc); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -513,6 +518,11 @@ func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, id s
 	existing, err := s.store.GetHarnessConfig(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: authorize update access to this specific harness config.
+	if !s.authorize(w, r, harnessConfigResource(existing), ActionUpdate) {
 		return
 	}
 
@@ -551,6 +561,14 @@ func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, id s
 	if updates.Status != "" {
 		switch updates.Status {
 		case store.HarnessConfigStatusActive, store.HarnessConfigStatusArchived:
+			// Block direct pending→active transition via PATCH: configs in
+			// pending status have files awaiting upload/finalization, and
+			// only the finalize endpoint should mark them active after
+			// verifying file integrity and computing content hashes.
+			if existing.Status == store.HarnessConfigStatusPending && updates.Status == store.HarnessConfigStatusActive {
+				BadRequest(w, "Cannot activate a pending harness config via PATCH; use the finalize endpoint to verify files and activate")
+				return
+			}
 			existing.Status = updates.Status
 		default:
 			BadRequest(w, fmt.Sprintf("Invalid status %q: must be %q or %q", updates.Status, store.HarnessConfigStatusActive, store.HarnessConfigStatusArchived))
