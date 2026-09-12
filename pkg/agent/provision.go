@@ -901,9 +901,21 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Step 3a2: Inject platform skills from embedded resources
 	hubEnabled := (settings != nil && settings.IsHubEnabled()) || api.IsBrokerModeFromContext(ctx)
+
+	// Detect Docker socket in the fully-merged volume list. The template and
+	// harness-config volumes are already merged into finalScionCfg; settings
+	// volumes are merged later (step 2e), so we peek at them here too.
+	dockerSocket := hasDockerSocket(finalScionCfg.Volumes)
+	if !dockerSocket && settings != nil {
+		if hConfig, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil && hConfig.Volumes != nil {
+			dockerSocket = hasDockerSocket(hConfig.Volumes)
+		}
+	}
+
 	injCtx := workspaceSkillsInjectionContext{
-		IsGit:      isGit,
-		HubEnabled: hubEnabled,
+		IsGit:           isGit,
+		HubEnabled:      hubEnabled,
+		HasDockerSocket: dockerSocket,
 	}
 	if skillsDir != "" {
 		if err := injectPlatformSkills(resources.PlatformSkillsFS(), agentHome, skillsDir, injCtx); err != nil {
@@ -1435,8 +1447,9 @@ func parseSkillFrontmatter(data []byte) skillFrontmatter {
 // workspaceSkillsInjectionContext holds the context needed to evaluate
 // conditional injection of platform skills.
 type workspaceSkillsInjectionContext struct {
-	IsGit      bool
-	HubEnabled bool
+	IsGit           bool
+	HubEnabled      bool
+	HasDockerSocket bool
 }
 
 // shouldInjectSkill checks whether a skill should be injected based on its
@@ -1449,6 +1462,8 @@ func shouldInjectSkill(fm skillFrontmatter, injCtx workspaceSkillsInjectionConte
 		return injCtx.IsGit
 	case "hub_enabled":
 		return injCtx.HubEnabled
+	case "docker_socket":
+		return injCtx.HasDockerSocket
 	default:
 		util.Debugf("provision: unknown inject_when=%q for skill %q, skipping", fm.InjectWhen, fm.Name)
 		return false
@@ -1500,6 +1515,28 @@ func composeInstructions(preamble, templateContent []byte) []byte {
 	result = append(result, '\n', '\n')
 	result = append(result, templateContent...)
 	return result
+}
+
+// hasDockerSocket checks whether any volume in the list mounts a Docker daemon
+// socket. It looks for common Docker socket paths in the Source or Target fields
+// of each volume.
+func hasDockerSocket(volumes []api.VolumeMount) bool {
+	for _, v := range volumes {
+		if isDockerSocketPath(v.Source) || isDockerSocketPath(v.Target) {
+			return true
+		}
+	}
+	return false
+}
+
+// isDockerSocketPath returns true if the path looks like a Docker daemon socket.
+func isDockerSocketPath(p string) bool {
+	switch p {
+	case "/var/run/docker.sock",
+		"/run/docker.sock":
+		return true
+	}
+	return strings.HasSuffix(p, "/docker.sock")
 }
 
 // injectPlatformSkills copies platform skills from the embedded filesystem

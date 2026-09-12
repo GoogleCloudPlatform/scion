@@ -2199,6 +2199,8 @@ func TestShouldInjectSkill(t *testing.T) {
 		{"git_workspace without git", "git_workspace", workspaceSkillsInjectionContext{IsGit: false}, false},
 		{"hub_enabled with hub", "hub_enabled", workspaceSkillsInjectionContext{HubEnabled: true}, true},
 		{"hub_enabled without hub", "hub_enabled", workspaceSkillsInjectionContext{HubEnabled: false}, false},
+		{"docker_socket with docker", "docker_socket", workspaceSkillsInjectionContext{HasDockerSocket: true}, true},
+		{"docker_socket without docker", "docker_socket", workspaceSkillsInjectionContext{HasDockerSocket: false}, false},
 		{"unknown condition skips", "unknown_condition", workspaceSkillsInjectionContext{IsGit: true, HubEnabled: true}, false},
 	}
 
@@ -2363,6 +2365,104 @@ func TestInjectPlatformSkills(t *testing.T) {
 			t.Errorf("expected git-only skill to be skipped when isGit=false")
 		}
 	})
+
+	t.Run("docker_socket skill injected when HasDockerSocket=true", func(t *testing.T) {
+		agentHome := t.TempDir()
+		skillsDir := ".claude/commands"
+
+		skillsFS := fstest.MapFS{
+			"docker-topology/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: docker-topology\ninject_when: docker_socket\n---\n\n# Docker Topology\n"),
+			},
+		}
+
+		injCtx := workspaceSkillsInjectionContext{HasDockerSocket: true}
+		if err := injectPlatformSkills(skillsFS, agentHome, skillsDir, injCtx); err != nil {
+			t.Fatalf("injectPlatformSkills failed: %v", err)
+		}
+
+		dest := filepath.Join(agentHome, skillsDir, "docker-topology", "SKILL.md")
+		if _, err := os.Stat(dest); os.IsNotExist(err) {
+			t.Errorf("expected docker-topology skill to be injected when HasDockerSocket=true")
+		}
+	})
+
+	t.Run("docker_socket skill skipped when HasDockerSocket=false", func(t *testing.T) {
+		agentHome := t.TempDir()
+		skillsDir := ".claude/commands"
+
+		skillsFS := fstest.MapFS{
+			"docker-topology/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: docker-topology\ninject_when: docker_socket\n---\n\n# Docker Topology\n"),
+			},
+		}
+
+		injCtx := workspaceSkillsInjectionContext{HasDockerSocket: false}
+		if err := injectPlatformSkills(skillsFS, agentHome, skillsDir, injCtx); err != nil {
+			t.Fatalf("injectPlatformSkills failed: %v", err)
+		}
+
+		dest := filepath.Join(agentHome, skillsDir, "docker-topology")
+		if _, err := os.Stat(dest); !os.IsNotExist(err) {
+			t.Errorf("expected docker-topology skill to NOT be injected when HasDockerSocket=false")
+		}
+	})
+}
+
+func TestHasDockerSocket(t *testing.T) {
+	tests := []struct {
+		name    string
+		volumes []api.VolumeMount
+		want    bool
+	}{
+		{
+			"empty volumes",
+			nil,
+			false,
+		},
+		{
+			"standard docker socket in source",
+			[]api.VolumeMount{{Source: "/var/run/docker.sock", Target: "/var/run/docker.sock"}},
+			true,
+		},
+		{
+			"docker socket in /run path",
+			[]api.VolumeMount{{Source: "/run/docker.sock", Target: "/run/docker.sock"}},
+			true,
+		},
+		{
+			"docker socket only in target",
+			[]api.VolumeMount{{Source: "/some/other/path", Target: "/var/run/docker.sock"}},
+			true,
+		},
+		{
+			"custom path ending in docker.sock",
+			[]api.VolumeMount{{Source: "/custom/path/docker.sock", Target: "/docker.sock"}},
+			true,
+		},
+		{
+			"no docker socket",
+			[]api.VolumeMount{{Source: "/workspace", Target: "/workspace"}},
+			false,
+		},
+		{
+			"mixed volumes with docker socket",
+			[]api.VolumeMount{
+				{Source: "/workspace", Target: "/workspace"},
+				{Source: "/var/run/docker.sock", Target: "/var/run/docker.sock"},
+			},
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hasDockerSocket(tt.volumes)
+			if got != tt.want {
+				t.Errorf("hasDockerSocket()=%v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestLoadMandatoryPreamble(t *testing.T) {
