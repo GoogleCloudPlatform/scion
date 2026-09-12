@@ -588,11 +588,10 @@ func (m *OIDCKeyManager) casCreateKeyInStore(ctx context.Context, keyName, pemVa
 	if m.encryptionKey != nil {
 		encrypted, encErr := secret.EncryptValue(pemValue, m.encryptionKey)
 		if encErr != nil {
-			m.log.Warn("Failed to encrypt OIDC key for CAS create, falling back to upsert",
+			// Encryption failed — skip the backup path since backupKeyToStore
+			// would attempt the same encryption and fail again.
+			m.log.Warn("Failed to encrypt OIDC key for CAS create, skipping backup",
 				"key", keyName, "error", encErr)
-			if persistErr := m.backupKeyToStore(ctx, keyName, pemValue, hubID); persistErr != nil {
-				m.log.Warn("Failed to persist OIDC signing key to store", "key", keyName, "error", persistErr)
-			}
 			return nil
 		}
 		valueToStore = encrypted
