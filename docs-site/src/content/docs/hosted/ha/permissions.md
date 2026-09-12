@@ -49,7 +49,7 @@ Scion uses a standardized set of actions:
 
 Scion enforces strict role-binding-based authorization for all agent operations:
 - **Agent Creation**: Requires active membership in the target project.
-- **Agent Interaction**: Interacting with an agent (e.g., via PTY/terminal or structured messaging) is restricted to the agent's owner (the creator) or system administrators.
+- **Agent Interaction**: Interacting with an agent (e.g., via PTY/terminal or structured messaging) is restricted to the agent's owner (the creator), users in the agent's ancestry chain, or system administrators. The default project-member role does not grant the `agent:message` permission — messaging authorization is aligned with the terminal attach permission gate.
 - **Agent Deletion**: Only the agent's owner, a system administrator, or authorized agent callers can delete an agent. For an agent caller to perform a deletion, it must have `project:agent:lifecycle` (associated with the `full` role) and must target an agent within its own project (which closes a cross-project agent deletion vulnerability).
 
 ### Membership-Based Project Access (Visibility Eradication)
