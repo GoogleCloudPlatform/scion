@@ -63,7 +63,7 @@ def _get_agy_version() -> tuple[int, ...] | None:
         ).strip()
         parts = out.split(".")
         return tuple(int(p) for p in parts)
-    except (subprocess.SubprocessError, ValueError):
+    except (subprocess.SubprocessError, ValueError, OSError):
         return None
 
 
