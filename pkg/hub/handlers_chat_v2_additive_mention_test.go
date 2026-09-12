@@ -140,7 +140,7 @@ func TestAdditiveMention_DefaultPlusMention(t *testing.T) {
 	}
 	setTopicConversationID(t, db, s, topicID, proj.ID)
 
-	body := map[string]string{"content": "@mention-b please help"}
+	body := map[string]string{"content": "please help @mention-b"}
 	rec := doRequest(t, srv, http.MethodPost,
 		"/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusCreated {
@@ -553,7 +553,7 @@ func TestAdditiveMention_DMPlusMention(t *testing.T) {
 	dmKey := "dm:agent:" + agentA.ID + ":user:" + DevUserID
 	setDMConversationID(t, s, dmKey, proj.ID)
 
-	body := map[string]string{"content": "@dm-mention-b help with this"}
+	body := map[string]string{"content": "help with this @dm-mention-b"}
 	rec := doRequest(t, srv, http.MethodPost,
 		"/api/v1/chat/conversations/"+dmKey+"/messages", body)
 	if rec.Code != http.StatusCreated {

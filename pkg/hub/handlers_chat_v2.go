@@ -955,51 +955,62 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	// Step 3: Determine routing.
 	if len(mentionedAgents) > 0 {
-		// --- Agent-routed: explicit mentions (additive model) ---
-		// Resolve the thread's implicit primary agent (default for topics,
-		// DM-implicit for DMs) so it receives dispatch alongside mentions.
-		var implicitPrimary *store.Agent
-		if isDM {
-			if agentID := parseAgentDMKey(key); agentID != "" {
-				if dmAgent, err := s.store.GetAgent(ctx, agentID); err == nil && dmAgent != nil {
-					implicitPrimary = dmAgent
-				}
-			}
-		} else if projectID != "" {
-			topic, topicErr := wcs.GetTopic(ctx, key)
-			if topicErr == nil && topic != nil && topic.DefaultAgent != "" {
-				defaultAgent, daErr := s.store.GetAgentBySlug(ctx, projectID, topic.DefaultAgent)
-				if daErr != nil || defaultAgent == nil {
-					// Fall back to lookup by ID in case the value is a UUID.
-					defaultAgent, daErr = s.store.GetAgent(ctx, topic.DefaultAgent)
-					// Scope the fallback: reject agents from other projects or
-					// soft-deleted agents. GetAgent is a bare primary-key fetch
-					// with no project or deletion filter, so without this guard
-					// a UUID naming an agent in another project (or a deleted
-					// agent) would bind successfully — DEF-31.
-					if daErr == nil && defaultAgent != nil {
-						if defaultAgent.ProjectID != projectID || !defaultAgent.DeletedAt.IsZero() {
-							defaultAgent = nil
-						}
-					}
-				}
-				if daErr == nil && defaultAgent != nil {
-					implicitPrimary = defaultAgent
-				}
-			}
-		}
+		// --- Agent-routed: explicit mentions ---
+		// Detect leading @-mention: if the message starts with @<first-resolved>,
+		// the leading mention overrides the thread's default agent (scenarios C/D).
+		// If not leading, mentions are additive (scenario B).
+		isLeading := len(mentionNames) > 0 &&
+			strings.EqualFold(mentionedAgents[0].Slug, mentionNames[0]) &&
+			messages.IsLeadingMention(content, mentionNames[0])
 
 		agents := mentionedAgents
-		if implicitPrimary != nil {
-			// Dedup: remove implicit primary from mentions if also @-mentioned.
-			deduped := make([]*store.Agent, 0, len(mentionedAgents))
-			for _, a := range mentionedAgents {
-				if a.ID != implicitPrimary.ID {
-					deduped = append(deduped, a)
+		if !isLeading {
+			// Non-leading mentions: additive model — resolve the thread's
+			// implicit primary agent and prepend it.
+			var implicitPrimary *store.Agent
+			if isDM {
+				if agentID := parseAgentDMKey(key); agentID != "" {
+					if dmAgent, err := s.store.GetAgent(ctx, agentID); err == nil && dmAgent != nil {
+						implicitPrimary = dmAgent
+					}
+				}
+			} else if projectID != "" {
+				topic, topicErr := wcs.GetTopic(ctx, key)
+				if topicErr == nil && topic != nil && topic.DefaultAgent != "" {
+					defaultAgent, daErr := s.store.GetAgentBySlug(ctx, projectID, topic.DefaultAgent)
+					if daErr != nil || defaultAgent == nil {
+						// Fall back to lookup by ID in case the value is a UUID.
+						defaultAgent, daErr = s.store.GetAgent(ctx, topic.DefaultAgent)
+						// Scope the fallback: reject agents from other projects or
+						// soft-deleted agents. GetAgent is a bare primary-key fetch
+						// with no project or deletion filter, so without this guard
+						// a UUID naming an agent in another project (or a deleted
+						// agent) would bind successfully — DEF-31.
+						if daErr == nil && defaultAgent != nil {
+							if defaultAgent.ProjectID != projectID || !defaultAgent.DeletedAt.IsZero() {
+								defaultAgent = nil
+							}
+						}
+					}
+					if daErr == nil && defaultAgent != nil {
+						implicitPrimary = defaultAgent
+					}
 				}
 			}
-			agents = append([]*store.Agent{implicitPrimary}, deduped...)
+
+			if implicitPrimary != nil {
+				// Dedup: remove implicit primary from mentions if also @-mentioned.
+				deduped := make([]*store.Agent, 0, len(mentionedAgents))
+				for _, a := range mentionedAgents {
+					if a.ID != implicitPrimary.ID {
+						deduped = append(deduped, a)
+					}
+				}
+				agents = append([]*store.Agent{implicitPrimary}, deduped...)
+			}
 		}
+		// When isLeading: agents = mentionedAgents as-is.
+		// mentionedAgents[0] is the leading-mentioned agent → primary by position.
 
 		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, agents, mentionNames, mentionResults, attachmentRefs, now, body.ReplyToID)
 		if msgID == "" {
