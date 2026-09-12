@@ -281,6 +281,10 @@ type DevAuthConfig struct {
 	// UserAccessMode controls how user access is evaluated at login time.
 	// Values: "open" (default), "domain_restricted", "invite_only".
 	UserAccessMode string `json:"userAccessMode" yaml:"userAccessMode" koanf:"userAccessMode"`
+	// DefaultUserRole is the role assigned to new users who are not in the
+	// admin_emails list. Values: "member" (default), "viewer". "admin" is
+	// blocked — admin promotion is handled exclusively by admin_emails.
+	DefaultUserRole string `json:"defaultUserRole" yaml:"defaultUserRole" koanf:"defaultUserRole"`
 	// Proxy holds proxy authentication settings (consulted when Mode == "proxy").
 	Proxy *ProxyAuthConfig `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
 	// Transport holds transport-layer auth settings for agent outbound requests.
@@ -900,6 +904,7 @@ var snakeCaseFields = map[string]string{
 	"cafile":                "ca_file",
 	"defaultharnessconfig":  "default_harness_config",
 	"defaultmaxduration":    "default_max_duration",
+	"defaultuserrole":       "default_user_role",
 	"defaultmaxmodelcalls":  "default_max_model_calls",
 	"defaultmaxturns":       "default_max_turns",
 	"defaultresources":      "default_resources",
@@ -962,6 +967,7 @@ var camelCaseFields = map[string]string{
 	"corsallowedorigins":            "corsAllowedOrigins",
 	"corsenabled":                   "corsEnabled",
 	"corsmaxage":                    "corsMaxAge",
+	"defaultuserrole":               "defaultUserRole",
 	"devmode":                       "devMode",
 	"devtoken":                      "devToken",
 	"devtokenfile":                  "devTokenFile",
