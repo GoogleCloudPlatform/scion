@@ -347,9 +347,10 @@ func TestFindHarnessConfigDir_NotFoundErrorIncludesSearchedPaths(t *testing.T) {
 			t.Errorf("expected error to include path %q, got: %s", p, errMsg)
 		}
 	}
-	// Global dir should also be included
-	if !strings.Contains(errMsg, harnessConfigsDirName) {
-		t.Errorf("expected error to reference harness-configs directory, got: %s", errMsg)
+	// Global dir should also be included — assert the exact path, not just the directory name
+	globalExpected := filepath.Join(tmpDir, DotScion, harnessConfigsDirName, "missing-harness")
+	if !strings.Contains(errMsg, globalExpected) {
+		t.Errorf("expected error to include global search path %q, got: %s", globalExpected, errMsg)
 	}
 	if !strings.Contains(errMsg, "searched:") {
 		t.Errorf("expected error to include 'searched:' prefix, got: %s", errMsg)
@@ -375,9 +376,17 @@ func TestFindHarnessConfigDir_NotFoundErrorNoProjectPath(t *testing.T) {
 	if !strings.Contains(errMsg, globalDir) {
 		t.Errorf("expected error to include global search path %q, got: %s", globalDir, errMsg)
 	}
-	// Should NOT include a project path since none was provided
-	if strings.Contains(errMsg, "project") {
-		t.Errorf("expected error to not include project path when none provided, got: %s", errMsg)
+	// Should NOT include a project search path since none was provided.
+	// Avoid checking for the generic word "project" — it could appear in the
+	// temp-dir path or error text.  Instead, verify that the specific
+	// project-level search path pattern is absent.
+	projectSearchPath := filepath.Join("harness-configs", "missing-harness")
+	// Count how many times the harness-configs/missing-harness pattern appears.
+	// With no project path, only the global path should be listed.
+	occurrences := strings.Count(errMsg, projectSearchPath)
+	if occurrences != 1 {
+		t.Errorf("expected exactly 1 searched path (global only), found %d occurrences of %q in: %s",
+			occurrences, projectSearchPath, errMsg)
 	}
 }
 
