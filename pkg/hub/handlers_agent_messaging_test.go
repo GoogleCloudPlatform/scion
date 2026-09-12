@@ -2308,3 +2308,177 @@ func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
 	}
 	require.True(t, userFound, "expected webchat_dm row for user with key %s", expectedKey)
 }
+
+// TestAgentMessage_UserSenderUsesEmailNotDisplayName verifies that the Sender
+// field for a user-originated message uses "user:<email>" — never
+// "user:<display_name>". A display name like "Preston Holmes" is not routable;
+// only the email produces a valid principal reference.
+func TestAgentMessage_UserSenderUsesEmailNotDisplayName(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "sender-email-project",
+		Slug: "sender-email-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	user := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "ptone@google.com",
+		DisplayName: "Preston Holmes",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "email-test-agent",
+		Slug:       "email-test-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// --- Subtest 1: structured_message path ---
+	t.Run("structured_message", func(t *testing.T) {
+		msg := &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Type:      messages.TypeInstruction,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "hello from structured",
+		}
+		body, _ := json.Marshal(MessageRequest{StructuredMessage: msg})
+		req := httptest.NewRequest(http.MethodPost,
+			"/api/v1/agents/"+agent.ID+"/message", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(),
+			NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, "user", "web")))
+
+		rr := httptest.NewRecorder()
+		srv.handleAgentMessage(rr, req, agent.ID)
+		t.Logf("structured response: %d %s", rr.Code, rr.Body.String())
+
+		// Read back the stored message and assert Sender uses email.
+		key, err := messages.DMConversationKey("user", user.ID, "agent", agent.ID)
+		require.NoError(t, err)
+		conv, err := s.GetConversationByExternalRef(ctx, "native", key)
+		require.NoError(t, err, "conversation should be created")
+
+		result, err := s.ListMessages(ctx, store.MessageFilter{
+			ConversationID: conv.ID,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.NotEmpty(t, result.Items, "expected at least one stored message")
+
+		for _, m := range result.Items {
+			require.Equal(t, "user:"+user.Email, m.Sender,
+				"Sender must use email, not display name")
+			require.NotContains(t, m.Sender, user.DisplayName,
+				"Sender must not contain display name")
+		}
+	})
+
+	// --- Subtest 2: plain message path ---
+	t.Run("plain_message", func(t *testing.T) {
+		// Use a different agent to avoid conversation overlap.
+		agent2 := &store.Agent{
+			ID:         api.NewUUID(),
+			Name:       "email-test-agent-2",
+			Slug:       "email-test-agent-2",
+			ProjectID:  project.ID,
+			Phase:      "running",
+			Visibility: store.VisibilityPrivate,
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent2))
+
+		body, _ := json.Marshal(MessageRequest{Message: "hello from plain"})
+		req := httptest.NewRequest(http.MethodPost,
+			"/api/v1/agents/"+agent2.ID+"/message", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(),
+			NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, "user", "web")))
+
+		rr := httptest.NewRecorder()
+		srv.handleAgentMessage(rr, req, agent2.ID)
+		t.Logf("plain response: %d %s", rr.Code, rr.Body.String())
+
+		key, err := messages.DMConversationKey("user", user.ID, "agent", agent2.ID)
+		require.NoError(t, err)
+		conv, err := s.GetConversationByExternalRef(ctx, "native", key)
+		require.NoError(t, err, "conversation should be created")
+
+		result, err := s.ListMessages(ctx, store.MessageFilter{
+			ConversationID: conv.ID,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.NotEmpty(t, result.Items, "expected at least one stored message")
+
+		for _, m := range result.Items {
+			require.Equal(t, "user:"+user.Email, m.Sender,
+				"Sender must use email, not display name")
+			require.NotContains(t, m.Sender, user.DisplayName,
+				"Sender must not contain display name")
+		}
+	})
+
+	// --- Subtest 3: email-only user (no display name) still works ---
+	t.Run("email_only_no_display_name", func(t *testing.T) {
+		emailOnlyUser := &store.User{
+			ID:          api.NewUUID(),
+			Email:       "nodisplay@example.com",
+			DisplayName: "",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+		}
+		require.NoError(t, s.CreateUser(ctx, emailOnlyUser))
+
+		agent3 := &store.Agent{
+			ID:         api.NewUUID(),
+			Name:       "email-test-agent-3",
+			Slug:       "email-test-agent-3",
+			ProjectID:  project.ID,
+			Phase:      "running",
+			Visibility: store.VisibilityPrivate,
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent3))
+
+		msg := &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Type:      messages.TypeInstruction,
+			Recipient: "agent:" + agent3.Slug,
+			Msg:       "hello from email-only user",
+		}
+		body, _ := json.Marshal(MessageRequest{StructuredMessage: msg})
+		req := httptest.NewRequest(http.MethodPost,
+			"/api/v1/agents/"+agent3.ID+"/message", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(),
+			NewAuthenticatedUser(emailOnlyUser.ID, emailOnlyUser.Email, emailOnlyUser.DisplayName, "user", "web")))
+
+		rr := httptest.NewRecorder()
+		srv.handleAgentMessage(rr, req, agent3.ID)
+		t.Logf("email-only response: %d %s", rr.Code, rr.Body.String())
+
+		key, err := messages.DMConversationKey("user", emailOnlyUser.ID, "agent", agent3.ID)
+		require.NoError(t, err)
+		conv, err := s.GetConversationByExternalRef(ctx, "native", key)
+		require.NoError(t, err, "conversation should be created")
+
+		result, err := s.ListMessages(ctx, store.MessageFilter{
+			ConversationID: conv.ID,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.NotEmpty(t, result.Items)
+
+		for _, m := range result.Items {
+			require.Equal(t, "user:"+emailOnlyUser.Email, m.Sender,
+				"Sender must use email when display name is empty")
+		}
+	})
+}

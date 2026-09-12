@@ -156,9 +156,9 @@ func (s *Server) resolveOutboundRouting(
 			u, err := s.store.GetUser(ctx, identifier)
 			if err == nil {
 				recipientID = u.ID
-				name := u.DisplayName
+				name := u.Email
 				if name == "" {
-					name = u.Email
+					name = u.DisplayName
 				}
 				recipient = "user:" + name
 			} else if errors.Is(err, store.ErrNotFound) {
@@ -176,9 +176,9 @@ func (s *Server) resolveOutboundRouting(
 			u, err := s.store.GetUserByEmail(ctx, identifier)
 			if err == nil {
 				recipientID = u.ID
-				name := u.DisplayName
+				name := u.Email
 				if name == "" {
-					name = u.Email
+					name = u.DisplayName
 				}
 				recipient = "user:" + name
 			} else if errors.Is(err, store.ErrNotSingular) {
@@ -537,9 +537,9 @@ func (s *Server) resolveOutboundRouting(
 					return nil, lookupErr
 				}
 				recipientID = u.ID
-				name := u.DisplayName
+				name := u.Email
 				if name == "" {
-					name = u.Email
+					name = u.DisplayName
 				}
 				recipient = "user:" + name
 				def152DerivedRecipient = true
@@ -1208,10 +1208,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		structuredMsg.SenderID = ""
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			structuredMsg.SenderID = user.ID()
-			if name := user.DisplayName(); name != "" {
-				structuredMsg.Sender = "user:" + name
-			} else if email := user.Email(); email != "" {
+			if email := user.Email(); email != "" {
 				structuredMsg.Sender = "user:" + email
+			} else if name := user.DisplayName(); name != "" {
+				structuredMsg.Sender = "user:" + name
 			}
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			structuredMsg.SenderID = agentIdent.ID()
@@ -1244,10 +1244,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		senderID := ""
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			senderID = user.ID()
-			if name := user.DisplayName(); name != "" {
-				sender = "user:" + name
-			} else if email := user.Email(); email != "" {
+			if email := user.Email(); email != "" {
 				sender = "user:" + email
+			} else if name := user.DisplayName(); name != "" {
+				sender = "user:" + name
 			}
 		}
 		structuredMsg = messages.NewInstruction(sender, "agent:"+id, plainMessage)
@@ -2095,9 +2095,9 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				u, lookupErr := s.store.GetUser(ctx, identifier)
 				if lookupErr == nil {
 					userID = u.ID
-					name := u.DisplayName
+					name := u.Email
 					if name == "" {
-						name = u.Email
+						name = u.DisplayName
 					}
 					userRecip = "user:" + name
 				} else if errors.Is(lookupErr, store.ErrNotFound) {
@@ -2114,9 +2114,9 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				u, lookupErr := s.store.GetUserByEmail(ctx, identifier)
 				if lookupErr == nil {
 					userID = u.ID
-					name := u.DisplayName
+					name := u.Email
 					if name == "" {
-						name = u.Email
+						name = u.DisplayName
 					}
 					userRecip = "user:" + name
 				} else if errors.Is(lookupErr, store.ErrNotSingular) {
@@ -2302,10 +2302,10 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	req.StructuredMessage.SenderID = ""
 	if userIdent != nil {
 		req.StructuredMessage.SenderID = userIdent.ID()
-		if name := userIdent.DisplayName(); name != "" {
-			req.StructuredMessage.Sender = "user:" + name
-		} else if email := userIdent.Email(); email != "" {
+		if email := userIdent.Email(); email != "" {
 			req.StructuredMessage.Sender = "user:" + email
+		} else if name := userIdent.DisplayName(); name != "" {
+			req.StructuredMessage.Sender = "user:" + name
 		}
 	} else if agentIdent != nil {
 		req.StructuredMessage.SenderID = agentIdent.ID()
