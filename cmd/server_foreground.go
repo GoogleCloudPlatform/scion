@@ -1516,13 +1516,13 @@ func parseAdminEmails(cfg *config.GlobalConfig) []string {
 }
 
 // resolveHubIDFromEnv resolves the hub instance ID from environment variables,
-// falling back to the deterministic hostname-derived default. This is used
+// falling back to the persisted hostname-derived default. This is used
 // during early logging init before the full config is loaded.
 func resolveHubIDFromEnv() string {
 	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
 		return v
 	}
-	return config.DefaultHubID()
+	return config.PersistentHubID()
 }
 
 // resolveHubNameFromEnv resolves the hub display name from environment variables,
