@@ -80,6 +80,11 @@ When two steps in the same run depend on each other, the orchestrator threads `B
 # land in your local engine's image store. Default builder: local-docker.
 image-build/scripts/build-images.sh --target all
 
+# Build locally, auto-detecting the registry from SCION_IMAGE_REGISTRY so
+# images are tagged with the prefix the hub expects (e.g., scion-local/scion-claude:latest).
+# No --registry flag needed when the env var is already set.
+image-build/scripts/build-images.sh --target all
+
 # Same, with Podman
 image-build/scripts/build-images.sh --builder local-podman --target all
 
@@ -97,7 +102,10 @@ image-build/scripts/build-images.sh --target all --platform all --dry-run
 scion config set image_registry ghcr.io/myorg
 ```
 
-`--registry` is optional for local builds without `--push`; it's required when `--push` is set or when using `--builder cloud-build`.
+`--registry` is optional for local builds without `--push`; it's required when
+`--push` is set or when using `--builder cloud-build`. When omitted, the script
+falls back to the `SCION_IMAGE_REGISTRY` environment variable so that locally-built
+images automatically match the hub's configured registry prefix.
 
 ### Quick Start: Google Cloud Build
 

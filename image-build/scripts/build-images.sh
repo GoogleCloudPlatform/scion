@@ -53,7 +53,8 @@ Build Scion container images via a pluggable builder backend.
 Options:
   --registry <path>     Target registry path (e.g., ghcr.io/myorg).
                         Required when --push is set or with --builder cloud-build.
-                        When omitted, images are tagged with bare names
+                        Falls back to SCION_IMAGE_REGISTRY env var when omitted.
+                        When both are unset, images are tagged with bare names
                         (e.g., scion-claude:latest) and stay in the local store.
   --builder <name>      Build backend (default: local-docker)
                           local-docker  - docker buildx, local
@@ -105,6 +106,14 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2; usage 1 ;;
   esac
 done
+
+# Default REGISTRY from SCION_IMAGE_REGISTRY when --registry was not passed.
+# This ensures locally-built images match the hub's configured registry prefix
+# without requiring --registry on every invocation.
+if [[ -z "${REGISTRY}" && -n "${SCION_IMAGE_REGISTRY:-}" ]]; then
+  REGISTRY="${SCION_IMAGE_REGISTRY}"
+  echo "Note: Using SCION_IMAGE_REGISTRY (${REGISTRY}) as default registry."
+fi
 
 REGISTRY="${REGISTRY%/}"
 
@@ -328,9 +337,25 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   echo "Dry run complete. No images were built or pushed."
 else
   echo "Done."
-  if [[ "${BUILDER_MODE}" == "per-image" && -n "${REGISTRY}" ]]; then
+  if [[ "${BUILDER_MODE}" == "per-image" ]]; then
     echo ""
-    echo "To configure scion to use these images, run:"
-    echo "  scion config set image_registry ${REGISTRY}"
+    echo "Built images:"
+    for step in "${STEPS[@]}"; do
+      image_name="$(step_image_name "${step}")"
+      echo "  $(compute_tags "${image_name}" | tr ',' '\n' | head -1)"
+    done
+    if [[ -n "${REGISTRY}" ]]; then
+      echo ""
+      echo "To configure scion to use these images, run:"
+      echo "  scion config set image_registry ${REGISTRY}"
+    elif [[ -n "${SCION_IMAGE_REGISTRY:-}" ]]; then
+      # REGISTRY is empty but SCION_IMAGE_REGISTRY is set — this shouldn't
+      # happen after the default-from-env logic above, but warn just in case.
+      echo ""
+      echo "Warning: SCION_IMAGE_REGISTRY is set to '${SCION_IMAGE_REGISTRY}'"
+      echo "but images were tagged without a registry prefix. The hub will look"
+      echo "for '${SCION_IMAGE_REGISTRY}/<image>:<tag>' and won't find bare-tagged images."
+      echo "Re-run with: --registry ${SCION_IMAGE_REGISTRY}"
+    fi
   fi
 fi
