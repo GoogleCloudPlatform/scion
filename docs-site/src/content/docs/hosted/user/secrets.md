@@ -367,7 +367,7 @@ Or via the environment variable:
 export SCION_SERVER_SECRETS_GCPREPLICATIONLOCATIONS=us-east1,europe-west1
 ```
 
-When this field is non-empty, Scion creates secrets with **user-managed** replication restricted to the specified regions instead of automatic global replication. When empty or omitted, the default automatic replication behavior is preserved. This field is also editable through the admin settings UI and is stored in the HA postgres config store in database mode.
+When this field is non-empty, Scion creates secrets with **user-managed** replication restricted to the specified regions instead of automatic global replication. When empty or omitted, the default automatic replication behavior is preserved. This field is also editable through the admin settings UI and is stored in the HA Postgres config store in database mode.
 
 When GCP Secret Manager is configured, Scion uses a **hybrid storage** model:
 - **Metadata** (name, type, scope) is stored in the Hub database.
