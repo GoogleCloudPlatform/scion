@@ -368,7 +368,10 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	// allowProgeny is only valid on user-scoped env vars with injection_mode=always
+	// allowProgeny is only valid on user-scoped env vars/secrets.
+	// Plain env vars additionally require injection_mode=always;
+	// secret promotions (req.Secret=true) do NOT — the secret dispatch
+	// flow supports as_needed progeny secrets (design doc §5.7).
 	if req.AllowProgeny {
 		if scope != store.ScopeUser {
 			ValidationError(w, "allowProgeny is only supported on user-scoped env vars", map[string]interface{}{
@@ -377,16 +380,18 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 			})
 			return
 		}
-		im := req.InjectionMode
-		if im == "" {
-			im = store.InjectionModeAsNeeded
-		}
-		if im != store.InjectionModeAlways {
-			ValidationError(w, "allowProgeny requires injectionMode to be 'always'", map[string]interface{}{
-				"field":         "allowProgeny",
-				"injectionMode": im,
-			})
-			return
+		if !req.Secret {
+			im := req.InjectionMode
+			if im == "" {
+				im = store.InjectionModeAsNeeded
+			}
+			if im != store.InjectionModeAlways {
+				ValidationError(w, "allowProgeny requires injectionMode to be 'always'", map[string]interface{}{
+					"field":         "allowProgeny",
+					"injectionMode": im,
+				})
+				return
+			}
 		}
 	}
 
