@@ -1520,7 +1520,7 @@ func isUIDMapped(uid int) bool {
 // agentHome is the scion user's home directory, used to write the credential
 // helper to the correct .gitconfig (not root's HOME).
 // Returns nil if no clone URL is configured (non-git workspace).
-func gitCloneWorkspace(uid, gid int, agentHome string) error {
+func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 	cloneURL := os.Getenv("SCION_GIT_CLONE_URL")
 	if cloneURL == "" {
 		return nil
@@ -1608,6 +1608,18 @@ func gitCloneWorkspace(uid, gid int, agentHome string) error {
 	if out, err := initCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git init failed: %s", sanitizeGitOutput(string(out), token))
 	}
+
+	// Clean up .git/ if the clone fails after init. This prevents a
+	// credential-bearing remote URL from persisting in .git/config when a
+	// subsequent fetch or checkout step errors out (miller79/scion#65).
+	defer func() {
+		if retErr != nil {
+			gitDir := filepath.Join(workspacePath, ".git")
+			if err := os.RemoveAll(gitDir); err != nil {
+				log.Error("Failed to clean up .git after clone failure: %v", err)
+			}
+		}
+	}()
 
 	remoteCmd := exec.Command("git", "-C", workspacePath, "remote", "add", "origin", authURL)
 	setupGitCmd(remoteCmd)
