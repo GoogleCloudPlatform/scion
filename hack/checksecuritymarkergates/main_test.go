@@ -244,31 +244,28 @@ func removeIdentFromFunc(t *testing.T, path, funcName, symbol string) string {
 	return result
 }
 
-// runMutationBinaryTest builds the gate checker, creates a temporary workspace
-// with the specified file mutated (symbol removed from funcName), and runs the
-// binary. The binary must exit non-zero.
-func runMutationBinaryTest(t *testing.T, relPath, funcName, symbol string) {
+// buildGateChecker compiles the gate-checker binary once per test binary run
+// and returns the path. Subtests that need it call this helper.
+func buildGateChecker(t *testing.T, root string) string {
 	t.Helper()
-
-	root := findRepoRoot(t)
-	fullPath := filepath.Join(root, relPath)
-
-	// Build the gate checker binary.
 	binPath := filepath.Join(t.TempDir(), "gate-checker")
 	buildCmd := exec.Command("go", "build", "-o", binPath, "./hack/checksecuritymarkergates")
 	buildCmd.Dir = root
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("build gate checker: %v\n%s", err, out)
 	}
+	return binPath
+}
 
-	// Create the mutated file.
-	mutated := removeIdentFromFunc(t, fullPath, funcName, symbol)
+// prepareOverlayWorkspace creates a temporary directory that overlays guarded
+// files via symlinks. If mutatedContent is non-empty, the file at relPath is
+// written with that content instead of symlinked. When mutatedContent is empty
+// all files are symlinked unchanged (clean baseline).
+func prepareOverlayWorkspace(t *testing.T, root, relPath, mutatedContent string) string {
+	t.Helper()
 
-	// Create a temp workspace that overlays the mutation.
 	tmpDir := t.TempDir()
 
-	// We need the full directory structure so the binary can find the files.
-	// Symlink all guarded files except the one we're mutating.
 	guardedFiles := []string{
 		"pkg/hub/handlers_agent_messaging.go",
 		"pkg/hub/handlers_chat_v2.go",
@@ -278,8 +275,6 @@ func runMutationBinaryTest(t *testing.T, relPath, funcName, symbol string) {
 		"pkg/hub/server.go",
 	}
 
-	// Also need the glob pattern pkg/hub/handlers_*.go to match.
-	// Symlink all handlers_*.go files.
 	handlerGlob, _ := filepath.Glob(filepath.Join(root, "pkg/hub/handlers_*.go"))
 
 	allFiles := make(map[string]bool)
@@ -296,17 +291,15 @@ func runMutationBinaryTest(t *testing.T, relPath, funcName, symbol string) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
-		if rel == relPath {
-			// Write the mutated content.
-			if err := os.WriteFile(filepath.Join(tmpDir, rel), []byte(mutated), 0o644); err != nil {
+		if mutatedContent != "" && rel == relPath {
+			if err := os.WriteFile(filepath.Join(tmpDir, rel), []byte(mutatedContent), 0o644); err != nil {
 				t.Fatalf("write mutated file: %v", err)
 			}
 		} else {
-			// Symlink the original.
 			src := filepath.Join(root, rel)
 			dst := filepath.Join(tmpDir, rel)
 			if _, err := os.Stat(dst); err == nil {
-				continue // already exists
+				continue
 			}
 			if err := os.Symlink(src, dst); err != nil {
 				t.Fatalf("symlink %s -> %s: %v", src, dst, err)
@@ -314,17 +307,74 @@ func runMutationBinaryTest(t *testing.T, relPath, funcName, symbol string) {
 		}
 	}
 
-	// Run the binary from the temp workspace.
+	return tmpDir
+}
+
+// runMutationBinaryTest builds the gate checker, creates a temporary workspace
+// with the specified file mutated (symbol removed from funcName), and runs the
+// binary. Verifies:
+//  1. Exit code is exactly 1 (gate failure), not 2 (analysis error).
+//  2. Output contains the exact FAIL row for the specific mutation, not just
+//     the symbol name anywhere in output.
+//  3. Baseline recovery: the same overlay with the original (unmutated) file
+//     exits 0 with "all gates pass".
+func runMutationBinaryTest(t *testing.T, relPath, funcName, symbol string) {
+	t.Helper()
+
+	root := findRepoRoot(t)
+	fullPath := filepath.Join(root, relPath)
+
+	binPath := buildGateChecker(t, root)
+
+	// Create the mutated file.
+	mutated := removeIdentFromFunc(t, fullPath, funcName, symbol)
+
+	// --- Phase 1: mutated overlay must fail with exit code 1 ---
+
+	mutatedDir := prepareOverlayWorkspace(t, root, relPath, mutated)
+
 	cmd := exec.Command(binPath)
-	cmd.Dir = tmpDir
+	cmd.Dir = mutatedDir
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected gate checker to fail after removing %s from %s, but it passed.\nOutput:\n%s",
 			symbol, funcName, out)
 	}
 
-	// Verify the output mentions the symbol we removed.
-	if !strings.Contains(string(out), symbol) {
-		t.Errorf("gate checker failed but output doesn't mention %q:\n%s", symbol, out)
+	// Assert exit code is exactly 1 (gate failure), not 2 (analysis error).
+	exitCode := cmd.ProcessState.ExitCode()
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1 (gate failure), got %d — exit 2 means "+
+			"'could not analyse' (environment failure, not a security statement).\nOutput:\n%s",
+			exitCode, out)
+	}
+
+	// Assert the EXACT expected FAIL row for this mutation. The gate checker
+	// emits "FAIL [REQUIRED] <symbol> in <funcName> (...)" for each failed
+	// required gate. A bare symbol-name substring check is too weak: NOTICE
+	// and PASS lines also print symbol names (e.g. DEF-37 exemptions print
+	// on every run).
+	expectedFailPrefix := "FAIL [REQUIRED] " + symbol + " in " + funcName
+	outStr := string(out)
+	if !strings.Contains(outStr, expectedFailPrefix) {
+		t.Errorf("gate checker output does not contain the expected FAIL row.\n"+
+			"  want (prefix): %s\n"+
+			"  full output:\n%s", expectedFailPrefix, outStr)
+	}
+
+	// --- Phase 2: clean baseline must pass with exit 0 ---
+
+	baselineDir := prepareOverlayWorkspace(t, root, relPath, "" /* no mutation */)
+
+	baselineCmd := exec.Command(binPath)
+	baselineCmd.Dir = baselineDir
+	baselineOut, baselineErr := baselineCmd.CombinedOutput()
+	if baselineErr != nil {
+		t.Fatalf("baseline (unmutated) gate checker run failed unexpectedly.\n"+
+			"  exit code: %d\n  output:\n%s",
+			baselineCmd.ProcessState.ExitCode(), baselineOut)
+	}
+	if !strings.Contains(string(baselineOut), "all gates pass") {
+		t.Errorf("baseline run did not report 'all gates pass'.\n  output:\n%s", baselineOut)
 	}
 }

@@ -114,13 +114,39 @@ func TestOutboundMessage_RoutingErrorStopsDispatch(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.handleAgentOutboundMessage(rr, req, agent.ID)
 
-	if rr.Code == http.StatusOK {
-		t.Fatalf("expected non-200 when resolveOutboundRouting fails (no recipient), got 200: %s",
-			rr.Body.String())
+	// Assert the SPECIFIC expected status code — 400 (BadRequest) — not just
+	// "any 4xx". resolveOutboundRouting calls ValidationError for missing
+	// recipient, which writes exactly 400.
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 (BadRequest) when resolveOutboundRouting fails (no recipient), got %d: %s",
+			rr.Code, rr.Body.String())
 	}
-	// The handler must return a 4xx error, not proceed to dispatch.
-	if rr.Code < 400 || rr.Code >= 500 {
-		t.Fatalf("expected 4xx client error, got %d: %s", rr.Code, rr.Body.String())
+
+	// Assert the specific error code and message in the JSON response body.
+	// This proves we hit the exact validation path in resolveOutboundRouting,
+	// not some other unrelated 400 error.
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("response body is not valid JSON: %v\nbody: %s", err, rr.Body.String())
+	}
+	if errResp.Error.Code != ErrCodeValidationError {
+		t.Errorf("expected error code %q, got %q", ErrCodeValidationError, errResp.Error.Code)
+	}
+	if !strings.Contains(errResp.Error.Message, "recipient is required") {
+		t.Errorf("expected error message to contain %q, got %q",
+			"recipient is required", errResp.Error.Message)
+	}
+
+	// Assert that dispatch/publish/persistence did NOT happen. If the handler
+	// proceeded past the routing error, it would call s.store.CreateMessage.
+	// An empty result proves the message was never persisted.
+	res, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(res.Items) != 0 {
+		t.Fatalf("expected zero persisted messages after routing error, got %d — dispatch was NOT stopped",
+			len(res.Items))
 	}
 }
 
