@@ -657,7 +657,11 @@ func TestHandleBrokerInbound_ConvResolutionFailure_WriteDenyOff(t *testing.T) {
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 	srv.createProjectMembersGroup(ctx, project)
-	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+	// The user already has a built-in project-owner membership from
+	// createProjectMembersGroup (which grants a role binding for the
+	// project creator). Only the explicit agent.message permission is
+	// needed — avoid a duplicate built-in membership grant.
+	msgAuthzGrantAgentMessage(t, s, user.ID, project.ID)
 
 	agent := &store.Agent{
 		ID:           tid("agent-conv-fail"),
