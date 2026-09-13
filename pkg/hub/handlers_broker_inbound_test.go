@@ -776,6 +776,11 @@ func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
+	// Wire a recording dispatcher so the handler can complete the full
+	// dispatch→persist→200 path instead of returning 503.
+	dispatcher := &recordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
 	// Separate owner and sender to avoid built-in membership conflicts.
 	owner := &store.User{
 		ID:          tid("owner-co-addr"),
@@ -875,23 +880,54 @@ func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
 		rec := httptest.NewRecorder()
 		srv.mux.ServeHTTP(rec, req)
 
-		// 503 = no dispatcher configured in test; reaching this status proves
-		// the co-addressee sender passed authorization (phase, mode, and
-		// agent.message permission checks) and the handler proceeded to
-		// dispatch. Co-addressee envelope rendering (lines 388-422 of the
-		// handler) executes only when a dispatcher is present, so this test
-		// validates the authorization path, not the rendering path.
-		assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
-			"primary with co-addressees should be authorized and reach dispatch; got %d: %s", rec.Code, rec.Body.String())
-		var errResp1 ErrorResponse
-		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp1))
-		assert.Equal(t, ErrCodeUnavailable, errResp1.Error.Code,
-			"expected 'unavailable' (no dispatcher), not an authorization denial")
+		// ── Status: full 200 success (dispatch + persist completed). ──
+		require.Equal(t, http.StatusOK, rec.Code,
+			"primary with co-addressees should succeed; got %d: %s", rec.Code, rec.Body.String())
+
+		// Verify response body confirms delivery to the primary agent.
+		var resp map[string]interface{}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Equal(t, true, resp["delivered"], "response should confirm delivery")
+		assert.Equal(t, primaryAgent.ID, resp["agentId"], "response should reference primary agent")
+
+		// ── Dispatch assertions: the dispatcher received the message. ──
+		calls := dispatcher.getCalls()
+		require.NotEmpty(t, calls, "dispatcher should have recorded at least one call")
+		lastCall := calls[len(calls)-1]
+		assert.Equal(t, primaryAgent.Slug, lastCall.Agent.Slug,
+			"dispatch target should be the primary agent (coder)")
+		assert.Equal(t, "check this PR", lastCall.Message,
+			"dispatched message body should match")
+
+		// The structured message should carry co-addressee rendering in
+		// DeliveryText (rendered by RenderDeliveryText when write-deny is
+		// enabled, which is the default in testServer).
+		if lastCall.StructuredMessage != nil && lastCall.StructuredMessage.DeliveryText != "" {
+			assert.Contains(t, lastCall.StructuredMessage.DeliveryText, "coder",
+				"delivery text should reference co-addressee 'coder'")
+			assert.Contains(t, lastCall.StructuredMessage.DeliveryText, "reviewer",
+				"delivery text should reference co-addressee 'reviewer'")
+		}
+
+		// ── Persistence: the message was stored. ──
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{
+			AgentID: primaryAgent.ID,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.NotEmpty(t, msgs.Items, "message should be persisted in the store")
+		persisted := msgs.Items[0]
+		assert.Equal(t, senderRef, persisted.Sender, "persisted sender should match")
+		assert.Equal(t, "agent:"+primaryAgent.Slug, persisted.Recipient, "persisted recipient should match")
+		assert.Equal(t, messages.TypeInstruction, persisted.Type, "persisted type should be instruction")
+		assert.Equal(t, "discord", persisted.Channel, "persisted channel should match")
 	})
 
 	t.Run("mention with co-addressees accepted", func(t *testing.T) {
 		topic := "scion.project." + project.ID + ".agent." + secondaryAgent.Slug + ".messages"
 		coAddressees, _ := json.Marshal([]string{"coder", "reviewer"})
+
+		// Record dispatcher call count before this subtest.
+		callsBefore := len(dispatcher.getCalls())
 
 		payload := inboundMessageRequest{
 			Topic: topic,
@@ -922,14 +958,47 @@ func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
 		rec := httptest.NewRecorder()
 		srv.mux.ServeHTTP(rec, req)
 
-		// Same as above: 503 proves the mention-typed message with
-		// co-addressees metadata passed authorization for the secondary
-		// agent (reviewer) and reached the dispatch stage.
-		assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
-			"mention with co-addressees should be authorized and reach dispatch; got %d: %s", rec.Code, rec.Body.String())
-		var errResp2 ErrorResponse
-		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp2))
-		assert.Equal(t, ErrCodeUnavailable, errResp2.Error.Code,
-			"expected 'unavailable' (no dispatcher), not an authorization denial")
+		// ── Status: full 200 success. ──
+		require.Equal(t, http.StatusOK, rec.Code,
+			"mention with co-addressees should succeed; got %d: %s", rec.Code, rec.Body.String())
+
+		// Verify response body confirms delivery to the secondary agent.
+		var resp map[string]interface{}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Equal(t, true, resp["delivered"], "response should confirm delivery")
+		assert.Equal(t, secondaryAgent.ID, resp["agentId"], "response should reference secondary agent (reviewer)")
+
+		// ── Dispatch assertions: the dispatcher received the mention. ──
+		callsAfter := dispatcher.getCalls()
+		require.Greater(t, len(callsAfter), callsBefore,
+			"dispatcher should have recorded a new call for the mention")
+		mentionCall := callsAfter[len(callsAfter)-1]
+		assert.Equal(t, secondaryAgent.Slug, mentionCall.Agent.Slug,
+			"dispatch target should be the secondary agent (reviewer)")
+
+		// The structured message should carry mention-type co-addressee
+		// rendering with both agents listed in the delivery envelope.
+		if mentionCall.StructuredMessage != nil && mentionCall.StructuredMessage.DeliveryText != "" {
+			assert.Contains(t, mentionCall.StructuredMessage.DeliveryText, "coder",
+				"mention delivery text should reference co-addressee 'coder'")
+			assert.Contains(t, mentionCall.StructuredMessage.DeliveryText, "reviewer",
+				"mention delivery text should reference co-addressee 'reviewer'")
+			// Mention-type messages set IsMention=true in the render input,
+			// which changes the envelope type to "mention".
+			assert.Contains(t, mentionCall.StructuredMessage.DeliveryText, "mention",
+				"mention delivery text should carry mention type marker")
+		}
+
+		// ── Persistence: the mention message was stored. ──
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{
+			AgentID: secondaryAgent.ID,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.NotEmpty(t, msgs.Items, "mention message should be persisted in the store")
+		persisted := msgs.Items[0]
+		assert.Equal(t, senderRef, persisted.Sender, "persisted sender should match")
+		assert.Equal(t, "agent:"+secondaryAgent.Slug, persisted.Recipient, "persisted recipient should match")
+		assert.Equal(t, messages.TypeMention, persisted.Type, "persisted type should be mention")
+		assert.Equal(t, "discord", persisted.Channel, "persisted channel should match")
 	})
 }
