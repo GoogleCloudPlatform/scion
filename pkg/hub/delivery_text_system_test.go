@@ -79,6 +79,7 @@ func TestPhase9f_Scheduler_DeliveryText_StampedWhenSwitchOn(t *testing.T) {
 		EventType: "message",
 		Payload:   string(payload),
 		Status:    store.ScheduledEventPending,
+		CreatedBy: agentID, // Creator must be a real agent for fire-time authorization.
 	}
 
 	err := handler(ctx, evt)
@@ -135,6 +136,7 @@ func TestPhase9f_Scheduler_DeliveryText_EmptyWhenSwitchOff(t *testing.T) {
 		EventType: "message",
 		Payload:   string(payload),
 		Status:    store.ScheduledEventPending,
+		CreatedBy: agentID, // Creator must be a real agent for fire-time authorization.
 	}
 
 	err := handler(ctx, evt)
