@@ -1586,11 +1586,11 @@ func isEmailAuthorized(email string, authorizedDomains []string, adminEmails []s
 //
 // The adminEmails config list is the sole authority for the "admin" role:
 //   - Present in adminEmails → always "admin" (promotion).
-//   - Absent from adminEmails AND currentRole is "admin" → demoted to "member"
-//     (D11: removal from AdminEmails is no longer a no-op).
+//   - Absent from adminEmails AND currentRole is "admin" → demoted to
+//     defaultRole (D11: removal from AdminEmails is no longer a no-op).
 //   - Absent from adminEmails AND currentRole is anything else → preserved
 //     verbatim (including "viewer" and any role added in future).
-//   - No stored role (new user) → "member".
+//   - No stored role (new user) → defaultRole (from config; defaults to "member").
 //
 // This function intentionally does NOT demote non-admin roles: a "viewer" set
 // through the admin UI stays "viewer". Only the "admin" role is owned by
@@ -1603,7 +1603,11 @@ func isEmailAuthorized(email string, authorizedDomains []string, adminEmails []s
 //
 // currentRole is the user's role as stored in the database; pass "" for a user
 // that does not exist yet.
-func determineUserRole(email string, adminEmails []string, currentRole string, demotionSafe bool) string {
+//
+// defaultRole is the configured default role for new users (from
+// auth.default_user_role). Only "member" and "viewer" are accepted; any other
+// value (including "admin") falls back to "member".
+func determineUserRole(email string, adminEmails []string, currentRole string, demotionSafe bool, defaultRole string) string {
 	emailLower := strings.ToLower(email)
 	for _, adminEmail := range adminEmails {
 		if strings.ToLower(adminEmail) == emailLower {
@@ -1611,7 +1615,10 @@ func determineUserRole(email string, adminEmails []string, currentRole string, d
 		}
 	}
 	// D11: if the user currently holds "admin" but is no longer in adminEmails,
-	// demote to "member". The admin role is owned by config, not by the store.
+	// demote to defaultRole. The admin role is owned by config, not by the
+	// store. Using defaultRole ensures that when the org configures "viewer"
+	// as default, a demoted admin does not land at a higher privilege than
+	// new users would receive.
 	//
 	// Empty-list safety: when adminEmails is nil or empty, do NOT demote.
 	// An empty list is almost always a config load failure, not an instruction
@@ -1623,10 +1630,19 @@ func determineUserRole(email string, adminEmails []string, currentRole string, d
 	// ran), refuse login-time demotion too — the same condition that prevents
 	// mass demotion at startup must prevent one-at-a-time demotion at login.
 	if currentRole == "admin" && len(adminEmails) > 0 && demotionSafe {
+		if defaultRole == "viewer" {
+			return "viewer"
+		}
 		return "member"
 	}
 	if currentRole != "" {
 		return currentRole
+	}
+	// New user: use the configured default role. Only "member" and "viewer"
+	// are accepted; anything else (including "admin") falls back to "member"
+	// to prevent config-driven admin escalation.
+	if defaultRole == "viewer" {
+		return "viewer"
 	}
 	return "member"
 }
@@ -1637,7 +1653,7 @@ func determineUserRole(email string, adminEmails []string, currentRole string, d
 // reconciler never ran), demotionSafe is false and login-time demotion is blocked
 // to prevent one-at-a-time admin loss through the interactive path.
 func (s *Server) getUserRole(email, currentRole string) string {
-	return determineUserRole(email, s.AdminEmails(), currentRole, s.demotionSafe.Load())
+	return determineUserRole(email, s.AdminEmails(), currentRole, s.demotionSafe.Load(), s.DefaultUserRole())
 }
 
 // handleInviteRedeem handles POST /api/v1/auth/invite/redeem.

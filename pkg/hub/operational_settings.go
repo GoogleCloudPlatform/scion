@@ -65,6 +65,7 @@ type Layer1Snapshot struct {
 	// Access
 	AdminEmails       []string
 	UserAccessMode    string
+	DefaultUserRole   string
 	AuthorizedDomains []string
 
 	// Lifecycle
@@ -700,6 +701,7 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	// Access
 	snap.AdminEmails = k.Strings("server.hub.admin_emails")
 	snap.UserAccessMode = k.String("server.auth.user_access_mode")
+	snap.DefaultUserRole = k.String("server.auth.default_user_role")
 	snap.AuthorizedDomains = k.Strings("server.auth.authorized_domains")
 
 	// Lifecycle
@@ -835,6 +837,7 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap := Layer1Snapshot{
 		AdminEmails:        gc.Hub.AdminEmails,
 		UserAccessMode:     gc.Auth.UserAccessMode,
+		DefaultUserRole:    gc.Auth.DefaultUserRole,
 		AuthorizedDomains:  gc.Auth.AuthorizedDomains,
 		AutoSuspendStalled: gc.Hub.AutoSuspendStalled,
 		TelemetryEnabled:   gc.TelemetryEnabled,
@@ -946,6 +949,15 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	} else if s.config.UserAccessMode != "" {
 		s.config.UserAccessMode = ""
 		applied = append(applied, "user_access_mode")
+	}
+
+	// Default user role
+	if snap.DefaultUserRole != "" {
+		s.config.DefaultUserRole = snap.DefaultUserRole
+		applied = append(applied, "default_user_role")
+	} else if s.config.DefaultUserRole != "" {
+		s.config.DefaultUserRole = ""
+		applied = append(applied, "default_user_role")
 	}
 
 	// GitHub App non-sensitive config

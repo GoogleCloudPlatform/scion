@@ -47,7 +47,7 @@ func init() {
 	Registry = []Section{
 		{
 			Name:       "access",
-			KoanfPaths: []string{"server.hub.admin_emails", "server.auth.user_access_mode", "server.auth.authorized_domains"},
+			KoanfPaths: []string{"server.hub.admin_emails", "server.auth.user_access_mode", "server.auth.default_user_role", "server.auth.authorized_domains"},
 			New:        func() any { return &AccessSettings{} },
 		},
 		{
@@ -281,6 +281,7 @@ func compileSchemas() {
 			"properties": map[string]interface{}{
 				"admin_emails":       getSchemaProperty(root, "server", "hub", "admin_emails"),
 				"user_access_mode":   getSchemaProperty(root, "server", "auth", "user_access_mode"),
+				"default_user_role":  getSchemaProperty(root, "server", "auth", "default_user_role"),
 				"authorized_domains": getSchemaProperty(root, "server", "auth", "authorized_domains"),
 			},
 			"additionalProperties": false,
