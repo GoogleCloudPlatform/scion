@@ -840,6 +840,11 @@ func TestGitCloneWorkspace_DefaultEnvValues(t *testing.T) {
 	if !strings.Contains(errMsg, "git clone failed") && !strings.Contains(errMsg, "git init failed") && !strings.Contains(errMsg, "git remote add failed") && !strings.Contains(errMsg, "failed") {
 		t.Errorf("expected a git failure error, got: %v", err)
 	}
+
+	// Verify .git/ is removed after clone failure to prevent credential leak (miller79/scion#65).
+	if _, err := os.Stat(filepath.Join(tmpWorkspace, ".git")); !os.IsNotExist(err) {
+		t.Error(".git/ should be removed after clone failure to prevent credential leak")
+	}
 }
 
 func TestGitCloneWorkspace_NonZeroUIDChownsWorkspace(t *testing.T) {
@@ -875,7 +880,13 @@ func TestGitCloneWorkspace_NonZeroUIDChownsWorkspace(t *testing.T) {
 	if !strings.Contains(errMsg, "git clone failed") && !strings.Contains(errMsg, "git init failed") && !strings.Contains(errMsg, "git remote add failed") && !strings.Contains(errMsg, "failed") {
 		t.Errorf("expected a git failure error, got: %v", err)
 	}
+
+	// Verify .git/ is removed after clone failure to prevent credential leak (miller79/scion#65).
+	if _, err := os.Stat(filepath.Join(tmpWorkspace, ".git")); !os.IsNotExist(err) {
+		t.Error(".git/ should be removed after clone failure to prevent credential leak")
+	}
 }
+
 func TestConfigureGitCommand_SkipsCredentialOverrideWhenAlreadyRunningAsTargetUser(t *testing.T) {
 	cmd := exec.CommandContext(context.Background(), "git", "status")
 
