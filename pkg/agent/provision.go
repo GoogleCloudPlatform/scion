@@ -483,6 +483,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	projectName := config.GetProjectName(projectDir)
 	isGit := util.IsGitRepoDir(projectDir)
+	isGitWorkspace := isGit // preserve for skill injection before container override
 	if isGit && os.Getenv("SCION_HOST_UID") != "" {
 		// Inside an agent container: treat as non-git to prevent worktree
 		// creation. Container worktrees produce path-identity mismatches
@@ -902,7 +903,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Step 3a2: Inject platform skills from embedded resources
 	hubEnabled := (settings != nil && settings.IsHubEnabled()) || api.IsBrokerModeFromContext(ctx)
 	injCtx := workspaceSkillsInjectionContext{
-		IsGit:      isGit,
+		IsGit:      isGitWorkspace,
 		HubEnabled: hubEnabled,
 	}
 	if skillsDir != "" {
