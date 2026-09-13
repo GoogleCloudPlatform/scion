@@ -993,6 +993,10 @@ func (s *Server) hydrateTemplate(ctx context.Context, cfg *CreateAgentConfig, co
 // config on its local filesystem.
 func (s *Server) hydrateHarnessConfig(ctx context.Context, cfg *CreateAgentConfig, conn *HubConnection) (string, error) {
 	if cfg == nil || (cfg.HarnessConfigID == "" && cfg.HarnessConfigHash == "") {
+		if cfg != nil && cfg.HarnessConfig != "" {
+			s.agentLifecycleLog.Warn("Harness-config hydration skipped: dispatch names harness-config but carries no config ID or hash; broker will fall back to on-disk search",
+				"harness_config", cfg.HarnessConfig)
+		}
 		return "", nil
 	}
 
