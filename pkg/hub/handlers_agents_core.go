@@ -3267,9 +3267,9 @@ func (s *Server) ensureHostSARecord(
 	}
 
 	sa := &store.GCPServiceAccount{
-		ID:      gouuid.New().String(),
-		Scope:   store.ScopeHub,
-		ScopeID: broker.ID,
+		ID:          gouuid.New().String(),
+		Scope:       store.ScopeHub,
+		ScopeID:     broker.ID,
 		Email:       broker.GCPHostServiceAccountEmail,
 		ProjectID:   projectID,
 		DisplayName: fmt.Sprintf("Broker host SA (%s)", broker.Name),
