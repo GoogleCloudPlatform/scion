@@ -23,7 +23,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"testing"
 	"time"
 
@@ -197,26 +196,4 @@ func TestPhase9f_Notification_DeliveryText_EmptyWhenSwitchOff(t *testing.T) {
 		t.Errorf("DeliveryText should be empty when envelope switch is OFF, got %q",
 			calls[0].StructuredMessage.DeliveryText)
 	}
-}
-
-// ---------------------------------------------------------------------------
-// helpers (shared with other test files via package scope)
-// ---------------------------------------------------------------------------
-
-// enableReadSwitchOnND is a helper that sets the writeDenyEnabled callback
-// on a NotificationDispatcher to always return true. This is the nd-level
-// equivalent of enableReadSwitch (which operates on *Server).
-func enableReadSwitchOnND(nd *NotificationDispatcher) {
-	nd.writeDenyEnabled = func() bool { return true }
-}
-
-// newSchedulerTestServer creates a test Server with a dispatcher and
-// operational settings suitable for exercising the messageEventHandler
-// dispatch path. It is NOT a general-purpose replacement for testServer;
-// it is purpose-built for the scheduler DeliveryText tests.
-func newSchedulerTestServer(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	srv, s := testServer(t)
-	srv.scheduler = NewScheduler(s, slog.Default())
-	return srv, s
 }

@@ -94,6 +94,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/brokers/":                               "broker-hmac:broker",
 	"/api/v1/broker/callback":                        "broker-hmac:callback",
 	"/api/v1/broker/inbound":                         "broker-hmac:inbound",
+	"/api/v1/broker/inbound/routed":                  "broker-hmac:inbound-routed",
 	"/api/v1/broker/projects":                        "broker-hmac:projects",
 	"/api/v1/admin/maintenance":                      "hub-admin:maintenance",
 	"/api/v1/admin/maintenance/operations":           "hub-admin:maintenance",

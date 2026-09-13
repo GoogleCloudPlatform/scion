@@ -876,3 +876,50 @@ func TestDeliverUserMessage_RoutedTimeout_NoLegacyFallback(t *testing.T) {
 	assert.Len(t, f.legacyCalls, 0,
 		"must NOT fall back to legacy on timeout")
 }
+
+// --- R-1 regression: context save after expired preflight context ---
+
+// TestDeliverUserMessage_RoutedEnabled_ContextSavedAfterPreflightExpiry is
+// the regression test for R-1: the 10-second preflight context created in
+// deliverUserMessage must NOT be reused for the store.SetConversationContext
+// call after deliverRoutedInbound returns. deliverRoutedInbound uses its own
+// 6-minute http.Client timeout, so the original context will be expired on
+// slow hub responses.
+//
+// This test shortens the preflight timeout to 50ms and replaces the delivery
+// function with one that sleeps 150ms (outliving the preflight context),
+// then returns a successful delivery. The fix creates a fresh bounded
+// context for the store call, so the save must succeed despite the expired
+// parent.
+func TestDeliverUserMessage_RoutedEnabled_ContextSavedAfterPreflightExpiry(t *testing.T) {
+	f := newRoutedTestFixture(t)
+	f.enableRouted()
+
+	es := f.events()
+
+	// Shorten the preflight timeout to 50ms so we don't wait 10s in the test.
+	es.preflightTimeout = 50 * time.Millisecond
+
+	// Override deliverRoutedInbound to simulate a slow hub response that
+	// outlives the short preflight context. deliverRoutedInbound in production
+	// creates its own http.Client (6-min timeout) and does NOT propagate the
+	// parent ctx to the HTTP call, so the request itself succeeds even though
+	// the parent ctx is long expired by return time.
+	origDeliver := es.deliverRoutedInbound
+	es.deliverRoutedInbound = func(projectID, defaultAgent string, msg *messages.StructuredMessage) (*routedInboundResult, *hubError) {
+		// Sleep longer than the 50ms preflight context.
+		time.Sleep(150 * time.Millisecond)
+		return origDeliver(projectID, defaultAgent, msg)
+	}
+
+	f.events().deliverUserMessage("C-TEST", "1726099200.009900", "U-SENDER", "preflight expiry regression")
+
+	// The context save must succeed despite the expired parent ctx, because
+	// deliverUserMessage now creates a fresh bounded context for the store call.
+	checkCtx := context.Background()
+	cc, err := f.store.GetConversationContext(checkCtx, "U-SENDER", "proj-001", "alpha")
+	require.NoError(t, err)
+	require.NotNil(t, cc, "conversation context must be saved even when preflight context is expired (R-1 regression)")
+	assert.Equal(t, "C-TEST", cc.LastChannelID)
+	assert.Equal(t, "1726099200.009900", cc.LastThreadTS)
+}
