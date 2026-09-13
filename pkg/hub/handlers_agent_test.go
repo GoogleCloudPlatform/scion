@@ -3800,8 +3800,10 @@ func TestHandleAgentMessage_PlainTextBuildsStructuredMessage(t *testing.T) {
 	assert.Equal(t, messages.TypeInstruction, sm.Type)
 	assert.Equal(t, "hello from the UI", sm.Msg)
 	assert.Equal(t, "agent:"+agent.Slug, sm.Recipient)
-	// Dev auth sets DisplayName to "Development User"
-	assert.Equal(t, "user:Development User", sm.Sender)
+	// Dev auth identity has Email="dev@localhost" and DisplayName="Development User".
+	// The handler prefers email over display name for user: principal refs
+	// (see commits 47ee6f407, a3d0d9378) to produce routable references.
+	assert.Equal(t, "user:dev@localhost", sm.Sender)
 	assert.NotEmpty(t, sm.Timestamp)
 }
 
@@ -3863,8 +3865,10 @@ func TestHandleAgentMessage_StructuredMessagePopulatesSender(t *testing.T) {
 	require.NotNil(t, sm, "expected a StructuredMessage")
 	assert.Equal(t, "hello from web UI", sm.Msg)
 	assert.Equal(t, "agent:"+agent.Slug, sm.Recipient)
-	// Dev auth sets DisplayName to "Development User"
-	assert.Equal(t, "user:Development User", sm.Sender, "sender should be populated from authenticated user")
+	// Dev auth identity has Email="dev@localhost" and DisplayName="Development User".
+	// The handler prefers email over display name for user: principal refs
+	// (see commits 47ee6f407, a3d0d9378) to produce routable references.
+	assert.Equal(t, "user:dev@localhost", sm.Sender, "sender should be populated from authenticated user")
 	assert.NotEmpty(t, sm.SenderID, "sender ID should be populated")
 }
 
