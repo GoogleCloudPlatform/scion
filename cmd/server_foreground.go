@@ -1911,17 +1911,50 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// --- Settings-DB Phase 3: OperationalSettings wiring (§3.9) ---
 	// Driver-agnostic: initOperationalSettings handles both postgres (advisory
 	// locking) and SQLite (single-writer) via the existing AdvisoryLocker branch.
-	// Fail-soft: a boot-time error is logged loudly but does not abort the hub.
-	// Without OperationalSettings the messaging admin API switches remain
-	// fail-closed (OFF) — see GetOperationalSettings nil guard in handlers.
-	if err := initOperationalSettings(ctx, cfg, hubSrv, s, globalDir); err != nil {
-		slog.Error("Operational settings init failed — settings will be unavailable for this process lifetime",
-			"error", err,
-			"driver", cfg.Database.Driver,
-		)
+	//
+	// Fail-closed: if settings cannot be loaded the hub must not serve ordinary
+	// traffic, because a DB-persisted admin_mode=true would be invisible to this
+	// process. Retry with exponential backoff to tolerate transient DB issues,
+	// then fail the hub startup if all attempts are exhausted.
+	if err := initOperationalSettingsWithRetry(ctx, cfg, hubSrv, s, globalDir); err != nil {
+		return nil, fmt.Errorf("operational settings init failed after retries (driver=%s): %w",
+			cfg.Database.Driver, err)
 	}
 
 	return hubSrv, nil
+}
+
+// settingsInitMaxRetries is the number of retry attempts for operational
+// settings initialization before the hub gives up and refuses to start.
+const settingsInitMaxRetries = 3
+
+// initOperationalSettingsWithRetry wraps initOperationalSettings with
+// exponential backoff. If all attempts fail, it returns the last error
+// so the caller can abort hub startup (fail-closed). This ensures a
+// DB-persisted admin_mode=true is never bypassed due to a transient
+// boot-time failure loading settings.
+func initOperationalSettingsWithRetry(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, s store.Store, globalDir string) error {
+	var lastErr error
+	for attempt := 0; attempt <= settingsInitMaxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(attempt) * 2 * time.Second
+			slog.Warn("Retrying operational settings init",
+				"attempt", attempt+1,
+				"backoff", backoff,
+				"prev_error", lastErr,
+			)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled during settings init retry: %w", ctx.Err())
+			}
+		}
+		lastErr = initOperationalSettings(ctx, cfg, hubSrv, s, globalDir)
+		if lastErr == nil {
+			return nil
+		}
+	}
+	return lastErr
 }
 
 // initOperationalSettings sets up the OperationalSettings service (settings-db
