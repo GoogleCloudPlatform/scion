@@ -80,7 +80,7 @@ func simulateRoute3Backfill(t *testing.T, db *sql.DB, projectID string) {
 		 WHERE project_id = ? AND thread_id != '' AND conversation_id = ''`,
 		projectID)
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	type msgRow struct{ id, threadID, channel string }
 	var msgs []msgRow

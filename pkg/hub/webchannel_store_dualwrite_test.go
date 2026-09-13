@@ -437,7 +437,7 @@ VALUES
 	rows, err := db.Query(
 		`SELECT id, conversation_id FROM messages WHERE thread_id = ? ORDER BY id`, "promoted-repoint")
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var count int
 	for rows.Next() {
 		var msgID, cid string
