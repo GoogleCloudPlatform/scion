@@ -419,7 +419,14 @@ func (r *PodmanRuntime) RemoveImage(ctx context.Context, image string) error {
 }
 
 func (r *PodmanRuntime) PullImage(ctx context.Context, image string) error {
-	return runInteractiveCommand(r.Command, "pull", image)
+	out, err := runSimpleCommand(ctx, r.Command, "pull", image)
+	if err != nil {
+		if trimmed := strings.TrimSpace(out); trimmed != "" {
+			return fmt.Errorf("pull %q: %w\n%s", image, err, trimmed)
+		}
+		return fmt.Errorf("pull %q: %w", image, err)
+	}
+	return nil
 }
 
 func (r *PodmanRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {
