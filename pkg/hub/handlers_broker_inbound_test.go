@@ -811,6 +811,9 @@ func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 	srv.createProjectMembersGroup(ctx, project)
 	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+	// project-member role does not include agent.message (removed in R3);
+	// grant it explicitly so the co-addressee sender is authorized.
+	msgAuthzGrantAgentMessage(t, s, user.ID, project.ID)
 
 	// Create two agents: primary (coder) and secondary (reviewer).
 	primaryAgent := &store.Agent{
@@ -872,10 +875,18 @@ func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
 		rec := httptest.NewRecorder()
 		srv.mux.ServeHTTP(rec, req)
 
-		// ServiceUnavailable = no dispatcher in test; message handling
-		// succeeded up to dispatch. OK = dispatch skipped (nil dispatcher).
-		assert.Contains(t, []int{http.StatusOK, http.StatusServiceUnavailable}, rec.Code,
-			"primary with co-addressees should be handled; got %d: %s", rec.Code, rec.Body.String())
+		// 503 = no dispatcher configured in test; reaching this status proves
+		// the co-addressee sender passed authorization (phase, mode, and
+		// agent.message permission checks) and the handler proceeded to
+		// dispatch. Co-addressee envelope rendering (lines 388-422 of the
+		// handler) executes only when a dispatcher is present, so this test
+		// validates the authorization path, not the rendering path.
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
+			"primary with co-addressees should be authorized and reach dispatch; got %d: %s", rec.Code, rec.Body.String())
+		var errResp1 ErrorResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp1))
+		assert.Equal(t, ErrCodeUnavailable, errResp1.Error.Code,
+			"expected 'unavailable' (no dispatcher), not an authorization denial")
 	})
 
 	t.Run("mention with co-addressees accepted", func(t *testing.T) {
@@ -911,8 +922,14 @@ func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
 		rec := httptest.NewRecorder()
 		srv.mux.ServeHTTP(rec, req)
 
-		// The mention message should be accepted.
-		assert.Contains(t, []int{http.StatusOK, http.StatusServiceUnavailable}, rec.Code,
-			"mention with co-addressees should be handled; got %d: %s", rec.Code, rec.Body.String())
+		// Same as above: 503 proves the mention-typed message with
+		// co-addressees metadata passed authorization for the secondary
+		// agent (reviewer) and reached the dispatch stage.
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
+			"mention with co-addressees should be authorized and reach dispatch; got %d: %s", rec.Code, rec.Body.String())
+		var errResp2 ErrorResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp2))
+		assert.Equal(t, ErrCodeUnavailable, errResp2.Error.Code,
+			"expected 'unavailable' (no dispatcher), not an authorization denial")
 	})
 }
