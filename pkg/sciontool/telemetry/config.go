@@ -230,9 +230,11 @@ func (c *Config) IsCloudConfigured() bool {
 	if !c.CloudEnabled {
 		return false
 	}
-	// GCP mode: SDKs handle endpoints and auth (ADC or explicit credentials)
+	// GCP mode: require a non-empty ProjectID so incomplete setups (e.g.
+	// stale credentials file without a project ID) do not silently enable
+	// cloud export and enter an indefinite retry loop.
 	if c.CloudProvider == "gcp" {
-		return true
+		return c.ProjectID != ""
 	}
 	// Generic OTLP mode: endpoint is required
 	return c.Endpoint != ""

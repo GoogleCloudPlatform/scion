@@ -222,19 +222,30 @@ func TestIsCloudConfigured_GCP(t *testing.T) {
 		expected bool
 	}{
 		{
-			name: "gcp with credentials",
+			name: "gcp with credentials and project ID",
+			config: &Config{
+				CloudEnabled:       true,
+				CloudProvider:      "gcp",
+				GCPCredentialsFile: "/path/to/creds.json",
+				ProjectID:          "my-project",
+			},
+			expected: true,
+		},
+		{
+			name: "gcp without project ID returns false",
 			config: &Config{
 				CloudEnabled:       true,
 				CloudProvider:      "gcp",
 				GCPCredentialsFile: "/path/to/creds.json",
 			},
-			expected: true,
+			expected: false,
 		},
 		{
-			name: "gcp without credentials (ADC fallback)",
+			name: "gcp without credentials but with project ID (ADC fallback)",
 			config: &Config{
 				CloudEnabled:  true,
 				CloudProvider: "gcp",
+				ProjectID:     "my-project",
 			},
 			expected: true,
 		},
@@ -244,15 +255,17 @@ func TestIsCloudConfigured_GCP(t *testing.T) {
 				CloudEnabled:       false,
 				CloudProvider:      "gcp",
 				GCPCredentialsFile: "/path/to/creds.json",
+				ProjectID:          "my-project",
 			},
 			expected: false,
 		},
 		{
-			name: "gcp with credentials and no endpoint is OK",
+			name: "gcp with credentials and project ID, no endpoint is OK",
 			config: &Config{
 				CloudEnabled:       true,
 				CloudProvider:      "gcp",
 				GCPCredentialsFile: "/path/to/creds.json",
+				ProjectID:          "my-project",
 				Endpoint:           "", // no endpoint needed for GCP
 			},
 			expected: true,
@@ -542,13 +555,32 @@ func TestIsGCP_WithEndpointNoCreds(t *testing.T) {
 	cfg := &Config{
 		CloudEnabled:  true,
 		CloudProvider: "gcp",
+		ProjectID:     "my-project",
 		Endpoint:      "cloudtrace.googleapis.com:443",
 	}
 	if !cfg.IsGCP() {
 		t.Error("IsGCP() should return true when CloudProvider=gcp, even without credentials file")
 	}
 	if !cfg.IsCloudConfigured() {
-		t.Error("IsCloudConfigured() should return true when CloudProvider=gcp, even without credentials file")
+		t.Error("IsCloudConfigured() should return true when CloudProvider=gcp with project ID, even without credentials file")
+	}
+}
+
+func TestIsCloudConfigured_GCPRequiresProjectID(t *testing.T) {
+	// GCP mode without a ProjectID should not be considered configured,
+	// preventing indefinite retry loops when credentials exist but project
+	// ID is missing.
+	cfg := &Config{
+		CloudEnabled:       true,
+		CloudProvider:      "gcp",
+		GCPCredentialsFile: "/path/to/creds.json",
+	}
+	if cfg.IsCloudConfigured() {
+		t.Error("IsCloudConfigured() should return false when CloudProvider=gcp but ProjectID is empty")
+	}
+	cfg.ProjectID = "my-project"
+	if !cfg.IsCloudConfigured() {
+		t.Error("IsCloudConfigured() should return true when CloudProvider=gcp and ProjectID is set")
 	}
 }
 
