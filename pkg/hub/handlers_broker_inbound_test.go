@@ -781,6 +781,11 @@ func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
 	dispatcher := &recordingDispatcher{}
 	srv.SetDispatcher(dispatcher)
 
+	// Enable the conversation envelope switch so the handler enters the
+	// RenderDeliveryText path and populates DeliveryText with co-addressee
+	// attribution (writeDenyEnabled() must return true).
+	enableWriteDenySwitch(t, srv)
+
 	// Separate owner and sender to avoid built-in membership conflicts.
 	owner := &store.User{
 		ID:          tid("owner-co-addr"),
@@ -900,14 +905,16 @@ func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
 			"dispatched message body should match")
 
 		// The structured message should carry co-addressee rendering in
-		// DeliveryText (rendered by RenderDeliveryText when write-deny is
-		// enabled, which is the default in testServer).
-		if lastCall.StructuredMessage != nil && lastCall.StructuredMessage.DeliveryText != "" {
-			assert.Contains(t, lastCall.StructuredMessage.DeliveryText, "coder",
-				"delivery text should reference co-addressee 'coder'")
-			assert.Contains(t, lastCall.StructuredMessage.DeliveryText, "reviewer",
-				"delivery text should reference co-addressee 'reviewer'")
-		}
+		// DeliveryText (rendered by RenderDeliveryText when the envelope
+		// switch is ON — enabled above via enableWriteDenySwitch).
+		require.NotNil(t, lastCall.StructuredMessage,
+			"dispatcher should receive a non-nil StructuredMessage")
+		require.NotEmpty(t, lastCall.StructuredMessage.DeliveryText,
+			"DeliveryText must be populated — envelope switch is ON")
+		assert.Contains(t, lastCall.StructuredMessage.DeliveryText, "coder",
+			"delivery text should reference co-addressee 'coder'")
+		assert.Contains(t, lastCall.StructuredMessage.DeliveryText, "reviewer",
+			"delivery text should reference co-addressee 'reviewer'")
 
 		// ── Persistence: the message was stored. ──
 		msgs, err := s.ListMessages(ctx, store.MessageFilter{
@@ -978,16 +985,18 @@ func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
 
 		// The structured message should carry mention-type co-addressee
 		// rendering with both agents listed in the delivery envelope.
-		if mentionCall.StructuredMessage != nil && mentionCall.StructuredMessage.DeliveryText != "" {
-			assert.Contains(t, mentionCall.StructuredMessage.DeliveryText, "coder",
-				"mention delivery text should reference co-addressee 'coder'")
-			assert.Contains(t, mentionCall.StructuredMessage.DeliveryText, "reviewer",
-				"mention delivery text should reference co-addressee 'reviewer'")
-			// Mention-type messages set IsMention=true in the render input,
-			// which changes the envelope type to "mention".
-			assert.Contains(t, mentionCall.StructuredMessage.DeliveryText, "mention",
-				"mention delivery text should carry mention type marker")
-		}
+		require.NotNil(t, mentionCall.StructuredMessage,
+			"dispatcher should receive a non-nil StructuredMessage")
+		require.NotEmpty(t, mentionCall.StructuredMessage.DeliveryText,
+			"DeliveryText must be populated — envelope switch is ON")
+		assert.Contains(t, mentionCall.StructuredMessage.DeliveryText, "coder",
+			"mention delivery text should reference co-addressee 'coder'")
+		assert.Contains(t, mentionCall.StructuredMessage.DeliveryText, "reviewer",
+			"mention delivery text should reference co-addressee 'reviewer'")
+		// Mention-type messages set IsMention=true in the render input,
+		// which changes the envelope type to "mention".
+		assert.Contains(t, mentionCall.StructuredMessage.DeliveryText, "mention",
+			"mention delivery text should carry mention type marker")
 
 		// ── Persistence: the mention message was stored. ──
 		msgs, err := s.ListMessages(ctx, store.MessageFilter{
