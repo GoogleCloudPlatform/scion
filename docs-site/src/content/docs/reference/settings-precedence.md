@@ -467,10 +467,11 @@ global-below-project ordering that profile env used to provide is retained. Veri
 measurement, with a discriminator key set in **both** the global and the project
 `harness_configs` and absent from the template.
 
-:::caution[The key still parses — the failure is silent]
-`profiles.<name>.env` is still accepted by the settings schema. Leaving it in place produces **no
-error, no warning and no log line** — the values are simply never injected. Do not expect a
-validation failure to find these for you; search your settings files.
+:::caution[The key is now rejected by the schema]
+`profiles.<name>.env` has been removed from the `ProfileConfig` structs and the JSON schema.
+Schema validation now **rejects** settings files that include this field. If your settings
+files still contain `profiles.<name>.env`, you will receive a validation error on startup.
+Search your settings files and migrate any remaining values before upgrading.
 :::
 
 **Why.** In the words of the change's author: *"settings schema has gotten pretty rich, need to
