@@ -113,7 +113,7 @@ In projects with multiple users:
 Messages to **users** (agent-to-human-inbox path) are limited to **2000
 characters** (counted as Unicode runes, not bytes — CJK and emoji each
 count as one character). Agent-to-agent messages have **no enforced cap
-in code** and are not subject to this limit, but remember to keep messge content focused. Longer findings can be written to a shared file and sent as a reference.
+in code** and are not subject to this limit, but remember to keep message content focused. Longer findings can be written to a shared file and sent as a reference.
 
 When the limit is exceeded, the command returns a non-zero exit code but
 also dumps the full CLI `--help` text to `stderr` — the actual error line
@@ -127,48 +127,55 @@ If your user-directed message is long:
 ## Inbound Message Types
 
 Messages arrive wrapped in `---BEGIN SCION MESSAGE---` / `---END SCION MESSAGE---`
-markers and include sender and type metadata.
+markers as a JSON envelope containing sender, type, and conversation metadata.
 
+### Direct vs group conversations
 
-<!-- This should be rewritten to look first at "direct or group" conversation, then 'type' updated fields
- -->
-**Check the `type` field before replying.** The type tells you whether a message
-is addressed to you or is a notification about another agent.
+**Check the `conversation.kind` field first.** It tells you the shape of the conversation you are in:
 
-- **`instruction`** — addressed to you. Read and act on it.
-- **`state-change`** — a notification that an agent changed state (e.g., completed, stalled). No reply needed.
-- **`input-needed`** — an agent is waiting for input. See below.
-- **`mention`** — you were CC'd or mentioned in a message primarily directed at someone else. Treat as FYI — no action needed unless the message text clearly directs you to do something.
-- **`group-set`** — a user @-mentioned multiple agents (not `@all`). Read and act on it like an `instruction`.
-- **`system`** — a hub-generated operational notice (e.g. scheduled event fired, port auto-exposed, message delivery failed). Read for situational awareness; no reply needed. Check `metadata.system_category` for the specific category.
+- **`"direct"`** — a one-to-one conversation between you and the sender. Messages here are addressed to you. The `to` field is usually omitted (your identity is implicit).
+- **`"group"`** — a multi-participant conversation. The `to` field lists all addressees. Read the message, but be aware others received it too — avoid duplicate work unless the message specifically assigns you a task.
 
-<!-- Need to cover mentions and that action only needs to be taken if your mention implies you do something vs just FYI or CC -->
+When `conversation` is absent, the message predates the conversation model or is a broadcast. Treat it like a direct message unless other context suggests otherwise.
 
-**Conversation routing:** Inbound messages carry a `conversation` field in the delivery envelope that identifies the conversation they belong to. When replying, include this conversation identifier using `conv:<uuid>` addressing (e.g., `scion message conv:<uuid> "your reply"`) so the reply persists into the same conversation. An agent that omits the conversation field sends a proactive DM instead of a reply — this is correct for new conversations but wrong for replies, and the system will flag the mismatch. Always read the `conversation` field from the message you are replying to and route your reply into it.
+### The `type` field
+
+Within a conversation, the `type` field classifies how the message reached you:
+
+- **`"message"`** — a text message addressed to you (directly or as part of a group). Read and act on it.
+- **`"event"`** — a lifecycle notification about another agent or the system. Check the `event.type` subfield for the specific event:
+  - `agent.state-changed` — an agent changed state (e.g., completed, stalled). No reply needed.
+  - `agent.input-needed` — an agent is waiting for input. See [Handling `input-needed`](#handling-input-needed) below.
+  - `delivery.failed` — a message you sent could not be delivered.
+  - `schedule.fired` — a scheduled event fired (see the `scion-scheduler` skill).
+  - `port.exposed` — an auto-exposed port notification.
+- **`"mention"`** — you were @-mentioned in a message primarily addressed to someone else. **Default to treating this as FYI — no action required.** Only act if the message text explicitly directs you to do something (e.g., "@agent-X, please review this PR"). Being CC'd or name-dropped in passing is not a request. When in doubt, do nothing.
+
+### Conversation routing
+
+Inbound messages carry a `conversation` field with an `id` that identifies the conversation. When replying, use `conv:<id>` addressing so the reply stays in the same conversation:
+
+```bash
+scion message conv:<conversation-id> "your reply"
+```
+
+An agent that omits the conversation ID sends a proactive DM instead of a reply — correct for starting new conversations, wrong for replies. Always read the `conversation.id` from the message you are replying to and route your reply into it.
 
 ### Handling `input-needed`
-<!-- This section should be reframed as  -->
-When an agent calls `sciontool status ask_user`, the question text is embedded
-in a notification dispatched to that agent's **subscribers** (including any
-agent that created it). The message arrives as
-`"<name> is WAITING_FOR_INPUT: <question>"` with type `input-needed`.
 
-**If you are the parent agent that created the waiting agent**, you may be the
-intended respondent — the child may be asking you for a decision or input as
-part of your coordination. Use `scion message agent:<name>` to reply.
+When an agent calls `sciontool status ask_user`, the hub dispatches the question as an event (`type: "event"`, `event.type: "agent.input-needed"`) to that agent's subscribers.
 
-**If you are a peer or unrelated subscriber**, do not answer. The agent is
-likely waiting for a human or its parent, and your reply will not unblock it.
-Repeated appearances are status re-signals, not impatience.
+**Decision tree when you receive one:**
 
-Answering `input-needed` messages you are not responsible for causes:
+1. **Am I the parent that created this agent?** → You are likely the intended respondent. Read the question and reply with `scion message @<agent-name> "your answer"`.
+2. **Am I a peer or unrelated subscriber?** → Ignore it. The agent is waiting for its parent or a human, and your reply will not unblock it. Repeated appearances are status re-signals, not impatience.
+
+**Why ignoring matters when you are not the parent:**
 - Wasted tokens — the reply goes nowhere useful.
 - False loop signals — repeated echoes look like a stuck agent.
 - **Scope violations** — answering a question meant for someone else can make a recommendation look ratified.
 
-**To request a peer's input, send an `instruction`** via `scion message
-agent:<name>`. Do not rely on your `ask_user` status signal to reach them — it
-is a broadcast to subscribers, not a delivery to an addressee.
+**To request a peer's input, send a direct message** via `scion message @<agent-name>`. Do not rely on your `ask_user` status signal to reach them — it is a broadcast to subscribers, not a delivery to an addressee.
 
 ## Anti-Patterns and Red Flags
 
