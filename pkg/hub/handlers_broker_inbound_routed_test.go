@@ -931,6 +931,8 @@ func TestHandleBrokerInboundRouted_MethodNotAllowed(t *testing.T) {
 	env.srv.mux.ServeHTTP(rec, httpReq)
 
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	assert.Equal(t, "POST", rec.Header().Get("Allow"),
+		"405 response must include Allow header per RFC 9110 §15.5.6")
 }
 
 func TestHandleBrokerInboundRouted_EmptyBody(t *testing.T) {

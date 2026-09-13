@@ -68,7 +68,7 @@ type routedMentionError struct {
 // authorization, conversation resolution, and structured results.
 func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
