@@ -66,34 +66,52 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockBrokerAffinityReap,
 		LockBrokerMessageSweep,
 		LockSchemaMigration,
+		LockGitHubResolutionCacheEviction,
+		LockDiscordGateway,
+		LockTelegramWebhook,
+		LockA2ABridgeSweep,
+		LockHubSettingsSeed,
 		LockExposedPortsSweep,
+		LockStorageMigration,
+		LockBundledResources,
+		LockRecoveryAuthz,
+		LockInlineSecretsMigration,
+		LockNonceCacheEviction,
+		LockChatLinkCodeEviction,
+		LockWebchatMigration,
+		LockDataMigrations,
 	}
 
-	seen := make(map[AdvisoryLockKey]bool, len(singletonKeys)+1)
+	seen := make(map[AdvisoryLockKey]bool, len(singletonKeys)+2)
 	for _, k := range singletonKeys {
 		if seen[k] {
-			t.Errorf("duplicate singleton key: %d", k)
+			t.Errorf("duplicate singleton key: 0x%X", int64(k))
 		}
 		seen[k] = true
 	}
 
-	// LockWorkspaceProvision is in a different range from singletons.
-	if seen[LockWorkspaceProvision] {
-		t.Errorf("LockWorkspaceProvision %d collides with a singleton key", LockWorkspaceProvision)
+	// Per-object class IDs must not collide with singletons or each other.
+	classIDs := []AdvisoryLockKey{
+		LockWorkspaceProvision,
+		LockQuotaEnforcement,
+	}
+	for _, k := range classIDs {
+		if seen[k] {
+			t.Errorf("class ID 0x%X collides with a singleton key", int64(k))
+		}
+		seen[k] = true
 	}
 
-	// Verify the ranges are visually distinct (different 0x5C10_0xxx vs 0x5C10_1xxx).
+	// Verify singletons are in the expected 0x5C10_0xxx range.
 	for _, k := range singletonKeys {
 		if int64(k)&0xFFFF0000 != 0x5C100000 {
-			t.Errorf("singleton key %d (0x%X) not in expected range 0x5C10_0xxx", k, int64(k))
+			t.Errorf("singleton key 0x%X not in expected range 0x5C10_0xxx", int64(k))
 		}
 	}
-	if int64(LockWorkspaceProvision)&0xFFFF0000 != 0x5C100000 {
-		// Both are in 0x5C10_xxxx but the lower 16 bits distinguish singleton vs per-object.
-		// LockWorkspaceProvision should be >= 0x5C10_1000.
-		if int64(LockWorkspaceProvision) < 0x5C101000 {
-			t.Errorf("LockWorkspaceProvision %d (0x%X) should be >= 0x5C10_1000 to separate from singletons",
-				LockWorkspaceProvision, int64(LockWorkspaceProvision))
+	// Class IDs should be >= 0x5C10_1000 to separate from singletons.
+	for _, k := range classIDs {
+		if int64(k) < 0x5C101000 {
+			t.Errorf("class ID 0x%X should be >= 0x5C10_1000 to separate from singletons", int64(k))
 		}
 	}
 }

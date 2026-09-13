@@ -126,10 +126,12 @@ const (
 	//
 	// Originally allocated 0x5C100014 on the Tranche G branch. Main
 	// independently allocated that same value to LockWebchatMigration and
-	// shipped first, so this key was renumbered to 0x5C100015 when the two
-	// lines merged. Advisory locks are ephemeral session locks — never
-	// persisted, and a no-op on SQLite — so renumbering is safe.
-	LockDataMigrations AdvisoryLockKey = 0x5C100015
+	// shipped first, so the key was renumbered. Then 0x5C100015 collided
+	// with upstream's LockBrokerHeartbeatTimeout, so the key was
+	// renumbered again to 0x5C100016. Advisory locks are ephemeral
+	// session locks — never persisted, and a no-op on SQLite — so
+	// renumbering is safe.
+	LockDataMigrations AdvisoryLockKey = 0x5C100016
 
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
