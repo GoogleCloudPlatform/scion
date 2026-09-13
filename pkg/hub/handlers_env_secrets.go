@@ -368,7 +368,10 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	// allowProgeny is only valid on user-scoped env vars with injection_mode=always
+	// allowProgeny is only valid on user-scoped env vars/secrets.
+	// Plain env vars additionally require injection_mode=always;
+	// secret promotions (req.Secret=true) do NOT — the secret dispatch
+	// flow supports as_needed progeny secrets (design doc §5.7).
 	if req.AllowProgeny {
 		if scope != store.ScopeUser {
 			ValidationError(w, "allowProgeny is only supported on user-scoped env vars", map[string]interface{}{
@@ -377,16 +380,18 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 			})
 			return
 		}
-		im := req.InjectionMode
-		if im == "" {
-			im = store.InjectionModeAsNeeded
-		}
-		if im != store.InjectionModeAlways {
-			ValidationError(w, "allowProgeny requires injectionMode to be 'always'", map[string]interface{}{
-				"field":         "allowProgeny",
-				"injectionMode": im,
-			})
-			return
+		if !req.Secret {
+			im := req.InjectionMode
+			if im == "" {
+				im = store.InjectionModeAsNeeded
+			}
+			if im != store.InjectionModeAlways {
+				ValidationError(w, "allowProgeny requires injectionMode to be 'always'", map[string]interface{}{
+					"field":         "allowProgeny",
+					"injectionMode": im,
+				})
+				return
+			}
 		}
 	}
 
@@ -413,6 +418,7 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 			ScopeID:       scopeID,
 			Description:   req.Description,
 			InjectionMode: req.InjectionMode,
+			AllowProgeny:  req.AllowProgeny,
 			CreatedBy:     createdBy,
 			UpdatedBy:     createdBy,
 		}
@@ -821,7 +827,10 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	// allowProgeny is only valid on user-scoped secrets
+	// allowProgeny is only valid on user-scoped secrets.
+	// Unlike env vars, secrets do NOT require injectionMode=always when
+	// allowProgeny is set — the secret dispatch flow supports as_needed
+	// progeny secrets (design doc §5.7).
 	if req.AllowProgeny && scope != store.ScopeUser {
 		ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
 			"field": "allowProgeny",
@@ -946,7 +955,10 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// allowProgeny is only valid on user-scoped secrets
+	// allowProgeny is only valid on user-scoped secrets.
+	// Unlike env vars, secrets do NOT require injectionMode=always when
+	// allowProgeny is set — the secret dispatch flow supports as_needed
+	// progeny secrets (design doc §5.7).
 	if req.AllowProgeny != nil && *req.AllowProgeny && scope != store.ScopeUser {
 		ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
 			"field": "allowProgeny",
@@ -1177,6 +1189,9 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	// allowProgeny is only valid on user-scoped secrets. Only an explicit
 	// true is rejected; unset on a project-scoped write is fine and simply
 	// resolves to false below.
+	// Unlike env vars, secrets do NOT require injectionMode=always when
+	// allowProgeny is set — the secret dispatch flow supports as_needed
+	// progeny secrets (design doc §5.7).
 	if req.AllowProgeny != nil && *req.AllowProgeny && scope != store.ScopeUser {
 		ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
 			"field": "allowProgeny",
