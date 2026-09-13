@@ -66,6 +66,64 @@ func postOutboundTyped(t *testing.T, srv *Server, projectID, agentID, msg, msgTy
 	return rr
 }
 
+// TestOutboundMessage_RoutingErrorStopsDispatch verifies that when
+// resolveOutboundRouting returns an error, handleAgentOutboundMessage does NOT
+// proceed to build or dispatch the message. This is the functional complement
+// to the static gate that asserts the delegation call exists.
+//
+// The trigger is a request with no recipient, no conversation_ref — a clear
+// routing error that resolveOutboundRouting rejects with a validation error.
+func TestOutboundMessage_RoutingErrorStopsDispatch(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "routing-error-project",
+		Slug: "routing-error-project",
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "routing-test-agent",
+		Slug:       "routing-test-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	srv.chatSendLimiter = newChatSendLimiter()
+
+	// Send a message with no recipient and no conversation_ref. This must
+	// be rejected by resolveOutboundRouting — the handler must NOT dispatch.
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Msg: "this message should never be dispatched",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+	if rr.Code == http.StatusOK {
+		t.Fatalf("expected non-200 when resolveOutboundRouting fails (no recipient), got 200: %s",
+			rr.Body.String())
+	}
+	// The handler must return a 4xx error, not proceed to dispatch.
+	if rr.Code < 400 || rr.Code >= 500 {
+		t.Fatalf("expected 4xx client error, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
 // An agent stuck in a loop is cut off with an explicit, retryable 429 — the
 // flood vector issue #1054 is actually about. The limit is per sender, so a
 // second agent going about its business is untouched.
