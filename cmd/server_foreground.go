@@ -1916,6 +1916,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// traffic, because a DB-persisted admin_mode=true would be invisible to this
 	// process. Retry with exponential backoff to tolerate transient DB issues,
 	// then fail the hub startup if all attempts are exhausted.
+	// NOTE: this call and its error-return-to-log.Fatalf chain is what makes
+	// settings init fail-closed. Do NOT revert to the old log-and-continue
+	// pattern — that would let the server accept traffic without authoritative
+	// settings, silently bypassing a DB-persisted admin_mode=true.
+	// See TestInitOperationalSettings_FailClosed for the regression test.
 	if err := initOperationalSettingsWithRetry(ctx, cfg, hubSrv, s, globalDir); err != nil {
 		return nil, fmt.Errorf("operational settings init failed after retries (driver=%s): %w",
 			cfg.Database.Driver, err)
