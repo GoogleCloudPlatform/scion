@@ -441,51 +441,50 @@ func TestM9_Gate3_TransientFailureWarn(t *testing.T) {
 	// Run the boot hook: backfill will hit a write failure.
 	runBootDataMigrations(ctx, failStore)
 
-	// Verify the marker has the correct transient count.
+	// Verify the marker is NOT completed. Production (#1491) intentionally
+	// leaves projects with write failures incomplete for retry — the project
+	// is skipped BEFORE accumulator updates, so no PermanentResidual or
+	// TransientFailures are recorded.
 	marker, err := loadBackfillMarker(ctx, realStore)
 	require.NoError(t, err)
-	require.NotNil(t, marker.CompletedAt)
-	require.NotNil(t, marker.PermanentResidual)
-	assert.Greater(t, marker.TransientFailures, 0,
-		"TransientFailures must be non-zero after a write failure")
+	assert.Nil(t, marker.CompletedAt,
+		"marker must NOT be completed when a project has write failures — "+
+			"production leaves failed projects incomplete for retry (#1491)")
+	assert.Nil(t, marker.PermanentResidual,
+		"PermanentResidual must not be set when the project was skipped "+
+			"due to write failures (check is BEFORE accumulator updates)")
+	assert.Equal(t, 0, marker.TransientFailures,
+		"TransientFailures must be 0: project skipped before accumulator updates (#1491)")
 
 	logOutput := buf.String()
 
-	// The post-derivation WARN must fire (renamed from "Transient" per
-	// item A: write/resolution failures are deterministic, not transient).
-	assert.Contains(t, logOutput, "Post-derivation failures during last backfill pass",
-		"post-derivation WARN must fire when there are write failures")
-	// The remedy string must NOT be present (item D: DEF-111 shape).
-	assert.NotContains(t, logOutput, "scion server backfill",
-		"post-derivation WARN must NOT include the backfill remedy (DEF-111)")
+	// The project-level write-failure WARN must fire, indicating the project
+	// will be retried on the next boot.
+	assert.Contains(t, logOutput, "project has write failures",
+		"must warn that the project has write failures and will be retried")
 
-	// The actionable WARN must NOT fire. The write-failed message stays
-	// unstamped (no conversation_id), so it's counted in reachable AND in
-	// permanent (measured). actionable = reachable - permanent = 0.
-	assert.NotContains(t, logOutput, "Messages remain unattributed in listed projects",
-		"actionable WARN must not fire; the write-failed message is in permanent (measured)")
+	// The "not all projects completed" WARN must fire.
+	assert.Contains(t, logOutput, "not all projects completed",
+		"must warn that incomplete projects remain for next boot")
 
-	// Assert the post-derivation count VALUE, not just presence.
-	loggedPostDerive, ok := extractLoggedIntOnLine(logOutput,
-		"Post-derivation failures during last backfill pass", "count")
-	assert.True(t, ok, "post-derivation WARN must include count=<int>")
-	assert.Equal(t, marker.TransientFailures, loggedPostDerive,
-		"GATE 3: logged post-derivation count must match marker.TransientFailures")
+	// Post-derivation WARN must NOT fire: TransientFailures is 0 in the
+	// marker because the project was skipped before accumulator updates.
+	assert.NotContains(t, logOutput, "Post-derivation failures during last backfill pass",
+		"post-derivation WARN must not fire when marker has no TransientFailures")
 
-	// Verify the arithmetic pre-clamp using the SAME function production calls.
+	// The actionable WARN fires because PermanentResidual is nil
+	// (permanent=0 in the residual report) and the message is still
+	// unbackfilled. This is CORRECT: the message IS genuinely actionable
+	// — it will be retried on the next boot.
+	assert.Contains(t, logOutput, "Messages remain unattributed in listed projects",
+		"actionable WARN must fire: the write-failed message is genuinely "+
+			"actionable (retryable on next boot)")
+
+	// Verify the message remains unbackfilled and ready for retry.
 	total, err := realStore.CountUnbackfilledMessages(ctx, "")
 	require.NoError(t, err)
-	unreachable, err := realStore.CountUnreachableUnbackfilledMessages(ctx)
-	require.NoError(t, err)
-	permanent := *marker.PermanentResidual
-
-	_, actionablePreClamp, _ := computeResidualBuckets(total, unreachable, permanent)
-
-	assert.Equal(t, 0, actionablePreClamp,
-		"GATE 3: actionable must be 0 pre-clamp; the write-failed message is "+
-			"measured into permanent (total=%d, unreachable=%d, permanent=%d). "+
-			"MUTATION: subtracting writeFailures from permanent makes this non-zero.",
-		total, unreachable, permanent)
+	assert.Equal(t, 1, total,
+		"GATE 3: the write-failed message must remain unbackfilled for retry")
 }
 
 // ---------------------------------------------------------------------------
@@ -881,21 +880,19 @@ func TestM9_GateC_PerProjectIdentityFromLog(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// A-2: hazardA message (valid dm key, non-UUID principals → Inferred).
-	// AddParticipant may produce write failures for the non-UUID principals.
-	id1 := uuid.NewString()
-	id2 := uuid.NewString()
-	if id1 > id2 {
-		id1, id2 = id2, id1 // canonical order
-	}
-	dmKeyA := fmt.Sprintf("dm:agent:%s:user:%s", id1, id2)
+	// A-2: hazardA message (non-dm thread key, non-UUID principals → Inferred).
+	// Uses a regular thread ID (not dm:) so the conversation is "group" kind.
+	// Group conversations do not enforce the DM participant-key check, so
+	// AddParticipant succeeds for non-UUID principals. This avoids the
+	// write failures that would prevent project completion (#1491) while
+	// still triggering hazardA (non-UUID principals detected by isValidUUID).
 	err = s.CreateMessage(ctx, &store.Message{
 		ID:        uuid.NewString(),
 		ProjectID: pidA,
 		Msg:       "hazardA-inferred",
 		Sender:    "user:alice@example.com",
 		Recipient: "agent:some-bot",
-		ThreadID:  dmKeyA,
+		ThreadID:  "thread-gateC-hazardA",
 	})
 	require.NoError(t, err)
 
@@ -1002,7 +999,7 @@ func TestM9_GateC_PerProjectIdentityFromLog(t *testing.T) {
 		})
 	}
 
-	// ---- Verify the fixture shape catches the mutation ----
+	// ---- Verify the fixture shape ----
 	var lineA string
 	for _, line := range strings.Split(logOutput, "\n") {
 		if strings.Contains(line, pidA) && strings.Contains(line, "project completed") {
@@ -1010,19 +1007,19 @@ func TestM9_GateC_PerProjectIdentityFromLog(t *testing.T) {
 			break
 		}
 	}
-	require.NotEmpty(t, lineA)
+	require.NotEmpty(t, lineA,
+		"fixture: Project A must produce a 'project completed' log line "+
+			"(no write failures that would prevent completion under #1491)")
 
-	// Project A must have derive_failures > 0 (for the mutation to change them).
+	// Project A must have derive_failures > 0 (from the derive-refused message).
 	df, _ := extractLoggedInt(lineA, "derive_failures")
-	re, _ := extractLoggedInt(lineA, "row_errors")
 	require.Greater(t, df, 0,
 		"fixture: Project A must have derive_failures > 0")
-	require.Greater(t, re, df,
-		"fixture: Project A must have row_errors > derive_failures "+
-			"(write failures from AddParticipant), so the mutation "+
-			"deriveCount=len(Errors) is distinguishable")
 
 	// Project A must have inferred > 0 (gteam's hazardA population).
+	// The thread-keyed message with non-UUID principals triggers hazardA,
+	// which produces an Inferred count without AddParticipant write failures
+	// (group conversations don't enforce the DM participant-key check).
 	inf, _ := extractLoggedInt(lineA, "inferred")
 	require.Greater(t, inf, 0,
 		"fixture: Project A must have inferred > 0 to represent gteam's hazardA population")

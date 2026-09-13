@@ -139,6 +139,12 @@ func setupRoutedTestEnv(t *testing.T) routedTestEnv {
 	srv.createProjectMembersGroup(ctx, project)
 	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
+	// Grant explicit agent.message send authority. Upstream removed
+	// agent.message from the project-member role; tests must not rely on
+	// that implicit grant. The negative tests (InactiveUser, UnknownSender)
+	// still verify denial for users without this explicit binding.
+	msgAuthzGrantAgentMessage(t, s, user.ID, project.ID)
+
 	agent1 := &store.Agent{
 		ID:           tid("agent-alpha"),
 		Slug:         "alpha",
