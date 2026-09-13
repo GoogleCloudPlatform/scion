@@ -1,0 +1,13 @@
+{
+  "auth_candidates": {
+    "schema_version": 1,
+    "env_vars": [],
+    "env_secret_files": {},
+    "files": []
+  },
+  "harness_config": {
+    "no_auth": {
+      "behavior": "allow"
+    }
+  }
+}

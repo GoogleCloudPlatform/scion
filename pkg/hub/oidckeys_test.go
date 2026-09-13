@@ -23,6 +23,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -1402,6 +1403,46 @@ func TestOIDCKeysetSecretID(t *testing.T) {
 	assert.NotEqual(t, id1, id2)
 	// Should be different from the signing key secret ID.
 	assert.NotEqual(t, id1, oidcSigningKeySecretID("hub-1"))
+}
+
+func TestOIDCKeyManager_BackupIsEncrypted(t *testing.T) {
+	// Verify that backupKeyToStore encrypts the PEM-encoded private key
+	// when an encryption key is configured, so key material is not stored
+	// as cleartext in the EncryptedValue column (miller79/scion#5).
+	s := createOIDCTestStore(t)
+	hubID := "test-oidc-encrypt"
+	sharedSecret := "test-oidc-secret"
+	encKey := secret.DeriveLocalEncryptionKey(sharedSecret)
+
+	mgr, err := NewOIDCKeyManager(context.Background(), OIDCKeyManagerConfig{
+		Store:         s,
+		HubID:         hubID,
+		IssuerURL:     "https://example.com",
+		EncryptionKey: encKey,
+		Log:           slog.Default(),
+	})
+	require.NoError(t, err, "NewOIDCKeyManager should succeed")
+	require.NotNil(t, mgr)
+
+	ctx := context.Background()
+
+	// The OIDC signing key should be encrypted in the store.
+	raw, err := s.GetSecretValue(ctx, SecretKeyOIDCSigningKey, store.ScopeHub, hubID)
+	if err == nil && raw != "" {
+		if !strings.HasPrefix(raw, secret.EncryptedPrefix) {
+			t.Errorf("OIDC signing key backup should be encrypted (expected %q prefix), got: %s",
+				secret.EncryptedPrefix, raw[:min(len(raw), 30)])
+		}
+	}
+
+	// The OIDC keyset should also be encrypted.
+	keysetRaw, err := s.GetSecretValue(ctx, SecretKeyOIDCKeyset, store.ScopeHub, hubID)
+	if err == nil && keysetRaw != "" {
+		if !strings.HasPrefix(keysetRaw, secret.EncryptedPrefix) {
+			t.Errorf("OIDC keyset backup should be encrypted (expected %q prefix), got: %s",
+				secret.EncryptedPrefix, keysetRaw[:min(len(keysetRaw), 30)])
+		}
+	}
 }
 
 // createOIDCTestStore creates an in-memory SQLite store for OIDC tests.

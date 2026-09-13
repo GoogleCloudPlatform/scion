@@ -184,6 +184,12 @@ def _configure_vertex_ai(
             env[key] = val
             break
 
+    # Normalize "global" to empty — the global Vertex AI endpoint uses the
+    # plain hostname (aiplatform.googleapis.com), not a region-prefixed one.
+    region = region.strip()
+    if region.lower() == "global":
+        region = ""
+
     # Construct Vertex AI base URL.
     if region:
         base_url = (
@@ -214,17 +220,32 @@ def _configure_vertex_ai(
         if not isinstance(aliases, dict):
             aliases = {}
         if raw_model.lower() in aliases:
-            # Scion alias (small, medium, large) — use default Vertex model.
+            # Scion size alias (small, medium, large) — use default Vertex model.
             model_id = _VERTEX_MODEL_ID
             ctx.info(f"vertex-ai: resolved alias '{raw_model}' to {_VERTEX_MODEL_ID}")
+        elif "/" not in raw_model:
+            # Pre-resolved model name without publisher prefix (e.g., "grok-4"
+            # from broker alias resolution). Not a valid Vertex AI model ID —
+            # Vertex requires <publisher>/<model> format.
+            model_id = _VERTEX_MODEL_ID
+            ctx.info(
+                f"vertex-ai: model '{raw_model}' lacks publisher prefix, "
+                f"using default {_VERTEX_MODEL_ID}"
+            )
         else:
-            # Explicit model ID (e.g., "xai/grok-4.2") — use as-is.
+            # Fully-qualified model ID with publisher prefix (e.g., "xai/grok-4.2").
             model_id = raw_model
     else:
         model_id = _VERTEX_MODEL_ID
 
     # Write Vertex AI model config to config.toml.
     _write_vertex_config(ctx, base_url, model_id)
+
+    # Create a model config block matching the raw SCION_MODEL name so that
+    # --model <name> on the command line (injected by the Go side) routes
+    # through vertex-ai instead of falling back to the direct xAI API.
+    if raw_model and raw_model != _VERTEX_MODEL_CONFIG_NAME:
+        _write_vertex_model_alias(ctx, base_url, model_id, raw_model)
 
     # Set GROK_DEFAULT_MODEL so grok uses the vertex-grok config block.
     # This is belt-and-suspenders alongside [models] default in config.toml —
@@ -281,6 +302,48 @@ default = "{_VERTEX_MODEL_CONFIG_NAME}"'''
     content += vertex_toml + "\n"
 
     scion_harness.atomic_write_text(config_path, content)
+
+
+def _write_vertex_model_alias(
+    ctx: scion_harness.ProvisionContext,
+    base_url: str,
+    model_id: str,
+    alias_name: str,
+) -> None:
+    """Add a model config block that aliases a raw model name to vertex-ai.
+
+    When the Go side injects --model <name> on the command line, grok looks
+    for [model.<name>] in config.toml. Without this block, grok falls back to
+    the direct xAI API and gets a 401 when vertex-ai auth is in use.
+    """
+    config_path = os.path.join(ctx.home, ".grok", "config.toml")
+    if not os.path.isfile(config_path):
+        return  # _write_vertex_config should have created it
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Strip any existing block with this alias name to avoid duplicates.
+    escaped_alias = scion_harness.toml_escape(alias_name)
+    content = scion_harness.strip_toml_sections(
+        content,
+        lambda line: (
+            line == f'[model."{escaped_alias}"]'
+            or line == f"[model.{alias_name}]"
+        ),
+    )
+
+    # Append the alias block.  Use quoted key so dots in the model name
+    # (e.g. "grok-4.6") are treated as a single key, not a TOML path.
+    alias_toml = f'''
+[model."{escaped_alias}"]
+model = "{scion_harness.toml_escape(model_id)}"
+base_url = "{scion_harness.toml_escape(base_url)}"
+auth_provider = "{_VERTEX_AUTH_PROVIDER_NAME}"'''
+
+    content = content.rstrip("\n") + "\n" + alias_toml + "\n"
+    scion_harness.atomic_write_text(config_path, content)
+    ctx.info(f"vertex-ai: created model alias '{alias_name}' -> vertex endpoint")
 
 
 # ---------------------------------------------------------------------------
@@ -515,9 +578,6 @@ def _build_telemetry_env(telemetry: dict[str, Any], env: dict[str, str] | None) 
 # Hooks – sciontool event bridge
 # ---------------------------------------------------------------------------
 
-# Events that send synthetic echo payloads (no stdin from grok).
-_ECHO_EVENTS = {"SessionStart", "SessionEnd"}
-
 # All hook events.
 _GROK_HOOK_EVENTS = [
     "SessionStart",
@@ -531,6 +591,10 @@ _GROK_HOOK_EVENTS = [
     "PostToolUseFailure",
     "SubagentStop",
     "Notification",
+    "PermissionDenied",
+    "SubagentStart",
+    "PreCompact",
+    "PostCompact",
 ]
 
 
@@ -546,14 +610,19 @@ def _write_hooks(home: str) -> None:
     """
     hooks: dict[str, list[dict[str, Any]]] = {}
     for event in _GROK_HOOK_EVENTS:
-        if event in _ECHO_EVENTS:
+        if event == "SessionStart":
             cmd = (
-                f"echo '{{\"hookEventName\": \"{event}\"}}' "
-                f"| sciontool hook --dialect=grok-build"
+                "echo '{\"hookEventName\": \"SessionStart\", \"source\": \"new\"}' "
+                "| sciontool hook --dialect=grok-build"
+            )
+        elif event == "SessionEnd":
+            cmd = (
+                "echo '{\"hookEventName\": \"SessionEnd\", \"reason\": \"end_turn\"}' "
+                "| sciontool hook --dialect=grok-build"
             )
         else:
             cmd = "cat | sciontool hook --dialect=grok-build"
-        timeout = 10 if event == "Stop" else 5
+        timeout = 60 if event in ("Stop", "SubagentStop") else 5
         hooks[event] = [
             {
                 "hooks": [

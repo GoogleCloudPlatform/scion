@@ -197,6 +197,84 @@ func TestBootstrapBundledResources_ParallelConverges(t *testing.T) {
 	}
 }
 
+// TestBootstrapBundledResources_SeedsNewConfigsWhenExistingPresent verifies
+// that BootstrapBundledResources seeds new harness configs even when some
+// active harness configs already exist in the DB. This is a regression test
+// for the SkipIfAnyExist bug where the presence of ANY harness config caused
+// ALL harness-config bootstrapping to be skipped.
+func TestBootstrapBundledResources_SeedsNewConfigsWhenExistingPresent(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	// Pre-seed ONE harness config into the DB to simulate a previous bootstrap
+	// that added only a subset of configs.
+	now := time.Now()
+	preSeeded := &store.HarnessConfig{
+		ID:         tid("hc_pre_seeded"),
+		Slug:       "pre-seeded-config",
+		Name:       "pre-seeded-config",
+		Harness:    "generic",
+		Scope:      store.HarnessConfigScopeGlobal,
+		SourceURL:  "",
+		Visibility: "public",
+		Status:     store.HarnessConfigStatusActive,
+		Created:    now,
+		Updated:    now,
+	}
+	if err := s.CreateHarnessConfig(ctx, preSeeded); err != nil {
+		t.Fatalf("failed to pre-seed harness config: %v", err)
+	}
+
+	// Verify the pre-seeded config exists.
+	existing, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+		Status: store.HarnessConfigStatusActive,
+	}, store.ListOptions{Limit: 1})
+	if err != nil || len(existing.Items) == 0 {
+		t.Fatal("pre-seeded config not found in DB")
+	}
+
+	// Bootstrap with the same options used in hosted mode.
+	err = srv.BootstrapBundledResources(ctx, BootstrapOptions{
+		RepairStorage:   true,
+		OverwritePolicy: OverwriteBuiltinManaged,
+	})
+	if err != nil {
+		t.Fatalf("BootstrapBundledResources failed: %v", err)
+	}
+
+	// Verify ALL bundled harness configs were created despite the pre-seeded
+	// config already being present.
+	configs, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expectedBundled := len(resources.BuiltinHarnessConfigs())
+	bundledNames := make(map[string]bool)
+	for _, name := range resources.BuiltinHarnessConfigNames() {
+		bundledNames[name] = false
+	}
+
+	for _, hc := range configs.Items {
+		if _, ok := bundledNames[hc.Name]; ok {
+			bundledNames[hc.Name] = true
+		}
+	}
+
+	for name, found := range bundledNames {
+		if !found {
+			t.Errorf("bundled harness config %q was NOT seeded (expected it to be created even though pre-seeded config exists)", name)
+		}
+	}
+
+	// Total should be: all bundled configs + 1 pre-seeded config.
+	expectedTotal := expectedBundled + 1
+	if configs.TotalCount != expectedTotal {
+		t.Errorf("expected %d total harness configs (%d bundled + 1 pre-seeded), got %d",
+			expectedTotal, expectedBundled, configs.TotalCount)
+	}
+}
+
 func TestBootstrapBundledResources_NoLocalDirRequired(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()

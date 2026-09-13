@@ -68,6 +68,13 @@ import '../shared/chat/chat-thread.js';
 const loadSpaceRail = () => import('../shared/chat/chat-space-rail.js');
 // Lazy-load the members sidebar only when v2 is active
 const loadChatMembers = () => import('../shared/chat/chat-members.js');
+
+/** Members panel width bounds, in px. */
+const MEMBERS_WIDTH_DEFAULT = 240;
+const MEMBERS_WIDTH_MIN = 180;
+const MEMBERS_WIDTH_MAX = 520;
+/** localStorage key for the persisted members panel width. */
+const MEMBERS_WIDTH_KEY = 'scion.chat.membersWidth';
 // Lazy-load the search component only when v2 is active
 const loadChatSearch = () => import('../shared/chat/chat-search.js');
 // Lazy-load the quick switcher component on first Cmd+K press
@@ -223,6 +230,9 @@ export class ScionPageChat extends LitElement {
   @state() private v2Conversation: V2ConversationState | null = null;
   @state() private v2Members: SpaceMember[] = [];
   @state() private v2MembersExpanded = true;
+
+  /** Width of the members panel in px. Persisted per browser. */
+  @state() private membersWidth = MEMBERS_WIDTH_DEFAULT;
   @state() private v2SpaceRailLoaded = false;
   /** Human members for the members sidebar (from the members endpoint). */
   @state() private v2HumanMembers: import('../shared/chat/chat-members.js').ChatHumanMember[] = [];
@@ -469,11 +479,41 @@ export class ScionPageChat extends LitElement {
     }
 
     .v2-members {
-      width: 240px;
+      /* Width is driven by --members-w so the mobile rules below, which set
+         width:100%, can still win — an inline width would beat them. */
+      position: relative;
+      width: var(--members-w, 240px);
       border-left: 1px solid var(--scion-border, #e2e8f0);
       background: var(--scion-surface, #ffffff);
       display: flex;
       flex-direction: column;
+      flex-shrink: 0;
+    }
+
+    /* Grab strip on the panel's left border.
+       The CSS resize property was tried first and is the wrong tool: it only
+       offers a corner grabber at the element's bottom-right, so on a
+       full-height right-hand panel it lands at the bottom of the viewport and
+       can never drag the left edge, which is the border people reach for. */
+    .v2-members-resizer {
+      position: absolute;
+      left: -3px;
+      top: 0;
+      bottom: 0;
+      width: 7px;
+      cursor: col-resize;
+      z-index: 5;
+      background: transparent;
+      border: none;
+      padding: 0;
+      touch-action: none;
+    }
+
+    .v2-members-resizer:hover,
+    .v2-members-resizer:focus-visible {
+      background: var(--scion-primary, #3b82f6);
+      opacity: 0.35;
+      outline: none;
     }
 
     .v2-members.collapsed {
@@ -644,6 +684,11 @@ export class ScionPageChat extends LitElement {
       .v2-panels .v2-members.collapsed {
         display: flex;
       }
+
+      /* Full-width here, so there is nothing to drag. */
+      .v2-members-resizer {
+        display: none;
+      }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -655,8 +700,79 @@ export class ScionPageChat extends LitElement {
     }
   `;
 
+  /**
+   * Begin dragging the members panel's left edge.
+   *
+   * Listeners go on window rather than the handle, because the pointer leaves
+   * the 7px strip immediately on any real drag.
+   */
+  private startMembersResize(e: PointerEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = this.membersWidth;
+
+    const onMove = (ev: PointerEvent) => {
+      // The panel sits on the right, so dragging left widens it.
+      const next = startWidth - (ev.clientX - startX);
+      this.membersWidth = Math.min(
+        MEMBERS_WIDTH_MAX,
+        Math.max(MEMBERS_WIDTH_MIN, Math.round(next))
+      );
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      this.persistMembersWidth();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  }
+
+  /** Keyboard resizing, so the panel is adjustable without a pointer. */
+  private onMembersResizeKey(e: KeyboardEvent): void {
+    const step = e.shiftKey ? 40 : 10;
+    let next = this.membersWidth;
+    if (e.key === 'ArrowLeft') next += step;
+    else if (e.key === 'ArrowRight') next -= step;
+    else if (e.key === 'Home') next = MEMBERS_WIDTH_DEFAULT;
+    else return;
+    e.preventDefault();
+    this.membersWidth = Math.min(MEMBERS_WIDTH_MAX, Math.max(MEMBERS_WIDTH_MIN, next));
+    this.persistMembersWidth();
+  }
+
+  private persistMembersWidth(): void {
+    try {
+      localStorage.setItem(MEMBERS_WIDTH_KEY, String(this.membersWidth));
+    } catch {
+      // Private mode or blocked storage: the width still applies for this
+      // session, it just will not be remembered.
+    }
+  }
+
+  /** Restore a persisted width, ignoring anything unparseable or out of range. */
+  private restoreMembersWidth(): void {
+    try {
+      const raw = localStorage.getItem(MEMBERS_WIDTH_KEY);
+      if (!raw) return;
+      const parsed = Number.parseInt(raw, 10);
+      if (
+        Number.isFinite(parsed) &&
+        parsed >= MEMBERS_WIDTH_MIN &&
+        parsed <= MEMBERS_WIDTH_MAX
+      ) {
+        this.membersWidth = parsed;
+      }
+    } catch {
+      // Blocked storage: keep the default.
+    }
+  }
+
   override connectedCallback(): void {
     super.connectedCallback();
+    this.restoreMembersWidth();
     // Global Cmd/Ctrl+K listener for the quick switcher.
     document.addEventListener('keydown', this._onKeydown);
 
@@ -1380,6 +1496,10 @@ export class ScionPageChat extends LitElement {
           realTimestamp(agent.updated) ||
           existing?.lastActivityEvent ||
           '',
+          // SSE deltas carry status, not authorization. Preserve what the
+          // members endpoint decided; rebuilding without it restores the
+          // terminal control on every status tick.
+          canAttach: existing?.canAttach,
       });
     }
 
@@ -1844,6 +1964,7 @@ export class ScionPageChat extends LitElement {
             lastActivityEvent?: string;
             updated?: string;
             projectId?: string;
+            canAttach?: boolean;
           }>;
         };
         this.v2AgentMembers = (agentData.agents || []).map((a) => ({
@@ -1857,6 +1978,7 @@ export class ScionPageChat extends LitElement {
           projectId: a.projectId || '',
           detailMessage: agentDetailMessage(a),
           lastActivityEvent: realTimestamp(a.lastActivityEvent) || realTimestamp(a.updated),
+          canAttach: a.canAttach,
         }));
         // Seed the shared agent map so SSE status deltas have a baseline to
         // merge onto — otherwise they are buffered and never notify.
@@ -1982,6 +2104,7 @@ export class ScionPageChat extends LitElement {
             lastSeen?: string;
             lastActivityEvent?: string;
             projectId?: string;
+            canAttach?: boolean;
           }>;
           members?: SpaceMember[];
         };
@@ -2006,6 +2129,10 @@ export class ScionPageChat extends LitElement {
           projectId: a.projectId || projectId,
           detailMessage: agentDetailMessage(a),
           lastActivityEvent: realTimestamp(a.lastActivityEvent),
+          // Carry the Hub attach decision through. These mappers rebuild the
+          // member objects field by field, so anything not named here is
+          // dropped before the sidebar sees it.
+          canAttach: a.canAttach,
         }));
         // Seed the shared agent map so SSE status deltas have a baseline to
         // merge onto — otherwise they are buffered and never notify.
@@ -2609,7 +2736,21 @@ export class ScionPageChat extends LitElement {
               `}
         </div>
 
-        <div class="v2-members ${this.v2MembersExpanded ? '' : 'collapsed'}">
+        <div
+          class="v2-members ${this.v2MembersExpanded ? '' : 'collapsed'}"
+          style="--members-w: ${this.membersWidth}px"
+        >
+          <button
+            class="v2-members-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize members panel"
+            aria-valuenow=${this.membersWidth}
+            aria-valuemin=${MEMBERS_WIDTH_MIN}
+            aria-valuemax=${MEMBERS_WIDTH_MAX}
+            @pointerdown=${this.startMembersResize}
+            @keydown=${this.onMembersResizeKey}
+          ></button>
           <div class="v2-members-header">
             ${this.renderMobileBackButton('center')}
             <span>Members</span>

@@ -686,10 +686,6 @@
           "type": "string",
           "description": "Container image registry prefix for this profile. Overrides the top-level image_registry."
         },
-        "env": {
-          "type": "object",
-          "additionalProperties": { "type": "string" }
-        },
         "volumes": {
           "type": "array",
           "items": { "$ref": "#/$defs/volumeMount" }

@@ -25,6 +25,9 @@ type PublicSettingsResponse struct {
 	// NativeChatEnabled mirrors the server.native_chat.enabled toggle so the
 	// web UI can hide chat without needing admin rights to read the config.
 	NativeChatEnabled bool `json:"nativeChatEnabled"`
+	// DefaultRuntimeBroker is the hub-level default broker ID/slug/name.
+	// The agent-create UI uses it as a fallback when no project default is set.
+	DefaultRuntimeBroker string `json:"defaultRuntimeBroker,omitempty"`
 }
 
 // nativeChatEnabled reports whether the built-in chat feature is active.
@@ -53,9 +56,12 @@ func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
 		autoExposePortsEnabled = *s.config.AutoExposePortsDefault
 	}
 
+	defaultRuntimeBroker := s.hubAgentDefaults().DefaultRuntimeBroker
+
 	writeJSON(w, http.StatusOK, PublicSettingsResponse{
 		TelemetryEnabled:       telemetryEnabled,
 		AutoExposePortsEnabled: autoExposePortsEnabled,
 		NativeChatEnabled:      s.nativeChatEnabled(),
+		DefaultRuntimeBroker:   defaultRuntimeBroker,
 	})
 }

@@ -740,6 +740,7 @@ type Server struct {
 	maintenance      *MaintenanceState // Runtime maintenance mode state
 	hubID            string            // Unique hub instance ID for secret namespacing
 	instanceID       string            // Unique per-process ID (uuid); affinity key for broker dispatch
+	encryptionKey    []byte            // AES-256 key for encrypting backup secrets; nil disables encryption
 	embeddedBrokerID string            // Broker ID when running in hub+broker combo mode
 	// statelessEmbeddedBroker is true when the embedded broker identity is a
 	// replica-independent API adapter rather than a process-owned control channel.
@@ -1046,6 +1047,14 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		srv.secretBackend = cfg.SecretBackend
 	}
 
+	// Derive AES-256 encryption key for encrypting signing key backups in
+	// SQLite. This uses the same shared secret as LocalBackend so that values
+	// written by backupSigningKeyToStore are encrypted at rest, closing the
+	// gap where signing key material was stored in cleartext (miller79/scion#5).
+	if cfg.SharedSigningSecret != "" {
+		srv.encryptionKey = secret.DeriveLocalEncryptionKey(cfg.SharedSigningSecret)
+	}
+
 	// Initialize update tracker for HA integration completion detection.
 	srv.updateTracker = newPendingUpdateTracker()
 
@@ -1201,6 +1210,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			IssuerURL:               oidcIssuerURL,
 			RequireStableSigningKey: cfg.RequireStableSigningKey,
 			Log:                     logging.Subsystem("hub.oidc"),
+			EncryptionKey:           srv.encryptionKey,
 		})
 		if err != nil {
 			if isGCPBackend || cfg.RequireStableSigningKey {
@@ -1679,6 +1689,15 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 			// migration or generate a new key rather than silently returning nil.
 			slog.Warn("Store contains empty signing key value (secret backend reference row); treating as not found", "key", keyName)
 		} else {
+			// The stored value may be AES-256-GCM encrypted (enc:v1: prefix).
+			// Decrypt transparently; legacy plaintext passes through as-is.
+			if s.encryptionKey != nil {
+				plaintext, _, decErr := secret.DecryptValue(val, s.encryptionKey)
+				if decErr != nil {
+					return nil, fmt.Errorf("failed to decrypt signing key %s from store: %w", keyName, decErr)
+				}
+				val = plaintext
+			}
 			slog.Info("Loaded existing signing key from store", "key", keyName)
 			key, decErr := base64.StdEncoding.DecodeString(val)
 			if decErr != nil {
@@ -1728,6 +1747,15 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 				rawVal, legacyErr := s.store.GetSecretValue(ctx, keyName, store.ScopeHub, legacyScopeID)
 				if legacyErr != nil {
 					continue
+				}
+				// Decrypt if the stored value is encrypted.
+				if s.encryptionKey != nil {
+					plaintext, _, decErr := secret.DecryptValue(rawVal, s.encryptionKey)
+					if decErr != nil {
+						slog.Warn("Failed to decrypt legacy signing key from store", "key", keyName, "legacyScopeID", legacyScopeID, "error", decErr)
+						continue
+					}
+					rawVal = plaintext
 				}
 				val = rawVal
 			}
@@ -1892,10 +1920,21 @@ func logSigningKeyFailure(keyType string, err error) {
 // EncryptedValue is updated — the SecretRef is preserved so the UI and other consumers
 // can see that the secret is backed by Secret Manager.
 func (s *Server) backupSigningKeyToStore(ctx context.Context, keyName, encodedValue, hubID string) error {
+	// Encrypt the value before writing to SQLite so that signing key material
+	// is stored at rest under AES-256-GCM, consistent with LocalBackend.Set().
+	valueToStore := encodedValue
+	if s.encryptionKey != nil {
+		encrypted, err := secret.EncryptValue(encodedValue, s.encryptionKey)
+		if err != nil {
+			return fmt.Errorf("encrypting signing key backup: %w", err)
+		}
+		valueToStore = encrypted
+	}
+
 	existing, err := s.store.GetSecret(ctx, keyName, store.ScopeHub, hubID)
 	if err == nil {
 		// Record exists — update value only, preserving SecretRef and other metadata.
-		existing.EncryptedValue = encodedValue
+		existing.EncryptedValue = valueToStore
 		return s.store.UpdateSecret(ctx, existing)
 	}
 	if err != store.ErrNotFound {
@@ -1905,7 +1944,7 @@ func (s *Server) backupSigningKeyToStore(ctx context.Context, keyName, encodedVa
 	sec := &store.Secret{
 		ID:             signingKeySecretID(keyName, hubID),
 		Key:            keyName,
-		EncryptedValue: encodedValue,
+		EncryptedValue: valueToStore,
 		Scope:          store.ScopeHub,
 		ScopeID:        hubID,
 		SecretType:     store.SecretTypeInternal,
@@ -3542,6 +3581,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())
 	s.scheduler.RegisterEventHandler("dispatch_agent", s.dispatchAgentEventHandler())
 	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())
+	s.scheduler.RegisterRecurringSingleton("broker-heartbeat-timeout", 5, store.LockBrokerHeartbeatTimeout, s.brokerHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-affinity-reap", 5, store.LockBrokerAffinityReap, s.brokerAffinityReapHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-message-sweep", 5, store.LockBrokerMessageSweep, s.brokerMessageSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())

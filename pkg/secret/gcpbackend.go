@@ -35,12 +35,13 @@ import (
 // GCPBackend implements SecretBackend using a hybrid approach:
 // metadata is stored in the Hub database, values are stored in GCP Secret Manager.
 type GCPBackend struct {
-	store     store.SecretStore
-	smClient  SMClient
-	projectID string
-	hubID     string
-	mu        sync.RWMutex
-	hubName   string
+	store                store.SecretStore
+	smClient             SMClient
+	projectID            string
+	hubID                string
+	replicationLocations []string
+	mu                   sync.RWMutex
+	hubName              string
 }
 
 // NewGCPBackend creates a GCPBackend with a real GCP Secret Manager client.
@@ -53,10 +54,11 @@ func NewGCPBackend(ctx context.Context, s store.SecretStore, cfg GCPBackendConfi
 		return nil, fmt.Errorf("failed to create GCP SM client: %w", err)
 	}
 	return &GCPBackend{
-		store:     s,
-		smClient:  smClient,
-		projectID: cfg.ProjectID,
-		hubID:     hubID,
+		store:                s,
+		smClient:             smClient,
+		projectID:            cfg.ProjectID,
+		hubID:                hubID,
+		replicationLocations: cfg.ReplicationLocations,
 	}, nil
 }
 
@@ -163,6 +165,28 @@ func (b *GCPBackend) accessLatestVersionByPath(ctx context.Context, smPath strin
 	return string(resp.Payload.Data), nil
 }
 
+// buildReplication returns the replication policy for new GCP SM secrets.
+// When replicationLocations is non-empty, user-managed replication with the
+// specified regions is used; otherwise automatic (global) replication is returned.
+func (b *GCPBackend) buildReplication() *smpb.Replication {
+	if len(b.replicationLocations) > 0 {
+		replicas := make([]*smpb.Replication_UserManaged_Replica, len(b.replicationLocations))
+		for i, loc := range b.replicationLocations {
+			replicas[i] = &smpb.Replication_UserManaged_Replica{Location: loc}
+		}
+		return &smpb.Replication{
+			Replication: &smpb.Replication_UserManaged_{
+				UserManaged: &smpb.Replication_UserManaged{Replicas: replicas},
+			},
+		}
+	}
+	return &smpb.Replication{
+		Replication: &smpb.Replication_Automatic_{
+			Automatic: &smpb.Replication_Automatic{},
+		},
+	}
+}
+
 func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *SecretMeta, error) {
 	smName := b.gcpSecretName(input.Name, input.Scope, input.ScopeID)
 	fullName := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
@@ -183,12 +207,8 @@ func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *Sec
 				Parent:   fmt.Sprintf("projects/%s", b.projectID),
 				SecretId: smName,
 				Secret: &smpb.Secret{
-					Replication: &smpb.Replication{
-						Replication: &smpb.Replication_Automatic_{
-							Automatic: &smpb.Replication_Automatic{},
-						},
-					},
-					Labels: buildLabels(input, target, b.resolveHubName()),
+					Replication: b.buildReplication(),
+					Labels:      buildLabels(input, target, b.resolveHubName()),
 				},
 			})
 			if err != nil {

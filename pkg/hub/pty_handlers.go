@@ -60,12 +60,6 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify WebSocket upgrade
-	if !isWebSocketUpgrade(r) {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "WebSocket upgrade required", nil)
-		return
-	}
-
 	// Check authentication - support both Bearer token and ticket parameter
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -101,6 +95,14 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 	// project. Attaching a PTY is not read-class, so the agent project read
 	// baseline deliberately does not reach it.
 	if !s.authorizeAgentLifecycle(w, r, agent) {
+		return
+	}
+
+	// Verify WebSocket upgrade — auth errors are already handled above
+	// for both WS and non-WS (preflight) requests. An authorized non-WS
+	// request is a preflight check: return 200 to signal "you have permission."
+	if !isWebSocketUpgrade(r) {
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 

@@ -17,6 +17,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -832,5 +834,174 @@ func TestSanitizeEmailList_AllEmpty(t *testing.T) {
 	got := SanitizeEmailList([]string{"", "  ", "\t"})
 	if len(got) != 0 {
 		t.Fatalf("all-empty input should return empty slice, got %v", got)
+	}
+}
+
+// --- PersistentHubID tests (miller79/scion#4) ---
+
+func TestPersistentHubID_FirstBoot(t *testing.T) {
+	// On first boot, PersistentHubID should compute an ID, write it to disk,
+	// and return it.
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	id := PersistentHubID()
+
+	// Should match what DefaultHubID computes.
+	expected := DefaultHubID()
+	if id != expected {
+		t.Errorf("PersistentHubID() = %q on first boot, want DefaultHubID() = %q", id, expected)
+	}
+
+	// File should have been created.
+	filePath := filepath.Join(tmpDir, ".scion", "hub-id")
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("hub-id file not created: %v", err)
+	}
+	got := strings.TrimSpace(string(data))
+	if got != expected {
+		t.Errorf("persisted hub-id = %q, want %q", got, expected)
+	}
+}
+
+func TestPersistentHubID_ReturnsStoredValue(t *testing.T) {
+	// If a hub-id file already exists, PersistentHubID should return its
+	// contents rather than recomputing from the hostname.
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0700); err != nil {
+		t.Fatalf("failed to create .scion dir: %v", err)
+	}
+	storedID := "aabbccddeeff"
+	if err := os.WriteFile(filepath.Join(scionDir, "hub-id"), []byte(storedID+"\n"), 0600); err != nil {
+		t.Fatalf("failed to write hub-id: %v", err)
+	}
+
+	id := PersistentHubID()
+	if id != storedID {
+		t.Errorf("PersistentHubID() = %q, want stored value %q", id, storedID)
+	}
+}
+
+func TestPersistentHubID_DriftWarning(t *testing.T) {
+	// When the stored ID differs from the computed ID, PersistentHubID should
+	// still return the stored value (the drift is warned about, not acted on).
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0700); err != nil {
+		t.Fatalf("failed to create .scion dir: %v", err)
+	}
+	// Use a value that will never match any real hostname hash.
+	storedID := "000000000000"
+	if err := os.WriteFile(filepath.Join(scionDir, "hub-id"), []byte(storedID+"\n"), 0600); err != nil {
+		t.Fatalf("failed to write hub-id: %v", err)
+	}
+
+	id := PersistentHubID()
+	if id != storedID {
+		t.Errorf("PersistentHubID() = %q, want stored (drifted) value %q", id, storedID)
+	}
+}
+
+func TestPersistentHubID_EmptyFileRecomputes(t *testing.T) {
+	// If the hub-id file exists but is empty, PersistentHubID should
+	// recompute and persist a new value.
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0700); err != nil {
+		t.Fatalf("failed to create .scion dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scionDir, "hub-id"), []byte(""), 0600); err != nil {
+		t.Fatalf("failed to write empty hub-id: %v", err)
+	}
+
+	id := PersistentHubID()
+	expected := DefaultHubID()
+	if id != expected {
+		t.Errorf("PersistentHubID() = %q with empty file, want %q", id, expected)
+	}
+
+	// File should now contain the computed value.
+	data, err := os.ReadFile(filepath.Join(scionDir, "hub-id"))
+	if err != nil {
+		t.Fatalf("hub-id file not updated: %v", err)
+	}
+	got := strings.TrimSpace(string(data))
+	if got != expected {
+		t.Errorf("persisted hub-id after empty file = %q, want %q", got, expected)
+	}
+}
+
+// --- ResolveHubIDFromEnv tests (Gemini review fix) ---
+
+func TestResolveHubIDFromEnv_ExplicitEnvVar(t *testing.T) {
+	// SCION_SERVER_HUB_HUBID should take precedence over everything.
+	t.Setenv("SCION_SERVER_HUB_HUBID", "explicit-hub-id")
+	// Even if K_SERVICE is set, explicit env var wins.
+	t.Setenv("K_SERVICE", "my-cloud-run-service")
+
+	id := ResolveHubIDFromEnv()
+	if id != "explicit-hub-id" {
+		t.Errorf("ResolveHubIDFromEnv() = %q, want %q", id, "explicit-hub-id")
+	}
+}
+
+func TestResolveHubIDFromEnv_CloudRunKService(t *testing.T) {
+	// On Cloud Run (K_SERVICE set), should derive from service name, NOT
+	// hostname, and should NOT attempt to persist to disk.
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("K_SERVICE", "my-cloud-run-service")
+	// Ensure no explicit hub ID env var.
+	t.Setenv("SCION_SERVER_HUB_HUBID", "")
+
+	// Reset the sync.Once to allow re-computation.
+	resolvedHubIDOnce = sync.Once{}
+	resolvedHubIDValue = ""
+
+	id := ResolveHubIDFromEnv()
+
+	// Should NOT be the hostname-derived ID.
+	hostnameID := DefaultHubID()
+	if id == hostnameID {
+		t.Errorf("ResolveHubIDFromEnv() on Cloud Run returned hostname-derived ID %q; should derive from K_SERVICE", id)
+	}
+
+	// Should be 12 hex chars derived from "my-cloud-run-service".
+	if len(id) != 12 {
+		t.Errorf("ResolveHubIDFromEnv() = %q, want 12-char hex string", id)
+	}
+
+	// hub-id file should NOT have been created (Cloud Run has read-only FS).
+	filePath := filepath.Join(tmpDir, ".scion", "hub-id")
+	if _, err := os.Stat(filePath); err == nil {
+		t.Errorf("hub-id file should not be created on Cloud Run (K_SERVICE path)")
+	}
+}
+
+func TestResolveHubIDFromEnv_WorkstationFallback(t *testing.T) {
+	// Without K_SERVICE or explicit env var, should fall back to PersistentHubID.
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("K_SERVICE", "")
+	t.Setenv("SCION_SERVER_HUB_HUBID", "")
+
+	// Reset the sync.Once to allow re-computation.
+	resolvedHubIDOnce = sync.Once{}
+	resolvedHubIDValue = ""
+
+	id := ResolveHubIDFromEnv()
+
+	// Should match PersistentHubID / DefaultHubID on first boot.
+	expected := DefaultHubID()
+	if id != expected {
+		t.Errorf("ResolveHubIDFromEnv() = %q on workstation, want %q", id, expected)
 	}
 }

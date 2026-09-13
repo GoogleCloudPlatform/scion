@@ -45,9 +45,7 @@ model_aliases:
   extra-large: anthropic/claude-opus-4
 
 command:
-  base: ["hermes", "chat", "--yolo"]
-  task_flag: "-q"
-  resume_flag: "-c"
+  base: ["hermes", "chat", "--yolo", "-c", "scion-session", "--create-if-missing"]
   task_position: after_base_args
 
 capabilities:
@@ -71,6 +69,7 @@ capabilities:
     sse: { support: "yes" }
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Not yet implemented" }
+  resume: { support: "yes" }
 
 no_auth:
   behavior: drop-to-shell

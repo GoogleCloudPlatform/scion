@@ -29,7 +29,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import { apiFetch, extractApiError } from '../../client/api.js';
+import { apiFetch, apiFetchAllPages, extractApiError } from '../../client/api.js';
 import { showToast } from '../../utils/toast.js';
 
 export type ResourceKind = 'template' | 'harness-config';
@@ -369,13 +369,12 @@ export class ScionResourceList extends LitElement {
       // every project's resources.
       if (this.scope === 'project' && this.scopeId) params.set('scopeId', this.scopeId);
 
-      const response = await apiFetch(`/api/v1/${this.apiResource}?${params.toString()}`);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      const data = (await response.json()) as Record<string, ResourceItem[]>;
-      const list = this.kind === 'template' ? data.templates : data.harnessConfigs;
-      this.items = (Array.isArray(list) ? list : [])
+      const key = this.kind === 'template' ? 'templates' : 'harnessConfigs';
+      const list = await apiFetchAllPages<ResourceItem>(
+        `/api/v1/${this.apiResource}?${params.toString()}`,
+        key
+      );
+      this.items = list
         .slice()
         .sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name));
     } catch (err) {
@@ -495,13 +494,12 @@ export class ScionResourceList extends LitElement {
     this.globalItems = [];
     try {
       const params = new URLSearchParams({ status: 'active', scope: 'global', limit: '100' });
-      const response = await apiFetch(`/api/v1/${this.apiResource}?${params.toString()}`);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      const data = (await response.json()) as Record<string, ResourceItem[]>;
-      const list = this.kind === 'template' ? data.templates : data.harnessConfigs;
-      this.globalItems = (Array.isArray(list) ? list : [])
+      const key = this.kind === 'template' ? 'templates' : 'harnessConfigs';
+      const list = await apiFetchAllPages<ResourceItem>(
+        `/api/v1/${this.apiResource}?${params.toString()}`,
+        key
+      );
+      this.globalItems = list
         .slice()
         .sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name));
     } catch (err) {
@@ -537,13 +535,12 @@ export class ScionResourceList extends LitElement {
       if (this.scope) params.set('scope', this.scope);
       if (this.scope === 'project' && this.scopeId) params.set('scopeId', this.scopeId);
 
-      const response = await apiFetch(`/api/v1/${this.apiResource}?${params.toString()}`);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      const data = (await response.json()) as Record<string, ResourceItem[]>;
-      const list = this.kind === 'template' ? data.templates : data.harnessConfigs;
-      this.items = (Array.isArray(list) ? list : [])
+      const key = this.kind === 'template' ? 'templates' : 'harnessConfigs';
+      const list = await apiFetchAllPages<ResourceItem>(
+        `/api/v1/${this.apiResource}?${params.toString()}`,
+        key
+      );
+      this.items = list
         .slice()
         .sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name));
     } catch (err) {

@@ -196,6 +196,7 @@ Backend for managing encrypted secrets. The `local` backend is read-only and rej
 | `backend` | string | `"local"` | Secrets backend: `local` or `gcpsm`. The `local` backend rejects writes; use `gcpsm` for production. |
 | `gcp_project_id` | string | | GCP Project ID for Secret Manager. Required when `backend` is `gcpsm`. |
 | `gcp_credentials` | string | | Path to GCP service account JSON or the JSON content itself. Optional if using Application Default Credentials. |
+| `gcp_replication_locations` | list of strings | `[]` | GCP regions for user-managed secret replication (e.g. `["us-east1", "europe-west1"]`). When non-empty, secrets are created with user-managed replication restricted to these regions instead of automatic global replication. Required for GCP orgs enforcing `constraints/gcp.resourceLocations`. See [User-Managed Replication Locations](/scion/hosted/user/secrets/#user-managed-replication-locations). |
 
 ### Workspace Storage (`server.workspace_storage`)
 
@@ -321,6 +322,7 @@ All server settings can be overridden via environment variables using the `SCION
 - `server.secrets.backend` -> `SCION_SERVER_SECRETS_BACKEND`
 - `server.secrets.gcp_project_id` -> `SCION_SERVER_SECRETS_GCPPROJECTID`
 - `server.secrets.gcp_credentials` -> `SCION_SERVER_SECRETS_GCPCREDENTIALS`
+- `server.secrets.gcp_replication_locations` -> `SCION_SERVER_SECRETS_GCPREPLICATIONLOCATIONS`
 - `server.scheduler.interval_seconds` -> `SCION_SERVER_SCHEDULER_INTERVAL_SECONDS`
 - `server.scheduler.max_concurrency` -> `SCION_SERVER_SCHEDULER_MAX_CONCURRENCY`
 

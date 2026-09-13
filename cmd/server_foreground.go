@@ -115,6 +115,14 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if err := config.UpdateDefaultTemplates(true, harness.EmbedOnlyHarnesses()); err != nil {
 			log.Printf("Warning: failed to refresh default templates: %v", err)
 		}
+	} else {
+		// In hosted mode, materialize any missing harness configs from the
+		// binary's embedded catalog. This ensures newly added harness configs
+		// from binary updates are available on disk without a full InitGlobal.
+		// Force=false preserves any operator-customized configs.
+		if err := config.MaterializeBundledHarnessConfigs(globalDir, config.MaterializeOptions{Force: false}); err != nil {
+			log.Printf("Warning: failed to materialize missing harness configs: %v", err)
+		}
 	}
 
 	// When --global is set, change to the home directory so the server
@@ -234,8 +242,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		hubID := cfg.Hub.ResolveHubID()
 		var sbErr error
 		secretBackend, sbErr = secret.NewBackend(ctx, cfg.Secrets.Backend, s, secret.GCPBackendConfig{
-			ProjectID:       cfg.Secrets.GCPProjectID,
-			CredentialsJSON: cfg.Secrets.GCPCredentials,
+			ProjectID:            cfg.Secrets.GCPProjectID,
+			CredentialsJSON:      cfg.Secrets.GCPCredentials,
+			ReplicationLocations: cfg.Secrets.GCPReplicationLocations,
 		}, hubID, resolveSessionSecret())
 		if sbErr != nil {
 			log.Printf("Warning: failed to initialize secret backend: %v", sbErr)
@@ -424,6 +433,38 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 		warnShadowedBrokerEnv(ctx, dispatcher)
 
+		// Initialize web chat store and attachment store. These only need a
+		// DB handle, not the message broker, so they live outside the broker
+		// gate to work on single-node instances without broker plugins.
+		var webStore hub.WebChatStore
+		if dbProvider, ok := s.(interface{ DB() *sql.DB }); ok {
+			if rawDB := dbProvider.DB(); rawDB != nil {
+				ws := hub.NewWebChatStore(rawDB, cfg.Database.Driver)
+				if err := ws.Init(); err != nil {
+					log.Printf("Warning: failed to initialize webchat store: %v", err)
+				} else {
+					webStore = ws
+					hubSrv.SetWebChatStore(webStore)
+					log.Printf("Web chat store initialized")
+
+					// W7: Initialize local-disk attachment store.
+					globalDir, err := config.GetGlobalDir()
+					if err != nil {
+						log.Printf("Warning: could not determine global dir, attachments disabled: %v", err)
+					} else {
+						attachDir := filepath.Join(globalDir, "attachments")
+						attachStore, err := hub.NewLocalDiskAttachmentStore(attachDir)
+						if err != nil {
+							log.Printf("Warning: failed to initialize attachment store: %v", err)
+						} else {
+							hubSrv.SetAttachmentStore(attachStore)
+							log.Printf("Attachment store initialized: dir=%s", attachDir)
+						}
+					}
+				}
+			}
+		}
+
 		// Initialize message broker from versioned settings.
 		// Uses FanOutBroker to support multiple simultaneous broker plugins.
 		if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil {
@@ -588,43 +629,21 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					log.Printf("Message broker spoke added: name=%s channel_id=%s observer=%v", bt, channelID, observer)
 				}
 
-				// Register the native web channel spoke. It follows the same
-				// contract as every plugin adapter: Subscribe discards the handler
-				// (F7/F8, #944), Publish does real work (webchat_* state).
-				// Observer: true so a state-write failure degrades the thread rail
-				// rather than failing the user's message.
-				if dbProvider, ok := s.(interface{ DB() *sql.DB }); ok {
-					if rawDB := dbProvider.DB(); rawDB != nil {
-						webStore := hub.NewWebChatStore(rawDB, cfg.Database.Driver)
-						if err := webStore.Init(); err != nil {
-							log.Printf("Warning: failed to initialize webchat store: %v", err)
-						} else {
-							webSpoke := hub.NewWebChannelBus(logging.Subsystem("hub.eventbus.web"), webStore)
-							namedBuses = append(namedBuses, eventbus.NamedEventBus{
-								Name:      "web",
-								ChannelID: "web",
-								Bus:       webSpoke,
-								Observer:  true,
-							})
-							hubSrv.SetWebChatStore(webStore)
-							log.Printf("Message broker spoke added: name=web channel_id=web observer=true")
-
-							// W7: Initialize local-disk attachment store.
-							globalDir, err := config.GetGlobalDir()
-							if err != nil {
-								log.Printf("Warning: could not determine global dir, attachments disabled: %v", err)
-							} else {
-								attachDir := filepath.Join(globalDir, "attachments")
-								attachStore, err := hub.NewLocalDiskAttachmentStore(attachDir)
-								if err != nil {
-									log.Printf("Warning: failed to initialize attachment store: %v", err)
-								} else {
-									hubSrv.SetAttachmentStore(attachStore)
-									log.Printf("Attachment store initialized: dir=%s", attachDir)
-								}
-							}
-						}
-					}
+				// Register the native web channel spoke if web chat store is
+				// available. The spoke follows the same contract as every plugin
+				// adapter: Subscribe discards the handler (F7/F8, #944), Publish
+				// does real work (webchat_* state). Observer: true so a
+				// state-write failure degrades the thread rail rather than
+				// failing the user's message.
+				if webStore != nil {
+					webSpoke := hub.NewWebChannelBus(logging.Subsystem("hub.eventbus.web"), webStore)
+					namedBuses = append(namedBuses, eventbus.NamedEventBus{
+						Name:      "web",
+						ChannelID: "web",
+						Bus:       webSpoke,
+						Observer:  true,
+					})
+					log.Printf("Message broker spoke added: name=web channel_id=web observer=true")
 				}
 
 				fanout := eventbus.NewFanOutEventBus(namedBuses, logging.Subsystem("hub.eventbus.fanout"))
@@ -1273,8 +1292,8 @@ func migrateStore(ctx context.Context, cfg *config.GlobalConfig, s *entadapter.C
 // safe because all guarded boot migrations are idempotent: each one checks
 // whether its work has already been done (e.g. MigrateStorageOnFirstBoot
 // checks for existing namespaced objects, BootstrapBundledResources uses
-// SkipIfAnyExist, secretmigration.MigratePluginSecrets checks for existing
-// secret values)
+// per-resource OverwritePolicy checks, secretmigration.MigratePluginSecrets
+// checks for existing secret values)
 // and no-ops if so. The winning replica does the work; the others skip it
 // here and will see the completed state on their next access.
 func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryLockKey, label string, fn func()) {
@@ -1496,13 +1515,11 @@ func parseAdminEmails(cfg *config.GlobalConfig) []string {
 }
 
 // resolveHubIDFromEnv resolves the hub instance ID from environment variables,
-// falling back to the deterministic hostname-derived default. This is used
-// during early logging init before the full config is loaded.
+// falling back to the environment-aware default (K_SERVICE on Cloud Run,
+// persisted hostname-derived ID on workstations). This is used during early
+// logging init before the full config is loaded.
 func resolveHubIDFromEnv() string {
-	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
-		return v
-	}
-	return config.DefaultHubID()
+	return config.ResolveHubIDFromEnv()
 }
 
 // resolveHubNameFromEnv resolves the hub display name from environment variables,
@@ -1874,7 +1891,6 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			if err := hubSrv.BootstrapBundledResources(ctx, hub.BootstrapOptions{
 				RepairStorage:   true,
 				OverwritePolicy: hub.OverwriteBuiltinManaged,
-				SkipIfAnyExist:  true,
 			}); err != nil {
 				log.Printf("Warning: bundled resource bootstrap failed: %v", err)
 			}

@@ -196,6 +196,7 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.DefaultResources = snap.DefaultResources
 	resp.DefaultModel = snap.DefaultModel
 	resp.DefaultThinkingLevel = snap.DefaultThinkingLevel
+	resp.DefaultRuntimeBroker = snap.DefaultRuntimeBroker
 
 	// Telemetry — always set from snapshot (nil = no telemetry configured).
 	resp.Telemetry = snap.TelemetryConfig
@@ -732,6 +733,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 	if req.DefaultThinkingLevel != nil {
 		keys = append(keys, "default_thinking_level")
 	}
+	if req.DefaultRuntimeBroker != nil {
+		keys = append(keys, "default_runtime_broker")
+	}
 
 	if req.AutoExposePorts != nil {
 		keys = append(keys, "auto_expose_ports.enabled")
@@ -1093,6 +1097,9 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			} else {
 				d.DefaultThinkingLevel = nil
 			}
+		}
+		if req.DefaultRuntimeBroker != nil {
+			d.DefaultRuntimeBroker = *req.DefaultRuntimeBroker
 		}
 		doc = d
 

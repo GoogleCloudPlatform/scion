@@ -15,7 +15,7 @@ projection, and MCP configuration across all bundles. See
 managed.
 
 `antigravity` and `gemini-cli` are installed by default. `opencode`, `codex`, `copilot`, `hermes`,
-and `grok-build` are opt-in bundles you add via a [harness-config](/scion/reference/harness-settings/#managing-harness-configs).
+`grok-build`, and `muse-code` are opt-in bundles you add via a [harness-config](/scion/reference/harness-settings/#managing-harness-configs).
 :::
 
 ## 1. Gemini CLI (`gemini-cli`)
@@ -255,8 +255,8 @@ interactively, then capture the credential with the container's `capture_auth.py
 - **Instructions**: `agent_instructions` are projected into `~/.grok/AGENTS.md`.
 - **System Prompt**: Supported natively via the `--system-prompt-override` flag during launch.
 - **MCP**: `~/.grok/config.toml` under `[mcp_servers.*]` TOML sections (supports `stdio`, `sse`, and `streamable-http` transports). Project-scoped MCP servers are not supported (demoted to global).
-- **Model aliases**: `small` → `grok-3-mini`, `medium` → `grok-3`, `large` → `grok-4`, `extra-large` → `grok-4` (resolved and injected via `GROK_DEFAULT_MODEL`).
-- **Hooks**: 11 Grok lifecycle event hooks are wired to sciontool via `~/.grok/hooks/scion.json` using the `grok-build` dialect.
+- **Model aliases**: `small` → `grok-3-mini`, `medium` → `grok-3`, `large` → `grok-4.5`, `extra-large` → `grok-4.6` (resolved and injected via `GROK_DEFAULT_MODEL`).
+- **Hooks**: 15 Grok lifecycle event hooks are wired to sciontool via `~/.grok/hooks/scion.json` using the `grok-build` dialect, including `PermissionDenied`, `SubagentStart`, `PreCompact`, and `PostCompact`.
 - **OpenTelemetry**: When telemetry is enabled, Scion injects `GROK_TELEMETRY_ENABLED`, `GROK_EXTERNAL_OTEL`, and standard `OTEL_*` env vars pointing at sciontool's local OTLP receiver.
 
 ### Known Limitations
@@ -266,33 +266,66 @@ interactively, then capture the credential with the container's `capture_auth.py
 
 ---
 
+## 9. Muse Code (`muse-code`)
+
+A harness for Meta's `muse` terminal coding agent. Opt-in bundle.
+
+### Authentication
+Muse Code authenticates with a **Meta API key** (auth type `api-key`). Scion resolves the key
+from the `META_API_KEY` environment variable.
+
+If no credentials are found, the agent drops to a shell — run `muse auth set` interactively,
+then capture the credential with the container's `capture_auth.py`
+(see [Harness Authentication](/scion/local/agent-credentials/#capturing-credentials-from-a-running-agent)).
+
+| Mode | Credential | Setup |
+|---|---|---|
+| API Key | `META_API_KEY` | Set env var with Meta API key |
+
+### Configuration
+- **Config directory**: `~/.config/muse/` (settings in `settings.json`).
+- **Instructions**: `agent_instructions` and `system_prompt` are projected into `AGENTS.md` in the agent home. Muse Code has no native system-prompt flag, so the system prompt is *prepended to `AGENTS.md`*.
+- **MCP**: `~/.config/muse/settings.json` under the `mcp_servers` key (supports `stdio` and `streamable-http` transports). Project-scoped MCP servers are not supported (demoted to global).
+- **Model aliases**: `small` → `muse-spark-1.2`, `medium` → `muse-spark-1.2`, `large` → `muse-spark-1.2`, `extra-large` → `muse-spark-1.2`.
+- **Hooks**: All 13 lifecycle event hooks are wired to sciontool via `settings.json` using the `muse-code` dialect.
+- **Skills directory**: `~/.muse/skills`.
+- **Default flags**: Runs with `--yolo` (auto-approve) mode enabled by default.
+
+### Known Limitations
+- **System Prompt**: approximated via `AGENTS.md` (no native override).
+- **Resume**: Partial — resume is an interactive slash command (`/resume --last`), not a CLI flag.
+- **No project-scoped MCP**.
+- **OAuth/Vertex AI/Auth File**: not supported — Meta API key auth only.
+
+---
+
 ## Feature Capability Matrix
 
 The following table summarizes the capabilities supported by each agent harness within Scion.
 
-| Capability | Gemini | Claude | OpenCode | Codex | Copilot | Hermes | Antigravity | Grok Build |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Resume** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| With Prompt | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Custom Session ID | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **Interject** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Interrupt Key | C-c | C-c | Esc / C-c | C-c | C-c | C-c | C-c | C-c |
-| **Enqueue** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Hooks** | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
-| Support | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
-| **OpenTelemetry** | ✅ | ✅  | ❌ | ✅  | ❌ | ❌ | ❌ | ✅ |
-| **System Prompt Override** | ✅ | ✅ | ❌ | ❌ | ◐ | ◐ | ◐ | ✅ |
-| **Auth: API Key** | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ❌ | ✅ |
-| **Auth: OAuth Token** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **Auth: Auth File** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅² | ✅ |
-| **Auth: Vertex AI** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Capability | Gemini | Claude | OpenCode | Codex | Copilot | Hermes | Antigravity | Grok Build | Muse Code |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Resume** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ◐ |
+| With Prompt | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| Custom Session ID | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Interject** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Interrupt Key | C-c | C-c | Esc / C-c | C-c | C-c | C-c | C-c | C-c | Esc |
+| **Enqueue** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Hooks** | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| Support | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| **OpenTelemetry** | ✅ | ✅  | ❌ | ✅  | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **System Prompt Override** | ✅ | ✅ | ❌ | ❌ | ◐ | ◐ | ◐ | ✅ | ◐ |
+| **Auth: API Key** | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ❌ | ✅ | ✅ |
+| **Auth: OAuth Token** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Auth: Auth File** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅² | ✅ | ❌ |
+| **Auth: Vertex AI** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ |
 
 * **Resume with Prompt**: Ability to provide a new task/prompt when resuming an existing session.
 * **Interject** (pending feature): Key used to interrupt the agent (e.g., stop generation).
 * **Enqueue**: Ability to send messages to the agent while it's running (supported via the built-in Tmux session).
 * **Hooks**: Support for lifecycle hooks (e.g., `SessionStart`, `AfterTool`).
 * **OpenTelemetry**: Specific events vary by harness and native emitter schema.
-* **System Prompt Override**: Support for providing a custom system prompt to the agent (e.g. via `system_prompt.md`). The `gemini-cli` harness has full support via `~/.gemini/system_prompt.md`. ◐ = *partial* — the harness has no native system-prompt flag, so Scion prepends the system prompt to the harness's instructions file: `AGENTS.md` for Hermes, `GEMINI.md` for Antigravity, and `copilot-instructions.md` for Copilot.
+* **System Prompt Override**: Support for providing a custom system prompt to the agent (e.g. via `system_prompt.md`). The `gemini-cli` harness has full support via `~/.gemini/system_prompt.md`. ◐ = *partial* — the harness has no native system-prompt flag, so Scion prepends the system prompt to the harness's instructions file: `AGENTS.md` for Hermes and Muse Code, `GEMINI.md` for Antigravity, and `copilot-instructions.md` for Copilot.
 * **Auth types**: The universal auth types (`api-key`, `oauth-token`, `auth-file`, `vertex-ai`) each harness accepts. Set an explicit type with `--harness-auth` or `auth_selectedType`; otherwise Scion auto-detects. See [Harness Authentication](/scion/local/agent-credentials/).
     * ¹ **Copilot** authenticates with a **GitHub token** (`COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN`) under the `api-key` type, not an LLM-provider key.
     * ² **Antigravity**'s `oauth-token` default type is a **file-based** OAuth token (`AGY_TOKEN` at `~/.gemini/antigravity-cli/antigravity-oauth-token`), captured under the auth-file capability — it does not accept a raw injected OAuth token the way Claude does.

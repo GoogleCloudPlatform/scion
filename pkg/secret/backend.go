@@ -31,6 +31,11 @@ const (
 type GCPBackendConfig struct {
 	ProjectID       string
 	CredentialsJSON string
+	// ReplicationLocations, if non-empty, switches Secret Manager from automatic
+	// (global) to user-managed regional replication. Use when org policy
+	// constraints/gcp.resourceLocations prohibits global secrets.
+	// Example: []string{"northamerica-northeast1"}
+	ReplicationLocations []string
 }
 
 // NewBackend creates a SecretBackend of the specified type.

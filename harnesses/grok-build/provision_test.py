@@ -470,9 +470,9 @@ class ModelResolutionTest(unittest.TestCase):
                 "instructions_file": "AGENTS.md",
                 "model_aliases": {
                     "small": "grok-3-mini",
-                    "medium": "grok-3",
-                    "large": "grok-4",
-                    "extra-large": "grok-4",
+                    "medium": "grok-4.5",
+                    "large": "grok-4.6",
+                    "extra-large": "grok-4.6",
                 },
             },
         })
@@ -483,14 +483,14 @@ class ModelResolutionTest(unittest.TestCase):
     def test_small_alias_resolves_to_grok_3_mini(self) -> None:
         self.assertEqual(self._resolve("small"), "grok-3-mini")
 
-    def test_medium_alias_resolves_to_grok_3(self) -> None:
-        self.assertEqual(self._resolve("medium"), "grok-3")
+    def test_medium_alias_resolves_to_grok_4_5(self) -> None:
+        self.assertEqual(self._resolve("medium"), "grok-4.5")
 
-    def test_large_alias_resolves_to_grok_4(self) -> None:
-        self.assertEqual(self._resolve("large"), "grok-4")
+    def test_large_alias_resolves_to_grok_4_6(self) -> None:
+        self.assertEqual(self._resolve("large"), "grok-4.6")
 
-    def test_extra_large_alias_resolves_to_grok_4(self) -> None:
-        self.assertEqual(self._resolve("extra-large"), "grok-4")
+    def test_extra_large_alias_resolves_to_grok_4_6(self) -> None:
+        self.assertEqual(self._resolve("extra-large"), "grok-4.6")
 
     def test_raw_model_name_passes_through(self) -> None:
         self.assertEqual(self._resolve("grok-4-turbo"), "grok-4-turbo")
@@ -500,7 +500,7 @@ class ModelResolutionTest(unittest.TestCase):
 
     def test_alias_is_case_insensitive(self) -> None:
         self.assertEqual(self._resolve("SMALL"), "grok-3-mini")
-        self.assertEqual(self._resolve("Large"), "grok-4")
+        self.assertEqual(self._resolve("Large"), "grok-4.6")
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +523,7 @@ class HookWriteTest(unittest.TestCase):
             for event in provision._GROK_HOOK_EVENTS:
                 self.assertIn(event, hooks, f"missing hook event: {event}")
 
-    def test_session_start_uses_echo(self) -> None:
+    def test_session_start_uses_echo_with_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             provision._write_hooks(tmp)
             hooks_path = os.path.join(tmp, ".grok", "hooks", "scion.json")
@@ -533,9 +533,10 @@ class HookWriteTest(unittest.TestCase):
             cmd = session_start[0]["hooks"][0]["command"]
             self.assertIn("echo", cmd)
             self.assertIn("SessionStart", cmd)
+            self.assertIn("source", cmd)
             self.assertIn("sciontool hook --dialect=grok-build", cmd)
 
-    def test_session_end_uses_echo(self) -> None:
+    def test_session_end_uses_echo_with_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             provision._write_hooks(tmp)
             hooks_path = os.path.join(tmp, ".grok", "hooks", "scion.json")
@@ -545,6 +546,7 @@ class HookWriteTest(unittest.TestCase):
             cmd = session_end[0]["hooks"][0]["command"]
             self.assertIn("echo", cmd)
             self.assertIn("SessionEnd", cmd)
+            self.assertIn("reason", cmd)
 
     def test_pre_tool_use_uses_cat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -565,7 +567,17 @@ class HookWriteTest(unittest.TestCase):
                 data = json.load(f)
             stop = data["hooks"]["Stop"]
             timeout = stop[0]["hooks"][0]["timeout"]
-            self.assertEqual(timeout, 10)
+            self.assertEqual(timeout, 60)
+
+    def test_subagent_stop_has_longer_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            provision._write_hooks(tmp)
+            hooks_path = os.path.join(tmp, ".grok", "hooks", "scion.json")
+            with open(hooks_path) as f:
+                data = json.load(f)
+            subagent_stop = data["hooks"]["SubagentStop"]
+            timeout = subagent_stop[0]["hooks"][0]["timeout"]
+            self.assertEqual(timeout, 60)
 
 
 # ---------------------------------------------------------------------------
@@ -981,6 +993,86 @@ class VertexAIAuthTest(unittest.TestCase):
                 content,
             )
 
+    def test_vertex_global_region_uses_plain_hostname(self) -> None:
+        """When GOOGLE_CLOUD_REGION is set to 'global', the base_url must use
+        the plain hostname (aiplatform.googleapis.com), NOT
+        'global-aiplatform.googleapis.com'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            project_path = os.path.join(tmp, "project-id")
+            with open(project_path, "w") as f:
+                f.write("my-gcp-project")
+            region_path = os.path.join(tmp, "region")
+            with open(region_path, "w") as f:
+                f.write("global")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": project_path,
+                        "GOOGLE_CLOUD_REGION": region_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            with temporary_home(tmp):
+                provision._configure_vertex_ai(ctx, env)
+                config_path = os.path.join(tmp, ".grok", "config.toml")
+                with open(config_path) as f:
+                    content = f.read()
+            # Must use the global endpoint (plain hostname), not region-prefixed.
+            self.assertIn(
+                "https://aiplatform.googleapis.com"
+                "/v1beta1/projects/my-gcp-project/locations/global/endpoints/openapi",
+                content,
+            )
+            # Must NOT contain the invalid region-prefixed hostname.
+            self.assertNotIn("global-aiplatform.googleapis.com", content)
+
+    def test_vertex_global_location_uses_plain_hostname(self) -> None:
+        """When GOOGLE_CLOUD_LOCATION is set to 'global', the base_url must use
+        the plain hostname — same fix applies regardless of which env var
+        provides the region."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            project_path = os.path.join(tmp, "project-id")
+            with open(project_path, "w") as f:
+                f.write("my-gcp-project")
+            location_path = os.path.join(tmp, "location")
+            with open(location_path, "w") as f:
+                f.write("global")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": [
+                        "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION",
+                    ],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": project_path,
+                        "GOOGLE_CLOUD_LOCATION": location_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            with temporary_home(tmp):
+                provision._configure_vertex_ai(ctx, env)
+                config_path = os.path.join(tmp, ".grok", "config.toml")
+                with open(config_path) as f:
+                    content = f.read()
+            self.assertIn(
+                "https://aiplatform.googleapis.com"
+                "/v1beta1/projects/my-gcp-project/locations/global/endpoints/openapi",
+                content,
+            )
+            self.assertNotIn("global-aiplatform.googleapis.com", content)
+
     def test_vertex_adc_placed_when_staged(self) -> None:
         """When gcloud-adc file secret is staged, it is written to
         ~/.config/gcloud/application_default_credentials.json and
@@ -1147,9 +1239,9 @@ class VertexAIAuthTest(unittest.TestCase):
                     "instructions_file": "AGENTS.md",
                     "model_aliases": {
                         "small": "grok-3-mini",
-                        "medium": "grok-3",
-                        "large": "grok-4",
-                        "extra-large": "grok-4",
+                        "medium": "grok-4.5",
+                        "large": "grok-4.6",
+                        "extra-large": "grok-4.6",
                     },
                 },
             })
@@ -1163,9 +1255,93 @@ class VertexAIAuthTest(unittest.TestCase):
                         content = f.read()
             finally:
                 os.environ.pop("SCION_MODEL", None)
-            # Alias "small" should resolve to default Vertex model, not "small".
+            # Alias "small" should resolve to default Vertex model.
             self.assertIn("xai/grok-4.6", content)
-            self.assertNotIn('"small"', content)
+            # The raw model name appears as an alias section header — that's
+            # the fix for --model routing — but NOT as a model value.
+            self.assertIn('[model."small"]', content)
+            self.assertNotIn('model = "small"', content)
+
+    def test_vertex_bare_model_falls_back_to_default(self) -> None:
+        """Pre-resolved model name without publisher prefix (e.g., 'grok-4')
+        falls back to the default Vertex AI model instead of passing through."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "project-id")
+            with open(secret_path, "w") as f:
+                f.write("my-gcp-project")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": secret_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({
+                "harness_bundle_dir": tmp,
+                "harness_config": {
+                    "no_auth": {"behavior": "drop-to-shell"},
+                    "instructions_file": "AGENTS.md",
+                    "model_aliases": {
+                        "small": "grok-3-mini",
+                        "medium": "grok-4.5",
+                        "large": "grok-4.6",
+                        "extra-large": "grok-4.6",
+                    },
+                },
+            })
+            env: dict[str, str] = {}
+            os.environ["SCION_MODEL"] = "grok-4"
+            try:
+                with temporary_home(tmp):
+                    provision._configure_vertex_ai(ctx, env)
+                    config_path = os.path.join(tmp, ".grok", "config.toml")
+                    with open(config_path) as f:
+                        content = f.read()
+            finally:
+                os.environ.pop("SCION_MODEL", None)
+            # Bare "grok-4" lacks publisher prefix — should use default model.
+            self.assertIn("xai/grok-4.6", content)
+            # The raw model name appears as an alias section header — that's
+            # the fix for --model routing — but NOT as a model value.
+            self.assertIn('[model."grok-4"]', content)
+            self.assertNotIn('model = "grok-4"', content)
+
+    def test_vertex_qualified_model_passes_through(self) -> None:
+        """Fully-qualified model ID with publisher prefix passes through."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "project-id")
+            with open(secret_path, "w") as f:
+                f.write("my-gcp-project")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": secret_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            os.environ["SCION_MODEL"] = "xai/grok-4.2"
+            try:
+                with temporary_home(tmp):
+                    provision._configure_vertex_ai(ctx, env)
+                    config_path = os.path.join(tmp, ".grok", "config.toml")
+                    with open(config_path) as f:
+                        content = f.read()
+            finally:
+                os.environ.pop("SCION_MODEL", None)
+            self.assertIn("xai/grok-4.2", content)
+            self.assertNotIn("xai/grok-4.6", content)
 
     def test_vertex_explicit_model_id_passes_through(self) -> None:
         """Explicit model IDs (non-aliases) pass through to vertex config."""
@@ -1247,6 +1423,175 @@ class VertexAIAuthTest(unittest.TestCase):
             self.assertIn("my-assigned-project", content)
             # GOOGLE_CLOUD_PROJECT should be exported for downstream tools.
             self.assertEqual(env["GOOGLE_CLOUD_PROJECT"], "my-assigned-project")
+
+    def test_vertex_model_alias_created_for_cli_override(self) -> None:
+        """When SCION_MODEL is a concrete model name (e.g., 'grok-4.6'),
+        config.toml must contain BOTH [model.vertex-grok] AND a
+        [model."grok-4.6"] block routing through the vertex auth_provider."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "project-id")
+            with open(secret_path, "w") as f:
+                f.write("my-gcp-project")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": secret_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({
+                "harness_bundle_dir": tmp,
+                "harness_config": {
+                    "no_auth": {"behavior": "drop-to-shell"},
+                    "instructions_file": "AGENTS.md",
+                    "model_aliases": {
+                        "small": "grok-3-mini",
+                        "medium": "grok-4.5",
+                        "large": "grok-4.6",
+                    },
+                },
+            })
+            env: dict[str, str] = {}
+            os.environ["SCION_MODEL"] = "grok-4.6"
+            try:
+                with temporary_home(tmp):
+                    provision._configure_vertex_ai(ctx, env)
+                    config_path = os.path.join(tmp, ".grok", "config.toml")
+                    with open(config_path) as f:
+                        content = f.read()
+            finally:
+                os.environ.pop("SCION_MODEL", None)
+            # Must have the default vertex-grok block.
+            self.assertIn("[model.vertex-grok]", content)
+            # Must also have the alias block for the CLI model name.
+            self.assertIn('[model."grok-4.6"]', content)
+            # Both blocks must route through the vertex auth_provider.
+            self.assertEqual(
+                content.count(f'auth_provider = "{provision._VERTEX_AUTH_PROVIDER_NAME}"'),
+                2,
+            )
+
+    def test_vertex_model_alias_not_created_when_matches_config_name(self) -> None:
+        """When SCION_MODEL equals the vertex config name ('vertex-grok'),
+        no duplicate alias block is created."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "project-id")
+            with open(secret_path, "w") as f:
+                f.write("my-gcp-project")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": secret_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            os.environ["SCION_MODEL"] = "vertex-grok"
+            try:
+                with temporary_home(tmp):
+                    provision._configure_vertex_ai(ctx, env)
+                    config_path = os.path.join(tmp, ".grok", "config.toml")
+                    with open(config_path) as f:
+                        content = f.read()
+            finally:
+                os.environ.pop("SCION_MODEL", None)
+            # Only one model block — no alias needed.
+            self.assertEqual(
+                content.count(f'auth_provider = "{provision._VERTEX_AUTH_PROVIDER_NAME}"'),
+                1,
+            )
+
+    def test_vertex_model_alias_not_created_when_scion_model_empty(self) -> None:
+        """When SCION_MODEL is empty, no alias block is created."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "project-id")
+            with open(secret_path, "w") as f:
+                f.write("my-gcp-project")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": secret_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            os.environ.pop("SCION_MODEL", None)
+            with temporary_home(tmp):
+                provision._configure_vertex_ai(ctx, env)
+                config_path = os.path.join(tmp, ".grok", "config.toml")
+                with open(config_path) as f:
+                    content = f.read()
+            self.assertEqual(
+                content.count(f'auth_provider = "{provision._VERTEX_AUTH_PROVIDER_NAME}"'),
+                1,
+            )
+
+    def test_vertex_model_alias_for_scion_alias_resolves_correctly(self) -> None:
+        """When SCION_MODEL is a Scion size alias (e.g. 'small'), the alias
+        block uses the raw name 'small' so --model small routes through vertex,
+        and the model field uses the default Vertex model ID."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            secret_path = os.path.join(tmp, "project-id")
+            with open(secret_path, "w") as f:
+                f.write("my-gcp-project")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {
+                        "GOOGLE_CLOUD_PROJECT": secret_path,
+                    },
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({
+                "harness_bundle_dir": tmp,
+                "harness_config": {
+                    "no_auth": {"behavior": "drop-to-shell"},
+                    "instructions_file": "AGENTS.md",
+                    "model_aliases": {
+                        "small": "grok-3-mini",
+                        "medium": "grok-4.5",
+                        "large": "grok-4.6",
+                    },
+                },
+            })
+            env: dict[str, str] = {}
+            os.environ["SCION_MODEL"] = "small"
+            try:
+                with temporary_home(tmp):
+                    provision._configure_vertex_ai(ctx, env)
+                    config_path = os.path.join(tmp, ".grok", "config.toml")
+                    with open(config_path) as f:
+                        content = f.read()
+            finally:
+                os.environ.pop("SCION_MODEL", None)
+            # The alias block should use the raw name "small".
+            self.assertIn('[model."small"]', content)
+            # Both blocks must route through vertex.
+            self.assertEqual(
+                content.count(f'auth_provider = "{provision._VERTEX_AUTH_PROVIDER_NAME}"'),
+                2,
+            )
 
     def test_vertex_empty_project_raises(self) -> None:
         """When GOOGLE_CLOUD_PROJECT is empty, ProvisionError is raised."""

@@ -122,6 +122,24 @@ export interface ChatAgentMember {
   detailMessage?: string;
   /** When the agent last changed state (not the heartbeat in `lastSeen`). */
   lastActivityEvent?: string;
+  /**
+   * Whether the viewer may open a terminal on this agent, as decided by the
+   * Hub. The sidebar lists every agent in the space's project, but attaching
+   * is gated by authorizeAgentLifecycle, so without this the terminal control
+   * appears for agents the viewer cannot open and clicking it is refused.
+   *
+   * The control renders only on an explicit true. Anything else - absent,
+   * undefined, dropped somewhere in the client - hides it. An earlier version
+   * tested `=== false` so a missing field would keep the old behaviour, and
+   * that is precisely how the gate failed twice: the server omitted false via
+   * omitempty, and the page's own mappers dropped the field while rebuilding
+   * member objects. A permission gate should fail closed.
+   *
+   * Explicitly `| undefined` because exactOptionalPropertyTypes is on: the
+   * mappers below pass the field through unconditionally, and "present but
+   * undefined" has to be assignable for that to typecheck.
+   */
+  canAttach?: boolean | undefined;
 }
 
 export type ChatMember = ChatHumanMember | ChatAgentMember;
@@ -551,25 +569,32 @@ export class ScionChatMembers extends LitElement {
             size="small"
           ></scion-status-badge>
         </div>
-        <a
-          href="/agents/${a.id}/terminal"
-          class="agent-terminal"
-          title="Open terminal in its own window (Ctrl/Cmd-click for a tab)"
-          @click=${(e: MouseEvent) => {
-            e.stopPropagation();
-            // Leave modified and non-primary clicks to the browser so
-            // Ctrl/Cmd-click, Shift-click and middle-click behave as they do
-            // on any other link. The previous handler called preventDefault()
-            // unconditionally, which swallowed all of them.
-            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
-              return;
-            }
-            e.preventDefault();
-            openTerminalPopout(a.id);
-          }}
-        >
-          <sl-icon name="terminal" style="font-size: 0.75rem;"></sl-icon>
-        </a>
+        ${a.canAttach !== true
+          ? nothing
+          : html`<a
+              href="/agents/${a.id}/terminal"
+              class="agent-terminal"
+              title="Open terminal in its own window (Ctrl/Cmd-click for a tab)"
+              @click=${(e: MouseEvent) => {
+                e.stopPropagation();
+                // Leave modified and non-primary clicks to the browser so
+                // Ctrl/Cmd-click, Shift-click and middle-click behave as they
+                // do on any other link.
+                if (
+                  e.button !== 0 ||
+                  e.metaKey ||
+                  e.ctrlKey ||
+                  e.shiftKey ||
+                  e.altKey
+                ) {
+                  return;
+                }
+                e.preventDefault();
+                openTerminalPopout(a.id);
+              }}
+            >
+              <sl-icon name="terminal" style="font-size: 0.75rem;"></sl-icon>
+            </a>`}
         <a
           href="/agents/${a.id}"
           target="_blank"

@@ -36,12 +36,12 @@ system_prompt_mode: native
 
 model_aliases:
   small: grok-3-mini
-  medium: grok-3
-  large: grok-4
-  extra-large: grok-4
+  medium: grok-4.5
+  large: grok-4.6
+  extra-large: grok-4.6
 
 command:
-  base: ["grok", "--yolo", "--sandbox", "off"]
+  base: ["grok", "--yolo", "--sandbox", "off", "--no-ask-user"]
   resume_flag: "-c"
   task_position: after_base_args
   system_prompt_flag: "--system-prompt-override"

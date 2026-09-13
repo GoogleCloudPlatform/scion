@@ -1030,13 +1030,16 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string
 
 // AgentSetSecretRequest is the request body for agent-initiated secret creation.
 type AgentSetSecretRequest struct {
-	Value        string `json:"value"`                  // Secret value (base64-encoded by default; use Encoding:"raw" for literal text)
-	Encoding     string `json:"encoding,omitempty"`     // "base64" (default) or "raw" (value is literal text, no decoding)
-	Type         string `json:"type,omitempty"`         // environment (default), variable, file
-	Target       string `json:"target,omitempty"`       // Injection target path
-	Force        bool   `json:"force,omitempty"`        // Overwrite existing secret
-	Scope        string `json:"scope,omitempty"`        // "project" (default) or "user"
-	AllowProgeny bool   `json:"allowProgeny,omitempty"` // Allow creator's progeny agents to access (user scope only)
+	Value    string `json:"value"`              // Secret value (base64-encoded by default; use Encoding:"raw" for literal text)
+	Encoding string `json:"encoding,omitempty"` // "base64" (default) or "raw" (value is literal text, no decoding)
+	Type     string `json:"type,omitempty"`     // environment (default), variable, file
+	Target   string `json:"target,omitempty"`   // Injection target path
+	Force    bool   `json:"force,omitempty"`    // Overwrite existing secret
+	Scope    string `json:"scope,omitempty"`    // "project" (default) or "user"
+	// AllowProgeny opts the secret in to progeny inheritance (user scope only).
+	// A pointer so an unset field is distinguishable from an explicit false;
+	// unset resolves to false (opt-in, per design doc §5.1).
+	AllowProgeny *bool `json:"allowProgeny,omitempty"`
 }
 
 // AgentSetSecretResponse is returned on successful agent secret creation.
@@ -1171,8 +1174,10 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		return
 	}
 
-	// allowProgeny is only valid on user-scoped secrets
-	if req.AllowProgeny && scope != store.ScopeUser {
+	// allowProgeny is only valid on user-scoped secrets. Only an explicit
+	// true is rejected; unset on a project-scoped write is fine and simply
+	// resolves to false below.
+	if req.AllowProgeny != nil && *req.AllowProgeny && scope != store.ScopeUser {
 		ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
 			"field": "allowProgeny",
 			"scope": scope,
@@ -1250,6 +1255,31 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
+	// Progeny opt-in is opt-in per design (§5.1): an unset AllowProgeny
+	// resolves to false. Writers that need progeny access — such as harness
+	// credential capture — are responsible for setting it explicitly.
+	allowProgeny := false
+	if req.AllowProgeny != nil {
+		allowProgeny = *req.AllowProgeny
+	}
+
+	// Attribution. A user-scoped secret belongs to the user whose scope it
+	// lives in, even when an agent is what wrote it — which is the normal case
+	// for harness credential capture.
+	//
+	// Two things go wrong if the writing agent is recorded instead. Progeny
+	// lookup matches created_by against the agent's ancestry chain
+	// (ListProgenySecrets -> CreatedByIn), and ancestry entries are bare UUIDs,
+	// so an "agent:<uuid>" value can never match and a captured credential can
+	// never be inherited. Even unprefixed it would only reach descendants of
+	// the one agent that captured it, rather than the owning user's agents.
+	//
+	// The agent is still recorded as the updater, so provenance is not lost.
+	createdBy := fmt.Sprintf("agent:%s", agentID)
+	if scope == store.ScopeUser && scopeID != "" {
+		createdBy = scopeID
+	}
+
 	input := &secret.SetSecretInput{
 		Name:         key,
 		Value:        string(decoded),
@@ -1257,8 +1287,8 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		Target:       target,
 		Scope:        scope,
 		ScopeID:      scopeID,
-		AllowProgeny: req.AllowProgeny,
-		CreatedBy:    fmt.Sprintf("agent:%s", agentID),
+		AllowProgeny: allowProgeny,
+		CreatedBy:    createdBy,
 		UpdatedBy:    fmt.Sprintf("agent:%s", agentID),
 	}
 

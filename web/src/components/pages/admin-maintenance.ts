@@ -1076,24 +1076,97 @@ export class ScionPageAdminMaintenance extends LitElement {
 
   private async handleRestartHub(): Promise<void> {
     this.restartLoading = true;
+    this.restartDialogOpen = false;
+
+    // Fire the restart request. The server will restart and likely drop the
+    // connection before a response arrives, so we expect a network error or
+    // 502 from the reverse proxy. Either outcome means the restart was
+    // initiated — not that it failed.
     try {
-      const response = await apiFetch('/api/v1/admin/maintenance/restart', {
-        method: 'POST',
-      });
-      if (!response.ok) {
-        const errMsg = await extractApiError(response, `HTTP ${response.status}`);
-        throw new Error(errMsg);
-      }
-      this.restartDialogOpen = false;
-      showToast('Hub is restarting... The page will reconnect shortly.', 'primary', {
-        icon: 'info-circle',
-        duration: 10000,
-      });
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to restart hub');
-    } finally {
-      this.restartLoading = false;
+      await apiFetch('/api/v1/admin/maintenance/restart', { method: 'POST' });
+    } catch {
+      // Expected — the server went away.
     }
+
+    // Poll /healthz until the server comes back with a small uptime,
+    // confirming the process actually restarted.
+    const POLL_TIMEOUT_MS = 30_000;
+    const INITIAL_DELAY_MS = 500;
+    const MAX_INTERVAL_MS = 2000;
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
+
+    await new Promise<void>((resolve) => setTimeout(resolve, INITIAL_DELAY_MS));
+
+    let interval = 1000;
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch('/healthz', { credentials: 'include' });
+        if (res.ok) {
+          const data = (await res.json()) as { uptime?: string };
+          // The uptime field is a Go duration string like "3.12s" or "1m5s".
+          // A small uptime (< 120s) confirms a fresh restart rather than
+          // a response from a server that never went down.
+          const uptimeSeconds = this.parseGoUptimeSeconds(data.uptime);
+          if (uptimeSeconds !== null) {
+            if (uptimeSeconds < 120) {
+              showToast('Server restarted successfully.', 'success');
+            } else {
+              showToast(
+                `Server responded but appears not to have restarted (uptime: ${data.uptime}).`,
+                'warning'
+              );
+            }
+            this.restartLoading = false;
+            return;
+          }
+        }
+      } catch {
+        // Server still down — keep polling.
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, interval));
+      interval = Math.min(interval * 1.5, MAX_INTERVAL_MS);
+    }
+
+    // Timed out — server did not come back within the polling window.
+    showToast('Server did not respond after restart. It may still be starting up.', 'warning', {
+      icon: 'exclamation-triangle',
+      duration: 10000,
+    });
+    this.restartLoading = false;
+  }
+
+  /**
+   * Parse a Go duration string (e.g. "3s", "1m5s", "2h3m") into total seconds.
+   * Returns null if the format is unrecognized.
+   */
+  private parseGoUptimeSeconds(uptime: string | undefined): number | null {
+    if (!uptime) return null;
+    let total = 0;
+    let matched = false;
+    const re = /(\d+(?:\.\d+)?)(h|m|s|ms|µs|ns)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(uptime)) !== null) {
+      matched = true;
+      const val = parseFloat(m[1]);
+      switch (m[2]) {
+        case 'h':
+          total += val * 3600;
+          break;
+        case 'm':
+          total += val * 60;
+          break;
+        case 's':
+          total += val;
+          break;
+        case 'ms':
+          total += val / 1000;
+          break;
+        case 'µs':
+        case 'ns':
+          break; // negligible
+      }
+    }
+    return matched ? total : null;
   }
 
   private renderMaintenanceMode() {

@@ -1075,3 +1075,124 @@ func TestServer_SigningKeyBackupPreservesSecretRef(t *testing.T) {
 		t.Error("signing key backup in SQLite should not be empty after loading from backend")
 	}
 }
+
+func TestServer_SigningKeyBackupIsEncrypted(t *testing.T) {
+	// Verify that backupSigningKeyToStore encrypts the signing key value
+	// when a SharedSigningSecret is configured, so key material is not
+	// stored as cleartext in the EncryptedValue column (miller79/scion#5).
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+
+	hubID := "test-encrypt-hub"
+	sharedSecret := "test-signing-secret"
+	backend := secret.NewLocalBackend(s, hubID, sharedSecret)
+
+	cfg := DefaultServerConfig()
+	cfg.HubID = hubID
+	cfg.SecretBackend = backend
+	cfg.SharedSigningSecret = sharedSecret
+
+	// Create server — this generates signing keys and backs them up to store.
+	srv, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	ctx := context.Background()
+
+	// Check that the raw value in SQLite is encrypted (enc:v1: prefix),
+	// not plaintext base64.
+	for _, keyName := range []string{SecretKeyAgentSigningKey, SecretKeyUserSigningKey} {
+		raw, err := s.GetSecretValue(ctx, keyName, store.ScopeHub, hubID)
+		if err != nil {
+			t.Fatalf("GetSecretValue(%s) failed: %v", keyName, err)
+		}
+		if raw == "" {
+			t.Errorf("signing key %s backup should not be empty", keyName)
+			continue
+		}
+		if !strings.HasPrefix(raw, secret.EncryptedPrefix) {
+			t.Errorf("signing key %s backup should be encrypted (expected %q prefix), got: %s",
+				keyName, secret.EncryptedPrefix, raw[:min(len(raw), 30)])
+		}
+	}
+
+	// Verify that creating a second server instance (which loads from
+	// backend and re-backups) still produces encrypted values and the
+	// server starts without error.
+	srv2, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New() [second instance] failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv2.Shutdown(context.Background()) })
+
+	for _, keyName := range []string{SecretKeyAgentSigningKey, SecretKeyUserSigningKey} {
+		raw, err := s.GetSecretValue(ctx, keyName, store.ScopeHub, hubID)
+		if err != nil {
+			t.Fatalf("GetSecretValue(%s) after second startup failed: %v", keyName, err)
+		}
+		if !strings.HasPrefix(raw, secret.EncryptedPrefix) {
+			t.Errorf("signing key %s backup after reload should still be encrypted", keyName)
+		}
+	}
+}
+
+func TestServer_SigningKeyBackupLegacyPlaintextMigration(t *testing.T) {
+	// Verify that a server with SharedSigningSecret can read a signing key
+	// that was stored as legacy plaintext (before encryption was added),
+	// and re-encrypts it on the next write.
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+
+	hubID := "test-legacy-hub"
+	sharedSecret := "test-signing-secret"
+
+	// Step 1: Create a server WITHOUT SharedSigningSecret to simulate
+	// legacy behavior — keys stored as plaintext.
+	cfg1 := DefaultServerConfig()
+	cfg1.HubID = hubID
+
+	srv1, err := New(cfg1, s)
+	if err != nil {
+		t.Fatalf("New() [legacy] failed: %v", err)
+	}
+	_ = srv1.Shutdown(context.Background())
+
+	ctx := context.Background()
+
+	// Verify the key is stored as plaintext (no enc:v1: prefix).
+	raw, err := s.GetSecretValue(ctx, SecretKeyAgentSigningKey, store.ScopeHub, hubID)
+	if err != nil {
+		t.Fatalf("GetSecretValue failed: %v", err)
+	}
+	if strings.HasPrefix(raw, secret.EncryptedPrefix) {
+		t.Fatal("legacy key should NOT have encrypted prefix")
+	}
+	// Verify it's valid base64 (the actual key material).
+	if _, err := base64.StdEncoding.DecodeString(raw); err != nil {
+		t.Fatalf("legacy key should be valid base64: %v", err)
+	}
+
+	// Step 2: Create a server WITH SharedSigningSecret — it should read the
+	// legacy plaintext key, use it, and re-encrypt the backup.
+	cfg2 := DefaultServerConfig()
+	cfg2.HubID = hubID
+	cfg2.SharedSigningSecret = sharedSecret
+
+	srv2, err := New(cfg2, s)
+	if err != nil {
+		t.Fatalf("New() [with encryption] failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv2.Shutdown(context.Background()) })
+}

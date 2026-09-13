@@ -41,7 +41,7 @@ import { isSharedWorkspace } from '../../shared/types.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
-import { apiFetch, parseApiError } from '../../client/api.js';
+import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/main.js';
 import type { EnvEntry } from '../shared/env-editor.js';
 import '../shared/env-editor.js';
@@ -83,6 +83,7 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private containerUser = '';
   @state() private telemetryEnabled = false;
   @state() private autoExposePortsEnabled = false;
+  @state() private hubDefaultRuntimeBroker = '';
   @state() private autoExposePortsMode = 'allowlist';
   @state() private autoExposePortsList = '';
   @state() private autoExposePortsInterval = '3s';
@@ -401,11 +402,19 @@ export class ScionPageAgentCreate extends LitElement {
     this.error = null;
 
     try {
-      const [projectsRes, brokersRes, templatesRes, settingsRes, harnessConfigsRes] =
+      // Build the templates URL — add scope filtering when a project is known
+      // (e.g. from a URL query param) to reduce the result set.
+      const tmplParams = new URLSearchParams({ status: 'active', limit: '100' });
+      if (this.projectId) {
+        tmplParams.set('projectId', this.projectId);
+      }
+      const tmplUrl = `/api/v1/templates?${tmplParams.toString()}`;
+
+      const [projectsRes, brokersRes, templates, settingsRes, harnessConfigsRes] =
         await Promise.all([
-          fetch('/api/v1/projects?mine=true&limit=200', { credentials: 'include' }),
-          fetch('/api/v1/runtime-brokers?limit=200', { credentials: 'include' }),
-          apiFetch('/api/v1/templates?status=active&limit=100'),
+          fetch('/api/v1/projects?mine=true&limit=100', { credentials: 'include' }),
+          fetch('/api/v1/runtime-brokers?limit=100', { credentials: 'include' }),
+          apiFetchAllPages<Template>(tmplUrl, 'templates'),
           fetch('/api/v1/settings/public', { credentials: 'include' }),
           apiFetch('/api/v1/harness-configs?status=active&limit=100'),
         ]);
@@ -421,18 +430,17 @@ export class ScionPageAgentCreate extends LitElement {
         this.brokers = Array.isArray(data) ? data : data.brokers || [];
       }
 
-      if (templatesRes.ok) {
-        const data = (await templatesRes.json()) as { templates?: Template[] } | Template[];
-        this.templates = Array.isArray(data) ? data : data.templates || [];
-      }
+      this.templates = templates;
 
       if (settingsRes.ok) {
         const data = (await settingsRes.json()) as {
           telemetryEnabled?: boolean;
           autoExposePortsEnabled?: boolean;
+          defaultRuntimeBroker?: string;
         };
         this.telemetryEnabled = data.telemetryEnabled ?? false;
         this.autoExposePortsEnabled = data.autoExposePortsEnabled ?? false;
+        this.hubDefaultRuntimeBroker = data.defaultRuntimeBroker ?? '';
       }
 
       if (harnessConfigsRes.ok) {
@@ -528,6 +536,21 @@ export class ScionPageAgentCreate extends LitElement {
       const defaultBroker = this.brokers.find((b) => b.id === project.defaultRuntimeBrokerId);
       if (defaultBroker) {
         this.brokerId = defaultBroker.id;
+        this.autoSelectProfile();
+        return;
+      }
+    }
+
+    // Fallback: hub-level default broker
+    if (this.hubDefaultRuntimeBroker) {
+      const hubBroker = this.brokers.find(
+        (b) =>
+          b.id === this.hubDefaultRuntimeBroker ||
+          (b.name && b.name.toLowerCase() === this.hubDefaultRuntimeBroker.toLowerCase()) ||
+          (b.slug && b.slug.toLowerCase() === this.hubDefaultRuntimeBroker.toLowerCase())
+      );
+      if (hubBroker) {
+        this.brokerId = hubBroker.id;
         this.autoSelectProfile();
         return;
       }

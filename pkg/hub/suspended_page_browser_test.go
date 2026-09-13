@@ -84,6 +84,9 @@ func TestSuspendedPage_HeadlessBrowser_ZeroFanOut(t *testing.T) {
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-extensions", true),
 		chromedp.Flag("disable-background-networking", true),
+		// CI runners may be slow to launch Chrome; raise the default 20 s
+		// WebSocket-URL read timeout so the test does not flake.
+		chromedp.WSURLReadTimeout(60*time.Second),
 	)
 
 	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
@@ -93,7 +96,9 @@ func TestSuspendedPage_HeadlessBrowser_ZeroFanOut(t *testing.T) {
 	defer cancel()
 
 	// Set a timeout for the entire browser operation.
-	ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+	// Use 90s to account for slow CI runners where Chrome startup alone can
+	// take 15-25s; must exceed the 60s WSURLReadTimeout above.
+	ctx, cancel = context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
 	// Listen for network request events to capture all URLs.

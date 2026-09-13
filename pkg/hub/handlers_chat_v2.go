@@ -2892,6 +2892,12 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 				ProjectID:   a.ProjectID,
 				Message:     a.Message,
 			}
+			// Whether this viewer may open a terminal on this agent. The PTY
+			// route gates on authorizeAgentLifecycle, which decides
+			// ActionAttach for a user identity, so ask the same question here
+			// rather than offering a control the server will refuse.
+			entry.CanAttach = s.authzService.CheckAccess(
+				ctx, user, agentResource(&a), ActionAttach).Allowed
 			if !a.LastSeen.IsZero() {
 				entry.LastSeen = a.LastSeen.UTC().Format(time.RFC3339)
 			}
@@ -3762,6 +3768,15 @@ type chatMemberEntry struct {
 	// never reported in.
 	LastSeen  string `json:"lastSeen,omitempty"`
 	ProjectID string `json:"projectId,omitempty"`
+	// CanAttach reports whether the requesting user may open a terminal on
+	// this agent, mirroring the ActionAttach decision the PTY route makes.
+	// Agents only; always false for humans.
+	//
+	// Deliberately NOT omitempty: false is the value the client most needs to
+	// receive. With omitempty a denied agent serialises to nothing, the client
+	// cannot distinguish "not allowed" from "field absent", and the control it
+	// gates stays visible — which is the exact case this field exists for.
+	CanAttach bool `json:"canAttach"`
 	// Message is the agent's freeform status detail — the text the agent
 	// detail page shows under "Detail" (e.g. "Waiting for user decision").
 	// Named to match store.Agent so /api/v1/agents and this endpoint can be

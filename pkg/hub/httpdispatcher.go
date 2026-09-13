@@ -2679,7 +2679,13 @@ func (d *HTTPAgentDispatcher) deferredDataOpResult(
 	}
 
 	// 4. Wait for completion — reads result from the DB row (authoritative).
-	result, err := waitForDispatchDone(ctx, eventCh, unsub, d.store, dispatchID)
+	// Delete operations use a shorter timeout since they are lightweight
+	// broker-side operations and should not block the caller for 90 seconds.
+	var timeoutOverrides []time.Duration
+	if op == "delete" {
+		timeoutOverrides = append(timeoutOverrides, dispatchDeleteTimeout)
+	}
+	result, err := waitForDispatchDone(ctx, eventCh, unsub, d.store, dispatchID, timeoutOverrides...)
 	if err != nil {
 		return nil, err
 	}

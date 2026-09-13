@@ -384,12 +384,14 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 	}
 
 	req := &hubclient.SetSecretRequest{
-		Value:        value,
-		Scope:        scope,
-		ScopeID:      scopeID,
-		Type:         secretType,
-		Target:       secretTarget,
-		AllowProgeny: secretAllowProgeny,
+		Value:   value,
+		Scope:   scope,
+		ScopeID: scopeID,
+		Type:    secretType,
+		Target:  secretTarget,
+	}
+	if cmd.Flags().Changed("allow-progeny") {
+		req.AllowProgeny = &secretAllowProgeny
 	}
 
 	// Plaintext values (not from @file syntax) must be sent with encoding "raw"

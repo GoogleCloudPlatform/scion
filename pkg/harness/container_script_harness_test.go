@@ -492,6 +492,53 @@ func newClaudeHarness(t *testing.T) *ContainerScriptHarness {
 	return h
 }
 
+func TestContainerScriptHarness_ResolveAuth_SetsGoogleCloudLocation(t *testing.T) {
+	// ResolveAuth must set GOOGLE_CLOUD_LOCATION alongside GOOGLE_CLOUD_REGION
+	// so that GOOGLE_CLOUD_LOCATION survives the auth env filtering in run.go
+	// (which deletes auth keys not in resolved.EnvVars). Without this, Gemini
+	// CLI's vertex-ai validation fails because it requires GOOGLE_CLOUD_LOCATION.
+	h, _ := newTestContainerScriptHarness(t)
+
+	resolved, err := h.ResolveAuth(api.AuthConfig{
+		GoogleCloudProject: "my-project",
+		GoogleCloudRegion:  "us-central1",
+	})
+	if err != nil {
+		t.Fatalf("ResolveAuth: %v", err)
+	}
+
+	if got := resolved.EnvVars["GOOGLE_CLOUD_REGION"]; got != "us-central1" {
+		t.Errorf("GOOGLE_CLOUD_REGION=%q, want %q", got, "us-central1")
+	}
+	if got := resolved.EnvVars["GOOGLE_CLOUD_LOCATION"]; got != "us-central1" {
+		t.Errorf("GOOGLE_CLOUD_LOCATION=%q, want %q — must be set alongside GOOGLE_CLOUD_REGION", got, "us-central1")
+	}
+	if got := resolved.EnvVars["GOOGLE_CLOUD_PROJECT"]; got != "my-project" {
+		t.Errorf("GOOGLE_CLOUD_PROJECT=%q, want %q", got, "my-project")
+	}
+}
+
+func TestContainerScriptHarness_ResolveAuth_NoLocationWhenRegionEmpty(t *testing.T) {
+	// When GoogleCloudRegion is empty, neither GOOGLE_CLOUD_REGION nor
+	// GOOGLE_CLOUD_LOCATION should be set.
+	h, _ := newTestContainerScriptHarness(t)
+
+	resolved, err := h.ResolveAuth(api.AuthConfig{
+		GoogleCloudProject: "my-project",
+		GoogleCloudRegion:  "",
+	})
+	if err != nil {
+		t.Fatalf("ResolveAuth: %v", err)
+	}
+
+	if _, ok := resolved.EnvVars["GOOGLE_CLOUD_REGION"]; ok {
+		t.Error("GOOGLE_CLOUD_REGION should not be set when GoogleCloudRegion is empty")
+	}
+	if _, ok := resolved.EnvVars["GOOGLE_CLOUD_LOCATION"]; ok {
+		t.Error("GOOGLE_CLOUD_LOCATION should not be set when GoogleCloudRegion is empty")
+	}
+}
+
 func TestContainerScriptHarness_ResolveAuth_VertexAICredentialTranslation(t *testing.T) {
 	// When the harness is "claude" and auth type is "vertex-ai", ResolveAuth
 	// must translate GCP env vars into Anthropic-specific env vars that Claude

@@ -40,7 +40,7 @@ import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
 import type { BoundarySummaryGroup } from '../shared/boundary-summary-notice.js';
-import { apiFetch, extractApiError } from '../../client/api.js';
+import { apiFetch, apiFetchAllPages, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/boundary-summary-notice.js';
 import '../shared/env-var-list.js';
@@ -983,13 +983,15 @@ export class ScionPageProjectSettings extends LitElement {
 
   private async loadDropdownTemplates(): Promise<void> {
     try {
-      const response = await apiFetch(
-        `/api/v1/templates?projectId=${encodeURIComponent(this.projectId)}&status=active`
+      const params = new URLSearchParams({
+        projectId: this.projectId,
+        status: 'active',
+        limit: '100',
+      });
+      this.dropdownTemplates = await apiFetchAllPages<Template>(
+        `/api/v1/templates?${params.toString()}`,
+        'templates'
       );
-      if (response.ok) {
-        const data = (await response.json()) as { templates?: Template[] } | Template[];
-        this.dropdownTemplates = Array.isArray(data) ? data : data.templates || [];
-      }
     } catch (err) {
       console.error('Failed to load dropdown templates:', err);
     }

@@ -138,11 +138,6 @@ func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig
 		runtimeType = profile.Runtime
 	}
 
-	// Merge profile-level env into runtime config
-	if profile.Env != nil {
-		rtConfig.Env = mergeMaps(rtConfig.Env, profile.Env)
-	}
-
 	return rtConfig, runtimeType, nil
 }
 
@@ -292,6 +287,9 @@ type VersionedSettings struct {
 	// Default agent authorization
 	DefaultMaxAgentRole string `json:"default_max_agent_role,omitempty" yaml:"default_max_agent_role,omitempty" koanf:"default_max_agent_role"`
 	DefaultAgentRole    string `json:"default_agent_role,omitempty" yaml:"default_agent_role,omitempty" koanf:"default_agent_role"`
+
+	// Default runtime broker (hub-level)
+	DefaultRuntimeBroker string `json:"default_runtime_broker,omitempty" yaml:"default_runtime_broker,omitempty" koanf:"default_runtime_broker"`
 
 	// AutoInjectGcloudADC controls whether the host's gcloud Application Default
 	// Credentials file is automatically injected into agent containers in
@@ -744,9 +742,10 @@ func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 
 // V1SecretsConfig holds secrets backend settings.
 type V1SecretsConfig struct {
-	Backend        string `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"`
-	GCPProjectID   string `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty" koanf:"gcp_project_id"`
-	GCPCredentials string `json:"gcp_credentials,omitempty" yaml:"gcp_credentials,omitempty" koanf:"gcp_credentials"`
+	Backend                 string   `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"`
+	GCPProjectID            string   `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty" koanf:"gcp_project_id"`
+	GCPCredentials          string   `json:"gcp_credentials,omitempty" yaml:"gcp_credentials,omitempty" koanf:"gcp_credentials"`
+	GCPReplicationLocations []string `json:"gcp_replication_locations,omitempty" yaml:"gcp_replication_locations,omitempty" koanf:"gcp_replication_locations"`
 }
 
 // V1CORSConfig holds CORS settings for server endpoints.
@@ -1034,7 +1033,6 @@ type V1ProfileConfig struct {
 	DefaultTemplate      string                       `json:"default_template,omitempty" yaml:"default_template,omitempty" koanf:"default_template"`
 	DefaultHarnessConfig string                       `json:"default_harness_config,omitempty" yaml:"default_harness_config,omitempty" koanf:"default_harness_config"`
 	ImageRegistry        string                       `json:"image_registry,omitempty" yaml:"image_registry,omitempty" koanf:"image_registry"`
-	Env                  map[string]string            `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
 	Volumes              []api.VolumeMount            `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
 	Resources            *api.ResourceSpec            `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
 	HarnessOverrides     map[string]V1HarnessOverride `json:"harness_overrides,omitempty" yaml:"harness_overrides,omitempty" koanf:"harness_overrides"`
@@ -1653,6 +1651,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Secrets.GCPCredentials != "" {
 			gc.Secrets.GCPCredentials = v1.Secrets.GCPCredentials
 		}
+		if len(v1.Secrets.GCPReplicationLocations) > 0 {
+			gc.Secrets.GCPReplicationLocations = v1.Secrets.GCPReplicationLocations
+		}
 	}
 
 	// Workspace storage — thread into GlobalConfig so the hub can read it.
@@ -1862,9 +1863,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Secrets config
 	v1.Secrets = &V1SecretsConfig{
-		Backend:        gc.Secrets.Backend,
-		GCPProjectID:   gc.Secrets.GCPProjectID,
-		GCPCredentials: gc.Secrets.GCPCredentials,
+		Backend:                 gc.Secrets.Backend,
+		GCPProjectID:            gc.Secrets.GCPProjectID,
+		GCPCredentials:          gc.Secrets.GCPCredentials,
+		GCPReplicationLocations: gc.Secrets.GCPReplicationLocations,
 	}
 
 	// GitHub App config
@@ -2026,7 +2028,6 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 		for name, pc := range legacy.Profiles {
 			profile := V1ProfileConfig{
 				Runtime:   pc.Runtime,
-				Env:       pc.Env,
 				Volumes:   pc.Volumes,
 				Resources: pc.Resources,
 			}
@@ -2132,7 +2133,6 @@ func convertVersionedToLegacy(vs *VersionedSettings) *Settings {
 		for name, pc := range vs.Profiles {
 			profile := ProfileConfig{
 				Runtime:   pc.Runtime,
-				Env:       pc.Env,
 				Volumes:   pc.Volumes,
 				Resources: pc.Resources,
 			}

@@ -1,0 +1,11 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "api-key",
+    "harness": "muse-code",
+    "env_var": "META_API_KEY"
+  },
+  "env": {
+    "META_API_KEY": "test-meta-api-key"
+  }
+}

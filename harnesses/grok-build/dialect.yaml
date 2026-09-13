@@ -22,8 +22,12 @@ mappings:
   # Session lifecycle.
   SessionStart:
     event: session-start
+    fields:
+      source: source
   SessionEnd:
     event: session-end
+    fields:
+      reason: reason
 
   # Prompt lifecycle.
   UserPromptSubmit:
@@ -61,6 +65,27 @@ mappings:
   # Subagent lifecycle.
   SubagentStop:
     event: subagent-end
+
+  # Permission events.
+  PermissionDenied:
+    event: permission-denied
+    fields:
+      tool_name: toolName
+      tool_input: toolInput
+
+  # Subagent lifecycle (start).
+  SubagentStart:
+    event: subagent-start
+
+  # Context compaction.
+  PreCompact:
+    event: compact-start
+    fields:
+      source: source
+  PostCompact:
+    event: compact-end
+    fields:
+      source: source
 
   # Notifications.
   Notification:

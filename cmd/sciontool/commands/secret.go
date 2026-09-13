@@ -136,10 +136,22 @@ Examples:
 			os.Exit(1)
 		}
 
+		// Resolve allowProgeny. User-scoped captured secrets should always
+		// enable progeny so spawned children inherit the credential. If the
+		// caller didn't set --allow-progeny explicitly and the scope is user,
+		// default to true; otherwise honour the flag value.
+		var allowProgeny *bool
+		if cmd.Flags().Changed("allow-progeny") {
+			allowProgeny = &secretAllowProgeny
+		} else if secretScope == "user" {
+			t := true
+			allowProgeny = &t
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		resp, err := hubClient.SetSecret(ctx, key, value, localType, localTarget, secretScope, secretForce, secretAllowProgeny)
+		resp, err := hubClient.SetSecret(ctx, key, value, localType, localTarget, secretScope, secretForce, allowProgeny)
 		if err != nil {
 			log.Error("%v", err)
 			os.Exit(1)

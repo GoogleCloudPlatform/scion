@@ -92,15 +92,16 @@ type oidcKeyRecord struct {
 // It loads or generates keys on initialization and provides thread-safe
 // access to the jose.Signer and JWKS for downstream consumers.
 type OIDCKeyManager struct {
-	mu        sync.RWMutex
-	activeKey *OIDCSigningKey
-	allKeys   []*OIDCSigningKey
-	signer    jose.Signer
-	store     store.Store
-	backend   secret.SecretBackend
-	hubID     string
-	issuerURL string
-	log       *slog.Logger
+	mu            sync.RWMutex
+	activeKey     *OIDCSigningKey
+	allKeys       []*OIDCSigningKey
+	signer        jose.Signer
+	store         store.Store
+	backend       secret.SecretBackend
+	hubID         string
+	issuerURL     string
+	log           *slog.Logger
+	encryptionKey []byte // AES-256 key for encrypting backup secrets; nil disables encryption
 }
 
 // OIDCKeyManagerConfig holds the configuration needed to initialize an OIDCKeyManager.
@@ -111,6 +112,7 @@ type OIDCKeyManagerConfig struct {
 	IssuerURL               string
 	RequireStableSigningKey bool
 	Log                     *slog.Logger
+	EncryptionKey           []byte // AES-256 key for encrypting backup secrets; nil disables encryption
 }
 
 // NewOIDCKeyManager creates a new OIDCKeyManager, loading or generating
@@ -129,11 +131,12 @@ func NewOIDCKeyManager(ctx context.Context, cfg OIDCKeyManagerConfig) (*OIDCKeyM
 	}
 
 	mgr := &OIDCKeyManager{
-		store:     cfg.Store,
-		backend:   cfg.Backend,
-		hubID:     cfg.HubID,
-		issuerURL: cfg.IssuerURL,
-		log:       log,
+		store:         cfg.Store,
+		backend:       cfg.Backend,
+		hubID:         cfg.HubID,
+		issuerURL:     cfg.IssuerURL,
+		log:           log,
+		encryptionKey: cfg.EncryptionKey,
 	}
 
 	privKey, err := mgr.loadOrCreateKey(ctx, cfg)
@@ -433,6 +436,14 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 	if cfg.Store != nil {
 		val, err := cfg.Store.GetSecretValue(ctx, keyName, store.ScopeHub, hubID)
 		if err == nil && val != "" {
+			// Decrypt if the stored value is AES-256-GCM encrypted.
+			if m.encryptionKey != nil {
+				plaintext, _, decErr := secret.DecryptValue(val, m.encryptionKey)
+				if decErr != nil {
+					return nil, fmt.Errorf("failed to decrypt OIDC signing key from store: %w", decErr)
+				}
+				val = plaintext
+			}
 			m.log.Info("Loading OIDC signing key from store", "key", keyName)
 			privKey, parseErr := decodePEMPrivateKey([]byte(val))
 			if parseErr != nil {
@@ -512,9 +523,20 @@ func (m *OIDCKeyManager) backupKeyToStore(ctx context.Context, keyName, pemValue
 	if m.store == nil {
 		return nil
 	}
+	// Encrypt the value before writing to SQLite so that OIDC key material
+	// is stored at rest under AES-256-GCM, consistent with LocalBackend.Set().
+	valueToStore := pemValue
+	if m.encryptionKey != nil {
+		encrypted, err := secret.EncryptValue(pemValue, m.encryptionKey)
+		if err != nil {
+			return fmt.Errorf("encrypting OIDC key backup: %w", err)
+		}
+		valueToStore = encrypted
+	}
+
 	existing, err := m.store.GetSecret(ctx, keyName, store.ScopeHub, hubID)
 	if err == nil {
-		existing.EncryptedValue = pemValue
+		existing.EncryptedValue = valueToStore
 		return m.store.UpdateSecret(ctx, existing)
 	}
 	if err != store.ErrNotFound {
@@ -523,7 +545,7 @@ func (m *OIDCKeyManager) backupKeyToStore(ctx context.Context, keyName, pemValue
 	sec := &store.Secret{
 		ID:             oidcSigningKeySecretID(hubID),
 		Key:            keyName,
-		EncryptedValue: pemValue,
+		EncryptedValue: valueToStore,
 		Scope:          store.ScopeHub,
 		ScopeID:        hubID,
 		SecretType:     store.SecretTypeInternal,
@@ -561,10 +583,24 @@ func oidcSigningKeySecretID(hubID string) string {
 // If another instance already created a key, it loads and returns that key.
 // Returns nil if our key was successfully created (caller should use theirs).
 func (m *OIDCKeyManager) casCreateKeyInStore(ctx context.Context, keyName, pemValue, hubID string) *rsa.PrivateKey {
+	// Encrypt the value before writing to SQLite.
+	valueToStore := pemValue
+	if m.encryptionKey != nil {
+		encrypted, encErr := secret.EncryptValue(pemValue, m.encryptionKey)
+		if encErr != nil {
+			// Encryption failed — skip the backup path since backupKeyToStore
+			// would attempt the same encryption and fail again.
+			m.log.Warn("Failed to encrypt OIDC key for CAS create, skipping backup",
+				"key", keyName, "error", encErr)
+			return nil
+		}
+		valueToStore = encrypted
+	}
+
 	sec := &store.Secret{
 		ID:             oidcSigningKeySecretID(hubID),
 		Key:            keyName,
-		EncryptedValue: pemValue,
+		EncryptedValue: valueToStore,
 		Scope:          store.ScopeHub,
 		ScopeID:        hubID,
 		SecretType:     store.SecretTypeInternal,
@@ -592,6 +628,16 @@ func (m *OIDCKeyManager) casCreateKeyInStore(ctx context.Context, keyName, pemVa
 		m.log.Warn("CAS lost but could not load winner's OIDC key from store, using ours",
 			"key", keyName, "error", getErr)
 		return nil
+	}
+	// Decrypt if the stored value is encrypted.
+	if m.encryptionKey != nil {
+		plaintext, _, decErr := secret.DecryptValue(val, m.encryptionKey)
+		if decErr != nil {
+			m.log.Warn("CAS lost but could not decrypt winner's OIDC key, using ours",
+				"key", keyName, "error", decErr)
+			return nil
+		}
+		val = plaintext
 	}
 	existingKey, parseErr := decodePEMPrivateKey([]byte(val))
 	if parseErr != nil {
@@ -633,10 +679,19 @@ func (m *OIDCKeyManager) saveKeysetToDB(ctx context.Context) error {
 		return fmt.Errorf("marshaling OIDC keyset: %w", err)
 	}
 
+	valueToStore := string(data)
+	if m.encryptionKey != nil {
+		encrypted, encErr := secret.EncryptValue(valueToStore, m.encryptionKey)
+		if encErr != nil {
+			return fmt.Errorf("encrypting OIDC keyset: %w", encErr)
+		}
+		valueToStore = encrypted
+	}
+
 	sec := &store.Secret{
 		ID:             oidcKeysetSecretID(m.hubID),
 		Key:            SecretKeyOIDCKeyset,
-		EncryptedValue: string(data),
+		EncryptedValue: valueToStore,
 		Scope:          store.ScopeHub,
 		ScopeID:        m.hubID,
 		SecretType:     store.SecretTypeInternal,
@@ -661,6 +716,14 @@ func (m *OIDCKeyManager) loadKeysetFromDB(ctx context.Context) ([]*OIDCSigningKe
 	}
 	if val == "" {
 		return nil, store.ErrNotFound
+	}
+	// Decrypt if the stored value is AES-256-GCM encrypted.
+	if m.encryptionKey != nil {
+		plaintext, _, decErr := secret.DecryptValue(val, m.encryptionKey)
+		if decErr != nil {
+			return nil, fmt.Errorf("decrypting OIDC keyset: %w", decErr)
+		}
+		val = plaintext
 	}
 
 	var records []oidcKeyRecord

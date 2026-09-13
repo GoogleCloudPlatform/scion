@@ -58,7 +58,6 @@ type BootstrapOptions struct {
 	RepairStorage   bool
 	AdoptExisting   bool
 	OverwritePolicy OverwritePolicy
-	SkipIfAnyExist  bool // skip seeding if any active resources of the same kind already exist
 }
 
 // OverwritePolicy determines which existing resources BootstrapSource may overwrite.

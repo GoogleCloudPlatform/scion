@@ -27,7 +27,7 @@ import (
 // LocalBackend implements SecretBackend using the local store.SecretStore.
 // Values are encrypted at rest using AES-256-GCM before being written to
 // the Hub database. The encryption key is derived from the deployment-wide
-// shared signing secret via deriveLocalEncryptionKey.
+// shared signing secret via DeriveLocalEncryptionKey.
 type LocalBackend struct {
 	store         store.SecretStore
 	hubID         string
@@ -41,7 +41,7 @@ type LocalBackend struct {
 func NewLocalBackend(s store.SecretStore, hubID, sharedSecret string) *LocalBackend {
 	var key []byte
 	if sharedSecret != "" {
-		key = deriveLocalEncryptionKey(sharedSecret)
+		key = DeriveLocalEncryptionKey(sharedSecret)
 	} else {
 		slog.Warn("local secret backend: no shared signing secret configured; " +
 			"secret values will be stored WITHOUT encryption")
@@ -68,7 +68,7 @@ func (b *LocalBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *S
 	// Encrypt the value before persisting. When no encryption key is
 	// configured the plaintext is stored as-is (legacy/dev mode).
 	if b.encryptionKey != nil {
-		encrypted, err := encryptValue(s.EncryptedValue, b.encryptionKey)
+		encrypted, err := EncryptValue(s.EncryptedValue, b.encryptionKey)
 		if err != nil {
 			return false, nil, fmt.Errorf("encrypting secret value: %w", err)
 		}
@@ -362,12 +362,12 @@ func fromStoreSecretMeta(s *store.Secret) *SecretMeta {
 func (b *LocalBackend) decryptStoreSecret(s *store.Secret) (*SecretWithValue, error) {
 	value := s.EncryptedValue
 	if b.encryptionKey != nil {
-		plaintext, _, err := decryptValue(s.EncryptedValue, b.encryptionKey)
+		plaintext, _, err := DecryptValue(s.EncryptedValue, b.encryptionKey)
 		if err != nil {
 			return nil, fmt.Errorf("decrypting secret %q: %w", s.Key, err)
 		}
 		value = plaintext
-	} else if strings.HasPrefix(s.EncryptedValue, encryptedPrefix) {
+	} else if strings.HasPrefix(s.EncryptedValue, EncryptedPrefix) {
 		// The stored value is encrypted but no encryption key is configured.
 		// Returning the raw ciphertext would leak an indistinguishable blob
 		// that the caller would treat as a real secret value.
@@ -387,14 +387,14 @@ func (b *LocalBackend) decryptStoreSecret(s *store.Secret) (*SecretWithValue, er
 // decryption failures should not abort the entire resolution.
 func (b *LocalBackend) decryptRawValue(raw string) (string, error) {
 	if b.encryptionKey == nil {
-		if strings.HasPrefix(raw, encryptedPrefix) {
+		if strings.HasPrefix(raw, EncryptedPrefix) {
 			// The stored value is encrypted but no encryption key is
 			// configured. Return an error instead of leaking ciphertext.
 			return "", fmt.Errorf("value is encrypted but no encryption key is configured")
 		}
 		return raw, nil // legacy plaintext
 	}
-	plaintext, _, err := decryptValue(raw, b.encryptionKey)
+	plaintext, _, err := DecryptValue(raw, b.encryptionKey)
 	if err != nil {
 		slog.Warn("failed to decrypt secret value, returning empty",
 			"error", err)

@@ -114,7 +114,7 @@ func runSecretMigrate(cmd *cobra.Command, args []string) error {
 	// Resolve hub ID for secret namespacing
 	hubID := migrateHubID
 	if hubID == "" {
-		hubID = config.DefaultHubID()
+		hubID = config.ResolveHubIDFromEnv()
 	}
 	log.Printf("Using hub ID: %s", hubID)
 
