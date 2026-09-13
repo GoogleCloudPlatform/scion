@@ -911,10 +911,14 @@ func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
 			"dispatcher should receive a non-nil StructuredMessage")
 		require.NotEmpty(t, lastCall.StructuredMessage.DeliveryText,
 			"DeliveryText must be populated — envelope switch is ON")
-		assert.Contains(t, lastCall.StructuredMessage.DeliveryText, "coder",
-			"delivery text should reference co-addressee 'coder'")
-		assert.Contains(t, lastCall.StructuredMessage.DeliveryText, "reviewer",
-			"delivery text should reference co-addressee 'reviewer'")
+
+		// Structurally parse the delivery envelope JSON to verify
+		// co-addressee attribution — not substring matching.
+		primaryEnv := parseCoAddrEnvelope(t, lastCall.StructuredMessage.DeliveryText)
+		assert.ElementsMatch(t, []string{"agent:coder", "agent:reviewer"}, primaryEnv.To,
+			"envelope To should list exactly the two co-addressees")
+		assert.Equal(t, "message", primaryEnv.Type,
+			"primary (instruction) envelope type should be 'message'")
 
 		// ── Persistence: the message was stored. ──
 		msgs, err := s.ListMessages(ctx, store.MessageFilter{
@@ -989,14 +993,15 @@ func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
 			"dispatcher should receive a non-nil StructuredMessage")
 		require.NotEmpty(t, mentionCall.StructuredMessage.DeliveryText,
 			"DeliveryText must be populated — envelope switch is ON")
-		assert.Contains(t, mentionCall.StructuredMessage.DeliveryText, "coder",
-			"mention delivery text should reference co-addressee 'coder'")
-		assert.Contains(t, mentionCall.StructuredMessage.DeliveryText, "reviewer",
-			"mention delivery text should reference co-addressee 'reviewer'")
+
+		// Structurally parse the delivery envelope JSON.
+		mentionEnv := parseCoAddrEnvelope(t, mentionCall.StructuredMessage.DeliveryText)
+		assert.ElementsMatch(t, []string{"agent:coder", "agent:reviewer"}, mentionEnv.To,
+			"mention envelope To should list exactly the two co-addressees")
 		// Mention-type messages set IsMention=true in the render input,
 		// which changes the envelope type to "mention".
-		assert.Contains(t, mentionCall.StructuredMessage.DeliveryText, "mention",
-			"mention delivery text should carry mention type marker")
+		assert.Equal(t, "mention", mentionEnv.Type,
+			"mention envelope type should be 'mention', not 'message'")
 
 		// ── Persistence: the mention message was stored. ──
 		msgs, err := s.ListMessages(ctx, store.MessageFilter{
@@ -1010,4 +1015,24 @@ func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
 		assert.Equal(t, messages.TypeMention, persisted.Type, "persisted type should be mention")
 		assert.Equal(t, "discord", persisted.Channel, "persisted channel should match")
 	})
+}
+
+// coAddrEnvelope is a minimal struct for structurally verifying co-addressee
+// attribution in DeliveryText. Mirrors the json tags of
+// messaging.DeliveryEnvelope without importing the full type.
+// Reuses extractEnvelopeJSON from handlers_outbound_def171_test.go.
+type coAddrEnvelope struct {
+	To   []string `json:"to"`
+	Type string   `json:"type"`
+}
+
+// parseCoAddrEnvelope extracts and parses the JSON body from a rendered
+// DeliveryText using the shared extractEnvelopeJSON helper.
+func parseCoAddrEnvelope(t *testing.T, deliveryText string) coAddrEnvelope {
+	t.Helper()
+	jsonStr := extractEnvelopeJSON(t, deliveryText)
+	var env coAddrEnvelope
+	require.NoError(t, json.Unmarshal([]byte(jsonStr), &env),
+		"failed to unmarshal envelope JSON: %s", jsonStr)
+	return env
 }
