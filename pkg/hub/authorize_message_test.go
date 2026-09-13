@@ -130,6 +130,46 @@ func msgAuthzAddProjectMember(t *testing.T, s store.Store, userID, projectID, pr
 	}
 }
 
+// msgAuthzGrantAgentMessage grants explicit agent.message permission to a user
+// for a project. This creates a one-off role definition with the agent.message
+// permission and binds it, so the test does not depend on agent.message being
+// present in the project-member built-in role (which upstream may remove).
+func msgAuthzGrantAgentMessage(t *testing.T, s store.Store, userID, projectID string) {
+	t.Helper()
+	ctx := context.Background()
+
+	const roleName = "test-agent-message-sender"
+
+	// Reuse an existing definition if one was already seeded by a prior test.
+	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
+	if err != nil {
+		rd = &store.RoleDefinition{
+			Name:        roleName,
+			Description: "Test role granting explicit agent.message permission",
+			ScopeType:   store.RoleScopeProject,
+			Permissions: []string{"agent.message"},
+			System:      false,
+		}
+		created, createErr := s.CreateRoleDefinition(ctx, rd)
+		if createErr != nil {
+			t.Fatalf("failed to create agent-message role definition: %v", createErr)
+		}
+		rd = created
+	}
+
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	if err != nil && err != store.ErrAlreadyExists {
+		t.Fatalf("failed to create agent.message role binding: %v", err)
+	}
+}
+
 // require_NoError is a test helper that fails immediately on error.
 func require_NoError(t *testing.T, err error) {
 	t.Helper()
