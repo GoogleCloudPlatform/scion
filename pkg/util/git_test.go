@@ -440,6 +440,13 @@ func TestToHTTPSCloneURL(t *testing.T) {
 		// http:// → HTTPS
 		{"http://github.com/org/repo.git", "https://github.com/org/repo.git"},
 
+		// Azure DevOps — must NOT append .git
+		{"https://dev.azure.com/org/project/_git/repo", "https://dev.azure.com/org/project/_git/repo"},
+		// ADO with erroneous .git suffix — must be stripped
+		{"https://dev.azure.com/org/project/_git/repo.git", "https://dev.azure.com/org/project/_git/repo"},
+		// ADO via visualstudio.com
+		{"https://myorg.visualstudio.com/project/_git/repo", "https://myorg.visualstudio.com/project/_git/repo"},
+
 		// Empty
 		{"", ""},
 	}
