@@ -213,7 +213,7 @@ func TestDEF156_FreshCutover_MessageBackfillFirst(t *testing.T) {
 	defer cancel()
 
 	s, db := newDEF156TestStore(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	projectID := "proj-def156"
 	topicID := "topic-1"
@@ -266,7 +266,7 @@ func TestDEF156_FreshCutover_TopicBackfillFirst(t *testing.T) {
 	defer cancel()
 
 	s, db := newDEF156TestStore(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	projectID := "proj-def156"
 	topicID := "topic-1"
@@ -313,7 +313,7 @@ func TestDEF156_Idempotent_SecondBoot(t *testing.T) {
 	defer cancel()
 
 	s, db := newDEF156TestStore(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	projectID := "proj-def156"
 	topicID := "topic-1"
@@ -358,7 +358,7 @@ func TestDEF156_Idempotent_SecondBoot(t *testing.T) {
 
 func TestDEF156_SurfaceFidelity_DiscordNotNative(t *testing.T) {
 	_, db := newDEF156TestStore(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	projectID := "proj-def156"
 	topicID := "discord-thread-123"
@@ -391,7 +391,7 @@ func TestDEF156_MixedPopulation_LegacyTopicStillResolves(t *testing.T) {
 	defer cancel()
 
 	_, db := newDEF156TestStore(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	projectID := "proj-def156"
 	topicID := "legacy-topic-1"
@@ -436,7 +436,7 @@ func TestDEF156_MultipleTopics_ExactlyOneConvEach(t *testing.T) {
 	defer cancel()
 
 	s, db := newDEF156TestStore(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	projectID := "proj-def156"
 
@@ -482,7 +482,7 @@ func TestDEF156_CreateTopic_FindsExistingConversation(t *testing.T) {
 	defer cancel()
 
 	s, db := newDEF156TestStore(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	projectID := "proj-def156"
 	topicID := "topic-new"
@@ -527,7 +527,7 @@ func TestDEF156_CreateTopic_MintsWhenNoExisting(t *testing.T) {
 	defer cancel()
 
 	s, db := newDEF156TestStore(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	projectID := "proj-def156"
 	topicID := "topic-fresh"
@@ -567,7 +567,7 @@ func TestDEF156_EnsureGeneralTopic_WritesDerivedKey(t *testing.T) {
 	defer cancel()
 
 	s, db := newDEF156TestStore(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	topicID, created, err := s.EnsureGeneralTopic(ctx, "proj-general", "user-1")
 	require.NoError(t, err)
@@ -597,7 +597,7 @@ func TestDEF156_EnsureGeneralTopic_FindsExistingConversation(t *testing.T) {
 	defer cancel()
 
 	s, db := newDEF156TestStore(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	projectID := "proj-general-existing"
 
@@ -634,7 +634,7 @@ func TestDEF156_EnsureGeneralTopic_ConvergesWithRoute3(t *testing.T) {
 	defer cancel()
 
 	s, db := newDEF156TestStore(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	projectID := "proj-general-converge"
 

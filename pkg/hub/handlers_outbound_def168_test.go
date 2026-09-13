@@ -72,7 +72,7 @@ func def168Setup(t *testing.T) (
 	// WebChatStore — also sets up ChatNotifier.
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 
 	wcs = NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
