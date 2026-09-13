@@ -41,6 +41,7 @@ type eventServer struct {
 	deliverInbound       func(topic string, msg *messages.StructuredMessage) *hubError
 	deliverRoutedInbound func(projectID, defaultAgent string, msg *messages.StructuredMessage) (*routedInboundResult, *hubError)
 	routedInboundEnabled bool
+	preflightTimeout     time.Duration // default 10s; settable for testing
 }
 
 // startHTTP begins listening for Slack events via HTTP webhooks.
@@ -350,7 +351,11 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	preflightTimeout := s.preflightTimeout
+	if preflightTimeout == 0 {
+		preflightTimeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), preflightTimeout)
 	defer cancel()
 
 	link, err := s.store.GetChannelLink(ctx, channelID)
@@ -432,6 +437,12 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 		// uncertain and must not be persisted. The adapter does not retry
 		// and does not fall back to legacy.
 		if result != nil && result.Delivered && result.PrimaryAgent != "" {
+			// Fresh context for the store call: the parent ctx (10s preflight)
+			// will have expired during the hub's 6-minute fan-out window.
+			// deliverRoutedInbound uses its own http.Client timeout and does
+			// not propagate ctx, so we must not reuse ctx for post-response work.
+			storeCtx, storeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer storeCancel()
 			cc := &ConversationContext{
 				SlackUserID:   userID,
 				ProjectID:     link.ProjectID,
@@ -440,7 +451,7 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 				LastThreadTS:  threadID,
 				LastMessageAt: time.Now(),
 			}
-			if err := s.store.SetConversationContext(ctx, cc); err != nil {
+			if err := s.store.SetConversationContext(storeCtx, cc); err != nil {
 				s.log.Warn("Failed to save conversation context", "error", err)
 			}
 		} else if result == nil || !result.Delivered {
