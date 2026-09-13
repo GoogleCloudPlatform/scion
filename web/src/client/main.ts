@@ -503,7 +503,7 @@ const ROUTES: RouteConfig[] = [
   },
   {
     pattern: /^\/projects\/[^/]+\/metrics$/,
-    tag: 'scion-page-metrics',
+    tag: 'scion-page-project-metrics',
     load: () => import('../components/pages/metrics-dashboard.js'),
   },
   {
@@ -626,6 +626,7 @@ const ADMIN_ROUTES = new Set([
   'scion-page-admin-skill-registry-detail',
   'scion-page-diagnostics',
   'scion-page-health-dashboard',
+  'scion-page-metrics',
 ]);
 
 // ---------------------------------------------------------------------------
