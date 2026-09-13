@@ -94,6 +94,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/brokers/":                               "broker-hmac:broker",
 	"/api/v1/broker/callback":                        "broker-hmac:callback",
 	"/api/v1/broker/inbound":                         "broker-hmac:inbound",
+	"/api/v1/broker/inbound/routed":                  "broker-hmac:inbound-routed",
 	"/api/v1/broker/projects":                        "broker-hmac:projects",
 	"/api/v1/admin/maintenance":                      "hub-admin:maintenance",
 	"/api/v1/admin/maintenance/operations":           "hub-admin:maintenance",
@@ -123,6 +124,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/diagnostics/logs/stream":          "hub-admin:diagnostics",
 	"/api/v1/admin/diagnostics/logs":                 "hub-admin:diagnostics",
 	"/api/v1/admin/health/summary":                   "hub-admin:health",
+	"/api/v1/admin/messaging":                        "hub-admin:messaging",
 	"/api/v1/admin/messaging/divergence":             "hub-admin:diagnostics",
 	"/api/v1/metrics/":                               "hub-admin:metrics-dashboard",
 	"/api/v1/admin/metrics-dashboard":                "hub-admin:metrics-dashboard",
@@ -467,7 +469,8 @@ func scopedAdminUATRouteRequest(route string) (string, string, *bytes.Reader) {
 		"/api/v1/admin/agents/reset-auth-all", "/api/v1/admin/maintenance/check-updates",
 		"/api/v1/admin/maintenance/restart":
 		method = http.MethodPost
-	case "/api/v1/admin/server-config", "/api/v1/admin/project-defaults":
+	case "/api/v1/admin/server-config", "/api/v1/admin/project-defaults",
+		"/api/v1/admin/messaging":
 		method = http.MethodPut
 		body = "{}"
 	case "/api/v1/hub/settings/injected-skills":

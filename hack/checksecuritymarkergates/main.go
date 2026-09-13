@@ -178,9 +178,14 @@ func main() {
 	// parseDMKeyIDs validates that the DM thread_id matches the resolved sender
 	// and agent. Without it, a user can claim a DM key belonging to another
 	// user's conversation.
+	//
+	// Since b72fac7f (refactor #1497), parseDMKeyIDs lives in
+	// resolveOutboundRouting, which handleAgentOutboundMessage delegates to.
+	// The call is conditional: it only runs when the thread_id is a DM key
+	// and a recipientID has already been resolved (non-conv-ref path).
 	assertRequired(
-		"parseDMKeyIDs in handleAgentOutboundMessage (#1322 — DM key ownership)",
-		ham, hamPath, "handleAgentOutboundMessage", "parseDMKeyIDs", 1)
+		"parseDMKeyIDs in resolveOutboundRouting (#1322 — DM key ownership)",
+		ham, hamPath, "resolveOutboundRouting", "parseDMKeyIDs", 1)
 
 	assertRequired(
 		"parseDMKeyIDs in handleAgentMessage (#1322 — DM key ownership)",
@@ -255,9 +260,13 @@ func main() {
 	// Every primary send path must call ValidateLegacyMessage for shape/content
 	// validation before dispatch (Audit M2).
 
+	// Since b72fac7f (refactor #1497), ValidateLegacyMessage on the outbound
+	// path lives in resolveOutboundRouting, which handleAgentOutboundMessage
+	// delegates to. The call runs unconditionally within the helper, after
+	// S1-S2 resolution and before conversation resolution.
 	assertRequired(
-		"ValidateLegacyMessage in handleAgentOutboundMessage (DEF-50 — outbound message validation)",
-		ham, hamPath, "handleAgentOutboundMessage", "ValidateLegacyMessage", 1)
+		"ValidateLegacyMessage in resolveOutboundRouting (DEF-50 — outbound message validation)",
+		ham, hamPath, "resolveOutboundRouting", "ValidateLegacyMessage", 1)
 
 	assertRequired(
 		"ValidateLegacyMessage in handleAgentMessage (DEF-50 — agent message validation)",
@@ -281,9 +290,14 @@ func main() {
 	// attribution has set a real one. Must be present on every path that
 	// resolves or creates a conversation.
 
+	// Since b72fac7f (refactor #1497), ValidateAttributed on the outbound path
+	// lives in resolveOutboundRouting, which handleAgentOutboundMessage
+	// delegates to. The call is conditional: it only runs on the
+	// derive-conversation path (no explicit conversation_id) after successful
+	// ResolveOrCreateConversationByKey.
 	assertRequired(
-		"ValidateAttributed in handleAgentOutboundMessage (DEF-50 — post-attribution validation)",
-		ham, hamPath, "handleAgentOutboundMessage", "ValidateAttributed", 1)
+		"ValidateAttributed in resolveOutboundRouting (DEF-50 — post-attribution validation)",
+		ham, hamPath, "resolveOutboundRouting", "ValidateAttributed", 1)
 
 	assertRequired(
 		"ValidateAttributed in handleAgentMessage (DEF-50 — post-attribution validation)",
@@ -315,6 +329,15 @@ func main() {
 	assertRequired(
 		"GetAgentIdentityFromContext in handleAgentOutboundMessage (DEF-50 — agent identity verification)",
 		ham, hamPath, "handleAgentOutboundMessage", "GetAgentIdentityFromContext", 1)
+
+	// REQUIRED: handleAgentOutboundMessage must delegate to resolveOutboundRouting.
+	// Since b72fac7f (refactor #1497), the three security checks (parseDMKeyIDs,
+	// ValidateLegacyMessage, ValidateAttributed) live in resolveOutboundRouting.
+	// This gate ensures the delegation call itself remains in the handler —
+	// removing it would silently bypass all three checks.
+	assertRequired(
+		"resolveOutboundRouting in handleAgentOutboundMessage (#1497 — routing delegation)",
+		ham, hamPath, "handleAgentOutboundMessage", "resolveOutboundRouting", 1)
 
 	// =========================================================================
 	// SECTION 4: Fail-closed dispatch scan (DEF-50)

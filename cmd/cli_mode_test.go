@@ -64,6 +64,7 @@ func buildTestTree() *cobra.Command {
 
 	// Top-level commands
 	for _, name := range []string{
+		"broadcast",
 		"create", "delete", "list", "start", "stop", "attach", "look", "logs",
 		"message", "resume", "restore", "sync", "clean", "cdw", "init",
 		"doctor", "version",
@@ -304,7 +305,7 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 
 	// These should be removed
 	absent := []string{
-		"attach", "broker", "cdw", "clean", "completion", "config", "doctor",
+		"attach", "broadcast", "broker", "cdw", "clean", "completion", "config", "doctor",
 		"grove", "hub",
 		"init", "messages", "restore", "server", "sync",
 	}
@@ -433,7 +434,7 @@ func TestAgentAllowedList(t *testing.T) {
 	}
 
 	notAllowed := []string{
-		"attach", "restore", "sync", "clean", "cdw", "init",
+		"attach", "broadcast", "restore", "sync", "clean", "cdw", "init",
 		"completion", "config", "doctor", "hub", "messages",
 		"server", "broker", "grove",
 		"config.set", "config.validate", "config.migrate",

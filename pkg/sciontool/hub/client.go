@@ -1458,7 +1458,6 @@ type OutboundMessage struct {
 	Msg         string            `json:"msg"`
 	Type        string            `json:"type,omitempty"`
 	Urgent      bool              `json:"urgent,omitempty"`
-	Visibility  string            `json:"visibility,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 

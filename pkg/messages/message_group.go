@@ -175,6 +175,9 @@ func classifyRecipient(s string) (GroupRecipient, error) {
 	}
 	if strings.Contains(s, ":") {
 		prefix := s[:strings.Index(s, ":")]
+		if prefix == "conv" {
+			return GroupRecipient{}, fmt.Errorf("conv: addresses a conversation directly and cannot be wrapped in group[] — send to %q as the sole recipient instead", s)
+		}
 		return GroupRecipient{}, fmt.Errorf("unknown recipient prefix %q in group[] element %q", prefix, s)
 	}
 	return GroupRecipient{Kind: RecipientAgent, Name: s}, nil

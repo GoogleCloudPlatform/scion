@@ -422,10 +422,25 @@ export class ScionAgentMessageViewer extends LitElement {
             this.mergeHubMessages(items);
             return;
           }
+        } else if (hubRes.status >= 400 && hubRes.status < 500) {
+          // DEF-128a: A 4xx is the hub answering, not failing. Surface the
+          // error instead of falling through to the Cloud Logging fallback.
+          // Without this guard, a 409 (conversation not resolved) silently
+          // escalates the viewer to the unscoped Cloud Logging path.
+          const errData = (await hubRes.json().catch(() => ({}))) as {
+            error?: { message?: string };
+            message?: string;
+          };
+          throw new Error(
+            (errData.error as { message?: string })?.message ||
+              errData.message ||
+              `HTTP ${hubRes.status}`
+          );
         }
       }
 
       // Fallback: Cloud Logging proxy (for pre-migration records or when Hub is unavailable).
+      // Only reached on network errors or 5xx — never on 4xx (DEF-128a).
       // Skipped when Cloud Logging is unavailable — the /message-logs endpoint returns 501
       // in that case, which would turn an empty hub-store result into a user-facing error
       // instead of the intended "No messages found" empty state.

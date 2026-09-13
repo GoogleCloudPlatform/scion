@@ -90,12 +90,6 @@ func (Message) Fields() []ent.Field {
 		field.UUID("conversation_id", uuid.UUID{}).
 			Optional().
 			Nillable(),
-		// visibility controls which consumers see this message:
-		// "normal", "verbose", or "full". Empty is treated as "normal"
-		// at read time (backfill in the store adapter).
-		field.String("visibility").
-			Optional().
-			MaxLen(16),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -156,7 +157,11 @@ func runBackfillWithStore(ctx context.Context, s store.Store, cfg messaging.Back
 
 // openBackfillStore resolves the database DSN and returns a CompositeStore.
 // Precedence: --db flag > config file (via LoadGlobalConfig).
-func openBackfillStore(ctx context.Context) (*entadapter.CompositeStore, error) {
+// By default, runs AutoMigrate to ensure the schema is up to date.
+// Pass readOnly=true to skip migrations (for read-only commands).
+func openBackfillStore(ctx context.Context, readOnly ...bool) (*entadapter.CompositeStore, error) {
+	skipMigrations := len(readOnly) > 0 && readOnly[0]
+
 	cfg, err := config.LoadGlobalConfig(serverConfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
@@ -194,9 +199,11 @@ func openBackfillStore(ctx context.Context) (*entadapter.CompositeStore, error) 
 		if err != nil {
 			return nil, fmt.Errorf("opening sqlite: %w", err)
 		}
-		if err := entc.AutoMigrate(ctx, client); err != nil {
-			_ = client.Close()
-			return nil, fmt.Errorf("running migrations: %w", err)
+		if !skipMigrations {
+			if err := entc.AutoMigrate(ctx, client); err != nil {
+				_ = client.Close()
+				return nil, fmt.Errorf("running migrations: %w", err)
+			}
 		}
 		s = entadapter.NewCompositeStore(client)
 
@@ -205,9 +212,11 @@ func openBackfillStore(ctx context.Context) (*entadapter.CompositeStore, error) 
 		if err != nil {
 			return nil, fmt.Errorf("opening postgres (verify DSN and network connectivity): %w", err)
 		}
-		if err := entc.AutoMigrate(ctx, client); err != nil {
-			_ = client.Close()
-			return nil, fmt.Errorf("running migrations: %w", err)
+		if !skipMigrations {
+			if err := entc.AutoMigrate(ctx, client); err != nil {
+				_ = client.Close()
+				return nil, fmt.Errorf("running migrations: %w", err)
+			}
 		}
 		s = entadapter.NewCompositeStore(client)
 
@@ -227,10 +236,22 @@ func mergeBackfillResult(dst, src *messaging.BackfillResult) {
 	dst.ConversationsCreated += src.ConversationsCreated
 	dst.HazardAEmailCount += src.HazardAEmailCount
 	dst.HazardBSlugCount += src.HazardBSlugCount
+	dst.WriteFailures += src.WriteFailures
+	dst.ResolutionFailures += src.ResolutionFailures
 	if src.LastCheckpoint != "" {
 		dst.LastCheckpoint = src.LastCheckpoint
 	}
 	dst.Errors = append(dst.Errors, src.Errors...)
+
+	// DEF-119: merge DeriveFailures maps (nil-safe on both sides).
+	if len(src.DeriveFailures) > 0 {
+		if dst.DeriveFailures == nil {
+			dst.DeriveFailures = make(map[string]int, len(src.DeriveFailures))
+		}
+		for cause, count := range src.DeriveFailures {
+			dst.DeriveFailures[cause] += count
+		}
+	}
 }
 
 // printBackfillReport writes a human-readable summary to out.
@@ -252,16 +273,33 @@ func printBackfillReport(out io.Writer, r *messaging.BackfillResult, projectIDs 
 	_, _ = fmt.Fprintln(out)
 	_, _ = fmt.Fprintf(out, "Messages processed:    %d\n", r.TotalProcessed)
 	_, _ = fmt.Fprintf(out, "  Attributed:          %d\n", r.Attributed)
-	_, _ = fmt.Fprintf(out, "  Inferred (hazard-a): %d\n", r.Inferred)
+	_, _ = fmt.Fprintf(out, "  Inferred:            %d\n", r.Inferred)
 	_, _ = fmt.Fprintf(out, "  Skipped:             %d\n", r.Skipped)
 	_, _ = fmt.Fprintf(out, "Conversations created: %d\n", r.ConversationsCreated)
+	_, _ = fmt.Fprintf(out, "Hazard-a (non-UUID):   %d\n", r.HazardAEmailCount)
 	_, _ = fmt.Fprintf(out, "Hazard-b (slug refs):  %d\n", r.HazardBSlugCount)
 	_, _ = fmt.Fprintf(out, "Errors:                %d\n", len(r.Errors))
+	_, _ = fmt.Fprintf(out, "Write failures:        %d\n", r.WriteFailures)
+	_, _ = fmt.Fprintf(out, "Resolution failures:   %d\n", r.ResolutionFailures)
 	if r.LastCheckpoint != "" {
 		_, _ = fmt.Fprintf(out, "Last checkpoint:       %s\n", r.LastCheckpoint)
 	}
 	if len(projectIDs) > 1 {
 		_, _ = fmt.Fprintln(out, "  (checkpoint valid for single-project runs only)")
+	}
+
+	// DEF-119: print per-cause derive failure breakdown (sorted for stable output).
+	if len(r.DeriveFailures) > 0 {
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out, "Derive failures by cause:")
+		causes := make([]string, 0, len(r.DeriveFailures))
+		for cause := range r.DeriveFailures {
+			causes = append(causes, cause)
+		}
+		sort.Strings(causes)
+		for _, cause := range causes {
+			_, _ = fmt.Fprintf(out, "  %-25s %d\n", cause, r.DeriveFailures[cause])
+		}
 	}
 
 	if len(r.Errors) > 0 {

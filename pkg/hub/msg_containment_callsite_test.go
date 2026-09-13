@@ -65,6 +65,14 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "handlers_agent_messaging.go", function: "handleAgentMessage", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage called in both routers before this handler"},
 
+	// handlers_agent_messaging.go: handleAgentOutboundMessage — guarded by
+	// agent self-identity gate at :722 and resolveOutboundRouting: S4
+	// CheckDMParticipantKey (:378) + S5 authenticatedSender DM-key
+	// participation (:494) ensure sender is a named DM participant before
+	// deliveryAgentDM dispatch.
+	{file: "handlers_agent_messaging.go", function: "handleAgentOutboundMessage", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "agent self-identity gate at :722; resolveOutboundRouting CheckDMParticipantKey (S4 :378) and authenticatedSender DM-key participation (S5 :494) before deliveryAgentDM dispatch"},
+
 	// handlers_agent_messaging.go: handleGroupMessage — guarded at :1286.
 	{file: "handlers_agent_messaging.go", function: "handleGroupMessage", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage at handlers_agent_messaging.go:1286"},
@@ -91,6 +99,10 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	// handlers_broker_inbound.go: guarded at :164 (authorizeAgentMessage).
 	{file: "handlers_broker_inbound.go", function: "handleBrokerInbound", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage at handlers_broker_inbound.go:164"},
+
+	// handlers_broker_inbound_routed.go: dispatchRoutedRecipient — guarded per-recipient.
+	{file: "handlers_broker_inbound_routed.go", function: "dispatchRoutedRecipient", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "authorizeAgentMessage called per-recipient before dispatch"},
 
 	// handlers_chat_v2.go: sendAgentRouted primary — guarded at :1125.
 	{file: "handlers_chat_v2.go", function: "sendAgentRouted", symbol: "dispatchWithBrokerRetry",

@@ -733,8 +733,6 @@ export interface Message {
   channel?: string;
   /** Thread identifier (e.g. "agent:<agentId>"). Phase 0 addition. */
   threadId?: string;
-  /** Visibility level: "normal", "verbose", or "full". Phase 0 addition. */
-  visibility?: string;
   /** Group identifier for related messages. */
   groupId?: string;
   /** Dispatch state: "pending", "dispatched", or "failed". */

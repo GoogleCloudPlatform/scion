@@ -27,9 +27,11 @@ func TestResolveTargetAgents_BotMentionOnly(t *testing.T) {
 }
 
 func TestResolveTargetAgents_SingleAgentMention(t *testing.T) {
+	// Additive model: the default agent ("coder") is included as implicit
+	// primary alongside the explicitly mentioned agent.
 	msg := newMockMessage("@reviewer check this PR", nil)
 	result, isAll := resolveTargetAgents(msg, "BOT123", "coder", []string{"coder", "reviewer"})
-	assert.Equal(t, []string{"reviewer"}, result)
+	assert.Equal(t, []string{"coder", "reviewer"}, result)
 	assert.False(t, isAll)
 }
 
@@ -113,9 +115,10 @@ func TestResolveTargetAgents_MentionWithTrailingPunctuation(t *testing.T) {
 }
 
 func TestResolveTargetAgents_MentionWithPeriod(t *testing.T) {
+	// Additive model: default agent is included as implicit primary.
 	msg := newMockMessage("Hey @reviewer.", nil)
 	result, isAll := resolveTargetAgents(msg, "BOT123", "coder", []string{"coder", "reviewer"})
-	assert.Equal(t, []string{"reviewer"}, result)
+	assert.Equal(t, []string{"coder", "reviewer"}, result)
 	assert.False(t, isAll)
 }
 
@@ -123,6 +126,61 @@ func TestResolveTargetAgents_MentionWithExclamation(t *testing.T) {
 	msg := newMockMessage("@coder!", nil)
 	result, isAll := resolveTargetAgents(msg, "BOT123", "coder", []string{"coder"})
 	assert.Equal(t, []string{"coder"}, result)
+	assert.False(t, isAll)
+}
+
+// --- Additive model tests ---
+
+func TestResolveTargetAgents_AdditiveModel_ImplicitPrimary(t *testing.T) {
+	// When a non-default agent is @-mentioned, the default agent is included
+	// as the implicit primary (position 0), mirroring native chat's additive model.
+	msg := newMockMessage("@reviewer check this PR", nil)
+	result, isAll := resolveTargetAgents(msg, "BOT123", "coder", []string{"coder", "reviewer"})
+	assert.Equal(t, []string{"coder", "reviewer"}, result)
+	assert.False(t, isAll)
+	// Verify the default agent is at position 0 (primary).
+	assert.Equal(t, "coder", result[0])
+}
+
+func TestResolveTargetAgents_AdditiveModel_DefaultAlsoMentioned(t *testing.T) {
+	// When the default agent is also explicitly @-mentioned, it should appear
+	// only once (deduplication) and remain the primary.
+	msg := newMockMessage("@coder @reviewer check this", nil)
+	result, isAll := resolveTargetAgents(msg, "BOT123", "coder", []string{"coder", "reviewer"})
+	assert.Equal(t, []string{"coder", "reviewer"}, result)
+	assert.False(t, isAll)
+}
+
+func TestResolveTargetAgents_AdditiveModel_OnlyDefaultMentioned(t *testing.T) {
+	// When only the default agent is @-mentioned, no secondary exists.
+	msg := newMockMessage("@coder help me", nil)
+	result, isAll := resolveTargetAgents(msg, "BOT123", "coder", []string{"coder", "reviewer"})
+	assert.Equal(t, []string{"coder"}, result)
+	assert.False(t, isAll)
+}
+
+func TestResolveTargetAgents_AdditiveModel_NoDefaultAgent(t *testing.T) {
+	// When no default agent is configured, only the mentioned agent is returned.
+	msg := newMockMessage("@reviewer check this", nil)
+	result, isAll := resolveTargetAgents(msg, "BOT123", "", []string{"coder", "reviewer"})
+	assert.Equal(t, []string{"reviewer"}, result)
+	assert.False(t, isAll)
+}
+
+func TestResolveTargetAgents_AdditiveModel_BotPlusNonDefault(t *testing.T) {
+	// Bot @-mention + explicit agent mention: default is primary, agent is secondary.
+	msg := newMockMessage("<@BOT123> @reviewer check this", []*discordgo.User{{ID: "BOT123"}})
+	result, isAll := resolveTargetAgents(msg, "BOT123", "coder", []string{"coder", "reviewer"})
+	assert.Equal(t, []string{"coder", "reviewer"}, result)
+	assert.False(t, isAll)
+}
+
+func TestResolveTargetAgents_AdditiveModel_UnknownMentionNoImplicit(t *testing.T) {
+	// Unknown @mention should NOT trigger implicit primary inclusion
+	// (extractAgentMentions returns empty for unknown agents).
+	msg := newMockMessage("@stranger hello", nil)
+	result, isAll := resolveTargetAgents(msg, "BOT123", "coder", []string{"coder", "reviewer"})
+	assert.Nil(t, result)
 	assert.False(t, isAll)
 }
 

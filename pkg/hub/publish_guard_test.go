@@ -128,8 +128,8 @@ func TestDeliverToUser_SkipsPublishOnPersistFailure(t *testing.T) {
 	proxy := NewMessageBrokerProxy(b, failStore, spy, func() AgentDispatcher { return nil }, slog.Default())
 
 	msg := messages.NewInstruction("agent:agent-a", "user:bob", "hello")
-	msg.SenderID = "agent-uuid"
-	msg.RecipientID = "user-bob-id"
+	msg.SenderID = tid("agent-a")
+	msg.RecipientID = tid("user-bob")
 
 	proxy.deliverToUser(context.Background(), projectID, "user.user-bob-id.message", msg)
 
@@ -150,8 +150,8 @@ func TestDeliverToUser_PublishesOnPersistSuccess(t *testing.T) {
 	proxy := NewMessageBrokerProxy(b, realStore, spy, func() AgentDispatcher { return nil }, slog.Default())
 
 	msg := messages.NewInstruction("agent:agent-a", "user:bob", "hello")
-	msg.SenderID = "agent-uuid"
-	msg.RecipientID = "user-bob-id"
+	msg.SenderID = tid("agent-a")
+	msg.RecipientID = tid("user-bob")
 
 	proxy.deliverToUser(context.Background(), projectID, "user.user-bob-id.message", msg)
 
@@ -196,7 +196,7 @@ func TestHandleAgentMessage_SkipsPublishOnPersistFailure(t *testing.T) {
 
 	structuredMsg := &messages.StructuredMessage{
 		Sender:    "user:tester",
-		SenderID:  "user-id-1",
+		SenderID:  tid("user-tester"),
 		Recipient: "agent:" + agent.Slug,
 		Msg:       "test message",
 		Type:      messages.TypeInstruction,
@@ -207,7 +207,7 @@ func TestHandleAgentMessage_SkipsPublishOnPersistFailure(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(contextWithIdentity(req.Context(),
-		NewAuthenticatedUser("user-id-1", "tester@example.com", "Tester", "user", "web")))
+		NewAuthenticatedUser(tid("user-tester"), "tester@example.com", "Tester", "user", "web")))
 
 	rr := httptest.NewRecorder()
 	srv.handleAgentMessage(rr, req, agent.ID)
@@ -250,7 +250,7 @@ func TestHandleAgentMessage_ResponseStatusNotDeliveredOnPersistFailure(t *testin
 
 	structuredMsg := &messages.StructuredMessage{
 		Sender:    "user:tester",
-		SenderID:  "user-id-1",
+		SenderID:  tid("user-tester"),
 		Recipient: "agent:" + agent.Slug,
 		Msg:       "test message",
 		Type:      messages.TypeInstruction,
@@ -261,7 +261,7 @@ func TestHandleAgentMessage_ResponseStatusNotDeliveredOnPersistFailure(t *testin
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(contextWithIdentity(req.Context(),
-		NewAuthenticatedUser("user-id-1", "tester@example.com", "Tester", "user", "web")))
+		NewAuthenticatedUser(tid("user-tester"), "tester@example.com", "Tester", "user", "web")))
 
 	rr := httptest.NewRecorder()
 	srv.handleAgentMessage(rr, req, agent.ID)
@@ -318,7 +318,7 @@ func TestHandleAgentMessage_PublishesOnPersistSuccess(t *testing.T) {
 
 	structuredMsg := &messages.StructuredMessage{
 		Sender:    "user:tester",
-		SenderID:  "user-id-1",
+		SenderID:  tid("user-tester"),
 		Recipient: "agent:" + agent.Slug,
 		Msg:       "test message",
 		Type:      messages.TypeInstruction,
@@ -329,7 +329,7 @@ func TestHandleAgentMessage_PublishesOnPersistSuccess(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(contextWithIdentity(req.Context(),
-		NewAuthenticatedUser("user-id-1", "tester@example.com", "Tester", "user", "web")))
+		NewAuthenticatedUser(tid("user-tester"), "tester@example.com", "Tester", "user", "web")))
 
 	rr := httptest.NewRecorder()
 	srv.handleAgentMessage(rr, req, agent.ID)
@@ -399,7 +399,7 @@ func TestHandleGroupMessage_SkipsPublishOnPersistFailure(t *testing.T) {
 	// Message to group[agent:target,user:groupuser@example.com]
 	structuredMsg := &messages.StructuredMessage{
 		Sender:    "user:tester",
-		SenderID:  "user-id-1",
+		SenderID:  tid("user-tester"),
 		Recipient: "group[agent:target,user:groupuser@example.com]",
 		Msg:       "group message",
 		Type:      messages.TypeInstruction,
@@ -411,7 +411,7 @@ func TestHandleGroupMessage_SkipsPublishOnPersistFailure(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+anchor.ID+"/message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(contextWithIdentity(req.Context(),
-		NewAuthenticatedUser("user-id-1", "tester@example.com", "Tester", "user", "web")))
+		NewAuthenticatedUser(tid("user-tester"), "tester@example.com", "Tester", "user", "web")))
 
 	rr := httptest.NewRecorder()
 	srv.handleAgentMessage(rr, req, anchor.ID)
@@ -478,7 +478,7 @@ func TestHandleGroupMessage_PublishesOnPersistSuccess(t *testing.T) {
 
 	structuredMsg := &messages.StructuredMessage{
 		Sender:    "user:tester",
-		SenderID:  "user-id-1",
+		SenderID:  tid("user-tester"),
 		Recipient: "group[agent:target2,user:groupuser2@example.com]",
 		Msg:       "group message ok",
 		Type:      messages.TypeInstruction,
@@ -493,7 +493,7 @@ func TestHandleGroupMessage_PublishesOnPersistSuccess(t *testing.T) {
 	// authorizeAgentMessage passes — this test validates publish-on-persist,
 	// not message authorization.
 	req = req.WithContext(contextWithIdentity(req.Context(),
-		NewAuthenticatedUser("user-id-1", "tester@example.com", "Tester", "admin", "web")))
+		NewAuthenticatedUser(tid("user-tester"), "tester@example.com", "Tester", "admin", "web")))
 
 	rr := httptest.NewRecorder()
 	srv.handleAgentMessage(rr, req, anchor.ID)
@@ -555,7 +555,7 @@ func TestProcessMentions_SkipsPublishOnPersistFailure(t *testing.T) {
 
 	originalMsg := &messages.StructuredMessage{
 		Sender:    "user:tester",
-		SenderID:  "user-id-1",
+		SenderID:  tid("user-tester"),
 		Recipient: "agent:" + primary.Slug,
 		Msg:       "hello @mentioned",
 		Type:      messages.TypeInstruction,
@@ -566,7 +566,7 @@ func TestProcessMentions_SkipsPublishOnPersistFailure(t *testing.T) {
 	// Phase 3 msg-authz: inject admin identity so authorizeAgentMessage
 	// passes — this test validates publish-on-persist, not authorization.
 	ctx = contextWithIdentity(ctx,
-		NewAuthenticatedUser("user-id-1", "tester@example.com", "Tester", "admin", "web"))
+		NewAuthenticatedUser(tid("user-tester"), "tester@example.com", "Tester", "admin", "web"))
 
 	results := srv.processMentions(ctx, []string{"mentioned"}, primary, originalMsg)
 
@@ -625,7 +625,7 @@ func TestProcessMentions_PublishesOnPersistSuccess(t *testing.T) {
 
 	originalMsg := &messages.StructuredMessage{
 		Sender:    "user:tester",
-		SenderID:  "user-id-1",
+		SenderID:  tid("user-tester"),
 		Recipient: "agent:" + primary.Slug,
 		Msg:       "hello @mentioned2",
 		Type:      messages.TypeInstruction,
@@ -636,7 +636,7 @@ func TestProcessMentions_PublishesOnPersistSuccess(t *testing.T) {
 	// Phase 3 msg-authz: inject admin identity so authorizeAgentMessage
 	// passes — this test validates publish-on-persist, not authorization.
 	ctx = contextWithIdentity(ctx,
-		NewAuthenticatedUser("user-id-1", "tester@example.com", "Tester", "admin", "web"))
+		NewAuthenticatedUser(tid("user-tester"), "tester@example.com", "Tester", "admin", "web"))
 
 	results := srv.processMentions(ctx, []string{"mentioned2"}, primary, originalMsg)
 	t.Logf("mention ok results: %+v", results)
@@ -682,12 +682,18 @@ func TestDeliverToUser_SkipsNotifyOnPersistFailure(t *testing.T) {
 	// Craft a message that satisfies all four W6 guard conditions:
 	//   ThreadID starts with "dm:", RecipientID non-empty,
 	//   Sender starts with "agent:".
+	agentID := tid("agent-a")
+	userID := tid("user-bob")
+	dmKey, dmErr := messages.DMConversationKey("user", userID, "agent", agentID)
+	if dmErr != nil {
+		t.Fatalf("DMConversationKey: %v", dmErr)
+	}
 	msg := messages.NewInstruction("agent:agent-a", "user:bob", "hello")
-	msg.SenderID = "agent-uuid"
-	msg.RecipientID = "user-bob-id"
-	msg.ThreadID = "dm:user:user-bob-id:agent:agent-uuid"
+	msg.SenderID = agentID
+	msg.RecipientID = userID
+	msg.ThreadID = dmKey
 
-	proxy.deliverToUser(context.Background(), projectID, "user.user-bob-id.message", msg)
+	proxy.deliverToUser(context.Background(), projectID, "user."+userID+".message", msg)
 
 	// The goroutine was never spawned, so the channel must be empty.
 	if spy.chatNotifFired() {
@@ -716,12 +722,18 @@ func TestDeliverToUser_NotifiesOnPersistSuccess(t *testing.T) {
 	cn := NewChatNotifier(realStore, spy, &stubWebChatStore{}, nil, slog.Default())
 	proxy.chatNotifier = cn
 
+	agentID := tid("agent-a")
+	userID := tid("user-bob")
+	dmKey, dmErr := messages.DMConversationKey("user", userID, "agent", agentID)
+	if dmErr != nil {
+		t.Fatalf("DMConversationKey: %v", dmErr)
+	}
 	msg := messages.NewInstruction("agent:agent-a", "user:bob", "hello")
-	msg.SenderID = "agent-uuid"
-	msg.RecipientID = "user-bob-id"
-	msg.ThreadID = "dm:user:user-bob-id:agent:agent-uuid"
+	msg.SenderID = agentID
+	msg.RecipientID = userID
+	msg.ThreadID = dmKey
 
-	proxy.deliverToUser(context.Background(), projectID, "user.user-bob-id.message", msg)
+	proxy.deliverToUser(context.Background(), projectID, "user."+userID+".message", msg)
 
 	// Wait for the goroutine to signal PublishChatNotification.
 	select {

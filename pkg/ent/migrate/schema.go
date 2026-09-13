@@ -1098,7 +1098,6 @@ var (
 		{Name: "channel", Type: field.TypeString, Nullable: true, Size: 64},
 		{Name: "thread_id", Type: field.TypeString, Nullable: true, Size: 256},
 		{Name: "conversation_id", Type: field.TypeUUID, Nullable: true},
-		{Name: "visibility", Type: field.TypeString, Nullable: true, Size: 16},
 		{Name: "created", Type: field.TypeTime},
 	}
 	// MessagesTable holds the schema information for the "messages" table.
@@ -1120,7 +1119,7 @@ var (
 			{
 				Name:    "message_created",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[20]},
+				Columns: []*schema.Column{MessagesColumns[19]},
 			},
 			{
 				Name:    "message_conversation_id",

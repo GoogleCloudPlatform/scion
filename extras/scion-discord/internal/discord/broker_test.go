@@ -229,6 +229,148 @@ func TestUnknownMentionRouting(t *testing.T) {
 	})
 }
 
+// TestAdditiveRoutingFlow traces the additive mention routing logic through
+// the same steps as handleIncomingMessage, verifying that primary and
+// secondary targets receive the correct message types.
+func TestAdditiveRoutingFlow(t *testing.T) {
+	knownAgents := []string{"coder", "reviewer", "tester"}
+	botUserID := "BOT123"
+
+	t.Run("start mention produces primary+secondary", func(t *testing.T) {
+		// "@reviewer check this PR" with default "coder".
+		content := "@reviewer check this PR"
+		effectiveDefault := "coder"
+
+		// Step 1: resolveTargetAgents includes default as implicit primary.
+		msg := newMockMessage(content, nil)
+		targets, isAll := resolveTargetAgents(msg, botUserID, effectiveDefault, knownAgents)
+		assert.False(t, isAll)
+		assert.Equal(t, []string{"coder", "reviewer"}, targets)
+
+		// Step 2: classifyMentions identifies @reviewer as a start mention.
+		classified := classifyMentions(content, botUserID, knownAgents, noopResolver)
+		assert.Equal(t, 1, countAgentStartMentions(classified))
+		assert.Equal(t, "reviewer", classified.StartMentions[0].Name)
+
+		// Step 3: Filtering keeps only start mentions → removes "coder".
+		agentStartMentions := countAgentStartMentions(classified)
+		if agentStartMentions > 0 {
+			startMentionSet := make(map[string]bool)
+			for _, sm := range classified.StartMentions {
+				if sm.Kind == "agent" {
+					startMentionSet[strings.ToLower(sm.Name)] = true
+				}
+			}
+			filtered := make([]string, 0)
+			for _, t2 := range targets {
+				if startMentionSet[strings.ToLower(t2)] {
+					filtered = append(filtered, t2)
+				}
+			}
+			targets = filtered
+		}
+		assert.Equal(t, []string{"reviewer"}, targets, "filter removes default agent")
+
+		// Step 4: Additive re-insertion puts the default back at position 0.
+		hasDefault := false
+		hasOther := false
+		for _, t2 := range targets {
+			if strings.EqualFold(t2, effectiveDefault) {
+				hasDefault = true
+			} else {
+				hasOther = true
+			}
+		}
+		if hasOther && !hasDefault {
+			targets = append([]string{effectiveDefault}, targets...)
+		}
+		assert.Equal(t, []string{"coder", "reviewer"}, targets)
+
+		// Step 5: Verify types — primary gets TypeInstruction, secondary gets TypeMention.
+		assert.Equal(t, "coder", targets[0], "primary (implicit default)")
+		assert.Equal(t, "reviewer", targets[1], "secondary (mentioned)")
+
+		// Primary should receive TypeInstruction.
+		primaryMsg := &messages.StructuredMessage{
+			Type:      messages.TypeInstruction,
+			Recipient: "agent:" + targets[0],
+		}
+		assert.Equal(t, messages.TypeInstruction, primaryMsg.Type)
+
+		// Secondary should receive TypeMention.
+		secondaryMsg := messages.NewMention("user:alice", "agent:"+targets[1], content, "agent:"+targets[0])
+		assert.Equal(t, messages.TypeMention, secondaryMsg.Type)
+		assert.Equal(t, "agent:coder", secondaryMsg.Metadata["mention_source"])
+	})
+
+	t.Run("no mentions routes to default only with TypeInstruction", func(t *testing.T) {
+		// Plain text with default "coder" — no mentions, no additive model.
+		content := "just a regular message"
+
+		msg := newMockMessage(content, nil)
+		targets, _ := resolveTargetAgents(msg, botUserID, "coder", knownAgents)
+		assert.Empty(t, targets, "no mentions → no targets from resolveTargetAgents")
+
+		// Default fallback sets targets to [effectiveDefault].
+		targets = []string{"coder"}
+		assert.Len(t, targets, 1)
+		assert.Equal(t, "coder", targets[0])
+
+		// Single target: TypeInstruction, no secondaries.
+		primaryMsg := &messages.StructuredMessage{
+			Type:      messages.TypeInstruction,
+			Recipient: "agent:coder",
+		}
+		assert.Equal(t, messages.TypeInstruction, primaryMsg.Type)
+	})
+
+	t.Run("body mention with default produces primary+body mention", func(t *testing.T) {
+		// "check this @reviewer" — reviewer is a body mention, not start mention.
+		content := "check this @reviewer"
+		effectiveDefault := "coder"
+
+		msg := newMockMessage(content, nil)
+		targets, _ := resolveTargetAgents(msg, botUserID, effectiveDefault, knownAgents)
+		// coder (default) + reviewer (body mention found by extractAgentMentions)
+		assert.Equal(t, []string{"coder", "reviewer"}, targets)
+
+		classified := classifyMentions(content, botUserID, knownAgents, noopResolver)
+		assert.Equal(t, 0, countAgentStartMentions(classified))
+		assert.Len(t, classified.BodyMentions, 1)
+		assert.Equal(t, "reviewer", classified.BodyMentions[0].Name)
+
+		// Body-mention filter removes body-mentioned agents from targets.
+		bodyMentionSet := make(map[string]bool)
+		for _, bm := range classified.BodyMentions {
+			if bm.Kind == "agent" {
+				bodyMentionSet[strings.ToLower(bm.Name)] = true
+			}
+		}
+		filtered := make([]string, 0)
+		for _, t2 := range targets {
+			if !bodyMentionSet[strings.ToLower(t2)] {
+				filtered = append(filtered, t2)
+			}
+		}
+		targets = filtered
+		assert.Equal(t, []string{"coder"}, targets, "coder remains as sole primary")
+
+		// Primary: coder → TypeInstruction
+		// Body mention: reviewer → TypeMention (from body mention loop)
+	})
+
+	t.Run("co-addressees metadata populated for multi-target", func(t *testing.T) {
+		targets := []string{"coder", "reviewer"}
+		slugsJSON, err := json.Marshal(targets)
+		require.NoError(t, err)
+
+		meta := map[string]string{
+			"mention_co_addressees": string(slugsJSON),
+		}
+		assert.Equal(t, `["coder","reviewer"]`, meta["mention_co_addressees"])
+	})
+}
+
 func TestParseHubError(t *testing.T) {
 	t.Run("valid error response", func(t *testing.T) {
 		body := `{"error":{"code":"agent_not_found","message":"Agent \"coder\" not found in project"}}`

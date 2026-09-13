@@ -145,11 +145,6 @@ func ConversationID(v uuid.UUID) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldConversationID, v))
 }
 
-// Visibility applies equality check predicate on the "visibility" field. It's identical to VisibilityEQ.
-func Visibility(v string) predicate.Message {
-	return predicate.Message(sql.FieldEQ(FieldVisibility, v))
-}
-
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldCreated, v))
@@ -1173,81 +1168,6 @@ func ConversationIDIsNil() predicate.Message {
 // ConversationIDNotNil applies the NotNil predicate on the "conversation_id" field.
 func ConversationIDNotNil() predicate.Message {
 	return predicate.Message(sql.FieldNotNull(FieldConversationID))
-}
-
-// VisibilityEQ applies the EQ predicate on the "visibility" field.
-func VisibilityEQ(v string) predicate.Message {
-	return predicate.Message(sql.FieldEQ(FieldVisibility, v))
-}
-
-// VisibilityNEQ applies the NEQ predicate on the "visibility" field.
-func VisibilityNEQ(v string) predicate.Message {
-	return predicate.Message(sql.FieldNEQ(FieldVisibility, v))
-}
-
-// VisibilityIn applies the In predicate on the "visibility" field.
-func VisibilityIn(vs ...string) predicate.Message {
-	return predicate.Message(sql.FieldIn(FieldVisibility, vs...))
-}
-
-// VisibilityNotIn applies the NotIn predicate on the "visibility" field.
-func VisibilityNotIn(vs ...string) predicate.Message {
-	return predicate.Message(sql.FieldNotIn(FieldVisibility, vs...))
-}
-
-// VisibilityGT applies the GT predicate on the "visibility" field.
-func VisibilityGT(v string) predicate.Message {
-	return predicate.Message(sql.FieldGT(FieldVisibility, v))
-}
-
-// VisibilityGTE applies the GTE predicate on the "visibility" field.
-func VisibilityGTE(v string) predicate.Message {
-	return predicate.Message(sql.FieldGTE(FieldVisibility, v))
-}
-
-// VisibilityLT applies the LT predicate on the "visibility" field.
-func VisibilityLT(v string) predicate.Message {
-	return predicate.Message(sql.FieldLT(FieldVisibility, v))
-}
-
-// VisibilityLTE applies the LTE predicate on the "visibility" field.
-func VisibilityLTE(v string) predicate.Message {
-	return predicate.Message(sql.FieldLTE(FieldVisibility, v))
-}
-
-// VisibilityContains applies the Contains predicate on the "visibility" field.
-func VisibilityContains(v string) predicate.Message {
-	return predicate.Message(sql.FieldContains(FieldVisibility, v))
-}
-
-// VisibilityHasPrefix applies the HasPrefix predicate on the "visibility" field.
-func VisibilityHasPrefix(v string) predicate.Message {
-	return predicate.Message(sql.FieldHasPrefix(FieldVisibility, v))
-}
-
-// VisibilityHasSuffix applies the HasSuffix predicate on the "visibility" field.
-func VisibilityHasSuffix(v string) predicate.Message {
-	return predicate.Message(sql.FieldHasSuffix(FieldVisibility, v))
-}
-
-// VisibilityIsNil applies the IsNil predicate on the "visibility" field.
-func VisibilityIsNil() predicate.Message {
-	return predicate.Message(sql.FieldIsNull(FieldVisibility))
-}
-
-// VisibilityNotNil applies the NotNil predicate on the "visibility" field.
-func VisibilityNotNil() predicate.Message {
-	return predicate.Message(sql.FieldNotNull(FieldVisibility))
-}
-
-// VisibilityEqualFold applies the EqualFold predicate on the "visibility" field.
-func VisibilityEqualFold(v string) predicate.Message {
-	return predicate.Message(sql.FieldEqualFold(FieldVisibility, v))
-}
-
-// VisibilityContainsFold applies the ContainsFold predicate on the "visibility" field.
-func VisibilityContainsFold(v string) predicate.Message {
-	return predicate.Message(sql.FieldContainsFold(FieldVisibility, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

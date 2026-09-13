@@ -423,10 +423,6 @@ export class ScionChatMessage extends LitElement {
   @property()
   channel = '';
 
-  /** Visibility level: "normal", "verbose", or "full". */
-  @property()
-  visibility = 'normal';
-
   /** Message type (e.g. "assistant-reply", "state-change"). */
   @property()
   messageType = '';
@@ -1937,19 +1933,13 @@ export class ScionChatMessage extends LitElement {
   }
 
   override render() {
-    // Full/trace messages render as a collapsed details block.
-    if (this.visibility === 'full') {
-      return this.renderTraceBlock();
-    }
-
     const dirClass = this.fromAgent ? 'from-agent' : 'from-user';
-    const visClass = this.visibility === 'verbose' ? ' verbose' : '';
     const groupClass = !this.showHeader ? ' grouped' : '';
     const isDeleted = !!this.deletedAt;
 
     return html`
       <div
-        class="message-wrapper ${dirClass}${visClass}${groupClass}"
+        class="message-wrapper ${dirClass}${groupClass}"
         @touchstart=${this.handleTouchStart}
       >
         ${this.showHeader && this.fromAgent
@@ -1961,15 +1951,7 @@ export class ScionChatMessage extends LitElement {
             : nothing}
         <div class="bubble">
           ${!isDeleted ? this.renderActionBar() : nothing}
-          ${this.visibility === 'verbose'
-            ? html`
-                <span class="verbose-label">
-                  <sl-icon name="arrow-return-right"></sl-icon>
-                  assistant reply
-                </span>
-              `
-            : nothing}
-          ${this.showHeader && this.fromAgent && this.visibility !== 'verbose'
+          ${this.showHeader && this.fromAgent
             ? html`
                 <div class="bubble-header">
                   <span class="sender-name">${this.senderName || this.sender}</span>
@@ -2001,21 +1983,6 @@ export class ScionChatMessage extends LitElement {
         </div>
       </div>
       ${this.renderFullPreview()}
-    `;
-  }
-
-  /** Render a collapsed trace block for full-visibility messages. */
-  private renderTraceBlock() {
-    return html`
-      <div class="trace-block">
-        <details>
-          <summary>
-            <sl-icon name="code-slash"></sl-icon>
-            Trace — ${this.sender} at ${this.formatTime()}
-          </summary>
-          <div class="trace-content">${this.body}</div>
-        </details>
-      </div>
     `;
   }
 

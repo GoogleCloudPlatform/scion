@@ -131,14 +131,11 @@ Sends a message to a running agent or user.
     - `--attach <path>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`.
         - **Constraints:** Cannot be combined with `--raw`, `--in`, or `--at`.
         - **Requirements:** Requires Hub mode (`scion hub enable`). If run in local mode, the command will fail with an error suggesting you include file contents directly in the message text. If the file is not a regular file (e.g., is a directory) or is outside allowed roots, the command will fail.
-    - `--visibility <string>`: Message visibility: `normal`, `verbose`, or `full`.
     - `--cc <agents>`: *(Deprecated — will be removed.)* Carbon copy additional agents. This flag is **repeatable** and also accepts a **comma-separated list** of agent names (e.g., `--cc dev-agent,qa-agent --cc test-agent`). Use `group[...]` addressing or body `@mentions` instead.
     - `--notify`: *(Deprecated — use `scion notifications subscribe` instead.)* Get notified when the target agent(s) respond or reach a terminal state after receiving the message.
     - `--plain`: *(Deprecated — will be removed.)*  Mark for plain-text delivery.
     - `--channel <channel>`: *(Deprecated — use conversation addressing instead.)* Target a specific message channel (e.g., `telegram`, `gchat`, `teams`, `web`).
     - `--thread-id <id>`: *(Deprecated — use conversation addressing instead.)* Target a specific thread ID within the channel.
-    - `-b, --broadcast`: *(Deprecated — use `scion broadcast` instead.)*
-    - `-a, --all`: *(Deprecated — use `scion broadcast --all` instead.)*
     - `--raw`: *(Deprecated — use `scion keys` instead.)* Send literal bytes via tmux send-keys with no trailing Enter.
     - `--in <duration>`: *(Deprecated — use `scion schedule create --in` instead.)* Schedule message delivery after a duration.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
@@ -179,7 +176,7 @@ Sends a message to all running agents in the current project (or across all proj
 
 **Usage:** `scion broadcast <message> [flags]`
 
-This command replaces the deprecated `--broadcast` / `--all` flags on `scion message`.
+This command replaces the removed `--broadcast` / `--all` flags on `scion message`.
 
 ### `scion keys`
 

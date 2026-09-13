@@ -1234,7 +1234,7 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 		return nil, nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
-	maybeWarnUnbackfilledMessages(ctx, s)
+	runBootDataMigrations(ctx, s)
 
 	if err := s.Ping(ctx); err != nil {
 		_ = s.Close()
@@ -1339,7 +1339,6 @@ func maybeWarnUnbackfilledMessages(ctx context.Context, s store.Store) {
 	}
 	slog.Warn("Messages without conversation attribution detected",
 		"count", count,
-		"action", "Run 'scion server backfill --execute' to attribute historical messages to conversations. Use 'scion server backfill' (default: dry-run) to preview first.",
 	)
 }
 
@@ -1926,19 +1925,62 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	log.Printf("Database: %s (%s)", cfg.Database.Driver, cfg.Database.URL)
 
 	// --- Settings-DB Phase 3: OperationalSettings wiring (§3.9) ---
-	// Gated on postgres: in SQLite/workstation mode the legacy file path is
-	// used unchanged.
-	if strings.EqualFold(cfg.Database.Driver, "postgres") {
-		if err := initOperationalSettings(ctx, cfg, hubSrv, s, globalDir); err != nil {
-			return nil, fmt.Errorf("operational settings init: %w", err)
-		}
+	// Driver-agnostic: initOperationalSettings handles both postgres (advisory
+	// locking) and SQLite (single-writer) via the existing AdvisoryLocker branch.
+	//
+	// Fail-closed: if settings cannot be loaded the hub must not serve ordinary
+	// traffic, because a DB-persisted admin_mode=true would be invisible to this
+	// process. Retry with exponential backoff to tolerate transient DB issues,
+	// then fail the hub startup if all attempts are exhausted.
+	// NOTE: this call and its error-return-to-log.Fatalf chain is what makes
+	// settings init fail-closed. Do NOT revert to the old log-and-continue
+	// pattern — that would let the server accept traffic without authoritative
+	// settings, silently bypassing a DB-persisted admin_mode=true.
+	// See TestInitOperationalSettings_FailClosed for the regression test.
+	if err := initOperationalSettingsWithRetry(ctx, cfg, hubSrv, s, globalDir); err != nil {
+		return nil, fmt.Errorf("operational settings init failed after retries (driver=%s): %w",
+			cfg.Database.Driver, err)
 	}
 
 	return hubSrv, nil
 }
 
-// initOperationalSettings sets up the OperationalSettings service for postgres
-// mode (settings-db §3.9). It:
+// settingsInitMaxRetries is the number of retry attempts for operational
+// settings initialization before the hub gives up and refuses to start.
+const settingsInitMaxRetries = 3
+
+// initOperationalSettingsWithRetry wraps initOperationalSettings with
+// exponential backoff. If all attempts fail, it returns the last error
+// so the caller can abort hub startup (fail-closed). This ensures a
+// DB-persisted admin_mode=true is never bypassed due to a transient
+// boot-time failure loading settings.
+func initOperationalSettingsWithRetry(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, s store.Store, globalDir string) error {
+	var lastErr error
+	for attempt := 0; attempt <= settingsInitMaxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(attempt) * 2 * time.Second
+			slog.Warn("Retrying operational settings init",
+				"attempt", attempt+1,
+				"backoff", backoff,
+				"prev_error", lastErr,
+			)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled during settings init retry: %w", ctx.Err())
+			}
+		}
+		lastErr = initOperationalSettings(ctx, cfg, hubSrv, s, globalDir)
+		if lastErr == nil {
+			return nil
+		}
+	}
+	return lastErr
+}
+
+// initOperationalSettings sets up the OperationalSettings service (settings-db
+// §3.9). It is driver-agnostic: postgres uses advisory locking, SQLite uses the
+// single-writer no-op path. It:
 //  1. Acquires advisory lock "hub_settings_seed"
 //  2. If no _meta row exists, seeds sections from settings.yaml (file values only)
 //  3. Releases the lock
@@ -2010,11 +2052,12 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 
 // startSettingsPropagation wires the event publisher into the OperationalSettings
 // service and starts the cross-replica propagation loop (design §3.6, Phase 4).
-// In file/SQLite mode (no OperationalSettings), this is a no-op.
+// When OperationalSettings is nil (init failed) this is a no-op. On SQLite the
+// event publisher is nil, so StartPropagation itself short-circuits.
 func startSettingsPropagation(ctx context.Context, hubSrv *hub.Server, eventPub hub.EventPublisher) {
 	ops := hubSrv.GetOperationalSettings()
 	if ops == nil {
-		return // file/SQLite mode — no propagation needed
+		return // OperationalSettings unavailable — no propagation possible
 	}
 	ops.SetEventPublisher(eventPub)
 	ops.StartPropagation(ctx, hubSrv)

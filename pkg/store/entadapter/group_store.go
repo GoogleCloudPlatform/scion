@@ -82,6 +82,9 @@ func mapError(err error) error {
 	if ent.IsNotFound(err) {
 		return store.ErrNotFound
 	}
+	if ent.IsNotSingular(err) {
+		return store.ErrNotSingular
+	}
 	if ent.IsConstraintError(err) {
 		// Both unique-constraint and foreign-key violations surface as Ent
 		// constraint errors, but they mean very different things: a unique

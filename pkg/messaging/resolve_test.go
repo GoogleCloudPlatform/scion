@@ -809,6 +809,239 @@ func TestResolve_Thread_SpaceSlashThread_Rejected(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// DEF-142 P1: resolveThread fails closed on ambiguity (≥2 matches).
+// ---------------------------------------------------------------------------
+
+func TestResolve_Thread_Ambiguous_DEF140ForkPath(t *testing.T) {
+	// AC-4: Two group conversations in one project sharing a display name →
+	// #<name> is refused with "ambiguous" and both candidates listed.
+	//
+	// Fixture built via the DEF-140 fork path: a native row and a discord
+	// row for the same thread, both carrying the same display_name. This is
+	// how duplicates actually occur in production — once ChannelToSurface
+	// stamps a real surface, (native, thread:P:T) and (discord, thread:P:T)
+	// are different conversations with the same display_name.
+	ms := newMockStore()
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	senderID := uuid.NewString()
+
+	nativeConvID := uuid.NewString()
+	discordConvID := uuid.NewString()
+
+	// The native row — original conversation.
+	ms.addConversation(
+		&store.Conversation{
+			ID:          nativeConvID,
+			ProjectID:   &projectID,
+			Kind:        "group",
+			Surface:     "native",
+			ExternalRef: "thread:" + projectID + ":general",
+			DisplayName: "general",
+		},
+		store.ConversationParticipant{ConversationID: nativeConvID, PrincipalKind: "user", PrincipalID: senderID},
+	)
+
+	// The discord fork — DEF-140: same external_ref stem, different surface,
+	// same display_name. This is the row ChannelToSurface("discord") creates.
+	ms.addConversation(
+		&store.Conversation{
+			ID:          discordConvID,
+			ProjectID:   &projectID,
+			Kind:        "group",
+			Surface:     "discord",
+			ExternalRef: "thread:" + projectID + ":general",
+			DisplayName: "general",
+		},
+		store.ConversationParticipant{ConversationID: discordConvID, PrincipalKind: "user", PrincipalID: senderID},
+	)
+
+	// Resolve #general — must fail with ambiguous, not silently pick one.
+	_, err := Resolve(ctx, ms, "#general", ResolveContext{
+		SenderPrincipalKind: "user",
+		SenderPrincipalID:   senderID,
+		ProjectID:           projectID,
+	})
+	require.Error(t, err)
+
+	var resErr *ResolutionError
+	require.ErrorAs(t, err, &resErr)
+	assert.Equal(t, "ambiguous", resErr.Reason,
+		"DEF-142 AC-4: ambiguous thread name must be refused, not silently resolved")
+	assert.Len(t, resErr.Candidates, 2,
+		"DEF-142 AC-4: both candidates must be listed")
+
+	// Both conversation IDs must appear in the candidates (as conv:<uuid>).
+	candidateStr := strings.Join(resErr.Candidates, " ")
+	assert.Contains(t, candidateStr, nativeConvID,
+		"native conversation must be listed as a candidate")
+	assert.Contains(t, candidateStr, discordConvID,
+		"discord conversation must be listed as a candidate")
+}
+
+func TestResolve_Thread_Ambiguous_ErrorMessage(t *testing.T) {
+	// Verify the error message format matches the design.
+	ms := newMockStore()
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	senderID := uuid.NewString()
+
+	id1 := uuid.NewString()
+	id2 := uuid.NewString()
+	ms.addConversation(
+		&store.Conversation{
+			ID:          id1,
+			ProjectID:   &projectID,
+			Kind:        "group",
+			Surface:     "native",
+			DisplayName: "dup-thread",
+		},
+		store.ConversationParticipant{ConversationID: id1, PrincipalKind: "user", PrincipalID: senderID},
+	)
+	ms.addConversation(
+		&store.Conversation{
+			ID:          id2,
+			ProjectID:   &projectID,
+			Kind:        "group",
+			Surface:     "discord",
+			DisplayName: "dup-thread",
+		},
+		store.ConversationParticipant{ConversationID: id2, PrincipalKind: "user", PrincipalID: senderID},
+	)
+
+	_, err := Resolve(ctx, ms, "#dup-thread", ResolveContext{
+		SenderPrincipalKind: "user",
+		SenderPrincipalID:   senderID,
+		ProjectID:           projectID,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous",
+		"error message must contain 'ambiguous'")
+	assert.Contains(t, err.Error(), "#dup-thread",
+		"error message must name the reference")
+}
+
+func TestResolve_Thread_SingleMatch_StillResolves(t *testing.T) {
+	// Positive control: one match still resolves normally after the
+	// ambiguity guard is added.
+	ms := newMockStore()
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	senderID := uuid.NewString()
+	convID := uuid.NewString()
+
+	ms.addConversation(
+		&store.Conversation{
+			ID:          convID,
+			ProjectID:   &projectID,
+			Kind:        "group",
+			Surface:     "native",
+			DisplayName: "unique-thread",
+		},
+		store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: senderID},
+	)
+
+	result, err := Resolve(ctx, ms, "#unique-thread", ResolveContext{
+		SenderPrincipalKind: "user",
+		SenderPrincipalID:   senderID,
+		ProjectID:           projectID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, convID, result.ConversationID)
+	assert.False(t, result.Created)
+}
+
+func TestResolve_Thread_ThreeMatches_StillAmbiguous(t *testing.T) {
+	// Three matches must also be refused — not just two.
+	ms := newMockStore()
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	senderID := uuid.NewString()
+
+	for _, surface := range []string{"native", "discord", "slack"} {
+		convID := uuid.NewString()
+		ms.addConversation(
+			&store.Conversation{
+				ID:          convID,
+				ProjectID:   &projectID,
+				Kind:        "group",
+				Surface:     surface,
+				DisplayName: "triple-thread",
+			},
+			store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: senderID},
+		)
+	}
+
+	_, err := Resolve(ctx, ms, "#triple-thread", ResolveContext{
+		SenderPrincipalKind: "user",
+		SenderPrincipalID:   senderID,
+		ProjectID:           projectID,
+	})
+	require.Error(t, err)
+
+	var resErr *ResolutionError
+	require.ErrorAs(t, err, &resErr)
+	assert.Equal(t, "ambiguous", resErr.Reason)
+	assert.Len(t, resErr.Candidates, 3)
+}
+
+func TestResolve_Thread_Ambiguous_AcrossPages(t *testing.T) {
+	// Ambiguity must be detected even when the duplicates span different
+	// pagination pages. Create enough conversations so the mock paginates.
+	//
+	// IDs are deterministic so sorted order equals insertion order and the
+	// two "target" rows (i=5, i=105) are guaranteed to straddle the Limit:100
+	// page boundary.
+	//
+	// Known bounded gap: mockStore paginates on ID alone; production uses
+	// keyset pagination on (created_at, id) via decodeCursor in
+	// conversation_store.go. This test proves the loop iterates across
+	// pages; it does not prove production pagination semantics.
+	ms := newMockStore()
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	senderID := uuid.NewString()
+
+	for i := 0; i < 110; i++ {
+		// Sortable IDs: sorted order == insertion order.
+		convID := fmt.Sprintf("00000000-0000-0000-0000-%012d", i)
+		name := fmt.Sprintf("filler-%03d", i)
+		surface := "native"
+		if i == 5 {
+			name = "target"
+			surface = "native"
+		}
+		if i == 105 {
+			name = "target"
+			surface = "discord"
+		}
+		ms.addConversation(
+			&store.Conversation{
+				ID:          convID,
+				ProjectID:   &projectID,
+				Kind:        "group",
+				Surface:     surface,
+				DisplayName: name,
+			},
+			store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: senderID},
+		)
+	}
+
+	_, err := Resolve(ctx, ms, "#target", ResolveContext{
+		SenderPrincipalKind: "user",
+		SenderPrincipalID:   senderID,
+		ProjectID:           projectID,
+	})
+	require.Error(t, err)
+
+	var resErr *ResolutionError
+	require.ErrorAs(t, err, &resErr)
+	assert.Equal(t, "ambiguous", resErr.Reason,
+		"ambiguity across pagination pages must still be detected")
+	assert.Len(t, resErr.Candidates, 2)
+}
+
+// ---------------------------------------------------------------------------
 // Invalid reference format tests
 // ---------------------------------------------------------------------------
 
@@ -1192,7 +1425,8 @@ func TestAC_DEF8_1_CrossPath_DualWriteAndResolverConverge(t *testing.T) {
 	}
 
 	// Step 1: Legacy dual-write path.
-	convResult := ResolveOrCreateDMConversation(ctx, ms, ms, log, "user", senderID, "agent", agentID)
+	convResult, convErr := ResolveOrCreateDMConversation(ctx, ms, ms, log, "user", senderID, "agent", agentID)
+	require.NoError(t, convErr, "dual-write path must not return an error")
 	require.NotNil(t, convResult, "dual-write path must return a result (rule 14: non-zero floor)")
 
 	// Step 2: Resolver path via @agent.

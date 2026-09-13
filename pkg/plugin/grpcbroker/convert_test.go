@@ -44,7 +44,6 @@ func TestStructuredMessageRoundTrip(t *testing.T) {
 		Metadata:     map[string]string{"key1": "val1", "key2": "val2"},
 		Channel:      "discord",
 		ThreadID:     "thread-123",
-		Visibility:   "normal",
 	}
 
 	pb := StructuredMessageToProto(original)
@@ -72,7 +71,6 @@ func TestStructuredMessageRoundTrip(t *testing.T) {
 	assert.Equal(t, original.Metadata, roundTripped.Metadata)
 	assert.Equal(t, original.Channel, roundTripped.Channel)
 	assert.Equal(t, original.ThreadID, roundTripped.ThreadID)
-	assert.Equal(t, original.Visibility, roundTripped.Visibility)
 }
 
 func TestStructuredMessageNilHandling(t *testing.T) {

@@ -37,8 +37,11 @@ func TestCreateMessageEnumeration(t *testing.T) {
 	// CreateMessage.
 	// -------------------------------------------------------------------
 	stamped := map[string]string{
-		// handleAgentOutboundMessage: agent → user outbound message.
-		"handlers_agent_messaging.go:handleAgentOutboundMessage": "Phase 5 dual-write: agent outbound DM or thread conversation",
+		// handleAgentOutboundMessage: agent-to-agent DM (DEF-164 deliveryAgentDM path).
+		"handlers_agent_messaging.go:handleAgentOutboundMessage:agentDM": "Phase 5 dual-write: DEF-164 agent-to-agent direct message persistence",
+
+		// handleAgentOutboundMessage: agent-to-user direct (deliveryUserDirect path).
+		"handlers_agent_messaging.go:handleAgentOutboundMessage:userDirect": "Phase 5 dual-write: agent outbound DM or thread conversation",
 
 		// handleAgentMessage direct-persist path: user/agent → agent.
 		"handlers_agent_messaging.go:handleAgentMessage": "Phase 5 dual-write: user/agent → agent (authenticated sender)",
@@ -54,6 +57,9 @@ func TestCreateMessageEnumeration(t *testing.T) {
 
 		// handleBrokerInbound: external channel inbound (B15).
 		"handlers_broker_inbound.go:handleBrokerInbound": "B15 dual-write: broker inbound conversation stamping",
+
+		// dispatchRoutedRecipient: routed broker inbound (centralized routing).
+		"handlers_broker_inbound_routed.go:dispatchRoutedRecipient": "Routed inbound: conversation stamped via Phase 11 or Phase 5 before CreateMessage",
 
 		// sendAgentRouted primary: web chat user → agent.
 		"handlers_chat_v2.go:sendAgentRouted:primary": "B15 dual-write: web chat user→agent primary message",
@@ -248,6 +254,11 @@ func isCreateMessageCall(call *ast.CallExpr) bool {
 // The mapping is hard-coded for known cases.
 func disambiguationSuffixes(file, fn string, idx, total int) []string {
 	switch {
+	case file == "handlers_agent_messaging.go" && fn == "handleAgentOutboundMessage" && total == 2:
+		if idx == 0 {
+			return []string{"agentDM"}
+		}
+		return []string{"userDirect"}
 	case file == "handlers_chat_v2.go" && fn == "sendAgentRouted" && total == 2:
 		if idx == 0 {
 			return []string{"primary"}

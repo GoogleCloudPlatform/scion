@@ -245,7 +245,6 @@ type UserMessageEvent struct {
 	CreatedAt     string `json:"createdAt"`
 	Channel       string `json:"channel,omitempty"`
 	ThreadID      string `json:"threadId,omitempty"`
-	Visibility    string `json:"visibility,omitempty"`
 	GroupID       string `json:"groupId,omitempty"`
 	Read          bool   `json:"read"`
 	DispatchState string `json:"dispatchState,omitempty"`
@@ -731,7 +730,6 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message)
 		CreatedAt:     msg.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
 		Channel:       msg.Channel,
 		ThreadID:      msg.ThreadID,
-		Visibility:    msg.Visibility,
 		GroupID:       msg.GroupID,
 		Read:          msg.Read,
 		DispatchState: msg.DispatchState,

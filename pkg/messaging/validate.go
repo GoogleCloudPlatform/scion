@@ -37,8 +37,13 @@ func validateMessageContent(msg *Message) error {
 	if msg == nil {
 		return fmt.Errorf("message must not be nil")
 	}
-	// Delegate structural checks to the type's own Validate.
-	if err := msg.Validate(); err != nil {
+	// Structural checks without the ID requirement. The ID check in
+	// Validate() was only ever satisfied by the fabricated "legacy-<ts>"
+	// value that MapLegacyEnvelope used to mint. Removing the fabrication
+	// exposed a gate propped up by the very thing we deleted. The
+	// pre-persistence path never has a real ID; the structural checks
+	// are the ones that actually validate content.
+	if err := msg.validateStructural(); err != nil {
 		return err
 	}
 	// Body size limits (reuse constants from messages package).

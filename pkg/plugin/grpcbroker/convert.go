@@ -47,7 +47,6 @@ func StructuredMessageToProto(msg *messages.StructuredMessage) *brokerv1.Structu
 		Status:       msg.Status,
 		Channel:      msg.Channel,
 		ThreadId:     msg.ThreadID,
-		Visibility:   msg.Visibility,
 	}
 	if len(msg.Attachments) > 0 {
 		pb.Attachments = make([]string, len(msg.Attachments))
@@ -85,7 +84,6 @@ func ProtoToStructuredMessage(pb *brokerv1.StructuredMessage) *messages.Structur
 		Status:       pb.Status,
 		Channel:      pb.Channel,
 		ThreadID:     pb.ThreadId,
-		Visibility:   pb.Visibility,
 	}
 	if len(pb.Attachments) > 0 {
 		msg.Attachments = make([]string, len(pb.Attachments))

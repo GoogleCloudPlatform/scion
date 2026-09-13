@@ -1167,6 +1167,24 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
+		ID:          "hub.messaging.update",
+		Domain:      "hub",
+		Description: "Read and update messaging configuration switches",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/messaging", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/messaging", Method: "PUT"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.messaging.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
 		ID:          "hub.maintenance.execute",
 		Domain:      "hub",
 		Description: "Execute maintenance operations including migrations and restarts",
@@ -2487,6 +2505,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/brokers/", Kind: ExemptionInternalOnly, Reason: "Broker by ID, broker-HMAC auth", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/broker/callback", Kind: ExemptionInternalOnly, Reason: "Broker callback, broker-HMAC auth", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/broker/inbound", Kind: ExemptionInternalOnly, Reason: "Broker message inbound, broker-HMAC auth; per-message authz via authorizeAgentMessage", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/broker/inbound/routed", Kind: ExemptionInternalOnly, Reason: "Broker routed message inbound, broker-HMAC auth; per-agent authorization via routing resolution", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/broker/projects", Kind: ExemptionInternalOnly, Reason: "Broker project list, broker-HMAC auth", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/runtime-brokers/connect", Kind: ExemptionInternalOnly, Reason: "Runtime broker WebSocket connect, broker-HMAC auth", Owner: "route_metadata.go"},
 

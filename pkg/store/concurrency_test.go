@@ -15,6 +15,8 @@
 package store
 
 import (
+	"os"
+	"regexp"
 	"testing"
 )
 
@@ -62,36 +64,153 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockSoftDeletePurge,
 		LockGitHubAppHealthCheck,
 		LockBrokerAffinityReap,
+		LockBrokerHeartbeatTimeout,
 		LockBrokerMessageSweep,
 		LockSchemaMigration,
+		LockGitHubResolutionCacheEviction,
+		LockDiscordGateway,
+		LockTelegramWebhook,
+		LockA2ABridgeSweep,
+		LockHubSettingsSeed,
 		LockExposedPortsSweep,
+		LockStorageMigration,
+		LockBundledResources,
+		LockRecoveryAuthz,
+		LockInlineSecretsMigration,
+		LockNonceCacheEviction,
+		LockChatLinkCodeEviction,
+		LockWebchatMigration,
+		LockDataMigrations,
 	}
 
-	seen := make(map[AdvisoryLockKey]bool, len(singletonKeys)+1)
+	seen := make(map[AdvisoryLockKey]bool, len(singletonKeys)+2)
 	for _, k := range singletonKeys {
 		if seen[k] {
-			t.Errorf("duplicate singleton key: %d", k)
+			t.Errorf("duplicate singleton key: 0x%X", int64(k))
 		}
 		seen[k] = true
 	}
 
-	// LockWorkspaceProvision is in a different range from singletons.
-	if seen[LockWorkspaceProvision] {
-		t.Errorf("LockWorkspaceProvision %d collides with a singleton key", LockWorkspaceProvision)
+	// Per-object class IDs must not collide with singletons or each other.
+	classIDs := []AdvisoryLockKey{
+		LockWorkspaceProvision,
+		LockQuotaEnforcement,
+	}
+	for _, k := range classIDs {
+		if seen[k] {
+			t.Errorf("class ID 0x%X collides with a singleton key", int64(k))
+		}
+		seen[k] = true
 	}
 
-	// Verify the ranges are visually distinct (different 0x5C10_0xxx vs 0x5C10_1xxx).
+	// Verify singletons are in the expected 0x5C10_0xxx range.
 	for _, k := range singletonKeys {
 		if int64(k)&0xFFFF0000 != 0x5C100000 {
-			t.Errorf("singleton key %d (0x%X) not in expected range 0x5C10_0xxx", k, int64(k))
+			t.Errorf("singleton key 0x%X not in expected range 0x5C10_0xxx", int64(k))
 		}
 	}
-	if int64(LockWorkspaceProvision)&0xFFFF0000 != 0x5C100000 {
-		// Both are in 0x5C10_xxxx but the lower 16 bits distinguish singleton vs per-object.
-		// LockWorkspaceProvision should be >= 0x5C10_1000.
-		if int64(LockWorkspaceProvision) < 0x5C101000 {
-			t.Errorf("LockWorkspaceProvision %d (0x%X) should be >= 0x5C10_1000 to separate from singletons",
-				LockWorkspaceProvision, int64(LockWorkspaceProvision))
+	// Class IDs should be >= 0x5C10_1000 to separate from singletons.
+	for _, k := range classIDs {
+		if int64(k) < 0x5C101000 {
+			t.Errorf("class ID 0x%X should be >= 0x5C10_1000 to separate from singletons", int64(k))
+		}
+	}
+}
+
+// TestAdvisoryLockKeys_AllUnique reads concurrency.go from disk, extracts
+// every AdvisoryLockKey declaration with a regex, and verifies:
+//  1. Every source-declared name appears in the test's compiled key list.
+//  2. Every key value is unique (no two names share the same numeric value).
+//
+// This catches both value collisions (which the Go compiler permits — different
+// const names with the same value are legal) and drift (a key added to the
+// source but not to the test list). The previous version used a hardcoded
+// count which never actually caught drift because both literals were updated
+// in the same commit.
+func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
+	type entry struct {
+		name string
+		key  AdvisoryLockKey
+	}
+
+	// Compiled key list — must stay in sync with concurrency.go.
+	// The source-driven regex check below catches any drift.
+	all := []entry{
+		{"LockScheduleEvaluator", LockScheduleEvaluator},
+		{"LockAgentHeartbeatTimeout", LockAgentHeartbeatTimeout},
+		{"LockAgentStalledDetection", LockAgentStalledDetection},
+		{"LockSoftDeletePurge", LockSoftDeletePurge},
+		{"LockGitHubAppHealthCheck", LockGitHubAppHealthCheck},
+		{"LockBrokerAffinityReap", LockBrokerAffinityReap},
+		{"LockBrokerHeartbeatTimeout", LockBrokerHeartbeatTimeout},
+		{"LockBrokerMessageSweep", LockBrokerMessageSweep},
+		{"LockSchemaMigration", LockSchemaMigration},
+		{"LockGitHubResolutionCacheEviction", LockGitHubResolutionCacheEviction},
+		{"LockDiscordGateway", LockDiscordGateway},
+		{"LockTelegramWebhook", LockTelegramWebhook},
+		{"LockA2ABridgeSweep", LockA2ABridgeSweep},
+		{"LockHubSettingsSeed", LockHubSettingsSeed},
+		{"LockExposedPortsSweep", LockExposedPortsSweep},
+		{"LockStorageMigration", LockStorageMigration},
+		{"LockBundledResources", LockBundledResources},
+		{"LockInlineSecretsMigration", LockInlineSecretsMigration},
+		{"LockNonceCacheEviction", LockNonceCacheEviction},
+		{"LockChatLinkCodeEviction", LockChatLinkCodeEviction},
+		{"LockWebchatMigration", LockWebchatMigration},
+		{"LockDataMigrations", LockDataMigrations},
+		{"LockRecoveryAuthz", LockRecoveryAuthz},
+		// Per-object class IDs (different range, but must not collide
+		// with singletons or each other).
+		{"LockWorkspaceProvision", LockWorkspaceProvision},
+		{"LockQuotaEnforcement", LockQuotaEnforcement},
+	}
+
+	// --- Check 1: value uniqueness ---
+	seen := make(map[AdvisoryLockKey]string, len(all))
+	for _, e := range all {
+		if prev, dup := seen[e.key]; dup {
+			t.Errorf("duplicate advisory lock key value 0x%X: %s and %s", int64(e.key), prev, e.name)
+		}
+		seen[e.key] = e.name
+	}
+
+	// --- Check 2: completeness against source ---
+	// Read concurrency.go from disk and extract every line that declares an
+	// AdvisoryLockKey constant. The regex matches lines like:
+	//     LockFoo AdvisoryLockKey = 0x5C100001
+	src, err := os.ReadFile("concurrency.go")
+	if err != nil {
+		t.Fatalf("reading concurrency.go: %v", err)
+	}
+
+	re := regexp.MustCompile(`(\w+)\s+AdvisoryLockKey\s*=\s*0x[0-9A-Fa-f]+`)
+	matches := re.FindAllStringSubmatch(string(src), -1)
+	if len(matches) == 0 {
+		t.Fatal("regex found zero AdvisoryLockKey declarations in concurrency.go")
+	}
+
+	// Build a set of names from the compiled test list.
+	testNames := make(map[string]bool, len(all))
+	for _, e := range all {
+		testNames[e.name] = true
+	}
+
+	// Every name in the source file must appear in the test list.
+	for _, m := range matches {
+		name := m[1]
+		if !testNames[name] {
+			t.Errorf("concurrency.go declares %s but this test does not include it — add it to the 'all' slice", name)
+		}
+	}
+
+	// Every name in the test list must appear in the source file.
+	sourceNames := make(map[string]bool, len(matches))
+	for _, m := range matches {
+		sourceNames[m[1]] = true
+	}
+	for _, e := range all {
+		if !sourceNames[e.name] {
+			t.Errorf("test includes %s but concurrency.go does not declare it — remove it from the 'all' slice", e.name)
 		}
 	}
 }

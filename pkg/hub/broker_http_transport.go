@@ -324,6 +324,11 @@ func (t *brokerHTTPTransport) MessageAgent(ctx context.Context, brokerID, broker
 	}
 	if structuredMsg != nil {
 		reqBody["structured_message"] = structuredMsg
+		// Phase 9b(i): promote DeliveryText to the top-level wire field
+		// so the broker can prefer it without parsing StructuredMessage.
+		if structuredMsg.DeliveryText != "" {
+			reqBody["delivery_text"] = structuredMsg.DeliveryText
+		}
 	} else {
 		reqBody["message"] = message
 	}
