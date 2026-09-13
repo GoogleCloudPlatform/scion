@@ -297,7 +297,7 @@ func TestResolveRoutingAgents_MentionCapOrdering(t *testing.T) {
 	for i := 1; i < 12; i++ {
 		mentions = append(mentions, fmt.Sprintf("@agent-%02d", i))
 	}
-	content := "hello " + fmt.Sprintf("%s", joinStrings(mentions))
+	content := "hello " + joinStrings(mentions)
 
 	lister := &mockAgentLister{agents: agents}
 	plan, err := resolveRoutingAgents(context.Background(), lister, "proj-1", content, defaultAgent)

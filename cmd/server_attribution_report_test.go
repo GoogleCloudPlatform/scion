@@ -872,7 +872,7 @@ func TestAttributionReport_SurfaceConflict(t *testing.T) {
 		Msg:         "message 1 native channel",
 		Type:        "instruction",
 		ThreadID:    threadID,
-		Channel:     "",        // maps to "native"
+		Channel:     "", // maps to "native"
 		CreatedAt:   time.Now(),
 	})
 	require.NoError(t, err)

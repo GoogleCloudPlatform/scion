@@ -238,7 +238,7 @@ func findTopicsByConversationID(ctx context.Context, db *sql.DB, conversationID 
 	if err != nil {
 		return nil, fmt.Errorf("querying webchat_topic by conversation_id %s: %w", conversationID, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // error checked via rows.Err below
 
 	var links []topicLink
 	for rows.Next() {
