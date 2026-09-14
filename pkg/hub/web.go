@@ -1628,7 +1628,11 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					ws.serveInternalError(w, r)
 					return
 				}
-				expectedRole := determineUserRole(email, ws.adminEmails(), storedRole, ws.isDemotionSafe())
+				uiPromoted := false
+				if storedRole == "admin" && ws.store != nil {
+					uiPromoted = hasUIPromotedBinding(r.Context(), ws.store, uid)
+				}
+				expectedRole := determineUserRole(email, ws.adminEmails(), storedRole, ws.isDemotionSafe(), uiPromoted)
 				if currentRole == expectedRole {
 					// Role unchanged — inject user into context and proceed
 					// without saving session (avoids redundant write).
@@ -1715,7 +1719,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		}
 		if err != nil {
 			// User not found — create new user
-			role := determineUserRole(proxyUser.Email, ws.adminEmails(), "", ws.isDemotionSafe())
+			role := determineUserRole(proxyUser.Email, ws.adminEmails(), "", ws.isDemotionSafe(), false)
 			user = &store.User{
 				ID:          generateID(),
 				Email:       proxyUser.Email,
@@ -1762,7 +1766,8 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				}
 				user.LastLogin = time.Now()
 				oldRole := user.Role
-				user.Role = determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe())
+				proxyUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
+				user.Role = determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), proxyUIPromoted)
 				if oldRole == "admin" && user.Role != "admin" {
 					bindingSuperAdmin = "delete"
 				} else if user.Role == "admin" {
@@ -1776,7 +1781,8 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					user.DisplayName = proxyUser.DisplayName
 				}
 				// Re-evaluate admin status on every login (matches handleOAuthCallback / provisionUser)
-				if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe()); user.Role != newRole {
+				proxyUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
+				if newRole := determineUserRole(proxyUser.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), proxyUIPromoted); user.Role != newRole {
 					oldRole := user.Role
 					ws.logger().Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", oldRole, "new_role", newRole)
 					user.Role = newRole
@@ -2045,7 +2051,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		// Create new user (only reachable in open/domain_restricted modes;
 		// in invite_only mode, checkUserAuthorized already confirmed a User record exists)
-		role := determineUserRole(userInfo.Email, ws.adminEmails(), "", ws.isDemotionSafe())
+		role := determineUserRole(userInfo.Email, ws.adminEmails(), "", ws.isDemotionSafe(), false)
 		user = &store.User{
 			ID:          generateID(),
 			Email:       userInfo.Email,
@@ -2095,7 +2101,8 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			}
 			user.LastLogin = time.Now()
 			oldRole := user.Role
-			user.Role = determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe())
+			oauthUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
+			user.Role = determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), oauthUIPromoted)
 			if oldRole == "admin" && user.Role != "admin" {
 				bindingSuperAdmin = "delete"
 			} else if user.Role == "admin" {
@@ -2114,7 +2121,8 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 				user.DisplayName = userInfo.DisplayName
 			}
 			// Re-evaluate admin status on every login
-			newRole := determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe())
+			oauthUIPromoted := hasUIPromotedBinding(ctx, ws.store, user.ID)
+			newRole := determineUserRole(userInfo.Email, ws.adminEmails(), user.Role, ws.isDemotionSafe(), oauthUIPromoted)
 			if user.Role != newRole {
 				oldRole := user.Role
 				ws.logger().Info("User role changed on login", "email", userInfo.Email, "old_role", oldRole, "new_role", newRole)

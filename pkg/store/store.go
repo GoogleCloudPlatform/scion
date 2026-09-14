@@ -63,19 +63,25 @@ const SystemReconcileCreatedBy = "system-reconcile"
 // startup backfill that migrates existing User.Role values into role bindings.
 const SystemBackfillCreatedBy = "system-backfill"
 
+// AdminAPICreatedBy is the CreatedBy sentinel that identifies super-admin
+// role bindings created through the admin API (UI-granted promotions).
+// These bindings are NOT touched by ReconcileSuperAdminBindings, making
+// UI-promoted admins immune to AdminEmails config changes.
+const AdminAPICreatedBy = "admin-api"
+
 // IsSuperAdminBindingAllowed reports whether the given CreatedBy value is
-// permitted to create a super-admin role binding. Only the system reconciler
-// and the startup backfill are allowed.
+// permitted to create a super-admin role binding. Only the system reconciler,
+// the startup backfill, and the admin API are allowed.
 func IsSuperAdminBindingAllowed(createdBy string) bool {
-	return createdBy == SystemReconcileCreatedBy || createdBy == SystemBackfillCreatedBy
+	return createdBy == SystemReconcileCreatedBy || createdBy == SystemBackfillCreatedBy || createdBy == AdminAPICreatedBy
 }
 
 // IsSystemCreatedBinding reports whether the given CreatedBy value identifies
-// a binding created automatically by the system (backfill or reconcile).
-// Used by cleanup routines to distinguish automatic bindings from
+// a binding created automatically by the system (backfill, reconcile, or
+// admin API). Used by cleanup routines to distinguish automatic bindings from
 // administrator-created ones.
 func IsSystemCreatedBinding(createdBy string) bool {
-	return createdBy == SystemReconcileCreatedBy || createdBy == SystemBackfillCreatedBy
+	return createdBy == SystemReconcileCreatedBy || createdBy == SystemBackfillCreatedBy || createdBy == AdminAPICreatedBy
 }
 
 // Store defines the interface for Hub data persistence.

@@ -698,9 +698,9 @@ func TestDetermineUserRole(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := determineUserRole(tc.email, tc.adminEmails, tc.currentRole, tc.demotionSafe)
+			got := determineUserRole(tc.email, tc.adminEmails, tc.currentRole, tc.demotionSafe, false)
 			if got != tc.expected {
-				t.Errorf("determineUserRole(%q, %v, %q, %v) = %q, expected %q",
+				t.Errorf("determineUserRole(%q, %v, %q, %v, false) = %q, expected %q",
 					tc.email, tc.adminEmails, tc.currentRole, tc.demotionSafe, got, tc.expected)
 			}
 		})
@@ -712,7 +712,7 @@ func TestDetermineUserRole(t *testing.T) {
 // preserves the admin role instead of demoting.
 func TestDetermineUserRole_GuardBlocksDemotion(t *testing.T) {
 	// Admin not in adminEmails, but demotionSafe is false → preserved.
-	got := determineUserRole("former@example.com", []string{"real-admin@example.com"}, "admin", false)
+	got := determineUserRole("former@example.com", []string{"real-admin@example.com"}, "admin", false, false)
 	if got != "admin" {
 		t.Errorf("expected admin preserved when demotionSafe=false, got %q", got)
 	}
@@ -722,7 +722,7 @@ func TestDetermineUserRole_GuardBlocksDemotion(t *testing.T) {
 // completed normally (demotionSafe=true), the login path demotes as expected.
 func TestDetermineUserRole_GuardAllowsDemotion(t *testing.T) {
 	// Admin not in adminEmails, demotionSafe is true → demoted.
-	got := determineUserRole("former@example.com", []string{"real-admin@example.com"}, "admin", true)
+	got := determineUserRole("former@example.com", []string{"real-admin@example.com"}, "admin", true, false)
 	if got != "member" {
 		t.Errorf("expected demotion to member when demotionSafe=true, got %q", got)
 	}
