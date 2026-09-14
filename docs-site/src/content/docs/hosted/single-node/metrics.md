@@ -126,6 +126,10 @@ export SCION_OTEL_PROTOCOL="grpc"
 export SCION_GCP_PROJECT_ID="your-project-id"
 ```
 
+:::caution[`SCION_GCP_PROJECT_ID` is required for cloud export]
+Cloud export is silently skipped when no GCP project ID is available. Set `SCION_GCP_PROJECT_ID` explicitly, or ensure the `scion-telemetry-gcp-credentials` service-account key file contains a `project_id` field so auto-detection can populate it. If export is enabled but no project ID is found, `sciontool` logs a warning at startup.
+:::
+
 ### 2. Configure the Agent (Native OTel)
 
 If your agent harness supports native OpenTelemetry (e.g., `opencode`), configure it to point to the `sciontool` forwarder running on localhost:

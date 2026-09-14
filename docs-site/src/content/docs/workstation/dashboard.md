@@ -86,6 +86,7 @@ Centralized views for managing the Scion infrastructure and access control (avai
 - **Access Boundaries**: Full-featured admin suite for defining and managing monotonic permission ceilings (AccessConstraints) via a guided authoring workflow, inventory page, and dry-run preview engine.
 - **Service Accounts**: Manage and validate registered Google Service Accounts for use with the metadata emulation pipeline.
 - **Brokers**: Comprehensive broker detail pages providing a grouped view of all active agents by their respective projects.
+- **Metrics Dashboard**: View infrastructure health and agent telemetry metrics. Access requires the `hub.metrics.read` permission scope. For details on the metrics collected, see [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/).
 - **Server Configuration Editor**: A full-featured settings editor at `/admin/server-config`. Restructured the **General** settings tab into three dedicated cards (General, Agent Defaults with sub-tabs, and Project Default Settings). Adds `DefaultModel`, `DefaultThinkingLevel`, and `DefaultHarnessAuth` fields to the defaults pipeline, moves the Telemetry toggle to Agent Defaults, and groups the Message Broker configuration in the Hub Server tab.
 - **Maintenance Mode**: Toggle maintenance mode for the Hub and Web servers to facilitate safe infrastructure updates.
 
