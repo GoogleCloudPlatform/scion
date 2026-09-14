@@ -28,11 +28,6 @@ import (
 
 const telegramLinkCodeTTL = 15 * time.Minute
 
-const (
-	verifyRatePerSecond = 5.0 / 60.0 // 5 attempts per minute
-	verifyBurst         = 5
-)
-
 // telegramPendingLink holds state for a pending Telegram account linking.
 type telegramPendingLink struct {
 	Code           string
@@ -57,11 +52,7 @@ type TelegramLinkService struct {
 	mu      sync.Mutex
 	pending map[string]*telegramPendingLink // code → pending link (in-memory fallback)
 
-	// NOTE: verifyLimiters is per-instance. At min-instances=N the effective
-	// rate limit is N× the configured per-IP limit. This is acceptable as
-	// defense-in-depth; the primary protection is code entropy + expiration.
-	verifyMu       sync.Mutex
-	verifyLimiters map[string]*tokenBucket // IP → token bucket
+	verifyLimiter linkVerifyLimiter
 
 	// db is the optional DB-backed link code store. When non-nil, all code
 	// operations are delegated to it instead of the in-memory map.
@@ -75,9 +66,9 @@ type TelegramLinkService struct {
 // a background goroutine that periodically removes expired entries.
 func NewTelegramLinkService() *TelegramLinkService {
 	s := &TelegramLinkService{
-		pending:        make(map[string]*telegramPendingLink),
-		verifyLimiters: make(map[string]*tokenBucket),
-		done:           make(chan struct{}),
+		pending:       make(map[string]*telegramPendingLink),
+		verifyLimiter: newLinkVerifyLimiter(),
+		done:          make(chan struct{}),
 	}
 	go s.cleanupLoop()
 	return s
@@ -223,33 +214,7 @@ func (s *TelegramLinkService) ConsumePending(telegramUserID string) {
 
 // AllowVerify checks whether the given IP is within the verify rate limit.
 func (s *TelegramLinkService) AllowVerify(ip string) bool {
-	s.verifyMu.Lock()
-	defer s.verifyMu.Unlock()
-
-	now := time.Now()
-	b, ok := s.verifyLimiters[ip]
-	if !ok {
-		b = &tokenBucket{
-			tokens:    float64(verifyBurst) - 1, // consume one token
-			lastCheck: now,
-		}
-		s.verifyLimiters[ip] = b
-		return true
-	}
-
-	// Refill tokens based on elapsed time.
-	elapsed := now.Sub(b.lastCheck).Seconds()
-	b.tokens += elapsed * verifyRatePerSecond
-	if b.tokens > float64(verifyBurst) {
-		b.tokens = float64(verifyBurst)
-	}
-	b.lastCheck = now
-
-	if b.tokens >= 1 {
-		b.tokens--
-		return true
-	}
-	return false
+	return s.verifyLimiter.Allow(ip)
 }
 
 // Close stops the background cleanup goroutine.
@@ -276,15 +241,7 @@ func (s *TelegramLinkService) cleanupLoop() {
 			}
 			s.mu.Unlock()
 
-			// Clean up stale verify rate limiter entries.
-			s.verifyMu.Lock()
-			cutoff := now.Add(-30 * time.Minute)
-			for ip, b := range s.verifyLimiters {
-				if b.lastCheck.Before(cutoff) {
-					delete(s.verifyLimiters, ip)
-				}
-			}
-			s.verifyMu.Unlock()
+			s.verifyLimiter.Cleanup(now)
 		}
 	}
 }

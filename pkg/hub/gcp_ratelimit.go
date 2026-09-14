@@ -29,11 +29,6 @@ type GCPTokenRateLimiter struct {
 	cleanup  time.Duration // how often to clean up stale entries
 }
 
-type tokenBucket struct {
-	tokens    float64
-	lastCheck time.Time
-}
-
 // NewGCPTokenRateLimiter creates a rate limiter with the given rate (tokens/sec) and burst size.
 // Call StartCleanup to begin the background cleanup goroutine.
 func NewGCPTokenRateLimiter(ratePerSecond float64, burst int) *GCPTokenRateLimiter {
