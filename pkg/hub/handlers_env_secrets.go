@@ -1601,6 +1601,133 @@ func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, pr
 	}
 }
 
+// handleScopedEnvVarByKey handles an env-var lifecycle after the caller has
+// verified the scope resource and authorized the request.
+func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request, key, scope, scopeID string) {
+	ctx := r.Context()
+
+	switch r.Method {
+	case http.MethodGet:
+		envVar, err := s.store.GetEnvVar(ctx, key, scope, scopeID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
+				meta, metaErr := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
+				if metaErr == nil && meta.SecretType == "environment" {
+					ev := secretMetaToEnvVar(*meta)
+					writeJSON(w, http.StatusOK, &ev)
+					return
+				}
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if envVar.Sensitive {
+			envVar.Value = "********"
+		}
+		writeJSON(w, http.StatusOK, envVar)
+
+	case http.MethodPut:
+		var req SetEnvVarRequest
+		if err := readJSON(r, &req); err != nil {
+			BadRequest(w, "Invalid request body: "+err.Error())
+			return
+		}
+		if req.Value == "" {
+			ValidationError(w, "value is required", nil)
+			return
+		}
+
+		var createdBy string
+		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+			createdBy = userIdent.ID()
+		}
+
+		if req.Secret {
+			if s.secretBackend == nil {
+				writeJSON(w, http.StatusNotImplemented, map[string]string{
+					"error": "secret storage requires a configured secrets backend",
+				})
+				return
+			}
+			input := &secret.SetSecretInput{
+				Name:          key,
+				Value:         req.Value,
+				SecretType:    "environment",
+				Target:        key,
+				Scope:         scope,
+				ScopeID:       scopeID,
+				Description:   req.Description,
+				InjectionMode: req.InjectionMode,
+				CreatedBy:     createdBy,
+				UpdatedBy:     createdBy,
+			}
+			created, meta, err := s.secretBackend.Set(ctx, input)
+			if err != nil {
+				if errors.Is(err, secret.ErrNoSecretBackend) {
+					writeJSON(w, http.StatusNotImplemented, map[string]string{
+						"error": "secret storage requires a configured secrets backend",
+					})
+					return
+				}
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			_ = s.store.DeleteEnvVar(ctx, key, scope, scopeID)
+			syntheticEnvVar := secretMetaToEnvVar(*meta)
+			writeJSON(w, http.StatusOK, SetEnvVarResponse{EnvVar: &syntheticEnvVar, Created: created})
+			return
+		}
+
+		injectionMode := req.InjectionMode
+		if injectionMode == "" {
+			injectionMode = store.InjectionModeAsNeeded
+		}
+		envVar := &store.EnvVar{
+			ID:            api.NewUUID(),
+			Key:           key,
+			Value:         req.Value,
+			Scope:         scope,
+			ScopeID:       scopeID,
+			Description:   req.Description,
+			Sensitive:     req.Sensitive,
+			InjectionMode: injectionMode,
+			Secret:        false,
+		}
+		envVar.CreatedBy = createdBy
+		created, err := s.store.UpsertEnvVar(ctx, envVar)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if s.secretBackend != nil {
+			_ = s.secretBackend.Delete(ctx, key, scope, scopeID)
+		}
+		if envVar.Sensitive {
+			envVar.Value = "********"
+		}
+		writeJSON(w, http.StatusOK, SetEnvVarResponse{EnvVar: envVar, Created: created})
+
+	case http.MethodDelete:
+		if err := s.store.DeleteEnvVar(ctx, key, scope, scopeID); err != nil {
+			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
+				if secErr := s.secretBackend.Delete(ctx, key, scope, scopeID); secErr == nil {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if s.secretBackend != nil {
+			_ = s.secretBackend.Delete(ctx, key, scope, scopeID)
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
 func (s *Server) handleProjectEnvVarByKey(w http.ResponseWriter, r *http.Request, projectID, key string) {
 	if !checkAgentReadScope(w, r) {
 		return
@@ -1654,129 +1781,7 @@ func (s *Server) handleProjectEnvVarByKey(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	switch r.Method {
-	case http.MethodGet:
-		envVar, err := s.store.GetEnvVar(ctx, key, store.ScopeProject, projectID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
-				meta, metaErr := s.secretBackend.GetMeta(ctx, key, store.ScopeProject, projectID)
-				if metaErr == nil && meta.SecretType == "environment" {
-					ev := secretMetaToEnvVar(*meta)
-					writeJSON(w, http.StatusOK, &ev)
-					return
-				}
-			}
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		if envVar.Sensitive {
-			envVar.Value = "********"
-		}
-		writeJSON(w, http.StatusOK, envVar)
-
-	case http.MethodPut:
-		var req SetEnvVarRequest
-		if err := readJSON(r, &req); err != nil {
-			BadRequest(w, "Invalid request body: "+err.Error())
-			return
-		}
-		if req.Value == "" {
-			ValidationError(w, "value is required", nil)
-			return
-		}
-
-		var createdBy string
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			createdBy = userIdent.ID()
-		}
-
-		// Secret promotion
-		if req.Secret {
-			if s.secretBackend == nil {
-				writeJSON(w, http.StatusNotImplemented, map[string]string{
-					"error": "secret storage requires a configured secrets backend",
-				})
-				return
-			}
-			input := &secret.SetSecretInput{
-				Name:          key,
-				Value:         req.Value,
-				SecretType:    "environment",
-				Target:        key,
-				Scope:         store.ScopeProject,
-				ScopeID:       projectID,
-				Description:   req.Description,
-				InjectionMode: req.InjectionMode,
-				CreatedBy:     createdBy,
-				UpdatedBy:     createdBy,
-			}
-			created, meta, err := s.secretBackend.Set(ctx, input)
-			if err != nil {
-				if errors.Is(err, secret.ErrNoSecretBackend) {
-					writeJSON(w, http.StatusNotImplemented, map[string]string{
-						"error": "secret storage requires a configured secrets backend",
-					})
-					return
-				}
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			_ = s.store.DeleteEnvVar(ctx, key, store.ScopeProject, projectID)
-			syntheticEnvVar := secretMetaToEnvVar(*meta)
-			writeJSON(w, http.StatusOK, SetEnvVarResponse{EnvVar: &syntheticEnvVar, Created: created})
-			return
-		}
-
-		// Plain env var write
-		projectInjectionMode := req.InjectionMode
-		if projectInjectionMode == "" {
-			projectInjectionMode = store.InjectionModeAsNeeded
-		}
-		envVar := &store.EnvVar{
-			ID:            api.NewUUID(),
-			Key:           key,
-			Value:         req.Value,
-			Scope:         store.ScopeProject,
-			ScopeID:       projectID,
-			Description:   req.Description,
-			Sensitive:     req.Sensitive,
-			InjectionMode: projectInjectionMode,
-			Secret:        false,
-		}
-		envVar.CreatedBy = createdBy
-		created, err := s.store.UpsertEnvVar(ctx, envVar)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		// Demotion cleanup
-		if s.secretBackend != nil {
-			_ = s.secretBackend.Delete(ctx, key, store.ScopeProject, projectID)
-		}
-		if envVar.Sensitive {
-			envVar.Value = "********"
-		}
-		writeJSON(w, http.StatusOK, SetEnvVarResponse{EnvVar: envVar, Created: created})
-
-	case http.MethodDelete:
-		if err := s.store.DeleteEnvVar(ctx, key, store.ScopeProject, projectID); err != nil {
-			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
-				if secErr := s.secretBackend.Delete(ctx, key, store.ScopeProject, projectID); secErr == nil {
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-			}
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		if s.secretBackend != nil {
-			_ = s.secretBackend.Delete(ctx, key, store.ScopeProject, projectID)
-		}
-		w.WriteHeader(http.StatusNoContent)
-
-	default:
-		MethodNotAllowed(w)
-	}
+	s.handleScopedEnvVarByKey(w, r, key, store.ScopeProject, projectID)
 }
 
 func (s *Server) handleProjectSecrets(w http.ResponseWriter, r *http.Request, projectID string) {
@@ -2316,129 +2321,7 @@ func (s *Server) handleBrokerEnvVarByKey(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	switch r.Method {
-	case http.MethodGet:
-		envVar, err := s.store.GetEnvVar(ctx, key, store.ScopeRuntimeBroker, brokerID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
-				meta, metaErr := s.secretBackend.GetMeta(ctx, key, store.ScopeRuntimeBroker, brokerID)
-				if metaErr == nil && meta.SecretType == "environment" {
-					ev := secretMetaToEnvVar(*meta)
-					writeJSON(w, http.StatusOK, &ev)
-					return
-				}
-			}
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		if envVar.Sensitive {
-			envVar.Value = "********"
-		}
-		writeJSON(w, http.StatusOK, envVar)
-
-	case http.MethodPut:
-		var req SetEnvVarRequest
-		if err := readJSON(r, &req); err != nil {
-			BadRequest(w, "Invalid request body: "+err.Error())
-			return
-		}
-		if req.Value == "" {
-			ValidationError(w, "value is required", nil)
-			return
-		}
-
-		var createdBy string
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			createdBy = userIdent.ID()
-		}
-
-		// Secret promotion
-		if req.Secret {
-			if s.secretBackend == nil {
-				writeJSON(w, http.StatusNotImplemented, map[string]string{
-					"error": "secret storage requires a configured secrets backend",
-				})
-				return
-			}
-			input := &secret.SetSecretInput{
-				Name:          key,
-				Value:         req.Value,
-				SecretType:    "environment",
-				Target:        key,
-				Scope:         store.ScopeRuntimeBroker,
-				ScopeID:       brokerID,
-				Description:   req.Description,
-				InjectionMode: req.InjectionMode,
-				CreatedBy:     createdBy,
-				UpdatedBy:     createdBy,
-			}
-			created, meta, err := s.secretBackend.Set(ctx, input)
-			if err != nil {
-				if errors.Is(err, secret.ErrNoSecretBackend) {
-					writeJSON(w, http.StatusNotImplemented, map[string]string{
-						"error": "secret storage requires a configured secrets backend",
-					})
-					return
-				}
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			_ = s.store.DeleteEnvVar(ctx, key, store.ScopeRuntimeBroker, brokerID)
-			syntheticEnvVar := secretMetaToEnvVar(*meta)
-			writeJSON(w, http.StatusOK, SetEnvVarResponse{EnvVar: &syntheticEnvVar, Created: created})
-			return
-		}
-
-		// Plain env var write
-		brokerInjectionMode := req.InjectionMode
-		if brokerInjectionMode == "" {
-			brokerInjectionMode = store.InjectionModeAsNeeded
-		}
-		envVar := &store.EnvVar{
-			ID:            api.NewUUID(),
-			Key:           key,
-			Value:         req.Value,
-			Scope:         store.ScopeRuntimeBroker,
-			ScopeID:       brokerID,
-			Description:   req.Description,
-			Sensitive:     req.Sensitive,
-			InjectionMode: brokerInjectionMode,
-			Secret:        false,
-		}
-		envVar.CreatedBy = createdBy
-		created, err := s.store.UpsertEnvVar(ctx, envVar)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		// Demotion cleanup
-		if s.secretBackend != nil {
-			_ = s.secretBackend.Delete(ctx, key, store.ScopeRuntimeBroker, brokerID)
-		}
-		if envVar.Sensitive {
-			envVar.Value = "********"
-		}
-		writeJSON(w, http.StatusOK, SetEnvVarResponse{EnvVar: envVar, Created: created})
-
-	case http.MethodDelete:
-		if err := s.store.DeleteEnvVar(ctx, key, store.ScopeRuntimeBroker, brokerID); err != nil {
-			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
-				if secErr := s.secretBackend.Delete(ctx, key, store.ScopeRuntimeBroker, brokerID); secErr == nil {
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-			}
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		if s.secretBackend != nil {
-			_ = s.secretBackend.Delete(ctx, key, store.ScopeRuntimeBroker, brokerID)
-		}
-		w.WriteHeader(http.StatusNoContent)
-
-	default:
-		MethodNotAllowed(w)
-	}
+	s.handleScopedEnvVarByKey(w, r, key, store.ScopeRuntimeBroker, brokerID)
 }
 
 func (s *Server) handleBrokerSecrets(w http.ResponseWriter, r *http.Request, brokerID string) {
