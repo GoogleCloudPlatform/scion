@@ -690,6 +690,43 @@ func TestHandleProjectImportResources(t *testing.T) {
 	}
 }
 
+func TestHandleProjectImportResources_UsesKindSpecificAuthorization(t *testing.T) {
+	srv, s, project, _ := setupWorkspaceProject(t, "project-import-authz")
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("user-project-import-authz"),
+		Email:       "project-import-authz@test.com",
+		DisplayName: "Project Import Authz",
+		Role:        store.UserRoleMember,
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+	grantUserActionOnResource(t, s, user.ID, "agent", project.ID, ActionCreate)
+
+	doImport := func(path string, body any, mockSource func(*testing.T) func()) *httptest.ResponseRecorder {
+		cleanup := mockSource(t)
+		defer cleanup()
+		return doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/projects/"+project.ID+"/"+path, body)
+	}
+
+	rec := doImport("import-templates", ImportTemplatesRequest{
+		SourceURL: "https://github.com/acme/repo/tree/main/templates",
+	}, mockTemplateTarball)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = doImport("import-harness-configs", ImportHarnessConfigsRequest{
+		SourceURL: "https://github.com/acme/repo/tree/main/harness-configs",
+	}, mockHarnessConfigTarball)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	grantUserActionOnResource(t, s, user.ID, "harness_config", project.ID, ActionCreate)
+	rec = doImport("import-harness-configs", ImportHarnessConfigsRequest{
+		SourceURL: "https://github.com/acme/repo/tree/main/harness-configs",
+	}, mockHarnessConfigTarball)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
 // TestHandleResourcesImport_MissingSourceURL verifies sourceUrl is required.
 func TestHandleResourcesImport_MissingSourceURL(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
