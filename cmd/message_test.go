@@ -337,7 +337,7 @@ func TestBuildStructuredMessage(t *testing.T) {
 	msgInterrupt = true
 	msgAttach = []string{"file1.go", "file2.go"}
 
-	msg := buildStructuredMessage("user:alice", "agent:dev", "do something")
+	msg := buildStructuredMessage("user:alice", "agent:dev", "do something", msgAttach)
 
 	assert.Equal(t, messages.Version, msg.Version)
 	assert.Equal(t, "user:alice", msg.Sender)

@@ -417,13 +417,13 @@ func resolveSenderIdentity(hubCtx *HubContext) string {
 }
 
 // buildStructuredMessage constructs a StructuredMessage from CLI parameters.
-func buildStructuredMessage(sender, recipient, message string) *messages.StructuredMessage {
+func buildStructuredMessage(sender, recipient, message string, attachments []string) *messages.StructuredMessage {
 	msg := messages.NewInstruction(sender, recipient, message)
 	msg.Plain = msgPlain
 	msg.Raw = msgRaw
 	msg.Urgent = msgInterrupt
-	if len(msgAttach) > 0 {
-		msg.Attachments = msgAttach
+	if len(attachments) > 0 {
+		msg.Attachments = attachments
 	}
 	msg.Channel = msgChannel
 	msg.ThreadID = msgThreadID
@@ -459,7 +459,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	msg := buildStructuredMessage(sender, "agent:"+agentName, message)
+	msg := buildStructuredMessage(sender, "agent:"+agentName, message, msgAttach)
 	// Validate through the new envelope choke point (Phase 7, AC-8).
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
@@ -529,7 +529,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		// and the orphan rows.
 		if ref.Kind == messaging.RefAgent {
 			sender := "agent:" + senderAgent
-			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message)
+			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments)
 			if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 				return fmt.Errorf("message validation failed: %w", err)
 			}
@@ -594,7 +594,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	// message endpoint. The server derives the conversation from the
 	// sender/recipient principals (DEF-138 Rule 3).
 	sender := resolveSenderIdentity(hubCtx)
-	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message)
+	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments)
 	if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
@@ -731,7 +731,7 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 			switch recip.Kind {
 			case messages.RecipientAgent:
 				slug := api.Slugify(recip.Name)
-				msg := buildStructuredMessage(sender, "agent:"+slug, message)
+				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach)
 				msg.Type = messages.TypeGroupSet
 				msg.Recipients = recipientsStr
 				msg.Metadata = map[string]string{"group_id": groupID}

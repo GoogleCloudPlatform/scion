@@ -601,8 +601,8 @@ func TestSendMessageViaConversation_EmailEmptyMsgBeforeSend(t *testing.T) {
 	restoreFlags := resetMessageFlags()
 	defer restoreFlags()
 
-	// Set attachments via CLI flag — buildStructuredMessage would include
-	// them, but the outbound path does not carry them.
+	// Set attachments via CLI flag — buildStructuredMessage reads these for
+	// non-conversation paths; the conversation path uses the explicit parameter.
 	msgAttach = []string{"/workspace/x.png"}
 
 	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
@@ -627,13 +627,20 @@ func TestSendMessageViaConversation_EmailEmptyMsgBeforeSend(t *testing.T) {
 	}
 
 	// Empty message body with attachments — ValidateLegacyMessage waives
-	// empty-body when attachments are present, but the outbound path does not
-	// send attachments. The probe must reflect the sent envelope.
+	// empty-body when attachments are present, and the outbound path now
+	// transmits them.
+	err = sendMessageViaConversation(hubCtx, ref, "", false, false, msgAttach)
+	require.NoError(t, err, "empty message on @email path with attachments should succeed")
+
+	// The outbound message should have been sent.
+	assert.Len(t, *outbound, 1, "one outbound message should be sent")
+
+	// Verify that an empty message without attachments still fails validation.
 	err = sendMessageViaConversation(hubCtx, ref, "", false, false, nil)
-	require.Error(t, err, "empty message on @email path must fail validation")
+	require.Error(t, err, "empty message on @email path without attachments must fail validation")
 	assert.Contains(t, err.Error(), "validation failed")
 
-	// DEF-51: no messages should be sent when validation fails.
+	// DEF-51: no additional messages should be sent when validation fails.
 	assert.Len(t, *sent, 0, "no agent messages should be sent")
-	assert.Len(t, *outbound, 0, "no outbound messages should be sent")
+	assert.Len(t, *outbound, 1, "outbound count should not increase after validation failure")
 }
