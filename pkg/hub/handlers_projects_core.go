@@ -2593,35 +2593,6 @@ func resolveProjectID(projectIDRaw string) string {
 	return projectIDRaw
 }
 
-// handleProjectByID is deprecated - use handleProjectRoutes instead
-//
-//nolint:unused // Kept for legacy route compatibility.
-func (s *Server) handleProjectByID(w http.ResponseWriter, r *http.Request) {
-	var id string
-	if strings.HasPrefix(r.URL.Path, "/api/v1/projects") {
-		id = extractID(r, "/api/v1/projects")
-	} else {
-		id = extractID(r, "/api/v1/groves")
-	}
-
-	if id == "" || id == "register" {
-		// Handled by handleProjectRegister
-		NotFound(w, "Project")
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		s.getProject(w, r, id)
-	case http.MethodPatch:
-		s.updateProject(w, r, id)
-	case http.MethodDelete:
-		s.deleteProject(w, r, id)
-	default:
-		MethodNotAllowed(w)
-	}
-}
-
 func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 	if !checkAgentReadScope(w, r) {
 		return

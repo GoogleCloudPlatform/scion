@@ -79,6 +79,13 @@ type CreateTemplateResponse struct {
 	ManifestURL string          `json:"manifestUrl,omitempty"`
 }
 
+type ListTemplatesResponse struct {
+	Templates    []TemplateWithCapabilities `json:"templates"`
+	NextCursor   string                     `json:"nextCursor,omitempty"`
+	TotalCount   int                        `json:"totalCount"`
+	Capabilities *Capabilities              `json:"_capabilities,omitempty"`
+}
+
 // UploadURLInfo contains a signed URL for uploading a file.
 type UploadURLInfo struct {
 	Path    string            `json:"path"`

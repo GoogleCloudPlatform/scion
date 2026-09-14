@@ -197,29 +197,6 @@ type ExternalUserInfo struct {
 // authorized to log in (domain restriction, invite-only, etc.).
 var ErrAccessDenied = errors.New("access denied")
 
-// handleAuth routes auth-related requests.
-//
-//nolint:unused // Kept as a legacy aggregate router; routes are registered individually.
-func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	switch {
-	case path == "/api/v1/auth/login" && r.Method == http.MethodPost:
-		s.handleAuthLogin(w, r)
-	case path == "/api/v1/auth/token" && r.Method == http.MethodPost:
-		s.handleAuthToken(w, r)
-	case path == "/api/v1/auth/refresh" && r.Method == http.MethodPost:
-		s.handleAuthRefresh(w, r)
-	case path == "/api/v1/auth/validate" && r.Method == http.MethodPost:
-		s.handleAuthValidate(w, r)
-	case path == "/api/v1/auth/logout" && r.Method == http.MethodPost:
-		s.handleAuthLogout(w, r)
-	case path == "/api/v1/auth/me" && r.Method == http.MethodGet:
-		s.handleAuthMe(w, r)
-	default:
-		MethodNotAllowed(w)
-	}
-}
-
 // handleAuthLogin handles POST /api/v1/auth/login.
 // This endpoint exchanges an OAuth provider token for Hub-issued tokens.
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
