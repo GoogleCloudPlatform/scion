@@ -738,17 +738,6 @@ func assertFuncDef(desc string, file *ast.File, filename, symbol string, expecte
 	}
 }
 
-func assertAudit(desc string, file *ast.File, filename, funcName, symbol string, expected int) {
-	actual := countIdentsInFunc(file, funcName, symbol)
-	if actual < expected {
-		fmt.Fprintf(os.Stderr, "FAIL [AUDIT] %s\n", desc)
-		fmt.Fprintf(os.Stderr, "  expected %s at least x%d in %s (%s), found x%d\n",
-			symbol, expected, funcName, filename, actual)
-		fmt.Fprintf(os.Stderr, "  This is a silent-denial path — logAuthzDenial is the ONLY record of the denial.\n")
-		rc = 1
-	}
-}
-
 func assertInformational(desc string, file *ast.File, filename, symbol string, expected int) {
 	actual := countCommentMentions(file, symbol)
 	if actual < expected {
