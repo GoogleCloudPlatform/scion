@@ -1830,6 +1830,7 @@ func TestRS1_AuthorityLookupFailure_PostLock(t *testing.T) {
 
 	owner := NewAuthenticatedUser(ownerID, ownerID+"@test.com", "ALPLOwner", "member", "test")
 	ownerCtx := contextWithIdentity(ctx, owner)
+	ownerCtx = contextWithCredentialContext(ownerCtx, CredentialContext{Kind: CredentialKindDev})
 
 	_, denial := failSvc.AddMember(ownerCtx, MembershipRequest{
 		Op:            MembershipOpAdd,
@@ -2163,7 +2164,9 @@ func TestRS1_StaleAuthorityForcedOverlap(t *testing.T) {
 	owner2 := NewAuthenticatedUser(owner2ID, owner2ID+"@test.com", "ForcedOverlapOwner2", "member", "test")
 	// Set identity in contexts so audit records can populate actor fields.
 	owner1Ctx := contextWithIdentity(ctx, owner1)
+	owner1Ctx = contextWithCredentialContext(owner1Ctx, CredentialContext{Kind: CredentialKindDev})
 	owner2Ctx := contextWithIdentity(ctx, owner2)
+	owner2Ctx = contextWithCredentialContext(owner2Ctx, CredentialContext{Kind: CredentialKindDev})
 
 	// Start owner1's RemoveMember in a goroutine. The pre-lock checkGovernance
 	// will pass (owner1 is still an owner), then WithTx will block.
@@ -2181,7 +2184,11 @@ func TestRS1_StaleAuthorityForcedOverlap(t *testing.T) {
 	}()
 
 	// Wait for owner1's mutation to reach WithTx (preflight passed with stale authority).
-	<-enteredCh
+	select {
+	case <-enteredCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for WithTx entry — RemoveMember likely denied before reaching WithTx")
+	}
 
 	// While owner1 is blocked, owner2 demotes owner1 to member using the
 	// normal service. This commits through the real store.
@@ -2304,7 +2311,9 @@ func TestRS1_StaleAuthorityForcedOverlap_AddMember(t *testing.T) {
 	owner1 := NewAuthenticatedUser(owner1ID, owner1ID+"@test.com", "FOAOwner1", "member", "test")
 	owner2 := NewAuthenticatedUser(owner2ID, owner2ID+"@test.com", "FOAOwner2", "member", "test")
 	owner1Ctx := contextWithIdentity(ctx, owner1)
+	owner1Ctx = contextWithCredentialContext(owner1Ctx, CredentialContext{Kind: CredentialKindDev})
 	owner2Ctx := contextWithIdentity(ctx, owner2)
+	owner2Ctx = contextWithCredentialContext(owner2Ctx, CredentialContext{Kind: CredentialKindDev})
 
 	var addDenial *MembershipDecision
 	var wg sync.WaitGroup
@@ -2321,7 +2330,11 @@ func TestRS1_StaleAuthorityForcedOverlap_AddMember(t *testing.T) {
 		})
 	}()
 
-	<-enteredCh
+	select {
+	case <-enteredCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for WithTx entry — AddMember likely denied before reaching WithTx")
+	}
 
 	// Demote owner1 to member.
 	owner1Bindings, _ := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, owner1ID)
@@ -2423,7 +2436,9 @@ func TestRS1_StaleAuthorityForcedOverlap_UpdateRole(t *testing.T) {
 	owner1 := NewAuthenticatedUser(owner1ID, owner1ID+"@test.com", "FOUOwner1", "member", "test")
 	owner2 := NewAuthenticatedUser(owner2ID, owner2ID+"@test.com", "FOUOwner2", "member", "test")
 	owner1Ctx := contextWithIdentity(ctx, owner1)
+	owner1Ctx = contextWithCredentialContext(owner1Ctx, CredentialContext{Kind: CredentialKindDev})
 	owner2Ctx := contextWithIdentity(ctx, owner2)
+	owner2Ctx = contextWithCredentialContext(owner2Ctx, CredentialContext{Kind: CredentialKindDev})
 
 	// Owner1 tries to promote target to admin (passes preflight as owner).
 	var updateDenial *MembershipDecision
@@ -2440,7 +2455,11 @@ func TestRS1_StaleAuthorityForcedOverlap_UpdateRole(t *testing.T) {
 		})
 	}()
 
-	<-enteredCh
+	select {
+	case <-enteredCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for WithTx entry — UpdateMemberRole likely denied before reaching WithTx")
+	}
 
 	// Demote owner1 to member while blocked.
 	owner1Bindings, _ := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, owner1ID)
@@ -2541,7 +2560,9 @@ func TestRS1_StaleAuthorityForcedOverlap_Transfer(t *testing.T) {
 	owner1 := NewAuthenticatedUser(owner1ID, owner1ID+"@test.com", "FOTOwner1", "member", "test")
 	owner2 := NewAuthenticatedUser(owner2ID, owner2ID+"@test.com", "FOTOwner2", "member", "test")
 	owner1Ctx := contextWithIdentity(ctx, owner1)
+	owner1Ctx = contextWithCredentialContext(owner1Ctx, CredentialContext{Kind: CredentialKindDev})
 	owner2Ctx := contextWithIdentity(ctx, owner2)
+	owner2Ctx = contextWithCredentialContext(owner2Ctx, CredentialContext{Kind: CredentialKindDev})
 
 	// Owner1 tries to transfer ownership (passes preflight isActorDirectOwner).
 	var transferDenial *MembershipDecision
@@ -2557,7 +2578,11 @@ func TestRS1_StaleAuthorityForcedOverlap_Transfer(t *testing.T) {
 		})
 	}()
 
-	<-enteredCh
+	select {
+	case <-enteredCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for WithTx entry — TransferOwnership likely denied before reaching WithTx")
+	}
 
 	// Demote owner1 to member while blocked.
 	owner1Bindings, _ := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, owner1ID)
