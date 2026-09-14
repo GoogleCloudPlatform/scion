@@ -15,8 +15,6 @@
 package hub
 
 import (
-	"net/http"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 )
 
@@ -38,54 +36,4 @@ func NewDiscordLinkService() *DiscordLinkService {
 // GetStatusByDiscordUser returns the linking status for a given Discord user ID.
 func (s *DiscordLinkService) GetStatusByDiscordUser(discordUserID string) (status, userID, userEmail string) {
 	return s.GetStatusByUser(discordUserID)
-}
-
-// handleDiscordLink handles POST /api/v1/discord/link.
-// This is called by the Discord plugin (broker-authenticated) to register a pending link code.
-func (s *Server) handleDiscordLink(w http.ResponseWriter, r *http.Request) {
-	var register func(string, string)
-	if s.discordLinkService != nil {
-		register = s.discordLinkService.RegisterCode
-	}
-	handleChatLinkRegistration(w, r, chatLinkRegistrationOptions{
-		providerName: "Discord",
-		userIDField:  "discordUserId",
-		userIDLogKey: "discord_user_id",
-		decode:       decodeDiscordLinkRegistration,
-		register:     register,
-	})
-}
-
-// handleDiscordLinkVerify handles POST /api/v1/discord/link/verify.
-// This is called by a logged-in user from the web UI to confirm a link code.
-func (s *Server) handleDiscordLinkVerify(w http.ResponseWriter, r *http.Request) {
-	var allowVerify func(string) bool
-	var verify func(string, string, string) (string, string)
-	if s.discordLinkService != nil {
-		allowVerify = s.discordLinkService.AllowVerify
-		verify = s.discordLinkService.VerifyCode
-	}
-	handleChatLinkVerification(w, r, chatLinkVerificationOptions{
-		providerName:      "Discord",
-		userIDResponseKey: "discordUserId",
-		userIDLogKey:      "discord_user_id",
-		allowVerify:       allowVerify,
-		verify:            verify,
-	})
-}
-
-// handleDiscordLinkStatus handles GET /api/v1/discord/link/status.
-// This is called by the Discord plugin (broker-authenticated) to poll for confirmation.
-func (s *Server) handleDiscordLinkStatus(w http.ResponseWriter, r *http.Request) {
-	var getStatus func(string) (string, string, string)
-	var consume func(string)
-	if s.discordLinkService != nil {
-		getStatus = s.discordLinkService.GetStatusByDiscordUser
-		consume = s.discordLinkService.ConsumePending
-	}
-	handleChatLinkStatus(w, r, chatLinkStatusOptions{
-		userIDQueryParam: "discord_user_id",
-		getStatus:        getStatus,
-		consume:          consume,
-	})
 }
