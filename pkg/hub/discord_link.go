@@ -245,45 +245,16 @@ func (s *DiscordLinkService) cleanupLoop() {
 // handleDiscordLink handles POST /api/v1/discord/link.
 // This is called by the Discord plugin (broker-authenticated) to register a pending link code.
 func (s *Server) handleDiscordLink(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
-		return
+	var register func(string, string)
+	if s.discordLinkService != nil {
+		register = s.discordLinkService.RegisterCode
 	}
-
-	broker := GetBrokerIdentityFromContext(r.Context())
-	if broker == nil {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "broker authentication required", nil)
-		return
-	}
-
-	var req struct {
-		Code          string `json:"code"`
-		DiscordUserID string `json:"discordUserId"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
-		return
-	}
-
-	if req.Code == "" || req.DiscordUserID == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "code and discordUserId are required", nil)
-		return
-	}
-
-	if s.discordLinkService == nil {
-		InternalError(w)
-		return
-	}
-
-	s.discordLinkService.RegisterCode(req.Code, req.DiscordUserID)
-
-	slog.Info("Discord link code registered",
-		"code_prefix", maskedLinkCode(req.Code),
-		"discord_user_id", req.DiscordUserID,
-		"broker_id", broker.BrokerID(),
-	)
-
-	writeJSON(w, http.StatusCreated, map[string]string{"status": "registered"})
+	handleChatLinkRegistration(w, r, chatLinkRegistrationOptions{
+		providerName: "Discord",
+		userIDField:  "discordUserId",
+		userIDLogKey: "discord_user_id",
+		register:     register,
+	})
 }
 
 // handleDiscordLinkVerify handles POST /api/v1/discord/link/verify.

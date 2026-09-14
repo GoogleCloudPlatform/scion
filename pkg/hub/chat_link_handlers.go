@@ -14,6 +14,77 @@
 
 package hub
 
+import (
+	"log/slog"
+	"net/http"
+)
+
+type chatLinkRegistrationRequest struct {
+	Code           string `json:"code"`
+	TelegramUserID string `json:"telegramUserId"`
+	DiscordUserID  string `json:"discordUserId"`
+	TeamsUserID    string `json:"teamsUserId"`
+}
+
+func (r chatLinkRegistrationRequest) userID(field string) string {
+	switch field {
+	case "telegramUserId":
+		return r.TelegramUserID
+	case "discordUserId":
+		return r.DiscordUserID
+	case "teamsUserId":
+		return r.TeamsUserID
+	default:
+		return ""
+	}
+}
+
+type chatLinkRegistrationOptions struct {
+	providerName string
+	userIDField  string
+	userIDLogKey string
+	register     func(code, userID string)
+}
+
+func handleChatLinkRegistration(w http.ResponseWriter, r *http.Request, opts chatLinkRegistrationOptions) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	broker := GetBrokerIdentityFromContext(r.Context())
+	if broker == nil {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "broker authentication required", nil)
+		return
+	}
+
+	var req chatLinkRegistrationRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
+		return
+	}
+
+	userID := req.userID(opts.userIDField)
+	if req.Code == "" || userID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "code and "+opts.userIDField+" are required", nil)
+		return
+	}
+
+	if opts.register == nil {
+		InternalError(w)
+		return
+	}
+
+	opts.register(req.Code, userID)
+	slog.Info(opts.providerName+" link code registered",
+		"code_prefix", maskedLinkCode(req.Code),
+		opts.userIDLogKey, userID,
+		"broker_id", broker.BrokerID(),
+	)
+
+	writeJSON(w, http.StatusCreated, map[string]string{"status": "registered"})
+}
+
 func maskedLinkCode(code string) string {
 	if len(code) > 3 {
 		code = code[:3]
