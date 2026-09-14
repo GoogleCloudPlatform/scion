@@ -336,6 +336,52 @@ func TestHandleResourcesImport_GlobalForbiddenForMember(t *testing.T) {
 	}
 }
 
+func TestHandleResources_ProjectUsesKindSpecificAuthorization(t *testing.T) {
+	kinds := []struct {
+		kind         string
+		resourceType string
+		sourceURL    string
+		mockSource   func(*testing.T) func()
+	}{
+		{
+			kind:         "template",
+			resourceType: "template",
+			sourceURL:    "https://github.com/acme/repo/tree/main/templates",
+			mockSource:   mockTemplateTarball,
+		},
+		{
+			kind:         "harness-config",
+			resourceType: "harness_config",
+			sourceURL:    "https://github.com/acme/repo/tree/main/harness-configs",
+			mockSource:   mockHarnessConfigTarball,
+		},
+	}
+
+	for _, operation := range []string{"import", "discover"} {
+		for _, kind := range kinds {
+			t.Run(operation+" "+kind.kind, func(t *testing.T) {
+				slug := operation + "-" + kind.kind
+				srv, s, project, _ := setupWorkspaceProject(t, "unified-"+slug)
+				ctx := context.Background()
+				user := &store.User{
+					ID: tid("user-unified-" + slug), Email: slug + "@test.com",
+					DisplayName: slug, Role: store.UserRoleMember,
+				}
+				require.NoError(t, s.CreateUser(ctx, user))
+				ensureHubMembership(ctx, s, user.ID)
+				grantUserActionOnResource(t, s, user.ID, kind.resourceType, project.ID, ActionCreate)
+
+				cleanup := kind.mockSource(t)
+				defer cleanup()
+				rec := doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/resources/"+operation, map[string]string{
+					"kind": kind.kind, "scope": "project", "scopeId": project.ID, "sourceUrl": kind.sourceURL,
+				})
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			})
+		}
+	}
+}
+
 // TestHandleResourcesImport_InvalidKind verifies an unknown kind is rejected.
 func TestHandleResourcesImport_InvalidKind(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
@@ -724,6 +770,40 @@ func TestHandleProjectImportResources_UsesKindSpecificAuthorization(t *testing.T
 	rec = doImport("import-harness-configs", ImportHarnessConfigsRequest{
 		SourceURL: "https://github.com/acme/repo/tree/main/harness-configs",
 	}, mockHarnessConfigTarball)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+func TestHarnessConfigReimport_ProjectUsesHarnessConfigAuthorization(t *testing.T) {
+	srv, s, project, _ := setupWorkspaceProject(t, "harness-config-reimport-authz")
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("user-harness-config-reimport-authz"),
+		Email:       "harness-config-reimport-authz@test.com",
+		DisplayName: "Harness Config Reimport Authz",
+		Role:        store.UserRoleMember,
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+	grantUserActionOnResource(t, s, user.ID, "harness_config", project.ID, ActionCreate)
+
+	harnessConfig := &store.HarnessConfig{
+		ID:         tid("harness-config-reimport-authz"),
+		Name:       "my-config",
+		Slug:       "my-config",
+		Harness:    "claude",
+		Scope:      store.HarnessConfigScopeProject,
+		ScopeID:    project.ID,
+		Visibility: store.VisibilityPublic,
+		Status:     store.HarnessConfigStatusActive,
+	}
+	require.NoError(t, s.CreateHarnessConfig(ctx, harnessConfig))
+
+	cleanup := mockHarnessConfigTarball(t)
+	defer cleanup()
+	rec := doRequestAsUser(t, srv, user, http.MethodPost,
+		"/api/v1/harness-configs/"+harnessConfig.ID+"/reimport",
+		ReimportHarnessConfigRequest{SourceURL: "https://github.com/acme/repo/tree/main/harness-configs"})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 

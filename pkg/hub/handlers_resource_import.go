@@ -286,7 +286,7 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 				"scopeId (project id) is required for project scope", nil)
 			return
 		}
-		if !s.authorizeProjectImport(ctx, w, req.ScopeID, kind.noun, "agent") {
+		if !s.authorizeProjectImport(ctx, w, req.ScopeID, kind.noun, authzType) {
 			return
 		}
 		// Verify project exists before fetching.
@@ -615,7 +615,7 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 				"scopeId (project id) is required for project scope", nil)
 			return
 		}
-		if !s.authorizeProjectImport(ctx, w, req.ScopeID, kind.noun, "agent") {
+		if !s.authorizeProjectImport(ctx, w, req.ScopeID, kind.noun, authzType) {
 			return
 		}
 		if _, perr := s.store.GetProject(ctx, req.ScopeID); perr != nil {
