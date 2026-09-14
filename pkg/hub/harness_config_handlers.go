@@ -165,8 +165,11 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 		Search:      query.Get("search"),
 	}
 
-	// Default to active harness configs only
-	if filter.Status == "" {
+	// Default to active harness configs only; "all" returns every status.
+	switch filter.Status {
+	case "all":
+		filter.Status = "" // empty means no status filter in the store layer
+	case "":
 		filter.Status = store.HarnessConfigStatusActive
 	}
 
@@ -482,6 +485,11 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
+	// SECURITY-GATE: authorize update access to this specific harness config.
+	if !s.authorize(w, r, harnessConfigResource(existing), ActionUpdate) {
+		return
+	}
+
 	var hc store.HarnessConfig
 	if err := readJSON(r, &hc); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -513,12 +521,18 @@ func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
+	// SECURITY-GATE: authorize update access to this specific harness config.
+	if !s.authorize(w, r, harnessConfigResource(existing), ActionUpdate) {
+		return
+	}
+
 	var updates struct {
 		Name        string `json:"name,omitempty"`
 		Slug        string `json:"slug,omitempty"`
 		DisplayName string `json:"displayName,omitempty"`
 		Description string `json:"description,omitempty"`
 		Visibility  string `json:"visibility,omitempty"`
+		Status      string `json:"status,omitempty"`
 	}
 
 	if err := readJSON(r, &updates); err != nil {
@@ -543,6 +557,23 @@ func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, id s
 	}
 	if updates.Visibility != "" {
 		existing.Visibility = updates.Visibility
+	}
+	if updates.Status != "" {
+		switch updates.Status {
+		case store.HarnessConfigStatusActive, store.HarnessConfigStatusArchived:
+			// Block direct pending→active transition via PATCH: configs in
+			// pending status have files awaiting upload/finalization, and
+			// only the finalize endpoint should mark them active after
+			// verifying file integrity and computing content hashes.
+			if existing.Status == store.HarnessConfigStatusPending && updates.Status == store.HarnessConfigStatusActive {
+				BadRequest(w, "Cannot activate a pending harness config via PATCH; use the finalize endpoint to verify files and activate")
+				return
+			}
+			existing.Status = updates.Status
+		default:
+			BadRequest(w, fmt.Sprintf("Invalid status %q: must be %q or %q", updates.Status, store.HarnessConfigStatusActive, store.HarnessConfigStatusArchived))
+			return
+		}
 	}
 
 	if err := s.store.UpdateHarnessConfig(ctx, existing); err != nil {
