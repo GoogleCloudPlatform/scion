@@ -146,7 +146,8 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 // revokeUserSessions increments the user's session generation, invalidating
 // all existing cookie-based sessions for that user.
 func (s *Server) revokeUserSessions(w http.ResponseWriter, r *http.Request, id string) {
-	if _, ok := s.requireAdmin(w, r); !ok {
+	admin, ok := s.requireAdmin(w, r)
+	if !ok {
 		return
 	}
 
@@ -155,7 +156,10 @@ func (s *Server) revokeUserSessions(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	slog.Info("Admin revoked all sessions for user", "user_id", id)
+	slog.Info("Admin revoked all sessions for user",
+		"user_id", id,
+		"admin_id", admin.ID(),
+		"admin_email", admin.Email())
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 

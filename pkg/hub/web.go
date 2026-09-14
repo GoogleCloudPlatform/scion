@@ -97,6 +97,12 @@ const (
 // webUserContextKey is the key for storing the web session user in the request context.
 type webUserContextKey struct{}
 
+// dbUserContextKey is the key for storing the authoritative store.User in the
+// request context. sessionAuthMiddleware populates this after the session-
+// generation check so that downstream middleware (e.g. suspendedUserMiddleware)
+// can reuse it instead of issuing a duplicate DB lookup.
+type dbUserContextKey struct{}
+
 // webSessionUser represents an authenticated user from the web session.
 type webSessionUser struct {
 	UserID    string `json:"id"`
@@ -1873,8 +1879,13 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 			// Verify session generation against the DB to support per-user
 			// session revocation. A mismatch means an admin has revoked
 			// this user's sessions since login.
+			//
+			// The fetched dbUser is stored in the request context so that
+			// downstream middleware (e.g. suspendedUserMiddleware) can
+			// reuse it instead of issuing a duplicate DB query.
+			var ctx = r.Context()
 			if ws.store != nil {
-				dbUser, err := ws.store.GetUser(r.Context(), uid)
+				dbUser, err := ws.store.GetUser(ctx, uid)
 				if err != nil {
 					// User deleted or DB error — clear session and force re-login
 					session.Options.MaxAge = -1
@@ -1890,6 +1901,7 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 					http.Redirect(w, r, "/auth/login", http.StatusFound)
 					return
 				}
+				ctx = context.WithValue(ctx, dbUserContextKey{}, dbUser)
 			}
 
 			user := &webSessionUser{
@@ -1899,7 +1911,7 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 				AvatarURL: sessionString(session, sessKeyUserAvatar),
 				Role:      sessionString(session, sessKeyUserRole),
 			}
-			ctx := context.WithValue(r.Context(), webUserContextKey{}, user)
+			ctx = context.WithValue(ctx, webUserContextKey{}, user)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
