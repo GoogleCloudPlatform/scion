@@ -29,7 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
-	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	yamlv3 "gopkg.in/yaml.v3"
 )
@@ -218,36 +217,7 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 // setGitHubAppSecret stores a GitHub App secret via the secrets backend,
 // falling back to direct store if the backend is unavailable.
 func (s *Server) setGitHubAppSecret(ctx context.Context, name, value, description, userID string) error {
-	if s.secretBackend != nil {
-		_, _, err := s.secretBackend.Set(ctx, &secret.SetSecretInput{
-			Name:          name,
-			Value:         value,
-			SecretType:    secret.TypeVariable,
-			Scope:         store.ScopeHub,
-			ScopeID:       s.hubID,
-			Description:   description,
-			InjectionMode: "as_needed",
-			CreatedBy:     userID,
-			UpdatedBy:     userID,
-		})
-		return err
-	}
-
-	// Fallback: store directly in the database (same pattern as ensureSigningKey)
-	sec := &store.Secret{
-		ID:             fmt.Sprintf("hub-ghapp-%s", strings.ToLower(strings.ReplaceAll(name, "_", "-"))),
-		Key:            name,
-		EncryptedValue: value,
-		Scope:          store.ScopeHub,
-		ScopeID:        s.hubID,
-		SecretType:     store.SecretTypeVariable,
-		Description:    description,
-		Version:        1,
-		CreatedBy:      userID,
-		UpdatedBy:      userID,
-	}
-	_, err := s.store.UpsertSecret(ctx, sec)
-	return err
+	return s.setHubSecret(ctx, name, value, description, userID)
 }
 
 // loadGitHubAppSecret loads a GitHub App secret from the secrets backend,

@@ -2740,13 +2740,16 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_chat_secrets.go", Function: "HasChatIntegrationSecret", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Chat integration secret check, route-guarded by hub admin", Scope: "pkg/hub/handlers_chat_secrets.go"}},
 	{File: "pkg/hub/handlers_chat_secrets.go", Function: "LoadChatIntegrationSecret", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Chat integration secret load, route-guarded by hub admin", Scope: "pkg/hub/handlers_chat_secrets.go"}},
-	{File: "pkg/hub/handlers_chat_secrets.go", Function: "SetChatIntegrationSecret", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Chat integration secret write, route-guarded by hub admin", Scope: "pkg/hub/handlers_chat_secrets.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_github_app.go — GitHub App admin
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_github_app.go", Function: "loadGitHubAppSecret", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "GitHub App secret read, hub-admin operation", Scope: "pkg/hub/handlers_github_app.go"}},
-	{File: "pkg/hub/handlers_github_app.go", Function: "setGitHubAppSecret", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "GitHub App secret write, hub-admin operation", Scope: "pkg/hub/handlers_github_app.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/hub_secrets.go — shared Hub-scoped secret persistence
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/hub_secrets.go", Function: "setHubSecret", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Shared Hub-scoped secret persistence, called only from route-guarded chat integration and GitHub App admin paths", Scope: "pkg/hub/hub_secrets.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/invite_service.go — invite code creation
