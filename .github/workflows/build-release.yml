@@ -120,8 +120,10 @@ jobs:
 
       - name: Determine release channel
         id: channel
+        env:
+          REF: ${{ github.ref }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${REF#refs/tags/}"
           if [[ "$TAG" == *"-preview."* ]]; then
             echo "prerelease=true" >> $GITHUB_OUTPUT
             echo "channel=preview" >> $GITHUB_OUTPUT
@@ -154,9 +156,12 @@ jobs:
           generate_release_notes: true
 
       - name: Update channel branch
+        continue-on-error: true
+        id: branch-update
+        env:
+          CHANNEL: ${{ steps.channel.outputs.channel }}
+          TAG: ${{ steps.channel.outputs.tag }}
         run: |
-          CHANNEL="${{ steps.channel.outputs.channel }}"
-          TAG="${{ steps.channel.outputs.tag }}"
           # For preview and rc tags, update the "preview" branch
           # For stable tags, update the "stable" branch
           if [[ "$CHANNEL" == "stable" ]]; then
@@ -165,4 +170,17 @@ jobs:
             BRANCH="preview"
           fi
           # Force-update the channel branch to point at this tag's commit
-          git push origin "refs/tags/${TAG}:refs/heads/${BRANCH}" --force
+          git push origin "HEAD:refs/heads/${BRANCH}" --force
+
+      - name: Warn on branch update failure
+        if: steps.branch-update.outcome == 'failure'
+        env:
+          CHANNEL: ${{ steps.channel.outputs.channel }}
+          TAG: ${{ steps.channel.outputs.tag }}
+        run: |
+          if [[ "$CHANNEL" == "stable" ]]; then
+            BRANCH="stable"
+          else
+            BRANCH="preview"
+          fi
+          echo "::warning::Failed to update channel branch '${BRANCH}' to ${TAG}. Manual update may be needed."
