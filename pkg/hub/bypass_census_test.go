@@ -88,6 +88,9 @@ func TestBypassCensus(t *testing.T) {
 		{file: "handlers_auth.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "admin reconciliation comment reference"},
 		{file: "handlers_auth.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "admin reconciliation helper"},
 		{file: "authz_candelegate.go", lineSubstr: "requireAdmin", description: "comment reference in CanDelegate"},
+
+		// ─── Session revocation (admin-only endpoint) ────────────────────
+		{file: "handlers_users_core.go", lineSubstr: "requireAdmin(w, r)", description: "revokeUserSessions: admin-only endpoint for session invalidation"},
 	}
 
 	// Build the allow map: file -> list of allowed substrings with counts

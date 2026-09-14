@@ -1888,10 +1888,14 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 				dbUser, err := ws.store.GetUser(ctx, uid)
 				if err != nil {
 					if errors.Is(err, store.ErrNotFound) {
-						// User deleted — clear session and force re-login
+						// User deleted — clear session and force re-login.
+						// Redirect to /login (the SPA login page) rather than
+						// /auth/login so the user sees the provider-choice page
+						// instead of being pushed into an OAuth flow for an
+						// account that no longer exists.
 						session.Options.MaxAge = -1
 						_ = session.Save(r, w)
-						http.Redirect(w, r, "/auth/login", http.StatusFound)
+						http.Redirect(w, r, "/login", http.StatusFound)
 						return
 					}
 					// Transient DB error — fail closed with 500 but do not destroy session
