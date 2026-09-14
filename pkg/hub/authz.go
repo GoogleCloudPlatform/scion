@@ -1362,43 +1362,16 @@ func projectIDForResource(r Resource) string {
 // IsSystemAdmin checks whether the given user has a system-scoped super-admin
 // role binding. Uses the batched query path.
 func (a *AuthzService) IsSystemAdmin(ctx context.Context, userID string) bool {
-	if userID == "" {
-		return false
-	}
-	now := time.Now()
-	principals := []store.PrincipalRef{{Type: "user", ID: userID}}
-	groups, err := a.store.GetEffectiveGroups(ctx, userID)
-	if err == nil {
-		for _, gid := range groups {
-			principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
-		}
-	}
-	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
-	if err != nil {
-		return false
-	}
-	for _, b := range bindings {
-		if b.ScopeType != store.RoleScopeSystem {
-			continue
-		}
-		// R-2: Check activation — expired super-admin binding should not return true.
-		if !isBindingActive(b, now) {
-			continue
-		}
-		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
-		if err != nil {
-			continue
-		}
-		if rd.Name == store.SystemRoleSuperAdmin {
-			return true
-		}
-	}
-	return false
+	return a.hasActiveSystemRole(ctx, userID, store.SystemRoleSuperAdmin)
 }
 
 // IsHubAdmin checks whether the given user has a system-scoped hub-admin
 // role binding.
 func (a *AuthzService) IsHubAdmin(ctx context.Context, userID string) bool {
+	return a.hasActiveSystemRole(ctx, userID, store.SystemRoleHubAdmin)
+}
+
+func (a *AuthzService) hasActiveSystemRole(ctx context.Context, userID, roleName string) bool {
 	if userID == "" {
 		return false
 	}
@@ -1418,7 +1391,6 @@ func (a *AuthzService) IsHubAdmin(ctx context.Context, userID string) bool {
 		if b.ScopeType != store.RoleScopeSystem {
 			continue
 		}
-		// R-2: Check activation — expired hub-admin binding should not return true.
 		if !isBindingActive(b, now) {
 			continue
 		}
@@ -1426,7 +1398,7 @@ func (a *AuthzService) IsHubAdmin(ctx context.Context, userID string) bool {
 		if err != nil {
 			continue
 		}
-		if rd.Name == store.SystemRoleHubAdmin {
+		if rd.Name == roleName {
 			return true
 		}
 	}
