@@ -19,30 +19,11 @@ import (
 	"net/http"
 )
 
-type chatLinkRegistrationRequest struct {
-	Code           string `json:"code"`
-	TelegramUserID string `json:"telegramUserId"`
-	DiscordUserID  string `json:"discordUserId"`
-	TeamsUserID    string `json:"teamsUserId"`
-}
-
-func (r chatLinkRegistrationRequest) userID(field string) string {
-	switch field {
-	case "telegramUserId":
-		return r.TelegramUserID
-	case "discordUserId":
-		return r.DiscordUserID
-	case "teamsUserId":
-		return r.TeamsUserID
-	default:
-		return ""
-	}
-}
-
 type chatLinkRegistrationOptions struct {
 	providerName string
 	userIDField  string
 	userIDLogKey string
+	decode       func(*http.Request) (code, userID string, err error)
 	register     func(code, userID string)
 }
 
@@ -58,14 +39,13 @@ func handleChatLinkRegistration(w http.ResponseWriter, r *http.Request, opts cha
 		return
 	}
 
-	var req chatLinkRegistrationRequest
-	if err := readJSON(r, &req); err != nil {
+	code, userID, err := opts.decode(r)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
 		return
 	}
 
-	userID := req.userID(opts.userIDField)
-	if req.Code == "" || userID == "" {
+	if code == "" || userID == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "code and "+opts.userIDField+" are required", nil)
 		return
 	}
@@ -75,14 +55,41 @@ func handleChatLinkRegistration(w http.ResponseWriter, r *http.Request, opts cha
 		return
 	}
 
-	opts.register(req.Code, userID)
+	opts.register(code, userID)
 	slog.Info(opts.providerName+" link code registered",
-		"code_prefix", maskedLinkCode(req.Code),
+		"code_prefix", maskedLinkCode(code),
 		opts.userIDLogKey, userID,
 		"broker_id", broker.BrokerID(),
 	)
 
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "registered"})
+}
+
+func decodeTelegramLinkRegistration(r *http.Request) (string, string, error) {
+	var req struct {
+		Code           string `json:"code"`
+		TelegramUserID string `json:"telegramUserId"`
+	}
+	err := readJSON(r, &req)
+	return req.Code, req.TelegramUserID, err
+}
+
+func decodeDiscordLinkRegistration(r *http.Request) (string, string, error) {
+	var req struct {
+		Code          string `json:"code"`
+		DiscordUserID string `json:"discordUserId"`
+	}
+	err := readJSON(r, &req)
+	return req.Code, req.DiscordUserID, err
+}
+
+func decodeTeamsLinkRegistration(r *http.Request) (string, string, error) {
+	var req struct {
+		Code        string `json:"code"`
+		TeamsUserID string `json:"teamsUserId"`
+	}
+	err := readJSON(r, &req)
+	return req.Code, req.TeamsUserID, err
 }
 
 func maskedLinkCode(code string) string {

@@ -124,6 +124,63 @@ func TestChatLinkRegistrationPreservesCommonGuards(t *testing.T) {
 	}
 }
 
+func TestChatLinkRegistrationJSONCompatibility(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantError  string
+		wantUserID string
+	}{
+		{
+			name:       "wrong-type unrelated provider field is ignored",
+			body:       `{"code":"ABC123","telegramUserId":"telegram-user","discordUserId":123}`,
+			wantStatus: http.StatusCreated,
+			wantUserID: "telegram-user",
+		},
+		{
+			name:       "wrong-type selected field is rejected",
+			body:       `{"code":"ABC123","telegramUserId":123}`,
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid request body",
+		},
+		{
+			name:       "null selected field is missing",
+			body:       `{"code":"ABC123","telegramUserId":null}`,
+			wantStatus: http.StatusBadRequest,
+			wantError:  "code and telegramUserId are required",
+		},
+		{
+			name:       "duplicate selected field uses last value",
+			body:       `{"code":"ABC123","telegramUserId":"first","telegramUserId":"second"}`,
+			wantStatus: http.StatusCreated,
+			wantUserID: "second",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := NewTelegramLinkService()
+			defer svc.Close()
+			srv := &Server{telegramLinkService: svc}
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tt.body))
+			req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("broker-1")))
+			recorder := httptest.NewRecorder()
+
+			srv.handleTelegramLink(recorder, req)
+
+			assert.Equal(t, tt.wantStatus, recorder.Code)
+			if tt.wantError != "" {
+				assert.Contains(t, recorder.Body.String(), tt.wantError)
+			}
+			if tt.wantUserID != "" {
+				status, _, _ := svc.GetStatusByTelegramUser(tt.wantUserID)
+				assert.Equal(t, "pending", status)
+			}
+		})
+	}
+}
+
 func TestMaskedLinkCode(t *testing.T) {
 	assert.Equal(t, "A***", maskedLinkCode("A"))
 	assert.Equal(t, "ABC***", maskedLinkCode("ABC"))

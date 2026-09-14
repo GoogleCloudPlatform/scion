@@ -257,6 +257,7 @@ func (s *Server) handleTelegramLink(w http.ResponseWriter, r *http.Request) {
 		providerName: "Telegram",
 		userIDField:  "telegramUserId",
 		userIDLogKey: "telegram_user_id",
+		decode:       decodeTelegramLinkRegistration,
 		register:     register,
 	})
 }
