@@ -243,35 +243,8 @@ func (s *Server) listEnvVars(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Merge environment-type secrets into the env var list
-	if s.secretBackend != nil {
-		metas, err := s.secretBackend.List(ctx, secret.Filter{
-			Scope:   scope,
-			ScopeID: scopeID,
-			Type:    "environment",
-		})
-		if err != nil {
-			s.envSecretLog.Warn("failed to list environment secrets for env var merge", "error", err)
-		} else {
-			// Build set of secret keys for deduplication
-			secretKeys := make(map[string]struct{}, len(metas))
-			for _, m := range metas {
-				secretKeys[m.Name] = struct{}{}
-				envVars = append(envVars, secretMetaToEnvVar(m))
-			}
-			// Remove stale plain env var records that are shadowed by secrets
-			if len(secretKeys) > 0 {
-				deduped := make([]store.EnvVar, 0, len(envVars))
-				for _, ev := range envVars {
-					if _, isShadowed := secretKeys[ev.Key]; isShadowed && !ev.Secret {
-						continue
-					}
-					deduped = append(deduped, ev)
-				}
-				envVars = deduped
-			}
-		}
-	}
+	envVars = s.mergeEnvironmentSecrets(ctx, envVars, scope, scopeID,
+		"failed to list environment secrets for env var merge")
 
 	// Mask sensitive values
 	for i := range envVars {
@@ -602,6 +575,46 @@ func secretMetaToEnvVar(m secret.SecretMeta) store.EnvVar {
 		Updated:       m.Updated,
 		CreatedBy:     m.CreatedBy,
 	}
+}
+
+func (s *Server) mergeEnvironmentSecrets(ctx context.Context, envVars []store.EnvVar, scope, scopeID, warning string) []store.EnvVar {
+	if s.secretBackend == nil {
+		return envVars
+	}
+
+	metas, err := s.secretBackend.List(ctx, secret.Filter{
+		Scope:   scope,
+		ScopeID: scopeID,
+		Type:    "environment",
+	})
+	if err != nil {
+		s.envSecretLog.Warn(warning, "error", err)
+		return envVars
+	}
+	return mergeEnvironmentSecretMetadata(envVars, metas)
+}
+
+func mergeEnvironmentSecretMetadata(envVars []store.EnvVar, metas []secret.SecretMeta) []store.EnvVar {
+	if len(metas) == 0 {
+		return envVars
+	}
+
+	secretKeys := make(map[string]struct{}, len(metas))
+	for _, meta := range metas {
+		secretKeys[meta.Name] = struct{}{}
+	}
+
+	merged := make([]store.EnvVar, 0, len(envVars)+len(metas))
+	for _, envVar := range envVars {
+		if _, shadowed := secretKeys[envVar.Key]; shadowed && !envVar.Secret {
+			continue
+		}
+		merged = append(merged, envVar)
+	}
+	for _, meta := range metas {
+		merged = append(merged, secretMetaToEnvVar(meta))
+	}
+	return merged
 }
 
 // =============================================================================
@@ -1568,33 +1581,8 @@ func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, pr
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		// Merge environment-type secrets
-		if s.secretBackend != nil {
-			metas, err := s.secretBackend.List(ctx, secret.Filter{
-				Scope:   store.ScopeProject,
-				ScopeID: projectID,
-				Type:    "environment",
-			})
-			if err != nil {
-				s.envSecretLog.Warn("failed to list environment secrets for project env var merge", "error", err)
-			} else {
-				secretKeys := make(map[string]struct{}, len(metas))
-				for _, m := range metas {
-					secretKeys[m.Name] = struct{}{}
-					envVars = append(envVars, secretMetaToEnvVar(m))
-				}
-				if len(secretKeys) > 0 {
-					deduped := make([]store.EnvVar, 0, len(envVars))
-					for _, ev := range envVars {
-						if _, isShadowed := secretKeys[ev.Key]; isShadowed && !ev.Secret {
-							continue
-						}
-						deduped = append(deduped, ev)
-					}
-					envVars = deduped
-				}
-			}
-		}
+		envVars = s.mergeEnvironmentSecrets(ctx, envVars, store.ScopeProject, projectID,
+			"failed to list environment secrets for project env var merge")
 		// Mask sensitive values
 		for i := range envVars {
 			if envVars[i].Sensitive {
@@ -2265,33 +2253,8 @@ func (s *Server) handleBrokerEnvVars(w http.ResponseWriter, r *http.Request, bro
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		// Merge environment-type secrets
-		if s.secretBackend != nil {
-			metas, err := s.secretBackend.List(ctx, secret.Filter{
-				Scope:   store.ScopeRuntimeBroker,
-				ScopeID: brokerID,
-				Type:    "environment",
-			})
-			if err != nil {
-				s.envSecretLog.Warn("failed to list environment secrets for broker env var merge", "error", err)
-			} else {
-				secretKeys := make(map[string]struct{}, len(metas))
-				for _, m := range metas {
-					secretKeys[m.Name] = struct{}{}
-					envVars = append(envVars, secretMetaToEnvVar(m))
-				}
-				if len(secretKeys) > 0 {
-					deduped := make([]store.EnvVar, 0, len(envVars))
-					for _, ev := range envVars {
-						if _, isShadowed := secretKeys[ev.Key]; isShadowed && !ev.Secret {
-							continue
-						}
-						deduped = append(deduped, ev)
-					}
-					envVars = deduped
-				}
-			}
-		}
+		envVars = s.mergeEnvironmentSecrets(ctx, envVars, store.ScopeRuntimeBroker, brokerID,
+			"failed to list environment secrets for broker env var merge")
 		for i := range envVars {
 			if envVars[i].Sensitive {
 				envVars[i].Value = "********"
