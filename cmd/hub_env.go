@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -324,33 +323,11 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("key cannot contain spaces, tabs, newlines, or '='")
 	}
 
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveEnvScope)
 	if err != nil {
 		return err
 	}
-
-	scope, scopeID, err := resolveEnvScope(cmd, settings)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
-	if err != nil {
-		return err
-	}
 
 	// Validate --always and --as-needed are mutually exclusive
 	if envAlways && envAsNeeded {
@@ -441,33 +418,11 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 }
 
 func runEnvGet(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveEnvScope)
 	if err != nil {
 		return err
 	}
-
-	scope, scopeID, err := resolveEnvScope(cmd, settings)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
-	if err != nil {
-		return err
-	}
 
 	// If key is provided, get specific variable
 	if len(args) == 1 {
@@ -501,33 +456,11 @@ func runEnvGet(cmd *cobra.Command, args []string) error {
 }
 
 func runEnvList(cmd *cobra.Command, _ []string) error {
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveEnvScope)
 	if err != nil {
 		return err
 	}
-
-	scope, scopeID, err := resolveEnvScope(cmd, settings)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
-	if err != nil {
-		return err
-	}
 
 	opts := &hubclient.ListEnvOptions{
 		Scope:   scope,
@@ -583,33 +516,11 @@ func formatEnvAnnotations(v *hubclient.EnvVar) string {
 func runEnvClear(cmd *cobra.Command, args []string) error {
 	key := args[0]
 
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveEnvScope)
 	if err != nil {
 		return err
 	}
-
-	scope, scopeID, err := resolveEnvScope(cmd, settings)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
-	if err != nil {
-		return err
-	}
 
 	opts := &hubclient.EnvScopeOptions{
 		Scope:   scope,
