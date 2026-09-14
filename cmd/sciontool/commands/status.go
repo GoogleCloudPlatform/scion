@@ -49,33 +49,18 @@ Examples:
 		statusType := args[0]
 		message := strings.Join(args[1:], " ")
 
-		switch statusType {
-		case "ask_user":
-			if message == "" {
-				message = "Input requested"
-			}
-			runStatusAskUser(message)
-		case "blocked":
-			if message == "" {
-				message = "Agent is blocked"
-			}
-			runStatusBlocked(message)
-		case "task_completed":
-			if message == "" {
-				message = "Task completed"
-			}
-			runStatusTaskCompleted(message)
-		case "limits_exceeded":
-			if message == "" {
-				message = "Agent limits exceeded"
-			}
-			runStatusLimitsExceeded(message)
-		default:
+		definition, ok := statusDefinitions[statusType]
+		if !ok {
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: unknown status type %q\n", statusType)
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Valid types: ask_user, blocked, task_completed, limits_exceeded\n")
 			cmd.Root().SetArgs([]string{"status", "--help"})
 			_ = cmd.Root().Execute()
+			return
 		}
+		if message == "" {
+			message = definition.defaultMessage
+		}
+		runStatusUpdate(definition, message)
 	},
 }
 
@@ -83,135 +68,76 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 }
 
-// runStatusAskUser updates status to waiting for input.
-func runStatusAskUser(message string) {
-	statusHandler := handlers.NewStatusHandler()
-	loggingHandler := handlers.NewLoggingHandler()
-
-	// Update activity to waiting_for_input (sticky)
-	if err := statusHandler.UpdateActivity(state.ActivityWaitingForInput, ""); err != nil {
-		log.Error("Failed to update status: %v", err)
-	}
-
-	// Log the event
-	logMessage := fmt.Sprintf("Agent requested input: %s", message)
-	if err := loggingHandler.LogEvent(string(state.ActivityWaitingForInput), logMessage); err != nil {
-		log.Error("Failed to log event: %v", err)
-	}
-
-	// Report to Hub if configured. The status update triggers the notification
-	// system, which handles both the notification tray and inbox message creation.
-	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		as := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWaitingForInput}
-		if err := hubClient.UpdateStatus(ctx, hub.StatusUpdate{
-			Activity: state.ActivityWaitingForInput,
-			Status:   as.DisplayStatus(),
-			Message:  message,
-		}); err != nil {
-			log.Error("Failed to report to Hub: %v", err)
-		}
-	}
-
-	log.Info("Agent asked: %s", message)
+type statusDefinition struct {
+	activity       state.Activity
+	defaultMessage string
+	eventPrefix    string
+	outputPrefix   string
+	useTaskSummary bool
 }
 
-// runStatusBlocked updates status to blocked (agent is intentionally waiting).
-func runStatusBlocked(message string) {
-	statusHandler := handlers.NewStatusHandler()
-	loggingHandler := handlers.NewLoggingHandler()
-
-	// Update activity to blocked (sticky)
-	if err := statusHandler.UpdateActivity(state.ActivityBlocked, ""); err != nil {
-		log.Error("Failed to update status: %v", err)
-	}
-
-	// Log the event
-	logMessage := fmt.Sprintf("Agent blocked: %s", message)
-	if err := loggingHandler.LogEvent(string(state.ActivityBlocked), logMessage); err != nil {
-		log.Error("Failed to log event: %v", err)
-	}
-
-	// Report to Hub if configured
-	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		as := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityBlocked}
-		if err := hubClient.UpdateStatus(ctx, hub.StatusUpdate{
-			Activity: state.ActivityBlocked,
-			Status:   as.DisplayStatus(),
-			Message:  message,
-		}); err != nil {
-			log.Error("Failed to report to Hub: %v", err)
-		}
-	}
-
-	log.Info("Agent blocked: %s", message)
+var statusDefinitions = map[string]statusDefinition{
+	"ask_user": {
+		activity:       state.ActivityWaitingForInput,
+		defaultMessage: "Input requested",
+		eventPrefix:    "Agent requested input",
+		outputPrefix:   "Agent asked",
+	},
+	"blocked": {
+		activity:       state.ActivityBlocked,
+		defaultMessage: "Agent is blocked",
+		eventPrefix:    "Agent blocked",
+		outputPrefix:   "Agent blocked",
+	},
+	"task_completed": {
+		activity:       state.ActivityCompleted,
+		defaultMessage: "Task completed",
+		eventPrefix:    "Agent completed task",
+		outputPrefix:   "Agent completed",
+		useTaskSummary: true,
+	},
+	"limits_exceeded": {
+		activity:       state.ActivityLimitsExceeded,
+		defaultMessage: "Agent limits exceeded",
+		eventPrefix:    "Agent limits exceeded",
+		outputPrefix:   "Agent limits exceeded",
+	},
 }
 
-// runStatusLimitsExceeded updates status to limits exceeded.
-func runStatusLimitsExceeded(message string) {
+func runStatusUpdate(definition statusDefinition, message string) {
 	statusHandler := handlers.NewStatusHandler()
 	loggingHandler := handlers.NewLoggingHandler()
 
-	// Update activity to limits_exceeded (sticky)
-	if err := statusHandler.UpdateActivity(state.ActivityLimitsExceeded, ""); err != nil {
+	if err := statusHandler.UpdateActivity(definition.activity, ""); err != nil {
 		log.Error("Failed to update status: %v", err)
 	}
 
-	// Log the event
-	logMessage := fmt.Sprintf("Agent limits exceeded: %s", message)
-	if err := loggingHandler.LogEvent(string(state.ActivityLimitsExceeded), logMessage); err != nil {
+	logMessage := fmt.Sprintf("%s: %s", definition.eventPrefix, message)
+	if err := loggingHandler.LogEvent(string(definition.activity), logMessage); err != nil {
 		log.Error("Failed to log event: %v", err)
 	}
 
-	// Report to Hub if configured
 	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		as := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityLimitsExceeded}
-		if err := hubClient.UpdateStatus(ctx, hub.StatusUpdate{
-			Activity: state.ActivityLimitsExceeded,
-			Status:   as.DisplayStatus(),
-			Message:  message,
-		}); err != nil {
+		if err := hubClient.UpdateStatus(ctx, definition.hubUpdate(message)); err != nil {
 			log.Error("Failed to report to Hub: %v", err)
 		}
 	}
 
-	log.Info("Agent limits exceeded: %s", message)
+	log.Info("%s: %s", definition.outputPrefix, message)
 }
 
-// runStatusTaskCompleted updates status to completed.
-func runStatusTaskCompleted(message string) {
-	statusHandler := handlers.NewStatusHandler()
-	loggingHandler := handlers.NewLoggingHandler()
-
-	// Update activity to completed (sticky)
-	if err := statusHandler.UpdateActivity(state.ActivityCompleted, ""); err != nil {
-		log.Error("Failed to update status: %v", err)
+func (definition statusDefinition) hubUpdate(message string) hub.StatusUpdate {
+	agentState := state.AgentState{Phase: state.PhaseRunning, Activity: definition.activity}
+	update := hub.StatusUpdate{
+		Activity: definition.activity,
+		Status:   agentState.DisplayStatus(),
 	}
-
-	// Log the event
-	logMessage := fmt.Sprintf("Agent completed task: %s", message)
-	if err := loggingHandler.LogEvent(string(state.ActivityCompleted), logMessage); err != nil {
-		log.Error("Failed to log event: %v", err)
+	if definition.useTaskSummary {
+		update.TaskSummary = message
+	} else {
+		update.Message = message
 	}
-
-	// Report to Hub if in hosted mode
-	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		as := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityCompleted}
-		if err := hubClient.UpdateStatus(ctx, hub.StatusUpdate{
-			Activity:    state.ActivityCompleted,
-			Status:      as.DisplayStatus(),
-			TaskSummary: message,
-		}); err != nil {
-			log.Error("Failed to report to Hub: %v", err)
-		}
-	}
-
-	log.Info("Agent completed: %s", message)
+	return update
 }
