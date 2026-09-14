@@ -398,55 +398,53 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 }
 
 func runSecretGet(cmd *cobra.Command, args []string) error {
+	if len(args) != 1 {
+		return runSecretList(cmd, nil)
+	}
+
 	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
 	defer cancel()
 
-	// If key is provided, get specific secret metadata
-	if len(args) == 1 {
-		key := args[0]
-		opts := &hubclient.SecretScopeOptions{
-			Scope:   scope,
-			ScopeID: scopeID,
-		}
-
-		secret, err := client.Secrets().Get(ctx, key, opts)
-		if err != nil {
-			return fmt.Errorf("failed to get secret: %w", err)
-		}
-
-		if secretOutputJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			return enc.Encode(secret)
-		}
-
-		fmt.Printf("Secret: %s\n", secret.Key)
-		fmt.Printf("  Scope:   %s\n", secret.Scope)
-		typeLabel := secret.SecretType
-		if typeLabel == "" {
-			typeLabel = "environment"
-		}
-		fmt.Printf("  Type:    %s\n", typeLabel)
-		if secret.Target != "" && secret.Target != secret.Key {
-			fmt.Printf("  Target:  %s\n", secret.Target)
-		}
-		if secret.SecretRef != "" {
-			fmt.Printf("  Ref:     %s\n", secret.SecretRef)
-		}
-		fmt.Printf("  Version: %d\n", secret.Version)
-		fmt.Printf("  Created: %s\n", secret.Created.Format(time.RFC3339))
-		fmt.Printf("  Updated: %s\n", secret.Updated.Format(time.RFC3339))
-		if secret.Description != "" {
-			fmt.Printf("  Description: %s\n", secret.Description)
-		}
-		return nil
+	key := args[0]
+	opts := &hubclient.SecretScopeOptions{
+		Scope:   scope,
+		ScopeID: scopeID,
 	}
 
-	// No key provided, delegate to list
-	return runSecretList(cmd, nil)
+	secret, err := client.Secrets().Get(ctx, key, opts)
+	if err != nil {
+		return fmt.Errorf("failed to get secret: %w", err)
+	}
+
+	if secretOutputJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(secret)
+	}
+
+	fmt.Printf("Secret: %s\n", secret.Key)
+	fmt.Printf("  Scope:   %s\n", secret.Scope)
+	typeLabel := secret.SecretType
+	if typeLabel == "" {
+		typeLabel = "environment"
+	}
+	fmt.Printf("  Type:    %s\n", typeLabel)
+	if secret.Target != "" && secret.Target != secret.Key {
+		fmt.Printf("  Target:  %s\n", secret.Target)
+	}
+	if secret.SecretRef != "" {
+		fmt.Printf("  Ref:     %s\n", secret.SecretRef)
+	}
+	fmt.Printf("  Version: %d\n", secret.Version)
+	fmt.Printf("  Created: %s\n", secret.Created.Format(time.RFC3339))
+	fmt.Printf("  Updated: %s\n", secret.Updated.Format(time.RFC3339))
+	if secret.Description != "" {
+		fmt.Printf("  Description: %s\n", secret.Description)
+	}
+	return nil
 }
 
 func runSecretList(cmd *cobra.Command, _ []string) error {
