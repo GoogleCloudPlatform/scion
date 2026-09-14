@@ -90,6 +90,7 @@ const USED_ICONS = [
   'dash-circle',
   'diagram-3',
   'diagram-3-fill',
+  'door-open',
   'download',
   'emoji-frown',
   'envelope',

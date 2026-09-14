@@ -81,17 +81,17 @@ const webSessionName = "scion_sess"
 
 // Session key constants for storing values in the gorilla session map.
 const (
-	sessKeyUserID          = "uid"
-	sessKeyUserEmail       = "email"
-	sessKeyUserName        = "name"
-	sessKeyUserAvatar      = "avatar"
-	sessKeyUserRole        = "role"
-	sessKeyReturnTo        = "returnTo"
-	sessKeyOAuthState      = "oauthState"
-	sessKeyHubAccessToken  = "hubAccessToken"
-	sessKeyHubRefreshToken    = "hubRefreshToken"
-	sessKeyHubTokenExpiry     = "hubTokenExpiry"
-	sessKeySessionGeneration  = "sessGen"
+	sessKeyUserID            = "uid"
+	sessKeyUserEmail         = "email"
+	sessKeyUserName          = "name"
+	sessKeyUserAvatar        = "avatar"
+	sessKeyUserRole          = "role"
+	sessKeyReturnTo          = "returnTo"
+	sessKeyOAuthState        = "oauthState"
+	sessKeyHubAccessToken    = "hubAccessToken"
+	sessKeyHubRefreshToken   = "hubRefreshToken"
+	sessKeyHubTokenExpiry    = "hubTokenExpiry"
+	sessKeySessionGeneration = "sessGen"
 )
 
 // webUserContextKey is the key for storing the web session user in the request context.
@@ -1887,10 +1887,16 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 			if ws.store != nil {
 				dbUser, err := ws.store.GetUser(ctx, uid)
 				if err != nil {
-					// User deleted or DB error — clear session and force re-login
-					session.Options.MaxAge = -1
-					_ = session.Save(r, w)
-					http.Redirect(w, r, "/auth/login", http.StatusFound)
+					if errors.Is(err, store.ErrNotFound) {
+						// User deleted — clear session and force re-login
+						session.Options.MaxAge = -1
+						_ = session.Save(r, w)
+						http.Redirect(w, r, "/auth/login", http.StatusFound)
+						return
+					}
+					// Transient DB error — fail closed with 500 but do not destroy session
+					ws.logger().Error("Session auth: store lookup failed", "user_id", uid, "error", err)
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 					return
 				}
 				cookieGen, _ := session.Values[sessKeySessionGeneration].(int64)
