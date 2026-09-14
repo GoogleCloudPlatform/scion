@@ -560,6 +560,34 @@ func syncGCSVolumes(ctx context.Context, encoded string, direction SyncDirection
 	return nil
 }
 
+func appendContainerResourceArgs(args []string, resources *api.ResourceSpec) ([]string, error) {
+	if resources == nil {
+		return args, nil
+	}
+	if resources.Limits.Memory != "" {
+		bytes, err := util.ParseMemory(resources.Limits.Memory)
+		if err != nil {
+			return nil, fmt.Errorf("invalid memory limit %q: %w", resources.Limits.Memory, err)
+		}
+		args = append(args, "--memory", util.FormatMemoryForDocker(bytes))
+	}
+	if resources.Requests.Memory != "" {
+		bytes, err := util.ParseMemory(resources.Requests.Memory)
+		if err != nil {
+			return nil, fmt.Errorf("invalid memory request %q: %w", resources.Requests.Memory, err)
+		}
+		args = append(args, "--memory-reservation", util.FormatMemoryForDocker(bytes))
+	}
+	if resources.Limits.CPU != "" {
+		cores, err := util.ParseCPU(resources.Limits.CPU)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cpu limit %q: %w", resources.Limits.CPU, err)
+		}
+		args = append(args, "--cpus", util.FormatCPU(cores))
+	}
+	return args, nil
+}
+
 // runtimeLog is the structured logger for runtime command execution.
 var runtimeLog = slog.Default().With(slog.String("subsystem", "runtime"))
 

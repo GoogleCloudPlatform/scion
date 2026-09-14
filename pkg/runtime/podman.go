@@ -195,28 +195,9 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	// these flags with a warning when limits are unsupported. Not implemented
 	// here — affected deployments must set
 	// `runtime.enforce_resource_defaults: false` until it lands.
-	if config.Resources != nil {
-		if config.Resources.Limits.Memory != "" {
-			bytes, err := util.ParseMemory(config.Resources.Limits.Memory)
-			if err != nil {
-				return "", fmt.Errorf("invalid memory limit %q: %w", config.Resources.Limits.Memory, err)
-			}
-			newArgs = append(newArgs, "--memory", util.FormatMemoryForDocker(bytes))
-		}
-		if config.Resources.Requests.Memory != "" {
-			bytes, err := util.ParseMemory(config.Resources.Requests.Memory)
-			if err != nil {
-				return "", fmt.Errorf("invalid memory request %q: %w", config.Resources.Requests.Memory, err)
-			}
-			newArgs = append(newArgs, "--memory-reservation", util.FormatMemoryForDocker(bytes))
-		}
-		if config.Resources.Limits.CPU != "" {
-			cores, err := util.ParseCPU(config.Resources.Limits.CPU)
-			if err != nil {
-				return "", fmt.Errorf("invalid cpu limit %q: %w", config.Resources.Limits.CPU, err)
-			}
-			newArgs = append(newArgs, "--cpus", util.FormatCPU(cores))
-		}
+	newArgs, err = appendContainerResourceArgs(newArgs, config.Resources)
+	if err != nil {
+		return "", err
 	}
 
 	newArgs = append(newArgs, args[1:]...)
