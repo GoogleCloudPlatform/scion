@@ -48,11 +48,7 @@ type DiscordLinkService struct {
 	mu      sync.Mutex
 	pending map[string]*discordPendingLink // in-memory fallback
 
-	// NOTE: verifyLimiters is per-instance. At min-instances=N the effective
-	// rate limit is N× the configured per-IP limit. This is acceptable as
-	// defense-in-depth; the primary protection is code entropy + expiration.
-	verifyMu       sync.Mutex
-	verifyLimiters map[string]*tokenBucket
+	verifyLimiter linkVerifyLimiter
 
 	// db is the optional DB-backed link code store.
 	db *ChatLinkStore
@@ -65,9 +61,9 @@ type DiscordLinkService struct {
 // a background goroutine that periodically removes expired entries.
 func NewDiscordLinkService() *DiscordLinkService {
 	s := &DiscordLinkService{
-		pending:        make(map[string]*discordPendingLink),
-		verifyLimiters: make(map[string]*tokenBucket),
-		done:           make(chan struct{}),
+		pending:       make(map[string]*discordPendingLink),
+		verifyLimiter: newLinkVerifyLimiter(),
+		done:          make(chan struct{}),
 	}
 	go s.cleanupLoop()
 	return s
@@ -214,32 +210,7 @@ func (s *DiscordLinkService) ConsumePending(discordUserID string) {
 
 // AllowVerify checks whether the given IP is within the verify rate limit.
 func (s *DiscordLinkService) AllowVerify(ip string) bool {
-	s.verifyMu.Lock()
-	defer s.verifyMu.Unlock()
-
-	now := time.Now()
-	b, ok := s.verifyLimiters[ip]
-	if !ok {
-		b = &tokenBucket{
-			tokens:    float64(verifyBurst) - 1,
-			lastCheck: now,
-		}
-		s.verifyLimiters[ip] = b
-		return true
-	}
-
-	elapsed := now.Sub(b.lastCheck).Seconds()
-	b.tokens += elapsed * verifyRatePerSecond
-	if b.tokens > float64(verifyBurst) {
-		b.tokens = float64(verifyBurst)
-	}
-	b.lastCheck = now
-
-	if b.tokens >= 1 {
-		b.tokens--
-		return true
-	}
-	return false
+	return s.verifyLimiter.Allow(ip)
 }
 
 // Close stops the background cleanup goroutine.
@@ -266,15 +237,7 @@ func (s *DiscordLinkService) cleanupLoop() {
 			}
 			s.mu.Unlock()
 
-			// Clean up stale verify rate limiter entries.
-			s.verifyMu.Lock()
-			cutoff := now.Add(-30 * time.Minute)
-			for ip, b := range s.verifyLimiters {
-				if b.lastCheck.Before(cutoff) {
-					delete(s.verifyLimiters, ip)
-				}
-			}
-			s.verifyMu.Unlock()
+			s.verifyLimiter.Cleanup(now)
 		}
 	}
 }

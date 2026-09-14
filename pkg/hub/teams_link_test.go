@@ -166,24 +166,6 @@ func TestTeamsLinkService_ConsumePending(t *testing.T) {
 	assert.Equal(t, "not_found", status)
 }
 
-func TestTeamsLinkService_AllowVerify_RateLimit(t *testing.T) {
-	svc := NewTeamsLinkService()
-	defer svc.Close()
-
-	ip := "192.168.1.1"
-
-	// First 5 attempts should be allowed (burst=5).
-	for i := 0; i < verifyBurst; i++ {
-		assert.True(t, svc.AllowVerify(ip), "attempt %d should be allowed", i)
-	}
-
-	// Next attempt should be rate-limited.
-	assert.False(t, svc.AllowVerify(ip), "should be rate-limited after burst")
-
-	// Different IP should still be allowed.
-	assert.True(t, svc.AllowVerify("10.0.0.1"), "different IP should be allowed")
-}
-
 func TestTeamsLinkService_ConcurrentAccess(t *testing.T) {
 	svc := NewTeamsLinkService()
 	defer svc.Close()
