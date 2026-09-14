@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -79,17 +78,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		Name:      query.Get("name"),
 	}
 
-	limit := 50
-	if l := query.Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-
-	result, err := s.store.ListRuntimeBrokers(ctx, filter, store.ListOptions{
-		Limit:  limit,
-		Cursor: query.Get("cursor"),
-	})
+	result, err := s.store.ListRuntimeBrokers(ctx, filter, listOptionsFromQuery(query))
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
