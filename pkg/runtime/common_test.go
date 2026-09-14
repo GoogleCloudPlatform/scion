@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -173,6 +174,61 @@ func TestSyncGCSVolumesValidation(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), test.wantError) {
 				t.Fatalf("syncGCSVolumes() error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestAppendContainerResourceArgs(t *testing.T) {
+	tests := []struct {
+		name      string
+		resources *api.ResourceSpec
+		want      []string
+		wantError string
+	}{
+		{
+			name: "nil resources",
+			want: []string{"run", "-t"},
+		},
+		{
+			name: "all supported resources",
+			resources: &api.ResourceSpec{
+				Limits:   api.ResourceList{Memory: "1Gi", CPU: "1500m"},
+				Requests: api.ResourceList{Memory: "512Mi", CPU: "250m"},
+			},
+			want: []string{"run", "-t", "--memory", "1g", "--memory-reservation", "512m", "--cpus", "1.5"},
+		},
+		{
+			name:      "invalid memory limit",
+			resources: &api.ResourceSpec{Limits: api.ResourceList{Memory: "bad"}},
+			wantError: `invalid memory limit "bad"`,
+		},
+		{
+			name:      "invalid memory request",
+			resources: &api.ResourceSpec{Requests: api.ResourceList{Memory: "bad"}},
+			wantError: `invalid memory request "bad"`,
+		},
+		{
+			name:      "invalid cpu limit",
+			resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "bad"}},
+			wantError: `invalid cpu limit "bad"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := appendContainerResourceArgs([]string{"run", "-t"}, test.resources)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("appendContainerResourceArgs() error = %v, want %q", err, test.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("appendContainerResourceArgs() error = %v", err)
+			}
+			if !slices.Equal(got, test.want) {
+				t.Fatalf("appendContainerResourceArgs() = %v, want %v", got, test.want)
 			}
 		})
 	}
