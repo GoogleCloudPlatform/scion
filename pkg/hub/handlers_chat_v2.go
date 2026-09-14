@@ -2341,54 +2341,23 @@ func (s *Server) authorizeConversationAccess(
 // Body: {"muted": bool}. A muted conversation raises no notifications
 // (ChatNotifier already honours the flag) and shows no unread badge.
 func (s *Server) handleConversationMute(w http.ResponseWriter, r *http.Request, key string) {
-	if r.Method != http.MethodPut {
-		MethodNotAllowed(w)
-		return
-	}
-
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil {
-		Forbidden(w)
-		return
-	}
-
-	s.mu.RLock()
-	wcs := s.webChatStore
-	s.mu.RUnlock()
-
-	if wcs == nil {
-		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
-		return
-	}
-
-	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID()) {
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
-	var body struct {
-		Muted *bool `json:"muted"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		BadRequest(w, "invalid request body")
-		return
-	}
-	if body.Muted == nil {
-		ValidationError(w, "muted is required", nil)
-		return
-	}
-
-	if err := wcs.SetMuted(r.Context(), user.ID(), key, *body.Muted); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update mute state", nil)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]bool{"muted": *body.Muted})
+	s.handleConversationFlag(w, r, key, "muted", "mute", WebChatStore.SetMuted)
 }
 
 // handleConversationPin handles PUT /api/v1/chat/conversations/{key}/pin.
 // Body: {"pinned": bool}. Pinned threads sort above the rest of their space.
 func (s *Server) handleConversationPin(w http.ResponseWriter, r *http.Request, key string) {
+	s.handleConversationFlag(w, r, key, "pinned", "pin", WebChatStore.SetPinned)
+}
+
+type conversationFlagSetter func(WebChatStore, context.Context, string, string, bool) error
+
+func (s *Server) handleConversationFlag(
+	w http.ResponseWriter,
+	r *http.Request,
+	key, field, action string,
+	set conversationFlagSetter,
+) {
 	if r.Method != http.MethodPut {
 		MethodNotAllowed(w)
 		return
@@ -2414,24 +2383,28 @@ func (s *Server) handleConversationPin(w http.ResponseWriter, r *http.Request, k
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
-	var body struct {
-		Pinned *bool `json:"pinned"`
-	}
+	var body map[string]json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		BadRequest(w, "invalid request body")
 		return
 	}
-	if body.Pinned == nil {
-		ValidationError(w, "pinned is required", nil)
+	raw, ok := body[field]
+	if !ok || strings.TrimSpace(string(raw)) == "null" {
+		ValidationError(w, field+" is required", nil)
+		return
+	}
+	var value bool
+	if err := json.Unmarshal(raw, &value); err != nil {
+		BadRequest(w, "invalid request body")
 		return
 	}
 
-	if err := wcs.SetPinned(r.Context(), user.ID(), key, *body.Pinned); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update pin state", nil)
+	if err := set(wcs, r.Context(), user.ID(), key, value); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update "+action+" state", nil)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]bool{"pinned": *body.Pinned})
+	writeJSON(w, http.StatusOK, map[string]bool{field: value})
 }
 
 // promoteResponse is the JSON response body for a successful DM promotion.
