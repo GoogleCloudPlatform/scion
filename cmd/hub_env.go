@@ -418,41 +418,39 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 }
 
 func runEnvGet(cmd *cobra.Command, args []string) error {
+	if len(args) != 1 {
+		return runEnvList(cmd, nil)
+	}
+
 	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveEnvScope)
 	if err != nil {
 		return err
 	}
 	defer cancel()
 
-	// If key is provided, get specific variable
-	if len(args) == 1 {
-		key := args[0]
-		opts := &hubclient.EnvScopeOptions{
-			Scope:   scope,
-			ScopeID: scopeID,
-		}
-
-		envVar, err := client.Env().Get(ctx, key, opts)
-		if err != nil {
-			return fmt.Errorf("failed to get environment variable: %w", err)
-		}
-
-		if envOutputJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			return enc.Encode(envVar)
-		}
-
-		if envVar.Sensitive {
-			fmt.Printf("%s=****** (sensitive, scope: %s)%s\n", envVar.Key, envVar.Scope, formatEnvAnnotations(envVar))
-		} else {
-			fmt.Printf("%s=%s%s\n", envVar.Key, envVar.Value, formatEnvAnnotations(envVar))
-		}
-		return nil
+	key := args[0]
+	opts := &hubclient.EnvScopeOptions{
+		Scope:   scope,
+		ScopeID: scopeID,
 	}
 
-	// No key provided, delegate to list
-	return runEnvList(cmd, nil)
+	envVar, err := client.Env().Get(ctx, key, opts)
+	if err != nil {
+		return fmt.Errorf("failed to get environment variable: %w", err)
+	}
+
+	if envOutputJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(envVar)
+	}
+
+	if envVar.Sensitive {
+		fmt.Printf("%s=****** (sensitive, scope: %s)%s\n", envVar.Key, envVar.Scope, formatEnvAnnotations(envVar))
+	} else {
+		fmt.Printf("%s=%s%s\n", envVar.Key, envVar.Value, formatEnvAnnotations(envVar))
+	}
+	return nil
 }
 
 func runEnvList(cmd *cobra.Command, _ []string) error {
