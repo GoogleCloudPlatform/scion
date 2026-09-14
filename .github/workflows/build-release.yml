@@ -17,7 +17,9 @@ name: Build Multi-Arch Release
 on:
   push:
     tags:
-      - '*'
+      - 'v[0-9]+.[0-9]+.[0-9]+'          # Stable: v0.3.0, v1.2.3
+      - 'v[0-9]+.[0-9]+.[0-9]+-preview.*' # Preview: v0.3.0-preview.1
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc.*'      # RC: v0.3.0-rc.1
 
 permissions:
   contents: write
@@ -113,6 +115,25 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Determine release channel
+        id: channel
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [[ "$TAG" == *"-preview."* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "channel=preview" >> $GITHUB_OUTPUT
+          elif [[ "$TAG" == *"-rc."* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "channel=rc" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "channel=stable" >> $GITHUB_OUTPUT
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -128,5 +149,20 @@ jobs:
         with:
           files: release/*
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.channel.outputs.prerelease == 'true' }}
+          name: ${{ steps.channel.outputs.tag }}
           generate_release_notes: true
+
+      - name: Update channel branch
+        run: |
+          CHANNEL="${{ steps.channel.outputs.channel }}"
+          TAG="${{ steps.channel.outputs.tag }}"
+          # For preview and rc tags, update the "preview" branch
+          # For stable tags, update the "stable" branch
+          if [[ "$CHANNEL" == "stable" ]]; then
+            BRANCH="stable"
+          else
+            BRANCH="preview"
+          fi
+          # Force-update the channel branch to point at this tag's commit
+          git push origin "refs/tags/${TAG}:refs/heads/${BRANCH}" --force
