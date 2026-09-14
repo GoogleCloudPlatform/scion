@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
@@ -151,17 +150,7 @@ func init() {
 // HubPreStartHookService. Unlike project hooks, no project ID is involved:
 // hub hooks live at the hub scope and require hub administrator privileges.
 func resolveHubHookClient() (hubclient.HubPreStartHookService, error) {
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return nil, err
 	}

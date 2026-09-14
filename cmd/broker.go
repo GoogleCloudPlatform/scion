@@ -719,18 +719,7 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no broker registration found, this host is not registered as a runtime broker with the hub")
 	}
 
-	// Load settings for Hub client
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -1673,18 +1662,7 @@ func runBrokerHubs(cmd *cobra.Command, args []string) error {
 
 // runRemoteBrokerStatus fetches and displays status for a remote broker from the Hub
 func runRemoteBrokerStatus(brokerID string) error {
-	// Load settings for Hub client
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	settings, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}

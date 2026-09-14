@@ -22,7 +22,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
@@ -157,17 +156,7 @@ func init() {
 }
 
 func runTokenCreate(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -229,17 +218,7 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 }
 
 func runTokenList(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -316,17 +295,7 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 func runTokenRevoke(cmd *cobra.Command, args []string) error {
 	tokenID := args[0]
 
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -345,17 +314,7 @@ func runTokenRevoke(cmd *cobra.Command, args []string) error {
 func runTokenDelete(cmd *cobra.Command, args []string) error {
 	tokenID := args[0]
 
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
