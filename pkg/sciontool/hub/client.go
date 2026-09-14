@@ -283,7 +283,10 @@ func (c *Client) UpdateStatus(ctx context.Context, status StatusUpdate) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal status: %w", err)
 	}
+	return c.postJSONWithRetry(ctx, endpoint, body)
+}
 
+func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []byte) error {
 	// Read token under lock to avoid data race with concurrent RefreshToken calls.
 	c.tokenMu.RLock()
 	currentToken := c.token

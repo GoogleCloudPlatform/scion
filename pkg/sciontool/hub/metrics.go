@@ -15,12 +15,9 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 
@@ -79,57 +76,7 @@ func (c *Client) ReportMetrics(ctx context.Context, payload MetricsPayload) erro
 	if err != nil {
 		return fmt.Errorf("failed to marshal metrics payload: %w", err)
 	}
-
-	c.tokenMu.RLock()
-	currentToken := c.token
-	c.tokenMu.RUnlock()
-
-	var lastErr error
-	attempts := c.maxRetries + 1
-	for attempt := 0; attempt < attempts; attempt++ {
-		if attempt > 0 {
-			delay := c.calculateBackoff(attempt)
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("context cancelled during retry: %w", ctx.Err())
-			case <-time.After(delay):
-			}
-		}
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-		if err != nil {
-			return fmt.Errorf("failed to create request: %w", err)
-		}
-
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Scion-Agent-Token", currentToken)
-
-		resp, err := c.client.Do(req)
-		if err != nil {
-			if ctx.Err() != nil {
-				return fmt.Errorf("request failed (context cancelled): %w", ctx.Err())
-			}
-			lastErr = fmt.Errorf("failed to send request: %w", err)
-			continue
-		}
-
-		respBody, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-
-		if resp.StatusCode < 400 {
-			return nil
-		}
-
-		// 4xx — client error, don't retry
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			return fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
-		}
-
-		// 5xx — server error, retry
-		lastErr = fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	return fmt.Errorf("request failed after %d attempts: %w", attempts, lastErr)
+	return c.postJSONWithRetry(ctx, endpoint, body)
 }
 
 // SummaryToMetricsPayload converts a telemetry.SessionSummary (produced by the
