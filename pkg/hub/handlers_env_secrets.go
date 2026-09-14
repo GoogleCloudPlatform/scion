@@ -1849,58 +1849,14 @@ func (s *Server) handleProjectSecrets(w http.ResponseWriter, r *http.Request, pr
 	}
 }
 
-func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request, projectID, key string) {
+// handleScopedSecretByKey handles a secret lifecycle after the caller has
+// verified the scope resource and authorized the request.
+func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request, key, scope, scopeID string) {
 	ctx := r.Context()
-
-	// Verify project exists
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		if err == store.ErrNotFound {
-			NotFound(w, "Project")
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Authorize access
-	isWrite := r.Method == http.MethodPut || r.Method == http.MethodPatch || r.Method == http.MethodDelete
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
-		return
-	}
-	if agentIdent, ok := identity.(AgentIdentity); ok {
-		if isWrite {
-			Forbidden(w)
-			return
-		}
-		if agentIdent.ProjectID() != projectID {
-			Forbidden(w)
-			return
-		}
-	} else if userIdent, ok := identity.(UserIdentity); ok {
-		action := ActionRead
-		if isWrite {
-			action = ActionUpdate
-		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:    "project",
-			ID:      project.ID,
-			OwnerID: project.OwnerID,
-		}, action)
-		if !decision.Allowed {
-			Forbidden(w)
-			return
-		}
-	} else {
-		Forbidden(w)
-		return
-	}
 
 	switch r.Method {
 	case http.MethodGet:
-		meta, err := s.secretBackend.GetMeta(ctx, key, store.ScopeProject, projectID)
+		meta, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -1972,8 +1928,8 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 			Value:         string(decoded),
 			SecretType:    secretType,
 			Target:        target,
-			Scope:         store.ScopeProject,
-			ScopeID:       projectID,
+			Scope:         scope,
+			ScopeID:       scopeID,
 			Description:   req.Description,
 			InjectionMode: req.InjectionMode,
 		}
@@ -1990,10 +1946,10 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusOK, SetSecretResponse{Secret: &result, Created: created})
 
 	case http.MethodPatch:
-		s.patchSecretValidateAndUpdate(w, r, key, store.ScopeProject, projectID)
+		s.patchSecretValidateAndUpdate(w, r, key, scope, scopeID)
 
 	case http.MethodDelete:
-		if err := s.secretBackend.Delete(ctx, key, store.ScopeProject, projectID); err != nil {
+		if err := s.secretBackend.Delete(ctx, key, scope, scopeID); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -2002,6 +1958,58 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 	default:
 		MethodNotAllowed(w)
 	}
+}
+
+func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request, projectID, key string) {
+	ctx := r.Context()
+
+	// Verify project exists
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			NotFound(w, "Project")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Authorize access
+	isWrite := r.Method == http.MethodPut || r.Method == http.MethodPatch || r.Method == http.MethodDelete
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+	if agentIdent, ok := identity.(AgentIdentity); ok {
+		if isWrite {
+			Forbidden(w)
+			return
+		}
+		if agentIdent.ProjectID() != projectID {
+			Forbidden(w)
+			return
+		}
+	} else if userIdent, ok := identity.(UserIdentity); ok {
+		action := ActionRead
+		if isWrite {
+			action = ActionUpdate
+		}
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type:    "project",
+			ID:      project.ID,
+			OwnerID: project.OwnerID,
+		}, action)
+		if !decision.Allowed {
+			Forbidden(w)
+			return
+		}
+	} else {
+		Forbidden(w)
+		return
+	}
+
+	s.handleScopedSecretByKey(w, r, key, store.ScopeProject, projectID)
 }
 
 // autoLinkProviders links brokers with auto_provide enabled as providers for a project.
@@ -2429,108 +2437,5 @@ func (s *Server) handleBrokerSecretByKey(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	switch r.Method {
-	case http.MethodGet:
-		meta, err := s.secretBackend.GetMeta(ctx, key, store.ScopeRuntimeBroker, brokerID)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		writeJSON(w, http.StatusOK, metaToStoreSecret(*meta))
-
-	case http.MethodPut:
-		r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
-		var req SetSecretRequest
-		if err := readJSON(r, &req); err != nil {
-			BadRequest(w, "Invalid request body: "+err.Error())
-			return
-		}
-		if req.Value == "" {
-			ValidationError(w, "value is required", nil)
-			return
-		}
-		if req.Encoding != "" && req.Encoding != "base64" && req.Encoding != "raw" {
-			ValidationError(w, "encoding must be \"base64\" or \"raw\"", map[string]interface{}{
-				"field":   "encoding",
-				"value":   req.Encoding,
-				"allowed": []string{"base64", "raw"},
-			})
-			return
-		}
-		var decoded []byte
-		if req.Encoding == "raw" {
-			// Caller explicitly opted in to raw text — store the value as-is.
-			decoded = []byte(req.Value)
-		} else {
-			// Default: value must be base64-encoded (matches CLI behaviour).
-			var decErr error
-			decoded, decErr = base64.StdEncoding.DecodeString(req.Value)
-			if decErr != nil {
-				BadRequest(w, "value must be base64-encoded")
-				return
-			}
-		}
-		secretType := req.Type
-		if secretType == "" {
-			secretType = store.SecretTypeEnvironment
-		}
-		switch secretType {
-		case store.SecretTypeEnvironment, store.SecretTypeVariable, store.SecretTypeFile:
-		default:
-			ValidationError(w, "type must be one of: environment, variable, file", map[string]interface{}{"field": "type", "value": secretType})
-			return
-		}
-		target := req.Target
-		if target == "" {
-			target = key
-		}
-		if secretType == store.SecretTypeFile {
-			if strings.Contains(target, "..") {
-				BadRequest(w, "target path must not contain '..'")
-				return
-			}
-			if !strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "~/") {
-				ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{"field": "target", "value": target})
-				return
-			}
-			if len(decoded) > 64*1024 {
-				BadRequest(w, "secret value exceeds 64KB limit")
-				return
-			}
-		}
-		input := &secret.SetSecretInput{
-			Name:          key,
-			Value:         string(decoded),
-			SecretType:    secretType,
-			Target:        target,
-			Scope:         store.ScopeRuntimeBroker,
-			ScopeID:       brokerID,
-			Description:   req.Description,
-			InjectionMode: req.InjectionMode,
-		}
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			input.CreatedBy = userIdent.ID()
-			input.UpdatedBy = userIdent.ID()
-		}
-		created, meta, err := s.secretBackend.Set(ctx, input)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		result := metaToStoreSecret(*meta)
-		writeJSON(w, http.StatusOK, SetSecretResponse{Secret: &result, Created: created})
-
-	case http.MethodPatch:
-		s.patchSecretValidateAndUpdate(w, r, key, store.ScopeRuntimeBroker, brokerID)
-
-	case http.MethodDelete:
-		if err := s.secretBackend.Delete(ctx, key, store.ScopeRuntimeBroker, brokerID); err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-
-	default:
-		MethodNotAllowed(w)
-	}
+	s.handleScopedSecretByKey(w, r, key, store.ScopeRuntimeBroker, brokerID)
 }
