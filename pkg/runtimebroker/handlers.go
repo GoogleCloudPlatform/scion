@@ -60,6 +60,10 @@ func matchesAgent(a api.AgentInfo, id, projectID string) bool {
 	if projectID == "" {
 		return true
 	}
+	return matchesAgentProject(a, projectID)
+}
+
+func matchesAgentProject(a api.AgentInfo, projectID string) bool {
 	// Check runtime labels first (canonical project_id, then legacy grove_id),
 	// then ProjectID field.
 	if labelProjectID := projectcompat.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
@@ -2482,6 +2486,15 @@ func (s *Server) resolveHarnessConfigForEnvGather(req CreateAgentRequest, settin
 	return res.Name
 }
 
+func hasAgentInProjectOrUnlabeled(agents []api.AgentInfo, projectID string) bool {
+	for _, info := range agents {
+		if matchesAgentProject(info, projectID) {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveAgentRuntimeTarget finds the manager/runtime pair that contains an
 // existing agent. Keeping the pair together prevents manager-based and direct
 // runtime operations from drifting to different backends.
@@ -2518,12 +2531,12 @@ func (s *Server) resolveAgentRuntimeTarget(ctx context.Context, id, projectID st
 	if projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
-		if err == nil && len(agents) > 0 {
+		if err == nil && hasAgentInProjectOrUnlabeled(agents, projectID) {
 			return s.manager, s.runtime
 		}
 		for _, aux := range auxRuntimes {
 			auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
-			if auxErr == nil && len(auxAgents) > 0 {
+			if auxErr == nil && hasAgentInProjectOrUnlabeled(auxAgents, projectID) {
 				return aux.Manager, aux.Runtime
 			}
 		}
