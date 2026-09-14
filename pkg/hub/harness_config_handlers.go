@@ -521,36 +521,14 @@ func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	var updates struct {
-		Name        string `json:"name,omitempty"`
-		Slug        string `json:"slug,omitempty"`
-		DisplayName string `json:"displayName,omitempty"`
-		Description string `json:"description,omitempty"`
-		Visibility  string `json:"visibility,omitempty"`
-	}
-
-	if err := readJSON(r, &updates); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !applyResourceMetadataPatch(w, r, resourceMetadataFields{
+		Name:        &existing.Name,
+		Slug:        &existing.Slug,
+		DisplayName: &existing.DisplayName,
+		Description: &existing.Description,
+		Visibility:  &existing.Visibility,
+	}) {
 		return
-	}
-
-	if updates.Name != "" {
-		existing.Name = updates.Name
-		if updates.Slug == "" {
-			existing.Slug = api.Slugify(updates.Name)
-		}
-	}
-	if updates.Slug != "" {
-		existing.Slug = updates.Slug
-	}
-	if updates.DisplayName != "" {
-		existing.DisplayName = updates.DisplayName
-	}
-	if updates.Description != "" {
-		existing.Description = updates.Description
-	}
-	if updates.Visibility != "" {
-		existing.Visibility = updates.Visibility
 	}
 
 	if err := s.store.UpdateHarnessConfig(ctx, existing); err != nil {
