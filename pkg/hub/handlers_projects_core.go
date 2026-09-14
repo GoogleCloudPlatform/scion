@@ -215,86 +215,16 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
 	}
 
-	// RS2: scope=mine / scope=shared / mine=true — D6 Mine/Shared classification.
-	//
-	// Mine = projects with an active direct project-owner RoleBinding.
-	// Shared = projects with current effective project.read access (direct +
-	// transitive group grants) minus Mine.
-	//
-	// Classification is an INTERSECTION with authority, not an authorization
-	// bypass. A system-wide caller still gets correct Mine/Shared when
-	// explicitly requesting those scopes.
-	//
-	// Legacy Project.OwnerID and ExcludeOwnerID have no authorization or
-	// classification role (D6 frozen decision).
-	switch query.Get("scope") {
-	case "mine":
-		userIdent := GetUserIdentityFromContext(ctx)
-		if userIdent == nil {
-			// RS2 Finding 6: Non-user identities (agent JWT) cannot hold direct
-			// project-owner RoleBindings. Mine is empty for them.
-			filter.MemberOrOwnerIDs = []string{"__none__"}
-		} else {
-			ownerIDs, resolveErr := s.resolveUserOwnerProjectIDsOrError(ctx, userIdent.ID())
-			if resolveErr != nil {
-				slog.WarnContext(ctx, "listProjects: owner resolution failed (fail-closed)", "error", resolveErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-					"unable to resolve authorization", nil)
-				return
-			}
-			if len(ownerIDs) > 0 {
-				filter.MemberOrOwnerIDs = ownerIDs
-			} else {
-				filter.MemberOrOwnerIDs = []string{"__none__"}
-			}
-		}
-	case "shared":
-		userIdent := GetUserIdentityFromContext(ctx)
-		if userIdent == nil {
-			// RS2 Finding 6: Non-user identities cannot hold owner bindings,
-			// so Shared = full scope - empty Mine = full scope. For agent JWT
-			// this is the credential-caveated scope. No filter restriction needed
-			// (the authorization predicate already restricts the result set).
-		} else {
-			sharedResult, resolveErr := s.resolveSharedProjectFilter(ctx, userIdent.ID(), scopeResult)
-			if resolveErr != nil {
-				slog.WarnContext(ctx, "listProjects: shared resolution failed (fail-closed)", "error", resolveErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-					"unable to resolve authorization", nil)
-				return
-			}
-			if sharedResult.IsAllScope {
-				// Finding 7: System-All Shared — exclude owned projects from
-				// the full-scope query by adding them to ExcludedProjectIDs.
-				filter.ExcludedProjectIDs = append(filter.ExcludedProjectIDs, sharedResult.OwnerExcludeIDs...)
-			} else if len(sharedResult.ProjectIDs) > 0 {
-				filter.MemberProjectIDs = sharedResult.ProjectIDs
-			} else {
-				filter.MemberProjectIDs = []string{"__none__"}
-			}
-		}
-	default:
-		// Legacy mine=true support — same semantics as scope=mine.
-		if query.Get("mine") == "true" {
-			userIdent := GetUserIdentityFromContext(ctx)
-			if userIdent == nil {
-				filter.MemberOrOwnerIDs = []string{"__none__"}
-			} else {
-				ownerIDs, resolveErr := s.resolveUserOwnerProjectIDsOrError(ctx, userIdent.ID())
-				if resolveErr != nil {
-					slog.WarnContext(ctx, "listProjects: owner resolution failed (fail-closed)", "error", resolveErr)
-					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-						"unable to resolve authorization", nil)
-					return
-				}
-				if len(ownerIDs) > 0 {
-					filter.MemberOrOwnerIDs = ownerIDs
-				} else {
-					filter.MemberOrOwnerIDs = []string{"__none__"}
-				}
-			}
-		}
+	classification, err := s.resolveProjectListClassification(
+		ctx, identity, query.Get("scope"), query.Get("mine") == "true", scopeResult, "listProjects")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"unable to resolve authorization", nil)
+		return
 	}
+	filter.MemberOrOwnerIDs = classification.OwnedProjectIDs
+	filter.MemberProjectIDs = classification.SharedProjectIDs
+	filter.ExcludedProjectIDs = append(filter.ExcludedProjectIDs, classification.ExcludedOwnedProjectIDs...)
 
 	limit := 500
 	if l := query.Get("limit"); l != "" {

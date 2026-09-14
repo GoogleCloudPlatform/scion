@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -118,6 +119,66 @@ func (s *Server) resolveSharedProjectFilter(ctx context.Context, userID string, 
 		IsAllScope: false,
 		ProjectIDs: sharedIDs,
 	}, nil
+}
+
+const emptyProjectListMatch = "__none__"
+
+// projectListClassification describes the project membership predicates for
+// scope=mine, scope=shared, and the legacy mine=true alias. Callers map these
+// project IDs to the corresponding fields on their resource-specific filters.
+type projectListClassification struct {
+	OwnedProjectIDs         []string
+	SharedProjectIDs        []string
+	ExcludedOwnedProjectIDs []string
+}
+
+// resolveProjectListClassification applies Mine/Shared classification after
+// ResolveListScopes has established the caller's authorized project set.
+func (s *Server) resolveProjectListClassification(
+	ctx context.Context,
+	identity Identity,
+	scope string,
+	legacyMine bool,
+	scopeResult ListScopeResult,
+	operation string,
+) (projectListClassification, error) {
+	var result projectListClassification
+	userIdent, isUser := identity.(UserIdentity)
+
+	if scope == "mine" || (scope != "shared" && legacyMine) {
+		if !isUser {
+			result.OwnedProjectIDs = []string{emptyProjectListMatch}
+			return result, nil
+		}
+		ownerIDs, err := s.resolveUserOwnerProjectIDsOrError(ctx, userIdent.ID())
+		if err != nil {
+			slog.WarnContext(ctx, operation+": owner resolution failed (fail-closed)", "error", err)
+			return result, err
+		}
+		if len(ownerIDs) == 0 {
+			ownerIDs = []string{emptyProjectListMatch}
+		}
+		result.OwnedProjectIDs = ownerIDs
+		return result, nil
+	}
+
+	if scope != "shared" || !isUser {
+		return result, nil
+	}
+
+	sharedResult, err := s.resolveSharedProjectFilter(ctx, userIdent.ID(), scopeResult)
+	if err != nil {
+		slog.WarnContext(ctx, operation+": shared resolution failed (fail-closed)", "error", err)
+		return result, err
+	}
+	if sharedResult.IsAllScope {
+		result.ExcludedOwnedProjectIDs = sharedResult.OwnerExcludeIDs
+	} else if len(sharedResult.ProjectIDs) > 0 {
+		result.SharedProjectIDs = sharedResult.ProjectIDs
+	} else {
+		result.SharedProjectIDs = []string{emptyProjectListMatch}
+	}
+	return result, nil
 }
 
 // canonicalizeStringSlice sorts and deduplicates a string slice in place,
