@@ -23,7 +23,7 @@ In this multi-agent orchestration environment, the primary way to communicate is
 
 Choosing the right recipient is critical to avoid spam and ensure the message reaches the intended target.
 
-- **** (preferred): The preferred way to message a specific agent (e.g., `scion message @tech-lead "..."`). This addresses the agent's conversation directly.
+- **`@<agent-name>`**: Send a message to a specific agent (e.g., `scion message @tech-lead "..."`). This addresses the agent's conversation directly.
 - **`@<email>`**: Send a global DM to a user by email address (e.g., `scion message @preston@example.com "..."`).
 - **`group[a,b,...]`**: Group messaging to a specific list of recipients (Hub mode only).
 - **`conv:<uuid>`**: Address a conversation by ID. Use this to reply into the conversation you were addressed in — pass the `conversation` field from the inbound message envelope.
