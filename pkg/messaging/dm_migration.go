@@ -480,12 +480,3 @@ func (s *DMMigrationService) mergeConversation(
 
 	return nil
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// isValidDMKind returns true if the kind is a valid DM principal kind.
-func isValidDMKind(kind string) bool {
-	return kind == "user" || kind == "agent"
-}
