@@ -329,86 +329,16 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
 	}
 
-	// RS2: scope=mine / scope=shared / mine=true — D6 Mine/Shared classification.
-	//
-	// Agent Mine = agents in Mine projects (active direct project-owner
-	// RoleBinding). Agent creator/OwnerID metadata must NOT expand either set.
-	// mine=true is preserved only as an exact alias of scope=mine.
-	//
-	// Agent Shared = agents in Shared projects (effective project.read access
-	// minus Mine projects).
-	//
-	// Classification is an intersection with authority, not an authorization bypass.
-	switch query.Get("scope") {
-	case "mine":
-		userIdent := GetUserIdentityFromContext(ctx)
-		if userIdent == nil {
-			// RS2 Finding 6: Non-user identities (agent JWT) cannot hold direct
-			// project-owner RoleBindings. Mine is empty for them.
-			filter.MemberOrOwnerProjectIDs = []string{"__none__"}
-		} else {
-			ownerIDs, resolveErr := s.resolveUserOwnerProjectIDsOrError(ctx, userIdent.ID())
-			if resolveErr != nil {
-				slog.WarnContext(ctx, "listAgents: owner resolution failed (fail-closed)", "error", resolveErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-					"unable to resolve authorization", nil)
-				return
-			}
-			if len(ownerIDs) > 0 {
-				filter.MemberOrOwnerProjectIDs = ownerIDs
-			} else {
-				filter.MemberOrOwnerProjectIDs = []string{"__none__"}
-			}
-			// RS2: Do NOT set filter.OwnerID. Agent creator ownership must
-			// not expand the Mine set beyond owned projects (D6 decision).
-		}
-	case "shared":
-		userIdent := GetUserIdentityFromContext(ctx)
-		if userIdent == nil {
-			// RS2 Finding 6: Non-user identities cannot hold owner bindings,
-			// so Shared = full scope - empty Mine = full scope. No filter needed.
-		} else {
-			sharedResult, resolveErr := s.resolveSharedProjectFilter(ctx, userIdent.ID(), scopeResult)
-			if resolveErr != nil {
-				slog.WarnContext(ctx, "listAgents: shared resolution failed (fail-closed)", "error", resolveErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-					"unable to resolve authorization", nil)
-				return
-			}
-			if sharedResult.IsAllScope {
-				// Finding 7: System-All Shared — exclude agents from owned
-				// projects by adding owner project IDs to ExcludedProjectIDs.
-				filter.ExcludedProjectIDs = append(filter.ExcludedProjectIDs, sharedResult.OwnerExcludeIDs...)
-			} else if len(sharedResult.ProjectIDs) > 0 {
-				filter.MemberProjectIDs = sharedResult.ProjectIDs
-			} else {
-				filter.MemberProjectIDs = []string{"__none__"}
-			}
-			// RS2: Do NOT set filter.ExcludeOwnerID. Agent creator metadata
-			// has no classification role (D6 decision).
-		}
-	default:
-		if query.Get("mine") == "true" {
-			userIdent := GetUserIdentityFromContext(ctx)
-			if userIdent == nil {
-				filter.MemberOrOwnerProjectIDs = []string{"__none__"}
-			} else {
-				ownerIDs, resolveErr := s.resolveUserOwnerProjectIDsOrError(ctx, userIdent.ID())
-				if resolveErr != nil {
-					slog.WarnContext(ctx, "listAgents: owner resolution failed (fail-closed)", "error", resolveErr)
-					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-						"unable to resolve authorization", nil)
-					return
-				}
-				if len(ownerIDs) > 0 {
-					filter.MemberOrOwnerProjectIDs = ownerIDs
-				} else {
-					filter.MemberOrOwnerProjectIDs = []string{"__none__"}
-				}
-				// RS2: Do NOT set filter.OwnerID (same as scope=mine).
-			}
-		}
+	classification, err := s.resolveProjectListClassification(
+		ctx, identity, query.Get("scope"), query.Get("mine") == "true", scopeResult, "listAgents")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"unable to resolve authorization", nil)
+		return
 	}
+	filter.MemberOrOwnerProjectIDs = classification.OwnedProjectIDs
+	filter.MemberProjectIDs = classification.SharedProjectIDs
+	filter.ExcludedProjectIDs = append(filter.ExcludedProjectIDs, classification.ExcludedOwnedProjectIDs...)
 
 	limit := 500
 	if l := query.Get("limit"); l != "" {
