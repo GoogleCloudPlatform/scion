@@ -172,6 +172,50 @@ func remoteIP(remoteAddr string) string {
 	return ip
 }
 
+type chatLinkStatusOptions struct {
+	userIDQueryParam string
+	getStatus        func(providerUserID string) (status, userID, userEmail string)
+	consume          func(providerUserID string)
+}
+
+func handleChatLinkStatus(w http.ResponseWriter, r *http.Request, opts chatLinkStatusOptions) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	if GetBrokerIdentityFromContext(r.Context()) == nil {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "broker authentication required", nil)
+		return
+	}
+
+	providerUserID := r.URL.Query().Get(opts.userIDQueryParam)
+	if providerUserID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, opts.userIDQueryParam+" query parameter is required", nil)
+		return
+	}
+
+	if opts.getStatus == nil {
+		InternalError(w)
+		return
+	}
+
+	status, userID, userEmail := opts.getStatus(providerUserID)
+	response := map[string]interface{}{"status": status}
+	if status == "confirmed" {
+		response["user"] = map[string]string{
+			"id":    userID,
+			"email": userEmail,
+		}
+	}
+
+	writeJSON(w, http.StatusOK, response)
+
+	if status == "confirmed" {
+		opts.consume(providerUserID)
+	}
+}
+
 func maskedLinkCode(code string) string {
 	if len(code) > 3 {
 		code = code[:3]
