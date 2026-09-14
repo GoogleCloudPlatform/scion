@@ -15,8 +15,6 @@
 package hub
 
 import (
-	"net/http"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 )
 
@@ -38,54 +36,4 @@ func NewTelegramLinkService() *TelegramLinkService {
 // GetStatusByTelegramUser returns the linking status for a given Telegram user ID.
 func (s *TelegramLinkService) GetStatusByTelegramUser(telegramUserID string) (status, userID, userEmail string) {
 	return s.GetStatusByUser(telegramUserID)
-}
-
-// handleTelegramLink handles POST /api/v1/telegram/link.
-// This is called by the Telegram plugin (broker-authenticated) to register a pending link code.
-func (s *Server) handleTelegramLink(w http.ResponseWriter, r *http.Request) {
-	var register func(string, string)
-	if s.telegramLinkService != nil {
-		register = s.telegramLinkService.RegisterCode
-	}
-	handleChatLinkRegistration(w, r, chatLinkRegistrationOptions{
-		providerName: "Telegram",
-		userIDField:  "telegramUserId",
-		userIDLogKey: "telegram_user_id",
-		decode:       decodeTelegramLinkRegistration,
-		register:     register,
-	})
-}
-
-// handleTelegramLinkVerify handles POST /api/v1/telegram/link/verify.
-// This is called by a logged-in user from the web UI to confirm a link code.
-func (s *Server) handleTelegramLinkVerify(w http.ResponseWriter, r *http.Request) {
-	var allowVerify func(string) bool
-	var verify func(string, string, string) (string, string)
-	if s.telegramLinkService != nil {
-		allowVerify = s.telegramLinkService.AllowVerify
-		verify = s.telegramLinkService.VerifyCode
-	}
-	handleChatLinkVerification(w, r, chatLinkVerificationOptions{
-		providerName:      "Telegram",
-		userIDResponseKey: "telegramUserId",
-		userIDLogKey:      "telegram_user_id",
-		allowVerify:       allowVerify,
-		verify:            verify,
-	})
-}
-
-// handleTelegramLinkStatus handles GET /api/v1/telegram/link/status.
-// This is called by the Telegram plugin (broker-authenticated) to poll for confirmation.
-func (s *Server) handleTelegramLinkStatus(w http.ResponseWriter, r *http.Request) {
-	var getStatus func(string) (string, string, string)
-	var consume func(string)
-	if s.telegramLinkService != nil {
-		getStatus = s.telegramLinkService.GetStatusByTelegramUser
-		consume = s.telegramLinkService.ConsumePending
-	}
-	handleChatLinkStatus(w, r, chatLinkStatusOptions{
-		userIDQueryParam: "telegram_user_id",
-		getStatus:        getStatus,
-		consume:          consume,
-	})
 }
