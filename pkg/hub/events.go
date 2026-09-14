@@ -47,7 +47,7 @@ type EventPublisher interface {
 	// authorization only gates project.* and user.* subjects, and project
 	// membership is not the same set as "people in this conversation".
 	PublishChatNotification(ctx context.Context, notif *store.Notification, msg ChatMessageContext)
-	PublishUserMessage(ctx context.Context, msg *store.Message)
+	PublishUserMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef)
 	PublishAgentPorts(ctx context.Context, agent *store.Agent)
 	PublishAllowListChanged(ctx context.Context, action string, email string)
 	PublishInviteChanged(ctx context.Context, action string, inviteID string, codePrefix string)
@@ -99,7 +99,7 @@ func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)   
 func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)      {}
 func (noopEventPublisher) PublishChatNotification(_ context.Context, _ *store.Notification, _ ChatMessageContext) {
 }
-func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message) {}
+func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef) {}
 func (noopEventPublisher) PublishAgentPorts(_ context.Context, _ *store.Agent)    {}
 func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string) {}
 func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string) {}
@@ -246,10 +246,9 @@ type UserMessageEvent struct {
 	Channel       string `json:"channel,omitempty"`
 	ThreadID      string `json:"threadId,omitempty"`
 	GroupID       string `json:"groupId,omitempty"`
-	Read          bool   `json:"read"`
-	DispatchState string `json:"dispatchState,omitempty"`
-	// Metadata on the SSE event is deferred to a later phase when metadata
-	// persistence is added to store.Message (F4 deliverable).
+	Read          bool              `json:"read"`
+	DispatchState string            `json:"dispatchState,omitempty"`
+	Attachments   []AttachmentRef   `json:"attachments,omitempty"`
 }
 
 // NotificationCreatedEvent is published when a user notification is created.
@@ -713,7 +712,7 @@ func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID,
 //     (only when the recipient is a user)
 //   - agent.<agentID>.message — per-agent conversation streams (both
 //     directions; subscribers filter by user participation themselves)
-func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message) {
+func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef) {
 	evt := UserMessageEvent{
 		ID:            msg.ID,
 		ProjectID:     msg.ProjectID,
@@ -733,6 +732,7 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message)
 		GroupID:       msg.GroupID,
 		Read:          msg.Read,
 		DispatchState: msg.DispatchState,
+		Attachments:   attachments,
 	}
 	// Only fan out to user-inbox and project-level subjects when the
 	// recipient is actually a human user. For user→agent messages the

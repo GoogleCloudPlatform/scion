@@ -571,7 +571,7 @@ func (s *Server) dispatchRoutedRecipient(
 		// Persistence failure after dispatch is nonfatal — dispatch succeeded.
 		result.PersistenceWarning = "message dispatched but persistence failed: " + err.Error()
 	} else {
-		s.events.PublishUserMessage(ctx, storeMsg)
+		s.events.PublishUserMessage(ctx, storeMsg, nil)
 	}
 
 	// --- Reply affinity ---

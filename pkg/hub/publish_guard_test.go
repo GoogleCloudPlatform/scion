@@ -47,7 +47,7 @@ type spyEventPublisher struct {
 	chatNotifCh chan struct{} // optional; signalled on PublishChatNotification
 }
 
-func (s *spyEventPublisher) PublishUserMessage(_ context.Context, msg *store.Message) {
+func (s *spyEventPublisher) PublishUserMessage(_ context.Context, msg *store.Message, _ []AttachmentRef) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.userMsgs = append(s.userMsgs, msg)

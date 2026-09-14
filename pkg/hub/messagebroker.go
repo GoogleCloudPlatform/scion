@@ -599,7 +599,7 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	}
 
 	// Publish SSE event so connected browser clients receive real-time inbox updates.
-	p.events.PublishUserMessage(ctx, storeMsg)
+	p.events.PublishUserMessage(ctx, storeMsg, nil)
 
 	// W6: DM notification for agent → human replies via broker path.
 	if p.chatNotifier != nil && storeMsg.ThreadID != "" &&

@@ -293,7 +293,7 @@ func TestChannelEventPublisher_PublishUserMessage_FanOut(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg)
+	pub.PublishUserMessage(context.Background(), msg, nil)
 
 	for name, ch := range map[string]<-chan Event{
 		"user":    userCh,
@@ -343,7 +343,7 @@ func TestChannelEventPublisher_PublishUserMessage_UserToAgent(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg)
+	pub.PublishUserMessage(context.Background(), msg, nil)
 
 	// Agent channel should receive the event.
 	select {
@@ -396,7 +396,7 @@ func TestChannelEventPublisher_PublishUserMessage_Broadcasted(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg)
+	pub.PublishUserMessage(context.Background(), msg, nil)
 
 	select {
 	case evt := <-ch:
@@ -661,7 +661,7 @@ func TestPublishUserMessage_ChatMessageSubject(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg)
+	pub.PublishUserMessage(context.Background(), msg, nil)
 
 	// Should receive on project.proj1.chat.message
 	select {
@@ -703,7 +703,7 @@ func TestPublishUserMessage_NoChatMessageForDM(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg)
+	pub.PublishUserMessage(context.Background(), msg, nil)
 
 	select {
 	case evt := <-ch:
@@ -735,7 +735,7 @@ func TestPublishUserMessage_NoChatMessageForLegacyThread(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg)
+	pub.PublishUserMessage(context.Background(), msg, nil)
 
 	select {
 	case evt := <-ch:
@@ -766,7 +766,7 @@ func TestPublishUserMessage_NoChatMessageForNonWebChannel(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg)
+	pub.PublishUserMessage(context.Background(), msg, nil)
 
 	select {
 	case evt := <-ch:
@@ -850,7 +850,7 @@ func TestPublishUserMessage_DMChatSubject(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg)
+	pub.PublishUserMessage(context.Background(), msg, nil)
 
 	// Should receive on user.{agentUUID}.chat.dm
 	select {
@@ -915,7 +915,7 @@ func TestPublishUserMessage_UserDM_BothSidesReceive(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg)
+	pub.PublishUserMessage(context.Background(), msg, nil)
 
 	// Both users should receive the DM event.
 	for _, ch := range []<-chan Event{ch1, ch2} {
