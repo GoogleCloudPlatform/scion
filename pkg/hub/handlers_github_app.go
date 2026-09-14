@@ -62,18 +62,6 @@ type GitHubAppConfigUpdateRequest struct {
 	InstallationURL *string `json:"installation_url,omitempty"`
 }
 
-// handleGitHubApp handles GET and PUT /api/v1/github-app.
-func (s *Server) handleGitHubApp(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.handleGetGitHubApp(w, r)
-	case http.MethodPut:
-		s.handleUpdateGitHubApp(w, r)
-	default:
-		MethodNotAllowed(w)
-	}
-}
-
 func (s *Server) handleGetGitHubApp(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	cfg := s.config.GitHubAppConfig
@@ -340,40 +328,6 @@ func (s *Server) persistGitHubAppConfig(cfg GitHubAppServerConfig) error {
 	}
 
 	return os.WriteFile(settingsPath, newData, 0644)
-}
-
-// handleGitHubAppInstallations handles GET and POST /api/v1/github-app/installations.
-func (s *Server) handleGitHubAppInstallations(w http.ResponseWriter, r *http.Request) {
-	// Check if this is a sub-route (e.g., /api/v1/github-app/installations/{id})
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/github-app/installations")
-	if path != "" && path != "/" {
-		subPath := strings.TrimPrefix(path, "/")
-		subPath = strings.TrimSuffix(subPath, "/")
-
-		// Handle /discover sub-route
-		if subPath == "discover" {
-			s.handleGitHubAppDiscover(w, r)
-			return
-		}
-
-		// Sub-route: /api/v1/github-app/installations/{id}
-		installationID, err := strconv.ParseInt(subPath, 10, 64)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid installation ID", nil)
-			return
-		}
-		s.handleGitHubAppInstallationByID(w, r, installationID)
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		s.handleListGitHubAppInstallations(w, r)
-	case http.MethodPost:
-		s.handleCreateGitHubAppInstallation(w, r)
-	default:
-		MethodNotAllowed(w)
-	}
 }
 
 func (s *Server) handleListGitHubAppInstallations(w http.ResponseWriter, r *http.Request) {

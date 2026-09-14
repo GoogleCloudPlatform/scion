@@ -71,7 +71,6 @@ func TestBypassCensus(t *testing.T) {
 		// ─── Authorization infrastructure (permanent or deprecating) ─────
 		{file: "authorize.go", lineSubstr: "func (s *Server) requireAdmin(", description: "requireAdmin helper definition (DEPRECATED — fallback only)"},
 		{file: "authorize.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "requireAdmin implementation"},
-		{file: "authorize.go", lineSubstr: "requireAdmin(w, r)", description: "requireAdminHandler wrapper"},
 		{file: "route_metadata.go", lineSubstr: "requireAdmin(w, r)", description: "routeGuard fallback for unconverted routes (temporary)"},
 		{file: "identity.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "IsUnscopedLocalPlatformAdmin definition"},
 		{file: "identity.go", lineSubstr: `user.Role() != "admin"`, description: "IsUnscopedLocalPlatformAdmin implementation"},
