@@ -444,9 +444,6 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	// Manage implicit env var progeny policy lifecycle
-	s.ensureEnvVarProgenyPolicy(ctx, envVar)
-
 	// Clean up any existing secret with same key (demotion from secret to plain)
 	if s.secretBackend != nil {
 		_ = s.secretBackend.Delete(ctx, key, scope, scopeID)
@@ -475,13 +472,6 @@ func (s *Server) deleteEnvVar(w http.ResponseWriter, r *http.Request, key string
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), true)
 	if !ok {
 		return
-	}
-
-	// Check for progeny policy cleanup before deletion
-	if scope == store.ScopeUser {
-		if existing, err := s.store.GetEnvVar(ctx, key, scope, scopeID); err == nil && existing.AllowProgeny {
-			s.deleteEnvVarProgenyPolicy(ctx, existing.ID)
-		}
 	}
 
 	if err := s.store.DeleteEnvVar(ctx, key, scope, scopeID); err != nil {
@@ -617,50 +607,6 @@ func mergeEnvironmentSecretMetadata(envVars []store.EnvVar, metas []secret.Secre
 	}
 	return merged
 }
-
-// =============================================================================
-// Progeny policy helpers for secrets
-// =============================================================================
-//
-// RG1 migration note: The RelationshipGrantResolver (authz_relationship.go)
-// provides the target replacement for these DelegatedFrom Policy rows. At CO1
-// cutover, the resolver is wired into the evaluator and these functions become
-// no-ops — the AllowProgeny flag on the resource serves as the relationship
-// record. Until then, Policy rows are still created here so that the existing
-// checkDelegation path (authz.go) continues to grant progeny access for newly
-// created resources.
-
-// progenyPolicyName returns the canonical policy name for a progeny secret policy.
-func progenyPolicyName(secretID string) string {
-	return "progeny-secret-access:" + secretID
-}
-
-// ensureProgenyPolicy is a no-op after CO1 cutover. Progeny access is now
-// handled by the RelationshipGrantResolver (authz_relationship.go) using the
-// AllowProgeny flag on the secret and the agent's hub-attested ancestry.
-func (s *Server) ensureProgenyPolicy(_ context.Context, _ *secret.SecretMeta) {}
-
-// deleteProgenyPolicy is a no-op after CO1 cutover.
-func (s *Server) deleteProgenyPolicy(_ context.Context, _ string) {}
-
-// =============================================================================
-// Progeny policy helpers for env vars
-// =============================================================================
-//
-// RG1 migration note: same as secrets above. See RelationshipGrantResolver
-// (authz_relationship.go) for the target model. CO1 converts these to no-ops.
-
-// envVarProgenyPolicyName returns the canonical policy name for a progeny env var policy.
-func envVarProgenyPolicyName(envVarID string) string {
-	return "progeny-envvar-access:" + envVarID
-}
-
-// ensureEnvVarProgenyPolicy is a no-op after CO1 cutover. Progeny access is
-// now handled by the RelationshipGrantResolver (authz_relationship.go).
-func (s *Server) ensureEnvVarProgenyPolicy(_ context.Context, _ *store.EnvVar) {}
-
-// deleteEnvVarProgenyPolicy is a no-op after CO1 cutover.
-func (s *Server) deleteEnvVarProgenyPolicy(_ context.Context, _ string) {}
 
 func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -880,9 +826,6 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	// Manage implicit progeny policy lifecycle
-	s.ensureProgenyPolicy(ctx, meta)
-
 	result := metaToStoreSecret(*meta)
 	writeJSON(w, http.StatusOK, SetSecretResponse{
 		Secret:  &result,
@@ -892,7 +835,7 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 
 // patchSecretValidateAndUpdate is the shared helper for all PATCH secret
 // handlers. It decodes and validates the PatchSecretRequest, applies the
-// metadata update, manages progeny-policy lifecycle, and writes the response.
+// metadata update, and writes the response.
 func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Request, key, scope, scopeID string) {
 	ctx := r.Context()
 
@@ -1002,11 +945,6 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Manage implicit progeny policy lifecycle if AllowProgeny changed
-	if req.AllowProgeny != nil {
-		s.ensureProgenyPolicy(ctx, meta)
-	}
-
 	result := metaToStoreSecret(*meta)
 	writeJSON(w, http.StatusOK, result)
 }
@@ -1037,13 +975,6 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), true)
 	if !ok {
 		return
-	}
-
-	// Fetch secret metadata before deletion for policy cleanup
-	if scope == store.ScopeUser {
-		if meta, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID); err == nil && meta.AllowProgeny {
-			defer s.deleteProgenyPolicy(ctx, meta.ID)
-		}
 	}
 
 	if err := s.secretBackend.Delete(ctx, key, scope, scopeID); err != nil {

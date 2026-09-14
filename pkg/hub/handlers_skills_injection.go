@@ -513,9 +513,6 @@ func (s *Server) addUserInjectedSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Manage implicit progeny policy lifecycle
-	s.ensureSkillProgenyPolicy(ctx, si)
-
 	writeJSON(w, http.StatusCreated, skillInjectionToEntry(*si))
 }
 
@@ -587,37 +584,15 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 			CreatedBy:    userIdent.ID(),
 		})
 	}
-	// Collect old progeny IDs before the replace so we can clean up
-	// their policies after the replace succeeds. Deleting before the
-	// replace risks inconsistent state if the replace fails.
-	var oldProgenyIDs []string
-	if existing, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID()); err == nil {
-		for _, e := range existing {
-			if e.AllowProgeny {
-				oldProgenyIDs = append(oldProgenyIDs, e.ID)
-			}
-		}
-	}
-
 	if err := s.store.SetSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID(), injections, userIdent.ID()); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
-	}
-
-	// Clean up old progeny policies only after the replace succeeded.
-	for _, id := range oldProgenyIDs {
-		s.deleteSkillProgenyPolicy(ctx, id)
 	}
 
 	sis, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID())
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
-	}
-
-	// Reconcile progeny policies for all user entries after bulk replace
-	for i := range sis {
-		s.ensureSkillProgenyPolicy(ctx, &sis[i])
 	}
 
 	writeJSON(w, http.StatusOK, api.SkillInjectionList{
@@ -653,11 +628,6 @@ func (s *Server) removeUserInjectedSkill(w http.ResponseWriter, r *http.Request,
 	if ownedEntry == nil {
 		NotFound(w, "Skill injection entry")
 		return
-	}
-
-	// Clean up progeny policy if the entry had AllowProgeny enabled
-	if ownedEntry.AllowProgeny {
-		s.deleteSkillProgenyPolicy(ctx, ownedEntry.ID)
 	}
 
 	if err := s.store.RemoveSkillInjection(ctx, entryID); err != nil {
@@ -816,29 +786,6 @@ func (s *Server) setHubInjectedSkills(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, updated)
 }
-
-// =============================================================================
-// Progeny policy helpers for skill injections
-// =============================================================================
-//
-// RG1 migration note: The RelationshipGrantResolver (authz_relationship.go)
-// provides the target replacement for these DelegatedFrom Policy rows. At CO1
-// cutover, the resolver is wired into the evaluator and these functions become
-// no-ops. Until then, Policy rows are still created here so that the existing
-// checkDelegation path (authz.go) continues to grant progeny access for newly
-// created resources.
-
-// skillProgenyPolicyName returns the canonical policy name for a progeny skill injection policy.
-func skillProgenyPolicyName(skillInjectionID string) string {
-	return "progeny-skill-access:" + skillInjectionID
-}
-
-// ensureSkillProgenyPolicy is a no-op after CO1 cutover. Progeny access is
-// now handled by the RelationshipGrantResolver (authz_relationship.go).
-func (s *Server) ensureSkillProgenyPolicy(_ context.Context, _ *store.SkillInjection) {}
-
-// deleteSkillProgenyPolicy is a no-op after CO1 cutover.
-func (s *Server) deleteSkillProgenyPolicy(_ context.Context, _ string) {}
 
 // =============================================================================
 // Shared helpers
