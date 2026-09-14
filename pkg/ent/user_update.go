@@ -201,6 +201,27 @@ func (_u *UserUpdate) ClearLastSeen() *UserUpdate {
 	return _u
 }
 
+// SetSessionGeneration sets the "session_generation" field.
+func (_u *UserUpdate) SetSessionGeneration(v int64) *UserUpdate {
+	_u.mutation.ResetSessionGeneration()
+	_u.mutation.SetSessionGeneration(v)
+	return _u
+}
+
+// SetNillableSessionGeneration sets the "session_generation" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableSessionGeneration(v *int64) *UserUpdate {
+	if v != nil {
+		_u.SetSessionGeneration(*v)
+	}
+	return _u
+}
+
+// AddSessionGeneration adds value to the "session_generation" field.
+func (_u *UserUpdate) AddSessionGeneration(v int64) *UserUpdate {
+	_u.mutation.AddSessionGeneration(v)
+	return _u
+}
+
 // AddOwnedGroupIDs adds the "owned_groups" edge to the Group entity by IDs.
 func (_u *UserUpdate) AddOwnedGroupIDs(ids ...uuid.UUID) *UserUpdate {
 	_u.mutation.AddOwnedGroupIDs(ids...)
@@ -420,6 +441,12 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.LastSeenCleared() {
 		_spec.ClearField(user.FieldLastSeen, field.TypeTime)
+	}
+	if value, ok := _u.mutation.SessionGeneration(); ok {
+		_spec.SetField(user.FieldSessionGeneration, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedSessionGeneration(); ok {
+		_spec.AddField(user.FieldSessionGeneration, field.TypeInt64, value)
 	}
 	if _u.mutation.OwnedGroupsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -744,6 +771,27 @@ func (_u *UserUpdateOne) ClearLastSeen() *UserUpdateOne {
 	return _u
 }
 
+// SetSessionGeneration sets the "session_generation" field.
+func (_u *UserUpdateOne) SetSessionGeneration(v int64) *UserUpdateOne {
+	_u.mutation.ResetSessionGeneration()
+	_u.mutation.SetSessionGeneration(v)
+	return _u
+}
+
+// SetNillableSessionGeneration sets the "session_generation" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableSessionGeneration(v *int64) *UserUpdateOne {
+	if v != nil {
+		_u.SetSessionGeneration(*v)
+	}
+	return _u
+}
+
+// AddSessionGeneration adds value to the "session_generation" field.
+func (_u *UserUpdateOne) AddSessionGeneration(v int64) *UserUpdateOne {
+	_u.mutation.AddSessionGeneration(v)
+	return _u
+}
+
 // AddOwnedGroupIDs adds the "owned_groups" edge to the Group entity by IDs.
 func (_u *UserUpdateOne) AddOwnedGroupIDs(ids ...uuid.UUID) *UserUpdateOne {
 	_u.mutation.AddOwnedGroupIDs(ids...)
@@ -993,6 +1041,12 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 	}
 	if _u.mutation.LastSeenCleared() {
 		_spec.ClearField(user.FieldLastSeen, field.TypeTime)
+	}
+	if value, ok := _u.mutation.SessionGeneration(); ok {
+		_spec.SetField(user.FieldSessionGeneration, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedSessionGeneration(); ok {
+		_spec.AddField(user.FieldSessionGeneration, field.TypeInt64, value)
 	}
 	if _u.mutation.OwnedGroupsCleared() {
 		edge := &sqlgraph.EdgeSpec{

@@ -738,6 +738,9 @@ type User struct {
 	// Preferences (stored as JSON)
 	Preferences *UserPreferences `json:"preferences,omitempty"`
 
+	// Session revocation
+	SessionGeneration int64 `json:"sessionGeneration,omitempty"`
+
 	// Timestamps
 	Created   time.Time `json:"created"`
 	LastLogin time.Time `json:"lastLogin,omitempty"`

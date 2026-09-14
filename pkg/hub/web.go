@@ -89,8 +89,9 @@ const (
 	sessKeyReturnTo        = "returnTo"
 	sessKeyOAuthState      = "oauthState"
 	sessKeyHubAccessToken  = "hubAccessToken"
-	sessKeyHubRefreshToken = "hubRefreshToken"
-	sessKeyHubTokenExpiry  = "hubTokenExpiry"
+	sessKeyHubRefreshToken    = "hubRefreshToken"
+	sessKeyHubTokenExpiry     = "hubTokenExpiry"
+	sessKeySessionGeneration  = "sessGen"
 )
 
 // webUserContextKey is the key for storing the web session user in the request context.
@@ -1823,6 +1824,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		session.Values[sessKeyUserName] = user.DisplayName
 		session.Values[sessKeyUserAvatar] = user.AvatarURL
 		session.Values[sessKeyUserRole] = user.Role
+		session.Values[sessKeySessionGeneration] = user.SessionGeneration
 
 		if err := session.Save(r, w); err != nil {
 			ws.logger().Error("Proxy auth: failed to save session", "error", err)
@@ -1868,6 +1870,28 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 
 		// Check for user in session
 		if uid, ok := session.Values[sessKeyUserID].(string); ok && uid != "" {
+			// Verify session generation against the DB to support per-user
+			// session revocation. A mismatch means an admin has revoked
+			// this user's sessions since login.
+			if ws.store != nil {
+				dbUser, err := ws.store.GetUser(r.Context(), uid)
+				if err != nil {
+					// User deleted or DB error — clear session and force re-login
+					session.Options.MaxAge = -1
+					_ = session.Save(r, w)
+					http.Redirect(w, r, "/auth/login", http.StatusFound)
+					return
+				}
+				cookieGen, _ := session.Values[sessKeySessionGeneration].(int64)
+				if dbUser.SessionGeneration > cookieGen {
+					// Generation mismatch — force re-login
+					session.Options.MaxAge = -1
+					_ = session.Save(r, w)
+					http.Redirect(w, r, "/auth/login", http.StatusFound)
+					return
+				}
+			}
+
 			user := &webSessionUser{
 				UserID:    uid,
 				Email:     sessionString(session, sessKeyUserEmail),
@@ -2162,6 +2186,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	session.Values[sessKeyUserName] = user.DisplayName
 	session.Values[sessKeyUserAvatar] = user.AvatarURL
 	session.Values[sessKeyUserRole] = user.Role
+	session.Values[sessKeySessionGeneration] = user.SessionGeneration
 
 	// Get returnTo and clear it
 	returnTo, _ := session.Values[sessKeyReturnTo].(string)

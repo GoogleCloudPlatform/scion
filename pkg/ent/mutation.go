@@ -57001,6 +57001,8 @@ type UserMutation struct {
 	invite_note            *string
 	last_login             *time.Time
 	last_seen              *time.Time
+	session_generation     *int64
+	addsession_generation  *int64
 	clearedFields          map[string]struct{}
 	owned_groups           map[uuid.UUID]struct{}
 	removedowned_groups    map[uuid.UUID]struct{}
@@ -57594,6 +57596,62 @@ func (m *UserMutation) ResetLastSeen() {
 	delete(m.clearedFields, user.FieldLastSeen)
 }
 
+// SetSessionGeneration sets the "session_generation" field.
+func (m *UserMutation) SetSessionGeneration(i int64) {
+	m.session_generation = &i
+	m.addsession_generation = nil
+}
+
+// SessionGeneration returns the value of the "session_generation" field in the mutation.
+func (m *UserMutation) SessionGeneration() (r int64, exists bool) {
+	v := m.session_generation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSessionGeneration returns the old "session_generation" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldSessionGeneration(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSessionGeneration is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSessionGeneration requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSessionGeneration: %w", err)
+	}
+	return oldValue.SessionGeneration, nil
+}
+
+// AddSessionGeneration adds i to the "session_generation" field.
+func (m *UserMutation) AddSessionGeneration(i int64) {
+	if m.addsession_generation != nil {
+		*m.addsession_generation += i
+	} else {
+		m.addsession_generation = &i
+	}
+}
+
+// AddedSessionGeneration returns the value that was added to the "session_generation" field in this mutation.
+func (m *UserMutation) AddedSessionGeneration() (r int64, exists bool) {
+	v := m.addsession_generation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetSessionGeneration resets all changes to the "session_generation" field.
+func (m *UserMutation) ResetSessionGeneration() {
+	m.session_generation = nil
+	m.addsession_generation = nil
+}
+
 // AddOwnedGroupIDs adds the "owned_groups" edge to the Group entity by ids.
 func (m *UserMutation) AddOwnedGroupIDs(ids ...uuid.UUID) {
 	if m.owned_groups == nil {
@@ -57790,7 +57848,7 @@ func (m *UserMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserMutation) Fields() []string {
-	fields := make([]string, 0, 11)
+	fields := make([]string, 0, 12)
 	if m.email != nil {
 		fields = append(fields, user.FieldEmail)
 	}
@@ -57824,6 +57882,9 @@ func (m *UserMutation) Fields() []string {
 	if m.last_seen != nil {
 		fields = append(fields, user.FieldLastSeen)
 	}
+	if m.session_generation != nil {
+		fields = append(fields, user.FieldSessionGeneration)
+	}
 	return fields
 }
 
@@ -57854,6 +57915,8 @@ func (m *UserMutation) Field(name string) (ent.Value, bool) {
 		return m.LastLogin()
 	case user.FieldLastSeen:
 		return m.LastSeen()
+	case user.FieldSessionGeneration:
+		return m.SessionGeneration()
 	}
 	return nil, false
 }
@@ -57885,6 +57948,8 @@ func (m *UserMutation) OldField(ctx context.Context, name string) (ent.Value, er
 		return m.OldLastLogin(ctx)
 	case user.FieldLastSeen:
 		return m.OldLastSeen(ctx)
+	case user.FieldSessionGeneration:
+		return m.OldSessionGeneration(ctx)
 	}
 	return nil, fmt.Errorf("unknown User field %s", name)
 }
@@ -57971,6 +58036,13 @@ func (m *UserMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetLastSeen(v)
 		return nil
+	case user.FieldSessionGeneration:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSessionGeneration(v)
+		return nil
 	}
 	return fmt.Errorf("unknown User field %s", name)
 }
@@ -57978,13 +58050,21 @@ func (m *UserMutation) SetField(name string, value ent.Value) error {
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *UserMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.addsession_generation != nil {
+		fields = append(fields, user.FieldSessionGeneration)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *UserMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case user.FieldSessionGeneration:
+		return m.AddedSessionGeneration()
+	}
 	return nil, false
 }
 
@@ -57993,6 +58073,13 @@ func (m *UserMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *UserMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case user.FieldSessionGeneration:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSessionGeneration(v)
+		return nil
 	}
 	return fmt.Errorf("unknown User numeric field %s", name)
 }
@@ -58091,6 +58178,9 @@ func (m *UserMutation) ResetField(name string) error {
 		return nil
 	case user.FieldLastSeen:
 		m.ResetLastSeen()
+		return nil
+	case user.FieldSessionGeneration:
+		m.ResetSessionGeneration()
 		return nil
 	}
 	return fmt.Errorf("unknown User field %s", name)

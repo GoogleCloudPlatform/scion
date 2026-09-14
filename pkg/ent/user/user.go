@@ -38,6 +38,8 @@ const (
 	FieldLastLogin = "last_login"
 	// FieldLastSeen holds the string denoting the last_seen field in the database.
 	FieldLastSeen = "last_seen"
+	// FieldSessionGeneration holds the string denoting the session_generation field in the database.
+	FieldSessionGeneration = "session_generation"
 	// EdgeOwnedGroups holds the string denoting the owned_groups edge name in mutations.
 	EdgeOwnedGroups = "owned_groups"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -83,6 +85,7 @@ var Columns = []string{
 	FieldInviteNote,
 	FieldLastLogin,
 	FieldLastSeen,
+	FieldSessionGeneration,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -100,6 +103,8 @@ var (
 	EmailValidator func(string) error
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
+	// DefaultSessionGeneration holds the default value on creation for the "session_generation" field.
+	DefaultSessionGeneration int64
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
@@ -214,6 +219,11 @@ func ByLastLogin(opts ...sql.OrderTermOption) OrderOption {
 // ByLastSeen orders the results by the last_seen field.
 func ByLastSeen(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLastSeen, opts...).ToFunc()
+}
+
+// BySessionGeneration orders the results by the session_generation field.
+func BySessionGeneration(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSessionGeneration, opts...).ToFunc()
 }
 
 // ByOwnedGroupsCount orders the results by owned_groups count.

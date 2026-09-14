@@ -731,6 +731,10 @@ type UserStore interface {
 	// given email and status in ("invited", "active"). Used by the
 	// invite_only authorization gate as a replacement for IsEmailAllowListed.
 	IsUserInvitedOrActive(ctx context.Context, email string) (bool, error)
+
+	// IncrementSessionGeneration atomically increments the user's
+	// session_generation counter, invalidating all existing sessions.
+	IncrementSessionGeneration(ctx context.Context, userID string) error
 }
 
 // UserFilter defines criteria for filtering users.

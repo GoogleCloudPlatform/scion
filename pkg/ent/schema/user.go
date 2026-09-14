@@ -80,6 +80,9 @@ func (User) Fields() []ent.Field {
 		field.Time("last_seen").
 			Optional().
 			Nillable(),
+		field.Int64("session_generation").
+			Default(0).
+			Comment("Incremented to revoke all sessions for this user"),
 	}
 }
 

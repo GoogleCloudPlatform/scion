@@ -96,6 +96,11 @@ func LastSeen(v time.Time) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldLastSeen, v))
 }
 
+// SessionGeneration applies equality check predicate on the "session_generation" field. It's identical to SessionGenerationEQ.
+func SessionGeneration(v int64) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldSessionGeneration, v))
+}
+
 // EmailEQ applies the EQ predicate on the "email" field.
 func EmailEQ(v string) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldEmail, v))
@@ -639,6 +644,46 @@ func LastSeenIsNil() predicate.User {
 // LastSeenNotNil applies the NotNil predicate on the "last_seen" field.
 func LastSeenNotNil() predicate.User {
 	return predicate.User(sql.FieldNotNull(FieldLastSeen))
+}
+
+// SessionGenerationEQ applies the EQ predicate on the "session_generation" field.
+func SessionGenerationEQ(v int64) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldSessionGeneration, v))
+}
+
+// SessionGenerationNEQ applies the NEQ predicate on the "session_generation" field.
+func SessionGenerationNEQ(v int64) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldSessionGeneration, v))
+}
+
+// SessionGenerationIn applies the In predicate on the "session_generation" field.
+func SessionGenerationIn(vs ...int64) predicate.User {
+	return predicate.User(sql.FieldIn(FieldSessionGeneration, vs...))
+}
+
+// SessionGenerationNotIn applies the NotIn predicate on the "session_generation" field.
+func SessionGenerationNotIn(vs ...int64) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldSessionGeneration, vs...))
+}
+
+// SessionGenerationGT applies the GT predicate on the "session_generation" field.
+func SessionGenerationGT(v int64) predicate.User {
+	return predicate.User(sql.FieldGT(FieldSessionGeneration, v))
+}
+
+// SessionGenerationGTE applies the GTE predicate on the "session_generation" field.
+func SessionGenerationGTE(v int64) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldSessionGeneration, v))
+}
+
+// SessionGenerationLT applies the LT predicate on the "session_generation" field.
+func SessionGenerationLT(v int64) predicate.User {
+	return predicate.User(sql.FieldLT(FieldSessionGeneration, v))
+}
+
+// SessionGenerationLTE applies the LTE predicate on the "session_generation" field.
+func SessionGenerationLTE(v int64) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldSessionGeneration, v))
 }
 
 // HasOwnedGroups applies the HasEdge predicate on the "owned_groups" edge.

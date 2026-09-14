@@ -1649,6 +1649,10 @@ func init() {
 	userDescCreated := userFields[7].Descriptor()
 	// user.DefaultCreated holds the default value on creation for the created field.
 	user.DefaultCreated = userDescCreated.Default.(func() time.Time)
+	// userDescSessionGeneration is the schema descriptor for session_generation field.
+	userDescSessionGeneration := userFields[12].Descriptor()
+	// user.DefaultSessionGeneration holds the default value on creation for the session_generation field.
+	user.DefaultSessionGeneration = userDescSessionGeneration.Default.(int64)
 	// userDescID is the schema descriptor for id field.
 	userDescID := userFields[0].Descriptor()
 	// user.DefaultID holds the default value on creation for the id field.
