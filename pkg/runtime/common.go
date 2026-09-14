@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	stagedsecrets "github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -42,6 +43,13 @@ const (
 	telemetryGCPCredentialsSecretName = "scion-telemetry-gcp-credentials"
 	telemetryGCPCredentialsEnvVar     = "SCION_OTEL_GCP_CREDENTIALS"
 )
+
+type gcsVolumeInfo struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Bucket string `json:"bucket"`
+	Prefix string `json:"prefix"`
+}
 
 // findGCPTelemetryCredentialPath scans the resolved secrets for the well-known
 // GCP telemetry credential file secret and returns the expanded container target
@@ -153,13 +161,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 
 	var fuseMounts []string
-	type gcsVolInfo struct {
-		Source string `json:"source"`
-		Target string `json:"target"`
-		Bucket string `json:"bucket"`
-		Prefix string `json:"prefix"`
-	}
-	var gcsVolumes []gcsVolInfo
+	var gcsVolumes []gcsVolumeInfo
 
 	addVolume := func(v api.VolumeMount) {
 		tgt := expandPath(v.Target, true)
@@ -179,7 +181,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			cmd += fmt.Sprintf("%q %q", v.Bucket, tgt)
 			fuseMounts = append(fuseMounts, cmd)
 
-			gcsVolumes = append(gcsVolumes, gcsVolInfo{
+			gcsVolumes = append(gcsVolumes, gcsVolumeInfo{
 				Source: expandPath(v.Source, false),
 				Target: tgt,
 				Bucket: v.Bucket,
@@ -508,15 +510,54 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 // When no match is found the original id is returned so callers can fall
 // back to the raw value (which may itself be a valid container name).
 func resolveContainerID(agents []api.AgentInfo, id string) string {
-	for _, a := range agents {
-		if a.ContainerID == id ||
-			(len(id) >= 12 && strings.HasPrefix(a.ContainerID, id)) ||
-			(len(a.ContainerID) >= 12 && strings.HasPrefix(id, a.ContainerID)) ||
-			a.Name == id || a.Name == "/"+id || strings.TrimPrefix(a.Name, "/") == id {
-			return a.ContainerID
-		}
+	if agent := findContainerAgent(agents, id); agent != nil {
+		return agent.ContainerID
 	}
 	return id
+}
+
+func findContainerAgent(agents []api.AgentInfo, id string) *api.AgentInfo {
+	for i := range agents {
+		agent := &agents[i]
+		if agent.ContainerID == id ||
+			(len(id) >= 12 && strings.HasPrefix(agent.ContainerID, id)) ||
+			(len(agent.ContainerID) >= 12 && strings.HasPrefix(id, agent.ContainerID)) ||
+			agent.Name == id || agent.Name == "/"+id || strings.TrimPrefix(agent.Name, "/") == id {
+			return agent
+		}
+	}
+	return nil
+}
+
+func syncGCSVolumes(ctx context.Context, encoded string, direction SyncDirection) error {
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return fmt.Errorf("failed to decode gcs volume info: %w", err)
+	}
+
+	var volumes []gcsVolumeInfo
+	if err := json.Unmarshal(decoded, &volumes); err != nil {
+		return fmt.Errorf("failed to parse gcs volume info: %w", err)
+	}
+
+	for _, volume := range volumes {
+		if volume.Source == "" {
+			continue
+		}
+		switch direction {
+		case SyncTo:
+			if err := gcp.SyncToGCS(ctx, volume.Source, volume.Bucket, volume.Prefix); err != nil {
+				return fmt.Errorf("failed to sync to GCS: %w", err)
+			}
+		case SyncFrom:
+			if err := gcp.SyncFromGCS(ctx, volume.Bucket, volume.Prefix, volume.Source); err != nil {
+				return fmt.Errorf("failed to sync from GCS: %w", err)
+			}
+		default:
+			return fmt.Errorf("sync direction must be specified for GCS volumes")
+		}
+	}
+	return nil
 }
 
 // runtimeLog is the structured logger for runtime command execution.

@@ -17,6 +17,8 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"log/slog"
@@ -111,6 +113,68 @@ func TestResolveContainerID_SlugMatchesAgentName(t *testing.T) {
 	got := resolveContainerID(agents, "foo")
 	if got != "a1b2c3d4e5f60000" {
 		t.Errorf("resolveContainerID(\"foo\") = %q, want %q", got, "a1b2c3d4e5f60000")
+	}
+}
+
+func TestSyncGCSVolumesValidation(t *testing.T) {
+	encode := func(t *testing.T, volumes []gcsVolumeInfo) string {
+		t.Helper()
+		data, err := json.Marshal(volumes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return base64.StdEncoding.EncodeToString(data)
+	}
+
+	tests := []struct {
+		name      string
+		encoded   string
+		direction SyncDirection
+		wantError string
+	}{
+		{
+			name:      "invalid base64",
+			encoded:   "%%%",
+			direction: SyncTo,
+			wantError: "failed to decode gcs volume info",
+		},
+		{
+			name:      "invalid json",
+			encoded:   base64.StdEncoding.EncodeToString([]byte("not json")),
+			direction: SyncTo,
+			wantError: "failed to parse gcs volume info",
+		},
+		{
+			name:      "direction required for sourced volume",
+			encoded:   encode(t, []gcsVolumeInfo{{Source: "/workspace", Bucket: "bucket"}}),
+			direction: SyncUnspecified,
+			wantError: "sync direction must be specified for GCS volumes",
+		},
+		{
+			name:      "empty source skipped",
+			encoded:   encode(t, []gcsVolumeInfo{{Bucket: "bucket"}}),
+			direction: SyncUnspecified,
+		},
+		{
+			name:      "empty list",
+			encoded:   encode(t, nil),
+			direction: SyncUnspecified,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := syncGCSVolumes(context.Background(), test.encoded, test.direction)
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatalf("syncGCSVolumes() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("syncGCSVolumes() error = %v, want %q", err, test.wantError)
+			}
+		})
 	}
 }
 
