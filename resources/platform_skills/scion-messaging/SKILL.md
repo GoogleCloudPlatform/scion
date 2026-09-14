@@ -23,11 +23,14 @@ In this multi-agent orchestration environment, the primary way to communicate is
 
 Choosing the right recipient is critical to avoid spam and ensure the message reaches the intended target.
 
-- **`@<agent-name>`** (preferred): The preferred way to message a specific agent (e.g., `scion message @tech-lead "..."`). This addresses the agent's conversation directly.
+- **** (preferred): The preferred way to message a specific agent (e.g., `scion message @tech-lead "..."`). This addresses the agent's conversation directly.
 - **`@<email>`**: Send a global DM to a user by email address (e.g., `scion message @preston@example.com "..."`).
 - **`group[a,b,...]`**: Group messaging to a specific list of recipients (Hub mode only).
 - **`conv:<uuid>`**: Address a conversation by ID. Use this to reply into the conversation you were addressed in — pass the `conversation` field from the inbound message envelope.
-- **`#<thread>`**: Address a named thread by its thread identifier.
+
+### Mentions
+
+- You can alert a secondary tier participant in a conversation by using the `@<agent-name>` or `@<email>` recipient types in the body of a message. Use this for FYI informative or CC, be clear if there is a response or action expected. If there is more than one primary recipient use the `group[]` recipient type.
 
 ## Message Timing and Cadence
 
@@ -90,14 +93,14 @@ The `scion message` command provides the following flags:
 - **`--wake`**: Resumes a suspended agent before delivering the message.
 - **`--interrupt`**: Interrupts the target agent's harness before sending the message (use with caution).
 - **`--attach <file>`**: Attaches one or more file paths to the message. Repeatable.
-**Capabilities that moved to separate commands:**
+**Capabilities that exist as separate commands:**
 - **Raw keystrokes**: Use `scion keys` to send literal keystrokes to an agent's tmux terminal.
 - **Scheduled messages**: Use `scion schedule create` to schedule messages for future delivery. See the `scion-scheduler` skill.
 - **Notifications**: Use `scion notifications subscribe` to subscribe to agent state changes.
 
 ## Agent-to-Agent Coordination Patterns
 
-- **Coordinator Relay**: Workers generally communicate through the coordinator rather than directly with each other. This guidance may be set by the coordinator.
+- **Coordinator**: Workers often collaborate on shared work through the coordinator rather than directly with each other. This guidance may be set by the coordinator on startup.
 - **Avoid being a relay.** If an agent needs to communicate something to a user, have them message the user directly rather than relaying through you. Relay adds latency, risks reframing the message in transit, and wastes context.
 - **Self-Callback Heartbeat**: For very long external tasks, use `scion schedule create` to send yourself a reminder to check on the process or provide a status update. (during long blocked periods)
 
@@ -105,7 +108,7 @@ The `scion message` command provides the following flags:
 
 In projects with multiple users:
 - Reply to direct messages from each user independently.
-- Do not repeat messages to different users who contact you in a group
+- Do not repeat messages in a group for each user you've interacted with in that group, assume they can see it, use mentions if you want to draw a specific user's attention to a message.
 - Handle each user's requests within their own context.
 
 ## Message Length Limit
@@ -134,17 +137,17 @@ markers as a JSON envelope containing sender, type, and conversation metadata.
 **Check the `conversation.kind` field first.** It tells you the shape of the conversation you are in:
 
 - **`"direct"`** — a one-to-one conversation between you and the sender. Messages here are addressed to you. The `to` field is usually omitted (your identity is implicit).
-- **`"group"`** — a multi-participant conversation. The `to` field lists all addressees. Read the message, but be aware others received it too — avoid duplicate work unless the message specifically assigns you a task.
+- **`"group"`** — a multi-participant conversation. The `to` field lists all addressees who were named explicitly but does NOT contain every entity in the group who sees messages in that conversation. Read the message, but be aware others received it too — avoid duplicate work unless the message specifically assigns you a task.
 
-When `conversation` is absent, the message predates the conversation model or is a broadcast. Treat it like a direct message unless other context suggests otherwise.
+When `conversation` is absent, the message predates the conversation model. Treat it like a direct message unless other context suggests otherwise.
 
 ### The `type` field
 
 Within a conversation, the `type` field classifies how the message reached you:
 
-- **`"message"`** — a text message addressed to you (directly or as part of a group). Read and act on it.
+- **`"message"`** — a text message addressed to you (directly or as part of a group). Read and act on it as appropriate.
 - **`"event"`** — a lifecycle notification about another agent or the system. Check the `event.type` subfield for the specific event:
-  - `agent.state-changed` — an agent changed state (e.g., completed, stalled). No reply needed.
+  - `agent.state-changed` — an agent changed state (e.g., completed, stalled). No reply needed. Action is situational.
   - `agent.input-needed` — an agent is waiting for input. See [Handling `input-needed`](#handling-input-needed) below.
   - `delivery.failed` — a message you sent could not be delivered.
   - `schedule.fired` — a scheduled event fired (see the `scion-scheduler` skill).
