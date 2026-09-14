@@ -262,32 +262,6 @@ func (s *Server) handleRuntimeBrokerByIDInternal(w http.ResponseWriter, r *http.
 	}
 }
 
-//nolint:unused // Kept for legacy route compatibility.
-func (s *Server) handleRuntimeBrokerByID(w http.ResponseWriter, r *http.Request) {
-	id, action := extractAction(r, "/api/v1/runtime-brokers")
-
-	if id == "" {
-		NotFound(w, "RuntimeBroker")
-		return
-	}
-
-	if action == "heartbeat" && r.Method == http.MethodPost {
-		s.handleBrokerHeartbeat(w, r, id)
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		s.getRuntimeBroker(w, r, id)
-	case http.MethodPatch:
-		s.updateRuntimeBroker(w, r, id)
-	case http.MethodDelete:
-		s.deleteRuntimeBroker(w, r, id)
-	default:
-		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
-	}
-}
-
 func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 

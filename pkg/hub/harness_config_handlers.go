@@ -126,6 +126,14 @@ type CreateHarnessConfigResponse struct {
 	ManifestURL   string               `json:"manifestUrl,omitempty"`
 }
 
+// ListHarnessConfigsResponse is the response for listing harness configs.
+type ListHarnessConfigsResponse struct {
+	HarnessConfigs []HarnessConfigWithCapabilities `json:"harnessConfigs"`
+	NextCursor     string                          `json:"nextCursor,omitempty"`
+	TotalCount     int                             `json:"totalCount"`
+	Capabilities   *Capabilities                   `json:"_capabilities,omitempty"`
+}
+
 // HarnessConfigManifest is the manifest of uploaded harness config files.
 type HarnessConfigManifest struct {
 	Version string               `json:"version"`
