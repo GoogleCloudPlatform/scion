@@ -282,45 +282,15 @@ func (s *Server) handleTelegramLinkVerify(w http.ResponseWriter, r *http.Request
 // handleTelegramLinkStatus handles GET /api/v1/telegram/link/status.
 // This is called by the Telegram plugin (broker-authenticated) to poll for confirmation.
 func (s *Server) handleTelegramLinkStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
-		return
+	var getStatus func(string) (string, string, string)
+	var consume func(string)
+	if s.telegramLinkService != nil {
+		getStatus = s.telegramLinkService.GetStatusByTelegramUser
+		consume = s.telegramLinkService.ConsumePending
 	}
-
-	broker := GetBrokerIdentityFromContext(r.Context())
-	if broker == nil {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "broker authentication required", nil)
-		return
-	}
-
-	telegramUserID := r.URL.Query().Get("telegram_user_id")
-	if telegramUserID == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "telegram_user_id query parameter is required", nil)
-		return
-	}
-
-	if s.telegramLinkService == nil {
-		InternalError(w)
-		return
-	}
-
-	status, userID, userEmail := s.telegramLinkService.GetStatusByTelegramUser(telegramUserID)
-
-	resp := map[string]interface{}{
-		"status": status,
-	}
-	if status == "confirmed" {
-		resp["user"] = map[string]string{
-			"id":    userID,
-			"email": userEmail,
-		}
-	}
-
-	writeJSON(w, http.StatusOK, resp)
-
-	// Clean up confirmed entries after sending the response so the
-	// Telegram plugin receives the confirmation exactly once.
-	if status == "confirmed" {
-		s.telegramLinkService.ConsumePending(telegramUserID)
-	}
+	handleChatLinkStatus(w, r, chatLinkStatusOptions{
+		userIDQueryParam: "telegram_user_id",
+		getStatus:        getStatus,
+		consume:          consume,
+	})
 }

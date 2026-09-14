@@ -278,45 +278,15 @@ func (s *Server) handleDiscordLinkVerify(w http.ResponseWriter, r *http.Request)
 // handleDiscordLinkStatus handles GET /api/v1/discord/link/status.
 // This is called by the Discord plugin (broker-authenticated) to poll for confirmation.
 func (s *Server) handleDiscordLinkStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
-		return
+	var getStatus func(string) (string, string, string)
+	var consume func(string)
+	if s.discordLinkService != nil {
+		getStatus = s.discordLinkService.GetStatusByDiscordUser
+		consume = s.discordLinkService.ConsumePending
 	}
-
-	broker := GetBrokerIdentityFromContext(r.Context())
-	if broker == nil {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "broker authentication required", nil)
-		return
-	}
-
-	discordUserID := r.URL.Query().Get("discord_user_id")
-	if discordUserID == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "discord_user_id query parameter is required", nil)
-		return
-	}
-
-	if s.discordLinkService == nil {
-		InternalError(w)
-		return
-	}
-
-	status, userID, userEmail := s.discordLinkService.GetStatusByDiscordUser(discordUserID)
-
-	resp := map[string]interface{}{
-		"status": status,
-	}
-	if status == "confirmed" {
-		resp["user"] = map[string]string{
-			"id":    userID,
-			"email": userEmail,
-		}
-	}
-
-	writeJSON(w, http.StatusOK, resp)
-
-	// Clean up confirmed entries after sending the response so the
-	// Discord plugin receives the confirmation exactly once.
-	if status == "confirmed" {
-		s.discordLinkService.ConsumePending(discordUserID)
-	}
+	handleChatLinkStatus(w, r, chatLinkStatusOptions{
+		userIDQueryParam: "discord_user_id",
+		getStatus:        getStatus,
+		consume:          consume,
+	})
 }

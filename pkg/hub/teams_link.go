@@ -279,45 +279,15 @@ func (s *Server) handleTeamsLinkVerify(w http.ResponseWriter, r *http.Request) {
 // handleTeamsLinkStatus handles GET /api/v1/teams/link/status.
 // This is called by the Teams plugin (broker-authenticated) to poll for confirmation.
 func (s *Server) handleTeamsLinkStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
-		return
+	var getStatus func(string) (string, string, string)
+	var consume func(string)
+	if s.teamsLinkService != nil {
+		getStatus = s.teamsLinkService.GetStatusByTeamsUser
+		consume = s.teamsLinkService.ConsumePending
 	}
-
-	broker := GetBrokerIdentityFromContext(r.Context())
-	if broker == nil {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "broker authentication required", nil)
-		return
-	}
-
-	teamsUserID := r.URL.Query().Get("teams_user_id")
-	if teamsUserID == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "teams_user_id query parameter is required", nil)
-		return
-	}
-
-	if s.teamsLinkService == nil {
-		InternalError(w)
-		return
-	}
-
-	status, userID, userEmail := s.teamsLinkService.GetStatusByTeamsUser(teamsUserID)
-
-	resp := map[string]interface{}{
-		"status": status,
-	}
-	if status == "confirmed" {
-		resp["user"] = map[string]string{
-			"id":    userID,
-			"email": userEmail,
-		}
-	}
-
-	writeJSON(w, http.StatusOK, resp)
-
-	// Clean up confirmed entries after sending the response so the
-	// Teams plugin receives the confirmation exactly once.
-	if status == "confirmed" {
-		s.teamsLinkService.ConsumePending(teamsUserID)
-	}
+	handleChatLinkStatus(w, r, chatLinkStatusOptions{
+		userIDQueryParam: "teams_user_id",
+		getStatus:        getStatus,
+		consume:          consume,
+	})
 }

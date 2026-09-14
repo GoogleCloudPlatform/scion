@@ -282,6 +282,103 @@ func TestChatLinkVerificationPreservesCommonGuards(t *testing.T) {
 	}
 }
 
+func TestChatLinkStatusReturnsConfirmationOnce(t *testing.T) {
+	srv := &Server{
+		telegramLinkService: NewTelegramLinkService(),
+		discordLinkService:  NewDiscordLinkService(),
+		teamsLinkService:    NewTeamsLinkService(),
+	}
+	t.Cleanup(srv.telegramLinkService.Close)
+	t.Cleanup(srv.discordLinkService.Close)
+	t.Cleanup(srv.teamsLinkService.Close)
+
+	tests := []struct {
+		name           string
+		providerUserID string
+		queryParam     string
+		register       func(code, providerUserID string)
+		verify         func(code, userID, userEmail string) (string, string)
+		getStatus      func(providerUserID string) (string, string, string)
+		handler        http.HandlerFunc
+	}{
+		{name: "telegram", providerUserID: "telegram-user", queryParam: "telegram_user_id", register: srv.telegramLinkService.RegisterCode, verify: srv.telegramLinkService.VerifyCode, getStatus: srv.telegramLinkService.GetStatusByTelegramUser, handler: srv.handleTelegramLinkStatus},
+		{name: "discord", providerUserID: "discord-user", queryParam: "discord_user_id", register: srv.discordLinkService.RegisterCode, verify: srv.discordLinkService.VerifyCode, getStatus: srv.discordLinkService.GetStatusByDiscordUser, handler: srv.handleDiscordLinkStatus},
+		{name: "teams", providerUserID: "teams-user", queryParam: "teams_user_id", register: srv.teamsLinkService.RegisterCode, verify: srv.teamsLinkService.VerifyCode, getStatus: srv.teamsLinkService.GetStatusByTeamsUser, handler: srv.handleTeamsLinkStatus},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.register("ABC123", tt.providerUserID)
+			_, reason := tt.verify("ABC123", "user-1", "user@example.com")
+			require.Empty(t, reason)
+			req := httptest.NewRequest(http.MethodGet, "/?"+tt.queryParam+"="+tt.providerUserID, nil)
+			req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("broker-1")))
+			recorder := httptest.NewRecorder()
+
+			tt.handler(recorder, req)
+
+			assert.Equal(t, http.StatusOK, recorder.Code)
+			var response map[string]interface{}
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+			assert.Equal(t, "confirmed", response["status"])
+			assert.Equal(t, map[string]interface{}{"id": "user-1", "email": "user@example.com"}, response["user"])
+			status, _, _ := tt.getStatus(tt.providerUserID)
+			assert.Equal(t, "not_found", status)
+		})
+	}
+}
+
+func TestChatLinkStatusKeepsPendingLinks(t *testing.T) {
+	svc := NewTelegramLinkService()
+	defer svc.Close()
+	svc.RegisterCode("ABC123", "telegram-user")
+	srv := &Server{telegramLinkService: svc}
+	req := httptest.NewRequest(http.MethodGet, "/?telegram_user_id=telegram-user", nil)
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("broker-1")))
+	recorder := httptest.NewRecorder()
+
+	srv.handleTelegramLinkStatus(recorder, req)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), `"status":"pending"`)
+	status, _, _ := svc.GetStatusByTelegramUser("telegram-user")
+	assert.Equal(t, "pending", status)
+}
+
+func TestChatLinkStatusPreservesCommonGuards(t *testing.T) {
+	svc := NewTelegramLinkService()
+	defer svc.Close()
+	srv := &Server{telegramLinkService: svc}
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		withBroker bool
+		server     *Server
+		wantStatus int
+	}{
+		{name: "method", method: http.MethodPost, path: "/?telegram_user_id=telegram-user", server: srv, wantStatus: http.StatusMethodNotAllowed},
+		{name: "broker authentication", method: http.MethodGet, path: "/?telegram_user_id=telegram-user", server: srv, wantStatus: http.StatusUnauthorized},
+		{name: "query parameter", method: http.MethodGet, path: "/", withBroker: true, server: srv, wantStatus: http.StatusBadRequest},
+		{name: "service unavailable", method: http.MethodGet, path: "/?telegram_user_id=telegram-user", withBroker: true, server: &Server{}, wantStatus: http.StatusInternalServerError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			if tt.withBroker {
+				req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("broker-1")))
+			}
+			recorder := httptest.NewRecorder()
+
+			tt.server.handleTelegramLinkStatus(recorder, req)
+
+			assert.Equal(t, tt.wantStatus, recorder.Code)
+		})
+	}
+}
+
 func authenticatedLinkRequest(method, body string) *http.Request {
 	req := httptest.NewRequest(method, "/", strings.NewReader(body))
 	return req.WithContext(contextWithIdentity(req.Context(), NewAuthenticatedUser("user-1", "user@example.com", "User", "member", "web")))
