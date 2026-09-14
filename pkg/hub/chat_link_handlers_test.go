@@ -15,10 +15,12 @@
 package hub
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -179,6 +181,110 @@ func TestChatLinkRegistrationJSONCompatibility(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestChatLinkVerification(t *testing.T) {
+	srv := &Server{
+		telegramLinkService: NewTelegramLinkService(),
+		discordLinkService:  NewDiscordLinkService(),
+		teamsLinkService:    NewTeamsLinkService(),
+	}
+	t.Cleanup(srv.telegramLinkService.Close)
+	t.Cleanup(srv.discordLinkService.Close)
+	t.Cleanup(srv.teamsLinkService.Close)
+
+	tests := []struct {
+		name           string
+		providerUserID string
+		responseKey    string
+		register       func(code, providerUserID string)
+		handler        http.HandlerFunc
+	}{
+		{name: "telegram", providerUserID: "telegram-user", responseKey: "telegramUserId", register: srv.telegramLinkService.RegisterCode, handler: srv.handleTelegramLinkVerify},
+		{name: "discord", providerUserID: "discord-user", responseKey: "discordUserId", register: srv.discordLinkService.RegisterCode, handler: srv.handleDiscordLinkVerify},
+		{name: "teams", providerUserID: "teams-user", responseKey: "teamsUserId", register: srv.teamsLinkService.RegisterCode, handler: srv.handleTeamsLinkVerify},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.register("ABC123", tt.providerUserID)
+			req := authenticatedLinkRequest(http.MethodPost, `{"code":"ABC123"}`)
+			recorder := httptest.NewRecorder()
+
+			tt.handler(recorder, req)
+
+			assert.Equal(t, http.StatusOK, recorder.Code)
+			var response map[string]interface{}
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+			assert.Equal(t, "confirmed", response["status"])
+			assert.Equal(t, tt.providerUserID, response[tt.responseKey])
+			assert.Equal(t, map[string]interface{}{"id": "user-1", "email": "user@example.com"}, response["user"])
+		})
+	}
+}
+
+func TestChatLinkVerificationPreservesCommonGuards(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		body       string
+		withUser   bool
+		nilService bool
+		setup      func(*testing.T, *TelegramLinkService)
+		wantStatus int
+	}{
+		{name: "method", method: http.MethodGet, wantStatus: http.StatusMethodNotAllowed},
+		{name: "user authentication", method: http.MethodPost, body: `{"code":"ABC123"}`, wantStatus: http.StatusUnauthorized},
+		{name: "invalid body", method: http.MethodPost, body: `{`, withUser: true, wantStatus: http.StatusBadRequest},
+		{name: "code required", method: http.MethodPost, body: `{}`, withUser: true, wantStatus: http.StatusBadRequest},
+		{name: "service unavailable", method: http.MethodPost, body: `{"code":"ABC123"}`, withUser: true, nilService: true, wantStatus: http.StatusInternalServerError},
+		{name: "code not found", method: http.MethodPost, body: `{"code":"MISSING"}`, withUser: true, wantStatus: http.StatusNotFound},
+		{
+			name: "code expired", method: http.MethodPost, body: `{"code":"EXPIRED"}`, withUser: true, wantStatus: http.StatusGone,
+			setup: func(_ *testing.T, svc *TelegramLinkService) {
+				svc.RegisterCode("EXPIRED", "telegram-user")
+				svc.mu.Lock()
+				svc.pending["EXPIRED"].ExpiresAt = time.Now().Add(-time.Minute)
+				svc.mu.Unlock()
+			},
+		},
+		{
+			name: "rate limit precedes body validation", method: http.MethodPost, body: `{`, withUser: true, wantStatus: http.StatusTooManyRequests,
+			setup: func(t *testing.T, svc *TelegramLinkService) {
+				for i := 0; i < verifyBurst; i++ {
+					require.True(t, svc.AllowVerify("192.0.2.1"))
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := NewTelegramLinkService()
+			defer svc.Close()
+			if tt.setup != nil {
+				tt.setup(t, svc)
+			}
+			srv := &Server{telegramLinkService: svc}
+			if tt.nilService {
+				srv.telegramLinkService = nil
+			}
+			req := httptest.NewRequest(tt.method, "/", strings.NewReader(tt.body))
+			if tt.withUser {
+				req = req.WithContext(contextWithIdentity(req.Context(), NewAuthenticatedUser("user-1", "user@example.com", "User", "member", "web")))
+			}
+			recorder := httptest.NewRecorder()
+
+			srv.handleTelegramLinkVerify(recorder, req)
+
+			assert.Equal(t, tt.wantStatus, recorder.Code)
+		})
+	}
+}
+
+func authenticatedLinkRequest(method, body string) *http.Request {
+	req := httptest.NewRequest(method, "/", strings.NewReader(body))
+	return req.WithContext(contextWithIdentity(req.Context(), NewAuthenticatedUser("user-1", "user@example.com", "User", "member", "web")))
 }
 
 func TestMaskedLinkCode(t *testing.T) {

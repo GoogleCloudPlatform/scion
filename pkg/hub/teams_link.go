@@ -17,7 +17,6 @@ package hub
 import (
 	"context"
 	"log/slog"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -262,73 +261,18 @@ func (s *Server) handleTeamsLink(w http.ResponseWriter, r *http.Request) {
 // handleTeamsLinkVerify handles POST /api/v1/teams/link/verify.
 // This is called by a logged-in user from the web UI to confirm a link code.
 func (s *Server) handleTeamsLinkVerify(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
-		return
-	}
-
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
-		return
-	}
-
-	// Rate limit by client IP to prevent brute-force attacks on link codes.
+	var allowVerify func(string) bool
+	var verify func(string, string, string) (string, string)
 	if s.teamsLinkService != nil {
-		ip, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			ip = r.RemoteAddr // fallback if no port
-		}
-		if !s.teamsLinkService.AllowVerify(ip) {
-			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many verify attempts, try again later", nil)
-			return
-		}
+		allowVerify = s.teamsLinkService.AllowVerify
+		verify = s.teamsLinkService.VerifyCode
 	}
-
-	var req struct {
-		Code string `json:"code"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
-		return
-	}
-
-	if req.Code == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "code is required", nil)
-		return
-	}
-
-	if s.teamsLinkService == nil {
-		InternalError(w)
-		return
-	}
-
-	teamsUserID, errReason := s.teamsLinkService.VerifyCode(req.Code, user.ID(), user.Email())
-	if errReason != "" {
-		switch errReason {
-		case "code_not_found":
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "code not found or expired", nil)
-		case "code_expired":
-			writeError(w, http.StatusGone, ErrCodeNotFound, "code has expired", nil)
-		default:
-			InternalError(w)
-		}
-		return
-	}
-
-	slog.Info("Teams account linked",
-		"teams_user_id", teamsUserID,
-		"user_id", user.ID(),
-		"user_email", user.Email(),
-	)
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":      "confirmed",
-		"teamsUserId": teamsUserID,
-		"user": map[string]string{
-			"id":    user.ID(),
-			"email": user.Email(),
-		},
+	handleChatLinkVerification(w, r, chatLinkVerificationOptions{
+		providerName:      "Teams",
+		userIDResponseKey: "teamsUserId",
+		userIDLogKey:      "teams_user_id",
+		allowVerify:       allowVerify,
+		verify:            verify,
 	})
 }
 
