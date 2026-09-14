@@ -452,6 +452,86 @@ func TestResolveAgentRuntimeTarget_ProjectScopedAuxiliary(t *testing.T) {
 	}
 }
 
+func TestResolveAgentRuntimeTarget_ProjectFallbackSkipsOtherProjects(t *testing.T) {
+	defaultMgr := &filteringMockManager{mockManager: mockManager{agents: []api.AgentInfo{
+		{Name: "shared-name", Labels: map[string]string{"scion.name": "shared-name", "scion.project_id": "project-a"}},
+	}}}
+	auxMgr := &filteringMockManager{mockManager: mockManager{agents: []api.AgentInfo{
+		// Legacy project metadata does not match the canonical filter, so this
+		// backend is discovered only by the compatibility fallback.
+		{Name: "shared-name", Labels: map[string]string{"scion.name": "shared-name", "scion.grove_id": "project-b"}},
+	}}}
+	defaultRuntime := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	auxRuntime := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	srv := New(DefaultServerConfig(), defaultMgr, defaultRuntime)
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRuntime, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	manager, selectedRuntime := srv.resolveAgentRuntimeTarget(context.Background(), "shared-name", "project-b")
+	if manager != auxMgr || selectedRuntime != auxRuntime {
+		t.Error("expected fallback to skip the same-name agent from another project")
+	}
+}
+
+func TestResolveAgentRuntimeTarget_ProjectFallbackAcceptsUnlabeledAgent(t *testing.T) {
+	manager := &filteringMockManager{mockManager: mockManager{agents: []api.AgentInfo{
+		{Name: "legacy-agent", Labels: map[string]string{"scion.name": "legacy-agent"}},
+	}}}
+	runtime := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), manager, runtime)
+
+	selectedManager, selectedRuntime := srv.resolveAgentRuntimeTarget(context.Background(), "legacy-agent", "project-a")
+	if selectedManager != manager || selectedRuntime != runtime {
+		t.Error("expected fallback to retain support for unlabeled agents")
+	}
+}
+
+func TestHasAgentInProjectOrUnlabeled(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent api.AgentInfo
+		match bool
+	}{
+		{
+			name:  "canonical label matches",
+			agent: api.AgentInfo{Labels: map[string]string{"scion.project_id": "project-a"}},
+			match: true,
+		},
+		{
+			name:  "legacy label matches",
+			agent: api.AgentInfo{Labels: map[string]string{"scion.grove_id": "project-a"}},
+			match: true,
+		},
+		{
+			name:  "agent field matches without label",
+			agent: api.AgentInfo{ProjectID: "project-a"},
+			match: true,
+		},
+		{
+			name:  "explicit other project",
+			agent: api.AgentInfo{ProjectID: "project-b"},
+		},
+		{
+			name:  "label takes precedence over agent field",
+			agent: api.AgentInfo{Labels: map[string]string{"scion.project_id": "project-b"}, ProjectID: "project-a"},
+		},
+		{
+			name:  "unlabeled compatibility",
+			agent: api.AgentInfo{},
+			match: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := hasAgentInProjectOrUnlabeled([]api.AgentInfo{test.agent}, "project-a"); got != test.match {
+				t.Fatalf("hasAgentInProjectOrUnlabeled() = %v, want %v", got, test.match)
+			}
+		})
+	}
+}
+
 func TestRuntimeCommand_ReturnsRuntimeName(t *testing.T) {
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "podman" }}
 	srv := New(DefaultServerConfig(), &mockManager{}, rt)
