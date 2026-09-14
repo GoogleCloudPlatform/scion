@@ -393,6 +393,73 @@ func mockHarnessConfigTarball(t *testing.T) func() {
 	return func() { http.DefaultClient.Transport = old }
 }
 
+func TestHandleProjectDiscoverResources(t *testing.T) {
+	tests := []struct {
+		name         string
+		path         string
+		mockSource   func(*testing.T) func()
+		sourceURL    string
+		wantResource string
+	}{
+		{
+			name:         "template",
+			path:         "discover-templates",
+			mockSource:   mockTemplateTarball,
+			sourceURL:    "https://github.com/acme/repo/tree/main/templates",
+			wantResource: "my-template",
+		},
+		{
+			name:         "harness config",
+			path:         "discover-harness-configs",
+			mockSource:   mockHarnessConfigTarball,
+			sourceURL:    "https://github.com/acme/repo/tree/main/harness-configs",
+			wantResource: "my-config",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, s, _ := testTemplateBootstrapServer(t)
+			ctx := context.Background()
+			slug := strings.ReplaceAll(tt.name, " ", "-")
+
+			admin := &store.User{
+				ID: tid("discover-admin-" + slug), Email: slug + "@test.com",
+				DisplayName: "Admin", Role: store.UserRoleAdmin,
+			}
+			if err := s.CreateUser(ctx, admin); err != nil {
+				t.Fatal(err)
+			}
+			ensureHubMembership(ctx, s, admin.ID)
+			ensureAdminRoleBinding(t, s, admin.ID)
+
+			project := &store.Project{
+				ID: tid("discover-project-" + slug), Name: "Discover Project",
+				Slug: "discover-project-" + slug, OwnerID: admin.ID,
+			}
+			if err := s.CreateProject(ctx, project); err != nil {
+				t.Fatal(err)
+			}
+
+			defer tt.mockSource(t)()
+			rec := doRequestAsUser(t, srv, admin, http.MethodPost,
+				"/api/v1/projects/"+project.ID+"/"+tt.path,
+				DiscoverResourcesRequest{SourceURL: tt.sourceURL})
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+			}
+
+			var resp DiscoverResourcesResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+			if resp.Count != 1 || len(resp.Resources) != 1 || resp.Resources[0] != tt.wantResource {
+				t.Fatalf("expected [%s], got %+v", tt.wantResource, resp)
+			}
+		})
+	}
+}
+
 // mockSingleHarnessConfigTarball serves a tarball where the pointed-to path IS
 // the harness-config (leaf), not a parent of configs.
 func mockSingleHarnessConfigTarball(t *testing.T) func() {
