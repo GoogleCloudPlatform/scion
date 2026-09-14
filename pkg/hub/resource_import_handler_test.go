@@ -579,47 +579,114 @@ func TestHandleResourcesImport_SingleHarnessConfig(t *testing.T) {
 	}
 }
 
-// TestHandleProjectImportHarnessConfigs verifies the per-project endpoint
-// POST /api/v1/projects/{id}/import-harness-configs works for remote URLs.
-func TestHandleProjectImportHarnessConfigs(t *testing.T) {
-	srv, s, project, _ := setupWorkspaceProject(t, "hc-proj-import")
-	ctx := context.Background()
-
-	admin := &store.User{ID: tid("user-admin-proj-hc"), Email: "admin-proj-hc@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
-	if err := s.CreateUser(ctx, admin); err != nil {
-		t.Fatal(err)
+// TestHandleProjectImportResources verifies both legacy per-project endpoints
+// retain their resource-specific response shapes and project-scoped storage.
+func TestHandleProjectImportResources(t *testing.T) {
+	tests := []struct {
+		name               string
+		path               string
+		request            any
+		mockSource         func(*testing.T) func()
+		responseField      string
+		otherResponseField string
+		wantResource       string
+		storedCount        func(context.Context, store.Store, string) (int, error)
+	}{
+		{
+			name:               "templates",
+			path:               "import-templates",
+			request:            ImportTemplatesRequest{SourceURL: "https://github.com/acme/repo/tree/main/templates"},
+			mockSource:         mockTemplateTarball,
+			responseField:      "templates",
+			otherResponseField: "harnessConfigs",
+			wantResource:       "my-template",
+			storedCount: func(ctx context.Context, s store.Store, projectID string) (int, error) {
+				result, err := s.ListTemplates(ctx, store.TemplateFilter{
+					Scope:     store.TemplateScopeProject,
+					ProjectID: projectID,
+				}, store.ListOptions{Limit: 10})
+				if err != nil {
+					return 0, err
+				}
+				return result.TotalCount, nil
+			},
+		},
+		{
+			name:               "harness configs",
+			path:               "import-harness-configs",
+			request:            ImportHarnessConfigsRequest{SourceURL: "https://github.com/acme/repo/tree/main/harness-configs"},
+			mockSource:         mockHarnessConfigTarball,
+			responseField:      "harnessConfigs",
+			otherResponseField: "templates",
+			wantResource:       "my-config",
+			storedCount: func(ctx context.Context, s store.Store, projectID string) (int, error) {
+				result, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+					Scope:     store.HarnessConfigScopeProject,
+					ProjectID: projectID,
+				}, store.ListOptions{Limit: 10})
+				if err != nil {
+					return 0, err
+				}
+				return result.TotalCount, nil
+			},
+		},
 	}
-	ensureHubMembership(ctx, s, admin.ID)
-	ensureAdminRoleBinding(t, s, admin.ID)
 
-	defer mockHarnessConfigTarball(t)()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, s, project, _ := setupWorkspaceProject(t, "project-import-"+strings.ReplaceAll(tt.name, " ", "-"))
+			ctx := context.Background()
 
-	rec := doRequestAsUser(t, srv, admin, http.MethodPost,
-		"/api/v1/projects/"+project.ID+"/import-harness-configs",
-		ImportHarnessConfigsRequest{
-			SourceURL: "https://github.com/acme/repo/tree/main/harness-configs",
+			admin := &store.User{
+				ID:          tid("user-admin-project-import-" + tt.name),
+				Email:       strings.ReplaceAll(tt.name, " ", "-") + "@test.com",
+				DisplayName: "Admin",
+				Role:        store.UserRoleAdmin,
+			}
+			if err := s.CreateUser(ctx, admin); err != nil {
+				t.Fatal(err)
+			}
+			ensureHubMembership(ctx, s, admin.ID)
+			ensureAdminRoleBinding(t, s, admin.ID)
+			defer tt.mockSource(t)()
+
+			rec := doRequestAsUser(t, srv, admin, http.MethodPost,
+				"/api/v1/projects/"+project.ID+"/"+tt.path, tt.request)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+			}
+
+			var response map[string]json.RawMessage
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			var imported []string
+			if err := json.Unmarshal(response[tt.responseField], &imported); err != nil {
+				t.Fatalf("decode %s response: %v", tt.responseField, err)
+			}
+			if len(imported) != 1 || imported[0] != tt.wantResource {
+				t.Fatalf("expected [%s], got %v", tt.wantResource, imported)
+			}
+			if _, exists := response[tt.otherResponseField]; exists {
+				t.Fatalf("unexpected response field %q", tt.otherResponseField)
+			}
+
+			var count int
+			if err := json.Unmarshal(response["count"], &count); err != nil {
+				t.Fatalf("decode count response: %v", err)
+			}
+			if count != 1 {
+				t.Fatalf("expected response count 1, got %d", count)
+			}
+
+			count, err := tt.storedCount(ctx, s, project.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 {
+				t.Fatalf("expected 1 project-scoped %s, got %d", tt.name, count)
+			}
 		})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp ImportHarnessConfigsResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatal(err)
-	}
-	if resp.Count != 1 || len(resp.HarnessConfigs) != 1 || resp.HarnessConfigs[0] != "my-config" {
-		t.Fatalf("expected [my-config], got %+v", resp)
-	}
-
-	result, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
-		Scope:     store.HarnessConfigScopeProject,
-		ProjectID: project.ID,
-	}, store.ListOptions{Limit: 10})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.TotalCount != 1 {
-		t.Fatalf("expected 1 project-scoped harness-config, got %d", result.TotalCount)
 	}
 }
 
