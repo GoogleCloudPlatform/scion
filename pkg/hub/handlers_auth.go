@@ -1660,6 +1660,9 @@ func (s *Server) getUserRole(ctx context.Context, email, currentRole, userID str
 // role binding created via the admin API (AdminAPICreatedBy). Such users were
 // promoted by an admin through the UI and must not be demoted by config changes.
 func hasUIPromotedBinding(ctx context.Context, st store.Store, userID string) bool {
+	if st == nil {
+		return false
+	}
 	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	if err != nil {
 		return false

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -110,7 +111,14 @@ func runAdminPromote(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("no database URL configured; provide --db flag or ensure server config exists")
 	}
 
-	_, _ = fmt.Fprintf(out, "Database: %s (%s)\n", cfg.Database.Driver, cfg.Database.URL)
+	printURL := cfg.Database.URL
+	if u, err := url.Parse(printURL); err == nil && u.User != nil {
+		if _, has := u.User.Password(); has {
+			u.User = url.UserPassword(u.User.Username(), "xxxxx")
+			printURL = u.String()
+		}
+	}
+	_, _ = fmt.Fprintf(out, "Database: %s (%s)\n", cfg.Database.Driver, printURL)
 
 	// Open the database
 	s, err := openRecoveryStore(ctx, cfg)
@@ -134,14 +142,36 @@ func runAdminPromote(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	// Promote to admin
+	// Get super-admin role definition
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve super-admin role definition: %w", err)
+	}
+
+	// Promote to admin: update role + create binding atomically
 	previousRole := user.Role
 	user.Role = store.UserRoleAdmin
-	if err := s.UpdateUser(ctx, user); err != nil {
-		return fmt.Errorf("failed to update user role: %w", err)
+	err = s.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.UpdateUser(ctx, user); err != nil {
+			return fmt.Errorf("failed to update user role: %w", err)
+		}
+		_, err = tx.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rd.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      user.ID,
+			ScopeType:        store.RoleScopeSystem,
+			ScopeID:          "",
+			CreatedBy:        store.AdminAPICreatedBy,
+		})
+		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return fmt.Errorf("failed to create super-admin role binding: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	_, _ = fmt.Fprintf(out, "Successfully promoted user %q (%s) from %q to %q.\n", email, user.ID, previousRole, store.UserRoleAdmin)
 	return nil
 }
-
