@@ -532,9 +532,7 @@ func (s *Server) enrichProjectOwnerNames(ctx context.Context, projects []store.P
 }
 
 // subtractProjectIDs returns IDs from all that are NOT in exclude.
-//
-// F-PLAN-01 (resolved-rs2 for project/agent list) — used to compute Shared =
-// all-membership minus owner-only set. Still used by broker list endpoint.
+// It computes Shared as the authorized project set minus the owner-only set.
 func subtractProjectIDs(all, exclude []string) []string {
 	if len(exclude) == 0 {
 		return all
