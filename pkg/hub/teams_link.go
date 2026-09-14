@@ -254,6 +254,7 @@ func (s *Server) handleTeamsLink(w http.ResponseWriter, r *http.Request) {
 		providerName: "Teams",
 		userIDField:  "teamsUserId",
 		userIDLogKey: "teams_user_id",
+		decode:       decodeTeamsLinkRegistration,
 		register:     register,
 	})
 }

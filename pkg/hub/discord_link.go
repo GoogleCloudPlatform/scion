@@ -253,6 +253,7 @@ func (s *Server) handleDiscordLink(w http.ResponseWriter, r *http.Request) {
 		providerName: "Discord",
 		userIDField:  "discordUserId",
 		userIDLogKey: "discord_user_id",
+		decode:       decodeDiscordLinkRegistration,
 		register:     register,
 	})
 }
