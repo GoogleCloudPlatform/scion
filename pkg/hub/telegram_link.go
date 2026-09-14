@@ -249,45 +249,16 @@ func (s *TelegramLinkService) cleanupLoop() {
 // handleTelegramLink handles POST /api/v1/telegram/link.
 // This is called by the Telegram plugin (broker-authenticated) to register a pending link code.
 func (s *Server) handleTelegramLink(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
-		return
+	var register func(string, string)
+	if s.telegramLinkService != nil {
+		register = s.telegramLinkService.RegisterCode
 	}
-
-	broker := GetBrokerIdentityFromContext(r.Context())
-	if broker == nil {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "broker authentication required", nil)
-		return
-	}
-
-	var req struct {
-		Code           string `json:"code"`
-		TelegramUserID string `json:"telegramUserId"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
-		return
-	}
-
-	if req.Code == "" || req.TelegramUserID == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "code and telegramUserId are required", nil)
-		return
-	}
-
-	if s.telegramLinkService == nil {
-		InternalError(w)
-		return
-	}
-
-	s.telegramLinkService.RegisterCode(req.Code, req.TelegramUserID)
-
-	slog.Info("Telegram link code registered",
-		"code_prefix", maskedLinkCode(req.Code),
-		"telegram_user_id", req.TelegramUserID,
-		"broker_id", broker.BrokerID(),
-	)
-
-	writeJSON(w, http.StatusCreated, map[string]string{"status": "registered"})
+	handleChatLinkRegistration(w, r, chatLinkRegistrationOptions{
+		providerName: "Telegram",
+		userIDField:  "telegramUserId",
+		userIDLogKey: "telegram_user_id",
+		register:     register,
+	})
 }
 
 // handleTelegramLinkVerify handles POST /api/v1/telegram/link/verify.

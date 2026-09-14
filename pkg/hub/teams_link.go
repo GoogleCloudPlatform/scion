@@ -246,45 +246,16 @@ func (s *TeamsLinkService) cleanupLoop() {
 // handleTeamsLink handles POST /api/v1/teams/link.
 // This is called by the Teams plugin (broker-authenticated) to register a pending link code.
 func (s *Server) handleTeamsLink(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
-		return
+	var register func(string, string)
+	if s.teamsLinkService != nil {
+		register = s.teamsLinkService.RegisterCode
 	}
-
-	broker := GetBrokerIdentityFromContext(r.Context())
-	if broker == nil {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "broker authentication required", nil)
-		return
-	}
-
-	var req struct {
-		Code        string `json:"code"`
-		TeamsUserID string `json:"teamsUserId"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
-		return
-	}
-
-	if req.Code == "" || req.TeamsUserID == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "code and teamsUserId are required", nil)
-		return
-	}
-
-	if s.teamsLinkService == nil {
-		InternalError(w)
-		return
-	}
-
-	s.teamsLinkService.RegisterCode(req.Code, req.TeamsUserID)
-
-	slog.Info("Teams link code registered",
-		"code_prefix", maskedLinkCode(req.Code),
-		"teams_user_id", req.TeamsUserID,
-		"broker_id", broker.BrokerID(),
-	)
-
-	writeJSON(w, http.StatusCreated, map[string]string{"status": "registered"})
+	handleChatLinkRegistration(w, r, chatLinkRegistrationOptions{
+		providerName: "Teams",
+		userIDField:  "teamsUserId",
+		userIDLogKey: "teams_user_id",
+		register:     register,
+	})
 }
 
 // handleTeamsLinkVerify handles POST /api/v1/teams/link/verify.
