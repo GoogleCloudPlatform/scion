@@ -150,7 +150,7 @@ func (s *Server) ingestAgentAttachments(ctx context.Context, projectID, senderID
 
 	sharedHostDir, _ := s.sharedDirHostPath(ctx, projectID, attachmentSharedDirName)
 	if sharedHostDir == "" {
-		s.messageLog.Error("Agent attachments dropped: no scratchpad shared dir on this host",
+		s.messageLog.ErrorContext(ctx, "Agent attachments dropped: no scratchpad shared dir on this host",
 			"project_id", projectID, "count", len(paths), "paths", paths)
 		return nil
 	}
