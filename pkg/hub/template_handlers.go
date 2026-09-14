@@ -212,52 +212,26 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var items []store.Template
-	var nextCursor string
-	var totalCount int
-	// Check if user has admin-level list visibility via permission.
-	hasAdminView := false
-	if user, ok := identity.(UserIdentity); ok {
-		hasAdminView = s.authzService.Decide(ctx, AuthzRequest{
-			Principal:  principalContextForIdentity(user),
-			Credential: credentialContextForIdentity(user),
-			Resource:   Resource{Type: "template", ID: "hub"},
-			Action:     Action("list"),
-			Permission: "template.list",
-		}).Allowed
-	}
-	// Agents with project:read scope can discover all templates.
-	// Global templates are parentless resources that cannot match
-	// project-scoped agent bindings in AuthorizeReadBatch, so agents
-	// would see zero results without this bypass. The agent's read
-	// access was already verified by checkAgentReadScope above.
-	// Individual template GET is separately gated (PR #1494).
-	if !hasAdminView {
-		if agentIdent, ok := identity.(AgentIdentity); ok && agentIdent.HasScope(ScopeProjectRead) {
-			hasAdminView = true
-		}
-	}
-	if identity != nil && !hasAdminView {
-		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Template], error) {
-			page, err := s.store.ListTemplates(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
-			if err != nil {
-				return authorizedCandidatePage[store.Template]{}, err
-			}
-			return authorizedCandidatePage[store.Template]{Items: page.Items, NextCursor: page.NextCursor}, nil
-		}, templateResource, func(t *store.Template) string { return authorizedListCursor(t.Created, t.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
-		if err != nil {
+	wideAccess := s.hasCatalogWideListAccess(ctx, identity, "template", "template.list")
+	authorizeEach := identity != nil && !wideAccess
+	result, err := listAuthorizedOrAll(
+		ctx, identity, cursor, limit, cursorBinding, authorizeEach,
+		func(ctx context.Context, opts store.ListOptions) (*store.ListResult[store.Template], error) {
+			return s.store.ListTemplates(ctx, filter, opts)
+		},
+		templateResource,
+		func(t *store.Template) string { return authorizedListCursor(t.Created, t.ID, cursorBinding) },
+		s.authzService.AuthorizeReadBatch,
+	)
+	if err != nil {
+		if authorizeEach {
 			writeAuthorizedListError(w, err)
-			return
-		}
-		items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
-	} else {
-		result, err := s.store.ListTemplates(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
-		if err != nil {
+		} else {
 			writeErrorFromErr(w, err, "")
-			return
 		}
-		items, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+		return
 	}
+	items, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
 	templates := make([]TemplateWithCapabilities, 0, len(items))
 	if identity == nil {
 		for i := range items {

@@ -192,51 +192,26 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var configs []store.HarnessConfig
-	var nextCursor string
-	var totalCount int
-	// Check if user has admin-level list visibility via permission.
-	hasAdminView := false
-	if user, ok := identity.(UserIdentity); ok {
-		hasAdminView = s.authzService.Decide(ctx, AuthzRequest{
-			Principal:  principalContextForIdentity(user),
-			Credential: credentialContextForIdentity(user),
-			Resource:   Resource{Type: "harness_config", ID: "hub"},
-			Action:     Action("list"),
-			Permission: "harness_config.list",
-		}).Allowed
-	}
-	// Agents with project:read scope can discover all harness configs.
-	// Global harness configs are parentless resources that cannot match
-	// project-scoped agent bindings in AuthorizeReadBatch, so agents
-	// would see zero results without this bypass. The agent's read
-	// access was already verified by checkAgentReadScope above.
-	if !hasAdminView {
-		if agentIdent, ok := identity.(AgentIdentity); ok && agentIdent.HasScope(ScopeProjectRead) {
-			hasAdminView = true
-		}
-	}
-	if identity != nil && !hasAdminView {
-		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.HarnessConfig], error) {
-			page, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
-			if err != nil {
-				return authorizedCandidatePage[store.HarnessConfig]{}, err
-			}
-			return authorizedCandidatePage[store.HarnessConfig]{Items: page.Items, NextCursor: page.NextCursor}, nil
-		}, harnessConfigResource, func(h *store.HarnessConfig) string { return authorizedListCursor(h.Created, h.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
-		if err != nil {
+	wideAccess := s.hasCatalogWideListAccess(ctx, identity, "harness_config", "harness_config.list")
+	authorizeEach := identity != nil && !wideAccess
+	result, err := listAuthorizedOrAll(
+		ctx, identity, cursor, limit, cursorBinding, authorizeEach,
+		func(ctx context.Context, opts store.ListOptions) (*store.ListResult[store.HarnessConfig], error) {
+			return s.store.ListHarnessConfigs(ctx, filter, opts)
+		},
+		harnessConfigResource,
+		func(h *store.HarnessConfig) string { return authorizedListCursor(h.Created, h.ID, cursorBinding) },
+		s.authzService.AuthorizeReadBatch,
+	)
+	if err != nil {
+		if authorizeEach {
 			writeAuthorizedListError(w, err)
-			return
-		}
-		configs, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
-	} else {
-		result, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
-		if err != nil {
+		} else {
 			writeErrorFromErr(w, err, "")
-			return
 		}
-		configs, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
+		return
 	}
+	configs, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
 	items := make([]HarnessConfigWithCapabilities, 0, len(configs))
 	if identity == nil {
 		for i := range configs {
