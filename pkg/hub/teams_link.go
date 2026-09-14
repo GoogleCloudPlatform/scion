@@ -278,12 +278,8 @@ func (s *Server) handleTeamsLink(w http.ResponseWriter, r *http.Request) {
 
 	s.teamsLinkService.RegisterCode(req.Code, req.TeamsUserID)
 
-	prefix := req.Code
-	if len(prefix) > 3 {
-		prefix = prefix[:3]
-	}
 	slog.Info("Teams link code registered",
-		"code_prefix", prefix+"***",
+		"code_prefix", maskedLinkCode(req.Code),
 		"teams_user_id", req.TeamsUserID,
 		"broker_id", broker.BrokerID(),
 	)

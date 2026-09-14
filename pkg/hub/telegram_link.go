@@ -282,7 +282,7 @@ func (s *Server) handleTelegramLink(w http.ResponseWriter, r *http.Request) {
 	s.telegramLinkService.RegisterCode(req.Code, req.TelegramUserID)
 
 	slog.Info("Telegram link code registered",
-		"code_prefix", req.Code[:3]+"***",
+		"code_prefix", maskedLinkCode(req.Code),
 		"telegram_user_id", req.TelegramUserID,
 		"broker_id", broker.BrokerID(),
 	)
