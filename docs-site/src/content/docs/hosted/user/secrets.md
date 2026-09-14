@@ -53,9 +53,14 @@ scion hub secret set --always MY_GLOBAL_TOKEN secret-value
 
 ### Propagation to Descendant Agents (Progeny)
 
-When an agent creates child/sub-agents (referred to as **progeny**), they do not inherit the parent agent's user-scoped configuration or secrets by default. This preserves a strict security and least-privilege boundary across agent ancestry chains.
+When an agent creates child/sub-agents (referred to as **progeny**), they do not inherit the parent agent's user-scoped configuration or secrets unless progeny propagation is enabled. This preserves a strict security and least-privilege boundary across agent ancestry chains.
 
-However, you can explicitly configure user-scoped environment variables or secrets to propagate down the progeny tree by using the `--allow-progeny` flag.
+You can enable progeny propagation in two ways:
+
+1. **Per-secret**: Use the `--allow-progeny` flag when setting an individual secret or environment variable.
+2. **Hub-wide default**: Hub administrators can configure a hub-wide default so that newly created user-scoped secrets default to progeny-enabled. Individual secrets can still override this default. When no hub-wide default is set, `AllowProgeny` defaults to `false`.
+
+To explicitly enable propagation on a specific secret or variable, use the `--allow-progeny` flag:
 
 * **User-Scoped Secrets**: Can be marked for progeny propagation at any time.
   ```bash
@@ -322,7 +327,7 @@ To use secrets in production, the Hub must be configured with a production-grade
 Scion uses a secrets backend to store secret values securely. The recommended backend for production is **GCP Secret Manager**, while the default `local` backend stores values directly in the Hub database using AES-256-GCM encryption at rest (derived from the hub signing secret).
 
 :::note[Encryption at Rest]
-Secret values are never stored in plaintext. If using the default `local` backend, values are encrypted before being written to the database. Legacy plaintext values are transparently re-encrypted on their next write.
+Secret values are never stored in plaintext. If using the default `local` backend, values are encrypted using AES-256-GCM (derived from the hub signing secret) before being written to the database. Legacy plaintext values migrate transparently on next read.
 :::
 
 #### Configuring GCP Secret Manager

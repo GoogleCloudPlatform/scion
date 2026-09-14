@@ -369,6 +369,27 @@ server:
 
 The `scripts/cloudrun/` directory on the `pr/cloudrun-hub` branch contains reference deployment scripts (deploy.sh, entrypoint.sh, hub-settings-template.yaml) for a Cloud Run + IAP topology that can serve as a starting point.
 
+### Cloud Run IAP reverse proxy (VPC-fronting)
+
+If your Scion Hub runs on a private GCE VM (or any internal VPC service) and you want to front it with IAP via Cloud Run, the `extras/cloudrun-iap-proxy/` directory provides a lightweight Go reverse proxy purpose-built for this topology:
+
+```text
+[User Browser / Client]
+        │ (HTTPS)
+[Cloud Run (IAP Proxy)]
+        │ (Direct VPC Egress / Private IP)
+  [Scion Hub (GCE VM)]
+```
+
+Key features:
+
+- **IAP header preservation** — forwards `X-Goog-IAP-JWT-Assertion` and authenticated-user headers to the backend Hub.
+- **HTTP/2 cleartext (h2c) support** — uses `h2c` for multiplexed streaming over Cloud Run, which is critical for SSE connections (agent events, live dashboard updates).
+- **Health probe** — exposes `/proxy-healthz` for Cloud Run health checks without proxying to the backend.
+- **Direct VPC Egress ready** — deploy with Cloud Run Direct VPC Egress to reach internal compute instances on private RFC 1918 IPs.
+
+The directory includes a Dockerfile, deploy script, and unit tests. See the `README.md` in `extras/cloudrun-iap-proxy/` for configuration and deployment instructions.
+
 ## Interactive CLI sessions (scion attach) via IAP
 
 Connecting an interactive terminal to a running agent's session (`scion attach <agent-name>`) when the Hub is behind IAP requires tunneling through the Google platform guard.
