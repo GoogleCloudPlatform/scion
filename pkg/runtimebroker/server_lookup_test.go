@@ -423,6 +423,35 @@ func TestResolveRuntimeForAgent_NotFoundFallsBackToDefault(t *testing.T) {
 	}
 }
 
+func TestResolveAgentRuntimeTarget_ProjectScopedAuxiliary(t *testing.T) {
+	defaultMgr := &filteringMockManager{mockManager: mockManager{agents: []api.AgentInfo{
+		{Name: "shared-name", Labels: map[string]string{"scion.name": "shared-name", "scion.project_id": "project-a"}},
+	}}}
+	auxMgr := &filteringMockManager{mockManager: mockManager{agents: []api.AgentInfo{
+		{Name: "shared-name", Labels: map[string]string{"scion.name": "shared-name", "scion.project_id": "project-b"}},
+	}}}
+	defaultRuntime := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	auxRuntime := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	srv := New(DefaultServerConfig(), defaultMgr, defaultRuntime)
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRuntime, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	manager, selectedRuntime := srv.resolveAgentRuntimeTarget(context.Background(), "Shared-Name", "project-b")
+	if manager != auxMgr {
+		t.Error("expected the project-scoped auxiliary manager")
+	}
+	if selectedRuntime != auxRuntime {
+		t.Error("expected the runtime paired with the project-scoped auxiliary manager")
+	}
+	if got := srv.resolveManagerForAgent(context.Background(), "Shared-Name", "project-b"); got != auxMgr {
+		t.Error("manager wrapper selected a different backend")
+	}
+	if got := srv.resolveRuntimeForAgent(context.Background(), "Shared-Name", "project-b"); got != auxRuntime {
+		t.Error("runtime wrapper selected a different backend")
+	}
+}
+
 func TestRuntimeCommand_ReturnsRuntimeName(t *testing.T) {
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "podman" }}
 	srv := New(DefaultServerConfig(), &mockManager{}, rt)
