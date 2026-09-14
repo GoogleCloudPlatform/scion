@@ -484,7 +484,11 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 			"user account is suspended", nil)
 		return
 	}
-	if newRole := s.getUserRole(claims.Email, storedRole); role != newRole {
+	refreshUserID := ""
+	if user != nil {
+		refreshUserID = user.ID
+	}
+	if newRole := s.getUserRole(r.Context(), claims.Email, storedRole, refreshUserID); role != newRole {
 		slog.Info("User role changed on token refresh", "email", claims.Email, "old_role", role, "new_role", newRole)
 		role = newRole
 		// Persist the role change
@@ -1368,7 +1372,7 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			Email:       info.Email,
 			DisplayName: info.DisplayName,
 			AvatarURL:   info.AvatarURL,
-			Role:        s.getUserRole(info.Email, ""),
+			Role:        s.getUserRole(ctx, info.Email, "", ""),
 			Status:      "active",
 			Created:     time.Now(),
 			LastLogin:   time.Now(),
@@ -1408,7 +1412,7 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			}
 			user.LastLogin = time.Now()
 			oldRole := user.Role
-			user.Role = s.getUserRole(info.Email, user.Role)
+			user.Role = s.getUserRole(ctx, info.Email, user.Role, user.ID)
 			if oldRole == "admin" && user.Role != "admin" {
 				bindingSuperAdmin = "delete"
 			} else if user.Role == "admin" && oldRole != "admin" {
@@ -1430,7 +1434,7 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			// agrees with IsUnscopedLocalPlatformAdmin. The empty-list guard
 			// is inherited: determineUserRole refuses to demote when AdminEmails
 			// is nil/empty, so oldRole == newRole and this branch is skipped.
-			if newRole := s.getUserRole(info.Email, user.Role); user.Role != newRole {
+			if newRole := s.getUserRole(ctx, info.Email, user.Role, user.ID); user.Role != newRole {
 				oldRole := user.Role
 				slog.Info("User role changed on login", "email", info.Email, "old_role", oldRole, "new_role", newRole)
 				user.Role = newRole
@@ -1603,7 +1607,7 @@ func isEmailAuthorized(email string, authorizedDomains []string, adminEmails []s
 //
 // currentRole is the user's role as stored in the database; pass "" for a user
 // that does not exist yet.
-func determineUserRole(email string, adminEmails []string, currentRole string, demotionSafe bool) string {
+func determineUserRole(email string, adminEmails []string, currentRole string, demotionSafe bool, isUIPromoted bool) string {
 	emailLower := strings.ToLower(email)
 	for _, adminEmail := range adminEmails {
 		if strings.ToLower(adminEmail) == emailLower {
@@ -1612,6 +1616,10 @@ func determineUserRole(email string, adminEmails []string, currentRole string, d
 	}
 	// D11: if the user currently holds "admin" but is no longer in adminEmails,
 	// demote to "member". The admin role is owned by config, not by the store.
+	//
+	// UI-promoted guard: admins promoted via the admin API (AdminAPICreatedBy
+	// binding) are immune to login-time demotion — their authority comes from
+	// an explicit admin action, not from the AdminEmails config.
 	//
 	// Empty-list safety: when adminEmails is nil or empty, do NOT demote.
 	// An empty list is almost always a config load failure, not an instruction
@@ -1622,7 +1630,7 @@ func determineUserRole(email string, adminEmails []string, currentRole string, d
 	// demotions because the intended admin set was empty, or reconciler never
 	// ran), refuse login-time demotion too — the same condition that prevents
 	// mass demotion at startup must prevent one-at-a-time demotion at login.
-	if currentRole == "admin" && len(adminEmails) > 0 && demotionSafe {
+	if currentRole == "admin" && len(adminEmails) > 0 && demotionSafe && !isUIPromoted {
 		return "member"
 	}
 	if currentRole != "" {
@@ -1636,8 +1644,39 @@ func determineUserRole(email string, adminEmails []string, currentRole string, d
 // when the reconciler refused demotions (zero intended admins, empty config, or
 // reconciler never ran), demotionSafe is false and login-time demotion is blocked
 // to prevent one-at-a-time admin loss through the interactive path.
-func (s *Server) getUserRole(email, currentRole string) string {
-	return determineUserRole(email, s.AdminEmails(), currentRole, s.demotionSafe.Load())
+//
+// userID may be empty for new users (no bindings to check). When non-empty and
+// the current role is "admin", the store is queried for an AdminAPICreatedBy
+// super-admin binding to protect UI-promoted admins from demotion.
+func (s *Server) getUserRole(ctx context.Context, email, currentRole, userID string) string {
+	uiPromoted := false
+	if currentRole == "admin" && userID != "" {
+		uiPromoted = hasUIPromotedBinding(ctx, s.store, userID)
+	}
+	return determineUserRole(email, s.AdminEmails(), currentRole, s.demotionSafe.Load(), uiPromoted)
+}
+
+// hasUIPromotedBinding reports whether the user has a system-scoped super-admin
+// role binding created via the admin API (AdminAPICreatedBy). Such users were
+// promoted by an admin through the UI and must not be demoted by config changes.
+func hasUIPromotedBinding(ctx context.Context, st store.Store, userID string) bool {
+	if st == nil {
+		return false
+	}
+	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		return false
+	}
+	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return false
+	}
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID && b.CreatedBy == store.AdminAPICreatedBy {
+			return true
+		}
+	}
+	return false
 }
 
 // handleInviteRedeem handles POST /api/v1/auth/invite/redeem.

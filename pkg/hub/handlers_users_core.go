@@ -762,7 +762,8 @@ func (s *Server) executeRoleTransition(
 }
 
 // createSuperAdminBindingTx idempotently creates a system-scoped super-admin
-// role binding. Uses SystemReconcileCreatedBy sentinel (D10 store guard).
+// role binding. Uses AdminAPICreatedBy sentinel so that UI/API-granted
+// promotions are protected from demotion by ReconcileSuperAdminBindings.
 func (s *Server) createSuperAdminBindingTx(
 	ctx context.Context, tx store.Store,
 	userID string, rd *store.RoleDefinition,
@@ -773,7 +774,7 @@ func (s *Server) createSuperAdminBindingTx(
 		PrincipalID:      userID,
 		ScopeType:        store.RoleScopeSystem,
 		ScopeID:          "",
-		CreatedBy:        store.SystemReconcileCreatedBy,
+		CreatedBy:        store.AdminAPICreatedBy,
 	})
 	if err != nil && errors.Is(err, store.ErrAlreadyExists) {
 		return nil

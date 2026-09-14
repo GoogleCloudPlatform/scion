@@ -1085,9 +1085,10 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 	canDemote := len(adminEmails) > 0
 
 	if canDemote {
-		// Pre-scan: count existing users who match AdminEmails. This is the
-		// intended admin set — the set of users who WILL be admin after
-		// reconciliation completes.
+		// Pre-scan: count existing users who match AdminEmails OR who have
+		// UI-promoted (AdminAPICreatedBy) super-admin bindings. Both groups
+		// will remain admin after reconciliation, so they form the intended
+		// admin set.
 		var intendedAdminCount int
 		var preCursor string
 		for {
@@ -1101,6 +1102,21 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 			for i := range users.Items {
 				if adminSet[strings.ToLower(users.Items[i].Email)] {
 					intendedAdminCount++
+					continue
+				}
+				// Also count UI-promoted admins who are not in AdminEmails —
+				// they will NOT be demoted, so they count toward intended admins.
+				if users.Items[i].Role == "admin" {
+					bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, users.Items[i].ID)
+					if err != nil {
+						continue
+					}
+					for _, b := range bindings {
+						if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID && b.CreatedBy == store.AdminAPICreatedBy {
+							intendedAdminCount++
+							break
+						}
+					}
 				}
 			}
 			if users.NextCursor == "" {
@@ -1112,8 +1128,8 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 		if intendedAdminCount == 0 {
 			// Every email in AdminEmails belongs to a user who has never
 			// logged in, or AdminEmails contains only whitespace/typos that
-			// match nobody. Proceeding would demote every current admin,
-			// leaving zero administrators. Refuse.
+			// match nobody, and no UI-promoted admins exist. Proceeding would
+			// demote every current admin, leaving zero administrators. Refuse.
 			slog.Error("effect guard: reconciliation would leave ZERO administrators — "+
 				"AdminEmails matches no existing users; refusing all demotions. "+
 				"Verify AdminEmails entries match real user emails",
@@ -1173,7 +1189,27 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 					created++
 				}
 			} else if canDemote {
-				// Reverse: demote role and delete super-admin binding.
+				// Check if this admin was promoted via UI/API (protected from demotion).
+				bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, u.ID)
+				if err != nil {
+					continue
+				}
+
+				isUIPromoted := false
+				for _, b := range bindings {
+					if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID && b.CreatedBy == store.AdminAPICreatedBy {
+						isUIPromoted = true
+						break
+					}
+				}
+
+				if isUIPromoted {
+					slog.Info("skipping demotion for UI-promoted admin",
+						"user_id", u.ID, "email", u.Email)
+					continue
+				}
+
+				// Reverse: demote role and delete super-admin binding (config-granted only).
 				if u.Role == "admin" {
 					slog.Warn("demoting user: removed from AdminEmails",
 						"user_id", u.ID, "email", u.Email, "old_role", "admin", "new_role", "member")
@@ -1186,11 +1222,6 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 					}
 				}
 				// Delete orphaned super-admin bindings for users NOT in adminEmails.
-				// Only the super-admin binding is touched — ordinary grants are preserved.
-				bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, u.ID)
-				if err != nil {
-					continue
-				}
 				for _, b := range bindings {
 					if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
 						slog.Warn("deleting orphaned super-admin binding",
