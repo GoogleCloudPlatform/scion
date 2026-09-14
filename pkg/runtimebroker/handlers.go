@@ -2482,26 +2482,23 @@ func (s *Server) resolveHarnessConfigForEnvGather(req CreateAgentRequest, settin
 	return res.Name
 }
 
-// resolveManagerForAgent returns the appropriate agent.Manager for an existing
-// agent by checking the default runtime first, then falling back to auxiliary
-// runtimes. This ensures stop/delete/restart operations target the correct
-// runtime when agents are launched on non-default runtimes (e.g. K8s pods
-// when the broker's default is Docker).
-// projectID scopes the lookup to a specific project to prevent cross-project collision.
-func (s *Server) resolveManagerForAgent(ctx context.Context, id, projectID string) agent.Manager {
+// resolveAgentRuntimeTarget finds the manager/runtime pair that contains an
+// existing agent. Keeping the pair together prevents manager-based and direct
+// runtime operations from drifting to different backends.
+func (s *Server) resolveAgentRuntimeTarget(ctx context.Context, id, projectID string) (agent.Manager, scionrt.Runtime) {
 	slug := strings.ToLower(id)
 	filter := map[string]string{"scion.name": slug}
 	if projectID != "" {
 		filter["scion.project_id"] = projectID
 	}
 
-	// Try the default manager first
+	// Try the default runtime first.
 	agents, err := s.manager.List(ctx, filter)
 	if err == nil && len(agents) > 0 {
-		return s.manager
+		return s.manager, s.runtime
 	}
 
-	// Fall back to auxiliary runtimes
+	// Snapshot the auxiliary runtimes so manager calls happen without the lock.
 	s.auxiliaryRuntimesMu.RLock()
 	auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
 	for k, v := range s.auxiliaryRuntimes {
@@ -2512,81 +2509,43 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, projectID strin
 	for _, aux := range auxRuntimes {
 		auxAgents, auxErr := aux.Manager.List(ctx, filter)
 		if auxErr == nil && len(auxAgents) > 0 {
-			return aux.Manager
+			return aux.Manager, aux.Runtime
 		}
 	}
 
 	// If project-scoped lookup found nothing, retry without project filter.
-	// This handles backward compatibility with containers that lack the
-	// scion.grove_id label (pre-existing agents or solo/CLI mode).
+	// This supports pre-existing containers and solo/CLI mode.
 	if projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
 		if err == nil && len(agents) > 0 {
-			return s.manager
+			return s.manager, s.runtime
 		}
 		for _, aux := range auxRuntimes {
 			auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
 			if auxErr == nil && len(auxAgents) > 0 {
-				return aux.Manager
+				return aux.Manager, aux.Runtime
 			}
 		}
 	}
 
 	// Default fallback — the agent may have already been removed or the
 	// runtime is genuinely the default one (e.g. pod already deleted).
-	return s.manager
+	return s.manager, s.runtime
 }
 
-// resolveRuntimeForAgent returns the appropriate runtime.Runtime for an
-// existing agent by checking the default runtime first, then falling back
-// to auxiliary runtimes. This is needed for operations that call runtime
-// methods directly (e.g. Exec, GetLogs) rather than going through the manager.
-// projectID scopes the lookup to a specific project to prevent cross-project collision.
+// resolveManagerForAgent returns the manager for an existing agent so
+// lifecycle operations target the backend where that agent is running.
+func (s *Server) resolveManagerForAgent(ctx context.Context, id, projectID string) agent.Manager {
+	manager, _ := s.resolveAgentRuntimeTarget(ctx, id, projectID)
+	return manager
+}
+
+// resolveRuntimeForAgent returns the runtime for direct operations such as
+// exec and log retrieval.
 func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID string) scionrt.Runtime {
-	slug := strings.ToLower(id)
-	filter := map[string]string{"scion.name": slug}
-	if projectID != "" {
-		filter["scion.project_id"] = projectID
-	}
-
-	// Try the default manager first
-	agents, err := s.manager.List(ctx, filter)
-	if err == nil && len(agents) > 0 {
-		return s.runtime
-	}
-
-	// Fall back to auxiliary runtimes
-	s.auxiliaryRuntimesMu.RLock()
-	auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
-	for k, v := range s.auxiliaryRuntimes {
-		auxRuntimes[k] = v
-	}
-	s.auxiliaryRuntimesMu.RUnlock()
-
-	for _, aux := range auxRuntimes {
-		auxAgents, auxErr := aux.Manager.List(ctx, filter)
-		if auxErr == nil && len(auxAgents) > 0 {
-			return aux.Runtime
-		}
-	}
-
-	// Backward compatibility: retry without project filter for pre-existing containers
-	if projectID != "" {
-		fallbackFilter := map[string]string{"scion.name": slug}
-		agents, err = s.manager.List(ctx, fallbackFilter)
-		if err == nil && len(agents) > 0 {
-			return s.runtime
-		}
-		for _, aux := range auxRuntimes {
-			auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
-			if auxErr == nil && len(auxAgents) > 0 {
-				return aux.Runtime
-			}
-		}
-	}
-
-	return s.runtime
+	_, runtime := s.resolveAgentRuntimeTarget(ctx, id, projectID)
+	return runtime
 }
 
 // resolveManagerForOpts returns the appropriate agent.Manager for the given
