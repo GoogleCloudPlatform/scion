@@ -195,7 +195,6 @@ func TestBuiltInRoles_ProjectMemberPermissions(t *testing.T) {
 		"agent.create",
 		"agent.read",
 		"agent.list",
-		"agent.message",
 		"project.read",
 		"project.list",
 	}
@@ -208,6 +207,7 @@ func TestBuiltInRoles_ProjectMemberPermissions(t *testing.T) {
 	// hub-level permissions.
 	excluded := []string{
 		"agent.delete",
+		"agent.message", // R3: messaging requires owner/admin or ancestry
 		"agent.update",
 		"agent.set_message_mode",
 		"agent.stop_all", // R2: bulk stop is administrative
