@@ -16,7 +16,6 @@ package runtime
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -25,7 +24,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -359,16 +357,7 @@ func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
 		return fmt.Errorf("failed to list containers: %w", err)
 	}
 
-	var agent *api.AgentInfo
-	for _, a := range agents {
-		// Match by full container ID, short ID (12 chars), or name (with or without leading slash)
-		if a.ContainerID == id || (len(id) >= 12 && strings.HasPrefix(a.ContainerID, id)) || (len(a.ContainerID) >= 12 && strings.HasPrefix(id, a.ContainerID)) ||
-			a.Name == id || a.Name == "/"+id || strings.TrimPrefix(a.Name, "/") == id {
-			agent = &a
-			break
-		}
-	}
-
+	agent := findContainerAgent(agents, id)
 	if agent == nil {
 		return fmt.Errorf("agent '%s' container not found, it may have exited and been removed", id)
 	}
@@ -435,56 +424,14 @@ func (r *PodmanRuntime) Sync(ctx context.Context, id string, direction SyncDirec
 		return fmt.Errorf("failed to list containers: %w", err)
 	}
 
-	var agent *api.AgentInfo
-	for _, a := range agents {
-		// Match by full container ID, short ID (12 chars), or name (with or without leading slash)
-		if a.ContainerID == id || (len(id) >= 12 && strings.HasPrefix(a.ContainerID, id)) || (len(a.ContainerID) >= 12 && strings.HasPrefix(id, a.ContainerID)) ||
-			a.Name == id || a.Name == "/"+id || strings.TrimPrefix(a.Name, "/") == id {
-			agent = &a
-			break
-		}
-	}
-
+	agent := findContainerAgent(agents, id)
 	if agent == nil {
 		return fmt.Errorf("agent '%s' container not found", id)
 	}
 
 	// Check for GCS volumes
-	if val, ok := agent.Labels["scion.gcs_volumes"]; ok && val != "" {
-		decoded, err := base64.StdEncoding.DecodeString(val)
-		if err != nil {
-			return fmt.Errorf("failed to decode gcs volume info: %w", err)
-		}
-
-		type gcsVolInfo struct {
-			Source string `json:"source"`
-			Target string `json:"target"`
-			Bucket string `json:"bucket"`
-			Prefix string `json:"prefix"`
-		}
-		var vols []gcsVolInfo
-		if err := json.Unmarshal(decoded, &vols); err != nil {
-			return fmt.Errorf("failed to parse gcs volume info: %w", err)
-		}
-
-		for _, v := range vols {
-			if v.Source == "" {
-				continue
-			}
-			switch direction {
-			case SyncTo:
-				if err := gcp.SyncToGCS(ctx, v.Source, v.Bucket, v.Prefix); err != nil {
-					return fmt.Errorf("failed to sync to GCS: %w", err)
-				}
-			case SyncFrom:
-				if err := gcp.SyncFromGCS(ctx, v.Bucket, v.Prefix, v.Source); err != nil {
-					return fmt.Errorf("failed to sync from GCS: %w", err)
-				}
-			default:
-				return fmt.Errorf("sync direction must be specified for GCS volumes")
-			}
-		}
-		return nil
+	if encoded := agent.Labels["scion.gcs_volumes"]; encoded != "" {
+		return syncGCSVolumes(ctx, encoded, direction)
 	}
 
 	// Podman runtime uses bind mounts for normal volumes, so sync is automatic/noop

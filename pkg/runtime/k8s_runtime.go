@@ -32,7 +32,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1483,13 +1482,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 
 	// Process Volumes
-	type gcsVolInfo struct {
-		Source string `json:"source"`
-		Target string `json:"target"`
-		Bucket string `json:"bucket"`
-		Prefix string `json:"prefix"`
-	}
-	var gcsVolumes []gcsVolInfo
+	var gcsVolumes []gcsVolumeInfo
 
 	for i, v := range config.Volumes {
 		switch v.Type {
@@ -1522,7 +1515,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			pod.Annotations = ensureAnnotations(pod.Annotations)
 			pod.Annotations["gke-gcsfuse/volumes"] = "true"
 
-			gcsVolumes = append(gcsVolumes, gcsVolInfo{
+			gcsVolumes = append(gcsVolumes, gcsVolumeInfo{
 				Source: v.Source,
 				Target: v.Target,
 				Bucket: v.Bucket,
@@ -2230,41 +2223,8 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 	}
 
 	// Check for GCS volumes
-	if val, ok := agent.Annotations["scion.gcs_volumes"]; ok && val != "" {
-		decoded, err := base64.StdEncoding.DecodeString(val)
-		if err != nil {
-			return fmt.Errorf("failed to decode gcs volume info: %w", err)
-		}
-
-		type gcsVolInfo struct {
-			Source string `json:"source"`
-			Target string `json:"target"`
-			Bucket string `json:"bucket"`
-			Prefix string `json:"prefix"`
-		}
-		var vols []gcsVolInfo
-		if err := json.Unmarshal(decoded, &vols); err != nil {
-			return fmt.Errorf("failed to parse gcs volume info: %w", err)
-		}
-
-		for _, v := range vols {
-			if v.Source == "" {
-				continue
-			}
-			switch direction {
-			case SyncTo:
-				if err := gcp.SyncToGCS(ctx, v.Source, v.Bucket, v.Prefix); err != nil {
-					return fmt.Errorf("failed to sync to GCS: %w", err)
-				}
-			case SyncFrom:
-				if err := gcp.SyncFromGCS(ctx, v.Bucket, v.Prefix, v.Source); err != nil {
-					return fmt.Errorf("failed to sync from GCS: %w", err)
-				}
-			default:
-				return fmt.Errorf("sync direction must be specified for GCS volumes")
-			}
-		}
-		return nil
+	if encoded := agent.Annotations["scion.gcs_volumes"]; encoded != "" {
+		return syncGCSVolumes(ctx, encoded, direction)
 	}
 
 	workspacePath := agent.Annotations["scion.workspace"]
