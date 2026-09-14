@@ -26,8 +26,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
-	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
-	"github.com/google/uuid"
 )
 
 // ProjectCacheRefreshResponse is the response for a project cache refresh operation.
@@ -358,7 +356,7 @@ func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, project *sto
 	}
 
 	var uploadResp RuntimeBrokerProjectUploadResponse
-	if err := tunnelProjectWorkspaceRequest(ctx, cc, brokerID, "POST", "/api/v1/workspace/project-upload", uploadReq, &uploadResp); err != nil {
+	if err := tunnelWorkspaceRequest(ctx, cc, brokerID, "POST", "/api/v1/workspace/project-upload", uploadReq, &uploadResp); err != nil {
 		return nil, fmt.Errorf("broker upload failed: %w", err)
 	}
 
@@ -467,44 +465,4 @@ func (s *Server) hasProjectCache(slug string) bool {
 	}
 	info, err := os.Stat(cachePath)
 	return err == nil && info.IsDir()
-}
-
-// tunnelProjectWorkspaceRequest tunnels a project workspace request to a Runtime Broker
-// via the control channel. This is similar to tunnelWorkspaceRequest but for
-// project-level (not agent-level) operations.
-func tunnelProjectWorkspaceRequest(ctx context.Context, cc *ControlChannelManager, brokerID, method, path string, reqBody interface{}, respBody interface{}) error {
-	if !cc.IsConnected(brokerID) {
-		return errBrokerNotConnected(brokerID)
-	}
-
-	var body []byte
-	var err error
-	if reqBody != nil {
-		body, err = json.Marshal(reqBody)
-		if err != nil {
-			return err
-		}
-	}
-
-	headers := map[string]string{
-		"Content-Type": "application/json",
-	}
-	reqEnv := wsprotocol.NewRequestEnvelope(uuid.New().String(), method, path, "", headers, body)
-
-	respEnv, err := cc.TunnelRequest(ctx, brokerID, reqEnv)
-	if err != nil {
-		return err
-	}
-
-	if respEnv.StatusCode >= 400 {
-		return errRuntimeBrokerError(respEnv.StatusCode, string(respEnv.Body))
-	}
-
-	if respBody != nil && len(respEnv.Body) > 0 {
-		if err := json.Unmarshal(respEnv.Body, respBody); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
