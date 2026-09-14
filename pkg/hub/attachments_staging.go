@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -167,6 +168,8 @@ func (s *Server) sharedDirHostPath(ctx context.Context, projectID, name string) 
 		}
 	}
 	if !found {
+		slog.Debug("sharedDirHostPath: project has no shared dir entry",
+			"project_id", projectID, "name", name)
 		return "", false
 	}
 
@@ -188,5 +191,7 @@ func (s *Server) sharedDirHostPath(ctx context.Context, projectID, name string) 
 			return c, inWorkspace
 		}
 	}
+	slog.Debug("sharedDirHostPath: no candidate directory exists on disk",
+		"project_id", projectID, "name", name, "candidates", candidates)
 	return "", false
 }
