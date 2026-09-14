@@ -166,38 +166,13 @@ func (r *Receiver) IsRunning() bool {
 
 // handleHTTPTraces handles OTLP HTTP trace requests.
 func (r *Receiver) handleHTTPTraces(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Read the request body
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		http.Error(w, "Failed to read body", http.StatusBadRequest)
-		return
-	}
-
 	var exportReq coltracepb.ExportTraceServiceRequest
-	if err := proto.Unmarshal(body, &exportReq); err != nil {
-		http.Error(w, "Failed to parse OTLP request", http.StatusBadRequest)
-		return
-	}
-
-	// Process spans
-	if r.handler != nil {
-		if err := r.handler(req.Context(), exportReq.ResourceSpans); err != nil {
-			http.Error(w, "Failed to process spans", http.StatusInternalServerError)
-			return
+	handleHTTPExport(w, req, &exportReq, &coltracepb.ExportTraceServiceResponse{}, "Failed to process spans", func(ctx context.Context) error {
+		if r.handler == nil {
+			return nil
 		}
-	}
-
-	// Return success response
-	resp := &coltracepb.ExportTraceServiceResponse{}
-	respBytes, _ := proto.Marshal(resp)
-	w.Header().Set("Content-Type", "application/x-protobuf")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(respBytes)
+		return r.handler(ctx, exportReq.ResourceSpans)
+	})
 }
 
 // traceServiceServer implements the OTLP gRPC trace service.
@@ -218,35 +193,13 @@ func (s *traceServiceServer) Export(ctx context.Context, req *coltracepb.ExportT
 
 // handleHTTPMetrics handles OTLP HTTP metric requests.
 func (r *Receiver) handleHTTPMetrics(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		http.Error(w, "Failed to read body", http.StatusBadRequest)
-		return
-	}
-
 	var exportReq colmetricpb.ExportMetricsServiceRequest
-	if err := proto.Unmarshal(body, &exportReq); err != nil {
-		http.Error(w, "Failed to parse OTLP request", http.StatusBadRequest)
-		return
-	}
-
-	if r.metricHandler != nil {
-		if err := r.metricHandler(req.Context(), exportReq.ResourceMetrics); err != nil {
-			http.Error(w, "Failed to process metrics", http.StatusInternalServerError)
-			return
+	handleHTTPExport(w, req, &exportReq, &colmetricpb.ExportMetricsServiceResponse{}, "Failed to process metrics", func(ctx context.Context) error {
+		if r.metricHandler == nil {
+			return nil
 		}
-	}
-
-	resp := &colmetricpb.ExportMetricsServiceResponse{}
-	respBytes, _ := proto.Marshal(resp)
-	w.Header().Set("Content-Type", "application/x-protobuf")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(respBytes)
+		return r.metricHandler(ctx, exportReq.ResourceMetrics)
+	})
 }
 
 // metricsServiceServer implements the OTLP gRPC metrics service.
@@ -267,6 +220,16 @@ func (s *metricsServiceServer) Export(ctx context.Context, req *colmetricpb.Expo
 
 // handleHTTPLogs handles OTLP HTTP log requests.
 func (r *Receiver) handleHTTPLogs(w http.ResponseWriter, req *http.Request) {
+	var exportReq collogspb.ExportLogsServiceRequest
+	handleHTTPExport(w, req, &exportReq, &collogspb.ExportLogsServiceResponse{}, "Failed to process logs", func(ctx context.Context) error {
+		if r.logHandler == nil {
+			return nil
+		}
+		return r.logHandler(ctx, exportReq.ResourceLogs)
+	})
+}
+
+func handleHTTPExport(w http.ResponseWriter, req *http.Request, exportReq, exportResp proto.Message, processError string, process func(context.Context) error) {
 	if req.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -277,22 +240,16 @@ func (r *Receiver) handleHTTPLogs(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
 		return
 	}
-
-	var exportReq collogspb.ExportLogsServiceRequest
-	if err := proto.Unmarshal(body, &exportReq); err != nil {
+	if err := proto.Unmarshal(body, exportReq); err != nil {
 		http.Error(w, "Failed to parse OTLP request", http.StatusBadRequest)
 		return
 	}
-
-	if r.logHandler != nil {
-		if err := r.logHandler(req.Context(), exportReq.ResourceLogs); err != nil {
-			http.Error(w, "Failed to process logs", http.StatusInternalServerError)
-			return
-		}
+	if err := process(req.Context()); err != nil {
+		http.Error(w, processError, http.StatusInternalServerError)
+		return
 	}
 
-	resp := &collogspb.ExportLogsServiceResponse{}
-	respBytes, _ := proto.Marshal(resp)
+	respBytes, _ := proto.Marshal(exportResp)
 	w.Header().Set("Content-Type", "application/x-protobuf")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(respBytes)
