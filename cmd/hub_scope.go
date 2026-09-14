@@ -26,21 +26,32 @@ import (
 
 type hubScopeResolver func(*cobra.Command, *config.Settings) (string, string, error)
 
-func resolveHubScope(
-	cmd *cobra.Command,
-	resolve hubScopeResolver,
-) (hubclient.Client, string, string, context.Context, context.CancelFunc, error) {
+// loadHubClient returns the resolved settings alongside the client for callers
+// that need project or endpoint metadata after client construction.
+func loadHubClient() (*config.Settings, hubclient.Client, error) {
 	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return nil, "", "", nil, nil, fmt.Errorf("failed to resolve project path: %w", err)
+		return nil, nil, fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
 	if err != nil {
-		return nil, "", "", nil, nil, fmt.Errorf("failed to load settings: %w", err)
+		return nil, nil, fmt.Errorf("failed to load settings: %w", err)
 	}
 
 	client, err := getHubClient(settings)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return settings, client, nil
+}
+
+func resolveHubScope(
+	cmd *cobra.Command,
+	resolve hubScopeResolver,
+) (hubclient.Client, string, string, context.Context, context.CancelFunc, error) {
+	settings, client, err := loadHubClient()
 	if err != nil {
 		return nil, "", "", nil, nil, err
 	}

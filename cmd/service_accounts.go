@@ -21,7 +21,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
@@ -239,17 +238,7 @@ type saScopeContext struct {
 func resolveSAScope() (*saScopeContext, error) {
 	scope := saScopeFromGlobalFlag()
 
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	settings, client, err := loadHubClient()
 	if err != nil {
 		return nil, err
 	}

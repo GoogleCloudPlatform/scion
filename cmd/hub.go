@@ -1197,18 +1197,7 @@ func runHubProjects(cmd *cobra.Command, args []string) error {
 		return runHubProjectsInfo(cmd, args)
 	}
 
-	// Resolve project path to find project settings
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -1524,18 +1513,7 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Load settings and get Hub client
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -1703,18 +1681,7 @@ func runHubBrokers(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	// Resolve project path to find project settings
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -1927,18 +1894,7 @@ func runHubBrokersDelete(cmd *cobra.Command, args []string) error {
 
 	brokerNameOrID := args[0]
 
-	// Resolve project path to find project settings
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}

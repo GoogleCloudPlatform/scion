@@ -21,7 +21,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
@@ -147,17 +146,7 @@ func init() {
 
 // resolveProjectForSA resolves the project ID and creates a hub client for SA operations.
 func resolveProjectForSA() (hubclient.Client, string, error) {
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	settings, client, err := loadHubClient()
 	if err != nil {
 		return nil, "", err
 	}
