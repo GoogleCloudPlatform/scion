@@ -1857,6 +1857,64 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 	return sources
 }
 
+func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
+	ctx context.Context,
+	agent *store.Agent,
+	resolvedEnv map[string]string,
+	envClassifications *map[string]api.EnvKind,
+	operation string,
+) {
+	if d.githubAppMinter == nil || agent.ProjectID == "" {
+		return
+	}
+
+	project, err := d.store.GetProject(ctx, agent.ProjectID)
+	if err != nil {
+		return
+	}
+	mintProject := project
+	if project.GitHubInstallationID == nil {
+		if sourceProjectID := agent.Labels["scion.dev/github-token-source-project"]; sourceProjectID != "" {
+			if sourceProject, sourceErr := d.store.GetProject(ctx, sourceProjectID); sourceErr == nil && sourceProject.GitHubInstallationID != nil {
+				mintProject = sourceProject
+			}
+		}
+	}
+	if mintProject.GitHubInstallationID == nil {
+		return
+	}
+
+	if resolvedEnv["GITHUB_TOKEN"] != "" {
+		d.log.Warn(operation+": user GITHUB_TOKEN takes precedence over GitHub App token — user token will be used for gh CLI, GitHub App for git credential helper",
+			"project_id", agent.ProjectID)
+		resolvedEnv["SCION_USER_GITHUB_TOKEN"] = "true"
+		classifyEnv(envClassifications, "SCION_USER_GITHUB_TOKEN", api.EnvKindPlain)
+		resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
+		classifyEnv(envClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
+		return
+	}
+
+	token, expiry, err := d.githubAppMinter.MintGitHubAppTokenForProject(ctx, mintProject)
+	if err != nil {
+		if d.debug {
+			d.log.Warn(operation+": GitHub App token minting failed", "error", err, "project_id", agent.ProjectID)
+		}
+		return
+	}
+	if token == "" {
+		return
+	}
+
+	resolvedEnv["GITHUB_TOKEN"] = token
+	classifyEnv(envClassifications, "GITHUB_TOKEN", api.EnvKindSecretInjected)
+	resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
+	classifyEnv(envClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
+	resolvedEnv["SCION_GITHUB_TOKEN_EXPIRY"] = expiry
+	classifyEnv(envClassifications, "SCION_GITHUB_TOKEN_EXPIRY", api.EnvKindPlain)
+	resolvedEnv["SCION_GITHUB_TOKEN_PATH"] = "/tmp/.github-token"
+	classifyEnv(envClassifications, "SCION_GITHUB_TOKEN_PATH", api.EnvKindPlain)
+}
+
 // DispatchAgentStart starts an agent on the runtime broker. When resume is
 // true, the harness is asked to continue its prior session (e.g. Claude
 // --continue) instead of starting a fresh conversation. The hub is the source
@@ -2072,47 +2130,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		}
 	}
 
-	// GitHub App token minting for agent start
-	if d.githubAppMinter != nil && agent.ProjectID != "" {
-		project, projectErr := d.store.GetProject(ctx, agent.ProjectID)
-		if projectErr == nil {
-			mintProject := project
-			if project.GitHubInstallationID == nil {
-				if sourceProjectID := agent.Labels["scion.dev/github-token-source-project"]; sourceProjectID != "" {
-					if sg, sgErr := d.store.GetProject(ctx, sourceProjectID); sgErr == nil && sg.GitHubInstallationID != nil {
-						mintProject = sg
-					}
-				}
-			}
-			if mintProject.GitHubInstallationID != nil {
-				if resolvedEnv["GITHUB_TOKEN"] == "" {
-					token, expiry, mintErr := d.githubAppMinter.MintGitHubAppTokenForProject(ctx, mintProject)
-					if mintErr != nil {
-						if d.debug {
-							d.log.Warn("DispatchAgentStart: GitHub App token minting failed",
-								"error", mintErr, "project_id", agent.ProjectID)
-						}
-					} else if token != "" {
-						resolvedEnv["GITHUB_TOKEN"] = token
-						classifyEnv(&envClassifications, "GITHUB_TOKEN", api.EnvKindSecretInjected)
-						resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
-						classifyEnv(&envClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
-						resolvedEnv["SCION_GITHUB_TOKEN_EXPIRY"] = expiry
-						classifyEnv(&envClassifications, "SCION_GITHUB_TOKEN_EXPIRY", api.EnvKindPlain)
-						resolvedEnv["SCION_GITHUB_TOKEN_PATH"] = "/tmp/.github-token"
-						classifyEnv(&envClassifications, "SCION_GITHUB_TOKEN_PATH", api.EnvKindPlain)
-					}
-				} else {
-					d.log.Warn("DispatchAgentStart: user GITHUB_TOKEN takes precedence over GitHub App token — user token will be used for gh CLI, GitHub App for git credential helper",
-						"project_id", agent.ProjectID)
-					resolvedEnv["SCION_USER_GITHUB_TOKEN"] = "true"
-					classifyEnv(&envClassifications, "SCION_USER_GITHUB_TOKEN", api.EnvKindPlain)
-					resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
-					classifyEnv(&envClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
-				}
-			}
-		}
-	}
+	d.injectLifecycleGitHubToken(ctx, agent, resolvedEnv, &envClassifications, "DispatchAgentStart")
 
 	if d.debug {
 		configEnvCount := 0
@@ -2361,47 +2379,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		}
 	}
 
-	// GitHub App token minting for agent restart — same as DispatchAgentStart.
-	if d.githubAppMinter != nil && agent.ProjectID != "" {
-		project, projectErr := d.store.GetProject(ctx, agent.ProjectID)
-		if projectErr == nil {
-			mintProject := project
-			if project.GitHubInstallationID == nil {
-				if sourceProjectID := agent.Labels["scion.dev/github-token-source-project"]; sourceProjectID != "" {
-					if sg, sgErr := d.store.GetProject(ctx, sourceProjectID); sgErr == nil && sg.GitHubInstallationID != nil {
-						mintProject = sg
-					}
-				}
-			}
-			if mintProject.GitHubInstallationID != nil {
-				if resolvedEnv["GITHUB_TOKEN"] == "" {
-					token, expiry, mintErr := d.githubAppMinter.MintGitHubAppTokenForProject(ctx, mintProject)
-					if mintErr != nil {
-						if d.debug {
-							d.log.Warn("DispatchAgentRestart: GitHub App token minting failed",
-								"error", mintErr, "project_id", agent.ProjectID)
-						}
-					} else if token != "" {
-						resolvedEnv["GITHUB_TOKEN"] = token
-						classifyEnv(&envClassifications, "GITHUB_TOKEN", api.EnvKindSecretInjected)
-						resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
-						classifyEnv(&envClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
-						resolvedEnv["SCION_GITHUB_TOKEN_EXPIRY"] = expiry
-						classifyEnv(&envClassifications, "SCION_GITHUB_TOKEN_EXPIRY", api.EnvKindPlain)
-						resolvedEnv["SCION_GITHUB_TOKEN_PATH"] = "/tmp/.github-token"
-						classifyEnv(&envClassifications, "SCION_GITHUB_TOKEN_PATH", api.EnvKindPlain)
-					}
-				} else {
-					d.log.Warn("DispatchAgentRestart: user GITHUB_TOKEN takes precedence over GitHub App token — user token will be used for gh CLI, GitHub App for git credential helper",
-						"project_id", agent.ProjectID)
-					resolvedEnv["SCION_USER_GITHUB_TOKEN"] = "true"
-					classifyEnv(&envClassifications, "SCION_USER_GITHUB_TOKEN", api.EnvKindPlain)
-					resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
-					classifyEnv(&envClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
-				}
-			}
-		}
-	}
+	d.injectLifecycleGitHubToken(ctx, agent, resolvedEnv, &envClassifications, "DispatchAgentRestart")
 
 	// TODO(#1350): Thread envClassifications to broker via client.RestartAgent.
 	// PRECONDITION for P3b: without this, the broker receives nil (state 3,
