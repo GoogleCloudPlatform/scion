@@ -652,23 +652,6 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	return preds, nil
 }
 
-// agentCursorPredicate builds the keyset predicate for paginating after the
-// agent identified by cursor (an agent ID).
-func (s *AgentStore) agentCursorPredicate(ctx context.Context, cursor string) (predicate.Agent, error) {
-	cursorUID, err := parseUUID(cursor)
-	if err != nil {
-		return nil, fmt.Errorf("invalid cursor: %w", err)
-	}
-	c, err := s.client.Agent.Get(ctx, cursorUID)
-	if err != nil {
-		return nil, fmt.Errorf("invalid cursor: %w", mapError(err))
-	}
-	return agent.Or(
-		agent.CreatedLT(c.Created),
-		agent.And(agent.CreatedEQ(c.Created), agent.IDLT(cursorUID)),
-	), nil
-}
-
 // UpdateAgentStatus applies a partial, status-only update. It is the hottest
 // agent write path, so it runs as a locked read-modify-write: the row is loaded
 // with SELECT ... FOR UPDATE, the legacy sticky/transition rules are applied in

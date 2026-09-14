@@ -556,23 +556,6 @@ func projectBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.
 	return keysetBeforeCursor(project.FieldCreated, project.FieldID, cursorCreated, cursorID)
 }
 
-// projectCursorPredicate builds the keyset predicate for paginating after the
-// project identified by cursor (a project ID).
-func (s *ProjectStore) projectCursorPredicate(ctx context.Context, cursor string) (predicate.Project, error) {
-	cursorUID, err := parseUUID(cursor)
-	if err != nil {
-		return nil, fmt.Errorf("invalid cursor: %w", err)
-	}
-	c, err := s.client.Project.Get(ctx, cursorUID)
-	if err != nil {
-		return nil, fmt.Errorf("invalid cursor: %w", mapError(err))
-	}
-	return project.Or(
-		project.CreatedLT(c.Created),
-		project.And(project.CreatedEQ(c.Created), project.IDLT(cursorUID)),
-	), nil
-}
-
 // populateProjectComputed fills the computed (non-persisted) fields on a project:
 // AgentCount, ActiveBrokerCount and ProjectType. This mirrors the derivations
 // performed by the legacy SQLite store on read.
