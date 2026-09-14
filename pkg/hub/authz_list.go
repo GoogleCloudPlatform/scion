@@ -44,10 +44,9 @@ type ListScopeResult struct {
 // ResolveListScopes resolves the set of projects the caller is authorized to
 // see for a given list permission (e.g. "project.list" or "agent.list").
 //
-// Currently wired into the project and agent list handlers. The same
-// hasAdminView pattern also exists in handlers_groups.go, template_handlers.go,
-// and harness_config_handlers.go — those should be converted in CO1 or a
-// follow-up using this same adapter.
+// Currently wired into the project and agent list handlers. Group and catalog
+// resources have different parentless-resource semantics and still use
+// per-resource authorization scans when the caller lacks wide list access.
 //
 // It bridges the store layer and the AK1 authorization kernel:
 //  1. Resolves the caller's principal closure (direct principal + effective groups).

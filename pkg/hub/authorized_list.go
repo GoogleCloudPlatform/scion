@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
 
@@ -40,6 +41,73 @@ type authorizedListResult[T any] struct {
 	Items      []T
 	NextCursor string
 	TotalCount int
+}
+
+// hasCatalogWideListAccess reports whether template and harness-config lists
+// can use a direct store query instead of per-resource authorization checks.
+func (s *Server) hasCatalogWideListAccess(ctx context.Context, identity Identity, resourceType, permissionID string) bool {
+	if user, ok := identity.(UserIdentity); ok {
+		if s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(user),
+			Credential: credentialContextForIdentity(user),
+			Resource:   Resource{Type: resourceType, ID: "hub"},
+			Action:     ActionList,
+			Permission: permissionID,
+		}).Allowed {
+			return true
+		}
+	}
+
+	// Agents with project:read can discover all catalog entries. Global entries
+	// are parentless and cannot match project-scoped bindings in the batch
+	// authorization path; checkAgentReadScope validates this scope first.
+	agent, ok := identity.(AgentIdentity)
+	return ok && agent.HasScope(ScopeProjectRead)
+}
+
+// listAuthorizedOrAll runs either the bounded per-resource authorization scan
+// or the direct store query selected by the caller's visibility decision.
+func listAuthorizedOrAll[T any](
+	ctx context.Context,
+	identity Identity,
+	requestCursor string,
+	pageLimit int,
+	cursorBinding string,
+	authorizeEach bool,
+	list func(context.Context, store.ListOptions) (*store.ListResult[T], error),
+	resource func(*T) Resource,
+	cursorFor func(*T) string,
+	read func(context.Context, Identity, []Resource) ([]bool, error),
+) (authorizedListResult[T], error) {
+	if !authorizeEach {
+		result, err := list(ctx, store.ListOptions{
+			Limit:         pageLimit,
+			Cursor:        requestCursor,
+			CursorBinding: cursorBinding,
+		})
+		if err != nil {
+			return authorizedListResult[T]{}, err
+		}
+		return authorizedListResult[T]{
+			Items:      result.Items,
+			NextCursor: result.NextCursor,
+			TotalCount: result.TotalCount,
+		}, nil
+	}
+
+	return authorizedList(ctx, identity, requestCursor, pageLimit,
+		func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[T], error) {
+			page, err := list(ctx, store.ListOptions{
+				Limit:          limit,
+				Cursor:         cursor,
+				SkipTotalCount: true,
+				CursorBinding:  cursorBinding,
+			})
+			if err != nil {
+				return authorizedCandidatePage[T]{}, err
+			}
+			return authorizedCandidatePage[T]{Items: page.Items, NextCursor: page.NextCursor}, nil
+		}, resource, cursorFor, read)
 }
 
 func parseAuthorizedListLimit(raw string) (int, error) {
