@@ -278,7 +278,7 @@ func (s *Server) handleDiscordLink(w http.ResponseWriter, r *http.Request) {
 	s.discordLinkService.RegisterCode(req.Code, req.DiscordUserID)
 
 	slog.Info("Discord link code registered",
-		"code_prefix", req.Code[:3]+"***",
+		"code_prefix", maskedLinkCode(req.Code),
 		"discord_user_id", req.DiscordUserID,
 		"broker_id", broker.BrokerID(),
 	)
