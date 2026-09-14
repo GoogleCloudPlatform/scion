@@ -337,7 +337,7 @@ Examples:
 
 		// Conversation-reference messages: resolve and send via Hub
 		if convRef != nil {
-			return sendMessageViaConversation(hubCtx, convRef, message, msgInterrupt, msgWake)
+			return sendMessageViaConversation(hubCtx, convRef, message, msgInterrupt, msgWake, msgAttach)
 		}
 
 		// Group-targeted messages: fan out to each recipient
@@ -501,7 +501,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 //   - Human CLI context: only @agent is supported. The message is sent via
 //     SendStructuredMessage; the server derives the conversation from
 //     sender/recipient principals (DEF-138 Rule 3).
-func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, message string, interrupt bool, wake bool) error {
+func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, message string, interrupt bool, wake bool, attachments []string) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
@@ -547,6 +547,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			Type:            "instruction",
 			Urgent:          interrupt,
 			ConversationRef: ref.Raw,
+			Attachments:     attachments,
 		}
 		if ref.Kind == messaging.RefEmail {
 			outMsg.Recipient = "user:" + ref.Value
@@ -554,13 +555,14 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 
 		// DEF-51 principle: the validated probe must match the sent envelope
 		// by construction. Fields the outbound path does not send (Channel,
-		// ThreadID, Attachments) are zero in both outMsg and probe.
+		// ThreadID) are zero in both outMsg and probe.
 		probe := &messages.StructuredMessage{
-			Version:   messages.Version,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-			Sender:    senderAgent,
-			Msg:       outMsg.Msg,
-			Type:      outMsg.Type,
+			Version:     messages.Version,
+			Timestamp:   time.Now().UTC().Format(time.RFC3339),
+			Sender:      senderAgent,
+			Msg:         outMsg.Msg,
+			Type:        outMsg.Type,
+			Attachments: attachments,
 		}
 		if ref.Kind == messaging.RefEmail {
 			probe.Recipient = outMsg.Recipient

@@ -203,7 +203,7 @@ func TestSendMessageViaConversation_AgentRef(t *testing.T) {
 		Raw:   "@builder",
 	}
 
-	err = sendMessageViaConversation(hubCtx, ref, "please review", false, false)
+	err = sendMessageViaConversation(hubCtx, ref, "please review", false, false, nil)
 	require.NoError(t, err)
 
 	// Verify message was sent to the agent via the agent message endpoint.
@@ -245,7 +245,7 @@ func TestSendMessageViaConversation_AgentRef_AgentContext(t *testing.T) {
 		Raw:   "@builder",
 	}
 
-	err = sendMessageViaConversation(hubCtx, ref, "please review", false, false)
+	err = sendMessageViaConversation(hubCtx, ref, "please review", false, false, nil)
 	require.NoError(t, err)
 
 	// DEF-164: agent-to-agent messages now route through SendStructuredMessage,
@@ -286,7 +286,7 @@ func TestConvRef_ThreadRefAccepted(t *testing.T) {
 		Raw:   "#general",
 	}
 
-	err = sendMessageViaConversation(hubCtx, ref, "hello thread", false, false)
+	err = sendMessageViaConversation(hubCtx, ref, "hello thread", false, false, nil)
 	require.NoError(t, err, "thread reference should be accepted after DEF-138")
 
 	// DEF-142 P5: the message is sent with conversation_ref — no resolve step.
@@ -322,7 +322,7 @@ func TestConvRef_ConvIDAccepted(t *testing.T) {
 		Raw:   "conv:7f3a91c2-1234-5678-9abc-def012345678",
 	}
 
-	err = sendMessageViaConversation(hubCtx, ref, "payload", false, false)
+	err = sendMessageViaConversation(hubCtx, ref, "payload", false, false, nil)
 	require.NoError(t, err, "conv: reference should be accepted after DEF-138")
 
 	// DEF-142 P5: the message is sent with conversation_ref — no resolve step.
@@ -359,7 +359,7 @@ func TestSendMessageViaConversation_EmailRef_AgentContext(t *testing.T) {
 		Raw:   "@user@example.com",
 	}
 
-	err = sendMessageViaConversation(hubCtx, ref, "hello from agent", false, false)
+	err = sendMessageViaConversation(hubCtx, ref, "hello from agent", false, false, nil)
 	require.NoError(t, err)
 
 	// DEF-142 P5: outbound message with conversation_ref — no resolve step.
@@ -402,7 +402,7 @@ func TestSendMessageViaConversation_EmailRef_NoAgentContext(t *testing.T) {
 		Raw:   "@user@example.com",
 	}
 
-	err = sendMessageViaConversation(hubCtx, ref, "should fail", false, false)
+	err = sendMessageViaConversation(hubCtx, ref, "should fail", false, false, nil)
 	require.Error(t, err, "email ref without agent context must fail")
 	assert.Contains(t, err.Error(), "requires an agent identity")
 
@@ -496,7 +496,7 @@ func TestSendMessageViaConversation_ValidationBeforeSend(t *testing.T) {
 
 	// Send an empty message body — ValidateLegacyMessage rejects this because
 	// "msg field is required" when there are no attachments.
-	err = sendMessageViaConversation(hubCtx, ref, "", false, false)
+	err = sendMessageViaConversation(hubCtx, ref, "", false, false, nil)
 	require.Error(t, err, "empty message must fail validation")
 	assert.Contains(t, err.Error(), "validation failed")
 
@@ -534,7 +534,7 @@ func TestSendMessageViaConversation_EmailPreconditionBeforeSend(t *testing.T) {
 		Raw:   "@user@example.com",
 	}
 
-	err = sendMessageViaConversation(hubCtx, ref, "should fail before send", false, false)
+	err = sendMessageViaConversation(hubCtx, ref, "should fail before send", false, false, nil)
 	require.Error(t, err, "email ref without agent context must fail")
 	assert.Contains(t, err.Error(), "requires an agent identity")
 
@@ -580,7 +580,7 @@ func TestSendMessageViaConversation_EmailThreadIDWithoutChannel(t *testing.T) {
 		Raw:   "@user@example.com",
 	}
 
-	err = sendMessageViaConversation(hubCtx, ref, "hello with thread", false, false)
+	err = sendMessageViaConversation(hubCtx, ref, "hello with thread", false, false, nil)
 	require.NoError(t, err, "thread-id without channel must not be rejected on @email path")
 
 	// DEF-142 P5: outbound message with conversation_ref.
@@ -629,7 +629,7 @@ func TestSendMessageViaConversation_EmailEmptyMsgBeforeSend(t *testing.T) {
 	// Empty message body with attachments — ValidateLegacyMessage waives
 	// empty-body when attachments are present, but the outbound path does not
 	// send attachments. The probe must reflect the sent envelope.
-	err = sendMessageViaConversation(hubCtx, ref, "", false, false)
+	err = sendMessageViaConversation(hubCtx, ref, "", false, false, nil)
 	require.Error(t, err, "empty message on @email path must fail validation")
 	assert.Contains(t, err.Error(), "validation failed")
 
