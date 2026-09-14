@@ -509,7 +509,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		// HTTP response here would mislead the caller into retrying —
 		// which would double-deliver.
 	} else {
-		s.events.PublishUserMessage(r.Context(), storeMsg)
+		s.events.PublishUserMessage(r.Context(), storeMsg, nil)
 	}
 
 	// Record reply-affinity context so that the agent's next untagged reply

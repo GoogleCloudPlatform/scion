@@ -558,7 +558,7 @@ func TestPostgresIntegration_OversizedRoundTrip(t *testing.T) {
 	time.Sleep(2 * listenPollInterval)
 
 	big := strings.Repeat("Q", pgNotifyMaxPayload+2048)
-	pub.PublishUserMessage(ctx, mkMessage(aid, big))
+	pub.PublishUserMessage(ctx, mkMessage(aid, big), nil)
 
 	select {
 	case got := <-ch:

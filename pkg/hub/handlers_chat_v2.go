@@ -1213,7 +1213,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		}
 	}
 
-	s.events.PublishUserMessage(ctx, storeMsg)
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message
 	// row and conversation result when the envelope switch is ON.
@@ -1329,7 +1329,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			if err := s.store.CreateMessage(ctx, mentionStoreMsg); err != nil {
 				s.messageLog.Error("Failed to persist mention message", "slug", mentionAgent.Slug, "error", err)
 			} else {
-				s.events.PublishUserMessage(ctx, mentionStoreMsg)
+				s.events.PublishUserMessage(ctx, mentionStoreMsg, attachmentRefs)
 			}
 
 			// Phase 9b(ii): render the delivery envelope for the mention.
@@ -1523,7 +1523,7 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	}
 
 	// Publish SSE event.
-	s.events.PublishUserMessage(ctx, storeMsg)
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
 	// For DMs, ensure DM registry rows exist for both participants. This must
 	// precede the watermark update: touchConversationActivity is a plain

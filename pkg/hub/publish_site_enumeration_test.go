@@ -312,15 +312,16 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 }
 
 // isPublishUserMessageCall returns true if the call expression is a call to
-// PublishUserMessage with exactly 2 arguments (the event publish signature).
-// The broker proxy's PublishUserMessage takes 4 arguments and is excluded —
-// persistence is handled by its deliverToUser callback, not by the caller.
+// PublishUserMessage with exactly 3 arguments (the event publish signature:
+// ctx, msg, attachments). The broker proxy's PublishUserMessage takes 4
+// arguments and is excluded — persistence is handled by its deliverToUser
+// callback, not by the caller.
 func isPublishUserMessageCall(call *ast.CallExpr) bool {
 	switch fn := call.Fun.(type) {
 	case *ast.SelectorExpr:
-		return fn.Sel.Name == "PublishUserMessage" && len(call.Args) == 2
+		return fn.Sel.Name == "PublishUserMessage" && len(call.Args) == 3
 	case *ast.Ident:
-		return fn.Name == "PublishUserMessage" && len(call.Args) == 2
+		return fn.Name == "PublishUserMessage" && len(call.Args) == 3
 	}
 	return false
 }
