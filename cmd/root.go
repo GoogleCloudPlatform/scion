@@ -106,6 +106,10 @@ return an error instead of blocking.`,
 		if commandInSubtree(cmd, "server") {
 			requiresProject = false
 		}
+		// Admin subcommands connect directly to the database and don't need a local project
+		if commandInSubtree(cmd, "admin") {
+			requiresProject = false
+		}
 		// Project subcommands operate on all projects, not just the current one
 		if parentName == "project" || parentName == "grove" {
 			requiresProject = false
