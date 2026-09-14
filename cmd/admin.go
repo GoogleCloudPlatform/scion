@@ -16,21 +16,20 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/spf13/cobra"
 )
 
 var (
-	adminPromoteEmail    string
-	adminPromoteDBURL    string
-	adminPromoteConfig   string
+	adminPromoteEmail  string
+	adminPromoteDB     string
+	adminPromoteConfig string
 )
 
 // adminCmd is the top-level command group for administrative operations.
@@ -62,7 +61,7 @@ Examples:
   scion admin promote --email user@example.com
 
   # Promote a user with explicit database URL
-  scion admin promote --email user@example.com --db-url postgres://user:pass@host:5432/db
+  scion admin promote --email user@example.com --db postgres://user:pass@host:5432/db
 
   # Promote a user with a specific config file
   scion admin promote --email user@example.com --config /path/to/server.yaml`,
@@ -74,7 +73,7 @@ func init() {
 	rootCmd.AddCommand(adminCmd)
 
 	adminPromoteCmd.Flags().StringVar(&adminPromoteEmail, "email", "", "Email address of the user to promote (required)")
-	adminPromoteCmd.Flags().StringVar(&adminPromoteDBURL, "db-url", "", "Database URL/path (overrides config)")
+	adminPromoteCmd.Flags().StringVar(&adminPromoteDB, "db", "", "Database URL/path (overrides config)")
 	adminPromoteCmd.Flags().StringVar(&adminPromoteConfig, "config", "", "Path to server configuration file")
 
 	_ = adminPromoteCmd.MarkFlagRequired("email")
@@ -98,23 +97,23 @@ func runAdminPromote(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Override database URL if provided
-	if adminPromoteDBURL != "" {
-		if strings.HasPrefix(adminPromoteDBURL, "postgres://") || strings.HasPrefix(adminPromoteDBURL, "postgresql://") || strings.Contains(adminPromoteDBURL, "host=") {
+	if adminPromoteDB != "" {
+		if strings.HasPrefix(adminPromoteDB, "postgres://") || strings.HasPrefix(adminPromoteDB, "postgresql://") || strings.Contains(adminPromoteDB, "host=") {
 			cfg.Database.Driver = "postgres"
 		} else {
 			cfg.Database.Driver = "sqlite"
 		}
-		cfg.Database.URL = adminPromoteDBURL
+		cfg.Database.URL = adminPromoteDB
 	}
 
 	if cfg.Database.URL == "" {
-		return fmt.Errorf("no database URL configured; provide --db-url flag or ensure server config exists")
+		return fmt.Errorf("no database URL configured; provide --db flag or ensure server config exists")
 	}
 
 	_, _ = fmt.Fprintf(out, "Database: %s (%s)\n", cfg.Database.Driver, cfg.Database.URL)
 
 	// Open the database
-	s, err := openAdminStore(ctx, cfg)
+	s, err := openRecoveryStore(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -123,7 +122,7 @@ func runAdminPromote(cmd *cobra.Command, _ []string) error {
 	// Look up the user by email
 	user, err := s.GetUserByEmail(ctx, email)
 	if err != nil {
-		if err == store.ErrNotFound {
+		if errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("user with email %q not found in the database; the user must already exist", email)
 		}
 		return fmt.Errorf("failed to look up user: %w", err)
@@ -146,50 +145,3 @@ func runAdminPromote(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// openAdminStore opens a database connection for the admin command.
-// This follows the same pattern as openRecoveryStore in server_recover_authz.go.
-func openAdminStore(ctx context.Context, cfg *config.GlobalConfig) (*entadapter.CompositeStore, error) {
-	pool := entc.PoolConfig{
-		MaxOpenConns: 2,
-		MaxIdleConns: 2,
-	}
-
-	var entClient interface{ Close() error }
-	var cs *entadapter.CompositeStore
-
-	switch strings.ToLower(cfg.Database.Driver) {
-	case "sqlite", "":
-		sqliteDSN := cfg.Database.URL
-		if !strings.HasPrefix(sqliteDSN, "file:") {
-			sqliteDSN = "file:" + sqliteDSN
-		}
-		if !strings.Contains(sqliteDSN, "?") {
-			sqliteDSN += "?cache=shared"
-		} else if !strings.Contains(sqliteDSN, "cache=") {
-			sqliteDSN += "&cache=shared"
-		}
-		ec, err := entc.OpenSQLite(sqliteDSN, pool)
-		if err != nil {
-			return nil, err
-		}
-		entClient = ec
-		cs = entadapter.NewCompositeStore(ec)
-	case "postgres":
-		ec, err := entc.OpenPostgres(cfg.Database.URL, pool)
-		if err != nil {
-			return nil, err
-		}
-		entClient = ec
-		cs = entadapter.NewCompositeStore(ec)
-	default:
-		return nil, fmt.Errorf("unsupported database driver: %s", cfg.Database.Driver)
-	}
-
-	// Run migrations to ensure schema is up to date
-	if err := cs.Migrate(ctx); err != nil {
-		_ = entClient.Close()
-		return nil, fmt.Errorf("failed to run database migration: %w", err)
-	}
-
-	return cs, nil
-}
