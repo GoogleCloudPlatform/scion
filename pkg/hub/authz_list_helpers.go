@@ -25,10 +25,8 @@ import (
 )
 
 // resolveUserOwnerProjectIDsOrError returns project IDs where the user has an
-// active, direct project-owner RoleBinding. Unlike resolveUserOwnerProjectIDs,
-// this version propagates dependency errors instead of silently returning nil
-// (Finding 9: owner lookup errors must fail closed, not silently change
-// classification).
+// active, direct project-owner RoleBinding. Dependency errors are propagated so
+// owner lookup fails closed instead of silently changing classification.
 func (s *Server) resolveUserOwnerProjectIDsOrError(ctx context.Context, userID string) ([]string, error) {
 	bindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {

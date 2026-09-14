@@ -478,90 +478,11 @@ func TestPM1_ProjectCreation_AtomicWithOwnerBinding(t *testing.T) {
 	assert.Equal(t, store.ProjectRoleOwner, membership.Role)
 }
 
-// =============================================================================
-// PM1: resolveUserRBProjectIDs — project discovery via RoleBindings
-// =============================================================================
-
-func TestResolveUserRBProjectIDs_ReturnsProjectScopedBindings(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	user := &store.User{
-		ID: tid("rb-proj-ids-user"), Email: "rb-proj-ids@test.com",
-		DisplayName: "RB ProjectIDs User", Role: store.UserRoleMember, Status: "active",
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-
-	// Create two projects and assign RoleBindings
-	project1 := &store.Project{
-		ID: tid("rb-proj1"), Name: "RB Proj 1", Slug: "rb-proj1",
-		OwnerID: user.ID, CreatedBy: user.ID,
-		Created: time.Now(), Updated: time.Now(),
-	}
-	project2 := &store.Project{
-		ID: tid("rb-proj2"), Name: "RB Proj 2", Slug: "rb-proj2",
-		OwnerID: user.ID, CreatedBy: user.ID,
-		Created: time.Now(), Updated: time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project1))
-	require.NoError(t, s.CreateProject(ctx, project2))
-	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project1.ID, user.ID))
-	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project2.ID, user.ID))
-
-	// Resolve project IDs via RoleBindings
-	ids := srv.resolveUserRBProjectIDs(ctx, user.ID)
-	assert.Len(t, ids, 2, "should resolve both project IDs from RoleBindings")
-	assert.Contains(t, ids, project1.ID)
-	assert.Contains(t, ids, project2.ID)
-}
-
-func TestResolveUserRBProjectIDs_ExcludesSystemBindings(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	user := &store.User{
-		ID: tid("rb-sys-excl-user"), Email: "rb-sys-excl@test.com",
-		DisplayName: "RB System Excl User", Role: store.UserRoleMember, Status: "active",
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-	ensureHubMembership(ctx, s, user.ID)
-
-	// User has a system-scoped binding (hub-member) but no project bindings
-	ids := srv.resolveUserRBProjectIDs(ctx, user.ID)
-	assert.Empty(t, ids, "should not return project IDs from system-scoped bindings")
-}
-
-// =============================================================================
-// PM1: mergeProjectIDs — deduplication
-// =============================================================================
-
-func TestMergeProjectIDs(t *testing.T) {
-	// Merge overlapping slices
-	merged := mergeProjectIDs(
-		[]string{"a", "b", "c"},
-		[]string{"b", "c", "d"},
-	)
-	assert.Len(t, merged, 4, "should merge and deduplicate")
-	for _, id := range []string{"a", "b", "c", "d"} {
-		assert.Contains(t, merged, id)
-	}
-}
-
-func TestMergeProjectIDs_NilInputs(t *testing.T) {
-	merged := mergeProjectIDs(nil, nil)
-	assert.Nil(t, merged, "merging nil slices should return nil")
-}
-
-func TestMergeProjectIDs_EmptyInputs(t *testing.T) {
-	merged := mergeProjectIDs([]string{}, []string{})
-	assert.Nil(t, merged, "merging empty slices should return nil")
-}
-
 // ===========================================================================
-// C0: resolveUserOwnerProjectIDs — Mine must select owner-only bindings
+// C0: Mine must select owner-only bindings
 // ===========================================================================
 
-func TestC0_ResolveUserOwnerProjectIDs_OnlyOwnerBindings(t *testing.T) {
+func TestC0_ResolveUserOwnerProjectIDsOrError_OnlyOwnerBindings(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -621,18 +542,15 @@ func TestC0_ResolveUserOwnerProjectIDs_OnlyOwnerBindings(t *testing.T) {
 	require.NoError(t, err)
 
 	// C0 exit gate: Mine must return ONLY the owned project.
-	ownerIDs := srv.resolveUserOwnerProjectIDs(ctx, user.ID)
+	ownerIDs, err := srv.resolveUserOwnerProjectIDsOrError(ctx, user.ID)
+	require.NoError(t, err)
 	assert.Len(t, ownerIDs, 1,
-		"C0: resolveUserOwnerProjectIDs must return only project-owner bindings")
+		"C0: owner resolution must return only project-owner bindings")
 	assert.Contains(t, ownerIDs, ownedProject.ID)
 	assert.NotContains(t, ownerIDs, adminProject.ID,
 		"C0: project-admin binding must NOT classify a project as Mine")
 	assert.NotContains(t, ownerIDs, memberProject.ID,
 		"C0: project-member binding must NOT classify a project as Mine")
-
-	// All bindings should still appear in the general resolver.
-	allIDs := srv.resolveUserRBProjectIDs(ctx, user.ID)
-	assert.Len(t, allIDs, 3, "resolveUserRBProjectIDs should return all 3 projects")
 }
 
 func TestC0_SubtractProjectIDs(t *testing.T) {
