@@ -243,7 +243,7 @@ func (s *Server) listEnvVars(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	envVars = s.mergeEnvironmentSecrets(ctx, envVars, scope, scopeID,
+	envVars = s.mergeEnvironmentSecrets(ctx, envVars, filter,
 		"failed to list environment secrets for env var merge")
 
 	// Mask sensitive values
@@ -577,15 +577,16 @@ func secretMetaToEnvVar(m secret.SecretMeta) store.EnvVar {
 	}
 }
 
-func (s *Server) mergeEnvironmentSecrets(ctx context.Context, envVars []store.EnvVar, scope, scopeID, warning string) []store.EnvVar {
+func (s *Server) mergeEnvironmentSecrets(ctx context.Context, envVars []store.EnvVar, filter store.EnvVarFilter, warning string) []store.EnvVar {
 	if s.secretBackend == nil {
 		return envVars
 	}
 
 	metas, err := s.secretBackend.List(ctx, secret.Filter{
-		Scope:   scope,
-		ScopeID: scopeID,
+		Scope:   filter.Scope,
+		ScopeID: filter.ScopeID,
 		Type:    "environment",
+		Name:    filter.Key,
 	})
 	if err != nil {
 		s.envSecretLog.Warn(warning, "error", err)
@@ -1573,15 +1574,16 @@ func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, pr
 
 	switch r.Method {
 	case http.MethodGet:
-		envVars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{
+		filter := store.EnvVarFilter{
 			Scope:   store.ScopeProject,
 			ScopeID: projectID,
-		})
+		}
+		envVars, err := s.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		envVars = s.mergeEnvironmentSecrets(ctx, envVars, store.ScopeProject, projectID,
+		envVars = s.mergeEnvironmentSecrets(ctx, envVars, filter,
 			"failed to list environment secrets for project env var merge")
 		// Mask sensitive values
 		for i := range envVars {
@@ -2245,15 +2247,16 @@ func (s *Server) handleBrokerEnvVars(w http.ResponseWriter, r *http.Request, bro
 
 	switch r.Method {
 	case http.MethodGet:
-		envVars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{
+		filter := store.EnvVarFilter{
 			Scope:   store.ScopeRuntimeBroker,
 			ScopeID: brokerID,
-		})
+		}
+		envVars, err := s.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		envVars = s.mergeEnvironmentSecrets(ctx, envVars, store.ScopeRuntimeBroker, brokerID,
+		envVars = s.mergeEnvironmentSecrets(ctx, envVars, filter,
 			"failed to list environment secrets for broker env var merge")
 		for i := range envVars {
 			if envVars[i].Sensitive {

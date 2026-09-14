@@ -902,6 +902,39 @@ func TestEnvVar_UnifiedList_Deduplication(t *testing.T) {
 	}
 }
 
+func TestEnvVar_UnifiedList_KeyFiltersSecrets(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+	ctx := context.Background()
+
+	for _, key := range []string{"MATCHING_SECRET", "OTHER_SECRET"} {
+		if err := s.CreateSecret(ctx, &store.Secret{
+			ID:             tid("sec-key-filter-" + key),
+			Key:            key,
+			EncryptedValue: "secret-value",
+			SecretType:     store.SecretTypeEnvironment,
+			Target:         key,
+			Scope:          store.ScopeUser,
+			ScopeID:        DevUserID,
+		}); err != nil {
+			t.Fatalf("failed to create %s: %v", key, err)
+		}
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/env?scope=user&key=MATCHING_SECRET", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp ListEnvVarsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.EnvVars) != 1 || resp.EnvVars[0].Key != "MATCHING_SECRET" {
+		t.Fatalf("expected only MATCHING_SECRET, got %+v", resp.EnvVars)
+	}
+}
+
 func TestEnvVar_FallbackGet_FromSecretBackend(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
