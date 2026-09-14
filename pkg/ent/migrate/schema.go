@@ -1961,6 +1961,7 @@ var (
 		{Name: "invite_note", Type: field.TypeString, Nullable: true},
 		{Name: "last_login", Type: field.TypeTime, Nullable: true},
 		{Name: "last_seen", Type: field.TypeTime, Nullable: true},
+		{Name: "session_generation", Type: field.TypeInt64, Default: 0},
 	}
 	// UsersTable holds the schema information for the "users" table.
 	UsersTable = &schema.Table{

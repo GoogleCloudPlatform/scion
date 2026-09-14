@@ -81,20 +81,27 @@ const webSessionName = "scion_sess"
 
 // Session key constants for storing values in the gorilla session map.
 const (
-	sessKeyUserID          = "uid"
-	sessKeyUserEmail       = "email"
-	sessKeyUserName        = "name"
-	sessKeyUserAvatar      = "avatar"
-	sessKeyUserRole        = "role"
-	sessKeyReturnTo        = "returnTo"
-	sessKeyOAuthState      = "oauthState"
-	sessKeyHubAccessToken  = "hubAccessToken"
-	sessKeyHubRefreshToken = "hubRefreshToken"
-	sessKeyHubTokenExpiry  = "hubTokenExpiry"
+	sessKeyUserID            = "uid"
+	sessKeyUserEmail         = "email"
+	sessKeyUserName          = "name"
+	sessKeyUserAvatar        = "avatar"
+	sessKeyUserRole          = "role"
+	sessKeyReturnTo          = "returnTo"
+	sessKeyOAuthState        = "oauthState"
+	sessKeyHubAccessToken    = "hubAccessToken"
+	sessKeyHubRefreshToken   = "hubRefreshToken"
+	sessKeyHubTokenExpiry    = "hubTokenExpiry"
+	sessKeySessionGeneration = "sessGen"
 )
 
 // webUserContextKey is the key for storing the web session user in the request context.
 type webUserContextKey struct{}
+
+// dbUserContextKey is the key for storing the authoritative store.User in the
+// request context. sessionAuthMiddleware populates this after the session-
+// generation check so that downstream middleware (e.g. suspendedUserMiddleware)
+// can reuse it instead of issuing a duplicate DB lookup.
+type dbUserContextKey struct{}
 
 // webSessionUser represents an authenticated user from the web session.
 type webSessionUser struct {
@@ -1829,6 +1836,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		session.Values[sessKeyUserName] = user.DisplayName
 		session.Values[sessKeyUserAvatar] = user.AvatarURL
 		session.Values[sessKeyUserRole] = user.Role
+		session.Values[sessKeySessionGeneration] = user.SessionGeneration
 
 		if err := session.Save(r, w); err != nil {
 			ws.logger().Error("Proxy auth: failed to save session", "error", err)
@@ -1874,6 +1882,44 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 
 		// Check for user in session
 		if uid, ok := session.Values[sessKeyUserID].(string); ok && uid != "" {
+			// Verify session generation against the DB to support per-user
+			// session revocation. A mismatch means an admin has revoked
+			// this user's sessions since login.
+			//
+			// The fetched dbUser is stored in the request context so that
+			// downstream middleware (e.g. suspendedUserMiddleware) can
+			// reuse it instead of issuing a duplicate DB query.
+			var ctx = r.Context()
+			if ws.store != nil {
+				dbUser, err := ws.store.GetUser(ctx, uid)
+				if err != nil {
+					if errors.Is(err, store.ErrNotFound) {
+						// User deleted — clear session and force re-login.
+						// Redirect to /login (the SPA login page) rather than
+						// /auth/login so the user sees the provider-choice page
+						// instead of being pushed into an OAuth flow for an
+						// account that no longer exists.
+						session.Options.MaxAge = -1
+						_ = session.Save(r, w)
+						http.Redirect(w, r, "/login", http.StatusFound)
+						return
+					}
+					// Transient DB error — fail closed with 500 but do not destroy session
+					ws.logger().Error("Session auth: store lookup failed", "user_id", uid, "error", err)
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+					return
+				}
+				cookieGen, _ := session.Values[sessKeySessionGeneration].(int64)
+				if dbUser.SessionGeneration > cookieGen {
+					// Generation mismatch — force re-login
+					session.Options.MaxAge = -1
+					_ = session.Save(r, w)
+					http.Redirect(w, r, "/auth/login", http.StatusFound)
+					return
+				}
+				ctx = context.WithValue(ctx, dbUserContextKey{}, dbUser)
+			}
+
 			user := &webSessionUser{
 				UserID:    uid,
 				Email:     sessionString(session, sessKeyUserEmail),
@@ -1881,7 +1927,7 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 				AvatarURL: sessionString(session, sessKeyUserAvatar),
 				Role:      sessionString(session, sessKeyUserRole),
 			}
-			ctx := context.WithValue(r.Context(), webUserContextKey{}, user)
+			ctx = context.WithValue(ctx, webUserContextKey{}, user)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -2170,6 +2216,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	session.Values[sessKeyUserName] = user.DisplayName
 	session.Values[sessKeyUserAvatar] = user.AvatarURL
 	session.Values[sessKeyUserRole] = user.Role
+	session.Values[sessKeySessionGeneration] = user.SessionGeneration
 
 	// Get returnTo and clear it
 	returnTo, _ := session.Values[sessKeyReturnTo].(string)

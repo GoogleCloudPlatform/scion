@@ -114,10 +114,20 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
-	id := extractID(r, "/api/v1/users")
+	id, action := extractAction(r, "/api/v1/users")
 
 	if id == "" {
 		NotFound(w, "User")
+		return
+	}
+
+	// Sub-resource actions
+	if action == "revoke-sessions" {
+		if r.Method != http.MethodPost {
+			MethodNotAllowed(w)
+			return
+		}
+		s.revokeUserSessions(w, r, id)
 		return
 	}
 
@@ -131,6 +141,26 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		MethodNotAllowed(w)
 	}
+}
+
+// revokeUserSessions increments the user's session generation, invalidating
+// all existing cookie-based sessions for that user.
+func (s *Server) revokeUserSessions(w http.ResponseWriter, r *http.Request, id string) {
+	admin, ok := s.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+
+	if err := s.store.IncrementSessionGeneration(r.Context(), id); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	slog.Info("Admin revoked all sessions for user",
+		"user_id", id,
+		"admin_id", admin.ID(),
+		"admin_email", admin.Email())
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (s *Server) getUser(w http.ResponseWriter, r *http.Request, id string) {

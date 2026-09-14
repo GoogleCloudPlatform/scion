@@ -938,6 +938,26 @@ export class ScionPageAdminUsers extends LitElement {
     };
   }
 
+  private promptRevokeSession(user: AdminUser): void {
+    this.confirmAction = {
+      title: 'Revoke Sessions',
+      message: `Force ${user.email} to re-authenticate? This will sign them out of all active sessions.`,
+      variant: 'warning',
+      confirmLabel: 'Revoke Sessions',
+      user,
+      action: async () => {
+        const res = await apiFetch(`/api/v1/users/${user.id}/revoke-sessions`, {
+          method: 'POST',
+        });
+        if (!res.ok) throw new Error('Failed to revoke sessions');
+        this.showFeedback(
+          'success',
+          `All sessions for ${user.displayName || user.email} have been revoked.`
+        );
+      },
+    };
+  }
+
   private promptDelete(user: AdminUser): void {
     const label = user.status === 'invited' ? 'Remove invited user' : 'Delete user';
     const message =
@@ -1638,6 +1658,10 @@ export class ScionPageAdminUsers extends LitElement {
                 <sl-menu-item @click=${() => this.promptToggleSuspend(user)}>
                   <sl-icon slot="prefix" name="slash-circle"></sl-icon>
                   Suspend
+                </sl-menu-item>
+                <sl-menu-item @click=${() => this.promptRevokeSession(user)}>
+                  <sl-icon slot="prefix" name="door-open"></sl-icon>
+                  Revoke Sessions
                 </sl-menu-item>`
             : nothing}
           ${canDelete
