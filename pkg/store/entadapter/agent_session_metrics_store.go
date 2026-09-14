@@ -18,6 +18,7 @@ import (
 	"context"
 
 	entasm "github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -135,29 +136,19 @@ const defaultMetricsListLimit = 100
 // ListAgentSessionMetricsByAgent returns session metrics for an agent,
 // ordered by started_at descending, capped at defaultMetricsListLimit.
 func (s *AgentSessionMetricsStore) ListAgentSessionMetricsByAgent(ctx context.Context, agentID string) ([]*store.AgentSessionMetrics, error) {
-	entities, err := s.client.AgentSessionMetrics.
-		Query().
-		Where(entasm.AgentIDEQ(agentID)).
-		Order(ent.Desc(entasm.FieldStartedAt)).
-		Limit(defaultMetricsListLimit).
-		All(ctx)
-	if err != nil {
-		return nil, mapError(err)
-	}
-
-	result := make([]*store.AgentSessionMetrics, 0, len(entities))
-	for _, e := range entities {
-		result = append(result, entAgentSessionMetricsToStore(e))
-	}
-	return result, nil
+	return s.listAgentSessionMetrics(ctx, entasm.AgentIDEQ(agentID))
 }
 
 // ListAgentSessionMetricsByProject returns session metrics for all agents
 // in a project, ordered by started_at descending, capped at defaultMetricsListLimit.
 func (s *AgentSessionMetricsStore) ListAgentSessionMetricsByProject(ctx context.Context, projectID string) ([]*store.AgentSessionMetrics, error) {
+	return s.listAgentSessionMetrics(ctx, entasm.GroveIDEQ(projectID))
+}
+
+func (s *AgentSessionMetricsStore) listAgentSessionMetrics(ctx context.Context, filter predicate.AgentSessionMetrics) ([]*store.AgentSessionMetrics, error) {
 	entities, err := s.client.AgentSessionMetrics.
 		Query().
-		Where(entasm.GroveIDEQ(projectID)).
+		Where(filter).
 		Order(ent.Desc(entasm.FieldStartedAt)).
 		Limit(defaultMetricsListLimit).
 		All(ctx)
@@ -176,67 +167,30 @@ func (s *AgentSessionMetricsStore) ListAgentSessionMetricsByProject(ctx context.
 // Aggregation queries (SQL-level COUNT/SUM)
 // ============================================================================
 
+type agentSessionMetricsAggregateRow struct {
+	Count           int    `json:"count"`
+	SumTokensInput  *int64 `json:"sum_tokens_input"`
+	SumTokensOutput *int64 `json:"sum_tokens_output"`
+	SumTokensCached *int64 `json:"sum_tokens_cached"`
+	SumTokensReason *int64 `json:"sum_tokens_reasoning"`
+	SumTurnCount    *int64 `json:"sum_turn_count"`
+}
+
 // AggregateByAgent returns SQL-level aggregate totals for an agent's sessions.
 func (s *AgentSessionMetricsStore) AggregateByAgent(ctx context.Context, agentID string) (*store.AgentSessionMetricsAggregates, error) {
-	var agg []struct {
-		Count           int    `json:"count"`
-		SumTokensInput  *int64 `json:"sum_tokens_input"`
-		SumTokensOutput *int64 `json:"sum_tokens_output"`
-		SumTokensCached *int64 `json:"sum_tokens_cached"`
-		SumTokensReason *int64 `json:"sum_tokens_reasoning"`
-		SumTurnCount    *int64 `json:"sum_turn_count"`
-	}
-
-	err := s.client.AgentSessionMetrics.
-		Query().
-		Where(entasm.AgentIDEQ(agentID)).
-		Aggregate(
-			ent.As(ent.Count(), "count"),
-			ent.As(ent.Sum(entasm.FieldTokensInput), "sum_tokens_input"),
-			ent.As(ent.Sum(entasm.FieldTokensOutput), "sum_tokens_output"),
-			ent.As(ent.Sum(entasm.FieldTokensCached), "sum_tokens_cached"),
-			ent.As(ent.Sum(entasm.FieldTokensReasoning), "sum_tokens_reasoning"),
-			ent.As(ent.Sum(entasm.FieldTurnCount), "sum_turn_count"),
-		).
-		Scan(ctx, &agg)
-	if err != nil {
-		return nil, mapError(err)
-	}
-
-	if len(agg) == 0 {
-		return &store.AgentSessionMetricsAggregates{}, nil
-	}
-
-	deref := func(p *int64) int64 {
-		if p == nil {
-			return 0
-		}
-		return *p
-	}
-	return &store.AgentSessionMetricsAggregates{
-		Count:           agg[0].Count,
-		SumTokensInput:  deref(agg[0].SumTokensInput),
-		SumTokensOutput: deref(agg[0].SumTokensOutput),
-		SumTokensCached: deref(agg[0].SumTokensCached),
-		SumTokensReason: deref(agg[0].SumTokensReason),
-		SumTurnCount:    deref(agg[0].SumTurnCount),
-	}, nil
+	return s.aggregateAgentSessionMetrics(ctx, entasm.AgentIDEQ(agentID))
 }
 
 // AggregateByProject returns SQL-level aggregate totals for a project's sessions.
 func (s *AgentSessionMetricsStore) AggregateByProject(ctx context.Context, projectID string) (*store.AgentSessionMetricsAggregates, error) {
-	var agg []struct {
-		Count           int    `json:"count"`
-		SumTokensInput  *int64 `json:"sum_tokens_input"`
-		SumTokensOutput *int64 `json:"sum_tokens_output"`
-		SumTokensCached *int64 `json:"sum_tokens_cached"`
-		SumTokensReason *int64 `json:"sum_tokens_reasoning"`
-		SumTurnCount    *int64 `json:"sum_turn_count"`
-	}
+	return s.aggregateAgentSessionMetrics(ctx, entasm.GroveIDEQ(projectID))
+}
 
+func (s *AgentSessionMetricsStore) aggregateAgentSessionMetrics(ctx context.Context, filter predicate.AgentSessionMetrics) (*store.AgentSessionMetricsAggregates, error) {
+	var rows []agentSessionMetricsAggregateRow
 	err := s.client.AgentSessionMetrics.
 		Query().
-		Where(entasm.GroveIDEQ(projectID)).
+		Where(filter).
 		Aggregate(
 			ent.As(ent.Count(), "count"),
 			ent.As(ent.Sum(entasm.FieldTokensInput), "sum_tokens_input"),
@@ -245,28 +199,28 @@ func (s *AgentSessionMetricsStore) AggregateByProject(ctx context.Context, proje
 			ent.As(ent.Sum(entasm.FieldTokensReasoning), "sum_tokens_reasoning"),
 			ent.As(ent.Sum(entasm.FieldTurnCount), "sum_turn_count"),
 		).
-		Scan(ctx, &agg)
+		Scan(ctx, &rows)
 	if err != nil {
 		return nil, mapError(err)
 	}
 
-	if len(agg) == 0 {
+	if len(rows) == 0 {
 		return &store.AgentSessionMetricsAggregates{}, nil
 	}
 
-	deref := func(p *int64) int64 {
+	value := func(p *int64) int64 {
 		if p == nil {
 			return 0
 		}
 		return *p
 	}
 	return &store.AgentSessionMetricsAggregates{
-		Count:           agg[0].Count,
-		SumTokensInput:  deref(agg[0].SumTokensInput),
-		SumTokensOutput: deref(agg[0].SumTokensOutput),
-		SumTokensCached: deref(agg[0].SumTokensCached),
-		SumTokensReason: deref(agg[0].SumTokensReason),
-		SumTurnCount:    deref(agg[0].SumTurnCount),
+		Count:           rows[0].Count,
+		SumTokensInput:  value(rows[0].SumTokensInput),
+		SumTokensOutput: value(rows[0].SumTokensOutput),
+		SumTokensCached: value(rows[0].SumTokensCached),
+		SumTokensReason: value(rows[0].SumTokensReason),
+		SumTurnCount:    value(rows[0].SumTurnCount),
 	}, nil
 }
 
