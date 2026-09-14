@@ -519,86 +519,23 @@ type DiscoverResourcesResponse struct {
 // handleProjectDiscoverTemplates handles POST /api/v1/projects/{id}/discover-templates:
 // discovers templates at a remote URL or workspace path without importing them.
 func (s *Server) handleProjectDiscoverTemplates(w http.ResponseWriter, r *http.Request, projectID string) {
-	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
-		return
-	}
-
-	ctx := r.Context()
-
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		if !agentIdent.HasScope(ScopeAgentCreate) {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
-			return
-		}
-		if projectID != agentIdent.ProjectID() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only discover templates within their own project", nil)
-			return
-		}
-	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:       "agent",
-			ParentType: "project",
-			ParentID:   projectID,
-		}, ActionCreate)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You don't have permission to discover templates in this project", nil)
-			return
-		}
-	} else {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Authentication required", nil)
-		return
-	}
-
-	var req DiscoverResourcesRequest
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
-		return
-	}
-
-	if req.SourceURL == "" && req.WorkspacePath == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "sourceUrl or workspacePath is required", nil)
-		return
-	}
-
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		if err == store.ErrNotFound {
-			NotFound(w, "Project")
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	if s.GetStorage() == nil {
-		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Template storage is not configured", nil)
-		return
-	}
-
-	var names, skipped []string
-	if req.WorkspacePath != "" {
-		names, skipped, err = s.discoverFromWorkspace(ctx, project, req.WorkspacePath, s.templateImportKind())
-	} else {
-		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
-		names, skipped, err = s.discoverFromRemote(ctx, projectID, req.SourceURL, s.templateImportKind())
-	}
-	if err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, err.Error(), nil)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, DiscoverResourcesResponse{
-		Resources: names,
-		Skipped:   skipped,
-		Count:     len(names),
-	})
+	s.handleProjectDiscoverResources(w, r, projectID, s.templateImportKind(), "agent", "Template")
 }
 
 // handleProjectDiscoverHarnessConfigs handles POST /api/v1/projects/{id}/discover-harness-configs:
 // discovers harness-configs at a remote URL or workspace path without importing them.
 func (s *Server) handleProjectDiscoverHarnessConfigs(w http.ResponseWriter, r *http.Request, projectID string) {
+	s.handleProjectDiscoverResources(w, r, projectID, s.harnessConfigImportKind(), "harness_config", "Harness-config")
+}
+
+func (s *Server) handleProjectDiscoverResources(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	kind resourceImportKind,
+	authzResourceType string,
+	storageLabel string,
+) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -612,18 +549,19 @@ func (s *Server) handleProjectDiscoverHarnessConfigs(w http.ResponseWriter, r *h
 			return
 		}
 		if projectID != agentIdent.ProjectID() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only discover harness-configs within their own project", nil)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Agents can only discover "+kind.noun+" within their own project", nil)
 			return
 		}
 	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:       "harness_config",
+			Type:       authzResourceType,
 			ParentType: "project",
 			ParentID:   projectID,
 		}, ActionCreate)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You don't have permission to discover harness-configs in this project", nil)
+				"You don't have permission to discover "+kind.noun+" in this project", nil)
 			return
 		}
 	} else {
@@ -653,16 +591,16 @@ func (s *Server) handleProjectDiscoverHarnessConfigs(w http.ResponseWriter, r *h
 	}
 
 	if s.GetStorage() == nil {
-		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Harness-config storage is not configured", nil)
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", storageLabel+" storage is not configured", nil)
 		return
 	}
 
 	var names, skipped []string
 	if req.WorkspacePath != "" {
-		names, skipped, err = s.discoverFromWorkspace(ctx, project, req.WorkspacePath, s.harnessConfigImportKind())
+		names, skipped, err = s.discoverFromWorkspace(ctx, project, req.WorkspacePath, kind)
 	} else {
 		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
-		names, skipped, err = s.discoverFromRemote(ctx, projectID, req.SourceURL, s.harnessConfigImportKind())
+		names, skipped, err = s.discoverFromRemote(ctx, projectID, req.SourceURL, kind)
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, err.Error(), nil)
