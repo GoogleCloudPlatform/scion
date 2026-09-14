@@ -297,37 +297,26 @@ func runNotificationsList(cmd *cobra.Command, args []string) error {
 }
 
 func runNotificationsAck(cmd *cobra.Command, args []string) error {
-	hasID := len(args) > 0
-
-	if !hasID && !notificationsAckAll {
-		return fmt.Errorf("provide a notification ID or use --all to acknowledge all notifications")
-	}
-	if hasID && notificationsAckAll {
-		return fmt.Errorf("provide either a notification ID or --all, not both")
-	}
-
-	_, client, err := requireHubClient()
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if notificationsAckAll {
-		if err := client.Notifications().AcknowledgeAll(ctx); err != nil {
-			return fmt.Errorf("failed to acknowledge notifications: %w", err)
-		}
-		fmt.Println("All notifications acknowledged.")
-		return nil
-	}
-
-	notifID := args[0]
-	if err := client.Notifications().Acknowledge(ctx, notifID); err != nil {
-		return fmt.Errorf("failed to acknowledge notification: %w", err)
-	}
-	fmt.Printf("Notification %s acknowledged.\n", notifID)
-	return nil
+	return runHubAllOrOne(
+		args,
+		notificationsAckAll,
+		"provide a notification ID or use --all to acknowledge all notifications",
+		"provide either a notification ID or --all, not both",
+		func(ctx context.Context, client hubclient.Client) error {
+			if err := client.Notifications().AcknowledgeAll(ctx); err != nil {
+				return fmt.Errorf("failed to acknowledge notifications: %w", err)
+			}
+			fmt.Println("All notifications acknowledged.")
+			return nil
+		},
+		func(ctx context.Context, client hubclient.Client, notifID string) error {
+			if err := client.Notifications().Acknowledge(ctx, notifID); err != nil {
+				return fmt.Errorf("failed to acknowledge notification: %w", err)
+			}
+			fmt.Printf("Notification %s acknowledged.\n", notifID)
+			return nil
+		},
+	)
 }
 
 func runNotificationsSubscribe(cmd *cobra.Command, args []string) error {
