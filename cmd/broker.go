@@ -480,15 +480,12 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	// Get global directory early (needed for stable broker ID)
 	globalDir, globalDirErr := config.GetGlobalDir()
 
-	// Initialize MultiStore with auto-migration from legacy single-file store
-	multiStore := brokercredentials.NewMultiStore("")
-	legacyStore := brokercredentials.NewStore("")
-	if legacyStore.Exists() {
-		if err := multiStore.MigrateFromLegacy(legacyStore.Path()); err != nil {
-			fmt.Printf("Warning: failed to migrate legacy credentials: %v\n", err)
-		} else {
-			fmt.Printf("Migrated legacy credentials to %s\n", multiStore.Dir())
-		}
+	// Initialize MultiStore with auto-migration from legacy single-file store.
+	multiStore, migrated, migrationErr := initializeBrokerCredentialStore()
+	if migrationErr != nil {
+		fmt.Printf("Warning: failed to migrate legacy credentials: %v\n", migrationErr)
+	} else if migrated {
+		fmt.Printf("Migrated legacy credentials to %s\n", multiStore.Dir())
 	}
 
 	// Determine hub connection name
@@ -665,13 +662,10 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 }
 
 func runBrokerDeregister(cmd *cobra.Command, args []string) error {
-	// Initialize MultiStore with auto-migration from legacy
-	multiStore := brokercredentials.NewMultiStore("")
-	legacyStore := brokercredentials.NewStore("")
-	if legacyStore.Exists() {
-		if err := multiStore.MigrateFromLegacy(legacyStore.Path()); err != nil {
-			fmt.Printf("Warning: failed to migrate legacy credentials: %v\n", err)
-		}
+	// Initialize MultiStore with auto-migration from legacy.
+	multiStore, _, migrationErr := initializeBrokerCredentialStore()
+	if migrationErr != nil {
+		fmt.Printf("Warning: failed to migrate legacy credentials: %v\n", migrationErr)
 	}
 
 	// Determine which connection to deregister
@@ -1397,15 +1391,10 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 		status.ServerVersion = health.Version
 	}
 
-	// Load hub connections from MultiStore
-	multiStore := brokercredentials.NewMultiStore("")
-
-	// Auto-migrate legacy credentials if they exist
-	legacyStore := brokercredentials.NewStore("")
-	if legacyStore.Exists() {
-		if err := multiStore.MigrateFromLegacy(legacyStore.Path()); err != nil {
-			util.Debugf("Warning: failed to migrate legacy credentials: %v", err)
-		}
+	// Load hub connections from MultiStore, migrating legacy credentials first.
+	multiStore, _, migrationErr := initializeBrokerCredentialStore()
+	if migrationErr != nil {
+		util.Debugf("Warning: failed to migrate legacy credentials: %v", migrationErr)
 	}
 
 	allCreds, _ := multiStore.List()
@@ -1617,13 +1606,10 @@ func runBrokerHubs(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	// Initialize MultiStore with auto-migration from legacy
-	multiStore := brokercredentials.NewMultiStore("")
-	legacyStore := brokercredentials.NewStore("")
-	if legacyStore.Exists() {
-		if err := multiStore.MigrateFromLegacy(legacyStore.Path()); err != nil {
-			fmt.Printf("Warning: failed to migrate legacy credentials: %v\n", err)
-		}
+	// Initialize MultiStore with auto-migration from legacy.
+	multiStore, _, migrationErr := initializeBrokerCredentialStore()
+	if migrationErr != nil {
+		fmt.Printf("Warning: failed to migrate legacy credentials: %v\n", migrationErr)
 	}
 
 	allCreds, err := multiStore.List()
