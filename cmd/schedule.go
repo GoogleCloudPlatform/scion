@@ -183,13 +183,13 @@ func resolveScheduleID(ctx context.Context, hubCtx *HubContext, projectID, prefi
 	}
 }
 
-func runScheduleList(cmd *cobra.Command, args []string) error {
+func scheduleHubContext() (*HubContext, string, context.Context, context.CancelFunc, error) {
 	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
 	if err != nil {
-		return err
+		return nil, "", nil, nil, err
 	}
 	if hubCtx == nil {
-		return fmt.Errorf("scheduled events require Hub mode (use 'scion hub enable' first)")
+		return nil, "", nil, nil, fmt.Errorf("scheduled events require Hub mode (use 'scion hub enable' first)")
 	}
 
 	if !isJSONOutput() {
@@ -198,10 +198,18 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 
 	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
-		return wrapHubError(err)
+		return nil, "", nil, nil, wrapHubError(err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	return hubCtx, projectID, ctx, cancel, nil
+}
+
+func runScheduleList(cmd *cobra.Command, args []string) error {
+	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
+	if err != nil {
+		return err
+	}
 	defer cancel()
 
 	showEvents := scheduleListType == "" || scheduleListType == "all" || scheduleListType == "events"
@@ -305,24 +313,10 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 func runScheduleGet(cmd *cobra.Command, args []string) error {
 	resourceID := args[0]
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("scheduled events require Hub mode (use 'scion hub enable' first)")
-	}
-
-	if !isJSONOutput() {
-		PrintUsingHub(hubCtx.Endpoint)
-	}
-
-	projectID, err := GetProjectID(hubCtx)
-	if err != nil {
-		return wrapHubError(err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Resolve potentially truncated ID to full UUID (get handles both types)
@@ -469,24 +463,10 @@ func printScheduleDetail(sched *hubclient.Schedule) {
 func runScheduleCancel(cmd *cobra.Command, args []string) error {
 	eventID := args[0]
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("scheduled events require Hub mode (use 'scion hub enable' first)")
-	}
-
-	if !isJSONOutput() {
-		PrintUsingHub(hubCtx.Endpoint)
-	}
-
-	projectID, err := GetProjectID(hubCtx)
-	if err != nil {
-		return wrapHubError(err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Resolve potentially truncated ID to full UUID (cancel only targets events)
@@ -527,22 +507,11 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unsupported event type: %q (supported: message)", scheduleType)
 	}
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("scheduled events require Hub mode (use 'scion hub enable' first)")
-	}
-
-	if !isJSONOutput() {
-		PrintUsingHub(hubCtx.Endpoint)
-	}
-
-	projectID, err := GetProjectID(hubCtx)
-	if err != nil {
-		return wrapHubError(err)
-	}
+	defer cancel()
 
 	req := &hubclient.CreateScheduledEventRequest{
 		EventType: scheduleType,
@@ -556,9 +525,6 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 	} else {
 		req.FireAt = scheduleAt
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 
 	evt, err := hubCtx.Client.ScheduledEvents(projectID).Create(ctx, req)
 	if err != nil {
@@ -596,22 +562,11 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unsupported event type: %q (supported: message)", scheduleType)
 	}
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("scheduled events require Hub mode (use 'scion hub enable' first)")
-	}
-
-	if !isJSONOutput() {
-		PrintUsingHub(hubCtx.Endpoint)
-	}
-
-	projectID, err := GetProjectID(hubCtx)
-	if err != nil {
-		return wrapHubError(err)
-	}
+	defer cancel()
 
 	req := &hubclient.CreateScheduleRequest{
 		Name:      scheduleName,
@@ -621,9 +576,6 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 		Message:   scheduleMessage,
 		Interrupt: scheduleInterrupt,
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 
 	sched, err := hubCtx.Client.Schedules(projectID).Create(ctx, req)
 	if err != nil {
@@ -648,24 +600,10 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 func runSchedulePause(cmd *cobra.Command, args []string) error {
 	scheduleID := args[0]
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("scheduled events require Hub mode (use 'scion hub enable' first)")
-	}
-
-	if !isJSONOutput() {
-		PrintUsingHub(hubCtx.Endpoint)
-	}
-
-	projectID, err := GetProjectID(hubCtx)
-	if err != nil {
-		return wrapHubError(err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Resolve potentially truncated ID to full UUID (pause only targets schedules)
@@ -688,24 +626,10 @@ func runSchedulePause(cmd *cobra.Command, args []string) error {
 func runScheduleResume(cmd *cobra.Command, args []string) error {
 	scheduleID := args[0]
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("scheduled events require Hub mode (use 'scion hub enable' first)")
-	}
-
-	if !isJSONOutput() {
-		PrintUsingHub(hubCtx.Endpoint)
-	}
-
-	projectID, err := GetProjectID(hubCtx)
-	if err != nil {
-		return wrapHubError(err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Resolve potentially truncated ID to full UUID (resume only targets schedules)
@@ -734,24 +658,10 @@ func runScheduleResume(cmd *cobra.Command, args []string) error {
 func runScheduleDelete(cmd *cobra.Command, args []string) error {
 	scheduleID := args[0]
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("scheduled events require Hub mode (use 'scion hub enable' first)")
-	}
-
-	if !isJSONOutput() {
-		PrintUsingHub(hubCtx.Endpoint)
-	}
-
-	projectID, err := GetProjectID(hubCtx)
-	if err != nil {
-		return wrapHubError(err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Resolve potentially truncated ID to full UUID (delete only targets schedules)
@@ -772,24 +682,10 @@ func runScheduleDelete(cmd *cobra.Command, args []string) error {
 }
 
 func runScheduleHistory(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("scheduled events require Hub mode (use 'scion hub enable' first)")
-	}
-
-	if !isJSONOutput() {
-		PrintUsingHub(hubCtx.Endpoint)
-	}
-
-	projectID, err := GetProjectID(hubCtx)
-	if err != nil {
-		return wrapHubError(err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if len(args) == 0 {
