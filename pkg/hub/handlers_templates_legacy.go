@@ -16,7 +16,6 @@ package hub
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -60,17 +59,7 @@ func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 		Harness:   query.Get("harness"),
 	}
 
-	limit := 50
-	if l := query.Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-
-	result, err := s.store.ListTemplates(ctx, filter, store.ListOptions{
-		Limit:  limit,
-		Cursor: query.Get("cursor"),
-	})
+	result, err := s.store.ListTemplates(ctx, filter, listOptionsFromQuery(query))
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return

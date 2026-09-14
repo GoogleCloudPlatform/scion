@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -55,19 +54,10 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 		Search: query.Get("search"),
 	}
 
-	limit := 50
-	if l := query.Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-
-	result, err := s.store.ListUsers(ctx, filter, store.ListOptions{
-		Limit:   limit,
-		Cursor:  query.Get("cursor"),
-		SortBy:  query.Get("sort"),
-		SortDir: query.Get("dir"),
-	})
+	listOptions := listOptionsFromQuery(query)
+	listOptions.SortBy = query.Get("sort")
+	listOptions.SortDir = query.Get("dir")
+	result, err := s.store.ListUsers(ctx, filter, listOptions)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return

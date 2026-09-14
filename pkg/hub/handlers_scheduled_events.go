@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -347,17 +346,7 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, pro
 		Status:    query.Get("status"),
 	}
 
-	limit := 50
-	if l := query.Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-
-	result, err := s.store.ListScheduledEvents(r.Context(), filter, store.ListOptions{
-		Limit:  limit,
-		Cursor: query.Get("cursor"),
-	})
+	result, err := s.store.ListScheduledEvents(r.Context(), filter, listOptionsFromQuery(query))
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
