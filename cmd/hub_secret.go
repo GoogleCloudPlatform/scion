@@ -15,7 +15,6 @@
 package cmd
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -355,33 +354,11 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
-
-	scope, scopeID, err := resolveSecretScope(cmd, settings)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
-	if err != nil {
-		return err
-	}
 
 	req := &hubclient.SetSecretRequest{
 		Value:   value,
@@ -421,33 +398,11 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 }
 
 func runSecretGet(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
-
-	scope, scopeID, err := resolveSecretScope(cmd, settings)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
-	if err != nil {
-		return err
-	}
 
 	// If key is provided, get specific secret metadata
 	if len(args) == 1 {
@@ -495,33 +450,11 @@ func runSecretGet(cmd *cobra.Command, args []string) error {
 }
 
 func runSecretList(cmd *cobra.Command, _ []string) error {
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
-
-	scope, scopeID, err := resolveSecretScope(cmd, settings)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
-	if err != nil {
-		return err
-	}
 
 	opts := &hubclient.ListSecretOptions{
 		Scope:   scope,
@@ -598,33 +531,11 @@ func runSecretUpdate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
-
-	scope, scopeID, err := resolveSecretScope(cmd, settings)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
-	if err != nil {
-		return err
-	}
 
 	req := &hubclient.UpdateSecretMetaRequest{
 		Scope:   scope,
@@ -667,33 +578,11 @@ func runSecretUpdate(cmd *cobra.Command, args []string) error {
 func runSecretClear(cmd *cobra.Command, args []string) error {
 	key := args[0]
 
-	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	client, err := getHubClient(settings)
+	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
 	if err != nil {
 		return err
 	}
-
-	scope, scopeID, err := resolveSecretScope(cmd, settings)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
-	if err != nil {
-		return err
-	}
 
 	opts := &hubclient.SecretScopeOptions{
 		Scope:   scope,
