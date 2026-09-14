@@ -704,10 +704,10 @@ func TestR2_ProjectMemberExcludesStopAllAndSkillCreate(t *testing.T) {
 		"project-member MUST NOT contain skill.create (skill creation is admin/owner)")
 }
 
-// TestR2_ProjectRoleExactPermissionSets verifies the exact permission sets for
-// each project-scoped role after R2 cleanup. This is a regression guard: any
+// TestProjectRoleExactPermissionSets verifies the current exact permission sets
+// for each project-scoped role. This is a regression guard: any
 // permission addition or removal must be deliberate and reflected here.
-func TestR2_ProjectRoleExactPermissionSets(t *testing.T) {
+func TestProjectRoleExactPermissionSets(t *testing.T) {
 	tests := []struct {
 		name  string
 		perms []string
@@ -755,7 +755,7 @@ func TestR2_ProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-member",
 			perms: projectMemberCuratedPermissionIDs(),
 			want: []string{
-				"agent.create", "agent.list", "agent.message", "agent.read",
+				"agent.create", "agent.list", "agent.read",
 				"harness_config.create", "harness_config.list", "harness_config.read",
 				"project.list", "project.read",
 				"scheduled_event.create", "scheduled_event.list", "scheduled_event.read",
@@ -772,55 +772,60 @@ func TestR2_ProjectRoleExactPermissionSets(t *testing.T) {
 	}
 }
 
-// TestR2_ProjectRoleRevisionsBumped verifies that all project-scoped roles
-// have their revision bumped to 2 after the R2 permission cleanup.
-func TestR2_ProjectRoleRevisionsBumped(t *testing.T) {
+// TestProjectRoleRevisions verifies the current revision of each project role.
+func TestProjectRoleRevisions(t *testing.T) {
+	wantRevisions := map[string]int{
+		store.ProjectRoleOwner:  2,
+		store.ProjectRoleAdmin:  2,
+		store.ProjectRoleMember: 3,
+	}
 	for _, role := range BuiltInRoles() {
 		if role.ScopeType != store.RoleScopeProject {
 			continue
 		}
-		assert.Equal(t, 2, role.Revision,
-			"project-scoped role %s should be at revision 2 after R2 cleanup", role.Name)
+		assert.Equal(t, wantRevisions[role.Name], role.Revision,
+			"project-scoped role %s revision mismatch", role.Name)
 	}
 }
 
-// TestR2_ReconciliationConvergesProjectRoles verifies that startup
+// TestProjectRoleReconciliationConverges verifies that startup
 // reconciliation updates existing project-scoped role definitions to the
-// corrected R2 permission sets.
-func TestR2_ReconciliationConvergesProjectRoles(t *testing.T) {
+// current permission sets and revisions.
+func TestProjectRoleReconciliationConverges(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
 	projectRoles := []struct {
-		name     string
-		permFunc func() []string
+		name        string
+		revision    int
+		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, projectAdminPermissionIDs},
-		{store.ProjectRoleMember, projectMemberCuratedPermissionIDs},
+		{store.ProjectRoleOwner, 2, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 2, projectAdminPermissionIDs},
+		{store.ProjectRoleMember, 3, projectMemberCuratedPermissionIDs},
 	}
 
 	for _, pr := range projectRoles {
 		rd, err := s.GetRoleDefinitionByName(ctx, pr.name, store.RoleScopeProject)
 		require.NoError(t, err, "role %s should exist after reconciliation", pr.name)
 
-		expectedPerms := pr.permFunc()
+		expectedPerms := pr.permissions()
 		assert.ElementsMatch(t, expectedPerms, rd.Permissions,
-			"role %s in store should match code-declared R2 permission set", pr.name)
+			"role %s in store should match its code-declared permission set", pr.name)
 
 		// Verify revision marker was recorded
 		marker := getAppliedBuiltInRoleMarker(ctx, s, pr.name)
-		assert.Equal(t, 2, marker.Revision,
-			"role %s revision marker should be 2", pr.name)
+		assert.Equal(t, pr.revision, marker.Revision,
+			"role %s revision marker mismatch", pr.name)
 		assert.Equal(t, permListHash(expectedPerms), marker.PermHash,
 			"role %s perm hash should match", pr.name)
 	}
 }
 
-// TestR2_ReconciliationUpdatesStaleProjectRoles verifies that running
-// reconciliation against a store that has R1 (pre-cleanup) permission sets
-// converges them to the R2 sets.
-func TestR2_ReconciliationUpdatesStaleProjectRoles(t *testing.T) {
+// TestProjectRoleReconciliationUpdatesStaleMember verifies that running
+// reconciliation against a store with the original project-member permissions
+// converges it to the current curated set.
+func TestProjectRoleReconciliationUpdatesStaleMember(t *testing.T) {
 	_, s := testServer(t)
 	ctx := context.Background()
 
@@ -855,7 +860,7 @@ func TestR2_ReconciliationUpdatesStaleProjectRoles(t *testing.T) {
 
 	expectedPerms := projectMemberCuratedPermissionIDs()
 	assert.ElementsMatch(t, expectedPerms, rd.Permissions,
-		"project-member should converge to R2 permission set after reconciliation")
+		"project-member should converge to the current permission set after reconciliation")
 
 	// Verify the removed permissions are gone
 	permSet := make(map[string]bool, len(rd.Permissions))
@@ -863,6 +868,7 @@ func TestR2_ReconciliationUpdatesStaleProjectRoles(t *testing.T) {
 		permSet[p] = true
 	}
 	assert.False(t, permSet["agent.stop_all"], "agent.stop_all should be removed after convergence")
+	assert.False(t, permSet["agent.message"], "agent.message should be removed after convergence")
 	assert.False(t, permSet["skill.create"], "skill.create should be removed after convergence")
 	assert.False(t, permSet["project.create"], "project.create should be removed after convergence")
 }
