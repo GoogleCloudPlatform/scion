@@ -1448,14 +1448,14 @@ func TestGetEffectivePermissions_GroupResolutionFailure_FailsClosed(t *testing.T
 	assert.ErrorIs(t, err, injectedErr, "original error must be wrapped")
 }
 
-// TestResolveConstraintAdminUsers_GetGroupMembersFailure_FailsClosed verifies
+// TestResolveAdminUsers_GetGroupMembersFailure_FailsClosed verifies
 // that when GetGroupMembers returns an error during lockout resolution,
-// resolveConstraintAdminUsers propagates the error (fail-closed) instead of
+// resolveAdminUsers propagates the error (fail-closed) instead of
 // silently continuing with incomplete admin data.
 //
 // Regression test for B1 fix 4a: lockout helper store fault → reject mutation.
-func TestResolveConstraintAdminUsers_GetGroupMembersFailure_FailsClosed(t *testing.T) {
-	srv, realStore := testServer(t)
+func TestResolveAdminUsers_GetGroupMembersFailure_FailsClosed(t *testing.T) {
+	_, realStore := testServer(t)
 	ctx := context.Background()
 
 	// Create a group and a role with constraint-admin permission.
@@ -1476,29 +1476,29 @@ func TestResolveConstraintAdminUsers_GetGroupMembersFailure_FailsClosed(t *testi
 	})
 	require.NoError(t, err)
 
-	// Inject GetGroupMembers error and replace the store on the server.
+	// Inject GetGroupMembers error into the production lockout resolver.
 	injectedErr := errors.New("simulated GetGroupMembers failure")
 	errStore := &errorInjectingStore{
 		Store:              realStore,
 		getGroupMembersErr: injectedErr,
 	}
-	srv.store = errStore
+	preview := &PreviewService{store: errStore}
 
-	_, err = srv.resolveConstraintAdminUsers(ctx, ScopeTypeSystem, "")
+	_, err = preview.resolveAdminUsers(ctx, ScopeTypeSystem, "")
 
 	// Must fail closed: error propagates instead of continuing with empty members.
-	assert.Error(t, err, "resolveConstraintAdminUsers must propagate GetGroupMembers error")
+	assert.Error(t, err, "resolveAdminUsers must propagate GetGroupMembers error")
 	assert.ErrorIs(t, err, injectedErr, "original error must be wrapped")
 }
 
-// TestResolveConstraintAdminUsers_GetEffectiveGroupsFailure_FailsClosed verifies
+// TestResolveAdminUsers_GetEffectiveGroupsFailure_FailsClosed verifies
 // that when GetEffectiveGroups returns an error during lockout resolution,
-// resolveConstraintAdminUsers propagates the error (fail-closed) instead of
+// resolveAdminUsers propagates the error (fail-closed) instead of
 // silently setting groupIDs to nil.
 //
 // Regression test for B1 fix 4b: lockout helper store fault → reject mutation.
-func TestResolveConstraintAdminUsers_GetEffectiveGroupsFailure_FailsClosed(t *testing.T) {
-	srv, realStore := testServer(t)
+func TestResolveAdminUsers_GetEffectiveGroupsFailure_FailsClosed(t *testing.T) {
+	_, realStore := testServer(t)
 	ctx := context.Background()
 
 	// Create a user and bind them directly to a constraint-admin role.
@@ -1519,17 +1519,17 @@ func TestResolveConstraintAdminUsers_GetEffectiveGroupsFailure_FailsClosed(t *te
 	})
 	require.NoError(t, err)
 
-	// Inject GetEffectiveGroups error and replace the store on the server.
+	// Inject GetEffectiveGroups error into the production lockout resolver.
 	injectedErr := errors.New("simulated GetEffectiveGroups failure")
 	errStore := &errorInjectingStore{
 		Store:                 realStore,
 		getEffectiveGroupsErr: injectedErr,
 	}
-	srv.store = errStore
+	preview := &PreviewService{store: errStore}
 
-	_, err = srv.resolveConstraintAdminUsers(ctx, ScopeTypeSystem, "")
+	_, err = preview.resolveAdminUsers(ctx, ScopeTypeSystem, "")
 
 	// Must fail closed: error propagates instead of setting groupIDs = nil.
-	assert.Error(t, err, "resolveConstraintAdminUsers must propagate GetEffectiveGroups error")
+	assert.Error(t, err, "resolveAdminUsers must propagate GetEffectiveGroups error")
 	assert.ErrorIs(t, err, injectedErr, "original error must be wrapped")
 }
