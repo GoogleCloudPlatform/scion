@@ -295,6 +295,14 @@ func seekToOffset(f *os.File, offset int64, slug string, emit func(string, strin
 // checkTruncation stats the file and, if it has been truncated (current size
 // less than our position), resets to the beginning after emitting a warning.
 // Returns the updated position.
+//
+// Known limitation: size-based truncation detection can miss a truncation
+// event if the file is truncated and then quickly rewritten past the old
+// position between consecutive poll ticks. In that case the tailer continues
+// reading from the old offset into the new content, missing the beginning of
+// the new log. This is acceptable for the entrypoint log, which is written
+// once per sandbox run. If more robust detection is needed in the future,
+// compare the file's inode or ModTime across polls.
 func checkTruncation(f *os.File, pos int64, logPath, slug string, emit func(string, string, map[string]string)) int64 {
 	st, err := f.Stat()
 	if err != nil {

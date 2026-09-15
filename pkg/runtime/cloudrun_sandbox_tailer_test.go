@@ -269,11 +269,9 @@ func TestTailer_FileNeverCreated(t *testing.T) {
 	var out safeBuffer
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Use a short retry schedule for testing.
-	origSchedule := openRetrySchedule
-	openRetrySchedule = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
-	defer func() { openRetrySchedule = origSchedule }()
-
+	// No need to shorten openRetrySchedule: the default first interval is
+	// 250ms, and we cancel the context after 200ms, so openWithRetry exits
+	// via ctx.Done() during the first retry sleep.
 	go doTailEntrypointLog(ctx, logPath, "slug", "agent-1", "proj-1", 0, &out)
 
 	// Wait a bit then cancel — the file never appears.
