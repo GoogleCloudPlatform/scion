@@ -183,7 +183,7 @@ With --global, it initializes in the user's home folder.`,
 			// Git project: read projectID from file, save to in-repo settings
 			projectID, _ = config.ReadProjectID(targetDir)
 			if projectID == "" {
-				projectID = config.GenerateProjectIDForDir(filepath.Dir(targetDir))
+				projectID = config.GenerateProjectID()
 			}
 			if err := config.UpdateSetting(targetDir, "project_id", projectID, false); err != nil {
 				if !isJSONOutput() {

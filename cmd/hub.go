@@ -2211,7 +2211,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	// Ensure project_id exists
 	projectID := settings.ProjectID
 	if projectID == "" {
-		projectID = config.GenerateProjectIDForDir(filepath.Dir(resolvedPath))
+		projectID = config.GenerateProjectID()
 		if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
 			return fmt.Errorf("failed to save project_id: %w", err)
 		}
@@ -2262,7 +2262,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 			if markerID, err := config.ReadProjectID(resolvedPath); err == nil && markerID != "" {
 				projectID = markerID
 			} else {
-				projectID = config.GenerateProjectIDForDir(filepath.Dir(resolvedPath))
+				projectID = config.GenerateProjectID()
 			}
 			if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
 				return fmt.Errorf("failed to save project_id: %w", err)

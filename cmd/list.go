@@ -586,7 +586,7 @@ func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
 		projectID = settings.ProjectID
 	}
 	if projectID == "" {
-		projectID = config.GenerateProjectIDForDir(resolvedPath)
+		projectID = config.GenerateProjectID()
 	}
 
 	linked, err := isProjectLinkedToHub(ctx, client, projectID)
