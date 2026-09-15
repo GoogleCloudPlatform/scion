@@ -323,14 +323,9 @@ When creating an agent, you can configure its **GCP Identity Mode**:
 - **Passthrough**: Requests are allowed to reach the actual host metadata server. Use with caution as this allows the agent to assume the identity of the underlying node. Security is tightened by restricting GCP identity passthrough to broker owners and admin-role users on embedded (co-located) brokers.
 
 :::caution[Passthrough does not work in Cloud Run Sandboxes]
-GCP identity passthrough mode does not work inside Cloud Run Sandbox
-(gVisor) runtimes because the real GCE metadata server is unreachable
-from inside gVisor. Use **assign** mode instead — it works correctly on
-all runtimes including Cloud Run Sandboxes.
-:::
+GCP identity passthrough mode does not work inside Cloud Run Sandbox (gVisor) runtimes because the real GCE metadata server is unreachable.
 
-:::note[Sandbox runtimes]
-Sandbox runtimes (such as `cloudrun-sandbox` profiles using gVisor) cannot reach the GCE metadata server at `169.254.169.254`, so passthrough mode produces no credentials. The Hub automatically translates passthrough to **assign** mode at agent creation and PATCH time, using the broker's host service account. Downstream JWT scopes, resolved environment variables, and the `gcp-token` endpoint work automatically after translation.
+While the Hub automatically translates passthrough to assign mode at agent creation and PATCH time (using the broker's host service account), explicitly configuring assign mode is recommended for clarity and consistency.
 :::
 
 ### Management UI & Hub-Minted Service Accounts

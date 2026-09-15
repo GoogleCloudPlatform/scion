@@ -130,8 +130,7 @@ for ROLE in roles/storage.admin roles/iam.serviceAccountAdmin \
             roles/iam.serviceAccountTokenCreator roles/aiplatform.user; do
   gcloud projects add-iam-policy-binding $PROJECT_ID \
     --member="serviceAccount:${SA_EMAIL}" \
-    --role="${ROLE}" \
-    --condition=None
+    --role="${ROLE}"
 done
 ```
 
@@ -389,6 +388,8 @@ This is a deliberate design trade for fast, cheap, disposable deployments — no
 oversight. Treat the Instance as a workspace, not as infrastructure. If you need
 durable workspaces, use the [VM (GCE) path](/scion/hosted/single-node/hub-setup-gce/)
 or the [HA tier](/scion/hosted/ha/overview/).
+
+<span id="overloading-the-instance-destroys-all-work"></span>
 
 :::danger[Overloading the Instance destroys all work]
 If too many agents are started on one Instance, the container is terminated. The
