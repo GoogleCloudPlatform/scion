@@ -808,6 +808,12 @@ func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 		return fmt.Errorf("backfill user role bindings: %w", err)
 	}
 
+	// Remove viewers from hub-members group. Older code paths added all users
+	// (including viewers) unconditionally; this reconciles existing state.
+	if err := reconcileViewerHubMemberships(ctx, s); err != nil {
+		return fmt.Errorf("reconcile viewer hub memberships: %w", err)
+	}
+
 	// Backfill project-owner role bindings from Project.CreatedBy.
 	// Pre-existing projects (created before project-scoped RoleBindings were
 	// introduced) have a legacy CreatedBy/OwnerID but no project-owner
@@ -894,6 +900,71 @@ func backfillUserRoleBindings(ctx context.Context, s store.Store) error {
 	}
 	if createdMemberships > 0 {
 		slog.Info("backfilled hub-member group memberships", "ensured", createdMemberships)
+	}
+	return nil
+}
+
+// reconcileViewerHubMemberships removes viewer-role users from the hub-members
+// group. Earlier code unconditionally added every user on login; this startup
+// reconciliation cleans up stale memberships so viewer restrictions take effect.
+//
+// To avoid an N+1 query pattern (GetUser per group member), we first collect
+// all viewer-role user IDs via ListUsers, then iterate group members and remove
+// only those whose IDs appear in the viewer set.
+func reconcileViewerHubMemberships(ctx context.Context, s store.Store) error {
+	group, err := s.GetGroupBySlug(ctx, "hub-members")
+	if err != nil {
+		// Group doesn't exist yet — nothing to reconcile.
+		slog.Debug("hub-members group not found, skipping viewer reconciliation", "error", err)
+		return nil
+	}
+
+	// Collect all viewer-role user IDs in a single paginated query.
+	viewerIDs := make(map[string]struct{})
+	var cursor string
+	for {
+		viewers, err := s.ListUsers(ctx, store.UserFilter{Role: store.UserRoleViewer}, store.ListOptions{
+			Limit:  200,
+			Cursor: cursor,
+		})
+		if err != nil {
+			return fmt.Errorf("list viewer-role users: %w", err)
+		}
+		for i := range viewers.Items {
+			viewerIDs[viewers.Items[i].ID] = struct{}{}
+		}
+		if viewers.NextCursor == "" {
+			break
+		}
+		cursor = viewers.NextCursor
+	}
+
+	if len(viewerIDs) == 0 {
+		return nil // no viewers — nothing to remove
+	}
+
+	members, err := s.GetGroupMembers(ctx, group.ID)
+	if err != nil {
+		return fmt.Errorf("list hub-members group members: %w", err)
+	}
+
+	var removed int
+	for _, m := range members {
+		if m.MemberType != store.GroupMemberTypeUser {
+			continue
+		}
+		if _, isViewer := viewerIDs[m.MemberID]; !isViewer {
+			continue
+		}
+		if err := s.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, m.MemberID); err != nil {
+			slog.Warn("failed to remove viewer from hub-members group", "userID", m.MemberID, "error", err)
+			continue
+		}
+		removed++
+	}
+
+	if removed > 0 {
+		slog.Info("removed viewers from hub-members group", "removed", removed)
 	}
 	return nil
 }

@@ -1813,8 +1813,10 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// Ensure hub membership
-		ensureHubMembership(ctx, ws.store, user.ID)
+		// Only members (not viewers) get hub-members group membership.
+		if user.Role == "member" {
+			ensureHubMembership(ctx, ws.store, user.ID)
+		}
 
 		// Generate Hub JWT tokens (mirrors devAuthMiddleware / handleOAuthCallback)
 		if ws.userTokenSvc != nil {
@@ -2193,8 +2195,10 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// Ensure user is a member of the hub-members group
-	ensureHubMembership(ctx, ws.store, user.ID)
+	// Only members (not viewers) get hub-members group membership.
+	if user.Role == "member" {
+		ensureHubMembership(ctx, ws.store, user.ID)
+	}
 
 	// Generate Hub tokens if token service is available
 	if ws.userTokenSvc != nil {
