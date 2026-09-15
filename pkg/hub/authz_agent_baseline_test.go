@@ -369,35 +369,6 @@ func TestAuthz_AgentProjectReadBaseline_AncestryUnchanged(t *testing.T) {
 	assert.Equal(t, "relationship grant: ancestor access", decision.Reason)
 }
 
-// TestIsReadClassAction pins the read-class set itself.
-func TestIsReadClassAction(t *testing.T) {
-	readClass := map[Action]bool{ActionRead: true, ActionList: true}
-	all := []Action{
-		ActionCreate, ActionRead, ActionUpdate, ActionDelete, ActionList,
-		ActionManage, ActionStart, ActionStop, ActionMessage, ActionAttach,
-		ActionRegister, ActionAddMember, ActionRemoveMember, ActionDispatch,
-		ActionStopAll, ActionVerify, ActionMint,
-	}
-	for _, action := range all {
-		assert.Equal(t, readClass[action], isReadClassAction(action),
-			"isReadClassAction(%s)", action)
-	}
-}
-
-// =============================================================================
-// matchesResource project-scope class defect (ptone/scion#595)
-// =============================================================================
-
-// TestMatchesResource_ProjectScopeIsAllowList pins the fix for #595: the
-// `case "project"` arm was a deny-list that only rejected resources declaring a
-// *disagreeing* project parent, so every parentless resource fell through and
-// matched. It is now an allow-list keyed on projectIDForResource.
-func TestMatchesResource_ProjectScopeIsAllowList(t *testing.T) {
-	// CO1: Policy matching removed; test retained as shell.
-	// matchesResource was deleted during the CO1 cutover (D1). Legacy policy
-	// matching is no longer part of the authorization pipeline.
-}
-
 // TestTemplateResource_ProjectParent pins the builder itself.
 //
 // templateResource used to return a parentless Resource for every scope. Under
@@ -502,42 +473,4 @@ func TestTemplateResource_UATConfinement(t *testing.T) {
 		assert.False(t, decision.Allowed)
 		assert.Equal(t, "token not scoped for hub-level resources", decision.Reason)
 	})
-}
-
-// TestMatchesResource_ProjectScopeEmptyScopeIDMatchesNothing pins the dropped
-// outer `policy.ScopeID != ""` guard. Keeping that guard would reproduce the
-// same "absence means unconstrained" overload one level up: a project-scoped
-// policy with an empty ScopeID would skip the check and match everything.
-//
-// This is a behaviour change for such a policy — it matched everything before.
-// It is not reachable through the API (createPolicy requires scopeId for
-// project scope) and no seeded row produces it, so this is hardening.
-func TestMatchesResource_ProjectScopeEmptyScopeIDMatchesNothing(t *testing.T) {
-	// CO1: Policy matching removed; test retained as shell.
-	// matchesResource was deleted during the CO1 cutover (D1). Legacy policy
-	// matching is no longer part of the authorization pipeline.
-}
-
-// TestMatchesResource_HubAndResourceScopesUnchanged confirms the fix is
-// confined to the `case "project"` arm.
-func TestMatchesResource_HubAndResourceScopesUnchanged(t *testing.T) {
-	// CO1: Policy matching removed; test retained as shell.
-	// matchesResource was deleted during the CO1 cutover (D1). Legacy policy
-	// matching is no longer part of the authorization pipeline.
-}
-
-// TestMatchesResource_SeededPoliciesUnaffected verifies the blast-radius claim
-// in the PR description against the real seeded rows rather than against copies
-// of their literals: the only configurations whose behaviour changes are
-// user-authored project-scoped policies targeting a parentless resource type.
-//
-//   - seed.go's per-type hub-member-read-* policies and hub-member-create-projects
-//     are ScopeType "hub", so the `case "project"` arm never runs for them.
-//   - handlers_projects_core.go's project:<slug>:member-create-agents is
-//     project-scoped but ResourceType "agent"; agent resources always carry a
-//     project parent, so it matches exactly the same set as before.
-func TestMatchesResource_SeededPoliciesUnaffected(t *testing.T) {
-	// CO1: Policy matching removed; test retained as shell.
-	// matchesResource was deleted during the CO1 cutover (D1). Legacy policy
-	// matching is no longer part of the authorization pipeline.
 }

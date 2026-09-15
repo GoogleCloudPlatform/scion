@@ -529,17 +529,6 @@ func TestExplainAPI_TraceContainsDecidingPolicy(t *testing.T) {
 	}
 }
 
-// =============================================================================
-// Mutation Audit Tests
-// =============================================================================
-
-func TestMutationAudit_PolicyCreate(t *testing.T) {
-	// CO1: Policy API removed (returns 410 Gone). Mutation audit for policy
-	// creation is no longer testable via HTTP. Test retained as shell.
-	// Mutation audit for remaining write operations (role bindings,
-	// credential revocation) is covered by TestMutationAudit_CredentialRevocation.
-}
-
 // TestMutationAudit_CredentialRevocation was vacuous pre-RS4: the token ID
 // extraction was wrong (read createResp["id"] instead of createResp["accessToken"]["id"]),
 // so it always hit t.Skip. Post-RS4, the create returns 403 for a DevUser without a

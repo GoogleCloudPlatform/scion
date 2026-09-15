@@ -918,8 +918,4 @@ func TestResourceBuilders(t *testing.T) {
 	t.Run("gcpServiceAccountResource nil", func(t *testing.T) {
 		assert.Equal(t, Resource{}, gcpServiceAccountResource(nil))
 	})
-
-	t.Run("policyResource", func(t *testing.T) {
-		// CO1: policyResource removed; test retained as shell.
-	})
 }

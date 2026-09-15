@@ -175,10 +175,6 @@ func TestUserWithCapabilities_MarshalJSON(t *testing.T) {
 	assert.NotNil(t, m["_capabilities"])
 }
 
-func TestPolicyWithCapabilities_MarshalJSON(t *testing.T) {
-	// CO1: PolicyWithCapabilities removed; test retained as shell.
-}
-
 func TestRuntimeBrokerWithCapabilities_MarshalJSON(t *testing.T) {
 	broker := RuntimeBrokerWithCapabilities{
 		RuntimeBroker: store.RuntimeBroker{

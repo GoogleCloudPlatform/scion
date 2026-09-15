@@ -12,6 +12,14 @@ import (
 
 type authorizedListTestItem struct{ id string }
 
+func makeAllowed(n int) []bool {
+	allowed := make([]bool, n)
+	for i := range allowed {
+		allowed[i] = true
+	}
+	return allowed
+}
+
 func TestAuthorizedListRejectsCandidateCap(t *testing.T) {
 	items := make([]authorizedListTestItem, authorizedListMaxCandidates+1)
 	for i := range items {

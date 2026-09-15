@@ -396,25 +396,6 @@ func TestAuthz_ResourceTypeMismatch(t *testing.T) {
 	assert.False(t, decision.Allowed)
 }
 
-func TestEvaluatePolicies_NoMatch(t *testing.T) {
-	// CO1: Legacy function removed; test retained as shell.
-}
-
-func TestMatchesAction(t *testing.T) {
-	// CO1: Legacy function removed; test retained as shell.
-}
-
-func TestMatchesResource(t *testing.T) {
-	// CO1: Legacy function removed; test retained as shell.
-}
-
-func TestScopeLevel(t *testing.T) {
-	assert.Equal(t, 0, scopeLevel("hub"))
-	assert.Equal(t, 1, scopeLevel("project"))
-	assert.Equal(t, 2, scopeLevel("resource"))
-	assert.Equal(t, -1, scopeLevel("unknown"))
-}
-
 func TestAuthz_BrokerDispatch_OwnerAllowed(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()

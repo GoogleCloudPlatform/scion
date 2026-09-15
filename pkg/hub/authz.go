@@ -1806,36 +1806,3 @@ func (a *AuthzService) getProjectScopedPermissions(ctx context.Context, principa
 
 	return result, nil
 }
-
-// makeAllowed creates a slice of n true values.
-func makeAllowed(n int) []bool {
-	allowed := make([]bool, n)
-	for i := range allowed {
-		allowed[i] = true
-	}
-	return allowed
-}
-
-// =============================================================================
-// Legacy compatibility: scope/action helpers used by other files
-// =============================================================================
-
-// scopeLevel returns a numeric level for scope ordering (higher = more specific).
-// Retained for compatibility with audit and response code.
-func scopeLevel(scope string) int {
-	switch scope {
-	case "hub":
-		return 0
-	case "project":
-		return 1
-	case "resource":
-		return 2
-	default:
-		return -1
-	}
-}
-
-// isReadClassAction reports whether an action is read-class.
-func isReadClassAction(a Action) bool {
-	return a == ActionRead || a == ActionList
-}
