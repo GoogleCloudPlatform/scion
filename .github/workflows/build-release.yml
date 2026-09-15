@@ -35,16 +35,37 @@ jobs:
           - goos: linux
             goarch: amd64
             output: scion-linux-amd64
+            build_path: ./cmd/scion
+            binary_name: scion
           - goos: linux
             goarch: arm64
             output: scion-linux-arm64
+            build_path: ./cmd/scion
+            binary_name: scion
           # macOS builds
           - goos: darwin
             goarch: amd64
             output: scion-darwin-amd64
+            build_path: ./cmd/scion
+            binary_name: scion
           - goos: darwin
             goarch: arm64
             output: scion-darwin-arm64
+            build_path: ./cmd/scion
+            binary_name: scion
+          # Chat plugin binaries (linux only — plugins run on the hub VM)
+          - goos: linux
+            goarch: amd64
+            output: scion-plugin-telegram-linux-amd64
+            build_path: ./cmd/scion-plugin-telegram
+            module_dir: extras/scion-telegram
+            binary_name: scion-plugin-telegram
+          - goos: linux
+            goarch: arm64
+            output: scion-plugin-telegram-linux-arm64
+            build_path: ./cmd/scion-plugin-telegram
+            module_dir: extras/scion-telegram
+            binary_name: scion-plugin-telegram
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
@@ -58,6 +79,7 @@ jobs:
           cache: true
 
       - name: Setup Node
+        if: ${{ !matrix.module_dir }}
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
         with:
           node-version: '24'
@@ -65,6 +87,7 @@ jobs:
           cache-dependency-path: 'web/package-lock.json'
 
       - name: Build Web UI
+        if: ${{ !matrix.module_dir }}
         working-directory: ./web
         run: |
           npm ci
@@ -100,10 +123,18 @@ jobs:
           CGO_ENABLED: 0
           LDFLAGS: ${{ steps.version.outputs.ldflags }}
           OUTPUT_NAME: ${{ matrix.output }}
+          MODULE_DIR: ${{ matrix.module_dir }}
+          BUILD_PATH: ${{ matrix.build_path || './cmd/scion' }}
+          BINARY_NAME: ${{ matrix.binary_name || 'scion' }}
         run: |
           mkdir -p dist
-          go build -ldflags "${LDFLAGS}" -o dist/scion ./cmd/scion
-          tar -czvf "${OUTPUT_NAME}.tar.gz" -C dist scion
+          if [ -n "${MODULE_DIR}" ]; then
+            cd "${MODULE_DIR}"
+            go build -o "${GITHUB_WORKSPACE}/dist/${BINARY_NAME}" "${BUILD_PATH}"
+          else
+            go build -ldflags "${LDFLAGS}" -o dist/${BINARY_NAME} ${BUILD_PATH}
+          fi
+          tar -czvf "${GITHUB_WORKSPACE}/${OUTPUT_NAME}.tar.gz" -C "${GITHUB_WORKSPACE}/dist" "${BINARY_NAME}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
