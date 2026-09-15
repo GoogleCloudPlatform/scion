@@ -51,6 +51,25 @@ export class ScionPageProfileTemplates extends LitElement {
   @state() private loading = true;
   @state() private error: string | null = null;
 
+  // Create dialog state
+  @state() private createDialogOpen = false;
+  @state() private createLoading = false;
+  @state() private createError = '';
+  @state() private newTemplateName = '';
+  @state() private newTemplateHarness = '';
+
+  // Clone dialog state
+  @state() private cloneTarget: UserTemplate | null = null;
+  @state() private cloneName = '';
+  @state() private cloneLoading = false;
+  @state() private cloneError = '';
+
+  // Rename dialog state
+  @state() private renameTarget: UserTemplate | null = null;
+  @state() private renameName = '';
+  @state() private renameLoading = false;
+  @state() private renameError = '';
+
   // Delete dialog state
   @state() private deleteTarget: UserTemplate | null = null;
   @state() private deleteLoading = false;
@@ -186,6 +205,26 @@ export class ScionPageProfileTemplates extends LitElement {
       justify-content: center;
       padding: 3rem;
     }
+
+    .template-name a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .template-name a:hover {
+      color: var(--scion-primary, #3b82f6);
+      text-decoration: underline;
+    }
+
+    .menu-item-danger::part(base) {
+      color: var(--sl-color-danger-600, #dc2626);
+    }
+
+    .dialog-error {
+      color: var(--sl-color-danger-600, #dc2626);
+      font-size: 0.8125rem;
+      margin-top: 0.5rem;
+    }
   `;
 
   override connectedCallback(): void {
@@ -233,6 +272,139 @@ export class ScionPageProfileTemplates extends LitElement {
     }
   }
 
+  // ── Create Template ────────────────────────────────────────────────
+
+  private openCreateDialog(): void {
+    this.createDialogOpen = true;
+    this.createError = '';
+    this.createLoading = false;
+    this.newTemplateName = '';
+    this.newTemplateHarness = '';
+  }
+
+  private closeCreateDialog(): void {
+    this.createDialogOpen = false;
+    this.createError = '';
+  }
+
+  private async confirmCreateTemplate(): Promise<void> {
+    if (!this.newTemplateName.trim()) {
+      this.createError = 'Template name is required.';
+      return;
+    }
+    this.createLoading = true;
+    this.createError = '';
+    try {
+      const body: Record<string, string> = { name: this.newTemplateName.trim() };
+      if (this.newTemplateHarness.trim()) {
+        body.harness = this.newTemplateHarness.trim();
+      }
+      const resp = await apiFetch('/api/v1/users/me/templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        throw new Error(await extractApiError(resp, 'Failed to create template'));
+      }
+      const created = (await resp.json()) as { id: string };
+      this.closeCreateDialog();
+      // Navigate to the new template's detail page
+      window.history.pushState({}, '', `/profile/templates/${created.id}`);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    } catch (err) {
+      this.createError = err instanceof Error ? err.message : 'Failed to create template';
+    } finally {
+      this.createLoading = false;
+    }
+  }
+
+  // ── Clone Template ────────────────────────────────────────────────
+
+  private openCloneDialog(template: UserTemplate): void {
+    this.cloneTarget = template;
+    this.cloneName = `${template.name} (copy)`;
+    this.cloneError = '';
+    this.cloneLoading = false;
+  }
+
+  private closeCloneDialog(): void {
+    this.cloneTarget = null;
+    this.cloneError = '';
+  }
+
+  private async confirmClone(): Promise<void> {
+    if (!this.cloneTarget) return;
+    if (!this.cloneName.trim()) {
+      this.cloneError = 'Template name is required.';
+      return;
+    }
+    this.cloneLoading = true;
+    this.cloneError = '';
+    try {
+      const body: Record<string, string> = { name: this.cloneName.trim() };
+      if (this.cloneTarget.harness) {
+        body.harness = this.cloneTarget.harness;
+      }
+      const resp = await apiFetch('/api/v1/users/me/templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        throw new Error(await extractApiError(resp, 'Failed to clone template'));
+      }
+      this.closeCloneDialog();
+      showToast(`Template cloned as "${this.cloneName.trim()}"`, 'success');
+      await this.loadTemplates();
+    } catch (err) {
+      this.cloneError = err instanceof Error ? err.message : 'Failed to clone template';
+    } finally {
+      this.cloneLoading = false;
+    }
+  }
+
+  // ── Rename Template ───────────────────────────────────────────────
+
+  private openRenameDialog(template: UserTemplate): void {
+    this.renameTarget = template;
+    this.renameName = template.name;
+    this.renameError = '';
+    this.renameLoading = false;
+  }
+
+  private closeRenameDialog(): void {
+    this.renameTarget = null;
+    this.renameError = '';
+  }
+
+  private async confirmRename(): Promise<void> {
+    if (!this.renameTarget) return;
+    if (!this.renameName.trim()) {
+      this.renameError = 'Name is required.';
+      return;
+    }
+    this.renameLoading = true;
+    this.renameError = '';
+    try {
+      const resp = await apiFetch(`/api/v1/users/me/templates/${this.renameTarget.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: this.renameName.trim() }),
+      });
+      if (!resp.ok) {
+        throw new Error(await extractApiError(resp, 'Failed to rename template'));
+      }
+      showToast(`Template renamed to "${this.renameName.trim()}"`, 'success');
+      this.closeRenameDialog();
+      await this.loadTemplates();
+    } catch (err) {
+      this.renameError = err instanceof Error ? err.message : 'Failed to rename template';
+    } finally {
+      this.renameLoading = false;
+    }
+  }
+
   private formatDate(dateStr: string): string {
     try {
       return new Date(dateStr).toLocaleDateString(undefined, {
@@ -255,6 +427,10 @@ export class ScionPageProfileTemplates extends LitElement {
             <code>scion template sync --template-scope user</code> to upload templates from the CLI.
           </p>
         </div>
+        <sl-button variant="primary" size="small" @click=${() => this.openCreateDialog()}>
+          <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+          Create Template
+        </sl-button>
       </div>
 
       ${this.loading
@@ -264,6 +440,7 @@ export class ScionPageProfileTemplates extends LitElement {
           : this.templates.length === 0
             ? this.renderEmptyState()
             : this.renderTemplateList()}
+      ${this.renderCreateDialog()} ${this.renderCloneDialog()} ${this.renderRenameDialog()}
       ${this.renderDeleteDialog()}
     `;
   }
@@ -288,7 +465,9 @@ export class ScionPageProfileTemplates extends LitElement {
           (t) => html`
             <div class="template-card">
               <div class="template-info">
-                <div class="template-name">${t.displayName || t.name}</div>
+                <div class="template-name">
+                  <a href="/profile/templates/${t.id}">${t.displayName || t.name}</a>
+                </div>
                 <div class="template-meta">
                   ${t.harness
                     ? html`<span class="template-badge">${t.harness}</span>`
@@ -301,18 +480,182 @@ export class ScionPageProfileTemplates extends LitElement {
                 </div>
               </div>
               <div class="template-actions">
-                <sl-icon-button
-                  name="trash"
-                  label="Delete"
-                  @click=${() => {
-                    this.deleteTarget = t;
-                  }}
-                ></sl-icon-button>
+                <sl-dropdown placement="bottom-end" hoist>
+                  <sl-button slot="trigger" size="small" variant="text" caret>
+                    <sl-icon name="three-dots-vertical"></sl-icon>
+                  </sl-button>
+                  <sl-menu>
+                    <sl-menu-item @click=${() => this.navigateToDetail(t)}>
+                      <sl-icon slot="prefix" name="eye"></sl-icon>
+                      View / Edit
+                    </sl-menu-item>
+                    <sl-menu-item @click=${() => this.openCloneDialog(t)}>
+                      <sl-icon slot="prefix" name="copy"></sl-icon>
+                      Clone
+                    </sl-menu-item>
+                    <sl-menu-item @click=${() => this.openRenameDialog(t)}>
+                      <sl-icon slot="prefix" name="pencil"></sl-icon>
+                      Rename
+                    </sl-menu-item>
+                    <sl-divider></sl-divider>
+                    <sl-menu-item
+                      class="menu-item-danger"
+                      @click=${() => {
+                        this.deleteTarget = t;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="trash"></sl-icon>
+                      Delete
+                    </sl-menu-item>
+                  </sl-menu>
+                </sl-dropdown>
               </div>
             </div>
           `
         )}
       </div>
+    `;
+  }
+
+  private navigateToDetail(template: UserTemplate): void {
+    window.history.pushState({}, '', `/profile/templates/${template.id}`);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  }
+
+  private renderCreateDialog() {
+    if (!this.createDialogOpen) return nothing;
+    return html`
+      <sl-dialog
+        label="Create Template"
+        open
+        @sl-request-close=${(e: Event) => {
+          if (this.createLoading) e.preventDefault();
+          else this.closeCreateDialog();
+        }}
+      >
+        <p>Create a new personal template.</p>
+        <sl-input
+          label="Template Name"
+          placeholder="My Template"
+          .value=${this.newTemplateName}
+          @sl-input=${(e: Event) => (this.newTemplateName = (e.target as HTMLInputElement).value)}
+          ?disabled=${this.createLoading}
+        ></sl-input>
+        <sl-input
+          label="Harness (optional)"
+          placeholder="e.g. claude-code"
+          .value=${this.newTemplateHarness}
+          @sl-input=${(e: Event) => (this.newTemplateHarness = (e.target as HTMLInputElement).value)}
+          ?disabled=${this.createLoading}
+          style="margin-top: 1rem;"
+        ></sl-input>
+        ${this.createError ? html`<div class="dialog-error">${this.createError}</div>` : nothing}
+        <div slot="footer">
+          <sl-button
+            variant="default"
+            size="small"
+            ?disabled=${this.createLoading}
+            @click=${() => this.closeCreateDialog()}
+          >
+            Cancel
+          </sl-button>
+          <sl-button
+            variant="primary"
+            size="small"
+            ?loading=${this.createLoading}
+            ?disabled=${this.createLoading || !this.newTemplateName.trim()}
+            @click=${() => this.confirmCreateTemplate()}
+          >
+            Create Template
+          </sl-button>
+        </div>
+      </sl-dialog>
+    `;
+  }
+
+  private renderCloneDialog() {
+    if (!this.cloneTarget) return nothing;
+    return html`
+      <sl-dialog
+        label="Clone Template"
+        open
+        @sl-request-close=${(e: Event) => {
+          if (this.cloneLoading) e.preventDefault();
+          else this.closeCloneDialog();
+        }}
+      >
+        <p>
+          Create a copy of template
+          <strong>${this.cloneTarget.name}</strong>.
+        </p>
+        <sl-input
+          label="New Template Name"
+          .value=${this.cloneName}
+          @sl-input=${(e: Event) => (this.cloneName = (e.target as HTMLInputElement).value)}
+          ?disabled=${this.cloneLoading}
+        ></sl-input>
+        ${this.cloneError ? html`<div class="dialog-error">${this.cloneError}</div>` : nothing}
+        <div slot="footer">
+          <sl-button
+            variant="default"
+            size="small"
+            ?disabled=${this.cloneLoading}
+            @click=${() => this.closeCloneDialog()}
+          >
+            Cancel
+          </sl-button>
+          <sl-button
+            variant="primary"
+            size="small"
+            ?loading=${this.cloneLoading}
+            ?disabled=${this.cloneLoading || !this.cloneName.trim()}
+            @click=${() => this.confirmClone()}
+          >
+            Clone
+          </sl-button>
+        </div>
+      </sl-dialog>
+    `;
+  }
+
+  private renderRenameDialog() {
+    if (!this.renameTarget) return nothing;
+    return html`
+      <sl-dialog
+        label="Rename Template"
+        open
+        @sl-request-close=${(e: Event) => {
+          if (this.renameLoading) e.preventDefault();
+          else this.closeRenameDialog();
+        }}
+      >
+        <sl-input
+          label="Name"
+          .value=${this.renameName}
+          @sl-input=${(e: Event) => (this.renameName = (e.target as HTMLInputElement).value)}
+          ?disabled=${this.renameLoading}
+        ></sl-input>
+        ${this.renameError ? html`<div class="dialog-error">${this.renameError}</div>` : nothing}
+        <div slot="footer">
+          <sl-button
+            variant="default"
+            size="small"
+            ?disabled=${this.renameLoading}
+            @click=${() => this.closeRenameDialog()}
+          >
+            Cancel
+          </sl-button>
+          <sl-button
+            variant="primary"
+            size="small"
+            ?loading=${this.renameLoading}
+            ?disabled=${this.renameLoading || !this.renameName.trim()}
+            @click=${() => this.confirmRename()}
+          >
+            Rename
+          </sl-button>
+        </div>
+      </sl-dialog>
     `;
   }
 
