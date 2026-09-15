@@ -170,7 +170,8 @@ type CreateAgentRequest struct {
 	NoAuth bool `json:"noAuth,omitempty"`
 	// AgentRole specifies the requested authorization role for the agent.
 	// Valid values: "none", "readonly", "baseline", "full".
-	// When omitted, defaults to the effective ceiling (project max intersected with caller ceiling).
+	// When omitted, user requests use the configured default and agent requests
+	// inherit the parent role. The project maximum caps both paths.
 	AgentRole string `json:"agentRole,omitempty"`
 	// GCPIdentity specifies the GCP identity assignment for the agent.
 	// Controls metadata server behavior and optional service account binding.
