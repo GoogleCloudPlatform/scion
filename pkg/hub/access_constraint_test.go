@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"context"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -1171,12 +1170,10 @@ func TestConstraintAllowsPermission(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Lockout prevention: userBlockedByConstraints tests
+// Lockout prevention: constraintsBlockUser tests
 // ---------------------------------------------------------------------------
 
-func TestConstraint_UserBlockedByConstraints(t *testing.T) {
-	s := &Server{} // zero-value; userBlockedByConstraints doesn't use server fields
-
+func TestConstraint_ConstraintsBlockUser(t *testing.T) {
 	ptrS := func(s string) *string { return &s }
 
 	cases := []struct {
@@ -1261,9 +1258,9 @@ func TestConstraint_UserBlockedByConstraints(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := s.userBlockedByConstraints(context.TODO(), tc.user, tc.constraints)
+			got := constraintsBlockUser(tc.constraints, tc.user)
 			if got != tc.blocked {
-				t.Fatalf("userBlockedByConstraints() = %v, want %v", got, tc.blocked)
+				t.Fatalf("constraintsBlockUser() = %v, want %v", got, tc.blocked)
 			}
 		})
 	}
@@ -1273,7 +1270,6 @@ func TestConstraint_UserBlockedByConstraints(t *testing.T) {
 // a principal-kind constraint targeting the sole constraint-admin user is
 // detected as a lockout (R1 scenario 1).
 func TestConstraint_LockoutScenario_PrincipalTargetingSoleAdmin(t *testing.T) {
-	s := &Server{}
 	ptrS := func(s string) *string { return &s }
 
 	// Sole admin user.
@@ -1289,7 +1285,7 @@ func TestConstraint_LockoutScenario_PrincipalTargetingSoleAdmin(t *testing.T) {
 	}
 
 	// The admin should be blocked.
-	if !s.userBlockedByConstraints(context.TODO(), admin, constraints) {
+	if !constraintsBlockUser(constraints, admin) {
 		t.Fatal("sole admin should be blocked by principal constraint targeting them")
 	}
 }
@@ -1298,7 +1294,6 @@ func TestConstraint_LockoutScenario_PrincipalTargetingSoleAdmin(t *testing.T) {
 // group_closure constraint targeting a group containing all admin users
 // is detected as a lockout (R1 scenario 2).
 func TestConstraint_LockoutScenario_GroupClosureAllAdmins(t *testing.T) {
-	s := &Server{}
 	ptrS := func(s string) *string { return &s }
 
 	// Both admins are in the same group.
@@ -1314,10 +1309,10 @@ func TestConstraint_LockoutScenario_GroupClosureAllAdmins(t *testing.T) {
 	}
 
 	// Both admins should be blocked.
-	if !s.userBlockedByConstraints(context.TODO(), admin1, constraints) {
+	if !constraintsBlockUser(constraints, admin1) {
 		t.Fatal("admin1 should be blocked by group_closure targeting ops-team")
 	}
-	if !s.userBlockedByConstraints(context.TODO(), admin2, constraints) {
+	if !constraintsBlockUser(constraints, admin2) {
 		t.Fatal("admin2 should be blocked by group_closure targeting ops-team")
 	}
 }
@@ -1326,7 +1321,6 @@ func TestConstraint_LockoutScenario_GroupClosureAllAdmins(t *testing.T) {
 // a combination of principal constraints blocking all admins is detected
 // (R1 scenario 3).
 func TestConstraint_LockoutScenario_CombinedPrincipalConstraints(t *testing.T) {
-	s := &Server{}
 	ptrS := func(s string) *string { return &s }
 
 	admin1 := adminUserInfo{userID: "admin1"}
@@ -1350,7 +1344,7 @@ func TestConstraint_LockoutScenario_CombinedPrincipalConstraints(t *testing.T) {
 	// Both admins should be blocked individually.
 	allBlocked := true
 	for _, admin := range admins {
-		if !s.userBlockedByConstraints(context.TODO(), admin, constraints) {
+		if !constraintsBlockUser(constraints, admin) {
 			allBlocked = false
 			break
 		}
@@ -1363,7 +1357,6 @@ func TestConstraint_LockoutScenario_CombinedPrincipalConstraints(t *testing.T) {
 // TestConstraint_LockoutSurvival_OneAdminUnaffected verifies that when
 // multiple admins exist and only some are targeted, the operation is allowed.
 func TestConstraint_LockoutSurvival_OneAdminUnaffected(t *testing.T) {
-	s := &Server{}
 	ptrS := func(s string) *string { return &s }
 
 	admin1 := adminUserInfo{userID: "admin1"}
@@ -1379,10 +1372,10 @@ func TestConstraint_LockoutSurvival_OneAdminUnaffected(t *testing.T) {
 	}
 
 	// admin1 is blocked, but admin2 survives.
-	if !s.userBlockedByConstraints(context.TODO(), admin1, constraints) {
+	if !constraintsBlockUser(constraints, admin1) {
 		t.Fatal("admin1 should be blocked")
 	}
-	if s.userBlockedByConstraints(context.TODO(), admin2, constraints) {
+	if constraintsBlockUser(constraints, admin2) {
 		t.Fatal("admin2 should NOT be blocked")
 	}
 }
@@ -1462,13 +1455,13 @@ func TestConstraint_StoreAllowsPermission(t *testing.T) {
 		MaximumPermissions: []string{"agent.read", "access_constraint.admin"},
 	}
 
-	if !constraintAllowsPermission(c, "access_constraint.admin") {
+	if !constraintAllowsPermissionStore(c, "access_constraint.admin") {
 		t.Fatal("should allow access_constraint.admin")
 	}
-	if !constraintAllowsPermission(c, "agent.read") {
+	if !constraintAllowsPermissionStore(c, "agent.read") {
 		t.Fatal("should allow agent.read")
 	}
-	if constraintAllowsPermission(c, "agent.create") {
+	if constraintAllowsPermissionStore(c, "agent.create") {
 		t.Fatal("should NOT allow agent.create")
 	}
 }
@@ -1849,8 +1842,6 @@ func TestLegacyGroupTargetedConstraint_LockoutAndEvaluatorConsistency(t *testing
 	// for existing rows (fail-closed).
 
 	ptrS := func(s string) *string { return &s }
-	s := &Server{}
-
 	// Store-level legacy constraint for lockout check.
 	storeConstraint := &store.AccessConstraint{
 		SubjectKind:          store.ConstraintSubjectPrincipal,
@@ -1862,7 +1853,7 @@ func TestLegacyGroupTargetedConstraint_LockoutAndEvaluatorConsistency(t *testing
 	user := adminUserInfo{userID: "u1", groupIDs: []string{"admin-group"}}
 
 	// Lockout guard says blocked (fail-closed).
-	lockoutBlocked := s.userBlockedByConstraints(context.TODO(), user, []*store.AccessConstraint{storeConstraint})
+	lockoutBlocked := constraintsBlockUser([]*store.AccessConstraint{storeConstraint}, user)
 	if !lockoutBlocked {
 		t.Fatal("lockout guard should detect that user is blocked by legacy group-targeted constraint")
 	}

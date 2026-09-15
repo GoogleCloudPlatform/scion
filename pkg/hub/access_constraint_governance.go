@@ -990,14 +990,7 @@ func (gs *GovernanceService) enforceRoleBindingLockout(ctx context.Context, bind
 			}
 
 			// Check if any restricting constraint matches this user.
-			blocked := false
-			for _, c := range restricting {
-				if gs.preview.constraintMatchesUser(ctx, c, au) {
-					blocked = true
-					break
-				}
-			}
-			if !blocked {
+			if !constraintsBlockUser(restricting, au) {
 				scheduledSurviving++
 			}
 		}

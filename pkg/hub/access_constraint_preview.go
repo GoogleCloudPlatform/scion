@@ -85,6 +85,12 @@ type PreviewService struct {
 	closeOnce sync.Once
 }
 
+// adminUserInfo holds identity data for a user with constraint-admin.
+type adminUserInfo struct {
+	userID   string
+	groupIDs []string
+}
+
 // NewPreviewService creates a new PreviewService.
 func NewPreviewService(s store.Store, authz *AuthzService, logger *slog.Logger) *PreviewService {
 	// Generate a random HMAC key.
@@ -1367,14 +1373,7 @@ func (ps *PreviewService) assessLockout(
 	actorSurvives := false
 
 	for _, au := range adminUsers {
-		blocked := false
-		for _, c := range restricting {
-			if ps.constraintMatchesUser(ctx, c, au) {
-				blocked = true
-				break
-			}
-		}
-		if !blocked {
+		if !constraintsBlockUser(restricting, au) {
 			surviving++
 			if au.userID == req.Actor.ID {
 				actorSurvives = true
@@ -1421,8 +1420,11 @@ func (ps *PreviewService) resolveAdminUsers(ctx context.Context, scopeType, scop
 		switch b.PrincipalType {
 		case "user":
 			if !seen[b.PrincipalID] {
+				groups, err := ps.store.GetEffectiveGroups(ctx, b.PrincipalID)
+				if err != nil {
+					return nil, fmt.Errorf("get effective groups for user %s: %w", b.PrincipalID, err)
+				}
 				seen[b.PrincipalID] = true
-				groups, _ := ps.store.GetEffectiveGroups(ctx, b.PrincipalID)
 				admins = append(admins, adminUserInfo{
 					userID:   b.PrincipalID,
 					groupIDs: groups,
@@ -1432,12 +1434,15 @@ func (ps *PreviewService) resolveAdminUsers(ctx context.Context, scopeType, scop
 			// Expand group members.
 			members, err := ps.store.GetGroupMembers(ctx, b.PrincipalID)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("get members for group %s: %w", b.PrincipalID, err)
 			}
 			for _, m := range members {
 				if m.MemberType == "user" && !seen[m.MemberID] {
+					groups, err := ps.store.GetEffectiveGroups(ctx, m.MemberID)
+					if err != nil {
+						return nil, fmt.Errorf("get effective groups for user %s: %w", m.MemberID, err)
+					}
 					seen[m.MemberID] = true
-					groups, _ := ps.store.GetEffectiveGroups(ctx, m.MemberID)
 					admins = append(admins, adminUserInfo{
 						userID:   m.MemberID,
 						groupIDs: groups,
@@ -1451,7 +1456,7 @@ func (ps *PreviewService) resolveAdminUsers(ctx context.Context, scopeType, scop
 }
 
 // constraintMatchesUser checks if a store constraint matches a user.
-func (ps *PreviewService) constraintMatchesUser(ctx context.Context, c *store.AccessConstraint, user adminUserInfo) bool {
+func constraintMatchesUser(c *store.AccessConstraint, user adminUserInfo) bool {
 	switch c.SubjectKind {
 	case store.ConstraintSubjectAllPrincipals:
 		return true
@@ -1477,6 +1482,15 @@ func (ps *PreviewService) constraintMatchesUser(ctx context.Context, c *store.Ac
 					return true
 				}
 			}
+		}
+	}
+	return false
+}
+
+func constraintsBlockUser(constraints []*store.AccessConstraint, user adminUserInfo) bool {
+	for _, c := range constraints {
+		if constraintMatchesUser(c, user) {
+			return true
 		}
 	}
 	return false
