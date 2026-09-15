@@ -511,9 +511,12 @@ func (s *pgWebChatStore) UpdateTopic(ctx context.Context, topicID string, update
 }
 
 // DeleteTopic soft-deletes a topic. Returns an error if it is the last thread.
+// The count-check and soft-delete are wrapped in a transaction with FOR UPDATE
+// to prevent a TOCTOU race where two concurrent deletes both see count=2 and
+// leave 0 threads.
 func (s *pgWebChatStore) DeleteTopic(ctx context.Context, topicID string) error {
 	var projectID string
-	err := s.db.QueryRowContext(ctx, "SELECT project_id FROM webchat_topic WHERE id = $1", topicID).Scan(&projectID)
+	err := s.db.QueryRowContext(ctx, "SELECT project_id FROM webchat_topic WHERE id = $1 AND deleted_at IS NULL", topicID).Scan(&projectID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil
@@ -521,10 +524,18 @@ func (s *pgWebChatStore) DeleteTopic(ctx context.Context, topicID string) error 
 		return fmt.Errorf("webchat store: delete topic check: %w", err)
 	}
 
-	// Count active (non-deleted) topics for this project
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("webchat store: delete topic begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Count active (non-deleted) topics for this project.
+	// FOR UPDATE locks the rows to prevent concurrent transactions from both
+	// seeing count=2 and proceeding to delete.
 	var count int
-	err = s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM webchat_topic WHERE project_id = $1 AND deleted_at IS NULL",
+	err = tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM webchat_topic WHERE project_id = $1 AND deleted_at IS NULL FOR UPDATE",
 		projectID).Scan(&count)
 	if err != nil {
 		return fmt.Errorf("webchat store: delete topic count: %w", err)
@@ -533,12 +544,15 @@ func (s *pgWebChatStore) DeleteTopic(ctx context.Context, topicID string) error 
 		return fmt.Errorf("webchat store: delete topic: cannot delete the last thread")
 	}
 
-	const query = `UPDATE webchat_topic SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL`
-	_, err = s.db.ExecContext(ctx, query, topicID)
+	// Soft-delete within the same transaction.
+	_, err = tx.ExecContext(ctx,
+		"UPDATE webchat_topic SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL",
+		topicID)
 	if err != nil {
 		return fmt.Errorf("webchat store: delete topic: %w", err)
 	}
-	return nil
+
+	return tx.Commit()
 }
 
 // TouchTopicActivity updates last_activity_at and, when messageID is

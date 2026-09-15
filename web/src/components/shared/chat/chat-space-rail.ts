@@ -36,6 +36,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
 import { showConfirm } from '../confirm-dialog.js';
+import { showToast } from '../../../utils/toast.js';
 import './chat-avatar.js';
 
 /** A space (project) in the rail. */
@@ -1248,9 +1249,14 @@ export class ScionChatSpaceRail extends LitElement {
     });
     if (!confirmed) return;
     try {
-      await apiFetch(`/api/v1/chat/topics/${encodeURIComponent(thread.id)}`, {
+      const res = await apiFetch(`/api/v1/chat/topics/${encodeURIComponent(thread.id)}`, {
         method: 'DELETE',
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string };
+        showToast(data.error || 'Failed to delete thread', 'danger');
+        return;
+      }
       // Remove locally
       const threads = this.threadsBySpace.get(projectId) || [];
       const newMap = new Map(this.threadsBySpace);
@@ -1259,8 +1265,8 @@ export class ScionChatSpaceRail extends LitElement {
         threads.filter((t) => t.id !== thread.id)
       );
       this.threadsBySpace = newMap;
-    } catch {
-      // Non-critical
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to delete thread', 'danger');
     }
   }
 

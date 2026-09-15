@@ -898,9 +898,13 @@ func (s *sqliteWebChatStore) UpdateTopic(ctx context.Context, topicID string, up
 }
 
 // DeleteTopic soft-deletes a topic. Returns an error if it is the last thread.
+// The count-check and soft-delete are wrapped in a transaction to prevent a
+// TOCTOU race where two concurrent deletes both see count=2 and leave 0
+// threads. SQLite transactions serialize writes by default, so FOR UPDATE is
+// not needed.
 func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) error {
 	var projectID string
-	err := s.db.QueryRowContext(ctx, "SELECT project_id FROM webchat_topic WHERE id = ?", topicID).Scan(&projectID)
+	err := s.db.QueryRowContext(ctx, "SELECT project_id FROM webchat_topic WHERE id = ? AND deleted_at IS NULL", topicID).Scan(&projectID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil
@@ -908,9 +912,15 @@ func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) er
 		return fmt.Errorf("webchat store: delete topic check: %w", err)
 	}
 
-	// Count active (non-deleted) topics for this project
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("webchat store: delete topic begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Count active (non-deleted) topics for this project within the transaction.
 	var count int
-	err = s.db.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM webchat_topic WHERE project_id = ? AND deleted_at IS NULL",
 		projectID).Scan(&count)
 	if err != nil {
@@ -920,12 +930,15 @@ func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) er
 		return fmt.Errorf("webchat store: delete topic: cannot delete the last thread")
 	}
 
-	const query = `UPDATE webchat_topic SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`
-	_, err = s.db.ExecContext(ctx, query, time.Now().UTC().Format(time.RFC3339Nano), topicID)
+	// Soft-delete within the same transaction.
+	_, err = tx.ExecContext(ctx,
+		"UPDATE webchat_topic SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
+		time.Now().UTC().Format(time.RFC3339Nano), topicID)
 	if err != nil {
 		return fmt.Errorf("webchat store: delete topic: %w", err)
 	}
-	return nil
+
+	return tx.Commit()
 }
 
 // TouchTopicActivity updates last_activity_at and, when messageID is
