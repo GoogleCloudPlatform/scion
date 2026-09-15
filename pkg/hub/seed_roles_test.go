@@ -30,6 +30,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func seedRoleDefinitions(ctx context.Context, s store.Store) {
+	reconcileBuiltInRoles(ctx, s)
+}
+
+func permissionIDsByActions(actions ...string) []string {
+	actionSet := make(map[string]bool, len(actions))
+	for _, action := range actions {
+		actionSet[action] = true
+	}
+
+	var ids []string
+	for _, permission := range permissions.Registry {
+		if actionSet[permission.Action] {
+			ids = append(ids, permission.ID)
+		}
+	}
+	return ids
+}
+
 // =============================================================================
 // Curated role permission tests
 // =============================================================================

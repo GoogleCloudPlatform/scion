@@ -236,17 +236,3 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 		}
 	}
 }
-
-// importTemplatesFromRemote fetches a remote source URL, discovers scion
-// templates within it, and registers each one into the Hub store scoped
-// to the given project. Returns the names of all templates imported or updated.
-func (s *Server) importTemplatesFromRemote(ctx context.Context, projectID, sourceURL string) ([]string, error) {
-	return s.importFromRemote(ctx, projectID, sourceURL, store.TemplateScopeProject, s.templateImportKind(), nil, nil)
-}
-
-// importTemplatesFromWorkspace imports templates from a path within the
-// project's workspace filesystem. The workspacePath is relative to the project's
-// workspace root (e.g. "/.scion/templates" or "/my/custom/path").
-func (s *Server) importTemplatesFromWorkspace(ctx context.Context, project *store.Project, workspacePath string) ([]string, error) {
-	return s.importFromWorkspace(ctx, project, workspacePath, store.TemplateScopeProject, s.templateImportKind(), nil, nil)
-}

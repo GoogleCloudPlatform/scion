@@ -537,7 +537,7 @@ func ensureDevUserRoleBinding(ctx context.Context, s store.Store) {
 //     the code-declared set exactly.
 //  3. If the code revision equals the stored revision, no update is needed.
 //
-// This replaces the old create-if-missing seedRoleDefinitions behavior.
+// This replaces the old create-if-missing role seeding behavior.
 // A new registry permission does NOT automatically enter a built-in role —
 // it must be explicitly added to the role's permission list and the revision
 // bumped.
@@ -753,21 +753,6 @@ func hubAdminPermissionIDs() []string {
 	var ids []string
 	for _, p := range permissions.Registry {
 		if included[p.ID] {
-			ids = append(ids, p.ID)
-		}
-	}
-	return ids
-}
-
-// permissionIDsByActions returns permission IDs for permissions whose action matches any given action.
-func permissionIDsByActions(actions ...string) []string {
-	actionSet := make(map[string]bool, len(actions))
-	for _, a := range actions {
-		actionSet[a] = true
-	}
-	var ids []string
-	for _, p := range permissions.Registry {
-		if actionSet[p.Action] {
 			ids = append(ids, p.ID)
 		}
 	}
@@ -1469,18 +1454,4 @@ func ensureHubMembership(ctx context.Context, s store.Store, userID string) {
 	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		slog.Debug("failed to add user to hub-members group", "userID", userID, "error", err)
 	}
-}
-
-// =============================================================================
-// Backward-compatible aliases (PG1)
-// =============================================================================
-//
-// These functions are kept as aliases so that test files outside this package's
-// ownership can continue to call them without modification. They delegate to
-// the new reconciliation and seeding functions.
-
-// seedRoleDefinitions is a backward-compatible alias for reconcileBuiltInRoles.
-// Tests and external callers that need to seed role definitions should use this.
-func seedRoleDefinitions(ctx context.Context, s store.Store) {
-	reconcileBuiltInRoles(ctx, s)
 }
