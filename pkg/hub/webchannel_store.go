@@ -934,12 +934,12 @@ func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) er
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return fmt.Errorf("webchat store: delete topic scan: %w", err)
 		}
 		count++
 	}
-	rows.Close()
+	_ = rows.Close()
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("webchat store: delete topic rows: %w", err)
 	}
