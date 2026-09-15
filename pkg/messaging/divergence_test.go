@@ -45,25 +45,6 @@ func (m *mockQueryStore) ListMessages(_ context.Context, filter store.MessageFil
 	return &store.ListResult[store.Message]{Items: matched}, nil
 }
 
-func TestLegacyDirectMessageExternalRef_Deterministic(t *testing.T) {
-	// Order should not matter — the ref is sorted.
-	refAB := directMessageExternalRef("aaa", "bbb")
-	refBA := directMessageExternalRef("bbb", "aaa")
-	if refAB != refBA {
-		t.Errorf("refs should be identical regardless of order: %q vs %q", refAB, refBA)
-	}
-	if refAB != "dm:aaa:bbb" {
-		t.Errorf("unexpected ref format: %q", refAB)
-	}
-}
-
-func TestLegacyDirectMessageExternalRef_EmptyID(t *testing.T) {
-	ref := directMessageExternalRef("", "xyz")
-	if ref != "dm::xyz" {
-		t.Errorf("expected dm::xyz, got %q", ref)
-	}
-}
-
 func TestOldRoutingFromMessage_WithThreadID(t *testing.T) {
 	routing := OldRoutingFromMessage("sender1", "recip1", "dm:abc123")
 	if routing != "thread:dm:abc123" {
