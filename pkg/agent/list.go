@@ -34,28 +34,9 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 		return nil, err
 	}
 
-	// Also find "created" agents that don't have a container yet
-	// We need to know which projects to scan.
-	// Preference is given to scion.project, then scion.grove.
-	var projectName string
-	if pn, ok := filter["scion.project"]; ok {
-		projectName = pn
-	} else if pn, ok := filter["scion.grove"]; ok {
-		projectName = pn
-	}
-
+	// Also find "created" agents that don't have a container yet. An explicit
+	// project path identifies which local project directory to scan.
 	var projectsToScan []string
-	if projectName != "" {
-		_ = projectName
-		// We need to resolve projectName to a path. This is currently not easy without searching.
-		// For now, if scion.project is provided, we assume we only care about running ones
-		// OR we need to be passed a project path.
-	}
-
-	// This logic is a bit tied to how CLI uses it.
-	// Let's at least support scanning a specific project if provided in filter?
-	// Or maybe Add a special filter key for ProjectPath.
-
 	projectPath := filter["scion.project_path"]
 	if projectPath == "" {
 		projectPath = filter["scion.grove_path"]
