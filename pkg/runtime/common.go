@@ -648,42 +648,6 @@ func runInteractiveCommand(command string, args ...string) error {
 	return cmd.Run()
 }
 
-// TODO(#284): remove once Phase 2 eliminates remaining bind-mount usage
-//
-// insertVolumeFlags inserts -v flags for the given mount specs before the image
-// in an args slice. This ensures volume mounts appear as runtime flags rather
-// than being appended after the image and container command.
-func insertVolumeFlags(args []string, image string, mountSpecs []string) []string {
-	if len(mountSpecs) == 0 {
-		return args
-	}
-
-	// Find the image position (search from end since it's near the tail)
-	imageIdx := -1
-	for i := len(args) - 1; i >= 0; i-- {
-		if args[i] == image {
-			imageIdx = i
-			break
-		}
-	}
-
-	var mountArgs []string
-	for _, spec := range mountSpecs {
-		mountArgs = append(mountArgs, "-v", spec)
-	}
-
-	if imageIdx < 0 {
-		// Fallback: shouldn't happen, but append before end as best-effort
-		return append(args, mountArgs...)
-	}
-
-	result := make([]string, 0, len(args)+len(mountArgs))
-	result = append(result, args[:imageIdx]...)
-	result = append(result, mountArgs...)
-	result = append(result, args[imageIdx:]...)
-	return result
-}
-
 // WriteRuntimeDebugFile writes a redacted summary of the runtime execution
 // command to a debug file inside the agent directory. The file records the
 // command name and argument count but NOT the argument values, because on the
