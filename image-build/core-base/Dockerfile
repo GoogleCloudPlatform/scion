@@ -139,12 +139,14 @@ COPY --from=builder /usr/local/share/git-core /usr/local/share/git-core
 
 # Install GitHub CLI from official release (pinned version for reproducibility).
 # Bump GH_VERSION at the top of this file to upgrade.
-# --force-depends: git is compiled from source above, not tracked by dpkg.
+# Uses the tar.gz archive instead of .deb to avoid dpkg dependency issues
+# (git is compiled from source above and not tracked by dpkg).
 ARG GH_VERSION
 RUN ARCH=$(dpkg --print-architecture) && \
-    curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${ARCH}.deb" -o /tmp/gh.deb && \
-    dpkg -i --force-depends /tmp/gh.deb && \
-    rm /tmp/gh.deb
+    curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${ARCH}.tar.gz" -o /tmp/gh.tar.gz && \
+    tar -xzf /tmp/gh.tar.gz -C /tmp && \
+    mv /tmp/gh_${GH_VERSION}_linux_${ARCH}/bin/gh /usr/local/bin/gh && \
+    rm -rf /tmp/gh.tar.gz /tmp/gh_${GH_VERSION}_linux_${ARCH}
 
 # Copy Bun from bun-source
 COPY --from=bun-source /usr/local/bin/bun /usr/local/bin/bun
