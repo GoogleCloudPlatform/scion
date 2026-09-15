@@ -99,7 +99,8 @@ func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)   
 func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)      {}
 func (noopEventPublisher) PublishChatNotification(_ context.Context, _ *store.Notification, _ ChatMessageContext) {
 }
-func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef) {}
+func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef) {
+}
 func (noopEventPublisher) PublishAgentPorts(_ context.Context, _ *store.Agent)    {}
 func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string) {}
 func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string) {}
@@ -230,25 +231,25 @@ type BrokerStatusEvent struct {
 // UserMessageEvent is published when a message involving a human user is
 // persisted — either an agent→user reply or a user→agent instruction.
 type UserMessageEvent struct {
-	ID            string `json:"id"`
-	ProjectID     string `json:"projectId"`
-	GroveID       string `json:"groveId"`
-	Sender        string `json:"sender"`
-	SenderID      string `json:"senderId"`
-	Recipient     string `json:"recipient"`
-	RecipientID   string `json:"recipientId"`
-	Msg           string `json:"msg"`
-	Type          string `json:"type"`
-	Urgent        bool   `json:"urgent,omitempty"`
-	Broadcasted   bool   `json:"broadcasted,omitempty"`
-	AgentID       string `json:"agentId"`
-	CreatedAt     string `json:"createdAt"`
-	Channel       string `json:"channel,omitempty"`
-	ThreadID      string `json:"threadId,omitempty"`
-	GroupID       string `json:"groupId,omitempty"`
-	Read          bool              `json:"read"`
-	DispatchState string            `json:"dispatchState,omitempty"`
-	Attachments   []AttachmentRef   `json:"attachments,omitempty"`
+	ID            string          `json:"id"`
+	ProjectID     string          `json:"projectId"`
+	GroveID       string          `json:"groveId"`
+	Sender        string          `json:"sender"`
+	SenderID      string          `json:"senderId"`
+	Recipient     string          `json:"recipient"`
+	RecipientID   string          `json:"recipientId"`
+	Msg           string          `json:"msg"`
+	Type          string          `json:"type"`
+	Urgent        bool            `json:"urgent,omitempty"`
+	Broadcasted   bool            `json:"broadcasted,omitempty"`
+	AgentID       string          `json:"agentId"`
+	CreatedAt     string          `json:"createdAt"`
+	Channel       string          `json:"channel,omitempty"`
+	ThreadID      string          `json:"threadId,omitempty"`
+	GroupID       string          `json:"groupId,omitempty"`
+	Read          bool            `json:"read"`
+	DispatchState string          `json:"dispatchState,omitempty"`
+	Attachments   []AttachmentRef `json:"attachments,omitempty"`
 }
 
 // NotificationCreatedEvent is published when a user notification is created.
