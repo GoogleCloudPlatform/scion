@@ -136,21 +136,8 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 			"use rootful Docker or Podman for NFS-backed projects")
 	}
 
-	// Serialize file and variable secrets into an env-var blob for
-	// container-side staging by sciontool init (stateless broker support).
-	if len(config.ResolvedSecrets) > 0 {
-		encoded, err := serializeSecrets(util.GetHomeDir(config.UnixUsername), config.ResolvedSecrets)
-		if err != nil {
-			return "", fmt.Errorf("failed to serialize secrets: %w", err)
-		}
-		if encoded != "" {
-			config.Env = append(config.Env, StagedSecretEnvVar+"="+encoded)
-		}
-	}
-
-	// Inject GCP telemetry credential path if the well-known secret is present
-	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, util.GetHomeDir(config.UnixUsername)); credPath != "" {
-		config.Env = append(config.Env, telemetryGCPCredentialsEnvVar+"="+credPath)
+	if err := prepareContainerSecretEnv(&config); err != nil {
+		return "", err
 	}
 
 	args, err := buildCommonRunArgs(config)

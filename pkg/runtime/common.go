@@ -879,27 +879,39 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 	return nil
 }
 
-// StagedSecretEnvVar is the environment variable used to pass serialized
-// file and variable secrets from the broker to the container.
-const StagedSecretEnvVar = stagedsecrets.EnvVar
-
 // stagedSecretWarnThreshold is the size (in bytes) above which a warning is
 // logged for the serialized secret blob. Container runtimes typically cap
 // the combined environment at ~128KB.
 const stagedSecretWarnThreshold = 100 * 1024
 
-// StagedFileSecret is an alias for the type in pkg/stagedsecrets.
-type StagedFileSecret = stagedsecrets.FileSecret
+// prepareContainerSecretEnv adds the shared secret-related environment needed
+// by local container runtimes.
+func prepareContainerSecretEnv(config *RunConfig) error {
+	if len(config.ResolvedSecrets) == 0 {
+		return nil
+	}
 
-// StagedSecrets is an alias for the type in pkg/stagedsecrets.
-type StagedSecrets = stagedsecrets.Staged
+	containerHome := util.GetHomeDir(config.UnixUsername)
+	encoded, err := serializeSecrets(containerHome, config.ResolvedSecrets)
+	if err != nil {
+		return fmt.Errorf("failed to serialize secrets: %w", err)
+	}
+	if encoded != "" {
+		config.Env = append(config.Env, stagedsecrets.EnvVar+"="+encoded)
+	}
+
+	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, containerHome); credPath != "" {
+		config.Env = append(config.Env, telemetryGCPCredentialsEnvVar+"="+credPath)
+	}
+	return nil
+}
 
 // serializeSecrets collects file and variable secrets into a single JSON blob,
 // base64-encodes it, and returns the encoded string suitable for injection as
 // an environment variable. Returns "" when there are no file or variable secrets.
 // The containerHome parameter is used to expand ~/ prefixes in file target paths.
 func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (string, error) {
-	var staged StagedSecrets
+	var staged stagedsecrets.Staged
 
 	// Collect file secrets, deduplicating by container target path (last wins).
 	targetIndex := make(map[string]int) // target → index in FileSecrets
@@ -918,7 +930,7 @@ func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (strin
 			data = []byte(s.Value)
 		}
 
-		entry := StagedFileSecret{
+		entry := stagedsecrets.FileSecret{
 			Name:   s.Name,
 			Target: target,
 			Value:  base64.StdEncoding.EncodeToString(data),
@@ -962,18 +974,6 @@ func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (strin
 	}
 
 	return encoded, nil
-}
-
-// DecodeStagedSecrets decodes the SCION_STAGED_SECRETS env var value.
-// Deprecated: Use stagedsecrets.Decode directly.
-func DecodeStagedSecrets(encoded string) (*StagedSecrets, error) {
-	return stagedsecrets.Decode(encoded)
-}
-
-// WriteStagedSecrets writes decoded staged secrets to the filesystem.
-// Deprecated: Use stagedsecrets.Write directly.
-func WriteStagedSecrets(homeDir string, staged *StagedSecrets) error {
-	return stagedsecrets.Write(homeDir, staged)
 }
 
 // phaseFromContainerStatus derives an agent phase from a container status string.

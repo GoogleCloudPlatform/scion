@@ -19,11 +19,67 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 )
+
+func TestPrepareContainerSecretEnv(t *testing.T) {
+	config := RunConfig{
+		UnixUsername: "scion",
+		Env:          []string{"EXISTING=value"},
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "CONFIG", Type: "variable", Target: "config", Value: "json-data"},
+			{
+				Name:   telemetryGCPCredentialsSecretName,
+				Type:   "file",
+				Target: "~/.config/gcp/sa.json",
+				Value:  "credentials",
+			},
+		},
+	}
+
+	if err := prepareContainerSecretEnv(&config); err != nil {
+		t.Fatalf("prepareContainerSecretEnv failed: %v", err)
+	}
+	if len(config.Env) != 3 {
+		t.Fatalf("environment entries = %v, want existing, staged secrets, and telemetry credentials", config.Env)
+	}
+	if config.Env[0] != "EXISTING=value" {
+		t.Errorf("existing environment moved or changed: %v", config.Env)
+	}
+
+	prefix := stagedsecrets.EnvVar + "="
+	if !strings.HasPrefix(config.Env[1], prefix) {
+		t.Fatalf("staged secret environment = %q, want %q prefix", config.Env[1], prefix)
+	}
+	staged, err := stagedsecrets.Decode(strings.TrimPrefix(config.Env[1], prefix))
+	if err != nil {
+		t.Fatalf("decode staged secrets: %v", err)
+	}
+	if staged.VariableSecrets["config"] != "json-data" {
+		t.Errorf("staged variable secrets = %#v", staged.VariableSecrets)
+	}
+
+	wantTelemetry := telemetryGCPCredentialsEnvVar + "=/home/scion/.config/gcp/sa.json"
+	if config.Env[2] != wantTelemetry {
+		t.Errorf("telemetry environment = %q, want %q", config.Env[2], wantTelemetry)
+	}
+
+	envOnly := RunConfig{
+		Env:             []string{"EXISTING=value"},
+		ResolvedSecrets: []api.ResolvedSecret{{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "secret"}},
+	}
+	if err := prepareContainerSecretEnv(&envOnly); err != nil {
+		t.Fatalf("prepareContainerSecretEnv with environment secret failed: %v", err)
+	}
+	if len(envOnly.Env) != 1 || envOnly.Env[0] != "EXISTING=value" {
+		t.Errorf("environment-only secret changed staged environment: %v", envOnly.Env)
+	}
+}
 
 func TestSerializeSecrets(t *testing.T) {
 	secrets := []api.ResolvedSecret{
@@ -73,9 +129,9 @@ func TestSerializeSecrets(t *testing.T) {
 	}
 
 	// Decode and verify the structure
-	staged, err := DecodeStagedSecrets(encoded)
+	staged, err := stagedsecrets.Decode(encoded)
 	if err != nil {
-		t.Fatalf("DecodeStagedSecrets failed: %v", err)
+		t.Fatalf("stagedsecrets.Decode failed: %v", err)
 	}
 
 	// Should have 2 file secrets (environment type is excluded)
@@ -158,9 +214,9 @@ func TestSerializeSecrets_TildeExpansion(t *testing.T) {
 		t.Fatalf("serializeSecrets failed: %v", err)
 	}
 
-	staged, err := DecodeStagedSecrets(encoded)
+	staged, err := stagedsecrets.Decode(encoded)
 	if err != nil {
-		t.Fatalf("DecodeStagedSecrets failed: %v", err)
+		t.Fatalf("stagedsecrets.Decode failed: %v", err)
 	}
 
 	if staged.FileSecrets[0].Target != "/home/gemini/.ssh/id_rsa" {
@@ -182,9 +238,9 @@ func TestSerializeSecrets_DuplicateTargetKeepsLater(t *testing.T) {
 		t.Fatalf("serializeSecrets failed: %v", err)
 	}
 
-	staged, err := DecodeStagedSecrets(encoded)
+	staged, err := stagedsecrets.Decode(encoded)
 	if err != nil {
-		t.Fatalf("DecodeStagedSecrets failed: %v", err)
+		t.Fatalf("stagedsecrets.Decode failed: %v", err)
 	}
 
 	// Dedup should keep only one entry per target (last wins).
@@ -200,131 +256,6 @@ func TestSerializeSecrets_DuplicateTargetKeepsLater(t *testing.T) {
 	}
 	if string(data) != "v2" {
 		t.Errorf("expected v2 content, got %q", string(data))
-	}
-}
-
-func TestWriteStagedSecrets_FileSecrets(t *testing.T) {
-	homeDir := t.TempDir()
-	targetDir := t.TempDir()
-
-	staged := &StagedSecrets{
-		FileSecrets: []StagedFileSecret{
-			{
-				Name:   "TLS_CERT",
-				Target: filepath.Join(targetDir, "ssl", "cert.pem"),
-				Value:  base64.StdEncoding.EncodeToString([]byte("cert-content")),
-			},
-			{
-				Name:   "SSH_KEY",
-				Target: filepath.Join(targetDir, "ssh", "id_rsa"),
-				Value:  base64.StdEncoding.EncodeToString([]byte("ssh-key")),
-			},
-		},
-	}
-
-	if err := WriteStagedSecrets(homeDir, staged); err != nil {
-		t.Fatalf("WriteStagedSecrets failed: %v", err)
-	}
-
-	// Verify files were written with correct content
-	content, err := os.ReadFile(filepath.Join(targetDir, "ssl", "cert.pem"))
-	if err != nil {
-		t.Fatalf("failed to read cert.pem: %v", err)
-	}
-	if string(content) != "cert-content" {
-		t.Errorf("expected cert-content, got %q", string(content))
-	}
-
-	content, err = os.ReadFile(filepath.Join(targetDir, "ssh", "id_rsa"))
-	if err != nil {
-		t.Fatalf("failed to read id_rsa: %v", err)
-	}
-	if string(content) != "ssh-key" {
-		t.Errorf("expected ssh-key, got %q", string(content))
-	}
-
-	// Verify file permissions (0600)
-	info, err := os.Stat(filepath.Join(targetDir, "ssl", "cert.pem"))
-	if err != nil {
-		t.Fatalf("failed to stat cert.pem: %v", err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Errorf("expected file mode 0600, got %o", info.Mode().Perm())
-	}
-}
-
-func TestWriteStagedSecrets_VariableSecrets(t *testing.T) {
-	homeDir := t.TempDir()
-
-	staged := &StagedSecrets{
-		VariableSecrets: map[string]string{
-			"config": `{"a":"b"}`,
-			"token":  "abc123",
-		},
-	}
-
-	if err := WriteStagedSecrets(homeDir, staged); err != nil {
-		t.Fatalf("WriteStagedSecrets failed: %v", err)
-	}
-
-	// Verify secrets.json was written
-	data, err := os.ReadFile(filepath.Join(homeDir, ".scion", "secrets.json"))
-	if err != nil {
-		t.Fatalf("failed to read secrets.json: %v", err)
-	}
-
-	var vars map[string]string
-	if err := json.Unmarshal(data, &vars); err != nil {
-		t.Fatalf("failed to unmarshal secrets.json: %v", err)
-	}
-
-	if len(vars) != 2 {
-		t.Fatalf("expected 2 variable entries, got %d", len(vars))
-	}
-	if vars["config"] != `{"a":"b"}` {
-		t.Errorf("config mismatch: got %q", vars["config"])
-	}
-	if vars["token"] != "abc123" {
-		t.Errorf("token mismatch: got %q", vars["token"])
-	}
-
-	// Verify file permissions
-	info, err := os.Stat(filepath.Join(homeDir, ".scion", "secrets.json"))
-	if err != nil {
-		t.Fatalf("failed to stat secrets.json: %v", err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Errorf("expected file mode 0600, got %o", info.Mode().Perm())
-	}
-}
-
-func TestWriteStagedSecrets_NoVariables(t *testing.T) {
-	homeDir := t.TempDir()
-
-	staged := &StagedSecrets{}
-
-	if err := WriteStagedSecrets(homeDir, staged); err != nil {
-		t.Fatalf("WriteStagedSecrets failed: %v", err)
-	}
-
-	// secrets.json should NOT be created when there are no variable secrets
-	if _, err := os.Stat(filepath.Join(homeDir, ".scion", "secrets.json")); !os.IsNotExist(err) {
-		t.Error("expected secrets.json to not be created when no variable secrets exist")
-	}
-}
-
-func TestDecodeStagedSecrets_InvalidBase64(t *testing.T) {
-	_, err := DecodeStagedSecrets("not-valid-base64!!!")
-	if err == nil {
-		t.Error("expected error for invalid base64")
-	}
-}
-
-func TestDecodeStagedSecrets_InvalidJSON(t *testing.T) {
-	encoded := base64.StdEncoding.EncodeToString([]byte("not json"))
-	_, err := DecodeStagedSecrets(encoded)
-	if err == nil {
-		t.Error("expected error for invalid JSON")
 	}
 }
 
@@ -363,12 +294,12 @@ func TestSerializeAndWriteRoundTrip(t *testing.T) {
 	}
 
 	// Container side: decode + write
-	staged, err := DecodeStagedSecrets(encoded)
+	staged, err := stagedsecrets.Decode(encoded)
 	if err != nil {
-		t.Fatalf("DecodeStagedSecrets failed: %v", err)
+		t.Fatalf("stagedsecrets.Decode failed: %v", err)
 	}
-	if err := WriteStagedSecrets(homeDir, staged); err != nil {
-		t.Fatalf("WriteStagedSecrets failed: %v", err)
+	if err := stagedsecrets.Write(homeDir, staged); err != nil {
+		t.Fatalf("stagedsecrets.Write failed: %v", err)
 	}
 
 	// Verify file secret
