@@ -1697,14 +1697,8 @@ func lastOwnerDenial() *MembershipDecision {
 	}
 }
 
-// countActiveDirectOwners counts active direct-user project-owner bindings.
-// Uses the same activation semantics as isProjectOwner per CT1 D2.
-func (svc *ProjectMembershipService) countActiveDirectOwners(ctx context.Context, projectID string) (int, error) {
-	return svc.countActiveDirectOwnersFromStore(ctx, svc.store, projectID)
-}
-
-// countActiveDirectOwnersFromStore is like countActiveDirectOwners but uses
-// the provided store (which may be a transactional store).
+// countActiveDirectOwnersFromStore counts active direct-user project-owner
+// bindings in the provided store, which may be transactional.
 func (svc *ProjectMembershipService) countActiveDirectOwnersFromStore(ctx context.Context, s store.Store, projectID string) (int, error) {
 	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
 	if err != nil {

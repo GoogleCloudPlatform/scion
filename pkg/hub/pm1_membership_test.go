@@ -195,7 +195,7 @@ func TestPM1_LastOwnerProtection_CanDeleteNonLastOwner(t *testing.T) {
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, owner2.ID))
 
 	// Verify two owners exist.
-	count, err := srv.countDirectOwnerBindings(ctx, project.ID)
+	count, err := srv.membershipService.countActiveDirectOwnersFromStore(ctx, s, project.ID)
 	require.NoError(t, err)
 	require.Equal(t, 2, count)
 
@@ -209,13 +209,13 @@ func TestPM1_LastOwnerProtection_CanDeleteNonLastOwner(t *testing.T) {
 		"should be able to delete a non-last owner; got: %s", rec.Body.String())
 
 	// Verify only one owner remains.
-	count, err = srv.countDirectOwnerBindings(ctx, project.ID)
+	count, err = srv.membershipService.countActiveDirectOwnersFromStore(ctx, s, project.ID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count)
 }
 
 // TestPM1_LastOwnerCount_ExcludesExpiredBindings verifies that
-// countDirectOwnerBindings does not count expired owner bindings. This is
+// countActiveDirectOwnersFromStore does not count expired owner bindings. This is
 // a regression test for G8: the count must use the same activation semantics
 // as isProjectOwner to prevent removing the last active owner while expired
 // bindings remain.
@@ -260,14 +260,14 @@ func TestPM1_LastOwnerCount_ExcludesExpiredBindings(t *testing.T) {
 	require.NoError(t, err)
 
 	// Count must be 1 (only the active binding), not 2.
-	count, err := srv.countDirectOwnerBindings(ctx, project.ID)
+	count, err := srv.membershipService.countActiveDirectOwnersFromStore(ctx, s, project.ID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count,
-		"G8: countDirectOwnerBindings must exclude expired bindings")
+		"G8: active owner count must exclude expired bindings")
 }
 
 // TestPM1_LastOwnerCount_ExcludesFutureBindings verifies that
-// countDirectOwnerBindings does not count not-yet-active owner bindings.
+// countActiveDirectOwnersFromStore does not count not-yet-active owner bindings.
 func TestPM1_LastOwnerCount_ExcludesFutureBindings(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -309,10 +309,10 @@ func TestPM1_LastOwnerCount_ExcludesFutureBindings(t *testing.T) {
 	require.NoError(t, err)
 
 	// Count must be 1 (only the active binding), not 2.
-	count, err := srv.countDirectOwnerBindings(ctx, project.ID)
+	count, err := srv.membershipService.countActiveDirectOwnersFromStore(ctx, s, project.ID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count,
-		"G8: countDirectOwnerBindings must exclude not-yet-active bindings")
+		"G8: active owner count must exclude not-yet-active bindings")
 }
 
 // TestPM1_LastOwnerCount_OnlyExpiredMeansZero verifies that if all owner
@@ -353,7 +353,7 @@ func TestPM1_LastOwnerCount_OnlyExpiredMeansZero(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	count, err := srv.countDirectOwnerBindings(ctx, project.ID)
+	count, err := srv.membershipService.countActiveDirectOwnersFromStore(ctx, s, project.ID)
 	require.NoError(t, err)
 	assert.Equal(t, 0, count,
 		"G8: all-expired owner bindings must produce count 0")
@@ -362,7 +362,7 @@ func TestPM1_LastOwnerCount_OnlyExpiredMeansZero(t *testing.T) {
 // TestPM1_MembershipViaRoleBinding verifies that project membership is
 // determined by role bindings, not group membership.
 func TestPM1_MembershipViaRoleBinding(t *testing.T) {
-	srv, s := testServer(t)
+	_, s := testServer(t)
 	ctx := context.Background()
 
 	user := &store.User{
@@ -385,67 +385,22 @@ func TestPM1_MembershipViaRoleBinding(t *testing.T) {
 	assert.False(t, isMember, "user without role binding should not be a project member")
 
 	// Add a project-member role binding.
-	require.NoError(t, srv.createProjectRoleBinding(ctx, project.ID,
-		store.RoleBindingPrincipalUser, user.ID, store.ProjectRoleMember, "test"))
+	memberRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRole.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	// Now user should be a project member.
 	isMember, err = s.IsProjectMember(ctx, project.ID, user.ID)
 	require.NoError(t, err)
 	assert.True(t, isMember, "user with role binding should be a project member")
-}
-
-// TestPM1_HubMembersGroupVisibility verifies that adding a hub-members group
-// role binding makes the project visible to all hub members.
-func TestPM1_HubMembersGroupVisibility(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	owner := &store.User{
-		ID: tid("pm1-vis-owner"), Email: "pm1-vis-owner@test.com",
-		DisplayName: "PM1 Vis Owner", Role: store.UserRoleMember, Status: "active",
-	}
-	viewer := &store.User{
-		ID: tid("pm1-vis-viewer"), Email: "pm1-vis-viewer@test.com",
-		DisplayName: "PM1 Vis Viewer", Role: store.UserRoleMember, Status: "active",
-	}
-	require.NoError(t, s.CreateUser(ctx, owner))
-	require.NoError(t, s.CreateUser(ctx, viewer))
-	ensureHubMembership(ctx, s, owner.ID)
-	ensureHubMembership(ctx, s, viewer.ID)
-
-	// Create project with owner binding.
-	project := &store.Project{
-		ID: tid("pm1-vis-proj"), Name: "PM1 Visibility Project",
-		Slug: "pm1-visibility", OwnerID: owner.ID, CreatedBy: owner.ID,
-		Created: time.Now(), Updated: time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
-
-	// Create hub-members group RoleBinding for project visibility.
-	srv.ensureHubMembersProjectVisibility(ctx, project)
-
-	// Verify the hub-members group has a project-member binding.
-	hubMembersGroup, err := s.GetGroupBySlug(ctx, "hub-members")
-	require.NoError(t, err)
-
-	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, project.ID)
-	require.NoError(t, err)
-
-	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
-	require.NoError(t, err)
-
-	foundGroupBinding := false
-	for _, b := range bindings {
-		if b.PrincipalType == store.RoleBindingPrincipalGroup &&
-			b.PrincipalID == hubMembersGroup.ID &&
-			b.RoleDefinitionID == memberRD.ID {
-			foundGroupBinding = true
-			break
-		}
-	}
-	assert.True(t, foundGroupBinding,
-		"hub-members group should have a project-member role binding for visibility")
 }
 
 // TestPM1_ProjectCreation_RollsBackOnBindingFailure verifies that project

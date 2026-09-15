@@ -691,59 +691,6 @@ func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, u
 	return nil
 }
 
-// createProjectRoleBinding creates a project-scoped role binding for any
-// principal (user, agent, or group). This is the canonical way to grant
-// project membership. Returns nil on duplicate (idempotent).
-func (s *Server) createProjectRoleBinding(ctx context.Context, projectID, principalType, principalID, roleName, createdBy string) error {
-	roleDef, err := s.store.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
-	if err != nil {
-		return fmt.Errorf("lookup %s role definition: %w", roleName, err)
-	}
-	_, err = s.store.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: roleDef.ID,
-		PrincipalType:    principalType,
-		PrincipalID:      principalID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        createdBy,
-	})
-	if err != nil {
-		if errors.Is(err, store.ErrAlreadyExists) {
-			return nil // idempotent
-		}
-		return fmt.Errorf("create %s role binding: %w", roleName, err)
-	}
-	return nil
-}
-
-// ensureHubMembersProjectVisibility creates a project-member RoleBinding for
-// the hub-members group, making the project visible to all hub members.
-// This replaces the old pattern of adding hub-members as a nested group member
-// of the project's members group. Best-effort; failures are logged.
-//
-// TODO(PM1): Wire into handleCreateProject. The legacy
-// ensureProjectMemberReadPolicy bridge has been removed (CO1 cutover);
-// this function provides the RoleBinding-based replacement.
-func (s *Server) ensureHubMembersProjectVisibility(ctx context.Context, project *store.Project) {
-	group, err := s.store.GetGroupBySlug(ctx, "hub-members")
-	if err != nil {
-		s.projectsLogger().Debug("hub-members group not found, skipping project visibility binding",
-			"project_id", project.ID, "error", err)
-		return
-	}
-	if err := s.createProjectRoleBinding(ctx, project.ID, store.RoleBindingPrincipalGroup,
-		group.ID, store.ProjectRoleMember, "system"); err != nil {
-		s.projectsLogger().Warn("failed to create hub-members project visibility binding",
-			"project_id", project.ID, "error", err)
-	}
-}
-
-// countDirectOwnerBindings delegates to the membership service's
-// countActiveDirectOwners (N-3 consolidation).
-func (s *Server) countDirectOwnerBindings(ctx context.Context, projectID string) (int, error) {
-	return s.membershipService.countActiveDirectOwners(ctx, projectID)
-}
-
 const systemProjectMembersGroupAnnotation = "scion.io/project-members-group"
 const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
 
