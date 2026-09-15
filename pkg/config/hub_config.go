@@ -880,6 +880,14 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 		loadServerConfigFile(k, ".")
 	}
 
+	// Check for unrecognized keys BEFORE environment variables are loaded.
+	// SCION_SERVER_* env vars that do not map to GlobalConfig fields would
+	// produce false-positive warnings if the check ran after merging env vars.
+	{
+		var probe GlobalConfig
+		unmarshalWithUnusedKeyCheck(k, &probe, "server config")
+	}
+
 	// 4. Load environment variables (SCION_SERVER_ prefix)
 	// Maps: SCION_SERVER_HUB_PORT -> hub.port
 	//       SCION_SERVER_DATABASE_DRIVER -> database.driver
@@ -906,7 +914,7 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 		},
 	}
 
-	if err := unmarshalWithUnusedKeyCheck(k, config, "server config"); err != nil {
+	if err := k.Unmarshal("", config); err != nil {
 		return nil, err
 	}
 

@@ -93,7 +93,16 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 		}
 	}
 
-	// 4. Load environment variables (SCION_ prefix, top-level only)
+	// Check for unrecognized keys BEFORE environment variables are loaded.
+	// Environment variables like SCION_PROJECT, SCION_GROVE, SCION_CREATOR
+	// do not map to Settings struct fields and would produce false-positive
+	// warnings if the check ran on the merged koanf instance.
+	{
+		var probe Settings
+		unmarshalWithUnusedKeyCheck(k, &probe, "settings")
+	}
+
+	// 5. Load environment variables (SCION_ prefix, top-level only)
 	// Maps: SCION_ACTIVE_PROFILE -> active_profile
 	//       SCION_DEFAULT_TEMPLATE -> default_template
 	//       SCION_BUCKET_PROVIDER -> bucket.provider
@@ -202,7 +211,7 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 		Profiles:  make(map[string]ProfileConfig),
 	}
 
-	if err := unmarshalWithUnusedKeyCheck(k, settings, "settings"); err != nil {
+	if err := k.Unmarshal("", settings); err != nil {
 		return nil, err
 	}
 
