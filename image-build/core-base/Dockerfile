@@ -17,7 +17,7 @@
 # No scion-specific tooling or user setup
 
 # GitHub CLI version — bump this variable to upgrade gh across all images.
-ARG GH_VERSION=2.97.0
+ARG GH_VERSION=2.100.0
 
 # Bun runtime source
 FROM oven/bun:latest AS bun-source
