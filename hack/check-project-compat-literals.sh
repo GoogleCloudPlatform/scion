@@ -39,7 +39,6 @@ allowed_paths=(
   "^cmd/project.go$"
   "^cmd/root.go$"
   "^cmd/scion-broker-repl/main.go$"
-  "^cmd/server_dispatcher.go$"
   "^cmd/template_import.go$"
   "^cmd/template_resolution.go$"
 
@@ -52,7 +51,6 @@ allowed_paths=(
   "^cmd/hub_secret_test.go$"
   "^cmd/message_test.go$"
   "^cmd/notifications_test.go$"
-  "^cmd/server_dispatcher_test.go$"
   "^cmd/server_test.go$"
   "^cmd/sync_test.go$"
   "^cmd/template_resolution_test.go$"
