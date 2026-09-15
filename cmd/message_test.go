@@ -36,6 +36,7 @@ type messageTestState struct {
 	noHub        bool
 	bcastChanged bool
 	allChanged   bool
+	bodyFile     string
 }
 
 func saveMessageTestState() messageTestState {
@@ -44,6 +45,7 @@ func saveMessageTestState() messageTestState {
 		noHub:        noHub,
 		bcastChanged: messageCmd.Flags().Lookup("broadcast").Changed,
 		allChanged:   messageCmd.Flags().Lookup("all").Changed,
+		bodyFile:     msgBodyFile,
 	}
 }
 
@@ -52,6 +54,7 @@ func (s messageTestState) restore() {
 	noHub = s.noHub
 	messageCmd.Flags().Lookup("broadcast").Changed = s.bcastChanged
 	messageCmd.Flags().Lookup("all").Changed = s.allChanged
+	msgBodyFile = s.bodyFile
 }
 
 // messageMockServer creates a mock Hub server that handles project-scoped
@@ -161,6 +164,105 @@ func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hub
 	}))
 
 	return server, &sent
+}
+
+// --- resolveMessageBody tests ---
+
+func TestResolveMessageBody_BodyFile(t *testing.T) {
+	// Create a temp file with known content
+	tmpDir := t.TempDir()
+	bodyFile := filepath.Join(tmpDir, "msg.txt")
+	content := "Hello, this is a message with `backticks` and $variables"
+	err := os.WriteFile(bodyFile, []byte(content), 0644)
+	require.NoError(t, err)
+
+	got, err := resolveMessageBody(bodyFile, "")
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
+}
+
+func TestResolveMessageBody_BodyFilePreservesNewlines(t *testing.T) {
+	tmpDir := t.TempDir()
+	bodyFile := filepath.Join(tmpDir, "msg.txt")
+	content := "line1\nline2\nline3\n"
+	err := os.WriteFile(bodyFile, []byte(content), 0644)
+	require.NoError(t, err)
+
+	got, err := resolveMessageBody(bodyFile, "")
+	require.NoError(t, err)
+	assert.Equal(t, content, got, "body-file content should be preserved exactly")
+}
+
+func TestResolveMessageBody_BodyFileNotFound(t *testing.T) {
+	_, err := resolveMessageBody("/tmp/nonexistent-body-file-xyz.txt", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to open body file")
+}
+
+func TestResolveMessageBody_Conflict(t *testing.T) {
+	tmpDir := t.TempDir()
+	bodyFile := filepath.Join(tmpDir, "msg.txt")
+	err := os.WriteFile(bodyFile, []byte("file content"), 0644)
+	require.NoError(t, err)
+
+	_, err = resolveMessageBody(bodyFile, "positional content")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--body-file and positional message arguments are mutually exclusive")
+}
+
+func TestResolveMessageBody_Stdin(t *testing.T) {
+	// Save and restore os.Stdin
+	origStdin := os.Stdin
+	defer func() { os.Stdin = origStdin }()
+
+	// Create a pipe to mock stdin
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	_, err = w.WriteString("hello from stdin\n")
+	require.NoError(t, err)
+	_ = w.Close()
+
+	os.Stdin = r
+
+	got, err := resolveMessageBody("", "-")
+	require.NoError(t, err)
+	assert.Equal(t, "hello from stdin", got, "trailing newline from stdin should be trimmed")
+}
+
+func TestResolveMessageBody_StdinNoTrailingNewline(t *testing.T) {
+	origStdin := os.Stdin
+	defer func() { os.Stdin = origStdin }()
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	_, err = w.WriteString("no trailing newline")
+	require.NoError(t, err)
+	_ = w.Close()
+
+	os.Stdin = r
+
+	got, err := resolveMessageBody("", "-")
+	require.NoError(t, err)
+	assert.Equal(t, "no trailing newline", got)
+}
+
+func TestResolveMessageBody_Positional(t *testing.T) {
+	got, err := resolveMessageBody("", "plain positional message")
+	require.NoError(t, err)
+	assert.Equal(t, "plain positional message", got)
+}
+
+func TestResolveMessageBody_EmptyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	bodyFile := filepath.Join(tmpDir, "empty.txt")
+	err := os.WriteFile(bodyFile, []byte(""), 0644)
+	require.NoError(t, err)
+
+	got, err := resolveMessageBody(bodyFile, "")
+	require.NoError(t, err)
+	assert.Equal(t, "", got, "empty file returns empty string; validation happens in RunE")
 }
 
 func TestSendMessageViaHub_SingleAgent(t *testing.T) {
