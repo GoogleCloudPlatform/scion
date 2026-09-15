@@ -494,10 +494,9 @@ func TestCredentialRecorderNilSafe(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, token)
 
-	token2, expiry, err := service.GenerateAgentTokenWithExpiry("agent-1", "project-1", nil, nil)
+	token2, err := service.GenerateAgentToken("agent-1", "project-1", nil, nil)
 	require.NoError(t, err)
 	assert.NotEmpty(t, token2)
-	assert.False(t, expiry.IsZero())
 }
 
 // TestCredentialStoreOperations verifies the basic CRUD operations on the
