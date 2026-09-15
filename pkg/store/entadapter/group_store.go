@@ -875,9 +875,11 @@ SELECT DISTINCT id FROM ancestors`, p1, maxParentGroupDepth)
 		return nil, err
 	}
 
-	result := make([]string, len(ids))
-	for i, id := range ids {
-		result[i] = id.String()
+	result := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id != uid {
+			result = append(result, id.String())
+		}
 	}
 	return result, nil
 }
@@ -944,6 +946,18 @@ func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID str
 		seedIDs = append(seedIDs, projectGroup.ID)
 	}
 	// If no project group exists, that's fine — just skip it
+
+	// De-duplicate seedIDs — an agent's explicit memberships may overlap
+	// with the implicit project group.
+	seen := make(map[uuid.UUID]struct{}, len(seedIDs))
+	unique := make([]uuid.UUID, 0, len(seedIDs))
+	for _, id := range seedIDs {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			unique = append(unique, id)
+		}
+	}
+	seedIDs = unique
 
 	if len(seedIDs) == 0 {
 		return nil, nil
