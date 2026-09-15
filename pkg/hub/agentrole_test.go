@@ -52,7 +52,7 @@ func TestScopesForRole_Baseline(t *testing.T) {
 
 func TestScopesForRole_Full(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleFull)
-	require.Len(t, scopes, 9)
+	require.Len(t, scopes, 10)
 
 	// Must include everything in baseline
 	assert.Contains(t, scopes, ScopeProjectRead)
@@ -66,6 +66,7 @@ func TestScopesForRole_Full(t *testing.T) {
 	assert.Contains(t, scopes, ScopeAgentLifecycle)
 	assert.Contains(t, scopes, ScopeProjectSecretRead)
 	assert.Contains(t, scopes, ScopeProjectTemplateWrite)
+	assert.Contains(t, scopes, ScopeAgentSetMessageMode)
 }
 
 func TestScopesForRole_InvalidDefault(t *testing.T) {
