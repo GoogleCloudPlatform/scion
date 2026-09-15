@@ -17,7 +17,9 @@ name: Build Multi-Arch Release
 on:
   push:
     tags:
-      - '*'
+      - 'v[0-9]+.[0-9]+.[0-9]+'          # Stable: v0.3.0, v1.2.3
+      - 'v[0-9]+.[0-9]+.[0-9]+-preview.*' # Preview: v0.3.0-preview.1
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc.*'      # RC: v0.3.0-rc.1
 
 permissions:
   contents: write
@@ -45,18 +47,18 @@ jobs:
             output: scion-darwin-arm64
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
         with:
           go-version-file: 'go.mod'
           cache: true
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
         with:
           node-version: '24'
           cache: 'npm'
@@ -96,13 +98,15 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
+          LDFLAGS: ${{ steps.version.outputs.ldflags }}
+          OUTPUT_NAME: ${{ matrix.output }}
         run: |
           mkdir -p dist
-          go build -ldflags "${{ steps.version.outputs.ldflags }}" -o dist/scion ./cmd/scion
-          tar -czvf ${{ matrix.output }}.tar.gz -C dist scion
+          go build -ldflags "${LDFLAGS}" -o dist/scion ./cmd/scion
+          tar -czvf "${OUTPUT_NAME}.tar.gz" -C dist scion
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: ${{ matrix.output }}
           path: ${{ matrix.output }}.tar.gz
@@ -113,8 +117,29 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+
+      - name: Determine release channel
+        id: channel
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          TAG="${REF#refs/tags/}"
+          if [[ "$TAG" == *"-preview."* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "channel=preview" >> $GITHUB_OUTPUT
+          elif [[ "$TAG" == *"-rc."* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "channel=rc" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "channel=stable" >> $GITHUB_OUTPUT
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           path: binaries
 
@@ -124,9 +149,40 @@ jobs:
           find binaries -type f -exec mv {} release/ \;
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           files: release/*
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.channel.outputs.prerelease == 'true' }}
+          name: ${{ steps.channel.outputs.tag }}
           generate_release_notes: true
+
+      - name: Update channel branch
+        continue-on-error: true
+        id: branch-update
+        env:
+          CHANNEL: ${{ steps.channel.outputs.channel }}
+          TAG: ${{ steps.channel.outputs.tag }}
+        run: |
+          # For preview and rc tags, update the "preview" branch
+          # For stable tags, update the "stable" branch
+          if [[ "$CHANNEL" == "stable" ]]; then
+            BRANCH="stable"
+          else
+            BRANCH="preview"
+          fi
+          # Force-update the channel branch to point at this tag's commit
+          git push origin "HEAD:refs/heads/${BRANCH}" --force
+
+      - name: Warn on branch update failure
+        if: steps.branch-update.outcome == 'failure'
+        env:
+          CHANNEL: ${{ steps.channel.outputs.channel }}
+          TAG: ${{ steps.channel.outputs.tag }}
+        run: |
+          if [[ "$CHANNEL" == "stable" ]]; then
+            BRANCH="stable"
+          else
+            BRANCH="preview"
+          fi
+          echo "::warning::Failed to update channel branch '${BRANCH}' to ${TAG}. Manual update may be needed."
