@@ -462,6 +462,11 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/profile-skills.js'),
   },
   {
+    pattern: /^\/profile\/templates\/[^/]+$/,
+    tag: 'scion-page-template-detail',
+    load: () => import('../components/pages/template-detail.js'),
+  },
+  {
     pattern: /^\/profile\/templates$/,
     tag: 'scion-page-profile-templates',
     load: () => import('../components/pages/profile-templates.js'),

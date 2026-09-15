@@ -49,6 +49,9 @@ export class ScionPageTemplateDetail extends LitElement {
   templateId = '';
 
   @state()
+  private scope: 'project' | 'hub' | 'user' = 'hub';
+
+  @state()
   private loading = true;
 
   @state()
@@ -176,25 +179,38 @@ export class ScionPageTemplateDetail extends LitElement {
       if (projectMatch) {
         this.projectId = projectMatch[1];
         this.templateId = projectMatch[2];
+        this.scope = 'project';
       } else {
         // Hub (global) scope: /settings/templates/{id}
         const hubMatch = window.location.pathname.match(/\/settings\/templates\/([^/]+)/);
         if (hubMatch) {
           this.projectId = '';
           this.templateId = hubMatch[1];
+          this.scope = 'hub';
+        } else {
+          // User (profile) scope: /profile/templates/{id}
+          const userMatch = window.location.pathname.match(/\/profile\/templates\/([^/]+)/);
+          if (userMatch) {
+            this.projectId = '';
+            this.templateId = userMatch[1];
+            this.scope = 'user';
+          }
         }
       }
     }
     void this.loadTemplate();
   }
 
-  /** Back-navigation links — project scope returns to project settings, hub scope to Hub Resources. */
+  /** Back-navigation links — project scope returns to project settings, user scope to profile templates, hub scope to Hub Resources. */
   private backLinks(): Array<{ href: string; label: string }> {
     if (this.projectId) {
       return [
         { href: `/projects/${this.projectId}/settings?tab=templates`, label: 'Templates' },
         { href: `/projects/${this.projectId}/settings`, label: 'Project Settings' },
       ];
+    }
+    if (this.scope === 'user') {
+      return [{ href: '/profile/templates', label: 'My Templates' }];
     }
     return [{ href: '/settings?tab=templates', label: 'Hub Resources' }];
   }
