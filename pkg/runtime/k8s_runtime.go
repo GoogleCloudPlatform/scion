@@ -878,33 +878,6 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	return nil
 }
 
-// cleanupSharedDirPVCs removes PVCs for shared directories belonging to a project.
-// This is called during project deletion, not agent deletion, since PVCs are project-scoped.
-// When backend=nfs, shared dirs live on the NFS volume (no separate PVCs) but the
-// cleanup still runs — it harmlessly finds nothing because no PVCs were created.
-func (r *KubernetesRuntime) cleanupSharedDirPVCs(ctx context.Context, namespace, projectName string) {
-	r.cleanupProjectRWXClaims(ctx, namespace, projectName, "scion.shared-dir")
-}
-
-// cleanupProjectRWXClaims is the generic cleanup helper for project-scoped RWX PVCs.
-// It lists PVCs matching the project and label key, then deletes them.
-func (r *KubernetesRuntime) cleanupProjectRWXClaims(ctx context.Context, namespace, projectName, labelKey string) {
-	selector := fmt.Sprintf("scion.grove=%s,%s", projectName, labelKey)
-	pvcList, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: selector,
-	})
-	if err != nil {
-		runtimeLog.Warn("Failed to list project RWX PVCs for cleanup", "project", projectName, "label", labelKey, "error", err)
-		return
-	}
-	for _, pvc := range pvcList.Items {
-		runtimeLog.Info("Deleting project RWX PVC", "pvc", pvc.Name, "project", projectName)
-		if err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, pvc.Name, metav1.DeleteOptions{}); err != nil {
-			runtimeLog.Warn("Failed to delete project RWX PVC", "pvc", pvc.Name, "error", err)
-		}
-	}
-}
-
 func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev1.Pod, error) {
 	// Command Resolution — see buildCommonRunArgs for the Docker/Podman
 	// equivalent. No-auth mode builds a raw shell command string to avoid
