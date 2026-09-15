@@ -1171,6 +1171,33 @@ type NotificationStore interface {
 	// for a given subscription. Returns ("", nil) if no notifications exist.
 	GetLastNotificationStatus(ctx context.Context, subscriptionID string) (string, error)
 
+	// ClaimNotificationForDispatch atomically transitions a notification from
+	// dispatched=false to dispatched=true, returning claimed=true if this caller
+	// won the CAS race. This is the retry-path concurrency primitive: exactly
+	// one caller (sweep or broker-connect hook) claims each notification.
+	// Returns (false, nil) if the notification is already dispatched or does
+	// not exist.
+	ClaimNotificationForDispatch(ctx context.Context, id string) (claimed bool, err error)
+
+	// UnmarkNotificationDispatched reverts a claimed notification back to
+	// dispatched=false so a future sweep can retry. Used when delivery cannot
+	// proceed (no dispatcher, no broker) after an optimistic claim.
+	UnmarkNotificationDispatched(ctx context.Context, id string) error
+
+	// GetUndispatchedAgentNotifications returns agent-targeted notifications
+	// with dispatched=false.
+	//
+	// If brokerID is empty (sweep mode), a 60s grace period is applied so
+	// the sweep does not race with an in-flight primary dispatch. All
+	// undispatched agent notifications older than 60s are returned.
+	//
+	// If brokerID is non-empty (broker-connect fast-path), no grace period
+	// is applied and only notifications whose subscriber agent currently
+	// has RuntimeBrokerID == brokerID are returned.
+	//
+	// Results are ordered by created_at ASC (oldest first), limited to 100.
+	GetUndispatchedAgentNotifications(ctx context.Context, brokerID string) ([]Notification, error)
+
 	// CreateSubscriptionTemplate creates a new subscription template.
 	CreateSubscriptionTemplate(ctx context.Context, tmpl *SubscriptionTemplate) error
 

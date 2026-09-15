@@ -3585,6 +3585,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler.RegisterRecurringSingleton("broker-affinity-reap", 5, store.LockBrokerAffinityReap, s.brokerAffinityReapHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-message-sweep", 5, store.LockBrokerMessageSweep, s.brokerMessageSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
+	s.scheduler.RegisterRecurringSingleton("notification-dispatch-sweep", 5, store.LockNotificationDispatchSweep, s.notificationDispatchSweepHandler())
 
 	// A2A bridge sweep — conditional on the bridge being registered as a standalone plugin.
 	if a2aExternalURL := s.getA2ABridgeExternalURL(); a2aExternalURL != "" {
@@ -4626,6 +4627,13 @@ func (s *Server) markBrokerOnline(brokerID, sessionID string) {
 	// offline or owned elsewhere. Async so it never blocks the connect path;
 	// idempotent + CAS-gated so concurrent drains execute each item once.
 	go s.reconcileBroker(context.Background(), brokerID)
+
+	// Notification redeliver (ptone/scion#495): drain undispatched agent
+	// notifications for agents on this broker. Async + CAS-gated, same
+	// pattern as reconcileBroker above.
+	if s.notificationDispatcher != nil {
+		go s.drainUndispatchedNotifications(context.Background(), brokerID)
+	}
 }
 
 // isWebSocketUpgrade checks if the request is a WebSocket upgrade request.
