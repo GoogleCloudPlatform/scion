@@ -19,31 +19,35 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	brokerv1 "github.com/GoogleCloudPlatform/scion/proto/broker/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 func TestStructuredMessageRoundTrip(t *testing.T) {
 	original := &messages.StructuredMessage{
-		Version:      1,
-		Timestamp:    "2026-07-04T12:00:00Z",
-		Sender:       "user:alice",
-		SenderID:     "uid-001",
-		Recipient:    "agent:coder",
-		RecipientID:  "aid-002",
-		Recipients:   "agent:coder,agent:reviewer",
-		Msg:          "hello world",
-		Type:         "instruction",
-		Plain:        true,
-		Raw:          false,
-		Urgent:       true,
-		Broadcasted:  false,
-		ObserverOnly: true,
-		Status:       "active",
-		Attachments:  []string{"file1.txt", "file2.png"},
-		Metadata:     map[string]string{"key1": "val1", "key2": "val2"},
-		Channel:      "discord",
-		ThreadID:     "thread-123",
+		Version:        1,
+		Timestamp:      "2026-07-04T12:00:00Z",
+		Sender:         "user:alice",
+		SenderID:       "uid-001",
+		Recipient:      "agent:coder",
+		RecipientID:    "aid-002",
+		Recipients:     "agent:coder,agent:reviewer",
+		Msg:            "hello world",
+		Type:           "instruction",
+		Plain:          true,
+		Raw:            false,
+		Urgent:         true,
+		Broadcasted:    false,
+		ObserverOnly:   true,
+		Status:         "active",
+		Attachments:    []string{"file1.txt", "file2.png"},
+		Metadata:       map[string]string{"key1": "val1", "key2": "val2"},
+		Channel:        "discord",
+		ThreadID:       "thread-123",
+		ConversationID: "conversation-456",
+		DeliveryText:   "rendered delivery text",
 	}
 
 	pb := StructuredMessageToProto(original)
@@ -71,6 +75,8 @@ func TestStructuredMessageRoundTrip(t *testing.T) {
 	assert.Equal(t, original.Metadata, roundTripped.Metadata)
 	assert.Equal(t, original.Channel, roundTripped.Channel)
 	assert.Equal(t, original.ThreadID, roundTripped.ThreadID)
+	assert.Equal(t, original.ConversationID, roundTripped.ConversationID)
+	assert.Equal(t, original.DeliveryText, roundTripped.DeliveryText)
 }
 
 func TestStructuredMessageNilHandling(t *testing.T) {
@@ -93,6 +99,16 @@ func TestStructuredMessageEmptyFields(t *testing.T) {
 	assert.Equal(t, original.Msg, roundTripped.Msg)
 	assert.Nil(t, roundTripped.Attachments)
 	assert.Nil(t, roundTripped.Metadata)
+}
+
+func TestStructuredMessageProtoSchema(t *testing.T) {
+	descriptor := (&brokerv1.StructuredMessage{}).ProtoReflect().Descriptor()
+
+	assert.Equal(t, protoreflect.FieldNumber(21), descriptor.Fields().ByName("conversation_id").Number())
+	assert.Equal(t, protoreflect.FieldNumber(22), descriptor.Fields().ByName("delivery_text").Number())
+	assert.Nil(t, descriptor.Fields().ByName("visibility"))
+	assert.True(t, descriptor.ReservedRanges().Has(20))
+	assert.True(t, descriptor.ReservedNames().Has("visibility"))
 }
 
 func TestHealthStatusRoundTrip(t *testing.T) {
