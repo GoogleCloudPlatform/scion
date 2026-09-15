@@ -245,8 +245,7 @@ reject_cluster() {
   cluster_want="as a CLUSTER of one-character shorthands"
   char_want="is the reserved shorthand -${2}"
   name_axis="hub.args may not contain -"
-  out="$("$HELM" template t "$CHART" "${BASE[@]}" --set-json "hub.args=[\"$1\"]" 2>&1)"
-  if [ $? -eq 0 ]; then
+  if out="$("$HELM" template t "$CHART" "${BASE[@]}" --set-json "hub.args=[\"$1\"]" 2>&1)"; then
     echo "FAIL  accepted but must reject: $1"; failed=$((failed + 1)); return
   fi
   case "$out" in *'%!'*)
