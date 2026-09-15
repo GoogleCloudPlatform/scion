@@ -110,10 +110,10 @@ func TestTailer_NormalAppendFromOffset(t *testing.T) {
 	}
 	newLines := "new line 1\nnew line 2\nnew line 3\n"
 	if _, err := f.WriteString(newLines); err != nil {
-		f.Close()
+		_ = f.Close()
 		t.Fatal(err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	var out safeBuffer
 	ctx, cancel := context.WithCancel(context.Background())
@@ -572,10 +572,10 @@ func TestTailer_LiveAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := f.WriteString("appended line\n"); err != nil {
-		f.Close()
+		_ = f.Close()
 		t.Fatal(err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	// Wait for the appended line.
 	lines := waitForTailerOutput(t, &out, 2, 5*time.Second)

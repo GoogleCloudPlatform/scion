@@ -130,7 +130,7 @@ func doTailEntrypointLog(ctx context.Context, logPath, slug, agentID, project st
 		}
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// --- Phase 2: Seek to offset, detecting truncation ---
 	pos := seekToOffset(f, offset, slug, emit)
