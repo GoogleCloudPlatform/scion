@@ -16,6 +16,7 @@ package config
 
 import (
 	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -1134,4 +1135,82 @@ profiles:
 	require.True(t, ok, "local profile should exist")
 	assert.Equal(t, "docker", profile.Runtime,
 		"external config should override in-repo profiles.local.runtime")
+}
+
+func TestLoadSettingsFromDir_KnownKeysOnly_NoWarning(t *testing.T) {
+	// When all keys in the settings file map to struct fields,
+	// no warning should be logged.
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	dir := t.TempDir()
+	settingsYAML := `active_profile: local
+default_template: default
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	s, err := LoadSettingsFromDir(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "local", s.ActiveProfile)
+	assert.Equal(t, "default", s.DefaultTemplate)
+
+	logged := buf.String()
+	assert.Empty(t, logged, "expected no log output for known-only keys, got: %s", logged)
+}
+
+func TestLoadSettingsFromDir_UnknownKey_WarnsButSucceeds(t *testing.T) {
+	// When a settings file contains an unknown key, a WARN should be logged
+	// but the unmarshal should still succeed with correct values for known keys.
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	dir := t.TempDir()
+	settingsYAML := `active_profile: local
+default_runtime: docker
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	s, err := LoadSettingsFromDir(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "local", s.ActiveProfile)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "level=WARN", "expected a WARN log for unknown key")
+	assert.Contains(t, logged, "default_runtime", "expected warning to name the unknown key")
+}
+
+func TestLoadSettingsFromDir_MixedKnownAndUnknown_WarnsOnlyUnknown(t *testing.T) {
+	// Known keys should be populated correctly and the warning should
+	// list only the unknown keys.
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	dir := t.TempDir()
+	settingsYAML := `active_profile: staging
+default_template: claude
+foo_bar: something
+phantom_key: value
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	s, err := LoadSettingsFromDir(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "staging", s.ActiveProfile)
+	assert.Equal(t, "claude", s.DefaultTemplate)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "level=WARN", "expected a WARN log for unknown keys")
+	assert.Contains(t, logged, "foo_bar", "expected warning to list foo_bar")
+	assert.Contains(t, logged, "phantom_key", "expected warning to list phantom_key")
+	// Known keys should NOT appear in the warning
+	assert.NotContains(t, logged, "active_profile",
+		"known key active_profile should not appear in warning")
+	assert.NotContains(t, logged, "default_template",
+		"known key default_template should not appear in warning")
 }
