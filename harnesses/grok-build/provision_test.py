@@ -156,6 +156,19 @@ class AuthSelectionNoAuthTest(unittest.TestCase):
 class WriteAuthFileTest(unittest.TestCase):
     """Test _write_auth_file writes, validates, and secures auth.json."""
 
+    _old_grok_home: str | None
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._old_grok_home = os.environ.pop("GROK_HOME", None)
+
+    def tearDown(self) -> None:
+        if self._old_grok_home is not None:
+            os.environ["GROK_HOME"] = self._old_grok_home
+        else:
+            os.environ.pop("GROK_HOME", None)
+        super().tearDown()
+
     def test_valid_json_written(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             inputs_dir = os.path.join(tmp, "inputs")
@@ -268,6 +281,19 @@ class MCPTranslationTest(unittest.TestCase):
     the full pipeline.
     """
 
+    _old_grok_home: str | None
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._old_grok_home = os.environ.pop("GROK_HOME", None)
+
+    def tearDown(self) -> None:
+        if self._old_grok_home is not None:
+            os.environ["GROK_HOME"] = self._old_grok_home
+        else:
+            os.environ.pop("GROK_HOME", None)
+        super().tearDown()
+
     def test_stdio_translation_via_toml(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ctx = _make_ctx()
@@ -311,6 +337,19 @@ class MCPTranslationTest(unittest.TestCase):
 
 class MCPTomlWriteTest(unittest.TestCase):
     """Test TOML output for MCP servers."""
+
+    _old_grok_home: str | None
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._old_grok_home = os.environ.pop("GROK_HOME", None)
+
+    def tearDown(self) -> None:
+        if self._old_grok_home is not None:
+            os.environ["GROK_HOME"] = self._old_grok_home
+        else:
+            os.environ.pop("GROK_HOME", None)
+        super().tearDown()
 
     def test_write_mcp_toml_creates_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -380,6 +419,19 @@ class MCPTomlWriteTest(unittest.TestCase):
 
 class ConfigHardeningTest(unittest.TestCase):
     """Test config hardening writes correct TOML."""
+
+    _old_grok_home: str | None
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._old_grok_home = os.environ.pop("GROK_HOME", None)
+
+    def tearDown(self) -> None:
+        if self._old_grok_home is not None:
+            os.environ["GROK_HOME"] = self._old_grok_home
+        else:
+            os.environ.pop("GROK_HOME", None)
+        super().tearDown()
 
     def test_hardening_writes_managed_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -510,6 +562,19 @@ class ModelResolutionTest(unittest.TestCase):
 
 class HookWriteTest(unittest.TestCase):
     """Test _write_hooks produces correct JSON structure."""
+
+    _old_grok_home: str | None
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._old_grok_home = os.environ.pop("GROK_HOME", None)
+
+    def tearDown(self) -> None:
+        if self._old_grok_home is not None:
+            os.environ["GROK_HOME"] = self._old_grok_home
+        else:
+            os.environ.pop("GROK_HOME", None)
+        super().tearDown()
 
     def test_hooks_written_correctly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -871,12 +936,12 @@ class VertexAIAuthTest(unittest.TestCase):
         super().setUp()
         self._saved_env = {}
         for key in list(os.environ):
-            if key.startswith(("GOOGLE_", "CLOUD_ML_", "SCION_MODEL", "SCION_METADATA_")):
+            if key.startswith(("GOOGLE_", "CLOUD_ML_", "SCION_MODEL", "SCION_METADATA_", "GROK_")):
                 self._saved_env[key] = os.environ.pop(key)
 
     def tearDown(self) -> None:
         for key in list(os.environ):
-            if key.startswith(("GOOGLE_", "CLOUD_ML_", "SCION_MODEL", "SCION_METADATA_")):
+            if key.startswith(("GOOGLE_", "CLOUD_ML_", "SCION_MODEL", "SCION_METADATA_", "GROK_")):
                 os.environ.pop(key, None)
         os.environ.update(self._saved_env)
         super().tearDown()

@@ -268,7 +268,7 @@ def _write_vertex_config(
     model_id: str,
 ) -> None:
     """Append Vertex AI auth_provider and model config to config.toml."""
-    config_path = os.path.join(ctx.home, ".grok", "config.toml")
+    config_path = os.path.join(_grok_config_dir(ctx), "config.toml")
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
 
     existing = ""
@@ -321,7 +321,7 @@ def _write_vertex_model_alias(
     for [model.<name>] in config.toml. Without this block, grok falls back to
     the direct xAI API and gets a 401 when vertex-ai auth is in use.
     """
-    config_path = os.path.join(ctx.home, ".grok", "config.toml")
+    config_path = os.path.join(_grok_config_dir(ctx), "config.toml")
     if not os.path.isfile(config_path):
         return  # _write_vertex_config should have created it
 
