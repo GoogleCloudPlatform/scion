@@ -62,9 +62,15 @@ func AllHarnessNames() []string {
 	entries, _ := fs.ReadDir(harnessesEmbed.FS, ".")
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() {
-			names = append(names, e.Name())
+		if !e.IsDir() {
+			continue
 		}
+		// Skip directories without config.yaml — they are not harnesses
+		// (e.g. gen/ is a code generator, not a harness definition).
+		if _, err := fs.Stat(harnessesEmbed.FS, e.Name()+"/config.yaml"); err != nil {
+			continue
+		}
+		names = append(names, e.Name())
 	}
 	sort.Strings(names)
 	return names
