@@ -164,6 +164,11 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	// workspace_handlers.go: DispatchAgentCreate in handleWorkspaceSyncToFinalize.
 	{file: "workspace_handlers.go", function: "handleWorkspaceSyncToFinalize", symbol: "DispatchAgentCreate",
 		class: "guarded", reason: "workspace agent creation with project authorization"},
+
+	// notification_sweep.go: RetryDispatch — guarded retry of previously
+	// authorized notification dispatch.
+	{file: "notification_sweep.go", function: "RetryDispatch", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "retry of previously authorized notification dispatch"},
 }
 
 // targetSymbols is the set of function/method names that constitute
