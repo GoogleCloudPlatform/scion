@@ -869,13 +869,3 @@ func collectRequiredSkillURIs(skills []api.SkillReference) []string {
 	}
 	return uris
 }
-
-// findRefByURI finds the first SkillReference matching the given URI.
-func findRefByURI(refs []api.SkillReference, uri string) *api.SkillReference {
-	for i := range refs {
-		if refs[i].URI == uri {
-			return &refs[i]
-		}
-	}
-	return nil
-}

@@ -1415,11 +1415,6 @@ func wrapHubError(err error) error {
 	return fmt.Errorf("%w\n\nTo use local-only mode, use: scion --no-hub <command>", err)
 }
 
-// containsIgnoreCase checks if a string contains a substring (case-insensitive).
-func containsIgnoreCase(s, substr string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
-}
-
 // cleanupProjectBrokerCredentials removes stale broker credentials from project settings.
 // These should only exist in global settings, not project-specific.
 // Earlier versions of scion incorrectly wrote them to project settings.
