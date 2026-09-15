@@ -128,8 +128,14 @@ if $FULL_DEPLOY; then
     fi
 
     # settings.yaml
+    if [[ "${ENABLE_GKE}" == "true" ]]; then
+        ACTIVE_PROFILE="remote"
+    else
+        ACTIVE_PROFILE="local"
+    fi
     cat <<SETTINGS_EOF > "$UPLOAD_DIR/scion-settings.yaml"
 schema_version: "1"
+active_profile: ${ACTIVE_PROFILE}
 server:
   mode: production
 telemetry:
