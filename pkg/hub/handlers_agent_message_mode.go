@@ -140,9 +140,9 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 		}
 
 		// Project constraint: agent can only set modes within its own project.
+		// Answer with 404 instead of 403 to prevent cross-project existence oracle.
 		if agentIdent.ProjectID() != agent.ProjectID {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"agents cannot change message mode for agents in other projects", nil)
+			NotFound(w, "Agent")
 			return
 		}
 

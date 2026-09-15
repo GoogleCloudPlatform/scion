@@ -83,6 +83,30 @@ var (
 	serviceAccountFlag    string
 )
 
+func validateMessageMode(mode string) error {
+	if mode == "" {
+		return nil
+	}
+	switch mode {
+	case "none", "lineage", "branch", "project":
+		return nil
+	default:
+		return fmt.Errorf("invalid message mode %q: must be one of none, lineage, branch, project", mode)
+	}
+}
+
+func validateAgentRole(role string) error {
+	if role == "" {
+		return nil
+	}
+	switch role {
+	case "none", "readonly", "baseline", "full":
+		return nil
+	default:
+		return fmt.Errorf("invalid role %q: must be one of none, readonly, baseline, full", role)
+	}
+}
+
 func parseLabels(raw []string) (map[string]string, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -775,23 +799,13 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	}
 
 	// Validate --role flag if provided
-	if agentRoleFlag != "" {
-		switch agentRoleFlag {
-		case "none", "readonly", "baseline", "full":
-			// valid
-		default:
-			return fmt.Errorf("invalid --role value %q: must be one of none, readonly, baseline, full", agentRoleFlag)
-		}
+	if err := validateAgentRole(agentRoleFlag); err != nil {
+		return err
 	}
 
 	// Validate --message-mode flag if provided
-	if messageModeFlag != "" {
-		switch messageModeFlag {
-		case "none", "lineage", "branch", "project":
-			// valid
-		default:
-			return fmt.Errorf("invalid --message-mode value %q: must be one of none, lineage, branch, project", messageModeFlag)
-		}
+	if err := validateMessageMode(messageModeFlag); err != nil {
+		return err
 	}
 
 	// Build create request (Hub creates and starts in one operation)

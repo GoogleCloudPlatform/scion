@@ -50,10 +50,8 @@ Use --dry-run to preview cascade effects without applying.`,
 		mode := args[1]
 
 		// Client-side validation
-		switch mode {
-		case "none", "lineage", "branch", "project":
-		default:
-			return fmt.Errorf("invalid mode %q: must be one of none, lineage, branch, project", mode)
+		if err := validateMessageMode(mode); err != nil {
+			return err
 		}
 
 		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, false)
@@ -71,7 +69,7 @@ Use --dry-run to preview cascade effects without applying.`,
 			return wrapHubError(err)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 		defer cancel()
 
 		agentSvc := hubCtx.Client.ProjectAgents(projectID)

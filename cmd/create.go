@@ -222,23 +222,13 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	}
 
 	// Validate --role flag if provided
-	if agentRoleFlag != "" {
-		switch agentRoleFlag {
-		case "none", "readonly", "baseline", "full":
-			// valid
-		default:
-			return fmt.Errorf("invalid --role value %q: must be one of none, readonly, baseline, full", agentRoleFlag)
-		}
+	if err := validateAgentRole(agentRoleFlag); err != nil {
+		return err
 	}
 
 	// Validate --message-mode flag if provided
-	if messageModeFlag != "" {
-		switch messageModeFlag {
-		case "none", "lineage", "branch", "project":
-			// valid
-		default:
-			return fmt.Errorf("invalid --message-mode value %q: must be one of none, lineage, branch, project", messageModeFlag)
-		}
+	if err := validateMessageMode(messageModeFlag); err != nil {
+		return err
 	}
 
 	// Build create request — always provision-only (create does not start the agent)

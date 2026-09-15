@@ -292,6 +292,54 @@ func TestSetMessageMode_LineageOwnerAllowed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Test: Cross-project agent caller gets 404 (not 403)
+// ---------------------------------------------------------------------------
+
+func TestSetMessageMode_CrossProjectAgentDenied(t *testing.T) {
+	srv, s, owner, _, _, projectID := smmSetup(t)
+	ctx := context.Background()
+
+	// Target agent in the default project.
+	target := smmAgent(t, s, "smm-cross-proj-target", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+
+	// Create a second project for the cross-project caller.
+	otherProjectID := tid("smm-other-project")
+	otherOwner := &store.User{
+		ID:          tid("smm-other-owner"),
+		Email:       "smm-other-owner@test.com",
+		DisplayName: "SMM Other Owner",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require_NoError(t, s.CreateUser(ctx, otherOwner))
+	ensureHubMembership(ctx, s, otherOwner.ID)
+
+	otherProject := &store.Project{
+		ID:        otherProjectID,
+		Name:      "smm-other-project",
+		Slug:      "smm-other-project",
+		OwnerID:   otherOwner.ID,
+		CreatedBy: otherOwner.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require_NoError(t, s.CreateProject(ctx, otherProject))
+
+	// Create a caller agent in the other project with full-role scopes.
+	caller := smmAgent(t, s, "smm-cross-proj-caller", otherProjectID, store.MessageModeProject,
+		[]string{otherOwner.ID})
+	callerIdent := msgAuthzAgentIdentity(caller.ID, otherProjectID, caller.Ancestry, ScopesForRole(AgentRoleFull)...)
+
+	rr := smmDoRequest(t, srv, target.ID, SetMessageModeRequest{Mode: "none"}, callerIdent)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for cross-project agent caller, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test 4: Agent callers always denied (D7)
 // ---------------------------------------------------------------------------
 
