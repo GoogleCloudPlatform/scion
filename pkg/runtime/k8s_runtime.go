@@ -752,8 +752,8 @@ func (r *KubernetesRuntime) createAuthFileSecret(ctx context.Context, namespace,
 //
 // When backend=nfs, shared dirs are served from the workspace NFS PVC via
 // subPath (e.g., "projects/<pid>/shared-dirs/<name>") and do NOT need their
-// own PVC — the NFS volume already provides RWX access. The create/cleanup
-// helpers short-circuit for NFS.
+// own PVC — the NFS volume already provides RWX access. PVC creation
+// short-circuits for NFS.
 
 // projectRWXClaimName returns a deterministic PVC name for a project-scoped
 // RWX claim. Usable for shared dirs ("shared") and workspace claims ("workspace").
