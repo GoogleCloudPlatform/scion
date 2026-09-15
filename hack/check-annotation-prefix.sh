@@ -32,10 +32,19 @@ tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
 rg -n 'scion\.io/' \
-  cmd pkg \
   --glob '*.go' \
+  --glob '*.yaml' \
+  --glob '*.yml' \
+  --glob '*.tpl' \
   --glob '!*_test.go' \
-  --glob '!pkg/ent/**' >"$tmp" || true
+  --glob '!pkg/ent/**' \
+  --glob '!hack/**' \
+  --glob '!docs/**' \
+  --glob '!docs-site/**' \
+  --glob '!docs-repo/**' \
+  --glob '!reviews/**' \
+  --glob '!web/**' \
+  --glob '!scratch/**' >"$tmp" || true
 
 if [[ ! -s "$tmp" ]]; then
   echo "check-annotation-prefix: analysed ${sha}, no scion.io/ references found" >&2
@@ -96,6 +105,26 @@ allowed_paths=(
   # --- pkg/hubclient/ ---
   # Client types: documents scion.io/ annotation key format in comment.
   "^pkg/hubclient/types.go$"
+
+  # --- pkg/store/entadapter/ ---
+  # Composite adapter: defines system annotation constants for project
+  # members-group, agents-group, and adoption-review-required.
+  "^pkg/store/entadapter/composite.go$"
+
+  # --- pkg/hub/ (additional) ---
+  # Core project handlers: defines system annotation constants for project
+  # members-group and agents-group.
+  "^pkg/hub/handlers_projects_core.go$"
+
+  # Passthrough gate: checks scion.io/broker-role label on embedded brokers.
+  "^pkg/hub/passthrough_gate.go$"
+
+  # --- deploy/helm/ ---
+  # Helm chart templates and values: uses scion.io/hub-id pod annotation for
+  # hub identity. Golden test files mirror the rendered output.
+  "^deploy/helm/scion-hub/templates/deployment.yaml$"
+  "^deploy/helm/scion-hub/values.yaml$"
+  "^deploy/helm/scion-hub/golden/.*\.yaml$"
 )
 
 # Build a combined regex from the allowlist: join with | for grep -E.
