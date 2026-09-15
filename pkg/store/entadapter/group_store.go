@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
@@ -760,93 +761,79 @@ func (s *GroupStore) WouldCreateCycle(ctx context.Context, groupID, memberGroupI
 		return false, err
 	}
 
-	// BFS down through child_groups from memberGroupID looking for groupID
-	visited := make(map[uuid.UUID]bool)
-	return s.hasPathDown(ctx, memberUID, groupUID, visited, 0)
+	// Walk child_groups downward from memberGroupID looking for groupID.
+	return s.hasPathDown(ctx, memberUID, groupUID)
 }
 
-// hasPathDown performs BFS to detect if target is reachable from current through child_groups.
-func (s *GroupStore) hasPathDown(ctx context.Context, current, target uuid.UUID, visited map[uuid.UUID]bool, depth int) (bool, error) {
+// hasPathDown uses a recursive CTE to detect if target is reachable from
+// current by walking the child_groups edge downward. The recursion depth is
+// capped at 10 levels as a safety measure.
+func (s *GroupStore) hasPathDown(ctx context.Context, current, target uuid.UUID) (bool, error) {
 	if current == target {
 		return true, nil
 	}
-	if visited[current] || depth >= 10 {
-		return false, nil
-	}
-	visited[current] = true
 
-	children, err := s.client.Group.Query().
-		Where(group.IDEQ(current)).
-		QueryChildGroups().
-		All(ctx)
-	if err != nil {
+	drv := s.client.Driver()
+	p1, p2 := sqlPh(drv.Dialect(), 1), sqlPh(drv.Dialect(), 2)
+
+	query := fmt.Sprintf(`WITH RECURSIVE descendants(id, depth) AS (
+    SELECT parent_group_id, 1 FROM group_child_groups WHERE group_id = %s
+    UNION ALL
+    SELECT gc.parent_group_id, d.depth + 1 FROM group_child_groups gc
+    JOIN descendants d ON gc.group_id = d.id
+    WHERE d.depth < 10
+)
+SELECT 1 FROM descendants WHERE id = %s LIMIT 1`, p1, p2)
+
+	rows := &entsql.Rows{}
+	if err := drv.Query(ctx, query, []any{current, target}, rows); err != nil {
 		return false, err
 	}
+	defer func() { _ = rows.Close() }()
 
-	for _, child := range children {
-		found, err := s.hasPathDown(ctx, child.ID, target, visited, depth+1)
-		if err != nil {
-			return false, err
-		}
-		if found {
-			return true, nil
-		}
+	found := rows.Next()
+	if err := rows.Err(); err != nil {
+		return false, err
 	}
-
-	return false, nil
+	return found, nil
 }
 
 // GetEffectiveGroups returns all groups a user belongs to, including
-// transitive memberships through nested groups.
+// transitive memberships through nested groups. It uses a single recursive
+// CTE: the seed selects direct group memberships from the group_memberships
+// table, and the recursive step walks the parent_groups edge upward.
 func (s *GroupStore) GetEffectiveGroups(ctx context.Context, userID string) ([]string, error) {
 	uid, err := parseUUID(userID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Get direct group memberships for the user
-	memberships, err := s.client.GroupMembership.Query().
-		Where(groupmembership.UserIDEQ(uid)).
-		All(ctx)
+	drv := s.client.Driver()
+	p1 := sqlPh(drv.Dialect(), 1)
+
+	query := fmt.Sprintf(`WITH RECURSIVE effective(id) AS (
+    SELECT group_id AS id FROM group_memberships WHERE user_id = %s
+    UNION
+    SELECT gc.group_id FROM group_child_groups gc
+    JOIN effective e ON gc.parent_group_id = e.id
+)
+SELECT id FROM effective`, p1)
+
+	rows := &entsql.Rows{}
+	if err := drv.Query(ctx, query, []any{uid}, rows); err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids, err := scanUUIDRows(rows)
 	if err != nil {
 		return nil, err
 	}
 
-	// BFS upward through parent_groups
-	visited := make(map[uuid.UUID]bool)
-	var result []string
-	queue := make([]uuid.UUID, 0, len(memberships))
-
-	for _, m := range memberships {
-		queue = append(queue, m.GroupID)
+	result := make([]string, len(ids))
+	for i, id := range ids {
+		result[i] = id.String()
 	}
-
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
-
-		if visited[current] {
-			continue
-		}
-		visited[current] = true
-		result = append(result, current.String())
-
-		// Find parent groups (groups that contain current as a child)
-		parents, err := s.client.Group.Query().
-			Where(group.IDEQ(current)).
-			QueryParentGroups().
-			All(ctx)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, p := range parents {
-			if !visited[p.ID] {
-				queue = append(queue, p.ID)
-			}
-		}
-	}
-
 	return result, nil
 }
 
@@ -856,42 +843,42 @@ func (s *GroupStore) GetEffectiveGroups(ctx context.Context, userID string) ([]s
 const maxParentGroupDepth = 32
 
 // GetParentGroups returns all ancestor groups of the given group — groups that
-// transitively contain this group as a child — via BFS through the
-// parent_groups edge. The group itself is NOT included in the result.
-// BFS is capped at maxParentGroupDepth levels.
+// transitively contain this group as a child — via a recursive CTE that walks
+// the parent_groups edge upward. The group itself is NOT included in the
+// result. Recursion depth is capped at maxParentGroupDepth levels.
 func (s *GroupStore) GetParentGroups(ctx context.Context, groupID string) ([]string, error) {
 	uid, err := parseUUID(groupID)
 	if err != nil {
 		return nil, err
 	}
 
-	visited := make(map[uuid.UUID]bool)
-	visited[uid] = true // mark self as visited to avoid including it in results
-	var result []string
-	queue := []uuid.UUID{uid}
+	drv := s.client.Driver()
+	p1 := sqlPh(drv.Dialect(), 1)
 
-	for depth := 0; len(queue) > 0 && depth < maxParentGroupDepth; depth++ {
-		nextQueue := make([]uuid.UUID, 0)
-		for _, current := range queue {
-			parents, err := s.client.Group.Query().
-				Where(group.IDEQ(current)).
-				QueryParentGroups().
-				All(ctx)
-			if err != nil {
-				return nil, err
-			}
+	query := fmt.Sprintf(`WITH RECURSIVE ancestors(id, depth) AS (
+    SELECT group_id, 1 FROM group_child_groups WHERE parent_group_id = %s
+    UNION ALL
+    SELECT gc.group_id, a.depth + 1 FROM group_child_groups gc
+    JOIN ancestors a ON gc.parent_group_id = a.id
+    WHERE a.depth < %d
+)
+SELECT DISTINCT id FROM ancestors`, p1, maxParentGroupDepth)
 
-			for _, p := range parents {
-				if !visited[p.ID] {
-					visited[p.ID] = true
-					result = append(result, p.ID.String())
-					nextQueue = append(nextQueue, p.ID)
-				}
-			}
-		}
-		queue = nextQueue
+	rows := &entsql.Rows{}
+	if err := drv.Query(ctx, query, []any{uid}, rows); err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids, err := scanUUIDRows(rows)
+	if err != nil {
+		return nil, err
 	}
 
+	result := make([]string, len(ids))
+	for i, id := range ids {
+		result[i] = id.String()
+	}
 	return result, nil
 }
 
@@ -917,6 +904,9 @@ func (s *GroupStore) GetGroupByProjectID(ctx context.Context, projectID string) 
 
 // GetEffectiveGroupsForAgent returns all groups an agent belongs to,
 // including the implicit project_agents group and transitive parent groups.
+// It collects seed group IDs from explicit memberships and the implicit
+// project_agents group, then uses a recursive CTE to walk the parent_groups
+// edge upward.
 func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID string) ([]string, error) {
 	uid, err := parseUUID(agentID)
 	if err != nil {
@@ -929,9 +919,8 @@ func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID str
 		return nil, mapError(err)
 	}
 
-	// Collect direct group IDs: explicit memberships + implicit project group
-	visited := make(map[uuid.UUID]bool)
-	queue := make([]uuid.UUID, 0)
+	// Collect seed group IDs: explicit memberships + implicit project group
+	var seedIDs []uuid.UUID
 
 	// 1. Get explicit group memberships for the agent
 	memberships, err := s.client.GroupMembership.Query().
@@ -941,7 +930,7 @@ func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID str
 		return nil, err
 	}
 	for _, m := range memberships {
-		queue = append(queue, m.GroupID)
+		seedIDs = append(seedIDs, m.GroupID)
 	}
 
 	// 2. Find the implicit project_agents group for this agent's project
@@ -952,37 +941,50 @@ func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID str
 		).
 		Only(ctx)
 	if err == nil {
-		queue = append(queue, projectGroup.ID)
+		seedIDs = append(seedIDs, projectGroup.ID)
 	}
 	// If no project group exists, that's fine — just skip it
 
-	// 3. BFS upward through parent_groups (reuse same logic as GetEffectiveGroups)
-	var result []string
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
-
-		if visited[current] {
-			continue
-		}
-		visited[current] = true
-		result = append(result, current.String())
-
-		parents, err := s.client.Group.Query().
-			Where(group.IDEQ(current)).
-			QueryParentGroups().
-			All(ctx)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, p := range parents {
-			if !visited[p.ID] {
-				queue = append(queue, p.ID)
-			}
-		}
+	if len(seedIDs) == 0 {
+		return nil, nil
 	}
 
+	// 3. Walk parent_groups upward via recursive CTE from all seed IDs.
+	drv := s.client.Driver()
+	d := drv.Dialect()
+
+	// Build seed clause: SELECT ? AS id UNION ALL SELECT ? AS id ...
+	parts := make([]string, len(seedIDs))
+	args := make([]any, len(seedIDs))
+	for i, id := range seedIDs {
+		parts[i] = fmt.Sprintf("SELECT %s AS id", sqlPh(d, i+1))
+		args[i] = id
+	}
+	seed := strings.Join(parts, " UNION ALL ")
+
+	query := fmt.Sprintf(`WITH RECURSIVE effective(id) AS (
+    %s
+    UNION
+    SELECT gc.group_id FROM group_child_groups gc
+    JOIN effective e ON gc.parent_group_id = e.id
+)
+SELECT id FROM effective`, seed)
+
+	rows := &entsql.Rows{}
+	if err := drv.Query(ctx, query, args, rows); err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids, err := scanUUIDRows(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]string, len(ids))
+	for i, id := range ids {
+		result[i] = id.String()
+	}
 	return result, nil
 }
 
@@ -1039,4 +1041,13 @@ func (s *GroupStore) GetGroupsByIDs(ctx context.Context, ids []string) ([]store.
 	}
 
 	return result, nil
+}
+
+// sqlPh returns a SQL placeholder for the given 1-based parameter position.
+// PostgreSQL uses $1, $2, …; SQLite (and other dialects) use ?.
+func sqlPh(d string, pos int) string {
+	if d == dialect.Postgres {
+		return fmt.Sprintf("$%d", pos)
+	}
+	return "?"
 }
