@@ -171,8 +171,8 @@ const PATH_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp
 /** Known markdown extensions for path-link preview. */
 const PATH_MD_EXTS = new Set(['.md', '.markdown']);
 
-/** Maximum file size for inline text preview (512 KB). */
-const PATH_PREVIEW_MAX = 512 * 1024;
+/** Maximum file size for inline text preview (100MB for read-only preview). */
+const PATH_PREVIEW_MAX = 100 * 1024 * 1024;
 
 /** State for the file-path viewer dialog. */
 interface FilePreviewState {
@@ -2280,7 +2280,7 @@ export class ScionChatThread extends LitElement {
     }
 
     try {
-      const res = await apiFetch(`${downloadUrl}?format=json`);
+      const res = await apiFetch(`${downloadUrl}?format=json&mode=preview`);
       // Staleness guard: user closed dialog or clicked a different file link.
       if (this.filePreview?.containerPath !== containerPath) return;
       if (!res.ok) {

@@ -52,6 +52,9 @@ const maxUploadFileSize = 50 * 1024 * 1024
 // maxEditableFileSize is the maximum file size the editor will serve for inline editing (1MB).
 const maxEditableFileSize = 1 * 1024 * 1024
 
+// maxPreviewFileSize is the maximum file size for read-only preview (100MB).
+const maxPreviewFileSize = 100 * 1024 * 1024
+
 // isCloudRunEnv checks K_SERVICE to determine if we're running on Cloud Run.
 // In production, K_SERVICE is set once at container startup and never changes,
 // so calling os.Getenv is effectively a cached lookup (the C library caches
@@ -468,8 +471,17 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 
 	// JSON format: return content wrapped with metadata for the editor
 	if r.URL.Query().Get("format") == "json" {
-		if info.Size() > maxEditableFileSize {
-			BadRequest(w, fmt.Sprintf("File too large for editing (%s). Maximum is 1MB.", formatByteSize(info.Size())))
+		mode := r.URL.Query().Get("mode")
+		sizeLimit := maxEditableFileSize
+		sizeLimitLabel := "1MB"
+		if mode == "preview" {
+			sizeLimit = maxPreviewFileSize
+			sizeLimitLabel = "100MB"
+		}
+		if info.Size() > int64(sizeLimit) {
+			BadRequest(w, fmt.Sprintf("File too large for %s (%s). Maximum is %s.",
+				map[bool]string{true: "preview", false: "editing"}[mode == "preview"],
+				formatByteSize(info.Size()), sizeLimitLabel))
 			return
 		}
 
