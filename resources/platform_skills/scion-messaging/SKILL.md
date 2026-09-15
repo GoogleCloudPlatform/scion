@@ -26,7 +26,15 @@ Choosing the right recipient is critical to avoid spam and ensure the message re
 - **`@<agent-name>`**: Send a message to a specific agent (e.g., `scion message @tech-lead "..."`). This addresses the agent's conversation directly.
 - **`@<email>`**: Send a global DM to a user by email address (e.g., `scion message @preston@example.com "..."`).
 - **`group[a,b,...]`**: Group messaging to a specific list of recipients (Hub mode only).
-- **`conv:<uuid>`**: Address a conversation by ID. Use this to reply into the conversation you were addressed in — pass the `conversation` field from the inbound message envelope.
+- **`conv:<uuid>`**: Address a conversation by ID. **This is the preferred and
+  usually correct way to reply to any message you received** — pass the
+  `conversation.id` field from the inbound message envelope. Prefer this over
+  addressing the sender directly (`@<email>`) when replying, especially in a
+  group conversation: addressing a user directly opens (or continues) that
+  user's native-surface DM conversation, a *different* conversation from the
+  one the message came from. Reply with `@<email>` only when you are
+  deliberately starting a new, separate DM — not when replying to something
+  you were addressed in.
 
 ### Mentions
 
@@ -164,6 +172,16 @@ scion message conv:<conversation-id> "your reply"
 
 An agent that omits the conversation ID sends a proactive DM instead of a reply — correct for starting new conversations, wrong for replies. Always read the `conversation.id` from the message you are replying to and route your reply into it.
 
+**Do not reply by addressing the sender instead.** `@<email>` (or
+`@<agent-name>`) opens a *direct* conversation with that principal — on a
+different surface/thread than a group conversation you were addressed in. If
+you received a message with `conversation.kind: "group"` and you reply with
+`@<the-sender's-email>` instead of `conv:<id>`, your reply goes to that user's
+native DM, not back into the group conversation they were watching — to them,
+it looks exactly like you never replied. This is the single most common
+addressing mistake: when in doubt about how to reply, use `conv:<id>` from the
+message you're responding to, not the sender's identity.
+
 ### Handling `input-needed`
 
 When an agent calls `sciontool status ask_user`, the hub dispatches the question as an event (`type: "event"`, `event.type: "agent.input-needed"`) to that agent's subscribers.
@@ -188,6 +206,9 @@ When an agent calls `sciontool status ask_user`, the hub dispatches the question
 - **Anti-Pattern**: Using `sleep` to wait for something; use `sciontool status blocked` instead. For external processes that emit no notification (CI, builds, deploys), pair `status blocked` with a scheduled self-callback — see the `scion-scheduler` skill → **Waiting on external processes**.
 - **Anti-Pattern**: Repeating the entire original brief in a follow-up message (exhausts context).
 - **Anti-Pattern**: JSON-encoding or escaping the message body before passing to `scion message`. The CLI delivers the body verbatim — use real newlines in shell strings or heredocs.
+- **Anti-Pattern**: Replying to a group-conversation message by addressing the
+  sender directly (`@<email>`) instead of the conversation (`conv:<id>`). This
+  silently reroutes the reply to a DM the original watchers never see.
 
 ## Verification Checklist
 
@@ -197,3 +218,4 @@ When an agent calls `sciontool status ask_user`, the hub dispatches the question
 - [ ] Does it include concrete references (paths, IDs, errors)?
 - [ ] If a decision is needed, are concrete options and a recommendation provided?
 - [ ] For long tasks, has a milestone reporting cadence been established?
+- [ ] If this is a reply to an inbound message, am I using `conv:<id>` from that message's `conversation.id` — not addressing the sender directly?
