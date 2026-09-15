@@ -89,7 +89,7 @@ When registering Scion as a client in your identity provider, set the **redirect
 https://<your-hub-domain>/auth/callback/oidc
 ```
 
-Replace `<your-hub-domain>` with the public hostname of your Scion Hub (the value of `SCION_SERVER_BASE_URL`). This is the endpoint the IdP redirects users to after authentication.
+Replace `<your-hub-domain>` with the public hostname of your Scion Hub (the value of `SCION_SERVER_HUB_ENDPOINT` or `server.hub.endpoint` in `settings.yaml`). This is the endpoint the IdP redirects users to after authentication.
 
 #### Configuration
 
@@ -114,7 +114,7 @@ Alternatively, you can configure these settings via environment variables at sta
 - `SCION_SERVER_OIDC_LOGIN_SCOPES="openid,email,profile"`
 
 :::tip[Troubleshooting: `invalid redirect_uri`]
-If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `https://<your-hub-domain>/auth/callback/oidc` exactly — including the scheme, hostname, and path. The value must match `SCION_SERVER_BASE_URL` plus `/auth/callback/oidc`.
+If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `https://<your-hub-domain>/auth/callback/oidc` exactly — including the scheme, hostname, and path. The value must match `SCION_SERVER_HUB_ENDPOINT` plus `/auth/callback/oidc`.
 :::
 
 ## Domain Authorization
