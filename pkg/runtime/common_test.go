@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 )
 
 func TestResolveContainerID(t *testing.T) {
@@ -1593,9 +1594,9 @@ func TestSerializeSecrets_DeduplicatesByTarget(t *testing.T) {
 		t.Fatalf("serializeSecrets failed: %v", err)
 	}
 
-	staged, err := DecodeStagedSecrets(encoded)
+	staged, err := stagedsecrets.Decode(encoded)
 	if err != nil {
-		t.Fatalf("DecodeStagedSecrets failed: %v", err)
+		t.Fatalf("stagedsecrets.Decode failed: %v", err)
 	}
 
 	// Duplicate targets are deduplicated (last entry wins), so we should have
