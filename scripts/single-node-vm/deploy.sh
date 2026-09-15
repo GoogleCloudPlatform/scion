@@ -14,11 +14,14 @@
 # limitations under the License.
 
 # scripts/single-node-vm/deploy.sh — Wizard-style deployment for a single-node
-# Scion Hub on a GCE VM (no public IP).
+# Scion Hub on a GCE VM with IAP proxy authentication.
 #
 # This script provisions a GCE VM, downloads the scion binary from GitHub
-# Releases, and starts the hub via systemd. The VM has no public IP; access
-# is via SSH tunnel (Phase 2) or IAP proxy (Phase 3, not yet implemented).
+# Releases, starts the hub via systemd, deploys a Cloud Run IAP reverse proxy,
+# enables IAP, configures the hub for proxy auth, and prints the access URL.
+#
+# The VM has no public IP; authenticated access is via the Cloud Run IAP proxy.
+# Agents running on the VM connect via localhost (no IAP needed).
 #
 # The script is idempotent: re-running converges without duplication.
 #
@@ -140,6 +143,8 @@ gcloud services enable \
   compute.googleapis.com \
   run.googleapis.com \
   iap.googleapis.com \
+  cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com \
   --project="${PROJECT_ID}" --quiet
 
 # --- Service account ---
@@ -269,17 +274,24 @@ ENVEOF
     "
 fi
 
-# --- Write settings.yaml ---
-info "Writing settings.yaml..."
-SETTINGS_CONTENT="$(sed \
-  -e "s|__HUB_NAME__|${HUB_NAME}|g" \
-  "${SCRIPT_DIR}/config-templates/settings.yaml.tpl")"
-
+# --- Write settings.yaml (dev mode for initial startup) ---
+# Phase 5 will overwrite this with proxy auth config once IAP is ready.
+info "Writing settings.yaml (dev mode)..."
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
-${SETTINGS_CONTENT}
+settings_version: \"1\"
+server:
+  hub:
+    name: \"${HUB_NAME}\"
+  storage:
+    local_path: /home/scion/.scion/workspace-storage
+  secrets:
+    backend: local
+  auth:
+    mode: dev
+  listen_port: 8080
 SETTINGSEOF
   "
 
@@ -322,6 +334,161 @@ else
 fi
 
 # ===================================================================
+# Phase 4: IAP Proxy
+# ===================================================================
+section "Phase 4: IAP Proxy"
+
+# --- Get VM internal IP ---
+info "Getting VM internal IP..."
+VM_IP="$(gcloud compute instances describe "${INSTANCE_NAME}" \
+  --zone="${ZONE}" --project="${PROJECT_ID}" \
+  --format="get(networkInterfaces[0].networkIP)")"
+if [[ -z "$VM_IP" ]]; then
+  err "Could not retrieve VM internal IP for ${INSTANCE_NAME}"
+  exit 1
+fi
+echo "  VM internal IP: ${VM_IP}"
+
+# --- Deploy Cloud Run IAP proxy ---
+PROXY_SERVICE="${INSTANCE_NAME}-iap-proxy"
+info "Deploying Cloud Run IAP proxy: ${PROXY_SERVICE}..."
+echo "  Target URL: http://${VM_IP}:8080"
+echo "  Source: ${SCRIPT_DIR}/../../extras/cloudrun-iap-proxy"
+
+gcloud run deploy "${PROXY_SERVICE}" \
+  --project="${PROJECT_ID}" \
+  --region="${REGION}" \
+  --source="${SCRIPT_DIR}/../../extras/cloudrun-iap-proxy" \
+  --set-env-vars="TARGET_URL=http://${VM_IP}:8080" \
+  --network=default \
+  --subnet=default \
+  --vpc-egress=all-traffic \
+  --allow-unauthenticated \
+  --port=8080 \
+  --quiet
+
+# --- Get Cloud Run service URL ---
+info "Getting Cloud Run service URL..."
+PROXY_URL="$(gcloud run services describe "${PROXY_SERVICE}" \
+  --project="${PROJECT_ID}" --region="${REGION}" \
+  --format="value(status.url)")"
+if [[ -z "$PROXY_URL" ]]; then
+  err "Could not retrieve Cloud Run service URL for ${PROXY_SERVICE}"
+  exit 1
+fi
+echo "  Proxy URL: ${PROXY_URL}"
+
+# --- Enable IAP ---
+info "Enabling IAP on Cloud Run service..."
+gcloud iap web enable \
+  --resource-type=cloud-run \
+  --service="${PROXY_SERVICE}" \
+  --region="${REGION}" \
+  --project="${PROJECT_ID}"
+echo "  IAP enabled."
+
+# --- Bind IAP access for deployer ---
+info "Binding IAP access for deployer..."
+OPERATOR_EMAIL="$(gcloud config get-value account 2>/dev/null)" || true
+if [[ -z "$OPERATOR_EMAIL" ]]; then
+  warn "Could not determine operator email; skipping IAP binding."
+else
+  gcloud iap web add-iam-policy-binding \
+    --resource-type=cloud-run \
+    --service="${PROXY_SERVICE}" \
+    --region="${REGION}" \
+    --project="${PROJECT_ID}" \
+    --member="user:${OPERATOR_EMAIL}" \
+    --role=roles/iap.httpsResourceAccessUser \
+    --quiet
+  echo "  IAP access granted to: ${OPERATOR_EMAIL}"
+fi
+
+# --- Wait for IAP enforcement ---
+info "Waiting for IAP enforcement to activate..."
+echo "  IAP takes 30-60 seconds to begin enforcing after being enabled."
+echo "  Waiting 60 seconds..."
+sleep 60
+echo "  Wait complete."
+
+# ===================================================================
+# Phase 5: Finalize
+# ===================================================================
+section "Phase 5: Finalize"
+
+# --- Compute IAP audience ---
+# For Cloud Run services, the IAP audience uses the format:
+#   /projects/PROJECT_NUMBER/locations/REGION/services/SERVICE_NAME
+info "Computing IAP audience..."
+PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" \
+  --format="value(projectNumber)" 2>/dev/null)" || true
+if [[ -z "$PROJECT_NUMBER" ]]; then
+  err "Could not determine project number for ${PROJECT_ID}"
+  exit 1
+fi
+IAP_AUDIENCE="/projects/${PROJECT_NUMBER}/locations/${REGION}/services/${PROXY_SERVICE}"
+echo "  Project number: ${PROJECT_NUMBER}"
+echo "  IAP audience:   ${IAP_AUDIENCE}"
+
+# --- Update settings.yaml with proxy auth ---
+info "Updating settings.yaml with proxy auth configuration..."
+gcloud compute ssh "${INSTANCE_NAME}" \
+  --zone="${ZONE}" --project="${PROJECT_ID}" \
+  --command="
+    sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
+settings_version: \"1\"
+server:
+  hub:
+    name: \"${HUB_NAME}\"
+  storage:
+    local_path: /home/scion/.scion/workspace-storage
+  secrets:
+    backend: local
+  auth:
+    mode: proxy
+    proxy:
+      provider: iap
+      iap:
+        audience: \"${IAP_AUDIENCE}\"
+  listen_port: 8080
+SETTINGSEOF
+  "
+echo "  settings.yaml updated (auth mode: proxy, provider: iap)."
+
+# --- Restart hub service ---
+info "Restarting scion-hub.service..."
+gcloud compute ssh "${INSTANCE_NAME}" \
+  --zone="${ZONE}" --project="${PROJECT_ID}" \
+  --command="
+    sudo systemctl restart scion-hub.service
+    echo 'scion-hub.service restarted.'
+  "
+
+# --- Post-restart health check ---
+info "Running post-restart health check..."
+HEALTH_OK=false
+for i in $(seq 1 12); do
+  if gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="curl -sf http://localhost:8080/healthz" \
+      2>/dev/null; then
+    HEALTH_OK=true
+    break
+  fi
+  echo "  Attempt ${i}/12 - waiting 5s..."
+  sleep 5
+done
+
+if [[ "$HEALTH_OK" == "true" ]]; then
+  echo ""
+  echo -e "${GREEN}  Health check passed.${RESET}"
+else
+  warn "Health check did not pass within 60s. Check the service logs:"
+  echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
+  echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
+fi
+
+# ===================================================================
 # Done
 # ===================================================================
 echo ""
@@ -331,15 +498,17 @@ echo "  Hub name:     ${HUB_NAME}"
 echo "  Instance:     ${INSTANCE_NAME}"
 echo "  Zone:         ${ZONE}"
 echo "  Scion:        ${VERSION}"
-echo "  Auth mode:    dev (no IAP proxy yet)"
+echo "  Auth mode:    proxy (IAP)"
+echo "  Proxy:        ${PROXY_SERVICE}"
+echo "  Access URL:   ${PROXY_URL}"
 echo ""
-echo "The VM has no public IP. To access the hub, create an SSH tunnel:"
+echo "Open the following URL in your browser to access the hub:"
 echo ""
-echo "  gcloud compute ssh ${INSTANCE_NAME} \\"
-echo "    --zone=${ZONE} --project=${PROJECT_ID} \\"
-echo "    -- -L 8080:localhost:8080"
+echo "  ${PROXY_URL}"
 echo ""
-echo "Then open http://localhost:8080 in your browser."
+echo "You will be prompted to authenticate via Google IAP."
+echo ""
+echo "Agents running on the VM connect via localhost:8080 (no IAP needed)."
 echo ""
 echo "To view service logs:"
 echo ""
