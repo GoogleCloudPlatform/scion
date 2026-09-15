@@ -190,6 +190,11 @@ type CreateAgentRequest struct {
 	// AgentRole specifies the requested authorization role.
 	AgentRole string `json:"agentRole,omitempty"`
 
+	// MessageMode specifies the initial message mode for the agent.
+	// Valid values: "none", "lineage", "branch", "project".
+	// When omitted, resolved from template, parent inheritance, or "project" default.
+	MessageMode string `json:"messageMode,omitempty"`
+
 	// GCPIdentity specifies the GCP identity assignment for the agent.
 	// Controls metadata server behavior and optional service account binding.
 	// When nil, the project default (if any) is applied by the Hub.

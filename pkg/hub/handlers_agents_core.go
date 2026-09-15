@@ -173,6 +173,10 @@ type CreateAgentRequest struct {
 	// When omitted, user requests use the configured default and agent requests
 	// inherit the parent role. The project maximum caps both paths.
 	AgentRole string `json:"agentRole,omitempty"`
+	// MessageMode specifies the initial message mode for the agent.
+	// Valid values: "none", "lineage", "branch", "project".
+	// When omitted, resolved from template, parent inheritance, or "project" default.
+	MessageMode string `json:"messageMode,omitempty"`
 	// GCPIdentity specifies the GCP identity assignment for the agent.
 	// Controls metadata server behavior and optional service account binding.
 	GCPIdentity *GCPIdentityAssignment `json:"gcp_identity,omitempty"`
@@ -1042,10 +1046,17 @@ func (s *Server) createAgentInProject(
 	agent.AppliedConfig = s.buildAppliedConfig(req, harnessConfig, creatorName, effectiveRole)
 
 	// Resolve message_mode (D10 spawn defaults):
-	//   1. Template specifies message_mode → use it.
-	//   2. Parent agent exists → inherit parent's message_mode.
-	//   3. Otherwise → default to "project" (handled by Ent schema default).
-	if resolvedTemplate != nil && resolvedTemplate.Config != nil && resolvedTemplate.Config.MessageMode != "" {
+	//   1. Explicit req.MessageMode from CLI flag → use it (after validation).
+	//   2. Template specifies message_mode → use it.
+	//   3. Parent agent exists → inherit parent's message_mode.
+	//   4. Otherwise → default to "project" (handled by Ent schema default).
+	if req.MessageMode != "" {
+		if !store.IsValidMessageMode(req.MessageMode) {
+			ValidationError(w, "invalid message mode: "+req.MessageMode, nil)
+			return
+		}
+		agent.MessageMode = req.MessageMode
+	} else if resolvedTemplate != nil && resolvedTemplate.Config != nil && resolvedTemplate.Config.MessageMode != "" {
 		if !store.IsValidMessageMode(resolvedTemplate.Config.MessageMode) {
 			ValidationError(w, "invalid template message mode: "+resolvedTemplate.Config.MessageMode, nil)
 			return

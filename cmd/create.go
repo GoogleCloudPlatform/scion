@@ -221,6 +221,26 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		return err
 	}
 
+	// Validate --role flag if provided
+	if agentRoleFlag != "" {
+		switch agentRoleFlag {
+		case "none", "readonly", "baseline", "full":
+			// valid
+		default:
+			return fmt.Errorf("invalid --role value %q: must be one of none, readonly, baseline, full", agentRoleFlag)
+		}
+	}
+
+	// Validate --message-mode flag if provided
+	if messageModeFlag != "" {
+		switch messageModeFlag {
+		case "none", "lineage", "branch", "project":
+			// valid
+		default:
+			return fmt.Errorf("invalid --message-mode value %q: must be one of none, lineage, branch, project", messageModeFlag)
+		}
+	}
+
 	// Build create request — always provision-only (create does not start the agent)
 	req := &hubclient.CreateAgentRequest{
 		Name:            agentName,
@@ -233,6 +253,8 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		Branch:          branch,
 		Labels:          parsedLabels,
 		ProvisionOnly:   true,
+		AgentRole:       agentRoleFlag,
+		MessageMode:     messageModeFlag,
 	}
 
 	// Wire --service-account flag into the GCP identity assignment.
@@ -342,6 +364,14 @@ func init() {
 
 	// Label flags
 	createCmd.Flags().StringArrayVar(&labelFlags, "label", nil, "Label in key=value format (repeatable)")
+
+	// Agent role flag
+	createCmd.Flags().StringVar(&agentRoleFlag, "role", "",
+		"Agent role for Hub API access: none, readonly, baseline, full")
+
+	// Agent message mode flag
+	createCmd.Flags().StringVar(&messageModeFlag, "message-mode", "",
+		"Agent message mode: none, lineage, branch, project")
 
 	// GCP service account assignment flag
 	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")

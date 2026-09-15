@@ -79,6 +79,7 @@ var (
 	modelFlag             string
 	thinkingLevelFlag     int = -1
 	agentRoleFlag         string
+	messageModeFlag       string
 	serviceAccountFlag    string
 )
 
@@ -783,6 +784,16 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		}
 	}
 
+	// Validate --message-mode flag if provided
+	if messageModeFlag != "" {
+		switch messageModeFlag {
+		case "none", "lineage", "branch", "project":
+			// valid
+		default:
+			return fmt.Errorf("invalid --message-mode value %q: must be one of none, lineage, branch, project", messageModeFlag)
+		}
+	}
+
 	// Build create request (Hub creates and starts in one operation)
 	req := &hubclient.CreateAgentRequest{
 		Name:            agentName,
@@ -802,6 +813,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		GatherEnv:       true, // Enable env-gather flow
 		Notify:          !startNoNotify,
 		AgentRole:       agentRoleFlag,
+		MessageMode:     messageModeFlag,
 	}
 
 	// Wire --service-account flag into the GCP identity assignment.
