@@ -214,7 +214,7 @@ The Hub stores agent templates and other artifacts.
 
 ### GCE VM
 
-The most direct path to getting a deployed demonstration hub, is to use the GCE setup scripts in `/scripts/starter-hub`
+The most direct path to getting a deployed demonstration hub is to use the GCE setup scripts in `/scripts/starter-hub` (the Developer Hub tier)
 
 ### Cloud Run, GKE (GCP) *Future*
 The Hub is designed to be stateless and is highly compatible with Google Cloud Run. 
