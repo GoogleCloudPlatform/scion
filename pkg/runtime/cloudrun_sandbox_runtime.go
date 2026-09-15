@@ -727,7 +727,7 @@ func buildEntrypoint(cfg RunConfig) ([]string, error) {
 	// Append (>>), not truncate (>): a restart must preserve the previous
 	// run's diagnostic output.  The run delimiter makes boundaries
 	// unambiguous when multiple runs accumulate in the same file.  #110.
-	wrappedCmd := fmt.Sprintf("echo '--- entrypoint start '$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)' ---' >> %s; { exec sciontool init -- /bin/sh -c %s; } >> %s 2>&1",
+	wrappedCmd := fmt.Sprintf("echo \"--- entrypoint start $(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ) ---\" >> %s 2>&1; { exec sciontool init -- /bin/sh -c %s; } >> %s 2>&1",
 		logPath, shellQuote(tmuxCmd), logPath)
 	return []string{"/bin/sh", "-c", wrappedCmd}, nil
 }
