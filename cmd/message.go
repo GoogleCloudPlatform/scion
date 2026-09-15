@@ -1102,7 +1102,7 @@ func resolveMessageBody(bodyFile string, positionalBody string) (string, error) 
 		if err != nil {
 			return "", fmt.Errorf("failed to open body file: %w", err)
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		data, err := io.ReadAll(io.LimitReader(file, int64(messages.MaxMsgSize)+1))
 		if err != nil {
 			return "", fmt.Errorf("failed to read body file: %w", err)

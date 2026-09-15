@@ -196,7 +196,7 @@ func TestResolveMessageBody_BodyFilePreservesNewlines(t *testing.T) {
 func TestResolveMessageBody_BodyFileNotFound(t *testing.T) {
 	_, err := resolveMessageBody("/tmp/nonexistent-body-file-xyz.txt", "")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to read body file")
+	assert.Contains(t, err.Error(), "failed to open body file")
 }
 
 func TestResolveMessageBody_Conflict(t *testing.T) {
