@@ -220,22 +220,6 @@ func GetGlobalTemplatesDir() (string, error) {
 	return filepath.Join(g, "templates"), nil
 }
 
-func GetProjectAgentsDir() (string, error) {
-	p, err := GetProjectDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(p, "agents"), nil
-}
-
-func GetProjectKubernetesConfigPath() (string, error) {
-	p, err := GetProjectDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(p, "kubernetes-config.json"), nil
-}
-
 func GetGlobalAgentsDir() (string, error) {
 	g, err := GetGlobalDir()
 	if err != nil {

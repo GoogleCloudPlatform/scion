@@ -160,27 +160,6 @@ func normalizeYAMLMappingKeys(node *yaml.Node) {
 	}
 }
 
-func LoadProjectKubernetesConfig() (*api.KubernetesConfig, error) {
-	path, err := GetProjectKubernetesConfigPath()
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	var cfg api.KubernetesConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
-}
-
 func FindTemplate(name string) (*Template, error) {
 	return FindTemplateWithContext(context.Background(), name)
 }
