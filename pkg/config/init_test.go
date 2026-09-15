@@ -230,12 +230,8 @@ server:
 	}
 }
 
-func TestGenerateProjectIDForDir_NoGitRepo(t *testing.T) {
-	// Create a non-git directory
-	tmpDir := t.TempDir()
-
-	// GenerateProjectIDForDir should return a UUID
-	id := GenerateProjectIDForDir(tmpDir)
+func TestGenerateProjectID(t *testing.T) {
+	id := GenerateProjectID()
 	if id == "" {
 		t.Error("expected non-empty project ID")
 	}

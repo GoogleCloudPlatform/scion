@@ -152,13 +152,6 @@ func GenerateProjectID() string {
 	return uuid.New().String()
 }
 
-// GenerateProjectIDForDir creates a new random project ID.
-// The dir parameter is accepted for API compatibility but does not affect
-// the generated ID.
-func GenerateProjectIDForDir(_ string) string {
-	return uuid.New().String()
-}
-
 // IsInsideProject returns true if the current working directory or any parent contains a .scion directory.
 func IsInsideProject() bool {
 	_, ok := FindProjectRoot()
@@ -396,7 +389,7 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 	// Ensure project-id file exists for split storage
 	if _, err := ReadProjectID(projectDir); err != nil {
 		if os.IsNotExist(err) {
-			projectID := GenerateProjectIDForDir(filepath.Dir(projectDir))
+			projectID := GenerateProjectID()
 			if err := WriteProjectID(projectDir, projectID); err != nil {
 				return fmt.Errorf("failed to write project-id: %w", err)
 			}

@@ -271,7 +271,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 			debugf("hub context without project_id — project-scoped operations may fail")
 		} else {
 			// Generate project_id for projects that don't have one
-			projectID = config.GenerateProjectIDForDir(filepath.Dir(resolvedPath))
+			projectID = config.GenerateProjectID()
 			if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
 				return nil, fmt.Errorf("failed to save project_id: %w", err)
 			}
