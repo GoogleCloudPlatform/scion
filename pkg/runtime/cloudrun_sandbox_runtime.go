@@ -1121,9 +1121,83 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 }
 
 func (r *CloudRunSandboxRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	// Use tmux capture-pane to get the scrollback buffer.
+	// Try tmux capture-pane first (live sandbox path).
 	// Absolute paths required -- PATH is empty inside a sandbox.
-	return runSimpleCommand(ctx, r.bin, "exec", id, "--", "/usr/bin/tmux", "capture-pane", "-p", "-t", "scion", "-S", "-1000")
+	logs, err := runSimpleCommand(ctx, r.bin, "exec", id, "--", "/usr/bin/tmux", "capture-pane", "-p", "-t", "scion", "-S", "-1000")
+	if err == nil && strings.TrimSpace(logs) != "" {
+		return logs, nil
+	}
+
+	// Fall back to reading the entrypoint log from the host filesystem
+	// via the state entry. This triggers in two cases:
+	//
+	//   1. tmux exec failed — the sandbox is likely dead.
+	//   2. tmux succeeded but returned empty output — the pane has
+	//      printed nothing (or only whitespace). Showing the entrypoint
+	//      log is strictly better than an empty tab, and the source
+	//      label (below) tells the operator what they are looking at.
+	//
+	// WHY FALLBACK, NOT FLAG CHECK: on this tier, liveness flags have
+	// been wrong before (#17: hub reported agents "running" when the
+	// entrypoint had hung). A flag-check strategy would consult the
+	// flag, and if it said "running" while the sandbox was dead, it
+	// would SKIP the fallback and return the exec error — leaving the
+	// tab empty in precisely the case the feature exists for. Try-and-
+	// fallback is strictly more robust: it does not consult the flag.
+
+	var reason string
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		// Preserve the tmux failure for diagnostics. The operator gets
+		// the fallback content (better than empty), but the exec error
+		// is recorded so it can be found during debugging.
+		runtimeLog.Warn("tmux capture-pane failed, falling back to entrypoint log",
+			"agent_id", id, "error", err)
+		reason = "sandbox was not reachable via tmux"
+	} else {
+		reason = "tmux returned no terminal output"
+	}
+
+	return r.readEntrypointLogFromState(id, reason)
+}
+
+// readEntrypointLogFromState reads the entrypoint log from the host
+// filesystem using the AgentHome path stored in the sandbox state entry.
+// This is the same file and the same host-side path that the DOA handler
+// (line 812-826) reads after a failed liveness probe — the mechanism
+// exists, this gives it an exit through GetLogs.
+func (r *CloudRunSandboxRuntime) readEntrypointLogFromState(id, reason string) (string, error) {
+	entry := r.state.get(id)
+	if entry == nil {
+		return "", fmt.Errorf("cloudrun-sandbox: sandbox %q not found in state store", id)
+	}
+	if entry.AgentHome == "" {
+		return "", fmt.Errorf("cloudrun-sandbox: sandbox %q has no AgentHome in state entry", id)
+	}
+
+	logPath := filepath.Join(entry.AgentHome, entrypointLogFile)
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// State the observation, not the inference.
+			return fmt.Sprintf("[no entrypoint log at %s]", logPath), nil
+		}
+		return "", fmt.Errorf("cloudrun-sandbox: failed to read entrypoint log at %s: %w", logPath, err)
+	}
+
+	if len(data) == 0 {
+		return fmt.Sprintf("[entrypoint log at %s is empty]", logPath), nil
+	}
+
+	// Label the source so the operator knows this is startup output,
+	// not live terminal content. This is mandatory: without it, the
+	// output is indistinguishable from a live pane. The reason is
+	// per-case so the operator can distinguish "agent is dead" from
+	// "agent has not printed yet."
+	header := fmt.Sprintf("[source: entrypoint log (startup) — %s]\n", reason)
+	return header + string(data), nil
 }
 
 func (r *CloudRunSandboxRuntime) Attach(ctx context.Context, id string) error {
