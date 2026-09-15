@@ -21,6 +21,11 @@ import (
 	_ "embed"
 )
 
+// FS embeds every subdirectory under harnesses/ using a wildcard so that new
+// harness directories are discovered automatically without updating a hard-coded
+// list. Non-harness entries (gen/, standalone files) are filtered at load time
+// in resources/catalog.go by checking for the presence of config.yaml.
+//
 //go:embed all:*
 var FS embed.FS
 

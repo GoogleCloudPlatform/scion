@@ -81,6 +81,9 @@ func BuiltinHarnessConfigs() []BundledResource {
 			continue
 		}
 		name := e.Name()
+		// The harnesses package uses a wildcard embed (all:*) for
+		// auto-discovery of new harness directories. Filter out
+		// non-harness entries (e.g. gen/) by requiring config.yaml.
 		if _, err := fs.Stat(harnesses.FS, name+"/config.yaml"); err != nil {
 			continue
 		}
