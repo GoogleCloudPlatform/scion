@@ -814,7 +814,7 @@ Failing here says so at render time.
    every segment instead of the last would reject all four.
 */}}
 {{- $camel := regexReplaceAll "([A-Z]+)([A-Z][a-z])" (regexReplaceAll "([a-z0-9])([A-Z])" $raw "${1}-${2}") "${1}-${2}" }}
-{{- $seg := lower (regexReplaceAll "[^A-Za-z0-9]+" $camel "-") }}
+{{- $seg := lower (regexReplaceAll "[^A-Za-z0-9]+" $camel "-") | trimAll "-" }}
 {{- if regexMatch "(^|-)(secret|password|passwd|token|credential|key|apikey|pat)$" $seg }}
 {{- fail (printf "%s %q names credential material. Anything on argv or in a plain environment value is readable by anyone with pod read access; credentials are delivered through a Secret. (The match is on the FINAL segment, and the segment separator can be a hyphen, a dot, a colon or a camelCase hump: --admin-token, --admin.token and --adminToken are all rejected, while --token-ttl and --max-tokens are fine.)" .source $n) }}
 {{- end }}
