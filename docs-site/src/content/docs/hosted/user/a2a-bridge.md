@@ -79,15 +79,21 @@ Unlike regular containerized plugins, the Hub does not manage the lifecycle (sta
 :::
 
 ### Step 2: Build the Binary
-From your Scion repository root, compile the Go binary:
+Clone the Scion repository and navigate to the root:
+
+```sh
+git clone https://github.com/GoogleCloudPlatform/scion.git
+cd scion
+```
+
+Then compile the Go binary:
 
 ```sh
 # Using the project Makefile
 make build-a2a-bridge
 
-# Or compiling manually (requires the -tags no_embed_web flag to skip embedding frontend assets)
-cd extras/scion-a2a-bridge
-go build -tags no_embed_web -o scion-a2a-bridge ./cmd/scion-a2a-bridge/
+# Or compiling manually
+go build -o bin/scion-a2a-bridge ./extras/scion-a2a-bridge/cmd/scion-a2a-bridge/
 ```
 
 Verify the binary is available:
