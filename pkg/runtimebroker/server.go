@@ -1529,16 +1529,6 @@ func (s *Server) isGlobalProject(projectID, projectPath string) bool {
 	return projectID == "global" || (projectID == "" && projectPath == "")
 }
 
-// resolveHydrator resolves the hydrator for a request, routing to the correct
-// hub connection based on the X-Scion-Hub-Connection header.
-func (s *Server) resolveHydrator(r *http.Request) *templatecache.Hydrator {
-	conn := s.resolveHubConnection(r)
-	if conn != nil {
-		return conn.Hydrator
-	}
-	return nil
-}
-
 // resolveHubConnection resolves the hub connection for a request, routing to
 // the correct connection based on the X-Scion-Hub-Connection header.
 func (s *Server) resolveHubConnection(r *http.Request) *HubConnection {
@@ -1579,19 +1569,6 @@ func (s *Server) resolveHubEndpointFromRequest(r *http.Request) string {
 		return conn.HubEndpoint
 	}
 	return ""
-}
-
-// getFirstHeartbeat returns the heartbeat service from the first available connection.
-// Used for backward compat with single-hub references (e.g., force heartbeat after stop).
-func (s *Server) getFirstHeartbeat() *HeartbeatService {
-	s.hubMu.RLock()
-	defer s.hubMu.RUnlock()
-	for _, conn := range s.hubConnections {
-		if conn.Heartbeat != nil {
-			return conn.Heartbeat
-		}
-	}
-	return nil
 }
 
 // logHubConnections logs a summary of all active hub connections.

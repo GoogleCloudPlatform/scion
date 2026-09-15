@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 )
 
 // makeTestCreds creates BrokerCredentials with a base64-encoded secret key.
@@ -441,64 +442,54 @@ func TestHydrateHarnessConfig_NoResolverIsGraceful(t *testing.T) {
 	}
 }
 
-func TestResolveHydrator_WithConnectionHeader(t *testing.T) {
+func TestResolveHubConnection_WithConnectionHeader(t *testing.T) {
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(creds)
 
-	// Verify the hydrator resolves via header
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
-	req.Header.Set("X-Scion-Hub-Connection", "local")
-
-	hydrator := srv.resolveHydrator(req)
-	// In test mode cache is nil, so hydrator is nil -- that's expected
-	// What we're testing is the routing logic
 	srv.hubMu.RLock()
 	conn := srv.hubConnections["local"]
 	srv.hubMu.RUnlock()
-
 	if conn == nil {
 		t.Fatal("expected 'local' connection to exist")
 	}
+	conn.Hydrator = new(templatecache.Hydrator)
 
-	// The hydrator from resolveHydrator should match the connection's hydrator
-	if hydrator != conn.Hydrator {
-		t.Error("expected resolveHydrator to return the local connection's hydrator")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
+	req.Header.Set("X-Scion-Hub-Connection", "local")
+
+	if got := srv.resolveHubConnection(req); got != conn {
+		t.Error("expected resolveHubConnection to return the named connection")
 	}
 }
 
-func TestResolveHydrator_FallbackToFirstAvailable(t *testing.T) {
+func TestResolveHubConnection_FallbackToFirstAvailable(t *testing.T) {
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(creds)
-
-	// Request without connection header should fall back to first available
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
-	hydrator := srv.resolveHydrator(req)
 
 	srv.hubMu.RLock()
 	conn := srv.hubConnections["local"]
 	srv.hubMu.RUnlock()
+	conn.Hydrator = new(templatecache.Hydrator)
 
-	if hydrator != conn.Hydrator {
-		t.Error("expected resolveHydrator to fall back to first available hydrator")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
+	if got := srv.resolveHubConnection(req); got != conn {
+		t.Error("expected resolveHubConnection to fall back to first available connection")
 	}
 }
 
-func TestResolveHydrator_UnknownConnection(t *testing.T) {
+func TestResolveHubConnection_UnknownConnection(t *testing.T) {
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(creds)
 
-	// Request with unknown connection name should fall back
+	srv.hubMu.RLock()
+	conn := srv.hubConnections["local"]
+	srv.hubMu.RUnlock()
+	conn.Hydrator = new(templatecache.Hydrator)
+
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
 	req.Header.Set("X-Scion-Hub-Connection", "nonexistent")
-	hydrator := srv.resolveHydrator(req)
-
-	// Should fall back to any available hydrator
-	srv.hubMu.RLock()
-	conn := srv.hubConnections["local"]
-	srv.hubMu.RUnlock()
-
-	if hydrator != conn.Hydrator {
-		t.Error("expected resolveHydrator to fall back when connection not found")
+	if got := srv.resolveHubConnection(req); got != conn {
+		t.Error("expected resolveHubConnection to fall back when connection not found")
 	}
 }
 
@@ -1062,15 +1053,6 @@ func TestValidateBrokerAuthStartup_NonLoopbackPermissiveModeFails(t *testing.T) 
 	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
 	if err := srv.validateBrokerAuthStartup(); err == nil {
 		t.Fatal("expected startup validation to fail for non-loopback host without strict auth")
-	}
-}
-
-func TestGetFirstHeartbeat_NoConnections(t *testing.T) {
-	srv := newTestServer(t)
-
-	hb := srv.getFirstHeartbeat()
-	if hb != nil {
-		t.Error("expected nil heartbeat when no connections")
 	}
 }
 

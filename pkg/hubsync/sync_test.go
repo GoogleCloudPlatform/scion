@@ -786,31 +786,6 @@ func TestSyncResult_ExcludeAgent_WithPending(t *testing.T) {
 	}
 }
 
-func TestContainsIgnoreCase(t *testing.T) {
-	tests := []struct {
-		s        string
-		substr   string
-		expected bool
-	}{
-		{"Hello World", "hello", true},
-		{"Hello World", "WORLD", true},
-		{"Hello World", "llo wor", true},
-		{"404 Not Found", "404", true},
-		{"404 Not Found", "not found", true},
-		{"Hello World", "goodbye", false},
-		{"", "test", false},
-		{"test", "", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.s+"_"+tt.substr, func(t *testing.T) {
-			if got := containsIgnoreCase(tt.s, tt.substr); got != tt.expected {
-				t.Errorf("containsIgnoreCase(%q, %q) = %v, want %v", tt.s, tt.substr, got, tt.expected)
-			}
-		})
-	}
-}
-
 func TestProjectChoice_Constants(t *testing.T) {
 	// Verify that the choice constants have expected values
 	if ProjectChoiceCancel != 0 {

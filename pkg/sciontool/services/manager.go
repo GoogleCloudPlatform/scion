@@ -115,13 +115,6 @@ func (svc *managedService) recordFailure() int {
 	return svc.failures
 }
 
-// currentFailures returns the current failure counter without mutating it.
-func (svc *managedService) currentFailures() int {
-	svc.mu.Lock()
-	defer svc.mu.Unlock()
-	return svc.failures
-}
-
 // resetFailuresIfRunning clears the failure counter, but only if the current
 // process has not yet exited. Called from the delayed reset goroutine.
 func (svc *managedService) resetFailuresIfRunning() {
