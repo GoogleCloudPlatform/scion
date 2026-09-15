@@ -594,7 +594,7 @@ func TestRS1_LifecycleEnforcement_ExpiredOwnerNotCounted(t *testing.T) {
 		store:   s,
 		nowFunc: time.Now,
 	}
-	count, err := svc.countActiveDirectOwners(ctx, projectID)
+	count, err := svc.countActiveDirectOwnersFromStore(ctx, s, projectID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count,
 		"expired owner should not be counted as active")
@@ -633,7 +633,7 @@ func TestRS1_LifecycleEnforcement_FutureOwnerNotCounted(t *testing.T) {
 		store:   s,
 		nowFunc: time.Now,
 	}
-	count, err := svc.countActiveDirectOwners(ctx, projectID)
+	count, err := svc.countActiveDirectOwnersFromStore(ctx, s, projectID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count,
 		"future owner should not be counted as active")

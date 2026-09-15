@@ -2675,7 +2675,6 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectMembersGroup", Symbol: "CreateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: creates members group", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectMembersGroup", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: updates members group", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectOwnerRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: creates owner role binding", Scope: "pkg/hub/handlers_projects_core.go"}},
-	{File: "pkg/hub/handlers_projects_core.go", Function: "createProjectRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project create sub-step: creates project role binding", Scope: "pkg/hub/handlers_projects_core.go"}},
 	// RS3: deleteProject handler now delegates to ProjectDeletionService.
 	// Cascade mutations are in the service's cascadeSecurityState method.
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteRoleBindingsForScope", OperationID: "project.lifecycle.delete"},

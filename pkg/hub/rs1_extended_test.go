@@ -1032,7 +1032,7 @@ func TestRS1_ConcurrentRemoveAndTransfer(t *testing.T) {
 
 	// Verify no zero-owner state.
 	svc := srv.membershipService
-	count, err := svc.countActiveDirectOwners(ctx, projectID)
+	count, err := svc.countActiveDirectOwnersFromStore(ctx, s, projectID)
 	require.NoError(t, err)
 	assert.True(t, count >= 1, "RS1: after concurrent ops, at least one owner must remain (got %d)", count)
 }
@@ -1121,7 +1121,7 @@ func TestRS1_ConcurrentDemotions(t *testing.T) {
 
 	// Verify at least one owner remains — the invariant MUST hold.
 	svc := srv.membershipService
-	count, err := svc.countActiveDirectOwners(ctx, projectID)
+	count, err := svc.countActiveDirectOwnersFromStore(ctx, s, projectID)
 	require.NoError(t, err)
 	assert.True(t, count >= 1,
 		"RS1: after concurrent demotions, at least one owner must remain (got %d)", count)
