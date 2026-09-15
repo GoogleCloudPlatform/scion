@@ -16,6 +16,7 @@ package teams
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -921,4 +922,10 @@ func (b *TeamsBroker) upsertConversationRef(activity *Activity) {
 			)
 		}
 	}
+}
+
+// BrokerQuery implements MessageBrokerPluginInterface.BrokerQuery.
+// The Teams broker does not support any query operations.
+func (b *TeamsBroker) BrokerQuery(_ context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
+	return nil, plugin.ErrUnsupportedOperation
 }

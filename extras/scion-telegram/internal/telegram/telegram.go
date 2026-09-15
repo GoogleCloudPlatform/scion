@@ -909,3 +909,9 @@ func subjectMatchesPattern(pattern, subject string) bool {
 
 	return len(patternParts) == len(subjectParts)
 }
+
+// BrokerQuery implements MessageBrokerPluginInterface.BrokerQuery.
+// The Telegram broker does not support any query operations.
+func (b *TelegramBroker) BrokerQuery(_ context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
+	return nil, plugin.ErrUnsupportedOperation
+}

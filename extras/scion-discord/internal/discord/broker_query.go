@@ -7,8 +7,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 )
+
+// brokerQueryContext holds snapshots of broker fields copied under the read lock.
+// This avoids holding the broker mutex across potentially slow operations
+// (Discord API calls, hub RPCs) and prevents data races during reconnection.
+type brokerQueryContext struct {
+	session   *discordgo.Session
+	store     Store
+	hubClient HubClient
+}
 
 // --- Request/Response types ---
 
@@ -128,7 +139,7 @@ type sendDMResponse struct {
 
 // --- Handlers ---
 
-func (b *DiscordBroker) queryListChannels(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
+func (q *brokerQueryContext) queryListChannels(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
 	var req listChannelsRequest
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
@@ -137,7 +148,7 @@ func (b *DiscordBroker) queryListChannels(ctx context.Context, params json.RawMe
 		return nil, fmt.Errorf("project_id is required")
 	}
 
-	links, err := b.store.GetChannelLinksForProject(ctx, req.ProjectID)
+	links, err := q.store.GetChannelLinksForProject(ctx, req.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("query channel links: %w", err)
 	}
@@ -160,7 +171,7 @@ func (b *DiscordBroker) queryListChannels(ctx context.Context, params json.RawMe
 	return json.Marshal(resp)
 }
 
-func (b *DiscordBroker) queryListThreads(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
+func (q *brokerQueryContext) queryListThreads(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
 	var req listThreadsRequest
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
@@ -170,13 +181,13 @@ func (b *DiscordBroker) queryListThreads(ctx context.Context, params json.RawMes
 	}
 
 	// Get all channel links for the project
-	links, err := b.store.GetChannelLinksForProject(ctx, req.ProjectID)
+	links, err := q.store.GetChannelLinksForProject(ctx, req.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("query channel links: %w", err)
 	}
 
-	var threads []threadInfo
-	var channelDefaults []channelDefaultInfo
+	threads := []threadInfo{}
+	channelDefaults := []channelDefaultInfo{}
 
 	for _, link := range links {
 		// If channel_id filter is specified, skip non-matching channels
@@ -193,7 +204,7 @@ func (b *DiscordBroker) queryListThreads(ctx context.Context, params json.RawMes
 		}
 
 		// Get thread defaults for this channel
-		tds, err := b.store.ListThreadDefaultsForChannel(ctx, link.ChannelID)
+		tds, err := q.store.ListThreadDefaultsForChannel(ctx, link.ChannelID)
 		if err != nil {
 			return nil, fmt.Errorf("query thread defaults for channel %s: %w", link.ChannelID, err)
 		}
@@ -206,14 +217,6 @@ func (b *DiscordBroker) queryListThreads(ctx context.Context, params json.RawMes
 		}
 	}
 
-	// Ensure non-nil slices for JSON marshaling
-	if threads == nil {
-		threads = []threadInfo{}
-	}
-	if channelDefaults == nil {
-		channelDefaults = []channelDefaultInfo{}
-	}
-
 	resp := listThreadsResponse{
 		Threads:         threads,
 		ChannelDefaults: channelDefaults,
@@ -221,7 +224,7 @@ func (b *DiscordBroker) queryListThreads(ctx context.Context, params json.RawMes
 	return json.Marshal(resp)
 }
 
-func (b *DiscordBroker) querySetDefault(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
+func (q *brokerQueryContext) querySetDefault(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
 	var req setDefaultRequest
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
@@ -231,7 +234,7 @@ func (b *DiscordBroker) querySetDefault(ctx context.Context, params json.RawMess
 	}
 
 	// Verify channel belongs to this project.
-	link, err := b.store.GetChannelLink(ctx, req.ChannelID)
+	link, err := q.store.GetChannelLink(ctx, req.ChannelID)
 	if err != nil {
 		return nil, fmt.Errorf("get channel link: %w", err)
 	}
@@ -243,7 +246,7 @@ func (b *DiscordBroker) querySetDefault(ctx context.Context, params json.RawMess
 	}
 
 	// Validate agent slug exists in the project.
-	agents, err := b.hubClient.ListAgents(ctx, req.ProjectID)
+	agents, err := q.hubClient.ListAgents(ctx, req.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("list agents: %w", err)
 	}
@@ -265,13 +268,13 @@ func (b *DiscordBroker) querySetDefault(ctx context.Context, params json.RawMess
 	if req.ThreadID != "" {
 		// Thread-level default.
 		scope = "thread"
-		if err := b.store.SetThreadDefault(ctx, req.ChannelID, req.ThreadID, matchedSlug); err != nil {
+		if err := q.store.SetThreadDefault(ctx, req.ChannelID, req.ThreadID, matchedSlug); err != nil {
 			return nil, fmt.Errorf("set thread default: %w", err)
 		}
 	} else {
 		// Channel-level default.
 		link.DefaultAgent = matchedSlug
-		if err := b.store.UpdateChannelLink(ctx, link); err != nil {
+		if err := q.store.UpdateChannelLink(ctx, link); err != nil {
 			return nil, fmt.Errorf("update channel link: %w", err)
 		}
 	}
@@ -286,7 +289,7 @@ func (b *DiscordBroker) querySetDefault(ctx context.Context, params json.RawMess
 	return json.Marshal(resp)
 }
 
-func (b *DiscordBroker) queryChannelHistory(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
+func (q *brokerQueryContext) queryChannelHistory(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
 	var req channelHistoryRequest
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
@@ -295,8 +298,11 @@ func (b *DiscordBroker) queryChannelHistory(ctx context.Context, params json.Raw
 		return nil, fmt.Errorf("channel_id and project_id are required")
 	}
 
-	// Verify channel belongs to this project.
-	link, err := b.store.GetChannelLink(ctx, req.ChannelID)
+	// Verify channel belongs to this project. If the channel ID refers to a
+	// thread (which won't have its own channel_link entry), resolve its parent
+	// channel and verify the parent is linked instead. This prevents an
+	// authorization bypass where a thread ID could skip the project check.
+	link, err := resolveChannelLink(ctx, q.session, q.store, req.ChannelID)
 	if err != nil {
 		return nil, fmt.Errorf("get channel link: %w", err)
 	}
@@ -318,7 +324,7 @@ func (b *DiscordBroker) queryChannelHistory(ctx context.Context, params json.Raw
 
 	// Fetch messages from Discord API.
 	// Request one extra to determine has_more.
-	msgs, err := b.session.ChannelMessages(req.ChannelID, limit+1, req.Before, req.After, "")
+	msgs, err := q.session.ChannelMessages(req.ChannelID, limit+1, req.Before, req.After, "")
 	if err != nil {
 		return nil, fmt.Errorf("fetch messages: %w", err)
 	}
@@ -329,7 +335,7 @@ func (b *DiscordBroker) queryChannelHistory(ctx context.Context, params json.Raw
 	}
 
 	// Convert to response format.
-	var messages []messageInfo
+	messages := []messageInfo{}
 	for _, m := range msgs {
 		// Filter bot messages if humans_only.
 		if req.HumansOnly && m.Author != nil && m.Author.Bot {
@@ -339,7 +345,7 @@ func (b *DiscordBroker) queryChannelHistory(ctx context.Context, params json.Raw
 		mi := messageInfo{
 			ID:        m.ID,
 			Content:   m.Content,
-			Timestamp: m.Timestamp.Format("2006-01-02T15:04:05Z07:00"),
+			Timestamp: m.Timestamp.Format(time.RFC3339),
 		}
 		if m.Author != nil {
 			mi.Author = messageAuthor{
@@ -360,10 +366,6 @@ func (b *DiscordBroker) queryChannelHistory(ctx context.Context, params json.Raw
 		messages = append(messages, mi)
 	}
 
-	if messages == nil {
-		messages = []messageInfo{}
-	}
-
 	resp := channelHistoryResponse{
 		ChannelID: req.ChannelID,
 		Messages:  messages,
@@ -372,7 +374,7 @@ func (b *DiscordBroker) queryChannelHistory(ctx context.Context, params json.Raw
 	return json.Marshal(resp)
 }
 
-func (b *DiscordBroker) querySendDM(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
+func (q *brokerQueryContext) querySendDM(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
 	var req sendDMRequest
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
@@ -382,7 +384,7 @@ func (b *DiscordBroker) querySendDM(ctx context.Context, params json.RawMessage)
 	}
 
 	// Look up Discord user by email.
-	mapping, err := b.store.GetUserMappingByEmail(ctx, req.RecipientEmail)
+	mapping, err := q.store.GetUserMappingByEmail(ctx, req.RecipientEmail)
 	if err != nil {
 		return nil, fmt.Errorf("get user mapping: %w", err)
 	}
@@ -396,13 +398,13 @@ func (b *DiscordBroker) querySendDM(ctx context.Context, params json.RawMessage)
 	}
 
 	// Create/get DM channel (idempotent).
-	dmChannel, err := b.session.UserChannelCreate(mapping.DiscordUserID)
+	dmChannel, err := q.session.UserChannelCreate(mapping.DiscordUserID)
 	if err != nil {
 		return nil, fmt.Errorf("create DM channel: %w", err)
 	}
 
 	// Send the message.
-	_, err = b.session.ChannelMessageSend(dmChannel.ID, req.Message)
+	_, err = q.session.ChannelMessageSend(dmChannel.ID, req.Message)
 	if err != nil {
 		return nil, fmt.Errorf("send DM: %w", err)
 	}

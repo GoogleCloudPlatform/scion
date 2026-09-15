@@ -64,7 +64,7 @@ func runDiscordChannels(cmd *cobra.Command, args []string) error {
 		return wrapHubError(err)
 	}
 
-	fmt.Fprintln(os.Stdout, string(result))
+	_, _ = fmt.Fprintln(os.Stdout, string(result))
 	return nil
 }
 
@@ -88,7 +88,7 @@ func runDiscordThreads(cmd *cobra.Command, args []string) error {
 		return wrapHubError(err)
 	}
 
-	fmt.Fprintln(os.Stdout, string(result))
+	_, _ = fmt.Fprintln(os.Stdout, string(result))
 	return nil
 }
 
@@ -128,7 +128,7 @@ func runDiscordSetDefault(cmd *cobra.Command, args []string) error {
 		return wrapHubError(err)
 	}
 
-	fmt.Fprintln(os.Stdout, string(result))
+	_, _ = fmt.Fprintln(os.Stdout, string(result))
 	return nil
 }
 
@@ -181,7 +181,7 @@ func runDiscordHistory(cmd *cobra.Command, args []string) error {
 		return wrapHubError(err)
 	}
 
-	fmt.Fprintln(os.Stdout, string(result))
+	_, _ = fmt.Fprintln(os.Stdout, string(result))
 	return nil
 }
 
@@ -218,7 +218,7 @@ func runDiscordDM(cmd *cobra.Command, args []string) error {
 		return wrapHubError(err)
 	}
 
-	fmt.Fprintln(os.Stdout, string(result))
+	_, _ = fmt.Fprintln(os.Stdout, string(result))
 	return nil
 }
 

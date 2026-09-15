@@ -1070,3 +1070,9 @@ func agentSlugs(agents []AgentInfo) []string {
 	}
 	return slugs
 }
+
+// BrokerQuery implements MessageBrokerPluginInterface.BrokerQuery.
+// The Slack broker does not support any query operations.
+func (b *SlackBroker) BrokerQuery(_ context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
+	return nil, plugin.ErrUnsupportedOperation
+}

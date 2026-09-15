@@ -370,18 +370,24 @@ func (a *GRPCBrokerAdapter) GetInfo() (*plugin.PluginInfo, error) {
 
 // BrokerQuery sends a named query to the remote broker plugin.
 func (a *GRPCBrokerAdapter) BrokerQuery(ctx context.Context, operation string, params json.RawMessage) (json.RawMessage, error) {
+	// Copy the client reference under lock, then release the lock before
+	// making the gRPC call. BrokerQuery may perform slow network operations
+	// (e.g. fetching channel history from Discord), and holding the lock
+	// across the call would block all other adapter operations including
+	// HealthCheck.
 	a.mu.Lock()
-	defer a.mu.Unlock()
-
 	if a.closed {
+		a.mu.Unlock()
 		return nil, fmt.Errorf("adapter is closed")
 	}
-
 	if err := a.ensureConnected(); err != nil {
+		a.mu.Unlock()
 		return nil, err
 	}
+	client := a.client
+	a.mu.Unlock()
 
-	resp, err := a.client.BrokerQuery(ctx, &brokerv1.BrokerQueryRequest{
+	resp, err := client.BrokerQuery(ctx, &brokerv1.BrokerQueryRequest{
 		Operation: operation,
 		Params:    []byte(params),
 	})

@@ -16,6 +16,7 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -223,6 +224,12 @@ func (b *BrokerServer) HealthCheck() (*plugin.HealthStatus, error) {
 	}
 
 	return hs, nil
+}
+
+// BrokerQuery implements MessageBrokerPluginInterface.BrokerQuery.
+// The A2A bridge broker does not support any query operations.
+func (b *BrokerServer) BrokerQuery(_ context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
+	return nil, plugin.ErrUnsupportedOperation
 }
 
 // SetHostCallbacks is called by the go-plugin framework to provide the reverse channel.

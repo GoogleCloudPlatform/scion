@@ -17,6 +17,7 @@ package hub
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -66,7 +67,7 @@ func (s *Server) handleDiscordChannels(w http.ResponseWriter, r *http.Request, p
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(result)
+	_, _ = w.Write(result)
 }
 
 func (s *Server) handleDiscordThreads(w http.ResponseWriter, r *http.Request, projectID string, mgr IntegrationManager) {
@@ -86,7 +87,7 @@ func (s *Server) handleDiscordThreads(w http.ResponseWriter, r *http.Request, pr
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(result)
+	_, _ = w.Write(result)
 }
 
 func (s *Server) handleDiscordSetDefault(w http.ResponseWriter, r *http.Request, projectID string, mgr IntegrationManager) {
@@ -122,7 +123,7 @@ func (s *Server) handleDiscordSetDefault(w http.ResponseWriter, r *http.Request,
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(result)
+	_, _ = w.Write(result)
 }
 
 func (s *Server) handleDiscordHistory(w http.ResponseWriter, r *http.Request, projectID, channelID string, mgr IntegrationManager) {
@@ -158,7 +159,7 @@ func (s *Server) handleDiscordHistory(w http.ResponseWriter, r *http.Request, pr
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(result)
+	_, _ = w.Write(result)
 }
 
 func (s *Server) handleDiscordDM(w http.ResponseWriter, r *http.Request, projectID string, mgr IntegrationManager) {
@@ -189,7 +190,7 @@ func (s *Server) handleDiscordDM(w http.ResponseWriter, r *http.Request, project
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(result)
+	_, _ = w.Write(result)
 }
 
 // writeDiscordError maps plugin errors to HTTP status codes.
@@ -206,6 +207,7 @@ func (s *Server) writeDiscordError(w http.ResponseWriter, err error) {
 	case errors.Is(err, plugin.ErrForbidden):
 		writeError(w, http.StatusForbidden, "forbidden", err.Error(), nil)
 	default:
+		slog.Error("unexpected discord error", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "internal server error", nil)
 	}
 }

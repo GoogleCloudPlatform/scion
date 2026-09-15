@@ -2865,3 +2865,9 @@ func extractUserIDFromTopic(topic string) string {
 	}
 	return ""
 }
+
+// BrokerQuery implements MessageBrokerPluginInterface.BrokerQuery.
+// The Telegram V2 broker does not support any query operations.
+func (b *TelegramBrokerV2) BrokerQuery(_ context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
+	return nil, plugin.ErrUnsupportedOperation
+}

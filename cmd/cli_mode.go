@@ -109,6 +109,12 @@ var agentAllowed = map[string]bool{
 	"project.skills.list":         true,
 	"project.skills.add":          true,
 	"project.skills.remove":       true,
+	"discord":                     true,
+	"discord.channels":            true,
+	"discord.threads":             true,
+	"discord.set-default":         true,
+	"discord.history":             true,
+	"discord.dm":                  true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.

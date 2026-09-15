@@ -893,17 +893,30 @@ func (b *DiscordBroker) GetInfo() (*plugin.PluginInfo, error) {
 
 // BrokerQuery handles named query/action operations.
 func (b *DiscordBroker) BrokerQuery(ctx context.Context, operation string, params json.RawMessage) (json.RawMessage, error) {
+	b.mu.RLock()
+	session := b.session
+	store := b.store
+	hubClient := b.hubClient
+	b.mu.RUnlock()
+
+	if session == nil || store == nil {
+		return nil, fmt.Errorf("broker not configured")
+	}
+
+	// Create a snapshot wrapper that the query handlers use instead of b.session/b.store/b.hubClient directly.
+	q := &brokerQueryContext{session: session, store: store, hubClient: hubClient}
+
 	switch operation {
 	case "list-channels":
-		return b.queryListChannels(ctx, params)
+		return q.queryListChannels(ctx, params)
 	case "list-threads":
-		return b.queryListThreads(ctx, params)
+		return q.queryListThreads(ctx, params)
 	case "set-default":
-		return b.querySetDefault(ctx, params)
+		return q.querySetDefault(ctx, params)
 	case "channel-history":
-		return b.queryChannelHistory(ctx, params)
+		return q.queryChannelHistory(ctx, params)
 	case "send-dm":
-		return b.querySendDM(ctx, params)
+		return q.querySendDM(ctx, params)
 	default:
 		return nil, plugin.ErrUnsupportedOperation
 	}

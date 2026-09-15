@@ -12,16 +12,21 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 )
 
+// newTestQueryContext creates a brokerQueryContext for testing with the given store.
+func newTestQueryContext(store Store) *brokerQueryContext {
+	return &brokerQueryContext{store: store}
+}
+
 // --- queryListChannels tests ---
 
 func TestQueryListChannels(t *testing.T) {
 	t.Run("EmptyProject", func(t *testing.T) {
 		store := newTestStore(t)
-		b := &DiscordBroker{store: store, log: discardLogger()}
+		q := newTestQueryContext(store)
 		ctx := context.Background()
 
 		params, _ := json.Marshal(listChannelsRequest{ProjectID: "proj-empty"})
-		result, err := b.queryListChannels(ctx, params)
+		result, err := q.queryListChannels(ctx, params)
 		require.NoError(t, err)
 
 		var resp listChannelsResponse
@@ -31,7 +36,7 @@ func TestQueryListChannels(t *testing.T) {
 
 	t.Run("ProjectWithChannels", func(t *testing.T) {
 		store := newTestStore(t)
-		b := &DiscordBroker{store: store, log: discardLogger()}
+		q := newTestQueryContext(store)
 		ctx := context.Background()
 
 		// Create two channel links for the same project.
@@ -57,7 +62,7 @@ func TestQueryListChannels(t *testing.T) {
 		}))
 
 		params, _ := json.Marshal(listChannelsRequest{ProjectID: "proj-1"})
-		result, err := b.queryListChannels(ctx, params)
+		result, err := q.queryListChannels(ctx, params)
 		require.NoError(t, err)
 
 		var resp listChannelsResponse
@@ -85,22 +90,22 @@ func TestQueryListChannels(t *testing.T) {
 
 	t.Run("MissingProjectID", func(t *testing.T) {
 		store := newTestStore(t)
-		b := &DiscordBroker{store: store, log: discardLogger()}
+		q := newTestQueryContext(store)
 		ctx := context.Background()
 
 		params := json.RawMessage(`{}`)
-		_, err := b.queryListChannels(ctx, params)
+		_, err := q.queryListChannels(ctx, params)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "project_id is required")
 	})
 
 	t.Run("MalformedParams", func(t *testing.T) {
 		store := newTestStore(t)
-		b := &DiscordBroker{store: store, log: discardLogger()}
+		q := newTestQueryContext(store)
 		ctx := context.Background()
 
 		params := json.RawMessage(`invalid json`)
-		_, err := b.queryListChannels(ctx, params)
+		_, err := q.queryListChannels(ctx, params)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid params")
 	})
@@ -111,11 +116,11 @@ func TestQueryListChannels(t *testing.T) {
 func TestQueryListThreads(t *testing.T) {
 	t.Run("EmptyProject", func(t *testing.T) {
 		store := newTestStore(t)
-		b := &DiscordBroker{store: store, log: discardLogger()}
+		q := newTestQueryContext(store)
 		ctx := context.Background()
 
 		params, _ := json.Marshal(listThreadsRequest{ProjectID: "proj-empty"})
-		result, err := b.queryListThreads(ctx, params)
+		result, err := q.queryListThreads(ctx, params)
 		require.NoError(t, err)
 
 		var resp listThreadsResponse
@@ -126,7 +131,7 @@ func TestQueryListThreads(t *testing.T) {
 
 	t.Run("WithThreadDefaults", func(t *testing.T) {
 		store := newTestStore(t)
-		b := &DiscordBroker{store: store, log: discardLogger()}
+		q := newTestQueryContext(store)
 		ctx := context.Background()
 
 		// Create a channel link.
@@ -143,7 +148,7 @@ func TestQueryListThreads(t *testing.T) {
 		require.NoError(t, store.SetThreadDefault(ctx, "ch-1", "thread-2", "agent-b"))
 
 		params, _ := json.Marshal(listThreadsRequest{ProjectID: "proj-1"})
-		result, err := b.queryListThreads(ctx, params)
+		result, err := q.queryListThreads(ctx, params)
 		require.NoError(t, err)
 
 		var resp listThreadsResponse
@@ -161,7 +166,7 @@ func TestQueryListThreads(t *testing.T) {
 
 	t.Run("ChannelIDFilter", func(t *testing.T) {
 		store := newTestStore(t)
-		b := &DiscordBroker{store: store, log: discardLogger()}
+		q := newTestQueryContext(store)
 		ctx := context.Background()
 
 		// Create two channel links.
@@ -185,7 +190,7 @@ func TestQueryListThreads(t *testing.T) {
 
 		// Filter by ch-1 only.
 		params, _ := json.Marshal(listThreadsRequest{ProjectID: "proj-1", ChannelID: "ch-1"})
-		result, err := b.queryListThreads(ctx, params)
+		result, err := q.queryListThreads(ctx, params)
 		require.NoError(t, err)
 
 		var resp listThreadsResponse
@@ -198,7 +203,7 @@ func TestQueryListThreads(t *testing.T) {
 
 	t.Run("ChannelDefaultsIncluded", func(t *testing.T) {
 		store := newTestStore(t)
-		b := &DiscordBroker{store: store, log: discardLogger()}
+		q := newTestQueryContext(store)
 		ctx := context.Background()
 
 		// Create a channel link with a default agent.
@@ -212,7 +217,7 @@ func TestQueryListThreads(t *testing.T) {
 		}))
 
 		params, _ := json.Marshal(listThreadsRequest{ProjectID: "proj-1"})
-		result, err := b.queryListThreads(ctx, params)
+		result, err := q.queryListThreads(ctx, params)
 		require.NoError(t, err)
 
 		var resp listThreadsResponse
@@ -228,7 +233,8 @@ func TestQueryListThreads(t *testing.T) {
 func TestBrokerQueryDispatch(t *testing.T) {
 	t.Run("ListChannelsDispatches", func(t *testing.T) {
 		store := newTestStore(t)
-		b := &DiscordBroker{store: store, log: discardLogger()}
+		session := stubSession(nil)
+		b := &DiscordBroker{store: store, session: session, log: discardLogger()}
 		ctx := context.Background()
 
 		params, _ := json.Marshal(listChannelsRequest{ProjectID: "proj-1"})
@@ -242,11 +248,23 @@ func TestBrokerQueryDispatch(t *testing.T) {
 
 	t.Run("UnknownOperationReturnsError", func(t *testing.T) {
 		store := newTestStore(t)
-		b := &DiscordBroker{store: store, log: discardLogger()}
+		session := stubSession(nil)
+		b := &DiscordBroker{store: store, session: session, log: discardLogger()}
 		ctx := context.Background()
 
 		_, err := b.BrokerQuery(ctx, "unknown-op", json.RawMessage(`{}`))
 		require.Error(t, err)
 		assert.ErrorIs(t, err, plugin.ErrUnsupportedOperation)
+	})
+
+	t.Run("NilSessionReturnsError", func(t *testing.T) {
+		store := newTestStore(t)
+		b := &DiscordBroker{store: store, log: discardLogger()}
+		ctx := context.Background()
+
+		params, _ := json.Marshal(listChannelsRequest{ProjectID: "proj-1"})
+		_, err := b.BrokerQuery(ctx, "list-channels", params)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "broker not configured")
 	})
 }
