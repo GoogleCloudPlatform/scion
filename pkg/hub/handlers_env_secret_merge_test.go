@@ -36,7 +36,6 @@ func TestMergeEnvironmentSecretMetadata(t *testing.T) {
 	got := mergeEnvironmentSecretMetadata(envVars, metas)
 	want := []store.EnvVar{
 		envVars[1],
-		envVars[2],
 		secretMetaToEnvVar(metas[0]),
 		secretMetaToEnvVar(metas[1]),
 	}

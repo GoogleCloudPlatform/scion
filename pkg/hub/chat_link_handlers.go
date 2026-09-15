@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 )
 
 type chatLinkProvider struct {
@@ -98,6 +99,7 @@ func (p chatLinkProvider) handleVerification(s *Server, w http.ResponseWriter, r
 		providerName:      p.name,
 		userIDResponseKey: p.userIDField,
 		userIDLogKey:      p.userIDLogKey,
+		clientIP:          chatLinkRateLimitIP(r, parseTrustedProxies(s.config.TrustedProxies)),
 		allowVerify:       allowVerify,
 		verify:            verify,
 	})
@@ -240,6 +242,7 @@ type chatLinkVerificationOptions struct {
 	providerName      string
 	userIDResponseKey string
 	userIDLogKey      string
+	clientIP          string
 	allowVerify       func(ip string) bool
 	verify            func(code, userID, userEmail string) (providerUserID, reason string)
 }
@@ -256,7 +259,7 @@ func handleChatLinkVerification(w http.ResponseWriter, r *http.Request, opts cha
 		return
 	}
 
-	if opts.allowVerify != nil && !opts.allowVerify(remoteIP(r.RemoteAddr)) {
+	if opts.allowVerify != nil && !opts.allowVerify(opts.clientIP) {
 		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many verify attempts, try again later", nil)
 		return
 	}
@@ -313,6 +316,24 @@ func remoteIP(remoteAddr string) string {
 		return remoteAddr
 	}
 	return ip
+}
+
+func chatLinkRateLimitIP(r *http.Request, trustedNets []*net.IPNet) string {
+	fallback := remoteIP(r.RemoteAddr)
+	if len(trustedNets) == 0 || !isTrustedProxy(r, trustedNets) {
+		return fallback
+	}
+
+	if forwardedFor := r.Header.Get("X-Forwarded-For"); forwardedFor != "" {
+		candidate := strings.TrimSpace(strings.SplitN(forwardedFor, ",", 2)[0])
+		if net.ParseIP(candidate) != nil {
+			return candidate
+		}
+	}
+	if candidate := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(candidate) != nil {
+		return candidate
+	}
+	return fallback
 }
 
 type chatLinkStatusOptions struct {

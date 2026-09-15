@@ -109,7 +109,7 @@ func TestUpdateSavedAgentInfo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
-	if err := os.WriteFile(agentInfoPath, data, 0o644); err != nil {
+	if err := os.WriteFile(agentInfoPath, data, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
@@ -140,6 +140,20 @@ func TestUpdateSavedAgentInfo(t *testing.T) {
 	}
 	if !got.DeletedAt.Equal(deletedAt) {
 		t.Fatalf("DeletedAt = %v, want %v", got.DeletedAt, deletedAt)
+	}
+	fi, err := os.Stat(agentInfoPath)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %o, want 600", fi.Mode().Perm())
+	}
+	tempFiles, err := filepath.Glob(filepath.Join(agentHome, ".agent-info.json.tmp-*"))
+	if err != nil {
+		t.Fatalf("Glob() error = %v", err)
+	}
+	if len(tempFiles) != 0 {
+		t.Fatalf("temp files should not remain: %v", tempFiles)
 	}
 }
 

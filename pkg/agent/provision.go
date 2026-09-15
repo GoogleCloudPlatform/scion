@@ -1626,8 +1626,11 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 
 	// If agent-info.json doesn't exist, we can't update it.
 	// This might happen if provisioning failed or hasn't finished.
-	if _, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
+	mode := os.FileMode(0o644)
+	if fi, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
 		return nil
+	} else if err == nil {
+		mode = fi.Mode().Perm()
 	}
 
 	data, err := os.ReadFile(agentInfoPath)
@@ -1647,7 +1650,30 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 		return err
 	}
 
-	return os.WriteFile(agentInfoPath, newData, 0644)
+	return writeAgentInfoFile(agentInfoPath, newData, mode)
+}
+
+func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	if err := tmp.Chmod(mode); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func UpdateAgentConfig(agentName string, projectPath string, status string, runtime string, profile string) error {

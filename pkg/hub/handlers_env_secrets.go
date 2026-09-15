@@ -597,7 +597,7 @@ func mergeEnvironmentSecretMetadata(envVars []store.EnvVar, metas []secret.Secre
 
 	merged := make([]store.EnvVar, 0, len(envVars)+len(metas))
 	for _, envVar := range envVars {
-		if _, shadowed := secretKeys[envVar.Key]; shadowed && !envVar.Secret {
+		if _, shadowed := secretKeys[envVar.Key]; shadowed {
 			continue
 		}
 		merged = append(merged, envVar)

@@ -324,9 +324,5 @@ func persistAgentInfoState(path, phase, activity string) error {
 		return err
 	}
 
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, updated, fi.Mode()); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return writeAgentInfoFile(path, updated, fi.Mode().Perm())
 }
