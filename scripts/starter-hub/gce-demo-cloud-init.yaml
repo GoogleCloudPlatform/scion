@@ -71,7 +71,7 @@ runcmd:
   # Install Go (latest stable)
   - |
     if [ ! -d /usr/local/go ]; then
-      curl -L https://go.dev/dl/go1.23.0.linux-amd64.tar.gz -o /tmp/go.tar.gz
+      curl -L https://go.dev/dl/go1.26.1.linux-amd64.tar.gz -o /tmp/go.tar.gz
       tar -C /usr/local -xzf /tmp/go.tar.gz
     fi
   - ln -sf /usr/local/go/bin/go /usr/bin/go
