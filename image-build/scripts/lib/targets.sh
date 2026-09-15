@@ -64,7 +64,7 @@ ALL_STEP_IDS+=(
 )
 
 # All known target names. Used by the orchestrator's --help and --target
-# validation.
+# validation. Includes both group targets and individual step IDs.
 # shellcheck disable=SC2034 # sourced library; ALL_TARGETS is read by build-images.sh
 ALL_TARGETS=(
   core-base
@@ -77,6 +77,21 @@ ALL_TARGETS=(
   all
   thick
 )
+# Append individual step IDs that are not already group targets, so they
+# appear in --help and in the error message for unknown targets.
+for _step_id in "${ALL_STEP_IDS[@]}"; do
+  _already="false"
+  for _t in "${ALL_TARGETS[@]}"; do
+    if [[ "${_step_id}" == "${_t}" ]]; then
+      _already="true"
+      break
+    fi
+  done
+  if [[ "${_already}" == "false" ]]; then
+    ALL_TARGETS+=("${_step_id}")
+  fi
+done
+unset _step_id _already _t
 
 # resolve_targets <target>
 #
@@ -118,6 +133,14 @@ resolve_targets() {
       printf '%s\n' scion-hub
       ;;
     *)
+      # Allow individual step IDs (e.g. scion-claude, scion-hub) as targets.
+      local _id
+      for _id in "${ALL_STEP_IDS[@]}"; do
+        if [[ "$1" == "${_id}" ]]; then
+          echo "$1"
+          return 0
+        fi
+      done
       return 1
       ;;
   esac

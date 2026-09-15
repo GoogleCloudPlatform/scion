@@ -41,6 +41,7 @@ PLATFORM=""
 PLATFORM_EXPLICIT="false"
 PUSH="false"
 DRY_RUN="false"
+CONTINUE_ON_ERROR="false"
 
 # shellcheck source=lib/targets.sh
 source "${SCRIPT_DIR}/lib/targets.sh"
@@ -62,6 +63,7 @@ Options:
                           local-podman  - podman build, local (single-arch by default)
                           cloud-build   - Google Cloud Build (submits a static cloudbuild-*.yaml)
   --target <target>     Build target (default: common)
+                        Group targets:
                           core-base   - just the core-base layer
                           scion-base  - just scion-base (uses existing core-base:<tag>)
                           harnesses   - all catalog harness images with Dockerfiles
@@ -76,6 +78,9 @@ Options:
                           thick       - full thick rebuild: thick-prep + scion-base +
                                         harnesses + hub (amd64 only, uses Cloud
                                         Workstations base instead of core-base)
+                        Individual image step IDs are also accepted (e.g.
+                        scion-claude, scion-hub, scion-codex). Use the group
+                        target "all" with --dry-run to list all valid step IDs.
   --tag <tag>           Mutable image tag (default: latest). The :<short-sha> tag
                         is always added when run inside a git repo.
   --platform <plat>     Target platform(s) (default: builder's native arch)
@@ -85,6 +90,9 @@ Options:
   --push                Push images after building.
                         Auto-enabled for multi-arch builds (buildx limitation).
                         Ignored by --builder cloud-build (YAMLs always push).
+  --continue-on-error   When building multiple images, continue past failures
+                        and report a summary at the end instead of stopping at
+                        the first error. Exit code is non-zero if any step failed.
   --dry-run             Print the steps and the exact builder commands without executing.
   -h, --help            Show this help message.
 
@@ -102,6 +110,7 @@ while [[ $# -gt 0 ]]; do
     --tag)      TAG="$2"; shift 2 ;;
     --platform) PLATFORM="$2"; PLATFORM_EXPLICIT="true"; shift 2 ;;
     --push)     PUSH="true"; shift ;;
+    --continue-on-error) CONTINUE_ON_ERROR="true"; shift ;;
     --dry-run)  DRY_RUN="true"; shift ;;
     -h|--help)  usage 0 ;;
     *) echo "Unknown option: $1" >&2; usage 1 ;;
@@ -300,6 +309,8 @@ compute_tags() {
   echo "${tags}"
 }
 
+FAILED_STEPS=()
+
 if [[ "${BUILDER_MODE}" == "target" ]]; then
   builder_run_target "${TARGET}" "${REGISTRY}" "${TAG}" "${PUSH}"
 else
@@ -319,6 +330,10 @@ else
       build_arg_flags+=(--build-arg "${line}")
     done < <(step_build_args "${step}")
 
+    if [[ "${CONTINUE_ON_ERROR}" == "true" ]]; then
+      set +e
+    fi
+
     DRY_RUN="${DRY_RUN}" \
     builder_build \
       --image-name "${image_name}" \
@@ -329,13 +344,31 @@ else
       ${build_arg_flags[@]+"${build_arg_flags[@]}"} \
       --push "${PUSH}" \
       --load "${LOAD}"
+    build_rc=$?
+
+    if [[ "${CONTINUE_ON_ERROR}" == "true" ]]; then
+      set -e
+      if [[ ${build_rc} -ne 0 ]]; then
+        echo ""
+        echo "Error: step '${step}' failed (exit ${build_rc}). Continuing..." >&2
+        FAILED_STEPS+=("${step}")
+      fi
+    fi
   done
 fi
 
 builder_finalize
 
 echo ""
-if [[ "${DRY_RUN}" == "true" ]]; then
+if [[ ${#FAILED_STEPS[@]} -gt 0 ]]; then
+  echo "Build completed with errors." >&2
+  echo "" >&2
+  echo "Failed steps (${#FAILED_STEPS[@]}):" >&2
+  for _failed in "${FAILED_STEPS[@]}"; do
+    echo "  - ${_failed}" >&2
+  done
+  exit 1
+elif [[ "${DRY_RUN}" == "true" ]]; then
   echo "Dry run complete. No images were built or pushed."
 else
   echo "Done."
