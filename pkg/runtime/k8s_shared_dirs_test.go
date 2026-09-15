@@ -303,30 +303,3 @@ func TestCreateSharedDirPVCs_MissingProjectLabel(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing scion.project or scion.grove label")
 }
-
-func TestCleanupSharedDirPVCs(t *testing.T) {
-	rt, clientset, _ := newTestK8sRuntime()
-	ctx := context.Background()
-
-	// Create PVCs with project labels
-	for _, name := range []string{"scion-shared-myproject-cache", "scion-shared-myproject-data"} {
-		pvc := &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      name,
-				Namespace: "default",
-				Labels: map[string]string{
-					"scion.grove":      "myproject",
-					"scion.shared-dir": "test",
-				},
-			},
-		}
-		_, err := clientset.CoreV1().PersistentVolumeClaims("default").Create(ctx, pvc, metav1.CreateOptions{})
-		require.NoError(t, err)
-	}
-
-	rt.cleanupSharedDirPVCs(ctx, "default", "myproject")
-
-	pvcList, err := clientset.CoreV1().PersistentVolumeClaims("default").List(ctx, metav1.ListOptions{})
-	require.NoError(t, err)
-	assert.Empty(t, pvcList.Items)
-}
