@@ -18,7 +18,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -832,7 +831,6 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 }
 
 // ListTopics returns non-deleted topics for a project, ordered by last_activity_at DESC.
-// Lazily creates #general if none exists.
 func (s *sqliteWebChatStore) ListTopics(ctx context.Context, projectID string) ([]WebChatTopic, error) {
 	const query = `
 SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
@@ -850,7 +848,6 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 	defer func() { _ = rows.Close() }()
 
 	var topics []WebChatTopic
-	hasGeneral := false
 	for rows.Next() {
 		var t WebChatTopic
 		var isGeneral int
@@ -864,26 +861,10 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 		t.IsGeneral = isGeneral != 0
 		t.CreatedAt = parseSQLiteTime(createdAtStr)
 		t.LastActivityAt = parseSQLiteTime(activityStr)
-		if t.IsGeneral {
-			hasGeneral = true
-		}
 		topics = append(topics, t)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("webchat store: list topics rows: %w", err)
-	}
-
-	// Lazy #general creation for pre-existing projects.
-	if !hasGeneral {
-		generalID, _, err := s.EnsureGeneralTopic(ctx, projectID, "system")
-		if err != nil {
-			slog.Warn("webchat store: lazy #general creation failed", "project_id", projectID, "error", err)
-		} else {
-			general, err := s.GetTopic(ctx, generalID)
-			if err == nil && general != nil {
-				topics = append([]WebChatTopic{*general}, topics...)
-			}
-		}
 	}
 
 	return topics, nil
@@ -916,19 +897,27 @@ func (s *sqliteWebChatStore) UpdateTopic(ctx context.Context, topicID string, up
 	return nil
 }
 
-// DeleteTopic soft-deletes a topic. Returns an error if it is #general.
+// DeleteTopic soft-deletes a topic. Returns an error if it is the last thread.
 func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) error {
-	// Check if topic is #general.
-	var isGeneral int
-	err := s.db.QueryRowContext(ctx, "SELECT is_general FROM webchat_topic WHERE id = ?", topicID).Scan(&isGeneral)
+	var projectID string
+	err := s.db.QueryRowContext(ctx, "SELECT project_id FROM webchat_topic WHERE id = ?", topicID).Scan(&projectID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil
 		}
 		return fmt.Errorf("webchat store: delete topic check: %w", err)
 	}
-	if isGeneral != 0 {
-		return fmt.Errorf("webchat store: delete topic: cannot delete #general topic")
+
+	// Count active (non-deleted) topics for this project
+	var count int
+	err = s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM webchat_topic WHERE project_id = ? AND deleted_at IS NULL",
+		projectID).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("webchat store: delete topic count: %w", err)
+	}
+	if count <= 1 {
+		return fmt.Errorf("webchat store: delete topic: cannot delete the last thread")
 	}
 
 	const query = `UPDATE webchat_topic SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`

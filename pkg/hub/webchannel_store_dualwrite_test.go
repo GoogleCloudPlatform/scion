@@ -777,14 +777,23 @@ func TestGetTopicConversationID_SoftDeleted(t *testing.T) {
 
 	ctx := context.Background()
 	convID := uuid.New().String()
+	now := time.Now().UTC()
 
+	// Create a second topic so the one we delete is not the last thread.
+	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
+		ID:        "topic-keeper",
+		ProjectID: "proj-1",
+		Name:      "keeper",
+		CreatedBy: "user-1",
+		CreatedAt: now,
+	}))
 	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
 		ID:             "topic-soft-del",
 		ProjectID:      "proj-1",
 		Name:           "will-be-deleted",
 		ConversationID: convID,
 		CreatedBy:      "user-1",
-		CreatedAt:      time.Now().UTC(),
+		CreatedAt:      now,
 	}))
 
 	// Soft-delete the topic.

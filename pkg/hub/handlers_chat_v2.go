@@ -568,10 +568,6 @@ func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicI
 
 	if body.Name != nil {
 		name := strings.TrimSpace(*body.Name)
-		if topic.IsGeneral {
-			ValidationError(w, "cannot rename the #general thread", nil)
-			return
-		}
 		if name == "" {
 			ValidationError(w, "name cannot be empty", nil)
 			return
@@ -662,8 +658,8 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 	}
 
 	if err := wcs.DeleteTopic(r.Context(), topicID); err != nil {
-		if strings.Contains(err.Error(), "#general") {
-			ValidationError(w, "cannot delete the #general thread", nil)
+		if strings.Contains(err.Error(), "last thread") {
+			ValidationError(w, "cannot delete the last thread", nil)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete thread", nil)

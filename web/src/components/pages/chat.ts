@@ -1395,16 +1395,16 @@ export class ScionPageChat extends LitElement {
       return;
     }
 
-    // Find #general thread for this space from the rail
+    // Find #general thread (or fall back to first thread) for this space
     const threads = await this.loadSpaceThreads(projectId);
-    const general = threads.find((t: { isGeneral: boolean }) => t.isGeneral);
-    if (general) {
+    const target = threads.find((t: { isGeneral: boolean }) => t.isGeneral) || threads[0];
+    if (target) {
       this.v2Conversation = {
-        conversationKey: general.id,
+        conversationKey: target.id,
         projectId,
         projectSlug: slug,
-        threadName: general.name,
-        defaultAgent: general.defaultAgent || '',
+        threadName: target.name,
+        defaultAgent: target.defaultAgent || '',
         isDM: false,
         peerName: '',
         peerId: '',
@@ -1412,9 +1412,9 @@ export class ScionPageChat extends LitElement {
       };
       this.mobilePanel = 'center';
       void this.loadV2Members(projectId);
-      dispatchPageTitle(this, `#${general.name}`, 'Chat');
+      dispatchPageTitle(this, `#${target.name}`, 'Chat');
       // Update URL to include the thread
-      navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(general.id)}`);
+      navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(target.id)}`);
     }
   }
 

@@ -927,9 +927,9 @@ export class ScionChatSpaceRail extends LitElement {
     if (this.isMobileViewport()) return;
 
     const threads = this.threadsBySpace.get(space.projectId) || [];
-    const general = threads.find((t) => t.isGeneral);
-    if (general) {
-      this.handleThreadClick(general, space.projectId);
+    const target = threads.find((t) => t.isGeneral) || threads[0];
+    if (target) {
+      this.handleThreadClick(target, space.projectId);
     }
   }
 
@@ -1217,7 +1217,6 @@ export class ScionChatSpaceRail extends LitElement {
 
   private startRename(thread: ChatSpaceThread): void {
     this.contextMenuTarget = null;
-    if (thread.isGeneral) return;
     this.renamingThread = thread.id;
     this.renameValue = thread.name;
   }
@@ -1242,7 +1241,6 @@ export class ScionChatSpaceRail extends LitElement {
 
   private async handleDeleteThread(thread: ChatSpaceThread, projectId: string): Promise<void> {
     this.contextMenuTarget = null;
-    if (thread.isGeneral) return;
     const confirmed = await showConfirm(`Delete #${thread.name}? This cannot be undone.`, {
       title: 'Delete Thread',
       confirmText: 'Delete',
@@ -1660,21 +1658,17 @@ export class ScionChatSpaceRail extends LitElement {
           <sl-icon name="download"></sl-icon>
           Download as Markdown
         </div>
-        ${!thread.isGeneral
-          ? html`
-              <div class="context-menu-item" @click=${() => this.startRename(thread)}>
-                <sl-icon name="pencil"></sl-icon>
-                Rename
-              </div>
-              <div
-                class="context-menu-item danger"
-                @click=${() => this.handleDeleteThread(thread, projectId)}
-              >
-                <sl-icon name="trash"></sl-icon>
-                Delete
-              </div>
-            `
-          : nothing}
+        <div class="context-menu-item" @click=${() => this.startRename(thread)}>
+          <sl-icon name="pencil"></sl-icon>
+          Rename
+        </div>
+        <div
+          class="context-menu-item danger"
+          @click=${() => this.handleDeleteThread(thread, projectId)}
+        >
+          <sl-icon name="trash"></sl-icon>
+          Delete
+        </div>
       </div>
     `;
   }
