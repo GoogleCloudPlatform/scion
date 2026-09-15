@@ -1115,11 +1115,6 @@ func correlationIDFromContext(ctx context.Context) string {
 	return ""
 }
 
-// contextWithCorrelationID returns a new context with the given correlation ID.
-func contextWithCorrelationID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, correlationIDKey, id)
-}
-
 type contextKey string
 
 const correlationIDKey contextKey = "correlation_id"

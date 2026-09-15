@@ -56,15 +56,6 @@ func newPendingUpdateTracker() *pendingUpdateTracker {
 	}
 }
 
-// hasPendingUpdate returns true if a non-terminal update is tracked for the
-// given integration.
-func (t *pendingUpdateTracker) hasPendingUpdate(integrationName string) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	_, ok := t.pending[integrationName]
-	return ok
-}
-
 // startUpdateTracking starts poll-based completion detection for an HA update.
 // A goroutine polls BrokerInfo every ~20s. A timeout timer marks the update
 // failed after defaultUpdateTimeout if the version hasn't changed.

@@ -443,7 +443,7 @@ func min(a, b int) int {
 	return b
 }
 
-func TestIsEmailAuthorized(t *testing.T) {
+func TestCheckUserAuthorized_OpenModeDomains(t *testing.T) {
 	tests := []struct {
 		name              string
 		email             string
@@ -591,9 +591,9 @@ func TestIsEmailAuthorized(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := isEmailAuthorized(tc.email, tc.authorizedDomains, tc.adminEmails)
+			result := checkUserAuthorized(context.Background(), tc.email, tc.authorizedDomains, tc.adminEmails, "open", nil)
 			if result != tc.expected {
-				t.Errorf("isEmailAuthorized(%q, domains=%v, admins=%v) = %v, expected %v",
+				t.Errorf("checkUserAuthorized(%q, domains=%v, admins=%v) = %v, expected %v",
 					tc.email, tc.authorizedDomains, tc.adminEmails, result, tc.expected)
 			}
 		})

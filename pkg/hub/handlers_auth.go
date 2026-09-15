@@ -1520,50 +1520,6 @@ func isEmailInDomains(emailLower string, authorizedDomains []string) bool {
 	return false
 }
 
-// isEmailAuthorized checks if an email address is from an authorized domain.
-// If authorizedDomains is empty, all emails are allowed.
-// Bootstrap admin emails (from AdminEmails config) bypass the domain check.
-func isEmailAuthorized(email string, authorizedDomains []string, adminEmails []string) bool {
-	// If no domains are configured, allow all
-	if len(authorizedDomains) == 0 {
-		return true
-	}
-
-	// Bootstrap admin emails bypass domain restrictions
-	emailLower := strings.ToLower(email)
-	for _, admin := range adminEmails {
-		if strings.ToLower(admin) == emailLower {
-			return true
-		}
-	}
-
-	// Extract domain from email
-	atIndex := strings.LastIndex(email, "@")
-	if atIndex == -1 {
-		return false
-	}
-
-	domain := strings.ToLower(email[atIndex+1:])
-
-	// Check if domain is in the authorized list
-	for _, authorized := range authorizedDomains {
-		authorizedLower := strings.ToLower(authorized)
-		if authorizedLower == domain {
-			return true
-		}
-		// Support wildcard subdomains: "*.example.com" matches "foo.example.com",
-		// "bar.baz.example.com", etc.
-		if strings.HasPrefix(authorizedLower, "*.") {
-			suffix := authorizedLower[1:] // e.g. ".example.com"
-			if strings.HasSuffix(domain, suffix) {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
 // determineUserRole returns the role for a user based on their email and the
 // role they currently hold.
 //
