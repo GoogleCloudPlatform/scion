@@ -116,6 +116,9 @@ Examples:
 			if len(args) < 1 {
 				return fmt.Errorf("recipient is required")
 			}
+			if len(args) > 1 {
+				return fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
+			}
 			return nil
 		}
 		if len(args) < 2 {
@@ -1095,14 +1098,19 @@ func resolveMessageBody(bodyFile string, positionalBody string) (string, error) 
 		if positionalBody != "" {
 			return "", fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
 		}
-		data, err := os.ReadFile(bodyFile)
+		file, err := os.Open(bodyFile)
+		if err != nil {
+			return "", fmt.Errorf("failed to open body file: %w", err)
+		}
+		defer file.Close()
+		data, err := io.ReadAll(io.LimitReader(file, int64(messages.MaxMsgSize)+1))
 		if err != nil {
 			return "", fmt.Errorf("failed to read body file: %w", err)
 		}
 		return string(data), nil
 	}
 	if positionalBody == "-" {
-		data, err := io.ReadAll(os.Stdin)
+		data, err := io.ReadAll(io.LimitReader(os.Stdin, int64(messages.MaxMsgSize)+1))
 		if err != nil {
 			return "", fmt.Errorf("failed to read message from stdin: %w", err)
 		}
