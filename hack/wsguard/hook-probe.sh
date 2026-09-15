@@ -234,7 +234,7 @@ abort_capable=()
 informational=()
 for h in "${native_hooks[@]}"; do
   case "$h" in
-    pre-*|reference-transaction|update|pre-receive|proc-receive) abort_capable+=("$h") ;;
+    pre-*|reference-transaction|update|proc-receive) abort_capable+=("$h") ;;
     *) informational+=("$h") ;;
   esac
 done

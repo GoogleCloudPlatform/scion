@@ -542,52 +542,77 @@ echo "==========================================================================
 
 dirty "$SHARED"
 arm "N1-checkout-pathspec" 77 "$SHARED" -- checkout -- tracked.txt
-still_dirty && assert "N1-checkout-pathspec" "the uncommitted modification is still in the working tree" 0 ||
+if still_dirty; then
+  assert "N1-checkout-pathspec" "the uncommitted modification is still in the working tree" 0
+else
   assert "N1-checkout-pathspec" "the uncommitted modification is still in the working tree" 1
-[[ "$LAST_OUT" == *"REFUSED [a/working-tree]"* ]] &&
-  assert "N1-checkout-pathspec" "refusal names the rule it fired" 0 ||
+fi
+if [[ "$LAST_OUT" == *"REFUSED [a/working-tree]"* ]]; then
+  assert "N1-checkout-pathspec" "refusal names the rule it fired" 0
+else
   assert "N1-checkout-pathspec" "refusal names the rule it fired" 1
+fi
 
 arm "N2-clean-force" 77 "$SHARED" -- clean -fd
-[[ -e "$SHARED/untracked.txt" ]] &&
-  assert "N2-clean-force" "the untracked file another agent was holding still exists" 0 ||
+if [[ -e "$SHARED/untracked.txt" ]]; then
+  assert "N2-clean-force" "the untracked file another agent was holding still exists" 0
+else
   assert "N2-clean-force" "the untracked file another agent was holding still exists" 1
+fi
 
 arm "N3-branch-switch" 77 "$SHARED" -- checkout -b some-other-branch
 branch_now="$("$REAL_GIT" -C "$SHARED" rev-parse --abbrev-ref HEAD)"
-[[ "$branch_now" == "main" ]] &&
-  assert "N3-branch-switch" "HEAD is still on main for every other agent in the tree" 0 ||
+if [[ "$branch_now" == "main" ]]; then
+  assert "N3-branch-switch" "HEAD is still on main for every other agent in the tree" 0
+else
   assert "N3-branch-switch" "HEAD is still on main for every other agent in the tree" 1
+fi
 
 arm "N4-reset-hard" 77 "$SHARED" -- reset --hard HEAD
-still_dirty && assert "N4-reset-hard" "the uncommitted modification survived the refused reset" 0 ||
+if still_dirty; then
+  assert "N4-reset-hard" "the uncommitted modification survived the refused reset" 0
+else
   assert "N4-reset-hard" "the uncommitted modification survived the refused reset" 1
+fi
 
 arm "N5-stash" 77 "$SHARED" -- stash push -m "mine"
-still_dirty && assert "N5-stash" "the modification was not swept into the shared stash" 0 ||
+if still_dirty; then
+  assert "N5-stash" "the modification was not swept into the shared stash" 0
+else
   assert "N5-stash" "the modification was not swept into the shared stash" 1
+fi
 
 arm "N6-restore" 77 "$SHARED" -- restore tracked.txt
-still_dirty && assert "N6-restore" "the uncommitted modification survived the refused restore" 0 ||
+if still_dirty; then
+  assert "N6-restore" "the uncommitted modification survived the refused restore" 0
+else
   assert "N6-restore" "the uncommitted modification survived the refused restore" 1
+fi
 
 arm "N7-branch-delete" 77 "$SHARED" -- branch -D main
 
 # Hazard (b), the invisible one: the write side and the read side.
 arm "N8-fetch-into-fetch-head" 77 "$SHARED" -- fetch "$DONOR" main
-[[ ! -f "$SHARED/.git/FETCH_HEAD" ]] &&
-  assert "N8-fetch-into-fetch-head" "the shared FETCH_HEAD slot was not written" 0 ||
+if [[ ! -f "$SHARED/.git/FETCH_HEAD" ]]; then
+  assert "N8-fetch-into-fetch-head" "the shared FETCH_HEAD slot was not written" 0
+else
   assert "N8-fetch-into-fetch-head" "the shared FETCH_HEAD slot was not written" 1
+fi
 
 arm "N9-read-fetch-head" 77 "$SHARED" -- log -1 --format=%H FETCH_HEAD
-[[ "$LAST_OUT" == *"REFUSED [b/fetch-head-read]"* ]] &&
-  assert "N9-read-fetch-head" "refusal names the FETCH_HEAD rule, not the working-tree rule" 0 ||
+if [[ "$LAST_OUT" == *"REFUSED [b/fetch-head-read]"* ]]; then
+  assert "N9-read-fetch-head" "refusal names the FETCH_HEAD rule, not the working-tree rule" 0
+else
   assert "N9-read-fetch-head" "refusal names the FETCH_HEAD rule, not the working-tree rule" 1
+fi
 
 OVERRIDE_REASON="1"
 arm "N10-override-without-a-reason" 77 "$SHARED" -- checkout -- tracked.txt
-still_dirty && assert "N10-override-without-a-reason" "a one-character override did not buy passage" 0 ||
+if still_dirty; then
+  assert "N10-override-without-a-reason" "a one-character override did not buy passage" 0
+else
   assert "N10-override-without-a-reason" "a one-character override did not buy passage" 1
+fi
 
 echo
 echo "==========================================================================="
@@ -595,12 +620,16 @@ echo "CANNOT EVALUATE — armed, watched, but the target could not be identified
 echo "==========================================================================="
 
 arm "U1-not-a-repository" 78 "$OUTSIDE" -- checkout -- anything.txt
-[[ "$LAST_OUT" == *"CANNOT EVALUATE"* ]] &&
-  assert "U1-not-a-repository" "the diagnostic says no reading was taken, and does not read as a refusal" 0 ||
+if [[ "$LAST_OUT" == *"CANNOT EVALUATE"* ]]; then
+  assert "U1-not-a-repository" "the diagnostic says no reading was taken, and does not read as a refusal" 0
+else
   assert "U1-not-a-repository" "the diagnostic says no reading was taken, and does not read as a refusal" 1
-[[ "$LAST_OUT" == *"rev-parse --show-toplevel exited"* ]] &&
-  assert "U1-not-a-repository" "the underlying git stderr is reprinted, not swallowed" 0 ||
+fi
+if [[ "$LAST_OUT" == *"rev-parse --show-toplevel exited"* ]]; then
+  assert "U1-not-a-repository" "the underlying git stderr is reprinted, not swallowed" 0
+else
   assert "U1-not-a-repository" "the underlying git stderr is reprinted, not swallowed" 1
+fi
 
 # The scoping decision compares two paths. If they are not produced by the same
 # normaliser the comparison silently answers "different", which for this guard
@@ -609,14 +638,21 @@ arm "U1-not-a-repository" 78 "$OUTSIDE" -- checkout -- anything.txt
 dirty "$SHARED"
 ROOT_OVERRIDE="$WORK/root-that-does-not-exist"
 arm "U2-unresolvable-root" 78 "$SHARED" -- checkout -- tracked.txt
-[[ "$LAST_OUT" == *"guarded root could not be resolved"* ]] &&
-  assert "U2-unresolvable-root" "an unresolvable root is cannot-evaluate, NOT a silent passthrough" 0 ||
+if [[ "$LAST_OUT" == *"guarded root could not be resolved"* ]]; then
+  assert "U2-unresolvable-root" "an unresolvable root is cannot-evaluate, NOT a silent passthrough" 0
+else
   assert "U2-unresolvable-root" "an unresolvable root is cannot-evaluate, NOT a silent passthrough" 1
-[[ "$LAST_OUT" == *"cd exited"* ]] &&
-  assert "U2-unresolvable-root" "the shell's own error is reprinted, not swallowed" 0 ||
+fi
+if [[ "$LAST_OUT" == *"cd exited"* ]]; then
+  assert "U2-unresolvable-root" "the shell's own error is reprinted, not swallowed" 0
+else
   assert "U2-unresolvable-root" "the shell's own error is reprinted, not swallowed" 1
-still_dirty && assert "U2-unresolvable-root" "the modification survived — nothing ran" 0 ||
+fi
+if still_dirty; then
+  assert "U2-unresolvable-root" "the modification survived — nothing ran" 0
+else
   assert "U2-unresolvable-root" "the modification survived — nothing ran" 1
+fi
 
 echo
 echo "==========================================================================="
@@ -645,8 +681,11 @@ printf 'committed\n' >"$SHARED/-h"
 dirty "$SHARED"
 ROOT_OVERRIDE="$SHARED/"
 arm "N11-root-with-trailing-slash" 77 "$SHARED" -- checkout -- tracked.txt
-still_dirty && assert "N11-root-with-trailing-slash" "a trailing slash on the root does not open the gate" 0 ||
+if still_dirty; then
+  assert "N11-root-with-trailing-slash" "a trailing slash on the root does not open the gate" 0
+else
   assert "N11-root-with-trailing-slash" "a trailing slash on the root does not open the gate" 1
+fi
 
 echo
 echo "==========================================================================="
@@ -657,44 +696,64 @@ echo "==========================================================================
 # and never re-enters the shim. Shipped behaviour was rc=0 and silence.
 dirty "$SHARED"
 arm "N12-alias-reaches-checkout" 77 "$SHARED" -- co -- tracked.txt
-still_dirty && assert "N12-alias-reaches-checkout" "an alias is judged as the command git will dispatch" 0 ||
+if still_dirty; then
+  assert "N12-alias-reaches-checkout" "an alias is judged as the command git will dispatch" 0
+else
   assert "N12-alias-reaches-checkout" "an alias is judged as the command git will dispatch" 1
+fi
 
 # F1. Depth two, depth six, and a chain ending at rm. Each is preceded by a hard
 # reset so that "the work survived" cannot be satisfied by a stale index.
 "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
 dirty "$SHARED"
 arm "N18-alias-chain-depth-2" 77 "$SHARED" -- a -- tracked.txt
-still_dirty && assert "N18-alias-chain-depth-2" "a two-deep chain is resolved to checkout and refused" 0 ||
+if still_dirty; then
+  assert "N18-alias-chain-depth-2" "a two-deep chain is resolved to checkout and refused" 0
+else
   assert "N18-alias-chain-depth-2" "a two-deep chain is resolved to checkout and refused" 1
+fi
 
 "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
 dirty "$SHARED"
 arm "N19-alias-chain-depth-6" 77 "$SHARED" -- d6 -- tracked.txt
-still_dirty && assert "N19-alias-chain-depth-6" "depth is not bounded at one: a six-deep chain is refused" 0 ||
+if still_dirty; then
+  assert "N19-alias-chain-depth-6" "depth is not bounded at one: a six-deep chain is refused" 0
+else
   assert "N19-alias-chain-depth-6" "depth is not bounded at one: a six-deep chain is refused" 1
-[[ "$LAST_OUT" == *"resolves to"* && "$LAST_OUT" == *"checkout"* ]] &&
-  assert "N19-alias-chain-depth-6" "the refusal names the resolution, so the operator can find a word they never typed" 0 ||
+fi
+if [[ "$LAST_OUT" == *"resolves to"* && "$LAST_OUT" == *"checkout"* ]]; then
+  assert "N19-alias-chain-depth-6" "the refusal names the resolution, so the operator can find a word they never typed" 0
+else
   assert "N19-alias-chain-depth-6" "the refusal names the resolution, so the operator can find a word they never typed" 1
+fi
 
 "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
 dirty "$SHARED"
 arm "N20-alias-chain-to-rm" 77 "$SHARED" -- r2 -f tracked.txt
-[[ -e "$SHARED/tracked.txt" ]] && assert "N20-alias-chain-to-rm" "a chain ending at rm is refused and the file survives" 0 ||
+if [[ -e "$SHARED/tracked.txt" ]]; then
+  assert "N20-alias-chain-to-rm" "a chain ending at rm is refused and the file survives" 0
+else
   assert "N20-alias-chain-to-rm" "a chain ending at rm is refused and the file survives" 1
+fi
 
 # F1b. The dispatched word is not always the first word.
 "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
 dirty "$SHARED"
 arm "N21-alias-leading-global-option" 77 "$SHARED" -- g -- tracked.txt
-still_dirty && assert "N21-alias-leading-global-option" "an expansion leading with -c is resolved past the option" 0 ||
+if still_dirty; then
+  assert "N21-alias-leading-global-option" "an expansion leading with -c is resolved past the option" 0
+else
   assert "N21-alias-leading-global-option" "an expansion leading with -c is resolved past the option" 1
+fi
 
 "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
 dirty "$SHARED"
 arm "N22-alias-quoted-word" 77 "$SHARED" -- q -- tracked.txt
-still_dirty && assert "N22-alias-quoted-word" "git splits aliases with shell quoting, so a quoted word still resolves" 0 ||
+if still_dirty; then
+  assert "N22-alias-quoted-word" "git splits aliases with shell quoting, so a quoted word still resolves" 0
+else
   assert "N22-alias-quoted-word" "git splits aliases with shell quoting, so a quoted word still resolves" 1
+fi
 
 # The cap is fail-closed, and it is tested rather than trusted. git refuses a
 # cyclic alias itself, but this guard cannot tell a cycle from a chain deeper
@@ -705,22 +764,30 @@ set_alias "$SHARED" "loop2" loop1
 "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
 dirty "$SHARED"
 arm "U4-alias-cap" 78 "$SHARED" -- loop1 -- tracked.txt
-still_dirty && assert "U4-alias-cap" "an unresolvable alias is 78 and NOT RUN, not a passthrough" 0 ||
+if still_dirty; then
+  assert "U4-alias-cap" "an unresolvable alias is 78 and NOT RUN, not a passthrough" 0
+else
   assert "U4-alias-cap" "an unresolvable alias is 78 and NOT RUN, not a passthrough" 1
+fi
 
 # R3. git rm deletes from the WORKING TREE, and was simply missing.
 dirty "$SHARED"
 arm "N13-rm-deletes-worktree" 77 "$SHARED" -- rm -f tracked.txt
-[[ -e "$SHARED/tracked.txt" ]] && assert "N13-rm-deletes-worktree" "the file is still on disk after the refusal" 0 ||
+if [[ -e "$SHARED/tracked.txt" ]]; then
+  assert "N13-rm-deletes-worktree" "the file is still on disk after the refusal" 0
+else
   assert "N13-rm-deletes-worktree" "the file is still on disk after the refusal" 1
+fi
 
 # O4. After `--` every token is a pathspec, including one that looks like a flag.
 dirty "$SHARED"
 printf 'UNCOMMITTED-WORK\n' >"$SHARED/-h"
 arm "N14-dash-h-after-terminator" 77 "$SHARED" -- checkout -- -h
-[[ "$(cat "$SHARED/-h")" == *UNCOMMITTED-WORK* ]] &&
-  assert "N14-dash-h-after-terminator" "the -h help scan stops at the terminator, so the FILE named -h survives" 0 ||
+if [[ "$(cat "$SHARED/-h")" == *UNCOMMITTED-WORK* ]]; then
+  assert "N14-dash-h-after-terminator" "the -h help scan stops at the terminator, so the FILE named -h survives" 0
+else
   assert "N14-dash-h-after-terminator" "the -h help scan stops at the terminator, so the FILE named -h survives" 1
+fi
 
 # ---------------------------------------------------------------------------
 # C3. A global option that takes a SEPARATE value and that the guard's table
@@ -731,16 +798,24 @@ arm "N14-dash-h-after-terminator" 77 "$SHARED" -- checkout -- -h
 "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
 dirty "$SHARED"
 arm "N23-unknown-option-separated-value" 77 "$SHARED" -- --attr-source HEAD checkout -- tracked.txt
-still_dirty && assert "N23-unknown-option-separated-value" "an option of unknown arity does not hide the verb behind it" 0 ||
+if still_dirty; then
+  assert "N23-unknown-option-separated-value" "an option of unknown arity does not hide the verb behind it" 0
+else
   assert "N23-unknown-option-separated-value" "an option of unknown arity does not hide the verb behind it" 1
-[[ "$LAST_OUT" == *"not an option this guard knows the shape of"* ]] &&
-  assert "N23-unknown-option-separated-value" "the refusal says which reading it rested on, instead of looking like a misparse" 0 ||
+fi
+if [[ "$LAST_OUT" == *"not an option this guard knows the shape of"* ]]; then
+  assert "N23-unknown-option-separated-value" "the refusal says which reading it rested on, instead of looking like a misparse" 0
+else
   assert "N23-unknown-option-separated-value" "the refusal says which reading it rested on, instead of looking like a misparse" 1
+fi
 
 dirty "$SHARED"
 arm "N24-unknown-option-then-another" 77 "$SHARED" -- --attr-source HEAD --literal-pathspecs checkout -- tracked.txt
-still_dirty && assert "N24-unknown-option-then-another" "the second reading resumes the scan rather than taking the next token blind" 0 ||
+if still_dirty; then
+  assert "N24-unknown-option-then-another" "the second reading resumes the scan rather than taking the next token blind" 0
+else
   assert "N24-unknown-option-then-another" "the second reading resumes the scan rather than taking the next token blind" 1
+fi
 
 # GENERATED, NOT ENUMERATED. The reviewer's central criticism of this suite was
 # that every arm was one-per-known-bug — N12 tests a depth-one alias because
@@ -797,9 +872,11 @@ done
 if (( ${#optlist[@]} == 0 )); then
   die_cannot_evaluate "N25 option list is empty: the class assertion would pass without measuring anything"
 fi
-(( gen_class_ok == 1 )) &&
-  assert "N25-global-option-class" "every option in the guard's table plus one it has never heard of: the guard itself stops the separated form and the content survives (${gen_class_spoke}/${#optlist[@]} options, guard spoke on each)" 0 ||
+if (( gen_class_ok == 1 )); then
+  assert "N25-global-option-class" "every option in the guard's table plus one it has never heard of: the guard itself stops the separated form and the content survives (${gen_class_spoke}/${#optlist[@]} options, guard spoke on each)" 0
+else
   assert "N25-global-option-class" "every option in the guard's table plus one it has never heard of: the guard itself stops the separated form and the content survives — LEAKED:$gen_class_detail" 1
+fi
 
 # N25 covers the class of unknown options at COUNT ONE. gd-wsg-rev-3 found the
 # other axis: the union was a single resumed scan, so it produced exactly two
@@ -837,9 +914,11 @@ done
 if (( attr_n == 0 )); then
   die_cannot_evaluate "N34 swept no depth/verb combinations; the assertion would be vacuous"
 fi
-(( attr_ok == 1 )) &&
-  assert "N35-unknown-option-repeated" "repeating an unknown-arity option does not exhaust the union: the verb is still found and refused at every depth ($attr_n combinations, depths 1-4)" 0 ||
+if (( attr_ok == 1 )); then
+  assert "N35-unknown-option-repeated" "repeating an unknown-arity option does not exhaust the union: the verb is still found and refused at every depth ($attr_n combinations, depths 1-4)" 0
+else
   assert "N35-unknown-option-repeated" "repeating an unknown-arity option does not exhaust the union — LEAKED:$attr_detail" 1
+fi
 
 # GENERATED, second: an alias chain of depth N, built here rather than written
 # out. gd-wsg-rev-2 was explicit that SIX WAS ITS FIXTURE DEPTH AND NOT A
@@ -855,11 +934,16 @@ done
 "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
 dirty "$SHARED"
 arm "N26-alias-chain-generated-depth-$GEN_DEPTH" 77 "$SHARED" -- "gen$GEN_DEPTH" -- tracked.txt
-still_dirty && assert "N26-alias-chain-generated-depth-$GEN_DEPTH" "a chain of generated depth $GEN_DEPTH is resolved to a fixed point and refused" 0 ||
+if still_dirty; then
+  assert "N26-alias-chain-generated-depth-$GEN_DEPTH" "a chain of generated depth $GEN_DEPTH is resolved to a fixed point and refused" 0
+else
   assert "N26-alias-chain-generated-depth-$GEN_DEPTH" "a chain of generated depth $GEN_DEPTH is resolved to a fixed point and refused" 1
-[[ "$LAST_OUT" == *"after $GEN_DEPTH expansion(s)"* ]] &&
-  assert "N26-alias-chain-generated-depth-$GEN_DEPTH" "the guard reports the depth it actually walked, so the arm cannot pass on a shorter walk" 0 ||
+fi
+if [[ "$LAST_OUT" == *"after $GEN_DEPTH expansion(s)"* ]]; then
+  assert "N26-alias-chain-generated-depth-$GEN_DEPTH" "the guard reports the depth it actually walked, so the arm cannot pass on a shorter walk" 0
+else
   assert "N26-alias-chain-generated-depth-$GEN_DEPTH" "the guard reports the depth it actually walked, so the arm cannot pass on a shorter walk" 1
+fi
 
 # ---------------------------------------------------------------------------
 # F3. Two plumbing commands that overwrite the working tree. Filed FYI; closed
@@ -869,13 +953,19 @@ still_dirty && assert "N26-alias-chain-generated-depth-$GEN_DEPTH" "a chain of g
 "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
 dirty "$SHARED"
 arm "N27-checkout-index-force" 77 "$SHARED" -- checkout-index -f -a
-still_dirty && assert "N27-checkout-index-force" "checkout-index -f overwrites the tree from the index, and is refused" 0 ||
+if still_dirty; then
+  assert "N27-checkout-index-force" "checkout-index -f overwrites the tree from the index, and is refused" 0
+else
   assert "N27-checkout-index-force" "checkout-index -f overwrites the tree from the index, and is refused" 1
+fi
 
 dirty "$SHARED"
 arm "N28-read-tree-u-reset" 77 "$SHARED" -- read-tree -u --reset HEAD
-still_dirty && assert "N28-read-tree-u-reset" "read-tree -u updates the WORKING TREE, and is refused" 0 ||
+if still_dirty; then
+  assert "N28-read-tree-u-reset" "read-tree -u updates the WORKING TREE, and is refused" 0
+else
   assert "N28-read-tree-u-reset" "read-tree -u updates the WORKING TREE, and is refused" 1
+fi
 
 echo
 echo "==========================================================================="
@@ -896,21 +986,27 @@ bare_before="$("$REAL_GIT" -C "$BARE" rev-parse refs/heads/main)" ||
   die_cannot_evaluate "stand-in remote has no main after seeding"
 
 arm "N15-push-delete" 77 "$SHARED" -- push origin --delete main
-[[ "$("$REAL_GIT" -C "$BARE" rev-parse refs/heads/main 2>/dev/null)" == "$bare_before" ]] &&
-  assert "N15-push-delete" "the remote branch still exists after the refusal" 0 ||
+if [[ "$("$REAL_GIT" -C "$BARE" rev-parse refs/heads/main 2>/dev/null)" == "$bare_before" ]]; then
+  assert "N15-push-delete" "the remote branch still exists after the refusal" 0
+else
   assert "N15-push-delete" "the remote branch still exists after the refusal" 1
+fi
 
 arm "N16-push-force" 77 "$SHARED" -- push --force origin main
-[[ "$LAST_OUT" == *"c/shared-remote"* ]] &&
-  assert "N16-push-force" "the refusal cites the remote namespace, not the local ref store" 0 ||
+if [[ "$LAST_OUT" == *"c/shared-remote"* ]]; then
+  assert "N16-push-force" "the refusal cites the remote namespace, not the local ref store" 0
+else
   assert "N16-push-force" "the refusal cites the remote namespace, not the local ref store" 1
+fi
 
 # The lease is the alternative the refusal offers, so it had better work.
 arm "P12-push-force-with-lease" 0 "$SHARED" -- push --force-with-lease origin main
 guard_silent "P12-push-force-with-lease"
-[[ "$LAST_STATUS" == 0 ]] &&
-  assert "P12-push-force-with-lease" "--force-with-lease is permitted: the offered alternative is real" 0 ||
+if [[ "$LAST_STATUS" == 0 ]]; then
+  assert "P12-push-force-with-lease" "--force-with-lease is permitted: the offered alternative is real" 0
+else
   assert "P12-push-force-with-lease" "--force-with-lease is permitted: the offered alternative is real" 1
+fi
 
 # C4. An alias whose NAME SHADOWS A BUILTIN. Git ignores it and runs the
 # builtin; the guard used to honour it and reclassify a real `push` as `log`,
@@ -920,12 +1016,16 @@ guard_silent "P12-push-force-with-lease"
 set_alias "$SHARED" "push" log
 require_alias_for "$SHARED" "push --force origin main:main"
 arm "N29-alias-shadowing-a-builtin" 77 "$SHARED" -- push --force origin main:main
-[[ "$("$REAL_GIT" -C "$BARE" rev-parse refs/heads/main 2>/dev/null)" == "$bare_before" ]] &&
-  assert "N29-alias-shadowing-a-builtin" "the remote ref is untouched: an alias cannot demote a watched builtin" 0 ||
+if [[ "$("$REAL_GIT" -C "$BARE" rev-parse refs/heads/main 2>/dev/null)" == "$bare_before" ]]; then
+  assert "N29-alias-shadowing-a-builtin" "the remote ref is untouched: an alias cannot demote a watched builtin" 0
+else
   assert "N29-alias-shadowing-a-builtin" "the remote ref is untouched: an alias cannot demote a watched builtin" 1
-[[ "$LAST_OUT" == *"c/shared-remote"* ]] &&
-  assert "N29-alias-shadowing-a-builtin" "it is refused AS a push, not as whatever the alias named" 0 ||
+fi
+if [[ "$LAST_OUT" == *"c/shared-remote"* ]]; then
+  assert "N29-alias-shadowing-a-builtin" "it is refused AS a push, not as whatever the alias named" 0
+else
   assert "N29-alias-shadowing-a-builtin" "it is refused AS a push, not as whatever the alias named" 1
+fi
 "$REAL_GIT" -C "$SHARED" config --unset alias.push
 
 # ...and N29 on its own is one-per-known-bug, which is the criticism that
@@ -989,9 +1089,11 @@ for sv in "${shadow_verbs[@]}"; do
     shadow_detail="$shadow_detail $sv=rc$LAST_STATUS"
   fi
 done
-(( shadow_ok == 1 )) &&
-  assert "N31-alias-shadowing-every-watched-verb" "an alias named after a watched builtin cannot demote it, for every verb in the guard's own list ($shadow_n verbs, derived not enumerated)" 0 ||
+if (( shadow_ok == 1 )); then
+  assert "N31-alias-shadowing-every-watched-verb" "an alias named after a watched builtin cannot demote it, for every verb in the guard's own list ($shadow_n verbs, derived not enumerated)" 0
+else
   assert "N31-alias-shadowing-every-watched-verb" "an alias named after a watched builtin cannot demote it, for every verb in the guard's own list — DEMOTED:$shadow_detail" 1
+fi
 
 # N31 GENERALISES OVER ADDITIONS AND IS BLIND TO DELETIONS. It derives its
 # verbs from is_watched_verb, so deleting a verb from that list shrinks the
@@ -1023,9 +1125,11 @@ for av in "${armed_set[@]}"; do
   for wv in "${watched_set[@]}"; do [[ "$av" == "$wv" ]] && { found=1; break; }; done
   (( found == 0 )) && unwatched="$unwatched $av"
 done
-[[ -z "$unwatched" ]] &&
-  assert "N32-armed-implies-watched" "every verb armed_for can arm is also in is_watched_verb, so no rule can be reached by a name the alias walk would demote (${#armed_set[@]} armed, ${#watched_set[@]} watched)" 0 ||
+if [[ -z "$unwatched" ]]; then
+  assert "N32-armed-implies-watched" "every verb armed_for can arm is also in is_watched_verb, so no rule can be reached by a name the alias walk would demote (${#armed_set[@]} armed, ${#watched_set[@]} watched)" 0
+else
   assert "N32-armed-implies-watched" "every verb armed_for can arm is also in is_watched_verb — ARMED BUT NOT WATCHED:$unwatched" 1
+fi
 
 # N32 WAS THE SAME SELF-REFERENCE ONE LEVEL UP, and gd-wsg-rev-3 was right about
 # why: not because armed_for is derived from is_watched_verb — it is a
@@ -1058,9 +1162,11 @@ for tv in "${!SHADOW_ARGV[@]}"; do
   for wv in "${watched_set[@]}"; do [[ "$tv" == "$wv" ]] && { found=1; break; }; done
   (( found == 0 )) && unarmed_but_tabled="$unarmed_but_tabled $tv"
 done
-[[ -z "$unarmed_but_tabled" ]] &&
-  assert "N34-watched-set-has-not-shrunk" "every verb in the hand-written argv table is still watched by the guard, so a verb cannot silently leave the watched set (${#SHADOW_ARGV[@]} table verbs, independent of the shim)" 0 ||
+if [[ -z "$unarmed_but_tabled" ]]; then
+  assert "N34-watched-set-has-not-shrunk" "every verb in the hand-written argv table is still watched by the guard, so a verb cannot silently leave the watched set (${#SHADOW_ARGV[@]} table verbs, independent of the shim)" 0
+else
   assert "N34-watched-set-has-not-shrunk" "every verb in the hand-written argv table is still watched by the guard — IN THE ARGV TABLE BUT NO LONGER WATCHED:$unarmed_but_tabled" 1
+fi
 
 # The guard grew two verbs this round and the sentence in AGENTS.md that tells
 # every agent what is guarded did not grow with them. That sentence is the only
@@ -1111,9 +1217,11 @@ for wv in "${watched_set[@]}"; do
   for dt in "${doc_tokens[@]}"; do [[ "$wv" == "$dt" ]] && { found=1; break; }; done
   (( found == 0 )) && undocumented="$undocumented $wv"
 done
-[[ -z "$undocumented" ]] &&
-  assert "N33-watched-set-is-documented" "every verb the guard watches is named in the AGENTS.md paragraph agents actually read (${#watched_set[@]} verbs)" 0 ||
+if [[ -z "$undocumented" ]]; then
+  assert "N33-watched-set-is-documented" "every verb the guard watches is named in the AGENTS.md paragraph agents actually read (${#watched_set[@]} verbs)" 0
+else
   assert "N33-watched-set-is-documented" "every verb the guard watches is named in the AGENTS.md paragraph agents actually read — UNDOCUMENTED:$undocumented" 1
+fi
 
 # N36. THE DOCUMENTATION AS A DELETION TRIPWIRE — the other direction of N33.
 #
@@ -1179,9 +1287,11 @@ done
 if (( doc_verb_n < 5 )); then
   die_cannot_evaluate "N36 found only $doc_verb_n documented verbs after the allowlist; the containment would be vacuous"
 fi
-[[ -z "$undeleted" ]] &&
-  assert "N36-documented-verbs-are-still-watched" "every verb AGENTS.md promises is guarded is still in is_watched_verb, so a verb cannot leave the shim while the documentation still promises it ($doc_verb_n documented verbs, from a file the shim is not generated from)" 0 ||
+if [[ -z "$undeleted" ]]; then
+  assert "N36-documented-verbs-are-still-watched" "every verb AGENTS.md promises is guarded is still in is_watched_verb, so a verb cannot leave the shim while the documentation still promises it ($doc_verb_n documented verbs, from a file the shim is not generated from)" 0
+else
   assert "N36-documented-verbs-are-still-watched" "every verb AGENTS.md promises is guarded is still in is_watched_verb — DOCUMENTED BUT NO LONGER WATCHED:$undeleted" 1
+fi
 
 # Rule (c) is armed in EVERY workspace mode, because the remote is shared in
 # every workspace mode. It used to ride on refs_shared, which left force-push
@@ -1190,9 +1300,11 @@ fi
 for wsmode in clone-per-agent unset; do
   MODE_OVERRIDE="$wsmode"
   arm "N30-push-force-mode-$wsmode" 77 "$SHARED" -- push --force origin main
-  [[ "$("$REAL_GIT" -C "$BARE" rev-parse refs/heads/main 2>/dev/null)" == "$bare_before" ]] &&
-    assert "N30-push-force-mode-$wsmode" "SCION_WORKSPACE_MODE=$wsmode: a private clone does not make the remote private" 0 ||
+  if [[ "$("$REAL_GIT" -C "$BARE" rev-parse refs/heads/main 2>/dev/null)" == "$bare_before" ]]; then
+    assert "N30-push-force-mode-$wsmode" "SCION_WORKSPACE_MODE=$wsmode: a private clone does not make the remote private" 0
+  else
     assert "N30-push-force-mode-$wsmode" "SCION_WORKSPACE_MODE=$wsmode: a private clone does not make the remote private" 1
+  fi
 done
 
 # ...and the tree rules must still stand down in a mode where the tree is NOT
@@ -1201,23 +1313,30 @@ MODE_OVERRIDE="clone-per-agent"
 dirty "$SHARED"
 arm "P14-checkout-permitted-in-private-mode" 0 "$SHARED" -- checkout -- tracked.txt
 guard_silent "P14-checkout-permitted-in-private-mode"
-[[ "$(cat "$SHARED/tracked.txt")" != *UNCOMMITTED-WORK* ]] &&
-  assert "P14-checkout-permitted-in-private-mode" "rule (a) stands down in clone-per-agent: arming rule (c) everywhere did not arm the others" 0 ||
+if [[ "$(cat "$SHARED/tracked.txt")" != *UNCOMMITTED-WORK* ]]; then
+  assert "P14-checkout-permitted-in-private-mode" "rule (a) stands down in clone-per-agent: arming rule (c) everywhere did not arm the others" 0
+else
   assert "P14-checkout-permitted-in-private-mode" "rule (a) stands down in clone-per-agent: arming rule (c) everywhere did not arm the others" 1
+fi
 
 # And the justification moved: branch -D is still refused, on the narrower
 # ground, and must no longer claim the shared namespace.
 arm "N17-branch-D-cites-local-ground" 77 "$SHARED" -- branch -D nonexistent-branch
-[[ "$LAST_OUT" == *"a/local-refs"* && "$LAST_OUT" != *"every agent in this project shares"* ]] &&
-  assert "N17-branch-D-cites-local-ground" "branch -D no longer claims a shared ref namespace it cannot reach" 0 ||
+if [[ "$LAST_OUT" == *"a/local-refs"* && "$LAST_OUT" != *"every agent in this project shares"* ]]; then
+  assert "N17-branch-D-cites-local-ground" "branch -D no longer claims a shared ref namespace it cannot reach" 0
+else
   assert "N17-branch-D-cites-local-ground" "branch -D no longer claims a shared ref namespace it cannot reach" 1
+fi
 
 # --cached is the discriminating flag for rm, exactly as -n is for clean.
 dirty "$SHARED"
 arm "P10-rm-cached-is-permitted" 0 "$SHARED" -- rm --cached -q tracked.txt
 guard_silent "P10-rm-cached-is-permitted"
-[[ -e "$SHARED/tracked.txt" ]] && assert "P10-rm-cached-is-permitted" "rm --cached is permitted and leaves the file on disk" 0 ||
+if [[ -e "$SHARED/tracked.txt" ]]; then
+  assert "P10-rm-cached-is-permitted" "rm --cached is permitted and leaves the file on disk" 0
+else
   assert "P10-rm-cached-is-permitted" "rm --cached is permitted and leaves the file on disk" 1
+fi
 "$REAL_GIT" -C "$SHARED" reset -q >/dev/null 2>&1
 
 # A `!`-alias needs no expansion here: any git it runs re-enters this shim on
@@ -1225,42 +1344,56 @@ guard_silent "P10-rm-cached-is-permitted"
 # answer, not a gap.
 arm "P13-alias-to-safe-command" 0 "$SHARED" -- safe --porcelain
 guard_silent "P13-alias-to-safe-command"
-[[ "$LAST_OUT" == *"tracked.txt"* ]] &&
-  assert "P13-alias-to-safe-command" "an alias resolving to status is permitted: the loop classifies, it does not blanket-refuse" 0 ||
+if [[ "$LAST_OUT" == *"tracked.txt"* ]]; then
+  assert "P13-alias-to-safe-command" "an alias resolving to status is permitted: the loop classifies, it does not blanket-refuse" 0
+else
   assert "P13-alias-to-safe-command" "an alias resolving to status is permitted: the loop classifies, it does not blanket-refuse" 1
+fi
 
 arm "P11-shell-alias-passes-through" 0 "$SHARED" -- sh
-[[ "$LAST_OUT" == *"SHELL-ALIAS"* ]] &&
-  assert "P11-shell-alias-passes-through" "a !-alias runs; its nested git is covered by re-entry, not by expansion" 0 ||
+if [[ "$LAST_OUT" == *"SHELL-ALIAS"* ]]; then
+  assert "P11-shell-alias-passes-through" "a !-alias runs; its nested git is covered by re-entry, not by expansion" 0
+else
   assert "P11-shell-alias-passes-through" "a !-alias runs; its nested git is covered by re-entry, not by expansion" 1
+fi
 
 arm "P1-status" 0 "$SHARED" -- status --porcelain
 guard_silent "P1-status"
-[[ "$LAST_OUT" == *"tracked.txt"* ]] &&
-  assert "P1-status" "real git output came back through the shim unaltered" 0 ||
+if [[ "$LAST_OUT" == *"tracked.txt"* ]]; then
+  assert "P1-status" "real git output came back through the shim unaltered" 0
+else
   assert "P1-status" "real git output came back through the shim unaltered" 1
+fi
 
 arm "P2-clean-dry-run" 0 "$SHARED" -- clean -n
 guard_silent "P2-clean-dry-run"
-[[ "$LAST_OUT" == *"untracked.txt"* ]] &&
-  assert "P2-clean-dry-run" "the permitted neighbour of the refused command still answers the question" 0 ||
+if [[ "$LAST_OUT" == *"untracked.txt"* ]]; then
+  assert "P2-clean-dry-run" "the permitted neighbour of the refused command still answers the question" 0
+else
   assert "P2-clean-dry-run" "the permitted neighbour of the refused command still answers the question" 1
-[[ -e "$SHARED/untracked.txt" ]] &&
-  assert "P2-clean-dry-run" "and it deleted nothing" 0 ||
+fi
+if [[ -e "$SHARED/untracked.txt" ]]; then
+  assert "P2-clean-dry-run" "and it deleted nothing" 0
+else
   assert "P2-clean-dry-run" "and it deleted nothing" 1
+fi
 
 arm "P3-fetch-to-named-ref" 0 "$SHARED" -- fetch "$DONOR" "main:refs/wsguard/wsguard-selftest/donor-main"
 guard_silent "P3-fetch-to-named-ref"
 fetched_sha="$("$REAL_GIT" -C "$SHARED" rev-parse refs/wsguard/wsguard-selftest/donor-main 2>&1)"
-[[ "$fetched_sha" == "$DONOR_SHA" ]] &&
-  assert "P3-fetch-to-named-ref" "the fetch landed in a ref this agent owns: $DONOR_SHA" 0 ||
+if [[ "$fetched_sha" == "$DONOR_SHA" ]]; then
+  assert "P3-fetch-to-named-ref" "the fetch landed in a ref this agent owns: $DONOR_SHA" 0
+else
   assert "P3-fetch-to-named-ref" "the fetch landed in a ref this agent owns (got '$fetched_sha')" 1
+fi
 
 arm "P4-log-named-ref" 0 "$SHARED" -- log -1 --format=%H refs/wsguard/wsguard-selftest/donor-main
 guard_silent "P4-log-named-ref"
-[[ "$LAST_OUT" == "$DONOR_SHA" ]] &&
-  assert "P4-log-named-ref" "reading the owned ref is permitted and returns the right commit" 0 ||
+if [[ "$LAST_OUT" == "$DONOR_SHA" ]]; then
+  assert "P4-log-named-ref" "reading the owned ref is permitted and returns the right commit" 0
+else
   assert "P4-log-named-ref" "reading the owned ref is permitted and returns the right commit" 1
+fi
 
 arm "P5-stash-list" 0 "$SHARED" -- stash list
 guard_silent "P5-stash-list"
@@ -1272,22 +1405,28 @@ printf 'MY OWN WORK\n' >"$PRIVATE/tracked.txt"
 arm "P7-checkout-in-private-clone" 0 "$PRIVATE" -- checkout -- tracked.txt
 guard_silent "P7-checkout-in-private-clone"
 private_content="$(cat "$PRIVATE/tracked.txt")"
-[[ "$private_content" == "committed content" ]] &&
-  assert "P7-checkout-in-private-clone" "the guard did not stand between the operator and their own clone" 0 ||
+if [[ "$private_content" == "committed content" ]]; then
+  assert "P7-checkout-in-private-clone" "the guard did not stand between the operator and their own clone" 0
+else
   assert "P7-checkout-in-private-clone" "the guard did not stand between the operator and their own clone (got '$private_content')" 1
+fi
 
 # The audited override. Destructive, permitted, and recorded.
 dirty "$SHARED"
 OVERRIDE_REASON="selftest: exercising the audited override path"
 arm "P8-override-with-a-reason" 0 "$SHARED" -- checkout -- tracked.txt
 override_content="$(cat "$SHARED/tracked.txt")"
-[[ "$override_content" == "committed content" ]] &&
-  assert "P8-override-with-a-reason" "the override actually let the command through" 0 ||
+if [[ "$override_content" == "committed content" ]]; then
+  assert "P8-override-with-a-reason" "the override actually let the command through" 0
+else
   assert "P8-override-with-a-reason" "the override actually let the command through" 1
+fi
 audit_body="$(cat "$AUDIT" 2>&1)"
-[[ "$audit_body" == *"exercising the audited override path"* ]] &&
-  assert "P8-override-with-a-reason" "and the reason is on the record in the audit log" 0 ||
+if [[ "$audit_body" == *"exercising the audited override path"* ]]; then
+  assert "P8-override-with-a-reason" "and the reason is on the record in the audit log" 0
+else
   assert "P8-override-with-a-reason" "and the reason is on the record in the audit log (got '$audit_body')" 1
+fi
 
 # P15. THE AUDIT LOG IS THE ONLY ACCOUNT OF AN OVERRIDE, AND ITS CONTENT COMES
 # FROM THE PERSON BEING AUDITED. $SCION_WSGUARD_OVERRIDE is free text and the
@@ -1306,19 +1445,25 @@ audit_lines_before="$(wc -l <"$AUDIT")"
 OVERRIDE_REASON="$(printf 'selftest injection: line one\n1999-01-01T00:00:00Z\tsomeone-else\ta/local-refs\tforged\tgit push --force')"
 arm "P15-audit-log-cannot-be-forged" 0 "$SHARED" -- checkout -- tracked.txt
 audit_lines_after="$(wc -l <"$AUDIT")"
-(( audit_lines_after - audit_lines_before == 1 )) &&
-  assert "P15-audit-log-cannot-be-forged" "one override wrote exactly one row: a newline in the reason cannot forge a second" 0 ||
+if (( audit_lines_after - audit_lines_before == 1 )); then
+  assert "P15-audit-log-cannot-be-forged" "one override wrote exactly one row: a newline in the reason cannot forge a second" 0
+else
   assert "P15-audit-log-cannot-be-forged" "one override wrote exactly one row (got $(( audit_lines_after - audit_lines_before )))" 1
+fi
 audit_last="$(tail -1 "$AUDIT")"
-[[ "$audit_last" == *'line one\n1999-01-01'* && "$audit_last" == *'Z\tsomeone-else'* ]] &&
-  assert "P15-audit-log-cannot-be-forged" "the injected newline and tab survive as visible escapes: sanitised, not silently dropped" 0 ||
+if [[ "$audit_last" == *'line one\n1999-01-01'* && "$audit_last" == *'Z\tsomeone-else'* ]]; then
+  assert "P15-audit-log-cannot-be-forged" "the injected newline and tab survive as visible escapes: sanitised, not silently dropped" 0
+else
   assert "P15-audit-log-cannot-be-forged" "the injected newline and tab survive as visible escapes (got '$audit_last')" 1
+fi
 # The row still has its own five fields. An escape that also ate a real
 # separator would pass the count check above while destroying the format.
 audit_fields="$(printf '%s' "$audit_last" | tr -cd '\t' | wc -c)"
-(( audit_fields == 4 )) &&
-  assert "P15-audit-log-cannot-be-forged" "the row still has exactly 5 fields: sanitising the payload did not corrupt the format" 0 ||
+if (( audit_fields == 4 )); then
+  assert "P15-audit-log-cannot-be-forged" "the row still has exactly 5 fields: sanitising the payload did not corrupt the format" 0
+else
   assert "P15-audit-log-cannot-be-forged" "the row still has exactly 5 fields (got $(( audit_fields + 1 )))" 1
+fi
 
 echo
 echo "audit log after the run:"
@@ -1368,27 +1513,35 @@ fi
 # otherwise be passing for some other reason.
 PATH_OVERRIDE="$TWOSHIM/a:$TWOSHIM/b:$MINBIN"
 arm "C1-only-shims-on-path" 78 "$SHARED" -- checkout -- tracked.txt
-[[ "$LAST_OUT" == *"could not find a real git"* ]] &&
-  assert "C1-only-shims-on-path" "a shim copy is recognised as a shim, not mistaken for the real git" 0 ||
+if [[ "$LAST_OUT" == *"could not find a real git"* ]]; then
+  assert "C1-only-shims-on-path" "a shim copy is recognised as a shim, not mistaken for the real git" 0
+else
   assert "C1-only-shims-on-path" "a shim copy is recognised as a shim, not mistaken for the real git" 1
-(( LAST_STATUS != 124 )) &&
-  assert "C1-only-shims-on-path" "it answered instead of spinning (124 is the timeout kill)" 0 ||
+fi
+if (( LAST_STATUS != 124 )); then
+  assert "C1-only-shims-on-path" "it answered instead of spinning (124 is the timeout kill)" 0
+else
   assert "C1-only-shims-on-path" "it answered instead of spinning (124 is the timeout kill)" 1
+fi
 
 PATH_OVERRIDE="$TWOSHIM/a:$TWOSHIM/b:$MINBIN:$real_git_dir"
 arm "P9-two-shims-then-real-git" 0 "$SHARED" -- --version
 guard_silent "P9-two-shims-then-real-git"
-[[ "$LAST_OUT" == *"git version"* ]] &&
-  assert "P9-two-shims-then-real-git" "two shims on PATH resolve THROUGH to the real git" 0 ||
+if [[ "$LAST_OUT" == *"git version"* ]]; then
+  assert "P9-two-shims-then-real-git" "two shims on PATH resolve THROUGH to the real git" 0
+else
   assert "P9-two-shims-then-real-git" "two shims on PATH resolve THROUGH to the real git" 1
+fi
 
 # The backstop, tested directly rather than trusted. It only fires if the marker
 # check has already failed, so it cannot be reached by any ordinary path.
 HOPS_OVERRIDE=99
 arm "U3-hop-cap" 78 "$SHARED" -- status --porcelain
-[[ "$LAST_OUT" == *"entered 99 times"* ]] &&
-  assert "U3-hop-cap" "the backstop names the loop instead of hanging" 0 ||
+if [[ "$LAST_OUT" == *"entered 99 times"* ]]; then
+  assert "U3-hop-cap" "the backstop names the loop instead of hanging" 0
+else
   assert "U3-hop-cap" "the backstop names the loop instead of hanging" 1
+fi
 
 echo
 echo "==========================================================================="
