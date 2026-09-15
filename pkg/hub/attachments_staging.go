@@ -167,6 +167,8 @@ func (s *Server) sharedDirHostPath(ctx context.Context, projectID, name string) 
 		}
 	}
 	if !found {
+		s.projectsLogger().DebugContext(ctx, "sharedDirHostPath: project has no shared dir entry",
+			"project_id", projectID, "name", name)
 		return "", false
 	}
 
@@ -188,5 +190,7 @@ func (s *Server) sharedDirHostPath(ctx context.Context, projectID, name string) 
 			return c, inWorkspace
 		}
 	}
+	s.projectsLogger().DebugContext(ctx, "sharedDirHostPath: no candidate directory exists on disk",
+		"project_id", projectID, "name", name, "candidates", candidates)
 	return "", false
 }
