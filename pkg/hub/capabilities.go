@@ -296,7 +296,7 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 
 		var allowed []string
 		for _, action := range actions {
-			decision := a.checkAccessPrecomputed(ctx, identity, resource, action)
+			decision := a.CheckAccess(ctx, identity, resource, action)
 			if decision.Allowed {
 				allowed = append(allowed, string(action))
 			}
@@ -323,13 +323,6 @@ func (a *AuthzService) computeCapabilitiesWithContext(ctx context.Context, ident
 		}
 	}
 	return &Capabilities{Actions: allowed}
-}
-
-// checkAccessPrecomputed evaluates access using CheckAccess through the
-// standard kernel pipeline. The pre-computed parameters are no longer used
-// — all decisions route through the AK1 kernel.
-func (a *AuthzService) checkAccessPrecomputed(ctx context.Context, identity Identity, resource Resource, action Action) Decision {
-	return a.CheckAccess(ctx, identity, resource, action)
 }
 
 // allActions returns a Capabilities with all provided actions.
