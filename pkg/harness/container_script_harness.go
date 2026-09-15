@@ -143,6 +143,14 @@ func (c *ContainerScriptHarness) GetCommand(task string, resume bool, baseArgs [
 		return args
 	}
 
+	// When resuming without a new task, inject a synthetic prompt for
+	// harnesses that use task_flag (e.g. opencode's --prompt). Without
+	// this, TUI-based harnesses exit immediately on resume because the
+	// session is already idle and there is no new work to process.
+	if resume && task == "" && cmd.TaskFlag != "" {
+		task = "Continue your previous task. Check for pending work or new messages."
+	}
+
 	resumeTokens := []string{}
 	if resume && cmd.ResumeFlag != "" {
 		resumeTokens = strings.Fields(cmd.ResumeFlag)

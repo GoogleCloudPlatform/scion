@@ -94,9 +94,92 @@ func TestContainerScriptHarness_BasicGetters(t *testing.T) {
 		t.Errorf("GetCommand=%v want %v", cmd, want)
 	}
 	cmd2 := h.GetCommand("", true, nil)
-	want2 := []string{"testcli", "--resume"}
+	want2 := []string{"testcli", "--resume", "--prompt", "Continue your previous task. Check for pending work or new messages."}
 	if strings.Join(cmd2, " ") != strings.Join(want2, " ") {
 		t.Errorf("GetCommand resume=%v want %v", cmd2, want2)
+	}
+}
+
+func TestContainerScriptHarness_GetCommand_ResumeWithSyntheticPrompt(t *testing.T) {
+	// Harness with task_flag: resume without explicit task injects synthetic prompt.
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), "harness: resumetest\nimage: scion-test:latest\n")
+	writeFile(t, filepath.Join(dir, "provision.py"), "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+	withTaskFlag := config.HarnessConfigEntry{
+		Harness: "resumetest",
+		Image:   "scion-test:latest",
+		Provisioner: &config.HarnessProvisionerConfig{
+			Type:             "container-script",
+			InterfaceVersion: 1,
+			Command:          []string{"python3", "$HOME/.scion/harness/provision.py"},
+			Timeout:          "10s",
+			LifecycleEvents:  []string{"pre-start"},
+		},
+		Command: &config.HarnessCommandConfig{
+			Base:         []string{"opencode-launch"},
+			ResumeFlag:   "--continue",
+			TaskFlag:     "--prompt",
+			TaskPosition: "before_base_args",
+		},
+	}
+	h, err := NewContainerScriptHarness(dir, withTaskFlag)
+	if err != nil {
+		t.Fatalf("NewContainerScriptHarness: %v", err)
+	}
+
+	// Initial start: task is passed through normally.
+	cmd := h.GetCommand("do something", false, nil)
+	want := []string{"opencode-launch", "--prompt", "do something"}
+	if strings.Join(cmd, " ") != strings.Join(want, " ") {
+		t.Errorf("initial start: GetCommand=%v want %v", cmd, want)
+	}
+
+	// Resume without task: synthetic prompt is injected via task_flag.
+	cmd = h.GetCommand("", true, nil)
+	want = []string{"opencode-launch", "--continue", "--prompt", "Continue your previous task. Check for pending work or new messages."}
+	if strings.Join(cmd, " ") != strings.Join(want, " ") {
+		t.Errorf("resume without task: GetCommand=%v want %v", cmd, want)
+	}
+
+	// Resume with explicit task: explicit task is used, not synthetic.
+	cmd = h.GetCommand("new work", true, nil)
+	want = []string{"opencode-launch", "--continue", "--prompt", "new work"}
+	if strings.Join(cmd, " ") != strings.Join(want, " ") {
+		t.Errorf("resume with task: GetCommand=%v want %v", cmd, want)
+	}
+}
+
+func TestContainerScriptHarness_GetCommand_ResumeNoTaskFlag(t *testing.T) {
+	// Harness WITHOUT task_flag: resume without task does NOT inject synthetic prompt.
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), "harness: noflagtest\nimage: scion-test:latest\n")
+	writeFile(t, filepath.Join(dir, "provision.py"), "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+	noTaskFlag := config.HarnessConfigEntry{
+		Harness: "noflagtest",
+		Image:   "scion-test:latest",
+		Provisioner: &config.HarnessProvisionerConfig{
+			Type:             "container-script",
+			InterfaceVersion: 1,
+			Command:          []string{"python3", "$HOME/.scion/harness/provision.py"},
+			Timeout:          "10s",
+			LifecycleEvents:  []string{"pre-start"},
+		},
+		Command: &config.HarnessCommandConfig{
+			Base:         []string{"grok", "--yolo"},
+			ResumeFlag:   "-c",
+			TaskPosition: "after_base_args",
+		},
+	}
+	h, err := NewContainerScriptHarness(dir, noTaskFlag)
+	if err != nil {
+		t.Fatalf("NewContainerScriptHarness: %v", err)
+	}
+
+	// Resume without task: no synthetic prompt (no task_flag configured).
+	cmd := h.GetCommand("", true, nil)
+	want := []string{"grok", "--yolo", "-c"}
+	if strings.Join(cmd, " ") != strings.Join(want, " ") {
+		t.Errorf("resume no task_flag: GetCommand=%v want %v", cmd, want)
 	}
 }
 
