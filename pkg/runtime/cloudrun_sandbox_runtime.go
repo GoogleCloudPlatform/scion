@@ -834,6 +834,23 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		return "", fmt.Errorf("cloudrun-sandbox: prepare layout: %w", err)
 	}
 
+	// Stat the entrypoint log BEFORE the sandbox launches to capture the
+	// current size as an offset. This run's output starts after this point;
+	// prior content (from earlier runs, if PR 1323 append-mode is present)
+	// is skipped. The entrypoint has not started yet, so nothing can write
+	// to the file between this stat and sandbox launch.
+	entrypointLogPath := filepath.Join(paths.agentHome, entrypointLogFile)
+	var entrypointLogOffset int64
+	if st, err := os.Stat(entrypointLogPath); err == nil {
+		entrypointLogOffset = st.Size()
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		// Unexpected stat error (permission denied, I/O error). Proceed with
+		// offset 0 but warn — this may cause prior-run output to be re-shipped.
+		runtimeLog.Warn("entrypoint log stat failed unexpectedly; starting from offset 0",
+			"path", entrypointLogPath, "error", err, "sandbox", slug)
+	}
+	// ENOENT is the normal case for first-ever run: offset stays 0.
+
 	// Build environment.
 	env := envFor(cfg, paths)
 
@@ -1017,6 +1034,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	r.watchCancels[slug] = watchCancel
 	r.watchMu.Unlock()
 	go r.watchSandbox(watchCtx, slug)
+	go r.tailEntrypointLog(watchCtx, slug, cfg.Name, cfg.Project, paths, entrypointLogOffset)
 
 	return slug, nil
 }
