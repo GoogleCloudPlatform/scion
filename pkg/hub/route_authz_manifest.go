@@ -25,7 +25,7 @@ package hub
 //	public         — No authentication required (health checks, setup callbacks).
 //	auth-flow      — Part of the authentication flow itself; skipped by auth middleware.
 //	authenticated  — Requires valid user/agent session (via UnifiedAuthMiddleware).
-//	admin          — Requires admin role (explicit user.Role() != "admin" check).
+//	admin          — Requires admin role (inline admin-role guard in handler).
 //	workstation    — Requires workstation mode (requireWorkstation middleware).
 //	broker-hmac    — Authenticated via runtime broker HMAC signature.
 //	webhook        — Authenticated via webhook signature (e.g. GitHub X-Hub-Signature-256).
