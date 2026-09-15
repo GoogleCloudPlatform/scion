@@ -342,11 +342,11 @@ export class ScionPageProfileTemplates extends LitElement {
     this.cloneLoading = true;
     this.cloneError = '';
     try {
-      const body: Record<string, string> = { name: this.cloneName.trim() };
-      if (this.cloneTarget.harness) {
-        body.harness = this.cloneTarget.harness;
-      }
-      const resp = await apiFetch('/api/v1/users/me/templates', {
+      const body: Record<string, string> = {
+        name: this.cloneName.trim(),
+        scope: 'user',
+      };
+      const resp = await apiFetch(`/api/v1/templates/${this.cloneTarget.id}/clone`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
