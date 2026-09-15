@@ -1616,7 +1616,7 @@ func GetSavedPhase(agentName string, projectPath string) string {
 	return ""
 }
 
-func UpdateAgentConfig(agentName string, projectPath string, status string, runtime string, profile string) error {
+func updateSavedAgentInfo(agentName string, projectPath string, update func(*api.AgentInfo)) error {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		return err
@@ -1640,51 +1640,7 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 		return err
 	}
 
-	if status != "" {
-		info.Phase = status
-	}
-	if runtime != "" {
-		info.Runtime = runtime
-	}
-	if profile != "" {
-		info.Profile = profile
-	}
-
-	newData, err := json.MarshalIndent(info, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	if err := os.WriteFile(agentInfoPath, newData, 0644); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// UpdateAgentDeletedAt writes the deletedAt timestamp to agent-info.json.
-func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.Time) error {
-	projectDir, err := config.GetResolvedProjectDir(projectPath)
-	if err != nil {
-		return err
-	}
-	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-
-	if _, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
-		return nil
-	}
-
-	data, err := os.ReadFile(agentInfoPath)
-	if err != nil {
-		return err
-	}
-
-	var info api.AgentInfo
-	if err := json.Unmarshal(data, &info); err != nil {
-		return err
-	}
-
-	info.DeletedAt = deletedAt
+	update(&info)
 
 	newData, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {
@@ -1692,6 +1648,27 @@ func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.T
 	}
 
 	return os.WriteFile(agentInfoPath, newData, 0644)
+}
+
+func UpdateAgentConfig(agentName string, projectPath string, status string, runtime string, profile string) error {
+	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
+		if status != "" {
+			info.Phase = status
+		}
+		if runtime != "" {
+			info.Runtime = runtime
+		}
+		if profile != "" {
+			info.Profile = profile
+		}
+	})
+}
+
+// UpdateAgentDeletedAt writes the deletedAt timestamp to agent-info.json.
+func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.Time) error {
+	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
+		info.DeletedAt = deletedAt
+	})
 }
 
 func GetAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, string, *api.ScionConfig, error) {

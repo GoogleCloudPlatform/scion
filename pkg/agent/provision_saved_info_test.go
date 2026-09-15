@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -87,5 +88,83 @@ func TestSavedAgentInfoGettersReturnEmptyForUnreadableMetadata(t *testing.T) {
 		if got := get(agentName, projectDir); got != "" {
 			t.Fatalf("getter() with malformed metadata = %q, want empty", got)
 		}
+	}
+}
+
+func TestUpdateSavedAgentInfo(t *testing.T) {
+	projectDir := filepath.Join(t.TempDir(), config.DotScion)
+	agentName := "saved-agent"
+	agentHome := config.GetAgentHomePath(projectDir, agentName)
+	if err := os.MkdirAll(agentHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	agentInfoPath := filepath.Join(agentHome, "agent-info.json")
+	data, err := json.Marshal(api.AgentInfo{
+		Name:          "Saved Agent",
+		Profile:       "fast",
+		Runtime:       "docker",
+		HarnessConfig: "claude",
+		Phase:         "running",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(agentInfoPath, data, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if err := UpdateAgentConfig(agentName, projectDir, "stopped", "podman", "balanced"); err != nil {
+		t.Fatalf("UpdateAgentConfig() error = %v", err)
+	}
+	if err := UpdateAgentConfig(agentName, projectDir, "", "", ""); err != nil {
+		t.Fatalf("UpdateAgentConfig() with empty fields error = %v", err)
+	}
+	deletedAt := time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC)
+	if err := UpdateAgentDeletedAt(agentName, projectDir, deletedAt); err != nil {
+		t.Fatalf("UpdateAgentDeletedAt() error = %v", err)
+	}
+
+	updatedData, err := os.ReadFile(agentInfoPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var got api.AgentInfo
+	if err := json.Unmarshal(updatedData, &got); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if got.Name != "Saved Agent" || got.HarnessConfig != "claude" {
+		t.Fatalf("unrelated fields changed: %+v", got)
+	}
+	if got.Phase != "stopped" || got.Runtime != "podman" || got.Profile != "balanced" {
+		t.Fatalf("config fields not updated: %+v", got)
+	}
+	if !got.DeletedAt.Equal(deletedAt) {
+		t.Fatalf("DeletedAt = %v, want %v", got.DeletedAt, deletedAt)
+	}
+}
+
+func TestUpdateSavedAgentInfoMissingAndMalformed(t *testing.T) {
+	projectDir := filepath.Join(t.TempDir(), config.DotScion)
+	agentName := "saved-agent"
+
+	if err := UpdateAgentConfig(agentName, projectDir, "stopped", "", ""); err != nil {
+		t.Fatalf("UpdateAgentConfig() missing file error = %v", err)
+	}
+	if err := UpdateAgentDeletedAt(agentName, projectDir, time.Now()); err != nil {
+		t.Fatalf("UpdateAgentDeletedAt() missing file error = %v", err)
+	}
+
+	agentHome := config.GetAgentHomePath(projectDir, agentName)
+	if err := os.MkdirAll(agentHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), []byte("{"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := UpdateAgentConfig(agentName, projectDir, "stopped", "", ""); err == nil {
+		t.Fatal("UpdateAgentConfig() malformed file error = nil, want error")
+	}
+	if err := UpdateAgentDeletedAt(agentName, projectDir, time.Now()); err == nil {
+		t.Fatal("UpdateAgentDeletedAt() malformed file error = nil, want error")
 	}
 }
