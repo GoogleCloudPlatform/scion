@@ -282,6 +282,35 @@ func TestChatLinkVerificationPreservesCommonGuards(t *testing.T) {
 	}
 }
 
+func TestChatLinkRateLimitIP(t *testing.T) {
+	tests := []struct {
+		name           string
+		remoteAddr     string
+		trustedProxies []string
+		forwardedFor   string
+		realIP         string
+		want           string
+	}{
+		{name: "direct client", remoteAddr: "192.0.2.1:1234", want: "192.0.2.1"},
+		{name: "untrusted proxy headers ignored", remoteAddr: "192.0.2.1:1234", trustedProxies: []string{"10.0.0.0/8"}, forwardedFor: "203.0.113.7", realIP: "203.0.113.8", want: "192.0.2.1"},
+		{name: "trusted proxy uses first forwarded address", remoteAddr: "10.0.0.2:1234", trustedProxies: []string{"10.0.0.0/8"}, forwardedFor: "203.0.113.7, 10.0.0.1", want: "203.0.113.7"},
+		{name: "trusted proxy falls back to real ip", remoteAddr: "10.0.0.2:1234", trustedProxies: []string{"10.0.0.2"}, forwardedFor: "invalid", realIP: "203.0.113.8", want: "203.0.113.8"},
+		{name: "trusted proxy rejects invalid headers", remoteAddr: "10.0.0.2:1234", trustedProxies: []string{"10.0.0.0/8"}, forwardedFor: "invalid", realIP: "also-invalid", want: "10.0.0.2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			req.RemoteAddr = tt.remoteAddr
+			req.Header.Set("X-Forwarded-For", tt.forwardedFor)
+			req.Header.Set("X-Real-IP", tt.realIP)
+
+			got := chatLinkRateLimitIP(req, parseTrustedProxies(tt.trustedProxies))
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestChatLinkStatusReturnsConfirmationOnce(t *testing.T) {
 	srv := &Server{
 		telegramLinkService: NewTelegramLinkService(),
