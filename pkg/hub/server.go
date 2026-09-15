@@ -1097,11 +1097,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		slog.Warn("Failed to initialize agent token service", "error", err)
 	} else {
 		srv.agentTokenService = tokenService
-		// Wire credential recorder and checker so issued tokens are persisted
-		// for revocation, and RefreshAgentToken can verify revocation status.
+		// Wire credential recorder so issued tokens are persisted for revocation.
 		credAdapter := &storeCredentialRecorder{store: s}
 		tokenService.SetCredentialRecorder(credAdapter)
-		tokenService.SetCredentialChecker(credAdapter)
 		fp := sha256.Sum256(tokenService.config.SigningKey)
 		slog.Info("Agent token service initialized", "key_fingerprint", hex.EncodeToString(fp[:8]))
 	}
@@ -2790,10 +2788,6 @@ type storeCredentialRecorder struct {
 
 func (r *storeCredentialRecorder) RecordAgentCredential(ctx context.Context, cred *store.AgentCredential) error {
 	return r.store.CreateAgentCredential(ctx, cred)
-}
-
-func (r *storeCredentialRecorder) GetAgentCredentialByJTIHash(ctx context.Context, jtiHash string) (*store.AgentCredential, error) {
-	return r.store.GetAgentCredentialByJTIHash(ctx, jtiHash)
 }
 
 // agentHeartbeatTimeoutHandler returns a recurring handler function that marks
