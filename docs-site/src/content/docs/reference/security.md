@@ -26,6 +26,7 @@ For both Web and CLI access, Scion relies on standard OAuth 2.0 providers (Googl
 - **Web Flow**: Standard Authorization Code flow. The embedded Go web server handles the callback and exchanges the provider token for a session-bound Hub access token.
 - **CLI Flow**: Uses a localhost callback server (defaulting to port `18271`). The CLI opens the user's browser for authentication and receives the authorization code via the local server.
 - **PKCE**: The CLI uses Proof Key for Code Exchange (PKCE) to prevent authorization code injection attacks.
+- **Per-User Session Revocation**: Each user carries a `session_generation` counter. Administrators can increment this counter via the API (`POST /api/v1/users/:id/revoke-sessions`) or the Web Dashboard, immediately invalidating all of the user's active cookie-based sessions. The Hub middleware checks the counter on every request and forces re-authentication on mismatch. See [Authentication & Identity — Session Revocation](/scion/hosted/single-node/auth/#session-revocation).
 
 ### 1.3 Agent Authentication (`sciontool`)
 
