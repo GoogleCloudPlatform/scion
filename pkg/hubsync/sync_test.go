@@ -991,7 +991,7 @@ func TestUpdateLastSyncedAt_UsesHubTime(t *testing.T) {
 	// Use a specific hub time that's clearly different from time.Now()
 	hubTime := time.Date(2025, 6, 15, 10, 30, 45, 123456789, time.UTC)
 
-	UpdateLastSyncedAt(tmpDir, hubTime, false)
+	UpdateLastSyncedAt(tmpDir, hubTime)
 
 	// Read back from state.yaml
 	state, err := config.LoadProjectState(tmpDir)
@@ -1022,7 +1022,7 @@ func TestUpdateLastSyncedAt_FallbackToLocalTime(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	before := time.Now().UTC()
-	UpdateLastSyncedAt(tmpDir, time.Time{}, false) // zero time = fallback
+	UpdateLastSyncedAt(tmpDir, time.Time{}) // zero time = fallback
 	after := time.Now().UTC()
 
 	state, err := config.LoadProjectState(tmpDir)
@@ -1053,7 +1053,7 @@ func TestUpdateLastSyncedAt_NanoPrecision(t *testing.T) {
 
 	// Use a time with sub-second precision
 	hubTime := time.Date(2025, 6, 15, 10, 30, 45, 123456789, time.UTC)
-	UpdateLastSyncedAt(tmpDir, hubTime, false)
+	UpdateLastSyncedAt(tmpDir, hubTime)
 
 	state, err := config.LoadProjectState(tmpDir)
 	if err != nil {
@@ -1083,8 +1083,8 @@ func TestUpdateLastSyncedAt_Monotonic(t *testing.T) {
 	newer := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
 	older := newer.Add(-time.Hour)
 
-	UpdateLastSyncedAt(tmpDir, newer, false)
-	UpdateLastSyncedAt(tmpDir, older, false)
+	UpdateLastSyncedAt(tmpDir, newer)
+	UpdateLastSyncedAt(tmpDir, older)
 
 	state, err := config.LoadProjectState(tmpDir)
 	if err != nil {
@@ -1110,7 +1110,7 @@ func TestUpdateLastSyncedAt_InvalidExistingTimestamp(t *testing.T) {
 	}
 
 	hubTime := time.Date(2026, 3, 2, 9, 30, 0, 123, time.UTC)
-	UpdateLastSyncedAt(tmpDir, hubTime, false)
+	UpdateLastSyncedAt(tmpDir, hubTime)
 
 	state, err := config.LoadProjectState(tmpDir)
 	if err != nil {

@@ -260,7 +260,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	// Advance watermark to the hub-assigned creation time so this agent
 	// won't trigger a sync warning on the next 'scion ls'.
 	if resp.Agent != nil && !resp.Agent.Created.IsZero() {
-		hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, resp.Agent.Created, hubCtx.IsGlobal)
+		hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, resp.Agent.Created)
 		hubsync.AddSyncedAgent(hubCtx.ProjectPath, agentName)
 	}
 
