@@ -452,22 +452,6 @@ func TestDelegationCeiling_FederatedAncestryNotUsedForDelegation(t *testing.T) {
 		"local agent with the same ancestry should still be ALLOWED (no regression)")
 }
 
-// --- Test: ResolveEffectiveRole no longer uses userCeiling ---
-
-func TestResolveEffectiveRole_NoUserCeiling(t *testing.T) {
-	// With the hardcoded ceiling removed, the role should be min(requested, projectMax)
-	// regardless of the user's hub role.
-	assert.Equal(t, AgentRoleFull, ResolveEffectiveRole(AgentRoleFull, "member", AgentRoleFull))
-	assert.Equal(t, AgentRoleFull, ResolveEffectiveRole(AgentRoleFull, "admin", AgentRoleFull))
-
-	// Project max caps the role
-	assert.Equal(t, AgentRoleBaseline, ResolveEffectiveRole(AgentRoleFull, "admin", AgentRoleBaseline))
-	assert.Equal(t, AgentRoleReadOnly, ResolveEffectiveRole(AgentRoleFull, "admin", AgentRoleReadOnly))
-
-	// Requested role is respected
-	assert.Equal(t, AgentRoleBaseline, ResolveEffectiveRole(AgentRoleBaseline, "admin", AgentRoleFull))
-}
-
 // --- Test: AgentRoleGrandfathered marker works correctly in store ---
 
 func TestAgentRoleGrandfathered_StoreRoundTrip(t *testing.T) {
