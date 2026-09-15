@@ -618,7 +618,7 @@ func (s *Server) cloneProjectEnvVars(ctx context.Context, srcProjectID, clonePro
 // since IAM bindings may not transfer automatically.
 func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectID, cloneProjectID, callerID string, rollback *[]func()) error {
 	accounts, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-		Scope:   "project",
+		Scope:   store.ScopeProject,
 		ScopeID: srcProjectID,
 	})
 	if err != nil {
@@ -633,12 +633,12 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 	for _, sa := range accounts {
 		newSA := &store.GCPServiceAccount{
 			ID:            api.NewUUID(),
-			Scope:         "project",
+			Scope:         store.ScopeProject,
 			ScopeID:       cloneProjectID,
 			Email:         sa.Email,
 			ProjectID:     sa.ProjectID,
 			DisplayName:   sa.DisplayName,
-			DefaultScopes: sa.DefaultScopes,
+			DefaultScopes: append([]string(nil), sa.DefaultScopes...),
 			Verified:      false,
 			CreatedBy:     callerID,
 		}
