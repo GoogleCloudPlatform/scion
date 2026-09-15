@@ -15,11 +15,11 @@
     "@astrojs/starlight": "^0.41.3",
     "astro": "^7.3.2",
     "sharp": "^0.35.4",
-    "starlight-links-validator": "^0.24.0",
+    "starlight-links-validator": "^0.25.3",
     "typescript": "^5.9.3"
   },
   "devDependencies": {
-    "astro-d2": "^0.10.0"
+    "astro-d2": "^0.14.0"
   },
   "engines": {
     "node": ">=22"

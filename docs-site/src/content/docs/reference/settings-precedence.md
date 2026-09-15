@@ -36,7 +36,7 @@ Every row that makes a claim about behaviour carries a status marker, defined on
 | Marker | Meaning |
 | --- | --- |
 | *(no marker)* | Current behaviour, not changed by the settings-precedence release |
-| **`Changed in this release`** | Behaviour changed by the settings-precedence release, with a one-line before → after. See the [release notes](/release-notes/). |
+| **`Changed in this release`** | Behaviour changed by the settings-precedence release, with a one-line before → after. See the [release notes](/scion/release-notes/). |
 | **`Unchanged`** | Explicitly *not* changed. Present because a neighbouring row would otherwise imply it was. |
 | **`Known gap`** | Documented as broken or incomplete. Not fixed here. |
 | **`Pending`** | The intended model is stated; the current behaviour does not match it and the resolution is not yet decided. |
@@ -854,8 +854,8 @@ of a settings change.
 
 ## See also
 
-- [Agent Configuration (`scion-agent.yaml`)](/reference/agent-config/) — the field reference for
+- [Agent Configuration (`scion-agent.yaml`)](/scion/reference/agent-config/) — the field reference for
   templates and agents, including the project-settings annotations named above.
-- [Admin Settings](/reference/admin-settings/) — where hub `agent_defaults` are configured.
-- [Harness-Specific Settings](/reference/harness-settings/) — configuration consumed by the tools
+- [Admin Settings](/scion/reference/admin-settings/) — where hub `agent_defaults` are configured.
+- [Harness-Specific Settings](/scion/reference/harness-settings/) — configuration consumed by the tools
   running inside the container.

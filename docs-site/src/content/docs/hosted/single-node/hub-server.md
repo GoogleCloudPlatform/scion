@@ -31,6 +31,11 @@ While they can run in the same process—known as **Combo Mode** (the default fo
 - **The Hub** is the stateless control plane. It provides the API and Web Dashboard, and should be accessible via a public or internal URL.
 - **The Broker** is the execution host. It registers with a Hub and executes agents. Brokers can run behind NAT or firewalls, as they establish outbound connections to the Hub. You can connect multiple external brokers to a single Hub.
 
+In combo mode on GCP (Cloud Run Instances or GCE), the co-located broker
+automatically detects the host's GCP service account email and project ID
+from the GCE metadata server at registration time. There is no need to
+configure these manually.
+
 If you prefer to run the server in the background:
 ```bash
 scion server start
@@ -64,6 +69,13 @@ server:
 
 :::note[Combined Mode]
 When running with `--enable-web`, the Hub API is mounted on the web server's port (default 8080) and the standalone Hub listener is not started. The `hub.port` setting only applies when the Hub runs without `--enable-web`.
+:::
+
+:::note[Cloud Run Instance defaults]
+On Cloud Run Instances, the Hub automatically detects the environment and
+applies the correct `cloudrun-sandbox` runtime profile as the default. You
+do not need to configure `profiles` or `runtimes` manually — the embedded
+defaults match the tier.
 :::
 
 See the [Server Configuration Reference](/scion/reference/server-config/) for all available fields.

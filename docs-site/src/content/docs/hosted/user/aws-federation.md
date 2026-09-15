@@ -14,7 +14,7 @@ This guide explains how to configure your AWS IAM roles and Scion agent environm
 Instead of storing secrets, the agent retrieves a Google-signed OpenID Connect (OIDC) identity token from the local GCP metadata server and exchanges it directly with the AWS Security Token Service (STS).
 
 ```d2
-direction: lr
+direction: right
 classes: {
   box: {
     style: {

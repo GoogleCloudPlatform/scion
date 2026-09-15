@@ -171,13 +171,13 @@ skills:
 
 The `gcp-skill://` scheme follows the format `gcp-skill://<alias>/<skillId>@<version>`, where:
 
-- **`alias`** — the registry alias configured in your [skill federation settings](/hosted/single-node/skill-registry/)
+- **`alias`** — the registry alias configured in your [skill federation settings](/scion/hosted/single-node/skill-registry/)
 - **`skillId`** — the skill name as registered in GCP
 - **`version`** — an optional version specifier (defaults to latest)
 
-For the federation setup that connects your Scion Hub to a GCP registry, see [Skill Registry & Federation](/hosted/single-node/skill-registry/).
+For the federation setup that connects your Scion Hub to a GCP registry, see [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/).
 
 ## See also
 
-- [Skills — Authoring & Publishing](/local/skills/) — the full skills guide, including URI formats and scopes.
-- [Skill Registry & Federation](/hosted/single-node/skill-registry/) — Hub-side registry administration and external registry federation.
+- [Skills — Authoring & Publishing](/scion/local/skills/) — the full skills guide, including URI formats and scopes.
+- [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/) — Hub-side registry administration and external registry federation.
