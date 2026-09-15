@@ -45,15 +45,6 @@ func TestIsGroupRecipient(t *testing.T) {
 	}
 }
 
-func TestIsSetRecipient_DeprecatedAlias(t *testing.T) {
-	if !IsSetRecipient("set[agent:a,agent:b]") {
-		t.Error("IsSetRecipient should return true for valid group recipient")
-	}
-	if IsSetRecipient("agent:foo") {
-		t.Error("IsSetRecipient should return false for non-group recipient")
-	}
-}
-
 func TestParseGroupRecipient_Valid(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -328,27 +319,5 @@ func TestGroupRecipientString(t *testing.T) {
 	r = GroupRecipient{Kind: RecipientUser, Name: "alice"}
 	if r.String() != "user:alice" {
 		t.Errorf("String() = %q, want %q", r.String(), "user:alice")
-	}
-}
-
-func TestDeprecatedAliases(t *testing.T) {
-	// ParseSetRecipient should work as alias for ParseGroupRecipient
-	parsed, err := ParseSetRecipient("set[agent:a,agent:b]")
-	if err != nil {
-		t.Fatalf("ParseSetRecipient alias failed: %v", err)
-	}
-	if len(parsed) != 2 {
-		t.Fatalf("expected 2 recipients, got %d", len(parsed))
-	}
-
-	// FormatSetRecipients should work as alias for FormatGroupRecipients
-	formatted := FormatSetRecipients("user:alice", []string{"agent:a"})
-	if formatted != "group[user:alice,agent:a]" {
-		t.Errorf("FormatSetRecipients alias = %q, want %q", formatted, "group[user:alice,agent:a]")
-	}
-
-	// MaxSetRecipients should equal MaxGroupRecipients
-	if MaxSetRecipients != MaxGroupRecipients {
-		t.Errorf("MaxSetRecipients (%d) != MaxGroupRecipients (%d)", MaxSetRecipients, MaxGroupRecipients)
 	}
 }

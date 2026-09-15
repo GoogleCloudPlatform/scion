@@ -23,16 +23,12 @@ import (
 const (
 	// GroupPrefix is the canonical prefix for the group recipient syntax.
 	GroupPrefix = "group["
-	// SetPrefix is the legacy prefix, kept for backward compatibility.
-	SetPrefix = "set["
-	// SetSuffix is the wire-format suffix for the group recipient syntax.
-	SetSuffix = "]"
 	// MaxGroupRecipients is the maximum number of recipients in a message group.
 	MaxGroupRecipients = 50
-)
 
-// Deprecated: Use MaxGroupRecipients instead.
-const MaxSetRecipients = MaxGroupRecipients
+	legacySetPrefix = "set["
+	groupSuffix     = "]"
+)
 
 type RecipientKind string
 
@@ -51,19 +47,9 @@ func (r GroupRecipient) String() string {
 	return string(r.Kind) + ":" + r.Name
 }
 
-// SetRecipient is a deprecated alias for GroupRecipient.
-// Deprecated: Use GroupRecipient instead.
-type SetRecipient = GroupRecipient
-
 // IsGroupRecipient reports whether s uses the group recipient syntax (group[...] or legacy set[...]).
 func IsGroupRecipient(s string) bool {
-	return (strings.HasPrefix(s, GroupPrefix) || strings.HasPrefix(s, SetPrefix)) && strings.HasSuffix(s, SetSuffix)
-}
-
-// IsSetRecipient is a deprecated alias for IsGroupRecipient.
-// Deprecated: Use IsGroupRecipient instead.
-func IsSetRecipient(s string) bool {
-	return IsGroupRecipient(s)
+	return (strings.HasPrefix(s, GroupPrefix) || strings.HasPrefix(s, legacySetPrefix)) && strings.HasSuffix(s, groupSuffix)
 }
 
 // ParseGroupRecipient parses a group recipient string (e.g. "group[agent:a,user:b]")
@@ -71,18 +57,18 @@ func IsSetRecipient(s string) bool {
 // but logs a deprecation warning.
 func ParseGroupRecipient(s string) ([]GroupRecipient, error) {
 	if !IsGroupRecipient(s) {
-		return nil, fmt.Errorf("not a group recipient: must start with %q and end with %q", GroupPrefix, SetSuffix)
+		return nil, fmt.Errorf("not a group recipient: must start with %q and end with %q", GroupPrefix, groupSuffix)
 	}
 
 	var inner string
 	if strings.HasPrefix(s, GroupPrefix) {
-		inner = s[len(GroupPrefix) : len(s)-len(SetSuffix)]
+		inner = s[len(GroupPrefix) : len(s)-len(groupSuffix)]
 	} else {
 		slog.Warn("set[] syntax is deprecated; use group[] instead")
-		inner = s[len(SetPrefix) : len(s)-len(SetSuffix)]
+		inner = s[len(legacySetPrefix) : len(s)-len(groupSuffix)]
 	}
 
-	if strings.Contains(inner, SetPrefix) || strings.Contains(inner, GroupPrefix) {
+	if strings.Contains(inner, legacySetPrefix) || strings.Contains(inner, GroupPrefix) {
 		return nil, fmt.Errorf("nested group[] recipients are not allowed")
 	}
 
@@ -127,12 +113,6 @@ func ParseGroupRecipient(s string) ([]GroupRecipient, error) {
 	return recipients, nil
 }
 
-// ParseSetRecipient is a deprecated alias for ParseGroupRecipient.
-// Deprecated: Use ParseGroupRecipient instead.
-func ParseSetRecipient(s string) ([]GroupRecipient, error) {
-	return ParseGroupRecipient(s)
-}
-
 // FormatGroupRecipients builds a group[...] string from a sender identity and a
 // list of recipient identities. The sender is included as the first element so
 // that the full group is represented. All identities should be prefixed
@@ -145,14 +125,8 @@ func FormatGroupRecipients(sender string, recipients []string) string {
 		b.WriteByte(',')
 		b.WriteString(r)
 	}
-	b.WriteString(SetSuffix)
+	b.WriteString(groupSuffix)
 	return b.String()
-}
-
-// FormatSetRecipients is a deprecated alias for FormatGroupRecipients.
-// Deprecated: Use FormatGroupRecipients instead.
-func FormatSetRecipients(sender string, recipients []string) string {
-	return FormatGroupRecipients(sender, recipients)
 }
 
 func classifyRecipient(s string) (GroupRecipient, error) {
