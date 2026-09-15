@@ -381,7 +381,7 @@ func TestCanDelegate_Agent_MemberWithCreatePermCanCreateFullRole(t *testing.T) {
 	})
 	// A project member with agent.create permission (from role binding) can
 	// create agents of any role. The effective role is governed by the role
-	// ceiling logic (project max, user ceiling), not by CanDelegate.
+	// ceiling logic (project maximum), not by CanDelegate.
 	// CanDelegate verifies the user has the base agent-create authority.
 	assert.True(t, decision.Allowed, "project member with create permission should be able to request full-role agent")
 }

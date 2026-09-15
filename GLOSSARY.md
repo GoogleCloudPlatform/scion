@@ -230,7 +230,7 @@ _Avoid_: access ceiling, permission boundary, role constraint
 _See also_: AccessConstraint, Group, RoleBinding
 
 **Agent Authorization Role**:
-A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. Resolves via a two-gate authority lattice matching requested role, user ceiling, and project maximums.
+A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. At creation, the requested or default role is capped by the project maximum and, for sub-agents, the parent agent's role. Live delegation checks separately verify the caller's authority.
 _Avoid_: raw template scopes, agent scopes
 _See also_: User Access Token (UAT)
 

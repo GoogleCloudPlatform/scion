@@ -193,7 +193,7 @@ func TestCreateAgent_RoleFull_AllowedForMember(t *testing.T) {
 		AgentRole: "full",
 	})
 
-	// Member user ceiling is now full; explicitly requesting full should succeed.
+	// Members may explicitly request the full role when the project permits it.
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
 		"member user requesting full should not be forbidden; got: %s", rec.Body.String())
 

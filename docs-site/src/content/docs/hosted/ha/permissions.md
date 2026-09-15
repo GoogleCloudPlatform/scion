@@ -221,16 +221,20 @@ Agents are assigned one of four named roles, each mapping to a fixed set of JWT 
 | `baseline` | `project:read`<br>`agent:status:update`<br>`agent:token:refresh`<br>`project:agent:notify`<br>`agent:port:forward` | Standard execution permissions. Allows the agent to report progress, refresh its token, register reverse-proxied port forwards, send notifications, and manage its own notification subscriptions. |
 | `full` | *All baseline scopes* +<br>`project:agent:create`<br>`project:agent:lifecycle`<br>`project:secret:read` | Complete agent control. Allows spawning child (sub) agents, managing their lifecycles, and reading project-scoped secrets from the secret backend. |
 
-#### Two-Gate Authority Lattice
-The effective role granted to an agent at creation is resolved by a **two-gate authority lattice**:
+#### Creation-Time Role Ceilings
+The effective role granted to an agent at creation depends on the caller:
 
-$$\text{effectiveRole} = \min(\text{requestedRole}, \text{userCeiling}, \text{projectMax})$$
+$$\text{user dispatch} = \min(\text{requestedRole}, \text{projectMax})$$
 
-1. **Requested Role**: The role requested during agent dispatch (e.g., using the `--role` flag in the CLI). If not specified, the role defaults to the project-level or Hub-level `default_agent_role`.
+$$\text{sub-agent dispatch} = \min(\text{requestedRole}, \text{parentRole}, \text{projectMax})$$
+
+1. **Requested Role**: The role requested during agent dispatch (e.g., using the `--role` flag in the CLI). For user dispatches, an omitted role defaults to the project-level or Hub-level `default_agent_role`. For sub-agent dispatches, it inherits the parent agent's role.
    - **Default Role Update**: For better usability, the default fallback role has been changed from `baseline` to `full`.
    - **Configuration Options**: You can specify `default_agent_role` globally under `agent_defaults` in the Hub settings (via settings/admin UI) or customize it per-project using the admin UI dropdown or the project setting `scion.io/default-agent-role`.
-2. **User Ceiling**: Capped by the user's own system permissions. (Note: The user-ceiling gate is currently configured as a pass-through where all Hub users receive a ceiling of `full`, making the project's maximum role the primary operational limiter).
-3. **Project Max**: Set by the project's `max_agent_role` setting, which defaults to the global Hub configuration (`default_max_agent_role` under `agent_defaults`).
+2. **Project Max**: Set by the project's `max_agent_role` setting, which defaults to the global Hub configuration (`default_max_agent_role` under `agent_defaults`).
+3. **Parent Role**: For sub-agent dispatches, the child cannot exceed the parent agent's stored role. Explicit over-requests are rejected with `403 Forbidden`.
+
+The live delegation check separately requires the caller to hold agent-creation authority in the target project.
 
 #### Fallback and Fail-Closed Security
 To guard against unauthorized escalations, the role fallback chain and parent lookup enforce fail-closed behavior:
@@ -291,7 +295,6 @@ The Scion Web Dashboard includes a centralized **Admin Management Suite** (acces
 - **Maintenance Mode**: Administrators can toggle maintenance mode for the Hub and Web servers directly from the UI to facilitate safe infrastructure updates.
 
 By leveraging these administrative views, Platform Ops can efficiently map their organization's structure directly into Scion's Principal and Policy hierarchy.
-
 ## Per-User Session Revocation
 
 Administrators can force any user to re-authenticate by revoking all of their active sessions. This is useful when a user's credentials may be compromised, when an account needs to be immediately locked out, or after a security incident.
