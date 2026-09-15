@@ -185,8 +185,7 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 		return
 	}
 
-	stor := s.GetStorage()
-	if stor == nil {
+	if s.GetStorage() == nil {
 		return
 	}
 
@@ -221,7 +220,7 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 		}
 
 		if existing == nil {
-			if err := s.bootstrapSingleHarnessConfigScoped(ctx, name, dirPath, hcDirCfg, stor, hcScope, scopeID); err != nil {
+			if err := s.bootstrapSingleHarnessConfig(ctx, name, dirPath, hcDirCfg, hcScope, scopeID); err != nil {
 				s.templateLog.Warn("template harness-config import: failed to import, skipping",
 					"config", name, "error", err)
 				continue
@@ -229,7 +228,7 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 			s.templateLog.Info("template harness-config import: imported config",
 				"config", name, "harness", hcDirCfg.Config.Harness, "scope", hcScope)
 		} else {
-			if _, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDirCfg, stor, false); err != nil {
+			if _, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDirCfg, false); err != nil {
 				s.templateLog.Warn("template harness-config import: failed to sync, skipping",
 					"config", name, "error", err)
 			}
