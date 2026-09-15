@@ -1017,7 +1017,7 @@ func TestCorrelationIDFromContext(t *testing.T) {
 	ctx := context.Background()
 	assert.Equal(t, "", correlationIDFromContext(ctx), "empty context should return empty string")
 
-	ctx = contextWithCorrelationID(ctx, "req-123")
+	ctx = context.WithValue(ctx, correlationIDKey, "req-123")
 	assert.Equal(t, "req-123", correlationIDFromContext(ctx))
 }
 

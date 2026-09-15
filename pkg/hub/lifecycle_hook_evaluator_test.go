@@ -33,6 +33,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func (d *memoryDeduper) previousPhaseLen() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.previousPhase)
+}
+
+func (d *memoryDeduper) previousPhaseHas(agentID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok := d.previousPhase[agentID]
+	return ok
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
