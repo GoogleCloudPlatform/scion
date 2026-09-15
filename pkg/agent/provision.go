@@ -1575,74 +1575,43 @@ func injectPlatformSkills(
 	return nil
 }
 
-func GetSavedProfile(agentName string, projectPath string) string {
+func getSavedAgentInfo(agentName string, projectPath string) *api.AgentInfo {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
-		return ""
+		return nil
 	}
 	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-	if _, err := os.Stat(agentInfoPath); err == nil {
-		data, err := os.ReadFile(agentInfoPath)
-		if err == nil {
-			var info api.AgentInfo
-			if err := json.Unmarshal(data, &info); err == nil {
-				return info.Profile
-			}
-		}
+	if _, err := os.Stat(agentInfoPath); err != nil {
+		return nil
 	}
-	return ""
+	data, err := os.ReadFile(agentInfoPath)
+	if err != nil {
+		return nil
+	}
+	var info api.AgentInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return nil
+	}
+	return &info
 }
 
-func GetSavedRuntime(agentName string, projectPath string) string {
-	projectDir, err := config.GetResolvedProjectDir(projectPath)
-	if err != nil {
-		return ""
-	}
-	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-	if _, err := os.Stat(agentInfoPath); err == nil {
-		data, err := os.ReadFile(agentInfoPath)
-		if err == nil {
-			var info api.AgentInfo
-			if err := json.Unmarshal(data, &info); err == nil {
-				return info.Runtime
-			}
-		}
+func GetSavedProfile(agentName string, projectPath string) string {
+	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
+		return info.Profile
 	}
 	return ""
 }
 
 func GetSavedHarnessConfig(agentName string, projectPath string) string {
-	projectDir, err := config.GetResolvedProjectDir(projectPath)
-	if err != nil {
-		return ""
-	}
-	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-	if _, err := os.Stat(agentInfoPath); err == nil {
-		data, err := os.ReadFile(agentInfoPath)
-		if err == nil {
-			var info api.AgentInfo
-			if err := json.Unmarshal(data, &info); err == nil {
-				return info.HarnessConfig
-			}
-		}
+	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
+		return info.HarnessConfig
 	}
 	return ""
 }
 
 func GetSavedPhase(agentName string, projectPath string) string {
-	projectDir, err := config.GetResolvedProjectDir(projectPath)
-	if err != nil {
-		return ""
-	}
-	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-	if _, err := os.Stat(agentInfoPath); err == nil {
-		data, err := os.ReadFile(agentInfoPath)
-		if err == nil {
-			var info api.AgentInfo
-			if err := json.Unmarshal(data, &info); err == nil {
-				return info.Phase
-			}
-		}
+	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
+		return info.Phase
 	}
 	return ""
 }
