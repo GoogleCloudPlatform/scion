@@ -530,15 +530,27 @@ func (s *pgWebChatStore) DeleteTopic(ctx context.Context, topicID string) error 
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Count active (non-deleted) topics for this project.
-	// FOR UPDATE locks the rows to prevent concurrent transactions from both
-	// seeing count=2 and proceeding to delete.
-	var count int
-	err = tx.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM webchat_topic WHERE project_id = $1 AND deleted_at IS NULL FOR UPDATE",
-		projectID).Scan(&count)
+	// Lock all active topic rows for this project to prevent concurrent deletes.
+	// We SELECT individual rows with FOR UPDATE rather than COUNT(*) because
+	// PostgreSQL does not allow FOR UPDATE with aggregate functions.
+	rows, err := tx.QueryContext(ctx,
+		"SELECT id FROM webchat_topic WHERE project_id = $1 AND deleted_at IS NULL FOR UPDATE",
+		projectID)
 	if err != nil {
-		return fmt.Errorf("webchat store: delete topic count: %w", err)
+		return fmt.Errorf("webchat store: delete topic lock: %w", err)
+	}
+	var count int
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("webchat store: delete topic scan: %w", err)
+		}
+		count++
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("webchat store: delete topic rows: %w", err)
 	}
 	if count <= 1 {
 		return fmt.Errorf("webchat store: delete topic: cannot delete the last thread")

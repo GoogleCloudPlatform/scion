@@ -912,19 +912,36 @@ func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) er
 		return fmt.Errorf("webchat store: delete topic check: %w", err)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	// Use LevelSerializable so the SQLite driver starts an IMMEDIATE
+	// transaction, preventing the TOCTOU race where two concurrent deletes
+	// both read count=2 under a DEFERRED transaction.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return fmt.Errorf("webchat store: delete topic begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Count active (non-deleted) topics for this project within the transaction.
-	var count int
-	err = tx.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM webchat_topic WHERE project_id = ? AND deleted_at IS NULL",
-		projectID).Scan(&count)
+	// Count active topics within the transaction by selecting individual rows.
+	// This mirrors the Postgres path (which uses FOR UPDATE) and avoids
+	// relying on an aggregate count that could be stale under concurrency.
+	rows, err := tx.QueryContext(ctx,
+		"SELECT id FROM webchat_topic WHERE project_id = ? AND deleted_at IS NULL",
+		projectID)
 	if err != nil {
-		return fmt.Errorf("webchat store: delete topic count: %w", err)
+		return fmt.Errorf("webchat store: delete topic lock: %w", err)
+	}
+	var count int
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("webchat store: delete topic scan: %w", err)
+		}
+		count++
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("webchat store: delete topic rows: %w", err)
 	}
 	if count <= 1 {
 		return fmt.Errorf("webchat store: delete topic: cannot delete the last thread")
