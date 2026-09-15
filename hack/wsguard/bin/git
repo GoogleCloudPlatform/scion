@@ -191,8 +191,8 @@ find_real_git() {
     [[ "$resolved" == "$self_dir" ]] && continue
     candidate="$resolved/git"
     # Not "is this me" — "is this one of us". See WSGUARD_SHIM_MARKER above.
-    is_wsguard_shim "$candidate" && continue
     if [[ -f "$candidate" && -x "$candidate" ]]; then
+      is_wsguard_shim "$candidate" && continue
       printf '%s' "$candidate"
       return 0
     fi
@@ -1126,7 +1126,7 @@ if [[ "$verdict" == "allow" ]]; then
         fi
         case "$tok" in
           --multiple) fetch_multiple=1 ;;
-          --depth|--deepen|--shallow-since|--shallow-exclude|--negotiation-tip|--upload-pack|--refmap|--server-option|--filter|--jobs|-j|-o)
+          --depth|--deepen|--shallow-since|--shallow-exclude|--negotiation-tip|--upload-pack|--refmap|--server-option|--filter|--jobs|-j|-o|--recurse-submodules)
             skip_next=1 ;;
           -*) ;;
           *) positionals+=("$tok") ;;
@@ -1231,7 +1231,12 @@ tsv_field() {
   printf '%s' "$s"
 }
 
-audit_line="$(date -u '+%Y-%m-%dT%H:%M:%SZ')	$(tsv_field "${SCION_AGENT_NAME:-${USER:-unknown}}")	$rule	$(tsv_field "$override")	$(tsv_field "git $*")"
+audit_line="$(printf '%s\t%s\t%s\t%s\t%s' \
+  "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+  "$(tsv_field "${SCION_AGENT_NAME:-${USER:-unknown}}")" \
+  "$rule" \
+  "$(tsv_field "$override")" \
+  "$(tsv_field "git $*")")"
 audit_status=0
 printf '%s\n' "$audit_line" >>"$audit_log" || audit_status=$?
 

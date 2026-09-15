@@ -133,7 +133,7 @@ while IFS= read -r tok; do
     -* | *-   ) continue ;;
   esac
   candidates+=("$tok")
-done < <(tr -c 'a-z-' '\n' < "$GIT" | sort -u)
+done < <(LC_ALL=C tr -c 'a-z-' '\n' < "$GIT" | LC_ALL=C sort -u)
 (( ${#candidates[@]} > 0 )) ||
   die_cannot_measure "candidate corpus for the hook enumeration came back empty"
 

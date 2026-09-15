@@ -1046,9 +1046,9 @@ fi
 # added later, which is how the single-entry version fell behind in the first
 # place.
 mapfile -t shadow_verbs < <(
-  /usr/bin/sed -n '/^is_watched_verb()/,/^}/p' "$SHIM_DIR/git" |
-  /usr/bin/grep -oE '^ *[a-z|-]+\)' |
-  /usr/bin/tr -d ' )' | /usr/bin/tr '|' '\n' | /usr/bin/grep -v '^$'
+  sed -n '/^is_watched_verb()/,/^}/p' "$SHIM_DIR/git" |
+  grep -oE '^ *[a-z|-]+\)' |
+  tr -d ' )' | tr '|' '\n' | grep -v '^$'
 )
 # Denominator control: an empty or implausibly short derived list would make
 # every check below vacuous, and the arm would report a clean sweep of nothing.
@@ -1110,9 +1110,9 @@ fi
 # guard permits. The converse (watched but not armed) only stops the alias walk
 # early and is harmless, so it is reported rather than failed.
 derive_verbs() { # <function-name>
-  /usr/bin/sed -n "/^$1()/,/^}/p" "$SHIM_DIR/git" |
-  /usr/bin/grep -oE '^ *[a-z|-]+\)' |
-  /usr/bin/tr -d ' )' | /usr/bin/tr '|' '\n' | /usr/bin/grep -v '^$' | LC_ALL=C sort -u
+  sed -n "/^$1()/,/^}/p" "$SHIM_DIR/git" |
+  grep -oE '^ *[a-z|-]+\)' |
+  tr -d ' )' | tr '|' '\n' | grep -v '^$' | LC_ALL=C sort -u
 }
 mapfile -t watched_set < <(derive_verbs is_watched_verb)
 mapfile -t armed_set   < <(derive_verbs armed_for)
@@ -1182,7 +1182,7 @@ fi
 # AGENTS.md as advice, and matching the whole file would let the check pass on
 # a mention that has nothing to do with the guard.
 # shellcheck disable=SC2016  # backticks are literal markdown code spans, not command substitution
-wsguard_para="$(/usr/bin/grep -F 'puts a `git` shim in front of the real git' "$AGENTS_MD")"
+wsguard_para="$(grep -F 'puts a `git` shim in front of the real git' "$AGENTS_MD")"
 if [[ -z "$wsguard_para" ]]; then
   die_cannot_evaluate "N33 could not locate the wsguard paragraph in AGENTS.md; the check would be vacuous"
 fi
@@ -1206,9 +1206,9 @@ fi
 # shellcheck disable=SC2016  # backticks are literal markdown code span delimiters
 mapfile -t doc_tokens < <(
   printf '%s' "$refused_half" |
-  /usr/bin/grep -oE '`[^`]+`' | /usr/bin/tr -d '`' |
-  /usr/bin/sed -E 's/^git +//' |
-  /usr/bin/awk '{print $1}' | LC_ALL=C sort -u
+  grep -oE '`[^`]+`' | tr -d '`' |
+  sed -E 's/^git +//' |
+  awk '{print $1}' | LC_ALL=C sort -u
 )
 if (( ${#doc_tokens[@]} == 0 )); then
   die_cannot_evaluate "N33 extracted no code spans from the AGENTS.md paragraph; the check would be vacuous"
