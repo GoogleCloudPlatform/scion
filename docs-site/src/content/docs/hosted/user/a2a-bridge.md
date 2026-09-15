@@ -93,6 +93,7 @@ Then compile the Go binary:
 make build-a2a-bridge
 
 # Or compiling manually
+mkdir -p bin
 go build -o bin/scion-a2a-bridge ./extras/scion-a2a-bridge/cmd/scion-a2a-bridge/
 ```
 
