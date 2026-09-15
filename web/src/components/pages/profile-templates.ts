@@ -390,7 +390,12 @@ export class ScionPageProfileTemplates extends LitElement {
       const resp = await apiFetch(`/api/v1/users/me/templates/${this.renameTarget.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: this.renameName.trim() }),
+        body: JSON.stringify({
+          name: this.renameName.trim(),
+          displayName: this.renameTarget.displayName || '',
+          description: this.renameTarget.description || '',
+          harness: this.renameTarget.harness || '',
+        }),
       });
       if (!resp.ok) {
         throw new Error(await extractApiError(resp, 'Failed to rename template'));
@@ -433,13 +438,17 @@ export class ScionPageProfileTemplates extends LitElement {
         </sl-button>
       </div>
 
-      ${this.loading
-        ? html`<div class="loading-spinner"><sl-spinner style="font-size: 2rem;"></sl-spinner></div>`
-        : this.error
-          ? html`<div class="error-box">${this.error}</div>`
-          : this.templates.length === 0
-            ? this.renderEmptyState()
-            : this.renderTemplateList()}
+      ${
+        this.loading
+          ? html`<div class="loading-spinner">
+              <sl-spinner style="font-size: 2rem;"></sl-spinner>
+            </div>`
+          : this.error
+            ? html`<div class="error-box">${this.error}</div>`
+            : this.templates.length === 0
+              ? this.renderEmptyState()
+              : this.renderTemplateList()
+      }
       ${this.renderCreateDialog()} ${this.renderCloneDialog()} ${this.renderRenameDialog()}
       ${this.renderDeleteDialog()}
     `;
@@ -469,19 +478,21 @@ export class ScionPageProfileTemplates extends LitElement {
                   <a href="/profile/templates/${t.id}">${t.displayName || t.name}</a>
                 </div>
                 <div class="template-meta">
-                  ${t.harness
-                    ? html`<span class="template-badge">${t.harness}</span>`
-                    : nothing}
+                  ${t.harness ? html`<span class="template-badge">${t.harness}</span>` : nothing}
                   <span class="template-badge ${t.status}">${t.status}</span>
-                  ${t.description
-                    ? html`<span>${t.description}</span>`
-                    : nothing}
+                  ${t.description ? html`<span>${t.description}</span>` : nothing}
                   <span>Updated ${this.formatDate(t.updated)}</span>
                 </div>
               </div>
               <div class="template-actions">
                 <sl-dropdown placement="bottom-end" hoist>
-                  <sl-button slot="trigger" size="small" variant="text" caret>
+                  <sl-button
+                    slot="trigger"
+                    size="small"
+                    variant="text"
+                    caret
+                    label="Template actions"
+                  >
                     <sl-icon name="three-dots-vertical"></sl-icon>
                   </sl-button>
                   <sl-menu>
