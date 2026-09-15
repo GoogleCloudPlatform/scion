@@ -478,10 +478,13 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 			sizeLimit = maxPreviewFileSize
 			sizeLimitLabel = "100MB"
 		}
+		action := "editing"
+		if mode == "preview" {
+			action = "preview"
+		}
 		if info.Size() > int64(sizeLimit) {
 			BadRequest(w, fmt.Sprintf("File too large for %s (%s). Maximum is %s.",
-				map[bool]string{true: "preview", false: "editing"}[mode == "preview"],
-				formatByteSize(info.Size()), sizeLimitLabel))
+				action, formatByteSize(info.Size()), sizeLimitLabel))
 			return
 		}
 
@@ -493,7 +496,11 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 
 		// Verify content is valid UTF-8 text
 		if !utf8.Valid(data) {
-			BadRequest(w, "File contains binary content and cannot be edited")
+			actionPast := "edited"
+			if mode == "preview" {
+				actionPast = "previewed"
+			}
+			BadRequest(w, fmt.Sprintf("File contains binary content and cannot be %s", actionPast))
 			return
 		}
 
