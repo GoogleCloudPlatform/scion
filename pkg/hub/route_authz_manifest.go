@@ -63,6 +63,11 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/auth/tokens":        "authenticated", // API token management — requires user session
 	"/api/v1/auth/tokens/":       "authenticated", // API token by ID — requires user session
 	"/api/v1/auth/invite/redeem": "authenticated", // Invite redemption — requires user session
+	"/api/v1/auth/admin-status":  "authenticated", // Admin status check — requires valid session
+	"/api/v1/auth/scopes":        "authenticated", // Auth scopes — requires valid session
+
+	// ── Authorization ──────────────────────────────────────────────────
+	"/api/v1/authz/explain": "authenticated", // Authorization explain — requires valid session
 
 	// ── Agents ─────────────────────────────────────────────────────────
 	"/api/v1/agents":  "authenticated", // List/create agents
@@ -118,6 +123,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/secrets":  "authenticated", // List/create secrets
 	"/api/v1/secrets/": "authenticated", // Secret by key
 
+	// ── Usage ──────────────────────────────────────────────────────────
+	"/api/v1/usage/me": "authenticated", // User usage — requires session
+
 	// ── Session metrics ────────────────────────────────────────────────
 	"/api/v1/metrics/session/": "authenticated", // Session metrics (DB-backed)
 
@@ -134,6 +142,8 @@ var routeAuthzManifest = map[string]string{
 	// ── User-scoped injected skills ────────────────────────────────────
 	"/api/v1/users/me/injected-skills":  "authenticated", // List/create user injected skills
 	"/api/v1/users/me/injected-skills/": "authenticated", // User injected skill by ID
+	"/api/v1/users/me/templates":        "authenticated", // User-scoped templates
+	"/api/v1/users/me/templates/":       "authenticated", // User-scoped template by ID
 
 	// ── Hub-scoped injected skills ─────────────────────────────────────
 	"/api/v1/hub/settings/injected-skills": "authenticated", // GET: authenticated (any user), PUT: admin (role check in handler)
@@ -145,7 +155,9 @@ var routeAuthzManifest = map[string]string{
 
 	// ── Broker plugin endpoints ────────────────────────────────────────
 	"/api/v1/broker/inbound":  "broker-hmac", // Broker inbound messages — broker HMAC
-	"/api/v1/broker/projects": "broker-hmac", // Broker project listing — broker HMAC
+	"/api/v1/broker/inbound/routed": "broker-hmac", // Broker inbound routed messages — broker HMAC
+	"/api/v1/broker/callback":       "broker-hmac", // Broker callback delivery — broker HMAC
+	"/api/v1/broker/projects":       "broker-hmac", // Broker project listing — broker HMAC
 
 	// ── Admin system endpoints ─────────────────────────────────────────
 	"/api/v1/admin/maintenance":                 "admin", // Maintenance mode — requires admin role
@@ -176,6 +188,25 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/diagnostics/logs/stream":     "admin", // Diagnostics log stream
 	"/api/v1/admin/diagnostics/logs":            "admin", // Diagnostics logs
 	"/api/v1/admin/health/summary":              "admin", // Health summary
+	"/api/v1/admin/messaging":                   "admin", // Admin messaging
+	"/api/v1/admin/messaging/divergence":        "admin", // Admin messaging divergence check
+	"/api/v1/admin/limits":                      "admin", // Admin limits
+	"/api/v1/admin/limits/":                     "admin", // Admin limit by ID
+	"/api/v1/admin/entitlements/":               "admin", // Admin entitlement by ID
+	"/api/v1/admin/usage":                       "admin", // Admin usage
+	"/api/v1/admin/usage/":                      "admin", // Admin usage by limit
+	"/api/v1/admin/roles":                       "admin", // Admin roles
+	"/api/v1/admin/roles/":                      "admin", // Admin role by ID
+	"/api/v1/admin/roles/export":                "admin", // Admin roles export
+	"/api/v1/admin/roles/import":                "admin", // Admin roles import
+	"/api/v1/admin/role-bindings":               "admin", // Admin role bindings
+	"/api/v1/admin/role-bindings/":              "admin", // Admin role binding by ID
+	"/api/v1/admin/permissions":                 "admin", // Admin permissions
+	"/api/v1/admin/access-constraints":          "admin", // Admin access constraints
+	"/api/v1/admin/access-constraints/":         "admin", // Admin access constraint by ID
+	"/api/v1/admin/access-constraint-previews":  "admin", // Admin access constraint previews
+	"/api/v1/admin/access-constraint-previews/": "admin", // Admin access constraint preview by ID
+	"/api/v1/admin/effective-access":            "admin", // Admin effective access
 
 	// ── Metrics dashboard (intentionally not admin-only) ───────────────
 	"/api/v1/metrics/":                "authenticated", // Metrics dashboard — any session
@@ -208,16 +239,21 @@ var routeAuthzManifest = map[string]string{
 	// ── Agent GCP identity ─────────────────────────────────────────────
 	"/api/v1/agent/gcp-token":          "agent-token", // Agent GCP access token
 	"/api/v1/agent/gcp-identity-token": "agent-token", // Agent GCP identity token
+	"POST /api/v1/agent/secrets":       "agent-token", // Agent secret fetch
 
 	// ── Public settings ────────────────────────────────────────────────
 	"/api/v1/settings/public": "authenticated", // Public settings — requires session despite name
 
-	// ── GitHub App integration ─────────────────────────────────────────
-	"/api/v1/github-app":                        "authenticated", // GitHub App management
-	"/api/v1/github-app/installations":          "authenticated", // GitHub App installations list
-	"/api/v1/github-app/installations/":         "authenticated", // GitHub App installation by ID
-	"/api/v1/github-app/installations/discover": "authenticated", // GitHub App discovery
-	"/api/v1/github-app/sync-permissions":       "authenticated", // GitHub App permission sync
+	// ── GitHub App integration (method-scoped) ────────────────────────
+	"GET /api/v1/github-app":                        "authenticated", // Get GitHub App config
+	"PUT /api/v1/github-app":                        "authenticated", // Update GitHub App config
+	"GET /api/v1/github-app/installations":          "authenticated", // List GitHub App installations
+	"POST /api/v1/github-app/installations":         "authenticated", // Create GitHub App installation
+	"GET /api/v1/github-app/installations/":         "authenticated", // Get GitHub App installation by ID
+	"PUT /api/v1/github-app/installations/":         "authenticated", // Update GitHub App installation by ID
+	"DELETE /api/v1/github-app/installations/":      "authenticated", // Delete GitHub App installation by ID
+	"POST /api/v1/github-app/installations/discover": "authenticated", // GitHub App discovery
+	"POST /api/v1/github-app/sync-permissions":      "authenticated", // GitHub App permission sync
 
 	// ── Platform account linking ───────────────────────────────────────
 	"/api/v1/telegram/link":        "authenticated", // Telegram account linking
