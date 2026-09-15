@@ -1322,26 +1322,6 @@ func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryL
 	fn()
 }
 
-// maybeWarnUnbackfilledMessages checks whether any messages lack a
-// conversation_id and, if so, logs a warning with remediation guidance.
-// It is called once at startup after migrations succeed. Errors are
-// non-fatal: a failed count is logged but does not prevent boot.
-func maybeWarnUnbackfilledMessages(ctx context.Context, s store.Store) {
-	tCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	count, err := s.CountUnbackfilledMessages(tCtx, "")
-	if err != nil {
-		slog.Warn("Failed to check for unbackfilled messages", "error", err)
-		return
-	}
-	if count == 0 {
-		return
-	}
-	slog.Warn("Messages without conversation attribution detected",
-		"count", count,
-	)
-}
-
 // maybeMigrateLegacySQLite detects a legacy raw-SQL hub.db at path and, unless
 // the operator opted out with --no-auto-migrate, upgrades it in-process to the
 // consolidated Ent schema (after taking an automatic backup). It is a no-op when
