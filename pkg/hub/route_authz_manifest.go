@@ -154,7 +154,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/brokers/":     "authenticated", // Broker by ID routes
 
 	// ── Broker plugin endpoints ────────────────────────────────────────
-	"/api/v1/broker/inbound":  "broker-hmac", // Broker inbound messages — broker HMAC
+	"/api/v1/broker/inbound":        "broker-hmac", // Broker inbound messages — broker HMAC
 	"/api/v1/broker/inbound/routed": "broker-hmac", // Broker inbound routed messages — broker HMAC
 	"/api/v1/broker/callback":       "broker-hmac", // Broker callback delivery — broker HMAC
 	"/api/v1/broker/projects":       "broker-hmac", // Broker project listing — broker HMAC
@@ -245,15 +245,15 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/settings/public": "authenticated", // Public settings — requires session despite name
 
 	// ── GitHub App integration (method-scoped) ────────────────────────
-	"GET /api/v1/github-app":                        "authenticated", // Get GitHub App config
-	"PUT /api/v1/github-app":                        "authenticated", // Update GitHub App config
-	"GET /api/v1/github-app/installations":          "authenticated", // List GitHub App installations
-	"POST /api/v1/github-app/installations":         "authenticated", // Create GitHub App installation
-	"GET /api/v1/github-app/installations/":         "authenticated", // Get GitHub App installation by ID
-	"PUT /api/v1/github-app/installations/":         "authenticated", // Update GitHub App installation by ID
-	"DELETE /api/v1/github-app/installations/":      "authenticated", // Delete GitHub App installation by ID
+	"GET /api/v1/github-app":                         "authenticated", // Get GitHub App config
+	"PUT /api/v1/github-app":                         "authenticated", // Update GitHub App config
+	"GET /api/v1/github-app/installations":           "authenticated", // List GitHub App installations
+	"POST /api/v1/github-app/installations":          "authenticated", // Create GitHub App installation
+	"GET /api/v1/github-app/installations/":          "authenticated", // Get GitHub App installation by ID
+	"PUT /api/v1/github-app/installations/":          "authenticated", // Update GitHub App installation by ID
+	"DELETE /api/v1/github-app/installations/":       "authenticated", // Delete GitHub App installation by ID
 	"POST /api/v1/github-app/installations/discover": "authenticated", // GitHub App discovery
-	"POST /api/v1/github-app/sync-permissions":      "authenticated", // GitHub App permission sync
+	"POST /api/v1/github-app/sync-permissions":       "authenticated", // GitHub App permission sync
 
 	// ── Platform account linking ───────────────────────────────────────
 	"/api/v1/telegram/link":        "authenticated", // Telegram account linking

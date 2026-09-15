@@ -63,7 +63,7 @@ MANIFEST
   registered=$(sed -n 's/.*s\.mux\.\(HandleFunc\|Handle\)(\s*"\([^"]*\)".*/\2/p' "$server_file" | sort -u)
 
   # Extract manifest routes from fixture manifest.go
-  manifested=$(sed -n 's/^	"\([^"]*\)".*/\1/p' "$manifest_file" | sort -u)
+  manifested=$(sed -n 's/^[[:blank:]]*"\([^"]*\)".*/\1/p' "$manifest_file" | sort -u)
 
   # Compute missing (in registered but not manifest) and stale (in manifest but not registered)
   missing=$(comm -23 <(echo "$registered") <(echo "$manifested"))
@@ -144,7 +144,7 @@ route_count=$(echo "$registered" | wc -l)
 
 # ── Extract manifest entries from route_authz_manifest.go ───────────────────
 # Matches lines like:   "/healthz": "public", // comment
-manifested=$(sed -n 's/^	"\([^"]*\)".*/\1/p' "$manifest_file" | sort -u)
+manifested=$(sed -n 's/^[[:blank:]]*"\([^"]*\)".*/\1/p' "$manifest_file" | sort -u)
 
 if [[ -z "$manifested" ]]; then
   msg="check-route-authz-manifest: analysed $(provenance) — no manifest entries found in $manifest_file, NOTHING WAS ANALYSED"
