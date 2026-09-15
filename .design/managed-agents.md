@@ -4,7 +4,7 @@
 
 **Problem statement.** Scion currently runs AI coding agents exclusively in containers (Docker, Podman, Kubernetes, Apple Container, Cloud Run). Each container bundles a Runtime (container lifecycle) and a Harness (LLM CLI like Claude Code or Gemini CLI). A growing class of cloud services offer fully-managed agent execution where the model, tools, sandbox, and orchestration loop are handled server-side. Scion needs to support these managed backends so that `scion start`, `scion message`, `scion stop`, and other commands work seamlessly whether the agent runs in a local container or a remote cloud service.
 
-**Design decision.** Option B: introduce `ManagedAgent` as a peer concept to the existing Runtime+Harness stack, not as a replacement. The `Manager` interface (`pkg/agent/manager.go`) is the branching point. A new `ManagedAgentManager` implements the same `Manager` interface but delegates to a cloud API client instead of a Runtime+Harness pair. Container code is untouched.
+**Design decision.** Option B: introduce `ManagedAgent` as a peer concept to the existing Runtime+Harness stack, not as a replacement. The Hub agent handlers are the live branching point: managed profiles dispatch directly to a `ManagedAgentBackend`, while container agents continue through the Runtime Broker. Container code is untouched.
 
 **First backend.** Google Managed Agents API (Gemini API) at `generativelanguage.googleapis.com`. The Antigravity agent is the base agent.
 
@@ -27,16 +27,16 @@ Template (scion-agent.yaml)
      -> Harness (claude/gemini/generic)
 ```
 
-The new dispatch chain for managed agents:
+The live dispatch chain for managed agents:
 
 ```
-Template (scion-agent.yaml with service: field)
-  -> ManagedAgentManager (implements Manager)
+Agent create request (profile: managed-agents)
+  -> Hub agent handlers
      -> ManagedAgentBackend (interface)
         -> GoogleManagedAgentBackend (first impl)
 ```
 
-Both `AgentManager` and `ManagedAgentManager` implement the same `Manager` interface defined in `pkg/agent/manager.go`. CLI commands and the broker both talk to `Manager` -- they do not need to know whether the agent is containerized or managed.
+The Hub detects the managed profile before broker dispatch and handles that lifecycle directly. Container agents continue through the existing `Manager` and Runtime Broker path.
 
 ### 2.2 Package layout
 
@@ -47,7 +47,8 @@ pkg/
     run.go                  # AgentManager.Start (UNCHANGED)
     managed_manager.go      # NEW: ManagedAgentManager struct + Manager impl
     managed_state.go        # NEW: ManagedAgentState persistence
-    manager_factory.go      # NEW: NewManagerForConfig factory
+  hub/
+    handlers_managed_agents.go # Hub-direct managed backend selection and lifecycle
   managedagent/
     backend.go              # NEW: ManagedAgentBackend interface
     types.go                # NEW: Backend-agnostic types (InteractionStream, etc.)
@@ -239,39 +240,13 @@ func (m *ManagedAgentManager) Watch(ctx context.Context, agentID string) (<-chan
 func (m *ManagedAgentManager) Close() { ... }
 ```
 
-### 2.4 How the Manager interface branches
+### 2.4 How execution branches
 
-The branching happens at construction time, not dispatch time. A factory function inspects the resolved template config:
-
-```go
-// pkg/agent/manager_factory.go
-
-package agent
-
-import (
-    "github.com/GoogleCloudPlatform/scion/pkg/api"
-    "github.com/GoogleCloudPlatform/scion/pkg/managedagent"
-    "github.com/GoogleCloudPlatform/scion/pkg/managedagent/google"
-    "github.com/GoogleCloudPlatform/scion/pkg/runtime"
-)
-
-// NewManagerForProfile returns the appropriate Manager implementation
-// based on the broker profile selected at agent creation time.
-// Managed agent config (API key, base agent) comes from Scion settings, not templates.
-func NewManagerForProfile(rt runtime.Runtime, profile string, settings *api.Settings, stateDir string) Manager {
-    switch profile {
-    case "managed-agents":
-        cfg := settings.ManagedAgents.Google
-        backend := google.NewBackend(google.BackendConfig{
-            APIKey:    cfg.APIKey,
-            BaseAgent: cfg.BaseAgent,
-        })
-        return NewManagedAgentManager(backend, stateDir)
-    default:
-        return NewManager(rt)
-    }
-}
-```
+The Hub branches before broker dispatch. `handlers_agents_core.go` recognizes the
+`managed-agents` profile and calls `managedAgentCreate`; the implementation in
+`handlers_managed_agents.go` lazily constructs the configured backend and handles
+managed lifecycle operations directly. All other profiles continue through the
+ordinary Runtime Broker path.
 
 ---
 
@@ -646,12 +621,12 @@ Custom `net/http` wrapper for v1. The API surface is small (~8 endpoints), auth 
 
 | File | Role | Change |
 |------|------|--------|
-| `pkg/agent/manager.go` | Manager interface | Add factory function |
+| `pkg/agent/manager.go` | Manager interface | Container manager contract |
 | `pkg/api/types.go` | Core types | Add ManagedAgentSettings (in settings, not ScionConfig) |
 | `pkg/agent/run.go` | AgentManager.Start | UNCHANGED |
 | `pkg/agent/managed_manager.go` | ManagedAgentManager | NEW |
 | `pkg/agent/managed_state.go` | State persistence | NEW |
-| `pkg/agent/manager_factory.go` | Manager factory | NEW |
+| `pkg/hub/handlers_managed_agents.go` | Hub-direct managed backend routing | NEW |
 | `pkg/managedagent/backend.go` | Backend interface | NEW |
 | `pkg/managedagent/types.go` | Backend types | NEW |
 | `pkg/managedagent/google/client.go` | Google HTTP client | NEW |
