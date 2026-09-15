@@ -85,3 +85,4 @@ pr-*-review*.md
 __pycache__/
 *.pyc
 /checksecuritymarkergates
+extras/scion-broker-log/scion-broker-log
