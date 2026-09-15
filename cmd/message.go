@@ -337,7 +337,7 @@ Examples:
 
 		// Conversation-reference messages: resolve and send via Hub
 		if convRef != nil {
-			return sendMessageViaConversation(hubCtx, convRef, message, msgInterrupt, msgWake)
+			return sendMessageViaConversation(hubCtx, convRef, message, msgInterrupt, msgWake, msgAttach)
 		}
 
 		// Group-targeted messages: fan out to each recipient
@@ -417,13 +417,13 @@ func resolveSenderIdentity(hubCtx *HubContext) string {
 }
 
 // buildStructuredMessage constructs a StructuredMessage from CLI parameters.
-func buildStructuredMessage(sender, recipient, message string) *messages.StructuredMessage {
+func buildStructuredMessage(sender, recipient, message string, attachments []string) *messages.StructuredMessage {
 	msg := messages.NewInstruction(sender, recipient, message)
 	msg.Plain = msgPlain
 	msg.Raw = msgRaw
 	msg.Urgent = msgInterrupt
-	if len(msgAttach) > 0 {
-		msg.Attachments = msgAttach
+	if len(attachments) > 0 {
+		msg.Attachments = attachments
 	}
 	msg.Channel = msgChannel
 	msg.ThreadID = msgThreadID
@@ -459,7 +459,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	msg := buildStructuredMessage(sender, "agent:"+agentName, message)
+	msg := buildStructuredMessage(sender, "agent:"+agentName, message, msgAttach)
 	// Validate through the new envelope choke point (Phase 7, AC-8).
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
@@ -501,7 +501,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 //   - Human CLI context: only @agent is supported. The message is sent via
 //     SendStructuredMessage; the server derives the conversation from
 //     sender/recipient principals (DEF-138 Rule 3).
-func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, message string, interrupt bool, wake bool) error {
+func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, message string, interrupt bool, wake bool, attachments []string) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
@@ -529,7 +529,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		// and the orphan rows.
 		if ref.Kind == messaging.RefAgent {
 			sender := "agent:" + senderAgent
-			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message)
+			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments)
 			if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 				return fmt.Errorf("message validation failed: %w", err)
 			}
@@ -547,6 +547,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			Type:            "instruction",
 			Urgent:          interrupt,
 			ConversationRef: ref.Raw,
+			Attachments:     attachments,
 		}
 		if ref.Kind == messaging.RefEmail {
 			outMsg.Recipient = "user:" + ref.Value
@@ -554,13 +555,14 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 
 		// DEF-51 principle: the validated probe must match the sent envelope
 		// by construction. Fields the outbound path does not send (Channel,
-		// ThreadID, Attachments) are zero in both outMsg and probe.
+		// ThreadID) are zero in both outMsg and probe.
 		probe := &messages.StructuredMessage{
-			Version:   messages.Version,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-			Sender:    senderAgent,
-			Msg:       outMsg.Msg,
-			Type:      outMsg.Type,
+			Version:     messages.Version,
+			Timestamp:   time.Now().UTC().Format(time.RFC3339),
+			Sender:      senderAgent,
+			Msg:         outMsg.Msg,
+			Type:        outMsg.Type,
+			Attachments: attachments,
 		}
 		if ref.Kind == messaging.RefEmail {
 			probe.Recipient = outMsg.Recipient
@@ -592,7 +594,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	// message endpoint. The server derives the conversation from the
 	// sender/recipient principals (DEF-138 Rule 3).
 	sender := resolveSenderIdentity(hubCtx)
-	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message)
+	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments)
 	if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
@@ -729,7 +731,7 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 			switch recip.Kind {
 			case messages.RecipientAgent:
 				slug := api.Slugify(recip.Name)
-				msg := buildStructuredMessage(sender, "agent:"+slug, message)
+				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach)
 				msg.Type = messages.TypeGroupSet
 				msg.Recipients = recipientsStr
 				msg.Metadata = map[string]string{"group_id": groupID}
