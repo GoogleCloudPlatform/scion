@@ -1147,6 +1147,9 @@ func (r *CloudRunSandboxRuntime) GetLogs(ctx context.Context, id string) (string
 
 	var reason string
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		// Preserve the tmux failure for diagnostics. The operator gets
 		// the fallback content (better than empty), but the exec error
 		// is recorded so it can be found during debugging.
