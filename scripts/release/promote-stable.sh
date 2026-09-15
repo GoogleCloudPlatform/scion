@@ -119,13 +119,8 @@ MINOR="${BRANCH_VERSION#*.}"
 # --- Find the latest preview tag for this release -------------------------
 
 LATEST_PREVIEW_TAG=""
-HIGHEST_PREVIEW=0
 for tag in $(git tag -l --sort=v:refname "v${MAJOR}.${MINOR}.*-preview.*"); do
-  preview_num="${tag##*-preview.}"
-  if [ "$preview_num" -gt "$HIGHEST_PREVIEW" ] 2>/dev/null; then
-    HIGHEST_PREVIEW="$preview_num"
-    LATEST_PREVIEW_TAG="$tag"
-  fi
+  LATEST_PREVIEW_TAG="$tag"
 done
 
 if [ -z "$LATEST_PREVIEW_TAG" ]; then

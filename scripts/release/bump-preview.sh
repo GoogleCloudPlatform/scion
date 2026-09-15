@@ -124,26 +124,22 @@ MINOR="${BRANCH_VERSION#*.}"
 
 # --- Find the highest preview tag for this release ------------------------
 
-HIGHEST_PREVIEW=0
-HIGHEST_PREVIEW_TAG=""
+LATEST_PREVIEW_TAG=""
 for tag in $(git tag -l --sort=v:refname "v${MAJOR}.${MINOR}.*-preview.*"); do
-  # Extract preview number: vX.Y.Z-preview.N -> N
-  preview_num="${tag##*-preview.}"
-  if [ "$preview_num" -gt "$HIGHEST_PREVIEW" ] 2>/dev/null; then
-    HIGHEST_PREVIEW="$preview_num"
-    HIGHEST_PREVIEW_TAG="$tag"
-  fi
+  LATEST_PREVIEW_TAG="$tag"
 done
 
-if [ "$HIGHEST_PREVIEW" -eq 0 ]; then
+if [ -z "$LATEST_PREVIEW_TAG" ]; then
   die "no existing preview tags found for ${RELEASE_BRANCH}. Use cut-preview.sh to create the first one."
 fi
 
+# Extract preview number from the latest tag for incrementing
+HIGHEST_PREVIEW="${LATEST_PREVIEW_TAG##*-preview.}"
 NEXT_PREVIEW=$((HIGHEST_PREVIEW + 1))
-PREVIEW_BASE="${HIGHEST_PREVIEW_TAG%-preview.*}"  # vX.Y.Z
+PREVIEW_BASE="${LATEST_PREVIEW_TAG%-preview.*}"  # vX.Y.Z
 NEW_TAG="${PREVIEW_BASE}-preview.${NEXT_PREVIEW}"
 BRANCH_HEAD="$(git rev-parse HEAD)"
-PREV_TAG="${HIGHEST_PREVIEW_TAG}"
+PREV_TAG="${LATEST_PREVIEW_TAG}"
 
 # --- Confirm what we will do ----------------------------------------------
 
