@@ -363,14 +363,17 @@ Two independent chains:
 - **Conversation**: `previous_interaction_id` links context
 - **Environment**: `environment_id` links sandbox state
 
+The Hub persists only the current provider state on the Agent record; it does
+not maintain a separate local interaction-chain document:
+
 ```json
 {
-  "cloud_agent_id": "agent_abc123",
-  "latest_interaction_id": "int_xyz789",
-  "latest_environment_id": "env_def456",
-  "interaction_chain": ["int_001", "int_002", "int_xyz789"],
-  "created_at": "2026-06-28T10:00:00Z",
-  "updated_at": "2026-06-28T10:05:00Z"
+  "runtime": "managed:google",
+  "annotations": {
+    "scion.dev/cloud-provider": "google",
+    "scion.dev/interaction-id": "int_xyz789",
+    "scion.dev/environment-id": "env_def456"
+  }
 }
 ```
 
