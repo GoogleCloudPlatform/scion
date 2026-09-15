@@ -99,7 +99,7 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	// warnings if the check ran on the merged koanf instance.
 	{
 		var probe Settings
-		unmarshalWithUnusedKeyCheck(k, &probe, "settings")
+		_ = unmarshalWithUnusedKeyCheck(k, &probe, "settings")
 	}
 
 	// 5. Load environment variables (SCION_ prefix, top-level only)

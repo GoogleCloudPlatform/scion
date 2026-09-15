@@ -885,7 +885,7 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 	// produce false-positive warnings if the check ran after merging env vars.
 	{
 		var probe GlobalConfig
-		unmarshalWithUnusedKeyCheck(k, &probe, "server config")
+		_ = unmarshalWithUnusedKeyCheck(k, &probe, "server config")
 	}
 
 	// 4. Load environment variables (SCION_SERVER_ prefix)
