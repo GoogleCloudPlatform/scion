@@ -584,16 +584,6 @@ func TestCanDelegate_ScheduledDispatch_FireTimeRecheck(t *testing.T) {
 	assert.Contains(t, err.Error(), userID, "error should reference the user")
 }
 
-// --- Part D.6: Policy authoring tests ---
-
-func TestCanDelegate_Policy_NonSuperAdminDenied(t *testing.T) {
-	// CO1: Policy grant type removed. Test retained as shell.
-}
-
-func TestCanDelegate_Policy_SuperAdminAllowed(t *testing.T) {
-	// CO1: Policy grant type removed. Test retained as shell.
-}
-
 // --- Part D.7: Phase 1E deferred item tests ---
 
 func TestIsProjectOwnerOrAdmin_NoRoleBinding_ReturnsFalse(t *testing.T) {

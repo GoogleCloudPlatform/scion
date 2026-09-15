@@ -849,10 +849,3 @@ func TestRequireAdmin_DenialReasons(t *testing.T) {
 		})
 	}
 }
-
-func TestRequireAdmin_ScopedAdminForbiddenAtAllRoleOnlyGates(t *testing.T) {
-	// CO1: Policy API handlers now return 410 Gone. Scoped-admin restriction
-	// for policies is moot because the entire policy API was removed. The
-	// route-guard tests cover scoped-admin rejection for the remaining
-	// admin-only endpoints (roles, skill registry). Test retained as shell.
-}
