@@ -462,6 +462,63 @@ func TestProjectWorkspaceDownload_FormatJSON_TooLarge(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "too large")
 }
 
+func TestProjectWorkspaceDownload_FormatJSON_PreviewMode(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Download JSON Preview")
+
+	// Write a file slightly over 1MB (over edit limit, under preview limit)
+	content := make([]byte, maxEditableFileSize+1)
+	for i := range content {
+		content[i] = 'A'
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "large.txt"), content, 0644))
+
+	// Without mode=preview, file over 1MB should be rejected
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files/large.txt?format=json", project.ID), nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "too large")
+	assert.Contains(t, rec.Body.String(), "editing")
+
+	// With mode=preview, file over 1MB but under 100MB should succeed
+	rec = doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files/large.txt?format=json&mode=preview", project.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "large.txt", resp["path"])
+	assert.Equal(t, "utf-8", resp["encoding"])
+}
+
+func TestProjectWorkspaceDownload_FormatJSON_PreviewMode_TooLarge(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Download JSON Preview Big")
+
+	// Write a file over 100MB (over preview limit) — use a sparse approach
+	// by creating the file and truncating to the desired size
+	f, err := os.Create(filepath.Join(workspacePath, "huge.txt"))
+	require.NoError(t, err)
+	require.NoError(t, f.Truncate(int64(maxPreviewFileSize+1)))
+	require.NoError(t, f.Close())
+
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files/huge.txt?format=json&mode=preview", project.ID), nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "too large")
+	assert.Contains(t, rec.Body.String(), "preview")
+}
+
+func TestProjectWorkspaceDownload_FormatJSON_PreviewMode_BinaryRejected(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Download JSON Preview Bin")
+
+	// Write binary content (invalid UTF-8)
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "data.bin"), []byte{0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF, 0xFE}, 0644))
+
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files/data.bin?format=json&mode=preview", project.ID), nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "binary")
+	assert.Contains(t, rec.Body.String(), "previewed")
+}
+
 // ============================================================================
 // Archive Download Tests
 // ============================================================================
