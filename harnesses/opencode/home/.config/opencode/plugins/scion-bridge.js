@@ -18,6 +18,16 @@
 
 import { execSync } from 'node:child_process';
 
+const HOOK_TIMEOUT_MS = 5000;
+const MESSAGE_UPDATE_DEBOUNCE_MS = 500;
+
+function getErrorString(err, defaultString = "") {
+  if (!err) return defaultString;
+  if (typeof err === 'string') return err;
+  if (err.message) return err.message;
+  return JSON.stringify(err);
+}
+
 function emitHookEvent(eventName, data) {
   try {
     const payload = JSON.stringify({
@@ -27,7 +37,7 @@ function emitHookEvent(eventName, data) {
     execSync('sciontool hook --dialect=opencode', {
       input: payload,
       stdio: ['pipe', 'ignore', 'ignore'],
-      timeout: 5000,
+      timeout: HOOK_TIMEOUT_MS,
     });
   } catch (err) {
     // Best-effort — never crash the plugin
@@ -60,7 +70,7 @@ export const ScionBridge = async (ctx) => {
       emitHookEvent("tool.execute.after", {
         tool_name: input?.name || input?.tool || "unknown",
         success: !output?.error,
-        error: output?.error || "",
+        error: getErrorString(output?.error),
       });
     },
     "session.idle": async () => {
@@ -68,7 +78,7 @@ export const ScionBridge = async (ctx) => {
     },
     "message.updated": async (input) => {
       const now = Date.now();
-      if (now - lastMessageEmit < 500) return;
+      if (now - lastMessageEmit < MESSAGE_UPDATE_DEBOUNCE_MS) return;
       lastMessageEmit = now;
       emitHookEvent("message.updated", {
         assistant_text: input?.content || input?.text || "",
@@ -84,7 +94,7 @@ export const ScionBridge = async (ctx) => {
     },
     "session.error": async (input) => {
       emitHookEvent("session.error", {
-        error: input?.error || "Unknown error",
+        error: getErrorString(input?.error, "Unknown error"),
         reason: "error",
       });
     },
