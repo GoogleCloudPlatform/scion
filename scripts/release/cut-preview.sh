@@ -40,10 +40,10 @@ fi
 
 # --- Helpers --------------------------------------------------------------
 
-die() { printf "${RED}error:${RESET} %s\n" "$1" >&2; exit 1; }
-info() { printf "${BOLD}%s${RESET}\n" "$1"; }
-success() { printf "${GREEN}%s${RESET}\n" "$1"; }
-dry_run_msg() { printf "${YELLOW}[dry-run]${RESET} %s\n" "$1"; }
+die() { printf '%b%s%b\n' "${RED}" "error: $1" "${RESET}" >&2; exit 1; }
+info() { printf '%b%s%b\n' "${BOLD}" "$1" "${RESET}"; }
+success() { printf '%b%s%b\n' "${GREEN}" "$1" "${RESET}"; }
+dry_run_msg() { printf '%b%s%b\n' "${YELLOW}" "[dry-run] $1" "${RESET}"; }
 
 # --- Parse flags ----------------------------------------------------------
 
@@ -79,13 +79,14 @@ if [ "$CURRENT_BRANCH" != "main" ]; then
 fi
 
 info "Fetching latest from origin..."
+git fetch origin
 git fetch origin --tags
 
 # --- Determine next version -----------------------------------------------
 
 # Find the highest existing release/vX.Y branch by inspecting remote refs.
 HIGHEST_MINOR=""
-for ref in $(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/release/v*' | sort -V); do
+for ref in $(git for-each-ref --sort=v:refname --format='%(refname:short)' 'refs/remotes/origin/release/v*'); do
   # Extract the version part: origin/release/vX.Y -> X.Y
   version="${ref#origin/release/v}"
   HIGHEST_MINOR="$version"
@@ -105,6 +106,18 @@ RELEASE_VERSION="v${NEXT_MAJOR}.${NEXT_MINOR}"
 BRANCH_NAME="release/${RELEASE_VERSION}"
 TAG_NAME="${RELEASE_VERSION}.0-preview.1"
 MAIN_HEAD="$(git rev-parse HEAD)"
+
+# --- Pre-existence checks -------------------------------------------------
+
+# Check if branch already exists
+if git rev-parse "origin/${BRANCH_NAME}" >/dev/null 2>&1; then
+  die "branch '${BRANCH_NAME}' already exists on origin"
+fi
+
+# Check if tag already exists
+if git rev-parse "${TAG_NAME}" >/dev/null 2>&1; then
+  die "tag '${TAG_NAME}' already exists"
+fi
 
 # --- Confirm what we will do ----------------------------------------------
 

@@ -43,10 +43,10 @@ fi
 
 # --- Helpers --------------------------------------------------------------
 
-die() { printf "${RED}error:${RESET} %s\n" "$1" >&2; exit 1; }
-info() { printf "${BOLD}%s${RESET}\n" "$1"; }
-success() { printf "${GREEN}%s${RESET}\n" "$1"; }
-dry_run_msg() { printf "${YELLOW}[dry-run]${RESET} %s\n" "$1"; }
+die() { printf '%b%s%b\n' "${RED}" "error: $1" "${RESET}" >&2; exit 1; }
+info() { printf '%b%s%b\n' "${BOLD}" "$1" "${RESET}"; }
+success() { printf '%b%s%b\n' "${GREEN}" "$1" "${RESET}"; }
+dry_run_msg() { printf '%b%s%b\n' "${YELLOW}" "[dry-run] $1" "${RESET}"; }
 
 # --- Parse flags ----------------------------------------------------------
 
@@ -87,6 +87,7 @@ git remote get-url origin >/dev/null 2>&1 || die "no 'origin' remote configured"
 # --- Fetch latest ---------------------------------------------------------
 
 info "Fetching latest from origin..."
+git fetch origin
 git fetch origin --tags
 
 # --- Determine release branch --------------------------------------------
@@ -94,7 +95,7 @@ git fetch origin --tags
 if [ -z "$RELEASE_BRANCH" ]; then
   # Auto-detect: pick the highest release/vX.Y from remote refs.
   RELEASE_BRANCH=""
-  for ref in $(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/release/v*' | sort -V); do
+  for ref in $(git for-each-ref --sort=v:refname --format='%(refname:short)' 'refs/remotes/origin/release/v*'); do
     RELEASE_BRANCH="${ref#origin/}"
   done
   if [ -z "$RELEASE_BRANCH" ]; then
@@ -124,11 +125,13 @@ MINOR="${BRANCH_VERSION#*.}"
 # --- Find the highest preview tag for this release ------------------------
 
 HIGHEST_PREVIEW=0
-for tag in $(git tag -l "v${MAJOR}.${MINOR}.*-preview.*" | sort -V); do
+HIGHEST_PREVIEW_TAG=""
+for tag in $(git tag -l --sort=v:refname "v${MAJOR}.${MINOR}.*-preview.*"); do
   # Extract preview number: vX.Y.Z-preview.N -> N
   preview_num="${tag##*-preview.}"
   if [ "$preview_num" -gt "$HIGHEST_PREVIEW" ] 2>/dev/null; then
     HIGHEST_PREVIEW="$preview_num"
+    HIGHEST_PREVIEW_TAG="$tag"
   fi
 done
 
@@ -137,9 +140,10 @@ if [ "$HIGHEST_PREVIEW" -eq 0 ]; then
 fi
 
 NEXT_PREVIEW=$((HIGHEST_PREVIEW + 1))
-NEW_TAG="v${MAJOR}.${MINOR}.0-preview.${NEXT_PREVIEW}"
+PREVIEW_BASE="${HIGHEST_PREVIEW_TAG%-preview.*}"  # vX.Y.Z
+NEW_TAG="${PREVIEW_BASE}-preview.${NEXT_PREVIEW}"
 BRANCH_HEAD="$(git rev-parse HEAD)"
-PREV_TAG="v${MAJOR}.${MINOR}.0-preview.${HIGHEST_PREVIEW}"
+PREV_TAG="${HIGHEST_PREVIEW_TAG}"
 
 # --- Confirm what we will do ----------------------------------------------
 
