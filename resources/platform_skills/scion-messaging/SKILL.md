@@ -176,7 +176,7 @@ An agent that omits the conversation ID sends a proactive DM instead of a reply 
 `@<agent-name>`) opens a *direct* conversation with that principal — on a
 different surface/thread than a group conversation you were addressed in. If
 you received a message with `conversation.kind: "group"` and you reply with
-`@<the-sender's-email>` instead of `conv:<id>`, your reply goes to that user's
+`@<sender-email>` instead of `conv:<id>`, your reply goes to that user's
 native DM, not back into the group conversation they were watching — to them,
 it looks exactly like you never replied. This is the single most common
 addressing mistake: when in doubt about how to reply, use `conv:<id>` from the
