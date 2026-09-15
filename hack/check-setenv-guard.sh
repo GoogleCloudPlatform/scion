@@ -57,24 +57,28 @@ fi
 # different token in the same file will still be caught.
 allowed_paths=(
   # Dev server credential injection — sets SCION_DEV_TOKEN for the local dev loop.
-  "^cmd/server_foreground.go:.*SCION_DEV_TOKEN"
+  "^cmd/server_foreground\.go:.*SCION_DEV_TOKEN"
 
   # Dev server credential injection — sets SCION_AUTH_TOKEN for the local dev loop.
-  "^cmd/server_foreground.go:.*SCION_AUTH_TOKEN"
+  "^cmd/server_foreground\.go:.*SCION_AUTH_TOKEN"
 
   # Credential helper — refreshes GITHUB_TOKEN for gh CLI subprocess calls.
-  "^cmd/sciontool/commands/credential_helper.go:.*GITHUB_TOKEN"
+  "^cmd/sciontool/commands/credential_helper\.go:.*GITHUB_TOKEN"
 
   # GH CLI wrapper — injects GH_TOKEN before exec'ing gh.
-  "^cmd/sciontool/commands/gh_wrapper.go:.*GH_TOKEN"
+  "^cmd/sciontool/commands/gh_wrapper\.go:.*GH_TOKEN"
 
   # Hub client — refreshes GITHUB_TOKEN for API calls.
-  "^pkg/sciontool/hub/client.go:.*GITHUB_TOKEN"
+  "^pkg/sciontool/hub/client\.go:.*GITHUB_TOKEN"
 )
 
-allowlist="$(printf '%s\n' "${allowed_paths[@]}" | paste -sd '|' -)"
+allowlist="$(printf '%s\n' "${allowed_paths[@]}" | grep -v '^$' | paste -sd '|' -)"
 
-violations="$(echo "$candidates" | grep -Ev "$allowlist" || true)"
+if [[ -n "$allowlist" ]]; then
+  violations="$(printf '%s\n' "$candidates" | grep -Ev "$allowlist" || true)"
+else
+  violations="$candidates"
+fi
 if [[ -n "$violations" ]]; then
   echo "check-setenv-guard: analysed ${sha}" >&2
   echo >&2
