@@ -79,6 +79,13 @@ The stored MIME type is derived from the file's content plus its extension; the 
 #### Auth (`/api/v1/auth`)
 - `GET /scopes`: Dynamically discover all available User Access Token (UAT) scopes and their descriptions.
 
+#### Users (`/api/v1/users`)
+- `GET /`: List users (admin only).
+- `GET /:id`: Get user details and capabilities.
+- `PATCH /:id`: Update user attributes (e.g., role).
+- `DELETE /:id`: Delete a user.
+- `POST /:id/revoke-sessions`: Revoke all active sessions for a user (admin only). Increments the user's session generation counter, causing every existing cookie-based session to be invalidated on the next request. The affected user is forced to re-authenticate.
+
 #### Admin (`/api/v1/admin`)
 - `GET /roles`: List Role Definitions.
 - `POST /roles`, `PUT /roles/:id`, `DELETE /roles/:id`: Manage Role Definitions (requires appropriate administrative capabilities). Note that `updateRoleDefinition` includes a `CanDelegate` check to prevent privilege escalation.

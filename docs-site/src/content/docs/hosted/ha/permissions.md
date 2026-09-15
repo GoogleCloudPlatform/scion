@@ -274,7 +274,7 @@ When an agent creates a child agent (for example, to delegate a sub-task), the s
 The Scion Web Dashboard includes a centralized **Admin Management Suite** (accessible to users with appropriate administrative capabilities) that provides dedicated views for access control and infrastructure management:
 
 - **Server Configuration Editor**: A full-featured settings editor at `/admin/server-config`. This allows administrators to view and modify the global `settings.yaml` through the Web UI with support for tabbed navigation, sensitive field masking, and hot-reloading of key settings like log levels, telemetry defaults, and admin emails.
-- **Users List**: View all authenticated users, search for specific accounts, track "Last Seen" timestamps, and manage their system-wide roles (e.g., granting `hub-admin` access).
+- **Users List**: View all authenticated users, search for specific accounts, track "Last Seen" timestamps, and manage their system-wide roles (e.g., granting `hub-admin` access). Administrators can also **revoke all active sessions** for a user, forcing immediate re-authentication across all devices (see [Session Revocation](#per-user-session-revocation) below).
 - **Groups Management**: Full-featured admin UI/UX for creating and managing custom membership groups. Administrators can easily define hierarchical collections of users and manage their membership using a human-friendly editor with user search autocomplete. Group creation is strictly authorized, and the `project:` prefix is a reserved slug. To prevent slug collisions, colliding group identifiers require a system marker combined with the `ProjectID`. Membership lookups rely on canonical identity resolution. This enables policy-based authorization where permissions can be granted to an entire team at once, while strictly enforcing group ownership and authorization rules.
 - **Access Boundaries**: Full-featured administrative suite for defining and managing monotonic permission ceilings (AccessConstraints) via the Hub Admin UI.
   - **Inventory Page**: Provides a centralized view of all active and disabled access boundaries configured on the Hub.
@@ -291,3 +291,36 @@ The Scion Web Dashboard includes a centralized **Admin Management Suite** (acces
 - **Maintenance Mode**: Administrators can toggle maintenance mode for the Hub and Web servers directly from the UI to facilitate safe infrastructure updates.
 
 By leveraging these administrative views, Platform Ops can efficiently map their organization's structure directly into Scion's Principal and Policy hierarchy.
+
+## Per-User Session Revocation
+
+Administrators can force any user to re-authenticate by revoking all of their active sessions. This is useful when a user's credentials may be compromised, when an account needs to be immediately locked out, or after a security incident.
+
+### How It Works
+
+Each user record carries a `session_generation` counter. When an admin revokes a user's sessions, the counter is incremented. On every subsequent web request, the Hub middleware compares the counter stored in the user's session cookie against the database value. If the database value is higher, the session is invalidated immediately and the user is redirected to re-authenticate.
+
+### Usage
+
+- **Web Dashboard**: On the Admin Users page, open the actions menu for a user and select **Revoke Sessions**. A confirmation dialog appears; on confirmation the revocation takes effect immediately.
+- **API**: `POST /api/v1/users/:id/revoke-sessions` (requires admin privileges).
+
+Session revocation affects cookie-based web sessions only. Agent tokens and User Access Tokens (UATs) are managed through their own revocation mechanisms.
+
+## Break-Glass Admin Recovery
+
+If all admin users have been removed or an organization has lost administrative access to the Hub, the `scion admin promote` CLI command provides an emergency recovery path. This command connects directly to the database — bypassing the running Hub server — and promotes an existing user to the admin role.
+
+```bash
+scion admin promote --email user@example.com
+```
+
+The target user must already exist in the database. See the [CLI Reference](/scion/reference/cli/#scion-admin-promote) for the full command syntax and flags.
+
+:::caution[Break-glass only]
+This command modifies the database directly. Use it only when normal admin access through the Hub API or Web Dashboard is unavailable.
+:::
+
+### AdminEmails and UI-Promoted Admins
+
+The `admin_emails` server setting is additive only: users listed in `admin_emails` are promoted to admin on login, but the list never demotes or overwrites a role that was set through the Web Dashboard (e.g., a user promoted to admin via the Users list). Changing a user's role is always an explicit admin action — removing an email from `admin_emails` does not revoke admin access that was granted through the UI.

@@ -360,6 +360,15 @@ Scion supports native GitHub App integration for secure, automated agent authent
 Projects can be linked to specific GitHub App installations. The system automatically associates GitHub App installations at project creation time, streamlining the authentication flow for private repositories. Project settings provide visual indicators and permission badges for real-time feedback on integration health.
 
 
+## Session Revocation
+
+Administrators can force any user to re-authenticate by revoking all of their active web sessions. This is useful for incident response, credential compromise, or when offboarding a user who is still logged in.
+
+- **Web Dashboard**: On the Admin Users page, open the actions menu for a user and select **Revoke Sessions**.
+- **API**: `POST /api/v1/users/:id/revoke-sessions` (requires admin privileges).
+
+Revocation takes effect immediately — the user is redirected to the login page on their next request. Agent tokens and User Access Tokens (UATs) are unaffected; revoke those through their own mechanisms ([UATs](/scion/hosted/user/personal-access-tokens/), agent credential reset via [`scion reset-auth`](/scion/reference/cli/#scion-reset-auth)).
+
 ## CLI Authentication
 
 Users can authenticate the CLI against a Scion Hub using the following flow:

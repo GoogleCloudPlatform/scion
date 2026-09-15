@@ -531,6 +531,42 @@ Manages Scion server components (Hub and Broker).
         - `--checkpoint <string>`: Resume from this pagination cursor (project-scoped).
         - `--db <string>`: Database DSN (overrides configuration/environment DSN).
 
+## Administration
+
+### `scion admin`
+
+Administrative operations for emergency recovery scenarios. These commands connect directly to the database, bypassing the running server. They are intended for break-glass situations where normal admin access has been lost.
+
+### `scion admin promote`
+
+Promotes an existing user to the admin role by connecting directly to the database, bypassing the running Hub server. This is a break-glass recovery command for situations where all admin users have been removed or an organization has lost admin access.
+
+The target user must already exist in the database — this command does not create new users.
+
+**Usage:** `scion admin promote [flags]`
+
+- **Flags:**
+    - `--email <string>`: Email address of the user to promote (required).
+    - `--db <string>`: Database URL or path (overrides the config-derived connection). Accepts Postgres connection strings (`postgres://...`) or SQLite file paths.
+    - `--config <string>`: Path to server configuration file (defaults to the standard `settings.yaml` resolution).
+
+**Examples:**
+
+```bash
+# Promote using the default config-derived database connection
+scion admin promote --email user@example.com
+
+# Promote with an explicit Postgres database URL
+scion admin promote --email user@example.com --db postgres://user:pass@host:5432/db
+
+# Promote using a specific config file
+scion admin promote --email user@example.com --config /path/to/server.yaml
+```
+
+:::caution[Break-glass only]
+This command modifies the database directly. Use it only when normal admin access through the Hub API or Web Dashboard is unavailable. Under normal operation, manage admin roles via the Web Dashboard Users list or the `admin_emails` server setting.
+:::
+
 ## Miscellaneous
 
 ### `scion doctor`
