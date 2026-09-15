@@ -83,6 +83,9 @@ jobs:
       - name: Check Compatibility Literals
         run: make compat-literals
 
+      - name: Check Setenv Guard
+        run: make check-setenv-guard
+
       - name: Check Authorization Guards
         run: |
           # Invoked directly rather than via `make check-authz-guards`: GNU make
