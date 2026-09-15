@@ -21,7 +21,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -36,8 +35,7 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 		return nil
 	}
 
-	stor := s.GetStorage()
-	if stor == nil {
+	if s.GetStorage() == nil {
 		s.resourceLog.Warn("harness config bootstrap: no storage backend configured, skipping")
 		return nil
 	}
@@ -73,14 +71,14 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 		}
 
 		if existing == nil {
-			if err := s.bootstrapSingleHarnessConfig(ctx, name, dirPath, hcDir, stor); err != nil {
+			if err := s.bootstrapSingleHarnessConfig(ctx, name, dirPath, hcDir, store.HarnessConfigScopeGlobal, ""); err != nil {
 				s.resourceLog.Warn("harness config bootstrap: failed to import config, skipping",
 					"config", name, "error", err)
 				continue
 			}
 			imported++
 		} else {
-			changed, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDir, stor, false)
+			changed, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDir, false)
 			if err != nil {
 				s.resourceLog.Warn("harness config bootstrap: failed to sync config, skipping",
 					"config", name, "error", err)
@@ -101,15 +99,8 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 }
 
 // bootstrapSingleHarnessConfig imports one local harness config directory into
-// the Hub's database and storage backend.
-func (s *Server) bootstrapSingleHarnessConfig(ctx context.Context, name, dirPath string, hcDir *config.HarnessConfigDir, stor storage.Storage) error {
-	return s.bootstrapSingleHarnessConfigScoped(ctx, name, dirPath, hcDir, stor, store.HarnessConfigScopeGlobal, "")
-}
-
-// bootstrapSingleHarnessConfigScoped delegates to the shared ResourceStore
-// (§7.3). stor is unused — the store resolves the backend itself — but is kept
-// in the signature to match the bundled-import call sites.
-func (s *Server) bootstrapSingleHarnessConfigScoped(ctx context.Context, name, dirPath string, hcDir *config.HarnessConfigDir, _ storage.Storage, scope, scopeID string) error {
+// the Hub's database and storage backend through the shared ResourceStore.
+func (s *Server) bootstrapSingleHarnessConfig(ctx context.Context, name, dirPath string, hcDir *config.HarnessConfigDir, scope, scopeID string) error {
 	_, err := s.harnessConfigStore(hcDir.Config.Harness).Bootstrap(ctx, name, dirPath, scope, scopeID, "", false)
 	return err
 }
@@ -126,6 +117,6 @@ func isHarnessConfigDir(dir string) bool {
 // the shared ResourceStore. Returns true if the stored content changed. When
 // force is true the config is re-uploaded and storage reconciled even if the
 // content hash is unchanged (used by direct imports).
-func (s *Server) syncExistingHarnessConfig(ctx context.Context, existing *store.HarnessConfig, dirPath string, hcDir *config.HarnessConfigDir, _ storage.Storage, force bool) (bool, error) {
+func (s *Server) syncExistingHarnessConfig(ctx context.Context, existing *store.HarnessConfig, dirPath string, hcDir *config.HarnessConfigDir, force bool) (bool, error) {
 	return s.harnessConfigStore(hcDir.Config.Harness).Bootstrap(ctx, existing.Name, dirPath, existing.Scope, existing.ScopeID, "", force)
 }
