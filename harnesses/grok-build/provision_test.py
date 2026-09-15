@@ -581,7 +581,9 @@ class HookWriteTest(unittest.TestCase):
 
     def test_subagent_stop_has_longer_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            provision._write_hooks(tmp)
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                provision._write_hooks(ctx)
             hooks_path = os.path.join(tmp, ".grok", "hooks", "scion.json")
             with open(hooks_path) as f:
                 data = json.load(f)
