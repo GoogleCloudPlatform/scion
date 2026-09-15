@@ -837,7 +837,7 @@ SELECT id FROM effective`, p1)
 	return result, nil
 }
 
-// maxParentGroupDepth caps the BFS depth when walking ancestor groups.
+// maxParentGroupDepth caps the recursion depth of the ancestor CTE.
 // This is a safety limit to bound query cost in pathological hierarchies;
 // in practice group nesting should be shallow.
 const maxParentGroupDepth = 32
