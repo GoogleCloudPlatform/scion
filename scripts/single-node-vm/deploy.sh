@@ -111,7 +111,7 @@ echo "  Instance:     ${INSTANCE_NAME}"
 # --- Release version ---
 if [[ -z "$VERSION" ]]; then
   info "Detecting latest Scion release..."
-  VERSION="$(curl -fsSL https://api.github.com/repos/ptone/scion/releases/latest \
+  VERSION="$(curl -fsSL https://api.github.com/repos/GoogleCloudPlatform/scion/releases/latest \
     | grep '"tag_name"' | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')" || true
   if [[ -z "$VERSION" ]]; then
     err "Could not detect latest release. Use --version to specify."
@@ -160,7 +160,6 @@ for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtra
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="${ROLE}" \
-    --condition=None \
     --quiet &>/dev/null
 done
 echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent"
@@ -213,7 +212,19 @@ fi
 # ===================================================================
 section "Phase 3: VM Setup"
 
-RELEASE_URL="https://github.com/ptone/scion/releases/download/${VERSION}"
+RELEASE_URL="https://github.com/GoogleCloudPlatform/scion/releases/download/${VERSION}"
+
+# --- Detect VM architecture ---
+info "Detecting VM architecture..."
+ARCH=$(gcloud compute ssh "${INSTANCE_NAME}" \
+  --zone="${ZONE}" --project="${PROJECT_ID}" \
+  --command="uname -m" 2>/dev/null)
+case "$ARCH" in
+  x86_64)  ARCH_SUFFIX="amd64" ;;
+  aarch64) ARCH_SUFFIX="arm64" ;;
+  *)       ARCH_SUFFIX="amd64" ;;  # default to amd64
+esac
+echo "  Architecture: ${ARCH} (${ARCH_SUFFIX})"
 
 # --- Download and install scion binary ---
 info "Installing scion binary (${VERSION})..."
@@ -222,33 +233,41 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   --command="
     set -euo pipefail
     echo 'Downloading scion binary...'
-    curl -fsSL '${RELEASE_URL}/scion-linux-amd64.tar.gz' -o /tmp/scion.tar.gz
+    curl -fsSL '${RELEASE_URL}/scion-linux-${ARCH_SUFFIX}.tar.gz' -o /tmp/scion.tar.gz
     tar -xzf /tmp/scion.tar.gz -C /tmp
     sudo mv /tmp/scion /usr/local/bin/scion
     sudo chmod +x /usr/local/bin/scion
     rm -f /tmp/scion.tar.gz
-    echo 'Installed: $(scion version 2>/dev/null || echo ${VERSION})'
+    echo \"Installed scion binary (${VERSION})\"
   "
 
-# --- Generate session secret ---
-info "Generating session secret..."
-SESSION_SECRET="$(openssl rand -base64 32)"
-
-# --- Write hub.env ---
-info "Writing hub.env..."
-HUB_ENV_CONTENT="$(sed \
-  -e "s|__SESSION_SECRET__|${SESSION_SECRET}|g" \
-  -e "s|__PROJECT_ID__|${PROJECT_ID}|g" \
-  "${SCRIPT_DIR}/config-templates/hub.env.template")"
-
-gcloud compute ssh "${INSTANCE_NAME}" \
+# --- Generate session secret and write hub.env (idempotent) ---
+# Check if hub.env already exists on the VM
+HUB_ENV_EXISTS=$(gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
-  --command="
-    sudo -u scion tee /home/scion/.scion/hub.env > /dev/null << 'ENVEOF'
+  --command="test -f /home/scion/.scion/hub.env && echo yes || echo no" 2>/dev/null) || true
+
+if [[ "$HUB_ENV_EXISTS" == "yes" ]]; then
+  info "hub.env already exists, preserving existing SESSION_SECRET."
+else
+  info "Generating session secret..."
+  SESSION_SECRET="$(openssl rand -base64 32)"
+
+  info "Writing hub.env..."
+  HUB_ENV_CONTENT="$(sed \
+    -e "s|__SESSION_SECRET__|${SESSION_SECRET}|g" \
+    -e "s|__PROJECT_ID__|${PROJECT_ID}|g" \
+    "${SCRIPT_DIR}/config-templates/hub.env.template")"
+
+  gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="
+      sudo -u scion tee /home/scion/.scion/hub.env > /dev/null << 'ENVEOF'
 ${HUB_ENV_CONTENT}
 ENVEOF
-    sudo chmod 600 /home/scion/.scion/hub.env
-  "
+      sudo chmod 600 /home/scion/.scion/hub.env
+    "
+fi
 
 # --- Write settings.yaml ---
 info "Writing settings.yaml..."
