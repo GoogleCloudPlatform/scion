@@ -92,6 +92,12 @@ func init() {
 			"Members can grant up to baseline; admins up to full.\n"+
 			"Capped by project max_agent_role setting. Default: project ceiling.")
 
+	// Agent message mode flag
+	startCmd.Flags().StringVar(&messageModeFlag, "message-mode", "",
+		"Agent message mode: none, lineage, branch, project\n"+
+			"Controls which agents and users this agent can message.\n"+
+			"Default: inherited from template, parent, or 'project'.")
+
 	// GCP service account assignment flag
 	startCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")
 

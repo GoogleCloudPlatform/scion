@@ -76,6 +76,9 @@ const (
 	// do; being able to publish the template it spawns them from is the same
 	// authority expressed once instead of per-agent.
 	ScopeProjectTemplateWrite AgentTokenScope = "project:template:write"
+	// ScopeAgentSetMessageMode allows the agent to change message mode
+	// for agents within the same project.
+	ScopeAgentSetMessageMode AgentTokenScope = "project:agent:set_message_mode"
 	// ScopeGCPTokenPrefix is the prefix for GCP token scopes.
 	// Full scope format: "project:gcp:token:<sa-id>"
 	ScopeGCPTokenPrefix = "project:gcp:token:"

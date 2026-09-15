@@ -63,6 +63,7 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeAgentLifecycle,
 			ScopeProjectSecretRead,
 			ScopeProjectTemplateWrite,
+			ScopeAgentSetMessageMode,
 		}
 	case "":
 		return ScopesForRole(AgentRoleNone)

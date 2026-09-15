@@ -249,8 +249,9 @@ POST /api/v1/projects/{pid}/agents/{aid}/action/set_message_mode
 | Super-admin | ALLOWED | |
 | Project owner | ALLOWED | |
 | Lineage owner (user in agent's ancestry) | ALLOWED | |
+| Full-role agent (same project) | ALLOWED | D7 amendment: full role includes `set_message_mode` scope |
+| Agent callers (non-full role) | DENIED | D7: insufficient role |
 | Project admin (non-owner) | DENIED | D7: admin cannot unseal `none` agents |
-| Agent callers | DENIED | D7: human-only operation |
 | UATs (any scope) | DENIED | D7: no UAT scope exists for this action |
 
 ### Semantics
@@ -298,13 +299,14 @@ across a per-agent boundary.
 | Capability Kind | Resource (per-agent) |
 | Description | Change agent message mode |
 | UAT Scope | _(none)_ |
-| Agent Scopes | _(none)_ |
+| Agent Scopes | `project:agent:set_message_mode` |
 | Default Role | Project owner only (explicitly excluded from project admin) |
 
 This permission is intentionally restricted:
 
-- **No agent scope** because mode changes extend authority and must fail
-  closed. Agents cannot hold this permission.
+- **Agent scope** (`project:agent:set_message_mode`) is granted to full-role
+  agents only. Full-role agents can change message mode for any agent within
+  the same project. Agents with lesser roles cannot hold this scope.
 - **No UAT scope** because bearer tokens cannot unseal agents.
 - **Excluded from project admin** because folding mode changes into the admin
   role would let admins unseal `none`-mode agents, breaking the quarantine
@@ -327,13 +329,38 @@ The messaging authorization system is governed by ten design decisions
 | D4 | Lineage mode: strict user-to-agent only, no agent-to-agent edges |
 | D5 | Mode is fully orthogonal to agent role |
 | D6 | Piercing rules: super-admin pierces all; owner/ancestry pierce lineage/branch; user-identity-only |
-| D7 | Mode changes are human-only, no agent scope, no UAT scope |
+| D7 | Mode changes restricted to human users and full-role agents; no UAT scope |
 | D8 | System plane exempt from all mode checks |
 | D9 | Branch mode uses 1-degree parent/child edges; relay closure = branch cell |
 | D10 | Modes are mutable; mutation is foundational to the design |
 
 For the full decision record with rationale, see the
 design notes (internal: `msg-authz-design-notes.md`).
+
+---
+
+## CLI Reference
+
+### `scion start --message-mode <mode>`
+
+Sets the initial message mode when creating an agent. Overrides template
+and parent inheritance. Valid modes: `none`, `lineage`, `branch`, `project`.
+Hub-only (ignored in local mode).
+
+### `scion create --message-mode <mode>`
+
+Sets the initial message mode for a provisioned agent. Same semantics as
+`scion start --message-mode`.
+
+### `scion set-message-mode <agent> <mode>`
+
+Changes a running agent's messaging mode via the Hub API.
+
+Flags:
+- `--cascade` — apply the mode change to all descendant agents
+- `--dry-run` — preview cascade effects without applying changes
+
+Hub-only. Returns an error when Hub is not available.
 
 ---
 
@@ -346,3 +373,5 @@ design notes (internal: `msg-authz-design-notes.md`).
 | Permission registry | `pkg/hub/permissions/registry.go` |
 | Role seeds (admin exclusion) | `pkg/hub/seed.go` |
 | MessageMode constants | `pkg/store/models.go` |
+| set-message-mode CLI command | `cmd/set_message_mode.go` |
+| Hub client SetMessageMode | `pkg/hubclient/agents.go` |

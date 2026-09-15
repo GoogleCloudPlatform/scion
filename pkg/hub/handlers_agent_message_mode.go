@@ -63,14 +63,17 @@ type CascadeResult struct {
 
 // handleSetMessageMode handles the set_message_mode action on an agent.
 //
-// Authorization enforces D7: this is a human-only operation. The following
-// callers are denied unconditionally:
-//   - Agent callers (no agent scope exists or will ever exist)
+// Authorization enforces D7 (amended): human users and full-role agents
+// within the same project may change message mode. The following callers
+// are denied:
+//   - Agents without project:agent:set_message_mode scope (requires full role)
+//   - Agents targeting agents in a different project
 //   - UATs / scoped tokens (no UAT scope exists)
 //   - Project admins who are not also project owners or lineage owners
+//   - Federated agents
 //
 // Allowed callers: super-admin, project owner, lineage owner (user in the
-// agent's ancestry chain).
+// agent's ancestry chain), full-role agent (same project).
 //
 // Mode changes are live (D10): the new mode takes effect on the next message
 // delivery. Every change emits an audit record. All transitions are legal
@@ -109,63 +112,89 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// 4. D7: Human-only — DENY agent callers unconditionally.
+	// 4. D7 (amended): allow "user", "dev", "federated_user", and
+	// "agent" callers with full role. All other identity types denied.
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Authentication required", nil)
 		return
 	}
-	// D7: Human-only — DENY all non-user callers unconditionally.
-	// This catches "agent", "federated_agent", "federated_service", "broker", etc.
+	agentCallerAuthorized := false
 	switch identity.Type() {
 	case "user", "dev", "federated_user":
-		// Allowed identity types — continue to further checks.
+		// Allowed identity types — continue to user-specific checks below.
+	case "agent":
+		// D7 amendment: full-role agents may call set_message_mode.
+		agentIdent, ok := identity.(AgentIdentity)
+		if !ok {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"invalid agent identity", nil)
+			return
+		}
+
+		// Verify the agent has the required scope.
+		if !agentIdent.HasScope(ScopeAgentSetMessageMode) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"agent lacks project:agent:set_message_mode scope (requires full role)", nil)
+			return
+		}
+
+		// Project constraint: agent can only set modes within its own project.
+		// Answer with 404 instead of 403 to prevent cross-project existence oracle.
+		if agentIdent.ProjectID() != agent.ProjectID {
+			NotFound(w, "Agent")
+			return
+		}
+
+		agentCallerAuthorized = true
 	default:
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"Only human users can change message mode (D7: human-only operation)", nil)
+			"Only human users or full-role agents can change message mode", nil)
 		return
 	}
 
-	// 5. D7: DENY UATs — no scope exists for set_message_mode.
-	if _, ok := identity.(*ScopedUserIdentity); ok {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"Scoped tokens cannot change message mode", nil)
-		return
-	}
-
-	// 5.5. D7: DENY project admins (non-owners).
-	// The generic authz bypass grants project admins full access, but D7
-	// restricts set_message_mode to project owners, lineage owners, and
-	// super-admins. Project admins who are NOT super-admins must be denied.
-	if userIdent, ok := identity.(UserIdentity); ok && !IsUnscopedLocalPlatformAdmin(userIdent) {
-		membership, err := s.store.GetProjectMembership(ctx, agent.ProjectID, userIdent.ID())
-		if err != nil {
-			// Fail closed: if we can't verify role, deny rather than skip the check.
-			slog.Error("failed to check project membership for set_message_mode",
-				"user_id", userIdent.ID(), "project_id", agent.ProjectID, "error", err)
-			RuntimeError(w, "Failed to verify project membership")
+	if !agentCallerAuthorized {
+		// 5. D7: DENY UATs — no scope exists for set_message_mode.
+		if _, ok := identity.(*ScopedUserIdentity); ok {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Scoped tokens cannot change message mode", nil)
 			return
 		}
-		// Also check ancestry before denying admins — a user who is both admin
-		// AND lineage owner should be allowed via lineage ownership (LOW-3).
-		isLineageOwner := false
-		for _, ancestorID := range agent.Ancestry {
-			if ancestorID == userIdent.ID() {
-				isLineageOwner = true
-				break
+
+		// 5.5. D7: DENY project admins (non-owners).
+		// The generic authz bypass grants project admins full access, but D7
+		// restricts set_message_mode to project owners, lineage owners, and
+		// super-admins. Project admins who are NOT super-admins must be denied.
+		if userIdent, ok := identity.(UserIdentity); ok && !IsUnscopedLocalPlatformAdmin(userIdent) {
+			membership, err := s.store.GetProjectMembership(ctx, agent.ProjectID, userIdent.ID())
+			if err != nil {
+				// Fail closed: if we can't verify role, deny rather than skip the check.
+				slog.Error("failed to check project membership for set_message_mode",
+					"user_id", userIdent.ID(), "project_id", agent.ProjectID, "error", err)
+				RuntimeError(w, "Failed to verify project membership")
+				return
+			}
+			// Also check ancestry before denying admins — a user who is both admin
+			// AND lineage owner should be allowed via lineage ownership (LOW-3).
+			isLineageOwner := false
+			for _, ancestorID := range agent.Ancestry {
+				if ancestorID == userIdent.ID() {
+					isLineageOwner = true
+					break
+				}
+			}
+			if !isLineageOwner && membership != nil && membership.Role == store.ProjectRoleAdmin {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"Project admins cannot change message mode (D7: owner-only operation)", nil)
+				return
 			}
 		}
-		if !isLineageOwner && membership != nil && membership.Role == store.ProjectRoleAdmin {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"Project admins cannot change message mode (D7: owner-only operation)", nil)
-			return
-		}
-	}
 
-	// 6. Authorize: agent.set_message_mode permission (CapabilityResource).
-	// This checks: lineage owner (ancestry), project owner, super-admin.
-	if !s.authorize(w, r, agentResource(agent), ActionSetMessageMode) {
-		return // authorize writes 403
+		// 6. Authorize: agent.set_message_mode permission (CapabilityResource).
+		// This checks: lineage owner (ancestry), project owner, super-admin.
+		if !s.authorize(w, r, agentResource(agent), ActionSetMessageMode) {
+			return // authorize writes 403
+		}
 	}
 
 	// 7. Record previous mode.

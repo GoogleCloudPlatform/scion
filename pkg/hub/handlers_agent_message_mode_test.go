@@ -292,6 +292,54 @@ func TestSetMessageMode_LineageOwnerAllowed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Test: Cross-project agent caller gets 404 (not 403)
+// ---------------------------------------------------------------------------
+
+func TestSetMessageMode_CrossProjectAgentDenied(t *testing.T) {
+	srv, s, owner, _, _, projectID := smmSetup(t)
+	ctx := context.Background()
+
+	// Target agent in the default project.
+	target := smmAgent(t, s, "smm-cross-proj-target", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+
+	// Create a second project for the cross-project caller.
+	otherProjectID := tid("smm-other-project")
+	otherOwner := &store.User{
+		ID:          tid("smm-other-owner"),
+		Email:       "smm-other-owner@test.com",
+		DisplayName: "SMM Other Owner",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require_NoError(t, s.CreateUser(ctx, otherOwner))
+	ensureHubMembership(ctx, s, otherOwner.ID)
+
+	otherProject := &store.Project{
+		ID:        otherProjectID,
+		Name:      "smm-other-project",
+		Slug:      "smm-other-project",
+		OwnerID:   otherOwner.ID,
+		CreatedBy: otherOwner.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require_NoError(t, s.CreateProject(ctx, otherProject))
+
+	// Create a caller agent in the other project with full-role scopes.
+	caller := smmAgent(t, s, "smm-cross-proj-caller", otherProjectID, store.MessageModeProject,
+		[]string{otherOwner.ID})
+	callerIdent := msgAuthzAgentIdentity(caller.ID, otherProjectID, caller.Ancestry, ScopesForRole(AgentRoleFull)...)
+
+	rr := smmDoRequest(t, srv, target.ID, SetMessageModeRequest{Mode: "none"}, callerIdent)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for cross-project agent caller, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test 4: Agent callers always denied (D7)
 // ---------------------------------------------------------------------------
 
@@ -720,5 +768,70 @@ func TestSetMessageMode_APIRouting(t *testing.T) {
 	rr := smmDoRequest(t, srv, agent.ID, SetMessageModeRequest{Mode: "lineage"}, ownerIdent)
 	if rr.Code == http.StatusNotFound {
 		t.Fatal("set_message_mode should be a recognized action, got 404")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Full-role agent allowed (D7 amendment)
+// ---------------------------------------------------------------------------
+
+func TestSetMessageMode_FullRoleAgentAllowed(t *testing.T) {
+	srv, s, owner, _, _, projectID := smmSetup(t)
+
+	// Target agent whose mode will be changed.
+	target := smmAgent(t, s, "smm-full-agent-target", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+
+	// Caller agent with full-role scopes (same project).
+	caller := smmAgent(t, s, "smm-full-agent-caller", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+	callerIdent := msgAuthzAgentIdentity(caller.ID, projectID, caller.Ancestry, ScopesForRole(AgentRoleFull)...)
+
+	rr := smmDoRequest(t, srv, target.ID, SetMessageModeRequest{Mode: "branch"}, callerIdent)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for full-role agent caller, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp SetMessageModeResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp.Mode != "branch" {
+		t.Fatalf("expected mode=branch, got %q", resp.Mode)
+	}
+	if resp.Previous != "project" {
+		t.Fatalf("expected previous_mode=project, got %q", resp.Previous)
+	}
+
+	// Verify mode is updated in store.
+	updated, err := s.GetAgent(context.Background(), target.ID)
+	if err != nil {
+		t.Fatalf("failed to get agent: %v", err)
+	}
+	if updated.MessageMode != "branch" {
+		t.Fatalf("store should reflect new mode, got %q", updated.MessageMode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Baseline-role agent denied (D7 amendment)
+// ---------------------------------------------------------------------------
+
+func TestSetMessageMode_BaselineRoleAgentDenied(t *testing.T) {
+	srv, s, owner, _, _, projectID := smmSetup(t)
+
+	target := smmAgent(t, s, "smm-baseline-agent-target", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+
+	// Caller agent with baseline-role scopes (does not include ScopeAgentSetMessageMode).
+	caller := smmAgent(t, s, "smm-baseline-agent-caller", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+	callerIdent := msgAuthzAgentIdentity(caller.ID, projectID, caller.Ancestry, ScopesForRole(AgentRoleBaseline)...)
+
+	rr := smmDoRequest(t, srv, target.ID, SetMessageModeRequest{Mode: "none"}, callerIdent)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for baseline-role agent caller, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
