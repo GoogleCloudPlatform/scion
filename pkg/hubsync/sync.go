@@ -499,7 +499,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		}
 	} else {
 		// Already in sync — update the watermark and synced agents to keep current
-		UpdateLastSyncedAt(hubCtx.ProjectPath, syncResult.ServerTime, hubCtx.IsGlobal)
+		UpdateLastSyncedAt(hubCtx.ProjectPath, syncResult.ServerTime)
 		UpdateSyncedAgents(hubCtx.ProjectPath, collectSyncedAgentNames(syncResult))
 	}
 
@@ -529,9 +529,7 @@ func checkBrokerAvailability(ctx context.Context, hubCtx *HubContext) (bool, err
 // Uses hubTime if non-zero (preferred), otherwise falls back to local time.
 var lastSyncedAtMu sync.Mutex
 
-func UpdateLastSyncedAt(projectPath string, hubTime time.Time, isGlobal bool) {
-	_ = isGlobal // retained for API compatibility
-
+func UpdateLastSyncedAt(projectPath string, hubTime time.Time) {
 	if strings.TrimSpace(projectPath) == "" {
 		debugf("Warning: skipping lastSyncedAt update: empty project path")
 		return
@@ -942,7 +940,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 	}
 
 	// Update lastSyncedAt watermark after successful sync
-	UpdateLastSyncedAt(hubCtx.ProjectPath, result.ServerTime, hubCtx.IsGlobal)
+	UpdateLastSyncedAt(hubCtx.ProjectPath, result.ServerTime)
 
 	// Record the set of agents now known to be on the hub for this broker.
 	// After sync: InSync + newly registered + RemoteOnly + Pending are all on hub.
