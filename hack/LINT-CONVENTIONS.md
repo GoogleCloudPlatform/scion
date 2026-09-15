@@ -53,8 +53,8 @@ identifiable. Append `-dirty` when the working tree has uncommitted changes
 (see the `provenance()` function in `check-authz-guards.sh`):
 
 ```bash
-sha="$(git rev-parse --short HEAD)"
-if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+sha="$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+if [[ "$sha" != "unknown" && -n "$(git status --porcelain 2>/dev/null)" ]]; then
   sha="${sha}-dirty"
 fi
 echo "check-name: analysed ${sha}, ..." >&2
