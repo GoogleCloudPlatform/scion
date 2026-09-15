@@ -1144,7 +1144,6 @@ func init() {
 	_ = messageCmd.Flags().MarkHidden("thread-id")
 	_ = messageCmd.Flags().MarkHidden("cc")
 
-
 	messageCmd.AddCommand(messageChannelsCmd)
 	rootCmd.AddCommand(messageCmd)
 }
