@@ -42,6 +42,7 @@ import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Agent, Message } from '../../../shared/types.js';
 import type { ChatSendDetail } from './chat-composer.js';
 import { stateManager } from '../../../client/main.js';
+import { showToast } from '../../../utils/toast.js';
 import './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
@@ -3020,6 +3021,146 @@ export class ScionChatThread extends LitElement {
     }
 
     return rows;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Export helpers (#1570)
+  // ---------------------------------------------------------------------------
+
+  /** Escape HTML special characters to prevent XSS. */
+  private escapeHtml(text: string): string {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  /** Format an ISO timestamp for export display. */
+  private formatExportTimestamp(iso: string): string {
+    try {
+      return new Date(iso).toLocaleString();
+    } catch {
+      return iso;
+    }
+  }
+
+  /** Generate a filename-safe date string (YYYY-MM-DD). */
+  private filenameDateStamp(): string {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  /**
+   * Download the conversation as a Markdown file.
+   *
+   * Iterates the current message buffer, formats each message with sender,
+   * timestamp, and body, then triggers a browser download.
+   */
+  public exportAsMarkdown(): void {
+    if (this.messages.length === 0) return;
+
+    const lines = this.messages.map((m) => {
+      const ts = this.formatExportTimestamp(m.createdAt);
+      return `### ${m.sender} — ${ts}\n\n${m.msg}\n\n---\n`;
+    });
+
+    const content = lines.join('\n');
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+
+    const nameBase = this.threadName
+      ? this.threadName.replace(/[^a-zA-Z0-9_-]/g, '_')
+      : 'conversation';
+    const fileName = `${nameBase}-${this.filenameDateStamp()}.md`;
+
+    const anchor = document.createElement('a');
+    anchor.href = URL.createObjectURL(blob);
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(anchor.href);
+  }
+
+  /**
+   * Open a print-friendly window with the conversation content.
+   *
+   * Creates a new browser window with clean HTML formatted messages and
+   * invokes the browser's print dialog (which allows saving as PDF).
+   */
+  public printConversation(): void {
+    if (this.messages.length === 0) return;
+
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      showToast('Unable to open print window — check your popup blocker.', 'warning');
+      return;
+    }
+
+    const title = this.threadName
+      ? this.escapeHtml(this.threadName)
+      : 'Conversation';
+
+    const messagesHtml = this.messages
+      .map(
+        (m) =>
+          `<div style="margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid #eee;">
+        <div style="font-weight: bold; font-size: 0.875rem;">${this.escapeHtml(m.sender)}
+          <span style="color: #666; font-weight: normal;">${this.escapeHtml(this.formatExportTimestamp(m.createdAt))}</span>
+        </div>
+        <div style="margin-top: 0.5rem; white-space: pre-wrap;">${this.escapeHtml(m.msg)}</div>
+      </div>`
+      )
+      .join('');
+
+    printWindow.document.write(
+      `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>` +
+        `<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:800px;margin:2rem auto;padding:0 1rem;color:#1a1a1a;}</style>` +
+        `</head><body><h1 style="font-size:1.25rem;margin-bottom:1.5rem;">${title}</h1>${messagesHtml}</body></html>`
+    );
+    printWindow.document.close();
+    printWindow.print();
+  }
+
+  /**
+   * Copy the conversation as formatted text to the clipboard.
+   *
+   * Writes both HTML and plain-text representations using the Clipboard API.
+   * Falls back to plain text if the ClipboardItem API is unavailable.
+   */
+  public async copyAsFormattedText(): Promise<void> {
+    if (this.messages.length === 0) return;
+
+    const htmlContent = this.messages
+      .map(
+        (m) =>
+          `<p><strong>${this.escapeHtml(m.sender)}</strong> (${this.escapeHtml(this.formatExportTimestamp(m.createdAt))})</p>` +
+          `<p>${this.escapeHtml(m.msg)}</p><hr>`
+      )
+      .join('');
+
+    const plainText = this.messages
+      .map(
+        (m) =>
+          `${m.sender} (${this.formatExportTimestamp(m.createdAt)})\n${m.msg}`
+      )
+      .join('\n\n---\n\n');
+
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'text/html': new Blob([htmlContent], { type: 'text/html' }),
+          'text/plain': new Blob([plainText], { type: 'text/plain' }),
+        }),
+      ]);
+      showToast('Conversation copied to clipboard.', 'success');
+    } catch {
+      // Fallback: plain text copy.
+      try {
+        await navigator.clipboard.writeText(plainText);
+        showToast('Conversation copied to clipboard (plain text).', 'success');
+      } catch {
+        showToast('Failed to copy to clipboard.', 'danger');
+      }
+    }
   }
 }
 

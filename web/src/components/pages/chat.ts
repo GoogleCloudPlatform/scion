@@ -2948,6 +2948,25 @@ export class ScionPageChat extends LitElement {
               `
             : nothing}
           ${conv.isDM ? this.renderDMMuteButton(conv) : nothing}
+          <sl-dropdown>
+            <sl-tooltip content="Export conversation" slot="trigger">
+              <sl-icon-button name="download" label="Export conversation"></sl-icon-button>
+            </sl-tooltip>
+            <sl-menu>
+              <sl-menu-item @click=${() => this.exportMarkdown()}>
+                <sl-icon slot="prefix" name="filetype-md"></sl-icon>
+                Download as Markdown
+              </sl-menu-item>
+              <sl-menu-item @click=${() => this.exportPrint()}>
+                <sl-icon slot="prefix" name="printer"></sl-icon>
+                Print / Save as PDF
+              </sl-menu-item>
+              <sl-menu-item @click=${() => void this.exportClipboard()}>
+                <sl-icon slot="prefix" name="clipboard"></sl-icon>
+                Copy to clipboard
+              </sl-menu-item>
+            </sl-menu>
+          </sl-dropdown>
           <sl-tooltip content="Search messages">
             <sl-icon-button
               name="search"
@@ -3264,6 +3283,32 @@ export class ScionPageChat extends LitElement {
     if (diffDays < 7) return `${diffDays}d`;
 
     return d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Export helpers — delegate to the thread component (#1570)
+  // ---------------------------------------------------------------------------
+
+  /** Get a reference to the active scion-chat-thread component. */
+  private get chatThread(): import('../shared/chat/chat-thread.js').ScionChatThread | null {
+    return this.shadowRoot?.querySelector('scion-chat-thread') as
+      | import('../shared/chat/chat-thread.js').ScionChatThread
+      | null;
+  }
+
+  /** Download the current conversation as Markdown. */
+  private exportMarkdown(): void {
+    this.chatThread?.exportAsMarkdown();
+  }
+
+  /** Open a print-friendly view of the conversation. */
+  private exportPrint(): void {
+    this.chatThread?.printConversation();
+  }
+
+  /** Copy the conversation to the clipboard as formatted text. */
+  private async exportClipboard(): Promise<void> {
+    await this.chatThread?.copyAsFormattedText();
   }
 }
 
