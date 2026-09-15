@@ -101,6 +101,9 @@ type AgentService interface {
 	// The handler is called for each log entry received. Blocks until the
 	// context is cancelled or the server closes the connection.
 	StreamCloudLogs(ctx context.Context, agentID string, opts *GetCloudLogsOptions, handler func(CloudLogEntry)) error
+
+	// SetMessageMode changes the messaging mode for an agent.
+	SetMessageMode(ctx context.Context, agentID string, req *SetMessageModeRequest, opts *SetMessageModeOptions) (*SetMessageModeResponse, error)
 }
 
 // agentService is the implementation of AgentService.
@@ -747,4 +750,36 @@ func (s *agentService) StreamCloudLogs(ctx context.Context, agentID string, opts
 	}
 
 	return scanner.Err()
+}
+
+// SetMessageModeRequest is the request body for changing an agent's message mode.
+type SetMessageModeRequest struct {
+	Mode    string `json:"mode"`
+	Cascade bool   `json:"cascade,omitempty"`
+}
+
+// SetMessageModeResponse is the response from changing an agent's message mode.
+type SetMessageModeResponse struct {
+	AgentID  string          `json:"agent_id"`
+	Mode     string          `json:"mode"`
+	Previous string          `json:"previous_mode"`
+	Cascade  json.RawMessage `json:"cascade,omitempty"`
+}
+
+// SetMessageModeOptions configures the set-message-mode call.
+type SetMessageModeOptions struct {
+	DryRun bool
+}
+
+// SetMessageMode changes the messaging mode for an agent.
+func (s *agentService) SetMessageMode(ctx context.Context, agentID string, req *SetMessageModeRequest, opts *SetMessageModeOptions) (*SetMessageModeResponse, error) {
+	path := s.agentPath(agentID) + "/set_message_mode"
+	if opts != nil && opts.DryRun {
+		path += "?dryRun=true"
+	}
+	resp, err := s.c.post(ctx, path, req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[SetMessageModeResponse](resp)
 }
