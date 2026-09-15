@@ -122,26 +122,6 @@ func isHarnessConfigDir(dir string) bool {
 	return err == nil && !info.IsDir()
 }
 
-// importHarnessConfigsFromRemote fetches a remote source URL, discovers
-// harness-configs within it, and registers each one into the Hub store scoped to
-// the given project. Returns the names of all configs imported or updated.
-//
-// This is a thin wrapper over the shared import driver (resource_import.go);
-// routing through it also gives harness-config remote import the GITHUB_TOKEN
-// secret fallback that templates already had.
-func (s *Server) importHarnessConfigsFromRemote(ctx context.Context, projectID, sourceURL string) ([]string, error) {
-	return s.importFromRemote(ctx, projectID, sourceURL, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), nil, nil)
-}
-
-// importHarnessConfigsFromWorkspace imports harness-configs from a path within
-// the project's workspace filesystem. The workspacePath is relative to the
-// project's workspace root (e.g. "/.scion/harness-configs").
-//
-// This is a thin wrapper over the shared import driver (resource_import.go).
-func (s *Server) importHarnessConfigsFromWorkspace(ctx context.Context, project *store.Project, workspacePath string) ([]string, error) {
-	return s.importFromWorkspace(ctx, project, workspacePath, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), nil, nil)
-}
-
 // syncExistingHarnessConfig re-syncs a local harness config directory through
 // the shared ResourceStore. Returns true if the stored content changed. When
 // force is true the config is re-uploaded and storage reconciled even if the
