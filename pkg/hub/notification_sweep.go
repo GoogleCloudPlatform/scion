@@ -135,6 +135,13 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 		}
 		return
 	}
+	if sub == nil {
+		nd.log.Error("retry: subscription lookup returned nil with no error", "subscriptionID", notif.SubscriptionID)
+		if err2 := nd.store.UnmarkNotificationDispatched(ctx, notif.ID); err2 != nil {
+			nd.log.Error("retry: failed to revert claim", "notificationID", notif.ID, "error", err2)
+		}
+		return
+	}
 
 	// 3. Look up subscriber agent.
 	subscriber, err := nd.store.GetAgentBySlug(ctx, sub.ProjectID, sub.SubscriberID)
@@ -152,6 +159,13 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 			if err2 := nd.store.UnmarkNotificationDispatched(ctx, notif.ID); err2 != nil {
 				nd.log.Error("retry: failed to revert claim", "notificationID", notif.ID, "error", err2)
 			}
+		}
+		return
+	}
+	if subscriber == nil {
+		nd.log.Error("retry: subscriber lookup returned nil with no error", "subscriberID", sub.SubscriberID)
+		if err2 := nd.store.UnmarkNotificationDispatched(ctx, notif.ID); err2 != nil {
+			nd.log.Error("retry: failed to revert claim", "notificationID", notif.ID, "error", err2)
 		}
 		return
 	}
@@ -190,6 +204,13 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 			if err2 := nd.store.UnmarkNotificationDispatched(ctx, notif.ID); err2 != nil {
 				nd.log.Error("retry: failed to revert claim", "notificationID", notif.ID, "error", err2)
 			}
+		}
+		return
+	}
+	if watchedAgent == nil {
+		nd.log.Error("retry: watched agent lookup returned nil with no error", "agentID", notif.AgentID)
+		if err2 := nd.store.UnmarkNotificationDispatched(ctx, notif.ID); err2 != nil {
+			nd.log.Error("retry: failed to revert claim", "notificationID", notif.ID, "error", err2)
 		}
 		return
 	}
