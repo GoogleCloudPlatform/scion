@@ -27,10 +27,12 @@
 #
 # Usage:
 #   ./deploy.sh [--version VERSION]
+#   ./deploy.sh --delete
 #
 # Options:
 #   --version VERSION   Scion release version to install (e.g. v0.5.0).
 #                       If omitted, the latest release is fetched from GitHub.
+#   --delete            Tear down all resources created by a previous deploy.
 
 set -euo pipefail
 
@@ -54,9 +56,11 @@ section() { echo ""; echo -e "${BOLD}--- $* ---${RESET}"; }
 # Parse flags
 # ---------------------------------------------------------------------------
 VERSION=""
+DELETE_MODE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
+    --delete) DELETE_MODE=true; shift ;;
     --help|-h)
       sed -n '/^# scripts\/single-node-vm/,/^[^#]/{ /^#/s/^# \?//p }' "${BASH_SOURCE[0]}"
       exit 0
@@ -64,6 +68,77 @@ while [[ $# -gt 0 ]]; do
     *) err "Unknown flag: $1"; exit 1 ;;
   esac
 done
+
+# ---------------------------------------------------------------------------
+# Teardown flow (--delete)
+# ---------------------------------------------------------------------------
+if [[ "$DELETE_MODE" == "true" ]]; then
+  section "Teardown: Delete Single-Node-VM Resources"
+
+  info "Detecting GCP project..."
+  PROJECT_ID="$(gcloud config get-value project 2>/dev/null)" || true
+  if [[ -z "$PROJECT_ID" ]]; then
+    err "No GCP project configured. Run: gcloud config set project PROJECT_ID"
+    exit 1
+  fi
+  echo "  Project: ${PROJECT_ID}"
+
+  read -p "Hub name [my-hub]: " HUB_NAME
+  HUB_NAME="${HUB_NAME:-my-hub}"
+
+  read -p "GCP region [us-central1]: " REGION
+  REGION="${REGION:-us-central1}"
+
+  ZONE="${REGION}-b"
+  INSTANCE_NAME="scion-hub-${HUB_NAME}"
+  PROXY_SERVICE="${INSTANCE_NAME}-iap-proxy"
+  SA_NAME="scion-hub-vm"
+  SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+  echo ""
+  echo "The following resources will be deleted:"
+  echo "  Cloud Run service: ${PROXY_SERVICE} (region: ${REGION})"
+  echo "  GCE VM:            ${INSTANCE_NAME} (zone: ${ZONE})"
+  echo "  Service account:   ${SA_EMAIL}"
+  echo ""
+  read -p "Continue? [y/N]: " CONFIRM
+  if [[ "${CONFIRM,,}" != "y" ]]; then
+    echo "Aborted."
+    exit 0
+  fi
+
+  info "Deleting Cloud Run IAP proxy service..."
+  if gcloud run services delete "${PROXY_SERVICE}" \
+      --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+    echo "  Deleted: ${PROXY_SERVICE}"
+  else
+    warn "Cloud Run service ${PROXY_SERVICE} not found or already deleted."
+  fi
+
+  info "Deleting GCE VM..."
+  if gcloud compute instances delete "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+    echo "  Deleted: ${INSTANCE_NAME}"
+  else
+    warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
+  fi
+
+  info "Deleting service account..."
+  if gcloud iam service-accounts delete "${SA_EMAIL}" \
+      --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+    echo "  Deleted: ${SA_EMAIL}"
+  else
+    warn "Service account ${SA_EMAIL} not found or already deleted."
+  fi
+
+  echo ""
+  echo -e "${BOLD}=== Teardown Complete ===${RESET}"
+  echo ""
+  echo "  Deleted Cloud Run service: ${PROXY_SERVICE}"
+  echo "  Deleted GCE VM:            ${INSTANCE_NAME}"
+  echo "  Deleted service account:   ${SA_EMAIL}"
+  exit 0
+fi
 
 # ===================================================================
 # Phase 1: Prerequisites
@@ -98,6 +173,51 @@ case "$SIZE_CHOICE" in
   *) err "Invalid selection: $SIZE_CHOICE"; exit 1 ;;
 esac
 
+echo "Disk size:"
+echo "  1) 200 GB (default)"
+echo "  2) 500 GB"
+echo "  3) Custom"
+read -p "Select [1]: " DISK_CHOICE
+DISK_CHOICE="${DISK_CHOICE:-1}"
+
+case "$DISK_CHOICE" in
+  1) DISK_SIZE="200GB" ;;
+  2) DISK_SIZE="500GB" ;;
+  3)
+    read -p "Enter disk size in GB: " CUSTOM_DISK
+    if [[ -z "$CUSTOM_DISK" ]] || ! [[ "$CUSTOM_DISK" =~ ^[0-9]+$ ]]; then
+      err "Invalid disk size: $CUSTOM_DISK"
+      exit 1
+    fi
+    DISK_SIZE="${CUSTOM_DISK}GB"
+    ;;
+  *) err "Invalid selection: $DISK_CHOICE"; exit 1 ;;
+esac
+
+echo "Chat integrations to install:"
+echo "  1) Telegram"
+echo "  2) Discord"
+echo "  3) Slack"
+echo "  4) Teams"
+echo "  5) None"
+read -p "Select (comma-separated) [5]: " CHAT_CHOICE
+CHAT_CHOICE="${CHAT_CHOICE:-5}"
+
+# Parse chat plugin selections into an array
+CHAT_PLUGINS=()
+IFS=',' read -ra CHAT_SELECTIONS <<< "$CHAT_CHOICE"
+for sel in "${CHAT_SELECTIONS[@]}"; do
+  sel="$(echo "$sel" | tr -d ' ')"
+  case "$sel" in
+    1) CHAT_PLUGINS+=("telegram") ;;
+    2) CHAT_PLUGINS+=("discord") ;;
+    3) CHAT_PLUGINS+=("slack") ;;
+    4) CHAT_PLUGINS+=("teams") ;;
+    5) ;;  # None
+    *) warn "Ignoring unknown chat selection: $sel" ;;
+  esac
+done
+
 # Derived values
 ZONE="${REGION}-b"
 INSTANCE_NAME="scion-hub-${HUB_NAME}"
@@ -109,7 +229,13 @@ echo "  Hub name:     ${HUB_NAME}"
 echo "  Region:       ${REGION}"
 echo "  Zone:         ${ZONE}"
 echo "  Machine type: ${MACHINE_TYPE}"
+echo "  Disk size:    ${DISK_SIZE}"
 echo "  Instance:     ${INSTANCE_NAME}"
+if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
+  echo "  Chat plugins: ${CHAT_PLUGINS[*]}"
+else
+  echo "  Chat plugins: (none)"
+fi
 
 # --- Release version ---
 if [[ -z "$VERSION" ]]; then
@@ -182,7 +308,7 @@ else
     --no-address \
     --service-account="${SA_EMAIL}" \
     --scopes=cloud-platform \
-    --boot-disk-size=200GB \
+    --boot-disk-size="${DISK_SIZE}" \
     --image-family=ubuntu-2204-lts \
     --image-project=ubuntu-os-cloud \
     --metadata-from-file=user-data="${SCRIPT_DIR}/cloud-init.yaml" \
@@ -245,6 +371,30 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     rm -f /tmp/scion.tar.gz
     echo \"Installed scion binary (${VERSION})\"
   "
+
+# --- Download and install chat plugins ---
+if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
+  info "Installing chat plugins..."
+  for PLUGIN in "${CHAT_PLUGINS[@]}"; do
+    PLUGIN_BINARY="scion-plugin-${PLUGIN}"
+    PLUGIN_ARCHIVE="${PLUGIN_BINARY}-linux-${ARCH_SUFFIX}.tar.gz"
+    info "  Installing ${PLUGIN_BINARY}..."
+    gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="
+        set -euo pipefail
+        sudo -u scion mkdir -p /home/scion/.scion/plugins/broker
+        curl -fsSL '${RELEASE_URL}/${PLUGIN_ARCHIVE}' -o /tmp/${PLUGIN_ARCHIVE}
+        tar -xzf /tmp/${PLUGIN_ARCHIVE} -C /tmp
+        sudo mv /tmp/${PLUGIN_BINARY} /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
+        sudo chown scion:scion /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
+        sudo chmod +x /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
+        rm -f /tmp/${PLUGIN_ARCHIVE}
+        echo 'Installed ${PLUGIN_BINARY}'
+      "
+  done
+  echo "  All chat plugins installed."
+fi
 
 # --- Generate session secret and write hub.env (idempotent) ---
 # Check if hub.env already exists on the VM
