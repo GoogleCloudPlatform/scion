@@ -1181,6 +1181,7 @@ fi
 # The paragraph, not the whole file: `git checkout main` appears elsewhere in
 # AGENTS.md as advice, and matching the whole file would let the check pass on
 # a mention that has nothing to do with the guard.
+# shellcheck disable=SC2016  # backticks are literal markdown code spans, not command substitution
 wsguard_para="$(/usr/bin/grep -F 'puts a `git` shim in front of the real git' "$AGENTS_MD")"
 if [[ -z "$wsguard_para" ]]; then
   die_cannot_evaluate "N33 could not locate the wsguard paragraph in AGENTS.md; the check would be vacuous"
@@ -1202,6 +1203,7 @@ fi
 # two-letter verb makes that failure obvious; a longer one would have hidden it.
 # So the paragraph is parsed the way it is written — as code spans — and each
 # span contributes its command word, with a leading `git ` stripped.
+# shellcheck disable=SC2016  # backticks are literal markdown code span delimiters
 mapfile -t doc_tokens < <(
   printf '%s' "$refused_half" |
   /usr/bin/grep -oE '`[^`]+`' | /usr/bin/tr -d '`' |
