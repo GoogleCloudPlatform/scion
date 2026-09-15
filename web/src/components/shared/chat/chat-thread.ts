@@ -3056,7 +3056,10 @@ export class ScionChatThread extends LitElement {
    * timestamp, and body, then triggers a browser download.
    */
   public exportAsMarkdown(): void {
-    if (this.messages.length === 0) return;
+    if (this.messages.length === 0) {
+      showToast('No messages to export', 'warning');
+      return;
+    }
 
     const lines = this.messages.map((m) => {
       const ts = this.formatExportTimestamp(m.createdAt);
@@ -3087,7 +3090,10 @@ export class ScionChatThread extends LitElement {
    * invokes the browser's print dialog (which allows saving as PDF).
    */
   public printConversation(): void {
-    if (this.messages.length === 0) return;
+    if (this.messages.length === 0) {
+      showToast('No messages to export', 'warning');
+      return;
+    }
 
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
@@ -3117,7 +3123,10 @@ export class ScionChatThread extends LitElement {
         `</head><body><h1 style="font-size:1.25rem;margin-bottom:1.5rem;">${title}</h1>${messagesHtml}</body></html>`
     );
     printWindow.document.close();
+    printWindow.onafterprint = () => printWindow.close();
     printWindow.print();
+    // Fallback for browsers that don't fire afterprint
+    setTimeout(() => { if (!printWindow.closed) printWindow.close(); }, 1000);
   }
 
   /**
@@ -3127,7 +3136,10 @@ export class ScionChatThread extends LitElement {
    * Falls back to plain text if the ClipboardItem API is unavailable.
    */
   public async copyAsFormattedText(): Promise<void> {
-    if (this.messages.length === 0) return;
+    if (this.messages.length === 0) {
+      showToast('No messages to export', 'warning');
+      return;
+    }
 
     const htmlContent = this.messages
       .map(
