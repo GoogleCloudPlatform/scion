@@ -45,8 +45,6 @@ pkg/
   agent/
     manager.go              # Manager interface (UNCHANGED)
     run.go                  # AgentManager.Start (UNCHANGED)
-    managed_manager.go      # NEW: ManagedAgentManager struct + Manager impl
-    managed_state.go        # NEW: ManagedAgentState persistence
   hub/
     handlers_managed_agents.go # Hub-direct managed backend selection and lifecycle
   managedagent/
@@ -201,45 +199,6 @@ type UsageInfo struct {
 }
 ```
 
-**ManagedAgentManager** (new, in `pkg/agent/managed_manager.go`):
-
-```go
-package agent
-
-import (
-    "context"
-
-    "github.com/GoogleCloudPlatform/scion/pkg/api"
-    "github.com/GoogleCloudPlatform/scion/pkg/managedagent"
-)
-
-// ManagedAgentManager implements the Manager interface for cloud-managed agents.
-type ManagedAgentManager struct {
-    Backend   managedagent.ManagedAgentBackend
-    stateDir  string // Base directory for managed agent state files
-}
-
-func NewManagedAgentManager(backend managedagent.ManagedAgentBackend, stateDir string) Manager {
-    return &ManagedAgentManager{
-        Backend:  backend,
-        stateDir: stateDir,
-    }
-}
-
-// All Manager interface methods implemented by delegating to Backend.
-// See Section 4 for detailed lifecycle flows.
-
-func (m *ManagedAgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) { ... }
-func (m *ManagedAgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) { ... }
-func (m *ManagedAgentManager) Stop(ctx context.Context, agentID string, projectPath string) error { ... }
-func (m *ManagedAgentManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) { ... }
-func (m *ManagedAgentManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) { ... }
-func (m *ManagedAgentManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error { ... }
-func (m *ManagedAgentManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error { ... }
-func (m *ManagedAgentManager) Watch(ctx context.Context, agentID string) (<-chan api.StatusEvent, error) { ... }
-func (m *ManagedAgentManager) Close() { ... }
-```
-
 ### 2.4 How execution branches
 
 The Hub branches before broker dispatch. `handlers_agents_core.go` recognizes the
@@ -307,63 +266,33 @@ max_duration: 30m
 
 ### 4.1 Start flow for managed agents
 
-When `ManagedAgentManager.Start()` is called:
+When an agent create request selects the `managed-agents` profile:
 
-1. **Project resolution** -- same as container path: `config.GetResolvedProjectDir(opts.ProjectPath)`.
-2. **Duplicate check** -- scan local state directory for existing managed agent with same slug.
-3. **Template/config resolution** -- load template chain, merge configs (same as container path up to merge).
-4. **Detect managed agent** -- broker profile is `managed-agents` (selected at creation time, not from template).
-5. **Resolve auth** -- resolve API key from Scion settings (`managed_agents.google.api_key`), Hub secrets, or environment variable.
-6. **Create cloud agent** -- call `Backend.CreateAgent()` with system instruction, tools, and environment config. Synchronous call. Receives `cloudAgentID`.
-7. **Create first interaction** -- if `opts.Task` is non-empty, call `Backend.CreateInteraction()` with the task as input and `Stream: true`.
-8. **Persist local state** -- write `managed-agent-state.json` to state directory. Write `agent-info.json` with phase=running, activity=working.
-9. **Return AgentInfo** -- populated with runtime set to `"managed:google"`.
-
-Container path steps 5-12 (image resolution, harness resolution, container auth, image pull, env construction, container launch, verify) are all skipped.
+1. The Hub performs the normal request validation, authorization, and Agent record creation.
+2. `handlers_agents_core.go` selects `managedAgentCreate` before broker dispatch.
+3. `getManagedBackend` loads `managed_agents.google` from global settings and lazily constructs the backend.
+4. The Hub sets the runtime to `managed:<provider>` and records the provider in Agent annotations.
+5. If the request includes a task, the Hub creates the first interaction and records its interaction and environment IDs in the same Agent annotations.
+6. The Hub persists the Agent record. No local agent directory or Runtime Broker is involved.
 
 ### 4.2 Message delivery flow
 
-1. **Find agent** -- look up managed agent state from local state directory by slug.
-2. **Load cloud state** -- read `managed-agent-state.json` for `cloudAgentID`, `latestEnvironmentID`, `latestInteractionID`.
-3. **Create new interaction** -- call `Backend.CreateInteraction()` with:
-   - `CloudAgentID`: from state
-   - `Input`: the message
-   - `PreviousInteractionID`: from state (chains conversation)
-   - `EnvironmentID`: from state (preserves sandbox)
-   - `Stream: true`
-4. **Update state** -- write new `interactionID` and `environmentID` to state file. Update `agent-info.json` with activity=working.
-5. **Monitor completion** -- goroutine reads SSE stream, updates `agent-info.json` on completion.
-
-`MessageRaw()` returns an error for managed agents (no tmux).
+1. The Hub loads the Agent record and selects `managedAgentMessage` from its `managed:` runtime.
+2. For interrupting messages, the current interaction is cancelled best-effort.
+3. The Hub creates a new interaction using the previous interaction and environment IDs from Agent annotations.
+4. The returned interaction and environment IDs replace those annotations and are persisted through the Agent store.
 
 ### 4.3 Status monitoring and mapping
 
-| Google Interaction Status | Scion Phase | Scion Activity |
-|---|---|---|
-| (agent created, no interaction yet) | running | waiting_for_input |
-| `in_progress` | running | working |
-| `requires_action` (unexpected) | running | error (log warning) |
-| `completed` | running | completed |
-| `failed` | error | crashed |
-| `cancelled` | stopped | -- |
-| `incomplete` | running | limits_exceeded |
-
-SSE event-level mapping:
-
-| SSE Event | Scion Activity |
-|---|---|
-| `step.start` type=thought | thinking |
-| `step.start` type=model_output | working |
-| `step.start` type=function_call | executing |
-| `step.start` type=code_execution_call | executing |
-| `interaction.completed` | completed |
-| `interaction.status_update` requires_action | error (log warning, unexpected) |
+`scion look` resolves the latest interaction ID from the stored Agent annotations,
+fetches that interaction from the backend, and formats its steps and token usage.
+Lifecycle phase remains Hub-owned Agent state.
 
 ### 4.4 Stop/Delete flows
 
-**Stop**: Cancel active interaction if `in_progress`. Cloud agent and environment persist (resumable). Update `agent-info.json` phase=stopped.
+**Stop**: Cancel the active interaction if it is still in progress, then update the Hub Agent phase to stopped. The remote environment remains reusable.
 
-**Delete**: Stop (as above), then `Backend.DeleteAgent()`, then remove local state directory if `deleteFiles` is true. Return `(false, nil)` -- no branch to delete.
+**Delete**: Stop best-effort, then continue through the Hub's normal Agent deletion path. There is no local managed-agent state directory to remove.
 
 ### 4.5 CLI command behavior for managed agents
 
@@ -418,7 +347,7 @@ Auth: `apiKey` set as `x-goog-api-key` header on every request.
 
 ### 5.2 Environment lifecycle
 
-Environments are NOT a separate CRUD resource. Created implicitly when an interaction uses `environment: "remote"`, reused by passing the returned `environment_id`. The `ManagedAgentManager` tracks `latestEnvironmentID` in state.
+Environments are NOT a separate CRUD resource. They are created implicitly when an interaction uses `environment: "remote"` and reused by passing the returned `environment_id`. The Hub tracks the latest environment ID in the Agent record's annotations.
 
 Google API lifecycle: auto-snapshot after ~15min idle, retained 7 days, then deleted. Scion does not manage this.
 
@@ -475,43 +404,24 @@ Managed agents are selected as a broker profile during agent creation — analog
 
 ## 7. State Storage
 
-### 7.1 Per-agent state
+### 7.1 Hub Agent record
 
-```go
-type ManagedAgentState struct {
-    CloudAgentID        string   `json:"cloud_agent_id"`
-    CloudProvider       string   `json:"cloud_provider"`
-    LatestInteractionID string   `json:"latest_interaction_id,omitempty"`
-    LatestEnvironmentID string   `json:"latest_environment_id,omitempty"`
-    InteractionChain    []string `json:"interaction_chain,omitempty"`
-    LastStatus          string   `json:"last_status,omitempty"`
-    CreatedAt           string   `json:"created_at"`
-    UpdatedAt           string   `json:"updated_at"`
-    APIKeyRef           string   `json:"api_key_ref,omitempty"`
-}
-```
+Managed agents use the same Hub Agent store as container agents. Provider state is
+kept in the record rather than a broker-local directory:
 
-### 7.2 Directory layout
+- `runtime`: `managed:<provider>`
+- `scion.dev/cloud-provider` annotation: backend name
+- `scion.dev/interaction-id` annotation: latest interaction
+- `scion.dev/environment-id` annotation: reusable remote environment
 
-```
-<projectDir>/agents/<agent-name>/
-  scion-agent.json          # Template config (same as container agents)
-  managed-agent-state.json  # NEW: cloud-side state tracking
-  home/
-    agent-info.json          # Status (same format as container agents)
-    # No local agent.log — logs go to GCP Cloud Logging (decision Q4)
-```
-
-### 7.3 Integration with agent-info.json
-
-Same schema, different field values:
+### 7.2 Agent fields
 
 | Field | Container Agent | Managed Agent |
 |---|---|---|
 | `ContainerID` | Docker/k8s ID | Empty |
 | `Runtime` | "docker" / "podman" / "kubernetes" | "managed:google" |
-| `Phase` | From container + sciontool hooks | From interaction status |
-| `Activity` | From `.scion-status.json` | From SSE event mapping |
+| `Phase` | From container + sciontool hooks | Hub lifecycle state |
+| `Activity` | From `.scion-status.json` | Hub lifecycle state |
 | `Image` | Container image | Empty |
 
 ---
@@ -523,8 +433,8 @@ Same schema, different field values:
 | `scion start <name> [task]` | Provision + container launch | Create cloud agent + first interaction |
 | `scion create <name> [task]` | Provision only (no container) | Create cloud agent (no interaction) |
 | `scion stop <name>` | Stop container | Cancel active interaction |
-| `scion delete <name>` | Delete container + files | Delete cloud agent + local state |
-| `scion list` | Merge container + on-disk state | Merge managed state from agent dirs |
+| `scion delete <name>` | Delete container + files | Stop interaction + delete Hub Agent record |
+| `scion list` | Merge container + on-disk state | Read managed agents from the Hub Agent store |
 | `scion message <name> <msg>` | tmux paste-buffer + send-keys | Create new interaction with message |
 | `scion message --raw <name>` | tmux send-keys (control chars) | Error: "not supported for managed agents" |
 | `scion message --broadcast` | Fan-out tmux delivery | Fan-out interaction creation |
@@ -537,44 +447,7 @@ Same schema, different field values:
 
 ---
 
-## 9. Migration Path to Option C
-
-### 9.1 Refactoring to ExecutionBackend
-
-Option C introduces a unified interface:
-
-```go
-type ExecutionBackend interface {
-    Name() string
-    Start(ctx context.Context, cfg BackendConfig) (AgentHandle, error)
-    Stop(ctx context.Context, handle AgentHandle) error
-    Delete(ctx context.Context, handle AgentHandle) error
-    SendMessage(ctx context.Context, handle AgentHandle, msg string) error
-    GetOutput(ctx context.Context, handle AgentHandle) (string, error)
-    StreamOutput(ctx context.Context, handle AgentHandle) (io.ReadCloser, error)
-    GetStatus(ctx context.Context, handle AgentHandle) (Phase, Activity, error)
-}
-```
-
-### 9.2 What stays stable
-
-- **`Manager` interface** -- the public API for CLI and broker. Internal impl switches from "Manager holds Runtime" to "Manager holds ExecutionBackend", but callers unaffected.
-- **`ScionConfig.Service` field** -- template schema is stable.
-- **`ManagedAgentState` persistence** -- state file format and directory layout are stable.
-- **`agent-info.json`** -- status format is stable.
-
-### 9.3 What changes
-
-- **`ManagedAgentBackend`** -- absorbed into `ExecutionBackend`.
-- **`ManagedAgentManager`** -- absorbed into unified `Manager` implementation.
-- **`AgentManager`** -- also absorbed; Runtime+Harness wrapped in `ContainerExecutionBackend`.
-- **Package layout** -- `pkg/managedagent/` may move to `pkg/backend/managed/`.
-
-Key insight: Option B's `ManagedAgentBackend` is a preview of `ExecutionBackend`'s shape, because managed agents naturally surface the right abstraction level (message-in, output-out, status query). The Option C refactor mostly consists of wrapping existing Runtime+Harness into the same shape.
-
----
-
-## 10. Resolved Design Decisions
+## 9. Resolved Design Decisions
 
 ### Q1: API key storage — DECIDED: Scion settings only
 
@@ -624,8 +497,6 @@ Custom `net/http` wrapper for v1. The API surface is small (~8 endpoints), auth 
 | `pkg/agent/manager.go` | Manager interface | Container manager contract |
 | `pkg/api/types.go` | Core types | Add ManagedAgentSettings (in settings, not ScionConfig) |
 | `pkg/agent/run.go` | AgentManager.Start | UNCHANGED |
-| `pkg/agent/managed_manager.go` | ManagedAgentManager | NEW |
-| `pkg/agent/managed_state.go` | State persistence | NEW |
 | `pkg/hub/handlers_managed_agents.go` | Hub-direct managed backend routing | NEW |
 | `pkg/managedagent/backend.go` | Backend interface | NEW |
 | `pkg/managedagent/types.go` | Backend types | NEW |
