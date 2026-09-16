@@ -51,6 +51,7 @@ starting a **stopped** or **error** agent runs a fresh session. See
     - `--harness-config <string>`: Named harness configuration to use.
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
     - `--broker <string>`: Preferred runtime broker ID or name for execution.
+    - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, or `none`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
 
 ### `scion stop`
@@ -128,6 +129,7 @@ Sends a message to a running agent or user.
 - **Flags:**
     - `-i, --interrupt`: Interrupt the harness before sending the message.
     - `-w, --wake`: Resume a suspended agent before delivering the message.
+    - `--body-file <path>`: Read the message body from a file instead of passing it inline. Useful for long messages and scripted workflows. Mutually exclusive with the inline `<message>` argument.
     - `--attach <path>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`.
         - **Constraints:** Cannot be combined with `--raw`, `--in`, or `--at`.
         - **Requirements:** Requires Hub mode (`scion hub enable`). If run in local mode, the command will fail with an error suggesting you include file contents directly in the message text. If the file is not a regular file (e.g., is a directory) or is outside allowed roots, the command will fail.
@@ -183,6 +185,18 @@ This command replaces the removed `--broadcast` / `--all` flags on `scion messag
 Sends raw keystrokes to an agent's terminal via tmux `send-keys` with no trailing Enter. Supports control keys like arrows and Escape. This command replaces the deprecated `--raw` flag on `scion message`.
 
 **Usage:** `scion keys <agent-name> <keys>`
+
+### `scion set-message-mode`
+
+Sets the message mode for an agent, controlling which users and agents can send messages to it. Full-role agents can also call this command programmatically.
+
+**Usage:** `scion set-message-mode <agent-name> <mode>`
+
+- **Arguments:**
+    - `<agent-name>`: The target agent.
+    - `<mode>`: One of `project` (default), `branch`, `lineage`, or `none`.
+
+See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes) for details on each mode.
 
 ### `scion messages` (aliases: `msgs`, `inbox`)
 

@@ -60,7 +60,11 @@ Hovering over a message (on desktop) or long-pressing (on mobile) reveals a cont
 - **Unread Divider with Watermark**: An unread indicator bar automatically segments new messages since your last visit, including a watermark to ensure you never miss a transition.
 - **Rich Agent Output Rendering**: Dispatched agents can render complex interactive payloads directly inside the chat, including structural diffs, test suite results, and interactive JSON/YAML tree-structures.
 - **Collapsed Agent-to-Agent Messages**: To keep threads readable, background agent-to-agent messages (visible under the **Full** density filter) are collapsed into a compact, click-to-expand pill. When expanded, these messages are displayed with 2-line truncation. If a message is truncated, an expand icon ('arrows-angle-expand') appears next to it, allowing you to open a full-screen Markdown-rendered dialog overlay.
-- **Thread Export**: Export any collaborative thread as a clean Markdown document, useful for sharing agent reasoning or saving session histories.
+- **Conversation Export**: Export any collaborative thread via the export dropdown in the chat header:
+  - **Download as Markdown** for archiving or sharing agent reasoning.
+  - **Print / Save as PDF** for offline review.
+  - **Copy to Clipboard** (HTML + plain text) for quick pasting into other tools.
+  All exported content is HTML-escaped for safe rendering.
 - **Send-to-Agent Context & Slash Commands**: Fast-track your workflow with slash commands (e.g. `/start`, `/help`) and easily forward snippets or whole discussions directly to your agents as contextual guidance.
 
 ---
@@ -139,6 +143,9 @@ scion message agent:tech-lead "Please review the auth module."
 
 # Attach a file
 scion message @tech-lead "See the test results." --attach ./results.json
+
+# Read message body from a file (useful for long messages or scripted workflows)
+scion message @tech-lead --body-file ./review-notes.md
 ```
 
 ### Message Formatting
@@ -205,7 +212,13 @@ Messages are delivered in real-time to the Web Dashboard via Server-Sent Events 
 
 ## Message Authorization & Modes
 
-Every agent is protected by a **Message Mode** that controls which users and other agents can send messages to it. An agent's message mode can be set via the Web Dashboard or via the `set_message_mode` action. The available modes are:
+Every agent is protected by a **Message Mode** that controls which users and other agents can send messages to it. An agent's message mode can be managed in several ways:
+
+- **Web Dashboard**: Use the mode controls on the agent detail page.
+- **CLI**: Use `scion set-message-mode <agent-name> <mode>`, or set the initial mode at creation time with `scion start --message-mode <mode>`.
+- **Agent self-service**: Full-role agents can call `set_message_mode` programmatically to adjust their own or their children's message modes.
+
+The available modes are:
 
 - **Project Mode (Default)**: Any user with the `agent:message` permission in the project can message the agent. Any peer agent in the project (that is not restricted by lineage mode) can also message it. The most permissive mode. Note that the default project-member role does **not** include `agent:message` — messaging requires an owner, admin, or ancestry relationship with the agent (i.e., the agent's creator or their ancestors). This aligns messaging authorization with the terminal attach permission gate.
 - **Branch Mode**: Only users in the agent's ancestry chain (its creator and their ancestors), plus the agent's direct parent and child agents, can message it.
