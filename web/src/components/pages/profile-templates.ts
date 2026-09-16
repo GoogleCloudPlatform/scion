@@ -25,7 +25,9 @@
 import { LitElement, html, css } from 'lit';
 import { customElement } from 'lit/decorators.js';
 
+import '../shared/resource-import.js';
 import '../shared/resource-list.js';
+import type { ScionResourceList } from '../shared/resource-list.js';
 
 @customElement('scion-page-profile-templates')
 export class ScionPageProfileTemplates extends LitElement {
@@ -68,6 +70,13 @@ export class ScionPageProfileTemplates extends LitElement {
         </div>
       </div>
 
+      <scion-resource-import
+        kind="template"
+        scope="user"
+        canImport
+        @resource-changed=${() => this._refreshList()}
+      ></scion-resource-import>
+
       <scion-resource-list
         id="templates-list"
         kind="template"
@@ -78,8 +87,14 @@ export class ScionPageProfileTemplates extends LitElement {
         canCreate
         canRename
         cloneFromGlobal
+        @resource-changed=${() => this._refreshList()}
       ></scion-resource-list>
     `;
+  }
+
+  private _refreshList() {
+    const list = this.shadowRoot?.querySelector<ScionResourceList>('#templates-list');
+    if (list) void list.load();
   }
 }
 

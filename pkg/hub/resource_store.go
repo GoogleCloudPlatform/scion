@@ -269,6 +269,13 @@ func (p *templatePersistence) Create(ctx context.Context, rec *ResourceRecord, d
 		SourceURL:     rec.SourceURL,
 		Visibility:    rec.Visibility,
 	}
+	// For user-scoped templates imported via the resource pipeline, set
+	// OwnerID and CreatedBy from the scope ID (which IS the user ID for
+	// user scope). This mirrors handleCreateTemplate's behavior.
+	if rec.Scope == store.TemplateScopeUser && rec.ScopeID != "" {
+		t.OwnerID = rec.ScopeID
+		t.CreatedBy = rec.ScopeID
+	}
 	p.applyDirMeta(t, dir, rec)
 	p.model = t
 	return p.s.store.CreateTemplate(ctx, t)
