@@ -209,7 +209,8 @@ export class ScionPageSettings extends LitElement {
   /** Refresh a resource list (by element id) after an import. */
   private refreshList(id: string): void {
     const list = this.shadowRoot?.querySelector(`#${id}`) as
-      import('../shared/resource-list.js').ScionResourceList | null;
+      | import('../shared/resource-list.js').ScionResourceList
+      | null;
     void list?.load();
   }
 
@@ -273,157 +274,126 @@ export class ScionPageSettings extends LitElement {
             this.activeTab = (e.detail as { name: string }).name;
           }}
         >
-          ${
-            this.isTabVisible('env-vars')
-              ? html`<sl-tab slot="nav" panel="env-vars" ?active=${this.activeTab === 'env-vars'}
-                  >Environment Variables</sl-tab
-                >`
-              : nothing
-          }
-          ${
-            this.isTabVisible('secrets')
-              ? html`<sl-tab slot="nav" panel="secrets" ?active=${this.activeTab === 'secrets'}
-                  >Secrets</sl-tab
-                >`
-              : nothing
-          }
-          ${
-            this.isTabVisible('templates')
-              ? html`<sl-tab slot="nav" panel="templates" ?active=${this.activeTab === 'templates'}
-                  >Templates</sl-tab
-                >`
-              : nothing
-          }
-          ${
-            this.isTabVisible('harness-configs')
-              ? html`<sl-tab
-                  slot="nav"
-                  panel="harness-configs"
-                  ?active=${this.activeTab === 'harness-configs'}
-                  >Harness Configs</sl-tab
-                >`
-              : nothing
-          }
-          ${
-            this.isTabVisible('pre-start-hooks')
-              ? html`<sl-tab
-                  slot="nav"
-                  panel="pre-start-hooks"
-                  ?active=${this.activeTab === 'pre-start-hooks'}
-                  >Pre-Start Hooks</sl-tab
-                >`
-              : nothing
-          }
-          ${
-            this.isTabVisible('service-accounts')
-              ? html`<sl-tab
-                  slot="nav"
-                  panel="service-accounts"
-                  ?active=${this.activeTab === 'service-accounts'}
-                  >Service Accounts</sl-tab
-                >`
-              : nothing
-          }
-          ${
-            this.isTabVisible('skills')
-              ? html`<sl-tab slot="nav" panel="skills" ?active=${this.activeTab === 'skills'}
-                  >Skills</sl-tab
-                >`
-              : nothing
-          }
-          ${
-            this.isTabVisible('project-templates')
-              ? html`<sl-tab
-                  slot="nav"
-                  panel="project-templates"
-                  ?active=${this.activeTab === 'project-templates'}
-                  >Project Templates</sl-tab
-                >`
-              : nothing
-          }
-          ${
-            this.isTabVisible('env-vars')
-              ? html`<sl-tab-panel name="env-vars">
-                  <scion-env-var-list
-                    scope="hub"
-                    apiBasePath="/api/v1"
-                    compact
-                  ></scion-env-var-list>
-                </sl-tab-panel>`
-              : nothing
-          }
-          ${
-            this.isTabVisible('secrets')
-              ? html`<sl-tab-panel name="secrets">
-                  <scion-secret-list scope="hub" apiBasePath="/api/v1" compact></scion-secret-list>
-                </sl-tab-panel>`
-              : nothing
-          }
-          ${
-            this.isTabVisible('templates')
-              ? html`<sl-tab-panel name="templates">
-                  <p class="tab-intro">
-                    Global agent templates. Open one to browse and edit its files.
-                  </p>
-                  <scion-resource-import
-                    kind="template"
-                    scope="global"
-                    canImport
-                    @resource-changed=${() => this.refreshList('templates-list')}
-                  ></scion-resource-import>
-                  <scion-resource-list
-                    id="templates-list"
-                    kind="template"
-                    scope="global"
-                    detailBasePath="/settings"
-                    canClone
-                    canDelete
-                    @resource-changed=${() => this.refreshList('templates-list')}
-                  ></scion-resource-list>
-                </sl-tab-panel>`
-              : nothing
-          }
-          ${
-            this.isTabVisible('harness-configs')
-              ? html`<sl-tab-panel name="harness-configs">
-                  <p class="tab-intro">
-                    Global harness configurations. Open one to browse and edit its files.
-                  </p>
-                  <scion-resource-import
-                    kind="harness-config"
-                    scope="global"
-                    canImport
-                    @resource-changed=${() => this.refreshList('harness-configs-list')}
-                  ></scion-resource-import>
-                  <scion-resource-list
-                    id="harness-configs-list"
-                    kind="harness-config"
-                    scope="global"
-                    detailBasePath="/settings"
-                    canClone
-                    canDelete
-                    @resource-changed=${() => this.refreshList('harness-configs-list')}
-                  ></scion-resource-list>
-                </sl-tab-panel>`
-              : nothing
-          }
-          ${
-            this.isTabVisible('pre-start-hooks')
-              ? html`<sl-tab-panel name="pre-start-hooks">
-                  <p class="tab-intro">
-                    Hub-wide default pre-start hook. Staged for any agent whose project has no
-                    project-level hook active.
-                  </p>
-                  <scion-pre-start-hook-list
-                    apiBasePath="/api/v1"
-                    ?readonly=${!this.canEditPreStartHooks}
-                  ></scion-pre-start-hook-list>
-                </sl-tab-panel>`
-              : nothing
-          }
-          ${
-            this.isTabVisible('service-accounts')
-              ? html`<sl-tab-panel name="service-accounts">
+          ${this.isTabVisible('env-vars')
+            ? html`<sl-tab slot="nav" panel="env-vars" ?active=${this.activeTab === 'env-vars'}
+                >Environment Variables</sl-tab
+              >`
+            : nothing}
+          ${this.isTabVisible('secrets')
+            ? html`<sl-tab slot="nav" panel="secrets" ?active=${this.activeTab === 'secrets'}
+                >Secrets</sl-tab
+              >`
+            : nothing}
+          ${this.isTabVisible('templates')
+            ? html`<sl-tab slot="nav" panel="templates" ?active=${this.activeTab === 'templates'}
+                >Templates</sl-tab
+              >`
+            : nothing}
+          ${this.isTabVisible('harness-configs')
+            ? html`<sl-tab
+                slot="nav"
+                panel="harness-configs"
+                ?active=${this.activeTab === 'harness-configs'}
+                >Harness Configs</sl-tab
+              >`
+            : nothing}
+          ${this.isTabVisible('pre-start-hooks')
+            ? html`<sl-tab
+                slot="nav"
+                panel="pre-start-hooks"
+                ?active=${this.activeTab === 'pre-start-hooks'}
+                >Pre-Start Hooks</sl-tab
+              >`
+            : nothing}
+          ${this.isTabVisible('service-accounts')
+            ? html`<sl-tab
+                slot="nav"
+                panel="service-accounts"
+                ?active=${this.activeTab === 'service-accounts'}
+                >Service Accounts</sl-tab
+              >`
+            : nothing}
+          ${this.isTabVisible('skills')
+            ? html`<sl-tab slot="nav" panel="skills" ?active=${this.activeTab === 'skills'}
+                >Skills</sl-tab
+              >`
+            : nothing}
+          ${this.isTabVisible('project-templates')
+            ? html`<sl-tab
+                slot="nav"
+                panel="project-templates"
+                ?active=${this.activeTab === 'project-templates'}
+                >Project Templates</sl-tab
+              >`
+            : nothing}
+          ${this.isTabVisible('env-vars')
+            ? html`<sl-tab-panel name="env-vars">
+                <scion-env-var-list scope="hub" apiBasePath="/api/v1" compact></scion-env-var-list>
+              </sl-tab-panel>`
+            : nothing}
+          ${this.isTabVisible('secrets')
+            ? html`<sl-tab-panel name="secrets">
+                <scion-secret-list scope="hub" apiBasePath="/api/v1" compact></scion-secret-list>
+              </sl-tab-panel>`
+            : nothing}
+          ${this.isTabVisible('templates')
+            ? html`<sl-tab-panel name="templates">
+                <p class="tab-intro">
+                  Global agent templates. Open one to browse and edit its files.
+                </p>
+                <scion-resource-import
+                  kind="template"
+                  scope="global"
+                  canImport
+                  @resource-changed=${() => this.refreshList('templates-list')}
+                ></scion-resource-import>
+                <scion-resource-list
+                  id="templates-list"
+                  kind="template"
+                  scope="global"
+                  detailBasePath="/settings"
+                  canClone
+                  canDelete
+                  @resource-changed=${() => this.refreshList('templates-list')}
+                ></scion-resource-list>
+              </sl-tab-panel>`
+            : nothing}
+          ${this.isTabVisible('harness-configs')
+            ? html`<sl-tab-panel name="harness-configs">
+                <p class="tab-intro">
+                  Global harness configurations. Open one to browse and edit its files.
+                </p>
+                <scion-resource-import
+                  kind="harness-config"
+                  scope="global"
+                  canImport
+                  @resource-changed=${() => this.refreshList('harness-configs-list')}
+                ></scion-resource-import>
+                <scion-resource-list
+                  id="harness-configs-list"
+                  kind="harness-config"
+                  scope="global"
+                  detailBasePath="/settings"
+                  canClone
+                  canDelete
+                  @resource-changed=${() => this.refreshList('harness-configs-list')}
+                ></scion-resource-list>
+              </sl-tab-panel>`
+            : nothing}
+          ${this.isTabVisible('pre-start-hooks')
+            ? html`<sl-tab-panel name="pre-start-hooks">
+                <p class="tab-intro">
+                  Hub-wide default pre-start hook. Staged for any agent whose project has no
+                  project-level hook active.
+                </p>
+                <scion-pre-start-hook-list
+                  apiBasePath="/api/v1"
+                  ?readonly=${!this.canEditPreStartHooks}
+                ></scion-pre-start-hook-list>
+              </sl-tab-panel>`
+            : nothing}
+          ${this.isTabVisible('service-accounts')
+            ? html`<sl-tab-panel name="service-accounts">
                   <p class="tab-intro">
                     GCP service accounts registered at hub scope. They belong to the hub rather than
                     to any one project, which is why they are managed here.
@@ -434,31 +404,26 @@ export class ScionPageSettings extends LitElement {
                   </p>
                   <scion-gcp-service-account-list scope="hub"></scion-gcp-service-account-list>
                 </sl-tab-panel>`
-              : nothing
-          }
-          ${
-            this.isTabVisible('skills')
-              ? html`<sl-tab-panel name="skills">
-                  <p class="tab-intro">
-                    Skills automatically injected into all agents on this hub. System entries are
-                    seeded from built-in platform skills and are read-only. User-defined entries can
-                    be added and removed by hub admins.
-                  </p>
-                  <scion-injected-skills-panel scope="hub"></scion-injected-skills-panel>
-                </sl-tab-panel>`
-              : nothing
-          }
-          ${
-            this.isTabVisible('project-templates')
-              ? html`<sl-tab-panel name="project-templates">
-                  <p class="tab-intro">
-                    Project templates for quick project setup. Create a template from any existing
-                    project, then use it to create new projects with pre-configured settings.
-                  </p>
-                  <scion-project-template-list></scion-project-template-list>
-                </sl-tab-panel>`
-              : nothing
-          }
+            : nothing}
+          ${this.isTabVisible('skills')
+            ? html`<sl-tab-panel name="skills">
+                <p class="tab-intro">
+                  Skills automatically injected into all agents on this hub. System entries are
+                  seeded from built-in platform skills and are read-only. User-defined entries can
+                  be added and removed by hub admins.
+                </p>
+                <scion-injected-skills-panel scope="hub"></scion-injected-skills-panel>
+              </sl-tab-panel>`
+            : nothing}
+          ${this.isTabVisible('project-templates')
+            ? html`<sl-tab-panel name="project-templates">
+                <p class="tab-intro">
+                  Project templates for quick project setup. Create a template from any existing
+                  project, then use it to create new projects with pre-configured settings.
+                </p>
+                <scion-project-template-list></scion-project-template-list>
+              </sl-tab-panel>`
+            : nothing}
         </sl-tab-group>
       </div>
     `;

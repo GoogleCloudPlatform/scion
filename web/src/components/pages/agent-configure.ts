@@ -144,9 +144,7 @@ export class ScionPageAgentConfigure extends LitElement {
   private async loadGCPServiceAccounts(projectId: string): Promise<void> {
     this.gcpServiceAccounts = [];
     try {
-      const res = await apiFetch(
-        `/api/v1/projects/${projectId}/gcp-service-accounts?includeHubScoped=true`
-      );
+      const res = await apiFetch(`/api/v1/projects/${projectId}/gcp-service-accounts?includeHubScoped=true`);
       if (res.ok) {
         const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
         this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];
@@ -787,26 +785,22 @@ export class ScionPageAgentConfigure extends LitElement {
       </div>
 
       <div class="form-card">
-        ${
-          this.error
-            ? html`
-                <div class="error-banner">
-                  <sl-icon name="exclamation-triangle"></sl-icon>
-                  <span>${this.error}</span>
-                </div>
-              `
-            : ''
-        }
-        ${
-          this.successMessage
-            ? html`
-                <div class="success-banner">
-                  <sl-icon name="check-circle"></sl-icon>
-                  <span>${this.successMessage}</span>
-                </div>
-              `
-            : ''
-        }
+        ${this.error
+          ? html`
+              <div class="error-banner">
+                <sl-icon name="exclamation-triangle"></sl-icon>
+                <span>${this.error}</span>
+              </div>
+            `
+          : ''}
+        ${this.successMessage
+          ? html`
+              <div class="success-banner">
+                <sl-icon name="check-circle"></sl-icon>
+                <span>${this.successMessage}</span>
+              </div>
+            `
+          : ''}
 
         <sl-tab-group>
           <sl-tab slot="nav" panel="general">General</sl-tab>
@@ -916,34 +910,30 @@ export class ScionPageAgentConfigure extends LitElement {
           <sl-option value="other">Other (specify)</sl-option>
         </sl-select>
 
-        ${
-          this.modelSelection === 'other'
-            ? html`
-                <sl-input
-                  label="Model ID"
-                  placeholder="e.g. claude-opus-4-8"
-                  .value=${this.customModelId}
-                  @sl-input=${(e: any) => {
-                    this.customModelId = e.target.value;
-                  }}
-                  style="margin-top: 0.75rem"
-                >
-                </sl-input>
-              `
-            : ''
-        }
+        ${this.modelSelection === 'other'
+          ? html`
+              <sl-input
+                label="Model ID"
+                placeholder="e.g. claude-opus-4-8"
+                .value=${this.customModelId}
+                @sl-input=${(e: any) => {
+                  this.customModelId = e.target.value;
+                }}
+                style="margin-top: 0.75rem"
+              >
+              </sl-input>
+            `
+          : ''}
       </div>
 
       <div class="form-field">
         <label
           >Thinking
-          Level${
-            this.thinkingLevel !== null
-              ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)"
-                  >(${this.thinkingLevel})</span
-                >`
-              : ''
-          }</label
+          Level${this.thinkingLevel !== null
+            ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)"
+                >(${this.thinkingLevel})</span
+              >`
+            : ''}</label
         >
         <div style="display:flex;align-items:center;gap:0.75rem">
           <sl-range
@@ -1027,101 +1017,82 @@ export class ScionPageAgentConfigure extends LitElement {
           >
           <sl-option value="none">No Authentication</sl-option>
         </sl-select>
-        ${
-          this.authMethod && this.isUnsupported(selectedAuthCap || undefined)
-            ? html`<div class="hint">${this.supportReason(selectedAuthCap || undefined)}</div>`
-            : nothing
-        }
+        ${this.authMethod && this.isUnsupported(selectedAuthCap || undefined)
+          ? html`<div class="hint">${this.supportReason(selectedAuthCap || undefined)}</div>`
+          : nothing}
       </div>
 
-      ${
-        this.harnessConfig
-          ? html`
-              <div class="form-field">
-                <label>Harness Config</label>
-                <sl-input .value=${this.harnessConfig} readonly></sl-input>
-                <div class="hint">Set at creation time and cannot be changed.</div>
+      ${this.harnessConfig
+        ? html`
+            <div class="form-field">
+              <label>Harness Config</label>
+              <sl-input .value=${this.harnessConfig} readonly></sl-input>
+              <div class="hint">Set at creation time and cannot be changed.</div>
+            </div>
+          `
+        : nothing}
+      ${this.agent?.appliedConfig?.agentRole
+        ? html`
+            <div class="form-field">
+              <label>Agent Role</label>
+              <sl-select value=${this.agent.appliedConfig.agentRole} disabled>
+                <sl-option value="none">None — No hub access</sl-option>
+                <sl-option value="readonly">Read-only — Read-only access</sl-option>
+                <sl-option value="baseline">Baseline — Standard access</sl-option>
+                <sl-option value="full">Full — Full access</sl-option>
+              </sl-select>
+              <div class="hint">
+                Authorization role set at creation time. Determines hub API access level.
               </div>
-            `
-          : nothing
-      }
-      ${
-        this.agent?.appliedConfig?.agentRole
-          ? html`
-              <div class="form-field">
-                <label>Agent Role</label>
-                <sl-select value=${this.agent.appliedConfig.agentRole} disabled>
-                  <sl-option value="none">None — No hub access</sl-option>
-                  <sl-option value="readonly">Read-only — Read-only access</sl-option>
-                  <sl-option value="baseline">Baseline — Standard access</sl-option>
-                  <sl-option value="full">Full — Full access</sl-option>
-                </sl-select>
-                <div class="hint">
-                  Authorization role set at creation time. Determines hub API access level.
-                </div>
-              </div>
-            `
-          : nothing
-      }
+            </div>
+          `
+        : nothing}
 
       <!-- Message Mode -->
-      ${
-        this.agent?.phase === 'created'
+      ${this.agent?.phase === 'created'
+        ? html`
+            <div class="form-field">
+              <label>Message Mode</label>
+              <sl-select
+                placeholder="Select a message mode..."
+                .value=${this.messageMode}
+                @sl-change=${(e: Event) => {
+                  this.messageMode = (e.target as HTMLElement & { value: string }).value;
+                }}
+              >
+                <sl-option value="">Default (inherit from parent)</sl-option>
+                ${(Object.entries(MESSAGE_MODE_DISPLAY) as [MessageMode, typeof MESSAGE_MODE_DISPLAY[MessageMode]][]).map(
+                  ([mode, display]) => html`
+                    <sl-option value=${mode}>
+                      <sl-icon slot="prefix" name=${display.icon}></sl-icon>
+                      ${display.label} — ${display.description}
+                    </sl-option>
+                  `
+                )}
+              </sl-select>
+              ${this.messageMode === 'none'
+                ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
+                    This agent is configured in sealed mode. It will not be able to send or receive messages.
+                  </div>`
+                : html`<div class="hint">Message authorization scope. Default inherits from the parent agent's mode.</div>`}
+            </div>
+          `
+        : this.agent?.messageMode
           ? html`
               <div class="form-field">
                 <label>Message Mode</label>
-                <sl-select
-                  placeholder="Select a message mode..."
-                  .value=${this.messageMode}
-                  @sl-change=${(e: Event) => {
-                    this.messageMode = (e.target as HTMLElement & { value: string }).value;
-                  }}
-                >
-                  <sl-option value="">Default (inherit from parent)</sl-option>
-                  ${(
-                    Object.entries(MESSAGE_MODE_DISPLAY) as [
-                      MessageMode,
-                      (typeof MESSAGE_MODE_DISPLAY)[MessageMode],
-                    ][]
-                  ).map(
-                    ([mode, display]) => html`
-                      <sl-option value=${mode}>
-                        <sl-icon slot="prefix" name=${display.icon}></sl-icon>
-                        ${display.label} — ${display.description}
-                      </sl-option>
-                    `
-                  )}
-                </sl-select>
-                ${
-                  this.messageMode === 'none'
-                    ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
-                        This agent is configured in sealed mode. It will not be able to send or
-                        receive messages.
-                      </div>`
-                    : html`<div class="hint">
-                        Message authorization scope. Default inherits from the parent agent's mode.
-                      </div>`
-                }
+                <div style="padding: 0.25rem 0;">
+                  <scion-message-mode-badge
+                    mode=${this.agent.messageMode}
+                    size="medium"
+                  ></scion-message-mode-badge>
+                </div>
+                <div class="hint">
+                  Message mode is read-only for started agents. Use the agent detail page to change it.
+                </div>
               </div>
             `
-          : this.agent?.messageMode
-            ? html`
-                <div class="form-field">
-                  <label>Message Mode</label>
-                  <div style="padding: 0.25rem 0;">
-                    <scion-message-mode-badge
-                      mode=${this.agent.messageMode}
-                      size="medium"
-                    ></scion-message-mode-badge>
-                  </div>
-                  <div class="hint">
-                    Message mode is read-only for started agents. Use the agent detail page to
-                    change it.
-                  </div>
-                </div>
-              `
-            : nothing
-      }
+          : nothing}
 
       <div class="form-field">
         <label for="gcp-mode">GCP Identity</label>
@@ -1130,90 +1101,82 @@ export class ScionPageAgentConfigure extends LitElement {
           .value=${this.gcpMetadataMode}
           @sl-change=${(e: Event) => {
             this.gcpMetadataMode = (e.target as HTMLElement & { value: string }).value as
-              'block' | 'passthrough' | 'assign';
+              | 'block'
+              | 'passthrough'
+              | 'assign';
             if (this.gcpMetadataMode !== 'assign') {
               this.gcpServiceAccountId = '';
             }
           }}
         >
           <sl-option value="block">Block</sl-option>
-          ${
-            this.gcpServiceAccounts.length > 0
-              ? html`<sl-option value="assign">Assign Service Account</sl-option>`
-              : nothing
-          }
+          ${this.gcpServiceAccounts.length > 0
+            ? html`<sl-option value="assign">Assign Service Account</sl-option>`
+            : nothing}
           <sl-option value="passthrough">Passthrough</sl-option>
         </sl-select>
         <div class="hint">
-          ${
-            this.gcpMetadataMode === 'block'
-              ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
-              : this.gcpMetadataMode === 'assign'
-                ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-                : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."
-          }
+          ${this.gcpMetadataMode === 'block'
+            ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
+            : this.gcpMetadataMode === 'assign'
+              ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
+              : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
         </div>
       </div>
 
-      ${
-        this.gcpMetadataMode === 'assign'
-          ? html`
-              <div class="form-field">
-                <label for="gcp-sa">Service Account</label>
-                ${
-                  this.verifiedGCPServiceAccounts.length > 0
-                    ? html`
-                        <sl-select
-                          id="gcp-sa"
-                          placeholder="Select a service account..."
-                          .value=${this.gcpServiceAccountId}
-                          @sl-change=${(e: Event) => {
-                            this.gcpServiceAccountId = (
-                              e.target as HTMLElement & { value: string }
-                            ).value;
-                          }}
-                        >
-                          ${this.verifiedGCPServiceAccounts.map(
-                            (sa) =>
-                              html`<sl-option value=${sa.id}>
-                                ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope === 'hub' ? ' (Hub)' : ''}
-                              </sl-option>`
-                          )}
-                        </sl-select>
-                      `
-                    : html`
-                        <div class="hint" style="margin-top: 0;">
-                          No verified service accounts available. Register and verify service
-                          accounts in project settings.
-                        </div>
-                      `
-                }
-              </div>
-            `
-          : nothing
-      }
+      ${this.gcpMetadataMode === 'assign'
+        ? html`
+            <div class="form-field">
+              <label for="gcp-sa">Service Account</label>
+              ${this.verifiedGCPServiceAccounts.length > 0
+                ? html`
+                    <sl-select
+                      id="gcp-sa"
+                      placeholder="Select a service account..."
+                      .value=${this.gcpServiceAccountId}
+                      @sl-change=${(e: Event) => {
+                        this.gcpServiceAccountId = (
+                          e.target as HTMLElement & { value: string }
+                        ).value;
+                      }}
+                    >
+                      ${this.verifiedGCPServiceAccounts.map(
+                        (sa) =>
+                          html`<sl-option value=${sa.id}>
+                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope === 'hub' ? ' (Hub)' : ''}
+                          </sl-option>`
+                      )}
+                    </sl-select>
+                  `
+                : html`
+                    <div class="hint" style="margin-top: 0;">
+                      No verified service accounts available. Register and verify service accounts
+                      in project settings.
+                    </div>
+                  `}
+            </div>
+          `
+        : nothing}
 
       <div class="notify-field">
-        ${
-          this.isUnsupported(telemetryCap)
-            ? html`
-                <sl-tooltip content=${this.supportReason(telemetryCap)} hoist>
-                  <sl-checkbox ?checked=${this.telemetryEnabled} ?disabled=${true}>
-                    Enable Telemetry
-                  </sl-checkbox>
-                </sl-tooltip>
-              `
-            : html`
-                <sl-checkbox
-                  ?checked=${this.telemetryEnabled}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryEnabled = (e.target as HTMLInputElement).checked;
-                  }}
-                >
+        ${this.isUnsupported(telemetryCap)
+          ? html`
+              <sl-tooltip content=${this.supportReason(telemetryCap)} hoist>
+                <sl-checkbox ?checked=${this.telemetryEnabled} ?disabled=${true}>
                   Enable Telemetry
                 </sl-checkbox>
-              `
-        }
+              </sl-tooltip>
+            `
+          : html`
+              <sl-checkbox
+                ?checked=${this.telemetryEnabled}
+                @sl-change=${(e: Event) => {
+                  this.telemetryEnabled = (e.target as HTMLInputElement).checked;
+                }}
+              >
+                Enable Telemetry
+              </sl-checkbox>
+            `}
         <sl-tooltip
           content="Collect telemetry data for this agent. The default reflects the global telemetry setting."
           hoist
@@ -1239,63 +1202,59 @@ export class ScionPageAgentConfigure extends LitElement {
         </sl-tooltip>
       </div>
 
-      ${
-        this.autoExposePortsEnabled
-          ? html`
-              <div class="form-field">
-                <label for="auto-expose-mode">Port Filter Mode</label>
-                <sl-select
-                  id="auto-expose-mode"
-                  .value=${this.autoExposePortsMode}
-                  @sl-change=${(e: Event) => {
-                    this.autoExposePortsMode = (e.target as HTMLElement & { value: string }).value;
-                  }}
-                >
-                  <sl-option value="allowlist">Allowlist</sl-option>
-                  <sl-option value="denylist">Denylist</sl-option>
-                </sl-select>
-                <div class="hint">
-                  ${
-                    this.autoExposePortsMode === 'allowlist'
-                      ? 'Only expose ports in the filter list below.'
-                      : 'Expose all ports except those in the filter list below.'
-                  }
-                </div>
+      ${this.autoExposePortsEnabled
+        ? html`
+            <div class="form-field">
+              <label for="auto-expose-mode">Port Filter Mode</label>
+              <sl-select
+                id="auto-expose-mode"
+                .value=${this.autoExposePortsMode}
+                @sl-change=${(e: Event) => {
+                  this.autoExposePortsMode = (e.target as HTMLElement & { value: string }).value;
+                }}
+              >
+                <sl-option value="allowlist">Allowlist</sl-option>
+                <sl-option value="denylist">Denylist</sl-option>
+              </sl-select>
+              <div class="hint">
+                ${this.autoExposePortsMode === 'allowlist'
+                  ? 'Only expose ports in the filter list below.'
+                  : 'Expose all ports except those in the filter list below.'}
               </div>
-              <div class="form-field">
-                <label for="auto-expose-ports-list">Port Filter List</label>
-                <sl-input
-                  id="auto-expose-ports-list"
-                  placeholder="e.g. 3000,5173,8080"
-                  .value=${this.autoExposePortsList}
-                  @sl-input=${(e: Event) => {
-                    this.autoExposePortsList = (e.target as HTMLElement & { value: string }).value;
-                  }}
-                ></sl-input>
-                <div class="hint">
-                  Comma-separated list of ports to
-                  ${this.autoExposePortsMode === 'allowlist' ? 'allow' : 'deny'}.
-                </div>
+            </div>
+            <div class="form-field">
+              <label for="auto-expose-ports-list">Port Filter List</label>
+              <sl-input
+                id="auto-expose-ports-list"
+                placeholder="e.g. 3000,5173,8080"
+                .value=${this.autoExposePortsList}
+                @sl-input=${(e: Event) => {
+                  this.autoExposePortsList = (e.target as HTMLElement & { value: string }).value;
+                }}
+              ></sl-input>
+              <div class="hint">
+                Comma-separated list of ports to
+                ${this.autoExposePortsMode === 'allowlist' ? 'allow' : 'deny'}.
               </div>
-              <div class="form-field">
-                <label for="auto-expose-interval">Scan Interval</label>
-                <sl-input
-                  id="auto-expose-interval"
-                  placeholder="3s"
-                  .value=${this.autoExposePortsInterval}
-                  @sl-input=${(e: Event) => {
-                    this.autoExposePortsInterval = (
-                      e.target as HTMLElement & { value: string }
-                    ).value;
-                  }}
-                ></sl-input>
-                <div class="hint">
-                  How often to scan for new listening ports (e.g. 3s, 5s). Minimum 1s.
-                </div>
+            </div>
+            <div class="form-field">
+              <label for="auto-expose-interval">Scan Interval</label>
+              <sl-input
+                id="auto-expose-interval"
+                placeholder="3s"
+                .value=${this.autoExposePortsInterval}
+                @sl-input=${(e: Event) => {
+                  this.autoExposePortsInterval = (
+                    e.target as HTMLElement & { value: string }
+                  ).value;
+                }}
+              ></sl-input>
+              <div class="hint">
+                How often to scan for new listening ports (e.g. 3s, 5s). Minimum 1s.
               </div>
-            `
-          : nothing
-      }
+            </div>
+          `
+        : nothing}
     `;
   }
 
@@ -1319,36 +1278,32 @@ export class ScionPageAgentConfigure extends LitElement {
 
       <div class="form-field">
         <label>System Prompt</label>
-        ${
-          this.isUnsupported(systemPromptCap)
-            ? html`
-                <sl-tooltip content=${this.supportReason(systemPromptCap)} hoist>
-                  <sl-textarea
-                    placeholder="System prompt content or file:// URI..."
-                    .value=${this.systemPrompt}
-                    rows="8"
-                    resize="auto"
-                    ?disabled=${true}
-                  ></sl-textarea>
-                </sl-tooltip>
-              `
-            : html`
+        ${this.isUnsupported(systemPromptCap)
+          ? html`
+              <sl-tooltip content=${this.supportReason(systemPromptCap)} hoist>
                 <sl-textarea
                   placeholder="System prompt content or file:// URI..."
                   .value=${this.systemPrompt}
-                  @sl-input=${(e: Event) => {
-                    this.systemPrompt = (e.target as HTMLElement & { value: string }).value;
-                  }}
                   rows="8"
                   resize="auto"
+                  ?disabled=${true}
                 ></sl-textarea>
-              `
-        }
-        ${
-          systemPromptCap?.support === 'partial'
-            ? html`<div class="hint">${this.supportReason(systemPromptCap)}</div>`
-            : nothing
-        }
+              </sl-tooltip>
+            `
+          : html`
+              <sl-textarea
+                placeholder="System prompt content or file:// URI..."
+                .value=${this.systemPrompt}
+                @sl-input=${(e: Event) => {
+                  this.systemPrompt = (e.target as HTMLElement & { value: string }).value;
+                }}
+                rows="8"
+                resize="auto"
+              ></sl-textarea>
+            `}
+        ${systemPromptCap?.support === 'partial'
+          ? html`<div class="hint">${this.supportReason(systemPromptCap)}</div>`
+          : nothing}
       </div>
 
       <div class="form-field">
@@ -1375,83 +1330,77 @@ export class ScionPageAgentConfigure extends LitElement {
       <div class="field-row">
         <div class="form-field">
           <label>Max Turns</label>
-          ${
-            this.isUnsupported(maxTurnsCap)
-              ? html`
-                  <sl-tooltip content=${this.supportReason(maxTurnsCap)} hoist>
-                    <sl-input
-                      type="number"
-                      placeholder="0 = unlimited"
-                      .value=${String(this.maxTurns || '')}
-                      ?disabled=${true}
-                    ></sl-input>
-                  </sl-tooltip>
-                `
-              : html`
+          ${this.isUnsupported(maxTurnsCap)
+            ? html`
+                <sl-tooltip content=${this.supportReason(maxTurnsCap)} hoist>
                   <sl-input
                     type="number"
                     placeholder="0 = unlimited"
                     .value=${String(this.maxTurns || '')}
-                    @sl-input=${(e: Event) => {
-                      this.maxTurns =
-                        parseInt((e.target as HTMLElement & { value: string }).value) || 0;
-                    }}
-                  ></sl-input>
-                `
-          }
-        </div>
-        <div class="form-field">
-          <label>Max Model Calls</label>
-          ${
-            this.isUnsupported(maxModelCallsCap)
-              ? html`
-                  <sl-tooltip content=${this.supportReason(maxModelCallsCap)} hoist>
-                    <sl-input
-                      type="number"
-                      placeholder="0 = unlimited"
-                      .value=${String(this.maxModelCalls || '')}
-                      ?disabled=${true}
-                    ></sl-input>
-                  </sl-tooltip>
-                `
-              : html`
-                  <sl-input
-                    type="number"
-                    placeholder="0 = unlimited"
-                    .value=${String(this.maxModelCalls || '')}
-                    @sl-input=${(e: Event) => {
-                      this.maxModelCalls =
-                        parseInt((e.target as HTMLElement & { value: string }).value) || 0;
-                    }}
-                  ></sl-input>
-                `
-          }
-        </div>
-      </div>
-
-      <div class="form-field">
-        <label>Max Duration</label>
-        ${
-          this.isUnsupported(maxDurationCap)
-            ? html`
-                <sl-tooltip content=${this.supportReason(maxDurationCap)} hoist>
-                  <sl-input
-                    placeholder="e.g. 30m, 2h"
-                    .value=${this.maxDuration}
                     ?disabled=${true}
                   ></sl-input>
                 </sl-tooltip>
               `
             : html`
                 <sl-input
-                  placeholder="e.g. 30m, 2h"
-                  .value=${this.maxDuration}
+                  type="number"
+                  placeholder="0 = unlimited"
+                  .value=${String(this.maxTurns || '')}
                   @sl-input=${(e: Event) => {
-                    this.maxDuration = (e.target as HTMLElement & { value: string }).value;
+                    this.maxTurns =
+                      parseInt((e.target as HTMLElement & { value: string }).value) || 0;
                   }}
                 ></sl-input>
+              `}
+        </div>
+        <div class="form-field">
+          <label>Max Model Calls</label>
+          ${this.isUnsupported(maxModelCallsCap)
+            ? html`
+                <sl-tooltip content=${this.supportReason(maxModelCallsCap)} hoist>
+                  <sl-input
+                    type="number"
+                    placeholder="0 = unlimited"
+                    .value=${String(this.maxModelCalls || '')}
+                    ?disabled=${true}
+                  ></sl-input>
+                </sl-tooltip>
               `
-        }
+            : html`
+                <sl-input
+                  type="number"
+                  placeholder="0 = unlimited"
+                  .value=${String(this.maxModelCalls || '')}
+                  @sl-input=${(e: Event) => {
+                    this.maxModelCalls =
+                      parseInt((e.target as HTMLElement & { value: string }).value) || 0;
+                  }}
+                ></sl-input>
+              `}
+        </div>
+      </div>
+
+      <div class="form-field">
+        <label>Max Duration</label>
+        ${this.isUnsupported(maxDurationCap)
+          ? html`
+              <sl-tooltip content=${this.supportReason(maxDurationCap)} hoist>
+                <sl-input
+                  placeholder="e.g. 30m, 2h"
+                  .value=${this.maxDuration}
+                  ?disabled=${true}
+                ></sl-input>
+              </sl-tooltip>
+            `
+          : html`
+              <sl-input
+                placeholder="e.g. 30m, 2h"
+                .value=${this.maxDuration}
+                @sl-input=${(e: Event) => {
+                  this.maxDuration = (e.target as HTMLElement & { value: string }).value;
+                }}
+              ></sl-input>
+            `}
         <div class="hint">Go duration string. Empty means no limit.</div>
       </div>
 

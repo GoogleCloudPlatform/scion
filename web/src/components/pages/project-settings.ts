@@ -969,13 +969,15 @@ export class ScionPageProjectSettings extends LitElement {
   /** Refresh the templates list component (e.g. after an import). */
   private refreshTemplatesList(): void {
     const list = this.shadowRoot?.querySelector('#templates-resource-list') as
-      import('../shared/resource-list.js').ScionResourceList | null;
+      | import('../shared/resource-list.js').ScionResourceList
+      | null;
     void list?.load();
   }
 
   private refreshHarnessConfigsList(): void {
     const list = this.shadowRoot?.querySelector('#harness-configs-resource-list') as
-      import('../shared/resource-list.js').ScionResourceList | null;
+      | import('../shared/resource-list.js').ScionResourceList
+      | null;
     void list?.load();
   }
 
@@ -1180,9 +1182,7 @@ export class ScionPageProjectSettings extends LitElement {
 
   private async loadGCPServiceAccounts(): Promise<void> {
     try {
-      const response = await apiFetch(
-        `/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`
-      );
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`);
       if (response.ok) {
         const data = (await response.json()) as { items?: GCPServiceAccount[] };
         this.gcpServiceAccounts = (data.items || []).filter((sa) => sa.verified);
@@ -1378,54 +1378,50 @@ export class ScionPageProjectSettings extends LitElement {
       ></scion-boundary-summary-notice>
 
       ${this.renderResourcesSection()}
-      ${
-        this.pageData?.user
-          ? html`
-              <scion-subscription-manager
-                .projectId=${this.project.id}
-                compact
-              ></scion-subscription-manager>
-            `
-          : ''
-      }
+      ${this.pageData?.user
+        ? html`
+            <scion-subscription-manager
+              .projectId=${this.project.id}
+              compact
+            ></scion-subscription-manager>
+          `
+        : ''}
       ${this.renderSchedulesSection()}
-      ${
-        can(this.project._capabilities, 'delete')
-          ? html`
-              <div class="section danger-section">
-                <h2>Danger Zone</h2>
-                <p>Irreversible actions that affect this project and its resources.</p>
+      ${can(this.project._capabilities, 'delete')
+        ? html`
+            <div class="section danger-section">
+              <h2>Danger Zone</h2>
+              <p>Irreversible actions that affect this project and its resources.</p>
 
-                <div class="delete-area">
-                  <div class="delete-info">
-                    <h3>Delete this project</h3>
-                    <p>
-                      Permanently remove this project, its configuration, and all agents. All
-                      running agents will be stopped and deleted. This action cannot be undone.
-                    </p>
-                  </div>
-                  <div class="delete-actions">
-                    <sl-button
-                      variant="danger"
-                      size="small"
-                      ?loading=${this.deleteLoading}
-                      ?disabled=${this.deleteLoading}
-                      @click=${(e: MouseEvent) => this.handleDeleteProject(e)}
-                    >
-                      <sl-icon slot="prefix" name="trash"></sl-icon>
-                      Delete Project
-                    </sl-button>
-                  </div>
+              <div class="delete-area">
+                <div class="delete-info">
+                  <h3>Delete this project</h3>
+                  <p>
+                    Permanently remove this project, its configuration, and all agents. All running
+                    agents will be stopped and deleted. This action cannot be undone.
+                  </p>
+                </div>
+                <div class="delete-actions">
+                  <sl-button
+                    variant="danger"
+                    size="small"
+                    ?loading=${this.deleteLoading}
+                    ?disabled=${this.deleteLoading}
+                    @click=${(e: MouseEvent) => this.handleDeleteProject(e)}
+                  >
+                    <sl-icon slot="prefix" name="trash"></sl-icon>
+                    Delete Project
+                  </sl-button>
                 </div>
               </div>
-            `
-          : html`
-              <div class="section">
-                <h2>Permissions</h2>
-                <p>You don't have permission to modify this project.</p>
-              </div>
-            `
-      }
+            </div>
+          `
+        : html`
+            <div class="section">
+              <h2>Permissions</h2>
+              <p>You don't have permission to modify this project.</p>
+            </div>
+          `}
 
       <div class="done-footer">
         <sl-button variant="default" href="/projects/${this.projectId}">
@@ -1484,156 +1480,138 @@ export class ScionPageProjectSettings extends LitElement {
         <h2>GitHub App Integration</h2>
         <p>Automatic token management for GitHub operations via GitHub App installation tokens.</p>
 
-        ${
-          this.githubAppError
-            ? html` <div class="status-message error">${this.githubAppError}</div> `
-            : ''
-        }
-        ${
-          !hasInstallation
-            ? html`
-                <div class="github-no-install">
-                  <sl-icon
-                    name="github"
-                    style="font-size: 2rem; color: var(--scion-text-muted, #64748b);"
-                  ></sl-icon>
-                  ${
-                    this.githubAppLoading
-                      ? html` <p>Checking for GitHub App installation…</p> `
-                      : !this.githubAppConfigured
-                        ? html`
-                            <p>No GitHub App has been configured on this Hub.</p>
-                            <p class="field-help">
-                              Ask your Hub admin to configure the GitHub App integration, then
-                              install it on your organization or account.
-                            </p>
-                          `
-                        : html`
-                            <p>No GitHub App installation found for this project's repository.</p>
-
-                            ${
-                              this.githubAppInstallationUrl
-                                ? html`
-                                    <p class="field-help">
-                                      <a
-                                        href=${this.githubAppInstallationUrl}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                      >
-                                        Install the GitHub App
-                                      </a>
-                                      on your organization or account, then click Discover.
-                                    </p>
-                                  `
-                                : html`
-                                    <p class="field-help">
-                                      Install the GitHub App on your organization or account, then
-                                      click Discover.
-                                    </p>
-                                  `
-                            }
-                            <sl-button
-                              variant="default"
-                              size="small"
-                              @click=${() => this.discoverGitHubInstallation()}
-                            >
-                              <sl-icon slot="prefix" name="search"></sl-icon>
-                              Discover Installation
-                            </sl-button>
-                          `
-                  }
-                </div>
-              `
-            : html`
-                <div class="github-status-row">
-                  <div class="github-status-item">
-                    <span class="field-help">Status</span>
-                    <div class="github-status-value">
-                      ${stateIcon(status?.state)}
-                      <strong>${stateLabel(status?.state)}</strong>
-                    </div>
-                  </div>
-                  <div class="github-status-item">
-                    <span class="field-help">Installation ID</span>
-                    <code>${this.githubAppInstallationId}</code>
-                  </div>
-                  ${
-                    status?.last_token_mint
-                      ? html`
-                          <div class="github-status-item">
-                            <span class="field-help">Last Token Mint</span>
-                            <span>${new Date(status.last_token_mint).toLocaleString()}</span>
-                          </div>
-                        `
-                      : ''
-                  }
-                </div>
-
-                ${
-                  status?.state === 'error' || status?.state === 'degraded'
+        ${this.githubAppError
+          ? html` <div class="status-message error">${this.githubAppError}</div> `
+          : ''}
+        ${!hasInstallation
+          ? html`
+              <div class="github-no-install">
+                <sl-icon
+                  name="github"
+                  style="font-size: 2rem; color: var(--scion-text-muted, #64748b);"
+                ></sl-icon>
+                ${this.githubAppLoading
+                  ? html` <p>Checking for GitHub App installation…</p> `
+                  : !this.githubAppConfigured
                     ? html`
-                        <div
-                          class="status-message ${status.state === 'error' ? 'error' : 'warning'}"
-                        >
-                          <strong>${this.formatGitHubErrorCode(status.error_code)}:</strong>
-                          ${status.error_message}
-                          ${
-                            status.state === 'error' && this.project?.gitRemote
-                              ? html`
-                                  <br /><small>Agents will use PAT fallback if available.</small>
-                                `
-                              : ''
-                          }
-                        </div>
+                        <p>No GitHub App has been configured on this Hub.</p>
+                        <p class="field-help">
+                          Ask your Hub admin to configure the GitHub App integration, then install
+                          it on your organization or account.
+                        </p>
                       `
-                    : ''
-                }
+                    : html`
+                        <p>No GitHub App installation found for this project's repository.</p>
 
-                <div class="github-permissions">
-                  <span class="field-help">Token Permissions</span>
-                  <div class="github-perm-grid">
-                    ${this.renderPermBadge('Contents', this.githubAppPermissions?.contents)}
-                    ${this.renderPermBadge('Pull Requests', this.githubAppPermissions?.pull_requests)}
-                    ${this.renderPermBadge('Issues', this.githubAppPermissions?.issues)}
-                    ${this.renderPermBadge('Metadata', this.githubAppPermissions?.metadata)}
-                    ${this.renderPermBadge('Checks', this.githubAppPermissions?.checks)}
-                    ${this.renderPermBadge('Actions', this.githubAppPermissions?.actions)}
+                        ${this.githubAppInstallationUrl
+                          ? html`
+                              <p class="field-help">
+                                <a
+                                  href=${this.githubAppInstallationUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                >
+                                  Install the GitHub App
+                                </a>
+                                on your organization or account, then click Discover.
+                              </p>
+                            `
+                          : html`
+                              <p class="field-help">
+                                Install the GitHub App on your organization or account, then click
+                                Discover.
+                              </p>
+                            `}
+                        <sl-button
+                          variant="default"
+                          size="small"
+                          @click=${() => this.discoverGitHubInstallation()}
+                        >
+                          <sl-icon slot="prefix" name="search"></sl-icon>
+                          Discover Installation
+                        </sl-button>
+                      `}
+              </div>
+            `
+          : html`
+              <div class="github-status-row">
+                <div class="github-status-item">
+                  <span class="field-help">Status</span>
+                  <div class="github-status-value">
+                    ${stateIcon(status?.state)}
+                    <strong>${stateLabel(status?.state)}</strong>
                   </div>
                 </div>
-
-                <div style="margin-top: 1rem; display: flex; align-items: center; gap: 0.5rem;">
-                  <sl-button
-                    variant="default"
-                    size="small"
-                    ?loading=${this.githubAppLoading}
-                    ?disabled=${this.githubAppLoading}
-                    @click=${() => this.checkGitHubStatus()}
-                  >
-                    <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-                    ${status?.state === 'unchecked' ? 'Check Status' : 'Recheck Status'}
-                  </sl-button>
-                  <a
-                    href=${`https://github.com/settings/installations/${this.githubAppInstallationId}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style="text-decoration: none;"
-                  >
-                    <sl-button variant="text" size="small">
-                      <sl-icon slot="prefix" name="gear"></sl-icon>
-                      Configure Installation
-                    </sl-button>
-                  </a>
-                  <sl-button
-                    variant="text"
-                    size="small"
-                    @click=${() => this.removeGitHubInstallation()}
-                  >
-                    <sl-icon slot="prefix" name="x-circle"></sl-icon>
-                    Remove
-                  </sl-button>
+                <div class="github-status-item">
+                  <span class="field-help">Installation ID</span>
+                  <code>${this.githubAppInstallationId}</code>
                 </div>
-              `
-        }
+                ${status?.last_token_mint
+                  ? html`
+                      <div class="github-status-item">
+                        <span class="field-help">Last Token Mint</span>
+                        <span>${new Date(status.last_token_mint).toLocaleString()}</span>
+                      </div>
+                    `
+                  : ''}
+              </div>
+
+              ${status?.state === 'error' || status?.state === 'degraded'
+                ? html`
+                    <div class="status-message ${status.state === 'error' ? 'error' : 'warning'}">
+                      <strong>${this.formatGitHubErrorCode(status.error_code)}:</strong>
+                      ${status.error_message}
+                      ${status.state === 'error' && this.project?.gitRemote
+                        ? html` <br /><small>Agents will use PAT fallback if available.</small> `
+                        : ''}
+                    </div>
+                  `
+                : ''}
+
+              <div class="github-permissions">
+                <span class="field-help">Token Permissions</span>
+                <div class="github-perm-grid">
+                  ${this.renderPermBadge('Contents', this.githubAppPermissions?.contents)}
+                  ${this.renderPermBadge('Pull Requests', this.githubAppPermissions?.pull_requests)}
+                  ${this.renderPermBadge('Issues', this.githubAppPermissions?.issues)}
+                  ${this.renderPermBadge('Metadata', this.githubAppPermissions?.metadata)}
+                  ${this.renderPermBadge('Checks', this.githubAppPermissions?.checks)}
+                  ${this.renderPermBadge('Actions', this.githubAppPermissions?.actions)}
+                </div>
+              </div>
+
+              <div style="margin-top: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+                <sl-button
+                  variant="default"
+                  size="small"
+                  ?loading=${this.githubAppLoading}
+                  ?disabled=${this.githubAppLoading}
+                  @click=${() => this.checkGitHubStatus()}
+                >
+                  <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                  ${status?.state === 'unchecked' ? 'Check Status' : 'Recheck Status'}
+                </sl-button>
+                <a
+                  href=${`https://github.com/settings/installations/${this.githubAppInstallationId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style="text-decoration: none;"
+                >
+                  <sl-button variant="text" size="small">
+                    <sl-icon slot="prefix" name="gear"></sl-icon>
+                    Configure Installation
+                  </sl-button>
+                </a>
+                <sl-button
+                  variant="text"
+                  size="small"
+                  @click=${() => this.removeGitHubInstallation()}
+                >
+                  <sl-icon slot="prefix" name="x-circle"></sl-icon>
+                  Remove
+                </sl-button>
+              </div>
+            `}
       </div>
     `;
   }
@@ -1797,10 +1775,7 @@ export class ScionPageProjectSettings extends LitElement {
           <sl-tab slot="nav" panel="general" ?active=${this.activeConfigTab === 'general'}
             >General</sl-tab
           >
-          <sl-tab
-            slot="nav"
-            panel="auth-security"
-            ?active=${this.activeConfigTab === 'auth-security'}
+          <sl-tab slot="nav" panel="auth-security" ?active=${this.activeConfigTab === 'auth-security'}
             >Auth &amp; Security</sl-tab
           >
           <sl-tab slot="nav" panel="limits" ?active=${this.activeConfigTab === 'limits'}
@@ -1816,9 +1791,9 @@ export class ScionPageProjectSettings extends LitElement {
           <sl-tab-panel name="general">
             <div class="config-form">
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/default-template') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/default-template')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label
                   >Default Template ${this.renderHubIndicator('scion.io/default-template')}</label
@@ -1845,9 +1820,9 @@ export class ScionPageProjectSettings extends LitElement {
               </div>
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/default-harness-config') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/default-harness-config')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label
                   >Default Harness Config
@@ -1865,23 +1840,21 @@ export class ScionPageProjectSettings extends LitElement {
                     this.configDefaultHarnessConfig = (e.target as HTMLSelectElement).value;
                   }}
                 >
-                  ${
-                    this.harnessConfigs.length > 0
-                      ? this.harnessConfigs.map(
-                          (hc) => html`
-                            <sl-option value=${hc.name}>
-                              ${hc.displayName || hc.name}
-                              ${hc.harness ? html` <small>(${hc.harness})</small>` : ''}
-                            </sl-option>
-                          `
-                        )
-                      : // Fallback: all known/installable harnesses (incl. opt-in), not the default-install set.
-                        KNOWN_HARNESS_NAMES.map(
-                          (name) => html`
-                            <sl-option value=${name}>${harnessDisplayName(name)}</sl-option>
-                          `
-                        )
-                  }
+                  ${this.harnessConfigs.length > 0
+                    ? this.harnessConfigs.map(
+                        (hc) => html`
+                          <sl-option value=${hc.name}>
+                            ${hc.displayName || hc.name}
+                            ${hc.harness ? html` <small>(${hc.harness})</small>` : ''}
+                          </sl-option>
+                        `
+                      )
+                    : // Fallback: all known/installable harnesses (incl. opt-in), not the default-install set.
+                      KNOWN_HARNESS_NAMES.map(
+                        (name) => html`
+                          <sl-option value=${name}>${harnessDisplayName(name)}</sl-option>
+                        `
+                      )}
                 </sl-select>
                 <span class="field-help"
                   >Harness configuration used by default for new agents.</span
@@ -1889,9 +1862,9 @@ export class ScionPageProjectSettings extends LitElement {
               </div>
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/default-model') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/default-model')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label>Default Model ${this.renderHubIndicator('scion.io/default-model')}</label>
                 <sl-select
@@ -1901,7 +1874,12 @@ export class ScionPageProjectSettings extends LitElement {
                   ?disabled=${!canEdit}
                   @sl-change=${(e: Event) => {
                     const val = (e.target as HTMLSelectElement).value as
-                      '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other';
+                      | ''
+                      | 'small'
+                      | 'medium'
+                      | 'large'
+                      | 'extra-large'
+                      | 'other';
                     this.defaultModelSelection = val;
                     if (val !== 'other') this.defaultCustomModelId = '';
                   }}
@@ -1915,38 +1893,35 @@ export class ScionPageProjectSettings extends LitElement {
                 <span class="field-help">Default model alias or ID used for new agents.</span>
               </div>
 
-              ${
-                this.defaultModelSelection === 'other'
-                  ? html`
-                      <div class="config-field">
-                        <label>Model ID</label>
-                        <sl-input
-                          placeholder="e.g. claude-opus-4-8"
-                          .value=${this.defaultCustomModelId}
-                          ?disabled=${!canEdit}
-                          @sl-input=${(e: Event) => {
-                            this.defaultCustomModelId = (e.target as HTMLInputElement).value;
-                          }}
-                        ></sl-input>
-                      </div>
-                    `
-                  : ''
-              }
+              ${this.defaultModelSelection === 'other'
+                ? html`
+                    <div class="config-field">
+                      <label>Model ID</label>
+                      <sl-input
+                        placeholder="e.g. claude-opus-4-8"
+                        .value=${this.defaultCustomModelId}
+                        ?disabled=${!canEdit}
+                        @sl-input=${(e: Event) => {
+                          this.defaultCustomModelId = (e.target as HTMLInputElement).value;
+                        }}
+                      ></sl-input>
+                    </div>
+                  `
+                : ''}
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/default-thinking-level') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/default-thinking-level')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label
                   >Default Thinking Level
-                  ${this.renderHubIndicator('scion.io/default-thinking-level')}${
-                    this.defaultThinkingLevel !== null
-                      ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)"
-                          >(${this.defaultThinkingLevel})</span
-                        >`
-                      : ''
-                  }</label
+                  ${this.renderHubIndicator('scion.io/default-thinking-level')}${this
+                    .defaultThinkingLevel !== null
+                    ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)"
+                        >(${this.defaultThinkingLevel})</span
+                      >`
+                    : ''}</label
                 >
                 <div style="display:flex;align-items:center;gap:0.75rem">
                   <sl-range
@@ -1986,19 +1961,17 @@ export class ScionPageProjectSettings extends LitElement {
               </div>
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/telemetry-enabled') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/telemetry-enabled')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label>Telemetry ${this.renderHubIndicator('scion.io/telemetry-enabled')}</label>
                 <sl-select
-                  value=${
-                    this.configTelemetryEnabled === true
-                      ? 'enabled'
-                      : this.configTelemetryEnabled === false
-                        ? 'disabled'
-                        : 'inherit'
-                  }
+                  value=${this.configTelemetryEnabled === true
+                    ? 'enabled'
+                    : this.configTelemetryEnabled === false
+                      ? 'disabled'
+                      : 'inherit'}
                   ?disabled=${!canEdit}
                   @sl-change=${(e: Event) => {
                     const val = (e.target as HTMLSelectElement).value;
@@ -2008,13 +1981,11 @@ export class ScionPageProjectSettings extends LitElement {
                 >
                   <sl-option value="inherit"
                     >Use hub default
-                    (${
-                      this.hubTelemetryDefault === null
-                        ? '…'
-                        : this.hubTelemetryDefault
-                          ? 'enabled'
-                          : 'disabled'
-                    })</sl-option
+                    (${this.hubTelemetryDefault === null
+                      ? '…'
+                      : this.hubTelemetryDefault
+                        ? 'enabled'
+                        : 'disabled'})</sl-option
                   >
                   <sl-option value="enabled">Enabled</sl-option>
                   <sl-option value="disabled">Disabled</sl-option>
@@ -2026,22 +1997,20 @@ export class ScionPageProjectSettings extends LitElement {
               </div>
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/auto-expose-ports-enabled') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/auto-expose-ports-enabled')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label
                   >Auto-Expose Ports
                   ${this.renderHubIndicator('scion.io/auto-expose-ports-enabled')}</label
                 >
                 <sl-select
-                  value=${
-                    this.configAutoExposePortsEnabled === true
-                      ? 'enabled'
-                      : this.configAutoExposePortsEnabled === false
-                        ? 'disabled'
-                        : 'inherit'
-                  }
+                  value=${this.configAutoExposePortsEnabled === true
+                    ? 'enabled'
+                    : this.configAutoExposePortsEnabled === false
+                      ? 'disabled'
+                      : 'inherit'}
                   ?disabled=${!canEdit}
                   @sl-change=${(e: Event) => {
                     const val = (e.target as HTMLSelectElement).value;
@@ -2051,13 +2020,11 @@ export class ScionPageProjectSettings extends LitElement {
                 >
                   <sl-option value="inherit"
                     >Use hub default
-                    (${
-                      this.hubAutoExposePortsDefault === null
-                        ? '…'
-                        : this.hubAutoExposePortsDefault
-                          ? 'enabled'
-                          : 'disabled'
-                    })</sl-option
+                    (${this.hubAutoExposePortsDefault === null
+                      ? '…'
+                      : this.hubAutoExposePortsDefault
+                        ? 'enabled'
+                        : 'disabled'})</sl-option
                   >
                   <sl-option value="enabled">Enabled</sl-option>
                   <sl-option value="disabled">Disabled</sl-option>
@@ -2067,15 +2034,16 @@ export class ScionPageProjectSettings extends LitElement {
                   default" inherits the server-level setting.</span
                 >
               </div>
+
             </div>
           </sl-tab-panel>
 
           <sl-tab-panel name="auth-security">
             <div class="config-form">
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/default-harness-auth') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/default-harness-auth')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label
                   >Default Harness Auth
@@ -2105,9 +2073,9 @@ export class ScionPageProjectSettings extends LitElement {
               </div>
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/default-agent-role') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/default-agent-role')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label
                   >Default Agent Role
@@ -2136,9 +2104,9 @@ export class ScionPageProjectSettings extends LitElement {
               </div>
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/max-agent-role') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/max-agent-role')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label
                   >Maximum Agent Role ${this.renderHubIndicator('scion.io/max-agent-role')}</label
@@ -2187,83 +2155,76 @@ export class ScionPageProjectSettings extends LitElement {
                 >
               </div>
 
-              ${
-                this.configDefaultGCPIdentityMode === 'assign'
-                  ? html`
-                      <div class="config-field">
-                        <label>Service Account</label>
-                        <div style="display: flex; align-items: center; gap: 0.25rem;">
-                          ${
-                            this.configDefaultGCPIdentitySAID
-                              ? html`
-                                  <sl-tooltip
-                                    content=${this.copiedDefaultSAEmail ? 'Copied!' : 'Copy email'}
-                                  >
-                                    <sl-icon-button
-                                      name=${
-                                        this.copiedDefaultSAEmail ? 'clipboard-check' : 'clipboard'
-                                      }
-                                      label="Copy service account email"
-                                      style="font-size: 1rem;"
-                                      @click=${() => {
-                                        const sa = this.gcpServiceAccounts.find(
-                                          (s) => s.id === this.configDefaultGCPIdentitySAID
-                                        );
-                                        if (sa && navigator.clipboard) {
-                                          void navigator.clipboard
-                                            .writeText(sa.email)
-                                            .then(() => {
-                                              this.copiedDefaultSAEmail = true;
-                                              setTimeout(() => {
-                                                this.copiedDefaultSAEmail = false;
-                                              }, 1500);
-                                            })
-                                            .catch(() => {});
-                                        }
-                                      }}
-                                    ></sl-icon-button>
-                                  </sl-tooltip>
-                                `
-                              : ''
-                          }
-                          <sl-select
-                            style="flex: 1;"
-                            placeholder="Select a verified service account"
-                            clearable
-                            value=${this.configDefaultGCPIdentitySAID}
-                            ?disabled=${!canEdit}
-                            @sl-change=${(e: Event) => {
-                              this.configDefaultGCPIdentitySAID = (
-                                e.target as HTMLSelectElement
-                              ).value;
-                              this.copiedDefaultSAEmail = false;
-                            }}
-                          >
-                            ${
-                              this.gcpServiceAccounts.length > 0
-                                ? this.gcpServiceAccounts.map(
-                                    (sa) => html`
-                                      <sl-option value=${sa.id}>
-                                        ${sa.displayName || sa.email}
-                                        <small>(${sa.email})</small
-                                        >${sa.scope === 'hub' ? ' (Hub)' : ''}
-                                      </sl-option>
-                                    `
-                                  )
-                                : html`<sl-option value="" disabled
-                                    >No verified service accounts available</sl-option
-                                  >`
-                            }
-                          </sl-select>
-                        </div>
-                        <span class="field-help"
-                          >The GCP service account to assign to new agents by default. Only verified
-                          accounts are shown.</span
+              ${this.configDefaultGCPIdentityMode === 'assign'
+                ? html`
+                    <div class="config-field">
+                      <label>Service Account</label>
+                      <div style="display: flex; align-items: center; gap: 0.25rem;">
+                        ${this.configDefaultGCPIdentitySAID
+                          ? html`
+                              <sl-tooltip
+                                content=${this.copiedDefaultSAEmail ? 'Copied!' : 'Copy email'}
+                              >
+                                <sl-icon-button
+                                  name=${this.copiedDefaultSAEmail
+                                    ? 'clipboard-check'
+                                    : 'clipboard'}
+                                  label="Copy service account email"
+                                  style="font-size: 1rem;"
+                                  @click=${() => {
+                                    const sa = this.gcpServiceAccounts.find(
+                                      (s) => s.id === this.configDefaultGCPIdentitySAID
+                                    );
+                                    if (sa && navigator.clipboard) {
+                                      void navigator.clipboard
+                                        .writeText(sa.email)
+                                        .then(() => {
+                                          this.copiedDefaultSAEmail = true;
+                                          setTimeout(() => {
+                                            this.copiedDefaultSAEmail = false;
+                                          }, 1500);
+                                        })
+                                        .catch(() => {});
+                                    }
+                                  }}
+                                ></sl-icon-button>
+                              </sl-tooltip>
+                            `
+                          : ''}
+                        <sl-select
+                          style="flex: 1;"
+                          placeholder="Select a verified service account"
+                          clearable
+                          value=${this.configDefaultGCPIdentitySAID}
+                          ?disabled=${!canEdit}
+                          @sl-change=${(e: Event) => {
+                            this.configDefaultGCPIdentitySAID = (
+                              e.target as HTMLSelectElement
+                            ).value;
+                            this.copiedDefaultSAEmail = false;
+                          }}
                         >
+                          ${this.gcpServiceAccounts.length > 0
+                            ? this.gcpServiceAccounts.map(
+                                (sa) => html`
+                                  <sl-option value=${sa.id}>
+                                    ${sa.displayName || sa.email}
+                                    <small>(${sa.email})</small>${sa.scope === 'hub' ? ' (Hub)' : ''}
+                                  </sl-option>
+                                `
+                              )
+                            : html`<sl-option value="" disabled
+                                >No verified service accounts available</sl-option
+                              >`}
+                        </sl-select>
                       </div>
-                    `
-                  : ''
-              }
+                      <span class="field-help"
+                        >The GCP service account to assign to new agents by default. Only verified
+                        accounts are shown.</span
+                      >
+                    </div>
+                  `
+                : ''}
             </div>
           </sl-tab-panel>
 
@@ -2274,9 +2235,9 @@ export class ScionPageProjectSettings extends LitElement {
               >
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/default-max-turns') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/default-max-turns')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label
                   >Default Max Turns ${this.renderHubIndicator('scion.io/default-max-turns')}</label
@@ -2295,9 +2256,9 @@ export class ScionPageProjectSettings extends LitElement {
               </div>
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/default-max-model-calls') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/default-max-model-calls')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label
                   >Default Max Model Calls
@@ -2306,9 +2267,9 @@ export class ScionPageProjectSettings extends LitElement {
                 <sl-input
                   type="number"
                   placeholder=${this.hubHint('scion.io/default-max-model-calls') || 'No limit'}
-                  .value=${
-                    this.configDefaultMaxModelCalls ? String(this.configDefaultMaxModelCalls) : ''
-                  }
+                  .value=${this.configDefaultMaxModelCalls
+                    ? String(this.configDefaultMaxModelCalls)
+                    : ''}
                   ?disabled=${!canEdit}
                   @sl-input=${(e: Event) => {
                     this.configDefaultMaxModelCalls =
@@ -2319,9 +2280,9 @@ export class ScionPageProjectSettings extends LitElement {
               </div>
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/default-max-duration') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/default-max-duration')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label
                   >Default Max Duration
@@ -2348,9 +2309,9 @@ export class ScionPageProjectSettings extends LitElement {
               >
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/default-resources-cpu-request') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/default-resources-cpu-request')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label
                   >CPU Request
@@ -2358,9 +2319,8 @@ export class ScionPageProjectSettings extends LitElement {
                 >
                 <sl-input
                   type="text"
-                  placeholder=${
-                    this.hubHint('scion.io/default-resources-cpu-request') || 'e.g. 500m, 1'
-                  }
+                  placeholder=${this.hubHint('scion.io/default-resources-cpu-request') ||
+                  'e.g. 500m, 1'}
                   .value=${this.configDefaultResCpuReq}
                   ?disabled=${!canEdit}
                   @sl-input=${(e: Event) => {
@@ -2370,11 +2330,9 @@ export class ScionPageProjectSettings extends LitElement {
               </div>
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/default-resources-memory-request')
-                    ? 'hub-inherited'
-                    : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/default-resources-memory-request')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label
                   >Memory Request
@@ -2382,9 +2340,8 @@ export class ScionPageProjectSettings extends LitElement {
                 >
                 <sl-input
                   type="text"
-                  placeholder=${
-                    this.hubHint('scion.io/default-resources-memory-request') || 'e.g. 512Mi, 1Gi'
-                  }
+                  placeholder=${this.hubHint('scion.io/default-resources-memory-request') ||
+                  'e.g. 512Mi, 1Gi'}
                   .value=${this.configDefaultResMemReq}
                   ?disabled=${!canEdit}
                   @sl-input=${(e: Event) => {
@@ -2394,9 +2351,9 @@ export class ScionPageProjectSettings extends LitElement {
               </div>
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/default-resources-cpu-limit') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/default-resources-cpu-limit')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label
                   >CPU Limit
@@ -2414,11 +2371,9 @@ export class ScionPageProjectSettings extends LitElement {
               </div>
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/default-resources-memory-limit')
-                    ? 'hub-inherited'
-                    : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/default-resources-memory-limit')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label
                   >Memory Limit
@@ -2426,9 +2381,8 @@ export class ScionPageProjectSettings extends LitElement {
                 >
                 <sl-input
                   type="text"
-                  placeholder=${
-                    this.hubHint('scion.io/default-resources-memory-limit') || 'e.g. 1Gi, 2Gi'
-                  }
+                  placeholder=${this.hubHint('scion.io/default-resources-memory-limit') ||
+                  'e.g. 1Gi, 2Gi'}
                   .value=${this.configDefaultResMemLim}
                   ?disabled=${!canEdit}
                   @sl-input=${(e: Event) => {
@@ -2438,9 +2392,9 @@ export class ScionPageProjectSettings extends LitElement {
               </div>
 
               <div
-                class="config-field ${
-                  this.isHubDefault('scion.io/default-resources-disk') ? 'hub-inherited' : ''
-                }"
+                class="config-field ${this.isHubDefault('scion.io/default-resources-disk')
+                  ? 'hub-inherited'
+                  : ''}"
               >
                 <label>Disk ${this.renderHubIndicator('scion.io/default-resources-disk')}</label>
                 <sl-input
@@ -2459,33 +2413,27 @@ export class ScionPageProjectSettings extends LitElement {
           <sl-tab-panel name="brokers"> ${this.renderBrokersContent()} </sl-tab-panel>
         </sl-tab-group>
 
-        ${
-          canEdit && this.activeConfigTab !== 'brokers'
-            ? html`
-                <div class="config-actions">
-                  ${
-                    this.settingsError
-                      ? html`<span class="config-status error">${this.settingsError}</span>`
-                      : ''
-                  }
-                  ${
-                    this.settingsSuccess
-                      ? html`<span class="config-status success">${this.settingsSuccess}</span>`
-                      : ''
-                  }
-                  <sl-button
-                    variant="primary"
-                    size="small"
-                    ?loading=${this.settingsSaving}
-                    ?disabled=${this.settingsSaving}
-                    @click=${() => this.handleSaveConfig()}
-                  >
-                    Save Configuration
-                  </sl-button>
-                </div>
-              `
-            : ''
-        }
+        ${canEdit && this.activeConfigTab !== 'brokers'
+          ? html`
+              <div class="config-actions">
+                ${this.settingsError
+                  ? html`<span class="config-status error">${this.settingsError}</span>`
+                  : ''}
+                ${this.settingsSuccess
+                  ? html`<span class="config-status success">${this.settingsSuccess}</span>`
+                  : ''}
+                <sl-button
+                  variant="primary"
+                  size="small"
+                  ?loading=${this.settingsSaving}
+                  ?disabled=${this.settingsSaving}
+                  @click=${() => this.handleSaveConfig()}
+                >
+                  Save Configuration
+                </sl-button>
+              </div>
+            `
+          : ''}
       </div>
     `;
   }
@@ -2615,9 +2563,8 @@ export class ScionPageProjectSettings extends LitElement {
         .scopeId=${this.projectId}
         detailBasePath="/projects/${this.projectId}"
         ?canClone=${canSync}
-        ?canDelete=${
-          can(this.project!._capabilities, 'delete') || can(this.project!._capabilities, 'manage')
-        }
+        ?canDelete=${can(this.project!._capabilities, 'delete') ||
+        can(this.project!._capabilities, 'manage')}
         ?cloneFromGlobal=${canSync}
         @resource-changed=${() => {
           this.refreshTemplatesList();
@@ -2654,9 +2601,8 @@ export class ScionPageProjectSettings extends LitElement {
         .scopeId=${this.projectId}
         detailBasePath="/projects/${this.projectId}"
         ?canClone=${canSync}
-        ?canDelete=${
-          can(this.project!._capabilities, 'delete') || can(this.project!._capabilities, 'manage')
-        }
+        ?canDelete=${can(this.project!._capabilities, 'delete') ||
+        can(this.project!._capabilities, 'manage')}
         ?cloneFromGlobal=${canSync}
         @resource-changed=${() => this.refreshHarnessConfigsList()}
       ></scion-resource-list>
@@ -2819,20 +2765,18 @@ export class ScionPageProjectSettings extends LitElement {
       <p style="margin: 0 0 1rem 0; font-size: 0.8125rem; color: var(--scion-text-muted, #64748b);">
         Runtime Brokers provide access to container runtime environments.
       </p>
-      ${
-        this.brokers.length === 0
-          ? html`
-              <div class="empty-brokers">
-                <sl-icon name="hdd-rack"></sl-icon>
-                <p>No runtime brokers are registered for this project.</p>
-              </div>
-            `
-          : html`
-              <div class="broker-list">
-                ${this.brokers.map((broker) => this.renderBrokerItem(broker))}
-              </div>
-            `
-      }
+      ${this.brokers.length === 0
+        ? html`
+            <div class="empty-brokers">
+              <sl-icon name="hdd-rack"></sl-icon>
+              <p>No runtime brokers are registered for this project.</p>
+            </div>
+          `
+        : html`
+            <div class="broker-list">
+              ${this.brokers.map((broker) => this.renderBrokerItem(broker))}
+            </div>
+          `}
     `;
   }
 
@@ -2853,60 +2797,54 @@ export class ScionPageProjectSettings extends LitElement {
             <span>Last seen: ${this.formatRelativeTime(broker.lastHeartbeat)}</span>
             ${broker.version ? html`<span>v${broker.version}</span>` : ''}
           </div>
-          ${
-            broker.profiles && broker.profiles.length > 0
-              ? html`
-                  <div class="broker-profiles">
-                    ${broker.profiles.map(
-                      (p: BrokerProfile) => html`
-                        <span class="broker-profile-badge ${p.available ? 'available' : ''}"
-                          >${p.name} (${p.type})</span
-                        >
-                      `
-                    )}
-                  </div>
-                `
-              : ''
-          }
-        </div>
-        ${
-          canEdit
+          ${broker.profiles && broker.profiles.length > 0
             ? html`
-                <div class="broker-actions">
-                  ${
-                    !isDefault
-                      ? html`
-                          <sl-tooltip content="Set as default">
-                            <sl-icon-button
-                              name="star"
-                              label="Set as default"
-                              @click=${() => this.handleSetDefaultBroker(broker.id)}
-                            ></sl-icon-button>
-                          </sl-tooltip>
-                        `
-                      : html`
-                          <sl-tooltip content="Default broker">
-                            <sl-icon-button
-                              name="star-fill"
-                              label="Default broker"
-                              style="color: var(--scion-primary, #3b82f6);"
-                              disabled
-                            ></sl-icon-button>
-                          </sl-tooltip>
-                        `
-                  }
-                  <sl-tooltip content="Remove broker">
-                    <sl-icon-button
-                      name="trash"
-                      label="Remove"
-                      style="color: var(--sl-color-danger-600, #dc2626);"
-                      @click=${() => this.handleRemoveBroker(broker.id, broker.name)}
-                    ></sl-icon-button>
-                  </sl-tooltip>
+                <div class="broker-profiles">
+                  ${broker.profiles.map(
+                    (p: BrokerProfile) => html`
+                      <span class="broker-profile-badge ${p.available ? 'available' : ''}"
+                        >${p.name} (${p.type})</span
+                      >
+                    `
+                  )}
                 </div>
               `
-            : ''
-        }
+            : ''}
+        </div>
+        ${canEdit
+          ? html`
+              <div class="broker-actions">
+                ${!isDefault
+                  ? html`
+                      <sl-tooltip content="Set as default">
+                        <sl-icon-button
+                          name="star"
+                          label="Set as default"
+                          @click=${() => this.handleSetDefaultBroker(broker.id)}
+                        ></sl-icon-button>
+                      </sl-tooltip>
+                    `
+                  : html`
+                      <sl-tooltip content="Default broker">
+                        <sl-icon-button
+                          name="star-fill"
+                          label="Default broker"
+                          style="color: var(--scion-primary, #3b82f6);"
+                          disabled
+                        ></sl-icon-button>
+                      </sl-tooltip>
+                    `}
+                <sl-tooltip content="Remove broker">
+                  <sl-icon-button
+                    name="trash"
+                    label="Remove"
+                    style="color: var(--sl-color-danger-600, #dc2626);"
+                    @click=${() => this.handleRemoveBroker(broker.id, broker.name)}
+                  ></sl-icon-button>
+                </sl-tooltip>
+              </div>
+            `
+          : ''}
       </div>
     `;
   }
