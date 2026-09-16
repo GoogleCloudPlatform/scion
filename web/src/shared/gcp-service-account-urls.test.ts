@@ -136,13 +136,13 @@ describe('saListUrl', () => {
   });
 });
 
-describe('saCreateUrl — hub-scoped creation must reach the Hub’s refusal', () => {
+describe('saCreateUrl — hub-scoped creation addresses the flat collection', () => {
   /**
-   * The requirement is not "creation fails at hub scope". It is that it fails
-   * AT THE SERVER, where the refusal is implemented and where lifting the hold
-   * (#19) will change it. A create URL that pointed at some project's
-   * collection would SUCCEED, and succeed at making the wrong thing: a
-   * project-scoped account registered from a hub-scoped screen.
+   * Hub-scope BYO registration is now live (enabled in P9). The test’s value
+   * is ensuring the URL points at the flat collection — not at some project’s
+   * nested collection. A create URL that pointed at a project’s collection
+   * would succeed at making the wrong thing: a project-scoped account
+   * registered from a hub-scoped screen.
    */
   it('points at the flat collection with scope=hub, never at a project', () => {
     const url = saCreateUrl('hub', '');

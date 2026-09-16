@@ -23,12 +23,11 @@
  *   ASKED THE WRONG SERVER QUESTION — the component renders fine and shows
  *   another scope's accounts, or none, with no error anywhere.
  *
- *   OFFERED AN ACTION THAT CANNOT WORK — hub-scoped accounts are readable by
- *   every logged-in user and writable by almost none, so any affordance
- *   rendered from a row being VISIBLE is a button that 403s for most of the
- *   hub. Creation at hub scope is refused by the Hub outright (held under #19),
- *   so there the button cannot work for ANYONE, including a hub admin whose
- *   `create` capability is true.
+ *   OFFERED AN ACTION THAT CANNOT WORK — Mint is a per-project quota
+ *   operation with no hub-scope endpoint, so the Mint button must be hidden
+ *   at hub scope regardless of capabilities. BYO registration, by contrast,
+ *   is now live at hub scope (enabled in P9) and gated solely on the
+ *   `create` capability.
  *
  * ON ASSERTING ABSENCE: "no create button" passes just as well when the
  * component failed to render, when the selector is misspelled, and when the
@@ -230,6 +229,17 @@ describe('scion-gcp-service-account-list', () => {
       expect(hubLabels).toContain('Register Existing');
       // POSITIVE CONTROL: both scopes show the button when the capability is present.
       expect(projectLabels).toContain('Register Existing');
+    });
+
+    it('hides Register Existing at hub scope when caller lacks create capability', async () => {
+      const caps = { actions: ['list'] }; // no 'create'
+
+      const el = await createComponent(
+        { scope: 'hub' },
+        makeFetch([], { items: [], _capabilities: caps })
+      );
+
+      expect(buttonLabels(el).join('|')).not.toContain('Register Existing');
     });
 
     it('hides Mint at hub scope, where there is no mint endpoint at all', async () => {
