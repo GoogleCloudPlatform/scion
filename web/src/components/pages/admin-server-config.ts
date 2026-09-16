@@ -83,6 +83,7 @@ interface V1AuthConfig {
   dev_token_file?: string;
   authorized_domains?: string[];
   user_access_mode?: string;
+  default_user_role?: string;
 }
 
 interface V1OAuthProviderConfig {
@@ -352,6 +353,7 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   // access section
   'server.hub.admin_emails': 'Admin Emails',
   'server.auth.user_access_mode': 'User Access Mode',
+  'server.auth.default_user_role': 'Default User Role',
   'server.auth.authorized_domains': 'Authorized Domains',
   // lifecycle section
   'server.hub.auto_suspend_stalled': 'Auto-Suspend Stalled Agents',
@@ -521,6 +523,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private authDevToken = '';
   @state() private authAuthorizedDomains = '';
   @state() private authUserAccessMode = 'open';
+  @state() private authDefaultUserRole = 'member';
 
   // Storage
   @state() private storageProvider = '';
@@ -1512,6 +1515,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.authDevToken = srv.auth.dev_token || '';
         this.authAuthorizedDomains = (srv.auth.authorized_domains || []).join(', ');
         this.authUserAccessMode = srv.auth.user_access_mode || 'open';
+        this.authDefaultUserRole = srv.auth.default_user_role || 'member';
       }
 
       // Storage
@@ -1785,6 +1789,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.auth.user_access_mode')) {
       auth.user_access_mode = this.authUserAccessMode;
     }
+    if (ok('server.auth.default_user_role')) {
+      auth.default_user_role = this.authDefaultUserRole;
+    }
     if (ok('server.auth.authorized_domains')) {
       auth.authorized_domains = this.authAuthorizedDomains
         ? this.authAuthorizedDomains
@@ -1993,6 +2000,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     if (ok('server.auth.user_access_mode') && this.authUserAccessMode) {
       auth.user_access_mode = this.authUserAccessMode;
+    }
+    if (ok('server.auth.default_user_role') && this.authDefaultUserRole) {
+      auth.default_user_role = this.authDefaultUserRole;
     }
     server.auth = auth;
 
@@ -4592,6 +4602,25 @@ export class ScionPageAdminServerConfig extends LitElement {
                     : ''}
                 </sl-alert>`
               : ''}
+          </div>
+          <div class="form-field full-width">
+            <label>Default User Role</label>
+            <span class="hint"
+              >Role assigned to new users who are not in the admin emails list. Takes effect immediately (hot-reloaded).</span
+            >
+            ${this.renderFieldValue(
+              'server.auth.default_user_role',
+              this.authDefaultUserRole,
+              html`${this.renderEnvBadge('server.auth.default_user_role')}<sl-select
+                  value=${this.authDefaultUserRole}
+                  @sl-change=${(e: Event) => {
+                    this.authDefaultUserRole = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="member">Member</sl-option>
+                  <sl-option value="viewer">Viewer</sl-option>
+                </sl-select>`
+            )}
           </div>
         </div>
       </div>
