@@ -128,7 +128,9 @@ export class ScionSlashAutocomplete extends LitElement {
               class="dropdown-item ${i === this.selectedIndex ? 'highlighted' : ''}"
               data-index=${i}
               @click=${() => this.acceptCommand(i)}
-              @mouseenter=${() => { this.selectedIndex = i; }}
+              @mouseenter=${() => {
+                this.selectedIndex = i;
+              }}
             >
               <span class="command-name">/${cmd.name}</span>
               <span class="command-desc">${cmd.description}</span>
@@ -200,8 +202,7 @@ export class ScionSlashAutocomplete extends LitElement {
 
       case 'ArrowUp':
         e.preventDefault();
-        this.selectedIndex =
-          (this.selectedIndex - 1 + this.commands.length) % this.commands.length;
+        this.selectedIndex = (this.selectedIndex - 1 + this.commands.length) % this.commands.length;
         return true;
 
       case 'Enter':

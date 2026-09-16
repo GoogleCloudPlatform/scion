@@ -120,9 +120,9 @@ describe('scion-chat-switcher', () => {
     });
 
     // Press Enter to select the first item (sorted by most recent).
-    el.shadowRoot?.querySelector('.overlay')?.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })
-    );
+    el.shadowRoot
+      ?.querySelector('.overlay')
+      ?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
 
     expect(selectedKey).toBe('topic-1');
   });
@@ -134,9 +134,9 @@ describe('scion-chat-switcher', () => {
       closed = true;
     });
 
-    el.shadowRoot?.querySelector('.overlay')?.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })
-    );
+    el.shadowRoot
+      ?.querySelector('.overlay')
+      ?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
 
     expect(closed).toBe(true);
   });

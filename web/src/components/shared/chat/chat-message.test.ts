@@ -433,7 +433,9 @@ describe('scion-chat-message path links', () => {
   });
 
   it('leaves path links inside fenced code blocks as literal text', async () => {
-    const el = await mount('run:\n```\ncat /workspace/src/main.go\n```\nthen check /workspace/README.md');
+    const el = await mount(
+      'run:\n```\ncat /workspace/src/main.go\n```\nthen check /workspace/README.md'
+    );
     const links = pathLinks(el);
 
     // Only the one outside the fence should be linked.

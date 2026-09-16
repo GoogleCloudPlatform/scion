@@ -18,9 +18,7 @@
       "referenceId": "grp-contarctors",
       "reason": "group_not_found",
       "remedy": "Select an existing group. Did you mean \"Contractors\" (grp-contractors)?",
-      "suggestions": [
-        { "type": "group", "id": "grp-contractors", "displayName": "Contractors" }
-      ]
+      "suggestions": [{ "type": "group", "id": "grp-contractors", "displayName": "Contractors" }]
     }
   }
 }

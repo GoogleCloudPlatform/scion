@@ -415,7 +415,9 @@ export class ScionHeader extends LitElement {
             name="house"
             label="Dashboard"
             class=${isChat ? '' : 'active'}
-            @click=${() => { this.handleModeSwitch('/'); }}
+            @click=${() => {
+              this.handleModeSwitch('/');
+            }}
           ></sl-icon-button>
         </sl-tooltip>
         <sl-tooltip content="Chat">
@@ -423,7 +425,9 @@ export class ScionHeader extends LitElement {
             name="chat-dots"
             label="Chat"
             class=${isChat ? 'active' : ''}
-            @click=${() => { this.handleModeSwitch('/chat'); }}
+            @click=${() => {
+              this.handleModeSwitch('/chat');
+            }}
           ></sl-icon-button>
         </sl-tooltip>
       </div>
@@ -448,9 +452,7 @@ export class ScionHeader extends LitElement {
     if (targetBase === '/chat') {
       // Dashboard → Chat: carry the project ID into a space URL.
       const projectId = projectIdFromDashboardPath(currentPath);
-      target = projectId
-        ? `/chat/space/${encodeURIComponent(projectId)}`
-        : '/chat';
+      target = projectId ? `/chat/space/${encodeURIComponent(projectId)}` : '/chat';
     } else {
       // Chat → Dashboard: resolve project ID from the chat URL.
       const projectId = projectIdFromChatSpacePath(currentPath);
@@ -460,9 +462,7 @@ export class ScionHeader extends LitElement {
         const slug = slugFromChatPath(currentPath);
         if (slug) {
           const resolvedId = await this.resolveProjectIdBySlug(slug);
-          target = resolvedId
-            ? `/projects/${encodeURIComponent(resolvedId)}`
-            : '/';
+          target = resolvedId ? `/projects/${encodeURIComponent(resolvedId)}` : '/';
         } else {
           target = '/';
         }
@@ -487,9 +487,7 @@ export class ScionHeader extends LitElement {
    */
   private async resolveProjectIdBySlug(slug: string): Promise<string> {
     try {
-      const res = await apiFetch(
-        `/api/v1/projects?slug=${encodeURIComponent(slug)}&limit=1`
-      );
+      const res = await apiFetch(`/api/v1/projects?slug=${encodeURIComponent(slug)}&limit=1`);
       if (res.ok) {
         const data = (await res.json()) as {
           items?: Array<{ id: string; slug: string }>;

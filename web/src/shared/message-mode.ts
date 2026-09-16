@@ -132,7 +132,7 @@ export const DENIAL_REASON_COPY: Record<MessageDenialReason, string> = {
 export function getDenialMessage(
   reason: string | undefined,
   recipientName?: string,
-  senderName?: string,
+  senderName?: string
 ): string {
   const template = DENIAL_REASON_COPY[reason as MessageDenialReason];
   if (!template) {

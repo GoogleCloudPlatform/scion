@@ -881,7 +881,6 @@ async function renderRoute(path: string): Promise<void> {
     return;
   }
 
-
   const shellType = getShellType(tag);
 
   // Lazy-load the page component module (and profile/chat shell if needed).

@@ -173,9 +173,7 @@ describe('chat notification dispatch', () => {
   it('dispatches from the SSE event the state manager raises', () => {
     dispatcher();
 
-    stateManager.dispatchEvent(
-      new CustomEvent('notification-created', { detail: { data: dm() } })
-    );
+    stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: { data: dm() } }));
 
     expect(popups).toHaveLength(1);
     expect(popups[0].title).toBe('Ada sent you a message');

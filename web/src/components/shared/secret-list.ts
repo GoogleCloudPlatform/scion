@@ -549,7 +549,6 @@ export class ScionSecretList extends LitElement {
                     required
                   ></sl-input>
                 `}
-
           ${isEditSettings
             ? nothing
             : html`<div class="dialog-hint">

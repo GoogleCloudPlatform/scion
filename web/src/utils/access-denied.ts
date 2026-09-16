@@ -66,13 +66,9 @@ export function formatAccessDenied(detail: AccessDeniedDetail): {
   // Primary: prefer the backend message when it is not the generic
   // "Insufficient permissions" (which adds no information). Custom
   // messages from authorizeMsg carry real user-facing guidance.
-  const isGeneric =
-    !detail.reason ||
-    detail.reason === 'Insufficient permissions';
+  const isGeneric = !detail.reason || detail.reason === 'Insufficient permissions';
 
-  const primary = isGeneric
-    ? "You don't have permission to perform this action."
-    : detail.reason!;
+  const primary = isGeneric ? "You don't have permission to perform this action." : detail.reason!;
 
   // Secondary: build from structured detail (denied_action / resource_type).
   const label = actionLabel(detail.action);

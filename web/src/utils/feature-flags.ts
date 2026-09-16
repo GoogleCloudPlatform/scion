@@ -86,4 +86,3 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
  * to fall back to wave-1 UI for rollback.
  */
 export const NATIVE_CHAT_V2_FLAG = 'web.native_chat_v2';
-

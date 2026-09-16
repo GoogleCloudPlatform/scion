@@ -628,7 +628,6 @@ export class ScionPageAdminRoles extends LitElement {
     this.showCreateDialog = true;
   }
 
-
   private togglePermission(permId: string): void {
     const next = new Set(this.formPermissions);
     if (next.has(permId)) {
@@ -716,12 +715,7 @@ export class ScionPageAdminRoles extends LitElement {
       let roles: unknown[];
       if (Array.isArray(data)) {
         roles = data;
-      } else if (
-        data &&
-        typeof data === 'object' &&
-        'roles' in data &&
-        Array.isArray(data.roles)
-      ) {
+      } else if (data && typeof data === 'object' && 'roles' in data && Array.isArray(data.roles)) {
         roles = data.roles as unknown[];
       } else {
         this.importParseError =
@@ -813,7 +807,12 @@ export class ScionPageAdminRoles extends LitElement {
         created: number;
         skipped: number;
         errors: number;
-        items: { name: string; status: 'created' | 'skipped' | 'error'; reason?: string; id?: string }[];
+        items: {
+          name: string;
+          status: 'created' | 'skipped' | 'error';
+          reason?: string;
+          id?: string;
+        }[];
       };
 
       const results: ImportResult = {
@@ -824,7 +823,7 @@ export class ScionPageAdminRoles extends LitElement {
           .map((item) => {
             const entry: ImportRoleResult = {
               name: item.name,
-              status: item.status === 'error' ? 'error' as const : 'skipped' as const,
+              status: item.status === 'error' ? ('error' as const) : ('skipped' as const),
             };
             if (item.reason) entry.error = item.reason;
             return entry;
@@ -841,11 +840,13 @@ export class ScionPageAdminRoles extends LitElement {
       this.importResults = {
         created: 0,
         skipped: 0,
-        errors: [{
-          name: '(request)',
-          status: 'error',
-          error: err instanceof Error ? err.message : 'Failed to import roles',
-        }],
+        errors: [
+          {
+            name: '(request)',
+            status: 'error',
+            error: err instanceof Error ? err.message : 'Failed to import roles',
+          },
+        ],
       };
     } finally {
       this.importInProgress = false;
@@ -895,7 +896,9 @@ export class ScionPageAdminRoles extends LitElement {
             href="/api/v1/admin/roles/export"
             target="_blank"
             download="scion-custom-roles.json"
-            ?disabled=${this.loading || !!this.error || this.roles.filter((r) => !r.system).length === 0}
+            ?disabled=${this.loading ||
+            !!this.error ||
+            this.roles.filter((r) => !r.system).length === 0}
           >
             <sl-icon slot="prefix" name="download"></sl-icon>
             Export Custom Roles
@@ -912,8 +915,7 @@ export class ScionPageAdminRoles extends LitElement {
       </div>
 
       ${this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderRoles()}
-      ${this.renderCreateDialog()}
-      ${this.renderImportDialog()}
+      ${this.renderCreateDialog()} ${this.renderImportDialog()}
     `;
   }
 
@@ -988,7 +990,8 @@ export class ScionPageAdminRoles extends LitElement {
               e.preventDefault();
               this.navigateToRole(role.id);
             }}
-          >${role.name}</a>
+            >${role.name}</a
+          >
           <div class="role-description">${role.description || '—'}</div>
         </td>
         <td><span class="scope-badge">${role.scopeType}</span></td>
@@ -1150,8 +1153,8 @@ export class ScionPageAdminRoles extends LitElement {
   private renderImportForm() {
     return html`
       <p class="import-help">
-        Upload a JSON file containing custom role definitions.
-        Roles with names that already exist will be skipped.
+        Upload a JSON file containing custom role definitions. Roles with names that already exist
+        will be skipped.
       </p>
 
       <div class="form-group">
@@ -1173,7 +1176,6 @@ export class ScionPageAdminRoles extends LitElement {
             </sl-alert>
           `
         : nothing}
-
       ${this.importParsedRoles.length > 0 ? this.renderImportPreview() : nothing}
 
       <sl-button
@@ -1191,7 +1193,10 @@ export class ScionPageAdminRoles extends LitElement {
         ?loading=${this.importInProgress}
         ?disabled=${this.importParsedRoles.length === 0}
         @click=${() => this.importRoles()}
-        >Import ${this.importParsedRoles.length > 0 ? `${this.importParsedRoles.length} Role${this.importParsedRoles.length !== 1 ? 's' : ''}` : 'Roles'}</sl-button
+        >Import
+        ${this.importParsedRoles.length > 0
+          ? `${this.importParsedRoles.length} Role${this.importParsedRoles.length !== 1 ? 's' : ''}`
+          : 'Roles'}</sl-button
       >
     `;
   }
@@ -1201,7 +1206,10 @@ export class ScionPageAdminRoles extends LitElement {
 
     return html`
       <div class="import-preview">
-        <h4>Preview (${this.importParsedRoles.length} role${this.importParsedRoles.length !== 1 ? 's' : ''})</h4>
+        <h4>
+          Preview (${this.importParsedRoles.length}
+          role${this.importParsedRoles.length !== 1 ? 's' : ''})
+        </h4>
         <div class="import-preview-list">
           ${this.importParsedRoles.map((role) => {
             const exists = existingNames.has(role.name);
@@ -1214,7 +1222,8 @@ export class ScionPageAdminRoles extends LitElement {
                     : html`<span class="import-new-badge">new</span>`}
                 </div>
                 <div class="import-preview-meta">
-                  ${role.scopeType} · ${role.permissions.length} permission${role.permissions.length !== 1 ? 's' : ''}
+                  ${role.scopeType} · ${role.permissions.length}
+                  permission${role.permissions.length !== 1 ? 's' : ''}
                 </div>
               </div>
             `;
@@ -1231,8 +1240,14 @@ export class ScionPageAdminRoles extends LitElement {
     return html`
       <div class="import-results">
         <sl-alert variant=${hasErrors ? 'warning' : 'success'} open>
-          <sl-icon slot="icon" name=${hasErrors ? 'exclamation-triangle' : 'check-circle'}></sl-icon>
-          Import complete: ${results.created} created, ${results.skipped} skipped${hasErrors ? `, ${results.errors.filter((e) => e.status === 'error').length} failed` : ''}.
+          <sl-icon
+            slot="icon"
+            name=${hasErrors ? 'exclamation-triangle' : 'check-circle'}
+          ></sl-icon>
+          Import complete: ${results.created} created, ${results.skipped}
+          skipped${hasErrors
+            ? `, ${results.errors.filter((e) => e.status === 'error').length} failed`
+            : ''}.
         </sl-alert>
 
         ${results.errors.length > 0
@@ -1247,7 +1262,9 @@ export class ScionPageAdminRoles extends LitElement {
                           ? html`<sl-badge variant="neutral">Skipped</sl-badge>`
                           : html`<sl-badge variant="danger">Error</sl-badge>`}
                       </span>
-                      ${r.error ? html`<span class="import-result-error">${r.error}</span>` : nothing}
+                      ${r.error
+                        ? html`<span class="import-result-error">${r.error}</span>`
+                        : nothing}
                     </div>
                   `
                 )}
@@ -1266,7 +1283,6 @@ export class ScionPageAdminRoles extends LitElement {
       >
     `;
   }
-
 }
 
 declare global {

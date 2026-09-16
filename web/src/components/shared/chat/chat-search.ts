@@ -468,9 +468,7 @@ export class ScionChatSearch extends LitElement {
               <div class="load-more">
                 ${this.loadingMore
                   ? html`<sl-spinner></sl-spinner>`
-                  : html`<button @click=${() => void this.performSearch(true)}>
-                      Load more
-                    </button>`}
+                  : html`<button @click=${() => void this.performSearch(true)}>Load more</button>`}
               </div>
             `
           : nothing}

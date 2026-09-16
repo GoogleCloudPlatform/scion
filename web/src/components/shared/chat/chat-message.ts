@@ -154,7 +154,8 @@ const ENTITY_PATTERNS: EntityPattern[] = [
   },
   // Bare UUIDs preceded by "session" (case-insensitive)
   {
-    regex: /\bsession\s+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b/gi,
+    regex:
+      /\bsession\s+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b/gi,
     linkBuilder: (m) => {
       const uuid = m[1];
       return `session <a class="entity-link" href="/sessions/${encodeURIComponent(uuid)}" title="Open session ${uuid}">${uuid}</a>`;
@@ -170,7 +171,8 @@ const ENTITY_PATTERNS: EntityPattern[] = [
   },
   // File paths: /workspace/... and /scion-volumes/... container paths
   {
-    regex: /(?:\/scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|\/workspace\/(?:\.scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*))/g,
+    regex:
+      /(?:\/scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|\/workspace\/(?:\.scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*))/g,
     linkBuilder: (m) => {
       const path = m[0];
       return `<a class="entity-link path-link" data-file-path="${path.replace(/"/g, '&quot;')}" href="javascript:void(0)" title="Open ${path.replace(/"/g, '&quot;')}">${path}</a>`;
@@ -193,7 +195,9 @@ function styleEntityLinksInText(text: string): string {
     // Clone the regex so each call starts from index 0.
     // Ensure the global flag is always set so re.exec() advances lastIndex
     // and cannot loop infinitely on a zero-width or non-advancing match.
-    const flags = pattern.regex.flags.includes('g') ? pattern.regex.flags : pattern.regex.flags + 'g';
+    const flags = pattern.regex.flags.includes('g')
+      ? pattern.regex.flags
+      : pattern.regex.flags + 'g';
     const re = new RegExp(pattern.regex.source, flags);
     let m: RegExpExecArray | null;
     let prevIndex = 0;
@@ -457,24 +461,6 @@ export class ScionChatMessage extends LitElement {
   @property({ type: Array })
   attachmentRefs: AttachmentRefInfo[] = [];
 
-  // ---- Phase-3 properties ----
-
-  /** Whether this is the current user's message. */
-  @property({ type: Boolean })
-  isOwn = false;
-
-  /** Whether edit is allowed (no agent in reply chain). */
-  @property({ type: Boolean })
-  canEdit = false;
-
-  /** Whether delete is allowed (no agent in reply chain). */
-  @property({ type: Boolean })
-  canDelete = false;
-
-  /** Message ID for copy-link and event dispatch. */
-  @property()
-  messageId = '';
-
   /** Reply preview data: the message this one is replying to. */
   @property({ type: Object })
   replyPreview: { messageId: string; senderName: string; content: string } | null = null;
@@ -489,10 +475,6 @@ export class ScionChatMessage extends LitElement {
 
   @state()
   private renderedHtml = '';
-
-  /** Whether the action bar is pinned visible (for touch devices). */
-  @state()
-  private actionBarPinned = false;
 
   /** Preview load state per attachment ID. Replaced, never mutated. */
   @state()
@@ -1187,56 +1169,6 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-danger-600, #dc2626);
     }
 
-    /* ---- Phase-3: Message action bar ---- */
-    .message-actions {
-      position: absolute;
-      top: -12px;
-      right: 8px;
-      display: flex;
-      gap: 0.0625rem;
-      padding: 0.125rem;
-      border-radius: 0.375rem;
-      background: var(--scion-surface-100, #f1f5f9);
-      border: 1px solid var(--scion-neutral-200, #e2e8f0);
-      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-      opacity: 0;
-      visibility: hidden;
-      pointer-events: none;
-      transition: opacity 0.15s ease, visibility 0.15s ease;
-      z-index: 10;
-    }
-
-    .message-wrapper:hover .message-actions,
-    .message-wrapper:focus-within .message-actions,
-    .message-actions.pinned {
-      opacity: 1;
-      visibility: visible;
-      pointer-events: auto;
-    }
-
-    @media (hover: none) {
-      .message-actions {
-        opacity: 0;
-        visibility: hidden;
-        pointer-events: none;
-      }
-      .message-actions.pinned {
-        opacity: 1;
-        visibility: visible;
-        pointer-events: auto;
-      }
-    }
-
-    .message-actions sl-icon-button::part(base) {
-      padding: 0.25rem;
-      font-size: 0.875rem;
-      color: var(--scion-neutral-600, #475569);
-    }
-
-    .message-actions sl-icon-button::part(base):hover {
-      color: var(--scion-primary-600, #2563eb);
-    }
-
     /* ---- Phase-3: Reply preview quote block ---- */
     .reply-preview {
       display: flex;
@@ -1427,11 +1359,6 @@ export class ScionChatMessage extends LitElement {
     this.previewObserver?.disconnect();
     this.previewObserver = null;
     this.observedPreviews = new WeakSet();
-    // Clean up touch long-press timer to prevent leaks on disconnect.
-    if (this.touchTimer) {
-      clearTimeout(this.touchTimer);
-      this.touchTimer = null;
-    }
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -1561,7 +1488,9 @@ export class ScionChatMessage extends LitElement {
       pre.setAttribute('data-highlighted', 'true');
 
       // Create a readonly code editor and replace the <pre> in-place.
-      const editor = document.createElement('scion-code-editor') as import('../code-editor.js').ScionCodeEditor;
+      const editor = document.createElement(
+        'scion-code-editor'
+      ) as import('../code-editor.js').ScionCodeEditor;
       editor.content = content;
       editor.language = language;
       editor.readonly = true;
@@ -1589,7 +1518,8 @@ export class ScionChatMessage extends LitElement {
       // Heuristic: require a ---/+++ header pair or @@ hunk headers to
       // avoid false-positives on YAML lists, markdown checklists, and
       // code with @ decorators.
-      const hasHeaders = lines.some((l) => l.startsWith('--- ')) && lines.some((l) => l.startsWith('+++ '));
+      const hasHeaders =
+        lines.some((l) => l.startsWith('--- ')) && lines.some((l) => l.startsWith('+++ '));
       const hasHunks = lines.some((l) => l.startsWith('@@ '));
       const diffLineCount = lines.filter((l) => /^[-+@]/.test(l)).length;
       const looksLikeDiff = hasHeaders || (hasHunks && diffLineCount >= 3);
@@ -1682,9 +1612,8 @@ export class ScionChatMessage extends LitElement {
 
       // Heuristic: test output if it contains PASS/FAIL/ok lines that look
       // like Go test output or a generic "Tests:" summary line.
-      const testIndicators = lines.filter(
-        (l) =>
-          /^(ok\s|PASS|FAIL|--- PASS|--- FAIL|Tests:)/.test(l.trimStart())
+      const testIndicators = lines.filter((l) =>
+        /^(ok\s|PASS|FAIL|--- PASS|--- FAIL|Tests:)/.test(l.trimStart())
       ).length;
       if (testIndicators < 2) return;
 
@@ -1790,51 +1719,6 @@ export class ScionChatMessage extends LitElement {
     );
   }
 
-  // ---- Phase-3: Action bar and event helpers ----
-
-  /** Render the hover action bar with contextual actions. */
-  private renderActionBar() {
-    const pinnedClass = this.actionBarPinned ? ' pinned' : '';
-    return html`
-      <div class="message-actions${pinnedClass}">
-        <sl-icon-button
-          name="reply"
-          label="Reply"
-          title="Reply"
-          @click=${this.handleReply}
-        ></sl-icon-button>
-        ${this.isOwn && this.canEdit
-          ? html`<sl-icon-button
-              name="pencil"
-              label="Edit"
-              title="Edit"
-              @click=${this.handleEdit}
-            ></sl-icon-button>`
-          : nothing}
-        ${this.isOwn && this.canDelete
-          ? html`<sl-icon-button
-              name="trash"
-              label="Delete"
-              title="Delete"
-              @click=${this.handleDelete}
-            ></sl-icon-button>`
-          : nothing}
-        <sl-icon-button
-          name="clipboard"
-          label="Copy text"
-          title="Copy message"
-          @click=${this.handleCopyText}
-        ></sl-icon-button>
-        <sl-icon-button
-          name="link-45deg"
-          label="Copy link"
-          title="Copy link"
-          @click=${this.handleCopyLink}
-        ></sl-icon-button>
-      </div>
-    `;
-  }
-
   /** Render the reply preview block above the bubble content. */
   private renderReplyPreview() {
     if (!this.replyPreview) return nothing;
@@ -1847,59 +1731,6 @@ export class ScionChatMessage extends LitElement {
     `;
   }
 
-  private handleReply() {
-    this.dispatchEvent(
-      new CustomEvent('message-reply', {
-        bubbles: true,
-        composed: true,
-        detail: {
-          messageId: this.messageId,
-          senderName: this.senderName || this.sender,
-          content: this.body,
-        },
-      })
-    );
-  }
-
-  private handleEdit() {
-    this.dispatchEvent(
-      new CustomEvent('message-edit', {
-        bubbles: true,
-        composed: true,
-        detail: {
-          messageId: this.messageId,
-          content: this.body,
-        },
-      })
-    );
-  }
-
-  private handleDelete() {
-    this.dispatchEvent(
-      new CustomEvent('message-delete', {
-        bubbles: true,
-        composed: true,
-        detail: { messageId: this.messageId },
-      })
-    );
-  }
-
-  private handleCopyText() {
-    navigator.clipboard.writeText(this.body).catch(() => {
-      // Fallback: ignore clipboard failure silently.
-    });
-  }
-
-  private handleCopyLink() {
-    this.dispatchEvent(
-      new CustomEvent('message-copy-link', {
-        bubbles: true,
-        composed: true,
-        detail: { messageId: this.messageId },
-      })
-    );
-  }
-
   private handleScrollToMessage(messageId: string) {
     this.dispatchEvent(
       new CustomEvent('scroll-to-message', {
@@ -1910,38 +1741,13 @@ export class ScionChatMessage extends LitElement {
     );
   }
 
-  /** Touch handler for long-press to toggle action bar on mobile. */
-  private touchTimer: ReturnType<typeof setTimeout> | null = null;
-
-  private handleTouchStart() {
-    this.touchTimer = setTimeout(() => {
-      this.actionBarPinned = !this.actionBarPinned;
-    }, 500);
-
-    const clearTimer = () => {
-      if (this.touchTimer) {
-        clearTimeout(this.touchTimer);
-        this.touchTimer = null;
-      }
-      window.removeEventListener('touchend', clearTimer);
-      window.removeEventListener('touchmove', clearTimer);
-      window.removeEventListener('touchcancel', clearTimer);
-    };
-    window.addEventListener('touchend', clearTimer, { once: true });
-    window.addEventListener('touchmove', clearTimer, { once: true });
-    window.addEventListener('touchcancel', clearTimer, { once: true });
-  }
-
   override render() {
     const dirClass = this.fromAgent ? 'from-agent' : 'from-user';
     const groupClass = !this.showHeader ? ' grouped' : '';
     const isDeleted = !!this.deletedAt;
 
     return html`
-      <div
-        class="message-wrapper ${dirClass}${groupClass}"
-        @touchstart=${this.handleTouchStart}
-      >
+      <div class="message-wrapper ${dirClass}${groupClass}">
         ${this.showHeader && this.fromAgent
           ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
               ${this.getInitials()}
@@ -1950,7 +1756,6 @@ export class ScionChatMessage extends LitElement {
             ? html`<div class="avatar-spacer"></div>`
             : nothing}
         <div class="bubble">
-          ${!isDeleted ? this.renderActionBar() : nothing}
           ${this.showHeader && this.fromAgent
             ? html`
                 <div class="bubble-header">
@@ -1975,7 +1780,9 @@ export class ScionChatMessage extends LitElement {
             : nothing}
           ${this.replyPreview ? this.renderReplyPreview() : nothing}
           ${isDeleted
-            ? html`<div class="bubble-content"><span class="deleted-message">This message was deleted</span></div>`
+            ? html`<div class="bubble-content">
+                <span class="deleted-message">This message was deleted</span>
+              </div>`
             : html`<div class="bubble-content">${this.renderBody()}</div>`}
           ${isDeleted ? nothing : this.renderDeliveryState()}
           ${isDeleted ? nothing : this.renderBadges()}

@@ -125,11 +125,7 @@ export type ConstraintSubject =
  * `exact_group` was removed: groups are collection resources with no identity
  * and cannot be targeted as individual principals. Use `group_closure` instead.
  */
-export type SubjectSelection =
-  | 'exact_user'
-  | 'exact_agent'
-  | 'group_closure'
-  | 'all_principals';
+export type SubjectSelection = 'exact_user' | 'exact_agent' | 'group_closure' | 'all_principals';
 
 export function subjectSelectionOf(subject: ConstraintSubject): SubjectSelection {
   switch (subject.kind) {

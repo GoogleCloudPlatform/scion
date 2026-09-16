@@ -225,7 +225,9 @@ describe('chat page — mobile panel default and header navigation', () => {
   it('gives the members panel a back button to the conversation', () => {
     const el = createPage();
     el.mobilePanel = 'right';
-    const back = renderToFragment(el.renderMobileBackButton('center')).querySelector('.mobile-back');
+    const back = renderToFragment(el.renderMobileBackButton('center')).querySelector(
+      '.mobile-back'
+    );
 
     back?.dispatchEvent(new Event('click'));
 
@@ -436,10 +438,14 @@ describe('chat page — DM mute toggle', () => {
   });
 
   it('renders the bell as filled-through only while muted', () => {
-    const quiet = renderToFragment(pageOnDM(true).renderDMMuteButton(pageOnDM(true).v2Conversation));
+    const quiet = renderToFragment(
+      pageOnDM(true).renderDMMuteButton(pageOnDM(true).v2Conversation)
+    );
     expect(quiet.querySelector('.dm-mute')?.getAttribute('name')).toBe('bell-slash');
 
-    const loud = renderToFragment(pageOnDM(false).renderDMMuteButton(pageOnDM(false).v2Conversation));
+    const loud = renderToFragment(
+      pageOnDM(false).renderDMMuteButton(pageOnDM(false).v2Conversation)
+    );
     expect(loud.querySelector('.dm-mute')?.getAttribute('name')).toBe('bell');
   });
 });

@@ -1775,7 +1775,10 @@ export class ScionPageProjectSettings extends LitElement {
           <sl-tab slot="nav" panel="general" ?active=${this.activeConfigTab === 'general'}
             >General</sl-tab
           >
-          <sl-tab slot="nav" panel="auth-security" ?active=${this.activeConfigTab === 'auth-security'}
+          <sl-tab
+            slot="nav"
+            panel="auth-security"
+            ?active=${this.activeConfigTab === 'auth-security'}
             >Auth &amp; Security</sl-tab
           >
           <sl-tab slot="nav" panel="limits" ?active=${this.activeConfigTab === 'limits'}
@@ -2034,7 +2037,6 @@ export class ScionPageProjectSettings extends LitElement {
                   default" inherits the server-level setting.</span
                 >
               </div>
-
             </div>
           </sl-tab-panel>
 

@@ -72,7 +72,11 @@
       "eventType": "boundary.recovery_disabled",
       "classification": "relax",
       "actor": {
-        "principal": { "type": "user", "id": "usr-root", "displayName": "offline recovery operator" },
+        "principal": {
+          "type": "user",
+          "id": "usr-root",
+          "displayName": "offline recovery operator"
+        },
         "credentialType": "offline_recovery_cli",
         "credentialId": null
       },

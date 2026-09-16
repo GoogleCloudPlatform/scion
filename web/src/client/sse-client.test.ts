@@ -381,10 +381,7 @@ describe('SSEClient single connection', () => {
 
   it('never holds two live connections when a probe and a wake-up race', async () => {
     let settle: (v: unknown) => void = () => {};
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockReturnValue(new Promise((res) => (settle = res)))
-    );
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(new Promise((res) => (settle = res))));
 
     // Never opened, so the failure is classified as a possibly-rejected
     // handshake and starts the auth probe. Nothing is queued while the fetch

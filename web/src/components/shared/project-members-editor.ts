@@ -503,7 +503,7 @@ export class ScionProjectMembersEditor extends LitElement {
       if (rolesRes.ok) {
         const rolesData = (await rolesRes.json()) as { items?: ProjectRole[] };
         this.projectRoles = (rolesData.items || []).filter(
-          (r) => r.scopeType === 'project' && BUILT_IN_PROJECT_MEMBERSHIP_ROLES.includes(r.name),
+          (r) => r.scopeType === 'project' && BUILT_IN_PROJECT_MEMBERSHIP_ROLES.includes(r.name)
         );
       }
     } catch (err) {

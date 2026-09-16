@@ -133,9 +133,7 @@ describe('formatAccessDenied', () => {
     const result = formatAccessDenied(detail);
     expect(result.secondary).toContain('<script>');
     // The string itself is literal text, not stripped or interpreted.
-    expect(result.secondary).toBe(
-      'Permission needed: <script>alert("xss")</script> on agent'
-    );
+    expect(result.secondary).toBe('Permission needed: <script>alert("xss")</script> on agent');
   });
 
   it('treats <img onerror> payload in resource as literal text', () => {
@@ -144,9 +142,7 @@ describe('formatAccessDenied', () => {
       resource: '<img src=x onerror=alert(1)>',
     };
     const result = formatAccessDenied(detail);
-    expect(result.secondary).toBe(
-      'Permission needed: delete on <img src=x onerror=alert(1)>'
-    );
+    expect(result.secondary).toBe('Permission needed: delete on <img src=x onerror=alert(1)>');
   });
 
   it('treats hostile strings in reason as literal text', () => {
@@ -189,12 +185,10 @@ describe('formatAccessDenied', () => {
     const detail: AccessDeniedDetail = {
       action: 'update',
       resource: 'user',
-      reason: 'requires user.update permission to modify another user\'s profile',
+      reason: "requires user.update permission to modify another user's profile",
     };
     const result = formatAccessDenied(detail);
-    expect(result.primary).toBe(
-      'requires user.update permission to modify another user\'s profile'
-    );
+    expect(result.primary).toBe("requires user.update permission to modify another user's profile");
     expect(result.secondary).toBe('Permission needed: update on user');
   });
 
@@ -216,9 +210,7 @@ describe('formatAccessDenied', () => {
       reason: 'Insufficient permissions',
     };
     const result = formatAccessDenied(detail);
-    expect(result.primary).toBe(
-      "You don't have permission to perform this action."
-    );
+    expect(result.primary).toBe("You don't have permission to perform this action.");
     expect(result.secondary).toBe('Permission needed: create on role_binding');
   });
 
@@ -229,9 +221,7 @@ describe('formatAccessDenied', () => {
       reason: 'Insufficient permissions',
     };
     const result = formatAccessDenied(detail);
-    expect(result.primary).toBe(
-      "You don't have permission to perform this action."
-    );
+    expect(result.primary).toBe("You don't have permission to perform this action.");
     expect(result.secondary).toBe('Permission needed: delete on role_binding');
   });
 
@@ -243,8 +233,7 @@ describe('formatAccessDenied', () => {
     };
     const result = formatAccessDenied(detail);
     // The formatted output should not contain any UUID-shaped strings.
-    const uuidPattern =
-      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+    const uuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
     expect(result.primary).not.toMatch(uuidPattern);
     expect(result.secondary).not.toMatch(uuidPattern);
   });
@@ -375,11 +364,11 @@ describe('showAccessDeniedToast dedup', () => {
   });
 
   it('suppresses A→B→A interleaved within window', () => {
-    showAccessDeniedToast({ action: 'read', resource: 'hub' });   // A fires
+    showAccessDeniedToast({ action: 'read', resource: 'hub' }); // A fires
     nowMs += 100;
     showAccessDeniedToast({ action: 'update', resource: 'hub' }); // B fires (distinct)
     nowMs += 100;
-    showAccessDeniedToast({ action: 'read', resource: 'hub' });   // A again at +200ms — suppressed
+    showAccessDeniedToast({ action: 'read', resource: 'hub' }); // A again at +200ms — suppressed
 
     expect(document.querySelectorAll('sl-alert').length).toBe(2);
   });

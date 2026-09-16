@@ -23,11 +23,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import {
-  isFeatureEnabled,
-  setFeatureFlag,
-  NATIVE_CHAT_V2_FLAG,
-} from './feature-flags.js';
+import { isFeatureEnabled, setFeatureFlag, NATIVE_CHAT_V2_FLAG } from './feature-flags.js';
 
 // Verify removed exports at the type level — these should not exist.
 // @ts-expect-error ACCESS_BOUNDARIES_READ_FLAG was removed
