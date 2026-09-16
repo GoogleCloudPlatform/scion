@@ -89,11 +89,29 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   read -rp "GCP region [us-central1]: " REGION
   REGION="${REGION:-us-central1}"
 
-  ZONE="${REGION}-b"
   INSTANCE_NAME="scion-hub-${HUB_NAME}"
   PROXY_SERVICE="${INSTANCE_NAME}-iap-proxy"
   ROUTER_NAME="scion-hub-${HUB_NAME}-router"
   NAT_NAME="scion-hub-${HUB_NAME}-nat"
+  FW_RULE_NAME="scion-hub-${HUB_NAME}-allow-iap-ssh"
+
+  # Discover the actual zone of the instance (if it still exists)
+  ZONE="$(gcloud compute instances list \
+    --filter="name=${INSTANCE_NAME}" \
+    --format="value(zone)" \
+    --project="${PROJECT_ID}" 2>/dev/null | head -1)" || true
+  if [[ -z "$ZONE" ]]; then
+    # Instance already deleted; discover an available zone in the region
+    ZONE="$(gcloud compute zones list \
+      --filter="region=${REGION}" \
+      --limit=1 \
+      --format="value(name)" \
+      --project="${PROJECT_ID}" 2>/dev/null)" || true
+  fi
+  if [[ -z "$ZONE" ]]; then
+    ZONE="${REGION}-b"
+    warn "Could not discover zone dynamically; defaulting to ${ZONE}"
+  fi
   SA_NAME="scion-hub-vm"
   SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
@@ -104,6 +122,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Cloud NAT:         ${NAT_NAME} (router: ${ROUTER_NAME})"
   echo "  Cloud Router:      ${ROUTER_NAME} (region: ${REGION})"
   echo "  Service account:   ${SA_EMAIL}"
+  echo "  Firewall rule:     ${FW_RULE_NAME}"
   echo ""
   read -rp "Continue? [y/N]: " CONFIRM
   if [[ "${CONFIRM,,}" != "y" ]]; then
@@ -152,6 +171,14 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     warn "Service account ${SA_EMAIL} not found or already deleted."
   fi
 
+  info "Deleting IAP SSH firewall rule..."
+  if gcloud compute firewall-rules delete "${FW_RULE_NAME}" \
+      --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+    echo "  Deleted: ${FW_RULE_NAME}"
+  else
+    warn "Firewall rule ${FW_RULE_NAME} not found or already deleted."
+  fi
+
   echo ""
   echo -e "${BOLD}=== Teardown Complete ===${RESET}"
   echo ""
@@ -160,6 +187,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Deleted Cloud NAT:         ${NAT_NAME}"
   echo "  Deleted Cloud Router:      ${ROUTER_NAME}"
   echo "  Deleted service account:   ${SA_EMAIL}"
+  echo "  Deleted firewall rule:     ${FW_RULE_NAME}"
   exit 0
 fi
 
@@ -242,7 +270,16 @@ for sel in "${CHAT_SELECTIONS[@]}"; do
 done
 
 # Derived values
-ZONE="${REGION}-b"
+info "Selecting zone in ${REGION}..."
+ZONE="$(gcloud compute zones list \
+  --filter="region=${REGION}" \
+  --limit=1 \
+  --format="value(name)" \
+  --project="${PROJECT_ID}" 2>/dev/null)" || true
+if [[ -z "$ZONE" ]]; then
+  ZONE="${REGION}-b"
+  warn "Could not discover zone dynamically; defaulting to ${ZONE}"
+fi
 INSTANCE_NAME="scion-hub-${HUB_NAME}"
 SA_NAME="scion-hub-vm"
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
@@ -263,8 +300,12 @@ fi
 # --- Release version ---
 if [[ -z "$VERSION" ]]; then
   info "Detecting latest Scion release..."
-  VERSION="$(curl -fsSL https://api.github.com/repos/GoogleCloudPlatform/scion/releases/latest \
-    | grep '"tag_name"' | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')" || true
+  RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/GoogleCloudPlatform/scion/releases/latest)" || true
+  if command -v jq &>/dev/null; then
+    VERSION="$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')" || true
+  else
+    VERSION="$(echo "$RELEASE_JSON" | grep '"tag_name"' | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')" || true
+  fi
   if [[ -z "$VERSION" ]]; then
     err "Could not detect latest release. Use --version to specify."
     exit 1
@@ -274,7 +315,12 @@ echo "  Scion version: ${VERSION}"
 
 # --- Validate gcloud auth ---
 info "Validating gcloud authentication..."
-ACCOUNT="$(gcloud config get-value account 2>/dev/null)" || true
+# Try gcloud auth list first (works with service accounts and CI),
+# fall back to gcloud config get account.
+ACCOUNT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)" || true
+if [[ -z "$ACCOUNT" ]]; then
+  ACCOUNT="$(gcloud config get-value account 2>/dev/null)" || true
+fi
 if [[ -z "$ACCOUNT" ]]; then
   err "Not authenticated with gcloud. Run: gcloud auth login"
   exit 1
@@ -353,6 +399,26 @@ else
   echo "  Created Cloud NAT: ${NAT_NAME}"
 fi
 
+# --- IAP SSH firewall rule ---
+# gcloud compute ssh via IAP tunneling requires TCP:22 from 35.235.240.0/20.
+FW_RULE_NAME="scion-hub-${HUB_NAME}-allow-iap-ssh"
+info "Creating IAP SSH firewall rule (if needed)..."
+if gcloud compute firewall-rules describe "${FW_RULE_NAME}" \
+    --project="${PROJECT_ID}" &>/dev/null; then
+  echo "  Firewall rule already exists: ${FW_RULE_NAME}"
+else
+  gcloud compute firewall-rules create "${FW_RULE_NAME}" \
+    --project="${PROJECT_ID}" \
+    --network=default \
+    --direction=INGRESS \
+    --action=ALLOW \
+    --rules=tcp:22 \
+    --source-ranges=35.235.240.0/20 \
+    --description="Allow SSH via IAP tunneling for Scion Hub" \
+    --quiet
+  echo "  Created firewall rule: ${FW_RULE_NAME}"
+fi
+
 # --- Create VM ---
 info "Creating GCE VM (if needed)..."
 if gcloud compute instances describe "${INSTANCE_NAME}" \
@@ -374,26 +440,38 @@ else
   echo "  Created VM: ${INSTANCE_NAME} (zone: ${ZONE})"
 fi
 
-# --- Wait for cloud-init ---
-info "Waiting for cloud-init to complete (this may take a few minutes)..."
-MAX_WAIT=300
-ELAPSED=0
-POLL_INTERVAL=15
-while [[ $ELAPSED -lt $MAX_WAIT ]]; do
+# --- Wait for SSH readiness (avoids race on initial boot) ---
+info "Waiting for SSH access to VM..."
+SSH_READY=false
+for attempt in $(seq 1 20); do
   if gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
-      --command="test -f /var/log/cloud-init-output.log && grep -q 'Cloud-init.*finished' /var/log/cloud-init-output.log" \
+      --command="echo ssh-ok" \
+      --ssh-flag="-o ConnectTimeout=5" \
       --quiet 2>/dev/null; then
-    echo "  Cloud-init completed."
+    SSH_READY=true
     break
   fi
-  echo "  Waiting... (${ELAPSED}s / ${MAX_WAIT}s)"
-  sleep "$POLL_INTERVAL"
-  ELAPSED=$((ELAPSED + POLL_INTERVAL))
+  BACKOFF=$((attempt < 5 ? 5 : 10))
+  echo "  SSH attempt ${attempt}/20 - retrying in ${BACKOFF}s..."
+  sleep "$BACKOFF"
 done
 
-if [[ $ELAPSED -ge $MAX_WAIT ]]; then
-  warn "Cloud-init did not finish within ${MAX_WAIT}s. Proceeding anyway."
+if [[ "$SSH_READY" != "true" ]]; then
+  err "Could not establish SSH connection to ${INSTANCE_NAME} after 20 attempts."
+  exit 1
+fi
+echo "  SSH connection established."
+
+# --- Wait for cloud-init ---
+info "Waiting for cloud-init to complete (this may take a few minutes)..."
+if gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="sudo cloud-init status --wait" \
+    2>/dev/null; then
+  echo "  Cloud-init completed."
+else
+  warn "cloud-init status --wait returned non-zero. Check cloud-init logs on the VM."
 fi
 
 # ===================================================================
@@ -414,6 +492,19 @@ case "$ARCH" in
   *)       ARCH_SUFFIX="amd64" ;;  # default to amd64
 esac
 echo "  Architecture: ${ARCH} (${ARCH_SUFFIX})"
+
+# --- Stop scion-hub.service before binary update (avoids ETXTBSY on re-run) ---
+info "Stopping scion-hub.service (if running)..."
+gcloud compute ssh "${INSTANCE_NAME}" \
+  --zone="${ZONE}" --project="${PROJECT_ID}" \
+  --command="
+    if systemctl is-active --quiet scion-hub.service 2>/dev/null; then
+      sudo systemctl stop scion-hub.service
+      echo 'Stopped scion-hub.service before binary update.'
+    else
+      echo 'scion-hub.service not running (first install or already stopped).'
+    fi
+  " 2>/dev/null || true
 
 # --- Download and install scion binary ---
 info "Installing scion binary (${VERSION})..."
@@ -607,7 +698,12 @@ echo "  IAP enabled."
 
 # --- Bind IAP access for deployer ---
 info "Binding IAP access for deployer..."
-OPERATOR_EMAIL="$(gcloud config get-value account 2>/dev/null)" || true
+# Use gcloud auth list for robust detection (works with service accounts and CI),
+# fall back to gcloud config get account.
+OPERATOR_EMAIL="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)" || true
+if [[ -z "$OPERATOR_EMAIL" ]]; then
+  OPERATOR_EMAIL="$(gcloud config get-value account 2>/dev/null)" || true
+fi
 if [[ -z "$OPERATOR_EMAIL" ]]; then
   warn "Could not determine operator email; skipping IAP binding."
 else

@@ -27,13 +27,18 @@ runcmd:
       echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
     fi
   - apt-get update
-  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
   - systemctl enable docker
   - systemctl start docker
 
   # Create scion user and add to docker group
-  - id scion &>/dev/null || useradd -m -s /bin/bash scion
-  - getent group docker &>/dev/null && usermod -aG docker scion || true
+  - id scion &>/dev/null || useradd -m -U -s /bin/bash scion
+  - |
+    if getent group docker &>/dev/null; then
+      usermod -aG docker scion
+    else
+      echo "Warning: docker group does not exist yet; skipping usermod"
+    fi
 
   # Create scion directories
   - mkdir -p /home/scion/.scion/plugins/broker
