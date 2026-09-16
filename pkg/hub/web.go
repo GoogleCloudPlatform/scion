@@ -193,8 +193,9 @@ type WebServer struct {
 	maintenance    *MaintenanceState           // runtime maintenance mode state (shared with Hub)
 	demotionSafe   *atomic.Bool                // shared with Hub; nil-safe (nil = false = don't demote)
 	authzService   *AuthzService               // authorization service for SSE subject checks
-	startTime      time.Time
-	log            *slog.Logger // subsystem logger for hub.web
+	hasAssets  bool         // cached result of asset detection
+	startTime time.Time
+	log       *slog.Logger // subsystem logger for hub.web
 
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
@@ -558,6 +559,8 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		ws.logger().Error("Failed to parse SPA shell template", "error", err)
 	}
 	ws.shellTmpl = tmpl
+
+	ws.hasAssets = ws.detectWebAssets()
 
 	ws.registerRoutes()
 
@@ -1074,11 +1077,18 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 	return template.JS(safeJSONForHTML(string(raw)))
 }
 
-// hasWebAssets reports whether the server has web assets available to serve,
-// either from an embedded FS or a filesystem directory. It verifies the
-// presence of the core entry point (assets/main.js) to ensure the UI is
-// actually built and ready to serve.
+// hasWebAssets reports whether the server has web assets available to serve.
+// The result is cached at startup by detectWebAssets since the asset state
+// does not change at runtime.
 func (ws *WebServer) hasWebAssets() bool {
+	return ws.hasAssets
+}
+
+// detectWebAssets checks whether web assets are available, either from an
+// embedded FS or a filesystem directory. It verifies the presence of the
+// core entry point (assets/main.js) to ensure the UI is actually built and
+// ready to serve. Called once at startup; the result is cached in hasAssets.
+func (ws *WebServer) detectWebAssets() bool {
 	if ws.assetsDisk != "" {
 		p := filepath.Join(ws.assetsDisk, "assets", "main.js")
 		_, err := os.Stat(p)

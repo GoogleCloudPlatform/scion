@@ -194,6 +194,7 @@ func newTestWebServer(t *testing.T, cfg WebServerConfig) *WebServer {
 		ws.assets = fstest.MapFS{
 			"assets/main.js": &fstest.MapFile{Data: []byte("// test stub")},
 		}
+		ws.hasAssets = ws.detectWebAssets()
 	}
 	return ws
 }
@@ -222,13 +223,14 @@ func newDevAuthWebServer(t *testing.T, overrides ...func(*WebServerConfig)) *Web
 		}
 	}
 	// When a disk-based assets dir is used, provision assets/main.js so that
-	// hasWebAssets() detects valid assets on disk.
+	// detectWebAssets() detects valid assets on disk.
 	if ws.assetsDisk != "" {
 		assetsSubDir := filepath.Join(ws.assetsDisk, "assets")
 		if err := os.MkdirAll(assetsSubDir, 0o755); err == nil {
 			_ = os.WriteFile(filepath.Join(assetsSubDir, "main.js"), []byte("// test stub"), 0o644)
 		}
 	}
+	ws.hasAssets = ws.detectWebAssets()
 
 	// Install a minimal authoritative store with an active dev user so the
 	// suspended-user middleware does not fail closed on every authenticated
@@ -388,6 +390,7 @@ func TestStaticAssetHandler_NoAssets(t *testing.T) {
 	// if the embedded dist/client/ directory happens to lack the requested file.
 	ws.assets = nil
 	ws.assetsDisk = ""
+	ws.hasAssets = false
 
 	req := httptest.NewRequest("GET", "/assets/main.js", nil)
 	rec := httptest.NewRecorder()
@@ -404,6 +407,7 @@ func TestSPAHandler_NoAssets_ServesErrorPage(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 	ws.assets = nil
 	ws.assetsDisk = ""
+	ws.hasAssets = false
 
 	handler := ws.Handler()
 
@@ -435,6 +439,7 @@ func TestSPAHandler_NoAssets_HealthzStillWorks(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{})
 	ws.assets = nil
 	ws.assetsDisk = ""
+	ws.hasAssets = false
 
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -453,6 +458,7 @@ func TestSPAHandler_NoAssets_APIStillWorks(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{})
 	ws.assets = nil
 	ws.assetsDisk = ""
+	ws.hasAssets = false
 
 	mockHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
