@@ -1667,7 +1667,9 @@ export class ScionPageAgentCreate extends LitElement {
                       ${this.verifiedGCPServiceAccounts.map(
                         (sa) =>
                           html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope === 'hub' ? ' (Hub)' : ''}
+                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${
+                              sa.scope === 'hub' ? ' (Hub)' : ''
+                            }
                           </sl-option>`
                       )}
                     </sl-select>
