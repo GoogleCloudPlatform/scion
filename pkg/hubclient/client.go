@@ -97,6 +97,9 @@ type Client interface {
 	// Messages returns the user message inbox operations interface.
 	Messages() MessageService
 
+	// Conversations returns the conversation operations interface.
+	Conversations() ConversationService
+
 	// AllowList returns the allow list management operations interface.
 	AllowList() AllowListService
 
@@ -145,6 +148,7 @@ type client struct {
 	subscriptions         *subscriptionService
 	subscriptionTemplates *subscriptionTemplateService
 	messages              *messageService
+	conversations         *conversationService
 	allowList             *allowListService
 	invites               *inviteService
 }
@@ -197,6 +201,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.subscriptions = &subscriptionService{c: c}
 	c.subscriptionTemplates = &subscriptionTemplateService{c: c}
 	c.messages = &messageService{c: c}
+	c.conversations = &conversationService{c: c}
 	c.allowList = &allowListService{c: c}
 	c.invites = &inviteService{c: c}
 
@@ -311,6 +316,11 @@ func (c *client) GCPServiceAccounts() GCPServiceAccountService {
 // Messages returns the user message inbox operations interface.
 func (c *client) Messages() MessageService {
 	return c.messages
+}
+
+// Conversations returns the conversation operations interface.
+func (c *client) Conversations() ConversationService {
+	return c.conversations
 }
 
 // AllowList returns the allow list management operations interface.

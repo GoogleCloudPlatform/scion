@@ -214,6 +214,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/message-channels", RouteID: "messageChannels.list",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/conversations": {
+		Pattern: "/api/v1/conversations", RouteID: "conversations.list",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/conversations/": {
+		Pattern: "/api/v1/conversations/", RouteID: "conversations.byId",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/chat/user-prefs": {
 		Pattern: "/api/v1/chat/user-prefs", RouteID: "chat.userPrefs",
 		Classification: RouteAuthenticated,
