@@ -154,6 +154,7 @@ func (m *mockHubClient) ScheduledEvents(string) hubclient.ScheduledEventService 
 func (m *mockHubClient) Schedules(string) hubclient.ScheduleService                   { return nil }
 func (m *mockHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService       { return nil }
 func (m *mockHubClient) Messages() hubclient.MessageService                           { return nil }
+func (m *mockHubClient) Conversations() hubclient.ConversationService                 { return nil }
 func (m *mockHubClient) AllowList() hubclient.AllowListService                        { return nil }
 func (m *mockHubClient) Invites() hubclient.InviteService                             { return nil }
 func (m *mockHubClient) Skills() hubclient.SkillService                               { return nil }

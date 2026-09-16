@@ -1,0 +1,536 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/stretchr/testify/require"
+)
+
+// setupConvTestData creates a project, agent, and conversation for testing.
+func setupConvTestData(t *testing.T, s store.Store) (project *store.Project, agent *store.Agent, conv *store.Conversation) {
+	t.Helper()
+	ctx := context.Background()
+
+	project = &store.Project{
+		ID:   api.NewUUID(),
+		Name: "conv-test-project",
+		Slug: "conv-test-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent = &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "conv-test-agent",
+		Slug:       "conv-test-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	now := time.Now().UTC()
+	conv = &store.Conversation{
+		ID:             api.NewUUID(),
+		ProjectID:      &project.ID,
+		Kind:           "group",
+		Surface:        "native",
+		DisplayName:    "Test Conversation",
+		DriftState:     "active",
+		LastActivityAt: now,
+		CreatedAt:      now,
+	}
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	return project, agent, conv
+}
+
+// addConvParticipant adds a participant to a conversation for testing.
+func addConvParticipant(t *testing.T, s store.Store, convID, principalKind, principalID string) {
+	t.Helper()
+	p := &store.ConversationParticipant{
+		ID:             api.NewUUID(),
+		ConversationID: convID,
+		PrincipalKind:  principalKind,
+		PrincipalID:    principalID,
+		Role:           "member",
+		JoinedAt:       time.Now().UTC(),
+	}
+	require.NoError(t, s.AddParticipant(context.Background(), p))
+}
+
+// agentContext returns a context with an agent identity set.
+func agentContext(agentID, projectID string) context.Context {
+	return contextWithIdentity(context.Background(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agentID},
+		ProjectID: projectID,
+	}})
+}
+
+// convProjectID extracts the project ID from a conversation, returning empty if nil.
+func convProjectID(c *store.Conversation) string {
+	if c.ProjectID != nil {
+		return *c.ProjectID
+	}
+	return ""
+}
+
+// ---- Tests ----
+
+func TestListConversations_HappyPath(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.handleListConversations(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	var result conversationListResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Len(t, result.Conversations, 1)
+	require.Equal(t, conv.ID, result.Conversations[0].ID)
+	require.Equal(t, "Test Conversation", result.Conversations[0].DisplayName)
+	// Participants should be included.
+	require.Len(t, result.Conversations[0].Participants, 1)
+}
+
+func TestListConversations_WithFilters(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	// Create a second conversation with different surface.
+	now := time.Now().UTC()
+	conv2 := &store.Conversation{
+		ID:             api.NewUUID(),
+		ProjectID:      &project.ID,
+		Kind:           "group",
+		Surface:        "discord",
+		DisplayName:    "Discord Thread",
+		DriftState:     "active",
+		LastActivityAt: now,
+		CreatedAt:      now,
+	}
+	require.NoError(t, s.CreateConversation(context.Background(), conv2))
+	addConvParticipant(t, s, conv2.ID, "agent", agent.ID)
+
+	// Filter by surface=native — should only return the first conversation.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?surface=native", nil)
+	req = req.WithContext(agentContext(agent.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.handleListConversations(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var result conversationListResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Len(t, result.Conversations, 1)
+	require.Equal(t, conv.ID, result.Conversations[0].ID)
+
+	// Filter by surface=discord — should only return the second conversation.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/conversations?surface=discord", nil)
+	req = req.WithContext(agentContext(agent.ID, project.ID))
+	rr = httptest.NewRecorder()
+	srv.handleListConversations(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Len(t, result.Conversations, 1)
+	require.Equal(t, conv2.ID, result.Conversations[0].ID)
+}
+
+func TestListConversations_WithLimit(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, _ := setupConvTestData(t, s)
+
+	// Create 3 more conversations (4 total with the one from setup).
+	for i := 0; i < 3; i++ {
+		now := time.Now().UTC()
+		c := &store.Conversation{
+			ID:             api.NewUUID(),
+			ProjectID:      &project.ID,
+			Kind:           "group",
+			Surface:        "native",
+			DisplayName:    "Conv " + string(rune('A'+i)),
+			DriftState:     "active",
+			LastActivityAt: now,
+			CreatedAt:      now,
+		}
+		require.NoError(t, s.CreateConversation(context.Background(), c))
+		addConvParticipant(t, s, c.ID, "agent", agent.ID)
+	}
+	// Add agent to the first conv from setup too.
+	conv := &store.Conversation{} // dummy; we already know setup created one
+	_ = conv
+	// We need the original conv ID. Re-read from store.
+	convs, err := s.GetConversationsForPrincipal(context.Background(), "agent", agent.ID)
+	require.NoError(t, err)
+	require.Len(t, convs, 3) // agent was only added to 3 new ones
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?limit=2", nil)
+	req = req.WithContext(agentContext(agent.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.handleListConversations(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var result conversationListResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Len(t, result.Conversations, 2)
+}
+
+func TestListConversations_Unauthenticated(t *testing.T) {
+	srv, _ := testServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
+	rr := httptest.NewRecorder()
+	srv.handleListConversations(rr, req)
+
+	require.Equal(t, http.StatusForbidden, rr.Code)
+}
+
+func TestListConversations_MethodNotAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/conversations", nil)
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.handleListConversations(rr, req)
+
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+}
+
+func TestGetConversation_HappyPath(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID, nil)
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.handleGetConversation(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	var result conversationResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Equal(t, conv.ID, result.ID)
+	require.Equal(t, "Test Conversation", result.DisplayName)
+	require.Len(t, result.Participants, 1)
+	require.Equal(t, "agent", result.Participants[0].PrincipalKind)
+	require.Equal(t, agent.ID, result.Participants[0].PrincipalID)
+}
+
+func TestGetConversation_NotParticipant(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	// Don't add the agent as a participant.
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID, nil)
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.handleGetConversation(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusForbidden, rr.Code)
+}
+
+func TestGetConversation_NotFound(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/nonexistent-id", nil)
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.handleGetConversation(rr, req, "nonexistent-id")
+
+	require.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+func TestConvListMessages_HappyPath(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	// Create a test message in the conversation.
+	recipientID := api.NewUUID()
+	msg := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      project.ID,
+		AgentID:        agent.ID,
+		Sender:         "agent:" + agent.Name,
+		SenderID:       agent.ID,
+		Recipient:      "user:test@example.com",
+		RecipientID:    recipientID,
+		Msg:            "Hello from conversation",
+		Type:           "instruction",
+		ConversationID: conv.ID,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateMessage(context.Background(), msg))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages", nil)
+	req = req.WithContext(agentContext(agent.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.handleConvListMessages(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	var result store.ListResult[store.Message]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Len(t, result.Items, 1)
+	require.Equal(t, "Hello from conversation", result.Items[0].Msg)
+}
+
+func TestConvListMessages_NotParticipant(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	// Don't add the agent as a participant.
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages", nil)
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.handleConvListMessages(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusForbidden, rr.Code)
+}
+
+func TestConvListMessages_WithPagination(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	// Create multiple messages.
+	recipientID := api.NewUUID()
+	for i := 0; i < 5; i++ {
+		msg := &store.Message{
+			ID:             api.NewUUID(),
+			ProjectID:      project.ID,
+			AgentID:        agent.ID,
+			Sender:         "agent:" + agent.Name,
+			SenderID:       agent.ID,
+			Recipient:      "user:test@example.com",
+			RecipientID:    recipientID,
+			Msg:            "Message " + string(rune('A'+i)),
+			Type:           "instruction",
+			ConversationID: conv.ID,
+			CreatedAt:      time.Now().UTC(),
+		}
+		require.NoError(t, s.CreateMessage(context.Background(), msg))
+	}
+
+	// Request with limit=2.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages?limit=2", nil)
+	req = req.WithContext(agentContext(agent.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.handleConvListMessages(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var result store.ListResult[store.Message]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Len(t, result.Items, 2)
+}
+
+func TestCreateConversation_HappyPath(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, _ := setupConvTestData(t, s)
+
+	body := createConversationRequest{
+		DisplayName: "New Discussion",
+		ProjectID:   project.ID,
+		Kind:        "group",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(agent.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.handleCreateConversation(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+
+	var result conversationResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Equal(t, "New Discussion", result.DisplayName)
+	require.Equal(t, "group", result.Kind)
+	require.Equal(t, "native", result.Surface)
+	require.NotEmpty(t, result.ID)
+	// Caller should be auto-added as participant.
+	require.Len(t, result.Participants, 1)
+	require.Equal(t, "agent", result.Participants[0].PrincipalKind)
+	require.Equal(t, agent.ID, result.Participants[0].PrincipalID)
+}
+
+func TestCreateConversation_MissingName(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, _ := setupConvTestData(t, s)
+
+	body := createConversationRequest{Kind: "group"}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(agent.ID, ""))
+	rr := httptest.NewRecorder()
+	srv.handleCreateConversation(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestCreateConversation_DefaultsToGroup(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, _ := setupConvTestData(t, s)
+
+	body := createConversationRequest{DisplayName: "No Kind Specified"}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(agent.ID, ""))
+	rr := httptest.NewRecorder()
+	srv.handleCreateConversation(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+
+	var result conversationResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Equal(t, "group", result.Kind)
+}
+
+func TestSetDefaultAgent_HappyPath(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	newAgentID := api.NewUUID()
+	body := setDefaultAgentRequest{AgentID: newAgentID}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	// Verify the default agent was set.
+	ctx := context.Background()
+	updated, err := s.GetConversation(ctx, conv.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated.DefaultAgentID)
+	require.Equal(t, newAgentID, *updated.DefaultAgentID)
+}
+
+func TestSetDefaultAgent_NotParticipant(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	// Don't add the agent as a participant.
+
+	body := setDefaultAgentRequest{AgentID: api.NewUUID()}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusForbidden, rr.Code)
+}
+
+func TestSetDefaultAgent_MissingAgentID(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	body := setDefaultAgentRequest{} // empty agent ID
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestConversationRoutes_MethodNotAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	// GET on get conversation endpoint works.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID, nil)
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.handleGetConversation(rr, req, conv.ID)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	// DELETE on get conversation is not allowed.
+	req = httptest.NewRequest(http.MethodDelete, "/api/v1/conversations/"+conv.ID, nil)
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr = httptest.NewRecorder()
+	srv.handleGetConversation(rr, req, conv.ID)
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+
+	// POST on messages endpoint is not allowed (read-only).
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/messages", nil)
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr = httptest.NewRecorder()
+	srv.handleConvListMessages(rr, req, conv.ID)
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+}
+
+func TestListConversations_AsUser(t *testing.T) {
+	srv, s := testServer(t)
+	_, _, conv := setupConvTestData(t, s)
+
+	// Create a user identity and add as participant.
+	userID := api.NewUUID()
+	addConvParticipant(t, s, conv.ID, "user", userID)
+
+	// Use user identity directly
+	userCtx := contextWithIdentity(context.Background(),
+		NewAuthenticatedUser(userID, "testuser@example.com", "Test User", "user", "web"))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
+	req = req.WithContext(userCtx)
+	rr := httptest.NewRecorder()
+	srv.handleListConversations(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var result conversationListResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Len(t, result.Conversations, 1)
+	require.Equal(t, conv.ID, result.Conversations[0].ID)
+}
