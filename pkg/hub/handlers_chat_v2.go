@@ -2998,6 +2998,8 @@ func (s *Server) handleChatUserPrefs(w http.ResponseWriter, r *http.Request) {
 			SpaceSortMode  string `json:"spaceSortMode"`
 			SpaceOrder     string `json:"spaceOrder"`
 			ThreadSortMode string `json:"threadSortMode"`
+			ThreadOrder    string `json:"threadOrder"`
+			ThreadGroups   string `json:"threadGroups"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			BadRequest(w, "invalid request body")
@@ -3009,9 +3011,17 @@ func (s *Server) handleChatUserPrefs(w http.ResponseWriter, r *http.Request) {
 			ValidationError(w, "spaceSortMode must be activity, alpha, or custom", nil)
 			return
 		}
-		validThreadSortModes := map[string]bool{"activity": true, "alpha": true}
+		validThreadSortModes := map[string]bool{"activity": true, "alpha": true, "custom": true}
 		if body.ThreadSortMode != "" && !validThreadSortModes[body.ThreadSortMode] {
-			ValidationError(w, "threadSortMode must be activity or alpha", nil)
+			ValidationError(w, "threadSortMode must be activity, alpha, or custom", nil)
+			return
+		}
+		if body.ThreadOrder != "" && !json.Valid([]byte(body.ThreadOrder)) {
+			BadRequest(w, "threadOrder must be valid JSON")
+			return
+		}
+		if body.ThreadGroups != "" && !json.Valid([]byte(body.ThreadGroups)) {
+			BadRequest(w, "threadGroups must be valid JSON")
 			return
 		}
 
@@ -3020,6 +3030,8 @@ func (s *Server) handleChatUserPrefs(w http.ResponseWriter, r *http.Request) {
 			SpaceSortMode:  body.SpaceSortMode,
 			SpaceOrder:     body.SpaceOrder,
 			ThreadSortMode: body.ThreadSortMode,
+			ThreadOrder:    body.ThreadOrder,
+			ThreadGroups:   body.ThreadGroups,
 		}
 		if prefs.SpaceSortMode == "" {
 			prefs.SpaceSortMode = "activity"

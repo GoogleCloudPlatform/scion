@@ -113,6 +113,7 @@ const USED_ICONS = [
   'floppy',
   'folder',
   'folder-fill',
+  'folder-minus',
   'folder-plus',
   'folder-symlink',
   'folder-x',

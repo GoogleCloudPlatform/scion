@@ -66,11 +66,20 @@ export interface ChatSpaceThread {
   hasUnreadMention: boolean;
 }
 
+/** A named group of threads within a space. */
+interface ThreadGroup {
+  id: string;
+  name: string;
+  threadIds: string[];
+}
+
 /** User preferences for rail display. */
 interface RailPrefs {
   spaceSortMode: 'activity' | 'alpha' | 'custom';
-  threadSortMode: 'activity' | 'alpha';
+  threadSortMode: 'activity' | 'alpha' | 'custom';
   spaceOrder: string[] | undefined;
+  threadOrder: Record<string, string[]> | undefined;
+  threadGroups: Record<string, ThreadGroup[]> | undefined;
 }
 
 /**
@@ -79,11 +88,23 @@ interface RailPrefs {
  * truncated value has to degrade to "no custom order" rather than throwing the
  * rail's whole load away. Non-string entries are dropped either way.
  */
+/** Safely parse a JSON string, returning undefined on failure. */
+function safeJsonParse(value: unknown): unknown {
+  if (typeof value !== 'string' || value === '') return undefined;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
 function parseRailPrefs(payload: unknown): RailPrefs {
   const data = (payload ?? {}) as {
     spaceSortMode?: string;
     threadSortMode?: string;
     spaceOrder?: unknown;
+    threadOrder?: unknown;
+    threadGroups?: unknown;
   };
   let spaceOrder: string[] | undefined;
   if (Array.isArray(data.spaceOrder)) {
@@ -98,13 +119,61 @@ function parseRailPrefs(payload: unknown): RailPrefs {
       spaceOrder = undefined;
     }
   }
+
+  // Parse threadOrder: either already an object or a JSON string.
+  let threadOrder: Record<string, string[]> | undefined;
+  const rawThreadOrder =
+    typeof data.threadOrder === 'string' ? safeJsonParse(data.threadOrder) : data.threadOrder;
+  if (rawThreadOrder && typeof rawThreadOrder === 'object' && !Array.isArray(rawThreadOrder)) {
+    threadOrder = {} as Record<string, string[]>;
+    for (const [key, val] of Object.entries(rawThreadOrder as Record<string, unknown>)) {
+      if (Array.isArray(val)) {
+        threadOrder[key] = val.filter((id): id is string => typeof id === 'string');
+      }
+    }
+  }
+
+  // Parse threadGroups: either already an object or a JSON string.
+  let threadGroups: Record<string, ThreadGroup[]> | undefined;
+  const rawThreadGroups =
+    typeof data.threadGroups === 'string' ? safeJsonParse(data.threadGroups) : data.threadGroups;
+  if (rawThreadGroups && typeof rawThreadGroups === 'object' && !Array.isArray(rawThreadGroups)) {
+    threadGroups = {} as Record<string, ThreadGroup[]>;
+    for (const [key, val] of Object.entries(rawThreadGroups as Record<string, unknown>)) {
+      if (Array.isArray(val)) {
+        const groups: ThreadGroup[] = [];
+        for (const g of val) {
+          if (
+            g &&
+            typeof g === 'object' &&
+            typeof (g as ThreadGroup).id === 'string' &&
+            typeof (g as ThreadGroup).name === 'string' &&
+            Array.isArray((g as ThreadGroup).threadIds)
+          ) {
+            groups.push({
+              id: (g as ThreadGroup).id,
+              name: (g as ThreadGroup).name,
+              threadIds: (g as ThreadGroup).threadIds.filter(
+                (id): id is string => typeof id === 'string'
+              ),
+            });
+          }
+        }
+        threadGroups[key] = groups;
+      }
+    }
+  }
+
   const spaceSortMode = data.spaceSortMode;
   const threadSortMode = data.threadSortMode;
   return {
     spaceSortMode:
       spaceSortMode === 'alpha' || spaceSortMode === 'custom' ? spaceSortMode : 'activity',
-    threadSortMode: threadSortMode === 'alpha' ? 'alpha' : 'activity',
+    threadSortMode:
+      threadSortMode === 'alpha' || threadSortMode === 'custom' ? threadSortMode : 'activity',
     spaceOrder,
+    threadOrder,
+    threadGroups,
   };
 }
 
@@ -134,6 +203,8 @@ export class ScionChatSpaceRail extends LitElement {
     spaceSortMode: 'activity',
     threadSortMode: 'activity',
     spaceOrder: undefined,
+    threadOrder: undefined,
+    threadGroups: undefined,
   };
   @state() private creatingThread = '';
   @state() private newThreadName = '';
@@ -153,6 +224,25 @@ export class ScionChatSpaceRail extends LitElement {
   @state() private dragOverSpaceId: string | null = null;
   /** Project id for which the emoji picker is open, or null if closed. */
   @state() private emojiPickerSpaceId: string | null = null;
+
+  // --- Thread DnD state ---
+  /** Thread id currently being dragged, if any. */
+  @state() private draggingThreadId: string | null = null;
+  /** Thread id the drag is hovering over. */
+  @state() private dragOverThreadId: string | null = null;
+
+  // --- Thread groups state ---
+  /** Set of collapsed group IDs. */
+  @state() private collapsedGroups = new Set<string>();
+  /** Group header id the drag is hovering over. */
+  @state() private dragOverGroupId: string | null = null;
+  /** State for the group name prompt (inline input). */
+  @state() private groupNameInput: {
+    projectId: string;
+    threadId?: string;
+    renamingGroupId?: string;
+    value: string;
+  } | null = null;
 
   static override styles = css`
     :host {
@@ -360,6 +450,81 @@ export class ScionChatSpaceRail extends LitElement {
       font-size: var(--chat-fs-xs);
       color: var(--scion-text-muted, #64748b);
       flex-shrink: 0;
+    }
+
+    /* Thread DnD feedback */
+    .thread-item.dragging {
+      opacity: 0.4;
+    }
+
+    .thread-item.drag-over {
+      box-shadow: inset 0 2px 0 0 var(--scion-primary, #3b82f6);
+    }
+
+    /* Thread group header */
+    .thread-group-header {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.375rem 0.75rem 0.375rem 1.25rem;
+      cursor: pointer;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--scion-text-muted, #64748b);
+      user-select: none;
+    }
+
+    .thread-group-header:hover {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .thread-group-header.drag-over {
+      box-shadow: inset 0 2px 0 0 var(--scion-primary, #3b82f6);
+    }
+
+    .thread-group-header .chevron {
+      transition: transform 0.15s;
+      font-size: 0.625rem;
+    }
+
+    .thread-group-header .chevron.collapsed {
+      transform: rotate(-90deg);
+    }
+
+    .thread-group-header .group-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .thread-group-header .group-count {
+      font-size: 0.625rem;
+      color: var(--scion-text-muted, #64748b);
+      font-weight: 400;
+    }
+
+    /* Threads inside a group get a slight indent */
+    .thread-group .thread-item {
+      padding-left: 2.25rem;
+    }
+
+    /* Group name inline input */
+    .group-name-input {
+      padding: 0.25rem 0.75rem 0.25rem 1.25rem;
+    }
+
+    .group-name-input sl-input::part(base) {
+      font-size: 0.8125rem;
+      min-height: 1.5rem;
+      background: var(--scion-surface-raised, #ffffff);
+      border-color: var(--scion-border, #e2e8f0);
+    }
+
+    .group-name-input sl-input::part(input) {
+      color: var(--scion-text, #1e293b);
     }
 
     /* Create thread inline input */
@@ -592,6 +757,9 @@ export class ScionChatSpaceRail extends LitElement {
     if (this.contextMenuTarget) {
       this.contextMenuTarget = null;
     }
+    if (this.groupContextMenuTarget) {
+      this.groupContextMenuTarget = null;
+    }
   }
 
   /** Reload all data (called externally when SSE events indicate changes). */
@@ -715,6 +883,8 @@ export class ScionChatSpaceRail extends LitElement {
           spaceSortMode: newPrefs.spaceSortMode,
           threadSortMode: newPrefs.threadSortMode,
           spaceOrder: JSON.stringify(newPrefs.spaceOrder ?? []),
+          threadOrder: JSON.stringify(newPrefs.threadOrder ?? {}),
+          threadGroups: JSON.stringify(newPrefs.threadGroups ?? {}),
         }),
       });
       if (!res.ok) {
@@ -866,6 +1036,319 @@ export class ScionChatSpaceRail extends LitElement {
     this.dragOverSpaceId = null;
   }
 
+  // ---------------------------------------------------------------------------
+  // Thread DnD reorder
+  // ---------------------------------------------------------------------------
+
+  /** Whether thread reordering is allowed (same logic as space reorder). */
+  private canReorderThreads(): boolean {
+    return this.spaceFilter === 'all';
+  }
+
+  /** The current thread display order (excluding #general) for a space. */
+  private currentThreadOrder(projectId: string): string[] {
+    return this.getSortedThreads(projectId)
+      .filter((t) => !t.isGeneral)
+      .map((t) => t.id);
+  }
+
+  private async applyThreadOrder(projectId: string, order: string[]): Promise<void> {
+    const threadOrder = { ...(this.prefs.threadOrder ?? {}), [projectId]: order };
+    await this.savePrefs({ threadSortMode: 'custom', threadOrder });
+  }
+
+  private handleThreadDragStart(e: DragEvent, threadId: string): void {
+    if (!this.canReorderThreads()) return;
+    this.draggingThreadId = threadId;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', threadId);
+    }
+  }
+
+  private handleThreadDragOver(e: DragEvent, threadId: string): void {
+    if (!this.draggingThreadId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    if (this.dragOverThreadId !== threadId) this.dragOverThreadId = threadId;
+    // Clear group highlight when over a thread
+    this.dragOverGroupId = null;
+  }
+
+  private async handleThreadDrop(
+    e: DragEvent,
+    targetThreadId: string,
+    projectId: string
+  ): Promise<void> {
+    e.preventDefault();
+    const sourceId = this.draggingThreadId;
+    this.draggingThreadId = null;
+    this.dragOverThreadId = null;
+    this.dragOverGroupId = null;
+    if (!sourceId || sourceId === targetThreadId) return;
+
+    const order = this.currentThreadOrder(projectId);
+    const from = order.indexOf(sourceId);
+    const to = order.indexOf(targetThreadId);
+    if (from === -1 || to === -1) return;
+    const next = [...order];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+
+    // If dropping on a thread inside a group, move the dragged thread into that group
+    const groups = this.prefs.threadGroups?.[projectId];
+    if (groups) {
+      const targetGroup = groups.find((g) => g.threadIds.includes(targetThreadId));
+      const sourceGroup = groups.find((g) => g.threadIds.includes(sourceId));
+      if (targetGroup !== sourceGroup) {
+        const updatedGroups = groups.map((g) => {
+          // Remove from source group
+          const filtered = g.threadIds.filter((id) => id !== sourceId);
+          if (g === targetGroup) {
+            // Add to target group at the right position relative to the target
+            const targetIdx = filtered.indexOf(targetThreadId);
+            const inserted = [...filtered];
+            inserted.splice(targetIdx, 0, sourceId);
+            return { ...g, threadIds: inserted };
+          }
+          return { ...g, threadIds: filtered };
+        });
+        const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: updatedGroups };
+        await this.savePrefs({
+          threadSortMode: 'custom',
+          threadOrder: { ...(this.prefs.threadOrder ?? {}), [projectId]: next },
+          threadGroups,
+        });
+        return;
+      } else if (targetGroup) {
+        // Same group — reorder within it
+        const updatedGroups = groups.map((g) => {
+          if (g !== targetGroup) return g;
+          const ids = g.threadIds.filter((id) => id !== sourceId);
+          const idx = ids.indexOf(targetThreadId);
+          ids.splice(idx, 0, sourceId);
+          return { ...g, threadIds: ids };
+        });
+        const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: updatedGroups };
+        await this.savePrefs({
+          threadSortMode: 'custom',
+          threadOrder: { ...(this.prefs.threadOrder ?? {}), [projectId]: next },
+          threadGroups,
+        });
+        return;
+      }
+    }
+
+    await this.applyThreadOrder(projectId, next);
+  }
+
+  private handleThreadDragEnd(): void {
+    this.draggingThreadId = null;
+    this.dragOverThreadId = null;
+    this.dragOverGroupId = null;
+  }
+
+  /** Move a thread one slot up or down in its space. */
+  private async moveThread(threadId: string, projectId: string, delta: -1 | 1): Promise<void> {
+    if (!this.canReorderThreads()) return;
+
+    const groups = this.prefs.threadGroups?.[projectId] ?? [];
+    const containingGroup = groups.find((g) => g.threadIds.includes(threadId));
+
+    if (containingGroup) {
+      // Reorder within the group's threadIds
+      const ids = [...containingGroup.threadIds];
+      const idx = ids.indexOf(threadId);
+      const swapIdx = idx + delta;
+      if (swapIdx < 0 || swapIdx >= ids.length) return;
+      [ids[idx], ids[swapIdx]] = [ids[swapIdx], ids[idx]];
+
+      const updatedGroups = groups.map((g) =>
+        g.id === containingGroup.id ? { ...g, threadIds: ids } : g
+      );
+      await this.savePrefs({
+        threadGroups: { ...(this.prefs.threadGroups ?? {}), [projectId]: updatedGroups },
+      });
+    } else {
+      // Reorder in global threadOrder (ungrouped threads)
+      const order = this.currentThreadOrder(projectId);
+      const from = order.indexOf(threadId);
+      const to = from + delta;
+      if (from === -1 || to < 0 || to >= order.length) return;
+      const next = [...order];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      await this.applyThreadOrder(projectId, next);
+    }
+  }
+
+  private isThreadAtEdge(threadId: string, projectId: string, edge: 'first' | 'last'): boolean {
+    if (!this.canReorderThreads()) return true;
+
+    const groups = this.prefs.threadGroups?.[projectId] ?? [];
+    const containingGroup = groups.find((g) => g.threadIds.includes(threadId));
+
+    if (containingGroup) {
+      // Check edges within the group
+      const ids = containingGroup.threadIds;
+      return edge === 'first' ? ids[0] === threadId : ids[ids.length - 1] === threadId;
+    }
+
+    // Check edges in global order (ungrouped threads)
+    const order = this.currentThreadOrder(projectId);
+    const index = order.indexOf(threadId);
+    if (index === -1) return true;
+    return edge === 'first' ? index === 0 : index === order.length - 1;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Thread groups
+  // ---------------------------------------------------------------------------
+
+  /** Get groups for a space, defaulting to empty array. */
+  private getGroups(projectId: string): ThreadGroup[] {
+    return this.prefs.threadGroups?.[projectId] ?? [];
+  }
+
+  private toggleGroupCollapse(groupId: string): void {
+    const next = new Set(this.collapsedGroups);
+    if (next.has(groupId)) {
+      next.delete(groupId);
+    } else {
+      next.add(groupId);
+    }
+    this.collapsedGroups = next;
+  }
+
+  /** Generate a simple unique id for a new group. */
+  private generateGroupId(): string {
+    return 'g-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  }
+
+  /** Create a new thread group and optionally move a thread into it. */
+  private async createGroup(projectId: string, name: string, threadId?: string): Promise<void> {
+    const currentGroups = this.getGroups(projectId);
+    if (currentGroups.length >= 20) {
+      showToast('Maximum 20 groups per space', 'warning');
+      return;
+    }
+    const newGroup: ThreadGroup = {
+      id: this.generateGroupId(),
+      name,
+      threadIds: threadId ? [threadId] : [],
+    };
+    // Remove thread from any existing group (immutably) and append the new group
+    const groups = threadId
+      ? [
+          ...currentGroups.map((g) => ({
+            ...g,
+            threadIds: g.threadIds.filter((id) => id !== threadId),
+          })),
+          newGroup,
+        ]
+      : [...currentGroups, newGroup];
+    const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
+    await this.savePrefs({ threadGroups });
+  }
+
+  /** Move a thread into an existing group. */
+  private async moveThreadToGroup(
+    threadId: string,
+    groupId: string,
+    projectId: string
+  ): Promise<void> {
+    const groups = this.getGroups(projectId).map((g) => {
+      const filtered = g.threadIds.filter((id) => id !== threadId);
+      return g.id === groupId
+        ? { ...g, threadIds: [...filtered, threadId] }
+        : { ...g, threadIds: filtered };
+    });
+    const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
+    await this.savePrefs({ threadGroups });
+  }
+
+  /** Remove a thread from its group (move to ungrouped). */
+  private async removeThreadFromGroup(threadId: string, projectId: string): Promise<void> {
+    const groups = this.getGroups(projectId).map((g) => ({
+      ...g,
+      threadIds: g.threadIds.filter((id) => id !== threadId),
+    }));
+    const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
+    await this.savePrefs({ threadGroups });
+  }
+
+  /** Rename a thread group. */
+  private async renameGroup(groupId: string, name: string, projectId: string): Promise<void> {
+    const groups = this.getGroups(projectId).map((g) => (g.id === groupId ? { ...g, name } : g));
+    const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
+    await this.savePrefs({ threadGroups });
+  }
+
+  /** Delete a thread group, moving its threads to ungrouped. */
+  private async deleteGroup(groupId: string, projectId: string): Promise<void> {
+    const groups = this.getGroups(projectId).filter((g) => g.id !== groupId);
+    const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
+    await this.savePrefs({ threadGroups });
+  }
+
+  /** Handle dropping a thread onto a group header. */
+  private handleGroupDragOver(e: DragEvent, groupId: string): void {
+    if (!this.draggingThreadId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    this.dragOverGroupId = groupId;
+    this.dragOverThreadId = null;
+  }
+
+  private async handleGroupDrop(e: DragEvent, groupId: string, projectId: string): Promise<void> {
+    e.preventDefault();
+    const threadId = this.draggingThreadId;
+    this.draggingThreadId = null;
+    this.dragOverThreadId = null;
+    this.dragOverGroupId = null;
+    if (!threadId) return;
+
+    if (groupId === '__ungrouped__') {
+      await this.removeThreadFromGroup(threadId, projectId);
+    } else {
+      await this.moveThreadToGroup(threadId, groupId, projectId);
+    }
+  }
+
+  /** Start inline input for creating/renaming a group. */
+  private startGroupNameInput(
+    projectId: string,
+    opts: { threadId?: string; renamingGroupId?: string; initialValue?: string }
+  ): void {
+    this.contextMenuTarget = null;
+    const input: {
+      projectId: string;
+      threadId?: string;
+      renamingGroupId?: string;
+      value: string;
+    } = {
+      projectId,
+      value: opts.initialValue ?? '',
+    };
+    if (opts.threadId !== undefined) input.threadId = opts.threadId;
+    if (opts.renamingGroupId !== undefined) input.renamingGroupId = opts.renamingGroupId;
+    this.groupNameInput = input;
+  }
+
+  private async submitGroupNameInput(): Promise<void> {
+    const input = this.groupNameInput;
+    if (!input || !input.value.trim()) {
+      this.groupNameInput = null;
+      return;
+    }
+    if (input.renamingGroupId) {
+      await this.renameGroup(input.renamingGroupId, input.value.trim(), input.projectId);
+    } else {
+      await this.createGroup(input.projectId, input.value.trim(), input.threadId);
+    }
+    this.groupNameInput = null;
+  }
+
   private getSpaceLastActivity(projectId: string): number {
     const threads = this.threadsBySpace.get(projectId) || [];
     let maxTime = 0;
@@ -880,6 +1363,25 @@ export class ScionChatSpaceRail extends LitElement {
 
   private getSortedThreads(projectId: string): ChatSpaceThread[] {
     const threads = [...(this.threadsBySpace.get(projectId) || [])];
+
+    // In custom sort mode, the user's explicit order takes control.
+    // #general is always first regardless.
+    if (this.prefs.threadSortMode === 'custom') {
+      const order = this.prefs.threadOrder?.[projectId];
+      if (order && order.length > 0) {
+        const general = threads.filter((t) => t.isGeneral);
+        const rest = threads.filter((t) => !t.isGeneral);
+        rest.sort((a, b) => {
+          const ai = order.indexOf(a.id);
+          const bi = order.indexOf(b.id);
+          if (ai === -1 && bi === -1) return 0;
+          if (ai === -1) return 1;
+          if (bi === -1) return -1;
+          return ai - bi;
+        });
+        return [...general, ...rest];
+      }
+    }
 
     // Separate #general, pinned, and regular
     const general = threads.filter((t) => t.isGeneral);
@@ -1409,6 +1911,7 @@ export class ScionChatSpaceRail extends LitElement {
             `
       }
       ${this.contextMenuTarget ? this.renderContextMenu() : nothing}
+      ${this.groupContextMenuTarget ? this.renderGroupContextMenu() : nothing}
       ${this.emojiPickerSpaceId ? this.renderEmojiPicker() : nothing}
     `;
   }
@@ -1462,6 +1965,29 @@ export class ScionChatSpaceRail extends LitElement {
             >
               Custom
             </sl-menu-item>
+            <sl-divider></sl-divider>
+            <sl-menu-label>Sort threads</sl-menu-label>
+            <sl-menu-item
+              type="checkbox"
+              value="thread-activity"
+              ?checked=${this.prefs.threadSortMode === 'activity'}
+            >
+              Recent activity
+            </sl-menu-item>
+            <sl-menu-item
+              type="checkbox"
+              value="thread-alpha"
+              ?checked=${this.prefs.threadSortMode === 'alpha'}
+            >
+              Alphabetical
+            </sl-menu-item>
+            <sl-menu-item
+              type="checkbox"
+              value="thread-custom"
+              ?checked=${this.prefs.threadSortMode === 'custom'}
+            >
+              Custom (drag to reorder)
+            </sl-menu-item>
           </sl-menu>
         </sl-dropdown>
       </div>
@@ -1484,21 +2010,39 @@ export class ScionChatSpaceRail extends LitElement {
     const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
     const item = detail?.item;
     const value = item?.getAttribute('value');
+
+    // Space sort modes
     if (value === 'activity' || value === 'alpha') {
       void this.savePrefs({ spaceSortMode: value });
       return;
     }
     if (value === 'custom') {
-      // Switching to custom with no order saved yet freezes the order the user
-      // is currently looking at, so the list does not jump on the click.
       void this.savePrefs({
         spaceSortMode: 'custom',
-        // An empty saved order counts as "no order saved yet", so test length
-        // rather than nullishness — `[]` would otherwise freeze nothing.
         spaceOrder: this.prefs.spaceOrder?.length
           ? this.prefs.spaceOrder
           : this.getSortedSpaces().map((s) => s.projectId),
       });
+      return;
+    }
+
+    // Thread sort modes
+    if (value === 'thread-activity' || value === 'thread-alpha') {
+      const mode = value.replace('thread-', '') as 'activity' | 'alpha';
+      void this.savePrefs({ threadSortMode: mode });
+      return;
+    }
+    if (value === 'thread-custom') {
+      // Switching to custom: freeze current order for all visible spaces.
+      const threadOrder = { ...(this.prefs.threadOrder ?? {}) };
+      for (const space of this.spaces) {
+        if (!threadOrder[space.projectId]?.length) {
+          threadOrder[space.projectId] = this.getSortedThreads(space.projectId)
+            .filter((t) => !t.isGeneral)
+            .map((t) => t.id);
+        }
+      }
+      void this.savePrefs({ threadSortMode: 'custom', threadOrder });
     }
   }
 
@@ -1613,7 +2157,7 @@ export class ScionChatSpaceRail extends LitElement {
           !isCollapsed
             ? html`
                 <div class="thread-list">
-                  ${threads.map((t) => this.renderThread(t, space.projectId))}
+                  ${this.renderThreadList(threads, space.projectId)}
                   ${
                     this.creatingThread === space.projectId
                       ? this.renderCreateThread(space.projectId)
@@ -1625,6 +2169,125 @@ export class ScionChatSpaceRail extends LitElement {
         }
       </div>
     `;
+  }
+
+  /**
+   * Render the thread list for a space. If thread groups exist, organize
+   * threads into groups with collapsible headers. Otherwise, render flat.
+   */
+  private renderThreadList(threads: ChatSpaceThread[], projectId: string) {
+    const groups = this.getGroups(projectId);
+    if (groups.length === 0) {
+      // No groups — render flat list
+      return threads.map((t) => this.renderThread(t, projectId));
+    }
+
+    // Build a lookup of thread id → thread
+    const threadMap = new Map(threads.map((t) => [t.id, t]));
+    const groupedThreadIds = new Set(groups.flatMap((g) => g.threadIds));
+
+    // #general threads always come first, ungrouped
+    const generalThreads = threads.filter((t) => t.isGeneral);
+
+    // Ungrouped threads (non-general, not in any group)
+    const ungrouped = threads.filter((t) => !t.isGeneral && !groupedThreadIds.has(t.id));
+
+    return html`
+      ${generalThreads.map((t) => this.renderThread(t, projectId))}
+      ${
+        ungrouped.length > 0
+          ? html`
+              <div
+                class="thread-group-header ${
+                  this.dragOverGroupId === '__ungrouped__' ? 'drag-over' : ''
+                }"
+                @dragover=${(e: DragEvent) => this.handleGroupDragOver(e, '__ungrouped__')}
+                @drop=${(e: DragEvent) => void this.handleGroupDrop(e, '__ungrouped__', projectId)}
+              >
+                <span class="group-name">Threads</span>
+                <span class="group-count">(${ungrouped.length})</span>
+              </div>
+              ${ungrouped.map((t) => this.renderThread(t, projectId))}
+            `
+          : nothing
+      }
+      ${groups.map((group) => {
+        const groupThreads = group.threadIds
+          .map((id) => threadMap.get(id))
+          .filter((t): t is ChatSpaceThread => t !== undefined);
+        const collapsed = this.collapsedGroups.has(group.id);
+        return html`
+          <div
+            class="thread-group-header ${this.dragOverGroupId === group.id ? 'drag-over' : ''}"
+            @click=${() => this.toggleGroupCollapse(group.id)}
+            @dragover=${(e: DragEvent) => this.handleGroupDragOver(e, group.id)}
+            @drop=${(e: DragEvent) => void this.handleGroupDrop(e, group.id, projectId)}
+            @contextmenu=${(e: MouseEvent) => {
+              e.preventDefault();
+              e.stopPropagation();
+              this.contextMenuTarget = null;
+              // Use a group-specific context menu via inline handler
+              this.showGroupContextMenu(e, group, projectId);
+            }}
+          >
+            <sl-icon name="chevron-down" class="chevron ${collapsed ? 'collapsed' : ''}"></sl-icon>
+            <span class="group-name">${group.name}</span>
+            <span class="group-count">(${groupThreads.length})</span>
+          </div>
+          ${
+            !collapsed
+              ? html`<div class="thread-group">
+                  ${groupThreads.map((t) => this.renderThread(t, projectId))}
+                </div>`
+              : nothing
+          }
+        `;
+      })}
+      ${this.groupNameInput?.projectId === projectId ? this.renderGroupNameInput() : nothing}
+    `;
+  }
+
+  /** Render inline input for creating or renaming a group. */
+  private renderGroupNameInput() {
+    if (!this.groupNameInput) return nothing;
+    return html`
+      <div class="group-name-input">
+        <sl-input
+          size="small"
+          placeholder="Group name"
+          .value=${this.groupNameInput.value}
+          @sl-input=${(e: Event) => {
+            if (this.groupNameInput) {
+              this.groupNameInput = {
+                ...this.groupNameInput,
+                value: (e.target as HTMLInputElement).value,
+              };
+            }
+          }}
+          @keydown=${(e: KeyboardEvent) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              void this.submitGroupNameInput();
+            }
+            if (e.key === 'Escape') {
+              this.groupNameInput = null;
+            }
+          }}
+          @sl-blur=${() => void this.submitGroupNameInput()}
+        ></sl-input>
+      </div>
+    `;
+  }
+
+  /** Show a context menu for a group header. Reuses the same context-menu position mechanism. */
+  @state() private groupContextMenuTarget: {
+    group: ThreadGroup;
+    projectId: string;
+  } | null = null;
+
+  private showGroupContextMenu(e: MouseEvent, group: ThreadGroup, projectId: string): void {
+    this.groupContextMenuTarget = { group, projectId };
+    this.contextMenuPos = { x: e.clientX, y: e.clientY };
   }
 
   /**
@@ -1661,9 +2324,30 @@ export class ScionChatSpaceRail extends LitElement {
       `;
     }
 
+    // Thread is draggable when in custom sort mode (or any mode, since dragging
+    // auto-switches to custom), but not for the #general thread.
+    const isDraggable = !thread.isGeneral;
+    const isDragging = this.draggingThreadId === thread.id;
+    const isDragOver = this.dragOverThreadId === thread.id && this.draggingThreadId !== thread.id;
+
     return html`
       <div
-        class="thread-item ${isSelected ? 'selected' : ''}"
+        class="thread-item ${isSelected ? 'selected' : ''} ${
+          isDragging ? 'dragging' : ''
+        } ${isDragOver ? 'drag-over' : ''}"
+        ?draggable=${isDraggable}
+        @dragstart=${
+          isDraggable ? (e: DragEvent) => this.handleThreadDragStart(e, thread.id) : nothing
+        }
+        @dragover=${
+          isDraggable ? (e: DragEvent) => this.handleThreadDragOver(e, thread.id) : nothing
+        }
+        @drop=${
+          isDraggable
+            ? (e: DragEvent) => void this.handleThreadDrop(e, thread.id, projectId)
+            : nothing
+        }
+        @dragend=${isDraggable ? () => this.handleThreadDragEnd() : nothing}
         @click=${() => this.handleThreadClick(thread, projectId)}
         @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, thread, projectId)}
       >
@@ -1829,6 +2513,79 @@ export class ScionChatSpaceRail extends LitElement {
           <sl-icon name=${thread.muted ? 'bell-slash' : 'bell'}></sl-icon>
           ${thread.muted ? 'Unmute' : 'Mute'}
         </div>
+        ${
+          !thread.isGeneral
+            ? html`
+                <div
+                  class="context-menu-item"
+                  @click=${() => void this.moveThread(thread.id, projectId, -1)}
+                  style="${
+                    this.isThreadAtEdge(thread.id, projectId, 'first')
+                      ? 'opacity: 0.4; pointer-events: none;'
+                      : ''
+                  }"
+                >
+                  <sl-icon name="arrow-up"></sl-icon>
+                  Move up
+                </div>
+                <div
+                  class="context-menu-item"
+                  @click=${() => void this.moveThread(thread.id, projectId, 1)}
+                  style="${
+                    this.isThreadAtEdge(thread.id, projectId, 'last')
+                      ? 'opacity: 0.4; pointer-events: none;'
+                      : ''
+                  }"
+                >
+                  <sl-icon name="arrow-down"></sl-icon>
+                  Move down
+                </div>
+              `
+            : nothing
+        }
+        ${
+          !thread.isGeneral
+            ? html`
+                ${this.getGroups(projectId).map(
+                  (group) => html`
+                    <div
+                      class="context-menu-item"
+                      @click=${() => {
+                        this.contextMenuTarget = null;
+                        void this.moveThreadToGroup(thread.id, group.id, projectId);
+                      }}
+                    >
+                      <sl-icon name="folder"></sl-icon>
+                      Move to ${group.name}
+                    </div>
+                  `
+                )}
+                ${
+                  this.getGroups(projectId).some((g) => g.threadIds.includes(thread.id))
+                    ? html`
+                        <div
+                          class="context-menu-item"
+                          @click=${() => {
+                            this.contextMenuTarget = null;
+                            void this.removeThreadFromGroup(thread.id, projectId);
+                          }}
+                        >
+                          <sl-icon name="folder-minus"></sl-icon>
+                          Remove from group
+                        </div>
+                      `
+                    : nothing
+                }
+                <div
+                  class="context-menu-item"
+                  @click=${() => this.startGroupNameInput(projectId, { threadId: thread.id })}
+                >
+                  <sl-icon name="folder-plus"></sl-icon>
+                  New group...
+                </div>
+              `
+            : nothing
+        }
         <div class="context-menu-item" @click=${() => this.handleExportThread(thread)}>
           <sl-icon name="file-earmark-text"></sl-icon>
           Copy as Markdown
@@ -1847,6 +2604,44 @@ export class ScionChatSpaceRail extends LitElement {
         >
           <sl-icon name="trash"></sl-icon>
           Delete
+        </div>
+      </div>
+    `;
+  }
+
+  /** Render context menu for a group header. */
+  private renderGroupContextMenu() {
+    if (!this.groupContextMenuTarget) return nothing;
+    const { group, projectId } = this.groupContextMenuTarget;
+
+    return html`
+      <div
+        class="context-menu"
+        style="left: ${this.contextMenuPos.x}px; top: ${this.contextMenuPos.y}px"
+        @click=${(e: Event) => e.stopPropagation()}
+      >
+        <div
+          class="context-menu-item"
+          @click=${() => {
+            this.groupContextMenuTarget = null;
+            this.startGroupNameInput(projectId, {
+              renamingGroupId: group.id,
+              initialValue: group.name,
+            });
+          }}
+        >
+          <sl-icon name="pencil"></sl-icon>
+          Rename group
+        </div>
+        <div
+          class="context-menu-item danger"
+          @click=${() => {
+            this.groupContextMenuTarget = null;
+            void this.deleteGroup(group.id, projectId);
+          }}
+        >
+          <sl-icon name="trash"></sl-icon>
+          Delete group
         </div>
       </div>
     `;

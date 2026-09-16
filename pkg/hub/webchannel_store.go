@@ -328,9 +328,11 @@ type WebChatReadState struct {
 // camelCase request and a PascalCase response.
 type WebChatUserPrefs struct {
 	UserID         string `json:"userId"`
-	SpaceSortMode  string `json:"spaceSortMode"`  // "activity", "alpha", "custom"
-	SpaceOrder     string `json:"spaceOrder"`     // JSON array of project UUIDs
-	ThreadSortMode string `json:"threadSortMode"` // "activity", "alpha"
+	SpaceSortMode  string `json:"spaceSortMode"`          // "activity", "alpha", "custom"
+	SpaceOrder     string `json:"spaceOrder"`             // JSON array of project UUIDs
+	ThreadSortMode string `json:"threadSortMode"`         // "activity", "alpha", "custom"
+	ThreadOrder    string `json:"threadOrder,omitempty"`  // JSON {"projectId": ["threadId1", ...]}
+	ThreadGroups   string `json:"threadGroups,omitempty"` // JSON {"projectId": [{"id":"..","name":"..","threadIds":[..]}]}
 }
 
 // WebChatDM represents one side of a DM conversation.
@@ -459,7 +461,9 @@ CREATE TABLE IF NOT EXISTS webchat_user_prefs (
     user_id         TEXT PRIMARY KEY,
     space_sort_mode TEXT NOT NULL DEFAULT 'activity',
     space_order     TEXT,
-    thread_sort_mode TEXT NOT NULL DEFAULT 'activity'
+    thread_sort_mode TEXT NOT NULL DEFAULT 'activity',
+    thread_order    TEXT,
+    thread_groups   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS webchat_dm (
@@ -1237,13 +1241,15 @@ func (s *sqliteWebChatStore) IsConversationMuted(ctx context.Context, userID, co
 // GetUserPrefs returns the user's rail preferences. Returns defaults if no row.
 func (s *sqliteWebChatStore) GetUserPrefs(ctx context.Context, userID string) (*WebChatUserPrefs, error) {
 	const query = `
-SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode
+SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode,
+       COALESCE(thread_order, ''), COALESCE(thread_groups, '')
   FROM webchat_user_prefs
  WHERE user_id = ?
 `
 	var p WebChatUserPrefs
 	err := s.db.QueryRowContext(ctx, query, userID).Scan(
-		&p.UserID, &p.SpaceSortMode, &p.SpaceOrder, &p.ThreadSortMode)
+		&p.UserID, &p.SpaceSortMode, &p.SpaceOrder, &p.ThreadSortMode,
+		&p.ThreadOrder, &p.ThreadGroups)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return &WebChatUserPrefs{
@@ -1260,16 +1266,19 @@ SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode
 // SetUserPrefs upserts the user's rail preferences.
 func (s *sqliteWebChatStore) SetUserPrefs(ctx context.Context, userID string, prefs WebChatUserPrefs) error {
 	const query = `
-INSERT INTO webchat_user_prefs (user_id, space_sort_mode, space_order, thread_sort_mode)
-VALUES (?, ?, ?, ?)
+INSERT INTO webchat_user_prefs (user_id, space_sort_mode, space_order, thread_sort_mode, thread_order, thread_groups)
+VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT (user_id)
 DO UPDATE SET
     space_sort_mode = excluded.space_sort_mode,
     space_order = excluded.space_order,
-    thread_sort_mode = excluded.thread_sort_mode
+    thread_sort_mode = excluded.thread_sort_mode,
+    thread_order = excluded.thread_order,
+    thread_groups = excluded.thread_groups
 `
 	_, err := s.db.ExecContext(ctx, query, userID, prefs.SpaceSortMode,
-		nullableString(prefs.SpaceOrder), prefs.ThreadSortMode)
+		nullableString(prefs.SpaceOrder), prefs.ThreadSortMode,
+		nullableString(prefs.ThreadOrder), nullableString(prefs.ThreadGroups))
 	if err != nil {
 		return fmt.Errorf("webchat store: set user prefs: %w", err)
 	}
@@ -1510,7 +1519,37 @@ func (s *sqliteWebChatStore) runMigrations() error {
 	if err := s.backfillTopicConversations(); err != nil {
 		return fmt.Errorf("topic conversation backfill: %w", err)
 	}
+	if err := s.addUserPrefsThreadColumns(); err != nil {
+		return fmt.Errorf("user prefs thread columns: %w", err)
+	}
 	return nil
+}
+
+// addUserPrefsThreadColumns adds thread_order and thread_groups columns to
+// webchat_user_prefs for existing databases that lack them.
+func (s *sqliteWebChatStore) addUserPrefsThreadColumns() error {
+	migrationName := "add_user_prefs_thread_columns"
+	done, err := s.migrationCompleted(migrationName)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+	_, err = s.db.Exec("ALTER TABLE webchat_user_prefs ADD COLUMN thread_order TEXT")
+	if err != nil {
+		// Column may already exist if table was created fresh with the new DDL
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
+	_, err = s.db.Exec("ALTER TABLE webchat_user_prefs ADD COLUMN thread_groups TEXT")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
+	return s.markMigrationCompleted(migrationName)
 }
 
 // addTopicConversationID adds the conversation_id column and unique index
