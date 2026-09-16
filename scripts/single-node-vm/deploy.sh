@@ -220,6 +220,11 @@ while true; do
     echo "  Please choose a shorter name."
     continue
   fi
+  if [[ ! "$HUB_NAME" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    warn "Hub name '${HUB_NAME}' is invalid. It must start with a lowercase letter and contain only lowercase letters, numbers, and hyphens."
+    echo "  Please choose a valid name."
+    continue
+  fi
   break
 done
 
@@ -326,13 +331,9 @@ if [[ -z "$VERSION" ]]; then
     warn "/releases/latest returned no data (pre-releases only?); querying /releases..."
     RELEASE_JSON="$(curl -fsSL 'https://api.github.com/repos/GoogleCloudPlatform/scion/releases?per_page=1')" \
       || { err "Could not fetch releases from GitHub API."; exit 1; }
-    # /releases returns an array; extract the first entry
-    if command -v jq &>/dev/null; then
-      RELEASE_JSON="$(echo "$RELEASE_JSON" | jq '.[0] // empty')" || true
-    fi
   fi
   if command -v jq &>/dev/null; then
-    VERSION="$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')" || true
+    VERSION="$(echo "$RELEASE_JSON" | jq -r 'select(. != null) | if type == "array" then .[0].tag_name else .tag_name end // empty')" || true
   else
     VERSION="$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')" || true
   fi
@@ -406,11 +407,15 @@ if [[ -n "$DEPLOYER_EMAIL" ]]; then
   else
     DEPLOYER_MEMBER="user:${DEPLOYER_EMAIL}"
   fi
-  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  if gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="${DEPLOYER_MEMBER}" \
     --role="roles/iap.tunnelResourceAccessor" \
-    --quiet &>/dev/null
-  echo "  IAP tunnel access granted to: ${DEPLOYER_EMAIL}"
+    --quiet 2>/dev/null; then
+    echo "  IAP tunnel access granted to: ${DEPLOYER_EMAIL}"
+  else
+    warn "Failed to grant roles/iap.tunnelResourceAccessor to ${DEPLOYER_EMAIL}."
+    warn "SSH to the VM may fail if you do not have this role. Please ensure it is granted manually."
+  fi
 else
   warn "Could not determine deployer identity; skipping IAP tunnel role grant."
   warn "SSH to the VM may fail. Grant roles/iap.tunnelResourceAccessor manually."
@@ -787,11 +792,15 @@ else
     echo "  IAP access granted to: ${OPERATOR_EMAIL} (service-level binding)"
   else
     warn "Service-level IAP binding failed; falling back to project-level binding."
-    gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    if gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
       --member="${OPERATOR_MEMBER}" \
       --role=roles/iap.httpsResourceAccessor \
-      --quiet &>/dev/null
-    echo "  IAP access granted to: ${OPERATOR_EMAIL} (project-level fallback)"
+      --quiet 2>/dev/null; then
+      echo "  IAP access granted to: ${OPERATOR_EMAIL} (project-level fallback)"
+    else
+      err "Failed to grant IAP access to ${OPERATOR_EMAIL} at both service and project levels."
+      err "You may not be able to access the Hub. Please grant roles/iap.httpsResourceAccessor manually."
+    fi
   fi
 fi
 
