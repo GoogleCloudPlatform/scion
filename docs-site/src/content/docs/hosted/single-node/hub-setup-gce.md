@@ -1,11 +1,11 @@
 ---
 title: Hub Setup on GCE
-description: Deploy a Scion Hub on a Google Compute Engine VM using the starter scripts.
+description: Deploy a Scion Hub on a Google Compute Engine VM using the Developer Hub scripts.
 ---
 
 ## Overview
 
-The quickest path to a deployed Scion Hub is a single Google Compute Engine VM using the starter scripts in `scripts/starter-hub/`. These scripts automate VM provisioning, repository setup, TLS configuration, and Hub startup.
+The quickest path to a deployed Scion Hub that builds from source is a single Google Compute Engine VM using the Developer Hub scripts in `scripts/starter-hub/`. These scripts automate VM provisioning, repository setup, TLS configuration, and Hub startup. For a simpler binary-based deployment, see the [Single-Node VM](/scion/hosted/single-node/hub-setup-vm/) tier.
 
 ## Prerequisites
 
@@ -15,7 +15,7 @@ The quickest path to a deployed Scion Hub is a single Google Compute Engine VM u
 
 ## Steps
 
-The starter scripts are designed to be run in sequence from your local machine.
+The Developer Hub scripts are designed to be run in sequence from your local machine.
 
 ### 1. Provision the VM
 

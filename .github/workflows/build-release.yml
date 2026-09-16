@@ -50,6 +50,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
@@ -112,9 +113,102 @@ jobs:
           path: ${{ matrix.output }}.tar.gz
           if-no-files-found: error
 
+  build-plugins:
+    name: Build Plugin Binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Telegram plugin
+          - goos: linux
+            goarch: amd64
+            module_dir: extras/scion-telegram
+            build_path: ./cmd/scion-plugin-telegram
+            binary_name: scion-plugin-telegram
+            output: scion-plugin-telegram-linux-amd64
+          - goos: linux
+            goarch: arm64
+            module_dir: extras/scion-telegram
+            build_path: ./cmd/scion-plugin-telegram
+            binary_name: scion-plugin-telegram
+            output: scion-plugin-telegram-linux-arm64
+          # Discord plugin
+          - goos: linux
+            goarch: amd64
+            module_dir: extras/scion-discord
+            build_path: ./cmd/scion-plugin-discord
+            binary_name: scion-plugin-discord
+            output: scion-plugin-discord-linux-amd64
+          - goos: linux
+            goarch: arm64
+            module_dir: extras/scion-discord
+            build_path: ./cmd/scion-plugin-discord
+            binary_name: scion-plugin-discord
+            output: scion-plugin-discord-linux-arm64
+          # Slack plugin
+          - goos: linux
+            goarch: amd64
+            module_dir: extras/scion-slack
+            build_path: ./cmd/scion-plugin-slack
+            binary_name: scion-plugin-slack
+            output: scion-plugin-slack-linux-amd64
+          - goos: linux
+            goarch: arm64
+            module_dir: extras/scion-slack
+            build_path: ./cmd/scion-plugin-slack
+            binary_name: scion-plugin-slack
+            output: scion-plugin-slack-linux-arm64
+          # Teams plugin
+          - goos: linux
+            goarch: amd64
+            module_dir: extras/scion-teams
+            build_path: ./cmd/scion-plugin-teams
+            binary_name: scion-plugin-teams
+            output: scion-plugin-teams-linux-amd64
+          - goos: linux
+            goarch: arm64
+            module_dir: extras/scion-teams
+            build_path: ./cmd/scion-plugin-teams
+            binary_name: scion-plugin-teams
+            output: scion-plugin-teams-linux-arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
+        with:
+          go-version-file: '${{ matrix.module_dir }}/go.mod'
+          cache: true
+
+      - name: Build plugin binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+          MODULE_DIR: ${{ matrix.module_dir }}
+          BUILD_PATH: ${{ matrix.build_path }}
+          BINARY_NAME: ${{ matrix.binary_name }}
+          OUTPUT_NAME: ${{ matrix.output }}
+        run: |
+          cd "${MODULE_DIR}"
+          mkdir -p dist
+          go build -o "dist/${BINARY_NAME}" "${BUILD_PATH}"
+          tar -czvf "${GITHUB_WORKSPACE}/${OUTPUT_NAME}.tar.gz" -C dist "${BINARY_NAME}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: ${{ matrix.output }}
+          path: ${{ matrix.output }}.tar.gz
+          if-no-files-found: error
+
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [build, build-plugins]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
