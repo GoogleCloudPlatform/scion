@@ -221,6 +221,14 @@ func newDevAuthWebServer(t *testing.T, overrides ...func(*WebServerConfig)) *Web
 			"assets/main.js": &fstest.MapFile{Data: []byte("// test stub")},
 		}
 	}
+	// When a disk-based assets dir is used, provision assets/main.js so that
+	// hasWebAssets() detects valid assets on disk.
+	if ws.assetsDisk != "" {
+		assetsSubDir := filepath.Join(ws.assetsDisk, "assets")
+		if err := os.MkdirAll(assetsSubDir, 0o755); err == nil {
+			_ = os.WriteFile(filepath.Join(assetsSubDir, "main.js"), []byte("// test stub"), 0o644)
+		}
+	}
 
 	// Install a minimal authoritative store with an active dev user so the
 	// suspended-user middleware does not fail closed on every authenticated
