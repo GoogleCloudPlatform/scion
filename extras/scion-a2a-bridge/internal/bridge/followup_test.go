@@ -129,6 +129,9 @@ func (m *mockAgentService) GetCloudLogs(ctx context.Context, agentID string, opt
 func (m *mockAgentService) StreamCloudLogs(ctx context.Context, agentID string, opts *hubclient.GetCloudLogsOptions, handler func(hubclient.CloudLogEntry)) error {
 	return fmt.Errorf("not implemented")
 }
+func (m *mockAgentService) SetMessageMode(ctx context.Context, agentID string, req *hubclient.SetMessageModeRequest, opts *hubclient.SetMessageModeOptions) (*hubclient.SetMessageModeResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}
 
 // mockHubClient implements hubclient.Client for testing, delegating to a mockAgentService.
 type mockHubClient struct {

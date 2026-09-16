@@ -91,12 +91,42 @@ func agentContext(agentID, projectID string) context.Context {
 	}})
 }
 
+// agentContextWithScopes returns a context with an agent identity that includes
+// the given JWT scopes. Use this when calling endpoints that check authorization
+// via s.authorize (e.g., project-level authz in handleCreateConversation).
+func agentContextWithScopes(agentID, projectID string, scopes []AgentTokenScope) context.Context {
+	return contextWithIdentity(context.Background(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agentID},
+		ProjectID: projectID,
+		Scopes:    scopes,
+	}})
+}
+
 // convProjectID extracts the project ID from a conversation, returning empty if nil.
 func convProjectID(c *store.Conversation) string {
 	if c.ProjectID != nil {
 		return *c.ProjectID
 	}
 	return ""
+}
+
+// grantAgentProjectAccess grants an agent a project-member role binding,
+// giving it read access to the project. This is needed after the BOLA fix
+// added an authorize check in handleCreateConversation.
+func grantAgentProjectAccess(t *testing.T, s store.Store, agentID, projectID string) {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err, "project-member role definition not found")
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    "agent",
+		PrincipalID:      agentID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 }
 
 // ---- Tests ----
@@ -362,6 +392,7 @@ func TestConvListMessages_WithPagination(t *testing.T) {
 func TestCreateConversation_HappyPath(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, _ := setupConvTestData(t, s)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	body := createConversationRequest{
 		DisplayName: "New Discussion",
@@ -372,7 +403,7 @@ func TestCreateConversation_HappyPath(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleCreateConversation(rr, req)
 
@@ -595,6 +626,7 @@ func TestCreateConversation_ProjectNotFound(t *testing.T) {
 func TestMux_CreateConversation(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, _ := setupConvTestData(t, s)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	body := createConversationRequest{
 		DisplayName: "Mux Test Conv",
@@ -605,7 +637,7 @@ func TestMux_CreateConversation(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rr, req)
 
@@ -713,4 +745,81 @@ func TestMux_SetDefaultAgent(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, updated.DefaultAgentID)
 	require.Equal(t, agent.ID, *updated.DefaultAgentID)
+}
+
+// ---- Security fix tests ----
+
+func TestHandleCreateConversation_ProjectAuthorizationDenied(t *testing.T) {
+	srv, s := testServer(t)
+	project, _, _ := setupConvTestData(t, s)
+
+	// Create a separate agent in a different project — it has NO access to `project`.
+	otherProject := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "other-project",
+		Slug: "other-project",
+	}
+	require.NoError(t, s.CreateProject(context.Background(), otherProject))
+
+	otherAgent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "other-agent",
+		Slug:       "other-agent",
+		ProjectID:  otherProject.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), otherAgent))
+
+	body := createConversationRequest{
+		DisplayName: "Unauthorized Conv",
+		ProjectID:   project.ID, // target project the agent has no access to
+		Kind:        "group",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(otherAgent.ID, otherProject.ID))
+	rr := httptest.NewRecorder()
+	srv.handleCreateConversation(rr, req)
+
+	require.Equal(t, http.StatusForbidden, rr.Code,
+		"agent without project access should be denied; body: %s", rr.Body.String())
+}
+
+func TestHandleSetDefaultAgent_CrossProjectDenied(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	// Create an agent in a DIFFERENT project.
+	otherProject := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "other-project",
+		Slug: "other-project",
+	}
+	require.NoError(t, s.CreateProject(context.Background(), otherProject))
+
+	crossAgent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "cross-project-agent",
+		Slug:       "cross-project-agent",
+		ProjectID:  otherProject.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), crossAgent))
+
+	body := setDefaultAgentRequest{AgentID: crossAgent.ID}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(agent.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"setting a cross-project agent should be rejected; body: %s", rr.Body.String())
 }

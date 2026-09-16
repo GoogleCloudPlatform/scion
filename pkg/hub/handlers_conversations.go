@@ -90,9 +90,12 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 
 	limit := 0
 	if limitStr != "" {
-		if n, parseErr := strconv.Atoi(limitStr); parseErr == nil && n > 0 {
-			limit = n
+		n, parseErr := strconv.Atoi(limitStr)
+		if parseErr != nil || n < 1 {
+			BadRequest(w, "invalid 'limit' parameter: must be a positive integer")
+			return
 		}
+		limit = n
 	}
 
 	// Apply client-side filtering.
@@ -235,21 +238,30 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if before := q.Get("before"); before != "" {
-		if t, parseErr := time.Parse(time.RFC3339, before); parseErr == nil {
-			filter.Before = t
+		t, parseErr := time.Parse(time.RFC3339, before)
+		if parseErr != nil {
+			BadRequest(w, "invalid 'before' parameter: must be RFC3339 format")
+			return
 		}
+		filter.Before = t
 	}
 	if after := q.Get("after"); after != "" {
-		if t, parseErr := time.Parse(time.RFC3339, after); parseErr == nil {
-			filter.After = t
+		t, parseErr := time.Parse(time.RFC3339, after)
+		if parseErr != nil {
+			BadRequest(w, "invalid 'after' parameter: must be RFC3339 format")
+			return
 		}
+		filter.After = t
 	}
 
 	opts := store.ListOptions{}
 	if limitStr := q.Get("limit"); limitStr != "" {
-		if n, parseErr := strconv.Atoi(limitStr); parseErr == nil && n > 0 {
-			opts.Limit = n
+		n, parseErr := strconv.Atoi(limitStr)
+		if parseErr != nil || n < 1 {
+			BadRequest(w, "invalid 'limit' parameter: must be a positive integer")
+			return
 		}
+		opts.Limit = n
 	}
 	if cursor := q.Get("cursor"); cursor != "" {
 		opts.Cursor = cursor
@@ -307,6 +319,11 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 				return
 			}
 			writeErrorFromErr(w, err, "")
+			return
+		}
+
+		// Authorize: caller must have read access to the project.
+		if !s.authorize(w, r, Resource{Type: "project", ID: req.ProjectID}, ActionRead) {
 			return
 		}
 	}
@@ -388,8 +405,15 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	// Fetch the conversation first so we can compare project IDs.
+	conv, err := s.store.GetConversation(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "Conversation")
+		return
+	}
+
 	// Verify the agent exists before setting it as default.
-	_, err = s.store.GetAgent(ctx, req.AgentID)
+	agent, err := s.store.GetAgent(ctx, req.AgentID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
@@ -399,9 +423,9 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	conv, err := s.store.GetConversation(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "Conversation")
+	// Verify the agent belongs to the same project as the conversation.
+	if conv.ProjectID != nil && agent.ProjectID != *conv.ProjectID {
+		BadRequest(w, "agent does not belong to the conversation's project")
 		return
 	}
 

@@ -181,7 +181,7 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	opts := &hubclient.ListConversationsOptions{
@@ -208,20 +208,11 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "ID\tKIND\tSURFACE\tNAME\tDEFAULT AGENT\tLAST ACTIVITY")
 	for _, conv := range result.Conversations {
-		shortID := conv.ID
-		if len(shortID) > 12 {
-			shortID = shortID[:12]
-		}
-		name := conv.DisplayName
-		if len(name) > 20 {
-			name = name[:17] + "..."
-		}
+		shortID := truncateRunes(conv.ID, 12, false)
+		name := truncateRunes(conv.DisplayName, 20, true)
 		defaultAgent := ""
 		if conv.DefaultAgentID != nil {
-			defaultAgent = *conv.DefaultAgentID
-			if len(defaultAgent) > 12 {
-				defaultAgent = defaultAgent[:12]
-			}
+			defaultAgent = truncateRunes(*conv.DefaultAgentID, 12, false)
 		}
 		lastActivity := formatTimeAgo(conv.LastActivityAt)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
@@ -240,7 +231,7 @@ func runConversationMessages(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	conversationID, err := resolveConversationRef(ctx, client, args[0])
@@ -272,14 +263,8 @@ func runConversationMessages(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tMESSAGE")
 	for _, msg := range result.Items {
 		timeStr := msg.CreatedAt.Format("15:04:05")
-		from := msg.Sender
-		if len(from) > 20 {
-			from = from[:17] + "..."
-		}
-		body := msg.Msg
-		if len(body) > 60 {
-			body = body[:57] + "..."
-		}
+		from := truncateRunes(msg.Sender, 20, true)
+		body := truncateRunes(msg.Msg, 60, true)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", timeStr, from, body)
 	}
 	return tw.Flush()
@@ -295,7 +280,7 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	req := &hubclient.CreateConversationRequest{
@@ -330,7 +315,7 @@ func runConversationGet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	conversationID, err := resolveConversationRef(ctx, client, args[0])
@@ -362,10 +347,7 @@ func runConversationGet(cmd *cobra.Command, args []string) error {
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		_, _ = fmt.Fprintln(tw, "  KIND\tID\tROLE")
 		for _, p := range conv.Participants {
-			shortID := p.PrincipalID
-			if len(shortID) > 12 {
-				shortID = shortID[:12]
-			}
+			shortID := truncateRunes(p.PrincipalID, 12, false)
 			_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\n", p.PrincipalKind, shortID, p.Role)
 		}
 		_ = tw.Flush()
@@ -379,7 +361,7 @@ func runConversationSetDefault(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	conversationID, err := resolveConversationRef(ctx, client, args[0])
@@ -445,6 +427,20 @@ func resolveConversationRef(ctx context.Context, client hubclient.Client, refStr
 	default:
 		return "", fmt.Errorf("unsupported conversation reference type: %s", refStr)
 	}
+}
+
+// truncateRunes truncates a string to at most max runes, preserving multi-byte
+// characters. When ellipsis is true and truncation occurs, the last 3 runes
+// are replaced with "..." so the total visual length stays at max.
+func truncateRunes(s string, max int, ellipsis bool) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if ellipsis && max > 3 {
+		return string(runes[:max-3]) + "..."
+	}
+	return string(runes[:max])
 }
 
 // formatTimeAgo formats a time as a human-readable relative time string.
