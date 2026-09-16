@@ -2691,6 +2691,8 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/project_clone.go", Function: "handleProjectClone", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project clone rollback, deletes on failure", Scope: "pkg/hub/project_clone.go"}},
 	{File: "pkg/hub/project_clone.go", Function: "handleProjectClone", Symbol: "DeleteRoleBindingsForScope", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project clone rollback, cleans up bindings on failure", Scope: "pkg/hub/project_clone.go"}},
+	{File: "pkg/hub/project_clone.go", Function: "cloneProjectGCPServiceAccounts", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project clone sub-step: clones GCP service account associations to target project", Scope: "pkg/hub/project_clone.go"}},
+	{File: "pkg/hub/project_clone.go", Function: "cloneProjectGCPServiceAccounts", Symbol: "DeleteGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project clone rollback, deletes cloned GCP service accounts on failure", Scope: "pkg/hub/project_clone.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_auth.go — auth flow user provisioning
