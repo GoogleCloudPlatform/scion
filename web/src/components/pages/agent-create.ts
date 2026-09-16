@@ -663,7 +663,9 @@ export class ScionPageAgentCreate extends LitElement {
     if (!this.projectId) return;
 
     try {
-      const res = await apiFetch(`/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`);
+      const res = await apiFetch(
+        `/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`
+      );
       if (res.ok) {
         const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
         this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];

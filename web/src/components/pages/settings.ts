@@ -394,16 +394,16 @@ export class ScionPageSettings extends LitElement {
             : nothing}
           ${this.isTabVisible('service-accounts')
             ? html`<sl-tab-panel name="service-accounts">
-                  <p class="tab-intro">
-                    GCP service accounts registered at hub scope. They belong to the hub rather than
-                    to any one project, which is why they are managed here.
-                  </p>
-                  <p class="tab-intro">
-                    Hub-scoped accounts are available from every project's agent form and can be set
-                    as a project's default GCP identity.
-                  </p>
-                  <scion-gcp-service-account-list scope="hub"></scion-gcp-service-account-list>
-                </sl-tab-panel>`
+                <p class="tab-intro">
+                  GCP service accounts registered at hub scope. They belong to the hub rather than
+                  to any one project, which is why they are managed here.
+                </p>
+                <p class="tab-intro">
+                  Hub-scoped accounts are available from every project's agent form and can be set
+                  as a project's default GCP identity.
+                </p>
+                <scion-gcp-service-account-list scope="hub"></scion-gcp-service-account-list>
+              </sl-tab-panel>`
             : nothing}
           ${this.isTabVisible('skills')
             ? html`<sl-tab-panel name="skills">
