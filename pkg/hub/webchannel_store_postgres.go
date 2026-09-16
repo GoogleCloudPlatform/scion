@@ -102,7 +102,9 @@ CREATE TABLE IF NOT EXISTS webchat_user_prefs (
     user_id         TEXT PRIMARY KEY,
     space_sort_mode TEXT NOT NULL DEFAULT 'activity',
     space_order     TEXT,
-    thread_sort_mode TEXT NOT NULL DEFAULT 'activity'
+    thread_sort_mode TEXT NOT NULL DEFAULT 'activity',
+    thread_order    TEXT,
+    thread_groups   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS webchat_dm (
@@ -804,13 +806,15 @@ func (s *pgWebChatStore) IsConversationMuted(ctx context.Context, userID, conver
 // GetUserPrefs returns the user's rail preferences. Returns defaults if no row.
 func (s *pgWebChatStore) GetUserPrefs(ctx context.Context, userID string) (*WebChatUserPrefs, error) {
 	const query = `
-SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode
+SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode,
+       COALESCE(thread_order, ''), COALESCE(thread_groups, '')
   FROM webchat_user_prefs
  WHERE user_id = $1
 `
 	var p WebChatUserPrefs
 	err := s.db.QueryRowContext(ctx, query, userID).Scan(
-		&p.UserID, &p.SpaceSortMode, &p.SpaceOrder, &p.ThreadSortMode)
+		&p.UserID, &p.SpaceSortMode, &p.SpaceOrder, &p.ThreadSortMode,
+		&p.ThreadOrder, &p.ThreadGroups)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return &WebChatUserPrefs{
@@ -827,20 +831,30 @@ SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode
 // SetUserPrefs upserts the user's rail preferences.
 func (s *pgWebChatStore) SetUserPrefs(ctx context.Context, userID string, prefs WebChatUserPrefs) error {
 	const query = `
-INSERT INTO webchat_user_prefs (user_id, space_sort_mode, space_order, thread_sort_mode)
-VALUES ($1, $2, $3, $4)
+INSERT INTO webchat_user_prefs (user_id, space_sort_mode, space_order, thread_sort_mode, thread_order, thread_groups)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (user_id)
 DO UPDATE SET
     space_sort_mode = EXCLUDED.space_sort_mode,
     space_order = EXCLUDED.space_order,
-    thread_sort_mode = EXCLUDED.thread_sort_mode
+    thread_sort_mode = EXCLUDED.thread_sort_mode,
+    thread_order = EXCLUDED.thread_order,
+    thread_groups = EXCLUDED.thread_groups
 `
 	var spaceOrder interface{}
 	if prefs.SpaceOrder != "" {
 		spaceOrder = prefs.SpaceOrder
 	}
+	var threadOrder interface{}
+	if prefs.ThreadOrder != "" {
+		threadOrder = prefs.ThreadOrder
+	}
+	var threadGroups interface{}
+	if prefs.ThreadGroups != "" {
+		threadGroups = prefs.ThreadGroups
+	}
 	_, err := s.db.ExecContext(ctx, query, userID, prefs.SpaceSortMode,
-		spaceOrder, prefs.ThreadSortMode)
+		spaceOrder, prefs.ThreadSortMode, threadOrder, threadGroups)
 	if err != nil {
 		return fmt.Errorf("webchat store: set user prefs: %w", err)
 	}
@@ -1126,6 +1140,9 @@ func (s *pgWebChatStore) runMigrations() error {
 	if err := s.backfillTopicConversations(); err != nil {
 		return fmt.Errorf("topic conversation backfill: %w", err)
 	}
+	if err := s.addUserPrefsThreadColumns(); err != nil {
+		return fmt.Errorf("user prefs thread columns: %w", err)
+	}
 	return nil
 }
 
@@ -1265,6 +1282,29 @@ func (s *pgWebChatStore) backfillTopicConversations() error {
 	}
 
 	return s.markMigrationCompleted("topic_conversation_backfill")
+}
+
+// addUserPrefsThreadColumns adds thread_order and thread_groups columns to
+// webchat_user_prefs for existing databases that lack them.
+func (s *pgWebChatStore) addUserPrefsThreadColumns() error {
+	done, err := s.migrationCompleted("user_prefs_thread_columns")
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+
+	_, err = s.db.Exec(`ALTER TABLE webchat_user_prefs ADD COLUMN IF NOT EXISTS thread_order TEXT`)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE webchat_user_prefs ADD COLUMN IF NOT EXISTS thread_groups TEXT`)
+	if err != nil {
+		return err
+	}
+
+	return s.markMigrationCompleted("user_prefs_thread_columns")
 }
 
 // migrationCompleted checks whether a named migration has already run.
