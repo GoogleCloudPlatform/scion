@@ -1771,55 +1771,6 @@ export class ScionChatMessage extends LitElement {
     );
   }
 
-  // ---- Phase-3: Action bar and event helpers ----
-
-  /** Render the hover action bar with contextual actions. */
-  private renderActionBar() {
-    const pinnedClass = this.actionBarPinned ? ' pinned' : '';
-    return html`
-      <div class="message-actions${pinnedClass}">
-        <sl-icon-button
-          name="reply"
-          label="Reply"
-          title="Reply"
-          @click=${this.handleReply}
-        ></sl-icon-button>
-        ${
-          this.isOwn && this.canEdit
-            ? html`<sl-icon-button
-                name="pencil"
-                label="Edit"
-                title="Edit"
-                @click=${this.handleEdit}
-              ></sl-icon-button>`
-            : nothing
-        }
-        ${
-          this.isOwn && this.canDelete
-            ? html`<sl-icon-button
-                name="trash"
-                label="Delete"
-                title="Delete"
-                @click=${this.handleDelete}
-              ></sl-icon-button>`
-            : nothing
-        }
-        <sl-icon-button
-          name="clipboard"
-          label="Copy text"
-          title="Copy message"
-          @click=${this.handleCopyText}
-        ></sl-icon-button>
-        <sl-icon-button
-          name="link-45deg"
-          label="Copy link"
-          title="Copy link"
-          @click=${this.handleCopyLink}
-        ></sl-icon-button>
-      </div>
-    `;
-  }
-
   /** Render the reply preview block above the bubble content. */
   private renderReplyPreview() {
     if (!this.replyPreview) return nothing;
@@ -1848,7 +1799,7 @@ export class ScionChatMessage extends LitElement {
     const isDeleted = !!this.deletedAt;
 
     return html`
-      <div class="message-wrapper ${dirClass}${groupClass}" @touchstart=${this.handleTouchStart}>
+      <div class="message-wrapper ${dirClass}${groupClass}">
         ${
           this.showHeader && this.fromAgent
             ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
@@ -1859,7 +1810,6 @@ export class ScionChatMessage extends LitElement {
               : nothing
         }
         <div class="bubble">
-          ${!isDeleted ? this.renderActionBar() : nothing}
           ${
             this.showHeader && this.fromAgent
               ? html`
