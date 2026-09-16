@@ -112,6 +112,7 @@ func TestGetAuthInfo_DevAuthPreferredOverStaleAgentTokenOnLocalhost(t *testing.T
 	t.Setenv("SCION_DEV_TOKEN", "")
 	t.Setenv("SCION_DEV_TOKEN_FILE", "")
 	t.Setenv("SCION_HUB_TOKEN", "")
+	t.Setenv("SCION_AGENT_ID", "") // Not a hub-managed agent — the exception under test applies.
 
 	scionDir := filepath.Join(tmpDir, ".scion")
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
@@ -133,6 +134,49 @@ func TestGetAuthInfo_DevAuthPreferredOverStaleAgentTokenOnLocalhost(t *testing.T
 	assert.Equal(t, "devauth", info.MethodType)
 	assert.Equal(t, "Dev auth", info.Method)
 	assert.True(t, info.IsDevAuth)
+}
+
+// TestGetAuthInfo_HubManagedAgentUsesRealTokenOnLocalhost is the counterpart
+// to TestGetAuthInfo_DevAuthPreferredOverStaleAgentTokenOnLocalhost: inside a
+// container the Runtime Broker started (SCION_AGENT_ID set), the scion-token
+// file is freshly minted for *this* Hub, not stale — so it must NOT be
+// overridden by dev auth even when the endpoint is localhost, since some Hub
+// endpoints (e.g. an agent's own outbound message to a user) require the
+// caller's authenticated identity to be that specific agent, which dev auth
+// does not provide. Regression test for the bug where every hub-managed
+// agent on a workstation-mode (loopback) Hub got 401'd trying to message a
+// user, because this same localhost exception silently swapped in dev auth.
+func TestGetAuthInfo_HubManagedAgentUsesRealTokenOnLocalhost(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SCION_AUTH_TOKEN", "")
+	t.Setenv("SCION_DEV_TOKEN", "")
+	t.Setenv("SCION_DEV_TOKEN_FILE", "")
+	t.Setenv("SCION_HUB_TOKEN", "")
+	t.Setenv("SCION_AGENT_ID", "agent-uuid-123") // Hub-managed agent context.
+
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Real per-agent token, freshly issued by the broker for this Hub.
+	if err := os.WriteFile(filepath.Join(scionDir, "scion-token"), []byte("eyJhbGciOiJIUzI1NiJ9.fresh-agent-jwt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A dev token also happens to be present (this IS a dev-mode Hub) — must
+	// not be preferred over the agent's own token in this context.
+	if err := os.WriteFile(filepath.Join(scionDir, "dev-token"), []byte("scion_dev_abc123"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	settings := &config.Settings{}
+	info := getAuthInfo(settings, "http://localhost:8080")
+	assert.Equal(t, "agent_token", info.MethodType)
+	assert.Equal(t, "Agent token", info.Method)
+	assert.Equal(t, "scion-token file", info.Source)
+	assert.False(t, info.IsDevAuth)
 }
 
 func TestGetAuthInfo_AgentTokenUsedOnRemoteEndpoint(t *testing.T) {
