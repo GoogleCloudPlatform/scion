@@ -112,7 +112,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     ZONE="${REGION}-b"
     warn "Could not discover zone dynamically; defaulting to ${ZONE}"
   fi
-  SA_NAME="scion-hub-vm"
+  SA_NAME="scion-hub-${HUB_NAME}"
   SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
   echo ""
@@ -171,6 +171,12 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     warn "Service account ${SA_EMAIL} not found or already deleted."
   fi
 
+  # Note: We intentionally do NOT revoke roles/iap.tunnelResourceAccessor from
+  # the deployer. This role is bound to the operator (not a service account) and
+  # may be used for IAP SSH access to other VMs in the project. Revoking it here
+  # would silently break access to those other resources.
+  info "Skipping IAP tunnel role cleanup (operator may use it for other VMs)."
+
   info "Deleting IAP SSH firewall rule..."
   if gcloud compute firewall-rules delete "${FW_RULE_NAME}" \
       --project="${PROJECT_ID}" --quiet 2>/dev/null; then
@@ -206,8 +212,21 @@ fi
 echo "  Project: ${PROJECT_ID}"
 
 # --- Interactive prompts ---
-read -rp "Hub name [my-hub]: " HUB_NAME
-HUB_NAME="${HUB_NAME:-my-hub}"
+while true; do
+  read -rp "Hub name [my-hub]: " HUB_NAME
+  HUB_NAME="${HUB_NAME:-my-hub}"
+  if [[ ${#HUB_NAME} -gt 20 ]]; then
+    warn "Hub name '${HUB_NAME}' is ${#HUB_NAME} chars; max is 20 (GCP service-account ID limit)."
+    echo "  Please choose a shorter name."
+    continue
+  fi
+  if [[ ! "$HUB_NAME" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    warn "Hub name '${HUB_NAME}' is invalid. It must start with a lowercase letter and contain only lowercase letters, numbers, and hyphens."
+    echo "  Please choose a valid name."
+    continue
+  fi
+  break
+done
 
 read -rp "GCP region [us-central1]: " REGION
 REGION="${REGION:-us-central1}"
@@ -281,7 +300,12 @@ if [[ -z "$ZONE" ]]; then
   warn "Could not discover zone dynamically; defaulting to ${ZONE}"
 fi
 INSTANCE_NAME="scion-hub-${HUB_NAME}"
-SA_NAME="scion-hub-vm"
+SA_NAME="scion-hub-${HUB_NAME}"
+# GCP service-account IDs must be 6-30 chars; truncate as a safety net
+if [[ ${#SA_NAME} -gt 30 ]]; then
+  SA_NAME="${SA_NAME:0:30}"
+  warn "Service-account name truncated to 30 chars: ${SA_NAME}"
+fi
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 echo ""
@@ -300,11 +324,18 @@ fi
 # --- Release version ---
 if [[ -z "$VERSION" ]]; then
   info "Detecting latest Scion release..."
-  RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/GoogleCloudPlatform/scion/releases/latest)" || true
+  # Try /releases/latest first (excludes pre-releases), fall back to
+  # /releases (includes pre-releases) when no full release exists yet.
+  RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/GoogleCloudPlatform/scion/releases/latest 2>/dev/null)" || true
+  if [[ -z "$RELEASE_JSON" ]]; then
+    warn "/releases/latest returned no data (pre-releases only?); querying /releases..."
+    RELEASE_JSON="$(curl -fsSL 'https://api.github.com/repos/GoogleCloudPlatform/scion/releases?per_page=1')" \
+      || { err "Could not fetch releases from GitHub API."; exit 1; }
+  fi
   if command -v jq &>/dev/null; then
-    VERSION="$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')" || true
+    VERSION="$(echo "$RELEASE_JSON" | jq -r 'select(. != null) | if type == "array" then .[0].tag_name else .tag_name end // empty')" || true
   else
-    VERSION="$(echo "$RELEASE_JSON" | grep '"tag_name"' | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')" || true
+    VERSION="$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')" || true
   fi
   if [[ -z "$VERSION" ]]; then
     err "Could not detect latest release. Use --version to specify."
@@ -349,7 +380,7 @@ if gcloud iam service-accounts describe "${SA_EMAIL}" \
   echo "  Service account already exists: ${SA_EMAIL}"
 else
   gcloud iam service-accounts create "${SA_NAME}" \
-    --display-name="Scion Hub VM" \
+    --display-name="Scion Hub VM (${HUB_NAME})" \
     --project="${PROJECT_ID}"
   echo "  Created service account: ${SA_EMAIL}"
 fi
@@ -363,6 +394,32 @@ for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtra
     --quiet &>/dev/null
 done
 echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent"
+
+# --- Grant deployer IAP tunnel access (required for SSH to --no-address VMs) ---
+info "Granting IAP tunnel access to deployer..."
+DEPLOYER_EMAIL="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)" || true
+if [[ -z "$DEPLOYER_EMAIL" ]]; then
+  DEPLOYER_EMAIL="$(gcloud config get-value account 2>/dev/null)" || true
+fi
+if [[ -n "$DEPLOYER_EMAIL" ]]; then
+  if [[ "$DEPLOYER_EMAIL" == *.gserviceaccount.com ]]; then
+    DEPLOYER_MEMBER="serviceAccount:${DEPLOYER_EMAIL}"
+  else
+    DEPLOYER_MEMBER="user:${DEPLOYER_EMAIL}"
+  fi
+  if gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    --member="${DEPLOYER_MEMBER}" \
+    --role="roles/iap.tunnelResourceAccessor" \
+    --quiet 2>/dev/null; then
+    echo "  IAP tunnel access granted to: ${DEPLOYER_EMAIL}"
+  else
+    warn "Failed to grant roles/iap.tunnelResourceAccessor to ${DEPLOYER_EMAIL}."
+    warn "SSH to the VM may fail if you do not have this role. Please ensure it is granted manually."
+  fi
+else
+  warn "Could not determine deployer identity; skipping IAP tunnel role grant."
+  warn "SSH to the VM may fail. Grant roles/iap.tunnelResourceAccessor manually."
+fi
 
 # --- Cloud Router + Cloud NAT ---
 # The VM has no public IP (--no-address).  Cloud NAT gives it outbound internet
@@ -443,12 +500,13 @@ fi
 # --- Wait for SSH readiness (avoids race on initial boot) ---
 info "Waiting for SSH access to VM..."
 SSH_READY=false
+SSH_STDERR_FILE="$(mktemp)"
 for attempt in $(seq 1 20); do
   if gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
       --command="echo ssh-ok" \
       --ssh-flag="-o ConnectTimeout=5" \
-      --quiet 2>/dev/null; then
+      --quiet 2>"${SSH_STDERR_FILE}"; then
     SSH_READY=true
     break
   fi
@@ -459,8 +517,14 @@ done
 
 if [[ "$SSH_READY" != "true" ]]; then
   err "Could not establish SSH connection to ${INSTANCE_NAME} after 20 attempts."
+  if [[ -s "${SSH_STDERR_FILE}" ]]; then
+    echo "  Last SSH error:" >&2
+    cat "${SSH_STDERR_FILE}" >&2
+  fi
+  rm -f "${SSH_STDERR_FILE}"
   exit 1
 fi
+rm -f "${SSH_STDERR_FILE}"
 echo "  SSH connection established."
 
 # --- Wait for cloud-init ---
@@ -637,9 +701,11 @@ if [[ "$HEALTH_OK" == "true" ]]; then
   echo ""
   echo -e "${GREEN}  Health check passed.${RESET}"
 else
-  warn "Health check did not pass within 60s. Check the service logs:"
+  err "Health check did not pass within 60s. The hub is not running."
+  echo "  Check the service logs:"
   echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
   echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
+  exit 1
 fi
 
 # ===================================================================
@@ -688,12 +754,14 @@ fi
 echo "  Proxy URL: ${PROXY_URL}"
 
 # --- Enable IAP ---
+# Note: --resource-type=cloud-run is NOT valid for gcloud iap web enable.
+# The supported path for Cloud Run is the --iap flag on the service itself.
 info "Enabling IAP on Cloud Run service..."
-gcloud iap web enable \
-  --resource-type=cloud-run \
-  --service="${PROXY_SERVICE}" \
+gcloud beta run services update "${PROXY_SERVICE}" \
   --region="${REGION}" \
-  --project="${PROJECT_ID}"
+  --project="${PROJECT_ID}" \
+  --iap \
+  --quiet
 echo "  IAP enabled."
 
 # --- Bind IAP access for deployer ---
@@ -707,15 +775,33 @@ fi
 if [[ -z "$OPERATOR_EMAIL" ]]; then
   warn "Could not determine operator email; skipping IAP binding."
 else
-  gcloud iap web add-iam-policy-binding \
-    --resource-type=cloud-run \
-    --service="${PROXY_SERVICE}" \
-    --region="${REGION}" \
-    --project="${PROJECT_ID}" \
-    --member="user:${OPERATOR_EMAIL}" \
-    --role=roles/iap.httpsResourceAccessUser \
-    --quiet
-  echo "  IAP access granted to: ${OPERATOR_EMAIL}"
+  # Detect correct IAM member prefix: service accounts vs human users
+  if [[ "$OPERATOR_EMAIL" == *.gserviceaccount.com ]]; then
+    OPERATOR_MEMBER="serviceAccount:${OPERATOR_EMAIL}"
+  else
+    OPERATOR_MEMBER="user:${OPERATOR_EMAIL}"
+  fi
+  # Use gcloud iap web add-iam-policy-binding (supports --resource-type=cloud-run)
+  # Note: this is distinct from "gcloud iap web enable" which does NOT support cloud-run.
+  if gcloud iap web add-iam-policy-binding \
+      --resource-type=cloud-run --service="${PROXY_SERVICE}" \
+      --region="${REGION}" --project="${PROJECT_ID}" \
+      --member="${OPERATOR_MEMBER}" \
+      --role=roles/iap.httpsResourceAccessor \
+      --quiet 2>/dev/null; then
+    echo "  IAP access granted to: ${OPERATOR_EMAIL} (service-level binding)"
+  else
+    warn "Service-level IAP binding failed; falling back to project-level binding."
+    if gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+      --member="${OPERATOR_MEMBER}" \
+      --role=roles/iap.httpsResourceAccessor \
+      --quiet 2>/dev/null; then
+      echo "  IAP access granted to: ${OPERATOR_EMAIL} (project-level fallback)"
+    else
+      err "Failed to grant IAP access to ${OPERATOR_EMAIL} at both service and project levels."
+      err "You may not be able to access the Hub. Please grant roles/iap.httpsResourceAccessor manually."
+    fi
+  fi
 fi
 
 # --- Wait for IAP enforcement ---
@@ -797,9 +883,11 @@ if [[ "$HEALTH_OK" == "true" ]]; then
   echo ""
   echo -e "${GREEN}  Health check passed.${RESET}"
 else
-  warn "Health check did not pass within 60s. Check the service logs:"
+  err "Post-restart health check did not pass within 60s. The hub is not running."
+  echo "  Check the service logs:"
   echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
   echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
+  exit 1
 fi
 
 # ===================================================================

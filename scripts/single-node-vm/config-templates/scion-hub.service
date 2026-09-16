@@ -8,7 +8,7 @@ Type=simple
 User=scion
 Group=scion
 EnvironmentFile=/home/scion/.scion/hub.env
-ExecStart=/usr/local/bin/scion server foreground --settings /home/scion/.scion/settings.yaml
+ExecStart=/usr/local/bin/scion server start --foreground --hosted --enable-hub --enable-web --web-port 8080
 Restart=always
 RestartSec=5
 
