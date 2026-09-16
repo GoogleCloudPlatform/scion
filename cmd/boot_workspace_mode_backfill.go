@@ -124,6 +124,9 @@ func findWorkspaceModeCandidates(ctx context.Context, s store.Store) ([]store.Pr
 		if err != nil {
 			return nil, fmt.Errorf("listing projects: %w", err)
 		}
+		if result == nil {
+			return nil, fmt.Errorf("listing projects: received nil result")
+		}
 		for _, p := range result.Items {
 			if p.GitRemote != "" && p.Labels[store.LabelWorkspaceMode] == "" {
 				candidates = append(candidates, p)
