@@ -461,6 +461,7 @@ func TestSetDefaultAgent_HappyPath(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	// Create a second agent to set as the default (must exist in the store per N-1 validation).
 	newAgent := &store.Agent{
@@ -478,7 +479,7 @@ func TestSetDefaultAgent_HappyPath(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleSetDefaultAgent(rr, req, conv.ID)
 
@@ -727,6 +728,7 @@ func TestMux_SetDefaultAgent(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	// The agent ID must reference an existing agent (N-1 validation).
 	body := setDefaultAgentRequest{AgentID: agent.ID}
@@ -734,7 +736,7 @@ func TestMux_SetDefaultAgent(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rr, req)
 
@@ -786,6 +788,74 @@ func TestHandleCreateConversation_ProjectAuthorizationDenied(t *testing.T) {
 
 	require.Equal(t, http.StatusForbidden, rr.Code,
 		"agent without project access should be denied; body: %s", rr.Body.String())
+}
+
+func TestHandleSetDefaultAgent_AgentProjectUnauthorized(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a global conversation (no project).
+	now := time.Now().UTC()
+	globalConv := &store.Conversation{
+		ID:             api.NewUUID(),
+		Kind:           "group",
+		Surface:        "native",
+		DisplayName:    "Global Conversation",
+		DriftState:     "active",
+		LastActivityAt: now,
+		CreatedAt:      now,
+	}
+	require.NoError(t, s.CreateConversation(ctx, globalConv))
+
+	// Create a participant agent in its own project.
+	participantProject := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "participant-project",
+		Slug: "participant-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, participantProject))
+
+	participantAgent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "participant-agent",
+		Slug:       "participant-agent",
+		ProjectID:  participantProject.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, participantAgent))
+	addConvParticipant(t, s, globalConv.ID, "agent", participantAgent.ID)
+
+	// Create an agent in a project the participant has NO access to.
+	restrictedProject := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "restricted-project",
+		Slug: "restricted-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, restrictedProject))
+
+	restrictedAgent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "restricted-agent",
+		Slug:       "restricted-agent",
+		ProjectID:  restrictedProject.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, restrictedAgent))
+
+	// Try to set the restricted agent as default — should be denied (403).
+	body := setDefaultAgentRequest{AgentID: restrictedAgent.ID}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+globalConv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(participantAgent.ID, participantProject.ID))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, globalConv.ID)
+
+	require.Equal(t, http.StatusForbidden, rr.Code,
+		"participant without access to the agent's project should be denied; body: %s", rr.Body.String())
 }
 
 func TestHandleSetDefaultAgent_CrossProjectDenied(t *testing.T) {

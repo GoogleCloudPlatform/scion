@@ -184,20 +184,23 @@ func (s *Server) handleGetConversation(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// Authorization: caller must be a participant.
-	isParticipant, err := isConversationParticipant(ctx, s.store, id, identity.Type(), identity.ID())
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	if !isParticipant {
-		Forbidden(w)
-		return
-	}
-
+	// Fetch participants once — used for both authorization and response.
 	participants, err := s.store.ListParticipants(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Authorization: caller must be a participant.
+	isParticipant := false
+	for _, p := range participants {
+		if p.PrincipalKind == identity.Type() && p.PrincipalID == identity.ID() {
+			isParticipant = true
+			break
+		}
+	}
+	if !isParticipant {
+		Forbidden(w)
 		return
 	}
 
@@ -427,6 +430,13 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 	if conv.ProjectID != nil && agent.ProjectID != *conv.ProjectID {
 		BadRequest(w, "agent does not belong to the conversation's project")
 		return
+	}
+
+	// Authorize: caller must have read access to the agent's project.
+	if agent.ProjectID != "" {
+		if !s.authorize(w, r, Resource{Type: "project", ID: agent.ProjectID}, ActionRead) {
+			return
+		}
 	}
 
 	conv.DefaultAgentID = &req.AgentID
