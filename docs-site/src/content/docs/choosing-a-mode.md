@@ -62,7 +62,7 @@ The fastest way in is the [Onboarding Wizard](/scion/getting-started/onboarding/
 
 ### Single-node hosted
 
-A **hosted** deployment whose control plane runs as a single Hub instance on one compute node, keeping state in an embedded SQLite database. It is non-HA — it accepts restart/redeploy downtime and single-volume durability — in exchange for low cost and operational simplicity. Realized as a single VM (for example the starter-hub scripts) or a single Cloud Run instance backed by SQLite. "Single-node" scopes the *control plane* only; agents may run on other nodes.
+A **hosted** deployment whose control plane runs as a single Hub instance on one compute node, keeping state in an embedded SQLite database. It is non-HA — it accepts restart/redeploy downtime and single-volume durability — in exchange for low cost and operational simplicity. Realized as a single VM (for example the Developer Hub or single-node-vm scripts) or a single Cloud Run instance backed by SQLite. "Single-node" scopes the *control plane* only; agents may run on other nodes.
 
 Choose Single-node hosted when: *"A cheap, shared Hub for me or a small team."*
 

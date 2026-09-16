@@ -60,7 +60,7 @@ If you need to survive node loss and redeploys **without downtime**, step up to
 | Database driver | Embedded `sqlite` | External `postgres` (Cloud SQL) |
 | State & durability | Single-volume; non-HA | External DB + object storage; highly available |
 | Downtime on restart/redeploy | Yes | No |
-| Typical realization | One VM (starter-hub scripts) or one Cloud Run instance + SQLite | Cloud Run (min-instances ≥ 2) + Cloud SQL |
+| Typical realization | One VM (Developer Hub or single-node-vm scripts) or one Cloud Run instance + SQLite | Cloud Run (min-instances ≥ 2) + Cloud SQL |
 | Cost & complexity | Low | Higher |
 | Tenancy | Single- or multi-user | Single- or multi-user |
 
@@ -70,7 +70,7 @@ The two tiers are distinguished purely by the **availability tier** dimension �
 ## Next steps
 
 - [Hub Setup](/scion/hosted/single-node/hub-server/) — configure and run the Hub.
-- [Deploy on a VM (GCE)](/scion/hosted/single-node/hub-setup-gce/) — the starter-hub path.
+- [Deploy on a VM (GCE)](/scion/hosted/single-node/hub-setup-gce/) — the Developer Hub path.
 - [Deploy on Cloud Run (Sandbox)](/scion/hosted/single-node/hub-setup-cloudrun/) — one-command deploy on a Cloud Run Instance with IAP.
 - [Auth & Tenancy](/scion/hosted/single-node/auth/) — single- vs multi-user access.
 - [Connecting to a Hub](/scion/hosted/user/hosted-user/) — the user-facing journey.
