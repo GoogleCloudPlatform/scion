@@ -327,7 +327,7 @@ func TestChatV2_TouchTopicActivity(t *testing.T) {
 	}
 }
 
-func TestWave2_DeleteTopic_GeneralGuard(t *testing.T) {
+func TestWave2_DeleteTopic_LastThreadGuard(t *testing.T) {
 	store, db := newTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
@@ -339,38 +339,39 @@ func TestWave2_DeleteTopic_GeneralGuard(t *testing.T) {
 		t.Fatalf("EnsureGeneralTopic: %v", err)
 	}
 
-	// Attempt to delete #general.
+	// Attempt to delete #general (the only thread) — should be rejected as last thread.
 	err = store.DeleteTopic(ctx, generalID)
 	if err == nil {
-		t.Fatal("expected error when deleting #general")
+		t.Fatal("expected error when deleting last thread")
 	}
-	if !strings.Contains(err.Error(), "#general") {
-		t.Errorf("error should mention #general, got: %v", err)
+	if !strings.Contains(err.Error(), "last thread") {
+		t.Errorf("error should mention last thread, got: %v", err)
 	}
 
-	// Create and delete a normal topic — should work.
+	// Create a second topic — now #general can be deleted.
 	if err := store.CreateTopic(ctx, WebChatTopic{
 		ID:        "topic-2",
 		ProjectID: "proj-1",
-		Name:      "deletable",
+		Name:      "other",
 		CreatedBy: "user-1",
 		CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
-	if err := store.DeleteTopic(ctx, "topic-2"); err != nil {
-		t.Fatalf("DeleteTopic (normal): %v", err)
+	if err := store.DeleteTopic(ctx, generalID); err != nil {
+		t.Fatalf("DeleteTopic (general with sibling): %v", err)
 	}
 
-	// Verify it's gone from listing.
+	// Verify #general is gone from listing but topic-2 remains.
 	topics, err := store.ListTopics(ctx, "proj-1")
 	if err != nil {
 		t.Fatalf("ListTopics: %v", err)
 	}
-	for _, t2 := range topics {
-		if t2.ID == "topic-2" {
-			t.Error("deleted topic should not appear in ListTopics")
-		}
+	if len(topics) != 1 {
+		t.Fatalf("expected 1 topic, got %d", len(topics))
+	}
+	if topics[0].ID != "topic-2" {
+		t.Errorf("expected topic-2, got %s", topics[0].ID)
 	}
 }
 
@@ -563,7 +564,7 @@ func TestChatV2_CreateThread_AndList(t *testing.T) {
 		t.Error("topic ID should be non-empty")
 	}
 
-	// List threads — should include #general (lazy-created) and our thread.
+	// List threads — should include our created thread.
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces/"+proj.ID+"/threads", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -573,19 +574,19 @@ func TestChatV2_CreateThread_AndList(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&listResp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(listResp.Threads) < 2 {
-		t.Fatalf("expected at least 2 threads (general + created), got %d", len(listResp.Threads))
+	if len(listResp.Threads) < 1 {
+		t.Fatalf("expected at least 1 thread, got %d", len(listResp.Threads))
 	}
 
-	// Verify #general exists.
-	var hasGeneral bool
+	// Verify our created thread exists.
+	var found bool
 	for _, th := range listResp.Threads {
-		if th.IsGeneral {
-			hasGeneral = true
+		if th.Name == "design-review" {
+			found = true
 		}
 	}
-	if !hasGeneral {
-		t.Error("expected #general to be in the list")
+	if !found {
+		t.Error("expected design-review thread to be in the list")
 	}
 }
 
@@ -670,7 +671,7 @@ func TestChatV2_PatchThread(t *testing.T) {
 	}
 }
 
-func TestChatV2_PatchThread_GeneralGuard(t *testing.T) {
+func TestChatV2_PatchThread_GeneralRenameAllowed(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -695,11 +696,11 @@ func TestChatV2_PatchThread_GeneralGuard(t *testing.T) {
 		t.Fatalf("EnsureGeneralTopic: %v", err)
 	}
 
-	// Attempt to rename #general.
+	// Renaming #general should now succeed.
 	newName := "not-general"
 	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/chat/topics/"+genID, map[string]*string{"name": &newName})
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("rename #general: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Errorf("rename #general: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -723,6 +724,16 @@ func TestChatV2_DeleteThread(t *testing.T) {
 	}
 	srv.SetWebChatStore(wcs)
 
+	// Create two topics so deleting one doesn't hit the last-thread guard.
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        "topic-keep",
+		ProjectID: proj.ID,
+		Name:      "keeper",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic (keeper): %v", err)
+	}
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
 		ID:        "topic-del",
 		ProjectID: proj.ID,
@@ -747,7 +758,7 @@ func TestChatV2_DeleteThread(t *testing.T) {
 	}
 }
 
-func TestChatV2_DeleteThread_GeneralGuard(t *testing.T) {
+func TestChatV2_DeleteThread_LastThreadGuard(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -767,10 +778,11 @@ func TestChatV2_DeleteThread_GeneralGuard(t *testing.T) {
 	}
 	srv.SetWebChatStore(wcs)
 
+	// Create the only thread — deleting it should be rejected.
 	genID, _, _ := wcs.EnsureGeneralTopic(ctx, proj.ID, "dev")
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/chat/topics/"+genID, nil)
 	if rec.Code != http.StatusBadRequest {
-		t.Errorf("delete #general: expected 400, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("delete last thread: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

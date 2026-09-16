@@ -454,7 +454,6 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 	defer func() { _ = rows.Close() }()
 
 	var topics []WebChatTopic
-	hasGeneral := false
 	for rows.Next() {
 		var t WebChatTopic
 		var activityAt *time.Time
@@ -468,26 +467,10 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 			t.LastActivityAt = *activityAt
 		}
 		t.DeletedAt = deletedAt
-		if t.IsGeneral {
-			hasGeneral = true
-		}
 		topics = append(topics, t)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("webchat store: list topics rows: %w", err)
-	}
-
-	// Lazy #general creation for pre-existing projects.
-	if !hasGeneral {
-		generalID, _, err := s.EnsureGeneralTopic(ctx, projectID, "system")
-		if err != nil {
-			slog.Warn("webchat store: lazy #general creation failed", "project_id", projectID, "error", err)
-		} else {
-			general, err := s.GetTopic(ctx, generalID)
-			if err == nil && general != nil {
-				topics = append([]WebChatTopic{*general}, topics...)
-			}
-		}
 	}
 
 	return topics, nil
@@ -527,26 +510,61 @@ func (s *pgWebChatStore) UpdateTopic(ctx context.Context, topicID string, update
 	return nil
 }
 
-// DeleteTopic soft-deletes a topic. Returns an error if it is #general.
+// DeleteTopic soft-deletes a topic. Returns an error if it is the last thread.
+// The count-check and soft-delete are wrapped in a transaction with FOR UPDATE
+// to prevent a TOCTOU race where two concurrent deletes both see count=2 and
+// leave 0 threads.
 func (s *pgWebChatStore) DeleteTopic(ctx context.Context, topicID string) error {
-	var isGeneral bool
-	err := s.db.QueryRowContext(ctx, "SELECT is_general FROM webchat_topic WHERE id = $1", topicID).Scan(&isGeneral)
+	var projectID string
+	err := s.db.QueryRowContext(ctx, "SELECT project_id FROM webchat_topic WHERE id = $1 AND deleted_at IS NULL", topicID).Scan(&projectID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil
 		}
 		return fmt.Errorf("webchat store: delete topic check: %w", err)
 	}
-	if isGeneral {
-		return fmt.Errorf("webchat store: delete topic: cannot delete #general topic")
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("webchat store: delete topic begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Lock all active topic rows for this project to prevent concurrent deletes.
+	// We SELECT individual rows with FOR UPDATE rather than COUNT(*) because
+	// PostgreSQL does not allow FOR UPDATE with aggregate functions.
+	rows, err := tx.QueryContext(ctx,
+		"SELECT id FROM webchat_topic WHERE project_id = $1 AND deleted_at IS NULL FOR UPDATE",
+		projectID)
+	if err != nil {
+		return fmt.Errorf("webchat store: delete topic lock: %w", err)
+	}
+	var count int
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("webchat store: delete topic scan: %w", err)
+		}
+		count++
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("webchat store: delete topic rows: %w", err)
+	}
+	if count <= 1 {
+		return fmt.Errorf("webchat store: delete topic: cannot delete the last thread")
 	}
 
-	const query = `UPDATE webchat_topic SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL`
-	_, err = s.db.ExecContext(ctx, query, topicID)
+	// Soft-delete within the same transaction.
+	_, err = tx.ExecContext(ctx,
+		"UPDATE webchat_topic SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL",
+		topicID)
 	if err != nil {
 		return fmt.Errorf("webchat store: delete topic: %w", err)
 	}
-	return nil
+
+	return tx.Commit()
 }
 
 // TouchTopicActivity updates last_activity_at and, when messageID is

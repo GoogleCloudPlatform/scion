@@ -136,6 +136,11 @@ func TestWave2_CreateTopic_DuplicateName(t *testing.T) {
 		ID: "t3", ProjectID: "proj-2", Name: "design", CreatedBy: "u1", CreatedAt: now,
 	}))
 
+	// Create a second topic so t1 is not the last thread.
+	require.NoError(t, store.CreateTopic(ctx, WebChatTopic{
+		ID: "t-extra", ProjectID: "proj-1", Name: "extra", CreatedBy: "u1", CreatedAt: now,
+	}))
+
 	// Soft-delete the original, then reuse the name — should succeed.
 	require.NoError(t, store.DeleteTopic(ctx, "t1"))
 	require.NoError(t, store.CreateTopic(ctx, WebChatTopic{
@@ -245,9 +250,15 @@ func TestWave2_DeleteTopic_SoftDelete(t *testing.T) {
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
+	now := time.Now().UTC()
+	// Create two topics so that deleting one doesn't hit the last-thread guard.
+	require.NoError(t, store.CreateTopic(ctx, WebChatTopic{
+		ID: "t0", ProjectID: "proj-1", Name: "keeper", CreatedBy: "u1",
+		CreatedAt: now,
+	}))
 	require.NoError(t, store.CreateTopic(ctx, WebChatTopic{
 		ID: "t1", ProjectID: "proj-1", Name: "temp-thread", CreatedBy: "u1",
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: now,
 	}))
 
 	require.NoError(t, store.DeleteTopic(ctx, "t1"))
@@ -287,19 +298,19 @@ func TestWave2_DeleteTopic_SoftDeleteExcludedFromList(t *testing.T) {
 	require.Equal(t, "general", topics[0].ID)
 }
 
-func TestWave2_DeleteTopic_RejectsGeneral(t *testing.T) {
+func TestWave2_DeleteTopic_RejectsLastThread(t *testing.T) {
 	store, db := newTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
 	require.NoError(t, store.CreateTopic(ctx, WebChatTopic{
-		ID: "general", ProjectID: "proj-1", Name: "general", IsGeneral: true,
+		ID: "only-thread", ProjectID: "proj-1", Name: "general", IsGeneral: true,
 		CreatedBy: "u1", CreatedAt: time.Now().UTC(),
 	}))
 
-	err := store.DeleteTopic(ctx, "general")
+	err := store.DeleteTopic(ctx, "only-thread")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "cannot delete #general")
+	require.Contains(t, err.Error(), "last thread")
 }
 
 // --- EnsureGeneralTopic ---
@@ -345,17 +356,15 @@ func TestWave2_EnsureGeneralTopic_Idempotent(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
-func TestWave2_ListTopics_LazyCreatesGeneral(t *testing.T) {
+func TestWave2_ListTopics_EmptyProject(t *testing.T) {
 	store, db := newTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
-	// ListTopics on a project with no topics should lazily create #general.
+	// ListTopics on a project with no topics should return an empty list.
 	topics, err := store.ListTopics(ctx, "proj-1")
 	require.NoError(t, err)
-	require.Len(t, topics, 1)
-	require.True(t, topics[0].IsGeneral)
-	require.Equal(t, "general", topics[0].Name)
+	require.Empty(t, topics)
 }
 
 // --- TouchTopicActivity ---

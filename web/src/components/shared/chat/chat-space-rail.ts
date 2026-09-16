@@ -36,6 +36,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
 import { showConfirm } from '../confirm-dialog.js';
+import { showToast } from '../../../utils/toast.js';
 import './chat-avatar.js';
 
 /** A space (project) in the rail. */
@@ -927,9 +928,9 @@ export class ScionChatSpaceRail extends LitElement {
     if (this.isMobileViewport()) return;
 
     const threads = this.threadsBySpace.get(space.projectId) || [];
-    const general = threads.find((t) => t.isGeneral);
-    if (general) {
-      this.handleThreadClick(general, space.projectId);
+    const target = threads.find((t) => t.isGeneral) || threads[0];
+    if (target) {
+      this.handleThreadClick(target, space.projectId);
     }
   }
 
@@ -1217,7 +1218,6 @@ export class ScionChatSpaceRail extends LitElement {
 
   private startRename(thread: ChatSpaceThread): void {
     this.contextMenuTarget = null;
-    if (thread.isGeneral) return;
     this.renamingThread = thread.id;
     this.renameValue = thread.name;
   }
@@ -1242,7 +1242,6 @@ export class ScionChatSpaceRail extends LitElement {
 
   private async handleDeleteThread(thread: ChatSpaceThread, projectId: string): Promise<void> {
     this.contextMenuTarget = null;
-    if (thread.isGeneral) return;
     const confirmed = await showConfirm(`Delete #${thread.name}? This cannot be undone.`, {
       title: 'Delete Thread',
       confirmText: 'Delete',
@@ -1250,9 +1249,14 @@ export class ScionChatSpaceRail extends LitElement {
     });
     if (!confirmed) return;
     try {
-      await apiFetch(`/api/v1/chat/topics/${encodeURIComponent(thread.id)}`, {
+      const res = await apiFetch(`/api/v1/chat/topics/${encodeURIComponent(thread.id)}`, {
         method: 'DELETE',
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string };
+        showToast(data.error || 'Failed to delete thread', 'danger');
+        return;
+      }
       // Remove locally
       const threads = this.threadsBySpace.get(projectId) || [];
       const newMap = new Map(this.threadsBySpace);
@@ -1261,8 +1265,8 @@ export class ScionChatSpaceRail extends LitElement {
         threads.filter((t) => t.id !== thread.id)
       );
       this.threadsBySpace = newMap;
-    } catch {
-      // Non-critical
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to delete thread', 'danger');
     }
   }
 
@@ -1660,21 +1664,17 @@ export class ScionChatSpaceRail extends LitElement {
           <sl-icon name="download"></sl-icon>
           Download as Markdown
         </div>
-        ${!thread.isGeneral
-          ? html`
-              <div class="context-menu-item" @click=${() => this.startRename(thread)}>
-                <sl-icon name="pencil"></sl-icon>
-                Rename
-              </div>
-              <div
-                class="context-menu-item danger"
-                @click=${() => this.handleDeleteThread(thread, projectId)}
-              >
-                <sl-icon name="trash"></sl-icon>
-                Delete
-              </div>
-            `
-          : nothing}
+        <div class="context-menu-item" @click=${() => this.startRename(thread)}>
+          <sl-icon name="pencil"></sl-icon>
+          Rename
+        </div>
+        <div
+          class="context-menu-item danger"
+          @click=${() => this.handleDeleteThread(thread, projectId)}
+        >
+          <sl-icon name="trash"></sl-icon>
+          Delete
+        </div>
       </div>
     `;
   }
