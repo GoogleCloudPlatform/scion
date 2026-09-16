@@ -300,9 +300,23 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 		}
 		projectID, scope = req.ScopeID, "project"
 
+	case "user":
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized",
+				"Authentication required", nil)
+			return
+		}
+		// projectID carries the user ID here. importFromRemote uses it for:
+		// 1. Auth token lookup in fetchRemoteForImport — will find no project,
+		//    so the fetch proceeds unauthenticated (correct for user scope).
+		// 2. scopeID in importResourceDirs/Bootstrap — correctly uses the user
+		//    ID as the template's scope identifier.
+		projectID, scope = userIdent.ID(), "user"
+
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_request",
-			"scope must be 'global' or 'project'", nil)
+			"scope must be 'global', 'project', or 'user'", nil)
 		return
 	}
 
@@ -628,9 +642,21 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 		}
 		projectID = req.ScopeID
 
+	case "user":
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized",
+				"Authentication required", nil)
+			return
+		}
+		// No authz check — users can always discover for their own scope.
+		// projectID stays empty — discovery is scope-independent (only fetches
+		// and walks directories) and user scope has no project for auth tokens.
+		projectID = ""
+
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_request",
-			"scope must be 'global' or 'project'", nil)
+			"scope must be 'global', 'project', or 'user'", nil)
 		return
 	}
 
