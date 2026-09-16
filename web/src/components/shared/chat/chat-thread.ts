@@ -171,8 +171,8 @@ const PATH_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp
 /** Known markdown extensions for path-link preview. */
 const PATH_MD_EXTS = new Set(['.md', '.markdown']);
 
-/** Maximum file size for inline text preview (100MB for read-only preview). */
-const PATH_PREVIEW_MAX = 100 * 1024 * 1024;
+/** Maximum file size for inline text preview (50MB for read-only preview). */
+const PATH_PREVIEW_MAX = 50 * 1024 * 1024;
 
 /** State for the file-path viewer dialog. */
 interface FilePreviewState {

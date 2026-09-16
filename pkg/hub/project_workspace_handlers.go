@@ -52,8 +52,8 @@ const maxUploadFileSize = 50 * 1024 * 1024
 // maxEditableFileSize is the maximum file size the editor will serve for inline editing (1MB).
 const maxEditableFileSize = 1 * 1024 * 1024
 
-// maxPreviewFileSize is the maximum file size for read-only preview (100MB).
-const maxPreviewFileSize = 100 * 1024 * 1024
+// maxPreviewFileSize is the maximum file size for read-only preview (50MB).
+const maxPreviewFileSize = 50 * 1024 * 1024
 
 // isCloudRunEnv checks K_SERVICE to determine if we're running on Cloud Run.
 // In production, K_SERVICE is set once at container startup and never changes,
@@ -476,7 +476,7 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 		sizeLimitLabel := "1MB"
 		if mode == "preview" {
 			sizeLimit = maxPreviewFileSize
-			sizeLimitLabel = "100MB"
+			sizeLimitLabel = "50MB"
 		}
 		action := "editing"
 		if mode == "preview" {
