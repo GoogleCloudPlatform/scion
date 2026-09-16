@@ -901,6 +901,8 @@ export class ScionChatThread extends LitElement {
       clearTimeout(this._readDebounceTimer);
       this._readDebounceTimer = null;
     }
+    // Clean up context menu keyboard listener
+    document.removeEventListener('keydown', this.handleContextMenuKeydown);
   }
 
   /** Called by the parent when the chat view is first shown. */
@@ -1795,59 +1797,6 @@ export class ScionChatThread extends LitElement {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Phase-3: Message action handlers
-  // ---------------------------------------------------------------------------
-
-  /** Handle reply action from a message. Sets the composer reply-to context. */
-  private handleMessageReply(
-    e: CustomEvent<{ messageId: string; senderName: string; content: string }>
-  ): void {
-    this.composerEditMessage = null; // Cancel any pending edit
-    this.composerReplyTo = {
-      messageId: e.detail.messageId,
-      senderName: e.detail.senderName,
-      content:
-        e.detail.content.length > 100
-          ? e.detail.content.slice(0, 100) + '...'
-          : e.detail.content,
-    };
-  }
-
-  /** Handle edit action from a message. Sets the composer edit mode. */
-  private handleMessageEditRequest(
-    e: CustomEvent<{ messageId: string; content: string }>
-  ): void {
-    this.composerReplyTo = null; // Cancel any pending reply
-    this.composerEditMessage = {
-      messageId: e.detail.messageId,
-      content: e.detail.content,
-    };
-  }
-
-  /** Handle delete action from a message. Shows confirmation and calls API. */
-  private async handleMessageDeleteRequest(
-    e: CustomEvent<{ messageId: string }>
-  ): Promise<void> {
-    const { messageId } = e.detail;
-    const confirmed = window.confirm('Delete this message? This cannot be undone.');
-    if (!confirmed) return;
-
-    try {
-      const res = await apiFetch(
-        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages/${encodeURIComponent(messageId)}`,
-        { method: 'DELETE' }
-      );
-      if (!res.ok) {
-        const errMsg = await extractApiError(res, 'Failed to delete message');
-        this.sendError = errMsg;
-      }
-      // SSE event will update the message state.
-    } catch (err) {
-      this.sendError = err instanceof Error ? err.message : 'Failed to delete message';
-    }
-  }
-
   /** Handle chat-edit event from the composer. Calls PUT endpoint. */
   private async handleChatEditV2(
     e: CustomEvent<{ messageId: string; text: string }>
@@ -2143,15 +2092,6 @@ export class ScionChatThread extends LitElement {
     });
   }
 
-  /** Handle copy-link event from a message's action bar. */
-  private handleCopyLink(e: CustomEvent<{ messageId: string }>): void {
-    const { messageId } = e.detail;
-    const url = `${window.location.origin}${window.location.pathname}#msg-${encodeURIComponent(messageId)}`;
-    navigator.clipboard.writeText(url).catch(() => {
-      // Fallback: ignore clipboard failure silently.
-    });
-  }
-
   // ---------------------------------------------------------------------------
   // Phase-5: Context menu
   // ---------------------------------------------------------------------------
@@ -2203,11 +2143,20 @@ export class ScionChatThread extends LitElement {
     e.preventDefault();
     this.contextMenuMessage = msg;
     this.contextMenuPosition = { x: e.clientX, y: e.clientY };
+    document.addEventListener('keydown', this.handleContextMenuKeydown);
   }
+
+  /** Dismiss context menu on Escape key. */
+  private handleContextMenuKeydown = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') {
+      this.closeContextMenu();
+    }
+  };
 
   /** Close the context menu. */
   private closeContextMenu(): void {
     this.contextMenuMessage = null;
+    document.removeEventListener('keydown', this.handleContextMenuKeydown);
   }
 
   /** Context menu: Reply to the right-clicked message. */
@@ -3014,17 +2963,9 @@ export class ScionChatThread extends LitElement {
           .attachments=${msg.attachments || []}
           .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
           routedTo=${msgRoutedTo}
-          messageId=${msg.id}
-          ?isOwn=${isOwnMessage}
-          ?canEdit=${canEditDelete}
-          ?canDelete=${canEditDelete}
           .replyPreview=${replyPreview}
           editedAt=${ext?.editedAt || ''}
           deletedAt=${ext?.deletedAt || ''}
-          @message-reply=${this.handleMessageReply}
-          @message-edit=${this.handleMessageEditRequest}
-          @message-delete=${this.handleMessageDeleteRequest}
-          @message-copy-link=${this.handleCopyLink}
           @scroll-to-message=${this.handleScrollToMessage}
           @path-link-click=${this.handlePathLinkClick}
         ></scion-chat-message>

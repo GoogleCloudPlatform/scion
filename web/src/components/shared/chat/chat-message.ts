@@ -457,24 +457,6 @@ export class ScionChatMessage extends LitElement {
   @property({ type: Array })
   attachmentRefs: AttachmentRefInfo[] = [];
 
-  // ---- Phase-3 properties ----
-
-  /** Whether this is the current user's message. */
-  @property({ type: Boolean })
-  isOwn = false;
-
-  /** Whether edit is allowed (no agent in reply chain). */
-  @property({ type: Boolean })
-  canEdit = false;
-
-  /** Whether delete is allowed (no agent in reply chain). */
-  @property({ type: Boolean })
-  canDelete = false;
-
-  /** Message ID for copy-link and event dispatch. */
-  @property()
-  messageId = '';
-
   /** Reply preview data: the message this one is replying to. */
   @property({ type: Object })
   replyPreview: { messageId: string; senderName: string; content: string } | null = null;
@@ -1373,11 +1355,6 @@ export class ScionChatMessage extends LitElement {
     this.previewObserver?.disconnect();
     this.previewObserver = null;
     this.observedPreviews = new WeakSet();
-    // Clean up touch long-press timer to prevent leaks on disconnect.
-    if (this.touchTimer) {
-      clearTimeout(this.touchTimer);
-      this.touchTimer = null;
-    }
   }
 
   override updated(changed: Map<string, unknown>): void {
