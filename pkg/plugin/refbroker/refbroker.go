@@ -335,6 +335,12 @@ func (b *RefBroker) GetInfo() (*plugin.PluginInfo, error) {
 	}, nil
 }
 
+// BrokerQuery handles named query/action operations.
+// The reference broker does not implement any queries.
+func (b *RefBroker) BrokerQuery(_ context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
+	return nil, plugin.ErrUnsupportedOperation
+}
+
 // HealthCheck returns the runtime health of the reference broker.
 func (b *RefBroker) HealthCheck() (*plugin.HealthStatus, error) {
 	b.mu.RLock()

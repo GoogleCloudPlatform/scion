@@ -1796,6 +1796,17 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for nested /discord path
+	if strings.HasPrefix(subPath, "discord/") {
+		discordPath := strings.TrimPrefix(subPath, "discord/")
+		s.handleProjectDiscord(w, r, projectID, discordPath)
+		return
+	}
+	if subPath == "discord" {
+		s.handleProjectDiscord(w, r, projectID, "")
+		return
+	}
+
 	// Check for nested /scheduled-events path
 	if strings.HasPrefix(subPath, "scheduled-events") {
 		eventPath := strings.TrimPrefix(subPath, "scheduled-events")

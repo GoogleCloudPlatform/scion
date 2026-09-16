@@ -87,3 +87,17 @@ func (s *Server) GetInfo(_ context.Context, _ *brokerv1.GetInfoRequest) (*broker
 	}
 	return PluginInfoToProto(info), nil
 }
+
+func (s *Server) BrokerQuery(ctx context.Context, req *brokerv1.BrokerQueryRequest) (*brokerv1.BrokerQueryResponse, error) {
+	result, err := s.impl.BrokerQuery(ctx, req.GetOperation(), req.GetParams())
+	if err != nil {
+		// Return the error in the response payload, not as gRPC error,
+		// so the caller can distinguish error types.
+		return &brokerv1.BrokerQueryResponse{
+			Error: err.Error(),
+		}, nil
+	}
+	return &brokerv1.BrokerQueryResponse{
+		Result: result,
+	}, nil
+}

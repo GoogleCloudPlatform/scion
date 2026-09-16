@@ -356,3 +356,6 @@ func (*noopPluginManager) InstallPlugin(_, _, _, _ string) error                
 func (*noopPluginManager) LoadOne(_, _ string, _ plugin.PluginEntry, _ string) error { return nil }
 func (*noopPluginManager) GetBroker(_ string) (eventbus.EventBus, error)             { return nil, nil }
 func (*noopPluginManager) GetGRPCBrokerAdapter(_ string) plugin.GRPCBrokerClient     { return nil }
+func (*noopPluginManager) BrokerQuery(_ context.Context, _ string, _ string, _ json.RawMessage) (json.RawMessage, error) {
+	return nil, nil
+}

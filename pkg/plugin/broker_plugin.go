@@ -16,6 +16,8 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/rpc"
@@ -65,6 +67,18 @@ type GetInfoResponse struct {
 // HealthCheckResponse holds the response from HealthCheck RPC call.
 type HealthCheckResponse struct {
 	Status HealthStatus
+}
+
+// BrokerQueryArgs holds arguments for the BrokerQuery RPC call.
+type BrokerQueryArgs struct {
+	Operation string
+	Params    json.RawMessage
+}
+
+// BrokerQueryResponse holds the response from BrokerQuery RPC call.
+type BrokerQueryResponse struct {
+	Result json.RawMessage
+	Error  string // non-empty if the plugin returned an error
 }
 
 // HealthStatus represents the runtime health of a plugin.
@@ -158,6 +172,11 @@ type MessageBrokerPluginInterface interface {
 	// The host gracefully handles plugins that do not implement this method
 	// (pre-HealthCheck plugins) by returning a default "unknown" status.
 	HealthCheck() (*HealthStatus, error)
+	// BrokerQuery executes a named query or action on the broker plugin.
+	// The operation string identifies the query type; params and response
+	// are opaque JSON blobs whose schema is defined per-operation.
+	// Returns ErrUnsupportedOperation if the plugin does not handle this operation.
+	BrokerQuery(ctx context.Context, operation string, params json.RawMessage) (json.RawMessage, error)
 }
 
 // --- go-plugin Plugin definition ---
@@ -258,6 +277,16 @@ func (s *BrokerRPCServer) HealthCheck(_ struct{}, resp *HealthCheckResponse) err
 	return nil
 }
 
+func (s *BrokerRPCServer) BrokerQuery(args *BrokerQueryArgs, resp *BrokerQueryResponse) error {
+	result, err := s.Impl.BrokerQuery(context.Background(), args.Operation, args.Params)
+	if err != nil {
+		resp.Error = err.Error()
+		return nil // transport-level success; error in payload
+	}
+	resp.Result = result
+	return nil
+}
+
 // --- RPC Client (runs in the host process) ---
 
 // BrokerRPCClient implements MessageBrokerPluginInterface by making RPC calls
@@ -320,6 +349,36 @@ func (c *BrokerRPCClient) HealthCheck() (*HealthStatus, error) {
 		}, nil
 	}
 	return &resp.Status, nil
+}
+
+// BrokerQuery sends a named query to the plugin.
+// If the plugin does not implement BrokerQuery (older protocol), returns ErrUnsupportedOperation.
+func (c *BrokerRPCClient) BrokerQuery(ctx context.Context, operation string, params json.RawMessage) (json.RawMessage, error) {
+	var resp BrokerQueryResponse
+	err := c.client.Call("Plugin.BrokerQuery", &BrokerQueryArgs{
+		Operation: operation,
+		Params:    params,
+	}, &resp)
+	if err != nil {
+		// Gracefully handle plugins that don't implement BrokerQuery.
+		return nil, ErrUnsupportedOperation
+	}
+	if resp.Error != "" {
+		// Check for known sentinel errors
+		switch resp.Error {
+		case ErrUnsupportedOperation.Error():
+			return nil, ErrUnsupportedOperation
+		case ErrNotFound.Error():
+			return nil, ErrNotFound
+		case ErrForbidden.Error():
+			return nil, ErrForbidden
+		case ErrRateLimited.Error():
+			return nil, ErrRateLimited
+		default:
+			return nil, errors.New(resp.Error)
+		}
+	}
+	return resp.Result, nil
 }
 
 // --- Host-side adapter: wraps BrokerRPCClient as broker.MessageBroker ---

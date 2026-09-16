@@ -88,6 +88,7 @@ type IntegrationManager interface {
 	LoadOne(pluginType, name string, entry plugin.PluginEntry, pluginsDir string) error
 	GetBroker(name string) (eventbus.EventBus, error)
 	GetGRPCBrokerAdapter(name string) plugin.GRPCBrokerClient
+	BrokerQuery(ctx context.Context, name string, operation string, params json.RawMessage) (json.RawMessage, error)
 }
 
 // --- Response types ---

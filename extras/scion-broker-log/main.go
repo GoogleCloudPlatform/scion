@@ -557,3 +557,9 @@ func includeField(fields map[string]bool, name string) bool {
 	}
 	return fields[name]
 }
+
+// BrokerQuery implements MessageBrokerPluginInterface.BrokerQuery.
+// The broker-log plugin does not support any query operations.
+func (b *brokerLog) BrokerQuery(_ context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
+	return nil, plugin.ErrUnsupportedOperation
+}

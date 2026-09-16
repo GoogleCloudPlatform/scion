@@ -211,6 +211,10 @@ func (m *mockIntegrationManager) GetGRPCBrokerAdapter(name string) plugin.GRPCBr
 	return nil
 }
 
+func (m *mockIntegrationManager) BrokerQuery(ctx context.Context, name string, operation string, params json.RawMessage) (json.RawMessage, error) {
+	return nil, plugin.ErrUnsupportedOperation
+}
+
 // integAdminServer creates a testServer with a super-admin user for
 // integration tests that exercise authorization paths. Returns the server,
 // the admin identity, and a context with the admin identity set.

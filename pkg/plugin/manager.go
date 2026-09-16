@@ -16,6 +16,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -786,6 +787,29 @@ func (m *Manager) BrokerInfo(name string) (version, channelID string, capabiliti
 		return "", "", nil, nil
 	}
 	return info.Version, info.ChannelID, info.Capabilities, nil
+}
+
+// BrokerQuery dispatches a named query/action to a broker plugin.
+// It checks gRPC adapters first, then falls back to net/rpc.
+func (m *Manager) BrokerQuery(ctx context.Context, name string, operation string, params json.RawMessage) (json.RawMessage, error) {
+	key := PluginTypeBroker + ":" + name
+	m.mu.RLock()
+	adapter, isGRPC := m.grpcAdapters[key]
+	m.mu.RUnlock()
+
+	if isGRPC {
+		return adapter.BrokerQuery(ctx, operation, params)
+	}
+
+	raw, err := m.Get(PluginTypeBroker, name)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrPluginUnavailable, err)
+	}
+	rpcClient, ok := raw.(*BrokerRPCClient)
+	if !ok {
+		return nil, fmt.Errorf("plugin %s is not a broker RPC client", name)
+	}
+	return rpcClient.BrokerQuery(ctx, operation, params)
 }
 
 // UpdatePlugin rebuilds a hub-managed (non-self-managed) plugin binary from
