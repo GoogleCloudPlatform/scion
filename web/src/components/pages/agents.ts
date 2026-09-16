@@ -515,7 +515,8 @@ export class ScionPageAgents extends LitElement {
     event?: MouseEvent
   ): Promise<void> {
     if (action === 'delete') {
-      if (!event?.altKey && !(await showConfirm('Are you sure you want to delete this agent?'))) {
+      const agentName = this.agents.find(a => a.id === agentId)?.name ?? 'this agent';
+      if (!event?.altKey && !(await showConfirm(`Are you sure you want to delete agent "${agentName}"?`))) {
         return;
       }
       // Show per-button spinner for delete; don't optimistically remove

@@ -834,7 +834,7 @@ export class ScionPageAgentDetail extends LitElement {
     if (!this.agent) return;
 
     if (action === 'delete') {
-      if (!event?.altKey && !(await showConfirm('Are you sure you want to delete this agent?'))) {
+      if (!event?.altKey && !(await showConfirm(`Are you sure you want to delete agent "${this.agent.name}"?`))) {
         return;
       }
       this.actionLoading = { ...this.actionLoading, delete: true };
