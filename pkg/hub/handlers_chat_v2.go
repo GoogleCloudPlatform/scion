@@ -2816,7 +2816,12 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 	var humans []chatMemberEntry
 	projectMembers, err := s.store.ListProjectMembers(ctx, project.ID)
 	if err == nil {
+		seen := make(map[string]bool)
 		for _, m := range projectMembers {
+			if seen[m.UserID] {
+				continue
+			}
+			seen[m.UserID] = true
 			u, err := s.store.GetUser(ctx, m.UserID)
 			if err != nil {
 				continue
@@ -3531,7 +3536,12 @@ func (s *Server) resolveProjectHumanMembers(ctx context.Context, projectID strin
 	}
 
 	var humans []chatMemberEntry
+	seen := make(map[string]bool)
 	for _, m := range projectMembers {
+		if seen[m.UserID] {
+			continue
+		}
+		seen[m.UserID] = true
 		u, err := s.store.GetUser(ctx, m.UserID)
 		if err != nil {
 			continue
