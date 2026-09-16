@@ -101,7 +101,7 @@ export class ScionChatSearch extends LitElement {
     .search-input-wrap sl-icon {
       position: absolute;
       left: 0.5rem;
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       color: var(--scion-text-muted, #64748b);
       pointer-events: none;
     }
@@ -111,7 +111,7 @@ export class ScionChatSearch extends LitElement {
       padding: 0.375rem 0.5rem 0.375rem 1.75rem;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 6px;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       outline: none;
       background: var(--scion-bg, #f8fafc);
       color: var(--scion-text, #1e293b);
@@ -137,7 +137,7 @@ export class ScionChatSearch extends LitElement {
       padding: 0.375rem 0.75rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
       background: var(--scion-surface, #ffffff);
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
     }
 
@@ -147,7 +147,7 @@ export class ScionChatSearch extends LitElement {
       cursor: pointer;
       border: 1px solid transparent;
       background: none;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
     }
 
@@ -189,7 +189,7 @@ export class ScionChatSearch extends LitElement {
     }
 
     .result-thread {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-weight: 600;
       color: var(--scion-text-muted, #64748b);
       white-space: nowrap;
@@ -198,20 +198,20 @@ export class ScionChatSearch extends LitElement {
     }
 
     .result-time {
-      font-size: 0.625rem;
+      font-size: var(--chat-fs-xs);
       color: var(--scion-text-muted, #94a3b8);
       white-space: nowrap;
       flex-shrink: 0;
     }
 
     .result-sender {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       font-weight: 600;
       color: var(--scion-text, #1e293b);
     }
 
     .result-snippet {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text, #334155);
       line-height: 1.4;
       word-break: break-word;
@@ -230,7 +230,7 @@ export class ScionChatSearch extends LitElement {
       justify-content: center;
       padding: 2rem;
       color: var(--scion-text-muted, #64748b);
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       text-align: center;
     }
 
@@ -246,7 +246,7 @@ export class ScionChatSearch extends LitElement {
       border-radius: 6px;
       background: var(--scion-surface, #ffffff);
       color: var(--scion-text, #1e293b);
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       cursor: pointer;
     }
 
@@ -436,42 +436,52 @@ export class ScionChatSearch extends LitElement {
         ></sl-icon-button>
       </div>
 
-      ${hasConversation
-        ? html`
-            <div class="scope-toggle">
-              <button
-                class="scope-btn ${!this.scopeAll ? 'active' : ''}"
-                @click=${() => this.toggleScope(false)}
-              >
-                In ${this.conversationName || 'this conversation'}
-              </button>
-              <button
-                class="scope-btn ${this.scopeAll ? 'active' : ''}"
-                @click=${() => this.toggleScope(true)}
-              >
-                All conversations
-              </button>
-            </div>
-          `
-        : nothing}
-
-      <div class="results-list">
-        ${this.loading
-          ? html`<div class="status-msg"><sl-spinner></sl-spinner></div>`
-          : this.noResults
-            ? html`<div class="status-msg">No messages found</div>`
-            : this.results.length === 0 && this.query.trim().length < 2
-              ? html`<div class="status-msg">Type at least 2 characters to search</div>`
-              : this.results.map((r) => this.renderResult(r))}
-        ${this.nextCursor && !this.loading
+      ${
+        hasConversation
           ? html`
-              <div class="load-more">
-                ${this.loadingMore
-                  ? html`<sl-spinner></sl-spinner>`
-                  : html`<button @click=${() => void this.performSearch(true)}>Load more</button>`}
+              <div class="scope-toggle">
+                <button
+                  class="scope-btn ${!this.scopeAll ? 'active' : ''}"
+                  @click=${() => this.toggleScope(false)}
+                >
+                  In ${this.conversationName || 'this conversation'}
+                </button>
+                <button
+                  class="scope-btn ${this.scopeAll ? 'active' : ''}"
+                  @click=${() => this.toggleScope(true)}
+                >
+                  All conversations
+                </button>
               </div>
             `
-          : nothing}
+          : nothing
+      }
+
+      <div class="results-list">
+        ${
+          this.loading
+            ? html`<div class="status-msg"><sl-spinner></sl-spinner></div>`
+            : this.noResults
+              ? html`<div class="status-msg">No messages found</div>`
+              : this.results.length === 0 && this.query.trim().length < 2
+                ? html`<div class="status-msg">Type at least 2 characters to search</div>`
+                : this.results.map((r) => this.renderResult(r))
+        }
+        ${
+          this.nextCursor && !this.loading
+            ? html`
+                <div class="load-more">
+                  ${
+                    this.loadingMore
+                      ? html`<sl-spinner></sl-spinner>`
+                      : html`<button @click=${() => void this.performSearch(true)}>
+                          Load more
+                        </button>`
+                  }
+                </div>
+              `
+            : nothing
+        }
       </div>
     `;
   }

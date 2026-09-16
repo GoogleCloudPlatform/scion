@@ -533,7 +533,7 @@ export class ScionChatMessage extends LitElement {
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       font-weight: 700;
       color: #fff;
       flex-shrink: 0;
@@ -561,20 +561,20 @@ export class ScionChatMessage extends LitElement {
     }
 
     .sender-name {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       font-weight: 600;
       color: var(--scion-text, #1e293b);
     }
 
     .msg-time {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       white-space: nowrap;
     }
 
     .routed-to {
       color: var(--scion-text-muted, #64748b);
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-weight: 400;
     }
 
@@ -582,7 +582,7 @@ export class ScionChatMessage extends LitElement {
       padding: 0.5rem 0.75rem;
       border-radius: 0.75rem;
       line-height: 1.5;
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       word-break: break-word;
     }
 
@@ -637,13 +637,13 @@ export class ScionChatMessage extends LitElement {
     }
 
     .md-content h1 {
-      font-size: 1.25rem;
+      font-size: var(--chat-fs-4xl);
     }
     .md-content h2 {
-      font-size: 1.125rem;
+      font-size: var(--chat-fs-3xl);
     }
     .md-content h3 {
-      font-size: 1rem;
+      font-size: var(--chat-fs-2xl);
     }
 
     .md-content a {
@@ -678,7 +678,7 @@ export class ScionChatMessage extends LitElement {
       background: none;
       border: none;
       padding: 0;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
     }
 
     /* Syntax-highlighted code blocks (#1049) */
@@ -696,9 +696,9 @@ export class ScionChatMessage extends LitElement {
       top: 0.375rem;
       right: 0.375rem;
       padding: 0.125rem 0.5rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-family: inherit;
-      line-height: 1.25rem;
+      line-height: var(--chat-lh-tight);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.25rem;
       background: var(--scion-bg-subtle, #f1f5f9);
@@ -755,7 +755,7 @@ export class ScionChatMessage extends LitElement {
       border-collapse: collapse;
       width: 100%;
       margin: 0.5em 0;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
     }
 
     .md-content th,
@@ -781,11 +781,11 @@ export class ScionChatMessage extends LitElement {
       display: inline-block;
       padding: 0 0.375rem;
       border-radius: 0.25rem;
-      font-size: 0.625rem;
+      font-size: var(--chat-fs-xs);
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.03em;
-      line-height: 1.25rem;
+      line-height: var(--chat-lh-tight);
     }
 
     .badge-urgent {
@@ -819,13 +819,13 @@ export class ScionChatMessage extends LitElement {
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.375rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       cursor: default;
     }
 
     .attachment-chip sl-icon {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
     }
 
     /* W7: Inline image attachments */
@@ -870,7 +870,7 @@ export class ScionChatMessage extends LitElement {
 
     .image-actions sl-icon-button::part(base) {
       padding: 0.25rem;
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       color: #ffffff;
     }
 
@@ -917,7 +917,7 @@ export class ScionChatMessage extends LitElement {
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.5rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text, #1e293b);
       cursor: pointer;
       text-decoration: none;
@@ -929,7 +929,7 @@ export class ScionChatMessage extends LitElement {
     }
 
     .download-chip sl-icon {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       color: var(--scion-primary, #3b82f6);
     }
 
@@ -943,7 +943,7 @@ export class ScionChatMessage extends LitElement {
 
     .download-chip .file-size {
       color: var(--scion-text-muted, #64748b);
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
     }
 
     /* Inline code/text previews for non-image attachments */
@@ -968,7 +968,7 @@ export class ScionChatMessage extends LitElement {
       flex: 1;
       min-width: 0;
       font-family: var(--scion-font-mono, 'SF Mono', 'Fira Code', monospace);
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text, #1e293b);
       overflow: hidden;
       text-overflow: ellipsis;
@@ -976,7 +976,7 @@ export class ScionChatMessage extends LitElement {
     }
 
     .preview-size {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       white-space: nowrap;
     }
@@ -988,7 +988,7 @@ export class ScionChatMessage extends LitElement {
 
     .preview-actions sl-icon-button::part(base) {
       padding: 0.25rem;
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       color: var(--scion-text-muted, #64748b);
     }
 
@@ -1036,12 +1036,12 @@ export class ScionChatMessage extends LitElement {
       align-items: center;
       gap: 0.5rem;
       padding: 0.75rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
     }
 
     .preview-placeholder sl-spinner {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
     }
 
     .preview-placeholder.error {
@@ -1076,7 +1076,7 @@ export class ScionChatMessage extends LitElement {
       padding: 0.25rem 0.75rem;
       border-radius: 0;
       color: var(--scion-text-muted, #64748b);
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       font-style: italic;
     }
 
@@ -1084,7 +1084,7 @@ export class ScionChatMessage extends LitElement {
       display: inline-flex;
       align-items: center;
       gap: 0.25rem;
-      font-size: 0.625rem;
+      font-size: var(--chat-fs-xs);
       font-weight: 500;
       color: var(--scion-text-muted, #94a3b8);
       text-transform: uppercase;
@@ -1093,7 +1093,7 @@ export class ScionChatMessage extends LitElement {
     }
 
     .verbose-label sl-icon {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
     }
 
     /* Full/trace rendering — collapsed details block */
@@ -1110,7 +1110,7 @@ export class ScionChatMessage extends LitElement {
 
     .trace-block summary {
       padding: 0.375rem 0.75rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-weight: 500;
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
@@ -1121,12 +1121,12 @@ export class ScionChatMessage extends LitElement {
     }
 
     .trace-block summary sl-icon {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
     }
 
     .trace-content {
       padding: 0.5rem 0.75rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       border-top: 1px solid var(--scion-border, #e2e8f0);
       white-space: pre-wrap;
@@ -1141,12 +1141,12 @@ export class ScionChatMessage extends LitElement {
       align-items: center;
       gap: 0.25rem;
       margin-top: 0.125rem;
-      font-size: 0.625rem;
+      font-size: var(--chat-fs-xs);
       color: var(--scion-text-muted, #94a3b8);
     }
 
     .delivery-state sl-icon {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
     }
 
     .delivery-state.pending sl-icon {
@@ -1169,6 +1169,58 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-danger-600, #dc2626);
     }
 
+    /* ---- Phase-3: Message action bar ---- */
+    .message-actions {
+      position: absolute;
+      top: -12px;
+      right: 8px;
+      display: flex;
+      gap: 0.0625rem;
+      padding: 0.125rem;
+      border-radius: 0.375rem;
+      background: var(--scion-surface-100, #f1f5f9);
+      border: 1px solid var(--scion-neutral-200, #e2e8f0);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transition:
+        opacity 0.15s ease,
+        visibility 0.15s ease;
+      z-index: 10;
+    }
+
+    .message-wrapper:hover .message-actions,
+    .message-wrapper:focus-within .message-actions,
+    .message-actions.pinned {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+    }
+
+    @media (hover: none) {
+      .message-actions {
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+      }
+      .message-actions.pinned {
+        opacity: 1;
+        visibility: visible;
+        pointer-events: auto;
+      }
+    }
+
+    .message-actions sl-icon-button::part(base) {
+      padding: 0.25rem;
+      font-size: var(--chat-fs-lg);
+      color: var(--scion-neutral-600, #475569);
+    }
+
+    .message-actions sl-icon-button::part(base):hover {
+      color: var(--scion-primary-600, #2563eb);
+    }
+
     /* ---- Phase-3: Reply preview quote block ---- */
     .reply-preview {
       display: flex;
@@ -1180,7 +1232,7 @@ export class ScionChatMessage extends LitElement {
       background: var(--scion-surface-50, #f8fafc);
       border-radius: 0 0.25rem 0.25rem 0;
       cursor: pointer;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-neutral-500, #64748b);
       max-width: 100%;
       overflow: hidden;
@@ -1210,7 +1262,7 @@ export class ScionChatMessage extends LitElement {
 
     /* ---- Phase-3: Edited label ---- */
     .edited-label {
-      font-size: 0.625rem;
+      font-size: var(--chat-fs-xs);
       color: var(--scion-neutral-400, #94a3b8);
       margin-left: 0.25rem;
     }
@@ -1242,7 +1294,7 @@ export class ScionChatMessage extends LitElement {
     /* ---- Rich output: diff blocks (#1060) ---- */
     .diff-block {
       font-family: var(--scion-font-mono, 'SF Mono', 'Fira Code', monospace);
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       line-height: 1.5;
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
@@ -1304,7 +1356,7 @@ export class ScionChatMessage extends LitElement {
       border-radius: 0 0 0.375rem 0.375rem;
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--sl-color-primary-600, #2563eb);
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       font-family: inherit;
       cursor: pointer;
       text-align: center;
@@ -1317,7 +1369,7 @@ export class ScionChatMessage extends LitElement {
     /* ---- Rich output: test results (#1060) ---- */
     .test-results {
       font-family: var(--scion-font-mono, 'SF Mono', 'Fira Code', monospace);
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       line-height: 1.5;
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
@@ -1719,6 +1771,55 @@ export class ScionChatMessage extends LitElement {
     );
   }
 
+  // ---- Phase-3: Action bar and event helpers ----
+
+  /** Render the hover action bar with contextual actions. */
+  private renderActionBar() {
+    const pinnedClass = this.actionBarPinned ? ' pinned' : '';
+    return html`
+      <div class="message-actions${pinnedClass}">
+        <sl-icon-button
+          name="reply"
+          label="Reply"
+          title="Reply"
+          @click=${this.handleReply}
+        ></sl-icon-button>
+        ${
+          this.isOwn && this.canEdit
+            ? html`<sl-icon-button
+                name="pencil"
+                label="Edit"
+                title="Edit"
+                @click=${this.handleEdit}
+              ></sl-icon-button>`
+            : nothing
+        }
+        ${
+          this.isOwn && this.canDelete
+            ? html`<sl-icon-button
+                name="trash"
+                label="Delete"
+                title="Delete"
+                @click=${this.handleDelete}
+              ></sl-icon-button>`
+            : nothing
+        }
+        <sl-icon-button
+          name="clipboard"
+          label="Copy text"
+          title="Copy message"
+          @click=${this.handleCopyText}
+        ></sl-icon-button>
+        <sl-icon-button
+          name="link-45deg"
+          label="Copy link"
+          title="Copy link"
+          @click=${this.handleCopyLink}
+        ></sl-icon-button>
+      </div>
+    `;
+  }
+
   /** Render the reply preview block above the bubble content. */
   private renderReplyPreview() {
     if (!this.replyPreview) return nothing;
@@ -1747,43 +1848,54 @@ export class ScionChatMessage extends LitElement {
     const isDeleted = !!this.deletedAt;
 
     return html`
-      <div class="message-wrapper ${dirClass}${groupClass}">
-        ${this.showHeader && this.fromAgent
-          ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
-              ${this.getInitials()}
-            </div>`
-          : this.fromAgent
-            ? html`<div class="avatar-spacer"></div>`
-            : nothing}
-        <div class="bubble">
-          ${this.showHeader && this.fromAgent
-            ? html`
-                <div class="bubble-header">
-                  <span class="sender-name">${this.senderName || this.sender}</span>
-                  ${this.routedTo
-                    ? html`<span class="routed-to"> &rarr; ${this.routedTo}</span>`
-                    : nothing}
-                  <span class="msg-time">${this.formatTime()}</span>
-                  ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
-                </div>
-              `
-            : nothing}
-          ${this.showHeader && !this.fromAgent && this.routedTo
-            ? html`
-                <div class="bubble-header">
-                  <span class="sender-name">${this.senderName || this.sender}</span>
-                  <span class="routed-to"> &rarr; ${this.routedTo}</span>
-                  <span class="msg-time">${this.formatTime()}</span>
-                  ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
-                </div>
-              `
-            : nothing}
-          ${this.replyPreview ? this.renderReplyPreview() : nothing}
-          ${isDeleted
-            ? html`<div class="bubble-content">
-                <span class="deleted-message">This message was deleted</span>
+      <div class="message-wrapper ${dirClass}${groupClass}" @touchstart=${this.handleTouchStart}>
+        ${
+          this.showHeader && this.fromAgent
+            ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
+                ${this.getInitials()}
               </div>`
-            : html`<div class="bubble-content">${this.renderBody()}</div>`}
+            : this.fromAgent
+              ? html`<div class="avatar-spacer"></div>`
+              : nothing
+        }
+        <div class="bubble">
+          ${!isDeleted ? this.renderActionBar() : nothing}
+          ${
+            this.showHeader && this.fromAgent
+              ? html`
+                  <div class="bubble-header">
+                    <span class="sender-name">${this.senderName || this.sender}</span>
+                    ${
+                      this.routedTo
+                        ? html`<span class="routed-to"> &rarr; ${this.routedTo}</span>`
+                        : nothing
+                    }
+                    <span class="msg-time">${this.formatTime()}</span>
+                    ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
+                  </div>
+                `
+              : nothing
+          }
+          ${
+            this.showHeader && !this.fromAgent && this.routedTo
+              ? html`
+                  <div class="bubble-header">
+                    <span class="sender-name">${this.senderName || this.sender}</span>
+                    <span class="routed-to"> &rarr; ${this.routedTo}</span>
+                    <span class="msg-time">${this.formatTime()}</span>
+                    ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
+                  </div>
+                `
+              : nothing
+          }
+          ${this.replyPreview ? this.renderReplyPreview() : nothing}
+          ${
+            isDeleted
+              ? html`<div class="bubble-content">
+                  <span class="deleted-message">This message was deleted</span>
+                </div>`
+              : html`<div class="bubble-content">${this.renderBody()}</div>`
+          }
           ${isDeleted ? nothing : this.renderDeliveryState()}
           ${isDeleted ? nothing : this.renderBadges()}
           ${isDeleted ? nothing : this.renderAttachments()}
@@ -1853,9 +1965,11 @@ export class ScionChatMessage extends LitElement {
       <div class="badges">
         ${this.urgent ? html`<span class="badge badge-urgent">urgent</span>` : nothing}
         ${this.broadcasted ? html`<span class="badge badge-broadcast">broadcast</span>` : nothing}
-        ${this.channel && this.channel !== 'web'
-          ? html`<span class="badge badge-channel">via ${this.channel}</span>`
-          : nothing}
+        ${
+          this.channel && this.channel !== 'web'
+            ? html`<span class="badge badge-channel">via ${this.channel}</span>`
+            : nothing
+        }
       </div>
     `;
   }
@@ -1896,66 +2010,70 @@ export class ScionChatMessage extends LitElement {
     const files = rest.filter((a) => !isTextPreviewable(a));
 
     return html`
-      ${images.length > 0
-        ? html`
-            <div class="attachment-images">
-              ${images.map(
-                (img) => html`
-                  <div class="image-preview-wrapper">
-                    <button
-                      type="button"
-                      class="image-expand"
-                      title="${img.name} — click to expand"
-                      aria-label="Expand ${img.name}"
-                      @click=${() => this.openFullPreview(img)}
-                    >
-                      <img
-                        class="attachment-image"
-                        src=${attachmentURL(img.id)}
-                        alt=${img.name}
-                        loading="lazy"
-                      />
-                    </button>
-                    <div class="image-actions">
-                      <sl-icon-button
-                        name="arrows-angle-expand"
-                        label="Expand ${img.name}"
+      ${
+        images.length > 0
+          ? html`
+              <div class="attachment-images">
+                ${images.map(
+                  (img) => html`
+                    <div class="image-preview-wrapper">
+                      <button
+                        type="button"
+                        class="image-expand"
+                        title="${img.name} — click to expand"
+                        aria-label="Expand ${img.name}"
                         @click=${() => this.openFullPreview(img)}
-                      ></sl-icon-button>
-                      <sl-icon-button
-                        name="download"
-                        label="Download ${img.name}"
-                        href=${attachmentURL(img.id)}
-                        download=${img.name}
-                      ></sl-icon-button>
+                      >
+                        <img
+                          class="attachment-image"
+                          src=${attachmentURL(img.id)}
+                          alt=${img.name}
+                          loading="lazy"
+                        />
+                      </button>
+                      <div class="image-actions">
+                        <sl-icon-button
+                          name="arrows-angle-expand"
+                          label="Expand ${img.name}"
+                          @click=${() => this.openFullPreview(img)}
+                        ></sl-icon-button>
+                        <sl-icon-button
+                          name="download"
+                          label="Download ${img.name}"
+                          href=${attachmentURL(img.id)}
+                          download=${img.name}
+                        ></sl-icon-button>
+                      </div>
                     </div>
-                  </div>
-                `
-              )}
-            </div>
-          `
-        : nothing}
+                  `
+                )}
+              </div>
+            `
+          : nothing
+      }
       ${previewable.map((file) => this.renderCodePreview(file))}
-      ${files.length > 0
-        ? html`
-            <div class="attachments">
-              ${files.map(
-                (file) => html`
-                  <a
-                    class="download-chip"
-                    href="/api/v1/chat/attachments/${file.id}"
-                    download=${file.name}
-                    title="Download ${file.name}"
-                  >
-                    <sl-icon name="file-earmark-arrow-down"></sl-icon>
-                    <span class="file-name">${file.name}</span>
-                    <span class="file-size">${formatFileSize(file.size)}</span>
-                  </a>
-                `
-              )}
-            </div>
-          `
-        : nothing}
+      ${
+        files.length > 0
+          ? html`
+              <div class="attachments">
+                ${files.map(
+                  (file) => html`
+                    <a
+                      class="download-chip"
+                      href="/api/v1/chat/attachments/${file.id}"
+                      download=${file.name}
+                      title="Download ${file.name}"
+                    >
+                      <sl-icon name="file-earmark-arrow-down"></sl-icon>
+                      <span class="file-name">${file.name}</span>
+                      <span class="file-size">${formatFileSize(file.size)}</span>
+                    </a>
+                  `
+                )}
+              </div>
+            `
+          : nothing
+      }
     `;
   }
 
@@ -1988,24 +2106,28 @@ export class ScionChatMessage extends LitElement {
           <span class="preview-filename" title=${ref.name}>${ref.name}</span>
           <span class="preview-size">${formatFileSize(ref.size)}</span>
           <div class="preview-actions">
-            ${isMd
-              ? html`
-                  <sl-icon-button
-                    name=${showSource ? 'eye' : 'code'}
-                    label=${showSource ? 'Preview' : 'Source'}
-                    @click=${() => this.toggleMdSource(ref.id)}
-                  ></sl-icon-button>
-                `
-              : nothing}
-            ${isMd && showSource
-              ? html`
-                  <sl-icon-button
-                    name=${this.copiedIds.has(ref.id) ? 'check2' : 'clipboard'}
-                    label="Copy to clipboard"
-                    @click=${() => this.copyAttachmentText(ref.id)}
-                  ></sl-icon-button>
-                `
-              : nothing}
+            ${
+              isMd
+                ? html`
+                    <sl-icon-button
+                      name=${showSource ? 'eye' : 'code'}
+                      label=${showSource ? 'Preview' : 'Source'}
+                      @click=${() => this.toggleMdSource(ref.id)}
+                    ></sl-icon-button>
+                  `
+                : nothing
+            }
+            ${
+              isMd && showSource
+                ? html`
+                    <sl-icon-button
+                      name=${this.copiedIds.has(ref.id) ? 'check2' : 'clipboard'}
+                      label="Copy to clipboard"
+                      @click=${() => this.copyAttachmentText(ref.id)}
+                    ></sl-icon-button>
+                  `
+                : nothing
+            }
             <sl-icon-button
               name="arrows-angle-expand"
               label="Expand ${ref.name}"
@@ -2019,11 +2141,13 @@ export class ScionChatMessage extends LitElement {
             ></sl-icon-button>
           </div>
         </div>
-        ${isMd && !showSource
-          ? html`<div class="md-preview-body">${this.renderMdPreviewBody(ref, state)}</div>`
-          : html`<div class="preview-body ${clipped || sourceClipped ? 'clipped' : ''}">
-              ${this.renderPreviewBody(ref, state)}
-            </div>`}
+        ${
+          isMd && !showSource
+            ? html`<div class="md-preview-body">${this.renderMdPreviewBody(ref, state)}</div>`
+            : html`<div class="preview-body ${clipped || sourceClipped ? 'clipped' : ''}">
+                ${this.renderPreviewBody(ref, state)}
+              </div>`
+        }
       </div>
     `;
   }
@@ -2116,31 +2240,37 @@ export class ScionChatMessage extends LitElement {
           if (e.target === e.currentTarget) this.expanded = null;
         }}
       >
-        ${IMAGE_MIMES.has(ref.mime)
-          ? html`<img class="full-image" src=${attachmentURL(ref.id)} alt=${ref.name} />`
-          : isMd && !showSource
-            ? this.renderMdPreviewBody(ref, state)
-            : this.renderPreviewBody(ref, state, true)}
+        ${
+          IMAGE_MIMES.has(ref.mime)
+            ? html`<img class="full-image" src=${attachmentURL(ref.id)} alt=${ref.name} />`
+            : isMd && !showSource
+              ? this.renderMdPreviewBody(ref, state)
+              : this.renderPreviewBody(ref, state, true)
+        }
         <div slot="footer" style="display:flex;gap:0.5rem;align-items:center">
-          ${isMd
-            ? html`
-                <sl-button size="small" @click=${() => this.toggleMdSource(ref.id)}>
-                  <sl-icon slot="prefix" name=${showSource ? 'eye' : 'code'}></sl-icon>
-                  ${showSource ? 'Preview' : 'Source'}
-                </sl-button>
-              `
-            : nothing}
-          ${isMd && showSource
-            ? html`
-                <sl-button size="small" @click=${() => this.copyAttachmentText(ref.id)}>
-                  <sl-icon
-                    slot="prefix"
-                    name=${this.copiedIds.has(ref.id) ? 'check2' : 'clipboard'}
-                  ></sl-icon>
-                  ${this.copiedIds.has(ref.id) ? 'Copied!' : 'Copy'}
-                </sl-button>
-              `
-            : nothing}
+          ${
+            isMd
+              ? html`
+                  <sl-button size="small" @click=${() => this.toggleMdSource(ref.id)}>
+                    <sl-icon slot="prefix" name=${showSource ? 'eye' : 'code'}></sl-icon>
+                    ${showSource ? 'Preview' : 'Source'}
+                  </sl-button>
+                `
+              : nothing
+          }
+          ${
+            isMd && showSource
+              ? html`
+                  <sl-button size="small" @click=${() => this.copyAttachmentText(ref.id)}>
+                    <sl-icon
+                      slot="prefix"
+                      name=${this.copiedIds.has(ref.id) ? 'check2' : 'clipboard'}
+                    ></sl-icon>
+                    ${this.copiedIds.has(ref.id) ? 'Copied!' : 'Copy'}
+                  </sl-button>
+                `
+              : nothing
+          }
           <sl-button href=${attachmentURL(ref.id)} download=${ref.name}>
             <sl-icon slot="prefix" name="download"></sl-icon>
             Download

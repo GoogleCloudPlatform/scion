@@ -50,13 +50,13 @@ export class ScionChatSystemLine extends LitElement {
       justify-content: center;
       gap: 0.5rem;
       padding: 0.375rem 0.75rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       text-align: center;
     }
 
     .system-line sl-icon {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       flex-shrink: 0;
     }
 
@@ -65,7 +65,7 @@ export class ScionChatSystemLine extends LitElement {
     }
 
     .system-time {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       opacity: 0.7;
       white-space: nowrap;
     }

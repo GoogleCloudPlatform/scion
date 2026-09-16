@@ -195,7 +195,7 @@ export class ScionChatMembers extends LitElement {
 
     .section-label {
       padding: 12px 16px 4px;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.05em;
@@ -229,7 +229,7 @@ export class ScionChatMembers extends LitElement {
     }
 
     .member-name {
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       font-weight: 500;
       color: var(--scion-text, #1e293b);
       overflow: hidden;
@@ -238,7 +238,7 @@ export class ScionChatMembers extends LitElement {
     }
 
     .member-role {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #94a3b8);
     }
 
@@ -281,7 +281,7 @@ export class ScionChatMembers extends LitElement {
 
     .empty-note {
       padding: 12px 16px;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #94a3b8);
       font-style: italic;
     }
@@ -475,9 +475,11 @@ export class ScionChatMembers extends LitElement {
 
     return html`
       <div class="section-label">People — ${sorted.length}</div>
-      ${sorted.length === 0
-        ? html`<div class="empty-note">No members</div>`
-        : sorted.map((m) => this.renderHuman(m))}
+      ${
+        sorted.length === 0
+          ? html`<div class="empty-note">No members</div>`
+          : sorted.map((m) => this.renderHuman(m))
+      }
     `;
   }
 
@@ -500,9 +502,11 @@ export class ScionChatMembers extends LitElement {
             presence-state="${m.presenceState || ''}"
           ></scion-chat-avatar>
           ${hasUnread ? html`<div class="unread-dot"></div>` : nothing}
-          ${isTyping
-            ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
-            : nothing}
+          ${
+            isTyping
+              ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
+              : nothing
+          }
         </div>
         <div class="member-info">
           <div class="member-name">${m.displayName}</div>
@@ -523,9 +527,11 @@ export class ScionChatMembers extends LitElement {
 
     return html`
       <div class="section-label">Agents — ${sorted.length}</div>
-      ${sorted.length === 0
-        ? html`<div class="empty-note">No agents</div>`
-        : sorted.map((a) => this.renderAgent(a))}
+      ${
+        sorted.length === 0
+          ? html`<div class="empty-note">No agents</div>`
+          : sorted.map((a) => this.renderAgent(a))
+      }
     `;
   }
 
@@ -568,34 +574,38 @@ export class ScionChatMembers extends LitElement {
             size="28"
           ></scion-chat-avatar>
           ${hasUnread ? html`<div class="unread-dot"></div>` : nothing}
-          ${isTyping
-            ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
-            : nothing}
+          ${
+            isTyping
+              ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
+              : nothing
+          }
         </div>
         <div class="member-info">
           <div class="member-name">${a.displayName}</div>
           <scion-status-badge status=${badgeStatus} size="small"></scion-status-badge>
         </div>
-        ${a.canAttach !== true
-          ? nothing
-          : html`<a
-              href="/agents/${a.id}/terminal"
-              class="agent-terminal"
-              title="Open terminal in its own window (Ctrl/Cmd-click for a tab)"
-              @click=${(e: MouseEvent) => {
-                e.stopPropagation();
-                // Leave modified and non-primary clicks to the browser so
-                // Ctrl/Cmd-click, Shift-click and middle-click behave as they
-                // do on any other link.
-                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
-                  return;
-                }
-                e.preventDefault();
-                openTerminalPopout(a.id);
-              }}
-            >
-              <sl-icon name="terminal" style="font-size: 0.75rem;"></sl-icon>
-            </a>`}
+        ${
+          a.canAttach !== true
+            ? nothing
+            : html`<a
+                href="/agents/${a.id}/terminal"
+                class="agent-terminal"
+                title="Open terminal in its own window (Ctrl/Cmd-click for a tab)"
+                @click=${(e: MouseEvent) => {
+                  e.stopPropagation();
+                  // Leave modified and non-primary clicks to the browser so
+                  // Ctrl/Cmd-click, Shift-click and middle-click behave as they
+                  // do on any other link.
+                  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+                    return;
+                  }
+                  e.preventDefault();
+                  openTerminalPopout(a.id);
+                }}
+              >
+                <sl-icon name="terminal" style="font-size: var(--chat-fs-base);"></sl-icon>
+              </a>`
+        }
         <a
           href="/agents/${a.id}"
           target="_blank"
@@ -603,7 +613,7 @@ export class ScionChatMembers extends LitElement {
           title="Open agent detail"
           @click=${(e: Event) => e.stopPropagation()}
         >
-          <sl-icon name="box-arrow-up-right" style="font-size: 0.75rem;"></sl-icon>
+          <sl-icon name="box-arrow-up-right" style="font-size: var(--chat-fs-base);"></sl-icon>
         </a>
       </div>
     `;

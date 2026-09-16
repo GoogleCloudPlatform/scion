@@ -170,8 +170,8 @@ const PATH_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp
 /** Known markdown extensions for path-link preview. */
 const PATH_MD_EXTS = new Set(['.md', '.markdown']);
 
-/** Maximum file size for inline text preview (50MB for read-only preview). */
-const PATH_PREVIEW_MAX = 50 * 1024 * 1024;
+/** Maximum file size for inline text preview (512 KB). */
+const PATH_PREVIEW_MAX = 512 * 1024;
 
 /** State for the file-path viewer dialog. */
 interface FilePreviewState {
@@ -444,7 +444,7 @@ export class ScionChatThread extends LitElement {
       align-items: center;
       justify-content: space-between;
       padding: 0.25rem 1rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
       background: var(--scion-surface, #ffffff);
@@ -508,7 +508,7 @@ export class ScionChatThread extends LitElement {
       color: #fff;
       border: none;
       border-radius: 1rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       font-weight: 500;
       cursor: pointer;
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
@@ -520,7 +520,7 @@ export class ScionChatThread extends LitElement {
     }
 
     .jump-btn sl-icon {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
     }
 
     /* Date divider */
@@ -540,7 +540,7 @@ export class ScionChatThread extends LitElement {
     }
 
     .date-label {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-weight: 600;
       color: var(--scion-text-muted, #64748b);
       text-transform: uppercase;
@@ -565,7 +565,7 @@ export class ScionChatThread extends LitElement {
     }
 
     .unread-label {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-weight: 600;
       color: var(--scion-primary, #3b82f6);
       white-space: nowrap;
@@ -598,18 +598,18 @@ export class ScionChatThread extends LitElement {
     }
 
     .state-msg sl-spinner {
-      font-size: 1.5rem;
+      font-size: var(--chat-fs-5xl);
     }
 
     .state-msg sl-icon {
-      font-size: 2rem;
+      font-size: var(--chat-fs-6xl);
       opacity: 0.4;
     }
 
     /* Send error toast */
     .send-error {
       padding: 0.375rem 1rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-danger-600, #dc2626);
       background: var(--scion-danger-50, #fef2f2);
       border-top: 1px solid var(--scion-danger-200, #fecaca);
@@ -618,7 +618,7 @@ export class ScionChatThread extends LitElement {
     /* Mention results footer */
     .mention-results {
       padding: 0.25rem 1rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       border-top: 1px solid var(--scion-border, #e2e8f0);
     }
@@ -637,7 +637,7 @@ export class ScionChatThread extends LitElement {
     }
 
     .interagent-label {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       font-weight: 500;
     }
@@ -649,7 +649,7 @@ export class ScionChatThread extends LitElement {
     }
 
     .interagent-icons sl-icon-button::part(base) {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       color: var(--scion-text-muted, #64748b);
     }
 
@@ -659,7 +659,7 @@ export class ScionChatThread extends LitElement {
       align-items: center;
       gap: 6px;
       padding: 4px 16px;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       min-height: 20px;
     }
@@ -737,7 +737,7 @@ export class ScionChatThread extends LitElement {
       align-items: center;
       gap: 0.5rem;
       padding: 0.5rem 0.75rem;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       cursor: pointer;
       color: var(--scion-text, #1e293b);
       white-space: nowrap;
@@ -753,7 +753,7 @@ export class ScionChatThread extends LitElement {
     }
 
     .context-menu-item sl-icon {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       color: var(--scion-text-muted, #64748b);
     }
 
@@ -779,7 +779,7 @@ export class ScionChatThread extends LitElement {
       gap: 0.5rem;
       padding: 3rem 2rem;
       color: var(--scion-text-muted, #64748b);
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
     }
 
     .file-preview-placeholder.error {
@@ -800,7 +800,7 @@ export class ScionChatThread extends LitElement {
     /* Phase-5: Slash command system message */
     .system-info-message {
       padding: 0.5rem 1rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       background: var(--scion-bg-subtle, #f1f5f9);
       border-radius: 0.375rem;
@@ -1073,11 +1073,7 @@ export class ScionChatThread extends LitElement {
       }
     }
 
-    // Filter out mention fan-out copies — they exist for agent dispatch
-    // tracking, not for human display. The primary (type:instruction) message
-    // already shows the content. Mention rows stay in messageMap so their IDs
-    // are still tracked for SSE/history dedup.
-    this.messages = sorted.filter((m) => m.type !== 'mention');
+    this.messages = sorted;
 
     // Track last known timestamp for backfill
     if (sorted.length > 0) {
@@ -1163,18 +1159,14 @@ export class ScionChatThread extends LitElement {
       } else {
         this.scrollToBottomAfterRender();
       }
-      // Advance read watermark after a short delay — 2s when an unread divider is
-      // visible (so the user can see it), otherwise 500ms to let the thread render.
-      if (this.messages.length > 0) {
-        const scheduledFetchId = this.fetchId;
+      // Advance read watermark after a short delay so the user sees the divider.
+      if (this.showUnreadDivider && this.messages.length > 0) {
         setTimeout(() => {
-          // Bail if the conversation changed since we scheduled this.
-          if (this.fetchId !== scheduledFetchId) return;
           const lastMsg = this.messages[this.messages.length - 1];
           if (lastMsg) {
             void this.advanceReadWatermark(lastMsg.id);
           }
-        }, this.showUnreadDivider ? 2000 : 500);
+        }, 2000);
       }
     }
   }
@@ -1311,8 +1303,7 @@ export class ScionChatThread extends LitElement {
       attachments?: import('./chat-message.js').AttachmentRefInfo[];
     };
     const detail = (e as CustomEvent).detail as
-      | ({ data?: ChatEventData } & ChatEventData)
-      | undefined;
+      ({ data?: ChatEventData } & ChatEventData) | undefined;
     // stateManager wraps SSE payloads as { state, data }; tolerate a flat detail too.
     const eventData: ChatEventData | undefined = detail?.data ?? detail;
     if (!eventData) {
@@ -1566,8 +1557,7 @@ export class ScionChatThread extends LitElement {
   private handleV2ReadStateEvent(e: Event): void {
     type ReadStateData = { conversationKey?: string; messageId?: string; readAt?: string };
     const detail = (e as CustomEvent).detail as
-      | ({ data?: ReadStateData } & ReadStateData)
-      | undefined;
+      ({ data?: ReadStateData } & ReadStateData) | undefined;
     const eventData: ReadStateData | undefined = detail?.data ?? detail;
     if (!eventData?.messageId) return;
     if (eventData.conversationKey !== this.conversationKey) return;
@@ -1803,6 +1793,53 @@ export class ScionChatThread extends LitElement {
       }
     } catch {
       // Non-critical
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase-3: Message action handlers
+  // ---------------------------------------------------------------------------
+
+  /** Handle reply action from a message. Sets the composer reply-to context. */
+  private handleMessageReply(
+    e: CustomEvent<{ messageId: string; senderName: string; content: string }>
+  ): void {
+    this.composerEditMessage = null; // Cancel any pending edit
+    this.composerReplyTo = {
+      messageId: e.detail.messageId,
+      senderName: e.detail.senderName,
+      content:
+        e.detail.content.length > 100 ? e.detail.content.slice(0, 100) + '...' : e.detail.content,
+    };
+  }
+
+  /** Handle edit action from a message. Sets the composer edit mode. */
+  private handleMessageEditRequest(e: CustomEvent<{ messageId: string; content: string }>): void {
+    this.composerReplyTo = null; // Cancel any pending reply
+    this.composerEditMessage = {
+      messageId: e.detail.messageId,
+      content: e.detail.content,
+    };
+  }
+
+  /** Handle delete action from a message. Shows confirmation and calls API. */
+  private async handleMessageDeleteRequest(e: CustomEvent<{ messageId: string }>): Promise<void> {
+    const { messageId } = e.detail;
+    const confirmed = window.confirm('Delete this message? This cannot be undone.');
+    if (!confirmed) return;
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages/${encodeURIComponent(messageId)}`,
+        { method: 'DELETE' }
+      );
+      if (!res.ok) {
+        const errMsg = await extractApiError(res, 'Failed to delete message');
+        this.sendError = errMsg;
+      }
+      // SSE event will update the message state.
+    } catch (err) {
+      this.sendError = err instanceof Error ? err.message : 'Failed to delete message';
     }
   }
 
@@ -2132,21 +2169,25 @@ export class ScionChatThread extends LitElement {
           <sl-icon name="reply"></sl-icon>
           Reply
         </div>
-        ${canEditDelete
-          ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuEdit()}>
-              <sl-icon name="pencil"></sl-icon>
-              Edit
-            </div>`
-          : nothing}
-        ${canEditDelete
-          ? html`<div
-              class="context-menu-item danger"
-              @click=${() => this.handleContextMenuDelete()}
-            >
-              <sl-icon name="trash"></sl-icon>
-              Delete
-            </div>`
-          : nothing}
+        ${
+          canEditDelete
+            ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuEdit()}>
+                <sl-icon name="pencil"></sl-icon>
+                Edit
+              </div>`
+            : nothing
+        }
+        ${
+          canEditDelete
+            ? html`<div
+                class="context-menu-item danger"
+                @click=${() => this.handleContextMenuDelete()}
+              >
+                <sl-icon name="trash"></sl-icon>
+                Delete
+              </div>`
+            : nothing
+        }
         <div class="context-menu-item" @click=${() => this.handleContextMenuCopyText()}>
           <sl-icon name="clipboard"></sl-icon>
           Copy text
@@ -2297,7 +2338,7 @@ export class ScionChatThread extends LitElement {
     }
 
     try {
-      const res = await apiFetch(`${downloadUrl}?format=json&mode=preview`);
+      const res = await apiFetch(`${downloadUrl}?format=json`);
       // Staleness guard: user closed dialog or clicked a different file link.
       if (this.filePreview?.containerPath !== containerPath) return;
       if (!res.ok) {
@@ -2389,7 +2430,7 @@ export class ScionChatThread extends LitElement {
         ${body}
         <div slot="footer" style="display:flex;gap:0.5rem;align-items:center">
           <span
-            style="flex:1;font-size:0.75rem;color:var(--scion-text-muted,#64748b);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+            style="flex:1;font-size:var(--chat-fs-base);color:var(--scion-text-muted,#64748b);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
             title=${fp.containerPath}
           >
             ${fp.containerPath}
@@ -2663,15 +2704,17 @@ export class ScionChatThread extends LitElement {
       <div class="thread-container">
         ${this.renderContent()}
         ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
-        ${this.canSend
-          ? html`
-              <scion-chat-composer
-                ?disabled=${this.sending}
-                .agents=${this.agents}
-                @chat-send=${this.handleChatSend}
-              ></scion-chat-composer>
-            `
-          : nothing}
+        ${
+          this.canSend
+            ? html`
+                <scion-chat-composer
+                  ?disabled=${this.sending}
+                  .agents=${this.agents}
+                  @chat-send=${this.handleChatSend}
+                ></scion-chat-composer>
+              `
+            : nothing
+        }
         ${this.renderFilePreview()}
       </div>
     `;
@@ -2700,6 +2743,13 @@ export class ScionChatThread extends LitElement {
           @chat-slash-command=${this.handleSlashCommand}
         ></scion-chat-composer>
         ${this.renderContextMenu()} ${this.renderFilePreview()}
+        <scion-send-to-agent-picker
+          .agents=${this.agents}
+          ?open=${this.showAgentPicker}
+          .posX=${this.contextMenuPosition.x}
+          .posY=${this.contextMenuPosition.y}
+          @agent-selected=${this.handleAgentSelected}
+        ></scion-send-to-agent-picker>
       </div>
     `;
   }
@@ -2810,21 +2860,25 @@ export class ScionChatThread extends LitElement {
         @click=${this.handleMessageAreaClick}
       >
         <div class="messages-list">
-          ${this.loadingOlder
-            ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
-            : nothing}
+          ${
+            this.loadingOlder
+              ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
+              : nothing
+          }
           ${this.renderMessages()}
         </div>
-        ${!this.pinnedToBottom
-          ? html`
-              <div class="jump-to-latest">
-                <button class="jump-btn" @click=${this.handleJumpToLatest}>
-                  <sl-icon name="arrow-down"></sl-icon>
-                  Jump to latest
-                </button>
-              </div>
-            `
-          : nothing}
+        ${
+          !this.pinnedToBottom
+            ? html`
+                <div class="jump-to-latest">
+                  <button class="jump-btn" @click=${this.handleJumpToLatest}>
+                    <sl-icon name="arrow-down"></sl-icon>
+                    Jump to latest
+                  </button>
+                </div>
+              `
+            : nothing
+        }
       </div>
     `;
   }

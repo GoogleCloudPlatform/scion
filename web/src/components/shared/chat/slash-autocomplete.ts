@@ -94,7 +94,7 @@ export class ScionSlashAutocomplete extends LitElement {
       flex-direction: column;
       padding: 0.375rem 0.75rem;
       cursor: pointer;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       transition: background 0.1s;
     }
 
@@ -109,7 +109,7 @@ export class ScionSlashAutocomplete extends LitElement {
     }
 
     .dropdown-item .command-desc {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       overflow: hidden;
       text-overflow: ellipsis;

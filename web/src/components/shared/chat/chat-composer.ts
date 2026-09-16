@@ -161,6 +161,9 @@ export class ScionChatComposer extends LitElement {
   /** Whether the right-click send context menu is visible. */
   @state() private showSendContextMenu = false;
 
+  /** Live mention override for the destination chip. */
+  @state() private liveMentionOverride = '';
+
   /** W7: Pending file uploads before send. */
   @state() private pendingFiles: UploadedAttachment[] = [];
 
@@ -230,7 +233,7 @@ export class ScionChatComposer extends LitElement {
     }
 
     sl-textarea::part(base) {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       border-radius: 0.75rem;
       background: var(--scion-surface-raised, #ffffff);
       border-color: var(--scion-border, #e2e8f0);
@@ -279,7 +282,7 @@ export class ScionChatComposer extends LitElement {
       align-items: center;
       gap: 0.5rem;
       padding: 0.375rem 0.75rem;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       cursor: pointer;
       color: var(--scion-text, #1e293b);
       white-space: nowrap;
@@ -306,14 +309,14 @@ export class ScionChatComposer extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.25rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
       white-space: nowrap;
     }
 
     .char-counter {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       white-space: nowrap;
     }
@@ -333,7 +336,7 @@ export class ScionChatComposer extends LitElement {
       align-items: center;
       gap: 0.375rem;
       padding: 0.25rem 0.75rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       background: var(--scion-bg-subtle, #f1f5f9);
       border-radius: 0.5rem 0.5rem 0 0;
@@ -360,6 +363,11 @@ export class ScionChatComposer extends LitElement {
       opacity: 0.8;
     }
 
+    .destination-chip .mention-override {
+      font-weight: 600;
+      color: var(--scion-warning-600, #d97706);
+    }
+
     .destination-chip.clickable {
       cursor: pointer;
       transition: background 0.15s;
@@ -370,7 +378,7 @@ export class ScionChatComposer extends LitElement {
     }
 
     .chip-chevron {
-      font-size: 0.625rem;
+      font-size: var(--chat-fs-xs);
       margin-left: auto;
       opacity: 0.6;
     }
@@ -385,7 +393,7 @@ export class ScionChatComposer extends LitElement {
     }
 
     .attach-btn::part(base) {
-      font-size: 1rem;
+      font-size: var(--chat-fs-2xl);
     }
 
     .pending-files {
@@ -403,7 +411,7 @@ export class ScionChatComposer extends LitElement {
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.375rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text, #1e293b);
       max-width: 200px;
     }
@@ -429,7 +437,7 @@ export class ScionChatComposer extends LitElement {
       line-height: 1;
       background: none;
       border: none;
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
     }
 
     .pending-file .remove-btn:hover {
@@ -447,7 +455,7 @@ export class ScionChatComposer extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.25rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-danger-600, #dc2626);
     }
 
@@ -463,11 +471,11 @@ export class ScionChatComposer extends LitElement {
       line-height: 1;
       background: none;
       border: none;
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
     }
 
     .upload-progress {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       padding: 0 0.25rem;
     }
@@ -481,7 +489,7 @@ export class ScionChatComposer extends LitElement {
       background: var(--scion-surface-50, #f8fafc);
       border-left: 3px solid var(--scion-primary-400, #60a5fa);
       border-radius: 0 0.25rem 0.25rem 0;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-neutral-600, #475569);
     }
 
@@ -504,7 +512,7 @@ export class ScionChatComposer extends LitElement {
 
     .reply-bar sl-icon-button::part(base) {
       padding: 0.125rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-neutral-400, #94a3b8);
     }
 
@@ -517,7 +525,7 @@ export class ScionChatComposer extends LitElement {
       background: var(--scion-warning-50, #fffbeb);
       border-left: 3px solid var(--scion-warning-400, #fbbf24);
       border-radius: 0 0.25rem 0.25rem 0;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-neutral-600, #475569);
     }
 
@@ -528,7 +536,7 @@ export class ScionChatComposer extends LitElement {
 
     .edit-bar sl-icon-button::part(base) {
       padding: 0.125rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-neutral-400, #94a3b8);
     }
 
@@ -551,7 +559,7 @@ export class ScionChatComposer extends LitElement {
     }
 
     .drop-zone-overlay span {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       font-weight: 600;
       color: var(--scion-primary, #3b82f6);
     }
@@ -661,9 +669,11 @@ export class ScionChatComposer extends LitElement {
         @dragleave=${this.handleDragLeave}
         @drop=${this.handleDrop}
       >
-        ${this.dragOver
-          ? html`<div class="drop-zone-overlay"><span>Drop files here</span></div>`
-          : nothing}
+        ${
+          this.dragOver
+            ? html`<div class="drop-zone-overlay"><span>Drop files here</span></div>`
+            : nothing
+        }
         <div class="composer">
           ${this.replyTo ? this.renderReplyBar() : nothing}
           ${this.editMessage ? this.renderEditBar() : nothing}
@@ -671,23 +681,25 @@ export class ScionChatComposer extends LitElement {
           ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
           ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
           <div class="input-row">
-            ${this.conversationMode && !inEditMode
-              ? html`
-                  <sl-icon-button
-                    class="attach-btn"
-                    name="paperclip"
-                    label="Attach file"
-                    @click=${this.handleAttachClick}
-                    ?disabled=${this.disabled || this.uploading}
-                  ></sl-icon-button>
-                  <input
-                    type="file"
-                    multiple
-                    style="display:none"
-                    @change=${this.handleFileSelected}
-                  />
-                `
-              : nothing}
+            ${
+              this.conversationMode && !inEditMode
+                ? html`
+                    <sl-icon-button
+                      class="attach-btn"
+                      name="paperclip"
+                      label="Attach file"
+                      @click=${this.handleAttachClick}
+                      ?disabled=${this.disabled || this.uploading}
+                    ></sl-icon-button>
+                    <input
+                      type="file"
+                      multiple
+                      style="display:none"
+                      @change=${this.handleFileSelected}
+                    />
+                  `
+                : nothing
+            }
             <div class="textarea-wrapper">
               <sl-textarea
                 placeholder=${inEditMode ? 'Edit your message...' : 'Send a message...'}
@@ -721,27 +733,31 @@ export class ScionChatComposer extends LitElement {
                 <sl-icon slot="prefix" name=${sendIcon}></sl-icon>
                 ${sendLabel}
               </sl-button>
-              ${this.showSendContextMenu && !inEditMode
-                ? html`
-                    <div class="send-context-overlay" @click=${this.closeSendContextMenu}></div>
-                    <div class="send-context-menu">
-                      <div class="send-context-item" @click=${this.handleSendWithInterrupt}>
-                        <sl-icon name="lightning-charge"></sl-icon>
-                        Send with interruption
+              ${
+                this.showSendContextMenu && !inEditMode
+                  ? html`
+                      <div class="send-context-overlay" @click=${this.closeSendContextMenu}></div>
+                      <div class="send-context-menu">
+                        <div class="send-context-item" @click=${this.handleSendWithInterrupt}>
+                          <sl-icon name="lightning-charge"></sl-icon>
+                          Send with interruption
+                        </div>
                       </div>
-                    </div>
-                  `
-                : nothing}
+                    `
+                  : nothing
+              }
             </div>
           </div>
           <div class="footer-row">
-            ${this.runeCount > 0 || isNearLimit
-              ? html`
-                  <span class="char-counter ${counterClass}">
-                    ${this.runeCount} / ${MAX_MESSAGE_LENGTH}
-                  </span>
-                `
-              : nothing}
+            ${
+              this.runeCount > 0 || isNearLimit
+                ? html`
+                    <span class="char-counter ${counterClass}">
+                      ${this.runeCount} / ${MAX_MESSAGE_LENGTH}
+                    </span>
+                  `
+                : nothing
+            }
           </div>
         </div>
       </div>
@@ -801,6 +817,17 @@ export class ScionChatComposer extends LitElement {
       `;
     }
 
+    // Thread mode with live mention override
+    if (this.liveMentionOverride) {
+      return html`
+        <div class="destination-chip">
+          <span class="arrow">&rarr;</span>
+          <span class="mention-override">@${this.liveMentionOverride}</span>
+          <span class="hint">(mention)</span>
+        </div>
+      `;
+    }
+
     // Thread mode: clickable chip to set/change default agent
     const agentMembers = this.members.filter((m) => m.kind === 'agent');
     const hasAgents = agentMembers.length > 0;
@@ -810,12 +837,14 @@ export class ScionChatComposer extends LitElement {
         <sl-dropdown>
           <div class="destination-chip clickable" slot="trigger">
             <span class="arrow">&rarr;</span>
-            <span style="font-size: 0.75rem">🤖</span>
+            <span style="font-size: var(--chat-fs-base)">🤖</span>
             <span class="agent-name">${this.defaultAgent}</span>
             <span class="hint">(thread default)</span>
-            ${hasAgents
-              ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>`
-              : nothing}
+            ${
+              hasAgents
+                ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>`
+                : nothing
+            }
           </div>
           ${hasAgents ? this.renderAgentMenu(agentMembers) : nothing}
         </sl-dropdown>
@@ -828,9 +857,9 @@ export class ScionChatComposer extends LitElement {
         <div class="destination-chip clickable" slot="trigger">
           <span class="arrow">&rarr;</span>
           <span class="hint">no agent</span>
-          ${hasAgents
-            ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>`
-            : nothing}
+          ${
+            hasAgents ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>` : nothing
+          }
         </div>
         ${hasAgents ? this.renderAgentMenu(agentMembers) : nothing}
       </sl-dropdown>
@@ -892,10 +921,12 @@ export class ScionChatComposer extends LitElement {
       this.dispatchEvent(new CustomEvent('chat-typing', { bubbles: true, composed: true }));
     }
 
+    // Update live mention override for destination chip
+    this.updateLiveMentionOverride();
+
     // Feed the autocomplete components.
     const autocomplete = this.shadowRoot?.querySelector('scion-mention-autocomplete') as
-      | import('./mention-autocomplete.js').ScionMentionAutocomplete
-      | null;
+      import('./mention-autocomplete.js').ScionMentionAutocomplete | null;
     if (autocomplete) {
       const textarea = this.getTextareaElement();
       if (textarea) {
@@ -905,27 +936,52 @@ export class ScionChatComposer extends LitElement {
 
     // Feed slash command autocomplete.
     const slashAutocomplete = this.shadowRoot?.querySelector('scion-slash-autocomplete') as
-      | import('./slash-autocomplete.js').ScionSlashAutocomplete
-      | null;
+      import('./slash-autocomplete.js').ScionSlashAutocomplete | null;
     if (slashAutocomplete) {
       const cursorPos = this.getTextareaElement()?.selectionStart ?? this.text.length;
       slashAutocomplete.handleInput(this.text, cursorPos);
     }
   }
 
+  /** Update live mention override based on @mentions in the text. */
+  private updateLiveMentionOverride(): void {
+    if (!this.conversationMode || this.conversationMode === 'dm') {
+      this.liveMentionOverride = '';
+      return;
+    }
+    // When no default agent is explicitly set, @-mentions should not affect the
+    // destination chip — there is nothing to "override". (#1151)
+    if (!this.defaultAgent) {
+      this.liveMentionOverride = '';
+      return;
+    }
+    // Find the first @mention in the text
+    const mentionMatch = this.text.match(/@(\S+)/);
+    if (mentionMatch) {
+      const slug = mentionMatch[1];
+      // Check if this matches a known agent
+      const matchedAgent = this.agents.find(
+        (a) => (a.slug || a.name || '').toLowerCase() === slug.toLowerCase()
+      );
+      if (matchedAgent) {
+        this.liveMentionOverride = matchedAgent.slug || matchedAgent.name || slug;
+        return;
+      }
+    }
+    this.liveMentionOverride = '';
+  }
+
   private handleKeydown(e: KeyboardEvent): void {
     // Let slash command autocomplete handle keys first.
     const slashAutocomplete = this.shadowRoot?.querySelector('scion-slash-autocomplete') as
-      | import('./slash-autocomplete.js').ScionSlashAutocomplete
-      | null;
+      import('./slash-autocomplete.js').ScionSlashAutocomplete | null;
     if (slashAutocomplete?.handleKeydown(e)) {
       return; // consumed by slash autocomplete
     }
 
     // Then let the mention autocomplete handle keys.
     const autocomplete = this.shadowRoot?.querySelector('scion-mention-autocomplete') as
-      | import('./mention-autocomplete.js').ScionMentionAutocomplete
-      | null;
+      import('./mention-autocomplete.js').ScionMentionAutocomplete | null;
     if (autocomplete?.handleKeydown(e)) {
       return; // consumed by autocomplete
     }
@@ -994,9 +1050,14 @@ export class ScionChatComposer extends LitElement {
         ${this.pendingFiles.map(
           (file, idx) => html`
             <div class="pending-file">
-              ${file.mime.startsWith('image/')
-                ? html`<img src=${file.url} alt=${file.name} />`
-                : html`<sl-icon name="file-earmark" style="font-size:0.875rem"></sl-icon>`}
+              ${
+                file.mime.startsWith('image/')
+                  ? html`<img src=${file.url} alt=${file.name} />`
+                  : html`<sl-icon
+                      name="file-earmark"
+                      style="font-size:var(--chat-fs-lg)"
+                    ></sl-icon>`
+              }
               <span class="file-name" title=${file.name}>${file.name}</span>
               <button class="remove-btn" @click=${() => this.removePendingFile(idx)}>
                 &times;
@@ -1019,7 +1080,7 @@ export class ScionChatComposer extends LitElement {
         ${this.uploadFailures.map(
           (failure, index) => html`
             <div class="upload-failure">
-              <sl-icon name="exclamation-triangle" style="font-size:0.75rem"></sl-icon>
+              <sl-icon name="exclamation-triangle" style="font-size:var(--chat-fs-base)"></sl-icon>
               <span class="failure-name">${failure.name}</span>
               <span class="failure-reason">${failure.error}</span>
               <button

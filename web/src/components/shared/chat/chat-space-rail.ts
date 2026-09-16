@@ -168,7 +168,7 @@ export class ScionChatSpaceRail extends LitElement {
       display: flex;
       align-items: center;
       padding: 0.75rem 1rem 0.5rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.05em;
@@ -192,7 +192,7 @@ export class ScionChatSpaceRail extends LitElement {
       gap: 0.375rem;
       padding: 0.375rem 0.75rem;
       cursor: pointer;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.05em;
@@ -216,7 +216,7 @@ export class ScionChatSpaceRail extends LitElement {
 
     .space-header .chevron {
       transition: transform 0.15s;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
     }
 
     .space-header .chevron.collapsed {
@@ -233,7 +233,7 @@ export class ScionChatSpaceRail extends LitElement {
     .space-header .unread-badge {
       background: var(--scion-primary, #3b82f6);
       color: #fff;
-      font-size: 0.5625rem;
+      font-size: var(--chat-fs-2xs);
       font-weight: 700;
       padding: 0.0625rem 0.3125rem;
       border-radius: 0.5rem;
@@ -244,7 +244,7 @@ export class ScionChatSpaceRail extends LitElement {
     .space-header .mention-badge {
       background: var(--scion-danger-500, #ef4444);
       color: #fff;
-      font-size: 0.5625rem;
+      font-size: var(--chat-fs-2xs);
       font-weight: 700;
       padding: 0.0625rem 0.3125rem;
       border-radius: 0.5rem;
@@ -259,7 +259,7 @@ export class ScionChatSpaceRail extends LitElement {
     }
 
     .space-actions sl-icon-button::part(base) {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       padding: 0.125rem;
     }
 
@@ -269,16 +269,16 @@ export class ScionChatSpaceRail extends LitElement {
     }
 
     .space-actions sl-menu-item::part(base) {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       padding: 0.25rem 0.5rem;
     }
 
     .space-actions sl-menu-item::part(label) {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
     }
 
     .space-actions sl-menu-item sl-icon {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
     }
 
     /* Thread items */
@@ -292,7 +292,7 @@ export class ScionChatSpaceRail extends LitElement {
       gap: 0.375rem;
       padding: 0.3125rem 0.75rem 0.3125rem 1.75rem;
       cursor: pointer;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       color: var(--scion-text, #1e293b);
       transition: background 0.1s;
       position: relative;
@@ -309,7 +309,7 @@ export class ScionChatSpaceRail extends LitElement {
 
     .thread-item .hash {
       color: var(--scion-text-muted, #64748b);
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       flex-shrink: 0;
     }
 
@@ -341,13 +341,13 @@ export class ScionChatSpaceRail extends LitElement {
     }
 
     .thread-item .pin-icon {
-      font-size: 0.625rem;
+      font-size: var(--chat-fs-xs);
       color: var(--scion-text-muted, #64748b);
       flex-shrink: 0;
     }
 
     .thread-item .mute-icon {
-      font-size: 0.625rem;
+      font-size: var(--chat-fs-xs);
       color: var(--scion-text-muted, #64748b);
       flex-shrink: 0;
     }
@@ -361,7 +361,7 @@ export class ScionChatSpaceRail extends LitElement {
     }
 
     .create-thread sl-input::part(base) {
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       min-height: 1.75rem;
       background: var(--scion-surface-raised, #ffffff);
       border-color: var(--scion-border, #e2e8f0);
@@ -397,7 +397,7 @@ export class ScionChatSpaceRail extends LitElement {
       align-items: center;
       gap: 0.5rem;
       padding: 0.375rem 0.75rem;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       cursor: pointer;
       color: var(--scion-text, #1e293b);
     }
@@ -411,7 +411,7 @@ export class ScionChatSpaceRail extends LitElement {
     }
 
     .context-menu-item sl-icon {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
     }
 
     /* Loading / empty */
@@ -450,7 +450,7 @@ export class ScionChatSpaceRail extends LitElement {
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
       padding: 0 0.5rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       font-family: inherit;
       font-weight: 500;
       transition: all 150ms ease;
@@ -473,7 +473,7 @@ export class ScionChatSpaceRail extends LitElement {
     }
 
     .filter-toggle button sl-icon {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
     }
 
     .sort-btn {
@@ -481,7 +481,7 @@ export class ScionChatSpaceRail extends LitElement {
     }
 
     .sort-btn::part(base) {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       padding: 0.125rem;
     }
 
@@ -497,7 +497,7 @@ export class ScionChatSpaceRail extends LitElement {
     }
 
     .rename-input::part(base) {
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       min-height: 1.5rem;
     }
   `;
@@ -1321,12 +1321,14 @@ export class ScionChatSpaceRail extends LitElement {
     return html`
       <div class="rail-header"><span>Project Spaces</span></div>
 
-      ${this.loading
-        ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
-        : html`
-            ${this.renderToolbar()}
-            <div class="rail-body" @click=${this.handleRailBodyClick}>${this.renderSpaces()}</div>
-          `}
+      ${
+        this.loading
+          ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
+          : html`
+              ${this.renderToolbar()}
+              <div class="rail-body" @click=${this.handleRailBodyClick}>${this.renderSpaces()}</div>
+            `
+      }
       ${this.contextMenuTarget ? this.renderContextMenu() : nothing}
     `;
   }
@@ -1433,9 +1435,11 @@ export class ScionChatSpaceRail extends LitElement {
     const filtered = this.getFilteredSpaces();
     if (filtered.length === 0) {
       if (this.spaceFilter === 'unread') {
-        return html`<div class="loading-state" style="font-size: 0.8125rem">All caught up!</div>`;
+        return html`<div class="loading-state" style="font-size: var(--chat-fs-md)">
+          All caught up!
+        </div>`;
       }
-      return html`<div class="loading-state" style="font-size: 0.8125rem">
+      return html`<div class="loading-state" style="font-size: var(--chat-fs-md)">
         No spaces available
       </div>`;
     }
@@ -1449,10 +1453,11 @@ export class ScionChatSpaceRail extends LitElement {
     return html`
       <div class="space-section">
         <div
-          class="space-header ${this.draggingSpaceId === space.projectId ? 'dragging' : ''} ${this
-            .dragOverSpaceId === space.projectId && this.draggingSpaceId !== space.projectId
-            ? 'drag-over'
-            : ''}"
+          class="space-header ${this.draggingSpaceId === space.projectId ? 'dragging' : ''} ${
+            this.dragOverSpaceId === space.projectId && this.draggingSpaceId !== space.projectId
+              ? 'drag-over'
+              : ''
+          }"
           draggable="true"
           @dragstart=${(e: DragEvent): void => this.handleSpaceDragStart(e, space.projectId)}
           @dragover=${(e: DragEvent): void => this.handleSpaceDragOver(e, space.projectId)}
@@ -1466,11 +1471,13 @@ export class ScionChatSpaceRail extends LitElement {
           <sl-icon name="chevron-down" class="chevron ${isCollapsed ? 'collapsed' : ''}"></sl-icon>
           <span class="space-name">${space.projectName}</span>
           <div class="space-actions" @click=${(e: Event) => e.stopPropagation()}>
-            ${space.hasUnreadMention
-              ? html`<span class="mention-badge">@</span>`
-              : space.unreadCount > 0
-                ? html`<span class="unread-badge">${space.unreadCount}</span>`
-                : nothing}
+            ${
+              space.hasUnreadMention
+                ? html`<span class="mention-badge">@</span>`
+                : space.unreadCount > 0
+                  ? html`<span class="unread-badge">${space.unreadCount}</span>`
+                  : nothing
+            }
             <sl-dropdown>
               <sl-icon-button
                 slot="trigger"
@@ -1515,16 +1522,20 @@ export class ScionChatSpaceRail extends LitElement {
             </sl-dropdown>
           </div>
         </div>
-        ${!isCollapsed
-          ? html`
-              <div class="thread-list">
-                ${threads.map((t) => this.renderThread(t, space.projectId))}
-                ${this.creatingThread === space.projectId
-                  ? this.renderCreateThread(space.projectId)
-                  : nothing}
-              </div>
-            `
-          : nothing}
+        ${
+          !isCollapsed
+            ? html`
+                <div class="thread-list">
+                  ${threads.map((t) => this.renderThread(t, space.projectId))}
+                  ${
+                    this.creatingThread === space.projectId
+                      ? this.renderCreateThread(space.projectId)
+                      : nothing
+                  }
+                </div>
+              `
+            : nothing
+        }
       </div>
     `;
   }
@@ -1574,13 +1585,15 @@ export class ScionChatSpaceRail extends LitElement {
           >${thread.name}</span
         >
         ${thread.pinned ? html`<sl-icon name="star-fill" class="pin-icon"></sl-icon>` : nothing}
-        ${thread.muted
-          ? html`<sl-icon name="bell-slash" class="mute-icon" title="Muted"></sl-icon>`
-          : thread.hasUnreadMention
-            ? html`<span class="mention-dot"></span>`
-            : thread.hasUnread
-              ? html`<span class="unread-dot"></span>`
-              : nothing}
+        ${
+          thread.muted
+            ? html`<sl-icon name="bell-slash" class="mute-icon" title="Muted"></sl-icon>`
+            : thread.hasUnreadMention
+              ? html`<span class="mention-dot"></span>`
+              : thread.hasUnread
+                ? html`<span class="unread-dot"></span>`
+                : nothing
+        }
       </div>
     `;
   }

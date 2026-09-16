@@ -97,14 +97,14 @@ export class ScionChatSwitcher extends LitElement {
 
     .search-row sl-icon {
       color: var(--scion-text-muted, #64748b);
-      font-size: 1rem;
+      font-size: var(--chat-fs-2xl);
     }
 
     .search-row input {
       flex: 1;
       border: none;
       outline: none;
-      font-size: 0.9375rem;
+      font-size: var(--chat-fs-xl);
       background: transparent;
       color: var(--scion-text, #1e293b);
     }
@@ -122,7 +122,7 @@ export class ScionChatSwitcher extends LitElement {
       padding: 2rem 1rem;
       text-align: center;
       color: var(--scion-text-muted, #94a3b8);
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
     }
 
     .item {
@@ -141,19 +141,19 @@ export class ScionChatSwitcher extends LitElement {
     }
 
     .item-name {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       font-weight: 500;
       color: var(--scion-text, #1e293b);
     }
 
     .item-context {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #94a3b8);
     }
 
     .dm-badge {
       display: inline-block;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       padding: 0 0.25rem;
       border-radius: 0.125rem;
       background: var(--scion-bg-subtle, #f1f5f9);
@@ -163,7 +163,7 @@ export class ScionChatSwitcher extends LitElement {
 
     .shortcut-hint {
       padding: 0.375rem 1rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #94a3b8);
       border-top: 1px solid var(--scion-border, #e2e8f0);
       display: flex;
@@ -176,7 +176,7 @@ export class ScionChatSwitcher extends LitElement {
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.125rem;
       font-family: inherit;
-      font-size: 0.625rem;
+      font-size: var(--chat-fs-xs);
       background: var(--scion-bg-subtle, #f1f5f9);
     }
   `;
@@ -282,26 +282,29 @@ export class ScionChatSwitcher extends LitElement {
             />
           </div>
           <div class="results">
-            ${items.length === 0
-              ? html`<div class="empty">
-                  ${this.searchTerm ? 'No matching conversations' : 'No conversations'}
-                </div>`
-              : items.map(
-                  (item, i) => html`
-                    <div
-                      class="item ${i === this.selectedIndex ? 'selected' : ''}"
-                      @click=${() => this.selectConversation(item)}
-                      @mouseenter=${() => {
-                        this.selectedIndex = i;
-                      }}
-                    >
-                      <div class="item-name">
-                        ${item.name} ${item.isDM ? html`<span class="dm-badge">DM</span>` : nothing}
+            ${
+              items.length === 0
+                ? html`<div class="empty">
+                    ${this.searchTerm ? 'No matching conversations' : 'No conversations'}
+                  </div>`
+                : items.map(
+                    (item, i) => html`
+                      <div
+                        class="item ${i === this.selectedIndex ? 'selected' : ''}"
+                        @click=${() => this.selectConversation(item)}
+                        @mouseenter=${() => {
+                          this.selectedIndex = i;
+                        }}
+                      >
+                        <div class="item-name">
+                          ${item.name}
+                          ${item.isDM ? html`<span class="dm-badge">DM</span>` : nothing}
+                        </div>
+                        <div class="item-context">${item.spaceName}</div>
                       </div>
-                      <div class="item-context">${item.spaceName}</div>
-                    </div>
-                  `
-                )}
+                    `
+                  )
+            }
           </div>
           <div class="shortcut-hint">
             <span><kbd>↑↓</kbd> navigate</span>
