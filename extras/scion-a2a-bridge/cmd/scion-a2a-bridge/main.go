@@ -252,7 +252,7 @@ func main() {
 		Addr:           listenAddr,
 		Handler:        srv.Handler(),
 		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   30 * time.Second,
+		WriteTimeout:   0, // Rely on request/task context timeouts; avoid cutting off SSE streams
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
@@ -534,7 +534,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 		Addr:           listenAddr,
 		Handler:        httpHandler,
 		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   30 * time.Second,
+		WriteTimeout:   0, // Rely on request/task context timeouts; avoid cutting off SSE streams
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
