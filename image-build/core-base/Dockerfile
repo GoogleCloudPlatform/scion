@@ -16,6 +16,9 @@
 # Core Base Image - Foundation tools only (Go, Git, unix tools, GCS fuse)
 # No scion-specific tooling or user setup
 
+# GitHub CLI version — bump this variable to upgrade gh across all images.
+ARG GH_VERSION=2.100.0
+
 # Bun runtime source
 FROM oven/bun:latest AS bun-source
 
@@ -50,10 +53,6 @@ RUN ARCH=$(dpkg --print-architecture) && \
     tar -C /usr/local -xzf go.tar.gz && \
     rm go.tar.gz
 
-# Download GitHub CLI keyring
-RUN mkdir -p -m 755 /etc/apt/keyrings && \
-    wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg > /etc/apt/keyrings/githubcli-archive-keyring.gpg
-
 # Download gcsfuse GPG key
 RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
 
@@ -72,9 +71,7 @@ USER root
 # Remove default node user to avoid UID 1000 collision with host user
 RUN if getent passwd node; then userdel -r node; fi
 
-COPY --from=builder /etc/apt/keyrings/githubcli-archive-keyring.gpg /etc/apt/keyrings/githubcli-archive-keyring.gpg
 COPY --from=builder /usr/share/keyrings/cloud.google.gpg /usr/share/keyrings/cloud.google.gpg
-RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
 
 # Setup gcsfuse repository
 RUN . /etc/os-release && \
@@ -97,7 +94,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     less \
     jq \
     bc \
-    gh \
     unzip \
     rsync \
     ripgrep \
@@ -140,6 +136,17 @@ COPY --from=builder /usr/local/go /usr/local/go
 COPY --from=builder /usr/local/bin/git /usr/local/bin/git
 COPY --from=builder /usr/local/libexec/git-core /usr/local/libexec/git-core
 COPY --from=builder /usr/local/share/git-core /usr/local/share/git-core
+
+# Install GitHub CLI from official release (pinned version for reproducibility).
+# Bump GH_VERSION at the top of this file to upgrade.
+# Uses the tar.gz archive instead of .deb to avoid dpkg dependency issues
+# (git is compiled from source above and not tracked by dpkg).
+ARG GH_VERSION
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${ARCH}.tar.gz" -o /tmp/gh.tar.gz && \
+    tar -xzf /tmp/gh.tar.gz -C /tmp && \
+    mv /tmp/gh_${GH_VERSION}_linux_${ARCH}/bin/gh /usr/local/bin/gh && \
+    rm -rf /tmp/gh.tar.gz /tmp/gh_${GH_VERSION}_linux_${ARCH}
 
 # Copy Bun from bun-source
 COPY --from=bun-source /usr/local/bin/bun /usr/local/bin/bun
