@@ -1153,7 +1153,8 @@ export class ScionChatThread extends LitElement {
       } else {
         this.scrollToBottomAfterRender();
       }
-      // Advance read watermark after a short delay so the user sees the divider.
+      // Advance read watermark after a short delay — 2s when an unread divider is
+      // visible (so the user can see it), otherwise 500ms to let the thread render.
       if (this.messages.length > 0) {
         setTimeout(() => {
           const lastMsg = this.messages[this.messages.length - 1];

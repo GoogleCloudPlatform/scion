@@ -204,6 +204,64 @@ describe('scion-chat-thread read watermark', () => {
    * completion afterwards moves the unread badge of a thread the user already
    * left, so a response that lands after a switch must be dropped.
    */
+  /**
+   * Regression: when a DM is opened for the first time, showUnreadDivider is
+   * false (no prior read state exists). The initial-load path must still
+   * advance the watermark after the 500ms render-settle delay so the blue
+   * dot clears.
+   */
+  it('advances watermark on initial load even when showUnreadDivider is false', async () => {
+    const MESSAGES = [
+      { id: 'm1', sender: 'them@example.com', msg: 'hello', createdAt: '2026-01-01T00:00:00Z' },
+      { id: 'm2', sender: 'them@example.com', msg: 'world', createdAt: '2026-01-01T00:01:00Z' },
+    ];
+
+    const messagesHistory = (): Response => ({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ items: MESSAGES }),
+    } as unknown as Response);
+
+    vi.useFakeTimers();
+
+    apiFetch.mockReset();
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (init?.method === 'POST' && String(url).endsWith('/read')) {
+        return Promise.resolve({ ok: true, status: 200 } as unknown as Response);
+      }
+      return Promise.resolve(messagesHistory());
+    });
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    // Do NOT set showUnreadDivider — simulates first-time DM open.
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+
+    // Let the history response settle and the component render.
+    await vi.waitFor(() =>
+      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(MESSAGES.length)
+    );
+    await el.updateComplete;
+
+    // Advance past the 500ms render-settle delay.
+    vi.advanceTimersByTime(600);
+    // Flush the microtask queue so the awaited POST resolves.
+    await vi.waitFor(() => {
+      const readCall = apiFetch.mock.calls.find(
+        (c) => String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
+      );
+      expect(readCall).toBeDefined();
+    });
+
+    const readCall = apiFetch.mock.calls.find(
+      (c) => String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
+    );
+    const body = JSON.parse(String((readCall![1] as RequestInit).body));
+    expect(body).toEqual({ messageId: 'm2' });
+
+    vi.useRealTimers();
+  });
+
   it('drops a watermark response that lands after a conversation switch', async () => {
     const el = await mount();
 
