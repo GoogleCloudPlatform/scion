@@ -658,7 +658,8 @@ export class ScionResourceList extends LitElement {
     const showRefreshAll =
       this.kind === 'harness-config' && this.items.some((item) => item.sourceUrl);
 
-    const hasListHeader = (this.cloneFromGlobal && this.canClone) || showRefreshAll || this.canCreate;
+    const hasListHeader =
+      (this.cloneFromGlobal && this.canClone) || showRefreshAll || this.canCreate;
 
     return html`
       ${hasListHeader
@@ -856,7 +857,8 @@ export class ScionResourceList extends LitElement {
 
   private renderEmpty() {
     const label = this.kind === 'template' ? 'templates' : 'harness configs';
-    const scopeLabel = this.scope === 'global' ? 'global' : this.scope === 'user' ? 'user' : 'project';
+    const scopeLabel =
+      this.scope === 'global' ? 'global' : this.scope === 'user' ? 'user' : 'project';
     return html`
       <div class="empty">
         <sl-icon name="file-earmark"></sl-icon>
@@ -937,7 +939,10 @@ export class ScionResourceList extends LitElement {
       >
         <p>
           Clone <strong>${this.cloneTarget.displayName || this.cloneTarget.name}</strong>
-          ${isFromGlobal ? html` from global ${this.scope === 'user' ? 'into your templates' : 'into this project'}` : nothing}.
+          ${isFromGlobal
+            ? html` from global
+              ${this.scope === 'user' ? 'into your templates' : 'into this project'}`
+            : nothing}.
         </p>
         <sl-input
           label="New name"
@@ -1019,15 +1024,13 @@ export class ScionResourceList extends LitElement {
       const created = (await resp.json()) as { id: string };
       this.closeCreateDialog();
       showToast(`${this.kind === 'template' ? 'Template' : 'Harness config'} created`, 'success');
-      this.dispatchEvent(
-        new CustomEvent('resource-changed', {
-          detail: { action: 'created', kind: this.kind, id: created.id },
-          bubbles: true,
-          composed: true,
-        })
-      );
+      this.emitChanged('created', created.id);
       // Navigate to the new resource's detail page
-      window.history.pushState({}, '', `${this.detailBasePath}/${this.detailSegment}/${created.id}`);
+      window.history.pushState(
+        {},
+        '',
+        `${this.detailBasePath}/${this.detailSegment}/${created.id}`
+      );
       window.dispatchEvent(new PopStateEvent('popstate'));
     } catch (err) {
       this.createError = err instanceof Error ? err.message : `Failed to create ${this.kindLabel}`;
@@ -1070,11 +1073,21 @@ export class ScionResourceList extends LitElement {
           : nothing}
         ${this.createError ? html`<div class="dialog-error">${this.createError}</div>` : nothing}
         <div slot="footer">
-          <sl-button variant="default" size="small" ?disabled=${this.createLoading}
-            @click=${() => this.closeCreateDialog()}>Cancel</sl-button>
-          <sl-button variant="primary" size="small" ?loading=${this.createLoading}
+          <sl-button
+            variant="default"
+            size="small"
+            ?disabled=${this.createLoading}
+            @click=${() => this.closeCreateDialog()}
+          >
+            Cancel
+          </sl-button>
+          <sl-button
+            variant="primary"
+            size="small"
+            ?loading=${this.createLoading}
             ?disabled=${this.createLoading || !this.newResourceName.trim()}
-            @click=${() => this.confirmCreate()}>
+            @click=${() => this.confirmCreate()}
+          >
             Create ${this.kind === 'template' ? 'Template' : 'Harness Config'}
           </sl-button>
         </div>
@@ -1114,15 +1127,10 @@ export class ScionResourceList extends LitElement {
       if (!resp.ok) {
         throw new Error(await extractApiError(resp, `Failed to rename ${this.kindLabel}`));
       }
+      const targetId = this.renameTarget.id;
       this.closeRenameDialog();
       showToast(`${this.kind === 'template' ? 'Template' : 'Harness config'} renamed`, 'success');
-      this.dispatchEvent(
-        new CustomEvent('resource-changed', {
-          detail: { action: 'renamed', kind: this.kind, id: this.renameTarget!.id },
-          bubbles: true,
-          composed: true,
-        })
-      );
+      this.emitChanged('renamed', targetId);
       void this.load();
     } catch (err) {
       this.renameError = err instanceof Error ? err.message : `Failed to rename ${this.kindLabel}`;
@@ -1151,11 +1159,23 @@ export class ScionResourceList extends LitElement {
         ></sl-input>
         ${this.renameError ? html`<div class="dialog-error">${this.renameError}</div>` : nothing}
         <div slot="footer">
-          <sl-button variant="default" size="small" ?disabled=${this.renameLoading}
-            @click=${() => this.closeRenameDialog()}>Cancel</sl-button>
-          <sl-button variant="primary" size="small" ?loading=${this.renameLoading}
+          <sl-button
+            variant="default"
+            size="small"
+            ?disabled=${this.renameLoading}
+            @click=${() => this.closeRenameDialog()}
+          >
+            Cancel
+          </sl-button>
+          <sl-button
+            variant="primary"
+            size="small"
+            ?loading=${this.renameLoading}
             ?disabled=${this.renameLoading || !this.renameName.trim()}
-            @click=${() => this.confirmRename()}>Rename</sl-button>
+            @click=${() => this.confirmRename()}
+          >
+            Rename
+          </sl-button>
         </div>
       </sl-dialog>
     `;
@@ -1166,7 +1186,10 @@ export class ScionResourceList extends LitElement {
     const label = this.kind === 'template' ? 'templates' : 'harness configs';
     return html`
       <sl-dialog label="Clone from Global" open @sl-request-close=${() => this.closeGlobalPicker()}>
-        <p>Select a global ${this.kindLabel} to clone ${this.scope === 'user' ? 'into your templates' : 'into this project'}.</p>
+        <p>
+          Select a global ${this.kindLabel} to clone
+          ${this.scope === 'user' ? 'into your templates' : 'into this project'}.
+        </p>
         ${this.globalLoading
           ? html`<div class="empty"><sl-spinner></sl-spinner></div>`
           : this.globalError
