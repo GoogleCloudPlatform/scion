@@ -1182,7 +1182,9 @@ export class ScionPageProjectSettings extends LitElement {
 
   private async loadGCPServiceAccounts(): Promise<void> {
     try {
-      const response = await apiFetch(`/api/v1/projects/${this.projectId}/gcp-service-accounts`);
+      const response = await apiFetch(
+        `/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`
+      );
       if (response.ok) {
         const data = (await response.json()) as { items?: GCPServiceAccount[] };
         this.gcpServiceAccounts = (data.items || []).filter((sa) => sa.verified);
@@ -2211,7 +2213,8 @@ export class ScionPageProjectSettings extends LitElement {
                                 (sa) => html`
                                   <sl-option value=${sa.id}>
                                     ${sa.displayName || sa.email}
-                                    <small>(${sa.email})</small>
+                                    <small>(${sa.email})</small
+                                    >${sa.scope === 'hub' ? ' (Hub)' : ''}
                                   </sl-option>
                                 `
                               )

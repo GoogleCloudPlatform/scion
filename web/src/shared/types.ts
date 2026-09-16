@@ -902,6 +902,8 @@ export interface GCPServiceAccount {
 export interface GCPMintQuotaInfo {
   project_minted: number;
   project_cap: number;
+  hub_minted?: number;
+  hub_cap?: number;
   global_minted: number;
   global_cap: number;
 }

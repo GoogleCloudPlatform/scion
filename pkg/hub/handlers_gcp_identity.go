@@ -388,6 +388,8 @@ type GCPServiceAccountWithCapabilities struct {
 type GCPMintQuotaInfo struct {
 	ProjectMinted int `json:"project_minted"`
 	ProjectCap    int `json:"project_cap"` // 0 = unlimited
+	HubMinted     int `json:"hub_minted,omitempty"`
+	HubCap        int `json:"hub_cap,omitempty"`
 	GlobalMinted  int `json:"global_minted"`
 	GlobalCap     int `json:"global_cap"`
 }

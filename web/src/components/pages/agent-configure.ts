@@ -144,7 +144,9 @@ export class ScionPageAgentConfigure extends LitElement {
   private async loadGCPServiceAccounts(projectId: string): Promise<void> {
     this.gcpServiceAccounts = [];
     try {
-      const res = await apiFetch(`/api/v1/projects/${projectId}/gcp-service-accounts`);
+      const res = await apiFetch(
+        `/api/v1/projects/${projectId}/gcp-service-accounts?includeHubScoped=true`
+      );
       if (res.ok) {
         const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
         this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];
@@ -1152,7 +1154,7 @@ export class ScionPageAgentConfigure extends LitElement {
                       ${this.verifiedGCPServiceAccounts.map(
                         (sa) =>
                           html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}
+                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope === 'hub' ? ' (Hub)' : ''}
                           </sl-option>`
                       )}
                     </sl-select>

@@ -359,6 +359,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "gcp_service_account.read", Resource: "gcp_service_account", Action: "read",
 	},
+	"/api/v1/gcp-service-accounts/mint": {
+		Pattern: "/api/v1/gcp-service-accounts/mint", RouteID: "gcpServiceAccounts.mint",
+		Classification: RoutePolicy,
+		Permission:     "gcp_service_account.create", Resource: "gcp_service_account", Action: "create",
+	},
 	"/api/v1/gcp-service-accounts/": {
 		Pattern: "/api/v1/gcp-service-accounts/", RouteID: "gcpServiceAccounts.byId",
 		Classification: RoutePolicy,

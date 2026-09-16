@@ -108,14 +108,11 @@ export function saListUrl(
 /**
  * saCreateUrl builds the collection URL a registration POST goes to.
  *
- * AT HUB SCOPE THIS POINTS AT THE HUB'S REFUSAL, ON PURPOSE. Hub-scoped
- * creation is not enabled: the flat collection answers 400 invalid_request to
- * POST ?scope=hub (svc-accnt #19 holds the enabling change). No UI renders a
- * create affordance at hub scope -- see the list component -- but if one is
- * ever added, this is the address it will use, and the server will refuse it.
- * The alternative, which is what makes this function worth writing down, is a
- * create button that quietly posts to some project's collection and succeeds at
- * making the WRONG THING: a project-scoped account on a hub-scoped screen.
+ * At hub scope this returns the flat collection URL with scope=hub, which the
+ * backend has accepted for hub-scoped BYO registration since P9. At project
+ * scope it returns the nested project collection URL. The alternative — a
+ * create button that quietly posts to some project's collection and succeeds
+ * at making the WRONG THING — is why this function exists.
  */
 export function saCreateUrl(scope: GCPSAListScope, scopeId: string): string {
   requireScopeId(scope, scopeId);
@@ -125,16 +122,22 @@ export function saCreateUrl(scope: GCPSAListScope, scopeId: string): string {
 /**
  * saMintUrl returns the mint URL, or null where minting has no meaning.
  *
- * Mint is a per-project quota operation against the Hub's own GCP project, and
- * the flat route has no mint endpoint at all -- /api/v1/gcp-service-accounts/mint
- * parses as an account whose id is "mint" and 404s. Returning null rather than
- * a string makes "there is nowhere to send this" a value the caller has to
- * handle, instead of a URL that looks plausible.
+ * Project-scope mint is a nested POST against the project's collection.
+ * Hub-scope mint uses the flat route with a scope query parameter — the backend
+ * added `POST /api/v1/gcp-service-accounts/mint?scope=hub` in Phase 2.
+ *
+ * Returning null rather than a string makes "there is nowhere to send this" a
+ * value the caller has to handle, instead of a URL that looks plausible.
  */
 export function saMintUrl(scope: GCPSAListScope, scopeId: string): string | null {
-  if (scope !== 'project') return null;
-  requireScopeId(scope, scopeId);
-  return `${nested(scopeId)}/mint`;
+  if (scope === 'project') {
+    requireScopeId(scope, scopeId);
+    return `${nested(scopeId)}/mint`;
+  }
+  if (scope === 'hub') {
+    return `${FLAT}/mint?scope=hub`;
+  }
+  return null;
 }
 
 /**
