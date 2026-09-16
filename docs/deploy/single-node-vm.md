@@ -30,7 +30,7 @@ Key properties:
 | GCP project | A Google Cloud project with billing enabled |
 | `gcloud` CLI | Authenticated (`gcloud auth login`) with a project set (`gcloud config set project PROJECT_ID`) |
 | Required APIs | `compute`, `run`, `iap`, `cloudbuild`, `artifactregistry` — enabled automatically by the script |
-| Permissions | Project Editor or equivalent (create VMs, Cloud Run services, service accounts, IAM bindings) |
+| Permissions | Project Editor or equivalent (create VMs, Cloud Run services, service accounts, IAM bindings). The script also grants `roles/iap.tunnelResourceAccessor` to the deployer for SSH access to the private VM. |
 
 ## Quick Start
 
@@ -90,7 +90,7 @@ The deploy script creates the following GCP resources:
 | Resource | Name pattern | Purpose |
 |----------|-------------|---------|
 | GCE VM | `scion-hub-<hub-name>` | Runs the Scion Hub binary via systemd |
-| Service account | `scion-hub-vm@<project>.iam.gserviceaccount.com` | VM identity with logging/monitoring roles |
+| Service account | `scion-hub-<hub-name>@<project>.iam.gserviceaccount.com` | VM identity with logging/monitoring roles |
 | Cloud Run service | `scion-hub-<hub-name>-iap-proxy` | IAP-authenticated reverse proxy to the VM |
 | IAM bindings | IAP `httpsResourceAccessUser` for the deployer | Grants the deployer browser access through IAP |
 
@@ -195,9 +195,7 @@ proxy service can reach the Hub.
 To grant additional users access:
 
 ```bash
-gcloud iap web add-iam-policy-binding \
-  --resource-type=cloud-run \
-  --service=scion-hub-my-hub-iap-proxy \
+gcloud beta run services add-iam-policy-binding scion-hub-my-hub-iap-proxy \
   --region=us-central1 \
   --project=PROJECT_ID \
   --member=user:colleague@example.com \
