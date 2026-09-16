@@ -669,7 +669,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	if !noAuth {
 		resolvedSecrets, asNeededKeys, err := d.resolveSecrets(ctx, agent)
 		if err != nil {
-			d.log.Error("Failed to resolve secrets; agent will start without injected secrets",
+			d.log.ErrorContext(ctx, "Failed to resolve secrets; agent will start without injected secrets",
 				"agent_id", agent.ID, "error", err)
 			// Continue without secrets rather than failing agent creation
 		} else if len(resolvedSecrets) > 0 {
@@ -1994,7 +1994,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// Resolve type-aware secrets and inject environment-type secrets
 	resolvedSecrets, _, err := d.resolveSecrets(ctx, agent)
 	if err != nil {
-		d.log.Error("DispatchAgentStart: failed to resolve secrets; agent will start without injected secrets",
+		d.log.ErrorContext(ctx, "DispatchAgentStart: failed to resolve secrets; agent will start without injected secrets",
 			"agent_id", agent.ID, "error", err)
 	} else {
 		for _, s := range resolvedSecrets {
@@ -2261,7 +2261,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// same as DispatchAgentStart.
 	resolvedSecrets, _, secretErr := d.resolveSecrets(ctx, agent)
 	if secretErr != nil {
-		d.log.Error("DispatchAgentRestart: failed to resolve secrets; agent will restart without injected secrets",
+		d.log.ErrorContext(ctx, "DispatchAgentRestart: failed to resolve secrets; agent will restart without injected secrets",
 			"agent_id", agent.ID, "error", secretErr)
 	} else {
 		for _, s := range resolvedSecrets {
