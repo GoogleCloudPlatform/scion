@@ -26,7 +26,13 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { Project, RuntimeBroker, Template, GCPServiceAccount, MessageMode } from '../../shared/types.js';
+import type {
+  Project,
+  RuntimeBroker,
+  Template,
+  GCPServiceAccount,
+  MessageMode,
+} from '../../shared/types.js';
 
 interface HarnessConfigEntry {
   id: string;
@@ -586,7 +592,9 @@ export class ScionPageAgentCreate extends LitElement {
     const user = visible.filter((t) => t.scope === 'user').sort(byName);
     const project = visible.filter((t) => t.scope === 'project').sort(byName);
     const global = visible.filter((t) => t.scope === 'global').sort(byName);
-    const rest = visible.filter((t) => t.scope !== 'user' && t.scope !== 'project' && t.scope !== 'global').sort(byName);
+    const rest = visible
+      .filter((t) => t.scope !== 'user' && t.scope !== 'project' && t.scope !== 'global')
+      .sort(byName);
     return [...user, ...project, ...global, ...rest];
   }
 
@@ -663,7 +671,9 @@ export class ScionPageAgentCreate extends LitElement {
     if (!this.projectId) return;
 
     try {
-      const res = await apiFetch(`/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`);
+      const res = await apiFetch(
+        `/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`
+      );
       if (res.ok) {
         const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
         this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];
@@ -1018,31 +1028,37 @@ export class ScionPageAgentCreate extends LitElement {
           Create Agent
         </h1>
         <p>Configure and start a new AI agent.</p>
-        ${this.projectFromUrl && this.sourceProject
-          ? html`<p class="project-subtitle">Project: ${this.sourceProject.name}</p>`
-          : nothing}
+        ${
+          this.projectFromUrl && this.sourceProject
+            ? html`<p class="project-subtitle">Project: ${this.sourceProject.name}</p>`
+            : nothing
+        }
       </div>
 
       <div class="form-card">
-        ${this.error
-          ? html`
-              <div class="error-banner">
-                <sl-icon name="exclamation-triangle"></sl-icon>
-                <span>${this.error}</span>
-                ${this.errorLinks.length > 0
-                  ? html`<span class="error-links"
-                      >&nbsp;&mdash;
-                      ${this.errorLinks.map(
-                        (link, i) =>
-                          html`${i > 0 ? html` or ` : nothing}<a href=${link.href}
-                              >${link.label}</a
-                            >`
-                      )}</span
-                    >`
-                  : nothing}
-              </div>
-            `
-          : ''}
+        ${
+          this.error
+            ? html`
+                <div class="error-banner">
+                  <sl-icon name="exclamation-triangle"></sl-icon>
+                  <span>${this.error}</span>
+                  ${
+                    this.errorLinks.length > 0
+                      ? html`<span class="error-links"
+                          >&nbsp;&mdash;
+                          ${this.errorLinks.map(
+                            (link, i) =>
+                              html`${i > 0 ? html` or ` : nothing}<a href=${link.href}
+                                  >${link.label}</a
+                                >`
+                          )}</span
+                        >`
+                      : nothing
+                  }
+                </div>
+              `
+            : ''
+        }
 
         <!-- ═══════ Default Section ═══════ -->
         ${this.renderDefaultSection()}
@@ -1135,33 +1151,35 @@ export class ScionPageAgentCreate extends LitElement {
       </div>
 
       <!-- Project (hidden when projectFromUrl) -->
-      ${!this.projectFromUrl
-        ? html`
-            <div class="form-field">
-              <label for="project">Project</label>
-              <sl-select
-                id="project"
-                placeholder="Select a project..."
-                .value=${this.projectId}
-                @sl-change=${(e: Event) => {
-                  this.projectId = (e.target as HTMLElement & { value: string }).value;
-                  this.selectBrokerForProject();
-                  void this.selectDefaultTemplate();
-                  void this.loadHarnessConfigs();
-                  void this.loadGCPServiceAccounts();
-                  void this.applyProjectDefaults();
-                  if (!this.selectedProject?.gitRemote) {
-                    this.branch = '';
-                  }
-                }}
-                required
-              >
-                ${this.projects.map((p) => html`<sl-option value=${p.id}>${p.name}</sl-option>`)}
-              </sl-select>
-              <div class="hint">The project workspace for this agent.</div>
-            </div>
-          `
-        : nothing}
+      ${
+        !this.projectFromUrl
+          ? html`
+              <div class="form-field">
+                <label for="project">Project</label>
+                <sl-select
+                  id="project"
+                  placeholder="Select a project..."
+                  .value=${this.projectId}
+                  @sl-change=${(e: Event) => {
+                    this.projectId = (e.target as HTMLElement & { value: string }).value;
+                    this.selectBrokerForProject();
+                    void this.selectDefaultTemplate();
+                    void this.loadHarnessConfigs();
+                    void this.loadGCPServiceAccounts();
+                    void this.applyProjectDefaults();
+                    if (!this.selectedProject?.gitRemote) {
+                      this.branch = '';
+                    }
+                  }}
+                  required
+                >
+                  ${this.projects.map((p) => html`<sl-option value=${p.id}>${p.name}</sl-option>`)}
+                </sl-select>
+                <div class="hint">The project workspace for this agent.</div>
+              </div>
+            `
+          : nothing
+      }
 
       <!-- Template -->
       <div class="form-field">
@@ -1175,13 +1193,15 @@ export class ScionPageAgentCreate extends LitElement {
           ${this.filteredTemplates.map(
             (t) =>
               html`<sl-option value=${t.id}
-                >${t.displayName || t.name}${t.scope === 'project'
-                  ? ' (project)'
-                  : t.scope === 'user'
-                    ? ' (user)'
-                    : t.scope === 'global'
-                      ? ' (global)'
-                      : ''}${t.description ? ` - ${t.description}` : ''}</sl-option
+                >${t.displayName || t.name}${
+                  t.scope === 'project'
+                    ? ' (project)'
+                    : t.scope === 'user'
+                      ? ' (user)'
+                      : t.scope === 'global'
+                        ? ' (global)'
+                        : ''
+                }${t.description ? ` - ${t.description}` : ''}</sl-option
               >`
           )}
         </sl-select>
@@ -1202,47 +1222,53 @@ export class ScionPageAgentCreate extends LitElement {
             }
           }}
         >
-          ${this.harnessConfigs.length > 0
-            ? this.harnessConfigs.map(
-                (hc) => html`
-                  <sl-option value=${hc.name}>
-                    ${hc.displayName || hc.name}
-                    ${hc.harness ? html` <small>(${hc.harness})</small>` : ''}
-                  </sl-option>
-                `
-              )
-            : KNOWN_HARNESS_NAMES.map(
-                (name) => html` <sl-option value=${name}>${harnessDisplayName(name)}</sl-option> `
-              )}
+          ${
+            this.harnessConfigs.length > 0
+              ? this.harnessConfigs.map(
+                  (hc) => html`
+                    <sl-option value=${hc.name}>
+                      ${hc.displayName || hc.name}
+                      ${hc.harness ? html` <small>(${hc.harness})</small>` : ''}
+                    </sl-option>
+                  `
+                )
+              : KNOWN_HARNESS_NAMES.map(
+                  (name) => html` <sl-option value=${name}>${harnessDisplayName(name)}</sl-option> `
+                )
+          }
           <sl-option value="__other__">Other...</sl-option>
         </sl-select>
         <div class="hint">
-          ${this.templateHarnessHint
-            ? this.templateHarnessHint
-            : 'The LLM harness configuration to use.'}
+          ${
+            this.templateHarnessHint
+              ? this.templateHarnessHint
+              : 'The LLM harness configuration to use.'
+          }
         </div>
       </div>
 
       <!-- Custom Harness Config Name (conditional) -->
-      ${this.harness === '__other__'
-        ? html`
-            <div class="form-field">
-              <label for="custom-harness">Custom Harness Config Name</label>
-              <sl-input
-                id="custom-harness"
-                placeholder="e.g. my-custom-harness"
-                .value=${this.customHarness}
-                @sl-input=${(e: Event) => {
-                  this.customHarness = (e.target as HTMLElement & { value: string }).value;
-                }}
-                required
-              ></sl-input>
-              <div class="hint">
-                Name of the harness config directory (from .scion/harness-configs/).
+      ${
+        this.harness === '__other__'
+          ? html`
+              <div class="form-field">
+                <label for="custom-harness">Custom Harness Config Name</label>
+                <sl-input
+                  id="custom-harness"
+                  placeholder="e.g. my-custom-harness"
+                  .value=${this.customHarness}
+                  @sl-input=${(e: Event) => {
+                    this.customHarness = (e.target as HTMLElement & { value: string }).value;
+                  }}
+                  required
+                ></sl-input>
+                <div class="hint">
+                  Name of the harness config directory (from .scion/harness-configs/).
+                </div>
               </div>
-            </div>
-          `
-        : nothing}
+            `
+          : nothing
+      }
 
       <!-- Runtime Broker -->
       <div class="form-field">
@@ -1267,26 +1293,28 @@ export class ScionPageAgentCreate extends LitElement {
       </div>
 
       <!-- Runtime Profile (conditional: broker has profiles) -->
-      ${this.selectedBrokerProfiles.length > 0
-        ? html`
-            <div class="form-field">
-              <label for="profile">Runtime Profile</label>
-              <sl-select
-                id="profile"
-                .value=${this.profile}
-                @sl-change=${(e: Event) => {
-                  this.profile = (e.target as HTMLElement & { value: string }).value;
-                }}
-              >
-                <sl-option value="">Use broker default</sl-option>
-                ${this.selectedBrokerProfiles.map(
-                  (p) => html`<sl-option value=${p.name}>${p.name} (${p.type})</sl-option>`
-                )}
-              </sl-select>
-              <div class="hint">The runtime profile on the selected broker.</div>
-            </div>
-          `
-        : nothing}
+      ${
+        this.selectedBrokerProfiles.length > 0
+          ? html`
+              <div class="form-field">
+                <label for="profile">Runtime Profile</label>
+                <sl-select
+                  id="profile"
+                  .value=${this.profile}
+                  @sl-change=${(e: Event) => {
+                    this.profile = (e.target as HTMLElement & { value: string }).value;
+                  }}
+                >
+                  <sl-option value="">Use broker default</sl-option>
+                  ${this.selectedBrokerProfiles.map(
+                    (p) => html`<sl-option value=${p.name}>${p.name} (${p.type})</sl-option>`
+                  )}
+                </sl-select>
+                <div class="hint">The runtime profile on the selected broker.</div>
+              </div>
+            `
+          : nothing
+      }
 
       <!-- Task -->
       <div class="form-field">
@@ -1329,21 +1357,23 @@ export class ScionPageAgentCreate extends LitElement {
   private renderGeneralTab() {
     return html`
       <!-- Branch (conditional: project has gitRemote and is not shared workspace) -->
-      ${this.selectedProject?.gitRemote && !isSharedWorkspace(this.selectedProject)
-        ? html`
-            <div class="form-field">
-              <label>Branch</label>
-              <sl-input
-                placeholder="defaults to agent name"
-                .value=${this.branch}
-                @sl-input=${(e: Event) => {
-                  this.branch = (e.target as HTMLElement & { value: string }).value;
-                }}
-              ></sl-input>
-              <div class="hint">Git branch for this agent's workspace.</div>
-            </div>
-          `
-        : nothing}
+      ${
+        this.selectedProject?.gitRemote && !isSharedWorkspace(this.selectedProject)
+          ? html`
+              <div class="form-field">
+                <label>Branch</label>
+                <sl-input
+                  placeholder="defaults to agent name"
+                  .value=${this.branch}
+                  @sl-input=${(e: Event) => {
+                    this.branch = (e.target as HTMLElement & { value: string }).value;
+                  }}
+                ></sl-input>
+                <div class="hint">Git branch for this agent's workspace.</div>
+              </div>
+            `
+          : nothing
+      }
 
       <!-- Model -->
       <div class="form-field">
@@ -1367,30 +1397,34 @@ export class ScionPageAgentCreate extends LitElement {
       </div>
 
       <!-- Custom Model ID (conditional) -->
-      ${this.modelSelection === 'other'
-        ? html`
-            <div class="form-field">
-              <label>Custom Model ID</label>
-              <sl-input
-                placeholder="e.g. claude-opus-4-8"
-                .value=${this.customModelId}
-                @sl-input=${(e: Event) => {
-                  this.customModelId = (e.target as HTMLElement & { value: string }).value;
-                }}
-              ></sl-input>
-            </div>
-          `
-        : nothing}
+      ${
+        this.modelSelection === 'other'
+          ? html`
+              <div class="form-field">
+                <label>Custom Model ID</label>
+                <sl-input
+                  placeholder="e.g. claude-opus-4-8"
+                  .value=${this.customModelId}
+                  @sl-input=${(e: Event) => {
+                    this.customModelId = (e.target as HTMLElement & { value: string }).value;
+                  }}
+                ></sl-input>
+              </div>
+            `
+          : nothing
+      }
 
       <!-- Thinking Level -->
       <div class="form-field">
         <label>
           Thinking
-          Level${this.thinkingLevel !== null
-            ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)"
-                >(${this.thinkingLevel})</span
-              >`
-            : nothing}
+          Level${
+            this.thinkingLevel !== null
+              ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)"
+                  >(${this.thinkingLevel})</span
+                >`
+              : nothing
+          }
         </label>
         <div style="display:flex;align-items:center;gap:0.75rem">
           <sl-range
@@ -1479,54 +1513,58 @@ export class ScionPageAgentCreate extends LitElement {
       </div>
 
       <!-- Auto-Expose Sub-fields (conditional) -->
-      ${this.autoExposePortsEnabled
-        ? html`
-            <div class="form-field">
-              <label>Port Filter Mode</label>
-              <sl-select
-                .value=${this.autoExposePortsMode}
-                @sl-change=${(e: Event) => {
-                  this.autoExposePortsMode = (e.target as HTMLElement & { value: string }).value;
-                }}
-              >
-                <sl-option value="allowlist">Allowlist</sl-option>
-                <sl-option value="denylist">Denylist</sl-option>
-              </sl-select>
-              <div class="hint">
-                ${this.autoExposePortsMode === 'allowlist'
-                  ? 'Only expose ports in the filter list below.'
-                  : 'Expose all ports except those in the filter list below.'}
+      ${
+        this.autoExposePortsEnabled
+          ? html`
+              <div class="form-field">
+                <label>Port Filter Mode</label>
+                <sl-select
+                  .value=${this.autoExposePortsMode}
+                  @sl-change=${(e: Event) => {
+                    this.autoExposePortsMode = (e.target as HTMLElement & { value: string }).value;
+                  }}
+                >
+                  <sl-option value="allowlist">Allowlist</sl-option>
+                  <sl-option value="denylist">Denylist</sl-option>
+                </sl-select>
+                <div class="hint">
+                  ${
+                    this.autoExposePortsMode === 'allowlist'
+                      ? 'Only expose ports in the filter list below.'
+                      : 'Expose all ports except those in the filter list below.'
+                  }
+                </div>
               </div>
-            </div>
-            <div class="form-field">
-              <label>Port Filter List</label>
-              <sl-input
-                placeholder="e.g. 3000,5173,8080"
-                .value=${this.autoExposePortsList}
-                @sl-input=${(e: Event) => {
-                  this.autoExposePortsList = (e.target as HTMLElement & { value: string }).value;
-                }}
-              ></sl-input>
-              <div class="hint">
-                Comma-separated list of ports to
-                ${this.autoExposePortsMode === 'allowlist' ? 'allow' : 'deny'}.
+              <div class="form-field">
+                <label>Port Filter List</label>
+                <sl-input
+                  placeholder="e.g. 3000,5173,8080"
+                  .value=${this.autoExposePortsList}
+                  @sl-input=${(e: Event) => {
+                    this.autoExposePortsList = (e.target as HTMLElement & { value: string }).value;
+                  }}
+                ></sl-input>
+                <div class="hint">
+                  Comma-separated list of ports to
+                  ${this.autoExposePortsMode === 'allowlist' ? 'allow' : 'deny'}.
+                </div>
               </div>
-            </div>
-            <div class="form-field">
-              <label>Scan Interval</label>
-              <sl-input
-                placeholder="3s"
-                .value=${this.autoExposePortsInterval}
-                @sl-input=${(e: Event) => {
-                  this.autoExposePortsInterval = (
-                    e.target as HTMLElement & { value: string }
-                  ).value;
-                }}
-              ></sl-input>
-              <div class="hint">How often to scan for new listening ports (e.g. 3s, 5s).</div>
-            </div>
-          `
-        : nothing}
+              <div class="form-field">
+                <label>Scan Interval</label>
+                <sl-input
+                  placeholder="3s"
+                  .value=${this.autoExposePortsInterval}
+                  @sl-input=${(e: Event) => {
+                    this.autoExposePortsInterval = (
+                      e.target as HTMLElement & { value: string }
+                    ).value;
+                  }}
+                ></sl-input>
+                <div class="hint">How often to scan for new listening ports (e.g. 3s, 5s).</div>
+              </div>
+            `
+          : nothing
+      }
     `;
   }
 
@@ -1564,7 +1602,12 @@ export class ScionPageAgentCreate extends LitElement {
           }}
         >
           <sl-option value="">Default (inherit from parent)</sl-option>
-          ${(Object.entries(MESSAGE_MODE_DISPLAY) as [MessageMode, typeof MESSAGE_MODE_DISPLAY[MessageMode]][]).map(
+          ${(
+            Object.entries(MESSAGE_MODE_DISPLAY) as [
+              MessageMode,
+              (typeof MESSAGE_MODE_DISPLAY)[MessageMode],
+            ][]
+          ).map(
             ([mode, display]) => html`
               <sl-option value=${mode}>
                 <sl-icon slot="prefix" name=${display.icon}></sl-icon>
@@ -1573,11 +1616,16 @@ export class ScionPageAgentCreate extends LitElement {
             `
           )}
         </sl-select>
-        ${this.messageMode === 'none'
-          ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
-              This agent will be created in sealed mode. It will not be able to send or receive messages.
-            </div>`
-          : html`<div class="hint">Message authorization scope. Default inherits from the parent agent's mode.</div>`}
+        ${
+          this.messageMode === 'none'
+            ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
+                This agent will be created in sealed mode. It will not be able to send or receive
+                messages.
+              </div>`
+            : html`<div class="hint">
+                Message authorization scope. Default inherits from the parent agent's mode.
+              </div>`
+        }
       </div>
 
       <!-- Harness Authentication -->
@@ -1607,62 +1655,68 @@ export class ScionPageAgentCreate extends LitElement {
           .value=${this.gcpMetadataMode}
           @sl-change=${(e: Event) => {
             this.gcpMetadataMode = (e.target as HTMLElement & { value: string }).value as
-              | 'block'
-              | 'passthrough'
-              | 'assign';
+              'block' | 'passthrough' | 'assign';
             if (this.gcpMetadataMode !== 'assign') {
               this.gcpServiceAccountId = '';
             }
           }}
         >
           <sl-option value="block">Block</sl-option>
-          ${this.gcpServiceAccounts.length > 0
-            ? html`<sl-option value="assign">Assign Service Account</sl-option>`
-            : ''}
+          ${
+            this.gcpServiceAccounts.length > 0
+              ? html`<sl-option value="assign">Assign Service Account</sl-option>`
+              : ''
+          }
           <sl-option value="passthrough">Passthrough</sl-option>
         </sl-select>
         <div class="hint">
-          ${this.gcpMetadataMode === 'block'
-            ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
-            : this.gcpMetadataMode === 'assign'
-              ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-              : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
+          ${
+            this.gcpMetadataMode === 'block'
+              ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
+              : this.gcpMetadataMode === 'assign'
+                ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
+                : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."
+          }
         </div>
       </div>
 
       <!-- GCP Service Account (conditional) -->
-      ${this.gcpMetadataMode === 'assign'
-        ? html`
-            <div class="form-field">
-              <label>Service Account</label>
-              ${this.verifiedGCPServiceAccounts.length > 0
-                ? html`
-                    <sl-select
-                      placeholder="Select a service account..."
-                      .value=${this.gcpServiceAccountId}
-                      @sl-change=${(e: Event) => {
-                        this.gcpServiceAccountId = (
-                          e.target as HTMLElement & { value: string }
-                        ).value;
-                      }}
-                    >
-                      ${this.verifiedGCPServiceAccounts.map(
-                        (sa) =>
-                          html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope === 'hub' ? ' (Hub)' : ''}
-                          </sl-option>`
-                      )}
-                    </sl-select>
-                  `
-                : html`
-                    <div class="hint" style="margin-top: 0;">
-                      No verified service accounts available. Register and verify service accounts
-                      in project settings.
-                    </div>
-                  `}
-            </div>
-          `
-        : nothing}
+      ${
+        this.gcpMetadataMode === 'assign'
+          ? html`
+              <div class="form-field">
+                <label>Service Account</label>
+                ${
+                  this.verifiedGCPServiceAccounts.length > 0
+                    ? html`
+                        <sl-select
+                          placeholder="Select a service account..."
+                          .value=${this.gcpServiceAccountId}
+                          @sl-change=${(e: Event) => {
+                            this.gcpServiceAccountId = (
+                              e.target as HTMLElement & { value: string }
+                            ).value;
+                          }}
+                        >
+                          ${this.verifiedGCPServiceAccounts.map(
+                            (sa) =>
+                              html`<sl-option value=${sa.id}>
+                                ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope === 'hub' ? ' (Hub)' : ''}
+                              </sl-option>`
+                          )}
+                        </sl-select>
+                      `
+                    : html`
+                        <div class="hint" style="margin-top: 0;">
+                          No verified service accounts available. Register and verify service
+                          accounts in project settings.
+                        </div>
+                      `
+                }
+              </div>
+            `
+          : nothing
+      }
     `;
   }
 
@@ -1864,18 +1918,20 @@ export class ScionPageAgentCreate extends LitElement {
             </div>
           `
         )}
-        ${this.labelEntries.length < 16
-          ? html`<sl-button
-              size="small"
-              variant="text"
-              @click=${() => {
-                this.labelEntries = [...this.labelEntries, { key: '', value: '' }];
-              }}
-            >
-              <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-              Add label
-            </sl-button>`
-          : nothing}
+        ${
+          this.labelEntries.length < 16
+            ? html`<sl-button
+                size="small"
+                variant="text"
+                @click=${() => {
+                  this.labelEntries = [...this.labelEntries, { key: '', value: '' }];
+                }}
+              >
+                <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                Add label
+              </sl-button>`
+            : nothing
+        }
         <div class="hint">Optional key-value labels to organize agents (max 16).</div>
       </div>
     `;
