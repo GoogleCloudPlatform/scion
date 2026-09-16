@@ -21,6 +21,9 @@ import "strings"
 // human sends a message that is routed to an agent, so the agent sees
 // canonical email identifiers instead of display-name slugs.
 func translateMentionsOutbound(content string, members []chatMemberEntry) string {
+	if !strings.Contains(content, "@") {
+		return content
+	}
 	for _, m := range members {
 		if m.Kind != "user" || m.Email == "" || m.DisplayName == "" {
 			continue
@@ -39,6 +42,9 @@ func translateMentionsOutbound(content string, members []chatMemberEntry) string
 // sends a message to a human thread, so the stored message renders correctly
 // in the native chat UI.
 func translateMentionsInbound(content string, members []chatMemberEntry) string {
+	if !strings.Contains(content, "@") {
+		return content
+	}
 	for _, m := range members {
 		if m.Kind != "user" || m.Email == "" || m.DisplayName == "" {
 			continue
@@ -52,13 +58,26 @@ func translateMentionsInbound(content string, members []chatMemberEntry) string 
 	return content
 }
 
+// isWordChar returns true for characters that are part of a word: letters,
+// digits, underscore, and hyphen. Everything else (whitespace, punctuation,
+// etc.) is considered a valid mention boundary.
+func isWordChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9') || b == '_' || b == '-'
+}
+
 // replaceMention replaces @oldName with @newName at word boundaries in content.
-// The match is case-insensitive. A word boundary is defined as start-of-string
-// or whitespace before the @, and end-of-string, whitespace, or common
-// punctuation after the mention name. Hyphens and @ are NOT treated as word
-// boundaries after the mention, preventing partial matches like @john-smith
-// matching inside @john-smith-jones, and @user matching inside @user@example.com.
+// The match is case-insensitive. A word boundary before the @ is any
+// non-word character (whitespace, punctuation, etc.) or start-of-string.
+// A word boundary after the mention is end-of-string, whitespace, or common
+// punctuation. Hyphens and @ are NOT treated as word boundaries after the
+// mention, preventing partial matches like @john-smith matching inside
+// @john-smith-jones, and @user matching inside @user@example.com.
 func replaceMention(content, oldName, newName string) string {
+	if !strings.Contains(strings.ToLower(content), strings.ToLower("@"+oldName)) {
+		return content
+	}
+
 	target := "@" + strings.ToLower(oldName)
 	replacement := "@" + newName
 	lower := strings.ToLower(content)
@@ -77,12 +96,10 @@ func replaceMention(content, oldName, newName string) string {
 		end := absIdx + len(target)
 
 		// Check word boundary before the mention: must be at start of
-		// string or preceded by whitespace.
-		boundaryBefore := absIdx == 0
-		if !boundaryBefore {
-			prev := content[absIdx-1]
-			boundaryBefore = prev == ' ' || prev == '\n' || prev == '\t' || prev == '\r'
-		}
+		// string or preceded by a non-word character (whitespace,
+		// punctuation, etc.). This allows mentions like (@user) and
+		// "@user" to be translated.
+		boundaryBefore := absIdx == 0 || !isWordChar(content[absIdx-1])
 
 		// Check word boundary after the mention: must be at end of string
 		// or followed by whitespace / common punctuation. Hyphens and @
@@ -94,7 +111,7 @@ func replaceMention(content, oldName, newName string) string {
 			boundaryAfter = next == ' ' || next == '\n' || next == '\t' || next == '\r' ||
 				next == ',' || next == '.' || next == '!' || next == '?' ||
 				next == ')' || next == '(' || next == ':' || next == ';' ||
-				next == '"' || next == '\''
+				next == '"' || next == '\'' || next == ']' || next == '['
 		}
 
 		if boundaryBefore && boundaryAfter {

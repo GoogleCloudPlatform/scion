@@ -122,6 +122,34 @@ func TestReplaceMention(t *testing.T) {
 			new:     "john@example.com",
 			want:    "",
 		},
+		{
+			name:    "mention in parentheses",
+			content: "Hey (@john-smith) please review",
+			old:     "john-smith",
+			new:     "john@example.com",
+			want:    "Hey (@john@example.com) please review",
+		},
+		{
+			name:    "mention in double quotes",
+			content: `She said "@john-smith is great"`,
+			old:     "john-smith",
+			new:     "john@example.com",
+			want:    `She said "@john@example.com is great"`,
+		},
+		{
+			name:    "mention after square bracket",
+			content: "[@john-smith] please review",
+			old:     "john-smith",
+			new:     "john@example.com",
+			want:    "[@john@example.com] please review",
+		},
+		{
+			name:    "no match without at sign",
+			content: "Just a regular message",
+			old:     "john-smith",
+			new:     "john@example.com",
+			want:    "Just a regular message",
+		},
 	}
 
 	for _, tt := range tests {
