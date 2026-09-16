@@ -87,7 +87,6 @@ export class ScionPageProfileTemplates extends LitElement {
         canCreate
         canRename
         cloneFromGlobal
-        @resource-changed=${() => this._refreshList()}
       ></scion-resource-list>
     `;
   }
