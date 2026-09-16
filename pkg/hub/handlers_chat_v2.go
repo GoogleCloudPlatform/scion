@@ -2812,34 +2812,32 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 	pm := s.presenceManager
 	s.mu.RUnlock()
 
-	// --- Humans: look up the project members group ---
+	// --- Humans: list project members via role bindings (PM1) ---
 	var humans []chatMemberEntry
-	membersSlug := "project:" + project.Slug + ":members"
-	group, err := s.store.GetGroupBySlug(ctx, membersSlug)
-	if err == nil && group != nil {
-		members, err := s.store.GetGroupMembers(ctx, group.ID)
-		if err == nil {
-			for _, m := range members {
-				if m.MemberType != store.GroupMemberTypeUser {
-					continue
-				}
-				u, err := s.store.GetUser(ctx, m.MemberID)
-				if err != nil {
-					continue
-				}
-				entry := chatMemberEntry{
-					ID:          u.ID,
-					Kind:        "user",
-					DisplayName: u.DisplayName,
-					Email:       u.Email,
-					AvatarURL:   u.AvatarURL,
-					Role:        m.Role,
-				}
-				if pm != nil {
-					entry.PresenceState = string(pm.GetState(u.ID))
-				}
-				humans = append(humans, entry)
+	projectMembers, err := s.store.ListProjectMembers(ctx, project.ID)
+	if err == nil {
+		seen := make(map[string]bool)
+		for _, m := range projectMembers {
+			if seen[m.UserID] {
+				continue
 			}
+			seen[m.UserID] = true
+			u, err := s.store.GetUser(ctx, m.UserID)
+			if err != nil {
+				continue
+			}
+			entry := chatMemberEntry{
+				ID:          u.ID,
+				Kind:        "user",
+				DisplayName: u.DisplayName,
+				Email:       u.Email,
+				AvatarURL:   u.AvatarURL,
+				Role:        m.Role,
+			}
+			if pm != nil {
+				entry.PresenceState = string(pm.GetState(u.ID))
+			}
+			humans = append(humans, entry)
 		}
 	}
 	if humans == nil {
@@ -3529,31 +3527,22 @@ func (s *Server) fireHumanMentionNotifications(ctx context.Context, mentionNames
 }
 
 // resolveProjectHumanMembers returns the human members of a project by
-// looking up the project's members group. This is used to match @mentions
+// querying project-scoped role bindings (PM1). This is used to match @mentions
 // against human display names.
 func (s *Server) resolveProjectHumanMembers(ctx context.Context, projectID string) []chatMemberEntry {
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		return nil
-	}
-
-	membersSlug := "project:" + project.Slug + ":members"
-	group, err := s.store.GetGroupBySlug(ctx, membersSlug)
-	if err != nil || group == nil {
-		return nil
-	}
-
-	members, err := s.store.GetGroupMembers(ctx, group.ID)
+	projectMembers, err := s.store.ListProjectMembers(ctx, projectID)
 	if err != nil {
 		return nil
 	}
 
 	var humans []chatMemberEntry
-	for _, m := range members {
-		if m.MemberType != store.GroupMemberTypeUser {
+	seen := make(map[string]bool)
+	for _, m := range projectMembers {
+		if seen[m.UserID] {
 			continue
 		}
-		u, err := s.store.GetUser(ctx, m.MemberID)
+		seen[m.UserID] = true
+		u, err := s.store.GetUser(ctx, m.UserID)
 		if err != nil {
 			continue
 		}
