@@ -411,7 +411,9 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	writeJSON(w, http.StatusOK, conv)
+	writeJSON(w, http.StatusOK, conversationResponse{
+		Conversation: *conv,
+	})
 }
 
 // isConversationParticipant checks whether a principal is an active participant
