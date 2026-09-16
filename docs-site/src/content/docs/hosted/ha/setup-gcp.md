@@ -789,7 +789,7 @@ gcloud run deploy scion-hub \
   --project=$PROJECT_ID \
   --service-account=scion-hub-runner@$PROJECT_ID.iam.gserviceaccount.com \
   --add-cloudsql-instances=$PROJECT_ID:$REGION:scion-hub-db \
-  --set-env-vars="SCION_DEPLOY=$(date +%s),KUBECONFIG=/etc/scion/kubeconfig.yaml,SCION_K8S_NAMESPACE=scion-agents" \
+  --set-env-vars="SCION_DEPLOY=$(date +%s),KUBECONFIG=/etc/scion/kubeconfig.yaml,SCION_K8S_NAMESPACE=scion-agents,SESSION_SECRET=$SESSION_SECRET" \
   --set-secrets="/etc/scion/kubeconfig.yaml=scion-gke-kubeconfig:latest,/home/scion/.scion/settings.yaml=scion-hub-settings:latest" \
   --min-instances=1 \
   --max-instances=3 \
@@ -798,7 +798,7 @@ gcloud run deploy scion-hub \
   --port=8080 \
   --timeout=900 \
   --command="/usr/local/bin/scion" \
-  --args="server,start,--hosted,--enable-hub,--enable-runtime-broker,--enable-web,--foreground,--web-port,8080,--session-secret,$SESSION_SECRET" \
+  --args="server,start,--hosted,--enable-hub,--enable-runtime-broker,--enable-web,--foreground,--web-port,8080" \
   --no-allow-unauthenticated \
   --quiet
 ```

@@ -13,7 +13,7 @@ The Web Dashboard is a client-side SPA served by the Go server, which also handl
 | :--- | :--- | :--- |
 | `--enable-web` | `false` | Enable the web dashboard. |
 | `--web-port` | `8080` | The HTTP port the web UI listens on. |
-| `--session-secret` | | Secret key for signing session cookies. **Must be set in production.** |
+| `--session-secret` | | **(Deprecated — use the `SESSION_SECRET` environment variable instead.)** Secret key for signing session cookies. **Must be set in production.** Passing secrets via CLI flags exposes them in `/proc/pid/cmdline` and `ps(1)` output; use the environment variable or a systemd `EnvironmentFile` for secure delivery. |
 
 ## Environment Variables
 
@@ -22,7 +22,7 @@ The Web Dashboard is a client-side SPA served by the Go server, which also handl
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `SCION_SERVER_WEB_PORT` | `8080` | The HTTP port the web UI listens on (overridden by `--web-port`). |
-| `SESSION_SECRET` | | Secret key for signing session cookies (overridden by `--session-secret`). |
+| `SESSION_SECRET` | | Secret key for signing session cookies. **Preferred over `--session-secret`** — environment variables are not visible in process listings. Deliver via systemd `EnvironmentFile` or a secrets manager. |
 
 ### Authentication
 
@@ -61,4 +61,4 @@ Used for local testing without setting up full OAuth.
 The Go server includes a pre-configured Content Security Policy (CSP) that allows connections to the Hub and necessary CDNs (Shoelace). HSTS is automatically enabled in production with a 1-year max-age.
 
 ## Deployment
-The Web Dashboard is served by the same Go binary as the Hub API. In production, enable it with `--enable-web` and ensure `--session-secret` and the OAuth provider variables are configured.
+The Web Dashboard is served by the same Go binary as the Hub API. In production, enable it with `--enable-web` and ensure the `SESSION_SECRET` environment variable and the OAuth provider variables are configured. Avoid passing the session secret via the `--session-secret` CLI flag, as CLI arguments are visible to other local users via `/proc/pid/cmdline`.
