@@ -630,6 +630,19 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 	}
 
 	var clonedIDs []string
+
+	// Register rollback BEFORE the loop so partial creates are cleaned up
+	// if CreateGCPServiceAccount fails mid-loop.
+	*rollback = append(*rollback, func() {
+		rbCtx := context.WithoutCancel(ctx)
+		for _, id := range clonedIDs {
+			if err := s.store.DeleteGCPServiceAccount(rbCtx, id); err != nil {
+				slog.Warn("project clone rollback: failed to delete GCP service account",
+					"clone_id", cloneProjectID, "sa_id", id, "error", err)
+			}
+		}
+	})
+
 	for _, sa := range accounts {
 		newSA := &store.GCPServiceAccount{
 			ID:            api.NewUUID(),
@@ -641,6 +654,8 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 			DefaultScopes: append([]string(nil), sa.DefaultScopes...),
 			Verified:      false,
 			CreatedBy:     callerID,
+			Managed:       sa.Managed,
+			ManagedBy:     sa.ManagedBy,
 		}
 
 		if err := s.store.CreateGCPServiceAccount(ctx, newSA); err != nil {
@@ -648,16 +663,6 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 		}
 		clonedIDs = append(clonedIDs, newSA.ID)
 	}
-
-	*rollback = append(*rollback, func() {
-		rbCtx := context.WithoutCancel(ctx)
-		for _, id := range clonedIDs {
-			if err := s.store.DeleteGCPServiceAccount(rbCtx, id); err != nil {
-				slog.Warn("project clone rollback: failed to delete GCP service account",
-					"clone_id", cloneProjectID, "sa_id", id, "error", err)
-			}
-		}
-	})
 
 	return nil
 }
