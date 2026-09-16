@@ -68,6 +68,10 @@ import (
 	"github.com/google/uuid"
 )
 
+// spaceEmojiAnnotationKey is the project annotation key used to store an
+// optional emoji icon for a chat space.
+const spaceEmojiAnnotationKey = "scion.dev/emoji"
+
 // ---------------------------------------------------------------------------
 // Route dispatchers
 // ---------------------------------------------------------------------------
@@ -159,6 +163,7 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 			ProjectID:   p.ID,
 			ProjectName: p.Name,
 			ProjectSlug: p.Slug,
+			Emoji:       p.Annotations[spaceEmojiAnnotationKey],
 			ThreadCount: len(topics),
 			UnreadCount: unreadCount,
 		})
@@ -209,6 +214,8 @@ func (s *Server) handleChatSpaceRoutes(w http.ResponseWriter, r *http.Request) {
 		s.handleSpaceMembers(w, r, projectID)
 	case "read":
 		s.handleSpaceRead(w, r, projectID)
+	case "emoji":
+		s.handleSpaceEmoji(w, r, projectID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -2694,6 +2701,64 @@ func (s *Server) handleSpaceRead(w http.ResponseWriter, r *http.Request, project
 }
 
 // ---------------------------------------------------------------------------
+// Space Emoji
+// ---------------------------------------------------------------------------
+
+// handleSpaceEmoji handles PUT /api/v1/chat/spaces/{projectId}/emoji.
+// Sets or clears the emoji icon for a space. The emoji is stored in the
+// project's annotations map under the key "scion.dev/emoji".
+func (s *Server) handleSpaceEmoji(w http.ResponseWriter, r *http.Request, projectID string) {
+	if r.Method != http.MethodPut {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		NotFound(w, "Project")
+		return
+	}
+	if !s.authorize(w, r, projectResource(project), ActionUpdate) {
+		return
+	}
+
+	var body struct {
+		Emoji string `json:"emoji"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// Validate: max 24 bytes — a single emoji grapheme cluster can be long due to ZWJ sequences.
+	if len(body.Emoji) > 24 {
+		BadRequest(w, "Emoji value too long (max 24 bytes)")
+		return
+	}
+
+	if project.Annotations == nil {
+		project.Annotations = make(map[string]string)
+	}
+
+	if body.Emoji == "" {
+		delete(project.Annotations, spaceEmojiAnnotationKey)
+	} else {
+		project.Annotations[spaceEmojiAnnotationKey] = body.Emoji
+	}
+
+	if err := s.store.UpdateProject(ctx, project); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	s.events.PublishProjectUpdated(ctx, project)
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// ---------------------------------------------------------------------------
 // DM Endpoints
 // ---------------------------------------------------------------------------
 
@@ -3623,6 +3688,7 @@ type chatSpaceEntry struct {
 	ProjectID   string `json:"projectId"`
 	ProjectName string `json:"projectName"`
 	ProjectSlug string `json:"projectSlug"`
+	Emoji       string `json:"emoji,omitempty"`
 	ThreadCount int    `json:"threadCount"`
 	UnreadCount int    `json:"unreadCount"`
 }
