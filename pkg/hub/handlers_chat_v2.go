@@ -3016,6 +3016,14 @@ func (s *Server) handleChatUserPrefs(w http.ResponseWriter, r *http.Request) {
 			ValidationError(w, "threadSortMode must be activity, alpha, or custom", nil)
 			return
 		}
+		if body.ThreadOrder != "" && !json.Valid([]byte(body.ThreadOrder)) {
+			BadRequest(w, "threadOrder must be valid JSON")
+			return
+		}
+		if body.ThreadGroups != "" && !json.Valid([]byte(body.ThreadGroups)) {
+			BadRequest(w, "threadGroups must be valid JSON")
+			return
+		}
 
 		prefs := WebChatUserPrefs{
 			UserID:         user.ID(),

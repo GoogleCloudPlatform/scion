@@ -1519,7 +1519,37 @@ func (s *sqliteWebChatStore) runMigrations() error {
 	if err := s.backfillTopicConversations(); err != nil {
 		return fmt.Errorf("topic conversation backfill: %w", err)
 	}
+	if err := s.addUserPrefsThreadColumns(); err != nil {
+		return fmt.Errorf("user prefs thread columns: %w", err)
+	}
 	return nil
+}
+
+// addUserPrefsThreadColumns adds thread_order and thread_groups columns to
+// webchat_user_prefs for existing databases that lack them.
+func (s *sqliteWebChatStore) addUserPrefsThreadColumns() error {
+	migrationName := "add_user_prefs_thread_columns"
+	done, err := s.migrationCompleted(migrationName)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+	_, err = s.db.Exec("ALTER TABLE webchat_user_prefs ADD COLUMN thread_order TEXT")
+	if err != nil {
+		// Column may already exist if table was created fresh with the new DDL
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
+	_, err = s.db.Exec("ALTER TABLE webchat_user_prefs ADD COLUMN thread_groups TEXT")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
+	return s.markMigrationCompleted(migrationName)
 }
 
 // addTopicConversationID adds the conversation_id column and unique index
