@@ -47,8 +47,6 @@ import './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
 import './chat-interagent-marker.js';
-import './send-to-agent-picker.js';
-import type { AgentSelectedDetail } from './send-to-agent-picker.js';
 import { getLanguageFromPath } from '../code-editor.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
@@ -311,19 +309,13 @@ export class ScionChatThread extends LitElement {
     content: string;
   } | null = null;
 
-  // ---- Phase-5: Context menu + Send-to-agent state ----
+  // ---- Phase-5: Context menu state ----
 
   /** The message targeted by the right-click context menu. */
   @state() private contextMenuMessage: Message | null = null;
 
   /** Position of the right-click context menu. */
   @state() private contextMenuPosition: { x: number; y: number } = { x: 0, y: 0 };
-
-  /** Whether the agent picker is visible. */
-  @state() private showAgentPicker = false;
-
-  /** Temporarily stored message for send-to-agent flow. */
-  private _pendingSendToAgentMessage: Message | null = null;
 
   // ---- Path-link file preview state (#1148) ----
 
@@ -751,9 +743,17 @@ export class ScionChatThread extends LitElement {
       background: var(--scion-primary-50, #eff6ff);
     }
 
+    .context-menu-item.danger {
+      color: var(--scion-danger-600, #dc2626);
+    }
+
     .context-menu-item sl-icon {
       font-size: 0.875rem;
       color: var(--scion-text-muted, #64748b);
+    }
+
+    .context-menu-item.danger sl-icon {
+      color: var(--scion-danger-600, #dc2626);
     }
 
     /* Path-link file preview dialog (#1148) */
@@ -2153,12 +2153,16 @@ export class ScionChatThread extends LitElement {
   }
 
   // ---------------------------------------------------------------------------
-  // Phase-5: Context menu + Send-to-agent
+  // Phase-5: Context menu
   // ---------------------------------------------------------------------------
 
   /** Render the context menu overlay when a message is right-clicked. */
   private renderContextMenu() {
     if (!this.contextMenuMessage) return nothing;
+
+    const msg = this.contextMenuMessage;
+    const isOwnMessage = msg.senderId === (this._currentUserId || this.currentUserId);
+    const canEditDelete = isOwnMessage && !this.hasAgentReplyAfter(msg);
 
     return html`
       <div class="context-menu-overlay" @click=${this.closeContextMenu}></div>
@@ -2166,9 +2170,29 @@ export class ScionChatThread extends LitElement {
         class="context-menu"
         style="left: ${this.contextMenuPosition.x}px; top: ${this.contextMenuPosition.y}px;"
       >
-        <div class="context-menu-item" @click=${this.handleSendToAgent}>
-          <sl-icon name="send"></sl-icon>
-          Send to Agent...
+        <div class="context-menu-item" @click=${() => this.handleContextMenuReply()}>
+          <sl-icon name="reply"></sl-icon>
+          Reply
+        </div>
+        ${canEditDelete
+          ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuEdit()}>
+              <sl-icon name="pencil"></sl-icon>
+              Edit
+            </div>`
+          : nothing}
+        ${canEditDelete
+          ? html`<div class="context-menu-item danger" @click=${() => this.handleContextMenuDelete()}>
+              <sl-icon name="trash"></sl-icon>
+              Delete
+            </div>`
+          : nothing}
+        <div class="context-menu-item" @click=${() => this.handleContextMenuCopyText()}>
+          <sl-icon name="clipboard"></sl-icon>
+          Copy text
+        </div>
+        <div class="context-menu-item" @click=${() => this.handleContextMenuCopyLink()}>
+          <sl-icon name="link-45deg"></sl-icon>
+          Copy link
         </div>
       </div>
     `;
@@ -2179,8 +2203,6 @@ export class ScionChatThread extends LitElement {
     e.preventDefault();
     this.contextMenuMessage = msg;
     this.contextMenuPosition = { x: e.clientX, y: e.clientY };
-    // Close agent picker if open
-    this.showAgentPicker = false;
   }
 
   /** Close the context menu. */
@@ -2188,44 +2210,71 @@ export class ScionChatThread extends LitElement {
     this.contextMenuMessage = null;
   }
 
-  /** Handle "Send to Agent..." click from context menu. */
-  private handleSendToAgent(): void {
-    // Close context menu and show agent picker
-    const pos = { ...this.contextMenuPosition };
-    this.contextMenuPosition = pos;
-    this.showAgentPicker = true;
-    // Keep contextMenuMessage so we have the message content
-    // but close the visual context menu
+  /** Context menu: Reply to the right-clicked message. */
+  private handleContextMenuReply(): void {
     const msg = this.contextMenuMessage;
     this.contextMenuMessage = null;
-    // Re-store message for the picker callback
-    this._pendingSendToAgentMessage = msg;
+    if (!msg) return;
+    this.composerEditMessage = null; // Cancel any pending edit
+    this.composerReplyTo = {
+      messageId: msg.id,
+      senderName: this.getSenderDisplayName(msg) || msg.sender,
+      content:
+        msg.msg.length > 100 ? msg.msg.slice(0, 100) + '...' : msg.msg,
+    };
   }
 
-  /** Handle agent selection from the picker. */
-  private handleAgentSelected(e: CustomEvent<AgentSelectedDetail>): void {
-    const { agentId } = e.detail;
-    const msg = this._pendingSendToAgentMessage;
-    this._pendingSendToAgentMessage = null;
-    this.showAgentPicker = false;
+  /** Context menu: Edit the right-clicked message. */
+  private handleContextMenuEdit(): void {
+    const msg = this.contextMenuMessage;
+    this.contextMenuMessage = null;
+    if (!msg) return;
+    this.composerReplyTo = null; // Cancel any pending reply
+    this.composerEditMessage = { messageId: msg.id, content: msg.msg };
+  }
 
+  /** Context menu: Delete the right-clicked message. */
+  private async handleContextMenuDelete(): Promise<void> {
+    const msg = this.contextMenuMessage;
+    this.contextMenuMessage = null;
     if (!msg) return;
 
-    // Store context in sessionStorage to avoid URL length overflow (msg.msg
-    // can be 16 000 runes → 48 KB+ when percent-encoded).
-    const contextKey = `scion-send-ctx-${crypto.randomUUID().slice(0, 8)}`;
-    sessionStorage.setItem(contextKey, msg.msg);
-    const url = `/chat/dm/agent/${encodeURIComponent(agentId)}?ctx=${contextKey}`;
-    const navEvent = new CustomEvent('navigate', {
-      detail: { url },
-      bubbles: true,
-      composed: true,
-      cancelable: true,
-    });
-    this.dispatchEvent(navEvent);
-    if (!navEvent.defaultPrevented) {
-      window.location.href = url;
+    const confirmed = window.confirm('Delete this message? This cannot be undone.');
+    if (!confirmed) return;
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages/${encodeURIComponent(msg.id)}`,
+        { method: 'DELETE' }
+      );
+      if (!res.ok) {
+        const errMsg = await extractApiError(res, 'Failed to delete message');
+        this.sendError = errMsg;
+      }
+    } catch (err) {
+      this.sendError = err instanceof Error ? err.message : 'Failed to delete message';
     }
+  }
+
+  /** Context menu: Copy message text to clipboard. */
+  private handleContextMenuCopyText(): void {
+    const msg = this.contextMenuMessage;
+    this.contextMenuMessage = null;
+    if (!msg) return;
+    navigator.clipboard.writeText(msg.msg).catch(() => {
+      // Fallback: ignore clipboard failure silently.
+    });
+  }
+
+  /** Context menu: Copy link to message. */
+  private handleContextMenuCopyLink(): void {
+    const msg = this.contextMenuMessage;
+    this.contextMenuMessage = null;
+    if (!msg) return;
+    const url = `${window.location.origin}${window.location.pathname}#msg-${encodeURIComponent(msg.id)}`;
+    navigator.clipboard.writeText(url).catch(() => {
+      // Fallback: ignore clipboard failure silently.
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -2682,13 +2731,6 @@ export class ScionChatThread extends LitElement {
         ></scion-chat-composer>
         ${this.renderContextMenu()}
         ${this.renderFilePreview()}
-        <scion-send-to-agent-picker
-          .agents=${this.agents}
-          ?open=${this.showAgentPicker}
-          .posX=${this.contextMenuPosition.x}
-          .posY=${this.contextMenuPosition.y}
-          @agent-selected=${this.handleAgentSelected}
-        ></scion-send-to-agent-picker>
       </div>
     `;
   }

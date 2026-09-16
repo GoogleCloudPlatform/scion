@@ -490,10 +490,6 @@ export class ScionChatMessage extends LitElement {
   @state()
   private renderedHtml = '';
 
-  /** Whether the action bar is pinned visible (for touch devices). */
-  @state()
-  private actionBarPinned = false;
-
   /** Preview load state per attachment ID. Replaced, never mutated. */
   @state()
   private previews: ReadonlyMap<string, PreviewState> = new Map();
@@ -1187,56 +1183,6 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-danger-600, #dc2626);
     }
 
-    /* ---- Phase-3: Message action bar ---- */
-    .message-actions {
-      position: absolute;
-      top: -12px;
-      right: 8px;
-      display: flex;
-      gap: 0.0625rem;
-      padding: 0.125rem;
-      border-radius: 0.375rem;
-      background: var(--scion-surface-100, #f1f5f9);
-      border: 1px solid var(--scion-neutral-200, #e2e8f0);
-      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-      opacity: 0;
-      visibility: hidden;
-      pointer-events: none;
-      transition: opacity 0.15s ease, visibility 0.15s ease;
-      z-index: 10;
-    }
-
-    .message-wrapper:hover .message-actions,
-    .message-wrapper:focus-within .message-actions,
-    .message-actions.pinned {
-      opacity: 1;
-      visibility: visible;
-      pointer-events: auto;
-    }
-
-    @media (hover: none) {
-      .message-actions {
-        opacity: 0;
-        visibility: hidden;
-        pointer-events: none;
-      }
-      .message-actions.pinned {
-        opacity: 1;
-        visibility: visible;
-        pointer-events: auto;
-      }
-    }
-
-    .message-actions sl-icon-button::part(base) {
-      padding: 0.25rem;
-      font-size: 0.875rem;
-      color: var(--scion-neutral-600, #475569);
-    }
-
-    .message-actions sl-icon-button::part(base):hover {
-      color: var(--scion-primary-600, #2563eb);
-    }
-
     /* ---- Phase-3: Reply preview quote block ---- */
     .reply-preview {
       display: flex;
@@ -1790,51 +1736,6 @@ export class ScionChatMessage extends LitElement {
     );
   }
 
-  // ---- Phase-3: Action bar and event helpers ----
-
-  /** Render the hover action bar with contextual actions. */
-  private renderActionBar() {
-    const pinnedClass = this.actionBarPinned ? ' pinned' : '';
-    return html`
-      <div class="message-actions${pinnedClass}">
-        <sl-icon-button
-          name="reply"
-          label="Reply"
-          title="Reply"
-          @click=${this.handleReply}
-        ></sl-icon-button>
-        ${this.isOwn && this.canEdit
-          ? html`<sl-icon-button
-              name="pencil"
-              label="Edit"
-              title="Edit"
-              @click=${this.handleEdit}
-            ></sl-icon-button>`
-          : nothing}
-        ${this.isOwn && this.canDelete
-          ? html`<sl-icon-button
-              name="trash"
-              label="Delete"
-              title="Delete"
-              @click=${this.handleDelete}
-            ></sl-icon-button>`
-          : nothing}
-        <sl-icon-button
-          name="clipboard"
-          label="Copy text"
-          title="Copy message"
-          @click=${this.handleCopyText}
-        ></sl-icon-button>
-        <sl-icon-button
-          name="link-45deg"
-          label="Copy link"
-          title="Copy link"
-          @click=${this.handleCopyLink}
-        ></sl-icon-button>
-      </div>
-    `;
-  }
-
   /** Render the reply preview block above the bubble content. */
   private renderReplyPreview() {
     if (!this.replyPreview) return nothing;
@@ -1847,59 +1748,6 @@ export class ScionChatMessage extends LitElement {
     `;
   }
 
-  private handleReply() {
-    this.dispatchEvent(
-      new CustomEvent('message-reply', {
-        bubbles: true,
-        composed: true,
-        detail: {
-          messageId: this.messageId,
-          senderName: this.senderName || this.sender,
-          content: this.body,
-        },
-      })
-    );
-  }
-
-  private handleEdit() {
-    this.dispatchEvent(
-      new CustomEvent('message-edit', {
-        bubbles: true,
-        composed: true,
-        detail: {
-          messageId: this.messageId,
-          content: this.body,
-        },
-      })
-    );
-  }
-
-  private handleDelete() {
-    this.dispatchEvent(
-      new CustomEvent('message-delete', {
-        bubbles: true,
-        composed: true,
-        detail: { messageId: this.messageId },
-      })
-    );
-  }
-
-  private handleCopyText() {
-    navigator.clipboard.writeText(this.body).catch(() => {
-      // Fallback: ignore clipboard failure silently.
-    });
-  }
-
-  private handleCopyLink() {
-    this.dispatchEvent(
-      new CustomEvent('message-copy-link', {
-        bubbles: true,
-        composed: true,
-        detail: { messageId: this.messageId },
-      })
-    );
-  }
-
   private handleScrollToMessage(messageId: string) {
     this.dispatchEvent(
       new CustomEvent('scroll-to-message', {
@@ -1910,28 +1758,6 @@ export class ScionChatMessage extends LitElement {
     );
   }
 
-  /** Touch handler for long-press to toggle action bar on mobile. */
-  private touchTimer: ReturnType<typeof setTimeout> | null = null;
-
-  private handleTouchStart() {
-    this.touchTimer = setTimeout(() => {
-      this.actionBarPinned = !this.actionBarPinned;
-    }, 500);
-
-    const clearTimer = () => {
-      if (this.touchTimer) {
-        clearTimeout(this.touchTimer);
-        this.touchTimer = null;
-      }
-      window.removeEventListener('touchend', clearTimer);
-      window.removeEventListener('touchmove', clearTimer);
-      window.removeEventListener('touchcancel', clearTimer);
-    };
-    window.addEventListener('touchend', clearTimer, { once: true });
-    window.addEventListener('touchmove', clearTimer, { once: true });
-    window.addEventListener('touchcancel', clearTimer, { once: true });
-  }
-
   override render() {
     const dirClass = this.fromAgent ? 'from-agent' : 'from-user';
     const groupClass = !this.showHeader ? ' grouped' : '';
@@ -1940,7 +1766,6 @@ export class ScionChatMessage extends LitElement {
     return html`
       <div
         class="message-wrapper ${dirClass}${groupClass}"
-        @touchstart=${this.handleTouchStart}
       >
         ${this.showHeader && this.fromAgent
           ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
@@ -1950,7 +1775,6 @@ export class ScionChatMessage extends LitElement {
             ? html`<div class="avatar-spacer"></div>`
             : nothing}
         <div class="bubble">
-          ${!isDeleted ? this.renderActionBar() : nothing}
           ${this.showHeader && this.fromAgent
             ? html`
                 <div class="bubble-header">
