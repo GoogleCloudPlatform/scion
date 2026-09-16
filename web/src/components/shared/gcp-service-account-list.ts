@@ -235,12 +235,12 @@ export class ScionGCPServiceAccountList extends LitElement {
   }
 
   /**
-   * Mint is a per-project operation against the Hub's own GCP project, with a
-   * per-project quota; the flat route has no mint endpoint at all. At hub scope
-   * there is nowhere to send it, which saMintUrl says by returning null.
+   * Whether minting is available at the current scope. The URL module is the
+   * sole source of truth for "does a mint endpoint exist at this scope" —
+   * saMintUrl returns null where there is nowhere to send it.
    */
   private canMintHere(): boolean {
-    if (this.scope !== 'project') return false;
+    if (!saMintUrl(this.scope, this.scopeId)) return false;
     return can(this.listCapabilities, 'mint');
   }
 
@@ -321,12 +321,11 @@ export class ScionGCPServiceAccountList extends LitElement {
       if (this.mintDescription.trim()) body.description = this.mintDescription.trim();
       if (!this.mintAllowSelfActAs) body.allow_self_act_as = false;
 
-      // Non-null asserted through a guard rather than a `!`: openMintDialog is
-      // unreachable at hub scope (renderMintAffordance returns nothing there),
-      // and mint has no hub address to fall back on.
+      // Non-null asserted through a guard rather than a `!`: canMintHere()
+      // already checks saMintUrl, so this is a defensive fallback.
       const url = saMintUrl(this.scope, this.scopeId);
       if (!url) {
-        throw new Error('Minting is only available for a project');
+        throw new Error('Minting is not available at this scope');
       }
 
       const response = await apiFetch(url, {
@@ -360,8 +359,14 @@ export class ScionGCPServiceAccountList extends LitElement {
 
   private isMintDisabled(): boolean {
     if (!this.mintQuota) return false;
-    const { project_cap, project_minted, global_cap, global_minted } = this.mintQuota;
-    if (project_cap > 0 && project_minted >= project_cap) return true;
+    const { global_cap, global_minted } = this.mintQuota;
+    if (this.scope === 'hub') {
+      const { hub_cap, hub_minted } = this.mintQuota;
+      if (hub_cap && hub_cap > 0 && (hub_minted ?? 0) >= hub_cap) return true;
+    } else {
+      const { project_cap, project_minted } = this.mintQuota;
+      if (project_cap > 0 && project_minted >= project_cap) return true;
+    }
     if (global_cap > 0 && global_minted >= global_cap) return true;
     return false;
   }
@@ -914,11 +919,19 @@ export class ScionGCPServiceAccountList extends LitElement {
 
   private renderQuotaInfo() {
     if (!this.mintQuota) return nothing;
-    const { project_minted, project_cap, global_minted, global_cap } = this.mintQuota;
+    const { global_minted, global_cap } = this.mintQuota;
 
     const parts: string[] = [];
-    if (project_cap > 0) {
-      parts.push(`Project: ${project_minted}/${project_cap}`);
+    if (this.scope === 'hub') {
+      const { hub_minted, hub_cap } = this.mintQuota;
+      if (hub_cap && hub_cap > 0) {
+        parts.push(`Hub: ${hub_minted ?? 0}/${hub_cap}`);
+      }
+    } else {
+      const { project_minted, project_cap } = this.mintQuota;
+      if (project_cap > 0) {
+        parts.push(`Project: ${project_minted}/${project_cap}`);
+      }
     }
     if (global_cap > 0) {
       parts.push(`Global: ${global_minted}/${global_cap}`);

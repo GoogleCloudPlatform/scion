@@ -122,16 +122,22 @@ export function saCreateUrl(scope: GCPSAListScope, scopeId: string): string {
 /**
  * saMintUrl returns the mint URL, or null where minting has no meaning.
  *
- * Mint is a per-project quota operation against the Hub's own GCP project, and
- * the flat route has no mint endpoint at all -- /api/v1/gcp-service-accounts/mint
- * parses as an account whose id is "mint" and 404s. Returning null rather than
- * a string makes "there is nowhere to send this" a value the caller has to
- * handle, instead of a URL that looks plausible.
+ * Project-scope mint is a nested POST against the project's collection.
+ * Hub-scope mint uses the flat route with a scope query parameter — the backend
+ * added `POST /api/v1/gcp-service-accounts/mint?scope=hub` in Phase 2.
+ *
+ * Returning null rather than a string makes "there is nowhere to send this" a
+ * value the caller has to handle, instead of a URL that looks plausible.
  */
 export function saMintUrl(scope: GCPSAListScope, scopeId: string): string | null {
-  if (scope !== 'project') return null;
-  requireScopeId(scope, scopeId);
-  return `${nested(scopeId)}/mint`;
+  if (scope === 'project') {
+    requireScopeId(scope, scopeId);
+    return `${nested(scopeId)}/mint`;
+  }
+  if (scope === 'hub') {
+    return `${FLAT}/mint?scope=hub`;
+  }
+  return null;
 }
 
 /**

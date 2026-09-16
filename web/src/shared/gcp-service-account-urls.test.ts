@@ -155,12 +155,9 @@ describe('saCreateUrl — hub-scoped creation addresses the flat collection', ()
   });
 });
 
-describe('saMintUrl — “nowhere to send this” is a value, not a URL', () => {
-  it('returns null at hub scope', () => {
-    // The flat route has no mint endpoint: /api/v1/gcp-service-accounts/mint
-    // parses as an account whose id is "mint". A plausible-looking string here
-    // would produce a 404 that reads like a missing account.
-    expect(saMintUrl('hub', '')).toBeNull();
+describe('saMintUrl — scope-appropriate mint endpoint', () => {
+  it('returns the flat mint URL with scope=hub at hub scope', () => {
+    expect(saMintUrl('hub', '')).toBe('/api/v1/gcp-service-accounts/mint?scope=hub');
   });
 
   it('returns the project mint endpoint at project scope', () => {
