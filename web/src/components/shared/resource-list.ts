@@ -18,9 +18,9 @@
  * Shared resource list component
  *
  * Lists file-based resources (templates or harness-configs) for a given scope
- * and links each one to its detail/editor page. Used by both the project
- * settings Resources section and the Hub Resources page so the two render
- * identically.
+ * (project, global, or user) and links each one to its detail/editor page.
+ * Used by the project settings Resources section, the Hub Resources page, and
+ * the user profile Templates page so they all render identically.
  *
  * It does not handle import/creation — those affordances (where they exist,
  * e.g. template import) are rendered by the host page around this list.
@@ -50,9 +50,9 @@ export class ScionResourceList extends LitElement {
   @property({ type: String })
   kind: ResourceKind = 'template';
 
-  /** Resource scope: 'project' or 'global'. */
+  /** Resource scope: 'project', 'global', or 'user'. */
   @property({ type: String })
-  scope: 'project' | 'global' = 'project';
+  scope: 'project' | 'global' | 'user' = 'project';
 
   /** Scope id (project id) — required for project scope, omitted for global. */
   @property({ type: String })
@@ -812,7 +812,7 @@ export class ScionResourceList extends LitElement {
     return html`
       <div class="empty">
         <sl-icon name="file-earmark"></sl-icon>
-        <p>No ${this.scope === 'global' ? 'global' : 'project'} ${label} yet.</p>
+        <p>No ${this.scope === 'global' ? 'global' : this.scope === 'user' ? 'user' : 'project'} ${label} yet.</p>
       </div>
     `;
   }
@@ -875,7 +875,7 @@ export class ScionResourceList extends LitElement {
 
     const isFromGlobal =
       this.cloneFromGlobal &&
-      this.scope === 'project' &&
+      (this.scope === 'project' || this.scope === 'user') &&
       !this.items.find((i) => i.id === this.cloneTarget!.id);
 
     return html`
@@ -889,7 +889,7 @@ export class ScionResourceList extends LitElement {
       >
         <p>
           Clone <strong>${this.cloneTarget.displayName || this.cloneTarget.name}</strong>
-          ${isFromGlobal ? html` from global into this project` : nothing}.
+          ${isFromGlobal ? html` from global ${this.scope === 'user' ? 'into your templates' : 'into this project'}` : nothing}.
         </p>
         <sl-input
           label="New name"
@@ -927,7 +927,7 @@ export class ScionResourceList extends LitElement {
     const label = this.kind === 'template' ? 'templates' : 'harness configs';
     return html`
       <sl-dialog label="Clone from Global" open @sl-request-close=${() => this.closeGlobalPicker()}>
-        <p>Select a global ${this.kindLabel} to clone into this project.</p>
+        <p>Select a global ${this.kindLabel} to clone ${this.scope === 'user' ? 'into your templates' : 'into this project'}.</p>
         ${this.globalLoading
           ? html`<div class="empty"><sl-spinner></sl-spinner></div>`
           : this.globalError
