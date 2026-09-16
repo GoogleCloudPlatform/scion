@@ -677,3 +677,163 @@ describe('scion-chat-thread catch-up after SSE reconnect', () => {
     expect(historyCalls()).toBe(0);
   });
 });
+
+/**
+ * Mention fan-out messages (type:"mention") are created for agent dispatch
+ * tracking. They duplicate the content of the primary instruction message and
+ * must not appear in the rendered chat. The filter lives in mergeMessages() and
+ * must:
+ *  1. Exclude mention messages from this.messages (the display array).
+ *  2. Allow non-mention types through unchanged.
+ *  3. Keep mention messages in messageMap for ID-based dedup tracking.
+ */
+describe('scion-chat-thread mention message filtering', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('excludes messages with type "mention" from the rendered message list', async () => {
+    const el = await mount();
+
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'msg-mention-1',
+      msg: '@coder please help',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      type: 'mention',
+      createdAt: '2026-01-01T00:00:00Z',
+    });
+
+    // Give the SSE handler time to process and merge.
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    // The mention message should NOT appear in the rendered output.
+    const rendered = el.shadowRoot?.querySelectorAll('scion-chat-message');
+    expect(rendered?.length).toBe(0);
+  });
+
+  it('allows messages with other types through the filter', async () => {
+    const el = await mount();
+    const now = new Date();
+
+    const messages = [
+      {
+        threadId: CONVERSATION_KEY,
+        id: 'msg-instruction',
+        msg: 'instruction msg',
+        sender: 'me@example.com',
+        senderId: 'user-me',
+        type: 'instruction',
+        createdAt: new Date(now.getTime()).toISOString(),
+      },
+      {
+        threadId: CONVERSATION_KEY,
+        id: 'msg-system',
+        msg: 'system msg',
+        sender: 'system',
+        senderId: 'system',
+        type: 'system',
+        createdAt: new Date(now.getTime() + 1000).toISOString(),
+      },
+      {
+        threadId: CONVERSATION_KEY,
+        id: 'msg-empty-type',
+        msg: 'empty type msg',
+        sender: 'them@example.com',
+        senderId: 'user-them',
+        type: '',
+        createdAt: new Date(now.getTime() + 2000).toISOString(),
+      },
+    ];
+
+    for (const m of messages) {
+      emitChatMessage(m);
+    }
+
+    await vi.waitFor(() => {
+      const rendered = el.shadowRoot?.querySelectorAll('scion-chat-message');
+      expect(rendered?.length).toBe(3);
+    });
+  });
+
+  it('keeps mention messages in messageMap for dedup tracking', async () => {
+    const el = await mount();
+
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'msg-mention-dedup',
+      msg: '@coder check this',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      type: 'mention',
+      createdAt: '2026-01-01T00:00:00Z',
+    });
+
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    // Not rendered.
+    const rendered = el.shadowRoot?.querySelectorAll('scion-chat-message');
+    expect(rendered?.length).toBe(0);
+
+    // But present in messageMap for dedup. messageMap is private — access via
+    // type escape so the test can verify the internal invariant.
+    const messageMap = (el as unknown as { messageMap: Map<string, unknown> }).messageMap;
+    expect(messageMap.has('msg-mention-dedup')).toBe(true);
+  });
+
+  it('filters mention messages mixed with displayable messages', async () => {
+    const el = await mount();
+    const now = new Date();
+
+    // Send a mix: one instruction, one mention, one assistant-reply.
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'msg-instr',
+      msg: 'Help me',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      type: 'instruction',
+      createdAt: new Date(now.getTime()).toISOString(),
+    });
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'msg-mention-mixed',
+      msg: 'Help me',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      type: 'mention',
+      createdAt: new Date(now.getTime() + 1000).toISOString(),
+    });
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'msg-reply',
+      msg: 'Sure!',
+      sender: 'agent:coder',
+      senderId: 'agent-1',
+      type: 'assistant-reply',
+      createdAt: new Date(now.getTime() + 2000).toISOString(),
+    });
+
+    // Wait for the two displayable messages to render.
+    await vi.waitFor(() => {
+      const rendered = el.shadowRoot?.querySelectorAll('scion-chat-message');
+      expect(rendered?.length).toBe(2);
+    });
+
+    // Verify the mention is in messageMap but not displayed.
+    const messageMap = (el as unknown as { messageMap: Map<string, unknown> }).messageMap;
+    expect(messageMap.has('msg-mention-mixed')).toBe(true);
+    expect(messageMap.has('msg-instr')).toBe(true);
+    expect(messageMap.has('msg-reply')).toBe(true);
+  });
+});
