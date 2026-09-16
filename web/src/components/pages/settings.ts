@@ -393,23 +393,14 @@ export class ScionPageSettings extends LitElement {
               </sl-tab-panel>`
             : nothing}
           ${this.isTabVisible('service-accounts')
-            ? html`<!--
-                THE COPY HERE STATES WHAT IS TRUE TODAY, NOT WHAT THE SCOPE IMPLIES.
-                An earlier draft said these accounts "are usable from every project".
-                The Hub does accept a hub-scoped account at agent creation, but no
-                agent-creation picker offers one yet, so that sentence promised a
-                capability a user cannot reach and would have read as a bug rather
-                than as unfinished work. Both gaps below are part of step 5's
-                definition of done; when the picker lands, this paragraph shrinks.
-              -->
-                <sl-tab-panel name="service-accounts">
+            ? html`<sl-tab-panel name="service-accounts">
                   <p class="tab-intro">
                     GCP service accounts registered at hub scope. They belong to the hub rather than
                     to any one project, which is why they are managed here.
                   </p>
                   <p class="tab-intro">
-                    One thing is not available yet: selecting a hub-scoped account when creating an
-                    agent, so an account listed here is not yet offered on any project's agent form.
+                    Hub-scoped accounts are available from every project's agent form and can be set
+                    as a project's default GCP identity.
                   </p>
                   <scion-gcp-service-account-list scope="hub"></scion-gcp-service-account-list>
                 </sl-tab-panel>`

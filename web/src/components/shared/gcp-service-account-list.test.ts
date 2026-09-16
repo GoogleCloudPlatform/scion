@@ -419,6 +419,54 @@ describe('scion-gcp-service-account-list', () => {
     });
   });
 
+  describe('hub-scope quota logic', () => {
+    it('isMintDisabled returns true when hub_cap is reached', async () => {
+      const caps = { actions: ['create', 'mint'] };
+      const mintQuota = {
+        project_minted: 0,
+        project_cap: 0,
+        hub_minted: 2,
+        hub_cap: 2,
+        global_minted: 2,
+        global_cap: 10,
+      };
+
+      const el = await createComponent(
+        { scope: 'hub' },
+        makeFetch([], { items: [], _capabilities: caps, mint_quota: mintQuota })
+      );
+
+      // The component exposes isMintDisabled as a private method — call it
+      // through the element to exercise scope-aware branching.
+      const disabled = (
+        el as unknown as { isMintDisabled: () => boolean }
+      ).isMintDisabled();
+      expect(disabled).toBe(true);
+    });
+
+    it('renderQuotaInfo shows "Hub: X/Y" at hub scope', async () => {
+      const caps = { actions: ['create', 'mint'] };
+      const mintQuota = {
+        project_minted: 0,
+        project_cap: 0,
+        hub_minted: 1,
+        hub_cap: 5,
+        global_minted: 3,
+        global_cap: 10,
+      };
+
+      const el = await createComponent(
+        { scope: 'hub' },
+        makeFetch([], { items: [], _capabilities: caps, mint_quota: mintQuota })
+      );
+
+      const text = el.shadowRoot!.textContent ?? '';
+      expect(text).toContain('Hub: 1/5');
+      // Should not show "Project:" at hub scope.
+      expect(text).not.toContain('Project:');
+    });
+  });
+
   describe('links out', () => {
     it('links parentless accounts to a detail page and project ones nowhere', async () => {
       const hubEl = await createComponent(
