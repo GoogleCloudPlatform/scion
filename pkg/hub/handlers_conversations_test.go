@@ -118,8 +118,9 @@ func TestListConversations_HappyPath(t *testing.T) {
 	require.Len(t, result.Conversations, 1)
 	require.Equal(t, conv.ID, result.Conversations[0].ID)
 	require.Equal(t, "Test Conversation", result.Conversations[0].DisplayName)
-	// Participants should be included.
-	require.Len(t, result.Conversations[0].Participants, 1)
+	// Participants are deliberately omitted from list responses (R-2: N+1 fix).
+	// Use GET /conversations/{id} for participant details.
+	require.Empty(t, result.Conversations[0].Participants)
 }
 
 func TestListConversations_WithFilters(t *testing.T) {
@@ -427,11 +428,21 @@ func TestCreateConversation_DefaultsToGroup(t *testing.T) {
 
 func TestSetDefaultAgent_HappyPath(t *testing.T) {
 	srv, s := testServer(t)
-	_, agent, conv := setupConvTestData(t, s)
+	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
 
-	newAgentID := api.NewUUID()
-	body := setDefaultAgentRequest{AgentID: newAgentID}
+	// Create a second agent to set as the default (must exist in the store per N-1 validation).
+	newAgent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "new-default-agent",
+		Slug:       "new-default-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), newAgent))
+
+	body := setDefaultAgentRequest{AgentID: newAgent.ID}
 	bodyBytes, _ := json.Marshal(body)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
@@ -447,7 +458,7 @@ func TestSetDefaultAgent_HappyPath(t *testing.T) {
 	updated, err := s.GetConversation(ctx, conv.ID)
 	require.NoError(t, err)
 	require.NotNil(t, updated.DefaultAgentID)
-	require.Equal(t, newAgentID, *updated.DefaultAgentID)
+	require.Equal(t, newAgent.ID, *updated.DefaultAgentID)
 }
 
 func TestSetDefaultAgent_NotParticipant(t *testing.T) {
@@ -533,4 +544,173 @@ func TestListConversations_AsUser(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
 	require.Len(t, result.Conversations, 1)
 	require.Equal(t, conv.ID, result.Conversations[0].ID)
+}
+
+// ---- Validation tests (N-1, N-2) ----
+
+func TestSetDefaultAgent_AgentNotFound(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	// Use a non-existent agent ID.
+	body := setDefaultAgentRequest{AgentID: api.NewUUID()}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+func TestCreateConversation_ProjectNotFound(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, _ := setupConvTestData(t, s)
+
+	body := createConversationRequest{
+		DisplayName: "Test Conv",
+		ProjectID:   api.NewUUID(), // non-existent project
+		Kind:        "group",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(agent.ID, ""))
+	rr := httptest.NewRecorder()
+	srv.handleCreateConversation(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+// ---- Mux-level integration tests (R-3) ----
+// These tests send requests through srv.mux.ServeHTTP to verify the HTTP
+// routing layer, not just individual handler functions. The R-1 routing bug
+// (POST /api/v1/conversations unreachable) was missed because the original
+// tests called handlers directly.
+
+func TestMux_CreateConversation(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, _ := setupConvTestData(t, s)
+
+	body := createConversationRequest{
+		DisplayName: "Mux Test Conv",
+		ProjectID:   project.ID,
+		Kind:        "group",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(agent.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+
+	var result conversationResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Equal(t, "Mux Test Conv", result.DisplayName)
+	require.Equal(t, "group", result.Kind)
+	require.NotEmpty(t, result.ID)
+	require.Len(t, result.Participants, 1)
+}
+
+func TestMux_ListConversations(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	var result conversationListResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Len(t, result.Conversations, 1)
+	require.Equal(t, conv.ID, result.Conversations[0].ID)
+}
+
+func TestMux_GetConversation(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID, nil)
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	var result conversationResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Equal(t, conv.ID, result.ID)
+	require.Equal(t, "Test Conversation", result.DisplayName)
+	// GET detail endpoint should include participants.
+	require.Len(t, result.Participants, 1)
+}
+
+func TestMux_ListMessages(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	// Create a test message.
+	msg := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      project.ID,
+		AgentID:        agent.ID,
+		Sender:         "agent:" + agent.Name,
+		SenderID:       agent.ID,
+		Recipient:      "user:test@example.com",
+		RecipientID:    api.NewUUID(),
+		Msg:            "Mux routed message",
+		Type:           "instruction",
+		ConversationID: conv.ID,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateMessage(context.Background(), msg))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages", nil)
+	req = req.WithContext(agentContext(agent.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	var result store.ListResult[store.Message]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Len(t, result.Items, 1)
+	require.Equal(t, "Mux routed message", result.Items[0].Msg)
+}
+
+func TestMux_SetDefaultAgent(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	// The agent ID must reference an existing agent (N-1 validation).
+	body := setDefaultAgentRequest{AgentID: agent.ID}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(agent.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	// Verify the default agent was set.
+	updated, err := s.GetConversation(context.Background(), conv.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated.DefaultAgentID)
+	require.Equal(t, agent.ID, *updated.DefaultAgentID)
 }

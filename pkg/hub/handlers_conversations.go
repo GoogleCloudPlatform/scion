@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -48,11 +49,19 @@ type setDefaultAgentRequest struct {
 	AgentID string `json:"agentId"`
 }
 
-// handleListConversations handles GET /api/v1/conversations.
-// Lists conversations for the authenticated caller (user or agent).
+// handleListConversations handles GET /api/v1/conversations (list) and
+// POST /api/v1/conversations (create). Go's http.ServeMux matches the
+// exact path (no trailing slash) to this handler, so POST must be
+// dispatched here to be reachable.
 func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		MethodNotAllowed(w, http.MethodGet)
+	switch r.Method {
+	case http.MethodGet:
+		// fall through to list logic below
+	case http.MethodPost:
+		s.handleCreateConversation(w, r)
+		return
+	default:
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 		return
 	}
 
@@ -108,19 +117,14 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 		filtered = filtered[:limit]
 	}
 
-	// Build response with participants for each conversation.
+	// Build response WITHOUT participants (available via GET /conversations/{id}).
+	// This avoids an N+1 query — one ListParticipants call per conversation.
 	result := conversationListResponse{
 		Conversations: make([]conversationResponse, 0, len(filtered)),
 	}
 	for _, conv := range filtered {
-		participants, pErr := s.store.ListParticipants(ctx, conv.ID)
-		if pErr != nil {
-			writeErrorFromErr(w, pErr, "")
-			return
-		}
 		result.Conversations = append(result.Conversations, conversationResponse{
 			Conversation: conv,
-			Participants: participants,
 		})
 	}
 
@@ -294,6 +298,19 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Verify the project exists when a project ID is provided.
+	if req.ProjectID != "" {
+		_, err := s.store.GetProject(ctx, req.ProjectID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not_found", "project not found", nil)
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	}
+
 	now := time.Now().UTC()
 	conv := &store.Conversation{
 		ID:             api.NewUUID(),
@@ -368,6 +385,17 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 
 	if req.AgentID == "" {
 		BadRequest(w, "agentId is required")
+		return
+	}
+
+	// Verify the agent exists before setting it as default.
+	_, err = s.store.GetAgent(ctx, req.AgentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
 		return
 	}
 
