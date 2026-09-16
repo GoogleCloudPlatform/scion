@@ -83,15 +83,17 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   fi
   echo "  Project: ${PROJECT_ID}"
 
-  read -p "Hub name [my-hub]: " HUB_NAME
+  read -rp "Hub name [my-hub]: " HUB_NAME
   HUB_NAME="${HUB_NAME:-my-hub}"
 
-  read -p "GCP region [us-central1]: " REGION
+  read -rp "GCP region [us-central1]: " REGION
   REGION="${REGION:-us-central1}"
 
   ZONE="${REGION}-b"
   INSTANCE_NAME="scion-hub-${HUB_NAME}"
   PROXY_SERVICE="${INSTANCE_NAME}-iap-proxy"
+  ROUTER_NAME="scion-hub-${HUB_NAME}-router"
+  NAT_NAME="scion-hub-${HUB_NAME}-nat"
   SA_NAME="scion-hub-vm"
   SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
@@ -99,9 +101,11 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "The following resources will be deleted:"
   echo "  Cloud Run service: ${PROXY_SERVICE} (region: ${REGION})"
   echo "  GCE VM:            ${INSTANCE_NAME} (zone: ${ZONE})"
+  echo "  Cloud NAT:         ${NAT_NAME} (router: ${ROUTER_NAME})"
+  echo "  Cloud Router:      ${ROUTER_NAME} (region: ${REGION})"
   echo "  Service account:   ${SA_EMAIL}"
   echo ""
-  read -p "Continue? [y/N]: " CONFIRM
+  read -rp "Continue? [y/N]: " CONFIRM
   if [[ "${CONFIRM,,}" != "y" ]]; then
     echo "Aborted."
     exit 0
@@ -123,6 +127,23 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
   fi
 
+  info "Deleting Cloud NAT..."
+  if gcloud compute routers nats delete "${NAT_NAME}" \
+      --router="${ROUTER_NAME}" \
+      --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+    echo "  Deleted: ${NAT_NAME}"
+  else
+    warn "Cloud NAT ${NAT_NAME} not found or already deleted."
+  fi
+
+  info "Deleting Cloud Router..."
+  if gcloud compute routers delete "${ROUTER_NAME}" \
+      --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+    echo "  Deleted: ${ROUTER_NAME}"
+  else
+    warn "Cloud Router ${ROUTER_NAME} not found or already deleted."
+  fi
+
   info "Deleting service account..."
   if gcloud iam service-accounts delete "${SA_EMAIL}" \
       --project="${PROJECT_ID}" --quiet 2>/dev/null; then
@@ -136,6 +157,8 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo ""
   echo "  Deleted Cloud Run service: ${PROXY_SERVICE}"
   echo "  Deleted GCE VM:            ${INSTANCE_NAME}"
+  echo "  Deleted Cloud NAT:         ${NAT_NAME}"
+  echo "  Deleted Cloud Router:      ${ROUTER_NAME}"
   echo "  Deleted service account:   ${SA_EMAIL}"
   exit 0
 fi
@@ -155,16 +178,16 @@ fi
 echo "  Project: ${PROJECT_ID}"
 
 # --- Interactive prompts ---
-read -p "Hub name [my-hub]: " HUB_NAME
+read -rp "Hub name [my-hub]: " HUB_NAME
 HUB_NAME="${HUB_NAME:-my-hub}"
 
-read -p "GCP region [us-central1]: " REGION
+read -rp "GCP region [us-central1]: " REGION
 REGION="${REGION:-us-central1}"
 
 echo "Machine size:"
 echo "  1) Small  (e2-standard-4,  4 vCPU,  16GB) - up to ~10 agents"
 echo "  2) Medium (n2-standard-16, 16 vCPU, 64GB) - up to ~50 agents"
-read -p "Select [1]: " SIZE_CHOICE
+read -rp "Select [1]: " SIZE_CHOICE
 SIZE_CHOICE="${SIZE_CHOICE:-1}"
 
 case "$SIZE_CHOICE" in
@@ -177,14 +200,14 @@ echo "Disk size:"
 echo "  1) 200 GB (default)"
 echo "  2) 500 GB"
 echo "  3) Custom"
-read -p "Select [1]: " DISK_CHOICE
+read -rp "Select [1]: " DISK_CHOICE
 DISK_CHOICE="${DISK_CHOICE:-1}"
 
 case "$DISK_CHOICE" in
   1) DISK_SIZE="200GB" ;;
   2) DISK_SIZE="500GB" ;;
   3)
-    read -p "Enter disk size in GB: " CUSTOM_DISK
+    read -rp "Enter disk size in GB: " CUSTOM_DISK
     if [[ -z "$CUSTOM_DISK" ]] || ! [[ "$CUSTOM_DISK" =~ ^[0-9]+$ ]]; then
       err "Invalid disk size: $CUSTOM_DISK"
       exit 1
@@ -200,7 +223,7 @@ echo "  2) Discord"
 echo "  3) Slack"
 echo "  4) Teams"
 echo "  5) None"
-read -p "Select (comma-separated) [5]: " CHAT_CHOICE
+read -rp "Select (comma-separated) [5]: " CHAT_CHOICE
 CHAT_CHOICE="${CHAT_CHOICE:-5}"
 
 # Parse chat plugin selections into an array
@@ -294,6 +317,41 @@ for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtra
     --quiet &>/dev/null
 done
 echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent"
+
+# --- Cloud Router + Cloud NAT ---
+# The VM has no public IP (--no-address).  Cloud NAT gives it outbound internet
+# access so cloud-init can install packages, download binaries, and pull images.
+ROUTER_NAME="scion-hub-${HUB_NAME}-router"
+NAT_NAME="scion-hub-${HUB_NAME}-nat"
+
+info "Creating Cloud Router (if needed)..."
+if gcloud compute routers describe "${ROUTER_NAME}" \
+    --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+  echo "  Cloud Router already exists: ${ROUTER_NAME}"
+else
+  gcloud compute routers create "${ROUTER_NAME}" \
+    --region="${REGION}" \
+    --project="${PROJECT_ID}" \
+    --network=default \
+    --quiet
+  echo "  Created Cloud Router: ${ROUTER_NAME}"
+fi
+
+info "Creating Cloud NAT (if needed)..."
+if gcloud compute routers nats describe "${NAT_NAME}" \
+    --router="${ROUTER_NAME}" \
+    --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+  echo "  Cloud NAT already exists: ${NAT_NAME}"
+else
+  gcloud compute routers nats create "${NAT_NAME}" \
+    --router="${ROUTER_NAME}" \
+    --region="${REGION}" \
+    --project="${PROJECT_ID}" \
+    --auto-allocate-nat-external-ips \
+    --nat-all-subnet-ip-ranges \
+    --quiet
+  echo "  Created Cloud NAT: ${NAT_NAME}"
+fi
 
 # --- Create VM ---
 info "Creating GCE VM (if needed)..."
@@ -409,17 +467,27 @@ else
   SESSION_SECRET="$(openssl rand -base64 32)"
 
   info "Writing hub.env..."
-  HUB_ENV_CONTENT="$(sed \
+  # Security: write to a local temp file and transfer via SCP to avoid
+  # embedding secrets in the gcloud ssh command string, which would be
+  # visible in local process listing (ps aux).  Same bug class as #1211.
+  HUB_ENV_TMPFILE="$(mktemp)"
+  chmod 600 "${HUB_ENV_TMPFILE}"
+  sed \
     -e "s|__SESSION_SECRET__|${SESSION_SECRET}|g" \
     -e "s|__PROJECT_ID__|${PROJECT_ID}|g" \
-    "${SCRIPT_DIR}/config-templates/hub.env.template")"
+    "${SCRIPT_DIR}/config-templates/hub.env.template" > "${HUB_ENV_TMPFILE}"
+  unset SESSION_SECRET
+
+  gcloud compute scp "${HUB_ENV_TMPFILE}" \
+    "${INSTANCE_NAME}:/tmp/hub.env" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" --quiet
+  rm -f "${HUB_ENV_TMPFILE}"
 
   gcloud compute ssh "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --command="
-      sudo -u scion tee /home/scion/.scion/hub.env > /dev/null << 'ENVEOF'
-${HUB_ENV_CONTENT}
-ENVEOF
+      sudo mv /tmp/hub.env /home/scion/.scion/hub.env
+      sudo chown scion:scion /home/scion/.scion/hub.env
       sudo chmod 600 /home/scion/.scion/hub.env
     "
 fi
