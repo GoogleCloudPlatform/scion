@@ -1154,13 +1154,13 @@ export class ScionChatThread extends LitElement {
         this.scrollToBottomAfterRender();
       }
       // Advance read watermark after a short delay so the user sees the divider.
-      if (this.showUnreadDivider && this.messages.length > 0) {
+      if (this.messages.length > 0) {
         setTimeout(() => {
           const lastMsg = this.messages[this.messages.length - 1];
           if (lastMsg) {
             void this.advanceReadWatermark(lastMsg.id);
           }
-        }, 2000);
+        }, this.showUnreadDivider ? 2000 : 500);
       }
     }
   }
