@@ -22,8 +22,11 @@
  * Used by the project settings Resources section, the Hub Resources page, and
  * the user profile Templates page so they all render identically.
  *
- * It does not handle import/creation — those affordances (where they exist,
- * e.g. template import) are rendered by the host page around this list.
+ * It does not handle import — that affordance is rendered by the host page
+ * via <scion-resource-import> around this list.
+ *
+ * Emits a `resource-changed` CustomEvent on mutations:
+ *   detail: { action: 'created' | 'cloned' | 'renamed' | 'deleted', kind: ResourceKind, id: string }
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -78,6 +81,14 @@ export class ScionResourceList extends LitElement {
   @property({ type: Boolean })
   cloneFromGlobal = false;
 
+  /** When true, show a "Create" button in the list header and handle create dialog. */
+  @property({ type: Boolean })
+  canCreate = false;
+
+  /** When true, show a "Rename" menu item in each row's action dropdown. */
+  @property({ type: Boolean })
+  canRename = false;
+
   @state() private items: ResourceItem[] = [];
   @state() private loading = true;
   @state() private error: string | null = null;
@@ -94,6 +105,19 @@ export class ScionResourceList extends LitElement {
     new Map();
 
   private _statusClearTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // Create dialog state
+  @state() private createDialogOpen = false;
+  @state() private createLoading = false;
+  @state() private createError = '';
+  @state() private newResourceName = '';
+  @state() private newResourceHarness = '';
+
+  // Rename dialog state
+  @state() private renameTarget: ResourceItem | null = null;
+  @state() private renameName = '';
+  @state() private renameLoading = false;
+  @state() private renameError = '';
 
   @state() private globalPickerOpen = false;
   @state() private globalItems: ResourceItem[] = [];
@@ -629,17 +653,29 @@ export class ScionResourceList extends LitElement {
       return html`<div class="error">${this.error}</div>`;
     }
 
-    const hasActions = this.canClone || this.canDelete;
+    const hasActions = this.canClone || this.canDelete || this.canRename;
 
     const showRefreshAll =
       this.kind === 'harness-config' && this.items.some((item) => item.sourceUrl);
 
-    const hasListHeader = (this.cloneFromGlobal && this.canClone) || showRefreshAll;
+    const hasListHeader = (this.cloneFromGlobal && this.canClone) || showRefreshAll || this.canCreate;
 
     return html`
       ${hasListHeader
         ? html`
             <div class="list-header">
+              ${this.canCreate
+                ? html`
+                    <sl-button
+                      size="small"
+                      variant="primary"
+                      @click=${() => this.openCreateDialog()}
+                    >
+                      <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                      Create ${this.kind === 'template' ? 'Template' : 'Harness Config'}
+                    </sl-button>
+                  `
+                : nothing}
               ${this.cloneFromGlobal && this.canClone
                 ? html`
                     <sl-button
@@ -677,6 +713,7 @@ export class ScionResourceList extends LitElement {
             </div>
           `}
       ${this.renderDeleteDialog()} ${this.renderCloneDialog()} ${this.renderGlobalPickerDialog()}
+      ${this.renderCreateDialog()} ${this.renderRenameDialog()}
     `;
   }
 
@@ -788,7 +825,17 @@ export class ScionResourceList extends LitElement {
                     </sl-menu-item>
                   `
                 : nothing}
-              ${this.canClone && this.canDelete ? html`<sl-divider></sl-divider>` : nothing}
+              ${this.canRename
+                ? html`
+                    <sl-menu-item @click=${() => this.openRenameDialog(item)}>
+                      <sl-icon slot="prefix" name="pencil"></sl-icon>
+                      Rename
+                    </sl-menu-item>
+                  `
+                : nothing}
+              ${(this.canClone || this.canRename) && this.canDelete
+                ? html`<sl-divider></sl-divider>`
+                : nothing}
               ${this.canDelete
                 ? html`
                     <sl-menu-item
@@ -809,10 +856,11 @@ export class ScionResourceList extends LitElement {
 
   private renderEmpty() {
     const label = this.kind === 'template' ? 'templates' : 'harness configs';
+    const scopeLabel = this.scope === 'global' ? 'global' : this.scope === 'user' ? 'user' : 'project';
     return html`
       <div class="empty">
         <sl-icon name="file-earmark"></sl-icon>
-        <p>No ${this.scope === 'global' ? 'global' : this.scope === 'user' ? 'user' : 'project'} ${label} yet.</p>
+        <p>No ${scopeLabel} ${label} yet.</p>
       </div>
     `;
   }
@@ -917,6 +965,197 @@ export class ScionResourceList extends LitElement {
           >
             Clone
           </sl-button>
+        </div>
+      </sl-dialog>
+    `;
+  }
+
+  // ── Create dialog ───────────────────────────────────────────────
+
+  private openCreateDialog(): void {
+    this.createDialogOpen = true;
+    this.createError = '';
+    this.createLoading = false;
+    this.newResourceName = '';
+    this.newResourceHarness = '';
+  }
+
+  private closeCreateDialog(): void {
+    this.createDialogOpen = false;
+    this.createError = '';
+  }
+
+  private async confirmCreate(): Promise<void> {
+    if (!this.newResourceName.trim()) {
+      this.createError = `${this.kind === 'template' ? 'Template' : 'Harness config'} name is required.`;
+      return;
+    }
+    this.createLoading = true;
+    this.createError = '';
+    try {
+      const body: Record<string, string> = {
+        name: this.newResourceName.trim(),
+        scope: this.scope,
+      };
+      if (this.scope === 'project' && this.scopeId) {
+        body.scopeId = this.scopeId;
+      }
+      if (this.newResourceHarness.trim()) {
+        body.harness = this.newResourceHarness.trim();
+      }
+      const resp = await apiFetch(`/api/v1/${this.apiResource}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (resp.status === 409) {
+        this.createError = 'A resource with this name already exists. Choose a different name.';
+        this.createLoading = false;
+        return;
+      }
+      if (!resp.ok) {
+        throw new Error(await extractApiError(resp, `Failed to create ${this.kindLabel}`));
+      }
+      const created = (await resp.json()) as { id: string };
+      this.closeCreateDialog();
+      showToast(`${this.kind === 'template' ? 'Template' : 'Harness config'} created`, 'success');
+      this.dispatchEvent(
+        new CustomEvent('resource-changed', {
+          detail: { action: 'created', kind: this.kind, id: created.id },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      // Navigate to the new resource's detail page
+      window.history.pushState({}, '', `${this.detailBasePath}/${this.detailSegment}/${created.id}`);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    } catch (err) {
+      this.createError = err instanceof Error ? err.message : `Failed to create ${this.kindLabel}`;
+    } finally {
+      this.createLoading = false;
+    }
+  }
+
+  private renderCreateDialog() {
+    if (!this.createDialogOpen) return nothing;
+    return html`
+      <sl-dialog
+        label="Create ${this.kind === 'template' ? 'Template' : 'Harness Config'}"
+        open
+        @sl-request-close=${(e: Event) => {
+          if (this.createLoading) e.preventDefault();
+          else this.closeCreateDialog();
+        }}
+      >
+        <p>Create a new ${this.scope === 'user' ? 'personal ' : ''}${this.kindLabel}.</p>
+        <sl-input
+          label="${this.kind === 'template' ? 'Template' : 'Harness Config'} Name"
+          placeholder="My ${this.kind === 'template' ? 'Template' : 'Config'}"
+          .value=${this.newResourceName}
+          @sl-input=${(e: Event) => (this.newResourceName = (e.target as HTMLInputElement).value)}
+          ?disabled=${this.createLoading}
+        ></sl-input>
+        ${this.kind === 'template'
+          ? html`
+              <sl-input
+                label="Harness (optional)"
+                placeholder="e.g. claude-code"
+                .value=${this.newResourceHarness}
+                @sl-input=${(e: Event) =>
+                  (this.newResourceHarness = (e.target as HTMLInputElement).value)}
+                ?disabled=${this.createLoading}
+                style="margin-top: 1rem;"
+              ></sl-input>
+            `
+          : nothing}
+        ${this.createError ? html`<div class="dialog-error">${this.createError}</div>` : nothing}
+        <div slot="footer">
+          <sl-button variant="default" size="small" ?disabled=${this.createLoading}
+            @click=${() => this.closeCreateDialog()}>Cancel</sl-button>
+          <sl-button variant="primary" size="small" ?loading=${this.createLoading}
+            ?disabled=${this.createLoading || !this.newResourceName.trim()}
+            @click=${() => this.confirmCreate()}>
+            Create ${this.kind === 'template' ? 'Template' : 'Harness Config'}
+          </sl-button>
+        </div>
+      </sl-dialog>
+    `;
+  }
+
+  // ── Rename dialog ───────────────────────────────────────────────
+
+  private openRenameDialog(item: ResourceItem): void {
+    this.renameTarget = item;
+    this.renameName = item.displayName || item.name;
+    this.renameError = '';
+    this.renameLoading = false;
+  }
+
+  private closeRenameDialog(): void {
+    this.renameTarget = null;
+    this.renameError = '';
+  }
+
+  private async confirmRename(): Promise<void> {
+    if (!this.renameTarget || !this.renameName.trim()) return;
+    this.renameLoading = true;
+    this.renameError = '';
+    try {
+      const resp = await apiFetch(`/api/v1/${this.apiResource}/${this.renameTarget.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: this.renameName.trim() }),
+      });
+      if (resp.status === 409) {
+        this.renameError = 'A resource with this name already exists. Choose a different name.';
+        this.renameLoading = false;
+        return;
+      }
+      if (!resp.ok) {
+        throw new Error(await extractApiError(resp, `Failed to rename ${this.kindLabel}`));
+      }
+      this.closeRenameDialog();
+      showToast(`${this.kind === 'template' ? 'Template' : 'Harness config'} renamed`, 'success');
+      this.dispatchEvent(
+        new CustomEvent('resource-changed', {
+          detail: { action: 'renamed', kind: this.kind, id: this.renameTarget!.id },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      void this.load();
+    } catch (err) {
+      this.renameError = err instanceof Error ? err.message : `Failed to rename ${this.kindLabel}`;
+    } finally {
+      this.renameLoading = false;
+    }
+  }
+
+  private renderRenameDialog() {
+    if (!this.renameTarget) return nothing;
+    return html`
+      <sl-dialog
+        label="Rename ${this.kindLabel}"
+        open
+        @sl-request-close=${(e: Event) => {
+          if (this.renameLoading) e.preventDefault();
+          else this.closeRenameDialog();
+        }}
+      >
+        <p>Rename <strong>${this.renameTarget.displayName || this.renameTarget.name}</strong>.</p>
+        <sl-input
+          label="New name"
+          .value=${this.renameName}
+          @sl-input=${(e: Event) => (this.renameName = (e.target as HTMLInputElement).value)}
+          ?disabled=${this.renameLoading}
+        ></sl-input>
+        ${this.renameError ? html`<div class="dialog-error">${this.renameError}</div>` : nothing}
+        <div slot="footer">
+          <sl-button variant="default" size="small" ?disabled=${this.renameLoading}
+            @click=${() => this.closeRenameDialog()}>Cancel</sl-button>
+          <sl-button variant="primary" size="small" ?loading=${this.renameLoading}
+            ?disabled=${this.renameLoading || !this.renameName.trim()}
+            @click=${() => this.confirmRename()}>Rename</sl-button>
         </div>
       </sl-dialog>
     `;
