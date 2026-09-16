@@ -171,26 +171,11 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     warn "Service account ${SA_EMAIL} not found or already deleted."
   fi
 
-  info "Removing deployer IAP tunnel role binding..."
-  DEPLOYER_EMAIL="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)" || true
-  if [[ -z "$DEPLOYER_EMAIL" ]]; then
-    DEPLOYER_EMAIL="$(gcloud config get-value account 2>/dev/null)" || true
-  fi
-  if [[ -n "$DEPLOYER_EMAIL" ]]; then
-    if [[ "$DEPLOYER_EMAIL" == *.gserviceaccount.com ]]; then
-      DEPLOYER_MEMBER="serviceAccount:${DEPLOYER_EMAIL}"
-    else
-      DEPLOYER_MEMBER="user:${DEPLOYER_EMAIL}"
-    fi
-    if gcloud projects remove-iam-policy-binding "${PROJECT_ID}" \
-        --member="${DEPLOYER_MEMBER}" \
-        --role="roles/iap.tunnelResourceAccessor" \
-        --quiet &>/dev/null; then
-      echo "  Removed IAP tunnel role from: ${DEPLOYER_EMAIL}"
-    else
-      warn "Could not remove IAP tunnel role binding (may not exist)."
-    fi
-  fi
+  # Note: We intentionally do NOT revoke roles/iap.tunnelResourceAccessor from
+  # the deployer. This role is bound to the operator (not a service account) and
+  # may be used for IAP SSH access to other VMs in the project. Revoking it here
+  # would silently break access to those other resources.
+  info "Skipping IAP tunnel role cleanup (operator may use it for other VMs)."
 
   info "Deleting IAP SSH firewall rule..."
   if gcloud compute firewall-rules delete "${FW_RULE_NAME}" \
@@ -227,8 +212,16 @@ fi
 echo "  Project: ${PROJECT_ID}"
 
 # --- Interactive prompts ---
-read -rp "Hub name [my-hub]: " HUB_NAME
-HUB_NAME="${HUB_NAME:-my-hub}"
+while true; do
+  read -rp "Hub name [my-hub]: " HUB_NAME
+  HUB_NAME="${HUB_NAME:-my-hub}"
+  if [[ ${#HUB_NAME} -gt 20 ]]; then
+    warn "Hub name '${HUB_NAME}' is ${#HUB_NAME} chars; max is 20 (GCP service-account ID limit)."
+    echo "  Please choose a shorter name."
+    continue
+  fi
+  break
+done
 
 read -rp "GCP region [us-central1]: " REGION
 REGION="${REGION:-us-central1}"
@@ -303,6 +296,11 @@ if [[ -z "$ZONE" ]]; then
 fi
 INSTANCE_NAME="scion-hub-${HUB_NAME}"
 SA_NAME="scion-hub-${HUB_NAME}"
+# GCP service-account IDs must be 6-30 chars; truncate as a safety net
+if [[ ${#SA_NAME} -gt 30 ]]; then
+  SA_NAME="${SA_NAME:0:30}"
+  warn "Service-account name truncated to 30 chars: ${SA_NAME}"
+fi
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 echo ""
@@ -778,13 +776,23 @@ else
   else
     OPERATOR_MEMBER="user:${OPERATOR_EMAIL}"
   fi
-  gcloud beta run services add-iam-policy-binding "${PROXY_SERVICE}" \
-    --region="${REGION}" \
-    --project="${PROJECT_ID}" \
-    --member="${OPERATOR_MEMBER}" \
-    --role=roles/iap.httpsResourceAccessUser \
-    --quiet
-  echo "  IAP access granted to: ${OPERATOR_EMAIL}"
+  # Use gcloud iap web add-iam-policy-binding (supports --resource-type=cloud-run)
+  # Note: this is distinct from "gcloud iap web enable" which does NOT support cloud-run.
+  if gcloud iap web add-iam-policy-binding \
+      --resource-type=cloud-run --service="${PROXY_SERVICE}" \
+      --region="${REGION}" --project="${PROJECT_ID}" \
+      --member="${OPERATOR_MEMBER}" \
+      --role=roles/iap.httpsResourceAccessor \
+      --quiet 2>/dev/null; then
+    echo "  IAP access granted to: ${OPERATOR_EMAIL} (service-level binding)"
+  else
+    warn "Service-level IAP binding failed; falling back to project-level binding."
+    gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+      --member="${OPERATOR_MEMBER}" \
+      --role=roles/iap.httpsResourceAccessor \
+      --quiet &>/dev/null
+    echo "  IAP access granted to: ${OPERATOR_EMAIL} (project-level fallback)"
+  fi
 fi
 
 # --- Wait for IAP enforcement ---
