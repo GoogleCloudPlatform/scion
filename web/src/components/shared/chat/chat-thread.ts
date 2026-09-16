@@ -1067,7 +1067,11 @@ export class ScionChatThread extends LitElement {
       }
     }
 
-    this.messages = sorted;
+    // Filter out mention fan-out copies — they exist for agent dispatch
+    // tracking, not for human display. The primary (type:instruction) message
+    // already shows the content. Mention rows stay in messageMap so their IDs
+    // are still tracked for SSE/history dedup.
+    this.messages = sorted.filter((m) => m.type !== 'mention');
 
     // Track last known timestamp for backfill
     if (sorted.length > 0) {
