@@ -89,7 +89,7 @@ export class ScionChatInteragentMarker extends LitElement {
       border: 1px solid var(--scion-border, rgba(148, 163, 184, 0.2));
       border-radius: 9999px;
       cursor: pointer;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       transition: background 0.15s;
       user-select: none;
@@ -123,7 +123,7 @@ export class ScionChatInteragentMarker extends LitElement {
       display: flex;
       align-items: baseline;
       gap: 0.25rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       line-height: 1.4;
       padding: 0.125rem 0;
@@ -163,7 +163,7 @@ export class ScionChatInteragentMarker extends LitElement {
 
     .ia-expand sl-icon-button::part(base) {
       padding: 0.125rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #94a3b8);
     }
 
@@ -185,7 +185,7 @@ export class ScionChatInteragentMarker extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.25rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       margin-bottom: 0.75rem;
       padding-bottom: 0.5rem;
@@ -199,7 +199,7 @@ export class ScionChatInteragentMarker extends LitElement {
     }
 
     .ia-full-preview .ia-full-body {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       line-height: 1.6;
       color: var(--scion-text, #1e293b);
       overflow-wrap: break-word;
@@ -229,7 +229,7 @@ export class ScionChatInteragentMarker extends LitElement {
 
     .ia-full-preview .ia-full-body-plain {
       white-space: pre-wrap;
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       line-height: 1.6;
       color: var(--scion-text, #1e293b);
     }
@@ -329,9 +329,11 @@ export class ScionChatInteragentMarker extends LitElement {
           <span class="ia-arrow">&rarr;</span>
           <span class="ia-recipient">${this.formatParticipant(msg.recipient)}</span>
         </div>
-        ${this.expandedHtml
-          ? html`<div class="ia-full-body" .innerHTML=${this.expandedHtml}></div>`
-          : html`<div class="ia-full-body-plain">${msg.msg}</div>`}
+        ${
+          this.expandedHtml
+            ? html`<div class="ia-full-body" .innerHTML=${this.expandedHtml}></div>`
+            : html`<div class="ia-full-body-plain">${msg.msg}</div>`
+        }
       </sl-dialog>
     `;
   }
@@ -341,29 +343,33 @@ export class ScionChatInteragentMarker extends LitElement {
       return html`
         <sl-tooltip content="Click to collapse">
           <div class="marker-expanded" @click=${this.toggle}>
-            ${this.messages.length > 0
-              ? this.messages.map(
-                  (m) => html`
-                    <div class="ia-msg">
-                      <span class="ia-sender">${this.formatParticipant(m.sender)}</span>
-                      <span class="ia-arrow">&rarr;</span>
-                      <span class="ia-recipient">${this.formatParticipant(m.recipient)}</span>:
-                      <span class="ia-body" data-msg-id=${m.id}>${m.msg}</span>
-                      ${this.truncatedIds.has(m.id)
-                        ? html`
-                            <span class="ia-expand">
-                              <sl-icon-button
-                                name="arrows-angle-expand"
-                                label="Expand message"
-                                @click=${(e: Event) => this.openMessagePreview(m, e)}
-                              ></sl-icon-button>
-                            </span>
-                          `
-                        : nothing}
-                    </div>
-                  `
-                )
-              : nothing}
+            ${
+              this.messages.length > 0
+                ? this.messages.map(
+                    (m) => html`
+                      <div class="ia-msg">
+                        <span class="ia-sender">${this.formatParticipant(m.sender)}</span>
+                        <span class="ia-arrow">&rarr;</span>
+                        <span class="ia-recipient">${this.formatParticipant(m.recipient)}</span>:
+                        <span class="ia-body" data-msg-id=${m.id}>${m.msg}</span>
+                        ${
+                          this.truncatedIds.has(m.id)
+                            ? html`
+                                <span class="ia-expand">
+                                  <sl-icon-button
+                                    name="arrows-angle-expand"
+                                    label="Expand message"
+                                    @click=${(e: Event) => this.openMessagePreview(m, e)}
+                                  ></sl-icon-button>
+                                </span>
+                              `
+                            : nothing
+                        }
+                      </div>
+                    `
+                  )
+                : nothing
+            }
           </div>
         </sl-tooltip>
         ${this.renderMessagePreview()}

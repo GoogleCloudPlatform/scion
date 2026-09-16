@@ -121,7 +121,7 @@ export class ScionMentionAutocomplete extends LitElement {
       flex-direction: column;
       padding: 0.375rem 0.75rem;
       cursor: pointer;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       transition: background 0.1s;
     }
 
@@ -136,7 +136,7 @@ export class ScionMentionAutocomplete extends LitElement {
     }
 
     .dropdown-item .name {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       overflow: hidden;
       text-overflow: ellipsis;
@@ -145,7 +145,7 @@ export class ScionMentionAutocomplete extends LitElement {
 
     .no-results {
       padding: 0.5rem 0.75rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       font-style: italic;
     }
@@ -188,13 +188,15 @@ export class ScionMentionAutocomplete extends LitElement {
               <span class="slug">
                 <sl-icon
                   name="${candidate.kind === 'agent' ? 'cpu' : 'person'}"
-                  style="font-size: 0.6875rem; vertical-align: -1px; margin-right: 0.125rem;"
+                  style="font-size: var(--chat-fs-sm); vertical-align: -1px; margin-right: 0.125rem;"
                 ></sl-icon>
                 @${candidate.slug}
               </span>
-              ${candidate.slug !== candidate.name
-                ? html`<span class="name">${candidate.name}</span>`
-                : nothing}
+              ${
+                candidate.slug !== candidate.name
+                  ? html`<span class="name">${candidate.name}</span>`
+                  : nothing
+              }
             </div>
           `
         )}
