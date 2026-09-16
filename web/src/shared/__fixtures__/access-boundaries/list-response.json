@@ -58,7 +58,15 @@
       },
       "updatedAt": "2026-08-28T11:03:47Z",
       "_capabilities": {
-        "actions": ["read", "readAudit", "previewCreate", "previewTighten", "previewRelax", "commit", "delete"]
+        "actions": [
+          "read",
+          "readAudit",
+          "previewCreate",
+          "previewTighten",
+          "previewRelax",
+          "commit",
+          "delete"
+        ]
       }
     },
     {
@@ -116,7 +124,15 @@
       },
       "updatedAt": "2026-08-30T16:41:19Z",
       "_capabilities": {
-        "actions": ["read", "readAudit", "previewCreate", "previewTighten", "previewRelax", "commit", "delete"]
+        "actions": [
+          "read",
+          "readAudit",
+          "previewCreate",
+          "previewTighten",
+          "previewRelax",
+          "commit",
+          "delete"
+        ]
       }
     },
     {

@@ -62,7 +62,9 @@ describe('canGroup — capability gating', () => {
   });
 
   it('checks resource-level actions correctly', () => {
-    const caps: Capabilities = { actions: ['read', 'update', 'delete', 'addMember', 'removeMember'] };
+    const caps: Capabilities = {
+      actions: ['read', 'update', 'delete', 'addMember', 'removeMember'],
+    };
     expect(canGroup(caps, 'read')).toBe(true);
     expect(canGroup(caps, 'update')).toBe(true);
     expect(canGroup(caps, 'delete')).toBe(true);
@@ -211,11 +213,7 @@ describe('URL round-trip (readFiltersFromURL / syncFiltersToURL)', () => {
 
     el.syncFiltersToURL();
 
-    expect(replaceStateSpy).toHaveBeenCalledWith(
-      {},
-      '',
-      expect.stringContaining('q=hello')
-    );
+    expect(replaceStateSpy).toHaveBeenCalledWith({}, '', expect.stringContaining('q=hello'));
     const urlArg = replaceStateSpy.mock.calls[0][2] as string;
     expect(urlArg).toContain('groupType=project_agents');
     expect(urlArg).toContain('owner=me');
@@ -660,10 +658,7 @@ describe('Accessibility (G6 sweep)', () => {
   const { readFileSync } = require('fs');
   const { resolve } = require('path');
   const LIST_SOURCE = readFileSync(resolve(__dirname, './admin-groups.ts'), 'utf-8');
-  const FORM_SOURCE = readFileSync(
-    resolve(__dirname, '../shared/group-form-dialog.ts'),
-    'utf-8'
-  );
+  const FORM_SOURCE = readFileSync(resolve(__dirname, '../shared/group-form-dialog.ts'), 'utf-8');
 
   it('groups table has role="table" and aria-label', () => {
     expect(LIST_SOURCE).toContain('role="table"');

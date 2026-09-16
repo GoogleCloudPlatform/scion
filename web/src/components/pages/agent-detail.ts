@@ -834,7 +834,10 @@ export class ScionPageAgentDetail extends LitElement {
     if (!this.agent) return;
 
     if (action === 'delete') {
-      if (!event?.altKey && !(await showConfirm(`Are you sure you want to delete agent "${this.agent.name}"?`))) {
+      if (
+        !event?.altKey &&
+        !(await showConfirm(`Are you sure you want to delete agent "${this.agent.name}"?`))
+      ) {
         return;
       }
       this.actionLoading = { ...this.actionLoading, delete: true };
@@ -852,18 +855,15 @@ export class ScionPageAgentDetail extends LitElement {
               { title: 'Force Delete', confirmText: 'Force Delete', variant: 'danger' }
             );
             if (forceConfirmed) {
-              const forceResponse = await apiFetch(
-                `/api/v1/agents/${this.agentId}?force=true`,
-                { method: 'DELETE' }
-              );
+              const forceResponse = await apiFetch(`/api/v1/agents/${this.agentId}?force=true`, {
+                method: 'DELETE',
+              });
               if (!forceResponse.ok) {
                 throw new Error(
                   await extractApiError(forceResponse, 'Failed to force delete agent')
                 );
               }
-              window.location.href = this.project
-                ? `/projects/${this.project.id}`
-                : '/agents';
+              window.location.href = this.project ? `/projects/${this.project.id}` : '/agents';
               return;
             }
           }

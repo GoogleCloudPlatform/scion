@@ -154,7 +154,8 @@ const ENTITY_PATTERNS: EntityPattern[] = [
   },
   // Bare UUIDs preceded by "session" (case-insensitive)
   {
-    regex: /\bsession\s+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b/gi,
+    regex:
+      /\bsession\s+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b/gi,
     linkBuilder: (m) => {
       const uuid = m[1];
       return `session <a class="entity-link" href="/sessions/${encodeURIComponent(uuid)}" title="Open session ${uuid}">${uuid}</a>`;
@@ -170,7 +171,8 @@ const ENTITY_PATTERNS: EntityPattern[] = [
   },
   // File paths: /workspace/... and /scion-volumes/... container paths
   {
-    regex: /(?:\/scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|\/workspace\/(?:\.scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*))/g,
+    regex:
+      /(?:\/scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|\/workspace\/(?:\.scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*))/g,
     linkBuilder: (m) => {
       const path = m[0];
       return `<a class="entity-link path-link" data-file-path="${path.replace(/"/g, '&quot;')}" href="javascript:void(0)" title="Open ${path.replace(/"/g, '&quot;')}">${path}</a>`;
@@ -193,7 +195,9 @@ function styleEntityLinksInText(text: string): string {
     // Clone the regex so each call starts from index 0.
     // Ensure the global flag is always set so re.exec() advances lastIndex
     // and cannot loop infinitely on a zero-width or non-advancing match.
-    const flags = pattern.regex.flags.includes('g') ? pattern.regex.flags : pattern.regex.flags + 'g';
+    const flags = pattern.regex.flags.includes('g')
+      ? pattern.regex.flags
+      : pattern.regex.flags + 'g';
     const re = new RegExp(pattern.regex.source, flags);
     let m: RegExpExecArray | null;
     let prevIndex = 0;
@@ -1484,7 +1488,9 @@ export class ScionChatMessage extends LitElement {
       pre.setAttribute('data-highlighted', 'true');
 
       // Create a readonly code editor and replace the <pre> in-place.
-      const editor = document.createElement('scion-code-editor') as import('../code-editor.js').ScionCodeEditor;
+      const editor = document.createElement(
+        'scion-code-editor'
+      ) as import('../code-editor.js').ScionCodeEditor;
       editor.content = content;
       editor.language = language;
       editor.readonly = true;
@@ -1512,7 +1518,8 @@ export class ScionChatMessage extends LitElement {
       // Heuristic: require a ---/+++ header pair or @@ hunk headers to
       // avoid false-positives on YAML lists, markdown checklists, and
       // code with @ decorators.
-      const hasHeaders = lines.some((l) => l.startsWith('--- ')) && lines.some((l) => l.startsWith('+++ '));
+      const hasHeaders =
+        lines.some((l) => l.startsWith('--- ')) && lines.some((l) => l.startsWith('+++ '));
       const hasHunks = lines.some((l) => l.startsWith('@@ '));
       const diffLineCount = lines.filter((l) => /^[-+@]/.test(l)).length;
       const looksLikeDiff = hasHeaders || (hasHunks && diffLineCount >= 3);
@@ -1605,9 +1612,8 @@ export class ScionChatMessage extends LitElement {
 
       // Heuristic: test output if it contains PASS/FAIL/ok lines that look
       // like Go test output or a generic "Tests:" summary line.
-      const testIndicators = lines.filter(
-        (l) =>
-          /^(ok\s|PASS|FAIL|--- PASS|--- FAIL|Tests:)/.test(l.trimStart())
+      const testIndicators = lines.filter((l) =>
+        /^(ok\s|PASS|FAIL|--- PASS|--- FAIL|Tests:)/.test(l.trimStart())
       ).length;
       if (testIndicators < 2) return;
 
@@ -1741,9 +1747,7 @@ export class ScionChatMessage extends LitElement {
     const isDeleted = !!this.deletedAt;
 
     return html`
-      <div
-        class="message-wrapper ${dirClass}${groupClass}"
-      >
+      <div class="message-wrapper ${dirClass}${groupClass}">
         ${this.showHeader && this.fromAgent
           ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
               ${this.getInitials()}
@@ -1776,7 +1780,9 @@ export class ScionChatMessage extends LitElement {
             : nothing}
           ${this.replyPreview ? this.renderReplyPreview() : nothing}
           ${isDeleted
-            ? html`<div class="bubble-content"><span class="deleted-message">This message was deleted</span></div>`
+            ? html`<div class="bubble-content">
+                <span class="deleted-message">This message was deleted</span>
+              </div>`
             : html`<div class="bubble-content">${this.renderBody()}</div>`}
           ${isDeleted ? nothing : this.renderDeliveryState()}
           ${isDeleted ? nothing : this.renderBadges()}

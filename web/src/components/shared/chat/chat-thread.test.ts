@@ -622,9 +622,7 @@ describe('scion-chat-thread SSE attachment preview', () => {
       senderId: 'agent-1',
       type: 'assistant-reply',
       createdAt: new Date().toISOString(),
-      attachments: [
-        { id: 'att-1', name: 'report.pdf', mime: 'application/pdf', size: 1024 },
-      ],
+      attachments: [{ id: 'att-1', name: 'report.pdf', mime: 'application/pdf', size: 1024 }],
     });
 
     // Wait for the message to render.

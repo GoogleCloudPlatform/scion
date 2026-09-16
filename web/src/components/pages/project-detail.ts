@@ -1183,8 +1183,11 @@ export class ScionPageProjectDetail extends LitElement {
     event?: MouseEvent
   ): Promise<void> {
     if (action === 'delete') {
-      const agentName = this.agents.find(a => a.id === agentId)?.name ?? 'this agent';
-      if (!event?.altKey && !(await showConfirm(`Are you sure you want to delete agent "${agentName}"?`))) {
+      const agentName = this.agents.find((a) => a.id === agentId)?.name ?? 'this agent';
+      if (
+        !event?.altKey &&
+        !(await showConfirm(`Are you sure you want to delete agent "${agentName}"?`))
+      ) {
         return;
       }
       this.actionLoading = { ...this.actionLoading, [agentId]: true };

@@ -1521,7 +1521,6 @@ export class ScionInjectedSkillsPanel extends LitElement {
                 </span>
               `
             : nothing}
-
           ${this.dialogError ? html`<div class="dialog-error">${this.dialogError}</div>` : nothing}
         </div>
 

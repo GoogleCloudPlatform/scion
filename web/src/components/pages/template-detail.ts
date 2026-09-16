@@ -333,7 +333,11 @@ export class ScionPageTemplateDetail extends LitElement {
             : ''}
           ${t.config?.messageMode
             ? html`<span>
-                Mode: <scion-message-mode-badge mode=${t.config.messageMode} size="small"></scion-message-mode-badge>
+                Mode:
+                <scion-message-mode-badge
+                  mode=${t.config.messageMode}
+                  size="small"
+                ></scion-message-mode-badge>
               </span>`
             : ''}
         </div>

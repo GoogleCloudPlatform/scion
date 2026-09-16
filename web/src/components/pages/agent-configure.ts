@@ -1061,7 +1061,12 @@ export class ScionPageAgentConfigure extends LitElement {
                 }}
               >
                 <sl-option value="">Default (inherit from parent)</sl-option>
-                ${(Object.entries(MESSAGE_MODE_DISPLAY) as [MessageMode, typeof MESSAGE_MODE_DISPLAY[MessageMode]][]).map(
+                ${(
+                  Object.entries(MESSAGE_MODE_DISPLAY) as [
+                    MessageMode,
+                    (typeof MESSAGE_MODE_DISPLAY)[MessageMode],
+                  ][]
+                ).map(
                   ([mode, display]) => html`
                     <sl-option value=${mode}>
                       <sl-icon slot="prefix" name=${display.icon}></sl-icon>
@@ -1072,9 +1077,12 @@ export class ScionPageAgentConfigure extends LitElement {
               </sl-select>
               ${this.messageMode === 'none'
                 ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
-                    This agent is configured in sealed mode. It will not be able to send or receive messages.
+                    This agent is configured in sealed mode. It will not be able to send or receive
+                    messages.
                   </div>`
-                : html`<div class="hint">Message authorization scope. Default inherits from the parent agent's mode.</div>`}
+                : html`<div class="hint">
+                    Message authorization scope. Default inherits from the parent agent's mode.
+                  </div>`}
             </div>
           `
         : this.agent?.messageMode
@@ -1088,7 +1096,8 @@ export class ScionPageAgentConfigure extends LitElement {
                   ></scion-message-mode-badge>
                 </div>
                 <div class="hint">
-                  Message mode is read-only for started agents. Use the agent detail page to change it.
+                  Message mode is read-only for started agents. Use the agent detail page to change
+                  it.
                 </div>
               </div>
             `

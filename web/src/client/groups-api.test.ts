@@ -185,26 +185,23 @@ describe('error classification from fixtures', () => {
     },
   ];
 
-  it.each(errorCases)(
-    '$description',
-    async ({ fixture, httpStatus, expectedKind }) => {
-      // Use createGroup as a representative API function to trigger classification
-      fetchMock.mockResolvedValueOnce(fixtureResponse(fixture, httpStatus));
+  it.each(errorCases)('$description', async ({ fixture, httpStatus, expectedKind }) => {
+    // Use createGroup as a representative API function to trigger classification
+    fetchMock.mockResolvedValueOnce(fixtureResponse(fixture, httpStatus));
 
-      try {
-        await createGroup({ name: 'test' });
-        expect.fail('Expected GroupsApiError to be thrown');
-      } catch (err) {
-        expect(err).toBeInstanceOf(GroupsApiError);
-        const apiErr = err as GroupsApiError;
-        expect(apiErr.kind).toBe(expectedKind);
-        expect(apiErr.httpStatus).toBe(httpStatus);
-        // Message should match the fixture's error message
-        const fixtureData = loadFixture<{ error: { message: string } }>(fixture);
-        expect(apiErr.message).toBe(fixtureData.error.message);
-      }
+    try {
+      await createGroup({ name: 'test' });
+      expect.fail('Expected GroupsApiError to be thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(GroupsApiError);
+      const apiErr = err as GroupsApiError;
+      expect(apiErr.kind).toBe(expectedKind);
+      expect(apiErr.httpStatus).toBe(httpStatus);
+      // Message should match the fixture's error message
+      const fixtureData = loadFixture<{ error: { message: string } }>(fixture);
+      expect(apiErr.message).toBe(fixtureData.error.message);
     }
-  );
+  });
 
   it('classifies unknown 500 as http', async () => {
     fetchMock.mockResolvedValueOnce(
@@ -239,10 +236,7 @@ describe('error classification from fixtures', () => {
 
   it('classifies generic 400 as validation', async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonResponse(
-        { error: { code: 'validation_error', message: 'name is required' } },
-        400
-      )
+      jsonResponse({ error: { code: 'validation_error', message: 'name is required' } }, 400)
     );
 
     try {
@@ -346,9 +340,7 @@ describe('listGroups()', () => {
   });
 
   it('passes filter parameters as query string', async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse({ groups: [], totalCount: 0 })
-    );
+    fetchMock.mockResolvedValueOnce(jsonResponse({ groups: [], totalCount: 0 }));
 
     await listGroups({ search: 'team', groupType: 'explicit', limit: 5 });
     const calledUrl = fetchMock.mock.calls[0][0] as string;
@@ -430,9 +422,7 @@ describe('deleteGroup()', () => {
 
   it('uses raw fetch (not apiFetch) — no scion:access-denied event', async () => {
     // deleteGroup uses raw fetch with credentials:'include'
-    fetchMock.mockResolvedValueOnce(
-      fixtureResponse('error-constraint-gate.json', 403)
-    );
+    fetchMock.mockResolvedValueOnce(fixtureResponse('error-constraint-gate.json', 403));
 
     try {
       await deleteGroup('g-123');
@@ -510,9 +500,7 @@ describe('removeMember()', () => {
   });
 
   it('throws last_owner on 400', async () => {
-    fetchMock.mockResolvedValueOnce(
-      fixtureResponse('error-last-owner.json', 400)
-    );
+    fetchMock.mockResolvedValueOnce(fixtureResponse('error-last-owner.json', 400));
 
     try {
       await removeMember('g-1', 'user', 'u-1');
@@ -524,9 +512,7 @@ describe('removeMember()', () => {
   });
 
   it('throws constraint_gate on 403', async () => {
-    fetchMock.mockResolvedValueOnce(
-      fixtureResponse('error-constraint-gate.json', 403)
-    );
+    fetchMock.mockResolvedValueOnce(fixtureResponse('error-constraint-gate.json', 403));
 
     try {
       await removeMember('g-1', 'user', 'u-1');
@@ -545,9 +531,7 @@ describe('removeMember()', () => {
 describe('abort propagation', () => {
   it('passes AbortSignal to fetch for listGroups', async () => {
     const controller = new AbortController();
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse({ groups: [], totalCount: 0 })
-    );
+    fetchMock.mockResolvedValueOnce(jsonResponse({ groups: [], totalCount: 0 }));
 
     await listGroups({}, controller.signal);
     const opts = fetchMock.mock.calls[0][1] as RequestInit;

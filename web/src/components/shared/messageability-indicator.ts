@@ -118,15 +118,8 @@ export class ScionMessageabilityIndicator extends LitElement {
 
     return html`
       <sl-tooltip content="${state.tooltip}">
-        <span
-          class="indicator ${this.size}"
-          aria-label="${state.tooltip}"
-          role="img"
-        >
-          <sl-icon
-            name="${state.icon}"
-            style="color: ${state.color}"
-          ></sl-icon>
+        <span class="indicator ${this.size}" aria-label="${state.tooltip}" role="img">
+          <sl-icon name="${state.icon}" style="color: ${state.color}"></sl-icon>
         </span>
       </sl-tooltip>
     `;

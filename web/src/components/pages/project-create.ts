@@ -595,8 +595,7 @@ export class ScionPageProjectCreate extends LitElement {
         // (except for Azure DevOps URLs where .git would break the path).
         let cloneUrl = trimmedUrl;
         const hadGitAt = cloneUrl.startsWith('git@');
-        cloneUrl = cloneUrl
-          .replace(/^(https?:\/\/|ssh:\/\/|git:\/\/|git@)/, '');
+        cloneUrl = cloneUrl.replace(/^(https?:\/\/|ssh:\/\/|git:\/\/|git@)/, '');
         if (hadGitAt) {
           cloneUrl = cloneUrl.replace(':', '/'); // git@host:org/repo → host/org/repo
         }

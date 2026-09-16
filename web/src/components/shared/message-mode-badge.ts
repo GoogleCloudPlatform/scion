@@ -129,11 +129,7 @@ export class ScionMessageModeBadge extends LitElement {
     `;
 
     if (this.showTooltip) {
-      return html`
-        <sl-tooltip content="${display.description}">
-          ${badge}
-        </sl-tooltip>
-      `;
+      return html` <sl-tooltip content="${display.description}"> ${badge} </sl-tooltip> `;
     }
 
     return badge;

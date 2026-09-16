@@ -34,7 +34,10 @@ const MOCK_PROJECTS = [
 let ProjectPickerCtor: any;
 
 beforeAll(async () => {
-  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('{}', { status: 200 }))));
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => Promise.resolve(new Response('{}', { status: 200 })))
+  );
   const mod = await import('./project-picker.js');
   ProjectPickerCtor = mod.ScionProjectPicker;
   vi.restoreAllMocks();
@@ -72,7 +75,10 @@ async function createElement(
   if (fetchHandler) {
     vi.stubGlobal('fetch', vi.fn(fetchHandler));
   } else {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('{}', { status: 200 }))));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(new Response('{}', { status: 200 })))
+    );
   }
   const el = new ProjectPickerCtor();
   document.body.appendChild(el);
@@ -152,9 +158,7 @@ describe('scion-project-picker', () => {
     await el.updateComplete;
 
     // searchQuery should show display-friendly format
-    expect((el as Record<string, unknown>)['searchQuery']).toBe(
-      'Beta Project (beta-project)'
-    );
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('Beta Project (beta-project)');
   });
 
   it('closes dropdown after selection', async () => {
@@ -167,9 +171,7 @@ describe('scion-project-picker', () => {
     await el.updateComplete;
 
     // Select a project
-    (el as Record<string, (...args: unknown[]) => void>)['selectProject'](
-      MOCK_PROJECTS[0]
-    );
+    (el as Record<string, (...args: unknown[]) => void>)['selectProject'](MOCK_PROJECTS[0]);
     await el.updateComplete;
 
     expect((el as Record<string, unknown>)['searchOpen']).toBe(false);
@@ -188,10 +190,7 @@ describe('scion-project-picker', () => {
     (el as Record<string, unknown>)['selectedViaDropdown'] = false;
 
     // Trigger blur handler
-    (el as Record<string, (...args: unknown[]) => void>)['emitChange'](
-      'my-project-slug',
-      ''
-    );
+    (el as Record<string, (...args: unknown[]) => void>)['emitChange']('my-project-slug', '');
     await el.updateComplete;
 
     expect(events.length).toBeGreaterThan(0);

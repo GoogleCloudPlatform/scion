@@ -26,7 +26,13 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { Project, RuntimeBroker, Template, GCPServiceAccount, MessageMode } from '../../shared/types.js';
+import type {
+  Project,
+  RuntimeBroker,
+  Template,
+  GCPServiceAccount,
+  MessageMode,
+} from '../../shared/types.js';
 
 interface HarnessConfigEntry {
   id: string;
@@ -586,7 +592,9 @@ export class ScionPageAgentCreate extends LitElement {
     const user = visible.filter((t) => t.scope === 'user').sort(byName);
     const project = visible.filter((t) => t.scope === 'project').sort(byName);
     const global = visible.filter((t) => t.scope === 'global').sort(byName);
-    const rest = visible.filter((t) => t.scope !== 'user' && t.scope !== 'project' && t.scope !== 'global').sort(byName);
+    const rest = visible
+      .filter((t) => t.scope !== 'user' && t.scope !== 'project' && t.scope !== 'global')
+      .sort(byName);
     return [...user, ...project, ...global, ...rest];
   }
 
@@ -1564,7 +1572,12 @@ export class ScionPageAgentCreate extends LitElement {
           }}
         >
           <sl-option value="">Default (inherit from parent)</sl-option>
-          ${(Object.entries(MESSAGE_MODE_DISPLAY) as [MessageMode, typeof MESSAGE_MODE_DISPLAY[MessageMode]][]).map(
+          ${(
+            Object.entries(MESSAGE_MODE_DISPLAY) as [
+              MessageMode,
+              (typeof MESSAGE_MODE_DISPLAY)[MessageMode],
+            ][]
+          ).map(
             ([mode, display]) => html`
               <sl-option value=${mode}>
                 <sl-icon slot="prefix" name=${display.icon}></sl-icon>
@@ -1575,9 +1588,12 @@ export class ScionPageAgentCreate extends LitElement {
         </sl-select>
         ${this.messageMode === 'none'
           ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
-              This agent will be created in sealed mode. It will not be able to send or receive messages.
+              This agent will be created in sealed mode. It will not be able to send or receive
+              messages.
             </div>`
-          : html`<div class="hint">Message authorization scope. Default inherits from the parent agent's mode.</div>`}
+          : html`<div class="hint">
+              Message authorization scope. Default inherits from the parent agent's mode.
+            </div>`}
       </div>
 
       <!-- Harness Authentication -->

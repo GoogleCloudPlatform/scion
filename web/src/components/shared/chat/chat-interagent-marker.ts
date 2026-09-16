@@ -102,8 +102,8 @@ export class ScionChatInteragentMarker extends LitElement {
 
     /* Expanded state — bordered container, centered to match collapsed pill */
     .marker-expanded {
-      max-width: min(70%, 600px);  /* match .bubble max-width in chat-message.ts */
-      margin-left: auto;   /* centered */
+      max-width: min(70%, 600px); /* match .bubble max-width in chat-message.ts */
+      margin-left: auto; /* centered */
       margin-right: auto;
       margin-top: 0.25rem;
       margin-bottom: 0.25rem;
@@ -274,7 +274,10 @@ export class ScionChatInteragentMarker extends LitElement {
         }
       });
       // Only update state if the set actually changed to avoid re-render loops.
-      if (next.size !== this.truncatedIds.size || [...next].some((id) => !this.truncatedIds.has(id))) {
+      if (
+        next.size !== this.truncatedIds.size ||
+        [...next].some((id) => !this.truncatedIds.has(id))
+      ) {
         this.truncatedIds = next;
       }
     });

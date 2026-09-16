@@ -679,72 +679,69 @@ export class ScionChatComposer extends LitElement {
           ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
           ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
           <div class="input-row">
-          ${this.conversationMode && !inEditMode
-            ? html`
-                <sl-icon-button
-                  class="attach-btn"
-                  name="paperclip"
-                  label="Attach file"
-                  @click=${this.handleAttachClick}
-                  ?disabled=${this.disabled || this.uploading}
-                ></sl-icon-button>
-                <input
-                  type="file"
-                  multiple
-                  style="display:none"
-                  @change=${this.handleFileSelected}
-                />
-              `
-            : nothing}
-          <div class="textarea-wrapper">
-            <sl-textarea
-              placeholder=${inEditMode ? 'Edit your message...' : 'Send a message...'}
-              size="small"
-              rows="1"
-              resize="auto"
-              .value=${this.text}
-              @sl-input=${this.handleInput}
-              @keydown=${this.handleKeydown}
-              @paste=${this.handlePaste}
-              ?disabled=${this.disabled}
-            ></sl-textarea>
-            <scion-mention-autocomplete
-              .agents=${this.agents}
-              .members=${this.members}
-              @mention-accept=${this.handleMentionAccept}
-            ></scion-mention-autocomplete>
-            <scion-slash-autocomplete
-              @slash-command=${this.handleSlashCommand}
-            ></scion-slash-autocomplete>
-          </div>
-          <div class="send-container">
-            <sl-button
-              class="send-btn"
-              size="small"
-              variant=${sendVariant}
-              ?disabled=${!canSend}
-              @click=${this.handleSend}
-              @contextmenu=${this.handleSendContextMenu}
-            >
-              <sl-icon slot="prefix" name=${sendIcon}></sl-icon>
-              ${sendLabel}
-            </sl-button>
-            ${this.showSendContextMenu && !inEditMode
+            ${this.conversationMode && !inEditMode
               ? html`
-                  <div
-                    class="send-context-overlay"
-                    @click=${this.closeSendContextMenu}
-                  ></div>
-                  <div class="send-context-menu">
-                    <div class="send-context-item" @click=${this.handleSendWithInterrupt}>
-                      <sl-icon name="lightning-charge"></sl-icon>
-                      Send with interruption
-                    </div>
-                  </div>
+                  <sl-icon-button
+                    class="attach-btn"
+                    name="paperclip"
+                    label="Attach file"
+                    @click=${this.handleAttachClick}
+                    ?disabled=${this.disabled || this.uploading}
+                  ></sl-icon-button>
+                  <input
+                    type="file"
+                    multiple
+                    style="display:none"
+                    @change=${this.handleFileSelected}
+                  />
                 `
               : nothing}
+            <div class="textarea-wrapper">
+              <sl-textarea
+                placeholder=${inEditMode ? 'Edit your message...' : 'Send a message...'}
+                size="small"
+                rows="1"
+                resize="auto"
+                .value=${this.text}
+                @sl-input=${this.handleInput}
+                @keydown=${this.handleKeydown}
+                @paste=${this.handlePaste}
+                ?disabled=${this.disabled}
+              ></sl-textarea>
+              <scion-mention-autocomplete
+                .agents=${this.agents}
+                .members=${this.members}
+                @mention-accept=${this.handleMentionAccept}
+              ></scion-mention-autocomplete>
+              <scion-slash-autocomplete
+                @slash-command=${this.handleSlashCommand}
+              ></scion-slash-autocomplete>
+            </div>
+            <div class="send-container">
+              <sl-button
+                class="send-btn"
+                size="small"
+                variant=${sendVariant}
+                ?disabled=${!canSend}
+                @click=${this.handleSend}
+                @contextmenu=${this.handleSendContextMenu}
+              >
+                <sl-icon slot="prefix" name=${sendIcon}></sl-icon>
+                ${sendLabel}
+              </sl-button>
+              ${this.showSendContextMenu && !inEditMode
+                ? html`
+                    <div class="send-context-overlay" @click=${this.closeSendContextMenu}></div>
+                    <div class="send-context-menu">
+                      <div class="send-context-item" @click=${this.handleSendWithInterrupt}>
+                        <sl-icon name="lightning-charge"></sl-icon>
+                        Send with interruption
+                      </div>
+                    </div>
+                  `
+                : nothing}
+            </div>
           </div>
-        </div>
           <div class="footer-row">
             ${this.runeCount > 0 || isNearLimit
               ? html`
@@ -784,11 +781,7 @@ export class ScionChatComposer extends LitElement {
     return html`
       <div class="edit-bar">
         <span class="edit-info">Editing message</span>
-        <sl-icon-button
-          name="x-lg"
-          label="Cancel edit"
-          @click=${this.cancelEdit}
-        ></sl-icon-button>
+        <sl-icon-button name="x-lg" label="Cancel edit" @click=${this.cancelEdit}></sl-icon-button>
       </div>
     `;
   }
@@ -836,7 +829,7 @@ export class ScionChatComposer extends LitElement {
         <sl-dropdown>
           <div class="destination-chip clickable" slot="trigger">
             <span class="arrow">&rarr;</span>
-            <span style="font-size: 0.75rem">\u{1F916}</span>
+            <span style="font-size: 0.75rem">🤖</span>
             <span class="agent-name">${this.defaultAgent}</span>
             <span class="hint">(thread default)</span>
             ${hasAgents
@@ -867,11 +860,13 @@ export class ScionChatComposer extends LitElement {
   private renderAgentMenu(agentMembers: MemberInfo[]) {
     return html`
       <sl-menu @sl-select=${this.handleAgentMenuSelect}>
-        <sl-menu-label style="padding: 0 var(--sl-spacing-medium);">Set thread default agent</sl-menu-label>
+        <sl-menu-label style="padding: 0 var(--sl-spacing-medium);"
+          >Set thread default agent</sl-menu-label
+        >
         ${agentMembers.map(
           (m) => html`
             <sl-menu-item value=${m.name} ?checked=${this.defaultAgent === m.name}>
-              <span slot="prefix" style="font-size: 1.1em;">\u{1F916}</span>
+              <span slot="prefix" style="font-size: 1.1em;">🤖</span>
               ${m.name}
             </sl-menu-item>
           `
@@ -1224,7 +1219,7 @@ export class ScionChatComposer extends LitElement {
   /** Hide the drop zone overlay on drag leave. */
   private handleDragLeave(e: DragEvent): void {
     // Only hide if we're leaving the composer-wrapper, not entering a child.
-    const wrapper = (e.currentTarget as HTMLElement);
+    const wrapper = e.currentTarget as HTMLElement;
     const related = e.relatedTarget as Node | null;
     if (related && wrapper.contains(related)) return;
     this.dragOver = false;

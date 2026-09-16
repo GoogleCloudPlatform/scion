@@ -130,9 +130,7 @@ function normalizeMentionSlug(value: string): string {
  * state manager's agent map. Only the fields SSE status deltas merge onto
  * matter — the map exists here purely to give those deltas a baseline.
  */
-function agentMemberToAgent(
-  m: import('../shared/chat/chat-members.js').ChatAgentMember
-): Agent {
+function agentMemberToAgent(m: import('../shared/chat/chat-members.js').ChatAgentMember): Agent {
   return {
     id: m.id,
     name: m.displayName,
@@ -264,7 +262,9 @@ export class ScionPageChat extends LitElement {
   /** Whether the quick-switcher component has been lazy-loaded. */
   private v2SwitcherLoaded = false;
   /** Cached conversation list for the switcher. */
-  @state() private v2SwitcherConversations: import('../shared/chat/chat-switcher.js').SwitcherConversation[] = [];
+  @state()
+  private v2SwitcherConversations: import('../shared/chat/chat-switcher.js').SwitcherConversation[] =
+    [];
   /** Whether the search panel is visible. */
   @state() private v2SearchActive = false;
   /** Whether the search component has been lazy-loaded. */
@@ -758,11 +758,7 @@ export class ScionPageChat extends LitElement {
       const raw = localStorage.getItem(MEMBERS_WIDTH_KEY);
       if (!raw) return;
       const parsed = Number.parseInt(raw, 10);
-      if (
-        Number.isFinite(parsed) &&
-        parsed >= MEMBERS_WIDTH_MIN &&
-        parsed <= MEMBERS_WIDTH_MAX
-      ) {
+      if (Number.isFinite(parsed) && parsed >= MEMBERS_WIDTH_MIN && parsed <= MEMBERS_WIDTH_MAX) {
         this.membersWidth = parsed;
       }
     } catch {
@@ -1425,9 +1421,7 @@ export class ScionPageChat extends LitElement {
     projectId: string
   ): Promise<Array<{ id: string; name: string; isGeneral: boolean; defaultAgent?: string }>> {
     try {
-      const res = await apiFetch(
-        `/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`
-      );
+      const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`);
       if (res.ok) {
         const data = (await res.json()) as {
           threads?: Array<{
@@ -1496,10 +1490,10 @@ export class ScionPageChat extends LitElement {
           realTimestamp(agent.updated) ||
           existing?.lastActivityEvent ||
           '',
-          // SSE deltas carry status, not authorization. Preserve what the
-          // members endpoint decided; rebuilding without it restores the
-          // terminal control on every status tick.
-          canAttach: existing?.canAttach,
+        // SSE deltas carry status, not authorization. Preserve what the
+        // members endpoint decided; rebuilding without it restores the
+        // terminal control on every status tick.
+        canAttach: existing?.canAttach,
       });
     }
 
@@ -1606,12 +1600,14 @@ export class ScionPageChat extends LitElement {
     const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
     const eventData = (detail?.data ?? detail) as Record<string, unknown> | undefined;
     const oldConversationKey = eventData?.oldConversationKey as string | undefined;
-    const newTopic = eventData?.newTopic as {
-      id: string;
-      projectId: string;
-      name: string;
-      defaultAgent?: string;
-    } | undefined;
+    const newTopic = eventData?.newTopic as
+      | {
+          id: string;
+          projectId: string;
+          name: string;
+          defaultAgent?: string;
+        }
+      | undefined;
     if (!oldConversationKey || !newTopic) return;
 
     // If we're currently viewing the promoted DM, navigate to the new thread
@@ -1650,10 +1646,7 @@ export class ScionPageChat extends LitElement {
     };
 
     // Determine the slug for the readable URL
-    const slug =
-      detail.projectSlug ||
-      this._projectIdToSlug.get(detail.projectId) ||
-      '';
+    const slug = detail.projectSlug || this._projectIdToSlug.get(detail.projectId) || '';
 
     // Cache the mapping if we received a slug
     if (slug && detail.projectId) {
@@ -1739,9 +1732,7 @@ export class ScionPageChat extends LitElement {
    */
   private async fetchThreadDetails(conversationKey: string): Promise<void> {
     try {
-      const res = await apiFetch(
-        `/api/v1/chat/topics/${encodeURIComponent(conversationKey)}`
-      );
+      const res = await apiFetch(`/api/v1/chat/topics/${encodeURIComponent(conversationKey)}`);
       if (!res.ok) return;
       const data = (await res.json()) as { name?: string; defaultAgent?: string };
       const conv = this.v2Conversation;
@@ -2581,9 +2572,7 @@ export class ScionPageChat extends LitElement {
       } else {
         // Find the project slug for this thread via its projectId.
         let foundSlug = '';
-        const conv = this.v2SwitcherConversations.find(
-          (c) => c.conversationKey === key && !c.isDM
-        );
+        const conv = this.v2SwitcherConversations.find((c) => c.conversationKey === key && !c.isDM);
         if (conv?.projectId) {
           foundSlug = this._projectIdToSlug.get(conv.projectId) || '';
         }
@@ -2898,9 +2887,10 @@ export class ScionPageChat extends LitElement {
     const conv = this.v2Conversation;
 
     // Look up the project slug for agent DMs
-    const agentProjectSlug = conv.isDM && conv.peerKind === 'agent' && conv.peerId
-      ? this.getAgentProjectSlug(conv.peerId)
-      : '';
+    const agentProjectSlug =
+      conv.isDM && conv.peerKind === 'agent' && conv.peerId
+        ? this.getAgentProjectSlug(conv.peerId)
+        : '';
 
     // The header renders for every open conversation, not only once the name
     // has resolved: on a deep link or reload the name arrives from the topic
@@ -2912,8 +2902,13 @@ export class ScionPageChat extends LitElement {
         ${conv.isDM
           ? html`
               ${conv.peerKind === 'agent' && agentProjectSlug
-                ? html`<sl-icon name="folder" style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b)"></sl-icon>
-                        <span style="font-size: 0.8125rem; color: var(--scion-text-muted, #64748b)">${agentProjectSlug}</span>`
+                ? html`<sl-icon
+                      name="folder"
+                      style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b)"
+                    ></sl-icon>
+                    <span style="font-size: 0.8125rem; color: var(--scion-text-muted, #64748b)"
+                      >${agentProjectSlug}</span
+                    >`
                 : nothing}
               ${conv.peerKind === 'agent'
                 ? html`<span style="font-size: 0.875rem">🤖</span>`
@@ -2935,7 +2930,10 @@ export class ScionPageChat extends LitElement {
                   `
                 : nothing}
             `}
-        <div class="header-actions" style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;">
+        <div
+          class="header-actions"
+          style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;"
+        >
           ${conv.isDM && conv.peerKind === 'agent'
             ? html`
                 <sl-tooltip content="Promote to thread">
@@ -2982,7 +2980,11 @@ export class ScionPageChat extends LitElement {
             <scion-chat-search
               projectId=${conv.projectId}
               conversationKey=${conv.conversationKey}
-              conversationName=${conv.isDM ? conv.peerName : conv.threadName ? '#' + conv.threadName : ''}
+              conversationName=${conv.isDM
+                ? conv.peerName
+                : conv.threadName
+                  ? '#' + conv.threadName
+                  : ''}
               @search-close=${this.handleSearchClose}
               @search-navigate=${this.handleSearchNavigate}
             ></scion-chat-search>
@@ -3023,8 +3025,8 @@ export class ScionPageChat extends LitElement {
       >
         <p>
           This will move your conversation with
-          <strong>${conv.peerName}</strong> into a shared thread visible to all
-          members of <strong>${conv.projectSlug}</strong>. This cannot be undone.
+          <strong>${conv.peerName}</strong> into a shared thread visible to all members of
+          <strong>${conv.projectSlug}</strong>. This cannot be undone.
         </p>
         <sl-input
           label="Thread name"
@@ -3094,10 +3096,7 @@ export class ScionPageChat extends LitElement {
                 : body.error || 'Conflict — please try again.';
           this.showPromoteToast(msg, 'warning');
         } else {
-          this.showPromoteToast(
-            body.error || `Promotion failed (${res.status})`,
-            'danger'
-          );
+          this.showPromoteToast(body.error || `Promotion failed (${res.status})`, 'danger');
         }
         return;
       }
@@ -3115,10 +3114,7 @@ export class ScionPageChat extends LitElement {
       // Close dialog and navigate to the new thread
       this.promoteDialogOpen = false;
       this.navigateToPromotedThread(topic);
-      this.showPromoteToast(
-        `Conversation promoted to #${topic.name}`,
-        'success'
-      );
+      this.showPromoteToast(`Conversation promoted to #${topic.name}`, 'success');
 
       // Remove the old DM from the switcher cache
       this.removeSwitcherConversation(conv.conversationKey);
@@ -3159,8 +3155,7 @@ export class ScionPageChat extends LitElement {
     } else {
       threadPath = `/chat/space/${encodeURIComponent(topic.projectId)}/thread/${encodeURIComponent(topic.id)}`;
     }
-    const browserPath =
-      base && base !== '/' ? base.replace(/\/$/, '') + threadPath : threadPath;
+    const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + threadPath : threadPath;
     window.history.pushState({}, '', browserPath);
 
     dispatchPageTitle(this, `#${topic.name}`, 'Chat');

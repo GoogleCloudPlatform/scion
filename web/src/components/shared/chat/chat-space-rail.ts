@@ -877,9 +877,7 @@ export class ScionChatSpaceRail extends LitElement {
     // Only fire when the click target is the rail-body itself (empty space)
     const target = e.target as HTMLElement;
     if (target === e.currentTarget) {
-      this.dispatchEvent(
-        new CustomEvent('reset-view', { bubbles: true, composed: true })
-      );
+      this.dispatchEvent(new CustomEvent('reset-view', { bubbles: true, composed: true }));
     }
   }
 
@@ -1099,15 +1097,17 @@ export class ScionChatSpaceRail extends LitElement {
   // ---------------------------------------------------------------------------
 
   /** Message shape returned by the conversations messages endpoint. */
-  private async fetchThreadMessages(threadId: string): Promise<Array<{
-    sender_name?: string;
-    sender?: string;
-    body?: string;
-    content?: string;
-    created_at?: string;
-    timestamp?: string;
-    attachments?: string[];
-  }>> {
+  private async fetchThreadMessages(threadId: string): Promise<
+    Array<{
+      sender_name?: string;
+      sender?: string;
+      body?: string;
+      content?: string;
+      created_at?: string;
+      timestamp?: string;
+      attachments?: string[];
+    }>
+  > {
     try {
       const res = await apiFetch(
         `/api/v1/chat/conversations/${encodeURIComponent(threadId)}/messages`
@@ -1253,7 +1253,7 @@ export class ScionChatSpaceRail extends LitElement {
         method: 'DELETE',
       });
       if (!res.ok) {
-        const data = await res.json().catch(() => ({})) as { error?: string };
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
         showToast(data.error || 'Failed to delete thread', 'danger');
         return;
       }
@@ -1650,17 +1650,11 @@ export class ScionChatSpaceRail extends LitElement {
           <sl-icon name=${thread.muted ? 'bell-slash' : 'bell'}></sl-icon>
           ${thread.muted ? 'Unmute' : 'Mute'}
         </div>
-        <div
-          class="context-menu-item"
-          @click=${() => this.handleExportThread(thread)}
-        >
+        <div class="context-menu-item" @click=${() => this.handleExportThread(thread)}>
           <sl-icon name="file-earmark-text"></sl-icon>
           Copy as Markdown
         </div>
-        <div
-          class="context-menu-item"
-          @click=${() => this.handleDownloadThread(thread)}
-        >
+        <div class="context-menu-item" @click=${() => this.handleDownloadThread(thread)}>
           <sl-icon name="download"></sl-icon>
           Download as Markdown
         </div>

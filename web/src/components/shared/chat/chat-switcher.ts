@@ -194,9 +194,7 @@ export class ScionChatSwitcher extends LitElement {
 
     if (term) {
       list = list.filter(
-        (c) =>
-          c.name.toLowerCase().includes(term) ||
-          c.spaceName.toLowerCase().includes(term)
+        (c) => c.name.toLowerCase().includes(term) || c.spaceName.toLowerCase().includes(term)
       );
     }
 
@@ -257,9 +255,7 @@ export class ScionChatSwitcher extends LitElement {
   }
 
   private close(): void {
-    this.dispatchEvent(
-      new CustomEvent('switcher-close', { bubbles: true, composed: true })
-    );
+    this.dispatchEvent(new CustomEvent('switcher-close', { bubbles: true, composed: true }));
   }
 
   private handleOverlayClick(e: MouseEvent): void {
@@ -295,11 +291,12 @@ export class ScionChatSwitcher extends LitElement {
                     <div
                       class="item ${i === this.selectedIndex ? 'selected' : ''}"
                       @click=${() => this.selectConversation(item)}
-                      @mouseenter=${() => { this.selectedIndex = i; }}
+                      @mouseenter=${() => {
+                        this.selectedIndex = i;
+                      }}
                     >
                       <div class="item-name">
-                        ${item.name}
-                        ${item.isDM ? html`<span class="dm-badge">DM</span>` : nothing}
+                        ${item.name} ${item.isDM ? html`<span class="dm-badge">DM</span>` : nothing}
                       </div>
                       <div class="item-context">${item.spaceName}</div>
                     </div>

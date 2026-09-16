@@ -242,7 +242,6 @@ export class ScionChatMembers extends LitElement {
       color: var(--scion-text-muted, #94a3b8);
     }
 
-
     .agent-terminal,
     .agent-popout {
       display: inline-flex;
@@ -336,9 +335,16 @@ export class ScionChatMembers extends LitElement {
     }
 
     @keyframes agent-wobble {
-      0%, 100% { transform: translateX(0); }
-      25% { transform: translateX(15%); }
-      75% { transform: translateX(-15%); }
+      0%,
+      100% {
+        transform: translateX(0);
+      }
+      25% {
+        transform: translateX(15%);
+      }
+      75% {
+        transform: translateX(-15%);
+      }
     }
 
     .avatar-wrapper.active {
@@ -556,7 +562,11 @@ export class ScionChatMembers extends LitElement {
         @click=${() => this.handleMemberClick(a.id, 'agent', a.displayName)}
       >
         <div class="avatar-wrapper ${this.recentlyChangedAgents.has(a.id) ? 'active' : ''}">
-          <scion-chat-avatar name="${a.slug || a.displayName}" color-seed="${a.id}" size="28"></scion-chat-avatar>
+          <scion-chat-avatar
+            name="${a.slug || a.displayName}"
+            color-seed="${a.id}"
+            size="28"
+          ></scion-chat-avatar>
           ${hasUnread ? html`<div class="unread-dot"></div>` : nothing}
           ${isTyping
             ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
@@ -564,10 +574,7 @@ export class ScionChatMembers extends LitElement {
         </div>
         <div class="member-info">
           <div class="member-name">${a.displayName}</div>
-          <scion-status-badge
-            status=${badgeStatus}
-            size="small"
-          ></scion-status-badge>
+          <scion-status-badge status=${badgeStatus} size="small"></scion-status-badge>
         </div>
         ${a.canAttach !== true
           ? nothing
@@ -580,13 +587,7 @@ export class ScionChatMembers extends LitElement {
                 // Leave modified and non-primary clicks to the browser so
                 // Ctrl/Cmd-click, Shift-click and middle-click behave as they
                 // do on any other link.
-                if (
-                  e.button !== 0 ||
-                  e.metaKey ||
-                  e.ctrlKey ||
-                  e.shiftKey ||
-                  e.altKey
-                ) {
+                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
                   return;
                 }
                 e.preventDefault();
@@ -608,9 +609,7 @@ export class ScionChatMembers extends LitElement {
     `;
 
     return html`
-      <sl-tooltip .content=${tooltipContent} placement="left" hoist>
-        ${agentRow}
-      </sl-tooltip>
+      <sl-tooltip .content=${tooltipContent} placement="left" hoist> ${agentRow} </sl-tooltip>
     `;
   }
 

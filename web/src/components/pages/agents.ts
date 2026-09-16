@@ -23,12 +23,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type {
-  PageData,
-  Agent,
-  AgentPhase,
-  Capabilities,
-} from '../../shared/types.js';
+import type { PageData, Agent, AgentPhase, Capabilities } from '../../shared/types.js';
 import {
   can,
   canLifecycle,
@@ -50,7 +45,11 @@ import '../shared/messageability-indicator.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import '../shared/quick-message-dialog.js';
-import { getDenialMessage, MESSAGE_MODE_DISPLAY, getMessageModeDisplay } from '../../shared/message-mode.js';
+import {
+  getDenialMessage,
+  MESSAGE_MODE_DISPLAY,
+  getMessageModeDisplay,
+} from '../../shared/message-mode.js';
 import type { MessageMode } from '../../shared/types.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
@@ -134,7 +133,6 @@ export class ScionPageAgents extends LitElement {
 
   @state()
   private quickMessageOpen = false;
-
 
   static override styles = [
     listPageStyles,
@@ -515,8 +513,11 @@ export class ScionPageAgents extends LitElement {
     event?: MouseEvent
   ): Promise<void> {
     if (action === 'delete') {
-      const agentName = this.agents.find(a => a.id === agentId)?.name ?? 'this agent';
-      if (!event?.altKey && !(await showConfirm(`Are you sure you want to delete agent "${agentName}"?`))) {
+      const agentName = this.agents.find((a) => a.id === agentId)?.name ?? 'this agent';
+      if (
+        !event?.altKey &&
+        !(await showConfirm(`Are you sure you want to delete agent "${agentName}"?`))
+      ) {
         return;
       }
       // Show per-button spinner for delete; don't optimistically remove

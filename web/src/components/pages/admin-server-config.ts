@@ -1525,7 +1525,9 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (srv.secrets) {
         this.secretsBackend = srv.secrets.backend || '';
         this.secretsGCPProjectId = srv.secrets.gcp_project_id || '';
-        this.secretsGCPReplicationLocations = (srv.secrets.gcp_replication_locations || []).join(', ');
+        this.secretsGCPReplicationLocations = (srv.secrets.gcp_replication_locations || []).join(
+          ', '
+        );
       }
 
       // Message Broker
@@ -2014,7 +2016,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       secrets.gcp_replication_locations = this.secretsGCPReplicationLocations
         ? this.secretsGCPReplicationLocations
             .split(',')
-            .map(s => s.trim())
+            .map((s) => s.trim())
             .filter(Boolean)
         : [];
     }
@@ -3161,16 +3163,12 @@ export class ScionPageAdminServerConfig extends LitElement {
                             clearable
                             value=${this.defaultRuntimeBroker}
                             @sl-change=${(e: Event) => {
-                              this.defaultRuntimeBroker = (
-                                e.target as HTMLSelectElement
-                              ).value;
+                              this.defaultRuntimeBroker = (e.target as HTMLSelectElement).value;
                             }}
                           >
                             ${this.runtimeBrokers.map(
                               (b) =>
-                                html`<sl-option value=${b.id}
-                                  >${b.name} (${b.status})</sl-option
-                                >`
+                                html`<sl-option value=${b.id}>${b.name} (${b.status})</sl-option>`
                             )}
                           </sl-select>`
                       : html`${this.renderEnvBadge('default_runtime_broker')}<sl-input
@@ -3178,9 +3176,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                             placeholder="broker ID, name, or slug"
                             clearable
                             @sl-change=${(e: Event) => {
-                              this.defaultRuntimeBroker = (
-                                e.target as HTMLInputElement
-                              ).value;
+                              this.defaultRuntimeBroker = (e.target as HTMLInputElement).value;
                             }}
                           ></sl-input>`
                   )}
@@ -4540,9 +4536,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                   value=${this.secretsGCPReplicationLocations}
                   placeholder="e.g. northamerica-northeast1, us-east1"
                   @sl-input=${(e: Event) => {
-                    this.secretsGCPReplicationLocations = (
-                      e.target as HTMLInputElement
-                    ).value;
+                    this.secretsGCPReplicationLocations = (e.target as HTMLInputElement).value;
                   }}
                 ></sl-input>
               </div>`

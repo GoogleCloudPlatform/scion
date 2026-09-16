@@ -141,9 +141,7 @@ function createFetchHandler(opts: {
     if (path.includes('/api/v1/admin/roles/')) {
       const status = opts.roleStatus ?? 200;
       if (status !== 200) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ error: 'Not found' }), { status })
-        );
+        return Promise.resolve(new Response(JSON.stringify({ error: 'Not found' }), { status }));
       }
       return Promise.resolve(
         new Response(JSON.stringify(opts.role ?? CUSTOM_ROLE), {
@@ -176,18 +174,15 @@ function createFetchHandler(opts: {
     // Admin status (required by navigateTo)
     if (path.includes('/api/v1/auth/admin-status')) {
       return Promise.resolve(
-        new Response(
-          JSON.stringify({ isAdmin: true, isSuperAdmin: true, permissions: [] }),
-          { status: 200 }
-        )
+        new Response(JSON.stringify({ isAdmin: true, isSuperAdmin: true, permissions: [] }), {
+          status: 200,
+        })
       );
     }
 
     // Settings public (required by navigateTo)
     if (path.includes('/api/v1/settings/public')) {
-      return Promise.resolve(
-        new Response(JSON.stringify({}), { status: 200 })
-      );
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }));
     }
 
     // Fallback
@@ -201,11 +196,14 @@ function createFetchHandler(opts: {
 
 // Pre-import the component module to avoid timeout during test execution.
 // The dynamic import warms up the module graph outside of the 5s test timeout.
-let ScionPageAdminRoleDetailCtor: typeof import('./admin-role-detail.js')['ScionPageAdminRoleDetail'];
+let ScionPageAdminRoleDetailCtor: (typeof import('./admin-role-detail.js'))['ScionPageAdminRoleDetail'];
 
 beforeAll(async () => {
   // Stub fetch for the duration of the import (connectedCallback may fire)
-  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('{}', { status: 200 }))));
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => Promise.resolve(new Response('{}', { status: 200 })))
+  );
   const mod = await import('./admin-role-detail.js');
   ScionPageAdminRoleDetailCtor = mod.ScionPageAdminRoleDetail;
   vi.restoreAllMocks();
@@ -241,7 +239,11 @@ async function createElement(
   while (Date.now() < deadline) {
     await el.updateComplete;
     // Check if the component has rendered content (not just loading)
-    if (el.shadowRoot?.querySelector('h1') || el.shadowRoot?.querySelector('.error-state') || el.shadowRoot?.querySelector('.empty-state')) {
+    if (
+      el.shadowRoot?.querySelector('h1') ||
+      el.shadowRoot?.querySelector('.error-state') ||
+      el.shadowRoot?.querySelector('.empty-state')
+    ) {
       break;
     }
     await new Promise((r) => setTimeout(r, 20));
@@ -358,9 +360,7 @@ describe('admin-role-detail', () => {
 
     // Switch to bindings tab
     const tabs = el.shadowRoot?.querySelectorAll('sl-tab');
-    const bindingsTab = [...(tabs ?? [])].find((t) =>
-      t.textContent?.includes('Bindings')
-    );
+    const bindingsTab = [...(tabs ?? [])].find((t) => t.textContent?.includes('Bindings'));
     expect(bindingsTab).toBeDefined();
     bindingsTab?.click();
     await new Promise((r) => setTimeout(r, 50));
@@ -376,13 +376,13 @@ describe('admin-role-detail', () => {
 
     // Switch to bindings tab
     const tabs = el.shadowRoot?.querySelectorAll('sl-tab');
-    const bindingsTab = [...(tabs ?? [])].find((t) =>
-      t.textContent?.includes('Bindings')
-    );
+    const bindingsTab = [...(tabs ?? [])].find((t) => t.textContent?.includes('Bindings'));
     bindingsTab?.click();
     await new Promise((r) => setTimeout(r, 50));
 
-    const emptyHeading = el.shadowRoot?.querySelector('sl-tab-panel[name="bindings"] .empty-state h2');
+    const emptyHeading = el.shadowRoot?.querySelector(
+      'sl-tab-panel[name="bindings"] .empty-state h2'
+    );
     expect(emptyHeading?.textContent?.trim()).toBe('No Bindings');
   });
 
@@ -436,9 +436,7 @@ describe('admin-role-detail: add binding form', () => {
 
     // Switch to bindings tab
     const tabs = el.shadowRoot?.querySelectorAll('sl-tab');
-    const bindingsTab = [...(tabs ?? [])].find((t) =>
-      t.textContent?.includes('Bindings')
-    );
+    const bindingsTab = [...(tabs ?? [])].find((t) => t.textContent?.includes('Bindings'));
     bindingsTab?.click();
     await new Promise((r) => setTimeout(r, 50));
 
@@ -474,9 +472,7 @@ describe('admin-role-detail: add binding form', () => {
 
     // Switch to bindings tab
     const tabs = el.shadowRoot?.querySelectorAll('sl-tab');
-    const bindingsTab = [...(tabs ?? [])].find((t) =>
-      t.textContent?.includes('Bindings')
-    );
+    const bindingsTab = [...(tabs ?? [])].find((t) => t.textContent?.includes('Bindings'));
     bindingsTab?.click();
     await new Promise((r) => setTimeout(r, 50));
 
@@ -503,9 +499,7 @@ describe('admin-role-detail: add binding form', () => {
 
     // Switch to bindings tab
     const tabs = el.shadowRoot?.querySelectorAll('sl-tab');
-    const bindingsTab = [...(tabs ?? [])].find((t) =>
-      t.textContent?.includes('Bindings')
-    );
+    const bindingsTab = [...(tabs ?? [])].find((t) => t.textContent?.includes('Bindings'));
     bindingsTab?.click();
     await new Promise((r) => setTimeout(r, 50));
 
@@ -602,7 +596,8 @@ describe('admin-role-detail: add binding form', () => {
             JSON.stringify({
               error: {
                 code: 'scope_mismatch',
-                message: 'binding scope type does not match role definition scope type: role "project-template-manager" requires scope "project" but got "system"',
+                message:
+                  'binding scope type does not match role definition scope type: role "project-template-manager" requires scope "project" but got "system"',
               },
             }),
             { status: 400, headers: { 'Content-Type': 'application/json' } }
@@ -641,7 +636,8 @@ describe('admin-role-detail: add binding form', () => {
             JSON.stringify({
               error: {
                 code: 'conflict',
-                message: 'principal already has a built-in membership role on this project: already has role "project-member"',
+                message:
+                  'principal already has a built-in membership role on this project: already has role "project-member"',
               },
             }),
             { status: 409, headers: { 'Content-Type': 'application/json' } }

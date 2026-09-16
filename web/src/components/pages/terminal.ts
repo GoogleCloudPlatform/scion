@@ -1255,7 +1255,10 @@ export class ScionPageTerminal extends LitElement {
 
   private static readonly SECRET_CONFLICT_RE = /secret "([^"]+)" already exists/g;
 
-  private async handleCaptureAuth(force = false, scope: 'project' | 'user' = 'project'): Promise<void> {
+  private async handleCaptureAuth(
+    force = false,
+    scope: 'project' | 'user' = 'project'
+  ): Promise<void> {
     if (!this.agent) return;
     this.captureAuthLoading = true;
     this.captureAuthConflicts = null;
@@ -1480,7 +1483,9 @@ export class ScionPageTerminal extends LitElement {
               <button
                 class="capture-auth-btn"
                 ?disabled=${this.captureAuthLoading}
-                @click=${() => { this.captureAuthScopeDialogOpen = true; }}
+                @click=${() => {
+                  this.captureAuthScopeDialogOpen = true;
+                }}
                 title="Capture credentials from inside the container"
               >
                 ${this.captureAuthLoading ? 'Capturing...' : 'Capture Auth'}
@@ -1541,8 +1546,7 @@ export class ScionPageTerminal extends LitElement {
                     ><span>${this.uploadDisabledReason}</span>`}
         </div>
       </div>
-      ${this.renderCaptureAuthConflictDialog()}
-      ${this.renderCaptureAuthScopeDialog()}
+      ${this.renderCaptureAuthConflictDialog()} ${this.renderCaptureAuthScopeDialog()}
     `;
   }
 
@@ -1564,12 +1568,8 @@ export class ScionPageTerminal extends LitElement {
             this.captureAuthSelectedScope = e.target.value;
           }}
         >
-          <sl-radio value="project"
-            >Project secret (all project agents)</sl-radio
-          >
-          <sl-radio value="user"
-            >Profile secret (your personal credential)</sl-radio
-          >
+          <sl-radio value="project">Project secret (all project agents)</sl-radio>
+          <sl-radio value="user">Profile secret (your personal credential)</sl-radio>
         </sl-radio-group>
         <sl-button
           slot="footer"
