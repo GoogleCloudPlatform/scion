@@ -1151,18 +1151,50 @@ export class ScionChatSpaceRail extends LitElement {
   /** Move a thread one slot up or down in its space. */
   private async moveThread(threadId: string, projectId: string, delta: -1 | 1): Promise<void> {
     if (!this.canReorderThreads()) return;
-    const order = this.currentThreadOrder(projectId);
-    const from = order.indexOf(threadId);
-    const to = from + delta;
-    if (from === -1 || to < 0 || to >= order.length) return;
-    const next = [...order];
-    const [moved] = next.splice(from, 1);
-    next.splice(to, 0, moved);
-    await this.applyThreadOrder(projectId, next);
+
+    const groups = this.prefs.threadGroups?.[projectId] ?? [];
+    const containingGroup = groups.find((g) => g.threadIds.includes(threadId));
+
+    if (containingGroup) {
+      // Reorder within the group's threadIds
+      const ids = [...containingGroup.threadIds];
+      const idx = ids.indexOf(threadId);
+      const swapIdx = idx + delta;
+      if (swapIdx < 0 || swapIdx >= ids.length) return;
+      [ids[idx], ids[swapIdx]] = [ids[swapIdx], ids[idx]];
+
+      const updatedGroups = groups.map((g) =>
+        g.id === containingGroup.id ? { ...g, threadIds: ids } : g
+      );
+      await this.savePrefs({
+        threadGroups: { ...(this.prefs.threadGroups ?? {}), [projectId]: updatedGroups },
+      });
+    } else {
+      // Reorder in global threadOrder (ungrouped threads)
+      const order = this.currentThreadOrder(projectId);
+      const from = order.indexOf(threadId);
+      const to = from + delta;
+      if (from === -1 || to < 0 || to >= order.length) return;
+      const next = [...order];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      await this.applyThreadOrder(projectId, next);
+    }
   }
 
   private isThreadAtEdge(threadId: string, projectId: string, edge: 'first' | 'last'): boolean {
     if (!this.canReorderThreads()) return true;
+
+    const groups = this.prefs.threadGroups?.[projectId] ?? [];
+    const containingGroup = groups.find((g) => g.threadIds.includes(threadId));
+
+    if (containingGroup) {
+      // Check edges within the group
+      const ids = containingGroup.threadIds;
+      return edge === 'first' ? ids[0] === threadId : ids[ids.length - 1] === threadId;
+    }
+
+    // Check edges in global order (ungrouped threads)
     const order = this.currentThreadOrder(projectId);
     const index = order.indexOf(threadId);
     if (index === -1) return true;
@@ -1195,8 +1227,8 @@ export class ScionChatSpaceRail extends LitElement {
 
   /** Create a new thread group and optionally move a thread into it. */
   private async createGroup(projectId: string, name: string, threadId?: string): Promise<void> {
-    const groups = [...this.getGroups(projectId)];
-    if (groups.length >= 20) {
+    const currentGroups = this.getGroups(projectId);
+    if (currentGroups.length >= 20) {
       showToast('Maximum 20 groups per space', 'warning');
       return;
     }
@@ -1205,13 +1237,16 @@ export class ScionChatSpaceRail extends LitElement {
       name,
       threadIds: threadId ? [threadId] : [],
     };
-    // Remove thread from any existing group
-    if (threadId) {
-      for (const g of groups) {
-        g.threadIds = g.threadIds.filter((id) => id !== threadId);
-      }
-    }
-    groups.push(newGroup);
+    // Remove thread from any existing group (immutably) and append the new group
+    const groups = threadId
+      ? [
+          ...currentGroups.map((g) => ({
+            ...g,
+            threadIds: g.threadIds.filter((id) => id !== threadId),
+          })),
+          newGroup,
+        ]
+      : [...currentGroups, newGroup];
     const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
     await this.savePrefs({ threadGroups });
   }
@@ -1222,14 +1257,12 @@ export class ScionChatSpaceRail extends LitElement {
     groupId: string,
     projectId: string
   ): Promise<void> {
-    const groups = this.getGroups(projectId).map((g) => ({
-      ...g,
-      threadIds: g.threadIds.filter((id) => id !== threadId),
-    }));
-    const target = groups.find((g) => g.id === groupId);
-    if (target) {
-      target.threadIds.push(threadId);
-    }
+    const groups = this.getGroups(projectId).map((g) => {
+      const filtered = g.threadIds.filter((id) => id !== threadId);
+      return g.id === groupId
+        ? { ...g, threadIds: [...filtered, threadId] }
+        : { ...g, threadIds: filtered };
+    });
     const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
     await this.savePrefs({ threadGroups });
   }
