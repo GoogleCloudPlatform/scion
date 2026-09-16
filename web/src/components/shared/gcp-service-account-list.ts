@@ -226,27 +226,11 @@ export class ScionGCPServiceAccountList extends LitElement {
   }
 
   /**
-   * THERE IS NO CREATE AFFORDANCE AT HUB SCOPE, AND THAT IS NOT A CAPABILITY
-   * DECISION.
-   *
-   * The Hub refuses hub-scoped registration outright: POST to the flat
-   * collection with scope=hub answers 400 invalid_request, and it does so
-   * before consulting any policy, because the enabling change is held (#19).
-   * So a hub admin's `create` capability at hub scope is TRUE and the operation
-   * still fails -- capability answers "may you", not "is it implemented".
-   *
-   * Rendering the button from the capability alone would therefore produce the
-   * one thing this feature is under instruction to avoid: an affordance that
-   * cannot work. It is suppressed here rather than in the template so the rule
-   * has a name and a single place to be deleted from when the hold lifts.
-   *
-   * WHAT MUST NOT HAPPEN when it does lift: this returning true while
-   * saCreateUrl still points somewhere that succeeds by registering the wrong
-   * thing. The URL is already correct -- it addresses the refusal -- which is
-   * why the two live apart.
+   * Whether the caller may register an existing GCP service account at the
+   * current scope. The capability is the sole gate — hub-scope registration
+   * was enabled on the backend in P9.
    */
   private canCreateHere(): boolean {
-    if (this.scope === 'hub') return false;
     return can(this.listCapabilities, 'create');
   }
 
@@ -417,10 +401,9 @@ export class ScionGCPServiceAccountList extends LitElement {
         body.displayName = this.dialogDisplayName.trim();
       }
 
-      // saCreateUrl at hub scope addresses the Hub's own refusal, not some
-      // project's collection. No affordance reaches this line at hub scope
-      // today; if one ever does, it must fail the way the server says it
-      // fails rather than quietly registering a project-scoped account.
+      // saCreateUrl at hub scope addresses the flat collection with scope=hub,
+      // which the backend accepts for hub-scoped BYO registration since P9.
+      // At project scope it addresses the nested project collection.
       const response = await apiFetch(saCreateUrl(this.scope, this.scopeId), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

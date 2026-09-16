@@ -408,10 +408,8 @@ export class ScionPageSettings extends LitElement {
                     to any one project, which is why they are managed here.
                   </p>
                   <p class="tab-intro">
-                    Two things are not available yet. Registering a hub-scoped account — use a
-                    project's settings to register an account for that project. And selecting a
-                    hub-scoped account when creating an agent, so an account listed here is not yet
-                    offered on any project's agent form.
+                    One thing is not available yet: selecting a hub-scoped account when creating an
+                    agent, so an account listed here is not yet offered on any project's agent form.
                   </p>
                   <scion-gcp-service-account-list scope="hub"></scion-gcp-service-account-list>
                 </sl-tab-panel>`

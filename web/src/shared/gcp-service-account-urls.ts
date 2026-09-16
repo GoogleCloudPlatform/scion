@@ -108,14 +108,11 @@ export function saListUrl(
 /**
  * saCreateUrl builds the collection URL a registration POST goes to.
  *
- * AT HUB SCOPE THIS POINTS AT THE HUB'S REFUSAL, ON PURPOSE. Hub-scoped
- * creation is not enabled: the flat collection answers 400 invalid_request to
- * POST ?scope=hub (svc-accnt #19 holds the enabling change). No UI renders a
- * create affordance at hub scope -- see the list component -- but if one is
- * ever added, this is the address it will use, and the server will refuse it.
- * The alternative, which is what makes this function worth writing down, is a
- * create button that quietly posts to some project's collection and succeeds at
- * making the WRONG THING: a project-scoped account on a hub-scoped screen.
+ * At hub scope this returns the flat collection URL with scope=hub, which the
+ * backend has accepted for hub-scoped BYO registration since P9. At project
+ * scope it returns the nested project collection URL. The alternative — a
+ * create button that quietly posts to some project's collection and succeeds
+ * at making the WRONG THING — is why this function exists.
  */
 export function saCreateUrl(scope: GCPSAListScope, scopeId: string): string {
   requireScopeId(scope, scopeId);

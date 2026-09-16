@@ -206,20 +206,13 @@ describe('scion-gcp-service-account-list', () => {
     });
   });
 
-  describe('creation is not offered at hub scope', () => {
+  describe('hub-scope affordances: Register is offered, Mint is not', () => {
     /**
-     * THE CAPABILITY IS TRUE AND THE BUTTON MUST STILL BE ABSENT.
-     *
-     * This fixture is a hub admin: `create` is in the list capabilities. The
-     * Hub nevertheless answers 400 to a hub-scoped registration, before
-     * consulting policy, because the write path is held. So the button is not
-     * suppressed because the caller may not — it is suppressed because the
-     * operation does not exist yet, and no capability can make it exist.
-     *
-     * The project-scope control in the same test is what makes the absence
-     * mean something: same selector, same capability payload, button present.
+     * Hub-scope BYO registration was enabled on the backend in P9. The
+     * capability is the sole gate — a hub admin with `create` now sees the
+     * Register Existing button at hub scope, just as at project scope.
      */
-    it('hides Register Existing at hub scope even for a caller who may create', async () => {
+    it('shows Register Existing at hub scope when caller has create capability', async () => {
       const caps = { actions: ['create', 'list', 'mint'] };
 
       const hubEl = await createComponent(
@@ -234,8 +227,8 @@ describe('scion-gcp-service-account-list', () => {
       const hubLabels = buttonLabels(hubEl).join('|');
       const projectLabels = buttonLabels(projectEl).join('|');
 
-      expect(hubLabels).not.toContain('Register Existing');
-      // POSITIVE CONTROL: the same selector finds the button where it belongs.
+      expect(hubLabels).toContain('Register Existing');
+      // POSITIVE CONTROL: both scopes show the button when the capability is present.
       expect(projectLabels).toContain('Register Existing');
     });
 
@@ -255,21 +248,20 @@ describe('scion-gcp-service-account-list', () => {
       expect(buttonLabels(projectEl).join('|')).toContain('Mint');
     });
 
-    it('hides them in the empty state too, which is the state a new hub is in', async () => {
-      // The empty state carries its own copy of both affordances. A hub with no
-      // accounts registered yet is precisely the screen where a "Register" call
-      // to action is most tempting to a reader and most broken in fact.
+    it('shows Register but hides Mint in the empty state', async () => {
+      // The empty state carries its own copy of both affordances. A new hub
+      // with no accounts is where "Register" is most useful.
       const el = await createComponent(
         { scope: 'hub' },
         makeFetch([], { items: [], _capabilities: { actions: ['create', 'mint'] } })
       );
 
       expect(el.shadowRoot!.textContent).toContain('No GCP Service Accounts');
-      expect(buttonLabels(el).join('|')).not.toContain('Register Existing');
+      expect(buttonLabels(el).join('|')).toContain('Register Existing');
       expect(buttonLabels(el).join('|')).not.toContain('Mint');
     });
 
-    it('hides them in compact mode too', async () => {
+    it('shows Register but hides Mint in compact mode', async () => {
       const caps = { actions: ['create', 'mint'] };
 
       const hubEl = await createComponent(
@@ -284,7 +276,7 @@ describe('scion-gcp-service-account-list', () => {
         })
       );
 
-      expect(buttonLabels(hubEl).join('|')).not.toContain('Register Existing');
+      expect(buttonLabels(hubEl).join('|')).toContain('Register Existing');
       expect(buttonLabels(projectEl).join('|')).toContain('Register Existing');
     });
   });
