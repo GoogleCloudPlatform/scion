@@ -49,9 +49,9 @@ import (
 // ---------------------------------------------------------------------------
 
 // def162Setup creates a server, project, agent, and human user wired for
-// mention notification tests. The human is added to the project members group
-// with an unambiguous display name ("UniqueHuman162") that resolves to exactly
-// one member (AC-3).
+// mention notification tests. The human is added as a project member via a
+// role binding (PM1) with an unambiguous display name ("UniqueHuman162") that
+// resolves to exactly one member (AC-3).
 func def162Setup(t *testing.T) (srv *Server, s store.Store, project *store.Project, agent *store.Agent, human *store.User, topicID string) {
 	t.Helper()
 	srv, s = testServer(t)
@@ -84,19 +84,19 @@ func def162Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	// Add human to project members group so resolveProjectHumanMembers finds them.
-	groupID := api.NewUUID()
-	require.NoError(t, s.CreateGroup(ctx, &store.Group{
-		ID:   groupID,
-		Name: "def162-project members",
-		Slug: "project:def162-project:members",
-	}))
-	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID:    groupID,
-		MemberType: store.GroupMemberTypeUser,
-		MemberID:   human.ID,
-		Role:       "member",
-	}))
+	// Add human as a project member via role binding (PM1).
+	// resolveProjectHumanMembers now queries ListProjectMembers (role bindings).
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err, "project-member role definition must exist")
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      human.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	// Set up WebChatStore + ChatNotifier.
 	db, err := sql.Open("sqlite3", ":memory:")
