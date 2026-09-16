@@ -93,6 +93,7 @@ const USED_ICONS = [
   'door-open',
   'download',
   'emoji-frown',
+  'emoji-smile',
   'envelope',
   'envelope-open',
   'exclamation-circle',

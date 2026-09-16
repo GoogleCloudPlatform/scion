@@ -44,6 +44,7 @@ export interface ChatSpace {
   projectId: string;
   projectName: string;
   projectSlug: string;
+  emoji?: string;
   unreadCount: number;
   hasUnreadMention: boolean;
 }
@@ -150,6 +151,8 @@ export class ScionChatSpaceRail extends LitElement {
   @state() private draggingSpaceId: string | null = null;
   /** Project id of the space header the drag is hovering over. */
   @state() private dragOverSpaceId: string | null = null;
+  /** Project id for which the emoji picker is open, or null if closed. */
+  @state() private emojiPickerSpaceId: string | null = null;
 
   static override styles = css`
     :host {
@@ -221,6 +224,13 @@ export class ScionChatSpaceRail extends LitElement {
 
     .space-header .chevron.collapsed {
       transform: rotate(-90deg);
+    }
+
+    .space-header .space-emoji {
+      font-size: 1rem;
+      text-transform: none;
+      line-height: 1;
+      flex-shrink: 0;
     }
 
     .space-header .space-name {
@@ -499,6 +509,30 @@ export class ScionChatSpaceRail extends LitElement {
     .rename-input::part(base) {
       font-size: 0.8125rem;
       min-height: 1.5rem;
+    }
+
+    /* Emoji picker dialog */
+    .emoji-grid {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 0.25rem;
+      padding: 0.5rem;
+    }
+
+    .emoji-grid button {
+      background: none;
+      border: 1px solid transparent;
+      border-radius: 0.25rem;
+      font-size: 1.25rem;
+      line-height: 1;
+      padding: 0.375rem;
+      cursor: pointer;
+      text-align: center;
+    }
+
+    .emoji-grid button:hover {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border-color: var(--scion-border, #e2e8f0);
     }
   `;
 
@@ -877,9 +911,7 @@ export class ScionChatSpaceRail extends LitElement {
     // Only fire when the click target is the rail-body itself (empty space)
     const target = e.target as HTMLElement;
     if (target === e.currentTarget) {
-      this.dispatchEvent(
-        new CustomEvent('reset-view', { bubbles: true, composed: true })
-      );
+      this.dispatchEvent(new CustomEvent('reset-view', { bubbles: true, composed: true }));
     }
   }
 
@@ -1099,15 +1131,17 @@ export class ScionChatSpaceRail extends LitElement {
   // ---------------------------------------------------------------------------
 
   /** Message shape returned by the conversations messages endpoint. */
-  private async fetchThreadMessages(threadId: string): Promise<Array<{
-    sender_name?: string;
-    sender?: string;
-    body?: string;
-    content?: string;
-    created_at?: string;
-    timestamp?: string;
-    attachments?: string[];
-  }>> {
+  private async fetchThreadMessages(threadId: string): Promise<
+    Array<{
+      sender_name?: string;
+      sender?: string;
+      body?: string;
+      content?: string;
+      created_at?: string;
+      timestamp?: string;
+      attachments?: string[];
+    }>
+  > {
     try {
       const res = await apiFetch(
         `/api/v1/chat/conversations/${encodeURIComponent(threadId)}/messages`
@@ -1253,7 +1287,7 @@ export class ScionChatSpaceRail extends LitElement {
         method: 'DELETE',
       });
       if (!res.ok) {
-        const data = await res.json().catch(() => ({})) as { error?: string };
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
         showToast(data.error || 'Failed to delete thread', 'danger');
         return;
       }
@@ -1310,6 +1344,51 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   // ---------------------------------------------------------------------------
+  // Emoji picker
+  // ---------------------------------------------------------------------------
+
+  private openEmojiPicker(projectId: string): void {
+    this.emojiPickerSpaceId = projectId;
+  }
+
+  private closeEmojiPicker(): void {
+    this.emojiPickerSpaceId = null;
+  }
+
+  private async selectEmoji(emoji: string): Promise<void> {
+    const projectId = this.emojiPickerSpaceId;
+    if (!projectId) return;
+
+    // Optimistic update.
+    this.spaces = this.spaces.map((s) => {
+      if (s.projectId !== projectId) return s;
+      const updated = { ...s };
+      if (emoji) {
+        updated.emoji = emoji;
+      } else {
+        delete updated.emoji;
+      }
+      return updated;
+    });
+    this.emojiPickerSpaceId = null;
+
+    try {
+      const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/emoji`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ emoji }),
+      });
+      if (!res.ok) {
+        showToast('Failed to update emoji', 'warning');
+        await this.reload();
+      }
+    } catch {
+      showToast('Failed to update emoji', 'warning');
+      await this.reload();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Utility
   // ---------------------------------------------------------------------------
 
@@ -1321,13 +1400,16 @@ export class ScionChatSpaceRail extends LitElement {
     return html`
       <div class="rail-header"><span>Project Spaces</span></div>
 
-      ${this.loading
-        ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
-        : html`
-            ${this.renderToolbar()}
-            <div class="rail-body" @click=${this.handleRailBodyClick}>${this.renderSpaces()}</div>
-          `}
+      ${
+        this.loading
+          ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
+          : html`
+              ${this.renderToolbar()}
+              <div class="rail-body" @click=${this.handleRailBodyClick}>${this.renderSpaces()}</div>
+            `
+      }
       ${this.contextMenuTarget ? this.renderContextMenu() : nothing}
+      ${this.emojiPickerSpaceId ? this.renderEmojiPicker() : nothing}
     `;
   }
 
@@ -1449,10 +1531,11 @@ export class ScionChatSpaceRail extends LitElement {
     return html`
       <div class="space-section">
         <div
-          class="space-header ${this.draggingSpaceId === space.projectId ? 'dragging' : ''} ${this
-            .dragOverSpaceId === space.projectId && this.draggingSpaceId !== space.projectId
-            ? 'drag-over'
-            : ''}"
+          class="space-header ${this.draggingSpaceId === space.projectId ? 'dragging' : ''} ${
+            this.dragOverSpaceId === space.projectId && this.draggingSpaceId !== space.projectId
+              ? 'drag-over'
+              : ''
+          }"
           draggable="true"
           @dragstart=${(e: DragEvent): void => this.handleSpaceDragStart(e, space.projectId)}
           @dragover=${(e: DragEvent): void => this.handleSpaceDragOver(e, space.projectId)}
@@ -1464,13 +1547,16 @@ export class ScionChatSpaceRail extends LitElement {
               : this.handleSpaceHeaderClick(space)}
         >
           <sl-icon name="chevron-down" class="chevron ${isCollapsed ? 'collapsed' : ''}"></sl-icon>
+          ${space.emoji ? html`<span class="space-emoji">${space.emoji}</span>` : nothing}
           <span class="space-name">${space.projectName}</span>
           <div class="space-actions" @click=${(e: Event) => e.stopPropagation()}>
-            ${space.hasUnreadMention
-              ? html`<span class="mention-badge">@</span>`
-              : space.unreadCount > 0
-                ? html`<span class="unread-badge">${space.unreadCount}</span>`
-                : nothing}
+            ${
+              space.hasUnreadMention
+                ? html`<span class="mention-badge">@</span>`
+                : space.unreadCount > 0
+                  ? html`<span class="unread-badge">${space.unreadCount}</span>`
+                  : nothing
+            }
             <sl-dropdown>
               <sl-icon-button
                 slot="trigger"
@@ -1483,6 +1569,8 @@ export class ScionChatSpaceRail extends LitElement {
                   const value = detail?.item?.getAttribute('value');
                   if (value === 'new-thread') {
                     this.startCreateThread(space.projectId);
+                  } else if (value === 'set-emoji') {
+                    this.openEmojiPicker(space.projectId);
                   } else if (value === 'move-up') {
                     void this.moveSpace(space.projectId, -1);
                   } else if (value === 'move-down') {
@@ -1493,6 +1581,10 @@ export class ScionChatSpaceRail extends LitElement {
                 <sl-menu-item value="new-thread">
                   <sl-icon slot="prefix" name="plus-lg"></sl-icon>
                   New thread
+                </sl-menu-item>
+                <sl-menu-item value="set-emoji">
+                  <sl-icon slot="prefix" name="emoji-smile"></sl-icon>
+                  Set emoji
                 </sl-menu-item>
                 <sl-divider></sl-divider>
                 <sl-menu-item
@@ -1515,16 +1607,20 @@ export class ScionChatSpaceRail extends LitElement {
             </sl-dropdown>
           </div>
         </div>
-        ${!isCollapsed
-          ? html`
-              <div class="thread-list">
-                ${threads.map((t) => this.renderThread(t, space.projectId))}
-                ${this.creatingThread === space.projectId
-                  ? this.renderCreateThread(space.projectId)
-                  : nothing}
-              </div>
-            `
-          : nothing}
+        ${
+          !isCollapsed
+            ? html`
+                <div class="thread-list">
+                  ${threads.map((t) => this.renderThread(t, space.projectId))}
+                  ${
+                    this.creatingThread === space.projectId
+                      ? this.renderCreateThread(space.projectId)
+                      : nothing
+                  }
+                </div>
+              `
+            : nothing
+        }
       </div>
     `;
   }
@@ -1574,13 +1670,15 @@ export class ScionChatSpaceRail extends LitElement {
           >${thread.name}</span
         >
         ${thread.pinned ? html`<sl-icon name="star-fill" class="pin-icon"></sl-icon>` : nothing}
-        ${thread.muted
-          ? html`<sl-icon name="bell-slash" class="mute-icon" title="Muted"></sl-icon>`
-          : thread.hasUnreadMention
-            ? html`<span class="mention-dot"></span>`
-            : thread.hasUnread
-              ? html`<span class="unread-dot"></span>`
-              : nothing}
+        ${
+          thread.muted
+            ? html`<sl-icon name="bell-slash" class="mute-icon" title="Muted"></sl-icon>`
+            : thread.hasUnreadMention
+              ? html`<span class="mention-dot"></span>`
+              : thread.hasUnread
+                ? html`<span class="unread-dot"></span>`
+                : nothing
+        }
       </div>
     `;
   }
@@ -1611,6 +1709,85 @@ export class ScionChatSpaceRail extends LitElement {
           style="flex: 1"
         ></sl-input>
       </div>
+    `;
+  }
+
+  /** Curated emoji set for the space emoji picker. */
+  private static readonly EMOJI_LIST = [
+    '🚀',
+    '⚡',
+    '🔥',
+    '⭐',
+    '💡',
+    '🎯',
+    '🔧',
+    '⚙️',
+    '🌐',
+    '🛡️',
+    '📦',
+    '🧪',
+    '🔬',
+    '📊',
+    '📈',
+    '🏗️',
+    '🎨',
+    '✨',
+    '💎',
+    '🔑',
+    '🏠',
+    '📚',
+    '🗂️',
+    '💬',
+    '🤖',
+    '🧠',
+    '🎮',
+    '🌱',
+    '🌊',
+    '☁️',
+    '🔒',
+    '📡',
+    '🎵',
+    '❤️',
+    '🐛',
+    '🦊',
+    '🐍',
+    '🦀',
+    '🐳',
+    '🦅',
+  ];
+
+  private renderEmojiPicker() {
+    const space = this.spaces.find((s) => s.projectId === this.emojiPickerSpaceId);
+    if (!space) return nothing;
+
+    return html`
+      <sl-dialog
+        label="Set emoji for ${space.projectName}"
+        open
+        @sl-after-hide=${() => this.closeEmojiPicker()}
+      >
+        <div class="emoji-grid">
+          ${ScionChatSpaceRail.EMOJI_LIST.map(
+            (emoji) => html`
+              <button @click=${() => void this.selectEmoji(emoji)} title=${emoji}>${emoji}</button>
+            `
+          )}
+        </div>
+        <sl-button
+          slot="footer"
+          variant="text"
+          size="small"
+          @click=${() => void this.selectEmoji('')}
+          >Remove emoji</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="default"
+          size="small"
+          @click=${() => this.closeEmojiPicker()}
+          >Cancel</sl-button
+        >
+      </sl-dialog>
     `;
   }
 
@@ -1650,17 +1827,11 @@ export class ScionChatSpaceRail extends LitElement {
           <sl-icon name=${thread.muted ? 'bell-slash' : 'bell'}></sl-icon>
           ${thread.muted ? 'Unmute' : 'Mute'}
         </div>
-        <div
-          class="context-menu-item"
-          @click=${() => this.handleExportThread(thread)}
-        >
+        <div class="context-menu-item" @click=${() => this.handleExportThread(thread)}>
           <sl-icon name="file-earmark-text"></sl-icon>
           Copy as Markdown
         </div>
-        <div
-          class="context-menu-item"
-          @click=${() => this.handleDownloadThread(thread)}
-        >
+        <div class="context-menu-item" @click=${() => this.handleDownloadThread(thread)}>
           <sl-icon name="download"></sl-icon>
           Download as Markdown
         </div>
