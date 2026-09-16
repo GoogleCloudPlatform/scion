@@ -577,8 +577,12 @@ export class ScionChatThread extends LitElement {
     }
 
     @keyframes permalink-fade {
-      0% { background-color: rgba(59, 130, 246, 0.2); }
-      100% { background-color: transparent; }
+      0% {
+        background-color: rgba(59, 130, 246, 0.2);
+      }
+      100% {
+        background-color: transparent;
+      }
     }
 
     /* Empty / Loading / Error states */
@@ -701,7 +705,8 @@ export class ScionChatThread extends LitElement {
     }
 
     @keyframes highlight-flash {
-      0%, 20% {
+      0%,
+      20% {
         background: var(--scion-primary-50, #eff6ff);
       }
       100% {
@@ -964,7 +969,6 @@ export class ScionChatThread extends LitElement {
       stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
       stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
     }
-
   }
 
   // ---------------------------------------------------------------------------
@@ -1193,10 +1197,7 @@ export class ScionChatThread extends LitElement {
         string,
         { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
       >;
-      replyPreviews?: Record<
-        string,
-        { messageId: string; senderName: string; content: string }
-      >;
+      replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
     };
 
     const items = data?.items ?? data?.messages ?? [];
@@ -1831,8 +1832,14 @@ export class ScionChatThread extends LitElement {
   /** SSE handler for message-edited events. */
   private handleV2MessageEdited(e: Event): void {
     const detail = (e as CustomEvent).detail as
-      | ({ data?: { conversationKey?: string; messageId?: string; content?: string; editedAt?: string } }
-        & { conversationKey?: string; messageId?: string; content?: string; editedAt?: string })
+      | ({
+          data?: {
+            conversationKey?: string;
+            messageId?: string;
+            content?: string;
+            editedAt?: string;
+          };
+        } & { conversationKey?: string; messageId?: string; content?: string; editedAt?: string })
       | undefined;
     // stateManager wraps SSE payloads as { state, data }; unwrap like handleV2ChatMessage.
     const eventData = detail?.data ?? detail;
@@ -1859,8 +1866,11 @@ export class ScionChatThread extends LitElement {
   /** SSE handler for message-deleted events. */
   private handleV2MessageDeleted(e: Event): void {
     const detail = (e as CustomEvent).detail as
-      | ({ data?: { conversationKey?: string; messageId?: string; deletedAt?: string } }
-        & { conversationKey?: string; messageId?: string; deletedAt?: string })
+      | ({ data?: { conversationKey?: string; messageId?: string; deletedAt?: string } } & {
+          conversationKey?: string;
+          messageId?: string;
+          deletedAt?: string;
+        })
       | undefined;
     // stateManager wraps SSE payloads as { state, data }; unwrap like handleV2ChatMessage.
     const eventData = detail?.data ?? detail;
@@ -1883,7 +1893,7 @@ export class ScionChatThread extends LitElement {
     const msgIdx = this.messages.indexOf(msg);
     if (msgIdx < 0) return false;
     for (let i = msgIdx + 1; i < this.messages.length; i++) {
-      if (this.messages[i].sender?.startsWith('agent:')) {
+      if (this.isSenderAgent(this.messages[i])) {
         return true;
       }
     }
@@ -2121,7 +2131,10 @@ export class ScionChatThread extends LitElement {
             </div>`
           : nothing}
         ${canEditDelete
-          ? html`<div class="context-menu-item danger" @click=${() => this.handleContextMenuDelete()}>
+          ? html`<div
+              class="context-menu-item danger"
+              @click=${() => this.handleContextMenuDelete()}
+            >
               <sl-icon name="trash"></sl-icon>
               Delete
             </div>`
@@ -2162,21 +2175,20 @@ export class ScionChatThread extends LitElement {
   /** Context menu: Reply to the right-clicked message. */
   private handleContextMenuReply(): void {
     const msg = this.contextMenuMessage;
-    this.contextMenuMessage = null;
+    this.closeContextMenu();
     if (!msg) return;
     this.composerEditMessage = null; // Cancel any pending edit
     this.composerReplyTo = {
       messageId: msg.id,
       senderName: this.getSenderDisplayName(msg) || msg.sender,
-      content:
-        msg.msg.length > 100 ? msg.msg.slice(0, 100) + '...' : msg.msg,
+      content: msg.msg.length > 100 ? msg.msg.slice(0, 100) + '...' : msg.msg,
     };
   }
 
   /** Context menu: Edit the right-clicked message. */
   private handleContextMenuEdit(): void {
     const msg = this.contextMenuMessage;
-    this.contextMenuMessage = null;
+    this.closeContextMenu();
     if (!msg) return;
     this.composerReplyTo = null; // Cancel any pending reply
     this.composerEditMessage = { messageId: msg.id, content: msg.msg };
@@ -2185,7 +2197,7 @@ export class ScionChatThread extends LitElement {
   /** Context menu: Delete the right-clicked message. */
   private async handleContextMenuDelete(): Promise<void> {
     const msg = this.contextMenuMessage;
-    this.contextMenuMessage = null;
+    this.closeContextMenu();
     if (!msg) return;
 
     const confirmed = window.confirm('Delete this message? This cannot be undone.');
@@ -2208,7 +2220,7 @@ export class ScionChatThread extends LitElement {
   /** Context menu: Copy message text to clipboard. */
   private handleContextMenuCopyText(): void {
     const msg = this.contextMenuMessage;
-    this.contextMenuMessage = null;
+    this.closeContextMenu();
     if (!msg) return;
     navigator.clipboard.writeText(msg.msg).catch(() => {
       // Fallback: ignore clipboard failure silently.
@@ -2218,7 +2230,7 @@ export class ScionChatThread extends LitElement {
   /** Context menu: Copy link to message. */
   private handleContextMenuCopyLink(): void {
     const msg = this.contextMenuMessage;
-    this.contextMenuMessage = null;
+    this.closeContextMenu();
     if (!msg) return;
     const url = `${window.location.origin}${window.location.pathname}#msg-${encodeURIComponent(msg.id)}`;
     navigator.clipboard.writeText(url).catch(() => {
@@ -2231,9 +2243,7 @@ export class ScionChatThread extends LitElement {
   // ---------------------------------------------------------------------------
 
   /** Handle path-link-click event from a chat message. */
-  private async handlePathLinkClick(
-    e: CustomEvent<{ path: string }>
-  ): Promise<void> {
+  private async handlePathLinkClick(e: CustomEvent<{ path: string }>): Promise<void> {
     const containerPath = e.detail.path;
 
     if (!this.projectId) {
@@ -2336,7 +2346,11 @@ export class ScionChatThread extends LitElement {
     } else if (fp.status === 'error') {
       body = html`<div class="file-preview-placeholder error">${fp.error}</div>`;
     } else if (fp.isImage) {
-      body = html`<img class="file-preview-image" src="${fp.downloadUrl}?view=true" alt=${fp.fileName} />`;
+      body = html`<img
+        class="file-preview-image"
+        src="${fp.downloadUrl}?view=true"
+        alt=${fp.fileName}
+      />`;
     } else if (fp.isBinary) {
       body = html`
         <div class="file-preview-placeholder">
@@ -2366,7 +2380,10 @@ export class ScionChatThread extends LitElement {
       >
         ${body}
         <div slot="footer" style="display:flex;gap:0.5rem;align-items:center">
-          <span style="flex:1;font-size:0.75rem;color:var(--scion-text-muted,#64748b);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title=${fp.containerPath}>
+          <span
+            style="flex:1;font-size:0.75rem;color:var(--scion-text-muted,#64748b);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+            title=${fp.containerPath}
+          >
             ${fp.containerPath}
           </span>
           <sl-button href="${fp.downloadUrl}" download=${fp.fileName} size="small">
@@ -2421,9 +2438,7 @@ export class ScionChatThread extends LitElement {
     }
 
     try {
-      const res = await apiFetch(
-        `/api/v1/agents?project=${encodeURIComponent(this.projectId)}`
-      );
+      const res = await apiFetch(`/api/v1/agents?project=${encodeURIComponent(this.projectId)}`);
       if (!res.ok) {
         this.insertLocalSystemMessage('Failed to fetch project status.');
         return;
@@ -2513,10 +2528,9 @@ export class ScionChatThread extends LitElement {
     }
 
     try {
-      const res = await apiFetch(
-        `/api/v1/agents/${encodeURIComponent(agentSlug)}`,
-        { method: 'DELETE' }
-      );
+      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(agentSlug)}`, {
+        method: 'DELETE',
+      });
 
       if (!res.ok) {
         const errMsg = await extractApiError(res, 'Failed to stop agent');
@@ -2658,8 +2672,7 @@ export class ScionChatThread extends LitElement {
   private renderV2() {
     return html`
       <div class="thread-container">
-        ${this.renderInteragentToggle()}
-        ${this.renderContent()} ${this.renderTypingIndicator()}
+        ${this.renderInteragentToggle()} ${this.renderContent()} ${this.renderTypingIndicator()}
         ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
         <scion-chat-composer
           ?disabled=${this.sending}
@@ -2678,8 +2691,7 @@ export class ScionChatThread extends LitElement {
           @default-agent-change=${this.handleDefaultAgentChange}
           @chat-slash-command=${this.handleSlashCommand}
         ></scion-chat-composer>
-        ${this.renderContextMenu()}
-        ${this.renderFilePreview()}
+        ${this.renderContextMenu()} ${this.renderFilePreview()}
       </div>
     `;
   }
@@ -2784,7 +2796,11 @@ export class ScionChatThread extends LitElement {
     }
 
     return html`
-      <div class="messages-scroll" @scroll=${this.handleScroll} @click=${this.handleMessageAreaClick}>
+      <div
+        class="messages-scroll"
+        @scroll=${this.handleScroll}
+        @click=${this.handleMessageAreaClick}
+      >
         <div class="messages-list">
           ${this.loadingOlder
             ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
@@ -2845,7 +2861,10 @@ export class ScionChatThread extends LitElement {
       if (hasIA) {
         const msgTime = d.getTime();
         const pendingIA: Message[] = [];
-        while (iaIdx < iaMessages.length && new Date(iaMessages[iaIdx].createdAt).getTime() < msgTime) {
+        while (
+          iaIdx < iaMessages.length &&
+          new Date(iaMessages[iaIdx].createdAt).getTime() < msgTime
+        ) {
           pendingIA.push(iaMessages[iaIdx]);
           iaIdx++;
         }
@@ -2922,9 +2941,12 @@ export class ScionChatThread extends LitElement {
       // send time) so historical messages without a default agent don't
       // retroactively show a routing header.
       const isAgentSender = this.isSenderAgent(msg);
-      const msgRoutedTo = !isAgentSender && msg.recipient
-        ? (msg.recipient.startsWith('agent:') ? msg.recipient.slice(6) : msg.recipient)
-        : '';
+      const msgRoutedTo =
+        !isAgentSender && msg.recipient
+          ? msg.recipient.startsWith('agent:')
+            ? msg.recipient.slice(6)
+            : msg.recipient
+          : '';
       const senderDisplayName = this.isV2
         ? this.getSenderDisplayName(msg)
         : isFromAgent
@@ -2934,7 +2956,7 @@ export class ScionChatThread extends LitElement {
       // Phase-3: Get extension data for this message.
       const ext = this.v2MessageExtMap.get(msg.id);
       const replyPreview = ext?.replyToId
-        ? this.v2ReplyPreviewMap.get(ext.replyToId) ?? null
+        ? (this.v2ReplyPreviewMap.get(ext.replyToId) ?? null)
         : null;
       const isOwnMessage = msg.senderId === this.currentUserId;
       // Guard: can edit/delete only if no agent has replied after this message.
@@ -3084,9 +3106,7 @@ export class ScionChatThread extends LitElement {
       return;
     }
 
-    const title = this.threadName
-      ? this.escapeHtml(this.threadName)
-      : 'Conversation';
+    const title = this.threadName ? this.escapeHtml(this.threadName) : 'Conversation';
 
     const messagesHtml = this.messages
       .map(
@@ -3109,7 +3129,9 @@ export class ScionChatThread extends LitElement {
     printWindow.onafterprint = () => printWindow.close();
     printWindow.print();
     // Fallback for browsers that don't fire afterprint
-    setTimeout(() => { if (!printWindow.closed) printWindow.close(); }, 1000);
+    setTimeout(() => {
+      if (!printWindow.closed) printWindow.close();
+    }, 1000);
   }
 
   /**
@@ -3133,10 +3155,7 @@ export class ScionChatThread extends LitElement {
       .join('');
 
     const plainText = this.messages
-      .map(
-        (m) =>
-          `${m.sender} (${this.formatExportTimestamp(m.createdAt)})\n${m.msg}`
-      )
+      .map((m) => `${m.sender} (${this.formatExportTimestamp(m.createdAt)})\n${m.msg}`)
       .join('\n\n---\n\n');
 
     try {
