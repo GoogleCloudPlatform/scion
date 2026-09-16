@@ -16,6 +16,7 @@ package hub
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -222,12 +223,31 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, req.scope, req.scopeID, "gcp_service_account")
 	}
 
-	// MintQuota is omitted here. It is a per-project quota surfaced for the
-	// project settings view; this route is scope-general and has no single
-	// project to report against when scope=hub.
+	// Include MintQuota when listing at hub scope and minting is configured.
+	// For project scope, quota is surfaced by the nested project route; for hub
+	// scope, this is the only list endpoint, so it carries the quota here.
+	var mintQuota *GCPMintQuotaInfo
+	if req.scope == store.ScopeHub && s.gcpIAMAdmin != nil && s.config.GCPProjectID != "" {
+		managed := true
+		hubCount, _ := s.store.CountGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+			Scope:   store.ScopeHub,
+			Managed: &managed,
+		})
+		globalCount, _ := s.store.CountGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+			Managed: &managed,
+		})
+		mintQuota = &GCPMintQuotaInfo{
+			HubMinted:    hubCount,
+			HubCap:       s.config.GCPMintCapPerHub,
+			GlobalMinted: globalCount,
+			GlobalCap:    s.config.GCPMintCapGlobal,
+		}
+	}
+
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{
 		Items:        items,
 		Capabilities: scopeCap,
+		MintQuota:    mintQuota,
 	})
 }
 
@@ -249,16 +269,12 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 // address therefore drops a routing question that has no answer for a
 // parentless account, and leaves the authorization exactly as it was.
 //
-// No POST to a member and no mint. Creation is the flat COLLECTION's business
-// (and hub-scoped creation is still refused there), and mint is a per-project
-// quota operation with no meaning at hub scope.
-//
-// Both fall out of the dispatch below as a 405 with no store lookup at all,
-// including /api/v1/gcp-service-accounts/mint -- "mint" parses as an account
-// ID, not as the collection-level action the NESTED dispatcher makes it. That
-// is the trap in this handler: copying the nested dispatcher would give the
-// flat route a mint endpoint at hub scope. The 405 arrives before any lookup,
-// so it also cannot be used to probe whether an account named "mint" exists.
+// No POST to a member. Creation is the flat COLLECTION's business, and
+// hub-scope mint is registered as a separate route at
+// /api/v1/gcp-service-accounts/mint (handleGCPServiceAccountsMint), which
+// Go's ServeMux prefers over this prefix handler because it is a longer
+// exact match. Any remaining unknown action falls through to the dispatch
+// below as a 404 with no store lookup.
 func (s *Server) handleGCPServiceAccountByID(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/gcp-service-accounts/")
 	if rest == "" {
@@ -654,4 +670,270 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 	}
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// handleGCPServiceAccountsMint handles POST /api/v1/gcp-service-accounts/mint.
+func (s *Server) handleGCPServiceAccountsMint(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	req, ok := s.parseGCPScopeRequest(w, r)
+	if !ok {
+		return
+	}
+
+	switch req.scope {
+	case store.ScopeHub:
+		s.mintHubScopedGCPServiceAccount(w, r)
+	case store.ScopeProject:
+		// Project-scope mint has its own nested endpoint. Refusing here avoids
+		// a second address for the same operation.
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"use /api/v1/projects/{id}/gcp-service-accounts/mint for project-scope minting", nil)
+	default:
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"unsupported scope for service account minting", nil)
+	}
+}
+
+// mintHubScopedGCPServiceAccount creates a new GCP service account at hub scope.
+// This mirrors mintGCPServiceAccount in handlers_gcp_identity.go with hub-specific
+// authorization (admin-only, no hub-member fallback), quota, and stored record.
+func (s *Server) mintHubScopedGCPServiceAccount(w http.ResponseWriter, r *http.Request) {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	// Check that minting is configured
+	if s.gcpIAMAdmin == nil {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"GCP service account minting is not configured on this Hub", nil)
+		return
+	}
+
+	hubGCPProjectID := s.config.GCPProjectID
+	if hubGCPProjectID == "" {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"GCP project ID is not configured for service account minting", nil)
+		return
+	}
+
+	var req mintGCPServiceAccountRequest
+	if r.Body != nil {
+		if err := readJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body: "+err.Error(), nil)
+			return
+		}
+	}
+
+	// Authorization: admin-only. Uses gcp_service_account.create permission
+	// on {Type: "gcp_service_account", ID: "hub"} — the same resource as
+	// createHubScopedGCPServiceAccount but WITHOUT the hub-member fallback.
+	// Only users with explicit admin-level permission can mint.
+	decision := s.authzService.Decide(r.Context(), AuthzRequest{
+		Principal:  principalContextForIdentity(user),
+		Credential: credentialContextForIdentity(user),
+		Resource:   Resource{Type: "gcp_service_account", ID: "hub"},
+		Action:     Action("create"),
+		Permission: "gcp_service_account.create",
+	})
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"You don't have permission to mint hub-scoped GCP service accounts", nil)
+		return
+	}
+
+	// Enforce per-hub mint cap
+	managed := true
+	hubCount, err := s.store.CountGCPServiceAccounts(r.Context(), store.GCPServiceAccountFilter{
+		Scope:   store.ScopeHub,
+		Managed: &managed,
+	})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if s.config.GCPMintCapPerHub > 0 && hubCount >= s.config.GCPMintCapPerHub {
+		writeError(w, http.StatusConflict, ErrCodeConflict,
+			fmt.Sprintf("per-hub mint limit reached (%d/%d)", hubCount, s.config.GCPMintCapPerHub), nil)
+		return
+	}
+
+	// Enforce global mint cap
+	if s.config.GCPMintCapGlobal > 0 {
+		globalCount, err := s.store.CountGCPServiceAccounts(r.Context(), store.GCPServiceAccountFilter{
+			Managed: &managed,
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if globalCount >= s.config.GCPMintCapGlobal {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				fmt.Sprintf("global mint limit reached (%d/%d)", globalCount, s.config.GCPMintCapGlobal), nil)
+			return
+		}
+	}
+
+	// Generate or validate the account ID
+	var accountID string
+	if req.AccountID != "" {
+		slug := slugifyAccountID(req.AccountID)
+		accountID = "scion-" + slug
+	} else {
+		accountID, err = generateRandomAccountID()
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	}
+
+	// Validate against GCP rules: 6-30 chars, [a-z][a-z0-9-]*[a-z0-9]
+	if len(accountID) < 6 || len(accountID) > 30 {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			fmt.Sprintf("account ID %q must be 6-30 characters (got %d)", accountID, len(accountID)), nil)
+		return
+	}
+	if !gcpSAAccountIDRegexp.MatchString(accountID) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			fmt.Sprintf("account ID %q must match [a-z][a-z0-9-]*[a-z0-9]", accountID), nil)
+		return
+	}
+
+	// Build display name and description
+	displayName := req.DisplayName
+	if displayName == "" {
+		displayName = "Scion hub agent"
+	}
+	description := req.Description
+	if description == "" {
+		description = fmt.Sprintf("Minted by Scion Hub (hub scope) by user %s", user.ID())
+	}
+
+	// Create the SA in GCP
+	saEmail, _, err := s.gcpIAMAdmin.CreateServiceAccount(r.Context(), hubGCPProjectID, accountID, displayName, description)
+	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "409") || strings.Contains(errStr, "alreadyExists") {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				fmt.Sprintf("service account %s already exists in project %s", accountID, hubGCPProjectID), nil)
+			return
+		}
+		slog.Error("GCP SA mint (hub scope): failed to create service account",
+			"hub_gcp_project_id", hubGCPProjectID, "account_id", accountID, "error", err)
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+			"failed to create GCP service account: "+err.Error(), nil)
+		return
+	}
+
+	// ================================================================
+	// IAM mutations — all are REQUIRED. If any fails, the mint is a
+	// failure: do NOT store Verified=true, best-effort delete the SA.
+	// ================================================================
+
+	cleanupAndFail := func(mutation string, mutErr error) {
+		slog.Error("GCP SA mint (hub scope): required IAM mutation failed",
+			"mutation", mutation, "sa_email", saEmail, "error", mutErr)
+		if delErr := s.gcpIAMAdmin.DeleteServiceAccount(r.Context(), saEmail); delErr != nil {
+			slog.Error("GCP SA mint (hub scope): best-effort cleanup of orphaned SA failed",
+				"sa_email", saEmail, "error", delErr)
+		}
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+			"service account was created but required IAM grants failed; the account is not usable. Contact your administrator.", nil)
+	}
+
+	// Token generator must be configured.
+	if s.gcpTokenGenerator == nil {
+		slog.Error("GCP SA mint (hub scope): token generator not configured, cannot grant tokenCreator",
+			"sa_email", saEmail)
+		if delErr := s.gcpIAMAdmin.DeleteServiceAccount(r.Context(), saEmail); delErr != nil {
+			slog.Error("GCP SA mint (hub scope): best-effort cleanup failed after missing token generator",
+				"sa_email", saEmail, "error", delErr)
+		}
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+			"service account was created but the Hub has no token generator configured; the account is not usable and has been removed", nil)
+		return
+	}
+
+	hubEmail := s.gcpTokenGenerator.ServiceAccountEmail()
+	if hubEmail == "" {
+		slog.Error("GCP SA mint (hub scope): hub service account email is empty, cannot grant tokenCreator",
+			"sa_email", saEmail)
+		if delErr := s.gcpIAMAdmin.DeleteServiceAccount(r.Context(), saEmail); delErr != nil {
+			slog.Error("GCP SA mint (hub scope): best-effort cleanup failed after empty hub email",
+				"sa_email", saEmail, "error", delErr)
+		}
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+			"service account was created but the Hub service account email is not configured; the account is not usable and has been removed", nil)
+		return
+	}
+
+	// Grant Hub SA tokenCreator on the minted SA.
+	hubMember := "serviceAccount:" + hubEmail
+	if err := retryIAMGrant(r.Context(), func() error {
+		return s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, hubMember, "roles/iam.serviceAccountTokenCreator")
+	}); err != nil {
+		cleanupAndFail("tokenCreator grant on minted SA", err)
+		return
+	}
+
+	// Optionally grant the minted SA serviceAccountUser on itself.
+	allowSelfActAs := req.AllowSelfActAs == nil || *req.AllowSelfActAs
+	if allowSelfActAs {
+		saMember := "serviceAccount:" + saEmail
+		if err := retryIAMGrant(r.Context(), func() error {
+			return s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, saMember, "roles/iam.serviceAccountUser")
+		}); err != nil {
+			cleanupAndFail("self serviceAccountUser grant on minted SA", err)
+			return
+		}
+		slog.Info("GCP SA mint (hub scope): self-actAs grant succeeded",
+			"sa_email", saEmail)
+	}
+
+	slog.Info("GCP SA mint (hub scope): SA created and IAM grants succeeded",
+		"sa_email", saEmail, "hub_email", hubEmail, "self_act_as", allowSelfActAs)
+
+	// Store the SA record — only reached when ALL required IAM mutations succeeded.
+	sa := &store.GCPServiceAccount{
+		ID:                 uuid.New().String(),
+		Scope:              store.ScopeHub,
+		ScopeID:            s.HubID(),
+		Email:              saEmail,
+		ProjectID:          hubGCPProjectID,
+		DisplayName:        displayName,
+		DefaultScopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
+		Verified:           true,
+		VerifiedAt:         time.Now(),
+		VerificationStatus: store.GCPVerificationVerified,
+		CreatedBy:          user.ID(),
+		CreatedAt:          time.Now(),
+		Managed:            true,
+		ManagedBy:          s.config.HubID,
+	}
+
+	if err := s.store.CreateGCPServiceAccount(r.Context(), sa); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"a service account with this email already exists", nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Audit log the mint
+	LogGCPTokenGeneration(r.Context(), s.auditLogger, GCPTokenEventMintSA,
+		"", "", saEmail, sa.ID, true, "")
+
+	slog.Info("GCP SA minted (hub scope)",
+		"sa_id", sa.ID, "email", saEmail,
+		"account_id", accountID, "user", user.ID(),
+		"self_act_as", allowSelfActAs)
+
+	writeJSON(w, http.StatusCreated, sa)
 }

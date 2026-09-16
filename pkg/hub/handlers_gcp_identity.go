@@ -386,8 +386,10 @@ type GCPServiceAccountWithCapabilities struct {
 
 // GCPMintQuotaInfo provides quota information for minted service accounts.
 type GCPMintQuotaInfo struct {
-	ProjectMinted int `json:"project_minted"`
-	ProjectCap    int `json:"project_cap"` // 0 = unlimited
+	ProjectMinted int `json:"project_minted,omitempty"`
+	ProjectCap    int `json:"project_cap,omitempty"` // 0 = unlimited
+	HubMinted     int `json:"hub_minted,omitempty"`
+	HubCap        int `json:"hub_cap,omitempty"`
 	GlobalMinted  int `json:"global_minted"`
 	GlobalCap     int `json:"global_cap"`
 }

@@ -377,12 +377,15 @@ func TestGCPSA_FlatByID_NoMintNoCreate(t *testing.T) {
 	before, err := s.CountGCPServiceAccounts(context.Background(), store.GCPServiceAccountFilter{})
 	require.NoError(t, err)
 
+	// /api/v1/gcp-service-accounts/mint is now a dedicated route handled by
+	// handleGCPServiceAccountsMint. Without a scope parameter, it returns 400;
+	// with scope=hub, a non-admin member is denied (403). Either way, the
+	// by-id handler no longer sees "mint" as an account ID.
 	rec := doRequestAsUser(t, srv, member, http.MethodPost, flatSAPath+"mint",
 		map[string]any{"account_id": "should-not-exist"})
-	require.Equal(t, http.StatusMethodNotAllowed, rec.Code,
-		"on the flat by-id route \"mint\" parses as an account ID with no action, not as the "+
-			"collection-level action the NESTED dispatcher makes it, so POST to it is simply a "+
-			"method that members do not accept; got: %s", rec.Body.String())
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"the dedicated /mint route requires a scope parameter; without one it "+
+			"returns 400, not 405; got: %s", rec.Body.String())
 
 	rec = doRequestAsUser(t, srv, member, http.MethodPost, flatSAPath+sa.ID, map[string]any{})
 	require.Equal(t, http.StatusMethodNotAllowed, rec.Code,

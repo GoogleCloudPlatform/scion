@@ -223,6 +223,10 @@ type ServerConfig struct {
 	// GCPMintCapGlobal is the maximum total number of minted service accounts across all projects.
 	// Zero means unlimited (default).
 	GCPMintCapGlobal int
+	// GCPMintCapPerHub is the maximum number of minted service accounts at hub scope.
+	// Zero means unlimited (default). Does not affect the global cap, which counts
+	// all minted SAs regardless of scope.
+	GCPMintCapPerHub int
 	// TransportMode is the transport-layer auth mode: "none" (default), "cloudrun_invoker", "iap".
 	// Controls which transport tokens the hub issues to agents.
 	TransportMode string
@@ -4014,6 +4018,7 @@ func (s *Server) registerRoutes() {
 	// needed to list; P5 needs to view, re-verify and delete a hub-scoped
 	// account from a UI and a CLI that are not inside any project.
 	s.mux.HandleFunc("/api/v1/gcp-service-accounts", s.guarded("/api/v1/gcp-service-accounts", s.handleGCPServiceAccounts))
+	s.mux.HandleFunc("/api/v1/gcp-service-accounts/mint", s.guarded("/api/v1/gcp-service-accounts/mint", s.handleGCPServiceAccountsMint))
 	s.mux.HandleFunc("/api/v1/gcp-service-accounts/", s.guarded("/api/v1/gcp-service-accounts/", s.handleGCPServiceAccountByID))
 
 	s.mux.HandleFunc("/api/v1/skills", s.guarded("/api/v1/skills", s.handleSkills))
