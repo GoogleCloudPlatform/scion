@@ -32,7 +32,7 @@
 # an empty table and exited 0; this must not be able to do that.
 set -u
 
-EXPECTED_TOTAL=31          # 29 must-reject + 2 must-accept. Update deliberately.
+EXPECTED_TOTAL=39          # 33 must-reject + 6 must-accept. Update deliberately.
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -224,6 +224,60 @@ reject() {
   fi
 }
 
+reject_cluster() {
+  # $1 = the FULL argument, passed verbatim. $2 = the shorthand character the
+  # guard must name.
+  #
+  # A SEPARATE HELPER, NOT A CALLER OF reject(), AND THE COUNTER-FORM IS THE
+  # REASON. reject() asserts "hub.args may not contain -<name>:", which is the
+  # NAME axis. These arguments must be refused by the CLUSTER axis, and the two
+  # are different guards with different messages and different failure modes.
+  # Asserting the outcome alone would let the name guard take credit for a
+  # refusal the cluster guard produced, or the reverse - and the reverse is the
+  # live hazard, because -ctx would be refused by a name guard the day someone
+  # adds "ctx" to a list, and this suite would keep reporting the cluster walk
+  # as working after it had been deleted.
+  #
+  # So the control here is INVERTED relative to reject(): the cluster wording
+  # must be PRESENT and the name-axis wording must be ABSENT.
+  executed=$((executed + 1))
+  local out cluster_want char_want name_axis m_cluster=0 m_char=0 m_name=0
+  cluster_want="as a CLUSTER of one-character shorthands"
+  char_want="is the reserved shorthand -${2}"
+  name_axis="hub.args may not contain -"
+  if out="$("$HELM" template t "$CHART" "${BASE[@]}" --set-json "hub.args=[\"$1\"]" 2>&1)"; then
+    echo "FAIL  accepted but must reject: $1"; failed=$((failed + 1)); return
+  fi
+  case "$out" in *'%!'*)
+     echo "FAIL  $1: the refusal message could not render its own value (%!)"
+     failed=$((failed + 1)); return ;;
+  esac
+  case "$out" in *"$cluster_want"*) m_cluster=1 ;; esac
+  case "$out" in *"$char_want"*)    m_char=1 ;;    esac
+  case "$out" in *"$name_axis"*)    m_name=1 ;;    esac
+
+  if [ "$m_cluster" -eq 1 ] && [ "$m_char" -eq 1 ] && [ "$m_name" -eq 0 ]; then
+    echo "ok    rejected by the cluster walk, naming -${2}: $1"
+  elif [ "$m_cluster" -eq 0 ] && [ "$m_name" -eq 0 ]; then
+    echo "FAIL  $1: refused, but by NEITHER argv guard. Broken world, not a refusal:"
+    echo "        no helm, a schema rejection, a renamed helper, or a bad CHART path."
+    echo "        got: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+    failed=$((failed + 1))
+  elif [ "$m_name" -eq 1 ]; then
+    echo "FAIL  $1: refused by the NAME axis, not the cluster walk."
+    echo "        The cluster walk may have been deleted and this row would still"
+    echo "        be refused. That is the false green this control exists to catch."
+    echo "        got: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+    failed=$((failed + 1))
+  else
+    echo "FAIL  $1: cluster guard fired but did not name -${2}."
+    echo "        The message must say WHICH character matched; an operator who is"
+    echo "        told only that a cluster is bad cannot tell which letter to remove."
+    echo "        got: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+    failed=$((failed + 1))
+  fi
+}
+
 accept() {  # POSITIVE TWIN: a benign flag the chart must still allow.
   executed=$((executed + 1))
   if "$HELM" template t "$CHART" "${BASE[@]}" --set-json "hub.args=[$1]" >/dev/null 2>&1; then
@@ -247,10 +301,50 @@ for f in session-secret dev-auth enable-test-login web-assets-dir; do reject "$f
 # Case-insensitivity of the reserved match (pflag itself is case-SENSITIVE).
 for f in CONFIG Global; do reject "$f"; done
 
+# SHORTHAND CLUSTERS. pflag walks a single-dash argument left to right and the
+# first value-taking shorthand swallows the remainder, so a reserved flag can be
+# reached by an argument whose first character is harmless. Measured against real
+# pflag at v1.0.10 (the go.mod pin) and v1.0.5; see the $neverPassedShorthand
+# comment in _helpers.tpl for the flag-table provenance by file and line.
+#
+# -yc/etc/evil IS THE ROW THAT KILLED THE FIRST FIX. The repair originally
+# ratified for this defect tokenised the FIRST character of the cluster, which
+# accepts this argument: -y is not reserved. pflag then sets yes=true AND
+# --config=/etc/evil. Keep this row above the others; it is the only one that
+# distinguishes a first-character check from a walk.
+reject_cluster '-yc/etc/evil' 'c'
+reject_cluster '-cy/etc/evil' 'c'
+reject_cluster '-project-id'  'p'
+reject_cluster '-ctx'         'c'
+
 # Positive twins. Without these the suite passes by refusing everything, which
 # is the shape that let --admin-token=hunter2 through in round 1.
 accept '"--log-level","debug"'
 accept '"--verbose"'
+
+# THE CLUSTER AXIS'S POSITIVE TWINS, AND THE FIRST ONE IS EXHAUSTIVE RATHER THAN
+# REPRESENTATIVE - THAT IS WHY IT IS WORTH A ROW.
+#
+# `server start` has EXACTLY FOUR reachable shorthands: -c (config), -g
+# (project), -p (profile), -y (yes). Obtained by walking the real cobra command
+# tree, not from --help, which prints the ROOT help after an "unknown command"
+# error in an agent container and will hand you the wrong command's flags.
+# Three of the four are reserved. SO THE SET OF SHORTHANDS THAT MUST STILL BE
+# ACCEPTED HAS EXACTLY ONE MEMBER, AND IT IS -y. This is not a sample: assert -y
+# and the accept side of this axis is complete as of the flag table cited in
+# _helpers.tpl. If a fifth shorthand is ever registered, this comment is wrong
+# and the row below is no longer exhaustive.
+accept '"-y"'
+accept '"-yy"'     # both characters boolean; the walk passes through and stops nowhere.
+accept '"--yc"'    # DOUBLE dash is a long flag named "yc". pflag does not cluster it,
+                   # and neither may we, or every long name containing a reserved
+                   # letter would be refused.
+accept '"-C/x"'    # CASE. pflag shorthands are case-sensitive and no -C is registered,
+                   # so this crash-loops at startup and the chart does NOT catch it.
+                   # Committed as an accept to record that boundary: refusing it would
+                   # print the reserved-config reason, which is false for -C. A guard
+                   # that fires for a true reason and prints a false one is worse than
+                   # no guard, because the operator acts on the reason.
 
 echo "---"
 echo "executed=${executed} expected=${EXPECTED_TOTAL} failed=${failed}"
