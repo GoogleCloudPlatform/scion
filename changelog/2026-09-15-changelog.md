@@ -7,7 +7,7 @@ Largest single-day merge — 36 PRs spanning Cloud Run sandbox observability, ch
 * **Helm credential guard fixes (#1624):** `assertNoCredentialTree` missed map keys (not just values), and the URL password pattern's character class didn't allow slashes, enabling bypass.
 
 ## 🚀 Features
-* **Cloud Run sandbox log observability (#1616, #1610, #1611):** Host-side entrypoint log tailer streams logs in real time with per-agent goroutine cleanup. When the sandbox is dead, logs are served from the host with per-case source labels. Logs are now preserved across restarts via rotation instead of truncation.
+* **Cloud Run sandbox log observability (#1616, #1610, #1611):** Host-side entrypoint log tailer streams logs in real time with per-agent goroutine cleanup. When the sandbox is dead, logs are served from the host with per-case source labels. Logs are now preserved across restarts via append mode instead of truncation.
 * **Chat conversation export (#1636):** Download as Markdown, print/save as PDF, and copy to clipboard (HTML + plain text). Export dropdown in chat header, all content HTML-escaped.
 * **Release management scripts (#1631):** `scripts/release/` with `cut-preview.sh`, `bump-preview.sh`, and `promote-stable.sh` — dry-run mode, interactive confirmation, and bash 3.2 compatibility.
 * **Profile template management UI (#1634):** Create, clone, rename, and detail view for user-scoped templates. Actions dropdown replacing single delete icon, with displayName/description/harness preserved on rename.
