@@ -229,18 +229,23 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 	var mintQuota *GCPMintQuotaInfo
 	if req.scope == store.ScopeHub && s.gcpIAMAdmin != nil && s.config.GCPProjectID != "" {
 		managed := true
-		hubCount, _ := s.store.CountGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+		hubCount, hubErr := s.store.CountGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
 			Scope:   store.ScopeHub,
 			Managed: &managed,
 		})
-		globalCount, _ := s.store.CountGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+		globalCount, globalErr := s.store.CountGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
 			Managed: &managed,
 		})
-		mintQuota = &GCPMintQuotaInfo{
-			HubMinted:    hubCount,
-			HubCap:       s.config.GCPMintCapPerHub,
-			GlobalMinted: globalCount,
-			GlobalCap:    s.config.GCPMintCapGlobal,
+		if hubErr != nil || globalErr != nil {
+			slog.Warn("hub-scope SA list: failed to count managed SAs for quota",
+				"hubErr", hubErr, "globalErr", globalErr)
+		} else {
+			mintQuota = &GCPMintQuotaInfo{
+				HubMinted:    hubCount,
+				HubCap:       s.config.GCPMintCapPerHub,
+				GlobalMinted: globalCount,
+				GlobalCap:    s.config.GCPMintCapGlobal,
+			}
 		}
 	}
 
@@ -701,6 +706,10 @@ func (s *Server) handleGCPServiceAccountsMint(w http.ResponseWriter, r *http.Req
 // mintHubScopedGCPServiceAccount creates a new GCP service account at hub scope.
 // This mirrors mintGCPServiceAccount in handlers_gcp_identity.go with hub-specific
 // authorization (admin-only, no hub-member fallback), quota, and stored record.
+//
+// TODO: Extract shared IAM/cleanup/validation logic with mintGCPServiceAccount
+// into a helper. Deferred from Phase 2 to keep the change set focused on the
+// new endpoint rather than refactoring the existing one.
 func (s *Server) mintHubScopedGCPServiceAccount(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
