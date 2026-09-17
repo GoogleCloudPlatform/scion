@@ -591,10 +591,13 @@ func (s *Server) resolveOutboundRouting(
 		} else {
 			switch convResult.Kind {
 			case "group":
-				// DEF-160/161: group conv-ref routing. Legacy group conversations
-				// have a "thread:<projectID>:<threadID>" external ref; native group
-				// conversations (created via the conversation API) have an empty
-				// ExternalRef and route by ConversationID alone.
+				// DEF-160/161: group conv-ref routing. Three cases:
+				//  1. "thread:"-prefixed ExternalRef → legacy group conversation
+				//     with a thread key derived from the external ref.
+				//  2. Empty ExternalRef → native group conversation (created via
+				//     the conversation API); route by ConversationID alone.
+				//  3. Any other non-empty ExternalRef → unexpected format; fail
+				//     closed rather than silently misrouting.
 				if strings.HasPrefix(convResult.ExternalRef, "thread:") {
 					// Legacy path: parse the external ref to extract the thread ID.
 					_, threadID, parseErr := messaging.ParseThreadConversationExternalRef(convResult.ExternalRef)
@@ -620,7 +623,7 @@ func (s *Server) resolveOutboundRouting(
 					if req.ThreadID == "" {
 						req.ThreadID = threadID
 					}
-				} else {
+				} else if convResult.ExternalRef == "" {
 					// Native path: the conversation was created via the native
 					// conversation API and has no legacy thread key. Routing is
 					// by ConversationID (already set in S4). Discard any
@@ -637,6 +640,14 @@ func (s *Server) resolveOutboundRouting(
 					// is the address — mirroring "thread:<id>" for legacy groups.
 					recipient = "conv:" + convResult.ConversationID
 					recipientID = convResult.ConversationID
+				} else {
+					// Unexpected ExternalRef format — fail closed rather than
+					// silently misrouting to the native path.
+					s.messageLog.Error("DEF-160: unexpected group external_ref format",
+						"external_ref", convResult.ExternalRef, "conversation_id", convResult.ConversationID)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"conversation has unexpected external_ref format", nil)
+					return nil, fmt.Errorf("unexpected external_ref format: %s", convResult.ExternalRef)
 				}
 
 				// Derive channel from surface when empty (DEF-158).

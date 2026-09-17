@@ -3286,3 +3286,72 @@ func TestOutboundMessage_LegacyGroupConvRef(t *testing.T) {
 	require.Equal(t, "web", storedMsg.Channel,
 		"channel must be derived from surface 'native' → 'web'")
 }
+
+// TestOutboundMessage_UnexpectedGroupExternalRef verifies that a group
+// conversation with a non-empty, non-"thread:"-prefixed ExternalRef
+// (e.g. from database corruption or a future integration) returns a 500
+// error rather than silently misrouting. This is the regression test for
+// the "fail closed on unexpected ExternalRef" follow-up to DEF-160.
+func TestOutboundMessage_UnexpectedGroupExternalRef(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "unexpected-extref-project",
+		Slug: "unexpected-extref-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "unexpected-extref-agent",
+		Slug:       "unexpected-extref-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	srv.chatSendLimiter = newChatSendLimiter()
+
+	// Create a group conversation with a malformed/unexpected ExternalRef —
+	// neither empty (native) nor "thread:"-prefixed (legacy).
+	bogusConv := &store.Conversation{
+		ID:          api.NewUUID(),
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "bogus:something",
+		ProjectID:   &project.ID,
+	}
+	require.NoError(t, s.CreateConversation(ctx, bogusConv))
+
+	// Send via conversation_ref (conv:<uuid>).
+	body, _ := json.Marshal(OutboundMessageRequest{
+		ConversationRef: "conv:" + bogusConv.ID,
+		Msg:             "hello bogus group",
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+	// Must fail with 500 — the unexpected ExternalRef should be rejected,
+	// not silently routed as if it were a native conversation.
+	require.Equal(t, http.StatusInternalServerError, rr.Code,
+		"unexpected ExternalRef must return 500; got: %s", rr.Body.String())
+
+	// Verify the error response body contains the expected error message.
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	require.Equal(t, ErrCodeInternalError, errResp.Error.Code,
+		"error code should be internal_error")
+	require.Contains(t, errResp.Error.Message, "unexpected external_ref format",
+		"error message should mention unexpected external_ref format")
+}
