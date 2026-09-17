@@ -80,6 +80,10 @@ export interface ChatSendDetail {
   attachmentIds: string[];
   /** Phase-3: Reply-to message ID. */
   replyToId?: string;
+  /** Reply-to sender (e.g. "agent:slug") for routing replies to agents. */
+  replyToSender?: string;
+  /** Reply-to content for RE_msg_starting metadata. */
+  replyToContent?: string;
 }
 
 /** Event detail for the chat-edit custom event (Phase 3). */
@@ -149,7 +153,8 @@ export class ScionChatComposer extends LitElement {
 
   /** Reply-to context: shows a reply preview bar above the input. */
   @property({ type: Object })
-  replyTo: { messageId: string; senderName: string; content: string } | null = null;
+  replyTo: { messageId: string; senderName: string; content: string; sender?: string } | null =
+    null;
 
   /** Edit mode: populates the textarea with existing content. */
   @property({ type: Object })
@@ -1303,6 +1308,12 @@ export class ScionChatComposer extends LitElement {
     };
     if (this.replyTo) {
       detail.replyToId = this.replyTo.messageId;
+      if (this.replyTo.sender) {
+        detail.replyToSender = this.replyTo.sender;
+      }
+      if (this.replyTo.content) {
+        detail.replyToContent = this.replyTo.content;
+      }
     }
 
     this.dispatchEvent(

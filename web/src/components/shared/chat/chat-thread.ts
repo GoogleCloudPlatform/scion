@@ -301,6 +301,7 @@ export class ScionChatThread extends LitElement {
     messageId: string;
     senderName: string;
     content: string;
+    sender?: string;
   } | null = null;
 
   /** Edit mode context for the composer. */
@@ -1663,7 +1664,8 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, mentions, attachmentIds, replyToId, onSuccess } = e.detail;
+    const { text, mentions, attachmentIds, replyToId, replyToSender, replyToContent, onSuccess } =
+      e.detail;
     const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
     if (!hasContent || this.sending) return;
 
@@ -1695,6 +1697,20 @@ export class ScionChatThread extends LitElement {
       // Phase-3: Include reply_to_id.
       if (replyToId) {
         body.reply_to_id = replyToId;
+      }
+      // Fix: When replying to an agent message, target that agent for routing.
+      if (replyToSender && replyToSender.startsWith('agent:')) {
+        const agentSlug = replyToSender.slice('agent:'.length);
+        if (agentSlug) {
+          body.reply_to_agent = agentSlug;
+        }
+      }
+      // Fix: Add RE_msg_starting metadata when replying.
+      if (replyToId && replyToContent) {
+        const metadata: Record<string, string> = {
+          RE_msg_starting: replyToContent.slice(0, 32),
+        };
+        body.metadata = metadata;
       }
 
       const res = await apiFetch(
@@ -1818,7 +1834,7 @@ export class ScionChatThread extends LitElement {
 
   /** Handle reply action from a message. Sets the composer reply-to context. */
   private handleMessageReply(
-    e: CustomEvent<{ messageId: string; senderName: string; content: string }>
+    e: CustomEvent<{ messageId: string; senderName: string; content: string; sender?: string }>
   ): void {
     this.composerEditMessage = null; // Cancel any pending edit
     this.composerReplyTo = {
@@ -1826,6 +1842,7 @@ export class ScionChatThread extends LitElement {
       senderName: e.detail.senderName,
       content:
         e.detail.content.length > 100 ? e.detail.content.slice(0, 100) + '...' : e.detail.content,
+      sender: e.detail.sender,
     };
   }
 
@@ -2243,6 +2260,7 @@ export class ScionChatThread extends LitElement {
       messageId: msg.id,
       senderName: this.getSenderDisplayName(msg) || msg.sender,
       content: msg.msg.length > 100 ? msg.msg.slice(0, 100) + '...' : msg.msg,
+      sender: msg.sender,
     };
   }
 

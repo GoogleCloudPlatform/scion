@@ -837,10 +837,12 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// --- Validate body ---
 	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
 	var body struct {
-		Content        string   `json:"content"`
-		Attachments    []string `json:"attachments,omitempty"` // W7: attachment IDs
-		ReplyToID      string   `json:"reply_to_id,omitempty"` // Phase-3: reply/quote
-		IdempotencyKey string   `json:"idempotency_key,omitempty"`
+		Content        string            `json:"content"`
+		Attachments    []string          `json:"attachments,omitempty"`    // W7: attachment IDs
+		ReplyToID      string            `json:"reply_to_id,omitempty"`    // Phase-3: reply/quote
+		ReplyToAgent   string            `json:"reply_to_agent,omitempty"` // Reply targeting: agent slug to route to
+		Metadata       map[string]string `json:"metadata,omitempty"`       // Client-supplied metadata (e.g. RE_msg_starting)
+		IdempotencyKey string            `json:"idempotency_key,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		BadRequest(w, "invalid request body")
@@ -949,6 +951,16 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	// --- Reply-to agent override ---
+	// When replying to an agent's message, use that agent as the routing target
+	// instead of the thread default, so the reply reaches the right agent.
+	if body.ReplyToAgent != "" && projectID != "" {
+		replyAgent, err := s.store.GetAgentBySlug(ctx, projectID, body.ReplyToAgent)
+		if err == nil && replyAgent != nil && replyAgent.DeletedAt.IsZero() {
+			defaultAgent = replyAgent
+		}
+	}
+
 	// --- Resolve routing via shared planner ---
 	var plan RoutingPlan
 	if projectID != "" {
@@ -975,7 +987,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	// --- Agent routing ---
 	if len(plan.Agents) > 0 {
-		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, body.ReplyToID)
+		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, body.ReplyToID, body.Metadata)
 		if msgID == "" {
 			return // error response already written by sendAgentRouted
 		}
@@ -998,7 +1010,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 // Returns the persisted message ID (empty on error).
 func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, projectID string, user UserIdentity,
 	content, senderLabel string, agents []*store.Agent, mentionNames []string, mentionResults []messages.MentionResult,
-	attachmentRefs []AttachmentRef, now time.Time, replyToID string) string {
+	attachmentRefs []AttachmentRef, now time.Time, replyToID string, clientMetadata map[string]string) string {
 
 	ctx := r.Context()
 
@@ -1041,6 +1053,16 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 
 	// The primary is NOT a mention recipient — it should not carry mention
 	// metadata. Fan-out messages get their own metadata via messages.NewMention.
+
+	// Merge client-supplied metadata (e.g. RE_msg_starting for replies).
+	if len(clientMetadata) > 0 {
+		if msg.Metadata == nil {
+			msg.Metadata = make(map[string]string)
+		}
+		for k, v := range clientMetadata {
+			msg.Metadata[k] = v
+		}
+	}
 
 	// W7: Add attachment metadata and file paths for agent dispatch.
 	if len(attachmentRefs) > 0 {

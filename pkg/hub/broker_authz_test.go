@@ -281,7 +281,7 @@ func TestSendAgentRouted_WithoutAttach(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, outsider,
-		"hello", "outsider@test.com", []*store.Agent{agent}, nil, nil, nil, time.Now(), "")
+		"hello", "outsider@test.com", []*store.Agent{agent}, nil, nil, nil, time.Now(), "", nil)
 
 	if msgID != "" {
 		t.Errorf("expected empty msgID on denied request, got %q", msgID)
@@ -329,7 +329,7 @@ func TestSendAgentRouted_WithAttach(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, owner,
-		"hello", "owner@test.com", []*store.Agent{agent}, nil, nil, nil, time.Now(), "")
+		"hello", "owner@test.com", []*store.Agent{agent}, nil, nil, nil, time.Now(), "", nil)
 
 	if msgID == "" {
 		t.Errorf("expected non-empty msgID, got empty; response: %d: %s", rr.Code, rr.Body.String())
@@ -407,7 +407,7 @@ func TestSendAgentRouted_MentionSkippedWithoutAttach(t *testing.T) {
 	agents := []*store.Agent{primaryAgent, mentionAgent}
 	mentionResults := []messages.MentionResult{{Slug: "mention-agent", Status: "delivered"}}
 	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, owner,
-		"@mention-agent hello", "owner@test.com", agents, []string{"mention-agent"}, mentionResults, nil, time.Now(), "")
+		"@mention-agent hello", "owner@test.com", agents, []string{"mention-agent"}, mentionResults, nil, time.Now(), "", nil)
 
 	if msgID == "" {
 		t.Errorf("expected non-empty msgID, got empty; response: %d: %s", rr.Code, rr.Body.String())
