@@ -109,6 +109,7 @@ var agentAllowed = map[string]bool{
 	"project.skills.list":         true,
 	"project.skills.add":          true,
 	"project.skills.remove":       true,
+	"set-message-mode":            true,
 	"conversation":                true,
 	"conversation.list":           true,
 	"conversation.messages":       true,

@@ -587,6 +587,156 @@ func (s *storedAgentIdentity) OriginUserID() string {
 	return ""
 }
 
+// authorizeCrossProjectAgentMessage implements the cross-project path of the
+// agent-to-agent messaging decision logic (design §2, §3, §5).
+//
+// Decision order:
+//  1. Sender must be hub mode.
+//  2. Recipient must be project or hub mode.
+//  3. Hub cross_project_messaging_enabled must be true.
+//  4. Destination project's crossProjectInbound policy must permit the sender.
+//  5. Both agent and project records must be valid (not deleted).
+func (s *Server) authorizeCrossProjectAgentMessage(
+	ctx context.Context,
+	senderAgent, targetAgent *store.Agent,
+	sMode, tMode string,
+) (bool, string) {
+	// 1. Sender must be hub mode — project-mode agents cannot send cross-project.
+	if sMode != store.MessageModeHub {
+		return false, "cross_project_sender_mode"
+	}
+
+	// 2. Recipient must be project or hub mode. branch/lineage/none cannot
+	//    receive external messages.
+	if tMode != store.MessageModeProject && tMode != store.MessageModeHub {
+		return false, "cross_project_target_mode"
+	}
+
+	// 3. Hub-level kill switch.
+	ops := s.GetOperationalSettings()
+	if ops == nil || !ops.CrossProjectMessagingEnabled() {
+		return false, "cross_project_disabled"
+	}
+
+	// 4. Destination project's inbound policy.
+	targetProject, err := s.store.GetProject(ctx, targetAgent.ProjectID)
+	if err != nil || targetProject == nil {
+		slog.Warn("authorizeCrossProjectAgentMessage: failed to fetch target project",
+			"project_id", targetAgent.ProjectID, "error", err)
+		return false, "cross_project_target_project_unavailable"
+	}
+
+	switch targetProject.CrossProjectInbound {
+	case store.CrossProjectInboundNone, "":
+		return false, "cross_project_inbound_none"
+
+	case store.CrossProjectInboundMembers:
+		// Sender's origin user must be a current member of the target project.
+		originUserID := resolveOriginUserID(senderAgent)
+		if originUserID == "" {
+			return false, "cross_project_untrusted_origin"
+		}
+		if !s.isActiveMember(ctx, originUserID, targetAgent.ProjectID) {
+			return false, "cross_project_origin_not_member"
+		}
+
+	case store.CrossProjectInboundAny:
+		// Accept from any eligible agent on this Hub — no origin check needed.
+
+	default:
+		return false, fmt.Sprintf("cross_project_inbound_unknown: %q", targetProject.CrossProjectInbound)
+	}
+
+	// 5. Verify sender project is also valid.
+	senderProject, err := s.store.GetProject(ctx, senderAgent.ProjectID)
+	if err != nil || senderProject == nil {
+		return false, "cross_project_sender_project_unavailable"
+	}
+
+	return true, "cross_project_authorized"
+}
+
+// resolveOriginUserID extracts the root human principal from an agent's
+// hub-attested ancestry chain. The first element of the ancestry is the
+// originating user.
+func resolveOriginUserID(agent *store.Agent) string {
+	if agent == nil || len(agent.Ancestry) == 0 {
+		return ""
+	}
+	// The first element in the ancestry chain is the root human.
+	// CreatedBy may also carry the origin user; prefer ancestry when present.
+	return agent.Ancestry[0]
+}
+
+// isActiveMember checks whether a user has active membership in the given project.
+// Counts built-in member/admin/owner bindings. Does not count custom-only roles
+// or public visibility.
+func (s *Server) isActiveMember(ctx context.Context, userID, projectID string) bool {
+	if userID == "" || projectID == "" {
+		return false
+	}
+	membership, err := s.store.GetProjectMembership(ctx, projectID, userID)
+	if err != nil || membership == nil {
+		return false
+	}
+	// Owner, admin, and member roles all count as active membership.
+	switch membership.Role {
+	case store.ProjectRoleOwner, store.ProjectRoleAdmin, store.ProjectRoleMember:
+		return true
+	default:
+		return false
+	}
+}
+
+// EvaluateCrossProjectReadAccess checks whether an agent can read cross-project
+// conversation history. Requires canonical participation, Hub enabled, valid
+// endpoint/project records, and at least one currently permitted direction.
+func (s *Server) EvaluateCrossProjectReadAccess(
+	ctx context.Context,
+	readerAgent *store.Agent,
+	peerAgent *store.Agent,
+) (allowed bool, reason string) {
+	if readerAgent == nil || peerAgent == nil {
+		return false, "invalid_agent"
+	}
+
+	// Both must be in project or hub mode.
+	rMode := readerAgent.MessageMode
+	pMode := peerAgent.MessageMode
+	if rMode != store.MessageModeProject && rMode != store.MessageModeHub {
+		return false, "reader_mode_insufficient"
+	}
+	if pMode != store.MessageModeProject && pMode != store.MessageModeHub {
+		return false, "peer_mode_insufficient"
+	}
+
+	// At least one must be hub mode.
+	if rMode != store.MessageModeHub && pMode != store.MessageModeHub {
+		return false, "no_hub_mode_endpoint"
+	}
+
+	// Hub switch must be enabled.
+	ops := s.GetOperationalSettings()
+	if ops == nil || !ops.CrossProjectMessagingEnabled() {
+		return false, "cross_project_disabled"
+	}
+
+	// Check at least one permitted direction.
+	// Forward: reader→peer
+	_, forwardReason := s.authorizeCrossProjectAgentMessage(ctx, readerAgent, peerAgent, rMode, pMode)
+	forwardAllowed := forwardReason == "cross_project_authorized"
+
+	// Reverse: peer→reader
+	_, reverseReason := s.authorizeCrossProjectAgentMessage(ctx, peerAgent, readerAgent, pMode, rMode)
+	reverseAllowed := reverseReason == "cross_project_authorized"
+
+	if !forwardAllowed && !reverseAllowed {
+		return false, "no_permitted_direction"
+	}
+
+	return true, "cross_project_read_authorized"
+}
+
 // isDirectParentChild reports whether two agents have a direct parent/child
 // relationship. The last element of an agent's Ancestry array is its parent
 // (which may be a user or an agent).

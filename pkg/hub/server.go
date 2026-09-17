@@ -4187,6 +4187,11 @@ func (s *Server) registerRoutes() {
 	// Conversation endpoints (user and agent facing)
 	s.mux.HandleFunc("/api/v1/conversations", s.guarded("/api/v1/conversations", s.handleListConversations))
 	s.mux.HandleFunc("/api/v1/conversations/", s.guarded("/api/v1/conversations/", s.handleConversationRoutes))
+	s.mux.HandleFunc("/api/v1/conversations/resolve", s.guarded("/api/v1/conversations/resolve", s.handleConversationResolve))
+
+	// Cross-project messaging endpoints (Phase 3)
+	s.mux.HandleFunc("/api/v1/messaging/capabilities", s.guarded("/api/v1/messaging/capabilities", s.handleMessagingCapabilities))
+	s.mux.HandleFunc("/api/v1/messaging/targets/resolve", s.guarded("/api/v1/messaging/targets/resolve", s.handleMessagingTargetsResolve))
 
 	// Native chat endpoints. Registration is gated on server.native_chat.enabled,
 	// so disabling the feature makes every /api/v1/chat/* path 404 rather than
