@@ -185,6 +185,43 @@ func TestFormatNewDelivery_NoMetadata(t *testing.T) {
 	}
 }
 
+func TestFormatNewDelivery_WithMetadata(t *testing.T) {
+	intent := IntentRequest
+	msg := &Message{
+		ID:   "msg-meta-001",
+		From: PrincipalRef("user:alice"),
+		Kind: KindText,
+		Intent: &intent,
+		Body:      "Replying to your question",
+		Metadata:  map[string]string{"RE-to": "original message preview..."},
+		CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC),
+	}
+	conv := &ConversationInfo{
+		ID:      "conv-meta",
+		Kind:    "direct",
+		Surface: "native",
+	}
+
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false)
+
+	env := extractEnvelope(t, result)
+	if env.Metadata == nil {
+		t.Fatal("metadata is nil, want non-nil")
+	}
+	if got, ok := env.Metadata["RE-to"]; !ok || got != "original message preview..." {
+		t.Errorf("metadata[RE-to] = %q, want %q", got, "original message preview...")
+	}
+
+	// Also verify via raw JSON that the "metadata" key exists.
+	jsonStr := extractJSON(t, result)
+	if !strings.Contains(jsonStr, `"metadata"`) {
+		t.Error("output does not contain 'metadata' field, want it present")
+	}
+	if !strings.Contains(jsonStr, `"RE-to"`) {
+		t.Error("output does not contain 'RE-to' key, want it present")
+	}
+}
+
 func TestFormatNewDelivery_NoBroadcasted(t *testing.T) {
 	intent := IntentRequest
 	msg := &Message{

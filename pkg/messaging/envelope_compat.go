@@ -23,6 +23,18 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
+// internalMetadataKeys lists metadata keys that are platform-internal and
+// should not appear in the new-format delivery envelope. These are either
+// represented as first-class envelope fields or are implementation details.
+var internalMetadataKeys = map[string]bool{
+	"system_category":  true,
+	"__attachments":    true,
+	"mention_source":   true,
+	"mention_position": true,
+	"channel":          true,
+	"thread_id":        true,
+}
+
 // MapLegacyType maps an old type enum value (and optional system_category
 // metadata) to the new split taxonomy: kind, intent, and event body.
 //
@@ -44,6 +56,11 @@ func MapLegacyType(oldType, systemCategory string, hasAddressee bool) (MessageKi
 
 	case messages.TypeChat:
 		intent := IntentInform
+		return KindText, &intent, nil
+
+	case messages.TypeReply:
+		// A reply to an agent is still a request, same as TypeInstruction.
+		intent := IntentRequest
 		return KindText, &intent, nil
 
 	case messages.TypeAssistantReply:
@@ -140,6 +157,14 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 	systemCategory := old.Metadata["system_category"]
 	kind, intent, event := MapLegacyType(old.Type, systemCategory, hasAddressee)
 
+	// Human-to-human replies should be inform, not request.
+	// MapLegacyType maps TypeReply to IntentRequest (correct for agent
+	// recipients), but human-to-human replies are informational.
+	if old.Type == messages.TypeReply && !strings.HasPrefix(old.Recipient, "agent:") {
+		inform := IntentInform
+		intent = &inform
+	}
+
 	// Enrich event body from old fields where possible.
 	if event != nil {
 		if old.Status != "" {
@@ -184,6 +209,23 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 		Attachments: attachments,
 		Urgent:      old.Urgent,
 		CreatedAt:   createdAt,
+	}
+
+	// Copy client-supplied metadata, filtering out internal keys that are
+	// either represented as first-class envelope fields (mention_source,
+	// mention_position, channel, thread_id, system_category) or are
+	// platform-specific implementation details (__attachments).
+	if len(old.Metadata) > 0 {
+		filtered := make(map[string]string)
+		for k, v := range old.Metadata {
+			if internalMetadataKeys[k] {
+				continue
+			}
+			filtered[k] = v
+		}
+		if len(filtered) > 0 {
+			msg.Metadata = filtered
+		}
 	}
 
 	// Build addressees.

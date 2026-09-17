@@ -1747,7 +1747,7 @@ export class ScionChatThread extends LitElement {
       recipient: this.defaultAgent ? 'agent:' + this.defaultAgent : '',
       recipientId: this.defaultAgent || '',
       msg: text,
-      type: 'chat',
+      type: replyToId ? 'reply' : 'chat',
       agentId: '',
       createdAt: new Date().toISOString(),
       dispatchState: 'pending',
@@ -1781,10 +1781,13 @@ export class ScionChatThread extends LitElement {
           body.reply_to_agent = agentSlug;
         }
       }
-      // Fix: Add RE_msg_starting metadata when replying.
+      // Fix: Add RE-to metadata when replying — first 32 codepoints with ellipsis.
+      // Use spread to avoid splitting UTF-16 surrogate pairs (e.g. emoji).
       if (replyToId && replyToContent) {
+        const codepoints = [...replyToContent];
         const metadata: Record<string, string> = {
-          RE_msg_starting: replyToContent.slice(0, 32),
+          'RE-to':
+            codepoints.length > 32 ? codepoints.slice(0, 32).join('') + '...' : replyToContent,
         };
         body.metadata = metadata;
       }

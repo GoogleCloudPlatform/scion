@@ -401,7 +401,7 @@ var dmKeyRegexp = regexp.MustCompile(`^dm:(user|agent):[0-9a-f-]{36}:(user|agent
 // that may be merged into outgoing messages. Keys not in this set are silently
 // dropped to prevent arbitrary metadata injection.
 var allowedClientMetadataKeys = map[string]bool{
-	"RE_msg_starting": true,
+	"RE-to": true,
 }
 
 // validDMKey returns true if the key matches the expected DM key format.
@@ -1033,6 +1033,9 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	// thread's implicit agent or the first-mentioned agent — it is never a
 	// "mention" recipient regardless of how the list was assembled.
 	msgType := messages.TypeInstruction
+	if replyToID != "" {
+		msgType = messages.TypeReply
+	}
 
 	// Translate human @firstname-lastname mentions to @email for agents.
 	// The original content is preserved for storage and human-facing display;
@@ -1478,6 +1481,11 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		msgProjectID = uuid.Nil.String()
 	}
 
+	msgType := messages.TypeChat
+	if replyToID != "" {
+		msgType = messages.TypeReply
+	}
+
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
 		ProjectID:     msgProjectID,
@@ -1486,7 +1494,7 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		Recipient:     recipient,
 		RecipientID:   recipientID,
 		Msg:           content,
-		Type:          messages.TypeChat,
+		Type:          msgType,
 		Channel:       "web",
 		ThreadID:      key,
 		DispatchState: store.MessageDispatchDispatched,

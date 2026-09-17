@@ -42,6 +42,7 @@ type DeliveryEnvelope struct {
 	Type         string            `json:"type"`            // "message" | "event"
 	Event        *EventBody        `json:"event,omitempty"` // Type == "event"
 	Msg          string            `json:"msg"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
 	Urgent       bool              `json:"urgent,omitempty"`
 	Attachments  []string          `json:"attachments,omitempty"`
 	ReplyTo      *string           `json:"reply_to,omitempty"` // msg ID
@@ -82,6 +83,7 @@ func FormatNewDelivery(
 		Type:         typeString(msg.Kind, isMention),
 		Event:        msg.Event,
 		Msg:          msg.Body,
+		Metadata:     msg.Metadata,
 		Urgent:       msg.Urgent,
 		ReplyTo:      msg.ReplyToID,
 	}

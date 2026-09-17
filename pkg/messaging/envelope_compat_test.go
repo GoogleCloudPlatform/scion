@@ -114,6 +114,12 @@ func TestMapLegacyType_AllOldTypes(t *testing.T) {
 			wantKind:   KindText,
 			wantIntent: ptrIntent(IntentRequest),
 		},
+		{
+			name:       "reply → text/request",
+			oldType:    messages.TypeReply,
+			wantKind:   KindText,
+			wantIntent: ptrIntent(IntentRequest),
+		},
 	}
 
 	for _, tc := range tests {
@@ -299,6 +305,91 @@ func TestMapLegacyEnvelope_SystemScheduler(t *testing.T) {
 	}
 	if msg.Event == nil || msg.Event.Type != EventScheduleFired {
 		t.Errorf("event.type: got %v, want schedule.fired", msg.Event)
+	}
+}
+
+func TestMapLegacyEnvelope_MetadataPassThrough(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Replying to your message",
+		Type:      messages.TypeReply,
+		Metadata: map[string]string{
+			"RE-to":           "original message preview...",
+			"system_category": "scheduler",
+			"__attachments":   "internal-data",
+		},
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// RE-to should pass through.
+	if msg.Metadata == nil {
+		t.Fatal("metadata is nil, want non-nil")
+	}
+	if got, ok := msg.Metadata["RE-to"]; !ok || got != "original message preview..." {
+		t.Errorf("metadata[RE-to] = %q, want %q", got, "original message preview...")
+	}
+
+	// Internal keys must be filtered out.
+	if _, ok := msg.Metadata["system_category"]; ok {
+		t.Error("metadata contains system_category, want filtered out")
+	}
+	if _, ok := msg.Metadata["__attachments"]; ok {
+		t.Error("metadata contains __attachments, want filtered out")
+	}
+}
+
+func TestMapLegacyEnvelope_MetadataEmpty(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "No metadata",
+		Type:      messages.TypeInstruction,
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.Metadata != nil {
+		t.Errorf("metadata = %v, want nil", msg.Metadata)
+	}
+}
+
+func TestMapLegacyEnvelope_MetadataOnlyInternalKeys(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Only internal metadata",
+		Type:      messages.TypeInstruction,
+		Metadata: map[string]string{
+			"system_category": "scheduler",
+			"__attachments":   "internal-data",
+		},
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// When only internal keys exist, Metadata should be nil (not empty map).
+	if msg.Metadata != nil {
+		t.Errorf("metadata = %v, want nil (all keys filtered)", msg.Metadata)
 	}
 }
 
@@ -1148,6 +1239,58 @@ func TestBuildPrincipalRef_BothEmpty(t *testing.T) {
 	ref := buildPrincipalRef("", "")
 	if ref != "system:unknown" {
 		t.Fatalf("expected system:unknown, got %q", ref)
+	}
+}
+
+// ---------- Human-to-human reply intent override ----------
+
+func TestMapLegacyEnvelope_ReplyToHuman_IntentInform(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "user:bob",
+		Msg:       "Replying to Bob",
+		Type:      messages.TypeReply,
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.Kind != KindText {
+		t.Errorf("kind: got %q, want text", msg.Kind)
+	}
+	// Human-to-human reply should be inform, not request.
+	if msg.Intent == nil || *msg.Intent != IntentInform {
+		t.Errorf("intent: got %v, want inform (human-to-human reply)", msg.Intent)
+	}
+}
+
+func TestMapLegacyEnvelope_ReplyToAgent_IntentRequest(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Replying to agent",
+		Type:      messages.TypeReply,
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.Kind != KindText {
+		t.Errorf("kind: got %q, want text", msg.Kind)
+	}
+	// Reply to agent should remain request.
+	if msg.Intent == nil || *msg.Intent != IntentRequest {
+		t.Errorf("intent: got %v, want request (reply to agent)", msg.Intent)
 	}
 }
 
