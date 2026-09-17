@@ -207,17 +207,17 @@ scion conversation messages @tech-lead
 scion conversation create "sprint-planning"
 
 # Set a default agent for a conversation
-scion conversation set-default #sprint-planning agent-id
+scion conversation set-default "#sprint-planning" agent-id
 
 # Catch up on recent messages (last 2 hours)
 scion conversation catch-up @tech-lead --since 2h
 
 # List participants in a conversation
-scion conversation participants #sprint-planning
+scion conversation participants "#sprint-planning"
 
 # Join or leave a conversation
-scion conversation join #sprint-planning user user-id
-scion conversation leave #sprint-planning
+scion conversation join "#sprint-planning" user user-id
+scion conversation leave "#sprint-planning"
 ```
 
 For full flag details, see the [CLI Reference](/scion/reference/cli/#scion-conversation-alias-conv).
