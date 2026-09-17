@@ -1603,7 +1603,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private async loadHarnessConfigs(): Promise<void> {
     try {
-      const res = await apiFetch('/api/v1/harness-configs?status=active&limit=100');
+      const res = await apiFetch('/api/v1/harness-configs?status=active&scope=global&limit=100');
       if (res.ok) {
         const data = (await res.json()) as { harnessConfigs?: HarnessConfigEntry[] };
         this.harnessConfigs = data.harnessConfigs || [];
