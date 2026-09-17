@@ -397,6 +397,13 @@ var threadNameRegexp = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9 _\-]*$`)
 // Format: dm:(user|agent):<uuid>:(user|agent):<uuid>
 var dmKeyRegexp = regexp.MustCompile(`^dm:(user|agent):[0-9a-f-]{36}:(user|agent):[0-9a-f-]{36}$`)
 
+// allowedClientMetadataKeys is the allowlist of client-supplied metadata keys
+// that may be merged into outgoing messages. Keys not in this set are silently
+// dropped to prevent arbitrary metadata injection.
+var allowedClientMetadataKeys = map[string]bool{
+	"RE_msg_starting": true,
+}
+
 // validDMKey returns true if the key matches the expected DM key format.
 func validDMKey(key string) bool {
 	return dmKeyRegexp.MatchString(key)
@@ -1055,12 +1062,15 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	// metadata. Fan-out messages get their own metadata via messages.NewMention.
 
 	// Merge client-supplied metadata (e.g. RE_msg_starting for replies).
+	// Only allowlisted keys are accepted to prevent arbitrary metadata injection.
 	if len(clientMetadata) > 0 {
 		if msg.Metadata == nil {
 			msg.Metadata = make(map[string]string)
 		}
 		for k, v := range clientMetadata {
-			msg.Metadata[k] = v
+			if allowedClientMetadataKeys[k] {
+				msg.Metadata[k] = v
+			}
 		}
 	}
 
