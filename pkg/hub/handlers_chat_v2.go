@@ -1262,6 +1262,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			ConvResult: chatV2ConvResult,
 			Msg:        msg,
 			CreatedAt:  storeMsg.CreatedAt,
+			ReplyToID:  replyToID,
 		}
 		if len(agents) > 1 {
 			renderInput.CoAddressees = groupCoAddressees(agents)
@@ -1380,6 +1381,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 					CreatedAt:    mentionStoreMsg.CreatedAt,
 					IsMention:    true,
 					CoAddressees: groupCoAddressees(agents),
+					ReplyToID:    replyToID,
 				})
 			}
 
