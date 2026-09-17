@@ -45,15 +45,15 @@ const (
 	MessageDenialCrossProjectAttachUnsupported   MessageDenialCode = "cross_project_attachment_unsupported"
 	MessageDenialCrossProjectScheduledDenied     MessageDenialCode = "cross_project_scheduled_denied"
 	MessageDenialCrossProjectScheduledDisabled   MessageDenialCode = "cross_project_scheduled_disabled"
-	MessageDenialCrossProjectScheduledTarget     MessageDenialCode = "cross_project_scheduled_target"
+	MessageDenialCrossProjectScheduledTarget     MessageDenialCode = "cross_project_scheduled_target"      // reserved: scheduled message target validation
 	MessageDenialCrossProjectContentUnauthorized MessageDenialCode = "cross_project_content_unauthorized"
-	MessageDenialScheduledCreatorDeleted         MessageDenialCode = "scheduled_message_creator_deleted"
-	MessageDenialScheduledCreatorInactive        MessageDenialCode = "scheduled_message_creator_inactive"
+	MessageDenialScheduledCreatorDeleted         MessageDenialCode = "scheduled_message_creator_deleted"  // reserved: creator lifecycle checks
+	MessageDenialScheduledCreatorInactive        MessageDenialCode = "scheduled_message_creator_inactive" // reserved: creator lifecycle checks
 	MessageDenialScheduledTargetDeleted          MessageDenialCode = "scheduled_message_target_deleted"
-	MessageDenialScheduledModeChanged            MessageDenialCode = "scheduled_message_mode_changed"
+	MessageDenialScheduledModeChanged            MessageDenialCode = "scheduled_message_mode_changed" // reserved: mode-change detection at fire time
 	MessageDenialAttachmentNotFound              MessageDenialCode = "attachment_not_found"
 	MessageDenialAttachmentUnauthorized          MessageDenialCode = "attachment_unauthorized"
-	MessageDenialDeliveryDuplicate               MessageDenialCode = "delivery_duplicate"
+	MessageDenialDeliveryDuplicate               MessageDenialCode = "delivery_duplicate" // reserved: delivery deduplication guard
 )
 
 // MessageDecision captures the outcome of an agent message authorization

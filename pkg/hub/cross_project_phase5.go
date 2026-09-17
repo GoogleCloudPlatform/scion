@@ -44,15 +44,29 @@ type QualifiedAgentRef struct {
 // Accepted forms:
 //   - "@project/agent" or "project/agent" → cross-project reference
 //   - "@agent" or "agent" → same-project reference (ProjectSlug is "")
-func ParseQualifiedAgentRef(s string) QualifiedAgentRef {
+//
+// Returns an error for clearly malformed refs (empty input, empty project
+// or agent slug after splitting).
+func ParseQualifiedAgentRef(s string) (QualifiedAgentRef, error) {
 	s = strings.TrimPrefix(s, "@")
-	if idx := strings.Index(s, "/"); idx > 0 {
-		return QualifiedAgentRef{
-			ProjectSlug: s[:idx],
-			AgentSlug:   s[idx+1:],
-		}
+	if s == "" {
+		return QualifiedAgentRef{}, fmt.Errorf("empty agent reference")
 	}
-	return QualifiedAgentRef{AgentSlug: s}
+	if idx := strings.Index(s, "/"); idx >= 0 {
+		project := s[:idx]
+		agent := s[idx+1:]
+		if project == "" {
+			return QualifiedAgentRef{}, fmt.Errorf("empty project slug in qualified ref %q", "@"+s)
+		}
+		if agent == "" {
+			return QualifiedAgentRef{}, fmt.Errorf("empty agent slug in qualified ref %q", "@"+s)
+		}
+		return QualifiedAgentRef{
+			ProjectSlug: project,
+			AgentSlug:   agent,
+		}, nil
+	}
+	return QualifiedAgentRef{AgentSlug: s}, nil
 }
 
 // FanOutTarget represents a resolved target in a multi-target DM fan-out.
@@ -178,6 +192,9 @@ func (s *Server) EvaluateFanOutTargets(
 				t.DenialCode = MessageDenialCrossProjectUnsupported
 			}
 			result.Denied++
+		} else {
+			t.Delivered = true
+			result.Delivered++
 		}
 	}
 
@@ -232,6 +249,9 @@ func ValidateCrossProjectRoomJoin(
 // ScheduledMessageCrossProjectContext stores the cross-project authority and
 // caveats captured at schedule time. This is persisted with the scheduled event
 // so that fire-time reauthorization uses the original context.
+//
+// TODO: wire into scheduled event creation/fire paths once the persistence
+// layer supports storing cross-project context alongside scheduled events.
 type ScheduledMessageCrossProjectContext struct {
 	// SenderProjectID is the project where the scheduled message was authored.
 	SenderProjectID string `json:"senderProjectId"`
@@ -370,8 +390,8 @@ func (s *Server) AuthorizeAttachmentDownload(
 	}
 
 	// For cross-project conversations, verify the Hub feature is enabled.
-	// Determine cross-project status from the conversation's message provenance.
-	if isCrossProjectConversation(ctx, s, conversationID) {
+	// Reuse the already-fetched participants to avoid a duplicate ListParticipants query.
+	if isCrossProjectConversationFromParticipants(ctx, s, participants) {
 		ops := s.GetOperationalSettings()
 		if ops == nil || !ops.CrossProjectMessagingEnabled() {
 			return AttachmentTransferDecision{
@@ -391,10 +411,18 @@ func (s *Server) AuthorizeAttachmentDownload(
 // isCrossProjectConversation checks whether a conversation contains
 // participants from different projects by examining stored messages.
 func isCrossProjectConversation(ctx context.Context, s *Server, conversationID string) bool {
-	// Look at the conversation's participants — if they are agents from
-	// different projects, it's cross-project.
 	participants, err := s.store.ListParticipants(ctx, conversationID)
 	if err != nil || len(participants) < 2 {
+		return false
+	}
+	return isCrossProjectConversationFromParticipants(ctx, s, participants)
+}
+
+// isCrossProjectConversationFromParticipants checks whether a pre-fetched
+// participant list contains agents from different projects. This avoids a
+// duplicate ListParticipants query when the caller already has the list.
+func isCrossProjectConversationFromParticipants(ctx context.Context, s *Server, participants []store.ConversationParticipant) bool {
+	if len(participants) < 2 {
 		return false
 	}
 

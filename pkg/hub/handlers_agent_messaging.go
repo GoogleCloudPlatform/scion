@@ -1337,7 +1337,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		})
 
 		for _, slug := range req.Mentions {
-			ref := ParseQualifiedAgentRef(slug)
+			ref, refErr := ParseQualifiedAgentRef(slug)
+			if refErr != nil {
+				s.messageLog.Warn("malformed mention reference, skipping", "slug", slug, "error", refErr)
+				continue
+			}
 			if ref.ProjectSlug != "" {
 				// Project-qualified reference: evaluate cross-project policy per-target.
 				qualifiedRefs = append(qualifiedRefs, ref)
@@ -2028,10 +2032,23 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 	// agent recipient must be in the anchor agent's project.
 	for _, recip := range recipients {
 		if recip.Kind == messages.RecipientAgent {
-			ref := ParseQualifiedAgentRef(recip.Name)
+			ref, refErr := ParseQualifiedAgentRef(recip.Name)
+			if refErr != nil {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+					fmt.Sprintf("malformed agent reference %q: %v", recip.Name, refErr), nil)
+				return
+			}
 			if ref.ProjectSlug != "" {
-				// Explicit cross-project reference in a group context: denied.
-				boundary := ValidateCrossProjectGroupBoundary(projectID, ref.ProjectSlug, "group message")
+				// Explicit cross-project reference in a group context: resolve
+				// the slug to a project ID so the boundary check compares the
+				// same type (ID vs ID) on both sides.
+				refProject, refErr := s.store.GetProjectBySlug(ctx, ref.ProjectSlug)
+				if refErr != nil {
+					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+						fmt.Sprintf("project %q not found", ref.ProjectSlug), nil)
+					return
+				}
+				boundary := ValidateCrossProjectGroupBoundary(projectID, refProject.ID, "group message")
 				if boundary != nil {
 					writeError(w, http.StatusForbidden, ErrCodeForbidden,
 						boundary.Reason, map[string]interface{}{
@@ -2389,14 +2406,11 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	// authorizeAgentMessage.
 	if agentIdent != nil && userIdent == nil {
 		if agentIdent.ProjectID() != projectID {
-			boundary := ValidateCrossProjectGroupBoundary(agentIdent.ProjectID(), projectID, "broadcast")
-			if boundary != nil {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden, boundary.Reason, map[string]interface{}{
-					"code": string(boundary.Code),
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"cross-project broadcast is not supported; group/broadcast/plugin channels retain project boundaries",
+				map[string]interface{}{
+					"code": string(MessageDenialCrossProjectGroupsUnsupported),
 				})
-				return
-			}
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only broadcast within their own project", nil)
 			return
 		}
 	}

@@ -65,18 +65,21 @@ func mapReasonToCode(reason string) string {
 	case strings.HasPrefix(reason, "agent.message permission denied"):
 		return ReasonMissingPermission
 	// Phase 5: Cross-project denial codes mapped to API-safe values.
-	case strings.HasPrefix(reason, "cross-project messaging"):
-		return string(MessageDenialCrossProjectDisabled)
+	// Order matters: longer/more-specific prefixes must be checked BEFORE
+	// shorter/broader ones so the broad "cross-project messaging" catch-all
+	// does not shadow more specific matches.
 	case strings.HasPrefix(reason, "cross-project messaging requires sender mode hub"):
 		return string(MessageDenialCrossProjectSenderMode)
+	case strings.HasPrefix(reason, "cross-project messaging requires hub-attested"):
+		return string(MessageDenialCrossProjectUntrusted)
+	case reason == "cross-project messaging is not enabled on this Hub":
+		return string(MessageDenialCrossProjectDisabled)
 	case strings.HasPrefix(reason, "cross-project target must be"):
 		return string(MessageDenialCrossProjectTargetMode)
 	case reason == "destination project does not accept external agent messages":
 		return string(MessageDenialCrossProjectInboundNone)
 	case reason == "origin user is not an active member of the destination project":
 		return string(MessageDenialCrossProjectNotMember)
-	case strings.HasPrefix(reason, "cross-project messaging requires hub-attested"):
-		return string(MessageDenialCrossProjectUntrusted)
 	case strings.HasPrefix(reason, "cross-project"):
 		return string(MessageDenialCrossProjectUnsupported)
 	default:

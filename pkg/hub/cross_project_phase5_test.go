@@ -161,12 +161,25 @@ func TestParseQualifiedAgentRef(t *testing.T) {
 		{"@my-proj/my-agent", "my-proj", "my-agent"},
 	}
 	for _, tt := range tests {
-		ref := ParseQualifiedAgentRef(tt.input)
+		ref, err := ParseQualifiedAgentRef(tt.input)
+		if err != nil {
+			t.Errorf("ParseQualifiedAgentRef(%q) unexpected error: %v", tt.input, err)
+			continue
+		}
 		if ref.ProjectSlug != tt.projectSlug {
 			t.Errorf("ParseQualifiedAgentRef(%q).ProjectSlug = %q, want %q", tt.input, ref.ProjectSlug, tt.projectSlug)
 		}
 		if ref.AgentSlug != tt.agentSlug {
 			t.Errorf("ParseQualifiedAgentRef(%q).AgentSlug = %q, want %q", tt.input, ref.AgentSlug, tt.agentSlug)
+		}
+	}
+
+	// O3: Malformed inputs should return errors.
+	malformedCases := []string{"", "@", "@/agent", "@project/", "/"}
+	for _, input := range malformedCases {
+		_, err := ParseQualifiedAgentRef(input)
+		if err == nil {
+			t.Errorf("ParseQualifiedAgentRef(%q) expected error for malformed input", input)
 		}
 	}
 }
@@ -248,6 +261,9 @@ func TestEvaluateFanOutTargets_MixedAuthorizedDenied(t *testing.T) {
 	if !result.Targets[0].Decision.Allowed {
 		t.Errorf("hub-agent-b should be allowed, got denied: %s", result.Targets[0].Decision.Reason)
 	}
+	if !result.Targets[0].Delivered {
+		t.Error("hub-agent-b should be marked as Delivered")
+	}
 
 	// branch-agent-b should be denied (cross-project target must be project/hub).
 	if result.Targets[1].Decision.Allowed {
@@ -256,6 +272,14 @@ func TestEvaluateFanOutTargets_MixedAuthorizedDenied(t *testing.T) {
 	if result.Targets[1].Decision.Code != MessageDenialCrossProjectTargetMode {
 		t.Errorf("expected denial code %q, got %q",
 			MessageDenialCrossProjectTargetMode, result.Targets[1].Decision.Code)
+	}
+
+	// R4: Verify the Delivered counter is incremented correctly.
+	if result.Delivered != 1 {
+		t.Errorf("expected Delivered = 1, got %d", result.Delivered)
+	}
+	if result.Denied != 1 {
+		t.Errorf("expected Denied = 1, got %d", result.Denied)
 	}
 }
 
@@ -854,4 +878,42 @@ func TestLogCrossProjectDecision_DeliveryLogged(t *testing.T) {
 		RecipientProject: "proj-b",
 		CrossProject:     true,
 	})
+}
+
+// ---------------------------------------------------------------------------
+// R1: mapReasonToCode prefix ordering regression test
+// ---------------------------------------------------------------------------
+
+func TestMapReasonToCode_CrossProjectPrefixOrdering(t *testing.T) {
+	tests := []struct {
+		reason string
+		want   string
+	}{
+		{
+			reason: "cross-project messaging is not enabled on this Hub",
+			want:   string(MessageDenialCrossProjectDisabled),
+		},
+		{
+			reason: `cross-project messaging requires sender mode hub, got "project"`,
+			want:   string(MessageDenialCrossProjectSenderMode),
+		},
+		{
+			reason: "cross-project messaging requires hub-attested ancestry",
+			want:   string(MessageDenialCrossProjectUntrusted),
+		},
+		{
+			reason: `cross-project target must be in project or hub mode, got "branch"`,
+			want:   string(MessageDenialCrossProjectTargetMode),
+		},
+		{
+			reason: "cross-project something else unsupported",
+			want:   string(MessageDenialCrossProjectUnsupported),
+		},
+	}
+	for _, tt := range tests {
+		got := mapReasonToCode(tt.reason)
+		if got != tt.want {
+			t.Errorf("mapReasonToCode(%q) = %q, want %q", tt.reason, got, tt.want)
+		}
+	}
 }
