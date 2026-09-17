@@ -32,8 +32,10 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/run/apiv2/runpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -68,6 +70,13 @@ type CloudRunRuntime struct {
 	// production (the real Cloud Run Admin API); tests inject a fake so the
 	// lifecycle can be exercised without GCP credentials.
 	newClient func(ctx context.Context) (cloudrun.InstancesAPI, error)
+
+	// resolveOnce ensures GCP metadata auto-discovery runs at most once.
+	// When ProjectID and Location are both empty (auto-detected Cloud Run
+	// environment), resolveConfig populates them from the GCE metadata
+	// server on first use.
+	resolveOnce sync.Once
+	resolveErr  error
 }
 
 func NewCloudRunRuntime(cfg *config.CloudRunConfig) (*CloudRunRuntime, error) {
@@ -112,6 +121,52 @@ func NewCloudRunRuntimeFromInstances(cfg *config.V1CloudRunInstancesConfig) (*Cl
 	}, nil
 }
 
+// resolveConfig ensures that ProjectID and Location are populated. When both
+// are empty (auto-detected Cloud Run environment with no explicit settings),
+// this method discovers them from the GCE metadata server. The resolution is
+// idempotent — it runs at most once and caches the result.
+//
+// This fills the gap described in NewCloudRunRuntime: "project/region will be
+// discovered from GCP metadata when API calls are made." Without this, Run()
+// formats an empty parent ("projects//locations/") causing
+// RESOURCE_PROJECT_INVALID from the Cloud Run Instances API.
+func (r *CloudRunRuntime) resolveConfig(ctx context.Context) error {
+	r.resolveOnce.Do(func() {
+		if r.config.ProjectID != "" && r.config.Location != "" {
+			return // already configured
+		}
+
+		if r.config.ProjectID == "" {
+			projectID, err := metadata.ProjectIDWithContext(ctx)
+			if err != nil {
+				r.resolveErr = fmt.Errorf("cloudrun: auto-detecting ProjectID from GCE metadata: %w", err)
+				return
+			}
+			r.config.ProjectID = projectID
+		}
+
+		if r.config.Location == "" {
+			// On Cloud Run, metadata.Zone() returns a full zone like
+			// "projects/NUM/zones/us-central1-1". We need the region
+			// portion (e.g. "us-central1"), which is the zone minus
+			// the trailing "-<letter/number>" suffix.
+			zone, err := metadata.ZoneWithContext(ctx)
+			if err != nil {
+				r.resolveErr = fmt.Errorf("cloudrun: auto-detecting Location from GCE metadata: %w", err)
+				return
+			}
+			// metadata.Zone() returns the bare zone name (e.g. "us-central1-1").
+			// Strip the last hyphen-delimited segment to derive the region.
+			if idx := strings.LastIndex(zone, "-"); idx > 0 {
+				r.config.Location = zone[:idx]
+			} else {
+				r.config.Location = zone
+			}
+		}
+	})
+	return r.resolveErr
+}
+
 func (r *CloudRunRuntime) Name() string { return "cloudrun" }
 
 func (r *CloudRunRuntime) ExecUser() string {
@@ -127,6 +182,9 @@ func (r *CloudRunRuntime) client(ctx context.Context) (cloudrun.InstancesAPI, er
 }
 
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
+	if err := r.resolveConfig(ctx); err != nil {
+		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	parent := fmt.Sprintf("projects/%s/locations/%s", r.config.ProjectID, r.config.Location)
 	agentID := cfg.Labels["agent_id"]
 	if agentID == "" {
@@ -535,6 +593,9 @@ func mkdirNFSAgentDir(dir string, uid, gid int) error {
 }
 
 func (r *CloudRunRuntime) Stop(ctx context.Context, id string) error {
+	if err := r.resolveConfig(ctx); err != nil {
+		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	c, err := r.client(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
@@ -559,6 +620,9 @@ func (r *CloudRunRuntime) Stop(ctx context.Context, id string) error {
 }
 
 func (r *CloudRunRuntime) Delete(ctx context.Context, id string) error {
+	if err := r.resolveConfig(ctx); err != nil {
+		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	c, err := r.client(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
@@ -583,6 +647,9 @@ func (r *CloudRunRuntime) Delete(ctx context.Context, id string) error {
 }
 
 func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+	if err := r.resolveConfig(ctx); err != nil {
+		return nil, fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	c, err := r.client(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client: %w", err)
@@ -635,6 +702,9 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 }
 
 func (r *CloudRunRuntime) GetLogs(ctx context.Context, id string) (string, error) {
+	if err := r.resolveConfig(ctx); err != nil {
+		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	logClient, err := cloudrun.NewLogClient(ctx, r.config.ProjectID)
 	if err != nil {
 		return "", fmt.Errorf("initializing log client: %w", err)
@@ -683,11 +753,17 @@ func (r *CloudRunRuntime) Sync(ctx context.Context, id string, direction SyncDir
 }
 
 func (r *CloudRunRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
+	if err := r.resolveConfig(ctx); err != nil {
+		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	out, err := r.exec.Exec(ctx, r.config.ProjectID, r.config.Location, id, cmd)
 	return string(out), err
 }
 
 func (r *CloudRunRuntime) Attach(ctx context.Context, id string) error {
+	if err := r.resolveConfig(ctx); err != nil {
+		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	return r.exec.Connect(ctx, r.config.ProjectID, r.config.Location, id)
 }
 
@@ -697,6 +773,9 @@ func (r *CloudRunRuntime) GetWorkspacePath(ctx context.Context, id string) (stri
 
 // StreamLogs tails log output in real time (for scion look / scion logs -f).
 func (r *CloudRunRuntime) StreamLogs(ctx context.Context, instanceName string, opts cloudrun.LogOptions) (<-chan cloudrun.LogEntry, error) {
+	if err := r.resolveConfig(ctx); err != nil {
+		return nil, fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	logClient, err := cloudrun.NewLogClient(ctx, r.config.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("initializing log client: %w", err)

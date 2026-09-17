@@ -19,6 +19,17 @@ func (r *CloudRunRuntime) RunDiagnostics(opts DiagnosticOpts) DiagnosticReport {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Check 0: Resolve config (auto-discover project/region if needed)
+	if err := r.resolveConfig(ctx); err != nil {
+		report.Checks = append(report.Checks, CheckResult{
+			Name:        "Cloud Run Config Resolution",
+			Status:      "fail",
+			Message:     fmt.Sprintf("Failed to resolve Cloud Run config from GCP metadata: %v", err),
+			Remediation: "Set project_id and location in the cloudrun runtime config, or verify the GCE metadata server is reachable.",
+		})
+		return report
+	}
+
 	// Check 1: API Access & Project/Location configuration
 	check := CheckResult{
 		Name: "Cloud Run API & Configuration",

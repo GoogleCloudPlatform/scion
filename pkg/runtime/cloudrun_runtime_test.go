@@ -108,6 +108,48 @@ func TestCloudRunRuntime_NewFromInstancesMissingRegion(t *testing.T) {
 	}
 }
 
+func TestCloudRunRuntime_ResolveConfig_SkipsWhenConfigured(t *testing.T) {
+	// When ProjectID and Location are already set, resolveConfig should be a no-op.
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID: "my-project",
+		Location:  "us-central1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// resolveConfig should succeed without touching the metadata server.
+	if err := rt.resolveConfig(context.Background()); err != nil {
+		t.Fatalf("resolveConfig() returned error for already-configured runtime: %v", err)
+	}
+	if rt.config.ProjectID != "my-project" {
+		t.Errorf("ProjectID changed after resolveConfig: got %q, want %q", rt.config.ProjectID, "my-project")
+	}
+	if rt.config.Location != "us-central1" {
+		t.Errorf("Location changed after resolveConfig: got %q, want %q", rt.config.Location, "us-central1")
+	}
+}
+
+func TestCloudRunRuntime_ResolveConfig_FailsWithoutMetadata(t *testing.T) {
+	// When ProjectID and Location are empty and no metadata server is available,
+	// resolveConfig should return an error (not produce an empty parent string).
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// In a test environment without a GCE metadata server, this should fail
+	// with a clear error rather than silently producing "projects//locations/".
+	err = rt.resolveConfig(context.Background())
+	if err == nil {
+		// If we're somehow running on GCE/Cloud Run, the metadata server
+		// will respond and this is fine — but in a standard test env, it should fail.
+		t.Log("resolveConfig() succeeded — likely running on GCE/Cloud Run")
+	} else {
+		if !strings.Contains(err.Error(), "auto-detecting") {
+			t.Errorf("resolveConfig() error = %q, want it to mention 'auto-detecting'", err)
+		}
+	}
+}
+
 func TestCloudRunRuntime_LifecycleMethods(t *testing.T) {
 	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
 		ProjectID: "test-project", Location: "us-central1",
