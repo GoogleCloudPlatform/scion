@@ -2959,3 +2959,162 @@ func TestAgentMessage_UserSenderFallsBackToUUID(t *testing.T) {
 		}
 	})
 }
+
+// TestOutboundMessage_GroupConv_AutoRegistersParticipant verifies that when an
+// agent sends an outbound message referencing a group conversation via
+// conversation_id, the agent is automatically registered as a participant. This
+// ensures the conversation appears in the agent's listing without requiring
+// explicit participant registration.
+func TestOutboundMessage_GroupConv_AutoRegistersParticipant(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("autopart-outbound-project")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:   projectID,
+		Name: "autopart-outbound-project",
+		Slug: "autopart-outbound-project",
+	}))
+
+	agent := &store.Agent{
+		ID:         tid("autopart-outbound-agent"),
+		Name:       "autopart-outbound-agent",
+		Slug:       "autopart-outbound-agent",
+		ProjectID:  projectID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Create a recipient user so the outbound message has a valid recipient.
+	recipientUser := &store.User{
+		ID:          tid("autopart-outbound-recipient"),
+		Email:       "autopart-outbound@example.com",
+		DisplayName: "Outbound Recipient",
+	}
+	require.NoError(t, s.CreateUser(ctx, recipientUser))
+
+	// Create a group conversation in the same project. Do NOT add the agent
+	// as a participant — the auto-registration should handle it.
+	conv := &store.Conversation{
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "group:" + projectID + ":autopart-outbound",
+		ProjectID:   &projectID,
+		DriftState:  "active",
+	}
+	created, err := s.UpsertConversationByExternalRef(ctx, conv)
+	require.NoError(t, err)
+
+	// Verify the agent is NOT a participant before sending.
+	partsBefore, err := s.ListParticipants(ctx, created.ID)
+	require.NoError(t, err)
+	for _, p := range partsBefore {
+		require.NotEqual(t, agent.ID, p.PrincipalID,
+			"agent should not be a participant before sending")
+	}
+
+	// Send an outbound message with conversation_id set to the group conv.
+	srv.chatSendLimiter = newChatSendLimiter()
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Recipient:      "user:" + recipientUser.Email,
+		Msg:            "hello from agent to group conv",
+		ConversationID: created.ID,
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: projectID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+	require.Equal(t, http.StatusOK, rr.Code,
+		"outbound message should succeed: %s", rr.Body.String())
+
+	// Verify the agent is now a participant.
+	partsAfter, err := s.ListParticipants(ctx, created.ID)
+	require.NoError(t, err)
+
+	var found bool
+	for _, p := range partsAfter {
+		if p.PrincipalKind == "agent" && p.PrincipalID == agent.ID {
+			found = true
+			require.Equal(t, "member", p.Role)
+			break
+		}
+	}
+	require.True(t, found,
+		"agent should be auto-registered as a participant after sending to a group conversation")
+}
+
+// TestAgentMessage_GroupConv_AutoRegistersParticipant verifies that when a user
+// sends a message to an agent referencing a group conversation via
+// conversation_id, both the user (sender) and the agent (recipient) are
+// automatically registered as participants.
+func TestAgentMessage_GroupConv_AutoRegistersParticipant(t *testing.T) {
+	srv, s, projectID, targetAgent, userID := def49Setup(t)
+	ctx := context.Background()
+
+	// Create a group conversation in the agent's project.
+	conv := &store.Conversation{
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "group:" + projectID + ":autopart-agentmsg",
+		ProjectID:   &projectID,
+		DriftState:  "active",
+	}
+	created, err := s.UpsertConversationByExternalRef(ctx, conv)
+	require.NoError(t, err)
+
+	// Verify neither user nor agent is a participant before sending.
+	partsBefore, err := s.ListParticipants(ctx, created.ID)
+	require.NoError(t, err)
+	for _, p := range partsBefore {
+		require.NotEqual(t, userID, p.PrincipalID,
+			"user should not be a participant before sending")
+		require.NotEqual(t, targetAgent.ID, p.PrincipalID,
+			"agent should not be a participant before sending")
+	}
+
+	// Send a message from the user to the agent with conversation_id set.
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+targetAgent.ProjectID+"/agents/"+targetAgent.Slug+"/message",
+		MessageRequest{
+			StructuredMessage: &messages.StructuredMessage{
+				Version:        messages.Version,
+				Timestamp:      time.Now().UTC().Format(time.RFC3339),
+				Sender:         "user:dev",
+				SenderID:       userID,
+				Recipient:      "agent:" + targetAgent.Slug,
+				Msg:            "hello to group conv",
+				Type:           messages.TypeInstruction,
+				ConversationID: created.ID,
+			},
+		})
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"message to agent should succeed: %s", rec.Body.String())
+
+	// Verify both user and agent are now participants.
+	partsAfter, err := s.ListParticipants(ctx, created.ID)
+	require.NoError(t, err)
+
+	var userFound, agentFound bool
+	for _, p := range partsAfter {
+		if p.PrincipalKind == "user" && p.PrincipalID == userID {
+			userFound = true
+			require.Equal(t, "member", p.Role)
+		}
+		if p.PrincipalKind == "agent" && p.PrincipalID == targetAgent.ID {
+			agentFound = true
+			require.Equal(t, "member", p.Role)
+		}
+	}
+	require.True(t, userFound,
+		"user should be auto-registered as a participant after sending to a group conversation")
+	require.True(t, agentFound,
+		"agent should be auto-registered as a participant after sending to a group conversation")
+}

@@ -401,6 +401,24 @@ func (s *Server) resolveOutboundRouting(
 					"conversation does not belong to the agent's project", nil)
 				return nil, fmt.Errorf("project mismatch")
 			}
+
+			// Auto-register sender as participant (listing concern, non-fatal).
+			// Group conversation authorization is project-based, not participant-based,
+			// so this only ensures the conversation appears in the sender's listing.
+			if authKind, authID := authenticatedSender(ctx); authID != "" {
+				if ensureErr := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
+					ConversationID: req.ConversationID,
+					PrincipalKind:  authKind,
+					PrincipalID:    authID,
+					Role:           "member",
+				}); ensureErr != nil {
+					s.messageLog.Warn("auto-register sender as participant failed (listing gap, not access)",
+						"conversation_id", req.ConversationID,
+						"principal_kind", authKind,
+						"principal_id", authID,
+						"error", ensureErr)
+				}
+			}
 		default:
 			// Unknown conversation kind — fail closed.
 			s.messageLog.Warn("DEF-138: unknown conversation kind, denying (outbound)",
@@ -1608,6 +1626,35 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					writeError(w, http.StatusForbidden, ErrCodeForbidden,
 						"conversation does not belong to the agent's project", nil)
 					return
+				}
+
+				// Auto-register both sender and recipient as participants.
+				if authKind, authID := authenticatedSender(ctx); authID != "" {
+					if ensureErr := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
+						ConversationID: structuredMsg.ConversationID,
+						PrincipalKind:  authKind,
+						PrincipalID:    authID,
+						Role:           "member",
+					}); ensureErr != nil {
+						s.messageLog.Warn("auto-register sender as participant failed (listing gap)",
+							"conversation_id", structuredMsg.ConversationID,
+							"principal_kind", authKind,
+							"principal_id", authID,
+							"error", ensureErr)
+					}
+				}
+				// Also register the recipient agent.
+				if ensureErr := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
+					ConversationID: structuredMsg.ConversationID,
+					PrincipalKind:  "agent",
+					PrincipalID:    agent.ID,
+					Role:           "member",
+				}); ensureErr != nil {
+					s.messageLog.Warn("auto-register recipient agent as participant failed (listing gap)",
+						"conversation_id", structuredMsg.ConversationID,
+						"principal_kind", "agent",
+						"principal_id", agent.ID,
+						"error", ensureErr)
 				}
 			default:
 				// Unknown conversation kind — fail closed.
