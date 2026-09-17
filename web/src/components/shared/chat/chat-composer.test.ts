@@ -375,4 +375,24 @@ describe('composer — paste-to-attachment', () => {
     expect(event.defaultPrevented).toBe(false);
     expect(apiFetch).not.toHaveBeenCalled();
   });
+
+  it('lets large paste fall through when at attachment limit', () => {
+    const el = createComposer();
+    // Simulate 10 pending files
+    el.pendingFiles = Array.from({ length: 10 }, (_, i) => ({
+      id: `att-${i}`,
+      name: `file-${i}.txt`,
+      mime: 'text/plain',
+      size: 100,
+      url: `/att/${i}`,
+    }));
+    const longText = 'z'.repeat(PASTE_TO_ATTACHMENT_THRESHOLD + 1);
+    const event = makePasteEvent(longText);
+
+    el.handlePaste(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
 });

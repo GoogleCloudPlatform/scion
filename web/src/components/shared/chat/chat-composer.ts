@@ -1176,6 +1176,10 @@ export class ScionChatComposer extends LitElement {
     if (!this.editMessage) {
       const pastedText = e.clipboardData?.getData('text/plain');
       if (pastedText && countRunes(pastedText) > PASTE_TO_ATTACHMENT_THRESHOLD) {
+        // Don't convert if already at attachment limit — let text enter textarea.
+        if (this.pendingFiles.length >= 10) {
+          return;
+        }
         e.preventDefault();
         const blob = new Blob([pastedText], { type: 'text/plain' });
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
