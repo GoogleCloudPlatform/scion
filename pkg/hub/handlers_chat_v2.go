@@ -1405,6 +1405,11 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	// Update topic/DM watermark.
 	s.touchConversationActivity(ctx, key, storeMsg.ID)
 
+	// Auto-advance the sender's read watermark so their own message does not
+	// mark the thread as unread.  The user just sent the message, so they have
+	// implicitly read everything up to and including it.
+	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
+
 	// --- W6: Human mention notifications ---
 	// Resolve @mentions that didn't match agents — they may be human members.
 	// Fire in a goroutine to avoid blocking the response.
@@ -1581,6 +1586,10 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	if wcs != nil {
 		s.touchConversationActivity(ctx, key, storeMsg.ID)
 	}
+
+	// Auto-advance the sender's read watermark so their own message does not
+	// mark the conversation as unread.
+	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
 
 	// --- W6: Chat notifications ---
 	if cn := s.getChatNotifier(); cn != nil {
@@ -3503,6 +3512,25 @@ func (s *Server) touchConversationActivity(ctx context.Context, key, messageID s
 		if err := wcs.TouchTopicActivity(ctx, key, messageID); err != nil {
 			s.messageLog.Error("Failed to touch topic activity", "key", key, "error", err)
 		}
+	}
+}
+
+// autoAdvanceSenderReadState advances the sender's read watermark to
+// messageID so that their own message does not appear as unread. Best-effort:
+// a failure is logged but does not fail the send — the watermark will be
+// corrected the next time the client scrolls and fires advanceReadWatermark.
+func (s *Server) autoAdvanceSenderReadState(ctx context.Context, senderID, conversationKey, messageID string) {
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil || senderID == "" || conversationKey == "" || messageID == "" {
+		return
+	}
+
+	if err := wcs.SetReadState(ctx, senderID, conversationKey, messageID); err != nil {
+		slog.Error("Failed to auto-advance sender read state",
+			"sender", senderID, "conversation", conversationKey, "error", err)
 	}
 }
 
