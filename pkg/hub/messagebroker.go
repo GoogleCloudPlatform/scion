@@ -603,8 +603,14 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// is never called. Build the canonical DM key from the sender and
 	// recipient and touch it explicitly so the web chat's unread indicator
 	// tracks per-conversation, not per-channel.
+	//
+	// Guard: skip @mention fan-out copies. When a user is @mentioned in a
+	// space thread, the routed copy also has SenderID + RecipientID set, but
+	// it is NOT a DM — touching DM activity for it would create phantom
+	// unread indicators for conversations that don't exist.
 	if p.webChatStore != nil && storeMsg.SenderID != "" && storeMsg.RecipientID != "" &&
-		!strings.HasPrefix(storeMsg.ThreadID, "dm:") {
+		!strings.HasPrefix(storeMsg.ThreadID, "dm:") &&
+		storeMsg.Type != messages.TypeMention {
 		senderKind, sOK := messages.PrincipalKindFromAddress(storeMsg.Sender)
 		recipientKind, rOK := messages.PrincipalKindFromAddress(storeMsg.Recipient)
 		if sOK && rOK {
