@@ -1170,15 +1170,28 @@ export class ScionChatSpaceRail extends LitElement {
         threadGroups: { ...(this.prefs.threadGroups ?? {}), [projectId]: updatedGroups },
       });
     } else {
-      // Reorder in global threadOrder (ungrouped threads)
-      const order = this.currentThreadOrder(projectId);
-      const from = order.indexOf(threadId);
-      const to = from + delta;
-      if (from === -1 || to < 0 || to >= order.length) return;
-      const next = [...order];
-      const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
-      await this.applyThreadOrder(projectId, next);
+      // Reorder among ungrouped threads only (exclude grouped thread IDs)
+      const groupedIds = new Set(groups.flatMap((g) => g.threadIds));
+      const currentOrder = [...this.currentThreadOrder(projectId)];
+      const ungroupedOrder = currentOrder.filter((id) => !groupedIds.has(id));
+
+      const idx = ungroupedOrder.indexOf(threadId);
+      const swapIdx = idx + delta;
+      if (idx < 0 || swapIdx < 0 || swapIdx >= ungroupedOrder.length) return;
+
+      // Identify swap target in the ungrouped list
+      const swapTarget = ungroupedOrder[swapIdx];
+
+      // Apply swap in the FULL order (find actual positions)
+      const fullIdx = currentOrder.indexOf(threadId);
+      const fullSwapIdx = currentOrder.indexOf(swapTarget);
+      if (fullIdx < 0 || fullSwapIdx < 0) return;
+      [currentOrder[fullIdx], currentOrder[fullSwapIdx]] = [
+        currentOrder[fullSwapIdx],
+        currentOrder[fullIdx],
+      ];
+
+      await this.applyThreadOrder(projectId, currentOrder);
     }
   }
 
@@ -1194,11 +1207,13 @@ export class ScionChatSpaceRail extends LitElement {
       return edge === 'first' ? ids[0] === threadId : ids[ids.length - 1] === threadId;
     }
 
-    // Check edges in global order (ungrouped threads)
-    const order = this.currentThreadOrder(projectId);
-    const index = order.indexOf(threadId);
+    // Check edges among ungrouped threads only (exclude grouped thread IDs)
+    const groupedIds = new Set(groups.flatMap((g) => g.threadIds));
+    const ungroupedOrder = this.currentThreadOrder(projectId).filter((id) => !groupedIds.has(id));
+    if (ungroupedOrder.length === 0) return true;
+    const index = ungroupedOrder.indexOf(threadId);
     if (index === -1) return true;
-    return edge === 'first' ? index === 0 : index === order.length - 1;
+    return edge === 'first' ? index === 0 : index === ungroupedOrder.length - 1;
   }
 
   // ---------------------------------------------------------------------------
@@ -1902,14 +1917,12 @@ export class ScionChatSpaceRail extends LitElement {
     return html`
       <div class="rail-header"><span>Project Spaces</span></div>
 
-      ${
-        this.loading
-          ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
-          : html`
-              ${this.renderToolbar()}
-              <div class="rail-body" @click=${this.handleRailBodyClick}>${this.renderSpaces()}</div>
-            `
-      }
+      ${this.loading
+        ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
+        : html`
+            ${this.renderToolbar()}
+            <div class="rail-body" @click=${this.handleRailBodyClick}>${this.renderSpaces()}</div>
+          `}
       ${this.contextMenuTarget ? this.renderContextMenu() : nothing}
       ${this.groupContextMenuTarget ? this.renderGroupContextMenu() : nothing}
       ${this.emojiPickerSpaceId ? this.renderEmojiPicker() : nothing}
@@ -2077,11 +2090,10 @@ export class ScionChatSpaceRail extends LitElement {
     return html`
       <div class="space-section">
         <div
-          class="space-header ${this.draggingSpaceId === space.projectId ? 'dragging' : ''} ${
-            this.dragOverSpaceId === space.projectId && this.draggingSpaceId !== space.projectId
-              ? 'drag-over'
-              : ''
-          }"
+          class="space-header ${this.draggingSpaceId === space.projectId ? 'dragging' : ''} ${this
+            .dragOverSpaceId === space.projectId && this.draggingSpaceId !== space.projectId
+            ? 'drag-over'
+            : ''}"
           draggable="true"
           @dragstart=${(e: DragEvent): void => this.handleSpaceDragStart(e, space.projectId)}
           @dragover=${(e: DragEvent): void => this.handleSpaceDragOver(e, space.projectId)}
@@ -2096,13 +2108,11 @@ export class ScionChatSpaceRail extends LitElement {
           ${space.emoji ? html`<span class="space-emoji">${space.emoji}</span>` : nothing}
           <span class="space-name">${space.projectName}</span>
           <div class="space-actions" @click=${(e: Event) => e.stopPropagation()}>
-            ${
-              space.hasUnreadMention
-                ? html`<span class="mention-badge">@</span>`
-                : space.unreadCount > 0
-                  ? html`<span class="unread-badge">${space.unreadCount}</span>`
-                  : nothing
-            }
+            ${space.hasUnreadMention
+              ? html`<span class="mention-badge">@</span>`
+              : space.unreadCount > 0
+                ? html`<span class="unread-badge">${space.unreadCount}</span>`
+                : nothing}
             <sl-dropdown>
               <sl-icon-button
                 slot="trigger"
@@ -2153,20 +2163,16 @@ export class ScionChatSpaceRail extends LitElement {
             </sl-dropdown>
           </div>
         </div>
-        ${
-          !isCollapsed
-            ? html`
-                <div class="thread-list">
-                  ${this.renderThreadList(threads, space.projectId)}
-                  ${
-                    this.creatingThread === space.projectId
-                      ? this.renderCreateThread(space.projectId)
-                      : nothing
-                  }
-                </div>
-              `
-            : nothing
-        }
+        ${!isCollapsed
+          ? html`
+              <div class="thread-list">
+                ${this.renderThreadList(threads, space.projectId)}
+                ${this.creatingThread === space.projectId
+                  ? this.renderCreateThread(space.projectId)
+                  : nothing}
+              </div>
+            `
+          : nothing}
       </div>
     `;
   }
@@ -2178,8 +2184,11 @@ export class ScionChatSpaceRail extends LitElement {
   private renderThreadList(threads: ChatSpaceThread[], projectId: string) {
     const groups = this.getGroups(projectId);
     if (groups.length === 0) {
-      // No groups — render flat list
-      return threads.map((t) => this.renderThread(t, projectId));
+      // No groups — render flat list, but still show group-name input if active
+      return html`
+        ${threads.map((t) => this.renderThread(t, projectId))}
+        ${this.groupNameInput?.projectId === projectId ? this.renderGroupNameInput() : nothing}
+      `;
     }
 
     // Build a lookup of thread id → thread
@@ -2194,23 +2203,21 @@ export class ScionChatSpaceRail extends LitElement {
 
     return html`
       ${generalThreads.map((t) => this.renderThread(t, projectId))}
-      ${
-        ungrouped.length > 0
-          ? html`
-              <div
-                class="thread-group-header ${
-                  this.dragOverGroupId === '__ungrouped__' ? 'drag-over' : ''
-                }"
-                @dragover=${(e: DragEvent) => this.handleGroupDragOver(e, '__ungrouped__')}
-                @drop=${(e: DragEvent) => void this.handleGroupDrop(e, '__ungrouped__', projectId)}
-              >
-                <span class="group-name">Threads</span>
-                <span class="group-count">(${ungrouped.length})</span>
-              </div>
-              ${ungrouped.map((t) => this.renderThread(t, projectId))}
-            `
-          : nothing
-      }
+      ${ungrouped.length > 0
+        ? html`
+            <div
+              class="thread-group-header ${this.dragOverGroupId === '__ungrouped__'
+                ? 'drag-over'
+                : ''}"
+              @dragover=${(e: DragEvent) => this.handleGroupDragOver(e, '__ungrouped__')}
+              @drop=${(e: DragEvent) => void this.handleGroupDrop(e, '__ungrouped__', projectId)}
+            >
+              <span class="group-name">Threads</span>
+              <span class="group-count">(${ungrouped.length})</span>
+            </div>
+            ${ungrouped.map((t) => this.renderThread(t, projectId))}
+          `
+        : nothing}
       ${groups.map((group) => {
         const groupThreads = group.threadIds
           .map((id) => threadMap.get(id))
@@ -2234,13 +2241,11 @@ export class ScionChatSpaceRail extends LitElement {
             <span class="group-name">${group.name}</span>
             <span class="group-count">(${groupThreads.length})</span>
           </div>
-          ${
-            !collapsed
-              ? html`<div class="thread-group">
-                  ${groupThreads.map((t) => this.renderThread(t, projectId))}
-                </div>`
-              : nothing
-          }
+          ${!collapsed
+            ? html`<div class="thread-group">
+                ${groupThreads.map((t) => this.renderThread(t, projectId))}
+              </div>`
+            : nothing}
         `;
       })}
       ${this.groupNameInput?.projectId === projectId ? this.renderGroupNameInput() : nothing}
@@ -2332,21 +2337,19 @@ export class ScionChatSpaceRail extends LitElement {
 
     return html`
       <div
-        class="thread-item ${isSelected ? 'selected' : ''} ${
-          isDragging ? 'dragging' : ''
-        } ${isDragOver ? 'drag-over' : ''}"
-        ?draggable=${isDraggable}
-        @dragstart=${
-          isDraggable ? (e: DragEvent) => this.handleThreadDragStart(e, thread.id) : nothing
-        }
-        @dragover=${
-          isDraggable ? (e: DragEvent) => this.handleThreadDragOver(e, thread.id) : nothing
-        }
-        @drop=${
-          isDraggable
-            ? (e: DragEvent) => void this.handleThreadDrop(e, thread.id, projectId)
-            : nothing
-        }
+        class="thread-item ${isSelected ? 'selected' : ''} ${isDragging
+          ? 'dragging'
+          : ''} ${isDragOver ? 'drag-over' : ''}"
+        draggable=${isDraggable ? 'true' : nothing}
+        @dragstart=${isDraggable
+          ? (e: DragEvent) => this.handleThreadDragStart(e, thread.id)
+          : nothing}
+        @dragover=${isDraggable
+          ? (e: DragEvent) => this.handleThreadDragOver(e, thread.id)
+          : nothing}
+        @drop=${isDraggable
+          ? (e: DragEvent) => void this.handleThreadDrop(e, thread.id, projectId)
+          : nothing}
         @dragend=${isDraggable ? () => this.handleThreadDragEnd() : nothing}
         @click=${() => this.handleThreadClick(thread, projectId)}
         @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, thread, projectId)}
@@ -2356,15 +2359,13 @@ export class ScionChatSpaceRail extends LitElement {
           >${thread.name}</span
         >
         ${thread.pinned ? html`<sl-icon name="star-fill" class="pin-icon"></sl-icon>` : nothing}
-        ${
-          thread.muted
-            ? html`<sl-icon name="bell-slash" class="mute-icon" title="Muted"></sl-icon>`
-            : thread.hasUnreadMention
-              ? html`<span class="mention-dot"></span>`
-              : thread.hasUnread
-                ? html`<span class="unread-dot"></span>`
-                : nothing
-        }
+        ${thread.muted
+          ? html`<sl-icon name="bell-slash" class="mute-icon" title="Muted"></sl-icon>`
+          : thread.hasUnreadMention
+            ? html`<span class="mention-dot"></span>`
+            : thread.hasUnread
+              ? html`<span class="unread-dot"></span>`
+              : nothing}
       </div>
     `;
   }
@@ -2513,40 +2514,35 @@ export class ScionChatSpaceRail extends LitElement {
           <sl-icon name=${thread.muted ? 'bell-slash' : 'bell'}></sl-icon>
           ${thread.muted ? 'Unmute' : 'Mute'}
         </div>
-        ${
-          !thread.isGeneral
-            ? html`
-                <div
-                  class="context-menu-item"
-                  @click=${() => void this.moveThread(thread.id, projectId, -1)}
-                  style="${
-                    this.isThreadAtEdge(thread.id, projectId, 'first')
-                      ? 'opacity: 0.4; pointer-events: none;'
-                      : ''
-                  }"
-                >
-                  <sl-icon name="arrow-up"></sl-icon>
-                  Move up
-                </div>
-                <div
-                  class="context-menu-item"
-                  @click=${() => void this.moveThread(thread.id, projectId, 1)}
-                  style="${
-                    this.isThreadAtEdge(thread.id, projectId, 'last')
-                      ? 'opacity: 0.4; pointer-events: none;'
-                      : ''
-                  }"
-                >
-                  <sl-icon name="arrow-down"></sl-icon>
-                  Move down
-                </div>
-              `
-            : nothing
-        }
-        ${
-          !thread.isGeneral
-            ? html`
-                ${this.getGroups(projectId).map(
+        ${!thread.isGeneral
+          ? html`
+              <div
+                class="context-menu-item"
+                @click=${() => void this.moveThread(thread.id, projectId, -1)}
+                style="${this.isThreadAtEdge(thread.id, projectId, 'first')
+                  ? 'opacity: 0.4; pointer-events: none;'
+                  : ''}"
+              >
+                <sl-icon name="arrow-up"></sl-icon>
+                Move up
+              </div>
+              <div
+                class="context-menu-item"
+                @click=${() => void this.moveThread(thread.id, projectId, 1)}
+                style="${this.isThreadAtEdge(thread.id, projectId, 'last')
+                  ? 'opacity: 0.4; pointer-events: none;'
+                  : ''}"
+              >
+                <sl-icon name="arrow-down"></sl-icon>
+                Move down
+              </div>
+            `
+          : nothing}
+        ${!thread.isGeneral
+          ? html`
+              ${this.getGroups(projectId)
+                .filter((g) => !g.threadIds.includes(thread.id))
+                .map(
                   (group) => html`
                     <div
                       class="context-menu-item"
@@ -2560,32 +2556,29 @@ export class ScionChatSpaceRail extends LitElement {
                     </div>
                   `
                 )}
-                ${
-                  this.getGroups(projectId).some((g) => g.threadIds.includes(thread.id))
-                    ? html`
-                        <div
-                          class="context-menu-item"
-                          @click=${() => {
-                            this.contextMenuTarget = null;
-                            void this.removeThreadFromGroup(thread.id, projectId);
-                          }}
-                        >
-                          <sl-icon name="folder-minus"></sl-icon>
-                          Remove from group
-                        </div>
-                      `
-                    : nothing
-                }
-                <div
-                  class="context-menu-item"
-                  @click=${() => this.startGroupNameInput(projectId, { threadId: thread.id })}
-                >
-                  <sl-icon name="folder-plus"></sl-icon>
-                  New group...
-                </div>
-              `
-            : nothing
-        }
+              ${this.getGroups(projectId).some((g) => g.threadIds.includes(thread.id))
+                ? html`
+                    <div
+                      class="context-menu-item"
+                      @click=${() => {
+                        this.contextMenuTarget = null;
+                        void this.removeThreadFromGroup(thread.id, projectId);
+                      }}
+                    >
+                      <sl-icon name="folder-minus"></sl-icon>
+                      Remove from group
+                    </div>
+                  `
+                : nothing}
+              <div
+                class="context-menu-item"
+                @click=${() => this.startGroupNameInput(projectId, { threadId: thread.id })}
+              >
+                <sl-icon name="folder-plus"></sl-icon>
+                New group...
+              </div>
+            `
+          : nothing}
         <div class="context-menu-item" @click=${() => this.handleExportThread(thread)}>
           <sl-icon name="file-earmark-text"></sl-icon>
           Copy as Markdown
