@@ -1555,12 +1555,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		recipientProjectID := agent.ProjectID
 		storeMsg.RecipientProjectID = &recipientProjectID
 		// SenderProjectID is derived from the authenticated sender.
+		// For human senders, SenderProjectID remains nil (no project-level provenance).
 		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			senderProjID := agentIdent.ProjectID()
 			storeMsg.SenderProjectID = &senderProjID
-		} else if structuredMsg.SenderID != "" {
-			// User sender — no project-level provenance.
-			// SenderProjectID remains nil for humans.
 		}
 
 		// Phase 5 dual-write: resolve-or-create conversation for user/agent → agent messages.
