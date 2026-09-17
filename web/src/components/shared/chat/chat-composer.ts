@@ -1279,12 +1279,15 @@ export class ScionChatComposer extends LitElement {
 
     // Optimistic clear — input empties immediately so the user can type the
     // next message without waiting for the network round-trip.
+    // Note: reply-to state is NOT cleared here. The parent (chat-thread)
+    // owns composerReplyTo and manages it: clearing on success, restoring
+    // on failure. Dispatching chat-cancel-reply here would clear the
+    // parent's state prematurely, making it unrecoverable on send failure.
     this.text = '';
     this.runeCount = 0;
     this.acceptedMentions.clear();
     this.pendingFiles = [];
     this.clearDraft();
-    this.dispatchEvent(new CustomEvent('chat-cancel-reply', { bubbles: true, composed: true }));
     this.focusTextarea();
 
     this.dispatchEvent(
