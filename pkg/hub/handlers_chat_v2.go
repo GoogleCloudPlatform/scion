@@ -1015,6 +1015,16 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	// "mention" recipient regardless of how the list was assembled.
 	msgType := messages.TypeInstruction
 
+	// Translate human @firstname-lastname mentions to @email for agents.
+	// The original content is preserved for storage and human-facing display;
+	// agentContent is what the dispatched agent sees.
+	agentContent := content
+	if projectID != "" {
+		if humanMembers := s.resolveProjectHumanMembers(ctx, projectID); len(humanMembers) > 0 {
+			agentContent = translateMentionsOutbound(content, humanMembers)
+		}
+	}
+
 	// Build the structured message for the primary agent.
 	msg := &messages.StructuredMessage{
 		Version:     messages.Version,
@@ -1023,7 +1033,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		SenderID:    user.ID(),
 		Recipient:   "agent:" + primaryAgent.Slug,
 		RecipientID: primaryAgent.ID,
-		Msg:         content,
+		Msg:         agentContent,
 		Type:        msgType,
 		Channel:     "web",
 		ThreadID:    key,
@@ -1241,7 +1251,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	if dispatcher != nil {
 		retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, content, false, msg); err != nil {
+		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, false, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
 			_ = s.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error())
 		}
@@ -1266,7 +1276,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				}
 				continue
 			}
-			mentionMsg := messages.NewMention(msg.Sender, "agent:"+mentionAgent.Slug, content, msg.Recipient)
+			mentionMsg := messages.NewMention(msg.Sender, "agent:"+mentionAgent.Slug, agentContent, msg.Recipient)
 			mentionMsg.SenderID = msg.SenderID
 			mentionMsg.RecipientID = mentionAgent.ID
 			mentionMsg.Channel = "web"
@@ -1352,7 +1362,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 
 			if dispatcher != nil {
 				retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-				if err := dispatchWithBrokerRetry(retryCtx, dispatcher, mentionAgent, content, false, mentionMsg); err != nil {
+				if err := dispatchWithBrokerRetry(retryCtx, dispatcher, mentionAgent, agentContent, false, mentionMsg); err != nil {
 					s.messageLog.Error("Failed to dispatch mention", "slug", mentionAgent.Slug, "error", err)
 				}
 				cancel()
@@ -3550,14 +3560,21 @@ func (s *Server) fireHumanMentionNotifications(ctx context.Context, mentionNames
 	}
 	lookup := make(map[string]memberInfo)
 	for _, m := range humanMembers {
+		info := memberInfo{ID: m.ID, DisplayName: m.DisplayName}
 		if m.DisplayName != "" {
-			lookup[strings.ToLower(m.DisplayName)] = memberInfo{ID: m.ID, DisplayName: m.DisplayName}
+			lookup[strings.ToLower(m.DisplayName)] = info
+			// Also match the hyphenated slug that the frontend autocomplete
+			// generates (e.g. "John Smith" → "john-smith"). Without this,
+			// multi-word display names never match the autocomplete output.
+			if slug := strings.ToLower(strings.ReplaceAll(m.DisplayName, " ", "-")); slug != strings.ToLower(m.DisplayName) {
+				lookup[slug] = info
+			}
 		}
 		if m.Email != "" {
 			// Also match by email prefix (before @).
-			lookup[strings.ToLower(m.Email)] = memberInfo{ID: m.ID, DisplayName: m.DisplayName}
+			lookup[strings.ToLower(m.Email)] = info
 			if at := strings.IndexByte(m.Email, '@'); at > 0 {
-				lookup[strings.ToLower(m.Email[:at])] = memberInfo{ID: m.ID, DisplayName: m.DisplayName}
+				lookup[strings.ToLower(m.Email[:at])] = info
 			}
 		}
 	}

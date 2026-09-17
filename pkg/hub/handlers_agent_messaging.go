@@ -795,6 +795,15 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Translate @email mentions to @firstname-lastname for user-facing messages.
+	// Agent-to-agent messages (deliveryAgentDM) keep the email format since
+	// agents understand it natively.
+	if result.DeliveryPath != deliveryAgentDM && agent.ProjectID != "" {
+		if humanMembers := s.resolveProjectHumanMembers(ctx, agent.ProjectID); len(humanMembers) > 0 {
+			req.Msg = translateMentionsInbound(req.Msg, humanMembers)
+		}
+	}
+
 	// Build storeMsg and structuredMsg from the routing result.
 	storeMsg := &store.Message{
 		ID:             api.NewUUID(),

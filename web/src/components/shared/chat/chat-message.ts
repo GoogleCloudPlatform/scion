@@ -354,7 +354,7 @@ const MENTION_SKIP_REGION = '<pre\\b[^>]*>[\\s\\S]*?</pre>|<code\\b[^>]*>[\\s\\S
  */
 function styleMentionsInText(text: string): string {
   return text.replace(
-    /@([\w.-]+)/g,
+    /@([\w.-]+(?:@[\w.-]+)?)/g,
     '<span class="mention clickable" data-mention="$1">@$1</span>'
   );
 }
