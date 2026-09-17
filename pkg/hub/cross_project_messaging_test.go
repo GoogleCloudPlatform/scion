@@ -586,17 +586,17 @@ func TestCrossProject_OneWayPolicy(t *testing.T) {
 
 func TestDerivePeerFromExternalRef(t *testing.T) {
 	t.Run("agent-agent DM", func(t *testing.T) {
-		ref := "dm:agent:aaa-bbb-ccc-ddd-eee-fff-111-222:agent:xxx-yyy-zzz-www-111-222-333-444"
-		kind, id := derivePeerFromExternalRef(ref, "agent", "aaa-bbb-ccc-ddd-eee-fff-111-222")
+		ref := "dm:agent:aaa0bb0c-cddd-eeef-ff11-122233344455:agent:ddd0ee0f-faaa-1112-2233-344455566677"
+		kind, id := derivePeerFromExternalRef(ref, "agent", "aaa0bb0c-cddd-eeef-ff11-122233344455")
 		require.Equal(t, "agent", kind)
-		require.Equal(t, "xxx-yyy-zzz-www-111-222-333-444", id)
+		require.Equal(t, "ddd0ee0f-faaa-1112-2233-344455566677", id)
 	})
 
 	t.Run("reverse direction", func(t *testing.T) {
-		ref := "dm:agent:aaa-bbb-ccc-ddd-eee-fff-111-222:agent:xxx-yyy-zzz-www-111-222-333-444"
-		kind, id := derivePeerFromExternalRef(ref, "agent", "xxx-yyy-zzz-www-111-222-333-444")
+		ref := "dm:agent:aaa0bb0c-cddd-eeef-ff11-122233344455:agent:ddd0ee0f-faaa-1112-2233-344455566677"
+		kind, id := derivePeerFromExternalRef(ref, "agent", "ddd0ee0f-faaa-1112-2233-344455566677")
 		require.Equal(t, "agent", kind)
-		require.Equal(t, "aaa-bbb-ccc-ddd-eee-fff-111-222", id)
+		require.Equal(t, "aaa0bb0c-cddd-eeef-ff11-122233344455", id)
 	})
 
 	t.Run("not a participant", func(t *testing.T) {

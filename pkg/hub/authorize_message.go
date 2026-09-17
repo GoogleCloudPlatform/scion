@@ -660,12 +660,13 @@ func (s *Server) authorizeCrossProjectAgentMessage(
 // hub-attested ancestry chain. The first element of the ancestry is the
 // originating user.
 func resolveOriginUserID(agent *store.Agent) string {
-	if agent == nil || len(agent.Ancestry) == 0 {
+	if agent == nil {
 		return ""
 	}
-	// The first element in the ancestry chain is the root human.
-	// CreatedBy may also carry the origin user; prefer ancestry when present.
-	return agent.Ancestry[0]
+	if len(agent.Ancestry) > 0 {
+		return agent.Ancestry[0]
+	}
+	return agent.CreatedBy
 }
 
 // isActiveMember checks whether a user has active membership in the given project.

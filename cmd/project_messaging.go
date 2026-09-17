@@ -63,7 +63,7 @@ when the hub switch is off, the effective policy is always "none".`,
 			return err
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 		defer cancel()
 
 		policy, err := client.Messaging().GetProjectMessagingPolicy(ctx, projectID)
@@ -120,7 +120,7 @@ Examples:
 			return err
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 		defer cancel()
 
 		switch projectMessagingSetPolicy {

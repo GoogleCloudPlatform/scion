@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -186,70 +187,15 @@ func (s *Server) sendViaDirectConversation(
 // derivePeerFromExternalRef extracts the peer identity from a DM external ref.
 // External refs have the format "dm:kind1:id1:kind2:id2".
 func derivePeerFromExternalRef(externalRef, callerKind, callerID string) (peerKind, peerID string) {
-	// Parse the DM key to extract both principals.
-	if len(externalRef) < 3 || externalRef[:3] != "dm:" {
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(externalRef)
+	if err != nil {
 		return "", ""
 	}
-
-	parts := splitDMRef(externalRef[3:])
-	if len(parts) != 4 {
-		return "", ""
-	}
-
-	kindA, idA, kindB, idB := parts[0], parts[1], parts[2], parts[3]
-
 	if kindA == callerKind && idA == callerID {
 		return kindB, idB
 	}
 	if kindB == callerKind && idB == callerID {
 		return kindA, idA
 	}
-
 	return "", ""
-}
-
-// splitDMRef splits a DM ref body into its four components.
-// The format is "kind1:id1:kind2:id2" where IDs may contain dashes.
-func splitDMRef(body string) []string {
-	// DM keys use the format "kind:uuid:kind:uuid"
-	// Kinds are simple words (agent, user), UUIDs contain dashes.
-	// Split into at most 4 parts by finding kind boundaries.
-	var result []string
-	remaining := body
-	for i := 0; i < 3; i++ {
-		// Find the first colon after a kind or UUID.
-		idx := findKindBoundary(remaining)
-		if idx < 0 {
-			return nil
-		}
-		result = append(result, remaining[:idx])
-		remaining = remaining[idx+1:]
-	}
-	if remaining != "" {
-		result = append(result, remaining)
-	}
-	return result
-}
-
-// findKindBoundary finds the index of the colon separating a kind/id from the
-// next component in a DM key. Kinds are short words (agent, user); UUIDs are
-// 36-char dash-separated hex strings.
-func findKindBoundary(s string) int {
-	// For kinds: look for "agent:" or "user:" at the start.
-	for _, kind := range []string{"agent", "user"} {
-		if len(s) > len(kind) && s[:len(kind)] == kind && s[len(kind)] == ':' {
-			return len(kind)
-		}
-	}
-	// For UUIDs (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx): find the colon after 36 chars.
-	if len(s) > 36 && s[36] == ':' {
-		return 36
-	}
-	// Fallback: find first colon.
-	for i, c := range s {
-		if c == ':' {
-			return i
-		}
-	}
-	return -1
 }

@@ -78,15 +78,14 @@ func (s *Server) handleConversationResolve(w http.ResponseWriter, r *http.Reques
 		}
 
 		// If project_id is specified, verify the conversation matches.
-		if projectID != "" && conv.ProjectID != nil && *conv.ProjectID != projectID {
-			// For direct conversations, check if either endpoint is in the project.
-			if conv.Kind == "direct" {
-				if !s.conversationInvolvesProject(ctx, conv, projectID) {
-					writeError(w, http.StatusConflict, "project_mismatch",
-						"Conversation does not match the specified project", nil)
-					return
-				}
-			} else {
+		if projectID != "" {
+			matches := false
+			if conv.ProjectID != nil && *conv.ProjectID == projectID {
+				matches = true
+			} else if conv.Kind == "direct" && s.conversationInvolvesProject(ctx, conv, projectID) {
+				matches = true
+			}
+			if !matches {
 				writeError(w, http.StatusConflict, "project_mismatch",
 					"Conversation does not match the specified project", nil)
 				return

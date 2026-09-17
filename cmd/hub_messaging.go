@@ -54,7 +54,7 @@ Shows:
 			return err
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 		defer cancel()
 
 		settings, err := client.Messaging().GetHubMessagingSettings(ctx)
@@ -106,7 +106,7 @@ Examples:
 			return err
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 		defer cancel()
 
 		req := &hubclient.UpdateHubMessagingRequest{}
