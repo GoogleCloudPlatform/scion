@@ -243,6 +243,8 @@ export class ScionChatSpaceRail extends LitElement {
     renamingGroupId?: string;
     value: string;
   } | null = null;
+  /** When creating a thread, the target group to add it to (if any). */
+  private _createThreadGroupId: string | null = null;
 
   static override styles = css`
     :host {
@@ -1220,8 +1222,24 @@ export class ScionChatSpaceRail extends LitElement {
           newGroup,
         ]
       : [...currentGroups, newGroup];
+
+    // Insert the group ID into threadOrder so it co-mingles with threads.
+    const currentOrder = [...(this.prefs.threadOrder?.[projectId] ?? [])];
+    if (threadId) {
+      // Replace the thread's position with the group ID
+      const idx = currentOrder.indexOf(threadId);
+      if (idx !== -1) {
+        currentOrder[idx] = newGroup.id;
+      } else {
+        currentOrder.push(newGroup.id);
+      }
+    } else {
+      currentOrder.push(newGroup.id);
+    }
+
     const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
-    await this.savePrefs({ threadGroups });
+    const threadOrder = { ...(this.prefs.threadOrder ?? {}), [projectId]: currentOrder };
+    await this.savePrefs({ threadGroups, threadOrder });
   }
 
   /** Move a thread into an existing group. */
@@ -1259,9 +1277,20 @@ export class ScionChatSpaceRail extends LitElement {
 
   /** Delete a thread group, moving its threads to ungrouped. */
   private async deleteGroup(groupId: string, projectId: string): Promise<void> {
+    // Retrieve the group's thread IDs before deleting, so they can be
+    // re-inserted into the threadOrder at the position the group occupied.
+    const deletedGroup = this.getGroups(projectId).find((g) => g.id === groupId);
     const groups = this.getGroups(projectId).filter((g) => g.id !== groupId);
     const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
-    await this.savePrefs({ threadGroups });
+
+    // Replace the group ID in threadOrder with its former thread IDs.
+    const currentOrder = [...(this.prefs.threadOrder?.[projectId] ?? [])];
+    const idx = currentOrder.indexOf(groupId);
+    if (idx !== -1) {
+      currentOrder.splice(idx, 1, ...(deletedGroup?.threadIds ?? []));
+    }
+    const threadOrder = { ...(this.prefs.threadOrder ?? {}), [projectId]: currentOrder };
+    await this.savePrefs({ threadGroups, threadOrder });
   }
 
   /** Handle dropping a thread onto a group header. */
@@ -1314,12 +1343,13 @@ export class ScionChatSpaceRail extends LitElement {
       this.groupNameInput = null;
       return;
     }
+    // Clear immediately to prevent double-submission (Enter + blur race).
+    this.groupNameInput = null;
     if (input.renamingGroupId) {
       await this.renameGroup(input.renamingGroupId, input.value.trim(), input.projectId);
     } else {
       await this.createGroup(input.projectId, input.value.trim(), input.threadId);
     }
-    this.groupNameInput = null;
   }
 
   private getSpaceLastActivity(projectId: string): number {
@@ -1779,8 +1809,10 @@ export class ScionChatSpaceRail extends LitElement {
   private async submitCreateThread(projectId: string): Promise<void> {
     if (!this.newThreadName.trim()) {
       this.creatingThread = '';
+      this._createThreadGroupId = null;
       return;
     }
+    const targetGroupId = this._createThreadGroupId;
     try {
       const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`, {
         method: 'POST',
@@ -1788,12 +1820,29 @@ export class ScionChatSpaceRail extends LitElement {
         body: JSON.stringify({ name: this.newThreadName.trim() }),
       });
       if (res.ok) {
+        const data = (await res.json().catch(() => ({}))) as {
+          id?: string;
+          thread?: { id?: string };
+        };
+        const threadId = data.id ?? data.thread?.id;
         await this.loadThreads(projectId);
+        // If creating in a group, move the thread into it.
+        if (targetGroupId && threadId) {
+          await this.moveThreadToGroup(threadId, targetGroupId, projectId);
+        } else if (targetGroupId) {
+          // Fallback: find the thread by name (server may use a different shape).
+          const threads = this.threadsBySpace.get(projectId) || [];
+          const created = threads.find((t) => t.name === this.newThreadName.trim());
+          if (created) {
+            await this.moveThreadToGroup(created.id, targetGroupId, projectId);
+          }
+        }
       }
     } catch {
       // Non-critical
     }
     this.creatingThread = '';
+    this._createThreadGroupId = null;
   }
 
   private updateThread(
@@ -1855,9 +1904,24 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Utility
-  // ---------------------------------------------------------------------------
+  /** Compute last-activity time for a unified rail item (thread or group). */
+  private getItemLastActivity(
+    item: { kind: 'thread'; thread: ChatSpaceThread } | { kind: 'group'; group: ThreadGroup },
+    threadMap: Map<string, ChatSpaceThread>
+  ): number {
+    if (item.kind === 'thread') {
+      return item.thread.lastActivityAt ? new Date(item.thread.lastActivityAt).getTime() : 0;
+    }
+    let maxTime = 0;
+    for (const id of item.group.threadIds) {
+      const t = threadMap.get(id);
+      if (t?.lastActivityAt) {
+        const time = new Date(t.lastActivityAt).getTime();
+        if (time > maxTime) maxTime = time;
+      }
+    }
+    return maxTime;
+  }
 
   // ---------------------------------------------------------------------------
   // Render
@@ -2113,8 +2177,8 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   /**
-   * Render the thread list for a space. If thread groups exist, organize
-   * threads into groups with collapsible headers. Otherwise, render flat.
+   * Render the thread list for a space. Groups and ungrouped threads are
+   * co-mingled in a single ordered list — no separate "THREADS" heading.
    */
   private renderThreadList(threads: ChatSpaceThread[], projectId: string) {
     const groups = this.getGroups(projectId);
@@ -2126,34 +2190,64 @@ export class ScionChatSpaceRail extends LitElement {
       `;
     }
 
-    // Build a lookup of thread id → thread
+    // Build lookups
     const threadMap = new Map(threads.map((t) => [t.id, t]));
     const groupedThreadIds = new Set(groups.flatMap((g) => g.threadIds));
 
-    // #general threads always come first, ungrouped
+    // #general threads always come first
     const generalThreads = threads.filter((t) => t.isGeneral);
 
-    // Ungrouped threads (non-general, not in any group)
-    const ungrouped = threads.filter((t) => !t.isGeneral && !groupedThreadIds.has(t.id));
+    // Build unified item list: ungrouped non-general threads + groups
+    type RailItem =
+      | { kind: 'thread'; id: string; thread: ChatSpaceThread }
+      | { kind: 'group'; id: string; group: ThreadGroup };
+
+    const items: RailItem[] = [];
+    for (const t of threads) {
+      if (t.isGeneral || groupedThreadIds.has(t.id)) continue;
+      items.push({ kind: 'thread', id: t.id, thread: t });
+    }
+    for (const g of groups) {
+      items.push({ kind: 'group', id: g.id, group: g });
+    }
+
+    // Sort items based on current mode
+    if (this.prefs.threadSortMode === 'custom') {
+      const order = this.prefs.threadOrder?.[projectId] ?? [];
+      items.sort((a, b) => {
+        const ai = order.indexOf(a.id);
+        const bi = order.indexOf(b.id);
+        if (ai === -1 && bi === -1) return 0;
+        if (ai === -1) return 1;
+        if (bi === -1) return -1;
+        return ai - bi;
+      });
+    } else {
+      // Activity or alpha — pinned ungrouped threads surface first.
+      items.sort((a, b) => {
+        const aPinned = a.kind === 'thread' && a.thread.pinned ? 0 : 1;
+        const bPinned = b.kind === 'thread' && b.thread.pinned ? 0 : 1;
+        if (aPinned !== bPinned) return aPinned - bPinned;
+
+        if (this.prefs.threadSortMode === 'alpha') {
+          const aName = a.kind === 'thread' ? a.thread.name : a.group.name;
+          const bName = b.kind === 'thread' ? b.thread.name : b.group.name;
+          return aName.localeCompare(bName);
+        }
+        // activity (default)
+        const aTime = this.getItemLastActivity(a, threadMap);
+        const bTime = this.getItemLastActivity(b, threadMap);
+        return bTime - aTime;
+      });
+    }
 
     return html`
       ${generalThreads.map((t) => this.renderThread(t, projectId))}
-      ${ungrouped.length > 0
-        ? html`
-            <div
-              class="thread-group-header ${this.dragOverGroupId === '__ungrouped__'
-                ? 'drag-over'
-                : ''}"
-              @dragover=${(e: DragEvent) => this.handleGroupDragOver(e, '__ungrouped__')}
-              @drop=${(e: DragEvent) => void this.handleGroupDrop(e, '__ungrouped__', projectId)}
-            >
-              <span class="group-name">Threads</span>
-              <span class="group-count">(${ungrouped.length})</span>
-            </div>
-            ${ungrouped.map((t) => this.renderThread(t, projectId))}
-          `
-        : nothing}
-      ${groups.map((group) => {
+      ${items.map((item) => {
+        if (item.kind === 'thread') {
+          return this.renderThread(item.thread, projectId);
+        }
+        const group = item.group;
         const groupThreads = group.threadIds
           .map((id) => threadMap.get(id))
           .filter((t): t is ChatSpaceThread => t !== undefined);
@@ -2168,7 +2262,6 @@ export class ScionChatSpaceRail extends LitElement {
               e.preventDefault();
               e.stopPropagation();
               this.contextMenuTarget = null;
-              // Use a group-specific context menu via inline handler
               this.showGroupContextMenu(e, group, projectId);
             }}
           >
@@ -2541,6 +2634,17 @@ export class ScionChatSpaceRail extends LitElement {
         style="left: ${this.contextMenuPos.x}px; top: ${this.contextMenuPos.y}px"
         @click=${(e: Event) => e.stopPropagation()}
       >
+        <div
+          class="context-menu-item"
+          @click=${() => {
+            this.groupContextMenuTarget = null;
+            this._createThreadGroupId = group.id;
+            this.startCreateThread(projectId);
+          }}
+        >
+          <sl-icon name="plus-lg"></sl-icon>
+          New thread
+        </div>
         <div
           class="context-menu-item"
           @click=${() => {
