@@ -1866,7 +1866,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('active_profile')) payload.active_profile = this.activeProfile || undefined;
     if (ok('default_template')) payload.default_template = this.defaultTemplate || undefined;
     if (ok('default_harness_config'))
-      payload.default_harness_config = this.defaultHarnessConfig || undefined;
+      payload.default_harness_config = this.resolvedHarnessConfig || undefined;
     if (ok('default_harness_auth'))
       payload.default_harness_auth = this.defaultHarnessAuth || undefined;
     if (ok('image_registry')) payload.image_registry = this.imageRegistry || undefined;
