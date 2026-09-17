@@ -16,20 +16,8 @@
 
 package hub
 
-// Phase 0 diagnostic: inventory existing noncanonical direct conversation rows
-// and extraneous participant rows.
-//
-// This diagnostic provides a read-only report mechanism for:
-//   1. Direct conversations with unparseable or malformed DM keys
-//   2. Direct conversations with extraneous participant rows (participants
-//      not named in the canonical key)
-//   3. Direct conversations with missing participant rows (key participants
-//      without listing rows)
-//
-// Rules:
-//   - Only migrate where historical principal IDs prove the pair unambiguously.
-//   - Never guess from display names or delete historical conversations.
-//   - Unresolvable rows fail closed and have a documented operator recovery path.
+// Phase 0 diagnostic tests: verify RunDMDiagnostic detects noncanonical
+// direct conversation rows and extraneous participant rows.
 
 import (
 	"context"
@@ -42,136 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
-
-// DMDiagnosticReport represents the diagnostic output for DM conversations.
-type DMDiagnosticReport struct {
-	TotalDMConversations int
-	CanonicalCount       int
-	NoncanonicalCount    int
-
-	// Details of issues found.
-	UnparseableKeys         []DMDiagnosticIssue
-	ExtraneousParticipants  []DMDiagnosticIssue
-	MissingParticipants     []DMDiagnosticIssue
-	MigratableConversations []DMDiagnosticMigration
-}
-
-// DMDiagnosticIssue describes a single noncanonical DM row.
-type DMDiagnosticIssue struct {
-	ConversationID string
-	ExternalRef    string
-	Detail         string
-}
-
-// DMDiagnosticMigration describes a DM that can be deterministically migrated
-// because historical principal IDs prove the pair unambiguously.
-type DMDiagnosticMigration struct {
-	ConversationID     string
-	CurrentExternalRef string
-	CanonicalKey       string
-	Reason             string
-}
-
-// runDMDiagnostic inspects all direct conversations in the store and reports
-// noncanonical rows, extraneous participants, and missing participants.
-// This is a read-only operation — it never modifies data.
-func runDMDiagnostic(ctx context.Context, s store.Store) (*DMDiagnosticReport, error) {
-	report := &DMDiagnosticReport{}
-
-	// List all conversations — we filter for kind=direct below.
-	// In a production setting, this would use pagination; for the diagnostic
-	// test, loading all conversations is acceptable.
-	result, err := s.ListConversations(ctx, store.ConversationFilter{
-		Kind: "direct",
-	}, store.ListOptions{Limit: 10000})
-	if err != nil {
-		return nil, fmt.Errorf("listing conversations: %w", err)
-	}
-
-	for _, conv := range result.Items {
-		report.TotalDMConversations++
-
-		// Check 1: Can we parse the DM key?
-		kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(conv.ExternalRef)
-		if parseErr != nil {
-			report.NoncanonicalCount++
-			report.UnparseableKeys = append(report.UnparseableKeys, DMDiagnosticIssue{
-				ConversationID: conv.ID,
-				ExternalRef:    conv.ExternalRef,
-				Detail:         fmt.Sprintf("unparseable DM key: %v", parseErr),
-			})
-			continue
-		}
-
-		// Key is parseable — check participants.
-		participants, partErr := s.ListParticipants(ctx, conv.ID)
-		if partErr != nil {
-			report.NoncanonicalCount++
-			report.UnparseableKeys = append(report.UnparseableKeys, DMDiagnosticIssue{
-				ConversationID: conv.ID,
-				ExternalRef:    conv.ExternalRef,
-				Detail:         fmt.Sprintf("error listing participants: %v", partErr),
-			})
-			continue
-		}
-
-		isCanonical := true
-
-		// Check 2: Extraneous participants (not named in the key).
-		for _, p := range participants {
-			if (p.PrincipalKind == kindA && p.PrincipalID == idA) ||
-				(p.PrincipalKind == kindB && p.PrincipalID == idB) {
-				continue
-			}
-			isCanonical = false
-			report.ExtraneousParticipants = append(report.ExtraneousParticipants, DMDiagnosticIssue{
-				ConversationID: conv.ID,
-				ExternalRef:    conv.ExternalRef,
-				Detail: fmt.Sprintf("extraneous participant: kind=%s id=%s (not in DM key)",
-					p.PrincipalKind, p.PrincipalID),
-			})
-		}
-
-		// Check 3: Missing participants (key members without rows).
-		hasA, hasB := false, false
-		for _, p := range participants {
-			if p.PrincipalKind == kindA && p.PrincipalID == idA {
-				hasA = true
-			}
-			if p.PrincipalKind == kindB && p.PrincipalID == idB {
-				hasB = true
-			}
-		}
-		if !hasA {
-			// Missing participant is a listing gap, not necessarily a data
-			// integrity issue (the key is still the ACL). Report it.
-			report.MissingParticipants = append(report.MissingParticipants, DMDiagnosticIssue{
-				ConversationID: conv.ID,
-				ExternalRef:    conv.ExternalRef,
-				Detail:         fmt.Sprintf("missing participant row: kind=%s id=%s", kindA, idA),
-			})
-		}
-		if !hasB {
-			report.MissingParticipants = append(report.MissingParticipants, DMDiagnosticIssue{
-				ConversationID: conv.ID,
-				ExternalRef:    conv.ExternalRef,
-				Detail:         fmt.Sprintf("missing participant row: kind=%s id=%s", kindB, idB),
-			})
-		}
-
-		if isCanonical && hasA && hasB {
-			report.CanonicalCount++
-		} else {
-			report.NoncanonicalCount++
-		}
-	}
-
-	return report, nil
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 // TestDMDiagnostic_CleanState verifies the diagnostic reports zero issues
 // when all DM conversations have valid keys and correct participants.
@@ -221,7 +79,7 @@ func TestDMDiagnostic_CleanState(t *testing.T) {
 	addConvParticipant(t, s, conv.ID, "agent", agentA.ID)
 	addConvParticipant(t, s, conv.ID, "agent", agentB.ID)
 
-	report, err := runDMDiagnostic(ctx, s)
+	report, err := RunDMDiagnostic(ctx, s)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, report.TotalDMConversations)
@@ -250,7 +108,7 @@ func TestDMDiagnostic_UnparseableKey(t *testing.T) {
 	}
 	require.NoError(t, s.CreateConversation(ctx, conv))
 
-	report, err := runDMDiagnostic(ctx, s)
+	report, err := RunDMDiagnostic(ctx, s)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, report.TotalDMConversations)
@@ -337,7 +195,7 @@ func TestDMDiagnostic_ExtraneousParticipant(t *testing.T) {
 
 	// Verify the diagnostic reports this DM as canonical (clean).
 	t.Run("diagnostic_reports_clean", func(t *testing.T) {
-		report, diagErr := runDMDiagnostic(ctx, s)
+		report, diagErr := RunDMDiagnostic(ctx, s)
 		require.NoError(t, diagErr)
 
 		require.Equal(t, 1, report.TotalDMConversations)
@@ -396,7 +254,7 @@ func TestDMDiagnostic_MissingParticipant(t *testing.T) {
 	// Only add one participant — the other is missing.
 	addConvParticipant(t, s, conv.ID, "agent", agentA.ID)
 
-	report, err := runDMDiagnostic(ctx, s)
+	report, err := RunDMDiagnostic(ctx, s)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, report.NoncanonicalCount)
@@ -459,7 +317,7 @@ func TestDMDiagnostic_MixedConversations(t *testing.T) {
 	}
 	require.NoError(t, s.CreateConversation(ctx, conv3))
 
-	report, err := runDMDiagnostic(ctx, s)
+	report, err := RunDMDiagnostic(ctx, s)
 	require.NoError(t, err)
 
 	require.Equal(t, 2, report.TotalDMConversations, "should only count direct conversations")
