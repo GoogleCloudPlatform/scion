@@ -1074,7 +1074,11 @@ export class ScionChatThread extends LitElement {
       }
     }
 
-    this.messages = sorted;
+    // Filter out mention fan-out messages from the display array. They are
+    // tracking artifacts for agent dispatch, not user-visible chat. They
+    // remain in messageMap so ID-based dedup prevents a later backfill from
+    // re-inserting them as real messages.
+    this.messages = sorted.filter((m) => m.type !== 'mention');
 
     // Track last known timestamp for backfill
     if (sorted.length > 0) {
@@ -1160,14 +1164,19 @@ export class ScionChatThread extends LitElement {
       } else {
         this.scrollToBottomAfterRender();
       }
-      // Advance read watermark after a short delay so the user sees the divider.
-      if (this.showUnreadDivider && this.messages.length > 0) {
+      // Advance read watermark after a delay so the blue dot clears. When
+      // showUnreadDivider is true, use a longer delay so the user can see the
+      // "New messages" divider before it is acknowledged. When it is false
+      // (first DM open — no prior read state), a shorter settle delay is
+      // enough to let the render commit.
+      if (this.messages.length > 0) {
+        const delay = this.showUnreadDivider ? 2000 : 500;
         setTimeout(() => {
           const lastMsg = this.messages[this.messages.length - 1];
           if (lastMsg) {
             void this.advanceReadWatermark(lastMsg.id);
           }
-        }, 2000);
+        }, delay);
       }
     }
   }
@@ -1729,9 +1738,9 @@ export class ScionChatThread extends LitElement {
       dispatchState: 'pending',
     };
     this.messageMap.set(optimisticMsg.id, optimisticMsg);
-    this.messages = Array.from(this.messageMap.values()).sort(
-      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-    );
+    this.messages = Array.from(this.messageMap.values())
+      .filter((m) => m.type !== 'mention')
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
     this.scrollToBottomAfterRender();
 
     try {
@@ -1777,9 +1786,9 @@ export class ScionChatThread extends LitElement {
       if (!res.ok) {
         // Remove optimistic message on failure.
         this.messageMap.delete(idempotencyKey);
-        this.messages = Array.from(this.messageMap.values()).sort(
-          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-        );
+        this.messages = Array.from(this.messageMap.values())
+          .filter((m) => m.type !== 'mention')
+          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
         // Restore reply-to state so the reply bar comes back for retry.
         this.composerReplyTo = savedReplyTo;
         this.sendError = await extractApiError(res, 'Failed to send message');
@@ -1808,9 +1817,9 @@ export class ScionChatThread extends LitElement {
           // Fallback: remove if we cannot remap (should not happen).
           this.messageMap.delete(idempotencyKey);
         }
-        this.messages = Array.from(this.messageMap.values()).sort(
-          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-        );
+        this.messages = Array.from(this.messageMap.values())
+          .filter((m) => m.type !== 'mention')
+          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
         onSuccess();
         // Backfill to get the full server-enriched message. The optimistic
@@ -1821,9 +1830,9 @@ export class ScionChatThread extends LitElement {
     } catch (err) {
       // Remove optimistic message on failure.
       this.messageMap.delete(idempotencyKey);
-      this.messages = Array.from(this.messageMap.values()).sort(
-        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-      );
+      this.messages = Array.from(this.messageMap.values())
+        .filter((m) => m.type !== 'mention')
+        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
       // Restore reply-to state so the reply bar comes back for retry.
       this.composerReplyTo = savedReplyTo;
       this.sendError = err instanceof Error ? err.message : 'Failed to send message';
