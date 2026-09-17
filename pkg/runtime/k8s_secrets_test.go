@@ -621,6 +621,33 @@ func TestCreateAuthFileSecret_AlreadyExists(t *testing.T) {
 	}
 }
 
+func TestCreateAuthFileSecret_EmptySourcePathSkipped(t *testing.T) {
+	// Regression test: in broker mode, SourcePath is cleared for all file
+	// mappings. createAuthFileSecret must skip these entries so the Secret's
+	// data map does not reference files that don't exist on the host.
+	rt, clientset, _ := newTestK8sRuntime()
+	ctx := context.Background()
+
+	files := []api.FileMapping{
+		{SourcePath: "", ContainerPath: "~/.config/gcloud/application_default_credentials.json"},
+		{SourcePath: "", ContainerPath: "~/.config/gcloud/credentials.db"},
+	}
+	labels := map[string]string{"scion.name": "test-agent"}
+
+	err := rt.createAuthFileSecret(ctx, "default", "test-agent", files, labels)
+	if err != nil {
+		t.Fatalf("createAuthFileSecret should succeed with empty SourcePaths, got: %v", err)
+	}
+
+	s, err := clientset.CoreV1().Secrets("default").Get(ctx, "scion-auth-test-agent", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to get auth secret: %v", err)
+	}
+	if len(s.Data) != 0 {
+		t.Errorf("expected empty Secret data map for all-empty SourcePaths, got %d entries: %v", len(s.Data), s.Data)
+	}
+}
+
 func TestDelete_PodNotFound_StillCleansSecrets(t *testing.T) {
 	rt, clientset, _ := newTestK8sRuntime()
 	ctx := context.Background()

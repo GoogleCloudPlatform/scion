@@ -1116,6 +1116,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 				},
 			})
 			for i, f := range config.ResolvedAuth.Files {
+				if f.SourcePath == "" {
+					continue
+				}
 				target := expandTildeTarget(f.ContainerPath, containerHome)
 				keyName := fmt.Sprintf("auth-file-%d", i)
 				extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{

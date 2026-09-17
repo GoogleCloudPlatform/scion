@@ -1247,6 +1247,47 @@ func TestGcloudMountSkippedInBrokerMode(t *testing.T) {
 	}
 }
 
+func TestEmptySourcePathSkippedInApplyResolvedAuth(t *testing.T) {
+	// Regression test: in broker mode, SourcePath is intentionally empty.
+	// applyResolvedAuth must skip these entries — attempting to copy an empty
+	// path would fail at util.CopyFile("").
+	agentHome := t.TempDir()
+
+	var mountedFiles []string
+	config := RunConfig{
+		UnixUsername: "scion",
+		HomeDir:      agentHome,
+		ResolvedAuth: &api.ResolvedAuth{
+			Files: []api.FileMapping{
+				{SourcePath: "", ContainerPath: "~/.config/gcloud/application_default_credentials.json"},
+				{SourcePath: "", ContainerPath: "~/.config/gcloud/credentials.db"},
+			},
+		},
+	}
+
+	err := applyResolvedAuth(config,
+		func(k, v string) {},                                   // addEnv
+		func(v api.VolumeMount) {},                             // addVolume
+		func(src, dst string, ro, bind bool) { mountedFiles = append(mountedFiles, src) }, // registerMount
+	)
+	if err != nil {
+		t.Fatalf("applyResolvedAuth should succeed with empty SourcePaths, got: %v", err)
+	}
+	if len(mountedFiles) > 0 {
+		t.Errorf("expected no mounts for empty SourcePath files, got %d: %v", len(mountedFiles), mountedFiles)
+	}
+
+	// Verify no files were copied into HomeDir
+	entries, _ := os.ReadDir(agentHome)
+	if len(entries) > 0 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected empty HomeDir, found: %v", names)
+	}
+}
+
 func TestResolveContainerWorkspace(t *testing.T) {
 	tests := []struct {
 		name      string
