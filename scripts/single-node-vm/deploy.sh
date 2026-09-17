@@ -310,6 +310,20 @@ case "$IMAGE_CHOICE" in
   *) err "Invalid selection: $IMAGE_CHOICE"; exit 1 ;;
 esac
 
+# --- Admin email ---
+echo ""
+echo "Hub admin email (will be granted super-admin access):"
+DEPLOYER_DEFAULT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)" || true
+if [[ -n "$DEPLOYER_DEFAULT" ]]; then
+  read -rp "Admin email [${DEPLOYER_DEFAULT}]: " ADMIN_EMAIL
+  ADMIN_EMAIL="${ADMIN_EMAIL:-$DEPLOYER_DEFAULT}"
+else
+  read -rp "Admin email: " ADMIN_EMAIL
+fi
+if [[ -z "$ADMIN_EMAIL" ]]; then
+  warn "No admin email provided. You can add one later in settings.yaml under server.hub.admin_emails."
+fi
+
 # Derived values
 info "Selecting zone in ${REGION}..."
 ZONE="$(gcloud compute zones list \
@@ -346,6 +360,9 @@ if [[ "$IMAGE_SOURCE" == "registry" ]]; then
   echo "  Images:       registry (${IMAGE_REGISTRY})"
 else
   echo "  Images:       build locally on VM"
+fi
+if [[ -n "$ADMIN_EMAIL" ]]; then
+  echo "  Admin:        ${ADMIN_EMAIL}"
 fi
 
 # --- Release version ---
@@ -686,6 +703,8 @@ image_registry: \"${IMAGE_REGISTRY}\"
 server:
   hub:
     name: \"${HUB_NAME}\"
+${ADMIN_EMAIL:+    admin_emails:
+      - \"${ADMIN_EMAIL}\"}
   storage:
     local_path: /home/scion/.scion/workspace-storage
   secrets:
@@ -985,6 +1004,8 @@ image_registry: \"${IMAGE_REGISTRY}\"
 server:
   hub:
     name: \"${HUB_NAME}\"
+${ADMIN_EMAIL:+    admin_emails:
+      - \"${ADMIN_EMAIL}\"}
   storage:
     local_path: /home/scion/.scion/workspace-storage
   secrets:
