@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
 // ---------- MessageKind ----------
@@ -291,6 +293,19 @@ func (m *Message) validateStructural() error {
 		}
 		if m.Intent != nil {
 			return fmt.Errorf("event message must not have intent")
+		}
+	}
+
+	// Validate metadata limits.
+	if len(m.Metadata) > messages.MaxMetadataEntries {
+		return fmt.Errorf("metadata exceeds maximum entries (%d > %d)", len(m.Metadata), messages.MaxMetadataEntries)
+	}
+	for k, v := range m.Metadata {
+		if len(k) > messages.MaxMetadataKeySize {
+			return fmt.Errorf("metadata key exceeds maximum size (%d > %d)", len(k), messages.MaxMetadataKeySize)
+		}
+		if len(v) > messages.MaxMetadataValueSize {
+			return fmt.Errorf("metadata value exceeds maximum size (%d > %d)", len(v), messages.MaxMetadataValueSize)
 		}
 	}
 

@@ -1242,6 +1242,58 @@ func TestBuildPrincipalRef_BothEmpty(t *testing.T) {
 	}
 }
 
+// ---------- Human-to-human reply intent override ----------
+
+func TestMapLegacyEnvelope_ReplyToHuman_IntentInform(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "user:bob",
+		Msg:       "Replying to Bob",
+		Type:      messages.TypeReply,
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.Kind != KindText {
+		t.Errorf("kind: got %q, want text", msg.Kind)
+	}
+	// Human-to-human reply should be inform, not request.
+	if msg.Intent == nil || *msg.Intent != IntentInform {
+		t.Errorf("intent: got %v, want inform (human-to-human reply)", msg.Intent)
+	}
+}
+
+func TestMapLegacyEnvelope_ReplyToAgent_IntentRequest(t *testing.T) {
+	old := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: "2026-08-27T10:00:00Z",
+		Sender:    "user:alice",
+		SenderID:  "user:alice",
+		Recipient: "agent:builder",
+		Msg:       "Replying to agent",
+		Type:      messages.TypeReply,
+	}
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.Kind != KindText {
+		t.Errorf("kind: got %q, want text", msg.Kind)
+	}
+	// Reply to agent should remain request.
+	if msg.Intent == nil || *msg.Intent != IntentRequest {
+		t.Errorf("intent: got %v, want request (reply to agent)", msg.Intent)
+	}
+}
+
 // ---------- helpers ----------
 
 func ptrIntent(i TextIntent) *TextIntent  { return &i }

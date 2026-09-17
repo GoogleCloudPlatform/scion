@@ -157,6 +157,14 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 	systemCategory := old.Metadata["system_category"]
 	kind, intent, event := MapLegacyType(old.Type, systemCategory, hasAddressee)
 
+	// Human-to-human replies should be inform, not request.
+	// MapLegacyType maps TypeReply to IntentRequest (correct for agent
+	// recipients), but human-to-human replies are informational.
+	if old.Type == messages.TypeReply && !strings.HasPrefix(old.Recipient, "agent:") {
+		inform := IntentInform
+		intent = &inform
+	}
+
 	// Enrich event body from old fields where possible.
 	if event != nil {
 		if old.Status != "" {

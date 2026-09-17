@@ -1781,11 +1781,13 @@ export class ScionChatThread extends LitElement {
           body.reply_to_agent = agentSlug;
         }
       }
-      // Fix: Add RE-to metadata when replying — first 32 chars with ellipsis.
+      // Fix: Add RE-to metadata when replying — first 32 codepoints with ellipsis.
+      // Use spread to avoid splitting UTF-16 surrogate pairs (e.g. emoji).
       if (replyToId && replyToContent) {
+        const codepoints = [...replyToContent];
         const metadata: Record<string, string> = {
           'RE-to':
-            replyToContent.length > 32 ? replyToContent.slice(0, 32) + '...' : replyToContent,
+            codepoints.length > 32 ? codepoints.slice(0, 32).join('') + '...' : replyToContent,
         };
         body.metadata = metadata;
       }
