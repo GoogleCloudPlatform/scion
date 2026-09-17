@@ -107,6 +107,7 @@ const USED_ICONS = [
   'file-earmark-arrow-down',
   'file-earmark-code',
   'file-earmark-plus',
+  'file-earmark-text',
   'file-earmark-zip',
   'file-text',
   'filetype-md',
