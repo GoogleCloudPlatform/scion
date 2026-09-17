@@ -1776,6 +1776,11 @@ export class ScionPageAgentDetail extends LitElement {
                         `
                       )}
                     </sl-select>
+                    ${(agent.messageMode || 'project') === 'hub'
+                      ? html`<div style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem; max-width: 360px;">
+                          Hub mode: sends within this project and to permitted agents in other projects. External messaging requires the Hub cross-project switch to be enabled.
+                        </div>`
+                      : nothing}
                   `
                 : html`
                     <scion-message-mode-badge
@@ -1785,6 +1790,11 @@ export class ScionPageAgentDetail extends LitElement {
                     <span style="margin-left: 0.5em; color: var(--sl-color-neutral-600);">
                       ${modeDisplay.description}
                     </span>
+                    ${(agent.messageMode || 'project') === 'hub'
+                      ? html`<div style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem;">
+                          External messaging requires the Hub cross-project switch to be enabled.
+                        </div>`
+                      : nothing}
                   `}
             </span>
           </div>
@@ -1793,8 +1803,8 @@ export class ScionPageAgentDetail extends LitElement {
                 <div class="info-item">
                   <span class="info-label">Reachability</span>
                   <span class="info-value">
-                    Can message: ${messageability.reachableAgentCount} agents,
-                    ${messageability.reachableUserCount} users
+                    Can reach ${messageability.reachableAgentCount} agents,
+                    ${messageability.reachableUserCount} users in this project
                   </span>
                 </div>
               `
@@ -1902,6 +1912,13 @@ export class ScionPageAgentDetail extends LitElement {
       });
 
       if (!response.ok) {
+        // Detect hub mode grant denial: server returns 403 when the caller
+        // lacks full-role + current-hub-mode authority to grant hub.
+        if (response.status === 403 && newMode === 'hub') {
+          throw new Error(
+            'Cannot grant Hub mode: the granting agent or user must have full role and already be in Hub mode.'
+          );
+        }
         throw new Error(await extractApiError(response, 'Failed to change message mode.'));
       }
 

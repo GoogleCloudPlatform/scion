@@ -473,6 +473,10 @@ export class ScionChatMessage extends LitElement {
   @property()
   deletedAt = '';
 
+  /** Sender's project slug for cross-project provenance display. */
+  @property()
+  senderProjectSlug = '';
+
   @state()
   private renderedHtml = '';
 
@@ -576,6 +580,16 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-text-muted, #64748b);
       font-size: var(--chat-fs-sm);
       font-weight: 400;
+    }
+
+    .cross-project-label {
+      font-size: var(--chat-fs-sm);
+      font-weight: 400;
+      color: var(--sl-color-success-700, #15803d);
+      background: var(--sl-color-success-50, #f0fdf4);
+      padding: 0 0.375rem;
+      border-radius: 0.25rem;
+      white-space: nowrap;
     }
 
     .bubble-content {
@@ -1812,6 +1826,9 @@ export class ScionChatMessage extends LitElement {
             ? html`
                 <div class="bubble-header">
                   <span class="sender-name">${this.senderName || this.sender}</span>
+                  ${this.senderProjectSlug
+                    ? html`<span class="cross-project-label">${this.senderProjectSlug}</span>`
+                    : nothing}
                   ${this.routedTo
                     ? html`<span class="routed-to"> &rarr; ${this.routedTo}</span>`
                     : nothing}
@@ -1824,6 +1841,9 @@ export class ScionChatMessage extends LitElement {
             ? html`
                 <div class="bubble-header">
                   <span class="sender-name">${this.senderName || this.sender}</span>
+                  ${this.senderProjectSlug
+                    ? html`<span class="cross-project-label">${this.senderProjectSlug}</span>`
+                    : nothing}
                   <span class="routed-to"> &rarr; ${this.routedTo}</span>
                   <span class="msg-time">${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}

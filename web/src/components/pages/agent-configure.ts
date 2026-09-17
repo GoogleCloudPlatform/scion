@@ -1082,9 +1082,15 @@ export class ScionPageAgentConfigure extends LitElement {
                     This agent is configured in sealed mode. It will not be able to send or receive
                     messages.
                   </div>`
-                : html`<div class="hint">
-                    Message authorization scope. Default inherits from the parent agent's mode.
-                  </div>`}
+                : this.messageMode === 'hub'
+                  ? html`<div class="hint">
+                      Hub mode enables messaging with permitted agents in other projects on this Hub,
+                      in addition to all agents and users in this project. External reach requires the
+                      Hub cross-project switch to be enabled.
+                    </div>`
+                  : html`<div class="hint">
+                      Message authorization scope. Default inherits from the parent agent's mode.
+                    </div>`}
             </div>
           `
         : this.agent?.messageMode

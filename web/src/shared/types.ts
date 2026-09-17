@@ -251,7 +251,50 @@ export interface AgentMessageability {
     | 'mode_branch_no_edge'
     | 'mode_lineage_agent_to_agent'
     | 'mode_none_sender'
-    | 'missing_permission';
+    | 'missing_permission'
+    | 'cross_project_disabled'
+    | 'cross_project_sender_mode'
+    | 'cross_project_target_mode'
+    | 'cross_project_inbound_none'
+    | 'cross_project_origin_not_member'
+    | 'cross_project_untrusted_origin'
+    | 'cross_project_surface_unsupported'
+    | 'denied';
+  /** Reason code when canReachViewer is false */
+  replyReason?: string;
+}
+
+/**
+ * Cross-project inbound policy for a project.
+ * Controls which external agents may send messages to agents in this project.
+ */
+export type CrossProjectInboundPolicy = 'none' | 'members' | 'any';
+
+/**
+ * Messaging policy for a project (GET /api/v1/projects/{id}/messaging-policy).
+ */
+export interface ProjectMessagingPolicy {
+  /** Configured inbound policy: "none", "members", "any" */
+  crossProjectInbound: CrossProjectInboundPolicy;
+  /** Optimistic concurrency revision */
+  revision: number;
+  /** Effective policy considering Hub switch state */
+  effectiveCrossProjectInbound: CrossProjectInboundPolicy;
+  /** Whether the Hub-level cross-project messaging is enabled */
+  hubCrossProjectEnabled: boolean;
+  /** Supported cross-project conversation kinds */
+  capabilities?: {
+    crossProjectConversationKinds: string[];
+  };
+}
+
+/**
+ * Hub-level messaging settings (GET /api/v1/admin/messaging).
+ */
+export interface HubMessagingSettings {
+  conversation_envelope_switch: boolean;
+  cross_project_messaging_enabled: boolean;
+  revision: number;
 }
 
 /** Present on agent DETAIL responses only. O(n) per agent — too costly for lists. */
@@ -745,6 +788,10 @@ export interface Message {
   attachments?: string[];
   /** Arbitrary metadata attached to the message. */
   metadata?: Record<string, unknown>;
+  /** Server-derived sender project ID for cross-project provenance. */
+  senderProjectId?: string;
+  /** Server-derived recipient project ID for cross-project provenance. */
+  recipientProjectId?: string;
 }
 
 // ---------------------------------------------------------------------------

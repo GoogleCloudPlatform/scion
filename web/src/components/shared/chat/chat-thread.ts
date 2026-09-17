@@ -412,6 +412,16 @@ export class ScionChatThread extends LitElement {
   /** Read tracking: whether the tab is focused. */
   private _tabFocused = true;
 
+  /**
+   * Cross-project: maps foreign project IDs to resolved slugs.
+   * Populated lazily when messages with senderProjectId are rendered.
+   * Not @state — updates trigger via message re-renders only.
+   */
+  private _projectSlugCache = new Map<string, string>();
+
+  /** Set of project IDs currently being resolved to avoid duplicate fetches. */
+  private _projectSlugPending = new Set<string>();
+
   /** Backfill single-flight guard: a backfill request is currently running. */
   private _backfillInFlight = false;
 
@@ -426,6 +436,41 @@ export class ScionChatThread extends LitElement {
   private _blurHandler = () => {
     this._tabFocused = false;
   };
+
+  /**
+   * Resolve a foreign project ID to its slug for cross-project display.
+   * Uses the viewer's own /api/v1/projects/{id} access — the server enforces
+   * visibility so hidden projects are not made browsable.
+   */
+  private resolveProjectSlug(projectId: string): string {
+    if (!projectId || projectId === this.projectId) return '';
+    const cached = this._projectSlugCache.get(projectId);
+    if (cached !== undefined) return cached;
+
+    // Start async resolution if not already pending
+    if (!this._projectSlugPending.has(projectId)) {
+      this._projectSlugPending.add(projectId);
+      void apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}`)
+        .then(async (res) => {
+          if (res.ok) {
+            const data = (await res.json()) as { slug?: string; name?: string };
+            this._projectSlugCache.set(projectId, data.slug || data.name || projectId.slice(0, 8));
+          } else {
+            // Project not accessible — use truncated ID
+            this._projectSlugCache.set(projectId, projectId.slice(0, 8));
+          }
+          this._projectSlugPending.delete(projectId);
+          this.requestUpdate();
+        })
+        .catch(() => {
+          this._projectSlugCache.set(projectId, projectId.slice(0, 8));
+          this._projectSlugPending.delete(projectId);
+          this.requestUpdate();
+        });
+    }
+    // Return empty string while resolving (no flash of partial content)
+    return '';
+  }
 
   static override styles = css`
     :host {
@@ -3080,6 +3125,7 @@ export class ScionChatThread extends LitElement {
               .messages=${pendingIA}
               ?global-expanded=${this.interagentExpandAll}
               ?hidden=${!this.interagentVisible}
+              current-project-id=${this.projectId}
             ></scion-chat-interagent-marker>
           `);
           // Reset grouping after a marker so the next message shows its header.
@@ -3187,6 +3233,7 @@ export class ScionChatThread extends LitElement {
           .replyPreview=${replyPreview}
           editedAt=${ext?.editedAt || ''}
           deletedAt=${ext?.deletedAt || ''}
+          senderProjectSlug=${msg.senderProjectId ? this.resolveProjectSlug(msg.senderProjectId) : ''}
           @scroll-to-message=${this.handleScrollToMessage}
           @path-link-click=${this.handlePathLinkClick}
         ></scion-chat-message>
@@ -3220,6 +3267,7 @@ export class ScionChatThread extends LitElement {
           .messages=${trailingIA}
           ?global-expanded=${this.interagentExpandAll}
           ?hidden=${!this.interagentVisible}
+          current-project-id=${this.projectId}
         ></scion-chat-interagent-marker>
       `);
     }

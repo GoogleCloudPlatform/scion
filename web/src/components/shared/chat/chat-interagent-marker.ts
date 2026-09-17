@@ -48,6 +48,10 @@ export class ScionChatInteragentMarker extends LitElement {
   @property({ type: Boolean, attribute: 'global-expanded' })
   globalExpanded = false;
 
+  /** Current project ID — used to detect cross-project messages. */
+  @property({ type: String, attribute: 'current-project-id' })
+  currentProjectId = '';
+
   /** Whether this marker is hidden (eye toggle off). */
   @property({ type: Boolean, reflect: true })
   override hidden = false;
@@ -171,6 +175,17 @@ export class ScionChatInteragentMarker extends LitElement {
       color: var(--scion-primary-600, #2563eb);
     }
 
+    .ia-cross-project {
+      font-size: 0.6875rem;
+      font-weight: 500;
+      color: var(--sl-color-success-700, #15803d);
+      background: var(--sl-color-success-50, #f0fdf4);
+      padding: 0 0.25rem;
+      border-radius: 0.1875rem;
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+
     /* Full message popover dialog */
     .ia-full-preview::part(panel) {
       width: 90vw;
@@ -250,11 +265,31 @@ export class ScionChatInteragentMarker extends LitElement {
     }
   }
 
-  /** Format a sender/recipient like "agent:slug" to just "slug". */
-  private formatParticipant(value: string): string {
-    if (value.startsWith('agent:')) return value.slice(6);
-    if (value.startsWith('user:')) return value.slice(5);
-    return value;
+  /**
+   * Format a sender/recipient like "agent:slug" to just "slug".
+   * For cross-project messages, includes a project context prefix
+   * when the participant's project differs from the current project.
+   */
+  private formatParticipant(value: string, projectId?: string): string {
+    let name = value;
+    if (name.startsWith('agent:')) name = name.slice(6);
+    else if (name.startsWith('user:')) name = name.slice(5);
+
+    // Add cross-project context if the participant's project differs
+    if (projectId && this.currentProjectId && projectId !== this.currentProjectId) {
+      const shortProject = projectId.slice(0, 8);
+      return `${shortProject} / ${name}`;
+    }
+    return name;
+  }
+
+  /** True when a message crossed project boundaries. */
+  private isCrossProject(msg: Message): boolean {
+    if (!this.currentProjectId) return false;
+    return (
+      (!!msg.senderProjectId && msg.senderProjectId !== this.currentProjectId) ||
+      (!!msg.recipientProjectId && msg.recipientProjectId !== this.currentProjectId)
+    );
   }
 
   /**
@@ -325,15 +360,20 @@ export class ScionChatInteragentMarker extends LitElement {
         @sl-after-hide=${(e: Event) => this.closeMessagePreview(e)}
       >
         <div class="ia-full-header">
-          <span class="ia-sender">${this.formatParticipant(msg.sender)}</span>
+          <span class="ia-sender">${this.formatParticipant(msg.sender, msg.senderProjectId)}</span>
           <span class="ia-arrow">&rarr;</span>
-          <span class="ia-recipient">${this.formatParticipant(msg.recipient)}</span>
+          <span class="ia-recipient"
+            >${this.formatParticipant(msg.recipient, msg.recipientProjectId)}</span
+          >
+          ${this.isCrossProject(msg)
+            ? html`<span class="ia-cross-project">
+                <sl-icon name="globe" style="font-size:0.5625rem"></sl-icon> cross-project
+              </span>`
+            : nothing}
         </div>
-        ${
-          this.expandedHtml
-            ? html`<div class="ia-full-body" .innerHTML=${this.expandedHtml}></div>`
-            : html`<div class="ia-full-body-plain">${msg.msg}</div>`
-        }
+        ${this.expandedHtml
+          ? html`<div class="ia-full-body" .innerHTML=${this.expandedHtml}></div>`
+          : html`<div class="ia-full-body-plain">${msg.msg}</div>`}
       </sl-dialog>
     `;
   }
@@ -343,43 +383,56 @@ export class ScionChatInteragentMarker extends LitElement {
       return html`
         <sl-tooltip content="Click to collapse">
           <div class="marker-expanded" @click=${this.toggle}>
-            ${
-              this.messages.length > 0
-                ? this.messages.map(
-                    (m) => html`
-                      <div class="ia-msg">
-                        <span class="ia-sender">${this.formatParticipant(m.sender)}</span>
-                        <span class="ia-arrow">&rarr;</span>
-                        <span class="ia-recipient">${this.formatParticipant(m.recipient)}</span>:
-                        <span class="ia-body" data-msg-id=${m.id}>${m.msg}</span>
-                        ${
-                          this.truncatedIds.has(m.id)
-                            ? html`
-                                <span class="ia-expand">
-                                  <sl-icon-button
-                                    name="arrows-angle-expand"
-                                    label="Expand message"
-                                    @click=${(e: Event) => this.openMessagePreview(m, e)}
-                                  ></sl-icon-button>
-                                </span>
-                              `
-                            : nothing
-                        }
-                      </div>
-                    `
-                  )
-                : nothing
-            }
+            ${this.messages.length > 0
+              ? this.messages.map(
+                  (m) => html`
+                    <div class="ia-msg">
+                      <span class="ia-sender"
+                        >${this.formatParticipant(m.sender, m.senderProjectId)}</span
+                      >
+                      <span class="ia-arrow">&rarr;</span>
+                      <span class="ia-recipient"
+                        >${this.formatParticipant(m.recipient, m.recipientProjectId)}</span
+                      >
+                      ${this.isCrossProject(m)
+                        ? html`<span class="ia-cross-project">
+                            <sl-icon name="globe" style="font-size:0.5625rem"></sl-icon>
+                            cross-project
+                          </span>`
+                        : nothing}:
+                      <span class="ia-body" data-msg-id=${m.id}>${m.msg}</span>
+                      ${this.truncatedIds.has(m.id)
+                        ? html`
+                            <span class="ia-expand">
+                              <sl-icon-button
+                                name="arrows-angle-expand"
+                                label="Expand message"
+                                @click=${(e: Event) => this.openMessagePreview(m, e)}
+                              ></sl-icon-button>
+                            </span>
+                          `
+                        : nothing}
+                    </div>
+                  `
+                )
+              : nothing}
           </div>
         </sl-tooltip>
         ${this.renderMessagePreview()}
       `;
     }
 
+    const crossCount = this.messages.filter((m) => this.isCrossProject(m)).length;
     return html`
       <sl-tooltip content="Click to expand">
         <div class="marker-pill" @click=${this.toggle}>
-          ${this.messageCount} agent-agent message${this.messageCount !== 1 ? 's' : ''}
+          ${this.messageCount} agent-agent
+          message${this.messageCount !== 1 ? 's' : ''}${crossCount > 0
+            ? html` <span class="ia-cross-project">
+                <sl-icon name="globe" style="font-size:0.5625rem"></sl-icon> ${crossCount}
+                cross-project
+              </span>`
+            : nothing}
         </div>
       </sl-tooltip>
     `;
