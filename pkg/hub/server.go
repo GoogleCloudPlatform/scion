@@ -2639,8 +2639,8 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 		// are in different projects (cross-project). Same-project messages
 		// were already authorized at enqueue time and don't need rechecking.
 		senderAgent, err := s.store.GetAgent(ctx, senderID)
-		if err != nil {
-			// Sender not found — could be a user sender or deleted agent.
+		if err != nil || senderAgent == nil {
+			// Sender not found or nil — could be a user sender or deleted agent.
 			// User messages don't need cross-project reauthorization.
 			return nil
 		}

@@ -100,6 +100,9 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 		if err != nil {
 			return nil, fmt.Errorf("get role definition %s: %w", rdID, err)
 		}
+		if rd == nil {
+			return nil, fmt.Errorf("role definition %s is nil", rdID)
+		}
 		rdCache[rdID] = rd
 		return rd, nil
 	}
@@ -335,6 +338,10 @@ func (s *Server) EvaluateAgentMessage(
 	senderIdentity Identity,
 	targetAgent *store.Agent,
 ) MessageDecision {
+	if targetAgent == nil {
+		return MessageDecision{Reason: "nil target agent"}
+	}
+
 	agentIdent, ok := senderIdentity.(AgentIdentity)
 	if !ok {
 		return MessageDecision{Reason: "invalid agent identity"}
@@ -346,6 +353,9 @@ func (s *Server) EvaluateAgentMessage(
 		slog.Warn("EvaluateAgentMessage: failed to fetch sender agent",
 			"sender_id", agentIdent.ID(), "error", err)
 		return MessageDecision{Reason: "failed to fetch sender agent record"}
+	}
+	if senderAgent == nil {
+		return MessageDecision{Reason: "sender agent record is nil"}
 	}
 
 	// Either side mode == none → DENY
@@ -429,6 +439,10 @@ func (s *Server) evaluateCrossProject(
 		slog.Warn("EvaluateAgentMessage: failed to fetch destination project",
 			"project_id", targetAgent.ProjectID, "error", err)
 		decision.Reason = "failed to fetch destination project"
+		return decision
+	}
+	if destProject == nil {
+		decision.Reason = "destination project record is nil"
 		return decision
 	}
 
@@ -524,6 +538,13 @@ func (s *Server) validateCrossProjectOrigin(ctx context.Context, agentIdent Agen
 			CrossProject: true,
 			Code:         MessageDenialCrossProjectUntrusted,
 			Reason:       "failed to fetch origin user",
+		}
+	}
+	if originUser == nil {
+		return "", &MessageDecision{
+			CrossProject: true,
+			Code:         MessageDenialCrossProjectUntrusted,
+			Reason:       "origin user record is nil",
 		}
 	}
 	if originUser.Status != "active" {
