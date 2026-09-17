@@ -2208,7 +2208,9 @@ export class ScionChatThread extends LitElement {
           <sl-icon name="link-45deg"></sl-icon>
           Copy link
         </div>
-        ${this.isSenderAgent(msg) && !this.isDM
+        ${this.isSenderAgent(msg) &&
+        !this.isDM &&
+        !(msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgent)
           ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuSetDefault()}>
               <sl-icon name="robot"></sl-icon>
               Make this agent thread default
@@ -2312,7 +2314,9 @@ export class ScionChatThread extends LitElement {
     if (!msg || !this.conversationKey || this.isDM) return;
 
     // Extract agent slug from sender (strip "agent:" prefix).
-    const agentSlug = msg.sender.startsWith('agent:') ? msg.sender.slice(6) : msg.sender;
+    // Guard: only proceed if the sender uses the "agent:" format.
+    if (!msg.sender.startsWith('agent:')) return;
+    const agentSlug = msg.sender.slice(6);
     if (!agentSlug) return;
 
     try {
