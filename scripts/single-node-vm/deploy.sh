@@ -800,7 +800,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
     --command="
       set -euo pipefail
       cd /home/scion/scion-source
-      rm -f /home/scion/image-build.exit
+      rm -f /tmp/scion-image-build.exit
       { nohup bash -c '
         set -euo pipefail
         # Step 1: Build core-base
@@ -832,9 +832,9 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
         sudo docker tag scion-antigravity:latest localhost/scion/scion-antigravity:latest
 
         echo \"=== All images built and tagged successfully ===\"
-      ' > /home/scion/image-build.log 2>&1; echo \$? > /home/scion/image-build.exit; } &
-      echo \$! > /home/scion/image-build.pid
-      echo \"Image build started in background (PID \$(cat /home/scion/image-build.pid))\"
+      ' > /tmp/scion-image-build.log 2>&1; echo \$? > /tmp/scion-image-build.exit; } &
+      echo \$! > /tmp/scion-image-build.pid
+      echo \"Image build started in background (PID \$(cat /tmp/scion-image-build.pid))\"
     "
 
   # Poll for build completion
@@ -848,7 +848,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
     # Check if the exit code file exists (build finished)
     BUILD_EXIT=$(gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
-      --command="cat /home/scion/image-build.exit 2>/dev/null || echo running" \
+      --command="cat /tmp/scion-image-build.exit 2>/dev/null || echo running" \
       2>/dev/null) || true
     if [[ "$BUILD_EXIT" != "running" ]]; then
       BUILD_DONE=true
@@ -856,7 +856,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
       # Show progress (last line of build log)
       LAST_LINE=$(gcloud compute ssh "${INSTANCE_NAME}" \
         --zone="${ZONE}" --project="${PROJECT_ID}" \
-        --command="tail -1 /home/scion/image-build.log 2>/dev/null || echo '(waiting...)'" \
+        --command="tail -1 /tmp/scion-image-build.log 2>/dev/null || echo '(waiting...)'" \
         2>/dev/null) || true
       echo "  [${POLL_COUNT}] ${LAST_LINE}"
     fi
@@ -864,13 +864,13 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
 
   if [[ "$BUILD_DONE" != "true" ]]; then
     err "Image build timed out after 45 minutes."
-    echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='cat /home/scion/image-build.log'"
+    echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='cat /tmp/scion-image-build.log'"
     exit 1
   fi
 
   if [[ "$BUILD_EXIT" != "0" ]]; then
     err "Image build failed (exit code: ${BUILD_EXIT})."
-    echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='tail -50 /home/scion/image-build.log'"
+    echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='tail -50 /tmp/scion-image-build.log'"
     exit 1
   fi
   echo "  Image build completed successfully."
