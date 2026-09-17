@@ -212,11 +212,9 @@ export class ScionMentionAutocomplete extends LitElement {
                 ></sl-icon>
                 @${candidate.slug}
               </span>
-              ${
-                candidate.slug !== candidate.name
-                  ? html`<span class="name">${candidate.name}</span>`
-                  : nothing
-              }
+              ${candidate.slug !== candidate.name
+                ? html`<span class="name">${candidate.name}</span>`
+                : nothing}
             </div>
           `
         )}
