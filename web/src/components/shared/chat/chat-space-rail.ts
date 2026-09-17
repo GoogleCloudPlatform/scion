@@ -1690,10 +1690,10 @@ export class ScionChatSpaceRail extends LitElement {
     lines.push('---');
 
     for (const msg of messages) {
-      const rawSender = (msg as any).sender ?? 'Unknown';
+      const rawSender = msg.sender ?? 'Unknown';
       const sender = rawSender.replace(/^(user|agent):/, '');
-      const ts = (msg as any).createdAt ?? '';
-      const content = (msg as any).msg ?? '';
+      const ts = msg.createdAt ?? '';
+      const content = msg.msg ?? '';
       const formattedTs = ts ? new Date(ts).toLocaleString() : '';
 
       lines.push('');
