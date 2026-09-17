@@ -1810,17 +1810,16 @@ export class ScionChatThread extends LitElement {
         const optimistic = this.messageMap.get(idempotencyKey);
         if (optimistic && resData?.id) {
           this.messageMap.delete(idempotencyKey);
-          // If SSE already delivered the real message, preserve its server-enriched fields
+          // If SSE already delivered the real message, keep it as the ground truth
+          // to preserve all server-enriched fields (createdAt, metadata, groupId, etc.)
           const sseVersion = this.messageMap.get(resData.id);
           if (sseVersion) {
-            optimistic.recipient = sseVersion.recipient || optimistic.recipient;
-            optimistic.recipientId = sseVersion.recipientId || optimistic.recipientId;
-            optimistic.sender = sseVersion.sender || optimistic.sender;
-            optimistic.type = sseVersion.type || optimistic.type;
+            sseVersion.dispatchState = 'dispatched';
+          } else {
+            optimistic.id = resData.id;
+            optimistic.dispatchState = 'dispatched';
+            this.messageMap.set(resData.id, optimistic);
           }
-          optimistic.id = resData.id;
-          optimistic.dispatchState = 'dispatched';
-          this.messageMap.set(resData.id, optimistic);
         } else {
           // Fallback: remove if we cannot remap (should not happen).
           this.messageMap.delete(idempotencyKey);
