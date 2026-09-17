@@ -305,7 +305,7 @@ case "$IMAGE_CHOICE" in
     ;;
   2)
     IMAGE_SOURCE="build"
-    IMAGE_REGISTRY=""
+    IMAGE_REGISTRY="localhost/scion"
     ;;
   *) err "Invalid selection: $IMAGE_CHOICE"; exit 1 ;;
 esac
@@ -437,7 +437,7 @@ if [[ -n "$DEPLOYER_EMAIL" ]]; then
   if gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="${DEPLOYER_MEMBER}" \
     --role="roles/iap.tunnelResourceAccessor" \
-    --quiet 2>/dev/null; then
+    --quiet >/dev/null 2>&1; then
     echo "  IAP tunnel access granted to: ${DEPLOYER_EMAIL}"
   else
     warn "Failed to grant roles/iap.tunnelResourceAccessor to ${DEPLOYER_EMAIL}."
@@ -677,16 +677,12 @@ fi
 # --- Write settings.yaml (dev mode for initial startup) ---
 # Phase 5 will overwrite this with proxy auth config once IAP is ready.
 info "Writing settings.yaml (dev mode)..."
-SETTINGS_IMAGE_REGISTRY=""
-if [[ "$IMAGE_SOURCE" == "registry" ]]; then
-  SETTINGS_IMAGE_REGISTRY="image_registry: \"${IMAGE_REGISTRY}\""
-fi
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
-settings_version: \"1\"
-${SETTINGS_IMAGE_REGISTRY:+${SETTINGS_IMAGE_REGISTRY}}
+schema_version: \"1\"
+image_registry: \"${IMAGE_REGISTRY}\"
 server:
   hub:
     name: \"${HUB_NAME}\"
@@ -761,6 +757,9 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
       fi
     "
 
+  # Build only the minimal set of images needed for deployment:
+  # core-base (foundation) -> scion-base (adds scion binary) -> scion-antigravity (default harness)
+  # Using --target all would build ALL ~12 images including harnesses with known build issues.
   info "Building container images (this may take 30-45 minutes)..."
   gcloud compute ssh "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
@@ -768,11 +767,38 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
       set -euo pipefail
       cd /home/scion/scion-source
       rm -f /home/scion/image-build.exit
-      nohup bash -c 'sudo bash image-build/scripts/build-images.sh \
-        --builder local-docker \
-        --target all \
-        --tag latest \
-        > /home/scion/image-build.log 2>&1; echo \$? > /home/scion/image-build.exit' &
+      nohup bash -c '
+        set -euo pipefail
+        # Step 1: Build core-base
+        echo \"=== Building core-base ===\"
+        sudo bash image-build/scripts/build-images.sh \
+          --builder local-docker \
+          --target core-base \
+          --tag latest
+
+        # Step 2: Build scion-base
+        echo \"=== Building scion-base ===\"
+        sudo bash image-build/scripts/build-images.sh \
+          --builder local-docker \
+          --target scion-base \
+          --tag latest
+
+        # Step 3: Build antigravity harness directly
+        echo \"=== Building scion-antigravity ===\"
+        sudo docker build \
+          -t scion-antigravity:latest \
+          --build-arg BASE_IMAGE=scion-base:latest \
+          -f harnesses/antigravity/Dockerfile \
+          harnesses/antigravity/
+
+        # Step 4: Tag images under localhost/scion for the runtime
+        echo \"=== Tagging images for localhost/scion registry ===\"
+        sudo docker tag core-base:latest localhost/scion/core-base:latest
+        sudo docker tag scion-base:latest localhost/scion/scion-base:latest
+        sudo docker tag scion-antigravity:latest localhost/scion/scion-antigravity:latest
+
+        echo \"=== All images built and tagged successfully ===\"
+      ' > /home/scion/image-build.log 2>&1; echo \$? > /home/scion/image-build.exit &
       echo \$! > /home/scion/image-build.pid
       echo \"Image build started in background (PID \$(cat /home/scion/image-build.pid))\"
     "
@@ -818,8 +844,8 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
   info "Verifying container images..."
   gcloud compute ssh "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
-    --command="docker images | grep -E 'core-base|scion-base|scion-antigravity'"
-  echo "  Container images built successfully."
+    --command="docker images | grep -E 'localhost/scion|core-base|scion-base|scion-antigravity'"
+  echo "  Container images built and tagged successfully."
 else
   section "Phase 3b: Container Images (Registry)"
   info "Using pre-built images from registry: ${IMAGE_REGISTRY}"
@@ -906,14 +932,14 @@ else
       --region="${REGION}" --project="${PROJECT_ID}" \
       --member="${OPERATOR_MEMBER}" \
       --role=roles/iap.httpsResourceAccessor \
-      --quiet 2>/dev/null; then
+      --quiet >/dev/null 2>&1; then
     echo "  IAP access granted to: ${OPERATOR_EMAIL} (service-level binding)"
   else
     warn "Service-level IAP binding failed; falling back to project-level binding."
     if gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
       --member="${OPERATOR_MEMBER}" \
       --role=roles/iap.httpsResourceAccessor \
-      --quiet 2>/dev/null; then
+      --quiet >/dev/null 2>&1; then
       echo "  IAP access granted to: ${OPERATOR_EMAIL} (project-level fallback)"
     else
       err "Failed to grant IAP access to ${OPERATOR_EMAIL} at both service and project levels."
@@ -954,8 +980,8 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
-settings_version: \"1\"
-${SETTINGS_IMAGE_REGISTRY:+${SETTINGS_IMAGE_REGISTRY}}
+schema_version: \"1\"
+image_registry: \"${IMAGE_REGISTRY}\"
 server:
   hub:
     name: \"${HUB_NAME}\"
