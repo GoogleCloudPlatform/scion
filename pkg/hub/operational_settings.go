@@ -63,11 +63,12 @@ type sectionState struct {
 //     DefaultTemplate, DefaultHarnessConfig, DefaultMaxTurns, DefaultMaxModelCalls,
 //     DefaultMaxDuration, DefaultResources, and NotificationChannels.
 //   - File mode (BuildLayer1SnapshotFromFile): only the fields that the old
-//     reloadSettings() consumed are populated. Fields like SoftDeleteRetention,
-//     DefaultTemplate, etc. remain at zero values because the old reloadSettings
-//     never applied them on reload — they are consumed only at startup. This
-//     maintains file-mode parity (the pre-refactor code never touched them on
-//     config reload either).
+//     reloadSettings() consumed are populated, plus DefaultHarnessConfig which
+//     is read from the top-level default_harness_config key in settings.yaml.
+//     Fields like SoftDeleteRetention, DefaultTemplate, etc. remain at zero
+//     values because the old reloadSettings never applied them on reload — they
+//     are consumed only at startup. This maintains file-mode parity (the
+//     pre-refactor code never touched them on config reload either).
 type Layer1Snapshot struct {
 	// Access
 	AdminEmails       []string
@@ -903,6 +904,9 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 
 	// Project defaults — read from settings.yaml project_defaults section
 	snap.DefaultScratchpad = gc.DefaultScratchpad
+
+	// Agent defaults — read from settings.yaml top-level keys
+	snap.DefaultHarnessConfig = gc.DefaultHarnessConfig
 
 	// Federation — read from GlobalConfig
 	if gc.Federation.Enabled || len(gc.Federation.TrustedIssuers) > 0 {

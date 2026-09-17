@@ -522,6 +522,11 @@ type GlobalConfig struct {
 	// project_defaults.default_scratchpad in file/SQLite mode.
 	DefaultScratchpad *bool `json:"-" yaml:"-" koanf:"-"`
 
+	// DefaultHarnessConfig is the hub-level default harness config name.
+	// Populated from the top-level default_harness_config key in settings.yaml
+	// in file/SQLite mode.
+	DefaultHarnessConfig string `json:"-" yaml:"-" koanf:"-"`
+
 	// Telemetry default — when set, the Hub exposes this as the default telemetry opt-in
 	// state for new agents via GET /api/v1/settings/public.
 	TelemetryEnabled *bool `json:"telemetryEnabled,omitempty" yaml:"telemetryEnabled,omitempty" koanf:"telemetryEnabled"`
@@ -1509,6 +1514,13 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 					gc.DefaultScratchpad = &b
 				}
 			}
+		}
+	}
+
+	// Top-level default_harness_config — read from raw YAML.
+	if dhc, ok := raw["default_harness_config"]; ok && dhc != nil {
+		if s, ok := dhc.(string); ok {
+			gc.DefaultHarnessConfig = s
 		}
 	}
 

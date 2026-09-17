@@ -90,6 +90,7 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private telemetryEnabled = false;
   @state() private autoExposePortsEnabled = false;
   @state() private hubDefaultRuntimeBroker = '';
+  @state() private hubDefaultHarnessConfig = '';
   @state() private autoExposePortsMode = 'allowlist';
   @state() private autoExposePortsList = '';
   @state() private autoExposePortsInterval = '3s';
@@ -443,10 +444,12 @@ export class ScionPageAgentCreate extends LitElement {
           telemetryEnabled?: boolean;
           autoExposePortsEnabled?: boolean;
           defaultRuntimeBroker?: string;
+          defaultHarnessConfig?: string;
         };
         this.telemetryEnabled = data.telemetryEnabled ?? false;
         this.autoExposePortsEnabled = data.autoExposePortsEnabled ?? false;
         this.hubDefaultRuntimeBroker = data.defaultRuntimeBroker ?? '';
+        this.hubDefaultHarnessConfig = data.defaultHarnessConfig ?? '';
       }
 
       if (harnessConfigsRes.ok) {
@@ -605,7 +608,7 @@ export class ScionPageAgentCreate extends LitElement {
     const visible = this.filteredTemplates;
 
     const settings = this.projectId ? await this.fetchProjectSettings(this.projectId) : null;
-    const harnessDefault = settings?.defaultHarnessConfig || 'antigravity';
+    const harnessDefault = settings?.defaultHarnessConfig || this.hubDefaultHarnessConfig || 'antigravity';
 
     const harnessFor = (t: { defaultHarnessConfig?: string; harness?: string }) =>
       t.defaultHarnessConfig || t.harness || harnessDefault;
