@@ -216,11 +216,12 @@ describe('scion-chat-thread read watermark', () => {
       { id: 'm2', sender: 'them@example.com', msg: 'world', createdAt: '2026-01-01T00:01:00Z' },
     ];
 
-    const messagesHistory = (): Response => ({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve({ items: MESSAGES }),
-    } as unknown as Response);
+    const messagesHistory = (): Response =>
+      ({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ items: MESSAGES }),
+      }) as unknown as Response;
 
     vi.useFakeTimers();
 
@@ -248,7 +249,8 @@ describe('scion-chat-thread read watermark', () => {
     // Flush the microtask queue so the awaited POST resolves.
     await vi.waitFor(() => {
       const readCall = apiFetch.mock.calls.find(
-        (c) => String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
+        (c) =>
+          String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
       );
       expect(readCall).toBeDefined();
     });
@@ -792,11 +794,11 @@ describe('scion-chat-thread mention message filtering', () => {
       },
       {
         threadId: CONVERSATION_KEY,
-        id: 'msg-system',
-        msg: 'system msg',
-        sender: 'system',
-        senderId: 'system',
-        type: 'system',
+        id: 'msg-chat',
+        msg: 'chat msg',
+        sender: 'them@example.com',
+        senderId: 'user-them',
+        type: 'chat',
         createdAt: new Date(now.getTime() + 1000).toISOString(),
       },
       {
