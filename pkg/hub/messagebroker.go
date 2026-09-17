@@ -598,6 +598,27 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		}
 	}
 
+	// Cross-channel DM fix: when a message arrives from a non-web channel
+	// (e.g. Discord), its ThreadID is not a DM key, so TouchDMActivity above
+	// is never called. Build the canonical DM key from the sender and
+	// recipient and touch it explicitly so the web chat's unread indicator
+	// tracks per-conversation, not per-channel.
+	if p.webChatStore != nil && storeMsg.SenderID != "" && storeMsg.RecipientID != "" &&
+		!strings.HasPrefix(storeMsg.ThreadID, "dm:") {
+		senderKind, sOK := messages.PrincipalKindFromAddress(storeMsg.Sender)
+		recipientKind, rOK := messages.PrincipalKindFromAddress(storeMsg.Recipient)
+		if sOK && rOK {
+			dmKey, err := messages.DMConversationKey(senderKind, storeMsg.SenderID, recipientKind, storeMsg.RecipientID)
+			if err == nil {
+				registerDMParticipants(ctx, p.webChatStore, dmKey)
+				if touchErr := p.webChatStore.TouchDMActivity(ctx, dmKey, storeMsg.ID); touchErr != nil {
+					p.log.Error("Failed to stamp cross-channel DM watermark",
+						"dm_key", dmKey, "thread_id", storeMsg.ThreadID, "error", touchErr)
+				}
+			}
+		}
+	}
+
 	// Publish SSE event so connected browser clients receive real-time inbox updates.
 	p.events.PublishUserMessage(ctx, storeMsg, parseAttachmentRefs(msg.Metadata))
 
