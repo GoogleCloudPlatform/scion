@@ -1921,50 +1921,6 @@ export class ScionChatThread extends LitElement {
     this.composerEditMessage = null;
   }
 
-  /** Handle reply action from a message. Sets the composer reply-to context. */
-  private handleMessageReply(
-    e: CustomEvent<{ messageId: string; senderName: string; content: string; sender?: string }>
-  ): void {
-    this.composerEditMessage = null; // Cancel any pending edit
-    this.composerReplyTo = {
-      messageId: e.detail.messageId,
-      senderName: e.detail.senderName,
-      content:
-        e.detail.content.length > 100 ? e.detail.content.slice(0, 100) + '...' : e.detail.content,
-      sender: e.detail.sender,
-    };
-  }
-
-  /** Handle edit action from a message. Sets the composer edit mode. */
-  private handleMessageEditRequest(e: CustomEvent<{ messageId: string; content: string }>): void {
-    this.composerReplyTo = null; // Cancel any pending reply
-    this.composerEditMessage = {
-      messageId: e.detail.messageId,
-      content: e.detail.content,
-    };
-  }
-
-  /** Handle delete action from a message. Shows confirmation and calls API. */
-  private async handleMessageDeleteRequest(e: CustomEvent<{ messageId: string }>): Promise<void> {
-    const { messageId } = e.detail;
-    const confirmed = window.confirm('Delete this message? This cannot be undone.');
-    if (!confirmed) return;
-
-    try {
-      const res = await apiFetch(
-        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages/${encodeURIComponent(messageId)}`,
-        { method: 'DELETE' }
-      );
-      if (!res.ok) {
-        const errMsg = await extractApiError(res, 'Failed to delete message');
-        this.sendError = errMsg;
-      }
-      // SSE event will update the message state.
-    } catch (err) {
-      this.sendError = err instanceof Error ? err.message : 'Failed to delete message';
-    }
-  }
-
   /** Handle chat-edit event from the composer. Calls PUT endpoint. */
   private async handleChatEditV2(
     e: CustomEvent<{ messageId: string; text: string }>
