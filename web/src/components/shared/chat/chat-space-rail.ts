@@ -1650,12 +1650,9 @@ export class ScionChatSpaceRail extends LitElement {
   /** Message shape returned by the conversations messages endpoint. */
   private async fetchThreadMessages(threadId: string): Promise<
     Array<{
-      sender_name?: string;
       sender?: string;
-      body?: string;
-      content?: string;
-      created_at?: string;
-      timestamp?: string;
+      msg?: string;
+      createdAt?: string;
       attachments?: string[];
     }>
   > {
@@ -1666,12 +1663,9 @@ export class ScionChatSpaceRail extends LitElement {
       if (!res.ok) return [];
       const data = (await res.json()) as { messages?: unknown[] };
       return (data.messages ?? []) as Array<{
-        sender_name?: string;
         sender?: string;
-        body?: string;
-        content?: string;
-        created_at?: string;
-        timestamp?: string;
+        msg?: string;
+        createdAt?: string;
         attachments?: string[];
       }>;
     } catch {
@@ -1683,12 +1677,9 @@ export class ScionChatSpaceRail extends LitElement {
   private formatThreadAsMarkdown(
     thread: ChatSpaceThread,
     messages: Array<{
-      sender_name?: string;
       sender?: string;
-      body?: string;
-      content?: string;
-      created_at?: string;
-      timestamp?: string;
+      msg?: string;
+      createdAt?: string;
       attachments?: string[];
     }>
   ): string {
@@ -1699,9 +1690,10 @@ export class ScionChatSpaceRail extends LitElement {
     lines.push('---');
 
     for (const msg of messages) {
-      const sender = msg.sender_name ?? msg.sender ?? 'Unknown';
-      const ts = msg.created_at ?? msg.timestamp ?? '';
-      const content = msg.body ?? msg.content ?? '';
+      const rawSender = (msg as any).sender ?? 'Unknown';
+      const sender = rawSender.replace(/^(user|agent):/, '');
+      const ts = (msg as any).createdAt ?? '';
+      const content = (msg as any).msg ?? '';
       const formattedTs = ts ? new Date(ts).toLocaleString() : '';
 
       lines.push('');
