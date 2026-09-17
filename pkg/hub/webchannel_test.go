@@ -645,4 +645,3 @@ func TestWebChannelBus_Publish_UntaggedFanout_SkipsAffinity(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, count, "untagged fan-out must not record web affinity")
 }
-
