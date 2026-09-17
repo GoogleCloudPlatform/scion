@@ -385,7 +385,7 @@ func TestCrossProjectAuth_HubToProject_Allowed(t *testing.T) {
 	projectAgent := msgAuthzAgent(t, s, "cpm-project-receiver", projectB, store.MessageModeProject, []string{ownerB.ID})
 
 	senderIdent := cpmAgentIdentity(hubAgent.ID, projectA, hubAgent.Ancestry)
-	allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, projectAgent, false)
+	allowed, reason, _ := srv.authorizeAgentMessage(ctx, senderIdent, projectAgent, false)
 	require.True(t, allowed, "hub-mode sender to project-mode receiver with inbound=any should be allowed: %s", reason)
 }
 
@@ -397,7 +397,7 @@ func TestCrossProjectAuth_ProjectToProject_Denied(t *testing.T) {
 	projectAgentB := msgAuthzAgent(t, s, "cpm-proj-receiver", projectB, store.MessageModeProject, []string{ownerB.ID})
 
 	senderIdent := cpmAgentIdentity(projectAgentA.ID, projectA, projectAgentA.Ancestry)
-	allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, projectAgentB, false)
+	allowed, _, _ := srv.authorizeAgentMessage(ctx, senderIdent, projectAgentB, false)
 	require.False(t, allowed, "project-mode to project-mode cross-project should be denied (sender must be hub)")
 }
 
@@ -412,7 +412,7 @@ func TestCrossProjectAuth_HubDisabled_Denied(t *testing.T) {
 	projectAgent := msgAuthzAgent(t, s, "cpm-proj-disabled", projectB, store.MessageModeProject, []string{ownerB.ID})
 
 	senderIdent := cpmAgentIdentity(hubAgent.ID, projectA, hubAgent.Ancestry)
-	allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, projectAgent, false)
+	allowed, _, _ := srv.authorizeAgentMessage(ctx, senderIdent, projectAgent, false)
 	require.False(t, allowed, "cross-project should be denied when hub switch is off")
 }
 
@@ -448,7 +448,7 @@ func TestCrossProjectAuth_InboundNone_Denied(t *testing.T) {
 	hubAgent := msgAuthzAgent(t, s, "cpm-hub-to-closed", tid("cpm-project-a"), store.MessageModeHub, []string{ownerA.ID})
 
 	senderIdent := cpmAgentIdentity(hubAgent.ID, tid("cpm-project-a"), hubAgent.Ancestry)
-	allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, closedAgent, false)
+	allowed, _, _ := srv.authorizeAgentMessage(ctx, senderIdent, closedAgent, false)
 	require.False(t, allowed, "cross-project to inbound=none project should be denied")
 }
 
@@ -477,7 +477,7 @@ func TestCrossProjectAuth_InboundMembers_OriginNotMember(t *testing.T) {
 	hubAgent := msgAuthzAgent(t, s, "cpm-hub-to-members", tid("cpm-project-a"), store.MessageModeHub, []string{ownerA.ID})
 
 	senderIdent := cpmAgentIdentity(hubAgent.ID, tid("cpm-project-a"), hubAgent.Ancestry)
-	allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, membersAgent, false)
+	allowed, _, _ := srv.authorizeAgentMessage(ctx, senderIdent, membersAgent, false)
 	require.False(t, allowed, "cross-project to inbound=members should deny when origin user is not a member")
 }
 
@@ -509,7 +509,7 @@ func TestCrossProjectAuth_InboundMembers_OriginIsMember(t *testing.T) {
 	hubAgent := msgAuthzAgent(t, s, "cpm-hub-to-members2", tid("cpm-project-a"), store.MessageModeHub, []string{ownerA.ID})
 
 	senderIdent := cpmAgentIdentity(hubAgent.ID, tid("cpm-project-a"), hubAgent.Ancestry)
-	allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, membersAgent, false)
+	allowed, reason, _ := srv.authorizeAgentMessage(ctx, senderIdent, membersAgent, false)
 	require.True(t, allowed, "cross-project to inbound=members should allow when origin user is a member: %s", reason)
 }
 
@@ -571,12 +571,12 @@ func TestCrossProject_OneWayPolicy(t *testing.T) {
 
 	// Forward: sender → receiver should be allowed
 	senderIdent := cpmAgentIdentity(senderAgent.ID, projectA, senderAgent.Ancestry)
-	allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, receiverAgent, false)
+	allowed, reason, _ := srv.authorizeAgentMessage(ctx, senderIdent, receiverAgent, false)
 	require.True(t, allowed, "forward send should be allowed: %s", reason)
 
 	// Reverse: receiver → sender should be denied (receiver is project-mode, not hub)
 	receiverIdent := cpmAgentIdentity(receiverAgent.ID, receiverProjectID, receiverAgent.Ancestry)
-	allowed, _ = srv.authorizeAgentMessage(ctx, receiverIdent, senderAgent, false)
+	allowed, _, _ = srv.authorizeAgentMessage(ctx, receiverIdent, senderAgent, false)
 	require.False(t, allowed, "reply should be denied because receiver is project-mode, can't send cross-project")
 }
 

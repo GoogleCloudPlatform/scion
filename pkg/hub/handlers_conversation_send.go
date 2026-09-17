@@ -148,7 +148,7 @@ func (s *Server) sendViaDirectConversation(
 	}
 
 	// Authorize the message.
-	allowed, reason := s.authorizeAgentMessage(ctx, identity, targetAgent, false)
+	allowed, reason, _ := s.authorizeAgentMessage(ctx, identity, targetAgent, false)
 	if !allowed {
 		writeError(w, http.StatusForbidden, ErrCodeMessageDenied, reason, nil)
 		return

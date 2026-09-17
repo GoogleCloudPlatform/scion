@@ -119,7 +119,7 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 	replyReason := ""
 
 	// Forward direction: caller → target
-	forwardAllowed, _ := s.authorizeAgentMessage(ctx, identity, targetAgent, false)
+	forwardAllowed, _, _ := s.authorizeAgentMessage(ctx, identity, targetAgent, false)
 	canMessage = forwardAllowed
 
 	// Reverse direction: target → caller (for reply capability).
@@ -127,7 +127,7 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 	if agentIdent, ok := identity.(AgentIdentity); ok {
 		callerAgent, err := s.store.GetAgent(ctx, agentIdent.ID())
 		if err == nil && callerAgent != nil {
-			reverseAllowed, reverseReason := s.authorizeAgentMessage(ctx,
+			reverseAllowed, reverseReason, _ := s.authorizeAgentMessage(ctx,
 				&peerAgentIdentity{agent: targetAgent}, callerAgent, false)
 			canReachViewer = reverseAllowed
 			if !reverseAllowed {
