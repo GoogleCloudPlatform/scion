@@ -336,7 +336,18 @@ func (s *Server) cascadeMessageMode(ctx context.Context, root *store.Agent, mode
 		}
 
 		// Hub-mode grant guard for each descendant that would newly receive hub.
-		if isNewHubGrant(oldMode, mode) && identity != nil {
+		if isNewHubGrant(oldMode, mode) {
+			if identity == nil {
+				slog.Warn("cascade hub grant denied: no authenticated identity",
+					"agent_id", desc.ID)
+				result.Details = append(result.Details, CascadeAgentDetail{
+					AgentID:     desc.ID,
+					AgentName:   agentDisplayName(desc),
+					CurrentMode: oldMode,
+					NewMode:     oldMode,
+				})
+				continue
+			}
 			decision := s.AuthorizeMessageModeGrant(ctx, identity, desc.ProjectID, mode)
 			if !decision.Allowed {
 				slog.Warn("cascade hub grant denied for descendant",

@@ -439,8 +439,8 @@ type ProjectStore interface {
 	// UpdateProjectMessagingPolicy updates only the cross-project inbound
 	// policy and its revision using optimistic concurrency. The
 	// expectedRevision must match the current revision; returns
-	// ErrConflict on mismatch. This is the only path that may change the
-	// policy; generic UpdateProject must NOT update these fields.
+	// ErrRevisionConflict on mismatch. This is the only path that may change
+	// the policy; generic UpdateProject must NOT update these fields.
 	UpdateProjectMessagingPolicy(ctx context.Context, projectID string, inbound string, expectedRevision int64) (*Project, error)
 }
 

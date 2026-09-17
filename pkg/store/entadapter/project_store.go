@@ -392,6 +392,9 @@ func (s *ProjectStore) UpdateProjectMessagingPolicy(ctx context.Context, project
 
 	// Validate the inbound value maps to a valid Ent enum.
 	inboundEnum := project.CrossProjectInbound(inbound)
+	if err := project.CrossProjectInboundValidator(inboundEnum); err != nil {
+		return nil, store.ErrInvalidInput
+	}
 
 	// Optimistic concurrency: update only if the revision matches.
 	n, err := s.client.Project.Update().
