@@ -862,3 +862,103 @@ func TestAuthorizeAgentMessage_IngressParity(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Hub mode compatibility tests (same-project)
+// ---------------------------------------------------------------------------
+
+func TestAuthorizeAgentMessage_HubModeCompatibility(t *testing.T) {
+	srv, s, owner, _, projectID := msgAuthzSetup(t)
+	ctx := context.Background()
+
+	hubAgent := msgAuthzAgent(t, s, "hub-agent", projectID, store.MessageModeHub,
+		[]string{owner.ID})
+	projectAgent := msgAuthzAgent(t, s, "proj-agent", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+	branchAgent := msgAuthzAgent(t, s, "branch-agent-hub", projectID, store.MessageModeBranch,
+		[]string{owner.ID})
+
+	t.Run("hub->hub same project allowed", func(t *testing.T) {
+		hub2 := msgAuthzAgent(t, s, "hub-agent-2", projectID, store.MessageModeHub,
+			[]string{owner.ID})
+		senderIdent := msgAuthzAgentIdentity(hubAgent.ID, projectID, hubAgent.Ancestry)
+		allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, hub2, false)
+		if !allowed {
+			t.Fatalf("hub->hub should be allowed: %s", reason)
+		}
+	})
+
+	t.Run("hub->project same project allowed", func(t *testing.T) {
+		senderIdent := msgAuthzAgentIdentity(hubAgent.ID, projectID, hubAgent.Ancestry)
+		allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, projectAgent, false)
+		if !allowed {
+			t.Fatalf("hub->project should be allowed: %s", reason)
+		}
+	})
+
+	t.Run("project->hub same project allowed", func(t *testing.T) {
+		senderIdent := msgAuthzAgentIdentity(projectAgent.ID, projectID, projectAgent.Ancestry)
+		allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, hubAgent, false)
+		if !allowed {
+			t.Fatalf("project->hub should be allowed: %s", reason)
+		}
+	})
+
+	t.Run("hub->branch denied (hub does not open branch)", func(t *testing.T) {
+		senderIdent := msgAuthzAgentIdentity(hubAgent.ID, projectID, hubAgent.Ancestry)
+		allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, branchAgent, false)
+		if allowed {
+			t.Fatal("hub->branch should be denied (hub does not open branch boundaries)")
+		}
+	})
+
+	t.Run("branch->hub denied", func(t *testing.T) {
+		senderIdent := msgAuthzAgentIdentity(branchAgent.ID, projectID, branchAgent.Ancestry)
+		allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, hubAgent, false)
+		if allowed {
+			t.Fatal("branch->hub should be denied")
+		}
+	})
+
+	t.Run("user->hub behaves like project", func(t *testing.T) {
+		// Grant the user agent.message permission.
+		msgAuthzGrantAgentMessage(t, s, owner.ID, projectID)
+		ownerIdent := msgAuthzUserIdentity(owner.ID)
+		allowed, reason := srv.authorizeAgentMessage(ctx, ownerIdent, hubAgent, false)
+		if !allowed {
+			t.Fatalf("user->hub should be allowed like project mode: %s", reason)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Cross-project hub agent denied (delivery not yet implemented)
+// ---------------------------------------------------------------------------
+
+func TestAuthorizeAgentMessage_CrossProjectHubDenied(t *testing.T) {
+	srv, s, owner, _, projectID := msgAuthzSetup(t)
+	ctx := context.Background()
+
+	otherProjectID := tid("msg-hub-other-project")
+	otherProject := &store.Project{
+		ID:        otherProjectID,
+		Name:      "hub-other-project",
+		Slug:      "hub-other-project",
+		OwnerID:   owner.ID,
+		CreatedBy: owner.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require_NoError(t, s.CreateProject(ctx, otherProject))
+
+	hubSender := msgAuthzAgent(t, s, "hub-sender-cross", projectID, store.MessageModeHub,
+		[]string{owner.ID})
+	hubTarget := msgAuthzAgent(t, s, "hub-target-cross", otherProjectID, store.MessageModeHub,
+		[]string{owner.ID})
+
+	senderIdent := msgAuthzAgentIdentity(hubSender.ID, projectID, hubSender.Ancestry)
+	allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, hubTarget, false)
+	if allowed {
+		t.Fatal("cross-project hub messaging should be denied (delivery not yet implemented)")
+	}
+}
