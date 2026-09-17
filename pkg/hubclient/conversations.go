@@ -39,6 +39,12 @@ type ConversationService interface {
 
 	// SetDefaultAgent sets the default agent for a conversation.
 	SetDefaultAgent(ctx context.Context, conversationID, agentID string) error
+
+	// AddParticipant adds a participant to a conversation.
+	AddParticipant(ctx context.Context, conversationID string, req *AddParticipantRequest) (*store.ConversationParticipant, error)
+
+	// Leave removes the caller from a conversation.
+	Leave(ctx context.Context, conversationID string) error
 }
 
 // conversationService is the implementation of ConversationService.
@@ -73,6 +79,12 @@ type CreateConversationRequest struct {
 type ConversationDetail struct {
 	store.Conversation
 	Participants []store.ConversationParticipant `json:"participants,omitempty"`
+}
+
+// AddParticipantRequest is the request to add a participant to a conversation.
+type AddParticipantRequest struct {
+	PrincipalKind string `json:"principalKind"`
+	PrincipalID   string `json:"principalId"`
 }
 
 // ConversationListResult is the response from listing conversations.
@@ -173,6 +185,24 @@ func (s *conversationService) Create(ctx context.Context, req *CreateConversatio
 func (s *conversationService) SetDefaultAgent(ctx context.Context, conversationID, agentID string) error {
 	body := map[string]string{"agentId": agentID}
 	resp, err := s.c.put(ctx, "/api/v1/conversations/"+url.PathEscape(conversationID)+"/default-agent", body, nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// AddParticipant adds a participant to a conversation.
+func (s *conversationService) AddParticipant(ctx context.Context, conversationID string, req *AddParticipantRequest) (*store.ConversationParticipant, error) {
+	resp, err := s.c.post(ctx, "/api/v1/conversations/"+url.PathEscape(conversationID)+"/participants", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[store.ConversationParticipant](resp)
+}
+
+// Leave removes the caller from a conversation.
+func (s *conversationService) Leave(ctx context.Context, conversationID string) error {
+	resp, err := s.c.post(ctx, "/api/v1/conversations/"+url.PathEscape(conversationID)+"/leave", nil, nil)
 	if err != nil {
 		return err
 	}

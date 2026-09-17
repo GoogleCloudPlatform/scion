@@ -49,6 +49,10 @@ func TestConversationSubcommands(t *testing.T) {
 	assert.True(t, subcommands["create"], "should have 'create' subcommand")
 	assert.True(t, subcommands["get"], "should have 'get' subcommand")
 	assert.True(t, subcommands["set-default"], "should have 'set-default' subcommand")
+	assert.True(t, subcommands["participants"], "should have 'participants' subcommand")
+	assert.True(t, subcommands["join"], "should have 'join' subcommand")
+	assert.True(t, subcommands["leave"], "should have 'leave' subcommand")
+	assert.True(t, subcommands["catch-up"], "should have 'catch-up' subcommand")
 }
 
 func TestConversationListFlags(t *testing.T) {
@@ -130,6 +134,52 @@ func TestConversationSetDefaultRequiresArgs(t *testing.T) {
 func TestConversationGetRequiresArgs(t *testing.T) {
 	err := conversationGetCmd.Args(conversationGetCmd, []string{})
 	assert.Error(t, err, "get should require a conversation ref argument")
+}
+
+func TestConversationParticipantsRequiresArgs(t *testing.T) {
+	err := conversationParticipantsCmd.Args(conversationParticipantsCmd, []string{})
+	assert.Error(t, err, "participants should require a conversation ref argument")
+}
+
+func TestConversationParticipantsFlags(t *testing.T) {
+	flags := conversationParticipantsCmd.Flags()
+
+	f := flags.Lookup("json")
+	require.NotNil(t, f, "--json flag should exist")
+	assert.Equal(t, "false", f.DefValue)
+}
+
+func TestConversationJoinRequiresArgs(t *testing.T) {
+	err := conversationJoinCmd.Args(conversationJoinCmd, []string{})
+	assert.Error(t, err, "join should require three arguments")
+
+	err = conversationJoinCmd.Args(conversationJoinCmd, []string{"ref"})
+	assert.Error(t, err, "join should require three arguments")
+
+	err = conversationJoinCmd.Args(conversationJoinCmd, []string{"ref", "agent"})
+	assert.Error(t, err, "join should require three arguments")
+}
+
+func TestConversationLeaveRequiresArgs(t *testing.T) {
+	err := conversationLeaveCmd.Args(conversationLeaveCmd, []string{})
+	assert.Error(t, err, "leave should require a conversation ref argument")
+}
+
+func TestConversationCatchUpRequiresArgs(t *testing.T) {
+	err := conversationCatchUpCmd.Args(conversationCatchUpCmd, []string{})
+	assert.Error(t, err, "catch-up should require a conversation ref argument")
+}
+
+func TestConversationCatchUpFlags(t *testing.T) {
+	flags := conversationCatchUpCmd.Flags()
+
+	f := flags.Lookup("since")
+	require.NotNil(t, f, "--since flag should exist")
+	assert.Equal(t, "1h", f.DefValue)
+
+	f = flags.Lookup("json")
+	require.NotNil(t, f, "--json flag should exist")
+	assert.Equal(t, "false", f.DefValue)
 }
 
 func TestFormatTimeAgo(t *testing.T) {

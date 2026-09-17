@@ -115,6 +115,10 @@ var agentAllowed = map[string]bool{
 	"conversation.get":            true,
 	"conversation.create":         true,
 	"conversation.set-default":    true,
+	"conversation.participants":   true,
+	"conversation.join":           true,
+	"conversation.leave":          true,
+	"conversation.catch-up":       true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.
