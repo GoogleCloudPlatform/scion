@@ -3038,6 +3038,10 @@ func TestOutboundMessage_NativeGroupConvRef(t *testing.T) {
 	// conversations — the conversation itself is the address (no thread key).
 	require.Equal(t, "conv:"+nativeConv.ID, storedMsg.Recipient,
 		"native group conversation should have conv:<id> recipient")
+	require.Equal(t, nativeConv.ID, storedMsg.RecipientID,
+		"native group conversation should have conversationID as recipientID")
+	require.Empty(t, storedMsg.ThreadID,
+		"native group conversation should have no thread ID")
 }
 
 // TestOutboundMessage_LegacyGroupConvRef verifies that sending an agent
