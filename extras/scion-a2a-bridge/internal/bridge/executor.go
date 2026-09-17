@@ -138,6 +138,10 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		e.bridge.registerActiveTask(string(taskID), aKey)
 		defer e.bridge.unregisterActiveTask(string(taskID), aKey)
 
+		// Snapshot event log cursor before sending so multi-turn follow-up calls only
+		// wait for events generated after this turn's message was dispatched.
+		initialCursor := e.bridge.latestTaskEventCursor(ctx, string(taskID))
+
 		// Send to Hub using the per-user or admin client.
 		if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 			e.log.Error("failed to send message to agent", "error", err, "task_id", taskID, "agent_id", agentCtx.AgentID)
@@ -161,7 +165,7 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			timeout = 120 * time.Second
 		}
 
-		ev, err := e.bridge.waitForTaskEvent(ctx, string(taskID), timeout)
+		ev, err := e.bridge.waitForTaskEventAfter(ctx, string(taskID), initialCursor, timeout)
 		if err != nil {
 			var failMsg *a2a.Message
 			if errors.Is(err, ErrTimeout) {
@@ -212,14 +216,33 @@ func taskEventToSDKEvent(execCtx *a2asrv.ExecutorContext, ev *state.TaskEvent) (
 			sdkParts = append(sdkParts, a2a.NewTextPart("[empty response]"))
 		}
 		statusMsg := a2a.NewMessageForTask(a2a.MessageRoleAgent, execCtx, sdkParts...)
-		return a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, statusMsg), nil
+		sdkState := a2a.TaskStateCompleted
+		if su.Status.State == TaskStateInputRequired {
+			sdkState = a2a.TaskStateInputRequired
+		}
+		return a2a.NewStatusUpdateEvent(execCtx, sdkState, statusMsg), nil
 	case "status":
 		var su TaskStatusUpdate
 		if err := json.Unmarshal(ev.Payload, &su); err != nil {
 			return nil, fmt.Errorf("unmarshal status event: %w", err)
 		}
+		var statusMsg *a2a.Message
+		if su.Status.Message != nil {
+			var sdkParts []*a2a.Part
+			for _, p := range su.Status.Message.Parts {
+				if p.Text != "" {
+					sdkParts = append(sdkParts, a2a.NewTextPart(p.Text))
+				}
+				if p.URL != "" {
+					sdkParts = append(sdkParts, &a2a.Part{Content: a2a.URL(p.URL)})
+				}
+			}
+			if len(sdkParts) > 0 {
+				statusMsg = a2a.NewMessageForTask(a2a.MessageRoleAgent, execCtx, sdkParts...)
+			}
+		}
 		sdkState := mapBridgeStateToSDK(su.Status.State)
-		return a2a.NewStatusUpdateEvent(execCtx, sdkState, nil), nil
+		return a2a.NewStatusUpdateEvent(execCtx, sdkState, statusMsg), nil
 	case "artifact":
 		var au TaskArtifactUpdate
 		if err := json.Unmarshal(ev.Payload, &au); err != nil {

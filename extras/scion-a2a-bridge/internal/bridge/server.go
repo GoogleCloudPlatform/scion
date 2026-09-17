@@ -15,10 +15,12 @@
 package bridge
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -54,8 +56,9 @@ type Server struct {
 	log        *slog.Logger
 	sdkHandler http.Handler // SDK JSON-RPC handler
 	// Legacy validators — used only when snapshot is nil (tests, backward compat).
-	uatValidator *UATValidator
-	jwtValidator *JWTValidator
+	uatValidator   *UATValidator
+	jwtValidator   *JWTValidator
+	oauthValidator *OAuthValidator
 }
 
 // NewServer creates a new A2A protocol server backed by the SDK.
@@ -74,6 +77,8 @@ func NewServer(bridge *Bridge, cfg *Config, metrics *Metrics, log *slog.Logger, 
 	case "hubJWT":
 		// JWTValidator is initialized later via SetJWTValidator once the
 		// signing key is loaded (it may come from Secret Manager).
+	case "oauth":
+		s.oauthValidator = NewOAuthValidator(cfg.Auth.OAuth)
 	}
 	return s
 }
@@ -126,17 +131,17 @@ func ValidateConfig(cfg *Config) error {
 		return fmt.Errorf("hub.user is required")
 	}
 	switch cfg.Auth.Scheme {
-	case "", "apiKey", "bearer", "none", "hubUAT", "hubJWT", "federation":
+	case "", "apiKey", "bearer", "none", "hubUAT", "hubJWT", "federation", "oauth":
 		// valid
 	default:
-		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer, none, hubUAT, hubJWT, federation)", cfg.Auth.Scheme)
+		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer, none, hubUAT, hubJWT, federation, oauth)", cfg.Auth.Scheme)
 	}
 	if (cfg.Auth.Scheme == "apiKey" || cfg.Auth.Scheme == "bearer") && cfg.Auth.APIKey == "" {
 		return fmt.Errorf("auth.api_key is required when auth.scheme is %q", cfg.Auth.Scheme)
 	}
 	// api_key is required for legacy schemes and the default (empty) scheme.
-	// hubUAT, hubJWT, and federation do not use api_key — they validate per-user/agent credentials instead.
-	if cfg.Auth.APIKey == "" && cfg.Auth.Scheme != "none" && cfg.Auth.Scheme != "hubUAT" && cfg.Auth.Scheme != "hubJWT" && cfg.Auth.Scheme != "federation" {
+	// hubUAT, hubJWT, federation, and oauth do not use api_key — they validate per-user/agent credentials instead.
+	if cfg.Auth.APIKey == "" && cfg.Auth.Scheme != "none" && cfg.Auth.Scheme != "hubUAT" && cfg.Auth.Scheme != "hubJWT" && cfg.Auth.Scheme != "federation" && cfg.Auth.Scheme != "oauth" {
 		return fmt.Errorf("auth.api_key is required (set auth.scheme: \"none\" to explicitly disable authentication)")
 	}
 	if cfg.Auth.Scheme == "hubJWT" && cfg.Hub.SigningKey == "" && cfg.Hub.SigningKeySecret == "" {
@@ -170,6 +175,8 @@ func (s *Server) WarnOnOpenAuth() {
 		s.log.Info("bridge auth: hubJWT — per-user Scion JWT authentication enabled")
 	case "federation":
 		s.log.Info("bridge auth: federation — pass-through OIDC federation authentication enabled (hub validates tokens)")
+	case "oauth":
+		s.log.Info("bridge auth: oauth — OAuth 2.0 authentication enabled")
 	}
 	if cfg.RateLimit.TrustProxy {
 		s.log.Warn("rate_limit.trust_proxy is enabled — X-Forwarded-For is trusted unconditionally, which allows clients to spoof their IP and bypass per-IP rate limits; consider adding network-level proxy restrictions")
@@ -181,6 +188,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Top-level well-known agent card (registry).
+	mux.HandleFunc("GET /.well-known/agent.json", s.handleWellKnownAgentCard)
 	mux.HandleFunc("GET /.well-known/agent-card.json", s.handleWellKnownAgentCard)
 
 	// OIDC discovery proxy — publicly exposes the hub's IAP-protected OIDC endpoints.
@@ -188,11 +196,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKSProxy)
 
 	// Per-agent routes — the SDK handler handles JSON-RPC protocol.
+	mux.HandleFunc("GET /projects/{projectSlug}/agents/{agentSlug}/.well-known/agent.json", s.handleAgentCard)
 	mux.HandleFunc("GET /projects/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
+	mux.HandleFunc("POST /projects/{projectSlug}/agents/{agentSlug}", s.handleJSONRPC)
 	mux.HandleFunc("POST /projects/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
 
 	// Legacy per-agent routes (backward compatibility for "grove" naming).
+	mux.HandleFunc("GET /groves/{projectSlug}/agents/{agentSlug}/.well-known/agent.json", s.handleAgentCard)
 	mux.HandleFunc("GET /groves/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
+	mux.HandleFunc("POST /groves/{projectSlug}/agents/{agentSlug}", s.handleJSONRPC)
 	mux.HandleFunc("POST /groves/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
 
 	// Health, readiness, and metrics.
@@ -364,7 +376,25 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	})
 	r = r.WithContext(ctx)
 
-	// Delegate to SDK JSON-RPC handler.
+	// Transparently translate A2A v0.3 JSON-RPC requests (e.g. "message/send",
+	// "message/stream" used by Gemini Enterprise / Vertex Agent Engine / Python ADK)
+	// to A2A v1.0 ("SendMessage", "SendStreamingMessage") and normalize the response
+	// back to A2A v0.3 schema.
+	if r.Body != nil {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err == nil {
+			normalizedBody, isV0 := normalizeV0RequestJSON(bodyBytes)
+			r.Body = io.NopCloser(bytes.NewReader(normalizedBody))
+			if isV0 {
+				v0Writer := newV0CompatResponseWriter(w)
+				s.sdkHandler.ServeHTTP(v0Writer, r)
+				v0Writer.finish()
+				return
+			}
+		}
+	}
+
+	// Delegate to SDK JSON-RPC handler (v1.0).
 	s.sdkHandler.ServeHTTP(w, r)
 }
 
@@ -395,17 +425,18 @@ func writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Public/operational endpoints skip auth.
-		if r.URL.Path == "/.well-known/agent-card.json" ||
+		if r.URL.Path == "/.well-known/agent.json" ||
+			r.URL.Path == "/.well-known/agent-card.json" ||
 			r.URL.Path == "/.well-known/openid-configuration" ||
 			r.URL.Path == "/.well-known/jwks.json" ||
 			r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Per-agent card: exactly /projects/{slug}/agents/{slug}/.well-known/agent-card.json
-		// or legacy /groves/{slug}/agents/{slug}/.well-known/agent-card.json
+		// Per-agent card: /projects/{slug}/agents/{slug}/.well-known/agent.json or agent-card.json
+		// or legacy /groves/{slug}/agents/{slug}/.well-known/agent.json or agent-card.json
 		segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
-		if len(segments) == 6 && (segments[0] == "projects" || segments[0] == "groves") && segments[2] == "agents" && segments[4] == ".well-known" && segments[5] == "agent-card.json" {
+		if len(segments) == 6 && (segments[0] == "projects" || segments[0] == "groves") && segments[2] == "agents" && segments[4] == ".well-known" && (segments[5] == "agent-card.json" || segments[5] == "agent.json") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -414,6 +445,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		var scheme string
 		var uatV *UATValidator
 		var jwtV *JWTValidator
+		var oauthV *OAuthValidator
 		var configAPIKey string
 
 		if s.snapshot != nil {
@@ -424,11 +456,16 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			if jwtV == nil {
 				jwtV = s.jwtValidator
 			}
+			oauthV = snap.Auth.OAuthValidator
+			if oauthV == nil {
+				oauthV = s.oauthValidator
+			}
 			configAPIKey = snap.Auth.APIKey
 		} else {
 			scheme = s.config.Auth.Scheme
 			uatV = s.uatValidator
 			jwtV = s.jwtValidator
+			oauthV = s.oauthValidator
 			configAPIKey = s.config.Auth.APIKey
 		}
 
@@ -479,6 +516,25 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 
+		case "oauth":
+			token := extractOAuthToken(r)
+			if token == "" {
+				http.Error(w, "unauthorized: missing oauth bearer token", http.StatusUnauthorized)
+				return
+			}
+			if oauthV == nil {
+				oauthV = NewOAuthValidator(s.effectiveConfig().Auth.OAuth)
+			}
+			caller, err := oauthV.Validate(r.Context(), token)
+			if err != nil {
+				s.log.Debug("OAuth token validation failed", "error", err)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			ctx := withCallerIdentity(r.Context(), caller)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+
 		case "federation":
 			// Federation pass-through: decode the JWT WITHOUT verification
 			// for bridge-local bookkeeping (task isolation, logging).
@@ -489,7 +545,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			// when the bridge passes it in the X-Scion-Federation-Token header.
 			// Bridge-level signature verification requires public OIDC discovery
 			// endpoints, which is tracked as issue #930.
-			token := extractBearerToken(r)
+			token := extractOAuthToken(r)
 			if token == "" {
 				http.Error(w, "unauthorized: missing bearer token", http.StatusUnauthorized)
 				return

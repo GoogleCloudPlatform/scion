@@ -33,6 +33,7 @@ var validAuthSchemes = map[string]bool{
 	"hubUAT":     true,
 	"hubJWT":     true,
 	"federation": true,
+	"oauth":      true,
 }
 
 // AdminOverlay holds the parsed admin-managed config values.
@@ -93,10 +94,11 @@ type ConfigSnapshot struct {
 
 // AuthValidators holds the active auth validation functions.
 type AuthValidators struct {
-	Scheme       string
-	UATValidator *UATValidator // non-nil when scheme is hubUAT
-	JWTValidator *JWTValidator // non-nil when scheme is hubJWT
-	APIKey       string        // non-empty when scheme is apiKey or bearer
+	Scheme         string
+	UATValidator   *UATValidator   // non-nil when scheme is hubUAT
+	JWTValidator   *JWTValidator   // non-nil when scheme is hubJWT
+	OAuthValidator *OAuthValidator // non-nil when scheme is oauth
+	APIKey         string          // non-empty when scheme is apiKey or bearer
 }
 
 // SnapshotHolder wraps an atomic pointer to ConfigSnapshot for lock-free reads.
@@ -329,6 +331,8 @@ func BuildAuthValidators(cfg *Config) AuthValidators {
 	case "hubJWT":
 		// JWTValidator requires a signing key which is loaded separately.
 		// It will be set via SetJWTValidator on the Server.
+	case "oauth":
+		av.OAuthValidator = NewOAuthValidator(cfg.Auth.OAuth)
 	case "apiKey", "bearer", "":
 		av.APIKey = cfg.Auth.APIKey
 	}

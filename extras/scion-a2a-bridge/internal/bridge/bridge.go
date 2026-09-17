@@ -189,6 +189,9 @@ func (b *Bridge) janitor() {
 // them to failed. Each instance runs this independently; CAS ensures exactly
 // one instance wins per task.
 func (b *Bridge) reapStaleTasks(ctx context.Context, maxAge time.Duration) {
+	if b.store == nil {
+		return
+	}
 	cutoff := time.Now().Add(-maxAge)
 	tasks, err := b.store.ListStaleActiveTasks(ctx, cutoff, 100)
 	if err != nil {
@@ -238,6 +241,9 @@ func (b *Bridge) reapStaleTasks(ctx context.Context, maxAge time.Duration) {
 // Safe to call from any goroutine; CAS in the store ensures exactly one
 // instance wins per task even under concurrent sweeps.
 func (b *Bridge) RunSweep(ctx context.Context) {
+	if b.store == nil {
+		return
+	}
 	maxAge := 2 * b.effectiveConfig().Timeouts.SendMessage
 	if maxAge < 2*time.Minute {
 		maxAge = 4 * time.Minute
@@ -319,11 +325,34 @@ func agentKey(projectID, agentSlug string) string {
 	return projectID + ":" + agentSlug
 }
 
-// waitForTaskEvent polls the event log for a response event on the given task,
-// with adaptive backoff. Returns the first response (content/message) event or
-// a final event, whichever comes first.
-func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout time.Duration) (*state.TaskEvent, error) {
+// latestTaskEventCursor returns the highest event ID currently stored for taskID.
+// Calling this before sending a new turn message ensures waitForTaskEventAfter
+// only consumes events generated after the message was sent.
+func (b *Bridge) latestTaskEventCursor(ctx context.Context, taskID string) int64 {
+	if b.store == nil {
+		return 0
+	}
 	var cursor int64
+	for {
+		events, err := b.store.ReadTaskEvents(ctx, taskID, cursor, 100)
+		if err != nil || len(events) == 0 {
+			break
+		}
+		cursor = events[len(events)-1].ID
+	}
+	return cursor
+}
+
+// waitForTaskEvent polls the event log from the beginning for a response event on the given task.
+func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout time.Duration) (*state.TaskEvent, error) {
+	return b.waitForTaskEventAfter(ctx, taskID, 0, timeout)
+}
+
+// waitForTaskEventAfter polls the event log starting after initialCursor for a response
+// event on the given task, with adaptive backoff. Returns the first response
+// (content/message) event or a final event after initialCursor, whichever comes first.
+func (b *Bridge) waitForTaskEventAfter(ctx context.Context, taskID string, initialCursor int64, timeout time.Duration) (*state.TaskEvent, error) {
+	cursor := initialCursor
 	interval := 100 * time.Millisecond
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -534,6 +563,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
 	b.registerActiveTask(taskID, aKey)
 
+	initialCursor := b.latestTaskEventCursor(ctx, taskID)
 	if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 		if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateFailed); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
@@ -551,7 +581,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 		timeout = 120 * time.Second
 	}
 
-	ev, err := b.waitForTaskEvent(ctx, taskID, timeout)
+	ev, err := b.waitForTaskEventAfter(ctx, taskID, initialCursor, timeout)
 	if err != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
@@ -632,6 +662,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		aKey := agentKey(task.ProjectID, task.AgentSlug)
 		b.registerActiveTask(taskID, aKey)
 
+		initialCursor := b.latestTaskEventCursor(ctx, taskID)
 		if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentID, scionMsg, false, false, false); err != nil {
 			b.failFollowUpTask(taskID)
 			b.unregisterActiveTask(taskID, aKey)
@@ -643,7 +674,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 			timeout = 120 * time.Second
 		}
 
-		ev, err := b.waitForTaskEvent(ctx, taskID, timeout)
+		ev, err := b.waitForTaskEventAfter(ctx, taskID, initialCursor, timeout)
 		if err != nil {
 			if errors.Is(err, ErrTimeout) {
 				b.failFollowUpTask(taskID)
@@ -1135,10 +1166,14 @@ func (b *Bridge) callerHubClient(caller *CallerIdentity) (hubclient.Client, erro
 			opts = append(opts, hubclient.WithTransportAuth(b.transportSrc, b.transportMode))
 		}
 		return hubclient.New(b.config.Hub.Endpoint, opts...)
-	case "jwt":
+	case "jwt", "oauth":
 		// Re-mint a 5-minute JWT for the caller's identity using the bridge's
-		// signing key. This is the same infrastructure used for the bridge's
-		// own admin identity.
+		// signing key. If no signing key minter is configured (e.g. static bearer
+		// auth to Hub), reuse b.hubClient while scionMsg.Sender carries the verified
+		// user identity.
+		if b.minter == nil {
+			return b.hubClient, nil
+		}
 		mintAuth := identity.NewMintingAuth(b.minter,
 			caller.UserID, caller.Email, caller.Role, 5*time.Minute)
 		opts := []hubclient.Option{hubclient.WithAuthenticator(mintAuth)}
@@ -1253,10 +1288,11 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, projectSlug, agentSlug s
 
 	jsonrpcURL := agentURL + "/jsonrpc"
 	card := map[string]interface{}{
-		"name":        name,
-		"description": description,
-		"url":         agentURL,
-		"version":     "1.0.0",
+		"name":               name,
+		"description":        description,
+		"url":                agentURL,
+		"preferredTransport": "JSONRPC",
+		"version":            "1.0.0",
 		"capabilities": map[string]bool{
 			"streaming":         true,
 			"pushNotifications": true,
@@ -1277,6 +1313,48 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, projectSlug, agentSlug s
 		card["provider"] = map[string]string{
 			"organization": cfg.Bridge.Provider.Organization,
 			"url":          cfg.Bridge.Provider.URL,
+		}
+	}
+
+	if cfg.Auth.Scheme == "oauth" {
+		authURL := cfg.Auth.OAuth.AuthorizationURL
+		if authURL == "" {
+			authURL = "https://accounts.google.com/o/oauth2/v2/auth"
+		}
+		tokenURL := cfg.Auth.OAuth.TokenURL
+		if tokenURL == "" {
+			tokenURL = "https://oauth2.googleapis.com/token"
+		}
+		scopes := cfg.Auth.OAuth.Scopes
+		if len(scopes) == 0 {
+			scopes = []string{"openid", "email", "profile"}
+		}
+		scopeMap := make(map[string]string, len(scopes))
+		for _, s := range scopes {
+			scopeMap[s] = fmt.Sprintf("Access %s", s)
+		}
+		flowObj := map[string]interface{}{
+			"authorizationCode": map[string]interface{}{
+				"authorizationUrl": authURL,
+				"tokenUrl":         tokenURL,
+				"scopes":           scopeMap,
+			},
+		}
+		card["securitySchemes"] = map[string]interface{}{
+			"oauth2": map[string]interface{}{
+				"type":        "oauth2",
+				"description": "OAuth 2.0 authentication for A2A agent access",
+				"flows":       flowObj,
+				"oauth2SecurityScheme": map[string]interface{}{
+					"description": "OAuth 2.0 authentication for A2A agent access",
+					"flows":       flowObj,
+				},
+			},
+		}
+		card["security"] = []map[string]interface{}{
+			{
+				"oauth2": scopes,
+			},
 		}
 	}
 

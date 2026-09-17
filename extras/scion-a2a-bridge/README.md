@@ -56,8 +56,11 @@ docker run -p 8443:8443 -p 9090:9090 \
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/.well-known/agent.json` | GET | Bridge registry card (Gemini Enterprise / ADK discovery) |
 | `/.well-known/agent-card.json` | GET | Bridge registry card |
+| `/projects/{project}/agents/{agent}/.well-known/agent.json` | GET | Per-agent A2A card (Gemini Enterprise / ADK discovery) |
 | `/projects/{project}/agents/{agent}/.well-known/agent-card.json` | GET | Per-agent A2A card |
+| `/projects/{project}/agents/{agent}` | POST | Direct A2A JSON-RPC endpoint (matches `agent_card.url` for Gemini Enterprise / ADK) |
 | `/projects/{project}/agents/{agent}/jsonrpc` | POST | A2A JSON-RPC endpoint |
 | `/healthz` | GET | Liveness check |
 | `/readyz` | GET | Readiness check (database, broker) |
@@ -65,15 +68,25 @@ docker run -p 8443:8443 -p 9090:9090 \
 
 ### Supported JSON-RPC methods
 
-- `message/send` — send a message (blocking or non-blocking)
-- `message/stream` — send a message with SSE streaming response
-- `tasks/get` — retrieve task status by ID
-- `tasks/list` — list tasks by context ID
-- `tasks/cancel` — cancel an in-progress task
-- `tasks/resubscribe` — re-attach an SSE stream to an active task
-- `tasks/pushNotification/set` — register a webhook for task updates
-- `tasks/pushNotification/get` — list webhooks for a task
-- `tasks/pushNotification/delete` — remove a webhook
+The bridge transparently supports **both A2A v0.3** (used by Gemini Enterprise, Vertex AI Agent Engine, and Python `a2a-sdk`) and **A2A v1.0** (`a2a-go/v2`) method names and schemas on the same endpoint:
+
+- `message/send` / `SendMessage` — send a message (blocking or non-blocking)
+- `message/stream` / `SendStreamingMessage` — send a message with SSE streaming response
+- `tasks/get` / `GetTask` — retrieve task status by ID
+- `tasks/list` / `ListTasks` — list tasks by context ID
+- `tasks/cancel` / `CancelTask` — cancel an in-progress task
+- `tasks/resubscribe` / `SubscribeToTask` — re-attach an SSE stream to an active task
+- `tasks/pushNotification/set` / `CreateTaskPushNotificationConfig` — register a webhook for task updates
+- `tasks/pushNotification/get` / `GetTaskPushNotificationConfig` — retrieve webhook config for a task
+- `tasks/pushNotification/delete` / `DeleteTaskPushNotificationConfig` — remove a webhook
+
+### Gemini Enterprise & OAuth 2.0 Plugin (`auth.scheme: "oauth"`)
+
+When `auth.scheme` is set to `"oauth"`, the bridge advertises an OAuth 2.0 `authorizationCode` flow in `securitySchemes.oauth2` and `security: [{"oauth2": scopes}]` inside each `AgentCard`. Gemini Enterprise and Vertex AI Agent Engine inspect this `AgentCard`, handle end-user OAuth consent, and forward the user's OAuth token on A2A JSON-RPC requests:
+
+1. **Header Precedence**: The bridge checks `X-Goog-Agent-User-Authorization: Bearer <token>` first (the header used by Gemini Enterprise / Vertex AI Agent Engine when `Authorization` carries the Cloud Run service account invoker ID token), falling back to `Authorization: Bearer <token>`.
+2. **Token Validation & Caching**: Access tokens are validated against `auth.oauth.userinfo_url` (defaults to `https://openidconnect.googleapis.com/v1/userinfo`, or `"jwt_decode"` for local JWT claim extraction) and cached in-memory with SHA-256 hashing and `singleflight` deduplication.
+3. **Per-User Attribution & Isolation**: The verified user identity (`user:<email>`) is stamped as the `Sender` on Hub messages and bound to the task in `ScopedTaskStore` so only the task owner can access or continue multi-turn conversations.
 
 ## TLS
 
@@ -106,7 +119,7 @@ Once installed, the bridge's admin-managed settings can be edited from the integ
 
 | Setting | Description |
 |---------|-------------|
-| **Auth scheme** | Client authentication mode: `apiKey`, `bearer`, `none`, `hubUAT`, or `hubJWT`. Select from the dropdown. |
+| **Auth scheme** | Client authentication mode: `apiKey`, `bearer`, `none`, `hubUAT`, `hubJWT`, `federation`, or `oauth`. Select from the dropdown. |
 | **API key** | Static API key for `apiKey`/`bearer` schemes. Stored in the Hub secret backend — never written to YAML files. Only shown when the auth scheme requires it. |
 | **External URL** | Public URL where A2A clients reach the bridge (e.g., `https://a2a.example.com`). Used in generated agent cards. |
 | **Rate limiting** | Enable/disable per-client rate limiting, with configurable requests-per-second and burst size. |
