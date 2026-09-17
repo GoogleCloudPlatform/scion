@@ -956,48 +956,6 @@ export class ScionChatSpaceRail extends LitElement {
     return this.getSortedSpaces().map((s) => s.projectId);
   }
 
-  /**
-   * Move a space one slot up (-1) or down (+1) in the displayed order. This is
-   * the keyboard-reachable half of reordering: drag-and-drop cannot be done
-   * without a pointer, and a rail only reorderable by mouse is not reorderable
-   * for everyone.
-   */
-  private async moveSpace(projectId: string, delta: -1 | 1): Promise<void> {
-    if (!this.canReorderSpaces()) return;
-    const order = this.currentSpaceOrder();
-    const from = order.indexOf(projectId);
-    const to = from + delta;
-    if (from === -1 || to < 0 || to >= order.length) return;
-    const next = [...order];
-    const [moved] = next.splice(from, 1);
-    next.splice(to, 0, moved);
-    await this.applySpaceOrder(next);
-  }
-
-  /**
-   * Reordering is only offered on the unfiltered list. The order that gets
-   * persisted is the global one, so "Move up" against a filtered view would
-   * swap the space with a neighbour the user cannot see — either appearing to
-   * do nothing, or quietly writing an arrangement they never chose. Reordering
-   * against the visible list instead would be worse: the same click would mean
-   * different things depending on a filter elsewhere in the rail.
-   */
-  private canReorderSpaces(): boolean {
-    return this.spaceFilter === 'all';
-  }
-
-  /**
-   * True when the reorder item should be disabled: the space is already at the
-   * given end of the displayed order, or reordering is off altogether.
-   */
-  private isSpaceAtEdge(projectId: string, edge: 'first' | 'last'): boolean {
-    if (!this.canReorderSpaces()) return true;
-    const order = this.currentSpaceOrder();
-    const index = order.indexOf(projectId);
-    if (index === -1) return true;
-    return edge === 'first' ? index === 0 : index === order.length - 1;
-  }
-
   private handleSpaceDragStart(e: DragEvent, projectId: string): void {
     this.draggingSpaceId = projectId;
     if (e.dataTransfer) {
@@ -2125,12 +2083,10 @@ export class ScionChatSpaceRail extends LitElement {
                   const value = detail?.item?.getAttribute('value');
                   if (value === 'new-thread') {
                     this.startCreateThread(space.projectId);
+                  } else if (value === 'new-group') {
+                    this.startGroupNameInput(space.projectId, {});
                   } else if (value === 'set-emoji') {
                     this.openEmojiPicker(space.projectId);
-                  } else if (value === 'move-up') {
-                    void this.moveSpace(space.projectId, -1);
-                  } else if (value === 'move-down') {
-                    void this.moveSpace(space.projectId, 1);
                   }
                 }}
               >
@@ -2138,26 +2094,13 @@ export class ScionChatSpaceRail extends LitElement {
                   <sl-icon slot="prefix" name="plus-lg"></sl-icon>
                   New thread
                 </sl-menu-item>
+                <sl-menu-item value="new-group">
+                  <sl-icon slot="prefix" name="folder-plus"></sl-icon>
+                  New thread group
+                </sl-menu-item>
                 <sl-menu-item value="set-emoji">
                   <sl-icon slot="prefix" name="emoji-smile"></sl-icon>
                   Set emoji
-                </sl-menu-item>
-                <sl-divider></sl-divider>
-                <sl-menu-item
-                  class="move-up"
-                  value="move-up"
-                  ?disabled=${this.isSpaceAtEdge(space.projectId, 'first')}
-                >
-                  <sl-icon slot="prefix" name="arrow-up"></sl-icon>
-                  Move up
-                </sl-menu-item>
-                <sl-menu-item
-                  class="move-down"
-                  value="move-down"
-                  ?disabled=${this.isSpaceAtEdge(space.projectId, 'last')}
-                >
-                  <sl-icon slot="prefix" name="arrow-down"></sl-icon>
-                  Move down
                 </sl-menu-item>
               </sl-menu>
             </sl-dropdown>
@@ -2570,13 +2513,6 @@ export class ScionChatSpaceRail extends LitElement {
                     </div>
                   `
                 : nothing}
-              <div
-                class="context-menu-item"
-                @click=${() => this.startGroupNameInput(projectId, { threadId: thread.id })}
-              >
-                <sl-icon name="folder-plus"></sl-icon>
-                New group...
-              </div>
             `
           : nothing}
         <div class="context-menu-item" @click=${() => this.handleExportThread(thread)}>
