@@ -80,6 +80,16 @@ func (Project) Fields() []ent.Field {
 			Optional(),
 		field.String("git_identity").
 			Optional(),
+
+		// Cross-project inbound messaging policy.
+		// Controls which external agents may deliver messages to this project's agents.
+		// Values: "none" (default), "members", "any".
+		field.Enum("cross_project_inbound").
+			Values("none", "members", "any").
+			Default("none"),
+		// Revision counter for optimistic concurrency on policy mutations.
+		field.Int64("cross_project_inbound_revision").
+			Default(1),
 	}
 }
 

@@ -320,6 +320,11 @@ type Project struct {
 	// Git commit attribution (used when GitHub App generates commits)
 	GitIdentity *GitIdentityConfig `json:"gitIdentity,omitempty"`
 
+	// Cross-project inbound messaging policy.
+	// Controls which external agents may deliver messages to this project's agents.
+	CrossProjectInbound         string `json:"crossProjectInbound,omitempty"`         // none, members, any
+	CrossProjectInboundRevision int64  `json:"crossProjectInboundRevision,omitempty"` // optimistic concurrency revision
+
 	// Computed fields (not stored, populated on read)
 	AgentCount        int    `json:"agentCount,omitempty"`
 	ActiveBrokerCount int    `json:"activeBrokerCount,omitempty"`
@@ -795,6 +800,24 @@ const (
 func IsValidMessageMode(mode string) bool {
 	switch mode {
 	case MessageModeNone, MessageModeLineage, MessageModeBranch, MessageModeProject, MessageModeHub:
+		return true
+	default:
+		return false
+	}
+}
+
+// CrossProjectInbound policy values define which external agents may deliver
+// messages to agents in this project. Default is "none".
+const (
+	CrossProjectInboundNone    = "none"    // Accept no external agent messages
+	CrossProjectInboundMembers = "members" // Accept only from agents whose origin user is a member
+	CrossProjectInboundAny     = "any"     // Accept from any eligible agent on this Hub
+)
+
+// IsValidCrossProjectInbound returns true if the value is a valid inbound policy.
+func IsValidCrossProjectInbound(policy string) bool {
+	switch policy {
+	case CrossProjectInboundNone, CrossProjectInboundMembers, CrossProjectInboundAny:
 		return true
 	default:
 		return false

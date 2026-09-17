@@ -46,32 +46,55 @@ func (s *Server) handleAdminMessaging(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// messagingResponse is the GET/PUT response shape for the admin messaging
-// endpoint. It exposes only the consolidated switch.
+// messagingResponse is the GET/PUT response shape for the admin messaging endpoint.
 type messagingResponse struct {
-	ConversationEnvelopeSwitch *bool `json:"conversation_envelope_switch"`
+	ConversationEnvelopeSwitch   *bool `json:"conversation_envelope_switch"`
+	CrossProjectMessagingEnabled *bool `json:"cross_project_messaging_enabled"`
+	// Revision is the settings section revision, used for CAS on security-
+	// critical flag changes.
+	Revision int64 `json:"revision"`
 }
 
-// handleGetMessaging returns the current messaging switch.
+// messagingPutRequest is the typed request for PUT /admin/messaging.
+// All fields are optional pointers; omitted = unchanged.
+type messagingPutRequest struct {
+	ConversationEnvelopeSwitch   *bool  `json:"conversation_envelope_switch,omitempty"`
+	CrossProjectMessagingEnabled *bool  `json:"cross_project_messaging_enabled,omitempty"`
+	ExpectedRevision             *int64 `json:"expected_revision,omitempty"`
+}
+
+// handleGetMessaging returns the current messaging settings.
 // Reports what enforcement sites would actually do: when OperationalSettings
-// is nil (init failed), enforcement reads `ops != nil && ops.…()` → false,
-// so the GET must report false too — not the compiled default.
+// is nil (init failed), enforcement reads false, so GET reports false.
 func (s *Server) handleGetMessaging(w http.ResponseWriter) {
-	envelopeSwitch := false // nil ops → same as enforcement: OFF
+	envelopeSwitch := false
+	crossProjectEnabled := false
+	var revision int64
 
 	if ops := s.GetOperationalSettings(); ops != nil {
 		envelopeSwitch = ops.ConversationEnvelopeSwitch()
+		crossProjectEnabled = ops.CrossProjectMessagingEnabled()
+		revision = ops.SectionRevision("messaging")
 	}
 
 	writeJSON(w, http.StatusOK, messagingResponse{
-		ConversationEnvelopeSwitch: &envelopeSwitch,
+		ConversationEnvelopeSwitch:   &envelopeSwitch,
+		CrossProjectMessagingEnabled: &crossProjectEnabled,
+		Revision:                     revision,
 	})
 }
 
-// handlePutMessaging accepts a presence-aware partial update to the messaging
-// section. An omitted field leaves the current value unchanged; only an
-// explicitly sent field updates. An explicit null resets to the compiled
-// default (ON) by deleting the section so the absent→default path runs.
+// handlePutMessaging accepts a field-preserving partial update to the
+// messaging section.
+//
+// Semantics:
+//   - Omitted field = unchanged
+//   - Explicit null = reset ONLY that field to its compiled default
+//   - Resetting conversation_envelope_switch does NOT reset cross_project_messaging_enabled
+//   - Changing cross_project_messaging_enabled requires expected_revision for CAS
+//
+// The handler merges the request with current state, preserving any
+// fields not mentioned in the request body.
 func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	ops := s.GetOperationalSettings()
 	if ops == nil {
@@ -86,44 +109,67 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var body opsettings.MessagingSettings
+	var body messagingPutRequest
 	if err := json.Unmarshal(rawBody, &body); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
 
-	// Presence-aware: detect explicit null for the reset path.
+	// Presence-aware: detect explicit null for per-field reset.
 	fp, fpErr := parseFieldPresence(rawBody)
 	if fpErr != nil {
 		slog.Warn("parseFieldPresence failed in messaging handler, falling back to omitted-semantics", "error", fpErr)
 	}
 
-	// Check for explicit-null reset: if the key was sent as null, delete the
-	// section entirely so the absent→compiled-default (ON) path runs.
-	if body.ConversationEnvelopeSwitch == nil && fp != nil && fp.has("conversation_envelope_switch") {
-		if err := ops.DeleteSection(r.Context(), "messaging"); err != nil {
-			slog.Error("PUT messaging: failed to delete section for null reset", "error", err)
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"Failed to reset messaging settings", nil)
-			return
-		}
-		// Read back the compiled default (ON).
-		result := ops.ConversationEnvelopeSwitch()
-		writeJSON(w, http.StatusOK, messagingResponse{
-			ConversationEnvelopeSwitch: &result,
-		})
-		return
-	}
+	// Build the merged messaging section from current values.
+	currentEnvelope := ops.ConversationEnvelopeSwitch()
+	currentCrossProject := ops.CrossProjectMessagingEnabled()
+	currentRevision := ops.SectionRevision("messaging")
 
-	// Build the messaging section doc from the current value.
-	current := ops.ConversationEnvelopeSwitch()
 	ms := opsettings.MessagingSettings{
-		ConversationEnvelopeSwitch: &current,
+		ConversationEnvelopeSwitch:   &currentEnvelope,
+		CrossProjectMessagingEnabled: &currentCrossProject,
 	}
 
-	// Apply the explicit value if sent.
+	// Apply per-field updates or resets.
+
+	// conversation_envelope_switch:
 	if body.ConversationEnvelopeSwitch != nil {
 		ms.ConversationEnvelopeSwitch = body.ConversationEnvelopeSwitch
+	} else if fp != nil && fp.has("conversation_envelope_switch") {
+		// Explicit null → reset to compiled default (ON).
+		defaultVal := true
+		ms.ConversationEnvelopeSwitch = &defaultVal
+	}
+
+	// cross_project_messaging_enabled:
+	if body.CrossProjectMessagingEnabled != nil {
+		// Security-critical flag: require expected_revision for CAS.
+		if body.ExpectedRevision == nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				"expected_revision is required when changing cross_project_messaging_enabled", nil)
+			return
+		}
+		if *body.ExpectedRevision != currentRevision {
+			writeError(w, http.StatusConflict, "revision_conflict",
+				"The messaging settings were modified concurrently. Please refresh and retry.", nil)
+			return
+		}
+		ms.CrossProjectMessagingEnabled = body.CrossProjectMessagingEnabled
+	} else if fp != nil && fp.has("cross_project_messaging_enabled") {
+		// Explicit null → reset to compiled default (OFF).
+		if body.ExpectedRevision == nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				"expected_revision is required when changing cross_project_messaging_enabled", nil)
+			return
+		}
+		if *body.ExpectedRevision != currentRevision {
+			writeError(w, http.StatusConflict, "revision_conflict",
+				"The messaging settings were modified concurrently. Please refresh and retry.", nil)
+			return
+		}
+		defaultVal := false
+		ms.CrossProjectMessagingEnabled = &defaultVal
 	}
 
 	doc, err := json.Marshal(ms)
@@ -149,8 +195,9 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 		updatedBy = caller.Email()
 	}
 
-	// last-writer-wins (-1) for messaging — no CAS needed for this endpoint.
-	if _, err := ops.Update(r.Context(), "messaging", doc, updatedBy, -1, "managed"); err != nil {
+	// Use CAS with the current revision to prevent concurrent overwrites.
+	casRevision := currentRevision
+	if _, err := ops.Update(r.Context(), "messaging", doc, updatedBy, casRevision, "managed"); err != nil {
 		slog.Error("Failed to update messaging settings", "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to update messaging settings", nil)
@@ -158,8 +205,12 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read back the applied state.
-	result := ops.ConversationEnvelopeSwitch()
+	resultEnvelope := ops.ConversationEnvelopeSwitch()
+	resultCrossProject := ops.CrossProjectMessagingEnabled()
+	resultRevision := ops.SectionRevision("messaging")
 	writeJSON(w, http.StatusOK, messagingResponse{
-		ConversationEnvelopeSwitch: &result,
+		ConversationEnvelopeSwitch:   &resultEnvelope,
+		CrossProjectMessagingEnabled: &resultCrossProject,
+		Revision:                     resultRevision,
 	})
 }

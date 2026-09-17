@@ -1249,6 +1249,48 @@ func (o *OperationalSettings) ConversationEnvelopeSwitch() bool {
 	return true // field omitted in doc → compiled default → ON
 }
 
+// SectionRevision returns the current revision of the named settings section.
+// Returns 0 if the section does not exist or operational settings are unavailable.
+func (o *OperationalSettings) SectionRevision(section string) int64 {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache[section]
+	if !ok {
+		return 0
+	}
+	return state.Revision
+}
+
+// CrossProjectMessagingEnabled returns whether cross-project agent messaging
+// is enabled on this Hub. Default is false (off). This is a security-critical
+// control: when disabled, no cross-project agent messages are authorized.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) CrossProjectMessagingEnabled() bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["messaging"]
+	if !ok {
+		return false // section absent → compiled default → OFF
+	}
+
+	if state.Malformed {
+		return false // unreadable → fail closed → OFF
+	}
+
+	var ms opsettings.MessagingSettings
+	if err := json.Unmarshal(state.Value, &ms); err != nil {
+		return false // parse error → fail closed → OFF
+	}
+
+	if ms.CrossProjectMessagingEnabled != nil {
+		return *ms.CrossProjectMessagingEnabled
+	}
+	return false // field omitted → compiled default → OFF
+}
+
 // applySnapshotLogLevel applies the log-level portion of the snapshot.
 // This is separated from applySnapshot because log level is a Layer-0 setting
 // (per design §3.1) and is only changed in file mode via reloadSettings.

@@ -135,6 +135,9 @@ func entProjectToStore(p *ent.Project) *store.Project {
 		sp.GitIdentity = &store.GitIdentityConfig{}
 		unmarshalRawJSON(p.GitIdentity, sp.GitIdentity)
 	}
+	// Cross-project inbound policy
+	sp.CrossProjectInbound = string(p.CrossProjectInbound)
+	sp.CrossProjectInboundRevision = p.CrossProjectInboundRevision
 	return sp
 }
 
@@ -376,6 +379,55 @@ func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) erro
 	}
 	p.Updated = updated.Updated
 	return nil
+}
+
+// UpdateProjectMessagingPolicy atomically updates the cross-project inbound
+// policy using optimistic concurrency on the revision counter. Returns the
+// updated project or ErrRevisionConflict if expectedRevision does not match.
+func (s *ProjectStore) UpdateProjectMessagingPolicy(ctx context.Context, projectID string, inbound string, expectedRevision int64) (*store.Project, error) {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate the inbound value maps to a valid Ent enum.
+	inboundEnum := project.CrossProjectInbound(inbound)
+
+	// Optimistic concurrency: update only if the revision matches.
+	n, err := s.client.Project.Update().
+		Where(
+			project.IDEQ(uid),
+			project.CrossProjectInboundRevisionEQ(expectedRevision),
+		).
+		SetCrossProjectInbound(inboundEnum).
+		SetCrossProjectInboundRevision(expectedRevision + 1).
+		Save(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if n == 0 {
+		// No rows affected — either project doesn't exist or revision mismatch.
+		// Check if the project exists to distinguish.
+		exists, existErr := s.client.Project.Query().Where(project.IDEQ(uid)).Exist(ctx)
+		if existErr != nil {
+			return nil, mapError(existErr)
+		}
+		if !exists {
+			return nil, store.ErrNotFound
+		}
+		return nil, store.ErrRevisionConflict
+	}
+
+	// Read back the updated project.
+	p, err := s.client.Project.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	sp := entProjectToStore(p)
+	if err := s.populateProjectComputed(ctx, sp, uid); err != nil {
+		return nil, err
+	}
+	return sp, nil
 }
 
 // DeleteProject removes a project by ID.

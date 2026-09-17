@@ -137,6 +137,11 @@ type HarnessConfigsSettings = map[string]config.HarnessConfigEntry
 type MessagingSettings struct {
 	ConversationEnvelopeSwitch *bool `json:"conversation_envelope_switch,omitempty"`
 
+	// CrossProjectMessagingEnabled controls whether agents may communicate
+	// across project boundaries on this Hub. Default false (off).
+	// This is a security-critical flag requiring revision/ETag concurrency.
+	CrossProjectMessagingEnabled *bool `json:"cross_project_messaging_enabled,omitempty"`
+
 	// Stale fields — kept for backward-compatible deserialization only.
 	// New code must not read or write these.
 	ConversationReadSwitch      *bool `json:"conversation_read_switch,omitempty"`
