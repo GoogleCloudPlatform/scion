@@ -5382,6 +5382,8 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async saveCrossProjectMessaging(enabled: boolean): Promise<void> {
+    const previous = this.crossProjectMessagingEnabled;
+    this.crossProjectMessagingEnabled = enabled; // optimistic
     this.crossProjectMessagingLoading = true;
     this.crossProjectMessagingError = null;
     this.crossProjectMessagingSuccess = null;
@@ -5399,6 +5401,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (res.status === 409) {
         this.crossProjectMessagingError =
           'Settings were changed by another administrator. Reloading current values.';
+        this.crossProjectMessagingEnabled = previous; // revert
         await this.loadMessagingSettings();
         return;
       }
@@ -5408,8 +5411,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           res,
           'Failed to update cross-project messaging setting'
         );
-        // Revert the switch visually
-        this.crossProjectMessagingEnabled = !enabled;
+        this.crossProjectMessagingEnabled = previous; // revert
         return;
       }
 
@@ -5424,7 +5426,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         : 'Cross-project messaging disabled.';
     } catch {
       this.crossProjectMessagingError = 'Failed to update cross-project messaging setting';
-      this.crossProjectMessagingEnabled = !enabled;
+      this.crossProjectMessagingEnabled = previous; // revert
     } finally {
       this.crossProjectMessagingLoading = false;
     }

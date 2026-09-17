@@ -962,6 +962,8 @@ export class ScionPageProjectSettings extends LitElement {
 
   private async saveMessagingPolicy(value: CrossProjectInboundPolicy): Promise<void> {
     if (!this.messagingPolicy) return;
+    const previous = this.messagingPolicy.crossProjectInbound;
+    this.messagingPolicy = { ...this.messagingPolicy, crossProjectInbound: value }; // optimistic
     this.messagingPolicySaving = true;
     this.messagingPolicyError = null;
     this.messagingPolicySuccess = null;
@@ -978,14 +980,14 @@ export class ScionPageProjectSettings extends LitElement {
         }
       );
       if (res.status === 409) {
-        const conflictMsg = 'Settings were modified by another user. Refreshing…';
+        this.messagingPolicy = { ...this.messagingPolicy, crossProjectInbound: previous }; // revert
         await this.loadMessagingPolicy();
-        this.messagingPolicyError = conflictMsg;
+        this.messagingPolicyError = 'Settings were modified by another user. Refreshing...';
         return;
       }
       if (!res.ok) {
         throw new Error(
-          await extractApiError(res, `Failed to save: HTTP ${res.status}`)
+          await extractApiError(res, 'Failed to save')
         );
       }
       this.messagingPolicy = (await res.json()) as ProjectMessagingPolicy;
@@ -993,6 +995,7 @@ export class ScionPageProjectSettings extends LitElement {
     } catch (err) {
       this.messagingPolicyError =
         err instanceof Error ? err.message : 'Failed to save policy';
+      this.messagingPolicy = { ...this.messagingPolicy, crossProjectInbound: previous }; // revert
     } finally {
       this.messagingPolicySaving = false;
     }

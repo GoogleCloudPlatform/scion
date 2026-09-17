@@ -414,10 +414,10 @@ export class ScionChatThread extends LitElement {
 
   /**
    * Cross-project: maps foreign project IDs to resolved slugs.
-   * Populated lazily when messages with senderProjectId are rendered.
-   * Not @state — updates trigger via message re-renders only.
+   * Populated in the `updated()` lifecycle when `messages` changes.
+   * Reactive so that resolved slugs trigger a re-render automatically.
    */
-  private _projectSlugCache = new Map<string, string>();
+  @state() private _projectSlugCache = new Map<string, string>();
 
   /** Set of project IDs currently being resolved to avoid duplicate fetches. */
   private _projectSlugPending = new Set<string>();
@@ -438,38 +438,54 @@ export class ScionChatThread extends LitElement {
   };
 
   /**
-   * Resolve a foreign project ID to its slug for cross-project display.
-   * Uses the viewer's own /api/v1/projects/{id} access — the server enforces
-   * visibility so hidden projects are not made browsable.
+   * Look up a resolved project slug from the cache. Called during render —
+   * no async work happens here. Resolution is handled in `updated()`.
    */
   private resolveProjectSlug(projectId: string): string {
     if (!projectId || projectId === this.projectId) return '';
-    const cached = this._projectSlugCache.get(projectId);
-    if (cached !== undefined) return cached;
+    return this._projectSlugCache.get(projectId) ?? '';
+  }
 
-    // Start async resolution if not already pending
-    if (!this._projectSlugPending.has(projectId)) {
+  /**
+   * Scan messages for foreign senderProjectId values and resolve any that
+   * are not yet cached. Called from the `updated()` lifecycle so that
+   * async fetches never run during render.
+   */
+  private resolveUnknownProjectSlugs(): void {
+    const toResolve = new Set<string>();
+    for (const msg of this.messages) {
+      const pid = msg.senderProjectId;
+      if (
+        pid &&
+        pid !== this.projectId &&
+        !this._projectSlugCache.has(pid) &&
+        !this._projectSlugPending.has(pid)
+      ) {
+        toResolve.add(pid);
+      }
+    }
+
+    for (const projectId of toResolve) {
       this._projectSlugPending.add(projectId);
       void apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}`)
         .then(async (res) => {
+          const updated = new Map(this._projectSlugCache);
           if (res.ok) {
             const data = (await res.json()) as { slug?: string; name?: string };
-            this._projectSlugCache.set(projectId, data.slug || data.name || projectId.slice(0, 8));
+            updated.set(projectId, data.slug || data.name || projectId.slice(0, 8));
           } else {
-            // Project not accessible — use truncated ID
-            this._projectSlugCache.set(projectId, projectId.slice(0, 8));
+            updated.set(projectId, projectId.slice(0, 8));
           }
           this._projectSlugPending.delete(projectId);
-          this.requestUpdate();
+          this._projectSlugCache = updated;
         })
         .catch(() => {
-          this._projectSlugCache.set(projectId, projectId.slice(0, 8));
+          const updated = new Map(this._projectSlugCache);
+          updated.set(projectId, projectId.slice(0, 8));
           this._projectSlugPending.delete(projectId);
-          this.requestUpdate();
+          this._projectSlugCache = updated;
         });
     }
-    // Return empty string while resolving (no flash of partial content)
-    return '';
   }
 
   static override styles = css`
@@ -880,6 +896,12 @@ export class ScionChatThread extends LitElement {
         this.resetV2State();
         this.loadHistory();
       }
+    }
+
+    // Resolve foreign project slugs when messages change — keeps async work
+    // out of the render phase (M1 fix).
+    if (changedProperties.has('messages')) {
+      this.resolveUnknownProjectSlugs();
     }
   }
 
