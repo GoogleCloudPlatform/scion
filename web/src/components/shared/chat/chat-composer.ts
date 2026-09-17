@@ -161,9 +161,6 @@ export class ScionChatComposer extends LitElement {
   /** Whether the right-click send context menu is visible. */
   @state() private showSendContextMenu = false;
 
-  /** Live mention override for the destination chip. */
-  @state() private liveMentionOverride = '';
-
   /** W7: Pending file uploads before send. */
   @state() private pendingFiles: UploadedAttachment[] = [];
 
@@ -361,11 +358,6 @@ export class ScionChatComposer extends LitElement {
     .destination-chip .hint {
       font-style: italic;
       opacity: 0.8;
-    }
-
-    .destination-chip .mention-override {
-      font-weight: 600;
-      color: var(--scion-warning-600, #d97706);
     }
 
     .destination-chip.clickable {
@@ -814,17 +806,6 @@ export class ScionChatComposer extends LitElement {
       `;
     }
 
-    // Thread mode with live mention override
-    if (this.liveMentionOverride) {
-      return html`
-        <div class="destination-chip">
-          <span class="arrow">&rarr;</span>
-          <span class="mention-override">@${this.liveMentionOverride}</span>
-          <span class="hint">(mention)</span>
-        </div>
-      `;
-    }
-
     // Thread mode: clickable chip to set/change default agent
     const agentMembers = this.members.filter((m) => m.kind === 'agent');
     const hasAgents = agentMembers.length > 0;
@@ -916,9 +897,6 @@ export class ScionChatComposer extends LitElement {
       this.dispatchEvent(new CustomEvent('chat-typing', { bubbles: true, composed: true }));
     }
 
-    // Update live mention override for destination chip
-    this.updateLiveMentionOverride();
-
     // Feed the autocomplete components.
     const autocomplete = this.shadowRoot?.querySelector('scion-mention-autocomplete') as
       | import('./mention-autocomplete.js').ScionMentionAutocomplete
@@ -938,34 +916,6 @@ export class ScionChatComposer extends LitElement {
       const cursorPos = this.getTextareaElement()?.selectionStart ?? this.text.length;
       slashAutocomplete.handleInput(this.text, cursorPos);
     }
-  }
-
-  /** Update live mention override based on @mentions in the text. */
-  private updateLiveMentionOverride(): void {
-    if (!this.conversationMode || this.conversationMode === 'dm') {
-      this.liveMentionOverride = '';
-      return;
-    }
-    // When no default agent is explicitly set, @-mentions should not affect the
-    // destination chip — there is nothing to "override". (#1151)
-    if (!this.defaultAgent) {
-      this.liveMentionOverride = '';
-      return;
-    }
-    // Find the first @mention in the text
-    const mentionMatch = this.text.match(/@(\S+)/);
-    if (mentionMatch) {
-      const slug = mentionMatch[1];
-      // Check if this matches a known agent
-      const matchedAgent = this.agents.find(
-        (a) => (a.slug || a.name || '').toLowerCase() === slug.toLowerCase()
-      );
-      if (matchedAgent) {
-        this.liveMentionOverride = matchedAgent.slug || matchedAgent.name || slug;
-        return;
-      }
-    }
-    this.liveMentionOverride = '';
   }
 
   private handleKeydown(e: KeyboardEvent): void {
