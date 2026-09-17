@@ -199,8 +199,8 @@ build orchestrator using `local-docker`. It builds core-base, scion-base, and
 all harness images directly on the VM.
 
 **Requirements:**
-- Approximately 15 minutes of build time
-- Approximately 10 GB of additional disk space
+- Approximately 30-45 minutes of build time
+- Approximately 30 GB of additional disk space
 - The VM must have outbound internet access (provided by Cloud NAT)
 
 When images are built locally, no `image_registry` is set in the Hub

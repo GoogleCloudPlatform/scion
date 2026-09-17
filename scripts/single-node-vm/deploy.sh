@@ -290,7 +290,7 @@ done
 
 echo "Container images:"
 echo "  1) Provide a registry path (images already pushed)"
-echo "  2) Build images locally on the VM (requires ~15 min, ~10GB disk)"
+echo "  2) Build images locally on the VM (requires 30-45 min, ~30GB disk)"
 read -rp "Select [2]: " IMAGE_CHOICE
 IMAGE_CHOICE="${IMAGE_CHOICE:-2}"
 
@@ -761,17 +761,59 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
       fi
     "
 
-  info "Building container images (this may take ~15 minutes)..."
+  info "Building container images (this may take 30-45 minutes)..."
   gcloud compute ssh "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --command="
       set -euo pipefail
       cd /home/scion/scion-source
-      sudo bash image-build/scripts/build-images.sh \
+      rm -f /home/scion/image-build.exit
+      nohup bash -c 'sudo bash image-build/scripts/build-images.sh \
         --builder local-docker \
         --target all \
-        --tag latest
+        --tag latest \
+        > /home/scion/image-build.log 2>&1; echo \$? > /home/scion/image-build.exit' &
+      echo \$! > /home/scion/image-build.pid
+      echo \"Image build started in background (PID \$(cat /home/scion/image-build.pid))\"
     "
+
+  # Poll for build completion
+  info "Waiting for image build to complete..."
+  BUILD_DONE=false
+  POLL_COUNT=0
+  MAX_POLLS=180  # 180 * 15s = 45 min max
+  while [[ "$BUILD_DONE" != "true" ]] && [[ $POLL_COUNT -lt $MAX_POLLS ]]; do
+    sleep 15
+    POLL_COUNT=$((POLL_COUNT + 1))
+    # Check if the exit code file exists (build finished)
+    BUILD_EXIT=$(gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="cat /home/scion/image-build.exit 2>/dev/null || echo running" \
+      2>/dev/null) || true
+    if [[ "$BUILD_EXIT" != "running" ]]; then
+      BUILD_DONE=true
+    else
+      # Show progress (last line of build log)
+      LAST_LINE=$(gcloud compute ssh "${INSTANCE_NAME}" \
+        --zone="${ZONE}" --project="${PROJECT_ID}" \
+        --command="tail -1 /home/scion/image-build.log 2>/dev/null || echo '(waiting...)'" \
+        2>/dev/null) || true
+      echo "  [${POLL_COUNT}] ${LAST_LINE}"
+    fi
+  done
+
+  if [[ "$BUILD_DONE" != "true" ]]; then
+    err "Image build timed out after 45 minutes."
+    echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='cat /home/scion/image-build.log'"
+    exit 1
+  fi
+
+  if [[ "$BUILD_EXIT" != "0" ]]; then
+    err "Image build failed (exit code: ${BUILD_EXIT})."
+    echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='tail -50 /home/scion/image-build.log'"
+    exit 1
+  fi
+  echo "  Image build completed successfully."
 
   info "Verifying container images..."
   gcloud compute ssh "${INSTANCE_NAME}" \
