@@ -135,11 +135,14 @@ func (b *webChannelBus) Publish(ctx context.Context, topic string, msg *messages
 		}
 	}
 
-	// Reply affinity — still needed for cross-channel reply routing.
-	if err := b.store.RecordChannel(ctx, userID, projectID, agentID, "web", time.Now().UTC()); err != nil {
-		b.log.Error("Failed to record conversation context",
-			"user_id", userID, "project_id", projectID, "agent_id", agentID, "error", err)
-		return err
+	// Reply affinity — only record "web" affinity when the message is explicitly tagged
+	// for the web channel (not during untagged fan-out across all broker spokes).
+	if msg.Channel == "web" {
+		if err := b.store.RecordChannel(ctx, userID, projectID, agentID, "web", time.Now().UTC()); err != nil {
+			b.log.Error("Failed to record conversation context",
+				"user_id", userID, "project_id", projectID, "agent_id", agentID, "error", err)
+			return err
+		}
 	}
 
 	return nil

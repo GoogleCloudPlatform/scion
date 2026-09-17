@@ -620,3 +620,29 @@ func TestTouchDMActivity_EmptyMessageID(t *testing.T) {
 	require.Equal(t, "old-msg", lastMsgID, "empty messageID should not overwrite last_message_id")
 	require.True(t, activityAt.Valid, "last_activity_at should be set")
 }
+
+func TestWebChannelBus_Publish_UntaggedFanout_SkipsAffinity(t *testing.T) {
+	store, db := newTestWebChatStore(t)
+	defer db.Close() //nolint:errcheck
+
+	bus := NewWebChannelBus(slog.Default(), store)
+
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:coder",
+		SenderID:  "agent-uuid-1",
+		Recipient: "user:alice",
+		Msg:       "Hello",
+		Type:      messages.TypeInstruction,
+		Channel:   "", // untagged fan-out — must not record web affinity
+	}
+
+	err := bus.Publish(context.Background(), "scion.project.proj1.user.user1.messages", msg)
+	require.NoError(t, err)
+
+	var count int
+	err = db.QueryRow(`SELECT COUNT(*) FROM webchat_conversation_context`).Scan(&count)
+	require.NoError(t, err)
+	require.Equal(t, 0, count, "untagged fan-out must not record web affinity")
+}
+
