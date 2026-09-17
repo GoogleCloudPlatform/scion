@@ -212,7 +212,7 @@ export type AgentPhase =
 /**
  * Message mode controlling an agent's messaging authorization scope
  */
-export type MessageMode = 'none' | 'lineage' | 'branch' | 'project';
+export type MessageMode = 'none' | 'lineage' | 'branch' | 'project' | 'hub';
 
 // ---------------------------------------------------------------------------
 // Cascade mode change types

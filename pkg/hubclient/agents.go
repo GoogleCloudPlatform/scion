@@ -194,7 +194,7 @@ type CreateAgentRequest struct {
 	AgentRole string `json:"agentRole,omitempty"`
 
 	// MessageMode specifies the initial message mode for the agent.
-	// Valid values: "none", "lineage", "branch", "project".
+	// Valid values: "none", "lineage", "branch", "project", "hub".
 	// When omitted, resolved from template, parent inheritance, or "project" default.
 	MessageMode string `json:"messageMode,omitempty"`
 

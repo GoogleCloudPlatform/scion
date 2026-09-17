@@ -88,7 +88,7 @@ type Agent struct {
 	CreatedBy   string `json:"createdBy,omitempty"`
 	OwnerID     string `json:"ownerId,omitempty"`
 	Visibility  string `json:"visibility"`  // private, team, public
-	MessageMode string `json:"messageMode"` // none, lineage, branch, project
+	MessageMode string `json:"messageMode"` // none, lineage, branch, project, hub
 
 	// Ancestry chain for transitive access control.
 	// Ordered list of ancestor IDs: [root, ..., parent].
@@ -699,7 +699,7 @@ type TemplateConfig struct {
 	HubAccess   *HubAccessConfig     `json:"hubAccess,omitempty"`
 	Secrets     []api.RequiredSecret `json:"secrets,omitempty"`
 	Telemetry   *api.TelemetryConfig `json:"telemetry,omitempty"`
-	MessageMode string               `json:"messageMode,omitempty"` // none, lineage, branch, project
+	MessageMode string               `json:"messageMode,omitempty"` // none, lineage, branch, project, hub
 }
 
 // HubAccessConfig defines what Hub API scopes an agent created from this template receives.
@@ -788,12 +788,13 @@ const (
 	MessageModeLineage = "lineage" // Ancestry users + project owners only; zero agent-to-agent edges (D4)
 	MessageModeBranch  = "branch"  // Ancestry users + project owners + direct parent/child agents (both must be branch mode)
 	MessageModeProject = "project" // Bidirectional with all agents and users in project (default; matches pre-mode behavior)
+	MessageModeHub     = "hub"     // Project messaging plus permitted agents in other projects on this Hub
 )
 
-// IsValidMessageMode returns true if mode is one of the four valid message modes.
+// IsValidMessageMode returns true if mode is one of the five valid message modes.
 func IsValidMessageMode(mode string) bool {
 	switch mode {
-	case MessageModeNone, MessageModeLineage, MessageModeBranch, MessageModeProject:
+	case MessageModeNone, MessageModeLineage, MessageModeBranch, MessageModeProject, MessageModeHub:
 		return true
 	default:
 		return false

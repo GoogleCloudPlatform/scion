@@ -70,7 +70,7 @@ func (Agent) Fields() []ent.Field {
 		field.String("visibility").
 			Default("private"),
 		field.Enum("message_mode").
-			Values("none", "lineage", "branch", "project").
+			Values("none", "lineage", "branch", "project", "hub").
 			Default("project"),
 
 		// --- Metadata (stored as JSON) ---

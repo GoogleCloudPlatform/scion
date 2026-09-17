@@ -123,8 +123,9 @@ func computeCanReachViewer(viewerIdentity Identity, targetAgent *store.Agent) bo
 	switch mode {
 	case store.MessageModeNone:
 		return false
-	case store.MessageModeProject:
-		// Project-mode agents can message any user/agent in the project.
+	case store.MessageModeProject, store.MessageModeHub:
+		// Project/hub-mode agents can message any user/agent in the project.
+		// Hub mode behaves like project for same-project sends.
 		// For user viewers, this is generally true (they are browsing the project).
 		// For agent viewers, the full check requires the viewer agent's mode — this
 		// is a simplified approximation (see design doc Section 3.2).
@@ -219,8 +220,9 @@ func countReachableUsers(targetAgent *store.Agent) int {
 			return 1
 		}
 		return 0
-	case store.MessageModeProject:
-		// Project-mode agents can reach all project members. Without a
+	case store.MessageModeProject, store.MessageModeHub:
+		// Project/hub-mode agents can reach all project members. Hub mode
+		// behaves like project for same-project sends. Without a
 		// project-member count available here, return -1 to signal "all
 		// project members" or a sentinel. The brief says simplified approach
 		// is acceptable, so return a positive indicator.

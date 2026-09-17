@@ -44,6 +44,13 @@ export interface MessageModeDisplay {
 // ---------------------------------------------------------------------------
 
 export const MESSAGE_MODE_DISPLAY: Record<MessageMode, MessageModeDisplay> = {
+  hub: {
+    icon: 'globe',
+    color: 'success',
+    label: 'Hub',
+    description:
+      'Project messaging plus permitted agents in other projects on this Hub',
+  },
   project: {
     icon: 'globe2',
     color: 'success',
@@ -75,10 +82,11 @@ export const MESSAGE_MODE_DISPLAY: Record<MessageMode, MessageModeDisplay> = {
 // ---------------------------------------------------------------------------
 
 export const MODE_SORT_ORDER: Record<MessageMode, number> = {
-  project: 0,
-  branch: 1,
-  lineage: 2,
-  none: 3,
+  hub: 0,
+  project: 1,
+  branch: 2,
+  lineage: 3,
+  none: 4,
 };
 
 // ---------------------------------------------------------------------------

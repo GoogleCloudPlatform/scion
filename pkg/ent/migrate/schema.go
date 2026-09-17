@@ -108,7 +108,7 @@ var (
 		{Name: "owner_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "delegation_enabled", Type: field.TypeBool, Default: false},
 		{Name: "visibility", Type: field.TypeString, Default: "private"},
-		{Name: "message_mode", Type: field.TypeEnum, Enums: []string{"none", "lineage", "branch", "project"}, Default: "project"},
+		{Name: "message_mode", Type: field.TypeEnum, Enums: []string{"none", "lineage", "branch", "project", "hub"}, Default: "project"},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
 		{Name: "phase", Type: field.TypeString, Nullable: true},
@@ -1259,6 +1259,14 @@ var (
 				Name:    "notification_project_id_subscriber_type_subscriber_id",
 				Unique:  false,
 				Columns: []*schema.Column{NotificationsColumns[3], NotificationsColumns[4], NotificationsColumns[5]},
+			},
+			{
+				Name:    "notification_subscriber_type_created",
+				Unique:  false,
+				Columns: []*schema.Column{NotificationsColumns[4], NotificationsColumns[10]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "dispatched = false",
+				},
 			},
 		},
 	}
