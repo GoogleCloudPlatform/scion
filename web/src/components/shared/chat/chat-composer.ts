@@ -36,9 +36,13 @@ import type { MentionAcceptDetail } from './mention-autocomplete.js';
 import type { SlashCommandDetail } from './slash-autocomplete.js';
 import './mention-autocomplete.js';
 import './slash-autocomplete.js';
+import { showToast } from '../../../utils/toast.js';
 
 /** Maximum message length in rune count. */
 const MAX_MESSAGE_LENGTH = 2000;
+
+/** Pastes exceeding this rune count are auto-converted to text attachments. */
+export const PASTE_TO_ATTACHMENT_THRESHOLD = 1000;
 
 /** Uploaded attachment info returned from the server. */
 export interface UploadedAttachment {
@@ -1164,6 +1168,25 @@ export class ScionChatComposer extends LitElement {
     if (imageFiles.length > 0) {
       e.preventDefault();
       void this.uploadFiles(imageFiles);
+      return;
+    }
+
+    // Auto-convert large text pastes to attachment (skip in edit mode —
+    // edits don't support attachments).
+    if (!this.editMessage) {
+      const pastedText = e.clipboardData?.getData('text/plain');
+      if (pastedText && countRunes(pastedText) > PASTE_TO_ATTACHMENT_THRESHOLD) {
+        // Don't convert if already at attachment limit — let text enter textarea.
+        if (this.pendingFiles.length >= 10) {
+          return;
+        }
+        e.preventDefault();
+        const blob = new Blob([pastedText], { type: 'text/plain' });
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const file = new File([blob], `pasted-text-${timestamp}.txt`, { type: 'text/plain' });
+        void this.uploadFiles([file]);
+        showToast('Large paste converted to text attachment', 'primary');
+      }
     }
   }
 
