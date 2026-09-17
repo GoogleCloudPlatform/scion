@@ -44,8 +44,8 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 
 The native web chat includes a complete suite of collaboration and developer productivity tools (Phases 0–5):
 
-#### 1. Message Action Bar
-Hovering over a message (on desktop) or long-pressing (on mobile) reveals a contextual **action bar** providing several per-message actions:
+#### 1. Message Context Menu
+Right-clicking a message (on desktop) or long-pressing (on mobile) opens a contextual **context menu** providing several per-message actions:
 - **Reply / Quote**: Quote a previous message with full backend support for reply-threading, maintaining clear context in fast-moving development discussions.
 - **Edit / Delete**: Edit or delete your own messages.
 - **Copy Permalink**: Generate a direct link to any message in the thread.
@@ -53,7 +53,9 @@ Hovering over a message (on desktop) or long-pressing (on mobile) reveals a cont
 #### 2. Advanced Organization
 - **Thread Pinning**: Pin critical threads to the top of the thread rail for easy access.
 - **Conversation Muting**: Mute busy threads or spaces to suppress notifications while keeping the discussion active.
-- **Custom Space Ordering**: Reorder your chat spaces using intuitive drag-and-drop navigation in the sidebar.
+- **Thread Drag-and-Drop Reorder**: Reorder threads within the rail by dragging and dropping them (native HTML5 drag API). Organize related threads into named **collapsible groups** that you can expand or collapse to manage long thread lists. Group membership and ordering are persisted server-side via user preferences.
+- **Space Emoji Icons**: Assign optional emoji icons to spaces, stored in project annotations, for quick visual identification in the thread rail.
+- **Layout Density**: Choose between **Dense** and **Comfortable** layout modes via the density toggle. Dense mode reduces whitespace for maximum information density; Comfortable mode provides more breathing room for extended reading.
 
 #### 3. High-Density Developer Utilities
 - **Cmd/Ctrl-K Conversation Switcher**: Trigger a keyboard-driven switcher to jump between spaces, threads, and DMs instantly without leaving your keyboard.
@@ -103,6 +105,7 @@ When writing instructions, you can easily pull other agents into the thread:
 - **Code-Fence Guard**: The mention autocomplete is smart — it automatically disables itself when typing inside Markdown code fences (e.g., ` ``` ` blocks) so code snippets don't trigger unwanted dropdowns.
 - **Mention Leak Protection**: Direct mentions are safely partitioned, resolving a previous bug where mentions would leak into the default agent tab.
 - **Fan-Out Restrictions**: For platform stability, a single message is fanned out to a maximum of **10 recipients** per `@-mention` broadcast.
+- **Bidirectional Mention Translation**: Mentions are automatically translated between the formats used by agents and the web chat. In the chat UI, mentions display as `@firstname-lastname`; when delivered to agents, they are translated to `@email` format, and vice versa. This ensures both humans and agents see the most natural identifier for their context.
 - **Composer Default-Agent Disambiguation**: When sending messages in collaborative project spaces with multiple active agents, typing a message without an explicit target or `@-mention` triggers a smart disambiguation interface. This guides the user to select which agent the message should target (or fall back to the project's configured default agent), keeping routing unambiguous and conversations clear.
 
 ### Cross-Channel Coherence
@@ -183,6 +186,41 @@ scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch
 
 - **`scion broadcast`**: Send a message to all agents in the current project, or use `--all` for a global broadcast. The `--broadcast` and `--all` flags on `scion message` have been removed; use this command instead.
 - **`scion keys`**: Send raw keystrokes to an agent's tmux terminal (e.g., `scion keys editor "ENTER"`). Useful for unblocking interactive prompts. This replaces the old `--raw` flag on `scion message`.
+
+### Conversation Management
+
+The `scion conversation` command (alias `conv`) provides a surface-agnostic interface for managing conversations — the containers for message threads that span across the web chat, external channels, and CLI. Requires Hub mode.
+
+Conversations are referenced using one of three forms:
+- `conv:<uuid>` — by conversation ID.
+- `@<agent-name>` — resolves the direct conversation with the named agent.
+- `#<thread-name>` — resolves a named group conversation.
+
+```bash
+# List your conversations
+scion conversation list
+
+# View messages in a specific conversation
+scion conversation messages @tech-lead
+
+# Create a new group conversation
+scion conversation create "sprint-planning"
+
+# Set a default agent for a conversation
+scion conversation set-default "#sprint-planning" agent-id
+
+# Catch up on recent messages (last 2 hours)
+scion conversation catch-up @tech-lead --since 2h
+
+# List participants in a conversation
+scion conversation participants "#sprint-planning"
+
+# Join or leave a conversation
+scion conversation join "#sprint-planning" user user-id
+scion conversation leave "#sprint-planning"
+```
+
+For full flag details, see the [CLI Reference](/scion/reference/cli/#scion-conversation-alias-conv).
 
 ## Discord
 
@@ -274,7 +312,7 @@ Write a unit test for the auth package.
 | **`system`** | Operational notices generated by the Hub (e.g. `delivery-failed`, `scheduler`, `port-forward`). | Treat as FYI or follow troubleshooting instructions in the notice. |
 
 :::note[Conversation Model Migration]
-The messaging system is transitioning to a conversation-based model where messages carry a `conversation_id` and are addressed to conversations rather than agents directly. During this transition, inbound messages continue to arrive with the `type` fields described above, and agents should continue to discriminate on the `type` field as documented. 
+The messaging system has transitioned to a conversation-based model where messages carry a `conversation_id` and are addressed to conversations rather than agents directly. The `scion conversation` CLI command (alias `conv`) provides full management of conversations — listing, viewing messages, creating group conversations, managing participants, and more (see [Conversation Management](#conversation-management) above). During this transition, inbound messages continue to arrive with the `type` fields described above, and agents should continue to discriminate on the `type` field as documented. 
 
 To migrate historical messages that predate the conversation model, administrators can use the `scion server backfill` command.
 

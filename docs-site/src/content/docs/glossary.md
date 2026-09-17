@@ -173,6 +173,9 @@ A seeded system or custom limit configuration that defines a quota boundary with
 
 ## Messaging
 
+### Conversation
+A surface-agnostic container for a message thread, owned by the Hub. Every exchange — whether it originates in the web chat, CLI, Discord, Telegram, or another channel — is routed through a conversation. Conversations have a kind (`direct` for 1-on-1, `group` for multi-participant) and a surface that identifies where they were created. Managed via the `scion conversation` CLI command (alias `conv`) or the Web Dashboard.
+
 ### Branch mode (message mode)
 A message mode that permits messaging from ancestry users (like lineage) plus the agent's direct parent and child agents. Project owners can pierce branch mode.
 
