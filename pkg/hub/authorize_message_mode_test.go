@@ -119,7 +119,7 @@ func TestCharacterization_ModeMatrix_AllPairs(t *testing.T) {
 			targetAgent := targetAgents[tt.target]
 			senderIdent := msgAuthzAgentIdentity(senderAgent.ID, projectID, senderAgent.Ancestry)
 
-			allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, targetAgent, false)
+			allowed, reason, _ := srv.authorizeAgentMessage(ctx, senderIdent, targetAgent, false)
 			if allowed != tt.allowed {
 				t.Fatalf("expected allowed=%v for %s, got allowed=%v (reason: %s)",
 					tt.allowed, name, allowed, reason)
@@ -162,7 +162,7 @@ func TestCharacterization_BranchParentChild(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			senderIdent := msgAuthzAgentIdentity(tt.sender.ID, projectID, tt.sender.Ancestry)
-			allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, tt.target, false)
+			allowed, reason, _ := srv.authorizeAgentMessage(ctx, senderIdent, tt.target, false)
 			if allowed != tt.allowed {
 				t.Fatalf("expected allowed=%v, got allowed=%v (reason: %s)",
 					tt.allowed, allowed, reason)
@@ -194,7 +194,7 @@ func TestCharacterization_SelfMessage(t *testing.T) {
 			agent := msgAuthzAgent(t, s, "self-"+mode, projectID, mode, []string{owner.ID})
 			selfIdent := msgAuthzAgentIdentity(agent.ID, projectID, agent.Ancestry)
 
-			allowed, reason := srv.authorizeAgentMessage(ctx, selfIdent, agent, false)
+			allowed, reason, _ := srv.authorizeAgentMessage(ctx, selfIdent, agent, false)
 			if !allowed {
 				t.Fatalf("self-message should be allowed for mode %s: %s", mode, reason)
 			}
@@ -229,7 +229,7 @@ func TestCharacterization_SystemPlaneBypass(t *testing.T) {
 			sender := msgAuthzAgent(t, s, "sys-sender-"+mode, projectID, store.MessageModeProject, []string{owner.ID})
 			senderIdent := msgAuthzAgentIdentity(sender.ID, projectID, sender.Ancestry)
 
-			allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, target, true)
+			allowed, reason, _ := srv.authorizeAgentMessage(ctx, senderIdent, target, true)
 			if !allowed {
 				t.Fatalf("system-plane should bypass mode check for %s: %s", mode, reason)
 			}
@@ -289,7 +289,7 @@ func TestCharacterization_HumanPiercing(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			allowed, reason := srv.authorizeAgentMessage(ctx, tt.sender, tt.target, false)
+			allowed, reason, _ := srv.authorizeAgentMessage(ctx, tt.sender, tt.target, false)
 			if allowed != tt.allowed {
 				t.Fatalf("expected allowed=%v, got allowed=%v (reason: %s)",
 					tt.allowed, allowed, reason)
@@ -313,14 +313,14 @@ func TestCharacterization_AgentNeverPiercesMode(t *testing.T) {
 	agentIdent := msgAuthzAgentIdentity(ownerAgent.ID, projectID, ownerAgent.Ancestry)
 
 	t.Run("owner agent cannot pierce lineage", func(t *testing.T) {
-		allowed, _ := srv.authorizeAgentMessage(ctx, agentIdent, lineageTarget, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, agentIdent, lineageTarget, false)
 		if allowed {
 			t.Fatal("owner's agent should NOT pierce lineage mode")
 		}
 	})
 
 	t.Run("owner agent cannot pierce branch", func(t *testing.T) {
-		allowed, _ := srv.authorizeAgentMessage(ctx, agentIdent, branchTarget, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, agentIdent, branchTarget, false)
 		if allowed {
 			t.Fatal("owner's agent should NOT pierce branch mode")
 		}
@@ -349,7 +349,7 @@ func TestCharacterization_FullAgentMutationAuthority(t *testing.T) {
 
 	fullIdent := msgAuthzAgentIdentity(fullAgent.ID, projectID, fullAgent.Ancestry, ScopeAgentLifecycle)
 
-	allowed, reason := srv.authorizeAgentMessage(ctx, fullIdent, target, false)
+	allowed, reason, _ := srv.authorizeAgentMessage(ctx, fullIdent, target, false)
 	if !allowed {
 		t.Fatalf("full-role agent should message same-project project-mode target: %s", reason)
 	}
@@ -396,7 +396,7 @@ func TestCharacterization_ProjectConfinement(t *testing.T) {
 					otherProjectID, targetMode, []string{owner.ID})
 
 				senderIdent := msgAuthzAgentIdentity(sender.ID, projectID, sender.Ancestry)
-				allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, target, false)
+				allowed, _, _ := srv.authorizeAgentMessage(ctx, senderIdent, target, false)
 				if allowed {
 					t.Fatalf("cross-project messaging should be denied for %s", name)
 				}
