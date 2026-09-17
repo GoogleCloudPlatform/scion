@@ -418,6 +418,9 @@ export class ScionChatThread extends LitElement {
   /** Backfill single-flight guard: another backfill was requested while one was running. */
   private _backfillPending = false;
 
+  /** The idempotency key of the currently in-flight optimistic message, if any. */
+  private _pendingIdempotencyKey: string | null = null;
+
   /** Focus/blur handlers for read tracking. */
   private _focusHandler = () => {
     this._tabFocused = true;
@@ -862,6 +865,7 @@ export class ScionChatThread extends LitElement {
     this.showUnreadDivider = false;
 
     // Clear message state
+    this._pendingIdempotencyKey = null;
     this.messageMap.clear();
     this.messages = [];
     this.nextCursor = null;
@@ -1328,8 +1332,7 @@ export class ScionChatThread extends LitElement {
       attachments?: import('./chat-message.js').AttachmentRefInfo[];
     };
     const detail = (e as CustomEvent).detail as
-      | ({ data?: ChatEventData } & ChatEventData)
-      | undefined;
+      ({ data?: ChatEventData } & ChatEventData) | undefined;
     // stateManager wraps SSE payloads as { state, data }; tolerate a flat detail too.
     const eventData: ChatEventData | undefined = detail?.data ?? detail;
     if (!eventData) {
@@ -1378,6 +1381,12 @@ export class ScionChatThread extends LitElement {
       // after mergeMessages would leave the first render without attachments.
       if (eventData.attachments && eventData.attachments.length > 0) {
         this.v2AttachmentMap.set(msg.id, eventData.attachments);
+      }
+
+      // If we have a pending optimistic message and this SSE event is from us,
+      // remove the temp-keyed optimistic entry to prevent a duplicate flash.
+      if (this._pendingIdempotencyKey && msg.senderId === this.selfUserId()) {
+        this.messageMap.delete(this._pendingIdempotencyKey);
       }
 
       this.mergeMessages([msg]);
@@ -1600,8 +1609,7 @@ export class ScionChatThread extends LitElement {
   private handleV2ReadStateEvent(e: Event): void {
     type ReadStateData = { conversationKey?: string; messageId?: string; readAt?: string };
     const detail = (e as CustomEvent).detail as
-      | ({ data?: ReadStateData } & ReadStateData)
-      | undefined;
+      ({ data?: ReadStateData } & ReadStateData) | undefined;
     const eventData: ReadStateData | undefined = detail?.data ?? detail;
     if (!eventData?.messageId) return;
     if (eventData.conversationKey !== this.conversationKey) return;
@@ -1753,6 +1761,7 @@ export class ScionChatThread extends LitElement {
       dispatchState: 'pending',
     };
     this.messageMap.set(optimisticMsg.id, optimisticMsg);
+    this._pendingIdempotencyKey = idempotencyKey;
     this.messages = Array.from(this.messageMap.values())
       .filter((m) => m.type !== 'mention')
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
@@ -1804,6 +1813,7 @@ export class ScionChatThread extends LitElement {
       if (!res.ok) {
         // Remove optimistic message on failure.
         this.messageMap.delete(idempotencyKey);
+        this._pendingIdempotencyKey = null;
         this.messages = Array.from(this.messageMap.values())
           .filter((m) => m.type !== 'mention')
           .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
@@ -1828,6 +1838,7 @@ export class ScionChatThread extends LitElement {
         const optimistic = this.messageMap.get(idempotencyKey);
         if (optimistic && resData?.id) {
           this.messageMap.delete(idempotencyKey);
+          this._pendingIdempotencyKey = null;
           // If SSE already delivered the real message, keep it as the ground truth
           // to preserve all server-enriched fields (createdAt, metadata, groupId, etc.)
           const sseVersion = this.messageMap.get(resData.id);
@@ -1841,6 +1852,7 @@ export class ScionChatThread extends LitElement {
         } else {
           // Fallback: remove if we cannot remap (should not happen).
           this.messageMap.delete(idempotencyKey);
+          this._pendingIdempotencyKey = null;
         }
         this.messages = Array.from(this.messageMap.values())
           .filter((m) => m.type !== 'mention')
@@ -1855,6 +1867,7 @@ export class ScionChatThread extends LitElement {
     } catch (err) {
       // Remove optimistic message on failure.
       this.messageMap.delete(idempotencyKey);
+      this._pendingIdempotencyKey = null;
       this.messages = Array.from(this.messageMap.values())
         .filter((m) => m.type !== 'mention')
         .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
@@ -2281,21 +2294,25 @@ export class ScionChatThread extends LitElement {
           <sl-icon name="reply"></sl-icon>
           Reply
         </div>
-        ${canEditDelete
-          ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuEdit()}>
-              <sl-icon name="pencil"></sl-icon>
-              Edit
-            </div>`
-          : nothing}
-        ${canEditDelete
-          ? html`<div
-              class="context-menu-item danger"
-              @click=${() => this.handleContextMenuDelete()}
-            >
-              <sl-icon name="trash"></sl-icon>
-              Delete
-            </div>`
-          : nothing}
+        ${
+          canEditDelete
+            ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuEdit()}>
+                <sl-icon name="pencil"></sl-icon>
+                Edit
+              </div>`
+            : nothing
+        }
+        ${
+          canEditDelete
+            ? html`<div
+                class="context-menu-item danger"
+                @click=${() => this.handleContextMenuDelete()}
+              >
+                <sl-icon name="trash"></sl-icon>
+                Delete
+              </div>`
+            : nothing
+        }
         <div class="context-menu-item" @click=${() => this.handleContextMenuCopyText()}>
           <sl-icon name="clipboard"></sl-icon>
           Copy text
@@ -2304,14 +2321,19 @@ export class ScionChatThread extends LitElement {
           <sl-icon name="link-45deg"></sl-icon>
           Copy link
         </div>
-        ${this.isSenderAgent(msg) &&
-        !this.isDM &&
-        !(msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgent)
-          ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuSetDefault()}>
-              <sl-icon name="robot"></sl-icon>
-              Make this agent thread default
-            </div>`
-          : nothing}
+        ${
+          this.isSenderAgent(msg) &&
+          !this.isDM &&
+          !(msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgent)
+            ? html`<div
+                class="context-menu-item"
+                @click=${() => this.handleContextMenuSetDefault()}
+              >
+                <sl-icon name="robot"></sl-icon>
+                Make this agent thread default
+              </div>`
+            : nothing
+        }
       </div>
     `;
   }
@@ -2860,14 +2882,16 @@ export class ScionChatThread extends LitElement {
       <div class="thread-container">
         ${this.renderContent()}
         ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
-        ${this.canSend
-          ? html`
-              <scion-chat-composer
-                .agents=${this.agents}
-                @chat-send=${this.handleChatSend}
-              ></scion-chat-composer>
-            `
-          : nothing}
+        ${
+          this.canSend
+            ? html`
+                <scion-chat-composer
+                  .agents=${this.agents}
+                  @chat-send=${this.handleChatSend}
+                ></scion-chat-composer>
+              `
+            : nothing
+        }
         ${this.renderFilePreview()}
       </div>
     `;
@@ -3007,21 +3031,25 @@ export class ScionChatThread extends LitElement {
         @click=${this.handleMessageAreaClick}
       >
         <div class="messages-list">
-          ${this.loadingOlder
-            ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
-            : nothing}
+          ${
+            this.loadingOlder
+              ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
+              : nothing
+          }
           ${this.renderMessages()}
         </div>
-        ${!this.pinnedToBottom
-          ? html`
-              <div class="jump-to-latest">
-                <button class="jump-btn" @click=${this.handleJumpToLatest}>
-                  <sl-icon name="arrow-down"></sl-icon>
-                  Jump to latest
-                </button>
-              </div>
-            `
-          : nothing}
+        ${
+          !this.pinnedToBottom
+            ? html`
+                <div class="jump-to-latest">
+                  <button class="jump-btn" @click=${this.handleJumpToLatest}>
+                    <sl-icon name="arrow-down"></sl-icon>
+                    Jump to latest
+                  </button>
+                </div>
+              `
+            : nothing
+        }
       </div>
     `;
   }
