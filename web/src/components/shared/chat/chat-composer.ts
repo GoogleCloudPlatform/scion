@@ -75,6 +75,8 @@ export interface ChatSendDetail {
   plain: boolean;
   interrupt: boolean;
   onSuccess: () => void;
+  /** Restore composer state on send failure. */
+  onError?: (errorMsg: string) => void;
   mentions: string[];
   /** W7: Attachment IDs to include with the message. */
   attachmentIds: string[];
@@ -1236,6 +1238,13 @@ export class ScionChatComposer extends LitElement {
     // W7: Collect attachment IDs from pending uploads.
     const attachmentIds = this.pendingFiles.map((f) => f.id);
 
+    // Save state for error recovery before clearing.
+    const savedText = this.text;
+    const savedRuneCount = this.runeCount;
+    const savedMentions = new Set(this.acceptedMentions);
+    const savedPendingFiles = [...this.pendingFiles];
+    const savedReplyTo = this.replyTo;
+
     // Phase-3: Build detail with optional replyToId.
     const detail: ChatSendDetail = {
       text: trimmed,
@@ -1244,15 +1253,17 @@ export class ScionChatComposer extends LitElement {
       mentions,
       attachmentIds,
       onSuccess: () => {
-        this.text = '';
-        this.runeCount = 0;
-        this.acceptedMentions.clear();
-        this.pendingFiles = [];
-        this.clearDraft();
-        // Phase-3: Clear reply context after successful send. Parent-owned,
-        // so emit rather than assign — otherwise the bar returns and the next
-        // message would carry a stale replyToId.
-        this.dispatchEvent(new CustomEvent('chat-cancel-reply', { bubbles: true, composed: true }));
+        // Input already cleared — nothing to do.
+      },
+      onError: () => {
+        // Restore composer state so the user can retry.
+        this.text = savedText;
+        this.runeCount = savedRuneCount;
+        this.acceptedMentions = savedMentions;
+        this.pendingFiles = savedPendingFiles;
+        if (savedReplyTo) {
+          this.replyTo = savedReplyTo;
+        }
         this.focusTextarea();
       },
     };
@@ -1265,6 +1276,16 @@ export class ScionChatComposer extends LitElement {
         detail.replyToContent = this.replyTo.content;
       }
     }
+
+    // Optimistic clear — input empties immediately so the user can type the
+    // next message without waiting for the network round-trip.
+    this.text = '';
+    this.runeCount = 0;
+    this.acceptedMentions.clear();
+    this.pendingFiles = [];
+    this.clearDraft();
+    this.dispatchEvent(new CustomEvent('chat-cancel-reply', { bubbles: true, composed: true }));
+    this.focusTextarea();
 
     this.dispatchEvent(
       new CustomEvent<ChatSendDetail>('chat-send', {

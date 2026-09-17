@@ -1664,8 +1664,16 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, mentions, attachmentIds, replyToId, replyToSender, replyToContent, onSuccess } =
-      e.detail;
+    const {
+      text,
+      mentions,
+      attachmentIds,
+      replyToId,
+      replyToSender,
+      replyToContent,
+      onSuccess,
+      onError,
+    } = e.detail;
     const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
     if (!hasContent || this.sending) return;
 
@@ -1679,10 +1687,32 @@ export class ScionChatThread extends LitElement {
     this.sending = true;
     this.sendError = null;
 
+    // Generate an idempotency key so duplicate sends (e.g. network retry)
+    // are collapsed server-side. Also used as the optimistic message temp ID.
+    const idempotencyKey = crypto.randomUUID();
+
+    // Optimistic insertion: show the message in the history immediately with
+    // a "Sending" indicator, before the API call returns.
+    const optimisticMsg: Message = {
+      id: idempotencyKey,
+      projectId: '',
+      sender: '',
+      senderId: this.selfUserId(),
+      recipient: '',
+      recipientId: '',
+      msg: text,
+      type: 'chat',
+      agentId: '',
+      createdAt: new Date().toISOString(),
+      dispatchState: 'pending',
+    };
+    this.messageMap.set(optimisticMsg.id, optimisticMsg);
+    this.messages = Array.from(this.messageMap.values()).sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+    this.scrollToBottomAfterRender();
+
     try {
-      // Generate an idempotency key so duplicate sends (e.g. network retry)
-      // are collapsed server-side.
-      const idempotencyKey = crypto.randomUUID();
       const body: Record<string, unknown> = {
         content: text,
         idempotency_key: idempotencyKey,
@@ -1723,7 +1753,13 @@ export class ScionChatThread extends LitElement {
       );
 
       if (!res.ok) {
+        // Remove optimistic message on failure.
+        this.messageMap.delete(idempotencyKey);
+        this.messages = Array.from(this.messageMap.values()).sort(
+          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
         this.sendError = await extractApiError(res, 'Failed to send message');
+        onError?.(this.sendError ?? 'Failed to send message');
       } else {
         // W7: Parse attachment refs from the send response.
         const resData = (await res.json().catch(() => null)) as {
@@ -1733,12 +1769,26 @@ export class ScionChatThread extends LitElement {
         if (resData?.id && resData?.attachments && resData.attachments.length > 0) {
           this.v2AttachmentMap.set(resData.id, resData.attachments);
         }
+
+        // Remove the optimistic message — backfill will deliver the real one
+        // with the server-assigned ID and dispatch state.
+        this.messageMap.delete(idempotencyKey);
+        this.messages = Array.from(this.messageMap.values()).sort(
+          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
+
         onSuccess();
-        // Backfill to pick up the message immediately
+        // Backfill to pick up the real message immediately.
         void this.backfillV2();
       }
     } catch (err) {
+      // Remove optimistic message on failure.
+      this.messageMap.delete(idempotencyKey);
+      this.messages = Array.from(this.messageMap.values()).sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      );
       this.sendError = err instanceof Error ? err.message : 'Failed to send message';
+      onError?.(this.sendError ?? 'Failed to send message');
     } finally {
       this.sending = false;
     }
@@ -2784,7 +2834,6 @@ export class ScionChatThread extends LitElement {
         ${this.canSend
           ? html`
               <scion-chat-composer
-                ?disabled=${this.sending}
                 .agents=${this.agents}
                 @chat-send=${this.handleChatSend}
               ></scion-chat-composer>
@@ -2801,7 +2850,6 @@ export class ScionChatThread extends LitElement {
         ${this.renderInteragentToggle()} ${this.renderContent()} ${this.renderTypingIndicator()}
         ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
         <scion-chat-composer
-          ?disabled=${this.sending}
           .agents=${this.agents}
           .members=${this.members}
           .defaultAgent=${this.defaultAgent}
