@@ -262,12 +262,12 @@ export class ScionChatSpaceRail extends LitElement {
     .rail-header {
       display: flex;
       align-items: center;
-      padding: 0.75rem 1rem 0.5rem;
-      font-size: var(--chat-fs-sm);
+      gap: 0.25rem;
+      padding: 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      font-size: var(--chat-fs-md);
       font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--scion-text-muted, #64748b);
+      color: var(--scion-text, #1e293b);
     }
 
     .rail-body {
@@ -1974,7 +1974,7 @@ export class ScionChatSpaceRail extends LitElement {
 
   override render() {
     return html`
-      <div class="rail-header"><span>Project Spaces</span></div>
+      <div class="rail-header"><span>Projects</span></div>
 
       ${
         this.loading
@@ -2039,29 +2039,6 @@ export class ScionChatSpaceRail extends LitElement {
             >
               Custom
             </sl-menu-item>
-            <sl-divider></sl-divider>
-            <sl-menu-label>Sort threads</sl-menu-label>
-            <sl-menu-item
-              type="checkbox"
-              value="thread-activity"
-              ?checked=${this.prefs.threadSortMode === 'activity'}
-            >
-              Recent activity
-            </sl-menu-item>
-            <sl-menu-item
-              type="checkbox"
-              value="thread-alpha"
-              ?checked=${this.prefs.threadSortMode === 'alpha'}
-            >
-              Alphabetical
-            </sl-menu-item>
-            <sl-menu-item
-              type="checkbox"
-              value="thread-custom"
-              ?checked=${this.prefs.threadSortMode === 'custom'}
-            >
-              Custom (drag to reorder)
-            </sl-menu-item>
           </sl-menu>
         </sl-dropdown>
       </div>
@@ -2097,26 +2074,6 @@ export class ScionChatSpaceRail extends LitElement {
           ? this.prefs.spaceOrder
           : this.getSortedSpaces().map((s) => s.projectId),
       });
-      return;
-    }
-
-    // Thread sort modes
-    if (value === 'thread-activity' || value === 'thread-alpha') {
-      const mode = value.replace('thread-', '') as 'activity' | 'alpha';
-      void this.savePrefs({ threadSortMode: mode });
-      return;
-    }
-    if (value === 'thread-custom') {
-      // Switching to custom: freeze current order for all visible spaces.
-      const threadOrder = { ...(this.prefs.threadOrder ?? {}) };
-      for (const space of this.spaces) {
-        if (!threadOrder[space.projectId]?.length) {
-          threadOrder[space.projectId] = this.getSortedThreads(space.projectId)
-            .filter((t) => !t.isGeneral)
-            .map((t) => t.id);
-        }
-      }
-      void this.savePrefs({ threadSortMode: 'custom', threadOrder });
     }
   }
 
