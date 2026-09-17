@@ -574,8 +574,8 @@ func TestSPACatchAll_EmbeddedDirectoryDoesNotIntercept(t *testing.T) {
 	})
 	// Override the embedded asset FS with one that has a "chat" directory.
 	ws.assets = fstest.MapFS{
-		"assets/main.js":              &fstest.MapFile{Data: []byte("// stub")},
-		"chat/somefile.txt":           &fstest.MapFile{Data: []byte("data")},
+		"assets/main.js":    &fstest.MapFile{Data: []byte("// stub")},
+		"chat/somefile.txt": &fstest.MapFile{Data: []byte("data")},
 	}
 	ws.hasAssets = ws.detectWebAssets()
 

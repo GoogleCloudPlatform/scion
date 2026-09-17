@@ -193,9 +193,9 @@ type WebServer struct {
 	maintenance    *MaintenanceState           // runtime maintenance mode state (shared with Hub)
 	demotionSafe   *atomic.Bool                // shared with Hub; nil-safe (nil = false = don't demote)
 	authzService   *AuthzService               // authorization service for SSE subject checks
-	hasAssets  bool         // cached result of asset detection
-	startTime time.Time
-	log       *slog.Logger // subsystem logger for hub.web
+	hasAssets      bool                        // cached result of asset detection
+	startTime      time.Time
+	log            *slog.Logger // subsystem logger for hub.web
 
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
@@ -1165,14 +1165,14 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			return false
 		}
-		defer f.Close()
 		// Reject directories — only serve actual files. Without this
 		// check, a request for a client-side route like /chat/space/xxx
 		// could match an embedded directory and be handed to
 		// http.FileServer, which returns a 404 or redirect instead of
 		// the SPA shell.
-		info, err := f.Stat()
-		if err != nil || info.IsDir() {
+		info, statErr := f.Stat()
+		_ = f.Close() // Close immediately — we only needed to probe existence + type.
+		if statErr != nil || info.IsDir() {
 			return false
 		}
 	} else {
@@ -1620,12 +1620,10 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				currentRole, _ := session.Values[sessKeyUserRole].(string)
 				// The stored role is the source of truth: it carries UI-granted
 				// promotions (and demotions) that the config list knows nothing
-				// about. If it can't be read we deliberately fall back to the
-				// session role, preserving the status quo rather than extending
-				// privilege: unlike a refresh token, the session cookie is not
-				// re-minted here, so a transient read failure cannot lengthen
-				// the life of a stale role.
-				storedRole := currentRole
+				// about. All lookup failures now fail closed (return early),
+				// so the only path that reaches role evaluation is the
+				// successful lookup where storedRole is set from the DB record.
+				var storedRole string
 				// A nil store must fail closed — do not trust stale cookie
 				// authority for authenticated protected routes.
 				if ws.store == nil {
