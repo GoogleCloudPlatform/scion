@@ -193,9 +193,9 @@ type WebServer struct {
 	maintenance    *MaintenanceState           // runtime maintenance mode state (shared with Hub)
 	demotionSafe   *atomic.Bool                // shared with Hub; nil-safe (nil = false = don't demote)
 	authzService   *AuthzService               // authorization service for SSE subject checks
-	hasAssets  bool         // cached result of asset detection
-	startTime time.Time
-	log       *slog.Logger // subsystem logger for hub.web
+	hasAssets      bool                        // cached result of asset detection
+	startTime      time.Time
+	log            *slog.Logger // subsystem logger for hub.web
 
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger

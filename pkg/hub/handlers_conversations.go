@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -99,6 +100,8 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Apply client-side filtering.
+	// For direct conversations, verify canonical DM key authorization to ensure
+	// stale or forged participant rows cannot grant list visibility.
 	var filtered []store.Conversation
 	for _, conv := range conversations {
 		if kindFilter != "" && conv.Kind != kindFilter {
@@ -111,6 +114,12 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 			if conv.ProjectID == nil || *conv.ProjectID != projectFilter {
 				continue
 			}
+		}
+		// For direct conversations, verify the caller is named in the canonical
+		// DM key. A stale participant row that does not match the key must not
+		// grant listing visibility.
+		if conv.Kind == "direct" && !isCanonicalDMParticipant(conv.ExternalRef, principalKind, principalID) {
+			continue
 		}
 		filtered = append(filtered, conv)
 	}
@@ -188,24 +197,50 @@ func (s *Server) handleGetConversation(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// Fetch participants once — used for both authorization and response.
+	// Authorization: for direct conversations, use canonical DM key (kind+ID).
+	// This prevents a third principal from reading a DM by adding a participant
+	// row or knowing its UUID. A matching ID with the wrong principal kind is
+	// denied. For group conversations, use participant rows.
+	if conv.Kind == "direct" {
+		if !authorizeDMRead(conv, identity.Type(), identity.ID()) {
+			Forbidden(w)
+			return
+		}
+	}
+
+	// Fetch participants — used for authorization (groups) and response.
 	participants, err := s.store.ListParticipants(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	// Authorization: caller must be a participant.
-	isParticipant := false
-	for _, p := range participants {
-		if p.PrincipalKind == identity.Type() && p.PrincipalID == identity.ID() {
-			isParticipant = true
-			break
+	// For non-direct conversations, authorize via participant rows.
+	if conv.Kind != "direct" {
+		isParticipant := false
+		for _, p := range participants {
+			if p.PrincipalKind == identity.Type() && p.PrincipalID == identity.ID() {
+				isParticipant = true
+				break
+			}
+		}
+		if !isParticipant {
+			Forbidden(w)
+			return
 		}
 	}
-	if !isParticipant {
-		Forbidden(w)
-		return
+
+	// For direct conversations, filter participants to only include canonical
+	// members (those named in the DM key). This prevents extraneous or legacy
+	// participant rows from leaking into the API response.
+	if conv.Kind == "direct" {
+		var canonical []store.ConversationParticipant
+		for _, p := range participants {
+			if isCanonicalDMParticipant(conv.ExternalRef, p.PrincipalKind, p.PrincipalID) {
+				canonical = append(canonical, p)
+			}
+		}
+		participants = canonical
 	}
 
 	writeJSON(w, http.StatusOK, conversationResponse{
@@ -228,15 +263,29 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Authorization: caller must be a participant.
-	isParticipant, err := isConversationParticipant(ctx, s.store, id, identity.Type(), identity.ID())
+	// Authorization: for direct conversations, use canonical DM key (kind+ID).
+	// For group conversations, use participant rows.
+	conv, err := s.store.GetConversation(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeErrorFromErr(w, err, "Conversation")
 		return
 	}
-	if !isParticipant {
-		Forbidden(w)
-		return
+
+	if conv.Kind == "direct" {
+		if !authorizeDMRead(conv, identity.Type(), identity.ID()) {
+			Forbidden(w)
+			return
+		}
+	} else {
+		isParticipant, partErr := isConversationParticipant(ctx, s.store, id, identity.Type(), identity.ID())
+		if partErr != nil {
+			writeErrorFromErr(w, partErr, "")
+			return
+		}
+		if !isParticipant {
+			Forbidden(w)
+			return
+		}
 	}
 
 	q := r.URL.Query()
@@ -312,8 +361,17 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 	if kind == "" {
 		kind = "group"
 	}
-	if kind != "group" && kind != "direct" {
-		BadRequest(w, "kind must be 'group' or 'direct'")
+
+	// Direct conversations must only be created through the canonical
+	// principal-pair minting path (ResolveOrCreateDMConversation). Generic
+	// create remains the group creation surface. This prevents bypassing
+	// the immutable two-party identity constraint of DMs.
+	if kind == "direct" {
+		BadRequest(w, "direct conversations cannot be created through this endpoint; use the messaging API to send a direct message")
+		return
+	}
+	if kind != "group" {
+		BadRequest(w, "kind must be 'group'")
 		return
 	}
 
@@ -399,6 +457,22 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	// Fetch the conversation first so we can reject DMs before auth checks.
+	// This ensures DMs without participant rows return 400 (BadRequest) rather
+	// than 403 (Forbidden) — the request is invalid regardless of caller.
+	conv, err := s.store.GetConversation(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "Conversation")
+		return
+	}
+
+	// Reject default-agent mutation for direct conversations. DMs have exactly
+	// two canonical participants; the default-agent concept does not apply.
+	if conv.Kind == "direct" {
+		BadRequest(w, "cannot set default agent on a direct conversation")
+		return
+	}
+
 	// Authorization: caller must be a participant.
 	isParticipant, err := isConversationParticipant(ctx, s.store, id, identity.Type(), identity.ID())
 	if err != nil {
@@ -418,13 +492,6 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 
 	if req.AgentID == "" {
 		BadRequest(w, "agentId is required")
-		return
-	}
-
-	// Fetch the conversation first so we can compare project IDs.
-	conv, err := s.store.GetConversation(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "Conversation")
 		return
 	}
 
@@ -510,24 +577,32 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// Reject participant addition for direct conversations. DM membership is
+	// immutable: it is derived from the canonical two-principal key. Adding a
+	// third principal would not grant them read access (key-based auth denies
+	// it), but the rejection must be explicit.
+	conv, err := s.store.GetConversation(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "Conversation")
+		return
+	}
+	if conv.Kind == "direct" {
+		BadRequest(w, "cannot add participants to a direct conversation")
+		return
+	}
+
 	// For agent principals, verify the agent exists and belongs to the
 	// conversation's project. Without this check, a cross-project agent
 	// could be added as a participant and read messages via ListMessages
 	// (which uses participant-based auth only, no project check).
 	if req.PrincipalKind == "agent" {
-		agent, err := s.store.GetAgent(ctx, req.PrincipalID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
+		agent, agentErr := s.store.GetAgent(ctx, req.PrincipalID)
+		if agentErr != nil {
+			if errors.Is(agentErr, store.ErrNotFound) {
 				writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
 				return
 			}
-			writeErrorFromErr(w, err, "")
-			return
-		}
-
-		conv, err := s.store.GetConversation(ctx, id)
-		if err != nil {
-			writeErrorFromErr(w, err, "Conversation")
+			writeErrorFromErr(w, agentErr, "")
 			return
 		}
 
@@ -610,4 +685,37 @@ func isConversationParticipant(ctx context.Context, st store.Store, conversation
 		}
 	}
 	return false, nil
+}
+
+// authorizeDMRead checks whether a principal may read a conversation.
+//
+// For direct conversations, authorization is derived from the canonical DM key
+// (principal kind AND ID), not from the participants table. This is strictly
+// tighter than a participant-table scan: a third principal cannot read a DM by
+// adding a participant row or knowing its UUID. A matching ID with the wrong
+// principal kind is denied.
+//
+// For group conversations, authorization uses participant rows (existing
+// behavior). Group conversations have project-level authorization enforced
+// elsewhere; participant presence authorizes listing/reading.
+func authorizeDMRead(conv *store.Conversation, principalKind, principalID string) bool {
+	if conv.Kind == "direct" {
+		return isCanonicalDMParticipant(conv.ExternalRef, principalKind, principalID)
+	}
+	// For non-direct conversations, caller must check participant rows separately.
+	// Return true here to fall through to the existing participant check.
+	return true
+}
+
+// isCanonicalDMParticipant checks whether a (kind, id) pair is named in a
+// direct conversation's canonical DM key. This is the single source of truth
+// for DM access: participant rows are listing preferences only.
+func isCanonicalDMParticipant(externalRef, principalKind, principalID string) bool {
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(externalRef)
+	if err != nil {
+		// Fail closed: unparseable key (old format, empty, corrupt) → deny.
+		return false
+	}
+	return (principalKind == kindA && principalID == idA) ||
+		(principalKind == kindB && principalID == idB)
 }
