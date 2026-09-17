@@ -775,7 +775,11 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   private async loadData(): Promise<void> {
-    this.loading = true;
+    // Only show the full-page spinner on the very first load. Subsequent
+    // reloads (e.g. SSE-triggered) update data in-place without a flash.
+    if (!this._initialLoadDone) {
+      this.loading = true;
+    }
     try {
       await Promise.all([this.loadSpaces(), this.loadPrefs()]);
     } finally {
@@ -1812,6 +1816,9 @@ export class ScionChatSpaceRail extends LitElement {
     this.newThreadName = '';
   }
 
+  /** IDs of topics created by this client — suppresses SSE-triggered reloads. */
+  _recentlyCreatedTopicIds = new Set<string>();
+
   private async submitCreateThread(projectId: string): Promise<void> {
     const threadName = this.newThreadName.trim();
     if (!threadName) {
@@ -1827,23 +1834,34 @@ export class ScionChatSpaceRail extends LitElement {
         body: JSON.stringify({ name: threadName }),
       });
       if (res.ok) {
-        const data = (await res.json().catch(() => ({}))) as {
-          id?: string;
-          thread?: { id?: string };
+        const data = (await res.json()) as Record<string, unknown>;
+        const newThread: ChatSpaceThread = {
+          id: data.id as string,
+          name: data.name as string,
+          isGeneral: false,
+          pinned: false,
+          hasUnread: false,
+          hasUnreadMention: false,
+          defaultAgent: (data.defaultAgent as string) || '',
+          lastActivityAt: (data.lastActivityAt as string) || new Date().toISOString(),
         };
-        const threadId = data.id ?? data.thread?.id;
-        await this.loadThreads(projectId);
+        // Optimistic local state update — no re-fetch needed
+        const threads = this.threadsBySpace.get(projectId) || [];
+        const newMap = new Map(this.threadsBySpace);
+        newMap.set(projectId, [...threads, newThread]);
+        this.threadsBySpace = newMap;
+        // Track this topic so the SSE reload is suppressed
+        this._recentlyCreatedTopicIds.add(newThread.id);
+        setTimeout(() => this._recentlyCreatedTopicIds.delete(newThread.id), 5000);
         // If creating in a group, move the thread into it.
-        if (targetGroupId && threadId) {
-          await this.moveThreadToGroup(threadId, targetGroupId, projectId);
-        } else if (targetGroupId) {
-          // Fallback: find the thread by name (server may use a different shape).
-          const threads = this.threadsBySpace.get(projectId) || [];
-          const created = threads.find((t) => t.name === threadName);
-          if (created) {
-            await this.moveThreadToGroup(created.id, targetGroupId, projectId);
-          }
+        if (targetGroupId && newThread.id) {
+          await this.moveThreadToGroup(newThread.id, targetGroupId, projectId);
         }
+        // Auto-select the new thread
+        this.creatingThread = '';
+        this._createThreadGroupId = null;
+        this.handleThreadClick(newThread, projectId);
+        return;
       }
     } catch {
       // Non-critical

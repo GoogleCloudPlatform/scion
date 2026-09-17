@@ -1426,7 +1426,8 @@ export class ScionPageChat extends LitElement {
   private async selectSpaceBySlug(slug: string, projectId: string): Promise<void> {
     // The rail may not have loaded yet; wait for it
     const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
-      import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail | null;
+      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+      | null;
 
     if (!rail) {
       // Rail not mounted yet — the rail-loaded handler will re-parse the route
@@ -1590,7 +1591,8 @@ export class ScionPageChat extends LitElement {
     }
 
     const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
-      import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail | null;
+      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+      | null;
     rail?.markThreadRead(key);
   }
 
@@ -1609,7 +1611,8 @@ export class ScionPageChat extends LitElement {
     this._refreshTimer = setTimeout(() => {
       this._refreshTimer = null;
       const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
-        import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail | null;
+        | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+        | null;
       if (rail) void rail.reload();
     }, 2000);
   }
@@ -1618,6 +1621,7 @@ export class ScionPageChat extends LitElement {
     const eventDetail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
     // Unwrap the notifyWithData envelope: { state, data: { action, topic: {...} } }
     const eventData = (eventDetail?.data ?? eventDetail) as Record<string, unknown> | undefined;
+    const action = eventData?.action as string | undefined;
     const topic = eventData?.topic as Record<string, unknown> | undefined;
     const topicId = (topic?.id as string) || '';
     const newDefault = (topic?.defaultAgent as string) ?? '';
@@ -1635,9 +1639,17 @@ export class ScionPageChat extends LitElement {
       return;
     }
 
-    // For other topic changes (rename, delete, etc.), reload rail
+    // Skip reload for topics this client just created — already handled
+    // optimistically by the rail's submitCreateThread.
     const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
-      import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail | null;
+      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+      | null;
+    if (action === 'created' && topicId && rail?._recentlyCreatedTopicIds?.has(topicId)) {
+      rail._recentlyCreatedTopicIds.delete(topicId);
+      return;
+    }
+
+    // For other topic changes (rename, delete, etc.), reload rail
     if (rail) void rail.reload();
   }
 
@@ -1671,7 +1683,8 @@ export class ScionPageChat extends LitElement {
 
     // Reload the space rail so the new thread appears
     const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
-      import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail | null;
+      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+      | null;
     if (rail) void rail.reload();
   }
 
@@ -2662,30 +2675,26 @@ export class ScionPageChat extends LitElement {
       <div class="thread-rail">
         <div class="rail-header"><span>Conversations</span></div>
         <div class="thread-list">
-          ${
-            this.loadingThreads
-              ? html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`
-              : this.threads.length === 0
-                ? html`<div class="loading-rail" style="font-size: var(--chat-fs-md)">
-                    No conversations yet
-                  </div>`
-                : this.threads.map((t) => this.renderThreadItem(t))
-          }
+          ${this.loadingThreads
+            ? html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`
+            : this.threads.length === 0
+              ? html`<div class="loading-rail" style="font-size: var(--chat-fs-md)">
+                  No conversations yet
+                </div>`
+              : this.threads.map((t) => this.renderThreadItem(t))}
         </div>
       </div>
 
       <div class="thread-content">
-        ${
-          this.selectedAgentId
-            ? this.renderSelectedThread()
-            : html`
-                <div class="empty-state">
-                  <sl-icon name="chat-dots"></sl-icon>
-                  <span class="title">Select a conversation</span>
-                  <span class="subtitle">Choose an agent from the left to start chatting</span>
-                </div>
-              `
-        }
+        ${this.selectedAgentId
+          ? this.renderSelectedThread()
+          : html`
+              <div class="empty-state">
+                <sl-icon name="chat-dots"></sl-icon>
+                <span class="title">Select a conversation</span>
+                <span class="subtitle">Choose an agent from the left to start chatting</span>
+              </div>
+            `}
       </div>
     `;
   }
@@ -2711,11 +2720,9 @@ export class ScionPageChat extends LitElement {
             <span>${displayName}</span>
             ${thread.hasUnread ? html`<span class="unread-dot"></span>` : nothing}
           </div>
-          ${
-            thread.lastMessage
-              ? html`<div class="thread-preview">${thread.lastMessage.msg}</div>`
-              : nothing
-          }
+          ${thread.lastMessage
+            ? html`<div class="thread-preview">${thread.lastMessage.msg}</div>`
+            : nothing}
         </div>
         ${timeStr ? html`<span class="thread-time">${timeStr}</span>` : nothing}
       </div>
@@ -2736,17 +2743,15 @@ export class ScionPageChat extends LitElement {
 
   private renderV2() {
     return html`
-      ${
-        this.v2SwitcherOpen
-          ? html`
-              <scion-chat-switcher
-                .conversations=${this.v2SwitcherConversations}
-                @switcher-select=${this.handleSwitcherSelect}
-                @switcher-close=${this.handleSwitcherClose}
-              ></scion-chat-switcher>
-            `
-          : nothing
-      }
+      ${this.v2SwitcherOpen
+        ? html`
+            <scion-chat-switcher
+              .conversations=${this.v2SwitcherConversations}
+              @switcher-select=${this.handleSwitcherSelect}
+              @switcher-close=${this.handleSwitcherClose}
+            ></scion-chat-switcher>
+          `
+        : nothing}
       <div
         class="v2-panels"
         data-panel=${this.mobilePanel}
@@ -2756,34 +2761,30 @@ export class ScionPageChat extends LitElement {
         @mention-click=${this.handleMentionClick}
       >
         <div class="v2-rail">
-          ${
-            this.v2SpaceRailLoaded
-              ? html`
-                  <scion-chat-space-rail
-                    selectedKey=${this.v2Conversation?.conversationKey || ''}
-                    @thread-select=${this.handleThreadSelect}
-                    @reset-view=${this.handleResetView}
-                  ></scion-chat-space-rail>
-                `
-              : html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`
-          }
+          ${this.v2SpaceRailLoaded
+            ? html`
+                <scion-chat-space-rail
+                  selectedKey=${this.v2Conversation?.conversationKey || ''}
+                  @thread-select=${this.handleThreadSelect}
+                  @reset-view=${this.handleResetView}
+                ></scion-chat-space-rail>
+              `
+            : html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`}
         </div>
 
         <div class="v2-content">
-          ${
-            this.v2Conversation
-              ? this.renderV2Conversation()
-              : html`
-                  <div class="empty-state">
-                    <sl-icon name="chat-dots"></sl-icon>
-                    <span class="title">Select a conversation</span>
-                    <span class="subtitle desktop-only"
-                      >Choose a thread from the left, or click a member to start a DM</span
-                    >
-                    <span class="subtitle mobile-only">Choose a thread to start chatting</span>
-                  </div>
-                `
-          }
+          ${this.v2Conversation
+            ? this.renderV2Conversation()
+            : html`
+                <div class="empty-state">
+                  <sl-icon name="chat-dots"></sl-icon>
+                  <span class="title">Select a conversation</span>
+                  <span class="subtitle desktop-only"
+                    >Choose a thread from the left, or click a member to start a DM</span
+                  >
+                  <span class="subtitle mobile-only">Choose a thread to start chatting</span>
+                </div>
+              `}
         </div>
 
         <div
@@ -2960,48 +2961,38 @@ export class ScionPageChat extends LitElement {
     return html`
       <div class="v2-thread-header">
         ${this.renderMobileBackButton()}
-        ${
-          conv.isDM
-            ? html`
-                ${
-                  conv.peerKind === 'agent' && agentProjectSlug
-                    ? html`<sl-icon
-                          name="folder"
-                          style="font-size: var(--chat-fs-base); color: var(--scion-text-muted, #64748b)"
-                        ></sl-icon>
-                        <span
-                          style="font-size: var(--chat-fs-md); color: var(--scion-text-muted, #64748b)"
-                          >${agentProjectSlug}</span
-                        >`
-                    : nothing
-                }
-                ${
-                  conv.peerKind === 'agent'
-                    ? html`<span style="font-size: var(--chat-fs-lg)">🤖</span>`
-                    : html`<sl-icon
-                        name="person"
-                        style="font-size: var(--chat-fs-lg); color: var(--scion-text-muted)"
-                      ></sl-icon>`
-                }
-                <span>${conv.peerName}</span>
-              `
-            : html`
-                ${
-                  conv.threadName
-                    ? html`<span class="hash">#</span><span>${conv.threadName}</span>`
-                    : nothing
-                }
-                ${
-                  conv.defaultAgent
-                    ? html`
-                        <sl-tooltip content="Default agent: ${conv.defaultAgent}">
-                          <span>🤖</span>
-                        </sl-tooltip>
-                      `
-                    : nothing
-                }
-              `
-        }
+        ${conv.isDM
+          ? html`
+              ${conv.peerKind === 'agent' && agentProjectSlug
+                ? html`<sl-icon
+                      name="folder"
+                      style="font-size: var(--chat-fs-base); color: var(--scion-text-muted, #64748b)"
+                    ></sl-icon>
+                    <span
+                      style="font-size: var(--chat-fs-md); color: var(--scion-text-muted, #64748b)"
+                      >${agentProjectSlug}</span
+                    >`
+                : nothing}
+              ${conv.peerKind === 'agent'
+                ? html`<span style="font-size: var(--chat-fs-lg)">🤖</span>`
+                : html`<sl-icon
+                    name="person"
+                    style="font-size: var(--chat-fs-lg); color: var(--scion-text-muted)"
+                  ></sl-icon>`}
+              <span>${conv.peerName}</span>
+            `
+          : html`
+              ${conv.threadName
+                ? html`<span class="hash">#</span><span>${conv.threadName}</span>`
+                : nothing}
+              ${conv.defaultAgent
+                ? html`
+                    <sl-tooltip content="Default agent: ${conv.defaultAgent}">
+                      <span>🤖</span>
+                    </sl-tooltip>
+                  `
+                : nothing}
+            `}
         <div
           class="header-actions"
           style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;"
@@ -3013,19 +3004,17 @@ export class ScionPageChat extends LitElement {
               @click=${() => this.toggleDensity()}
             ></sl-icon-button>
           </sl-tooltip>
-          ${
-            conv.isDM && conv.peerKind === 'agent'
-              ? html`
-                  <sl-tooltip content="Promote to thread">
-                    <sl-icon-button
-                      name="box-arrow-up-right"
-                      label="Promote to thread"
-                      @click=${() => void this.openPromoteDialog()}
-                    ></sl-icon-button>
-                  </sl-tooltip>
-                `
-              : nothing
-          }
+          ${conv.isDM && conv.peerKind === 'agent'
+            ? html`
+                <sl-tooltip content="Promote to thread">
+                  <sl-icon-button
+                    name="box-arrow-up-right"
+                    label="Promote to thread"
+                    @click=${() => void this.openPromoteDialog()}
+                  ></sl-icon-button>
+                </sl-tooltip>
+              `
+            : nothing}
           ${conv.isDM ? this.renderDMMuteButton(conv) : nothing}
           <sl-dropdown>
             <sl-tooltip content="Export conversation" slot="trigger">
@@ -3056,33 +3045,35 @@ export class ScionPageChat extends LitElement {
           ${this.renderMembersButtons()}
         </div>
       </div>
-      ${
-        this.v2SearchActive && this.v2SearchLoaded
-          ? html`
-              <scion-chat-search
-                projectId=${conv.projectId}
-                conversationKey=${conv.conversationKey}
-                conversationName=${conv.isDM ? conv.peerName : conv.threadName ? '#' + conv.threadName : ''}
-                @search-close=${this.handleSearchClose}
-                @search-navigate=${this.handleSearchNavigate}
-              ></scion-chat-search>
-            `
-          : html`
-              <scion-chat-thread
-                conversationKey=${conv.conversationKey}
-                projectId=${conv.projectId}
-                threadName=${conv.threadName}
-                .defaultAgent=${conv.defaultAgent}
-                ?isDM=${conv.isDM}
-                peerName=${conv.peerName}
-                currentUserId=${this.pageData?.user?.id || ''}
-                ?canSend=${true}
-                .members=${this.v2Members}
-                .agents=${this.getAgentsFromMembers()}
-                @default-agent-changed=${this.handleDefaultAgentChanged}
-              ></scion-chat-thread>
-            `
-      }
+      ${this.v2SearchActive && this.v2SearchLoaded
+        ? html`
+            <scion-chat-search
+              projectId=${conv.projectId}
+              conversationKey=${conv.conversationKey}
+              conversationName=${conv.isDM
+                ? conv.peerName
+                : conv.threadName
+                  ? '#' + conv.threadName
+                  : ''}
+              @search-close=${this.handleSearchClose}
+              @search-navigate=${this.handleSearchNavigate}
+            ></scion-chat-search>
+          `
+        : html`
+            <scion-chat-thread
+              conversationKey=${conv.conversationKey}
+              projectId=${conv.projectId}
+              threadName=${conv.threadName}
+              .defaultAgent=${conv.defaultAgent}
+              ?isDM=${conv.isDM}
+              peerName=${conv.peerName}
+              currentUserId=${this.pageData?.user?.id || ''}
+              ?canSend=${true}
+              .members=${this.v2Members}
+              .agents=${this.getAgentsFromMembers()}
+              @default-agent-changed=${this.handleDefaultAgentChanged}
+            ></scion-chat-thread>
+          `}
       ${this.renderPromoteDialog()}
     `;
   }
@@ -3242,7 +3233,8 @@ export class ScionPageChat extends LitElement {
 
     // Reload the space rail so the new thread appears
     const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
-      import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail | null;
+      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+      | null;
     if (rail) void rail.reload();
   }
 
@@ -3272,7 +3264,8 @@ export class ScionPageChat extends LitElement {
     // Focus the search input after render.
     requestAnimationFrame(() => {
       const search = this.shadowRoot?.querySelector('scion-chat-search') as
-        import('../shared/chat/chat-search.js').ScionChatSearch | null;
+        | import('../shared/chat/chat-search.js').ScionChatSearch
+        | null;
       search?.open();
     });
   }
@@ -3316,7 +3309,8 @@ export class ScionPageChat extends LitElement {
       // Same conversation: scroll directly to the message.
       void this.updateComplete.then(() => {
         const thread = this.shadowRoot?.querySelector('scion-chat-thread') as
-          import('../shared/chat/chat-thread.js').ScionChatThread | null;
+          | import('../shared/chat/chat-thread.js').ScionChatThread
+          | null;
         thread?.scrollToMessageById(detail.messageId);
       });
     }
@@ -3363,7 +3357,8 @@ export class ScionPageChat extends LitElement {
   /** Get a reference to the active scion-chat-thread component. */
   private get chatThread(): import('../shared/chat/chat-thread.js').ScionChatThread | null {
     return this.shadowRoot?.querySelector('scion-chat-thread') as
-      import('../shared/chat/chat-thread.js').ScionChatThread | null;
+      | import('../shared/chat/chat-thread.js').ScionChatThread
+      | null;
   }
 
   /** Download the current conversation as Markdown. */
