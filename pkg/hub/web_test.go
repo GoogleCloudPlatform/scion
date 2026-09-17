@@ -292,8 +292,18 @@ func TestSPACatchAll(t *testing.T) {
 	// Use dev-auth so all routes are accessible
 	ws := newDevAuthWebServer(t)
 
-	// Various SPA routes should all return the SPA shell
-	paths := []string{"/", "/projects", "/agents", "/projects/abc123", "/settings", "/not-a-real-page"}
+	// Various SPA routes should all return the SPA shell.
+	// Chat routes are included to verify that multi-segment client-side
+	// paths survive a browser refresh (SPA routing fallback).
+	paths := []string{
+		"/", "/projects", "/agents", "/projects/abc123", "/settings", "/not-a-real-page",
+		"/chat",
+		"/chat/my-project",
+		"/chat/chat-grove/649788a3-322a-45d5-9972-c7e66b2ada30",
+		"/chat/space/project-id",
+		"/chat/space/project-id/thread/topic-id",
+		"/chat/dm/dm-key",
+	}
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest("GET", path, nil)
@@ -552,6 +562,36 @@ func TestRootLevelStaticFile_NonexistentFallsToSPA(t *testing.T) {
 	ct := resp.Header.Get("Content-Type")
 	if !strings.Contains(ct, "text/html") {
 		t.Errorf("non-existent root file should fall through to SPA shell (text/html), got Content-Type %q", ct)
+	}
+}
+
+func TestSPACatchAll_EmbeddedDirectoryDoesNotIntercept(t *testing.T) {
+	// Ensure that an embedded directory matching part of a client-side route
+	// does not cause tryServeStaticFile to intercept the request. The SPA
+	// handler must fall through to the SPA shell for directory-like paths.
+	ws := newDevAuthWebServer(t, func(cfg *WebServerConfig) {
+		// AssetsDir stays empty so ws.assets (in-memory FS) is used.
+	})
+	// Override the embedded asset FS with one that has a "chat" directory.
+	ws.assets = fstest.MapFS{
+		"assets/main.js":              &fstest.MapFile{Data: []byte("// stub")},
+		"chat/somefile.txt":           &fstest.MapFile{Data: []byte("data")},
+	}
+	ws.hasAssets = ws.detectWebAssets()
+
+	// A request to /chat/my-project/thread-id should get the SPA shell,
+	// NOT a static file or 404 from the file server.
+	req := httptest.NewRequest("GET", "/chat/my-project/thread-id", nil)
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "scion-app") {
+		t.Errorf("expected SPA shell HTML, got: %s", string(body)[:min(200, len(body))])
 	}
 }
 

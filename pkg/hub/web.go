@@ -1165,7 +1165,16 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			return false
 		}
-		_ = f.Close()
+		defer f.Close()
+		// Reject directories — only serve actual files. Without this
+		// check, a request for a client-side route like /chat/space/xxx
+		// could match an embedded directory and be handed to
+		// http.FileServer, which returns a 404 or redirect instead of
+		// the SPA shell.
+		info, err := f.Stat()
+		if err != nil || info.IsDir() {
+			return false
+		}
 	} else {
 		return false
 	}
