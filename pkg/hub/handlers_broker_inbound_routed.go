@@ -353,7 +353,7 @@ func (s *Server) dispatchRoutedRecipient(
 	}
 
 	// --- Authorization ---
-	allowed, reason := s.authorizeAgentMessage(ctx, params.sender, agent, false)
+	allowed, reason, _ := s.authorizeAgentMessage(ctx, params.sender, agent, false)
 	if !allowed {
 		s.messageLog.Warn("routed inbound authorization denied",
 			"agent_slug", agent.Slug, "reason", reason)

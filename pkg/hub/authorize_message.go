@@ -47,12 +47,12 @@ const (
 // evaluation. It replaces the (bool, string) return of authorizeAgentMessage
 // with a typed, machine-readable result per design Section 5.
 type MessageDecision struct {
-	Allowed              bool              `json:"allowed"`
-	Code                 MessageDenialCode `json:"code,omitempty"`
-	Reason               string            `json:"reason,omitempty"`
-	CrossProject         bool              `json:"crossProject,omitempty"`
-	HubPolicyRevision    int64             `json:"hubPolicyRevision,omitempty"`
-	ProjectPolicyRevision int64            `json:"projectPolicyRevision,omitempty"`
+	Allowed               bool              `json:"allowed"`
+	Code                  MessageDenialCode `json:"code,omitempty"`
+	Reason                string            `json:"reason,omitempty"`
+	CrossProject          bool              `json:"crossProject,omitempty"`
+	HubPolicyRevision     int64             `json:"hubPolicyRevision,omitempty"`
+	ProjectPolicyRevision int64             `json:"projectPolicyRevision,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +192,9 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 //     are request-derived (authored by a user or agent) and must be
 //     authorized with isSystemPlane=false at both authoring and fire time.
 //
-// Returns (allowed, reason). When allowed is false, reason describes why.
+// Returns (allowed, reason, decision). When allowed is false, reason
+// describes why. For agent-to-agent paths, decision carries a typed
+// MessageDecision with stable denial codes; for user paths it is nil.
 //
 // See docs/messaging-authorization.md for the full decision table and
 // piercing rules.
@@ -201,41 +203,43 @@ func (s *Server) authorizeAgentMessage(
 	senderIdentity Identity,
 	targetAgent *store.Agent,
 	isSystemPlane bool,
-) (allowed bool, reason string) {
+) (allowed bool, reason string, decision *MessageDecision) {
 	if senderIdentity == nil {
-		return false, "no authenticated identity"
+		return false, "no authenticated identity", nil
 	}
 	if targetAgent == nil {
-		return false, "nil target agent"
+		return false, "nil target agent", nil
 	}
 
 	// ---- D8: system-plane messages bypass all mode checks ----
 	if isSystemPlane {
-		return true, "system plane bypass"
+		return true, "system plane bypass", nil
 	}
 
 	// Agent self-message: allow an agent to deliver to itself regardless of mode.
 	// This is NOT system-plane (D8); it is a self-access exemption for harness
 	// integration (sciontool port-expose, etc.).
 	if agentIdent, ok := senderIdentity.(AgentIdentity); ok && agentIdent.ID() == targetAgent.ID {
-		return true, "agent self-message"
+		return true, "agent self-message", nil
 	}
 
 	// ---- D6: super-admin user pierces everything, including none ----
 	if user, ok := senderIdentity.(UserIdentity); ok {
 		if IsUnscopedLocalPlatformAdmin(user) {
-			return true, "super-admin bypass"
+			return true, "super-admin bypass", nil
 		}
 	}
 
 	// Branch by sender type.
 	switch senderIdentity.Type() {
 	case "user", "dev", "federated_user":
-		return s.authorizeUserToAgent(ctx, senderIdentity, targetAgent)
+		allowed, reason := s.authorizeUserToAgent(ctx, senderIdentity, targetAgent)
+		return allowed, reason, nil
 	case "agent":
-		return s.authorizeAgentToAgent(ctx, senderIdentity, targetAgent)
+		d := s.authorizeAgentToAgent(ctx, senderIdentity, targetAgent)
+		return d.Allowed, d.Reason, &d
 	default:
-		return false, fmt.Sprintf("identity type %q may not send messages", senderIdentity.Type())
+		return false, fmt.Sprintf("identity type %q may not send messages", senderIdentity.Type()), nil
 	}
 }
 
@@ -301,13 +305,15 @@ func (s *Server) authorizeUserToAgent(
 // authorizeAgentToAgent implements the agent-sender path of the messaging
 // decision logic. Agents NEVER pierce mode restrictions, even if their origin
 // user is a super-admin or project owner (D6 pinning rule).
+//
+// Returns a MessageDecision with typed denial codes, eliminating the need for
+// callers to re-evaluate via EvaluateAgentMessage.
 func (s *Server) authorizeAgentToAgent(
 	ctx context.Context,
 	senderIdentity Identity,
 	targetAgent *store.Agent,
-) (bool, string) {
-	decision := s.EvaluateAgentMessage(ctx, senderIdentity, targetAgent)
-	return decision.Allowed, decision.Reason
+) MessageDecision {
+	return s.EvaluateAgentMessage(ctx, senderIdentity, targetAgent)
 }
 
 // EvaluateAgentMessage is the typed cross-project message evaluator (Phase 2,
@@ -395,7 +401,7 @@ func (s *Server) evaluateCrossProject(
 	decision := MessageDecision{CrossProject: true}
 
 	// Gate (a): Hub cross_project_messaging_enabled must be true.
-	// Read authoritatively from the store, not from cache.
+	// Read from operational settings (DB-backed cache, periodically refreshed).
 	ops := s.GetOperationalSettings()
 	if ops == nil || !ops.CrossProjectMessagingEnabled() {
 		decision.Code = MessageDenialCrossProjectDisabled
@@ -439,39 +445,27 @@ func (s *Server) evaluateCrossProject(
 		return decision
 
 	case store.CrossProjectInboundAny:
-		// Any local agent from any project is allowed. Continue to remaining gates.
+		// Any local agent from any project is allowed after origin validation.
 
 	case store.CrossProjectInboundMembers:
-		// Gate (e): Ancestry must be hub-attested.
-		if !AncestryIsHubAttested(agentIdent) {
-			decision.Code = MessageDenialCrossProjectUntrusted
-			decision.Reason = "cross-project messaging requires hub-attested ancestry"
-			return decision
-		}
+		// Members policy requires origin validation AND membership check.
 
-		// Gate (f): Root human principal must be valid, not disabled/deleted.
-		originUserID := agentIdent.OriginUserID()
-		if originUserID == "" {
-			decision.Code = MessageDenialCrossProjectUntrusted
-			decision.Reason = "sender agent has no root human principal in ancestry"
-			return decision
-		}
+	default:
+		// Unknown policy value → fail closed.
+		decision.Code = MessageDenialCrossProjectInboundNone
+		decision.Reason = fmt.Sprintf("unknown inbound policy %q, failing closed", inboundPolicy)
+		return decision
+	}
 
-		originUser, err := s.store.GetUser(ctx, originUserID)
-		if err != nil {
-			slog.Warn("EvaluateAgentMessage: failed to fetch origin user",
-				"user_id", originUserID, "error", err)
-			decision.Code = MessageDenialCrossProjectUntrusted
-			decision.Reason = "failed to fetch origin user"
-			return decision
-		}
-		if originUser.Status != "active" {
-			decision.Code = MessageDenialCrossProjectUntrusted
-			decision.Reason = fmt.Sprintf("origin user is %s, not active", originUser.Status)
-			return decision
-		}
+	// Gates (e, f): validate ancestry attestation and origin user for all
+	// cross-project sends (both "any" and "members" policies).
+	originUserID, originDenial := s.validateCrossProjectOrigin(ctx, agentIdent)
+	if originDenial != nil {
+		return *originDenial
+	}
 
-		// Check membership of origin user in destination project.
+	// "members" policy additionally requires membership in the destination project.
+	if inboundPolicy == store.CrossProjectInboundMembers {
 		memberResult := s.CheckEffectiveMembership(ctx, originUserID, targetAgent.ProjectID)
 		if memberResult.Err != nil {
 			slog.Warn("EvaluateAgentMessage: membership check failed",
@@ -486,47 +480,61 @@ func (s *Server) evaluateCrossProject(
 			decision.Reason = "origin user is not an active member of the destination project"
 			return decision
 		}
-
-	default:
-		// Unknown policy value → fail closed.
-		decision.Code = MessageDenialCrossProjectInboundNone
-		decision.Reason = fmt.Sprintf("unknown inbound policy %q, failing closed", inboundPolicy)
-		return decision
-	}
-
-	// For "any" policy, still validate ancestry and origin user gates
-	// (gates e, f apply to all cross-project sends per the design).
-	if inboundPolicy == store.CrossProjectInboundAny {
-		if !AncestryIsHubAttested(agentIdent) {
-			decision.Code = MessageDenialCrossProjectUntrusted
-			decision.Reason = "cross-project messaging requires hub-attested ancestry"
-			return decision
-		}
-
-		originUserID := agentIdent.OriginUserID()
-		if originUserID == "" {
-			decision.Code = MessageDenialCrossProjectUntrusted
-			decision.Reason = "sender agent has no root human principal in ancestry"
-			return decision
-		}
-
-		originUser, err := s.store.GetUser(ctx, originUserID)
-		if err != nil {
-			decision.Code = MessageDenialCrossProjectUntrusted
-			decision.Reason = "failed to fetch origin user"
-			return decision
-		}
-		if originUser.Status != "active" {
-			decision.Code = MessageDenialCrossProjectUntrusted
-			decision.Reason = fmt.Sprintf("origin user is %s, not active", originUser.Status)
-			return decision
-		}
 	}
 
 	// All gates passed — cross-project delivery is authorized.
 	decision.Allowed = true
 	decision.Reason = "cross-project messaging authorized"
 	return decision
+}
+
+// validateCrossProjectOrigin implements gates (e) and (f) for cross-project
+// messaging: ancestry must be hub-attested and the root human principal must
+// be valid and active. Called once for both "members" and "any" inbound
+// policies — eliminates the duplication that previously existed between the
+// two branches.
+//
+// Returns (originUserID, nil) on success, or ("", *MessageDecision) with a
+// typed denial on failure.
+func (s *Server) validateCrossProjectOrigin(ctx context.Context, agentIdent AgentIdentity) (string, *MessageDecision) {
+	// Gate (e): Ancestry must be hub-attested (reject federated identities).
+	if !AncestryIsHubAttested(agentIdent) {
+		return "", &MessageDecision{
+			CrossProject: true,
+			Code:         MessageDenialCrossProjectUntrusted,
+			Reason:       "cross-project messaging requires hub-attested ancestry",
+		}
+	}
+
+	// Gate (f): Root human principal must be valid, not disabled/deleted.
+	originUserID := agentIdent.OriginUserID()
+	if originUserID == "" {
+		return "", &MessageDecision{
+			CrossProject: true,
+			Code:         MessageDenialCrossProjectUntrusted,
+			Reason:       "sender agent has no root human principal in ancestry",
+		}
+	}
+
+	originUser, err := s.store.GetUser(ctx, originUserID)
+	if err != nil {
+		slog.Warn("validateCrossProjectOrigin: failed to fetch origin user",
+			"user_id", originUserID, "error", err)
+		return "", &MessageDecision{
+			CrossProject: true,
+			Code:         MessageDenialCrossProjectUntrusted,
+			Reason:       "failed to fetch origin user",
+		}
+	}
+	if originUser.Status != "active" {
+		return "", &MessageDecision{
+			CrossProject: true,
+			Code:         MessageDenialCrossProjectUntrusted,
+			Reason:       fmt.Sprintf("origin user is %s, not active", originUser.Status),
+		}
+	}
+
+	return originUserID, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -536,17 +544,20 @@ func (s *Server) evaluateCrossProject(
 // trusted stored data — the persisted ancestry built by the Hub.
 // ---------------------------------------------------------------------------
 
+// Compile-time interface assertion.
+var _ AgentIdentity = (*storedAgentIdentity)(nil)
+
 type storedAgentIdentity struct {
 	agent *store.Agent
 }
 
-func (s *storedAgentIdentity) ID() string          { return s.agent.ID }
-func (s *storedAgentIdentity) Type() string         { return "agent" }
-func (s *storedAgentIdentity) ProjectID() string    { return s.agent.ProjectID }
-func (s *storedAgentIdentity) Scopes() []AgentTokenScope { return nil }
+func (s *storedAgentIdentity) ID() string                      { return s.agent.ID }
+func (s *storedAgentIdentity) Type() string                    { return "agent" }
+func (s *storedAgentIdentity) ProjectID() string               { return s.agent.ProjectID }
+func (s *storedAgentIdentity) Scopes() []AgentTokenScope       { return nil }
 func (s *storedAgentIdentity) HasScope(_ AgentTokenScope) bool { return false }
-func (s *storedAgentIdentity) Ancestry() []string   { return s.agent.Ancestry }
-func (s *storedAgentIdentity) TokenID() string       { return "" }
+func (s *storedAgentIdentity) Ancestry() []string              { return s.agent.Ancestry }
+func (s *storedAgentIdentity) TokenID() string                 { return "" }
 
 func (s *storedAgentIdentity) OriginUserID() string {
 	if len(s.agent.Ancestry) > 0 {

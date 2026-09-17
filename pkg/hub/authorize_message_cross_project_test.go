@@ -57,13 +57,13 @@ func enableCrossProjectMessaging(t *testing.T, srv *Server) {
 // crossProjectSetup creates two projects (A and B) with owners, members,
 // and agents for cross-project testing. Returns all the fixtures.
 type crossProjectFixture struct {
-	srv       *Server
-	store     store.Store
-	ownerA    *store.User
-	ownerB    *store.User
-	memberA   *store.User
-	projectA  string
-	projectB  string
+	srv      *Server
+	store    store.Store
+	ownerA   *store.User
+	ownerB   *store.User
+	memberA  *store.User
+	projectA string
+	projectB string
 }
 
 func crossProjectSetup(t *testing.T) crossProjectFixture {
@@ -502,13 +502,13 @@ type federatedAgentIdentityForTest struct {
 	ancestry  []string
 }
 
-func (f *federatedAgentIdentityForTest) ID() string                       { return f.id }
-func (f *federatedAgentIdentityForTest) Type() string                      { return "agent" }
-func (f *federatedAgentIdentityForTest) ProjectID() string                 { return f.projectID }
-func (f *federatedAgentIdentityForTest) Scopes() []AgentTokenScope         { return nil }
-func (f *federatedAgentIdentityForTest) HasScope(_ AgentTokenScope) bool   { return false }
-func (f *federatedAgentIdentityForTest) Ancestry() []string                { return f.ancestry }
-func (f *federatedAgentIdentityForTest) TokenID() string                   { return "" }
+func (f *federatedAgentIdentityForTest) ID() string                      { return f.id }
+func (f *federatedAgentIdentityForTest) Type() string                    { return "agent" }
+func (f *federatedAgentIdentityForTest) ProjectID() string               { return f.projectID }
+func (f *federatedAgentIdentityForTest) Scopes() []AgentTokenScope       { return nil }
+func (f *federatedAgentIdentityForTest) HasScope(_ AgentTokenScope) bool { return false }
+func (f *federatedAgentIdentityForTest) Ancestry() []string              { return f.ancestry }
+func (f *federatedAgentIdentityForTest) TokenID() string                 { return "" }
 func (f *federatedAgentIdentityForTest) OriginUserID() string {
 	if len(f.ancestry) > 0 {
 		return f.ancestry[0]
@@ -871,5 +871,410 @@ func TestEvaluateAgentMessage_CrossProject_FullMatrix(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// R-3: Missing acceptance-gate tests
+// ---------------------------------------------------------------------------
+
+// Test R-3/1: Group-derived member/admin — user in a group that has a built-in
+// role binding on the destination project counts as a member for cross-project
+// messaging.
+func TestEvaluateAgentMessage_CrossProject_GroupDerivedMember(t *testing.T) {
+	f := crossProjectSetup(t)
+	ctx := context.Background()
+
+	enableCrossProjectMessaging(t, f.srv)
+	_, err := f.store.UpdateProjectMessagingPolicy(ctx, f.projectB, store.CrossProjectInboundMembers, 1)
+	require_NoError(t, err)
+
+	// Create a user who is NOT a direct member of project B.
+	groupUser := &store.User{
+		ID:          tid("msg-group-user"),
+		Email:       "group-user@test.com",
+		DisplayName: "Group User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require_NoError(t, f.store.CreateUser(ctx, groupUser))
+	ensureHubMembership(ctx, f.store, groupUser.ID)
+
+	// Create a group.
+	grp := &store.Group{
+		ID:        tid("msg-test-group"),
+		Name:      "Test Group for Membership",
+		Slug:      "msg-test-group-" + tid("rand"),
+		GroupType: "explicit",
+	}
+	require_NoError(t, f.store.CreateGroup(ctx, grp))
+
+	// Add the user to the group.
+	require_NoError(t, f.store.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    grp.ID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   groupUser.ID,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	// Create a group-principal role binding for the admin role in project B.
+	rd, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require_NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      grp.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.projectB,
+		CreatedBy:        "test",
+	})
+	require_NoError(t, err)
+
+	// Verify CheckEffectiveMembership sees the user as a member.
+	memberResult := f.srv.CheckEffectiveMembership(ctx, groupUser.ID, f.projectB)
+	if memberResult.Err != nil {
+		t.Fatalf("CheckEffectiveMembership error: %v", memberResult.Err)
+	}
+	if !memberResult.IsMember {
+		t.Fatal("user in group with admin binding should be a member")
+	}
+
+	// Verify cross-project messaging is allowed with members policy.
+	sender := msgAuthzAgent(t, f.store, "cp-grp-sender", f.projectA, store.MessageModeHub,
+		[]string{groupUser.ID})
+	target := msgAuthzAgent(t, f.store, "cp-grp-target", f.projectB, store.MessageModeProject,
+		[]string{f.ownerB.ID})
+
+	senderIdent := msgAuthzAgentIdentity(sender.ID, f.projectA, sender.Ancestry)
+	decision := f.srv.EvaluateAgentMessage(ctx, senderIdent, target)
+	if !decision.Allowed {
+		t.Fatalf("group-derived member should be allowed: %s (code: %s)",
+			decision.Reason, decision.Code)
+	}
+}
+
+// Test R-3/2: Nested group membership — user in an inner group, inner group
+// nested inside an outer group that has a built-in role binding on the
+// destination project.
+func TestEvaluateAgentMessage_CrossProject_NestedGroupMembership(t *testing.T) {
+	f := crossProjectSetup(t)
+	ctx := context.Background()
+
+	enableCrossProjectMessaging(t, f.srv)
+	_, err := f.store.UpdateProjectMessagingPolicy(ctx, f.projectB, store.CrossProjectInboundMembers, 1)
+	require_NoError(t, err)
+
+	nestedUser := &store.User{
+		ID:          tid("msg-nested-user"),
+		Email:       "nested-user@test.com",
+		DisplayName: "Nested User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require_NoError(t, f.store.CreateUser(ctx, nestedUser))
+	ensureHubMembership(ctx, f.store, nestedUser.ID)
+
+	// Create inner group and add the user.
+	innerGroup := &store.Group{
+		ID:        tid("msg-inner-group"),
+		Name:      "Inner Group",
+		Slug:      "msg-inner-group-" + tid("rand2"),
+		GroupType: "explicit",
+	}
+	require_NoError(t, f.store.CreateGroup(ctx, innerGroup))
+	require_NoError(t, f.store.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    innerGroup.ID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   nestedUser.ID,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	// Create outer group and nest inner group inside it.
+	outerGroup := &store.Group{
+		ID:        tid("msg-outer-group"),
+		Name:      "Outer Group",
+		Slug:      "msg-outer-group-" + tid("rand3"),
+		GroupType: "explicit",
+	}
+	require_NoError(t, f.store.CreateGroup(ctx, outerGroup))
+	require_NoError(t, f.store.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    outerGroup.ID,
+		MemberType: store.GroupMemberTypeGroup,
+		MemberID:   innerGroup.ID,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	// Create a group-principal role binding for the outer group as member in project B.
+	rd, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require_NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      outerGroup.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.projectB,
+		CreatedBy:        "test",
+	})
+	require_NoError(t, err)
+
+	// Verify nested membership resolves.
+	memberResult := f.srv.CheckEffectiveMembership(ctx, nestedUser.ID, f.projectB)
+	if memberResult.Err != nil {
+		t.Fatalf("CheckEffectiveMembership error: %v", memberResult.Err)
+	}
+	if !memberResult.IsMember {
+		t.Fatal("user in nested group should be an effective member")
+	}
+
+	// Verify cross-project messaging.
+	sender := msgAuthzAgent(t, f.store, "cp-nested-sender", f.projectA, store.MessageModeHub,
+		[]string{nestedUser.ID})
+	target := msgAuthzAgent(t, f.store, "cp-nested-target", f.projectB, store.MessageModeProject,
+		[]string{f.ownerB.ID})
+
+	senderIdent := msgAuthzAgentIdentity(sender.ID, f.projectA, sender.Ancestry)
+	decision := f.srv.EvaluateAgentMessage(ctx, senderIdent, target)
+	if !decision.Allowed {
+		t.Fatalf("nested group member should be allowed: %s (code: %s)",
+			decision.Reason, decision.Code)
+	}
+}
+
+// Test R-3/3: Group removal — user removed from group, membership revoked,
+// delivery denied.
+func TestEvaluateAgentMessage_CrossProject_GroupRemoval(t *testing.T) {
+	f := crossProjectSetup(t)
+	ctx := context.Background()
+
+	enableCrossProjectMessaging(t, f.srv)
+	_, err := f.store.UpdateProjectMessagingPolicy(ctx, f.projectB, store.CrossProjectInboundMembers, 1)
+	require_NoError(t, err)
+
+	removedUser := &store.User{
+		ID:          tid("msg-removed-user"),
+		Email:       "removed-user@test.com",
+		DisplayName: "Removed User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require_NoError(t, f.store.CreateUser(ctx, removedUser))
+	ensureHubMembership(ctx, f.store, removedUser.ID)
+
+	// Create group, add user, bind group to project B with member role.
+	grp := &store.Group{
+		ID:        tid("msg-removal-group"),
+		Name:      "Removal Test Group",
+		Slug:      "msg-removal-group-" + tid("rand4"),
+		GroupType: "explicit",
+	}
+	require_NoError(t, f.store.CreateGroup(ctx, grp))
+	require_NoError(t, f.store.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    grp.ID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   removedUser.ID,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	rd, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require_NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      grp.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.projectB,
+		CreatedBy:        "test",
+	})
+	require_NoError(t, err)
+
+	// Confirm membership before removal.
+	pre := f.srv.CheckEffectiveMembership(ctx, removedUser.ID, f.projectB)
+	if !pre.IsMember {
+		t.Fatal("user should be a member before removal")
+	}
+
+	// Remove the user from the group.
+	require_NoError(t, f.store.RemoveGroupMember(ctx, grp.ID, store.GroupMemberTypeUser, removedUser.ID))
+
+	// Confirm membership is revoked.
+	post := f.srv.CheckEffectiveMembership(ctx, removedUser.ID, f.projectB)
+	if post.IsMember {
+		t.Fatal("user should NOT be a member after removal from group")
+	}
+
+	// Verify cross-project messaging is denied.
+	sender := msgAuthzAgent(t, f.store, "cp-rmvd-sender", f.projectA, store.MessageModeHub,
+		[]string{removedUser.ID})
+	target := msgAuthzAgent(t, f.store, "cp-rmvd-target", f.projectB, store.MessageModeProject,
+		[]string{f.ownerB.ID})
+
+	senderIdent := msgAuthzAgentIdentity(sender.ID, f.projectA, sender.Ancestry)
+	decision := f.srv.EvaluateAgentMessage(ctx, senderIdent, target)
+	if decision.Allowed {
+		t.Fatal("removed group member should be denied cross-project messaging")
+	}
+	if decision.Code != MessageDenialCrossProjectNotMember {
+		t.Fatalf("expected code %s, got %s", MessageDenialCrossProjectNotMember, decision.Code)
+	}
+}
+
+// Test R-3/4: Custom-only role binding — user has only a custom/additive role
+// (NOT a built-in membership role), delivery denied with
+// cross_project_origin_not_member.
+func TestEvaluateAgentMessage_CrossProject_CustomRoleNotMember(t *testing.T) {
+	f := crossProjectSetup(t)
+	ctx := context.Background()
+
+	enableCrossProjectMessaging(t, f.srv)
+	_, err := f.store.UpdateProjectMessagingPolicy(ctx, f.projectB, store.CrossProjectInboundMembers, 1)
+	require_NoError(t, err)
+
+	customUser := &store.User{
+		ID:          tid("msg-custom-role-user"),
+		Email:       "custom-role@test.com",
+		DisplayName: "Custom Role User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require_NoError(t, f.store.CreateUser(ctx, customUser))
+	ensureHubMembership(ctx, f.store, customUser.ID)
+
+	// Create a custom additive role.
+	customRD, err := f.store.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "custom-agent-viewer",
+		Description: "Custom additive role — NOT a membership role",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"agent.read"},
+		System:      false,
+	})
+	require_NoError(t, err)
+
+	// Bind the custom role to the user in project B.
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: customRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      customUser.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.projectB,
+		CreatedBy:        "test",
+	})
+	require_NoError(t, err)
+
+	// CheckEffectiveMembership should NOT consider custom-only as member.
+	memberResult := f.srv.CheckEffectiveMembership(ctx, customUser.ID, f.projectB)
+	if memberResult.Err != nil {
+		t.Fatalf("CheckEffectiveMembership error: %v", memberResult.Err)
+	}
+	if memberResult.IsMember {
+		t.Fatal("custom-only role binding should NOT count as membership")
+	}
+
+	// Verify cross-project messaging is denied.
+	sender := msgAuthzAgent(t, f.store, "cp-cust-sender", f.projectA, store.MessageModeHub,
+		[]string{customUser.ID})
+	target := msgAuthzAgent(t, f.store, "cp-cust-target", f.projectB, store.MessageModeProject,
+		[]string{f.ownerB.ID})
+
+	senderIdent := msgAuthzAgentIdentity(sender.ID, f.projectA, sender.Ancestry)
+	decision := f.srv.EvaluateAgentMessage(ctx, senderIdent, target)
+	if decision.Allowed {
+		t.Fatal("custom-only role should be denied cross-project messaging")
+	}
+	if decision.Code != MessageDenialCrossProjectNotMember {
+		t.Fatalf("expected code %s, got %s", MessageDenialCrossProjectNotMember, decision.Code)
+	}
+}
+
+// Test R-3/5: Visibility-only / public-project access — public project
+// visibility alone is NOT membership, delivery denied.
+func TestEvaluateAgentMessage_CrossProject_PublicProjectNotMember(t *testing.T) {
+	f := crossProjectSetup(t)
+	ctx := context.Background()
+
+	enableCrossProjectMessaging(t, f.srv)
+	_, err := f.store.UpdateProjectMessagingPolicy(ctx, f.projectB, store.CrossProjectInboundMembers, 1)
+	require_NoError(t, err)
+
+	// A user who is NOT a member of project B but can see it (visibility).
+	viewerUser := &store.User{
+		ID:          tid("msg-viewer-user"),
+		Email:       "viewer@test.com",
+		DisplayName: "Viewer User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require_NoError(t, f.store.CreateUser(ctx, viewerUser))
+	ensureHubMembership(ctx, f.store, viewerUser.ID)
+
+	// viewerUser has NO role bindings in project B at all — just visibility.
+	// CheckEffectiveMembership should return false.
+	memberResult := f.srv.CheckEffectiveMembership(ctx, viewerUser.ID, f.projectB)
+	if memberResult.Err != nil {
+		t.Fatalf("CheckEffectiveMembership error: %v", memberResult.Err)
+	}
+	if memberResult.IsMember {
+		t.Fatal("visibility-only user should NOT be a member")
+	}
+
+	// Verify cross-project messaging is denied.
+	sender := msgAuthzAgent(t, f.store, "cp-view-sender", f.projectA, store.MessageModeHub,
+		[]string{viewerUser.ID})
+	target := msgAuthzAgent(t, f.store, "cp-view-target", f.projectB, store.MessageModeProject,
+		[]string{f.ownerB.ID})
+
+	senderIdent := msgAuthzAgentIdentity(sender.ID, f.projectA, sender.Ancestry)
+	decision := f.srv.EvaluateAgentMessage(ctx, senderIdent, target)
+	if decision.Allowed {
+		t.Fatal("visibility-only access should be denied cross-project messaging")
+	}
+	if decision.Code != MessageDenialCrossProjectNotMember {
+		t.Fatalf("expected code %s, got %s", MessageDenialCrossProjectNotMember, decision.Code)
+	}
+}
+
+// Test R-3/6: Deleted intermediate parent in ancestry — parent agent deleted
+// but ancestry chain survives. Hub-attested ancestry survives deletion; the
+// chain is immutable once written.
+func TestEvaluateAgentMessage_CrossProject_DeletedIntermediateParent(t *testing.T) {
+	f := crossProjectSetup(t)
+	ctx := context.Background()
+
+	enableCrossProjectMessaging(t, f.srv)
+	_, err := f.store.UpdateProjectMessagingPolicy(ctx, f.projectB, store.CrossProjectInboundAny, 1)
+	require_NoError(t, err)
+
+	// Create an intermediate agent in project A.
+	intermediate := msgAuthzAgent(t, f.store, "cp-intermediate", f.projectA, store.MessageModeHub,
+		[]string{f.ownerA.ID})
+
+	// Create a child agent whose ancestry includes ownerA → intermediate.
+	child := msgAuthzAgent(t, f.store, "cp-child-of-deleted", f.projectA, store.MessageModeHub,
+		[]string{f.ownerA.ID, intermediate.ID})
+
+	// Delete the intermediate agent from the store.
+	require_NoError(t, f.store.DeleteAgent(ctx, intermediate.ID))
+
+	// Verify the intermediate is actually gone.
+	_, err = f.store.GetAgent(ctx, intermediate.ID)
+	if err == nil {
+		t.Fatal("intermediate agent should have been deleted")
+	}
+
+	// The child's ancestry chain [ownerA, intermediate] is still intact in
+	// the child's record — deletion of intermediate does not invalidate the
+	// Hub-attested chain.
+	target := msgAuthzAgent(t, f.store, "cp-del-target", f.projectB, store.MessageModeProject,
+		[]string{f.ownerB.ID})
+
+	senderIdent := msgAuthzAgentIdentity(child.ID, f.projectA, child.Ancestry)
+	decision := f.srv.EvaluateAgentMessage(ctx, senderIdent, target)
+	if !decision.Allowed {
+		t.Fatalf("deleted intermediate should not break Hub-attested ancestry: %s (code: %s)",
+			decision.Reason, decision.Code)
 	}
 }

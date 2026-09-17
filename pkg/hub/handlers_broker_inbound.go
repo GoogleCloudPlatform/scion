@@ -177,7 +177,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		// so authorizeAgentMessage denies it.
 		senderIdentity = broker
 	}
-	allowed, reason := s.authorizeAgentMessage(r.Context(), senderIdentity, agent, false)
+	allowed, reason, _ := s.authorizeAgentMessage(r.Context(), senderIdentity, agent, false)
 	if !allowed {
 		log.Warn("broker inbound message authorization denied",
 			"sender", req.Message.Sender, "agent_slug", agentSlug, "reason", reason)

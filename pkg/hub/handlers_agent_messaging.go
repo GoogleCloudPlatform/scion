@@ -2013,7 +2013,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			}
 
 			// Phase 3 msg-authz: Check message authorization per group recipient.
-			allowed, _ := s.authorizeAgentMessage(ctx, senderIdentity, agent, false)
+			allowed, _, _ := s.authorizeAgentMessage(ctx, senderIdentity, agent, false)
 			if !allowed {
 				results[i] = GroupMessageRecipientResult{
 					Recipient: recipStr,
@@ -2450,7 +2450,7 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	var authorizedAgents []store.Agent
 	for i := range runningAgents {
 		a := &runningAgents[i]
-		allowed, _ := s.authorizeAgentMessage(ctx, senderIdentity, a, false)
+		allowed, _, _ := s.authorizeAgentMessage(ctx, senderIdentity, a, false)
 		if allowed {
 			authorizedAgents = append(authorizedAgents, runningAgents[i])
 		}
@@ -2670,7 +2670,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		}
 
 		// Phase 3 msg-authz: Check message authorization per mention recipient.
-		mentionAllowed, _ := s.authorizeAgentMessage(ctx, senderIdentity, mentionAgent, false)
+		mentionAllowed, _, _ := s.authorizeAgentMessage(ctx, senderIdentity, mentionAgent, false)
 		if !mentionAllowed {
 			results[i].Status = "unauthorized"
 			results[i].Error = "message delivery denied"

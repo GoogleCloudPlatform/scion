@@ -1127,7 +1127,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	// only on user and primaryAgent (both resolved above). An unauthorized user
 	// must receive the enriched 403 with {reason, senderMode, recipientMode}
 	// (#1382), not a 400 from the validator.
-	allowed, reason := s.authorizeAgentMessage(ctx, user, primaryAgent, false)
+	allowed, reason, _ := s.authorizeAgentMessage(ctx, user, primaryAgent, false)
 	if !allowed {
 		slog.Warn("chat v2 message authorization denied",
 			"user", user.ID(),
@@ -1282,7 +1282,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		for _, mentionAgent := range agents[1:] {
 			// Phase 3 msg-authz: Check message authorization on each mentioned agent.
 			// Replaces the ActionAttach check — chat v2 mention fan-out is messaging.
-			mentionAllowed, _ := s.authorizeAgentMessage(ctx, user, mentionAgent, false)
+			mentionAllowed, _, _ := s.authorizeAgentMessage(ctx, user, mentionAgent, false)
 			if !mentionAllowed {
 				s.messageLog.Warn("User lacks message authorization for mentioned agent",
 					"user", user.ID(), "agent", mentionAgent.Slug)

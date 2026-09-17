@@ -138,7 +138,7 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 
 	// Fail-fast: preview whether the caller is authorized to message this
 	// agent right now. The definitive check runs at fire time.
-	allowed, reason := s.authorizeAgentMessage(ctx, identity, agent, false)
+	allowed, reason, _ := s.authorizeAgentMessage(ctx, identity, agent, false)
 	if !allowed {
 		slog.Warn("scheduled message authoring denied",
 			"identity", identity.ID(), "identity_type", identity.Type(),
@@ -228,7 +228,7 @@ func (s *Server) authorizeScheduledMessageFire(
 
 	// Call the production messaging authorization choke point.
 	// isSystemPlane=false: scheduled messages are request-derived.
-	allowed, reason := s.authorizeAgentMessage(ctx, creatorIdentity, agent, false)
+	allowed, reason, _ := s.authorizeAgentMessage(ctx, creatorIdentity, agent, false)
 	if !allowed {
 		return nil, fmt.Errorf("scheduled_message_denied: %s", reason)
 	}

@@ -84,7 +84,7 @@ func (s *Server) ComputeMessageability(
 	}
 
 	// canMessage: can the viewer send a message to this agent?
-	canMessage, reason := s.authorizeAgentMessage(ctx, viewerIdentity, targetAgent, false)
+	canMessage, reason, _ := s.authorizeAgentMessage(ctx, viewerIdentity, targetAgent, false)
 
 	// canReachViewer: can this agent send a message to the viewer?
 	canReachViewer := computeCanReachViewer(viewerIdentity, targetAgent)
@@ -165,7 +165,7 @@ func (s *Server) ComputeMessageabilityDetail(
 		if other.ID == targetAgent.ID {
 			continue
 		}
-		allowed, _ := s.authorizeAgentMessage(ctx, senderIdentity, other, false)
+		allowed, _, _ := s.authorizeAgentMessage(ctx, senderIdentity, other, false)
 		if allowed {
 			reachableAgents++
 		}
