@@ -967,6 +967,28 @@ export class ScionChatSpaceRail extends LitElement {
     return this.getSortedSpaces().map((s) => s.projectId);
   }
 
+  /** Move a space one slot up (delta = -1) or down (delta = 1). */
+  async moveSpace(spaceId: string, delta: -1 | 1): Promise<void> {
+    if (this.spaceFilter !== 'all') return;
+    const order = this.currentSpaceOrder();
+    const idx = order.indexOf(spaceId);
+    if (idx === -1) return;
+    const swapIdx = idx + delta;
+    if (swapIdx < 0 || swapIdx >= order.length) return;
+    const next = [...order];
+    [next[idx], next[swapIdx]] = [next[swapIdx], next[idx]];
+    await this.applySpaceOrder(next);
+  }
+
+  /** Whether a space sits at the first or last edge of the visible list. */
+  isSpaceAtEdge(spaceId: string, edge: 'first' | 'last'): boolean {
+    if (this.spaceFilter !== 'all') return true;
+    const order = this.currentSpaceOrder();
+    const idx = order.indexOf(spaceId);
+    if (idx === -1) return true;
+    return edge === 'first' ? idx === 0 : idx === order.length - 1;
+  }
+
   private handleSpaceDragStart(e: DragEvent, projectId: string): void {
     this.draggingSpaceId = projectId;
     if (e.dataTransfer) {
@@ -2150,6 +2172,10 @@ export class ScionChatSpaceRail extends LitElement {
                     this.startGroupNameInput(space.projectId, {});
                   } else if (value === 'set-emoji') {
                     this.openEmojiPicker(space.projectId);
+                  } else if (value === 'move-up') {
+                    void this.moveSpace(space.projectId, -1);
+                  } else if (value === 'move-down') {
+                    void this.moveSpace(space.projectId, 1);
                   }
                 }}
               >
@@ -2164,6 +2190,22 @@ export class ScionChatSpaceRail extends LitElement {
                 <sl-menu-item value="set-emoji">
                   <sl-icon slot="prefix" name="emoji-smile"></sl-icon>
                   Set emoji
+                </sl-menu-item>
+                <sl-menu-item
+                  class="move-up"
+                  value="move-up"
+                  ?disabled=${this.isSpaceAtEdge(space.projectId, 'first')}
+                >
+                  <sl-icon slot="prefix" name="arrow-up"></sl-icon>
+                  Move up
+                </sl-menu-item>
+                <sl-menu-item
+                  class="move-down"
+                  value="move-down"
+                  ?disabled=${this.isSpaceAtEdge(space.projectId, 'last')}
+                >
+                  <sl-icon slot="prefix" name="arrow-down"></sl-icon>
+                  Move down
                 </sl-menu-item>
               </sl-menu>
             </sl-dropdown>
