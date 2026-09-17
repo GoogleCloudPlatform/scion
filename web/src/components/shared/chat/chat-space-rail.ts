@@ -1170,15 +1170,28 @@ export class ScionChatSpaceRail extends LitElement {
         threadGroups: { ...(this.prefs.threadGroups ?? {}), [projectId]: updatedGroups },
       });
     } else {
-      // Reorder in global threadOrder (ungrouped threads)
-      const order = this.currentThreadOrder(projectId);
-      const from = order.indexOf(threadId);
-      const to = from + delta;
-      if (from === -1 || to < 0 || to >= order.length) return;
-      const next = [...order];
-      const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
-      await this.applyThreadOrder(projectId, next);
+      // Reorder among ungrouped threads only (exclude grouped thread IDs)
+      const groupedIds = new Set(groups.flatMap((g) => g.threadIds));
+      const currentOrder = [...this.currentThreadOrder(projectId)];
+      const ungroupedOrder = currentOrder.filter((id) => !groupedIds.has(id));
+
+      const idx = ungroupedOrder.indexOf(threadId);
+      const swapIdx = idx + delta;
+      if (idx < 0 || swapIdx < 0 || swapIdx >= ungroupedOrder.length) return;
+
+      // Identify swap target in the ungrouped list
+      const swapTarget = ungroupedOrder[swapIdx];
+
+      // Apply swap in the FULL order (find actual positions)
+      const fullIdx = currentOrder.indexOf(threadId);
+      const fullSwapIdx = currentOrder.indexOf(swapTarget);
+      if (fullIdx < 0 || fullSwapIdx < 0) return;
+      [currentOrder[fullIdx], currentOrder[fullSwapIdx]] = [
+        currentOrder[fullSwapIdx],
+        currentOrder[fullIdx],
+      ];
+
+      await this.applyThreadOrder(projectId, currentOrder);
     }
   }
 
@@ -1194,11 +1207,13 @@ export class ScionChatSpaceRail extends LitElement {
       return edge === 'first' ? ids[0] === threadId : ids[ids.length - 1] === threadId;
     }
 
-    // Check edges in global order (ungrouped threads)
-    const order = this.currentThreadOrder(projectId);
-    const index = order.indexOf(threadId);
+    // Check edges among ungrouped threads only (exclude grouped thread IDs)
+    const groupedIds = new Set(groups.flatMap((g) => g.threadIds));
+    const ungroupedOrder = this.currentThreadOrder(projectId).filter((id) => !groupedIds.has(id));
+    if (ungroupedOrder.length === 0) return true;
+    const index = ungroupedOrder.indexOf(threadId);
     if (index === -1) return true;
-    return edge === 'first' ? index === 0 : index === order.length - 1;
+    return edge === 'first' ? index === 0 : index === ungroupedOrder.length - 1;
   }
 
   // ---------------------------------------------------------------------------
