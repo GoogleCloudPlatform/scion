@@ -707,6 +707,9 @@ func (r *KubernetesRuntime) createAuthFileSecret(ctx context.Context, namespace,
 	data := make(map[string][]byte)
 
 	for i, f := range files {
+		if f.SourcePath == "" {
+			continue
+		}
 		content, err := os.ReadFile(f.SourcePath)
 		if err != nil {
 			return fmt.Errorf("failed to read auth file %s: %w", f.SourcePath, err)
