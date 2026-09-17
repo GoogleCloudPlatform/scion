@@ -1800,49 +1800,6 @@ export class ScionChatThread extends LitElement {
   // Phase-3: Message action handlers
   // ---------------------------------------------------------------------------
 
-  /** Handle reply action from a message. Sets the composer reply-to context. */
-  private handleMessageReply(
-    e: CustomEvent<{ messageId: string; senderName: string; content: string }>
-  ): void {
-    this.composerEditMessage = null; // Cancel any pending edit
-    this.composerReplyTo = {
-      messageId: e.detail.messageId,
-      senderName: e.detail.senderName,
-      content:
-        e.detail.content.length > 100 ? e.detail.content.slice(0, 100) + '...' : e.detail.content,
-    };
-  }
-
-  /** Handle edit action from a message. Sets the composer edit mode. */
-  private handleMessageEditRequest(e: CustomEvent<{ messageId: string; content: string }>): void {
-    this.composerReplyTo = null; // Cancel any pending reply
-    this.composerEditMessage = {
-      messageId: e.detail.messageId,
-      content: e.detail.content,
-    };
-  }
-
-  /** Handle delete action from a message. Shows confirmation and calls API. */
-  private async handleMessageDeleteRequest(e: CustomEvent<{ messageId: string }>): Promise<void> {
-    const { messageId } = e.detail;
-    const confirmed = window.confirm('Delete this message? This cannot be undone.');
-    if (!confirmed) return;
-
-    try {
-      const res = await apiFetch(
-        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages/${encodeURIComponent(messageId)}`,
-        { method: 'DELETE' }
-      );
-      if (!res.ok) {
-        const errMsg = await extractApiError(res, 'Failed to delete message');
-        this.sendError = errMsg;
-      }
-      // SSE event will update the message state.
-    } catch (err) {
-      this.sendError = err instanceof Error ? err.message : 'Failed to delete message';
-    }
-  }
-
   /** Handle chat-edit event from the composer. Calls PUT endpoint. */
   private async handleChatEditV2(
     e: CustomEvent<{ messageId: string; text: string }>
@@ -2743,13 +2700,6 @@ export class ScionChatThread extends LitElement {
           @chat-slash-command=${this.handleSlashCommand}
         ></scion-chat-composer>
         ${this.renderContextMenu()} ${this.renderFilePreview()}
-        <scion-send-to-agent-picker
-          .agents=${this.agents}
-          ?open=${this.showAgentPicker}
-          .posX=${this.contextMenuPosition.x}
-          .posY=${this.contextMenuPosition.y}
-          @agent-selected=${this.handleAgentSelected}
-        ></scion-send-to-agent-picker>
       </div>
     `;
   }
@@ -3020,10 +2970,6 @@ export class ScionChatThread extends LitElement {
       const replyPreview = ext?.replyToId
         ? (this.v2ReplyPreviewMap.get(ext.replyToId) ?? null)
         : null;
-      const isOwnMessage = msg.senderId === this.currentUserId;
-      // Guard: can edit/delete only if no agent has replied after this message.
-      const canEditDelete = isOwnMessage && !this.hasAgentReplyAfter(msg);
-
       rows.push(html`
         <scion-chat-message
           @contextmenu=${(e: MouseEvent) => this.handleMessageContextMenu(e, msg)}
