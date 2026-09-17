@@ -119,6 +119,13 @@ func TestTypeChat_InValidTypes(t *testing.T) {
 	}
 }
 
+func TestTypeReply_InValidTypes(t *testing.T) {
+	// TypeReply must be accepted by ValidateType.
+	if err := messages.ValidateType(messages.TypeReply); err != nil {
+		t.Fatalf("ValidateType(%q) returned error: %v", messages.TypeReply, err)
+	}
+}
+
 func TestTypeChat_NotDispatchedToAgent(t *testing.T) {
 	// type:chat audit (a): Messages with recipient "thread:..." or
 	// "user:..." (non-agent-prefixed) are never dispatched to an agent.

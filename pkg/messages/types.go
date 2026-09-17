@@ -80,6 +80,12 @@ const (
 	//       type validation is in StructuredMessage.Validate(), and chat is now
 	//       in validTypes. No plugin Publish or Validate method rejects unknown types.
 	TypeChat = "chat"
+
+	// TypeReply is used when a user replies to a specific message. It carries
+	// reply-to metadata (e.g. RE-to) so that agents can see the context of
+	// what was replied to. Mapped to text/request in the envelope taxonomy
+	// (same as TypeInstruction — a reply to an agent is still a request).
+	TypeReply = "reply"
 )
 
 // System message category constants identify the origin of a system message.
@@ -99,6 +105,7 @@ var validTypes = map[string]bool{
 	TypeMention:        true,
 	TypeSystem:         true,
 	TypeChat:           true,
+	TypeReply:          true,
 }
 
 // StructuredMessage represents a formatted Scion message.

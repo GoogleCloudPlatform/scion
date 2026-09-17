@@ -252,10 +252,11 @@ type Message struct {
 	Intent *TextIntent `json:"intent,omitempty"` // Kind == text
 	Event  *EventBody  `json:"event,omitempty"`  // Kind == event
 
-	Body        string          `json:"body"`
-	Attachments []AttachmentRef `json:"attachments,omitempty"`
-	Urgent      bool            `json:"urgent,omitempty"`
-	CreatedAt   time.Time       `json:"created_at"`
+	Body        string            `json:"body"`
+	Attachments []AttachmentRef   `json:"attachments,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+	Urgent      bool              `json:"urgent,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
 }
 
 // validateStructural checks every Message invariant that does not depend on

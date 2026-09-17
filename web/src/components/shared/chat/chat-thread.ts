@@ -1747,7 +1747,7 @@ export class ScionChatThread extends LitElement {
       recipient: '',
       recipientId: '',
       msg: text,
-      type: 'chat',
+      type: replyToId ? 'reply' : 'chat',
       agentId: '',
       createdAt: new Date().toISOString(),
       dispatchState: 'pending',
@@ -1781,10 +1781,11 @@ export class ScionChatThread extends LitElement {
           body.reply_to_agent = agentSlug;
         }
       }
-      // Fix: Add RE_msg_starting metadata when replying.
+      // Fix: Add RE-to metadata when replying — first 32 chars with ellipsis.
       if (replyToId && replyToContent) {
         const metadata: Record<string, string> = {
-          RE_msg_starting: replyToContent.slice(0, 32),
+          'RE-to':
+            replyToContent.length > 32 ? replyToContent.slice(0, 32) + '...' : replyToContent,
         };
         body.metadata = metadata;
       }

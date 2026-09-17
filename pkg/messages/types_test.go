@@ -31,6 +31,8 @@ func TestValidateType(t *testing.T) {
 		{TypeGroupSet, false},
 		{TypeMention, false},
 		{TypeSystem, false},
+		{TypeChat, false},
+		{TypeReply, false},
 		{"unknown", true},
 		{"", true},
 	}
