@@ -599,7 +599,7 @@ export class ScionChatMessage extends LitElement {
     }
 
     .from-user .bubble-header {
-      flex-direction: row-reverse;
+      justify-content: flex-end;
     }
 
     /* Pre-formatted (plain) text */
@@ -1800,52 +1800,42 @@ export class ScionChatMessage extends LitElement {
 
     return html`
       <div class="message-wrapper ${dirClass}${groupClass}">
-        ${
-          this.showHeader && this.fromAgent
-            ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
-                ${this.getInitials()}
-              </div>`
-            : this.fromAgent
-              ? html`<div class="avatar-spacer"></div>`
-              : nothing
-        }
+        ${this.showHeader && this.fromAgent
+          ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
+              ${this.getInitials()}
+            </div>`
+          : this.fromAgent
+            ? html`<div class="avatar-spacer"></div>`
+            : nothing}
         <div class="bubble">
-          ${
-            this.showHeader && this.fromAgent
-              ? html`
-                  <div class="bubble-header">
-                    <span class="sender-name">${this.senderName || this.sender}</span>
-                    ${
-                      this.routedTo
-                        ? html`<span class="routed-to"> &rarr; ${this.routedTo}</span>`
-                        : nothing
-                    }
-                    <span class="msg-time">${this.formatTime()}</span>
-                    ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
-                  </div>
-                `
-              : nothing
-          }
-          ${
-            this.showHeader && !this.fromAgent && this.routedTo
-              ? html`
-                  <div class="bubble-header">
-                    <span class="sender-name">${this.senderName || this.sender}</span>
-                    <span class="routed-to"> &rarr; ${this.routedTo}</span>
-                    <span class="msg-time">${this.formatTime()}</span>
-                    ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
-                  </div>
-                `
-              : nothing
-          }
+          ${this.showHeader && this.fromAgent
+            ? html`
+                <div class="bubble-header">
+                  <span class="sender-name">${this.senderName || this.sender}</span>
+                  ${this.routedTo
+                    ? html`<span class="routed-to"> &rarr; ${this.routedTo}</span>`
+                    : nothing}
+                  <span class="msg-time">${this.formatTime()}</span>
+                  ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
+                </div>
+              `
+            : nothing}
+          ${this.showHeader && !this.fromAgent && this.routedTo
+            ? html`
+                <div class="bubble-header">
+                  <span class="sender-name">${this.senderName || this.sender}</span>
+                  <span class="routed-to"> &rarr; ${this.routedTo}</span>
+                  <span class="msg-time">${this.formatTime()}</span>
+                  ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
+                </div>
+              `
+            : nothing}
           ${this.replyPreview ? this.renderReplyPreview() : nothing}
-          ${
-            isDeleted
-              ? html`<div class="bubble-content">
-                  <span class="deleted-message">This message was deleted</span>
-                </div>`
-              : html`<div class="bubble-content">${this.renderBody()}</div>`
-          }
+          ${isDeleted
+            ? html`<div class="bubble-content">
+                <span class="deleted-message">This message was deleted</span>
+              </div>`
+            : html`<div class="bubble-content">${this.renderBody()}</div>`}
           ${isDeleted ? nothing : this.renderDeliveryState()}
           ${isDeleted ? nothing : this.renderBadges()}
           ${isDeleted ? nothing : this.renderAttachments()}
@@ -1915,11 +1905,9 @@ export class ScionChatMessage extends LitElement {
       <div class="badges">
         ${this.urgent ? html`<span class="badge badge-urgent">urgent</span>` : nothing}
         ${this.broadcasted ? html`<span class="badge badge-broadcast">broadcast</span>` : nothing}
-        ${
-          this.channel && this.channel !== 'web'
-            ? html`<span class="badge badge-channel">via ${this.channel}</span>`
-            : nothing
-        }
+        ${this.channel && this.channel !== 'web'
+          ? html`<span class="badge badge-channel">via ${this.channel}</span>`
+          : nothing}
       </div>
     `;
   }
@@ -1960,70 +1948,66 @@ export class ScionChatMessage extends LitElement {
     const files = rest.filter((a) => !isTextPreviewable(a));
 
     return html`
-      ${
-        images.length > 0
-          ? html`
-              <div class="attachment-images">
-                ${images.map(
-                  (img) => html`
-                    <div class="image-preview-wrapper">
-                      <button
-                        type="button"
-                        class="image-expand"
-                        title="${img.name} — click to expand"
-                        aria-label="Expand ${img.name}"
-                        @click=${() => this.openFullPreview(img)}
-                      >
-                        <img
-                          class="attachment-image"
-                          src=${attachmentURL(img.id)}
-                          alt=${img.name}
-                          loading="lazy"
-                        />
-                      </button>
-                      <div class="image-actions">
-                        <sl-icon-button
-                          name="arrows-angle-expand"
-                          label="Expand ${img.name}"
-                          @click=${() => this.openFullPreview(img)}
-                        ></sl-icon-button>
-                        <sl-icon-button
-                          name="download"
-                          label="Download ${img.name}"
-                          href=${attachmentURL(img.id)}
-                          download=${img.name}
-                        ></sl-icon-button>
-                      </div>
-                    </div>
-                  `
-                )}
-              </div>
-            `
-          : nothing
-      }
-      ${previewable.map((file) => this.renderCodePreview(file))}
-      ${
-        files.length > 0
-          ? html`
-              <div class="attachments">
-                ${files.map(
-                  (file) => html`
-                    <a
-                      class="download-chip"
-                      href="/api/v1/chat/attachments/${file.id}"
-                      download=${file.name}
-                      title="Download ${file.name}"
+      ${images.length > 0
+        ? html`
+            <div class="attachment-images">
+              ${images.map(
+                (img) => html`
+                  <div class="image-preview-wrapper">
+                    <button
+                      type="button"
+                      class="image-expand"
+                      title="${img.name} — click to expand"
+                      aria-label="Expand ${img.name}"
+                      @click=${() => this.openFullPreview(img)}
                     >
-                      <sl-icon name="file-earmark-arrow-down"></sl-icon>
-                      <span class="file-name">${file.name}</span>
-                      <span class="file-size">${formatFileSize(file.size)}</span>
-                    </a>
-                  `
-                )}
-              </div>
-            `
-          : nothing
-      }
+                      <img
+                        class="attachment-image"
+                        src=${attachmentURL(img.id)}
+                        alt=${img.name}
+                        loading="lazy"
+                      />
+                    </button>
+                    <div class="image-actions">
+                      <sl-icon-button
+                        name="arrows-angle-expand"
+                        label="Expand ${img.name}"
+                        @click=${() => this.openFullPreview(img)}
+                      ></sl-icon-button>
+                      <sl-icon-button
+                        name="download"
+                        label="Download ${img.name}"
+                        href=${attachmentURL(img.id)}
+                        download=${img.name}
+                      ></sl-icon-button>
+                    </div>
+                  </div>
+                `
+              )}
+            </div>
+          `
+        : nothing}
+      ${previewable.map((file) => this.renderCodePreview(file))}
+      ${files.length > 0
+        ? html`
+            <div class="attachments">
+              ${files.map(
+                (file) => html`
+                  <a
+                    class="download-chip"
+                    href="/api/v1/chat/attachments/${file.id}"
+                    download=${file.name}
+                    title="Download ${file.name}"
+                  >
+                    <sl-icon name="file-earmark-arrow-down"></sl-icon>
+                    <span class="file-name">${file.name}</span>
+                    <span class="file-size">${formatFileSize(file.size)}</span>
+                  </a>
+                `
+              )}
+            </div>
+          `
+        : nothing}
     `;
   }
 
@@ -2056,28 +2040,24 @@ export class ScionChatMessage extends LitElement {
           <span class="preview-filename" title=${ref.name}>${ref.name}</span>
           <span class="preview-size">${formatFileSize(ref.size)}</span>
           <div class="preview-actions">
-            ${
-              isMd
-                ? html`
-                    <sl-icon-button
-                      name=${showSource ? 'eye' : 'code'}
-                      label=${showSource ? 'Preview' : 'Source'}
-                      @click=${() => this.toggleMdSource(ref.id)}
-                    ></sl-icon-button>
-                  `
-                : nothing
-            }
-            ${
-              isMd && showSource
-                ? html`
-                    <sl-icon-button
-                      name=${this.copiedIds.has(ref.id) ? 'check2' : 'clipboard'}
-                      label="Copy to clipboard"
-                      @click=${() => this.copyAttachmentText(ref.id)}
-                    ></sl-icon-button>
-                  `
-                : nothing
-            }
+            ${isMd
+              ? html`
+                  <sl-icon-button
+                    name=${showSource ? 'eye' : 'code'}
+                    label=${showSource ? 'Preview' : 'Source'}
+                    @click=${() => this.toggleMdSource(ref.id)}
+                  ></sl-icon-button>
+                `
+              : nothing}
+            ${isMd && showSource
+              ? html`
+                  <sl-icon-button
+                    name=${this.copiedIds.has(ref.id) ? 'check2' : 'clipboard'}
+                    label="Copy to clipboard"
+                    @click=${() => this.copyAttachmentText(ref.id)}
+                  ></sl-icon-button>
+                `
+              : nothing}
             <sl-icon-button
               name="arrows-angle-expand"
               label="Expand ${ref.name}"
@@ -2091,13 +2071,11 @@ export class ScionChatMessage extends LitElement {
             ></sl-icon-button>
           </div>
         </div>
-        ${
-          isMd && !showSource
-            ? html`<div class="md-preview-body">${this.renderMdPreviewBody(ref, state)}</div>`
-            : html`<div class="preview-body ${clipped || sourceClipped ? 'clipped' : ''}">
-                ${this.renderPreviewBody(ref, state)}
-              </div>`
-        }
+        ${isMd && !showSource
+          ? html`<div class="md-preview-body">${this.renderMdPreviewBody(ref, state)}</div>`
+          : html`<div class="preview-body ${clipped || sourceClipped ? 'clipped' : ''}">
+              ${this.renderPreviewBody(ref, state)}
+            </div>`}
       </div>
     `;
   }
@@ -2190,37 +2168,31 @@ export class ScionChatMessage extends LitElement {
           if (e.target === e.currentTarget) this.expanded = null;
         }}
       >
-        ${
-          IMAGE_MIMES.has(ref.mime)
-            ? html`<img class="full-image" src=${attachmentURL(ref.id)} alt=${ref.name} />`
-            : isMd && !showSource
-              ? this.renderMdPreviewBody(ref, state)
-              : this.renderPreviewBody(ref, state, true)
-        }
+        ${IMAGE_MIMES.has(ref.mime)
+          ? html`<img class="full-image" src=${attachmentURL(ref.id)} alt=${ref.name} />`
+          : isMd && !showSource
+            ? this.renderMdPreviewBody(ref, state)
+            : this.renderPreviewBody(ref, state, true)}
         <div slot="footer" style="display:flex;gap:0.5rem;align-items:center">
-          ${
-            isMd
-              ? html`
-                  <sl-button size="small" @click=${() => this.toggleMdSource(ref.id)}>
-                    <sl-icon slot="prefix" name=${showSource ? 'eye' : 'code'}></sl-icon>
-                    ${showSource ? 'Preview' : 'Source'}
-                  </sl-button>
-                `
-              : nothing
-          }
-          ${
-            isMd && showSource
-              ? html`
-                  <sl-button size="small" @click=${() => this.copyAttachmentText(ref.id)}>
-                    <sl-icon
-                      slot="prefix"
-                      name=${this.copiedIds.has(ref.id) ? 'check2' : 'clipboard'}
-                    ></sl-icon>
-                    ${this.copiedIds.has(ref.id) ? 'Copied!' : 'Copy'}
-                  </sl-button>
-                `
-              : nothing
-          }
+          ${isMd
+            ? html`
+                <sl-button size="small" @click=${() => this.toggleMdSource(ref.id)}>
+                  <sl-icon slot="prefix" name=${showSource ? 'eye' : 'code'}></sl-icon>
+                  ${showSource ? 'Preview' : 'Source'}
+                </sl-button>
+              `
+            : nothing}
+          ${isMd && showSource
+            ? html`
+                <sl-button size="small" @click=${() => this.copyAttachmentText(ref.id)}>
+                  <sl-icon
+                    slot="prefix"
+                    name=${this.copiedIds.has(ref.id) ? 'check2' : 'clipboard'}
+                  ></sl-icon>
+                  ${this.copiedIds.has(ref.id) ? 'Copied!' : 'Copy'}
+                </sl-button>
+              `
+            : nothing}
           <sl-button href=${attachmentURL(ref.id)} download=${ref.name}>
             <sl-icon slot="prefix" name="download"></sl-icon>
             Download

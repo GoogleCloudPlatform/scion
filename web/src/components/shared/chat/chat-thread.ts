@@ -1729,8 +1729,8 @@ export class ScionChatThread extends LitElement {
       projectId: '',
       sender: '',
       senderId: this.selfUserId(),
-      recipient: '',
-      recipientId: '',
+      recipient: this.defaultAgent ? 'agent:' + this.defaultAgent : '',
+      recipientId: this.defaultAgent || '',
       msg: text,
       type: 'chat',
       agentId: '',
@@ -1810,6 +1810,14 @@ export class ScionChatThread extends LitElement {
         const optimistic = this.messageMap.get(idempotencyKey);
         if (optimistic && resData?.id) {
           this.messageMap.delete(idempotencyKey);
+          // If SSE already delivered the real message, preserve its server-enriched fields
+          const sseVersion = this.messageMap.get(resData.id);
+          if (sseVersion) {
+            optimistic.recipient = sseVersion.recipient || optimistic.recipient;
+            optimistic.recipientId = sseVersion.recipientId || optimistic.recipientId;
+            optimistic.sender = sseVersion.sender || optimistic.sender;
+            optimistic.type = sseVersion.type || optimistic.type;
+          }
           optimistic.id = resData.id;
           optimistic.dispatchState = 'dispatched';
           this.messageMap.set(resData.id, optimistic);
@@ -3122,10 +3130,8 @@ export class ScionChatThread extends LitElement {
       // retroactively show a routing header.
       const isAgentSender = this.isSenderAgent(msg);
       const msgRoutedTo =
-        !isAgentSender && msg.recipient
-          ? msg.recipient.startsWith('agent:')
-            ? msg.recipient.slice(6)
-            : msg.recipient
+        !isAgentSender && msg.recipient && msg.recipient.startsWith('agent:')
+          ? msg.recipient.slice(6)
           : '';
       const senderDisplayName = this.isV2
         ? this.getSenderDisplayName(msg)
