@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -116,14 +117,33 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 		return true
 	}
 
-	// Cross-project check: target must belong to this project.
-	if agent.ProjectID != projectID {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"scheduled message target agent is not in this project", map[string]interface{}{
-				"target_project":  agent.ProjectID,
-				"request_project": projectID,
-			})
-		return false
+	// Phase 5 D3: Cross-project scheduled message support.
+	// The event remains owned/administered in the sender's project; its target
+	// agent/project are separate immutable fields.
+	isCrossProject := agent.ProjectID != projectID
+	if isCrossProject {
+		// Cross-project scheduled message: validate the Hub feature is enabled
+		// and the sender has cross-project messaging authorization.
+		ops := s.GetOperationalSettings()
+		if ops == nil || !ops.CrossProjectMessagingEnabled() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"cross-project scheduled messages require cross-project messaging to be enabled", map[string]interface{}{
+					"code": string(MessageDenialCrossProjectScheduledDisabled),
+				})
+			return false
+		}
+		// Persist cross-project context with the scheduled event for
+		// fire-time reauthorization.
+		LogCrossProjectDecision(CrossProjectAuditEntry{
+			Timestamp:        time.Now(),
+			Action:           "scheduled_author",
+			SenderID:         identity.ID(),
+			SenderProjectID:  projectID,
+			RecipientID:      agent.ID,
+			RecipientProject: agent.ProjectID,
+			CrossProject:     true,
+			Surface:          "scheduled_message",
+		})
 	}
 
 	// Reject scoped UATs: the scheduler persists only the creator ID.
@@ -143,7 +163,8 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 		slog.Warn("scheduled message authoring denied",
 			"identity", identity.ID(), "identity_type", identity.Type(),
 			"agent_id", agent.ID, "agent_slug", agent.Slug,
-			"project_id", projectID, "reason", reason)
+			"project_id", projectID, "reason", reason,
+			"cross_project", isCrossProject)
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"not authorized to message this agent", map[string]interface{}{
 				"reason":     mapReasonToCode(reason),
@@ -173,10 +194,21 @@ func (s *Server) authorizeScheduledMessageFire(
 		return nil, fmt.Errorf("scheduled_message_no_creator: message event has no creator; cannot authorize at fire time")
 	}
 
-	// Target must be in the event's project.
-	if agent.ProjectID != evt.ProjectID {
-		return nil, fmt.Errorf("scheduled_message_cross_project: target agent %q is in project %q, event is in project %q",
-			agent.ID, agent.ProjectID, evt.ProjectID)
+	// Phase 5 D3: Cross-project scheduled messages are now allowed when the
+	// Hub feature is enabled. The event's project is the sender's project;
+	// the target agent may be in a different project.
+	isCrossProject := agent.ProjectID != evt.ProjectID
+	if isCrossProject {
+		ops := s.GetOperationalSettings()
+		if ops == nil || !ops.CrossProjectMessagingEnabled() {
+			return nil, fmt.Errorf("%s: cross-project messaging is disabled; target agent %q is in project %q, event is in project %q",
+				MessageDenialCrossProjectScheduledDisabled, agent.ID, agent.ProjectID, evt.ProjectID)
+		}
+		// Check if target has been deleted since scheduling.
+		if !agent.DeletedAt.IsZero() {
+			return nil, fmt.Errorf("%s: target agent %q has been deleted since scheduling",
+				MessageDenialScheduledTargetDeleted, agent.ID)
+		}
 	}
 
 	// Resolve the creator. Try agent first (mirrors authorizeScheduledAgentCreate),
@@ -184,9 +216,11 @@ func (s *Server) authorizeScheduledMessageFire(
 	var creatorIdentity Identity
 
 	if creator, err := s.store.GetAgent(ctx, evt.CreatedBy); err == nil {
-		// Creator is an agent.
+		// Creator is an agent. For same-project events, the creator must be
+		// in the event's project. For cross-project events (Phase 5 D3),
+		// the creator's project is the event's project (sender's project).
 		if creator.ProjectID != evt.ProjectID {
-			return nil, fmt.Errorf("scheduled_message_creator_cross_project: creator agent %q is not in project %q",
+			return nil, fmt.Errorf("scheduled_message_creator_cross_project: creator agent %q is not in the event's project %q",
 				evt.CreatedBy, evt.ProjectID)
 		}
 		// Check creator agent is not soft-deleted. Agent soft-deletion sets
