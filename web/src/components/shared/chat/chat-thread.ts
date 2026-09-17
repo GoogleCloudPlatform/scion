@@ -1664,8 +1664,16 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, mentions, attachmentIds, replyToId, replyToSender, replyToContent, onSuccess } =
-      e.detail;
+    const {
+      text,
+      mentions,
+      attachmentIds,
+      replyToId,
+      replyToSender,
+      replyToContent,
+      onSuccess,
+      onError,
+    } = e.detail;
     const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
     if (!hasContent || this.sending) return;
 
@@ -1679,10 +1687,37 @@ export class ScionChatThread extends LitElement {
     this.sending = true;
     this.sendError = null;
 
+    // Generate an idempotency key so duplicate sends (e.g. network retry)
+    // are collapsed server-side. Also used as the optimistic message temp ID.
+    const idempotencyKey = crypto.randomUUID();
+
+    // Save composerReplyTo before clearing it optimistically. On failure we
+    // restore it so the reply bar comes back; on success it stays cleared.
+    const savedReplyTo = this.composerReplyTo;
+    this.composerReplyTo = null;
+
+    // Optimistic insertion: show the message in the history immediately with
+    // a "Sending" indicator, before the API call returns.
+    const optimisticMsg: Message = {
+      id: idempotencyKey,
+      projectId: '',
+      sender: '',
+      senderId: this.selfUserId(),
+      recipient: '',
+      recipientId: '',
+      msg: text,
+      type: 'chat',
+      agentId: '',
+      createdAt: new Date().toISOString(),
+      dispatchState: 'pending',
+    };
+    this.messageMap.set(optimisticMsg.id, optimisticMsg);
+    this.messages = Array.from(this.messageMap.values()).sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+    this.scrollToBottomAfterRender();
+
     try {
-      // Generate an idempotency key so duplicate sends (e.g. network retry)
-      // are collapsed server-side.
-      const idempotencyKey = crypto.randomUUID();
       const body: Record<string, unknown> = {
         content: text,
         idempotency_key: idempotencyKey,
@@ -1723,7 +1758,15 @@ export class ScionChatThread extends LitElement {
       );
 
       if (!res.ok) {
+        // Remove optimistic message on failure.
+        this.messageMap.delete(idempotencyKey);
+        this.messages = Array.from(this.messageMap.values()).sort(
+          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
+        // Restore reply-to state so the reply bar comes back for retry.
+        this.composerReplyTo = savedReplyTo;
         this.sendError = await extractApiError(res, 'Failed to send message');
+        onError?.(this.sendError ?? 'Failed to send message');
       } else {
         // W7: Parse attachment refs from the send response.
         const resData = (await res.json().catch(() => null)) as {
@@ -1733,12 +1776,41 @@ export class ScionChatThread extends LitElement {
         if (resData?.id && resData?.attachments && resData.attachments.length > 0) {
           this.v2AttachmentMap.set(resData.id, resData.attachments);
         }
+
+        // Update the optimistic message in-place with the server-assigned ID
+        // instead of deleting it. This avoids a visible flicker (message
+        // disappearing then reappearing) between the delete and the backfill
+        // delivering the real message.
+        const optimistic = this.messageMap.get(idempotencyKey);
+        if (optimistic && resData?.id) {
+          this.messageMap.delete(idempotencyKey);
+          optimistic.id = resData.id;
+          optimistic.dispatchState = 'dispatched';
+          this.messageMap.set(resData.id, optimistic);
+        } else {
+          // Fallback: remove if we cannot remap (should not happen).
+          this.messageMap.delete(idempotencyKey);
+        }
+        this.messages = Array.from(this.messageMap.values()).sort(
+          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
+
         onSuccess();
-        // Backfill to pick up the message immediately
+        // Backfill to get the full server-enriched message. The optimistic
+        // message (now keyed by the real ID) stays visible until the backfill
+        // overwrites it, so there is no gap.
         void this.backfillV2();
       }
     } catch (err) {
+      // Remove optimistic message on failure.
+      this.messageMap.delete(idempotencyKey);
+      this.messages = Array.from(this.messageMap.values()).sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      );
+      // Restore reply-to state so the reply bar comes back for retry.
+      this.composerReplyTo = savedReplyTo;
       this.sendError = err instanceof Error ? err.message : 'Failed to send message';
+      onError?.(this.sendError ?? 'Failed to send message');
     } finally {
       this.sending = false;
     }
@@ -2784,7 +2856,6 @@ export class ScionChatThread extends LitElement {
         ${this.canSend
           ? html`
               <scion-chat-composer
-                ?disabled=${this.sending}
                 .agents=${this.agents}
                 @chat-send=${this.handleChatSend}
               ></scion-chat-composer>
@@ -2801,7 +2872,6 @@ export class ScionChatThread extends LitElement {
         ${this.renderInteragentToggle()} ${this.renderContent()} ${this.renderTypingIndicator()}
         ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
         <scion-chat-composer
-          ?disabled=${this.sending}
           .agents=${this.agents}
           .members=${this.members}
           .defaultAgent=${this.defaultAgent}
