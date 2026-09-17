@@ -1,27 +1,28 @@
 # Scion
 
-Run multiple agents in parallel — each in its own container, with its own workspace, collaborating on your code or project files simultaneously.
+An open foundation for agent collaboration.
 
 _sci·on /ˈsīən/ — a young shoot or twig, cut for grafting or rooting._
 
-Scion is a multi-agent orchestration platform designed to manage "deep agents" running in containers.
+Scion is an open-source orchestration platform for teams of AI agents and the people working with them. Bring your choice of agent harnesses and models, give agents specialized roles, and let them delegate tasks, share findings, and work in parallel — on your laptop or across cloud infrastructure.
 
+As agents take on longer, more complex projects, the challenge becomes how they work together: who owns a task, what context they share, when they ask for help, and how you follow their progress. Scion provides the running environments, communication, identity, and visibility to explore those questions in practice.
 
-Scion orchestrates "deep agents" (Claude Code, Gemini CLI, and others) as isolated, concurrent processes. Each agent gets its own container, (optional) git worktree, and credentials — so they can work on different parts of your project without stepping on each other. Agents run locally, on remote VMs, or across Kubernetes clusters.
+Run harnesses such as Claude Code, Gemini CLI, Codex, and OpenCode as independent processes, with per-agent configuration and credentials. Choose shared workspaces or separate Git worktrees and clones to suit the work. Start with a local CLI or the Workstation web UI, then move to a hosted Hub when your team needs shared access and remote execution.
 
-Rather than prescribing rigid orchestration patterns, Scion takes a "less is more" approach: agents dynamically learn a CLI tool, letting the models themselves decide how to coordinate among agents. This makes it a rapid prototype testbed for experimenting with multi-agent patterns through natural language prompting. Read more in [Philosophy](https://googlecloudplatform.github.io/scion/philosophy/).
+Scion's philosophy is **less is more**. Agents learn the `scion` CLI through skills and help text; you describe responsibilities and collaboration patterns in instructions. Teams can grow, delegate, review, and regroup as a task unfolds. Use Scion as a practical testbed for emerging patterns in agent collaboration, with the freedom to choose your models, tools, and infrastructure. Read more in [Philosophy](https://googlecloudplatform.github.io/scion/philosophy/).
 
 
 ## In Action
 
-While Scion is powered by coding agents, and can absolutely be used for multi-agent software development, it isn't exclusive to software development, but is a orchestration tool and layer, which can be combined with other agent augmenting system (task tracking, memory, etc - see below on compliments to Scion). We have used it internally at Google for exploring software porting, used for market research, product testing, and more. We are exploring it for use in Cloud operations, and scientific research.  Below are a couple other demonstrations of how agents can collaborate in interesting scenarios.
+Coding harnesses give agents access to files, tools, and a working environment. Scion puts those capabilities to work across software development, research, testing, and creative projects. Internal experiments at Google have included software porting, market research, and product testing, with cloud operations and scientific research under exploration. The projects below show how collaboration patterns can be developed through real tasks and human feedback.
 
 ### Scion Films
 
 <img height="200" alt="scion-films-poster" src="https://github.com/user-attachments/assets/51be1c80-4bb3-48ad-90e9-356aeffcb678" />
 
 
-The [Scion Films](https://films.scion-ai.dev/) project was an exploration in how to iterate and improve multi-agent orchestration, skills, and tools in a domain that is not as innate or "verifiable" as classic auto-research problems where a simple computable scoring metric was used. Instead, human viewer feedback and agent retrospectives were used to iterate across a series of "pilots" - for fun, we use agents to document the entire proces, and in the end, they used the same refined tools and process to make a documentary film.
+In [Scion Films](https://films.scion-ai.dev/), agent crews explored filmmaking, where success depends on human judgment as well as technical execution. Viewer feedback and agent retrospectives shaped the team's skills, tools, and collaboration across a series of pilots. An agent documentary crew then used those same practices to tell the story of the experiment.
 
 ### Relics of Athenaeum
 
@@ -29,11 +30,13 @@ The [Scion Films](https://films.scion-ai.dev/) project was an exploration in how
 
 <a href="https://github.com/ptone/scion-athenaeum"><img height="200" alt="Relics of Athenaeum" src="https://github.com/user-attachments/assets/cbee74a3-f3aa-4739-b423-0a83d5dd4c13" /></a>&nbsp;<a href="https://www.youtube.com/watch?v=w16bsh6lFL8"><img height="200" alt="Visualization of agent coordination" src="https://github.com/user-attachments/assets/a615da24-33d8-4882-abe1-95adea4ed79a" /></a>
 
-The visualization above replays the actual telemetry collected from messages and file access in the shared workspace while the agents solved the challenges of the game. While this is a "game", the same process of team definition works for software engineering, data research, and platform engineering workflows.
+The visualization above replays telemetry from messages and shared-workspace file access as the agents solved the game's challenges. The same approach — define responsibilities, exchange findings, inspect what happened, and refine the instructions — can be applied to software engineering, research, and operations.
 
 ## Scion architecture companions
 
-Scion acts as a core component in a multi-agent solution, but does not try to package all capabilities into a monolithic and over-opinionated solution, instead trying to offer value in durable and well structure abstractions and primitives.  In that sense it is like a game engine upon which you build your game title. First and foremost this comes down to defining your own agent templates, which increasingly are based on skills. If you are doing software factory work, you will want some task management system which could be Github issues, Linear, or something more agent-centric like [Farmtable](https://github.com/scion-frontiers/farmtable), or [Beads](https://github.com/gastownhall/beads). You also might want to introduce a component that manages agent memory (although Scion's use of shared filesystem may get you a long way), network proxy access, etc.
+Scion is designed to be one part of your agent system. Compose templates and reusable skills with the task tracking, memory, data, and network tools that fit your project. For software work, that might mean GitHub Issues, Linear, [Farmtable](https://github.com/scion-frontiers/farmtable), or [Beads](https://github.com/gastownhall/beads). Shared directories give agents a place to exchange artifacts and notes; specialized memory systems can extend that foundation.
+
+The Skill Bank supports publishing and versioning skills, with resolution from GitHub and external registries. Harness configuration bundles make agent setup extensible, while the A2A bridge connects Scion to other agent systems. These boundaries let the surrounding ecosystem evolve alongside Scion.
 
 ## Quick Start
 
@@ -70,15 +73,9 @@ See the [homebrew-scion tap](https://github.com/homebrew-scion/homebrew-scion) f
 
 ### Install from Source
 
-See the full [Installation Guide](https://googlecloudplatform.github.io/scion/getting-started/install/), or install from source (requires Go 1.22+):
+Follow the [Installation Guide](https://googlecloudplatform.github.io/scion/getting-started/install/) to build from a clone with `make all`. This builds the web frontend and embeds it in the binary; use the Go version specified in `go.mod` and the guide's Node.js prerequisites.
 
-```bash
-go install github.com/GoogleCloudPlatform/scion/cmd/scion@latest
-```
-
-> **Warning:** `go install` builds only the Go binary. It does not build or embed the web frontend, so `scion server start` will serve a blank web UI with missing frontend assets. Use Homebrew for a ready-to-run install, or build from a clone with `make all` before installing the binary.
-
-### Initialize your machine and a Project (project)
+### Initialize your machine and a project
 
 > **Tip:** If you used `scion server start` above, the onboarding wizard handles machine initialization automatically — you can skip this section.
 
@@ -117,24 +114,25 @@ scion start debug "Help me debug this error" --attach
 
 ## Key Features
 
-- **Harness Agnostic** — Ships with Gemini CLI and Claude Code by default. Additional harnesses (OpenCode, Codex, Antigravity) are available as [opt-in bundles](harnesses/README.md). Adaptable to anything that runs in a container.
-- **True Isolation** — Each agent runs in its own container with separated credentials, config, and a dedicated `git worktree`, preventing merge conflicts.
-- **Parallel Execution** — Run multiple agents concurrently as fully independent processes, locally or remotely.
-- **Attach / Detach** — Agents run in `tmux` sessions for background operation. Attach for human-in-the-loop interaction, enqueue messages while detached, and tunnel into remote agents securely.
-- **Specialization via Templates** — Define agent roles ("Security Auditor", "QA Tester") with custom system prompts and skill sets. See [Templates](https://googlecloudplatform.github.io/scion/local/templates/).
-- **Multi-Runtime** — Manage execution across Docker, Podman, Apple containers, and Kubernetes via named profiles.
-- **Observability** — Normalized OTEL telemetry across harnesses for logging and metrics across agent swarms.
+- **Your choice of agents** — Mix supported harnesses and models across a team. Extend agent setup through [harness configuration bundles](harnesses/README.md), with provisioning and authentication defined outside Scion's core.
+- **Teams that adapt** — Agents can delegate through the CLI, message collaborators, and receive notifications when work finishes or needs attention. Define the collaboration pattern in templates, skills, and instructions.
+- **Workspaces with deliberate sharing** — Run agents in containers with their own configuration and credentials. Choose shared directories, Git worktrees, or separate clones according to the project's coordination needs.
+- **People in the conversation** — Follow work in native web chat or connect Telegram, Discord, Slack, Google Chat, and Microsoft Teams. Attach to supported interactive harness sessions when you want to work directly with an agent.
+- **Reusable expertise** — Package instructions and tools in [templates](https://googlecloudplatform.github.io/scion/local/templates/) and versioned skills. Publish, discover, and resolve skills through the Skill Bank and connected registries.
+- **Local to hosted execution** — Use Docker, Podman, Apple Container, Kubernetes, or Cloud Run. Choose local, Workstation, single-node hosted, or HA hosted operation, with a managed-agent API path for supported providers.
+- **Visibility and control** — Inspect logs, session metrics, and system health. Hosted deployments add roles, access boundaries, scoped secrets, and federated identity to control how people and agents work together.
+- **Open interfaces** — Integrate through the CLI, APIs, lifecycle hooks, MCP configuration, and the A2A bridge. Build on Apache-2.0-licensed code and contribute new patterns back to the project.
 
 ## Core Concepts
 
 | Concept | Description |
 |---------|-------------|
-| **Agent** | A containerized process running a deep agent harness (Claude Code, Gemini CLI, etc.) |
+| **Agent** | A worker with its own identity, typically running an agent harness in a container; managed agents use a provider API |
 | **Project** | A project namespace and collection of agents, commonly 1:1 with a git repo |
 | **Template** | An agent blueprint — system prompt plus a collection of skills |
-| **Runtime** | A container runtime: Docker, Podman, Apple Container, or Kubernetes |
-| **Hub** | Optional central control plane for multi-machine orchestration |
-| **Runtime Broker** | A machine (laptop or VM) offering its runtimes to a Hub |
+| **Runtime** | The execution technology: Docker, Podman, Apple Container, Kubernetes, or Cloud Run |
+| **Hub** | The control plane for Workstation and hosted operation, managing shared state, identity, and dispatch |
+| **Runtime Broker** | A service that provisions and runs containerized agents on behalf of a Hub |
 
 Not all concepts apply in every scenario — local mode is simpler. See [Concepts](https://googlecloudplatform.github.io/scion/concepts/) for the full picture.
 
@@ -153,13 +151,14 @@ Visit our **[Documentation Site](https://googlecloudplatform.github.io/scion/)**
 
 ## Project Status
 
-Scion is in active development. Core concepts are settled and all deployment modes are supported:
+Scion is an actively developed, pre-release project. It is a place to explore emerging agent collaboration patterns and improve the infrastructure they need through practical use.
 
-- **Local mode** — stable, with an increasingly capable local "workstation" mode where a full local server runs.
-- **Single-node Hub** — mature and in use for many projects inside Google.
-- **Distributed HA** — supported on GCP (Cloud Run + GKE), with continued evolution.
+- **Local** — run agents directly from the CLI.
+- **Workstation** — use a local Hub, Runtime Broker, and web UI for one person.
+- **Single-node hosted** — share a networked Hub running on a VM or Cloud Run.
+- **HA hosted** — operate a replicated Hub with Postgres and shared storage.
 
-See the [public roadmap](https://github.com/orgs/scion-frontiers/projects/5/views/2) for details.
+Capabilities and operational requirements vary by mode. APIs and configuration continue to evolve; see [Choosing a Mode](https://googlecloudplatform.github.io/scion/choosing-a-mode/), the [release notes](https://googlecloudplatform.github.io/scion/release-notes/), and the [public roadmap](https://github.com/orgs/scion-frontiers/projects/5/views/2).
 
 ## Disclaimers
 
