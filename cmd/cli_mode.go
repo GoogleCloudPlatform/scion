@@ -109,6 +109,12 @@ var agentAllowed = map[string]bool{
 	"project.skills.list":         true,
 	"project.skills.add":          true,
 	"project.skills.remove":       true,
+	"conversation":                true,
+	"conversation.list":           true,
+	"conversation.messages":       true,
+	"conversation.get":            true,
+	"conversation.create":         true,
+	"conversation.set-default":    true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.
