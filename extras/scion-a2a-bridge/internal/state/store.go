@@ -50,6 +50,7 @@ type Store interface {
 	// Task event log (Phase 2 will use these; defined and stubbed for now)
 	AppendTaskEvent(ctx context.Context, ev *TaskEvent) (id int64, err error)
 	ReadTaskEvents(ctx context.Context, taskID string, afterID int64, limit int) ([]TaskEvent, error)
+	LatestTaskEventID(ctx context.Context, taskID string) (int64, error)
 	PurgeTaskEvents(ctx context.Context, olderThan time.Time) (int64, error)
 
 	// Lifecycle

@@ -497,3 +497,83 @@ func TestEndToEnd_GeminiEnterprise_A2A_OAuth_MultiTurn(t *testing.T) {
 	}
 }
 
+func TestExtractOAuthToken_NoAPIKeyFallback(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/projects/default/agents/assistant", nil)
+	req.Header.Set("X-API-Key", "secret-internal-api-key")
+	if got := extractOAuthToken(req); got != "" {
+		t.Fatalf("expected empty token when only X-API-Key is set, got %q", got)
+	}
+}
+
+func TestOAuthValidator_EvictExpiredAndErrorBody(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer expired-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid_token","error_description":"Token has expired"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"sub":"u-1","email":"u1@example.com"}`))
+	}))
+	defer ts.Close()
+
+	v := NewOAuthValidator(OAuthConfig{
+		UserInfoURL: ts.URL,
+		CacheTTL:    10 * time.Millisecond,
+	})
+
+	_, err := v.Validate(context.Background(), "expired-token")
+	if err == nil || !strings.Contains(err.Error(), "Token has expired") {
+		t.Fatalf("expected error containing response body 'Token has expired', got: %v", err)
+	}
+
+	if _, err := v.Validate(context.Background(), "valid-1"); err != nil {
+		t.Fatalf("Validate valid-1: %v", err)
+	}
+	v.mu.RLock()
+	initialLen := len(v.cache)
+	v.mu.RUnlock()
+	if initialLen != 1 {
+		t.Fatalf("expected 1 cached entry, got %d", initialLen)
+	}
+
+	time.Sleep(25 * time.Millisecond)
+	v.evictExpired()
+
+	v.mu.RLock()
+	afterLen := len(v.cache)
+	v.mu.RUnlock()
+	if afterLen != 0 {
+		t.Fatalf("expected 0 cached entries after evictExpired, got %d", afterLen)
+	}
+}
+
+func TestV0CompatResponseWriter_PartialSSEChunks(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rec.Header().Set("Content-Type", "text/event-stream")
+	w := newV0CompatResponseWriter(rec)
+	w.WriteHeader(http.StatusOK)
+
+	// Write a single SSE data line split across 3 separate Write calls.
+	chunk1 := []byte("data: {\"jsonrpc\":\"2.0\",\"id\":\"1\",")
+	chunk2 := []byte("\"result\":{\"id\":\"t-1\",\"status\":{\"state\":\"TASK_STATE_COMPLETED\"}}}")
+	chunk3 := []byte("\n\n")
+
+	if _, err := w.Write(chunk1); err != nil {
+		t.Fatalf("Write chunk1: %v", err)
+	}
+	if _, err := w.Write(chunk2); err != nil {
+		t.Fatalf("Write chunk2: %v", err)
+	}
+	if _, err := w.Write(chunk3); err != nil {
+		t.Fatalf("Write chunk3: %v", err)
+	}
+	w.finish()
+
+	out := rec.Body.String()
+	if !strings.Contains(out, `"state":"completed"`) {
+		t.Fatalf("expected converted v0 state 'completed' in streamed output, got: %s", out)
+	}
+}
+
+

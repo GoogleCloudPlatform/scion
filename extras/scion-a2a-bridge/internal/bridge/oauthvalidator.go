@@ -34,6 +34,7 @@ const (
 	defaultOAuthUserInfoURL = "https://openidconnect.googleapis.com/v1/userinfo"
 	defaultOAuthCacheTTL    = 60 * time.Second
 	maxOAuthResponseBytes   = 64 * 1024 // 64 KB
+	maxOAuthCacheEntries    = 4096
 )
 
 // AgentUserAuthHeader is the HTTP header used by Gemini Enterprise / Vertex Agent Engine
@@ -52,9 +53,10 @@ type OAuthValidator struct {
 	cacheTTL    time.Duration
 	client      *http.Client
 
-	mu     sync.RWMutex
-	cache  map[string]*oauthCacheEntry
-	flight singleflight.Group
+	mu        sync.RWMutex
+	cache     map[string]*oauthCacheEntry
+	lastSweep time.Time
+	flight    singleflight.Group
 }
 
 // NewOAuthValidator creates a new OAuthValidator from OAuthConfig.
@@ -73,14 +75,15 @@ func NewOAuthValidator(cfg OAuthConfig) *OAuthValidator {
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		cache: make(map[string]*oauthCacheEntry),
+		cache:     make(map[string]*oauthCacheEntry),
+		lastSweep: time.Now(),
 	}
 }
 
 // extractOAuthToken extracts an OAuth bearer token from a request.
 // It checks X-Goog-Agent-User-Authorization first (for Gemini Enterprise / Cloud Run
 // environments where Authorization carries the service invoker token), falling back
-// to Authorization: Bearer and X-API-Key.
+// to Authorization: Bearer.
 func extractOAuthToken(r *http.Request) string {
 	if val := strings.TrimSpace(r.Header.Get(AgentUserAuthHeader)); val != "" {
 		if strings.HasPrefix(val, "Bearer ") || strings.HasPrefix(val, "bearer ") {
@@ -88,10 +91,23 @@ func extractOAuthToken(r *http.Request) string {
 		}
 		return val
 	}
-	if token := extractBearerToken(r); token != "" {
-		return token
+	return extractBearerToken(r)
+}
+
+// evictExpired removes all expired entries from the token cache.
+func (v *OAuthValidator) evictExpired() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.evictExpiredLocked(time.Now())
+}
+
+func (v *OAuthValidator) evictExpiredLocked(now time.Time) {
+	for k, e := range v.cache {
+		if now.After(e.expiresAt) {
+			delete(v.cache, k)
+		}
 	}
-	return strings.TrimSpace(r.Header.Get("X-API-Key"))
+	v.lastSweep = now
 }
 
 // Validate verifies the OAuth access token and returns the associated CallerIdentity.
@@ -124,10 +140,28 @@ func (v *OAuthValidator) Validate(ctx context.Context, token string) (*CallerIde
 			return nil, err
 		}
 
+		now := time.Now()
 		v.mu.Lock()
+		if now.Sub(v.lastSweep) >= 2*v.cacheTTL || len(v.cache) >= maxOAuthCacheEntries {
+			v.evictExpiredLocked(now)
+		}
+		// If cache is still at capacity after sweeping expired entries, evict the entry expiring soonest.
+		if len(v.cache) >= maxOAuthCacheEntries {
+			var oldestKey string
+			var oldestExp time.Time
+			for k, e := range v.cache {
+				if oldestKey == "" || e.expiresAt.Before(oldestExp) {
+					oldestKey = k
+					oldestExp = e.expiresAt
+				}
+			}
+			if oldestKey != "" {
+				delete(v.cache, oldestKey)
+			}
+		}
 		v.cache[cacheKey] = &oauthCacheEntry{
 			identity:  identity,
-			expiresAt: time.Now().Add(v.cacheTTL),
+			expiresAt: now.Add(v.cacheTTL),
 		}
 		v.mu.Unlock()
 
@@ -160,7 +194,7 @@ func (v *OAuthValidator) fetchUserInfo(ctx context.Context, token string) (*Call
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("oauth: userinfo returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("oauth: userinfo returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
 	return parseOAuthClaims(body, token)

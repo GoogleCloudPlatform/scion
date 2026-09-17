@@ -382,15 +382,17 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	// back to A2A v0.3 schema.
 	if r.Body != nil {
 		bodyBytes, err := io.ReadAll(r.Body)
-		if err == nil {
-			normalizedBody, isV0 := normalizeV0RequestJSON(bodyBytes)
-			r.Body = io.NopCloser(bytes.NewReader(normalizedBody))
-			if isV0 {
-				v0Writer := newV0CompatResponseWriter(w)
-				s.sdkHandler.ServeHTTP(v0Writer, r)
-				v0Writer.finish()
-				return
-			}
+		if err != nil {
+			http.Error(w, "failed to read request body", http.StatusBadRequest)
+			return
+		}
+		normalizedBody, isV0 := normalizeV0RequestJSON(bodyBytes)
+		r.Body = io.NopCloser(bytes.NewReader(normalizedBody))
+		if isV0 {
+			v0Writer := newV0CompatResponseWriter(w)
+			s.sdkHandler.ServeHTTP(v0Writer, r)
+			v0Writer.finish()
+			return
 		}
 	}
 

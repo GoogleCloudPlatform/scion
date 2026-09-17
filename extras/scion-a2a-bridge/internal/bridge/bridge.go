@@ -332,13 +332,9 @@ func (b *Bridge) latestTaskEventCursor(ctx context.Context, taskID string) int64
 	if b.store == nil {
 		return 0
 	}
-	var cursor int64
-	for {
-		events, err := b.store.ReadTaskEvents(ctx, taskID, cursor, 100)
-		if err != nil || len(events) == 0 {
-			break
-		}
-		cursor = events[len(events)-1].ID
+	cursor, err := b.store.LatestTaskEventID(ctx, taskID)
+	if err != nil {
+		return 0
 	}
 	return cursor
 }

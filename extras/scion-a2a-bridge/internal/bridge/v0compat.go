@@ -244,6 +244,7 @@ type v0CompatResponseWriter struct {
 	headerSent bool
 	isSSE      bool
 	buf        bytes.Buffer
+	sseBuf     bytes.Buffer
 }
 
 func newV0CompatResponseWriter(w http.ResponseWriter) *v0CompatResponseWriter {
@@ -263,6 +264,18 @@ func (w *v0CompatResponseWriter) WriteHeader(code int) {
 	}
 }
 
+func transformSSELine(line string) []byte {
+	if strings.HasPrefix(line, "data: ") {
+		jsonStr := strings.TrimPrefix(line, "data: ")
+		converted := convertV1ToV0JSONRPCResponse([]byte(jsonStr))
+		var out bytes.Buffer
+		out.WriteString("data: ")
+		out.Write(converted)
+		return out.Bytes()
+	}
+	return []byte(line)
+}
+
 func (w *v0CompatResponseWriter) Write(p []byte) (int, error) {
 	if !w.headerSent {
 		ct := w.Header().Get("Content-Type")
@@ -273,24 +286,25 @@ func (w *v0CompatResponseWriter) Write(p []byte) (int, error) {
 		}
 	}
 	if w.isSSE {
-		// Transform any "data: {...}" lines in the SSE chunk.
-		lines := strings.Split(string(p), "\n")
-		var out strings.Builder
-		for i, line := range lines {
-			if strings.HasPrefix(line, "data: ") {
-				jsonStr := strings.TrimPrefix(line, "data: ")
-				converted := convertV1ToV0JSONRPCResponse([]byte(jsonStr))
-				out.WriteString("data: ")
-				out.Write(converted)
-			} else {
-				out.WriteString(line)
+		w.sseBuf.Write(p)
+		var out bytes.Buffer
+		for {
+			b := w.sseBuf.Bytes()
+			idx := bytes.IndexByte(b, '\n')
+			if idx < 0 {
+				break
 			}
-			if i < len(lines)-1 {
-				out.WriteByte('\n')
+			line := string(b[:idx])
+			w.sseBuf.Next(idx + 1)
+			out.Write(transformSSELine(line))
+			out.WriteByte('\n')
+		}
+		if out.Len() > 0 {
+			if _, err := w.ResponseWriter.Write(out.Bytes()); err != nil {
+				return len(p), err
 			}
 		}
-		_, err := w.ResponseWriter.Write([]byte(out.String()))
-		return len(p), err
+		return len(p), nil
 	}
 	return w.buf.Write(p)
 }
@@ -303,6 +317,11 @@ func (w *v0CompatResponseWriter) Flush() {
 
 func (w *v0CompatResponseWriter) finish() {
 	if w.isSSE {
+		if w.sseBuf.Len() > 0 {
+			line := w.sseBuf.String()
+			w.sseBuf.Reset()
+			_, _ = w.ResponseWriter.Write(transformSSELine(line))
+		}
 		return
 	}
 	converted := convertV1ToV0JSONRPCResponse(w.buf.Bytes())

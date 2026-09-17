@@ -523,6 +523,18 @@ func (s *SQLiteStore) ReadTaskEvents(ctx context.Context, taskID string, afterID
 	return events, rows.Err()
 }
 
+// LatestTaskEventID returns the highest event ID currently stored for taskID, or 0 if none exist.
+func (s *SQLiteStore) LatestTaskEventID(ctx context.Context, taskID string) (int64, error) {
+	var maxID int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(id), 0) FROM a2a_task_events WHERE task_id = ?`, taskID,
+	).Scan(&maxID)
+	if err != nil {
+		return 0, fmt.Errorf("latest task event id: %w", err)
+	}
+	return maxID, nil
+}
+
 // PurgeTaskEvents deletes events older than olderThan and returns the count deleted.
 func (s *SQLiteStore) PurgeTaskEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	result, err := s.db.ExecContext(ctx,
