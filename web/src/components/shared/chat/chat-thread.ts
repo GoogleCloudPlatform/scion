@@ -1467,6 +1467,11 @@ export class ScionChatThread extends LitElement {
       items?: Message[];
       messages?: Message[];
       messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+      messageExtensions?: Record<
+        string,
+        { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
+      >;
+      replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
     };
     const items = data?.items ?? data?.messages ?? [];
 
@@ -1474,6 +1479,18 @@ export class ScionChatThread extends LitElement {
     if (data?.messageAttachments) {
       for (const [msgId, refs] of Object.entries(data.messageAttachments)) {
         this.v2AttachmentMap.set(msgId, refs);
+      }
+    }
+
+    // Phase-3: Merge message extensions and reply previews from backfill.
+    if (data?.messageExtensions) {
+      for (const [msgId, ext] of Object.entries(data.messageExtensions)) {
+        this.v2MessageExtMap.set(msgId, ext);
+      }
+    }
+    if (data?.replyPreviews) {
+      for (const [msgId, preview] of Object.entries(data.replyPreviews)) {
+        this.v2ReplyPreviewMap.set(msgId, preview);
       }
     }
 
