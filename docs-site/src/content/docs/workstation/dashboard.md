@@ -35,6 +35,10 @@ When enabled via the `web.native_chat` feature flag, the dashboard includes a to
 - **Conversation Export**: Export any thread via the export dropdown in the chat header — download as Markdown, print/save as PDF, or copy to clipboard (HTML + plain text). All exported content is HTML-escaped for safe rendering.
 - **@-Mentions & Autocomplete**: Call other agents into the thread by typing `@` to trigger a fuzzy-matching, keyboard-navigable agent dropdown. Protected by code-fence guards to prevent triggering inside Markdown code snippets.
 - **Visibility Density Filters**: Choose from three filter levels—**Conversation** (pure dialogue), **Verbose** (adds mentions/CCs), or **Full** (adds state updates and background processes)—with preferences saved individually per agent.
+- **Layout Density**: Switch between **Dense** and **Comfortable** layout modes via the density toggle to control whitespace and information density across the chat interface.
+- **Space Emoji Icons**: Assign optional emoji icons to spaces (stored in project annotations) for quick visual identification in the thread rail.
+- **Thread Drag-and-Drop & Collapsible Groups**: Reorder threads in the thread rail by drag-and-drop. Organize threads into named collapsible groups; ordering is persisted server-side via user preferences.
+- **Bidirectional Mention Translation**: `@-mentions` are automatically translated between the `@firstname-lastname` format used in the web chat and the `@email` format used by agents, ensuring natural display for each context.
 - **Agent-to-Agent Message Expansion**: Background inter-agent communications (displayed in the **Full** density view) are collapsed into a compact pill to preserve screen space. Expanding the pill displays the messages with a 2-line limit; truncated messages feature a zoom/expand icon (`arrows-angle-expand`) that opens a rich, full-screen Markdown-rendered dialog overlay, closeable via its X button or by clicking outside.
 - **Coherence Sync**: Real-time sync ensures actions taken on external channels (e.g. Discord or Teams) propagate instantly to the Web UI, with delivery state tooltips indicating whether messages succeeded.
 

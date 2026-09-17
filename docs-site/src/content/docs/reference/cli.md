@@ -120,8 +120,8 @@ Sends a message to a running agent or user.
     - `group[a,b,...]`: Send to multiple recipients. *(Hub mode only)*
     - `@<agent-name>`: Send to an agent's conversation (preferred).
     - `@<email>`: Send to a user by email (global DM).
-    - `conv:<uuid>`: Send to a conversation by ID. *(Not yet supported — errors)*
-    - `#<thread>`: Send to a named thread. *(Not yet supported — errors)*
+    - `conv:<uuid>`: Send to a conversation by ID. *(Hub mode only)*
+    - `#<thread>`: Send to a named thread. *(Hub mode only)*
 
 - **Arguments:**
     - `<recipient>`: The recipient (see above).
@@ -211,6 +211,46 @@ Manages bidirectional communication and persistent messages sent by agents to hu
 - **Flags:**
     - `--agent <string>`: Filter messages by a specific agent.
     - `--all`: Show all messages, including those already marked as read.
+
+### `scion conversation` (alias: `conv`)
+
+Manages conversations — the surface-agnostic containers for message threads. Requires Hub mode. Running `scion conversation` without a subcommand defaults to `list`.
+
+Conversations are referenced using one of three forms:
+
+- `conv:<uuid>` — by conversation ID.
+- `@<agent-name>` — resolves the direct conversation with the named agent.
+- `#<thread-name>` — resolves a named group conversation.
+
+**Usage:** `scion conversation [command] [flags]`
+
+- **Commands:**
+    - `list` (default): List conversations you participate in.
+    - `get <conversation-ref>`: Show conversation details.
+    - `messages <conversation-ref>`: View messages in a conversation.
+    - `create <name>`: Create a new group conversation.
+    - `set-default <conversation-ref> <agent-id>`: Set the default agent for a conversation.
+    - `participants <conversation-ref>`: List participants in a conversation.
+    - `join <conversation-ref> <principal-kind> <principal-id>`: Add a participant to a conversation.
+    - `leave <conversation-ref>`: Leave a conversation.
+    - `catch-up <conversation-ref>`: Show recent messages in a conversation.
+- **Flags (on `list`):**
+    - `--kind <string>`: Filter by kind (`direct`, `group`).
+    - `--surface <string>`: Filter by surface (`native`, `discord`, `slack`, etc.).
+    - `--project <string>`: Filter by project ID.
+    - `--limit <int>`: Maximum number of conversations to show (default 50).
+    - `--json`: Output in JSON format.
+- **Flags (on `messages`):**
+    - `--limit <int>`: Maximum number of messages to show (default 25).
+    - `--before <time>`: Show messages before this time (RFC 3339).
+    - `--after <time>`: Show messages after this time (RFC 3339).
+    - `--json`: Output in JSON format.
+- **Flags (on `create`):**
+    - `--project <string>`: Project ID (defaults to current project).
+    - `--json`: Output in JSON format.
+- **Flags (on `catch-up`):**
+    - `--since <duration>`: Show messages from this duration ago, e.g. `30m`, `2h` (default `1h`).
+    - `--json`: Output in JSON format.
 
 ### `scion logs`
 
