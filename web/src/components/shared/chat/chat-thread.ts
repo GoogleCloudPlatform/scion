@@ -840,6 +840,12 @@ export class ScionChatThread extends LitElement {
 
   /** Tear down v2 state so a fresh load can happen. */
   private resetV2State(): void {
+    // Clear initial watermark timer to prevent it from firing against wrong thread
+    if (this._initialWatermarkTimer) {
+      clearTimeout(this._initialWatermarkTimer);
+      this._initialWatermarkTimer = null;
+    }
+
     // Stop any active SSE listener
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
