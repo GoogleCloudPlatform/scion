@@ -911,13 +911,13 @@ export class ScionChatSpaceRail extends LitElement {
         break;
       case 'custom':
         if (this.prefs.spaceOrder) {
-          const order = this.prefs.spaceOrder;
+          const orderMap = new Map(this.prefs.spaceOrder.map((id, i) => [id, i]));
           spaces.sort((a, b) => {
-            const ai = order.indexOf(a.projectId);
-            const bi = order.indexOf(b.projectId);
-            if (ai === -1 && bi === -1) return 0;
-            if (ai === -1) return 1;
-            if (bi === -1) return -1;
+            const ai = orderMap.get(a.projectId);
+            const bi = orderMap.get(b.projectId);
+            if (ai === undefined && bi === undefined) return 0;
+            if (ai === undefined) return 1;
+            if (bi === undefined) return -1;
             return ai - bi;
           });
         }
@@ -1283,11 +1283,16 @@ export class ScionChatSpaceRail extends LitElement {
     const groups = this.getGroups(projectId).filter((g) => g.id !== groupId);
     const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
 
-    // Replace the group ID in threadOrder with its former thread IDs.
+    // Replace the group ID in threadOrder with its former thread IDs,
+    // filtering out any that already exist elsewhere to avoid duplicates.
     const currentOrder = [...(this.prefs.threadOrder?.[projectId] ?? [])];
     const idx = currentOrder.indexOf(groupId);
     if (idx !== -1) {
-      currentOrder.splice(idx, 1, ...(deletedGroup?.threadIds ?? []));
+      const deletedThreadIds = deletedGroup?.threadIds ?? [];
+      const existingIds = new Set(currentOrder);
+      existingIds.delete(groupId); // the group entry itself is being replaced
+      const newIds = deletedThreadIds.filter((id) => !existingIds.has(id));
+      currentOrder.splice(idx, 1, ...newIds);
     }
     const threadOrder = { ...(this.prefs.threadOrder ?? {}), [projectId]: currentOrder };
     await this.savePrefs({ threadGroups, threadOrder });
@@ -1374,12 +1379,13 @@ export class ScionChatSpaceRail extends LitElement {
       if (order && order.length > 0) {
         const general = threads.filter((t) => t.isGeneral);
         const rest = threads.filter((t) => !t.isGeneral);
+        const orderMap = new Map(order.map((id, i) => [id, i]));
         rest.sort((a, b) => {
-          const ai = order.indexOf(a.id);
-          const bi = order.indexOf(b.id);
-          if (ai === -1 && bi === -1) return 0;
-          if (ai === -1) return 1;
-          if (bi === -1) return -1;
+          const ai = orderMap.get(a.id);
+          const bi = orderMap.get(b.id);
+          if (ai === undefined && bi === undefined) return 0;
+          if (ai === undefined) return 1;
+          if (bi === undefined) return -1;
           return ai - bi;
         });
         return [...general, ...rest];
@@ -1807,7 +1813,8 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   private async submitCreateThread(projectId: string): Promise<void> {
-    if (!this.newThreadName.trim()) {
+    const threadName = this.newThreadName.trim();
+    if (!threadName) {
       this.creatingThread = '';
       this._createThreadGroupId = null;
       return;
@@ -1817,7 +1824,7 @@ export class ScionChatSpaceRail extends LitElement {
       const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: this.newThreadName.trim() }),
+        body: JSON.stringify({ name: threadName }),
       });
       if (res.ok) {
         const data = (await res.json().catch(() => ({}))) as {
@@ -1832,7 +1839,7 @@ export class ScionChatSpaceRail extends LitElement {
         } else if (targetGroupId) {
           // Fallback: find the thread by name (server may use a different shape).
           const threads = this.threadsBySpace.get(projectId) || [];
-          const created = threads.find((t) => t.name === this.newThreadName.trim());
+          const created = threads.find((t) => t.name === threadName);
           if (created) {
             await this.moveThreadToGroup(created.id, targetGroupId, projectId);
           }
@@ -2214,12 +2221,13 @@ export class ScionChatSpaceRail extends LitElement {
     // Sort items based on current mode
     if (this.prefs.threadSortMode === 'custom') {
       const order = this.prefs.threadOrder?.[projectId] ?? [];
+      const orderMap = new Map(order.map((id, i) => [id, i]));
       items.sort((a, b) => {
-        const ai = order.indexOf(a.id);
-        const bi = order.indexOf(b.id);
-        if (ai === -1 && bi === -1) return 0;
-        if (ai === -1) return 1;
-        if (bi === -1) return -1;
+        const ai = orderMap.get(a.id);
+        const bi = orderMap.get(b.id);
+        if (ai === undefined && bi === undefined) return 0;
+        if (ai === undefined) return 1;
+        if (bi === undefined) return -1;
         return ai - bi;
       });
     } else {
