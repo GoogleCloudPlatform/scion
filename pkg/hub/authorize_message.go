@@ -723,12 +723,10 @@ func (s *Server) EvaluateCrossProjectReadAccess(
 
 	// Check at least one permitted direction.
 	// Forward: reader→peer
-	_, forwardReason := s.authorizeCrossProjectAgentMessage(ctx, readerAgent, peerAgent, rMode, pMode)
-	forwardAllowed := forwardReason == "cross_project_authorized"
+	forwardAllowed, _ := s.authorizeCrossProjectAgentMessage(ctx, readerAgent, peerAgent, rMode, pMode)
 
 	// Reverse: peer→reader
-	_, reverseReason := s.authorizeCrossProjectAgentMessage(ctx, peerAgent, readerAgent, pMode, rMode)
-	reverseAllowed := reverseReason == "cross_project_authorized"
+	reverseAllowed, _ := s.authorizeCrossProjectAgentMessage(ctx, peerAgent, readerAgent, pMode, rMode)
 
 	if !forwardAllowed && !reverseAllowed {
 		return false, "no_permitted_direction"

@@ -79,18 +79,10 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 	var targetProject *store.Project
 	targetProject, err := s.store.GetProject(ctx, projectRef)
 	if err != nil {
-		// Try by slug.
-		projectResult, listErr := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{})
-		if listErr != nil {
-			// Privacy-preserving: return 404 for all failures.
-			NotFound(w, "Target")
-			return
-		}
-		for i := range projectResult.Items {
-			if projectResult.Items[i].Slug == projectRef || projectResult.Items[i].Name == projectRef {
-				targetProject = &projectResult.Items[i]
-				break
-			}
+		// Try by slug using the dedicated store method.
+		targetProject, err = s.store.GetProjectBySlug(ctx, projectRef)
+		if err != nil {
+			targetProject = nil
 		}
 	}
 	if targetProject == nil {
@@ -110,7 +102,7 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 	}
 
 	for i := range agentResult.Items {
-		if agentResult.Items[i].ID == agentRef || agentResult.Items[i].Slug == agentRef || agentResult.Items[i].Name == agentRef {
+		if agentResult.Items[i].ID == agentRef || agentResult.Items[i].Slug == agentRef {
 			targetAgent = &agentResult.Items[i]
 			break
 		}
@@ -142,6 +134,14 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 				replyReason = reverseReason
 			}
 		}
+	}
+
+	// Privacy-preserving: if the caller cannot message the target in either
+	// direction, return the same NotFound as for nonexistent targets so that
+	// existence cannot be distinguished from non-existence.
+	if !canMessage && !canReachViewer {
+		NotFound(w, "Target")
+		return
 	}
 
 	resp := targetResolveResponse{

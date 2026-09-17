@@ -130,9 +130,19 @@ Examples:
 			return fmt.Errorf("invalid policy %q: must be none, members, or any", projectMessagingSetPolicy)
 		}
 
+		rev := projectMessagingSetRevision
+		if !cmd.Flags().Changed("revision") {
+			// Auto-fetch current revision for CAS if not explicitly provided.
+			current, fetchErr := client.Messaging().GetProjectMessagingPolicy(ctx, projectID)
+			if fetchErr != nil {
+				return fmt.Errorf("failed to auto-fetch current revision: %w", fetchErr)
+			}
+			rev = current.Revision
+		}
+
 		req := &hubclient.UpdateProjectMessagingPolicyRequest{
 			CrossProjectInbound: projectMessagingSetPolicy,
-			ExpectedRevision:    projectMessagingSetRevision,
+			ExpectedRevision:    rev,
 		}
 
 		result, err := client.Messaging().UpdateProjectMessagingPolicy(ctx, projectID, req)

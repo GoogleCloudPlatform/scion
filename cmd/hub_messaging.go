@@ -115,6 +115,14 @@ Examples:
 			val := *hubMessagingSetCrossProject
 			req.CrossProjectMessagingEnabled = &val
 			rev := hubMessagingSetRevision
+			if !cmd.Flags().Changed("revision") {
+				// Auto-fetch current revision for CAS if not explicitly provided.
+				current, fetchErr := client.Messaging().GetHubMessagingSettings(ctx)
+				if fetchErr != nil {
+					return fmt.Errorf("failed to auto-fetch current revision: %w", fetchErr)
+				}
+				rev = current.Revision
+			}
 			req.ExpectedRevision = &rev
 		}
 		if cmd.Flags().Changed("envelope-switch") {

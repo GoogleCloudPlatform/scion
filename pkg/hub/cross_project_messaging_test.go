@@ -276,7 +276,8 @@ func TestConversationResolve_NoMintOnRead(t *testing.T) {
 	ctx := context.Background()
 
 	// Count conversations before resolve
-	convsBefore, _ := s.GetConversationsForPrincipal(ctx, "agent", tid("cpm-agent-a"))
+	convsBefore, err := s.GetConversationsForPrincipal(ctx, "agent", tid("cpm-agent-a"))
+	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/v1/conversations/resolve?reference=@agent-beta&project_id="+tid("cpm-project-b"), nil)
@@ -288,7 +289,8 @@ func TestConversationResolve_NoMintOnRead(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	// Verify no rows were created
-	convsAfter, _ := s.GetConversationsForPrincipal(ctx, "agent", tid("cpm-agent-a"))
+	convsAfter, err := s.GetConversationsForPrincipal(ctx, "agent", tid("cpm-agent-a"))
+	require.NoError(t, err)
 	require.Equal(t, len(convsBefore), len(convsAfter), "conversation resolve must not create rows")
 }
 

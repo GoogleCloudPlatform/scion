@@ -149,7 +149,7 @@ func (s *Server) resolveAgentConversation(
 
 	var targetAgent *store.Agent
 	for i := range agentResult.Items {
-		if agentResult.Items[i].Slug == agentSlug || agentResult.Items[i].Name == agentSlug {
+		if agentResult.Items[i].ID == agentSlug || agentResult.Items[i].Slug == agentSlug {
 			targetAgent = &agentResult.Items[i]
 			break
 		}
@@ -159,6 +159,21 @@ func (s *Server) resolveAgentConversation(
 		// Privacy-preserving: return exists: false instead of an error.
 		writeJSON(w, http.StatusOK, conversationResolveResponse{Exists: false})
 		return
+	}
+
+	// R1: Gate cross-project resolution on the Hub CPM feature switch.
+	// Determine the caller's project to check if this is a cross-project lookup.
+	callerProjectID := ""
+	if agentIdent, ok := identity.(AgentIdentity); ok {
+		callerProjectID = agentIdent.ProjectID()
+	}
+	if callerProjectID != "" && callerProjectID != targetAgent.ProjectID {
+		// Cross-project resolution — require CPM to be enabled.
+		ops := s.GetOperationalSettings()
+		if ops == nil || !ops.CrossProjectMessagingEnabled() {
+			writeJSON(w, http.StatusOK, conversationResolveResponse{Exists: false})
+			return
+		}
 	}
 
 	// Look up existing DM — do NOT create one.
