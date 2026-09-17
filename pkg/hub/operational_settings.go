@@ -880,6 +880,9 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 // values — the old reloadSettings never applied those on config reload (they
 // are consumed at startup, not on reload). In postgres mode, the full koanf-based
 // Snapshot() populates all fields. See the Layer1Snapshot type comment for details.
+//
+// Exception: DefaultHarnessConfig is now populated from GlobalConfig.DefaultHarnessConfig
+// so that hubAgentDefaults() works in file mode.
 func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap := Layer1Snapshot{
 		AdminEmails:        gc.Hub.AdminEmails,
@@ -1032,10 +1035,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// Agent defaults (hub operational agent_defaults section).
 	//
 	// Written unconditionally from the snapshot rather than only-if-non-empty,
-	// so that clearing a value in the DB clears it here too. In file mode the
-	// snapshot's agent-defaults fields are always zero — see
-	// BuildLayer1SnapshotFromFile — so this assignment is a no-op there and
-	// file-mode dispatch is unchanged.
+	// so that clearing a value in the DB clears it here too. In file mode,
+	// BuildLayer1SnapshotFromFile populates DefaultHarnessConfig; other
+	// agent-defaults fields remain at zero values in file mode, so this
+	// assignment is a no-op for those fields and file-mode dispatch is unchanged.
 	newDefaults := opsettings.AgentDefaultsSettings{
 		DefaultTemplate:      snap.DefaultTemplate,
 		DefaultHarnessConfig: snap.DefaultHarnessConfig,
