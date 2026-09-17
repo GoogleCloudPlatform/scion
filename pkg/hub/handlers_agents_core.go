@@ -402,6 +402,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
+	s.addAgentCreateIfAnyProjectAllows(ctx, identity, scopeCap)
 
 	writeJSON(w, http.StatusOK, ListAgentsResponse{
 		Agents:       agents,
@@ -410,6 +411,95 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		ServerTime:   time.Now().UTC(),
 		Capabilities: scopeCap,
 	})
+}
+
+// maxProjectsProbedForAgentCreate bounds the work done by
+// addAgentCreateIfAnyProjectAllows. A user in more projects than this who can
+// create in none of the first N loses only the affordance on this page — the
+// per-project create path is unaffected — so the cap trades an unlikely false
+// negative for a bounded response time.
+const maxProjectsProbedForAgentCreate = 50
+
+// addAgentCreateIfAnyProjectAllows adds "create" to the agents list's
+// scope-level capabilities when the caller may create an agent in at least one
+// project they can reach.
+//
+// Agent creation is inherently project-scoped: `POST /api/v1/agents` decides
+// against the target project via authorizeAgentCreate, and `agent.create` lives
+// in project-scoped roles rather than in hub-member or hub-admin. A hub-scope
+// capability check therefore answers "no" for every principal except a
+// super-admin (who passes via the Decide step-1 bypass), which hid the
+// "New Agent" button from the page whose subject is agents.
+//
+// This reports what the enforcement point would decide, on behalf of a page
+// that has no project in hand. It grants nothing: creation is still authorized
+// per project at the API, so a caller who gets "create" here and then targets a
+// project they may not create in is still refused.
+//
+// Skipped entirely when the caller already has create, which is both the
+// super-admin case and any future role that carries it at hub scope.
+func (s *Server) addAgentCreateIfAnyProjectAllows(
+	ctx context.Context,
+	identity Identity,
+	caps *Capabilities,
+) {
+	if caps == nil {
+		return
+	}
+	for _, a := range caps.Actions {
+		if a == string(ActionCreate) {
+			return
+		}
+	}
+
+	// Only human callers. Agents create agents through the delegation path,
+	// which has its own ceiling checks, and this page is not their surface.
+	user, isUser := identity.(UserIdentity)
+	if !isUser {
+		return
+	}
+
+	// Candidates are the projects the caller holds a binding on. This is
+	// deliberately not taken from the list filter: on the default "All" view
+	// resolveProjectListClassification returns an empty classification (it only
+	// populates for the "mine" and "shared" tabs), so sourcing candidates from
+	// the filter would probe nothing in exactly the common case.
+	bindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID())
+	if err != nil {
+		// Advisory only — the button stays hidden and the per-project create
+		// path still works. Not worth failing the list response.
+		slog.WarnContext(ctx, "listAgents: could not resolve projects for agent-create capability",
+			"error", err)
+		return
+	}
+
+	seen := make(map[string]struct{})
+	probed := 0
+	for _, rb := range bindings {
+		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID == "" {
+			continue
+		}
+		if _, dup := seen[rb.ScopeID]; dup {
+			continue
+		}
+		seen[rb.ScopeID] = struct{}{}
+		if probed >= maxProjectsProbedForAgentCreate {
+			return
+		}
+		probed++
+
+		// Expired or not-yet-valid bindings are not filtered here; CheckAccess
+		// is the authority on that and simply denies, costing one probe.
+		decision := s.authzService.CheckAccess(ctx, identity, Resource{
+			Type:       "agent",
+			ParentType: "project",
+			ParentID:   rb.ScopeID,
+		}, ActionCreate)
+		if decision.Allowed {
+			caps.Actions = append(caps.Actions, string(ActionCreate))
+			return
+		}
+	}
 }
 
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
