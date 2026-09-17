@@ -221,8 +221,24 @@ func taskEventToSDKEvent(execCtx *a2asrv.ExecutorContext, ev *state.TaskEvent) (
 		sdkState := mapBridgeStateToSDK(su.Status.State)
 		return a2a.NewStatusUpdateEvent(execCtx, sdkState, nil), nil
 	case "artifact":
-		// Return as completed with a text message about the artifact.
-		return a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil
+		var au TaskArtifactUpdate
+		if err := json.Unmarshal(ev.Payload, &au); err != nil {
+			return nil, fmt.Errorf("unmarshal artifact event: %w", err)
+		}
+		var artParts []*a2a.Part
+		for _, p := range au.Artifact.Parts {
+			if p.Text != "" {
+				artParts = append(artParts, a2a.NewTextPart(p.Text))
+			}
+			if p.URL != "" {
+				artParts = append(artParts, &a2a.Part{Content: a2a.URL(p.URL)})
+			}
+		}
+		if len(artParts) == 0 {
+			return a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil
+		}
+		artMsg := a2a.NewMessageForTask(a2a.MessageRoleAgent, execCtx, artParts...)
+		return a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, artMsg), nil
 	default:
 		return nil, fmt.Errorf("unknown event kind: %s", ev.Kind)
 	}

@@ -269,16 +269,10 @@ func (b *BrokerServer) HostCallbacks() plugin.HostCallbacks {
 }
 
 // RequestSubscription asks the Hub to subscribe this plugin to a topic pattern.
-// Skips the remote RPC if the pattern is already subscribed locally.
 func (b *BrokerServer) RequestSubscription(pattern string) error {
 	b.mu.Lock()
-	already := b.subscriptions[pattern]
 	b.subscriptions[pattern] = true
 	b.mu.Unlock()
-
-	if already {
-		return nil
-	}
 
 	hc := b.HostCallbacks()
 	if hc == nil {

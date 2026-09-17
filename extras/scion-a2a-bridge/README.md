@@ -229,10 +229,12 @@ Add or update these sections:
 message_broker:
   enabled: true
 
-plugins:
-  a2a-bridge:
-    type: self_managed
-    address: "localhost:9090"
+server:
+  plugins:
+    broker:
+      a2a-bridge:
+        self_managed: true
+        address: "localhost:9090"
 ```
 
 The `address` must match `plugin.listen_address` in the bridge config. Restart the Hub after making these changes.
