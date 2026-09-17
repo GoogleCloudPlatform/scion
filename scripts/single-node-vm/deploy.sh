@@ -288,6 +288,28 @@ for sel in "${CHAT_SELECTIONS[@]}"; do
   esac
 done
 
+echo "Container images:"
+echo "  1) Provide a registry path (images already pushed)"
+echo "  2) Build images locally on the VM (requires ~15 min, ~10GB disk)"
+read -rp "Select [2]: " IMAGE_CHOICE
+IMAGE_CHOICE="${IMAGE_CHOICE:-2}"
+
+case "$IMAGE_CHOICE" in
+  1)
+    IMAGE_SOURCE="registry"
+    read -rp "Registry path (e.g. us-docker.pkg.dev/my-project/scion): " IMAGE_REGISTRY
+    if [[ -z "$IMAGE_REGISTRY" ]]; then
+      err "Registry path cannot be empty."
+      exit 1
+    fi
+    ;;
+  2)
+    IMAGE_SOURCE="build"
+    IMAGE_REGISTRY=""
+    ;;
+  *) err "Invalid selection: $IMAGE_CHOICE"; exit 1 ;;
+esac
+
 # Derived values
 info "Selecting zone in ${REGION}..."
 ZONE="$(gcloud compute zones list \
@@ -319,6 +341,11 @@ if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
   echo "  Chat plugins: ${CHAT_PLUGINS[*]}"
 else
   echo "  Chat plugins: (none)"
+fi
+if [[ "$IMAGE_SOURCE" == "registry" ]]; then
+  echo "  Images:       registry (${IMAGE_REGISTRY})"
+else
+  echo "  Images:       build locally on VM"
 fi
 
 # --- Release version ---
@@ -650,11 +677,16 @@ fi
 # --- Write settings.yaml (dev mode for initial startup) ---
 # Phase 5 will overwrite this with proxy auth config once IAP is ready.
 info "Writing settings.yaml (dev mode)..."
+SETTINGS_IMAGE_REGISTRY=""
+if [[ "$IMAGE_SOURCE" == "registry" ]]; then
+  SETTINGS_IMAGE_REGISTRY="image_registry: \"${IMAGE_REGISTRY}\""
+fi
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 settings_version: \"1\"
+${SETTINGS_IMAGE_REGISTRY:+${SETTINGS_IMAGE_REGISTRY}}
 server:
   hub:
     name: \"${HUB_NAME}\"
@@ -706,6 +738,50 @@ else
   echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
   echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
   exit 1
+fi
+
+# ===================================================================
+# Phase 3b: Container Images
+# ===================================================================
+if [[ "$IMAGE_SOURCE" == "build" ]]; then
+  section "Phase 3b: Build Container Images on VM"
+
+  info "Cloning scion repository on VM..."
+  gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="
+      set -euo pipefail
+      if [ ! -d /home/scion/scion-source ]; then
+        sudo -u scion git clone --depth 1 --branch '${VERSION}' \
+          https://github.com/GoogleCloudPlatform/scion.git /home/scion/scion-source
+      else
+        cd /home/scion/scion-source
+        sudo -u scion git fetch --depth 1 origin tag '${VERSION}'
+        sudo -u scion git checkout '${VERSION}'
+      fi
+    "
+
+  info "Building container images (this may take ~15 minutes)..."
+  gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="
+      set -euo pipefail
+      cd /home/scion/scion-source
+      sudo bash image-build/scripts/build-images.sh \
+        --builder local-docker \
+        --target all \
+        --tag latest
+    "
+
+  info "Verifying container images..."
+  gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="docker images | grep -E 'core-base|scion-base|scion-antigravity'"
+  echo "  Container images built successfully."
+else
+  section "Phase 3b: Container Images (Registry)"
+  info "Using pre-built images from registry: ${IMAGE_REGISTRY}"
+  echo "  The hub will pull images from: ${IMAGE_REGISTRY}"
 fi
 
 # ===================================================================
@@ -837,6 +913,7 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 settings_version: \"1\"
+${SETTINGS_IMAGE_REGISTRY:+${SETTINGS_IMAGE_REGISTRY}}
 server:
   hub:
     name: \"${HUB_NAME}\"

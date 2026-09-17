@@ -47,6 +47,7 @@ The script runs interactively, prompting for:
 3. **Machine size** — Small (e2-standard-4) or Medium (n2-standard-16)
 4. **Disk size** — 200 GB, 500 GB, or custom
 5. **Chat plugins** — Telegram, Discord, Slack, Teams, or none
+6. **Container images** — provide a registry path or build locally on the VM
 
 To install a specific release version:
 
@@ -177,6 +178,34 @@ You can select multiple plugins by entering comma-separated numbers (e.g.,
 Plugins are downloaded from the same GitHub Release as the main binary and
 installed to `/home/scion/.scion/plugins/broker/`. Each plugin runs as a
 broker plugin within the Hub process.
+
+## Container Images
+
+Agents need container images to run (core-base, scion-base, and harness images
+like scion-antigravity). The deploy wizard offers two options:
+
+### Option 1: Provide a registry path
+
+If you have already pushed images to a container registry (e.g., Artifact
+Registry), select this option and provide the registry path. The Hub will
+pull images from the registry at runtime.
+
+Example registry path: `us-docker.pkg.dev/my-project/scion`
+
+### Option 2: Build images locally on the VM
+
+This option clones the Scion source repository onto the VM and runs the image
+build orchestrator using `local-docker`. It builds core-base, scion-base, and
+all harness images directly on the VM.
+
+**Requirements:**
+- Approximately 15 minutes of build time
+- Approximately 10 GB of additional disk space
+- The VM must have outbound internet access (provided by Cloud NAT)
+
+When images are built locally, no `image_registry` is set in the Hub
+configuration — Docker finds images by their local name (e.g.,
+`scion-antigravity:latest`).
 
 ## Access Patterns
 
