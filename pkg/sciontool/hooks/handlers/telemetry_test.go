@@ -11,7 +11,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
-	otellog "go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/attribute"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -215,8 +215,9 @@ func (p *recordingProcessor) OnEmit(_ context.Context, record *sdklog.Record) er
 	return nil
 }
 
-func (p *recordingProcessor) Shutdown(context.Context) error   { return nil }
-func (p *recordingProcessor) ForceFlush(context.Context) error { return nil }
+func (p *recordingProcessor) Enabled(context.Context, sdklog.EnabledParameters) bool { return true }
+func (p *recordingProcessor) Shutdown(context.Context) error                         { return nil }
+func (p *recordingProcessor) ForceFlush(context.Context) error                       { return nil }
 
 func (p *recordingProcessor) Records() []sdklog.Record {
 	p.mu.Lock()
@@ -281,8 +282,8 @@ func TestTelemetryHandler_WithLoggerProvider(t *testing.T) {
 
 	// Check that event attributes are present in the log record
 	found := map[string]string{}
-	rec.WalkAttributes(func(kv otellog.KeyValue) bool {
-		found[kv.Key] = kv.Value.AsString()
+	rec.WalkAttributes(func(kv attribute.KeyValue) bool {
+		found[string(kv.Key)] = kv.Value.AsString()
 		return true
 	})
 
@@ -327,8 +328,8 @@ func TestTelemetryHandler_LogRedaction(t *testing.T) {
 
 	found := map[string]string{}
 	rec := &records[0]
-	rec.WalkAttributes(func(kv otellog.KeyValue) bool {
-		found[kv.Key] = kv.Value.AsString()
+	rec.WalkAttributes(func(kv attribute.KeyValue) bool {
+		found[string(kv.Key)] = kv.Value.AsString()
 		return true
 	})
 
@@ -374,9 +375,9 @@ func TestTelemetryHandler_LogRecordIncludesFilePath(t *testing.T) {
 
 	found := map[string]string{}
 	rec := &records[0]
-	rec.WalkAttributes(func(kv otellog.KeyValue) bool {
-		if kv.Value.Kind() == otellog.KindString {
-			found[kv.Key] = kv.Value.AsString()
+	rec.WalkAttributes(func(kv attribute.KeyValue) bool {
+		if kv.Value.Type() == attribute.STRING {
+			found[string(kv.Key)] = kv.Value.AsString()
 		}
 		return true
 	})
@@ -417,9 +418,9 @@ func TestTelemetryHandler_LogRecordIncludesTokens(t *testing.T) {
 
 	found := map[string]int64{}
 	rec := &records[0]
-	rec.WalkAttributes(func(kv otellog.KeyValue) bool {
-		if kv.Value.Kind() == otellog.KindInt64 {
-			found[kv.Key] = kv.Value.AsInt64()
+	rec.WalkAttributes(func(kv attribute.KeyValue) bool {
+		if kv.Value.Type() == attribute.INT64 {
+			found[string(kv.Key)] = kv.Value.AsInt64()
 		}
 		return true
 	})
