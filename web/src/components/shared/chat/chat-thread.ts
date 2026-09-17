@@ -2208,6 +2208,14 @@ export class ScionChatThread extends LitElement {
           <sl-icon name="link-45deg"></sl-icon>
           Copy link
         </div>
+        ${this.isSenderAgent(msg) &&
+        !this.isDM &&
+        !(msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgent)
+          ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuSetDefault()}>
+              <sl-icon name="robot"></sl-icon>
+              Make this agent thread default
+            </div>`
+          : nothing}
       </div>
     `;
   }
@@ -2297,6 +2305,45 @@ export class ScionChatThread extends LitElement {
     navigator.clipboard.writeText(url).catch(() => {
       // Fallback: ignore clipboard failure silently.
     });
+  }
+
+  /** Context menu: Set the sender agent as the thread default. */
+  private async handleContextMenuSetDefault(): Promise<void> {
+    const msg = this.contextMenuMessage;
+    this.closeContextMenu();
+    if (!msg || !this.conversationKey || this.isDM) return;
+
+    // Extract agent slug from sender (strip "agent:" prefix).
+    // Guard: only proceed if the sender uses the "agent:" format.
+    if (!msg.sender.startsWith('agent:')) return;
+    const agentSlug = msg.sender.slice(6);
+    if (!agentSlug) return;
+
+    try {
+      const body: Record<string, unknown> = {
+        defaultAgent: agentSlug,
+      };
+      const res = await apiFetch(
+        `/api/v1/chat/topics/${encodeURIComponent(this.conversationKey)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }
+      );
+      if (res.ok) {
+        this.defaultAgent = agentSlug;
+        this.dispatchEvent(
+          new CustomEvent('default-agent-changed', {
+            detail: { defaultAgent: this.defaultAgent },
+            bubbles: true,
+            composed: true,
+          })
+        );
+      }
+    } catch {
+      // Non-critical
+    }
   }
 
   // ---------------------------------------------------------------------------
