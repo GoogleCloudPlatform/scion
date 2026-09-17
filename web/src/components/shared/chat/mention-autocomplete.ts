@@ -89,6 +89,26 @@ export class ScionMentionAutocomplete extends LitElement {
   /** Internal tracking of the trigger position. */
   private triggerStart = -1;
 
+  /**
+   * Start offset of a trigger the user explicitly dismissed, or null.
+   *
+   * Without this, Escape only holds until the next keystroke: handleInput runs
+   * on every input event and re-derives `active` from text that still contains
+   * the `@`, so the dropdown reopens on the next character typed.
+   */
+  private dismissedTriggerStart: number | null = null;
+
+  /**
+   * The query string at the time the user dismissed the dropdown.
+   * Used together with dismissedTriggerStart so that backspacing past the
+   * dismissed query or pasting new content at the same trigger position
+   * re-opens the dropdown instead of staying permanently dismissed.
+   */
+  private dismissedQuery: string | null = null;
+
+  /** The query string from the most recent handleInput call (for dismiss). */
+  private currentQuery = '';
+
   /** Cached mirror div for caret position measurement (O2 fix). */
   private mirrorDiv: HTMLDivElement | null = null;
 
@@ -192,11 +212,9 @@ export class ScionMentionAutocomplete extends LitElement {
                 ></sl-icon>
                 @${candidate.slug}
               </span>
-              ${
-                candidate.slug !== candidate.name
-                  ? html`<span class="name">${candidate.name}</span>`
-                  : nothing
-              }
+              ${candidate.slug !== candidate.name
+                ? html`<span class="name">${candidate.name}</span>`
+                : nothing}
             </div>
           `
         )}
@@ -217,12 +235,29 @@ export class ScionMentionAutocomplete extends LitElement {
     const triggerInfo = this.findTrigger(text, cursorPos);
 
     if (!triggerInfo) {
+      // The trigger is gone, so a previous dismissal no longer applies.
+      this.dismissedTriggerStart = null;
+      this.dismissedQuery = null;
       this.dismiss();
       return;
     }
 
     this.triggerStart = triggerInfo.start;
     const query = text.slice(triggerInfo.start + 1, cursorPos);
+    this.currentQuery = query;
+
+    // A trigger the user dismissed stays dismissed while the query is a
+    // continuation of the dismissed text. Backspacing past or typing something
+    // different clears the dismissal so the dropdown reopens.
+    if (
+      triggerInfo.start === this.dismissedTriggerStart &&
+      this.dismissedQuery !== null &&
+      query.startsWith(this.dismissedQuery)
+    ) {
+      return;
+    }
+    this.dismissedTriggerStart = null;
+    this.dismissedQuery = null;
 
     // Filter and rank agents + members.
     const matched = this.matchCandidates(query);
@@ -266,7 +301,7 @@ export class ScionMentionAutocomplete extends LitElement {
 
       case 'Escape':
         e.preventDefault();
-        this.dismiss();
+        this.dismiss(true);
         return true;
 
       default:
@@ -274,8 +309,26 @@ export class ScionMentionAutocomplete extends LitElement {
     }
   }
 
-  /** Dismiss the dropdown. */
-  dismiss(): void {
+  /**
+   * Dismiss the dropdown.
+   *
+   * @param userInitiated when true the current trigger is remembered so input
+   *   handling does not immediately reopen it. Internal dismissals (no trigger,
+   *   no matches) must not set it, or a later legitimate trigger is swallowed.
+   */
+  dismiss(userInitiated = false): void {
+    if (userInitiated && this.triggerStart >= 0) {
+      this.dismissedTriggerStart = this.triggerStart;
+      // Store the current query so only continuations stay dismissed.
+      // The query was last derived by handleInput from the textarea text;
+      // re-derive it from the candidates' source would be fragile, so we
+      // read it from the textarea via the trigger position. The parent always
+      // calls handleInput (which sets triggerStart) before a keydown can
+      // reach dismiss(), so the textarea still has the relevant content.
+      // However, dismiss() has no direct access to the textarea text — so
+      // instead we track currentQuery as it is computed in handleInput.
+      this.dismissedQuery = this.currentQuery;
+    }
     this.active = false;
     this.candidates = [];
     this.highlightIndex = 0;
@@ -407,6 +460,9 @@ export class ScionMentionAutocomplete extends LitElement {
 
   /** Dispatch the accept event and close the dropdown. */
   private acceptCandidate(index: number): void {
+    // An accepted mention ends this trigger; a later @ must work normally.
+    this.dismissedTriggerStart = null;
+    this.dismissedQuery = null;
     const candidate = this.candidates[index];
     if (!candidate) return;
 

@@ -1303,7 +1303,8 @@ export class ScionChatThread extends LitElement {
       attachments?: import('./chat-message.js').AttachmentRefInfo[];
     };
     const detail = (e as CustomEvent).detail as
-      ({ data?: ChatEventData } & ChatEventData) | undefined;
+      | ({ data?: ChatEventData } & ChatEventData)
+      | undefined;
     // stateManager wraps SSE payloads as { state, data }; tolerate a flat detail too.
     const eventData: ChatEventData | undefined = detail?.data ?? detail;
     if (!eventData) {
@@ -1557,7 +1558,8 @@ export class ScionChatThread extends LitElement {
   private handleV2ReadStateEvent(e: Event): void {
     type ReadStateData = { conversationKey?: string; messageId?: string; readAt?: string };
     const detail = (e as CustomEvent).detail as
-      ({ data?: ReadStateData } & ReadStateData) | undefined;
+      | ({ data?: ReadStateData } & ReadStateData)
+      | undefined;
     const eventData: ReadStateData | undefined = detail?.data ?? detail;
     if (!eventData?.messageId) return;
     if (eventData.conversationKey !== this.conversationKey) return;
@@ -1799,6 +1801,63 @@ export class ScionChatThread extends LitElement {
   // ---------------------------------------------------------------------------
   // Phase-3: Message action handlers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Clear the composer's reply context. The composer cannot do this itself —
+   * `replyTo` is a property we own and push down, so a local assignment there
+   * is overwritten on our next render.
+   */
+  private handleComposerCancelReply(): void {
+    this.composerReplyTo = null;
+  }
+
+  /** Clear the composer's edit context. See handleComposerCancelReply. */
+  private handleComposerCancelEdit(): void {
+    this.composerEditMessage = null;
+  }
+
+  /** Handle reply action from a message. Sets the composer reply-to context. */
+  private handleMessageReply(
+    e: CustomEvent<{ messageId: string; senderName: string; content: string }>
+  ): void {
+    this.composerEditMessage = null; // Cancel any pending edit
+    this.composerReplyTo = {
+      messageId: e.detail.messageId,
+      senderName: e.detail.senderName,
+      content:
+        e.detail.content.length > 100 ? e.detail.content.slice(0, 100) + '...' : e.detail.content,
+    };
+  }
+
+  /** Handle edit action from a message. Sets the composer edit mode. */
+  private handleMessageEditRequest(e: CustomEvent<{ messageId: string; content: string }>): void {
+    this.composerReplyTo = null; // Cancel any pending reply
+    this.composerEditMessage = {
+      messageId: e.detail.messageId,
+      content: e.detail.content,
+    };
+  }
+
+  /** Handle delete action from a message. Shows confirmation and calls API. */
+  private async handleMessageDeleteRequest(e: CustomEvent<{ messageId: string }>): Promise<void> {
+    const { messageId } = e.detail;
+    const confirmed = window.confirm('Delete this message? This cannot be undone.');
+    if (!confirmed) return;
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages/${encodeURIComponent(messageId)}`,
+        { method: 'DELETE' }
+      );
+      if (!res.ok) {
+        const errMsg = await extractApiError(res, 'Failed to delete message');
+        this.sendError = errMsg;
+      }
+      // SSE event will update the message state.
+    } catch (err) {
+      this.sendError = err instanceof Error ? err.message : 'Failed to delete message';
+    }
+  }
 
   /** Handle chat-edit event from the composer. Calls PUT endpoint. */
   private async handleChatEditV2(
@@ -2126,25 +2185,21 @@ export class ScionChatThread extends LitElement {
           <sl-icon name="reply"></sl-icon>
           Reply
         </div>
-        ${
-          canEditDelete
-            ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuEdit()}>
-                <sl-icon name="pencil"></sl-icon>
-                Edit
-              </div>`
-            : nothing
-        }
-        ${
-          canEditDelete
-            ? html`<div
-                class="context-menu-item danger"
-                @click=${() => this.handleContextMenuDelete()}
-              >
-                <sl-icon name="trash"></sl-icon>
-                Delete
-              </div>`
-            : nothing
-        }
+        ${canEditDelete
+          ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuEdit()}>
+              <sl-icon name="pencil"></sl-icon>
+              Edit
+            </div>`
+          : nothing}
+        ${canEditDelete
+          ? html`<div
+              class="context-menu-item danger"
+              @click=${() => this.handleContextMenuDelete()}
+            >
+              <sl-icon name="trash"></sl-icon>
+              Delete
+            </div>`
+          : nothing}
         <div class="context-menu-item" @click=${() => this.handleContextMenuCopyText()}>
           <sl-icon name="clipboard"></sl-icon>
           Copy text
@@ -2661,17 +2716,15 @@ export class ScionChatThread extends LitElement {
       <div class="thread-container">
         ${this.renderContent()}
         ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
-        ${
-          this.canSend
-            ? html`
-                <scion-chat-composer
-                  ?disabled=${this.sending}
-                  .agents=${this.agents}
-                  @chat-send=${this.handleChatSend}
-                ></scion-chat-composer>
-              `
-            : nothing
-        }
+        ${this.canSend
+          ? html`
+              <scion-chat-composer
+                ?disabled=${this.sending}
+                .agents=${this.agents}
+                @chat-send=${this.handleChatSend}
+              ></scion-chat-composer>
+            `
+          : nothing}
         ${this.renderFilePreview()}
       </div>
     `;
@@ -2693,6 +2746,8 @@ export class ScionChatThread extends LitElement {
           .conversationKey=${this.conversationKey}
           .replyTo=${this.composerReplyTo}
           .editMessage=${this.composerEditMessage}
+          @chat-cancel-reply=${this.handleComposerCancelReply}
+          @chat-cancel-edit=${this.handleComposerCancelEdit}
           @chat-send=${this.handleChatSendV2}
           @chat-edit=${this.handleChatEditV2}
           @chat-typing=${() => this.sendTypingEvent()}
@@ -2810,25 +2865,21 @@ export class ScionChatThread extends LitElement {
         @click=${this.handleMessageAreaClick}
       >
         <div class="messages-list">
-          ${
-            this.loadingOlder
-              ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
-              : nothing
-          }
+          ${this.loadingOlder
+            ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
+            : nothing}
           ${this.renderMessages()}
         </div>
-        ${
-          !this.pinnedToBottom
-            ? html`
-                <div class="jump-to-latest">
-                  <button class="jump-btn" @click=${this.handleJumpToLatest}>
-                    <sl-icon name="arrow-down"></sl-icon>
-                    Jump to latest
-                  </button>
-                </div>
-              `
-            : nothing
-        }
+        ${!this.pinnedToBottom
+          ? html`
+              <div class="jump-to-latest">
+                <button class="jump-btn" @click=${this.handleJumpToLatest}>
+                  <sl-icon name="arrow-down"></sl-icon>
+                  Jump to latest
+                </button>
+              </div>
+            `
+          : nothing}
       </div>
     `;
   }

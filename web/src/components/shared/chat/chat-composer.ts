@@ -669,11 +669,9 @@ export class ScionChatComposer extends LitElement {
         @dragleave=${this.handleDragLeave}
         @drop=${this.handleDrop}
       >
-        ${
-          this.dragOver
-            ? html`<div class="drop-zone-overlay"><span>Drop files here</span></div>`
-            : nothing
-        }
+        ${this.dragOver
+          ? html`<div class="drop-zone-overlay"><span>Drop files here</span></div>`
+          : nothing}
         <div class="composer">
           ${this.replyTo ? this.renderReplyBar() : nothing}
           ${this.editMessage ? this.renderEditBar() : nothing}
@@ -681,25 +679,23 @@ export class ScionChatComposer extends LitElement {
           ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
           ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
           <div class="input-row">
-            ${
-              this.conversationMode && !inEditMode
-                ? html`
-                    <sl-icon-button
-                      class="attach-btn"
-                      name="paperclip"
-                      label="Attach file"
-                      @click=${this.handleAttachClick}
-                      ?disabled=${this.disabled || this.uploading}
-                    ></sl-icon-button>
-                    <input
-                      type="file"
-                      multiple
-                      style="display:none"
-                      @change=${this.handleFileSelected}
-                    />
-                  `
-                : nothing
-            }
+            ${this.conversationMode && !inEditMode
+              ? html`
+                  <sl-icon-button
+                    class="attach-btn"
+                    name="paperclip"
+                    label="Attach file"
+                    @click=${this.handleAttachClick}
+                    ?disabled=${this.disabled || this.uploading}
+                  ></sl-icon-button>
+                  <input
+                    type="file"
+                    multiple
+                    style="display:none"
+                    @change=${this.handleFileSelected}
+                  />
+                `
+              : nothing}
             <div class="textarea-wrapper">
               <sl-textarea
                 placeholder=${inEditMode ? 'Edit your message...' : 'Send a message...'}
@@ -733,31 +729,27 @@ export class ScionChatComposer extends LitElement {
                 <sl-icon slot="prefix" name=${sendIcon}></sl-icon>
                 ${sendLabel}
               </sl-button>
-              ${
-                this.showSendContextMenu && !inEditMode
-                  ? html`
-                      <div class="send-context-overlay" @click=${this.closeSendContextMenu}></div>
-                      <div class="send-context-menu">
-                        <div class="send-context-item" @click=${this.handleSendWithInterrupt}>
-                          <sl-icon name="lightning-charge"></sl-icon>
-                          Send with interruption
-                        </div>
+              ${this.showSendContextMenu && !inEditMode
+                ? html`
+                    <div class="send-context-overlay" @click=${this.closeSendContextMenu}></div>
+                    <div class="send-context-menu">
+                      <div class="send-context-item" @click=${this.handleSendWithInterrupt}>
+                        <sl-icon name="lightning-charge"></sl-icon>
+                        Send with interruption
                       </div>
-                    `
-                  : nothing
-              }
+                    </div>
+                  `
+                : nothing}
             </div>
           </div>
           <div class="footer-row">
-            ${
-              this.runeCount > 0 || isNearLimit
-                ? html`
-                    <span class="char-counter ${counterClass}">
-                      ${this.runeCount} / ${MAX_MESSAGE_LENGTH}
-                    </span>
-                  `
-                : nothing
-            }
+            ${this.runeCount > 0 || isNearLimit
+              ? html`
+                  <span class="char-counter ${counterClass}">
+                    ${this.runeCount} / ${MAX_MESSAGE_LENGTH}
+                  </span>
+                `
+              : nothing}
           </div>
         </div>
       </div>
@@ -795,14 +787,19 @@ export class ScionChatComposer extends LitElement {
   }
 
   private cancelReply(): void {
-    this.replyTo = null;
+    // `replyTo` is owned by the parent and pushed down as a property. Clearing
+    // it here would be undone the moment the parent re-renders for any reason
+    // (an inbound message, a typing tick), so ask the parent to clear instead.
+    this.dispatchEvent(new CustomEvent('chat-cancel-reply', { bubbles: true, composed: true }));
     this.focusTextarea();
   }
 
   private cancelEdit(): void {
-    this.editMessage = null;
+    // `text`/`runeCount` are local state and stay here; `editMessage` belongs
+    // to the parent (see cancelReply).
     this.text = '';
     this.runeCount = 0;
+    this.dispatchEvent(new CustomEvent('chat-cancel-edit', { bubbles: true, composed: true }));
     this.focusTextarea();
   }
 
@@ -840,11 +837,9 @@ export class ScionChatComposer extends LitElement {
             <span style="font-size: var(--chat-fs-base)">🤖</span>
             <span class="agent-name">${this.defaultAgent}</span>
             <span class="hint">(thread default)</span>
-            ${
-              hasAgents
-                ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>`
-                : nothing
-            }
+            ${hasAgents
+              ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>`
+              : nothing}
           </div>
           ${hasAgents ? this.renderAgentMenu(agentMembers) : nothing}
         </sl-dropdown>
@@ -857,9 +852,9 @@ export class ScionChatComposer extends LitElement {
         <div class="destination-chip clickable" slot="trigger">
           <span class="arrow">&rarr;</span>
           <span class="hint">no agent</span>
-          ${
-            hasAgents ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>` : nothing
-          }
+          ${hasAgents
+            ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>`
+            : nothing}
         </div>
         ${hasAgents ? this.renderAgentMenu(agentMembers) : nothing}
       </sl-dropdown>
@@ -926,7 +921,8 @@ export class ScionChatComposer extends LitElement {
 
     // Feed the autocomplete components.
     const autocomplete = this.shadowRoot?.querySelector('scion-mention-autocomplete') as
-      import('./mention-autocomplete.js').ScionMentionAutocomplete | null;
+      | import('./mention-autocomplete.js').ScionMentionAutocomplete
+      | null;
     if (autocomplete) {
       const textarea = this.getTextareaElement();
       if (textarea) {
@@ -936,7 +932,8 @@ export class ScionChatComposer extends LitElement {
 
     // Feed slash command autocomplete.
     const slashAutocomplete = this.shadowRoot?.querySelector('scion-slash-autocomplete') as
-      import('./slash-autocomplete.js').ScionSlashAutocomplete | null;
+      | import('./slash-autocomplete.js').ScionSlashAutocomplete
+      | null;
     if (slashAutocomplete) {
       const cursorPos = this.getTextareaElement()?.selectionStart ?? this.text.length;
       slashAutocomplete.handleInput(this.text, cursorPos);
@@ -974,14 +971,16 @@ export class ScionChatComposer extends LitElement {
   private handleKeydown(e: KeyboardEvent): void {
     // Let slash command autocomplete handle keys first.
     const slashAutocomplete = this.shadowRoot?.querySelector('scion-slash-autocomplete') as
-      import('./slash-autocomplete.js').ScionSlashAutocomplete | null;
+      | import('./slash-autocomplete.js').ScionSlashAutocomplete
+      | null;
     if (slashAutocomplete?.handleKeydown(e)) {
       return; // consumed by slash autocomplete
     }
 
     // Then let the mention autocomplete handle keys.
     const autocomplete = this.shadowRoot?.querySelector('scion-mention-autocomplete') as
-      import('./mention-autocomplete.js').ScionMentionAutocomplete | null;
+      | import('./mention-autocomplete.js').ScionMentionAutocomplete
+      | null;
     if (autocomplete?.handleKeydown(e)) {
       return; // consumed by autocomplete
     }
@@ -1050,14 +1049,9 @@ export class ScionChatComposer extends LitElement {
         ${this.pendingFiles.map(
           (file, idx) => html`
             <div class="pending-file">
-              ${
-                file.mime.startsWith('image/')
-                  ? html`<img src=${file.url} alt=${file.name} />`
-                  : html`<sl-icon
-                      name="file-earmark"
-                      style="font-size:var(--chat-fs-lg)"
-                    ></sl-icon>`
-              }
+              ${file.mime.startsWith('image/')
+                ? html`<img src=${file.url} alt=${file.name} />`
+                : html`<sl-icon name="file-earmark" style="font-size:var(--chat-fs-lg)"></sl-icon>`}
               <span class="file-name" title=${file.name}>${file.name}</span>
               <button class="remove-btn" @click=${() => this.removePendingFile(idx)}>
                 &times;
@@ -1276,7 +1270,7 @@ export class ScionChatComposer extends LitElement {
       );
       this.text = '';
       this.runeCount = 0;
-      this.editMessage = null;
+      this.dispatchEvent(new CustomEvent('chat-cancel-edit', { bubbles: true, composed: true }));
       this.focusTextarea();
       return;
     }
@@ -1300,8 +1294,10 @@ export class ScionChatComposer extends LitElement {
         this.acceptedMentions.clear();
         this.pendingFiles = [];
         this.clearDraft();
-        // Phase-3: Clear reply context after successful send.
-        this.replyTo = null;
+        // Phase-3: Clear reply context after successful send. Parent-owned,
+        // so emit rather than assign — otherwise the bar returns and the next
+        // message would carry a stale replyToId.
+        this.dispatchEvent(new CustomEvent('chat-cancel-reply', { bubbles: true, composed: true }));
         this.focusTextarea();
       },
     };
