@@ -707,6 +707,9 @@ func (r *KubernetesRuntime) createAuthFileSecret(ctx context.Context, namespace,
 	data := make(map[string][]byte)
 
 	for i, f := range files {
+		if f.SourcePath == "" {
+			continue
+		}
 		content, err := os.ReadFile(f.SourcePath)
 		if err != nil {
 			return fmt.Errorf("failed to read auth file %s: %w", f.SourcePath, err)
@@ -1113,6 +1116,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 				},
 			})
 			for i, f := range config.ResolvedAuth.Files {
+				if f.SourcePath == "" {
+					continue
+				}
 				target := expandTildeTarget(f.ContainerPath, containerHome)
 				keyName := fmt.Sprintf("auth-file-%d", i)
 				extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{

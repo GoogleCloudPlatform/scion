@@ -874,6 +874,9 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		// the Docker runtime's file-copy mode (common.go:820-839) for
 		// robustness in case the staging path is bypassed or incomplete.
 		for _, f := range cfg.ResolvedAuth.Files {
+			if f.SourcePath == "" {
+				continue
+			}
 			containerPath := expandTildeTarget(f.ContainerPath, sandboxAgentHome)
 			var relPath string
 			if strings.HasPrefix(containerPath, sandboxAgentHome+"/") {

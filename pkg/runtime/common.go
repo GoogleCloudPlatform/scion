@@ -852,6 +852,12 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 	// Inject files
 	containerHome := util.GetHomeDir(config.UnixUsername)
 	for _, f := range ra.Files {
+		if f.SourcePath == "" {
+			// In broker mode, file content is projected from staged secrets
+			// (SCION_STAGED_SECRETS), not copied from host paths. SourcePath is
+			// intentionally cleared by run.go. Skip the copy/mount.
+			continue
+		}
 		containerPath := expandTildeTarget(f.ContainerPath, containerHome)
 
 		if config.HomeDir != "" {
