@@ -72,6 +72,8 @@ function serveUserPrefs(stored: Record<string, string> = {}): void {
         spaceSortMode: body.spaceSortMode || 'activity',
         threadSortMode: body.threadSortMode || 'activity',
         spaceOrder: body.spaceOrder ?? '',
+        threadOrder: body.threadOrder ?? '{}',
+        threadGroups: body.threadGroups ?? '{}',
       };
     }
     return Promise.resolve(new Response(JSON.stringify(stored), { status: 200 }));
@@ -154,6 +156,8 @@ describe('space rail — prefs round trip', () => {
       spaceSortMode: 'custom',
       threadSortMode: 'activity',
       spaceOrder: JSON.stringify(['p-b', 'p-a']),
+      threadOrder: '{}',
+      threadGroups: '{}',
     });
     expect(el.prefs.spaceOrder).toEqual(['p-b', 'p-a']);
   });

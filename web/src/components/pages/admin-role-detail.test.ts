@@ -207,7 +207,7 @@ beforeAll(async () => {
   const mod = await import('./admin-role-detail.js');
   ScionPageAdminRoleDetailCtor = mod.ScionPageAdminRoleDetail;
   vi.restoreAllMocks();
-});
+}, 30_000);
 
 async function createElement(
   fetchHandler: ReturnType<typeof createFetchHandler>,

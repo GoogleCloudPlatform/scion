@@ -403,6 +403,9 @@ export class ScionChatThread extends LitElement {
   /** Current user ID, cached from the stateManager scope once it exists. */
   private _currentUserId = '';
 
+  /** Timer for the initial-load watermark advance (500ms or 2000ms). */
+  private _initialWatermarkTimer: ReturnType<typeof setTimeout> | null = null;
+
   /** Read tracking: debounce timer for advancing watermark. */
   private _readDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -837,6 +840,12 @@ export class ScionChatThread extends LitElement {
 
   /** Tear down v2 state so a fresh load can happen. */
   private resetV2State(): void {
+    // Clear initial watermark timer to prevent it from firing against wrong thread
+    if (this._initialWatermarkTimer) {
+      clearTimeout(this._initialWatermarkTimer);
+      this._initialWatermarkTimer = null;
+    }
+
     // Stop any active SSE listener
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
@@ -903,6 +912,10 @@ export class ScionChatThread extends LitElement {
     // Clean up read tracking
     window.removeEventListener('focus', this._focusHandler);
     window.removeEventListener('blur', this._blurHandler);
+    if (this._initialWatermarkTimer) {
+      clearTimeout(this._initialWatermarkTimer);
+      this._initialWatermarkTimer = null;
+    }
     if (this._readDebounceTimer) {
       clearTimeout(this._readDebounceTimer);
       this._readDebounceTimer = null;
@@ -1171,7 +1184,9 @@ export class ScionChatThread extends LitElement {
       // enough to let the render commit.
       if (this.messages.length > 0) {
         const delay = this.showUnreadDivider ? 2000 : 500;
-        setTimeout(() => {
+        if (this._initialWatermarkTimer) clearTimeout(this._initialWatermarkTimer);
+        this._initialWatermarkTimer = setTimeout(() => {
+          this._initialWatermarkTimer = null;
           const lastMsg = this.messages[this.messages.length - 1];
           if (lastMsg) {
             void this.advanceReadWatermark(lastMsg.id);

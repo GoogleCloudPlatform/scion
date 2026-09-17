@@ -203,7 +203,7 @@ beforeAll(async () => {
   ScionPageAdminRolesCtor = rolesMod.ScionPageAdminRoles;
   ScionPageAdminRoleDetailCtor = detailMod.ScionPageAdminRoleDetail;
   vi.restoreAllMocks();
-});
+}, 30_000);
 
 // ---------------------------------------------------------------------------
 // Helpers

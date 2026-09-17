@@ -29,7 +29,7 @@
  * - Error kind → surface mapping
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 import { canGroup } from '../../shared/groups.js';
 import type { Capabilities } from '../../shared/groups.js';
@@ -146,6 +146,12 @@ describe('buildGroupsQuery — filter to query-param mapping', () => {
 describe('URL round-trip (readFiltersFromURL / syncFiltersToURL)', () => {
   let originalLocation: Location;
   let replaceStateSpy: ReturnType<typeof vi.fn>;
+  let ScionPageAdminGroups: (typeof import('./admin-groups.js'))['ScionPageAdminGroups'];
+
+  beforeAll(async () => {
+    const mod = await import('./admin-groups.js');
+    ScionPageAdminGroups = mod.ScionPageAdminGroups;
+  }, 30_000);
 
   beforeEach(() => {
     originalLocation = window.location;
@@ -158,8 +164,6 @@ describe('URL round-trip (readFiltersFromURL / syncFiltersToURL)', () => {
   });
 
   it('reads filters from URL query params', async () => {
-    // Import dynamically to work with happy-dom
-    const { ScionPageAdminGroups } = await import('./admin-groups.js');
     const el = new ScionPageAdminGroups();
 
     // Simulate URL params
@@ -191,7 +195,6 @@ describe('URL round-trip (readFiltersFromURL / syncFiltersToURL)', () => {
   });
 
   it('syncs filters to URL', async () => {
-    const { ScionPageAdminGroups } = await import('./admin-groups.js');
     const el = new ScionPageAdminGroups();
 
     Object.defineProperty(window, 'location', {
@@ -227,7 +230,6 @@ describe('URL round-trip (readFiltersFromURL / syncFiltersToURL)', () => {
   });
 
   it('omits default/empty values from URL', async () => {
-    const { ScionPageAdminGroups } = await import('./admin-groups.js');
     const el = new ScionPageAdminGroups();
 
     Object.defineProperty(window, 'location', {
