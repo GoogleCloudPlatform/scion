@@ -288,6 +288,42 @@ for sel in "${CHAT_SELECTIONS[@]}"; do
   esac
 done
 
+echo "Container images:"
+echo "  1) Provide a registry path (images already pushed)"
+echo "  2) Build images locally on the VM (requires 30-45 min, ~30GB disk)"
+read -rp "Select [2]: " IMAGE_CHOICE
+IMAGE_CHOICE="${IMAGE_CHOICE:-2}"
+
+case "$IMAGE_CHOICE" in
+  1)
+    IMAGE_SOURCE="registry"
+    read -rp "Registry path (e.g. us-docker.pkg.dev/my-project/scion): " IMAGE_REGISTRY
+    if [[ -z "$IMAGE_REGISTRY" ]]; then
+      err "Registry path cannot be empty."
+      exit 1
+    fi
+    ;;
+  2)
+    IMAGE_SOURCE="build"
+    IMAGE_REGISTRY="localhost/scion"
+    ;;
+  *) err "Invalid selection: $IMAGE_CHOICE"; exit 1 ;;
+esac
+
+# --- Admin email ---
+echo ""
+echo "Hub admin email (will be granted super-admin access):"
+DEPLOYER_DEFAULT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)" || true
+if [[ -n "$DEPLOYER_DEFAULT" ]]; then
+  read -rp "Admin email [${DEPLOYER_DEFAULT}]: " ADMIN_EMAIL
+  ADMIN_EMAIL="${ADMIN_EMAIL:-$DEPLOYER_DEFAULT}"
+else
+  read -rp "Admin email: " ADMIN_EMAIL
+fi
+if [[ -z "$ADMIN_EMAIL" ]]; then
+  warn "No admin email provided. You can add one later in settings.yaml under server.hub.admin_emails."
+fi
+
 # Derived values
 info "Selecting zone in ${REGION}..."
 ZONE="$(gcloud compute zones list \
@@ -319,6 +355,14 @@ if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
   echo "  Chat plugins: ${CHAT_PLUGINS[*]}"
 else
   echo "  Chat plugins: (none)"
+fi
+if [[ "$IMAGE_SOURCE" == "registry" ]]; then
+  echo "  Images:       registry (${IMAGE_REGISTRY})"
+else
+  echo "  Images:       build locally on VM"
+fi
+if [[ -n "$ADMIN_EMAIL" ]]; then
+  echo "  Admin:        ${ADMIN_EMAIL}"
 fi
 
 # --- Release version ---
@@ -410,7 +454,7 @@ if [[ -n "$DEPLOYER_EMAIL" ]]; then
   if gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="${DEPLOYER_MEMBER}" \
     --role="roles/iap.tunnelResourceAccessor" \
-    --quiet 2>/dev/null; then
+    --quiet >/dev/null 2>&1; then
     echo "  IAP tunnel access granted to: ${DEPLOYER_EMAIL}"
   else
     warn "Failed to grant roles/iap.tunnelResourceAccessor to ${DEPLOYER_EMAIL}."
@@ -528,15 +572,30 @@ rm -f "${SSH_STDERR_FILE}"
 echo "  SSH connection established."
 
 # --- Wait for cloud-init ---
+# cloud-init installs Docker and creates the scion user. The script cannot
+# proceed until this finishes — writing to directories cloud-init owns before
+# it completes causes "No such file or directory" errors.
 info "Waiting for cloud-init to complete (this may take a few minutes)..."
-if gcloud compute ssh "${INSTANCE_NAME}" \
-    --zone="${ZONE}" --project="${PROJECT_ID}" \
-    --command="sudo cloud-init status --wait" \
-    2>/dev/null; then
-  echo "  Cloud-init completed."
-else
-  warn "cloud-init status --wait returned non-zero. Check cloud-init logs on the VM."
+CLOUD_INIT_OK=false
+for ci_attempt in $(seq 1 6); do
+  if gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="sudo cloud-init status --wait" \
+      2>/dev/null; then
+    CLOUD_INIT_OK=true
+    break
+  fi
+  if [[ $ci_attempt -lt 6 ]]; then
+    echo "  cloud-init check attempt ${ci_attempt}/6 returned non-zero, retrying in 15s..."
+    sleep 15
+  fi
+done
+if [[ "$CLOUD_INIT_OK" != "true" ]]; then
+  err "cloud-init did not complete successfully after 6 attempts."
+  echo "  Check cloud-init logs: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='sudo cloud-init status --long'"
+  exit 1
 fi
+echo "  Cloud-init completed."
 
 # ===================================================================
 # Phase 3: VM Setup
@@ -654,10 +713,13 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
-settings_version: \"1\"
+schema_version: \"1\"
+image_registry: \"${IMAGE_REGISTRY}\"
 server:
   hub:
     name: \"${HUB_NAME}\"
+${ADMIN_EMAIL:+    admin_emails:
+      - \"${ADMIN_EMAIL}\"}
   storage:
     local_path: /home/scion/.scion/workspace-storage
   secrets:
@@ -706,6 +768,122 @@ else
   echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
   echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
   exit 1
+fi
+
+# ===================================================================
+# Phase 3b: Container Images
+# ===================================================================
+if [[ "$IMAGE_SOURCE" == "build" ]]; then
+  section "Phase 3b: Build Container Images on VM"
+
+  info "Cloning scion repository on VM..."
+  gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="
+      set -euo pipefail
+      if [ ! -d /home/scion/scion-source ]; then
+        sudo -u scion git clone --depth 1 --branch '${VERSION}' \
+          https://github.com/GoogleCloudPlatform/scion.git /home/scion/scion-source
+      else
+        cd /home/scion/scion-source
+        sudo -u scion git fetch --depth 1 origin tag '${VERSION}'
+        sudo -u scion git checkout '${VERSION}'
+      fi
+    "
+
+  # Build only the minimal set of images needed for deployment:
+  # core-base (foundation) -> scion-base (adds scion binary) -> scion-antigravity (default harness)
+  # Using --target all would build ALL ~12 images including harnesses with known build issues.
+  info "Building container images (this may take 30-45 minutes)..."
+  gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="
+      set -euo pipefail
+      cd /home/scion/scion-source
+      rm -f /tmp/scion-image-build.exit
+      { nohup bash -c '
+        set -euo pipefail
+        # Step 1: Build core-base
+        echo \"=== Building core-base ===\"
+        sudo bash image-build/scripts/build-images.sh \
+          --builder local-docker \
+          --target core-base \
+          --tag latest
+
+        # Step 2: Build scion-base
+        echo \"=== Building scion-base ===\"
+        sudo bash image-build/scripts/build-images.sh \
+          --builder local-docker \
+          --target scion-base \
+          --tag latest
+
+        # Step 3: Build antigravity harness directly
+        echo \"=== Building scion-antigravity ===\"
+        sudo docker build \
+          -t scion-antigravity:latest \
+          --build-arg BASE_IMAGE=scion-base:latest \
+          -f harnesses/antigravity/Dockerfile \
+          harnesses/antigravity/
+
+        # Step 4: Tag images under localhost/scion for the runtime
+        echo \"=== Tagging images for localhost/scion registry ===\"
+        sudo docker tag core-base:latest localhost/scion/core-base:latest
+        sudo docker tag scion-base:latest localhost/scion/scion-base:latest
+        sudo docker tag scion-antigravity:latest localhost/scion/scion-antigravity:latest
+
+        echo \"=== All images built and tagged successfully ===\"
+      ' > /tmp/scion-image-build.log 2>&1; echo \$? > /tmp/scion-image-build.exit; } &
+      echo \$! > /tmp/scion-image-build.pid
+      echo \"Image build started in background (PID \$(cat /tmp/scion-image-build.pid))\"
+    "
+
+  # Poll for build completion
+  info "Waiting for image build to complete..."
+  BUILD_DONE=false
+  POLL_COUNT=0
+  MAX_POLLS=180  # 180 * 15s = 45 min max
+  while [[ "$BUILD_DONE" != "true" ]] && [[ $POLL_COUNT -lt $MAX_POLLS ]]; do
+    sleep 15
+    POLL_COUNT=$((POLL_COUNT + 1))
+    # Check if the exit code file exists (build finished)
+    BUILD_EXIT=$(gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="cat /tmp/scion-image-build.exit 2>/dev/null || echo running" \
+      2>/dev/null) || true
+    if [[ "$BUILD_EXIT" != "running" ]]; then
+      BUILD_DONE=true
+    else
+      # Show progress (last line of build log)
+      LAST_LINE=$(gcloud compute ssh "${INSTANCE_NAME}" \
+        --zone="${ZONE}" --project="${PROJECT_ID}" \
+        --command="tail -1 /tmp/scion-image-build.log 2>/dev/null || echo '(waiting...)'" \
+        2>/dev/null) || true
+      echo "  [${POLL_COUNT}] ${LAST_LINE}"
+    fi
+  done
+
+  if [[ "$BUILD_DONE" != "true" ]]; then
+    err "Image build timed out after 45 minutes."
+    echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='cat /tmp/scion-image-build.log'"
+    exit 1
+  fi
+
+  if [[ "$BUILD_EXIT" != "0" ]]; then
+    err "Image build failed (exit code: ${BUILD_EXIT})."
+    echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='tail -50 /tmp/scion-image-build.log'"
+    exit 1
+  fi
+  echo "  Image build completed successfully."
+
+  info "Verifying container images..."
+  gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="docker images | grep -E 'localhost/scion|core-base|scion-base|scion-antigravity'"
+  echo "  Container images built and tagged successfully."
+else
+  section "Phase 3b: Container Images (Registry)"
+  info "Using pre-built images from registry: ${IMAGE_REGISTRY}"
+  echo "  The hub will pull images from: ${IMAGE_REGISTRY}"
 fi
 
 # ===================================================================
@@ -788,14 +966,14 @@ else
       --region="${REGION}" --project="${PROJECT_ID}" \
       --member="${OPERATOR_MEMBER}" \
       --role=roles/iap.httpsResourceAccessor \
-      --quiet 2>/dev/null; then
+      --quiet >/dev/null 2>&1; then
     echo "  IAP access granted to: ${OPERATOR_EMAIL} (service-level binding)"
   else
     warn "Service-level IAP binding failed; falling back to project-level binding."
     if gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
       --member="${OPERATOR_MEMBER}" \
       --role=roles/iap.httpsResourceAccessor \
-      --quiet 2>/dev/null; then
+      --quiet >/dev/null 2>&1; then
       echo "  IAP access granted to: ${OPERATOR_EMAIL} (project-level fallback)"
     else
       err "Failed to grant IAP access to ${OPERATOR_EMAIL} at both service and project levels."
@@ -836,10 +1014,13 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
-settings_version: \"1\"
+schema_version: \"1\"
+image_registry: \"${IMAGE_REGISTRY}\"
 server:
   hub:
     name: \"${HUB_NAME}\"
+${ADMIN_EMAIL:+    admin_emails:
+      - \"${ADMIN_EMAIL}\"}
   storage:
     local_path: /home/scion/.scion/workspace-storage
   secrets:
