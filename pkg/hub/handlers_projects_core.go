@@ -1859,6 +1859,12 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for nested /messaging-policy path (cross-project inbound policy)
+	if subPath == "messaging-policy" {
+		s.handleProjectMessagingPolicy(w, r, projectID)
+		return
+	}
+
 	// Check for nested /set-template path
 	if subPath == "set-template" {
 		s.handleSetTemplate(w, r, projectID)

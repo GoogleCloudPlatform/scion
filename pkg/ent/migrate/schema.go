@@ -108,7 +108,7 @@ var (
 		{Name: "owner_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "delegation_enabled", Type: field.TypeBool, Default: false},
 		{Name: "visibility", Type: field.TypeString, Default: "private"},
-		{Name: "message_mode", Type: field.TypeEnum, Enums: []string{"none", "lineage", "branch", "project"}, Default: "project"},
+		{Name: "message_mode", Type: field.TypeEnum, Enums: []string{"none", "lineage", "branch", "project", "hub"}, Default: "project"},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
 		{Name: "phase", Type: field.TypeString, Nullable: true},
@@ -1260,6 +1260,14 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{NotificationsColumns[3], NotificationsColumns[4], NotificationsColumns[5]},
 			},
+			{
+				Name:    "notification_subscriber_type_created",
+				Unique:  false,
+				Columns: []*schema.Column{NotificationsColumns[4], NotificationsColumns[10]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "dispatched = false",
+				},
+			},
 		},
 	}
 	// NotificationSubscriptionsColumns holds the columns for the "notification_subscriptions" table.
@@ -1353,6 +1361,8 @@ var (
 		{Name: "github_permissions", Type: field.TypeString, Nullable: true},
 		{Name: "github_app_status", Type: field.TypeString, Nullable: true},
 		{Name: "git_identity", Type: field.TypeString, Nullable: true},
+		{Name: "cross_project_inbound", Type: field.TypeEnum, Enums: []string{"none", "members", "any"}, Default: "none"},
+		{Name: "cross_project_inbound_revision", Type: field.TypeInt64, Default: 1},
 	}
 	// ProjectsTable holds the schema information for the "projects" table.
 	ProjectsTable = &schema.Table{

@@ -174,7 +174,7 @@ type CreateAgentRequest struct {
 	// inherit the parent role. The project maximum caps both paths.
 	AgentRole string `json:"agentRole,omitempty"`
 	// MessageMode specifies the initial message mode for the agent.
-	// Valid values: "none", "lineage", "branch", "project".
+	// Valid values: "none", "lineage", "branch", "project", "hub".
 	// When omitted, resolved from template, parent inheritance, or "project" default.
 	MessageMode string `json:"messageMode,omitempty"`
 	// GCPIdentity specifies the GCP identity assignment for the agent.
@@ -1066,6 +1066,19 @@ func (s *Server) createAgentInProject(
 		agent.MessageMode = parentMessageMode
 	} else {
 		agent.MessageMode = store.MessageModeProject
+	}
+
+	// Hub-mode grant guard: for creation, any effective "hub" is a new grant,
+	// even if it came from a template, parent inheritance, or a default.
+	// The guard runs after effective mode resolution.
+	if agent.MessageMode == store.MessageModeHub {
+		identity := GetIdentityFromContext(ctx)
+		decision := s.AuthorizeMessageModeGrant(ctx, identity, projectID, agent.MessageMode)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Cannot grant hub message mode: "+decision.Reason, nil)
+			return
+		}
 	}
 
 	// Populate GCP identity in applied config.

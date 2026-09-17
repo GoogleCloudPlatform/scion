@@ -457,17 +457,18 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// Fetch the conversation first so we can reject DMs before auth checks.
-	// This ensures DMs without participant rows return 400 (BadRequest) rather
-	// than 403 (Forbidden) — the request is invalid regardless of caller.
+	// Fetch the conversation first: DM-specific rejection must run before
+	// the participant-row auth check so that DMs without participant rows
+	// return 400 (bad request) instead of 403 (forbidden).
 	conv, err := s.store.GetConversation(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "Conversation")
 		return
 	}
 
-	// Reject default-agent mutation for direct conversations. DMs have exactly
-	// two canonical participants; the default-agent concept does not apply.
+	// DM conversations have exactly two immutable principals — setting a
+	// default agent is a group-conversation operation and is not meaningful
+	// for direct conversations.
 	if conv.Kind == "direct" {
 		BadRequest(w, "cannot set default agent on a direct conversation")
 		return

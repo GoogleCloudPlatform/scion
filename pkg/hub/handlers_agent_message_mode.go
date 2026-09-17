@@ -30,7 +30,7 @@ import (
 
 // SetMessageModeRequest is the request body for the set_message_mode action.
 type SetMessageModeRequest struct {
-	Mode    string `json:"mode"`              // Required: "none", "lineage", "branch", "project"
+	Mode    string `json:"mode"`              // Required: "none", "lineage", "branch", "project", "hub"
 	Cascade bool   `json:"cascade,omitempty"` // Optional: apply to all descendants
 }
 
@@ -101,7 +101,7 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 
 	// 2. Validate mode value.
 	if !store.IsValidMessageMode(req.Mode) {
-		ValidationError(w, "invalid message mode: must be one of none, lineage, branch, project", nil)
+		ValidationError(w, "invalid message mode: must be one of none, lineage, branch, project, hub", nil)
 		return
 	}
 
@@ -197,7 +197,18 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 		}
 	}
 
-	// 7. Record previous mode.
+	// 7. Hub-mode grant guard: if the requested mode is hub and the agent
+	// does not already have hub mode, apply the non-escalation check.
+	if isNewHubGrant(agent.MessageMode, req.Mode) {
+		decision := s.AuthorizeMessageModeGrant(ctx, identity, agent.ProjectID, req.Mode)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Cannot grant hub message mode: "+decision.Reason, nil)
+			return
+		}
+	}
+
+	// 8. Record previous mode.
 	previousMode := agent.MessageMode
 
 	// --- Dry-run path: preview cascade effects without applying changes ---
@@ -291,8 +302,16 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 // When dryRun is true, it computes which agents would be affected but does not
 // modify any records — this uses the same code path so the preview cannot
 // disagree with what a real apply would do.
+//
+// The hub-mode grant guard is applied to each descendant that would newly
+// receive hub mode, using the same check as the direct mutation path.
+// Dry-run uses the same guard so previews cannot disagree with real execution.
+//
 // Best-effort per agent: a failure to update one descendant does not stop the rest.
 func (s *Server) cascadeMessageMode(ctx context.Context, root *store.Agent, mode string, dryRun bool) (*CascadeResult, error) {
+	// Resolve the identity of the caller for hub grant checks.
+	identity := GetIdentityFromContext(ctx)
+
 	descendants, err := s.store.ListAgents(ctx, store.AgentFilter{
 		ProjectID:  root.ProjectID,
 		AncestorID: root.ID,
@@ -314,6 +333,34 @@ func (s *Server) cascadeMessageMode(ctx context.Context, root *store.Agent, mode
 		oldMode := desc.MessageMode
 		if oldMode == mode {
 			continue // already at target mode
+		}
+
+		// Hub-mode grant guard for each descendant that would newly receive hub.
+		if isNewHubGrant(oldMode, mode) {
+			if identity == nil {
+				slog.Warn("cascade hub grant denied: no authenticated identity",
+					"agent_id", desc.ID)
+				result.Details = append(result.Details, CascadeAgentDetail{
+					AgentID:     desc.ID,
+					AgentName:   agentDisplayName(desc),
+					CurrentMode: oldMode,
+					NewMode:     oldMode,
+				})
+				continue
+			}
+			decision := s.AuthorizeMessageModeGrant(ctx, identity, desc.ProjectID, mode)
+			if !decision.Allowed {
+				slog.Warn("cascade hub grant denied for descendant",
+					"agent_id", desc.ID, "reason", decision.Reason)
+				// Do not silently clamp — skip this descendant and record the denial.
+				result.Details = append(result.Details, CascadeAgentDetail{
+					AgentID:     desc.ID,
+					AgentName:   agentDisplayName(desc),
+					CurrentMode: oldMode,
+					NewMode:     oldMode, // unchanged — grant denied
+				})
+				continue
+			}
 		}
 
 		if dryRun {

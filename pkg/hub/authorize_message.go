@@ -139,9 +139,10 @@ func (s *Server) authorizeUserToAgent(
 		return true, "project owner piercing"
 	}
 
-	// target.mode == project → require agent.message permission on the project
+	// target.mode == project or hub → require agent.message permission on the project
 	// (evaluated via AK1 kernel including UAT credential caveat intersection).
-	if targetAgent.MessageMode == store.MessageModeProject {
+	// For user delivery, hub behaves like project under existing authorization.
+	if targetAgent.MessageMode == store.MessageModeProject || targetAgent.MessageMode == store.MessageModeHub {
 		decision := s.authzService.CheckAccess(ctx, userIdent, targetResource, ActionMessage)
 		if decision.Allowed {
 			return true, "agent.message permission granted"
@@ -183,20 +184,25 @@ func (s *Server) authorizeAgentToAgent(
 		return false, "target agent message_mode is none"
 	}
 
-	// Cross-project → DENY
+	// Cross-project → DENY (cross-project delivery is a later phase)
 	if senderAgent.ProjectID != targetAgent.ProjectID {
 		return false, "cross-project agent-to-agent messaging denied"
 	}
 
-	// Both project mode → ALLOW
-	if senderAgent.MessageMode == store.MessageModeProject &&
-		targetAgent.MessageMode == store.MessageModeProject {
-		return true, "both agents in project mode"
+	// Same-project mode compatibility (design §3):
+	// hub/project and hub/hub are allowed (hub joins the project cell);
+	// hub does NOT open branch/lineage boundaries.
+	sMode := senderAgent.MessageMode
+	tMode := targetAgent.MessageMode
+
+	// Both in project cell (project or hub) → ALLOW
+	if (sMode == store.MessageModeProject || sMode == store.MessageModeHub) &&
+		(tMode == store.MessageModeProject || tMode == store.MessageModeHub) {
+		return true, "both agents in project/hub communication cell"
 	}
 
 	// Both branch mode with parent/child relationship → ALLOW
-	if senderAgent.MessageMode == store.MessageModeBranch &&
-		targetAgent.MessageMode == store.MessageModeBranch {
+	if sMode == store.MessageModeBranch && tMode == store.MessageModeBranch {
 		if isDirectParentChild(senderAgent, targetAgent) {
 			return true, "branch mode parent/child relationship"
 		}
@@ -205,9 +211,10 @@ func (s *Server) authorizeAgentToAgent(
 
 	// All other combinations (including lineage mode, mixed modes) → DENY
 	// Lineage-mode agents have NO agent-to-agent edges (D4).
+	// hub does NOT open branch/lineage boundaries.
 	return false, fmt.Sprintf(
 		"agent-to-agent messaging denied: sender mode %q, target mode %q",
-		senderAgent.MessageMode, targetAgent.MessageMode,
+		sMode, tMode,
 	)
 }
 

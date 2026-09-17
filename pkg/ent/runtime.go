@@ -1195,6 +1195,10 @@ func init() {
 	project.DefaultUpdated = projectDescUpdated.Default.(func() time.Time)
 	// project.UpdateDefaultUpdated holds the default value on update for the updated field.
 	project.UpdateDefaultUpdated = projectDescUpdated.UpdateDefault.(func() time.Time)
+	// projectDescCrossProjectInboundRevision is the schema descriptor for cross_project_inbound_revision field.
+	projectDescCrossProjectInboundRevision := projectFields[17].Descriptor()
+	// project.DefaultCrossProjectInboundRevision holds the default value on creation for the cross_project_inbound_revision field.
+	project.DefaultCrossProjectInboundRevision = projectDescCrossProjectInboundRevision.Default.(int64)
 	// projectDescID is the schema descriptor for id field.
 	projectDescID := projectFields[0].Descriptor()
 	// project.DefaultID holds the default value on creation for the id field.

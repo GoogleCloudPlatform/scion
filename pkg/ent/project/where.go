@@ -121,6 +121,11 @@ func GitIdentity(v string) predicate.Project {
 	return predicate.Project(sql.FieldEQ(FieldGitIdentity, v))
 }
 
+// CrossProjectInboundRevision applies equality check predicate on the "cross_project_inbound_revision" field. It's identical to CrossProjectInboundRevisionEQ.
+func CrossProjectInboundRevision(v int64) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldCrossProjectInboundRevision, v))
+}
+
 // NameEQ applies the EQ predicate on the "name" field.
 func NameEQ(v string) predicate.Project {
 	return predicate.Project(sql.FieldEQ(FieldName, v))
@@ -999,6 +1004,66 @@ func GitIdentityEqualFold(v string) predicate.Project {
 // GitIdentityContainsFold applies the ContainsFold predicate on the "git_identity" field.
 func GitIdentityContainsFold(v string) predicate.Project {
 	return predicate.Project(sql.FieldContainsFold(FieldGitIdentity, v))
+}
+
+// CrossProjectInboundEQ applies the EQ predicate on the "cross_project_inbound" field.
+func CrossProjectInboundEQ(v CrossProjectInbound) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldCrossProjectInbound, v))
+}
+
+// CrossProjectInboundNEQ applies the NEQ predicate on the "cross_project_inbound" field.
+func CrossProjectInboundNEQ(v CrossProjectInbound) predicate.Project {
+	return predicate.Project(sql.FieldNEQ(FieldCrossProjectInbound, v))
+}
+
+// CrossProjectInboundIn applies the In predicate on the "cross_project_inbound" field.
+func CrossProjectInboundIn(vs ...CrossProjectInbound) predicate.Project {
+	return predicate.Project(sql.FieldIn(FieldCrossProjectInbound, vs...))
+}
+
+// CrossProjectInboundNotIn applies the NotIn predicate on the "cross_project_inbound" field.
+func CrossProjectInboundNotIn(vs ...CrossProjectInbound) predicate.Project {
+	return predicate.Project(sql.FieldNotIn(FieldCrossProjectInbound, vs...))
+}
+
+// CrossProjectInboundRevisionEQ applies the EQ predicate on the "cross_project_inbound_revision" field.
+func CrossProjectInboundRevisionEQ(v int64) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldCrossProjectInboundRevision, v))
+}
+
+// CrossProjectInboundRevisionNEQ applies the NEQ predicate on the "cross_project_inbound_revision" field.
+func CrossProjectInboundRevisionNEQ(v int64) predicate.Project {
+	return predicate.Project(sql.FieldNEQ(FieldCrossProjectInboundRevision, v))
+}
+
+// CrossProjectInboundRevisionIn applies the In predicate on the "cross_project_inbound_revision" field.
+func CrossProjectInboundRevisionIn(vs ...int64) predicate.Project {
+	return predicate.Project(sql.FieldIn(FieldCrossProjectInboundRevision, vs...))
+}
+
+// CrossProjectInboundRevisionNotIn applies the NotIn predicate on the "cross_project_inbound_revision" field.
+func CrossProjectInboundRevisionNotIn(vs ...int64) predicate.Project {
+	return predicate.Project(sql.FieldNotIn(FieldCrossProjectInboundRevision, vs...))
+}
+
+// CrossProjectInboundRevisionGT applies the GT predicate on the "cross_project_inbound_revision" field.
+func CrossProjectInboundRevisionGT(v int64) predicate.Project {
+	return predicate.Project(sql.FieldGT(FieldCrossProjectInboundRevision, v))
+}
+
+// CrossProjectInboundRevisionGTE applies the GTE predicate on the "cross_project_inbound_revision" field.
+func CrossProjectInboundRevisionGTE(v int64) predicate.Project {
+	return predicate.Project(sql.FieldGTE(FieldCrossProjectInboundRevision, v))
+}
+
+// CrossProjectInboundRevisionLT applies the LT predicate on the "cross_project_inbound_revision" field.
+func CrossProjectInboundRevisionLT(v int64) predicate.Project {
+	return predicate.Project(sql.FieldLT(FieldCrossProjectInboundRevision, v))
+}
+
+// CrossProjectInboundRevisionLTE applies the LTE predicate on the "cross_project_inbound_revision" field.
+func CrossProjectInboundRevisionLTE(v int64) predicate.Project {
+	return predicate.Project(sql.FieldLTE(FieldCrossProjectInboundRevision, v))
 }
 
 // HasAgents applies the HasEdge predicate on the "agents" edge.

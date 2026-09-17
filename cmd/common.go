@@ -88,10 +88,10 @@ func validateMessageMode(mode string) error {
 		return nil
 	}
 	switch mode {
-	case "none", "lineage", "branch", "project":
+	case "none", "lineage", "branch", "project", "hub":
 		return nil
 	default:
-		return fmt.Errorf("invalid message mode %q: must be one of none, lineage, branch, project", mode)
+		return fmt.Errorf("invalid message mode %q: must be one of none, lineage, branch, project, hub", mode)
 	}
 }
 

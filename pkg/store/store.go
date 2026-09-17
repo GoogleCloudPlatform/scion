@@ -435,6 +435,13 @@ type ProjectStore interface {
 	// Must be called inside a transaction (WithTx) before any membership
 	// reads or writes. Returns ErrNotFound if the project does not exist.
 	LockProjectForMembership(ctx context.Context, projectID string) error
+
+	// UpdateProjectMessagingPolicy updates only the cross-project inbound
+	// policy and its revision using optimistic concurrency. The
+	// expectedRevision must match the current revision; returns
+	// ErrRevisionConflict on mismatch. This is the only path that may change
+	// the policy; generic UpdateProject must NOT update these fields.
+	UpdateProjectMessagingPolicy(ctx context.Context, projectID string, inbound string, expectedRevision int64) (*Project, error)
 }
 
 // ProjectFilter defines criteria for filtering projects.

@@ -38450,32 +38450,35 @@ func (m *PolicyBindingMutation) ResetEdge(name string) error {
 // ProjectMutation represents an operation that mutates the Project nodes in the graph.
 type ProjectMutation struct {
 	config
-	op                        Op
-	typ                       string
-	id                        *uuid.UUID
-	name                      *string
-	slug                      *string
-	git_remote                *string
-	default_runtime_broker_id *string
-	labels                    *map[string]string
-	annotations               *map[string]string
-	shared_dirs               *string
-	created                   *time.Time
-	updated                   *time.Time
-	created_by                *string
-	owner_id                  *string
-	github_installation_id    *int64
-	addgithub_installation_id *int64
-	github_permissions        *string
-	github_app_status         *string
-	git_identity              *string
-	clearedFields             map[string]struct{}
-	agents                    map[uuid.UUID]struct{}
-	removedagents             map[uuid.UUID]struct{}
-	clearedagents             bool
-	done                      bool
-	oldValue                  func(context.Context) (*Project, error)
-	predicates                []predicate.Project
+	op                                Op
+	typ                               string
+	id                                *uuid.UUID
+	name                              *string
+	slug                              *string
+	git_remote                        *string
+	default_runtime_broker_id         *string
+	labels                            *map[string]string
+	annotations                       *map[string]string
+	shared_dirs                       *string
+	created                           *time.Time
+	updated                           *time.Time
+	created_by                        *string
+	owner_id                          *string
+	github_installation_id            *int64
+	addgithub_installation_id         *int64
+	github_permissions                *string
+	github_app_status                 *string
+	git_identity                      *string
+	cross_project_inbound             *project.CrossProjectInbound
+	cross_project_inbound_revision    *int64
+	addcross_project_inbound_revision *int64
+	clearedFields                     map[string]struct{}
+	agents                            map[uuid.UUID]struct{}
+	removedagents                     map[uuid.UUID]struct{}
+	clearedagents                     bool
+	done                              bool
+	oldValue                          func(context.Context) (*Project, error)
+	predicates                        []predicate.Project
 }
 
 var _ ent.Mutation = (*ProjectMutation)(nil)
@@ -39286,6 +39289,98 @@ func (m *ProjectMutation) ResetGitIdentity() {
 	delete(m.clearedFields, project.FieldGitIdentity)
 }
 
+// SetCrossProjectInbound sets the "cross_project_inbound" field.
+func (m *ProjectMutation) SetCrossProjectInbound(ppi project.CrossProjectInbound) {
+	m.cross_project_inbound = &ppi
+}
+
+// CrossProjectInbound returns the value of the "cross_project_inbound" field in the mutation.
+func (m *ProjectMutation) CrossProjectInbound() (r project.CrossProjectInbound, exists bool) {
+	v := m.cross_project_inbound
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCrossProjectInbound returns the old "cross_project_inbound" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldCrossProjectInbound(ctx context.Context) (v project.CrossProjectInbound, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCrossProjectInbound is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCrossProjectInbound requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCrossProjectInbound: %w", err)
+	}
+	return oldValue.CrossProjectInbound, nil
+}
+
+// ResetCrossProjectInbound resets all changes to the "cross_project_inbound" field.
+func (m *ProjectMutation) ResetCrossProjectInbound() {
+	m.cross_project_inbound = nil
+}
+
+// SetCrossProjectInboundRevision sets the "cross_project_inbound_revision" field.
+func (m *ProjectMutation) SetCrossProjectInboundRevision(i int64) {
+	m.cross_project_inbound_revision = &i
+	m.addcross_project_inbound_revision = nil
+}
+
+// CrossProjectInboundRevision returns the value of the "cross_project_inbound_revision" field in the mutation.
+func (m *ProjectMutation) CrossProjectInboundRevision() (r int64, exists bool) {
+	v := m.cross_project_inbound_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCrossProjectInboundRevision returns the old "cross_project_inbound_revision" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldCrossProjectInboundRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCrossProjectInboundRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCrossProjectInboundRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCrossProjectInboundRevision: %w", err)
+	}
+	return oldValue.CrossProjectInboundRevision, nil
+}
+
+// AddCrossProjectInboundRevision adds i to the "cross_project_inbound_revision" field.
+func (m *ProjectMutation) AddCrossProjectInboundRevision(i int64) {
+	if m.addcross_project_inbound_revision != nil {
+		*m.addcross_project_inbound_revision += i
+	} else {
+		m.addcross_project_inbound_revision = &i
+	}
+}
+
+// AddedCrossProjectInboundRevision returns the value that was added to the "cross_project_inbound_revision" field in this mutation.
+func (m *ProjectMutation) AddedCrossProjectInboundRevision() (r int64, exists bool) {
+	v := m.addcross_project_inbound_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCrossProjectInboundRevision resets all changes to the "cross_project_inbound_revision" field.
+func (m *ProjectMutation) ResetCrossProjectInboundRevision() {
+	m.cross_project_inbound_revision = nil
+	m.addcross_project_inbound_revision = nil
+}
+
 // AddAgentIDs adds the "agents" edge to the Agent entity by ids.
 func (m *ProjectMutation) AddAgentIDs(ids ...uuid.UUID) {
 	if m.agents == nil {
@@ -39374,7 +39469,7 @@ func (m *ProjectMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ProjectMutation) Fields() []string {
-	fields := make([]string, 0, 15)
+	fields := make([]string, 0, 17)
 	if m.name != nil {
 		fields = append(fields, project.FieldName)
 	}
@@ -39420,6 +39515,12 @@ func (m *ProjectMutation) Fields() []string {
 	if m.git_identity != nil {
 		fields = append(fields, project.FieldGitIdentity)
 	}
+	if m.cross_project_inbound != nil {
+		fields = append(fields, project.FieldCrossProjectInbound)
+	}
+	if m.cross_project_inbound_revision != nil {
+		fields = append(fields, project.FieldCrossProjectInboundRevision)
+	}
 	return fields
 }
 
@@ -39458,6 +39559,10 @@ func (m *ProjectMutation) Field(name string) (ent.Value, bool) {
 		return m.GithubAppStatus()
 	case project.FieldGitIdentity:
 		return m.GitIdentity()
+	case project.FieldCrossProjectInbound:
+		return m.CrossProjectInbound()
+	case project.FieldCrossProjectInboundRevision:
+		return m.CrossProjectInboundRevision()
 	}
 	return nil, false
 }
@@ -39497,6 +39602,10 @@ func (m *ProjectMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldGithubAppStatus(ctx)
 	case project.FieldGitIdentity:
 		return m.OldGitIdentity(ctx)
+	case project.FieldCrossProjectInbound:
+		return m.OldCrossProjectInbound(ctx)
+	case project.FieldCrossProjectInboundRevision:
+		return m.OldCrossProjectInboundRevision(ctx)
 	}
 	return nil, fmt.Errorf("unknown Project field %s", name)
 }
@@ -39611,6 +39720,20 @@ func (m *ProjectMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetGitIdentity(v)
 		return nil
+	case project.FieldCrossProjectInbound:
+		v, ok := value.(project.CrossProjectInbound)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCrossProjectInbound(v)
+		return nil
+	case project.FieldCrossProjectInboundRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCrossProjectInboundRevision(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Project field %s", name)
 }
@@ -39622,6 +39745,9 @@ func (m *ProjectMutation) AddedFields() []string {
 	if m.addgithub_installation_id != nil {
 		fields = append(fields, project.FieldGithubInstallationID)
 	}
+	if m.addcross_project_inbound_revision != nil {
+		fields = append(fields, project.FieldCrossProjectInboundRevision)
+	}
 	return fields
 }
 
@@ -39632,6 +39758,8 @@ func (m *ProjectMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
 	case project.FieldGithubInstallationID:
 		return m.AddedGithubInstallationID()
+	case project.FieldCrossProjectInboundRevision:
+		return m.AddedCrossProjectInboundRevision()
 	}
 	return nil, false
 }
@@ -39647,6 +39775,13 @@ func (m *ProjectMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddGithubInstallationID(v)
+		return nil
+	case project.FieldCrossProjectInboundRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCrossProjectInboundRevision(v)
 		return nil
 	}
 	return fmt.Errorf("unknown Project numeric field %s", name)
@@ -39788,6 +39923,12 @@ func (m *ProjectMutation) ResetField(name string) error {
 		return nil
 	case project.FieldGitIdentity:
 		m.ResetGitIdentity()
+		return nil
+	case project.FieldCrossProjectInbound:
+		m.ResetCrossProjectInbound()
+		return nil
+	case project.FieldCrossProjectInboundRevision:
+		m.ResetCrossProjectInboundRevision()
 		return nil
 	}
 	return fmt.Errorf("unknown Project field %s", name)
