@@ -795,14 +795,23 @@ export class ScionChatComposer extends LitElement {
   }
 
   private cancelReply(): void {
-    this.replyTo = null;
+    // `replyTo` is owned by the parent and pushed down as a property. Clearing
+    // it here would be undone the moment the parent re-renders for any reason
+    // (an inbound message, a typing tick), so ask the parent to clear instead.
+    this.dispatchEvent(
+      new CustomEvent('chat-cancel-reply', { bubbles: true, composed: true })
+    );
     this.focusTextarea();
   }
 
   private cancelEdit(): void {
-    this.editMessage = null;
+    // `text`/`runeCount` are local state and stay here; `editMessage` belongs
+    // to the parent (see cancelReply).
     this.text = '';
     this.runeCount = 0;
+    this.dispatchEvent(
+      new CustomEvent('chat-cancel-edit', { bubbles: true, composed: true })
+    );
     this.focusTextarea();
   }
 
@@ -1276,7 +1285,9 @@ export class ScionChatComposer extends LitElement {
       );
       this.text = '';
       this.runeCount = 0;
-      this.editMessage = null;
+      this.dispatchEvent(
+        new CustomEvent('chat-cancel-edit', { bubbles: true, composed: true })
+      );
       this.focusTextarea();
       return;
     }
@@ -1300,8 +1311,12 @@ export class ScionChatComposer extends LitElement {
         this.acceptedMentions.clear();
         this.pendingFiles = [];
         this.clearDraft();
-        // Phase-3: Clear reply context after successful send.
-        this.replyTo = null;
+        // Phase-3: Clear reply context after successful send. Parent-owned,
+        // so emit rather than assign — otherwise the bar returns and the next
+        // message would carry a stale replyToId.
+        this.dispatchEvent(
+          new CustomEvent('chat-cancel-reply', { bubbles: true, composed: true })
+        );
         this.focusTextarea();
       },
     };

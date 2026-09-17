@@ -69,6 +69,12 @@ export class ScionSlashAutocomplete extends LitElement {
   /** Index of the highlighted command. */
   @state() private selectedIndex = 0;
 
+  /**
+   * True when the user explicitly dismissed the dropdown for the current `/`
+   * trigger. Cleared once the trigger goes away. See handleInput.
+   */
+  private dismissed = false;
+
   static override styles = css`
     :host {
       display: block;
@@ -151,7 +157,15 @@ export class ScionSlashAutocomplete extends LitElement {
   handleInput(text: string, _cursorPos: number): void {
     // Only trigger if the text starts with `/`
     if (!text.startsWith('/')) {
+      // The trigger is gone, so a previous dismissal no longer applies.
+      this.dismissed = false;
       this.dismiss();
+      return;
+    }
+
+    // A dismissal holds until the `/` trigger itself goes away; otherwise
+    // Escape lasts only until the next keystroke re-derives `active`.
+    if (this.dismissed) {
       return;
     }
 
@@ -213,7 +227,7 @@ export class ScionSlashAutocomplete extends LitElement {
 
       case 'Escape':
         e.preventDefault();
-        this.dismiss();
+        this.dismiss(true);
         return true;
 
       default:
@@ -222,7 +236,10 @@ export class ScionSlashAutocomplete extends LitElement {
   }
 
   /** Dismiss the dropdown. */
-  dismiss(): void {
+  dismiss(userInitiated = false): void {
+    if (userInitiated) {
+      this.dismissed = true;
+    }
     this.active = false;
     this.commands = [];
     this.selectedIndex = 0;
@@ -234,6 +251,8 @@ export class ScionSlashAutocomplete extends LitElement {
 
   /** Dispatch the slash-command event and close the dropdown. */
   private acceptCommand(index: number): void {
+    // An accepted command ends this trigger.
+    this.dismissed = false;
     const cmd = this.commands[index];
     if (!cmd) return;
 

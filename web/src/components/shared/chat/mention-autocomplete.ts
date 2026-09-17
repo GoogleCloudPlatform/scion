@@ -89,6 +89,15 @@ export class ScionMentionAutocomplete extends LitElement {
   /** Internal tracking of the trigger position. */
   private triggerStart = -1;
 
+  /**
+   * Start offset of a trigger the user explicitly dismissed, or null.
+   *
+   * Without this, Escape only holds until the next keystroke: handleInput runs
+   * on every input event and re-derives `active` from text that still contains
+   * the `@`, so the dropdown reopens on the next character typed.
+   */
+  private dismissedTriggerStart: number | null = null;
+
   /** Cached mirror div for caret position measurement (O2 fix). */
   private mirrorDiv: HTMLDivElement | null = null;
 
@@ -217,9 +226,17 @@ export class ScionMentionAutocomplete extends LitElement {
     const triggerInfo = this.findTrigger(text, cursorPos);
 
     if (!triggerInfo) {
+      // The trigger is gone, so a previous dismissal no longer applies.
+      this.dismissedTriggerStart = null;
       this.dismiss();
       return;
     }
+
+    // A trigger the user dismissed stays dismissed until they start a new one.
+    if (triggerInfo.start === this.dismissedTriggerStart) {
+      return;
+    }
+    this.dismissedTriggerStart = null;
 
     this.triggerStart = triggerInfo.start;
     const query = text.slice(triggerInfo.start + 1, cursorPos);
@@ -266,7 +283,7 @@ export class ScionMentionAutocomplete extends LitElement {
 
       case 'Escape':
         e.preventDefault();
-        this.dismiss();
+        this.dismiss(true);
         return true;
 
       default:
@@ -274,8 +291,17 @@ export class ScionMentionAutocomplete extends LitElement {
     }
   }
 
-  /** Dismiss the dropdown. */
-  dismiss(): void {
+  /**
+   * Dismiss the dropdown.
+   *
+   * @param userInitiated when true the current trigger is remembered so input
+   *   handling does not immediately reopen it. Internal dismissals (no trigger,
+   *   no matches) must not set it, or a later legitimate trigger is swallowed.
+   */
+  dismiss(userInitiated = false): void {
+    if (userInitiated && this.triggerStart >= 0) {
+      this.dismissedTriggerStart = this.triggerStart;
+    }
     this.active = false;
     this.candidates = [];
     this.highlightIndex = 0;
@@ -407,6 +433,8 @@ export class ScionMentionAutocomplete extends LitElement {
 
   /** Dispatch the accept event and close the dropdown. */
   private acceptCandidate(index: number): void {
+    // An accepted mention ends this trigger; a later @ must work normally.
+    this.dismissedTriggerStart = null;
     const candidate = this.candidates[index];
     if (!candidate) return;
 
