@@ -855,6 +855,84 @@ func TestAddParticipant_AlreadyExists(t *testing.T) {
 	require.Equal(t, http.StatusConflict, rr.Code)
 }
 
+func TestAddParticipant_InvalidPrincipalKind(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	body := addParticipantRequest{
+		PrincipalKind: "robot",
+		PrincipalID:   api.NewUUID(),
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.handleAddParticipant(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestAddParticipant_CrossProjectAgent(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	// Create an agent in a DIFFERENT project.
+	otherProject := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "other-project",
+		Slug: "other-project",
+	}
+	require.NoError(t, s.CreateProject(context.Background(), otherProject))
+
+	crossProjectAgent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "cross-project-agent",
+		Slug:       "cross-project-agent",
+		ProjectID:  otherProject.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), crossProjectAgent))
+
+	body := addParticipantRequest{
+		PrincipalKind: "agent",
+		PrincipalID:   crossProjectAgent.ID,
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.handleAddParticipant(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+}
+
+func TestAddParticipant_AgentNotFound(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	body := addParticipantRequest{
+		PrincipalKind: "agent",
+		PrincipalID:   api.NewUUID(), // non-existent agent
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	rr := httptest.NewRecorder()
+	srv.handleAddParticipant(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusNotFound, rr.Code)
+}
+
 func TestLeaveConversation_HappyPath(t *testing.T) {
 	srv, s := testServer(t)
 	_, agent, conv := setupConvTestData(t, s)

@@ -505,6 +505,38 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	if req.PrincipalKind != "user" && req.PrincipalKind != "agent" {
+		BadRequest(w, "principalKind must be 'user' or 'agent'")
+		return
+	}
+
+	// For agent principals, verify the agent exists and belongs to the
+	// conversation's project. Without this check, a cross-project agent
+	// could be added as a participant and read messages via ListMessages
+	// (which uses participant-based auth only, no project check).
+	if req.PrincipalKind == "agent" {
+		agent, err := s.store.GetAgent(ctx, req.PrincipalID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+
+		conv, err := s.store.GetConversation(ctx, id)
+		if err != nil {
+			writeErrorFromErr(w, err, "Conversation")
+			return
+		}
+
+		if conv.ProjectID != nil && agent.ProjectID != *conv.ProjectID {
+			BadRequest(w, "agent does not belong to the conversation's project")
+			return
+		}
+	}
+
 	now := time.Now().UTC()
 	participant := &store.ConversationParticipant{
 		ID:             api.NewUUID(),
