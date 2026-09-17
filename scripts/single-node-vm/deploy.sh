@@ -572,15 +572,30 @@ rm -f "${SSH_STDERR_FILE}"
 echo "  SSH connection established."
 
 # --- Wait for cloud-init ---
+# cloud-init installs Docker and creates the scion user. The script cannot
+# proceed until this finishes — writing to directories cloud-init owns before
+# it completes causes "No such file or directory" errors.
 info "Waiting for cloud-init to complete (this may take a few minutes)..."
-if gcloud compute ssh "${INSTANCE_NAME}" \
-    --zone="${ZONE}" --project="${PROJECT_ID}" \
-    --command="sudo cloud-init status --wait" \
-    2>/dev/null; then
-  echo "  Cloud-init completed."
-else
-  warn "cloud-init status --wait returned non-zero. Check cloud-init logs on the VM."
+CLOUD_INIT_OK=false
+for ci_attempt in $(seq 1 6); do
+  if gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="sudo cloud-init status --wait" \
+      2>/dev/null; then
+    CLOUD_INIT_OK=true
+    break
+  fi
+  if [[ $ci_attempt -lt 6 ]]; then
+    echo "  cloud-init check attempt ${ci_attempt}/6 returned non-zero, retrying in 15s..."
+    sleep 15
+  fi
+done
+if [[ "$CLOUD_INIT_OK" != "true" ]]; then
+  err "cloud-init did not complete successfully after 6 attempts."
+  echo "  Check cloud-init logs: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='sudo cloud-init status --long'"
+  exit 1
 fi
+echo "  Cloud-init completed."
 
 # ===================================================================
 # Phase 3: VM Setup
@@ -786,7 +801,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
       set -euo pipefail
       cd /home/scion/scion-source
       rm -f /home/scion/image-build.exit
-      nohup bash -c '
+      { nohup bash -c '
         set -euo pipefail
         # Step 1: Build core-base
         echo \"=== Building core-base ===\"
@@ -817,7 +832,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
         sudo docker tag scion-antigravity:latest localhost/scion/scion-antigravity:latest
 
         echo \"=== All images built and tagged successfully ===\"
-      ' > /home/scion/image-build.log 2>&1; echo \$? > /home/scion/image-build.exit &
+      ' > /home/scion/image-build.log 2>&1; echo \$? > /home/scion/image-build.exit; } &
       echo \$! > /home/scion/image-build.pid
       echo \"Image build started in background (PID \$(cat /home/scion/image-build.pid))\"
     "

@@ -48,6 +48,7 @@ The script runs interactively, prompting for:
 4. **Disk size** — 200 GB, 500 GB, or custom
 5. **Chat plugins** — Telegram, Discord, Slack, Teams, or none
 6. **Container images** — provide a registry path or build locally on the VM
+7. **Admin email** — email address to grant super-admin access (defaults to deployer identity)
 
 To install a specific release version:
 
@@ -78,11 +79,12 @@ To install a specific release version:
 - **Cloud Run IAP Proxy** — a lightweight reverse proxy deployed from
   `extras/cloudrun-iap-proxy`. Forwards authenticated requests to the VM's
   internal IP on port 8080.
-- **GCE VM** — runs the Scion Hub via a systemd unit (`scion-hub.service`).
+- **GCE VM** — runs the Scion Hub via a systemd unit (`scion-hub.service`)
+  with the runtime broker co-located in the same process (`--enable-runtime-broker`).
   Has no public IP address. Sits on the default VPC so the Cloud Run proxy
-  can reach it via internal networking.
-- **Agents** — launched on the VM itself; they connect to the Hub at
-  `localhost:8080`, no IAP needed.
+  can reach it via internal networking. Docker is installed by cloud-init.
+- **Agents** — launched as Docker containers on the VM by the runtime broker;
+  they connect to the Hub at `localhost:8080`, no IAP needed.
 
 ## What Gets Created
 
@@ -120,10 +122,13 @@ The Hub configuration file. The deploy script writes it in two stages:
 Final configuration:
 
 ```yaml
-settings_version: "1"
+schema_version: "1"
+image_registry: "localhost/scion"
 server:
   hub:
     name: "my-hub"
+    admin_emails:
+      - "you@example.com"
   storage:
     local_path: /home/scion/.scion/workspace-storage
   secrets:
@@ -139,6 +144,10 @@ server:
 
 Key settings:
 
+- `schema_version` — must be `"1"` (not `settings_version`).
+- `image_registry` — required, even for locally built images. Set to
+  `localhost/scion` for local builds, or the registry path for remote images.
+- `admin_emails` — email(s) auto-promoted to super-admin on login.
 - `storage.local_path` — all workspace data stored on the VM's local disk.
 - `secrets.backend: local` — secrets are read from `hub.env` on disk, not from
   GCP Secret Manager.
@@ -194,18 +203,22 @@ Example registry path: `us-docker.pkg.dev/my-project/scion`
 
 ### Option 2: Build images locally on the VM
 
-This option clones the Scion source repository onto the VM and runs the image
-build orchestrator using `local-docker`. It builds core-base, scion-base, and
-all harness images directly on the VM.
+This option clones the Scion source repository onto the VM and builds the
+minimal set of images needed for deployment: core-base, scion-base, and
+scion-antigravity (the default harness).
+
+The build runs in the background on the VM (via `nohup`) so it survives
+SSH disconnects. The deploy script polls for completion and shows progress.
 
 **Requirements:**
 - Approximately 30-45 minutes of build time
 - Approximately 30 GB of additional disk space
 - The VM must have outbound internet access (provided by Cloud NAT)
 
-When images are built locally, no `image_registry` is set in the Hub
-configuration — Docker finds images by their local name (e.g.,
-`scion-antigravity:latest`).
+Images are tagged under the `localhost/scion` prefix (e.g.,
+`localhost/scion/scion-antigravity:latest`) and `image_registry` is set to
+`localhost/scion` in the Hub configuration. The runtime broker resolves
+images through this registry prefix.
 
 ## Access Patterns
 
