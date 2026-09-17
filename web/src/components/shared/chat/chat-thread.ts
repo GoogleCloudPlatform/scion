@@ -418,8 +418,8 @@ export class ScionChatThread extends LitElement {
   /** Backfill single-flight guard: another backfill was requested while one was running. */
   private _backfillPending = false;
 
-  /** The idempotency key of the currently in-flight optimistic message, if any. */
-  private _pendingIdempotencyKey: string | null = null;
+  /** Idempotency keys of currently in-flight optimistic messages. */
+  private _pendingIdempotencyKeys = new Set<string>();
 
   /** Focus/blur handlers for read tracking. */
   private _focusHandler = () => {
@@ -865,7 +865,7 @@ export class ScionChatThread extends LitElement {
     this.showUnreadDivider = false;
 
     // Clear message state
-    this._pendingIdempotencyKey = null;
+    this._pendingIdempotencyKeys.clear();
     this.messageMap.clear();
     this.messages = [];
     this.nextCursor = null;
@@ -1385,8 +1385,14 @@ export class ScionChatThread extends LitElement {
 
       // If we have a pending optimistic message and this SSE event is from us,
       // remove the temp-keyed optimistic entry to prevent a duplicate flash.
-      if (this._pendingIdempotencyKey && msg.senderId === this.selfUserId()) {
-        this.messageMap.delete(this._pendingIdempotencyKey);
+      if (this._pendingIdempotencyKeys.size > 0 && msg.senderId === this.selfUserId()) {
+        for (const key of this._pendingIdempotencyKeys) {
+          if (this.messageMap.has(key)) {
+            this.messageMap.delete(key);
+            this._pendingIdempotencyKeys.delete(key);
+            break;
+          }
+        }
       }
 
       this.mergeMessages([msg]);
@@ -1761,7 +1767,7 @@ export class ScionChatThread extends LitElement {
       dispatchState: 'pending',
     };
     this.messageMap.set(optimisticMsg.id, optimisticMsg);
-    this._pendingIdempotencyKey = idempotencyKey;
+    this._pendingIdempotencyKeys.add(idempotencyKey);
     this.messages = Array.from(this.messageMap.values())
       .filter((m) => m.type !== 'mention')
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
@@ -1813,7 +1819,7 @@ export class ScionChatThread extends LitElement {
       if (!res.ok) {
         // Remove optimistic message on failure.
         this.messageMap.delete(idempotencyKey);
-        this._pendingIdempotencyKey = null;
+        this._pendingIdempotencyKeys.delete(idempotencyKey);
         this.messages = Array.from(this.messageMap.values())
           .filter((m) => m.type !== 'mention')
           .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
@@ -1838,7 +1844,7 @@ export class ScionChatThread extends LitElement {
         const optimistic = this.messageMap.get(idempotencyKey);
         if (optimistic && resData?.id) {
           this.messageMap.delete(idempotencyKey);
-          this._pendingIdempotencyKey = null;
+          this._pendingIdempotencyKeys.delete(idempotencyKey);
           // If SSE already delivered the real message, keep it as the ground truth
           // to preserve all server-enriched fields (createdAt, metadata, groupId, etc.)
           const sseVersion = this.messageMap.get(resData.id);
@@ -1852,7 +1858,7 @@ export class ScionChatThread extends LitElement {
         } else {
           // Fallback: remove if we cannot remap (should not happen).
           this.messageMap.delete(idempotencyKey);
-          this._pendingIdempotencyKey = null;
+          this._pendingIdempotencyKeys.delete(idempotencyKey);
         }
         this.messages = Array.from(this.messageMap.values())
           .filter((m) => m.type !== 'mention')
@@ -1867,7 +1873,7 @@ export class ScionChatThread extends LitElement {
     } catch (err) {
       // Remove optimistic message on failure.
       this.messageMap.delete(idempotencyKey);
-      this._pendingIdempotencyKey = null;
+      this._pendingIdempotencyKeys.delete(idempotencyKey);
       this.messages = Array.from(this.messageMap.values())
         .filter((m) => m.type !== 'mention')
         .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
