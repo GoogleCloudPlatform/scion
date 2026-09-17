@@ -1549,6 +1549,18 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			DispatchState: store.MessageDispatchDispatched,
 			CreatedAt:     time.Now(),
 		}
+
+		// Phase 2 D4: stamp server-derived cross-project provenance.
+		// RecipientProjectID is always the target agent's project.
+		recipientProjectID := agent.ProjectID
+		storeMsg.RecipientProjectID = &recipientProjectID
+		// SenderProjectID is derived from the authenticated sender.
+		// For human senders, SenderProjectID remains nil (no project-level provenance).
+		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			senderProjID := agentIdent.ProjectID()
+			storeMsg.SenderProjectID = &senderProjID
+		}
+
 		// Phase 5 dual-write: resolve-or-create conversation for user/agent → agent messages.
 		// If the CLI already resolved a conversation_id (S4 conversation references),
 		// use it directly instead of re-resolving.
@@ -1999,7 +2011,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			}
 
 			// Phase 3 msg-authz: Check message authorization per group recipient.
-			allowed, _ := s.authorizeAgentMessage(ctx, senderIdentity, agent, false)
+			allowed, _, _ := s.authorizeAgentMessage(ctx, senderIdentity, agent, false)
 			if !allowed {
 				results[i] = GroupMessageRecipientResult{
 					Recipient: recipStr,
@@ -2436,7 +2448,7 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	var authorizedAgents []store.Agent
 	for i := range runningAgents {
 		a := &runningAgents[i]
-		allowed, _ := s.authorizeAgentMessage(ctx, senderIdentity, a, false)
+		allowed, _, _ := s.authorizeAgentMessage(ctx, senderIdentity, a, false)
 		if allowed {
 			authorizedAgents = append(authorizedAgents, runningAgents[i])
 		}
@@ -2656,7 +2668,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		}
 
 		// Phase 3 msg-authz: Check message authorization per mention recipient.
-		mentionAllowed, _ := s.authorizeAgentMessage(ctx, senderIdentity, mentionAgent, false)
+		mentionAllowed, _, _ := s.authorizeAgentMessage(ctx, senderIdentity, mentionAgent, false)
 		if !mentionAllowed {
 			results[i].Status = "unauthorized"
 			results[i].Error = "message delivery denied"

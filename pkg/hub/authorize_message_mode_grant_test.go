@@ -237,7 +237,7 @@ func newTestAgentIdentity(id, projectID string, scopes []AgentTokenScope) *grant
 	return &grantGuardAgentIdentity{id: id, projectID: projectID, scopes: scopes}
 }
 
-func (a *grantGuardAgentIdentity) ID() string        { return a.id }
+func (a *grantGuardAgentIdentity) ID() string         { return a.id }
 func (a *grantGuardAgentIdentity) Type() string       { return "agent" }
 func (a *grantGuardAgentIdentity) ProjectID() string  { return a.projectID }
 func (a *grantGuardAgentIdentity) Ancestry() []string { return a.ancestry }

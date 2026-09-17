@@ -235,14 +235,14 @@ func TestAuthorizeAgentMessage_BaselineProjectMode_NoLifecycleScope(t *testing.T
 	senderIdent := msgAuthzAgentIdentity(sender.ID, projectID, sender.Ancestry)
 	// No scopes — baseline agent
 
-	allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, target, false)
+	allowed, reason, _ := srv.authorizeAgentMessage(ctx, senderIdent, target, false)
 	if !allowed {
 		t.Fatalf("baseline project-mode agent should be allowed to message: %s", reason)
 	}
 
 	// A project member (user) without agent.message cannot message (removed from member role).
 	memberIdent := msgAuthzUserIdentity(member.ID)
-	allowed, _ = srv.authorizeAgentMessage(ctx, memberIdent, target, false)
+	allowed, _, _ = srv.authorizeAgentMessage(ctx, memberIdent, target, false)
 	if allowed {
 		t.Fatal("project member without agent.message should be denied messaging project-mode agent")
 	}
@@ -265,7 +265,7 @@ func TestAuthorizeAgentMessage_ModeNone_DeniedExceptSuperAdmin(t *testing.T) {
 			[]string{owner.ID})
 		senderIdent := msgAuthzAgentIdentity(sender.ID, projectID, sender.Ancestry, ScopeAgentLifecycle)
 
-		allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, noneAgent, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, senderIdent, noneAgent, false)
 		if allowed {
 			t.Fatal("agent should be denied when target is mode none")
 		}
@@ -276,7 +276,7 @@ func TestAuthorizeAgentMessage_ModeNone_DeniedExceptSuperAdmin(t *testing.T) {
 			[]string{owner.ID})
 		noneSenderIdent := msgAuthzAgentIdentity(noneAgent.ID, projectID, noneAgent.Ancestry, ScopeAgentLifecycle)
 
-		allowed, _ := srv.authorizeAgentMessage(ctx, noneSenderIdent, noneTarget, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, noneSenderIdent, noneTarget, false)
 		if allowed {
 			t.Fatal("mode-none agent should be denied from sending even with lifecycle scope")
 		}
@@ -284,7 +284,7 @@ func TestAuthorizeAgentMessage_ModeNone_DeniedExceptSuperAdmin(t *testing.T) {
 
 	t.Run("super-admin CAN deliver to none-mode agent", func(t *testing.T) {
 		adminIdent := msgAuthzAdminIdentity()
-		allowed, reason := srv.authorizeAgentMessage(ctx, adminIdent, noneAgent, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, adminIdent, noneAgent, false)
 		if !allowed {
 			t.Fatalf("super-admin should be allowed to deliver to none-mode agent: %s", reason)
 		}
@@ -305,7 +305,7 @@ func TestAuthorizeAgentMessage_MemberWithoutAttach(t *testing.T) {
 
 	// Member cannot message (agent.message removed from member role)
 	memberIdent := msgAuthzUserIdentity(member.ID)
-	allowed, _ := srv.authorizeAgentMessage(ctx, memberIdent, target, false)
+	allowed, _, _ := srv.authorizeAgentMessage(ctx, memberIdent, target, false)
 	if allowed {
 		t.Fatal("member without agent.message should be denied messaging project-mode agent")
 	}
@@ -332,7 +332,7 @@ func TestAuthorizeAgentMessage_LineageMode(t *testing.T) {
 	t.Run("ancestry user converses (ALLOW)", func(t *testing.T) {
 		// Owner is in the ancestry chain
 		ownerIdent := msgAuthzUserIdentity(owner.ID)
-		allowed, reason := srv.authorizeAgentMessage(ctx, ownerIdent, lineageAgent, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, ownerIdent, lineageAgent, false)
 		if !allowed {
 			t.Fatalf("ancestry user should be allowed to message lineage agent: %s", reason)
 		}
@@ -340,7 +340,7 @@ func TestAuthorizeAgentMessage_LineageMode(t *testing.T) {
 
 	t.Run("non-lineage project member denied", func(t *testing.T) {
 		memberIdent := msgAuthzUserIdentity(member.ID)
-		allowed, _ := srv.authorizeAgentMessage(ctx, memberIdent, lineageAgent, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, memberIdent, lineageAgent, false)
 		if allowed {
 			t.Fatal("non-lineage project member should be denied")
 		}
@@ -361,7 +361,7 @@ func TestAuthorizeAgentMessage_LineageMode(t *testing.T) {
 		msgAuthzAddProjectMember(t, s, otherOwner.ID, projectID, "msg-authz-project", store.GroupMemberRoleOwner)
 
 		otherOwnerIdent := msgAuthzUserIdentity(otherOwner.ID)
-		allowed, reason := srv.authorizeAgentMessage(ctx, otherOwnerIdent, lineageAgent, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, otherOwnerIdent, lineageAgent, false)
 		if !allowed {
 			t.Fatalf("project owner should pierce lineage mode: %s", reason)
 		}
@@ -374,14 +374,14 @@ func TestAuthorizeAgentMessage_LineageMode(t *testing.T) {
 		senderIdent := msgAuthzAgentIdentity(lineageAgent.ID, projectID, lineageAgent.Ancestry)
 
 		// Cannot message child
-		allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, child, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, senderIdent, child, false)
 		if allowed {
 			t.Fatal("lineage agent should NOT be able to message any agent, including children")
 		}
 
 		// Child also cannot message parent
 		childIdent := msgAuthzAgentIdentity(child.ID, projectID, child.Ancestry)
-		allowed, _ = srv.authorizeAgentMessage(ctx, childIdent, lineageAgent, false)
+		allowed, _, _ = srv.authorizeAgentMessage(ctx, childIdent, lineageAgent, false)
 		if allowed {
 			t.Fatal("lineage child should NOT be able to message parent")
 		}
@@ -405,13 +405,13 @@ func TestAuthorizeAgentMessage_BranchMode(t *testing.T) {
 
 	t.Run("parent/child allowed when both branch mode", func(t *testing.T) {
 		parentIdent := msgAuthzAgentIdentity(parent.ID, projectID, parent.Ancestry)
-		allowed, reason := srv.authorizeAgentMessage(ctx, parentIdent, child, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, parentIdent, child, false)
 		if !allowed {
 			t.Fatalf("branch parent should message branch child: %s", reason)
 		}
 
 		childIdent := msgAuthzAgentIdentity(child.ID, projectID, child.Ancestry)
-		allowed, reason = srv.authorizeAgentMessage(ctx, childIdent, parent, false)
+		allowed, reason, _ = srv.authorizeAgentMessage(ctx, childIdent, parent, false)
 		if !allowed {
 			t.Fatalf("branch child should message branch parent: %s", reason)
 		}
@@ -419,7 +419,7 @@ func TestAuthorizeAgentMessage_BranchMode(t *testing.T) {
 
 	t.Run("sibling denied (must communicate through parent)", func(t *testing.T) {
 		childIdent := msgAuthzAgentIdentity(child.ID, projectID, child.Ancestry)
-		allowed, _ := srv.authorizeAgentMessage(ctx, childIdent, sibling, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, childIdent, sibling, false)
 		if allowed {
 			t.Fatal("siblings should be denied direct messaging")
 		}
@@ -431,14 +431,14 @@ func TestAuthorizeAgentMessage_BranchMode(t *testing.T) {
 
 		// project-mode → branch parent: DENIED
 		pmIdent := msgAuthzAgentIdentity(projectModeChild.ID, projectID, projectModeChild.Ancestry)
-		allowed, _ := srv.authorizeAgentMessage(ctx, pmIdent, parent, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, pmIdent, parent, false)
 		if allowed {
 			t.Fatal("project-mode agent should be denied messaging branch-mode parent")
 		}
 
 		// branch parent → project-mode child: DENIED
 		parentIdent := msgAuthzAgentIdentity(parent.ID, projectID, parent.Ancestry)
-		allowed, _ = srv.authorizeAgentMessage(ctx, parentIdent, projectModeChild, false)
+		allowed, _, _ = srv.authorizeAgentMessage(ctx, parentIdent, projectModeChild, false)
 		if allowed {
 			t.Fatal("branch-mode parent should be denied messaging project-mode child")
 		}
@@ -465,7 +465,7 @@ func TestAuthorizeAgentMessage_RelayPinning(t *testing.T) {
 
 	t.Run("owner's agent denied delivery to lineage agent", func(t *testing.T) {
 		agentIdent := msgAuthzAgentIdentity(ownerProjectAgent.ID, projectID, ownerProjectAgent.Ancestry)
-		allowed, _ := srv.authorizeAgentMessage(ctx, agentIdent, lineageAgent, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, agentIdent, lineageAgent, false)
 		if allowed {
 			t.Fatal("owner's project-mode agent should NOT pierce lineage — piercing is user-identity-only")
 		}
@@ -473,7 +473,7 @@ func TestAuthorizeAgentMessage_RelayPinning(t *testing.T) {
 
 	t.Run("owner's agent denied delivery to branch agent", func(t *testing.T) {
 		agentIdent := msgAuthzAgentIdentity(ownerProjectAgent.ID, projectID, ownerProjectAgent.Ancestry)
-		allowed, _ := srv.authorizeAgentMessage(ctx, agentIdent, branchAgent, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, agentIdent, branchAgent, false)
 		if allowed {
 			t.Fatal("owner's project-mode agent should NOT pierce branch — piercing is user-identity-only")
 		}
@@ -481,7 +481,7 @@ func TestAuthorizeAgentMessage_RelayPinning(t *testing.T) {
 
 	t.Run("owner as user CAN deliver to lineage agent", func(t *testing.T) {
 		ownerIdent := msgAuthzUserIdentity(owner.ID)
-		allowed, reason := srv.authorizeAgentMessage(ctx, ownerIdent, lineageAgent, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, ownerIdent, lineageAgent, false)
 		if !allowed {
 			t.Fatalf("owner as user should pierce lineage: %s", reason)
 		}
@@ -489,7 +489,7 @@ func TestAuthorizeAgentMessage_RelayPinning(t *testing.T) {
 
 	t.Run("owner as user CAN deliver to branch agent", func(t *testing.T) {
 		ownerIdent := msgAuthzUserIdentity(owner.ID)
-		allowed, reason := srv.authorizeAgentMessage(ctx, ownerIdent, branchAgent, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, ownerIdent, branchAgent, false)
 		if !allowed {
 			t.Fatalf("owner as user should pierce branch: %s", reason)
 		}
@@ -509,7 +509,7 @@ func TestAuthorizeAgentMessage_NoneMode(t *testing.T) {
 
 	t.Run("denied for lineage owner (user in ancestry)", func(t *testing.T) {
 		ownerIdent := msgAuthzUserIdentity(owner.ID)
-		allowed, _ := srv.authorizeAgentMessage(ctx, ownerIdent, noneAgent, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, ownerIdent, noneAgent, false)
 		if allowed {
 			t.Fatal("lineage owner should be denied when target is mode none")
 		}
@@ -518,7 +518,7 @@ func TestAuthorizeAgentMessage_NoneMode(t *testing.T) {
 	t.Run("denied for project owner", func(t *testing.T) {
 		// owner IS the project owner
 		ownerIdent := msgAuthzUserIdentity(owner.ID)
-		allowed, _ := srv.authorizeAgentMessage(ctx, ownerIdent, noneAgent, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, ownerIdent, noneAgent, false)
 		if allowed {
 			t.Fatal("project owner should be denied when target is mode none")
 		}
@@ -526,7 +526,7 @@ func TestAuthorizeAgentMessage_NoneMode(t *testing.T) {
 
 	t.Run("allowed for super-admin (D6)", func(t *testing.T) {
 		adminIdent := msgAuthzAdminIdentity()
-		allowed, reason := srv.authorizeAgentMessage(ctx, adminIdent, noneAgent, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, adminIdent, noneAgent, false)
 		if !allowed {
 			t.Fatalf("super-admin should pierce mode none: %s", reason)
 		}
@@ -569,7 +569,7 @@ func TestAuthorizeAgentMessage_CrossProjectDenied(t *testing.T) {
 		[]string{owner.ID})
 
 	senderIdent := msgAuthzAgentIdentity(senderAgent.ID, projectID, senderAgent.Ancestry)
-	allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, targetAgent, false)
+	allowed, _, _ := srv.authorizeAgentMessage(ctx, senderIdent, targetAgent, false)
 	if allowed {
 		t.Fatal("cross-project agent-to-agent messaging should be denied")
 	}
@@ -588,7 +588,7 @@ func TestAuthorizeAgentMessage_SystemPlaneBypass(t *testing.T) {
 
 	// Even a none-mode agent receives system-plane messages
 	senderIdent := msgAuthzAgentIdentity(noneAgent.ID, projectID, noneAgent.Ancestry)
-	allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, noneAgent, true)
+	allowed, reason, _ := srv.authorizeAgentMessage(ctx, senderIdent, noneAgent, true)
 	if !allowed {
 		t.Fatalf("system plane should bypass all mode checks: %s", reason)
 	}
@@ -606,7 +606,7 @@ func TestAuthorizeAgentMessage_NilInputs(t *testing.T) {
 		[]string{owner.ID})
 
 	t.Run("nil identity denied", func(t *testing.T) {
-		allowed, _ := srv.authorizeAgentMessage(ctx, nil, target, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, nil, target, false)
 		if allowed {
 			t.Fatal("nil identity should be denied")
 		}
@@ -614,7 +614,7 @@ func TestAuthorizeAgentMessage_NilInputs(t *testing.T) {
 
 	t.Run("nil target denied", func(t *testing.T) {
 		ident := msgAuthzUserIdentity(owner.ID)
-		allowed, _ := srv.authorizeAgentMessage(ctx, ident, nil, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, ident, nil, false)
 		if allowed {
 			t.Fatal("nil target should be denied")
 		}
@@ -633,7 +633,7 @@ func TestAuthorizeAgentMessage_BrokerDenied(t *testing.T) {
 		[]string{owner.ID})
 
 	brokerIdent := NewBrokerIdentity("test-broker")
-	allowed, _ := srv.authorizeAgentMessage(ctx, brokerIdent, target, false)
+	allowed, _, _ := srv.authorizeAgentMessage(ctx, brokerIdent, target, false)
 	if allowed {
 		t.Fatal("broker identity should be denied")
 	}
@@ -657,13 +657,13 @@ func TestAuthorizeAgentMessage_MixedBranchModes(t *testing.T) {
 
 	t.Run("branch child of project parent denied both directions", func(t *testing.T) {
 		childIdent := msgAuthzAgentIdentity(branchChildOfProject.ID, projectID, branchChildOfProject.Ancestry)
-		allowed, _ := srv.authorizeAgentMessage(ctx, childIdent, projectParent, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, childIdent, projectParent, false)
 		if allowed {
 			t.Fatal("branch child should not message project-mode parent")
 		}
 
 		parentIdent := msgAuthzAgentIdentity(projectParent.ID, projectID, projectParent.Ancestry)
-		allowed, _ = srv.authorizeAgentMessage(ctx, parentIdent, branchChildOfProject, false)
+		allowed, _, _ = srv.authorizeAgentMessage(ctx, parentIdent, branchChildOfProject, false)
 		if allowed {
 			t.Fatal("project parent should not message branch-mode child")
 		}
@@ -681,7 +681,7 @@ func TestAuthorizeAgentMessage_MixedBranchModes(t *testing.T) {
 			[]string{owner.ID, branchParent.ID})
 
 		parentIdent := msgAuthzAgentIdentity(branchParent.ID, projectID, branchParent.Ancestry)
-		allowed, reason := srv.authorizeAgentMessage(ctx, parentIdent, branchChild, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, parentIdent, branchChild, false)
 		if !allowed {
 			t.Fatalf("branch parent should message branch child: %s", reason)
 		}
@@ -706,7 +706,7 @@ func TestAuthorizeAgentMessage_UATWithoutMessageScope(t *testing.T) {
 		baseIdent := msgAuthzUserIdentity(owner.ID)
 		scopedIdent := NewScopedUserIdentity(baseIdent, projectID, []string{"agent:read"})
 
-		allowed, _ := srv.authorizeAgentMessage(ctx, scopedIdent, lineageAgent, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, scopedIdent, lineageAgent, false)
 		if allowed {
 			t.Fatal("UAT without agent:message should be denied piercing lineage mode")
 		}
@@ -716,7 +716,7 @@ func TestAuthorizeAgentMessage_UATWithoutMessageScope(t *testing.T) {
 		baseIdent := msgAuthzUserIdentity(owner.ID)
 		scopedIdent := NewScopedUserIdentity(baseIdent, projectID, []string{"agent:read", "agent:message"})
 
-		allowed, reason := srv.authorizeAgentMessage(ctx, scopedIdent, lineageAgent, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, scopedIdent, lineageAgent, false)
 		if !allowed {
 			t.Fatalf("UAT with agent:message should be allowed to pierce lineage: %s", reason)
 		}
@@ -729,7 +729,7 @@ func TestAuthorizeAgentMessage_UATWithoutMessageScope(t *testing.T) {
 		baseIdent := msgAuthzUserIdentity(owner.ID)
 		scopedIdent := NewScopedUserIdentity(baseIdent, projectID, []string{"agent:read", "agent:message"})
 
-		allowed, reason := srv.authorizeAgentMessage(ctx, scopedIdent, projectAgent, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, scopedIdent, projectAgent, false)
 		if !allowed {
 			t.Fatalf("UAT with agent:message should be allowed for project-mode agent: %s", reason)
 		}
@@ -750,7 +750,7 @@ func TestAuthorizeAgentMessage_SelfMessage(t *testing.T) {
 
 		// Agent identity sends to itself — should be allowed even with mode none
 		selfIdent := msgAuthzAgentIdentity(noneAgent.ID, projectID, noneAgent.Ancestry)
-		allowed, reason := srv.authorizeAgentMessage(ctx, selfIdent, noneAgent, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, selfIdent, noneAgent, false)
 		if !allowed {
 			t.Fatalf("agent self-message should be allowed even when mode is none: %s", reason)
 		}
@@ -762,7 +762,7 @@ func TestAuthorizeAgentMessage_SelfMessage(t *testing.T) {
 
 		// Agent sends to itself with isSystemPlane=false — should still be allowed
 		selfIdent := msgAuthzAgentIdentity(projectModeAgent.ID, projectID, projectModeAgent.Ancestry)
-		allowed, reason := srv.authorizeAgentMessage(ctx, selfIdent, projectModeAgent, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, selfIdent, projectModeAgent, false)
 		if !allowed {
 			t.Fatalf("agent self-message should be allowed without system-plane flag: %s", reason)
 		}
@@ -778,7 +778,7 @@ func TestAuthorizeAgentMessage_SelfMessage(t *testing.T) {
 			[]string{owner.ID})
 
 		otherIdent := msgAuthzAgentIdentity(otherAgent.ID, projectID, otherAgent.Ancestry)
-		allowed, _ := srv.authorizeAgentMessage(ctx, otherIdent, noneAgent, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, otherIdent, noneAgent, false)
 		if allowed {
 			t.Fatal("different agent should be denied when target is mode none")
 		}
@@ -855,7 +855,7 @@ func TestAuthorizeAgentMessage_IngressParity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			allowed, reason := srv.authorizeAgentMessage(ctx, tt.sender, tt.target, tt.system)
+			allowed, reason, _ := srv.authorizeAgentMessage(ctx, tt.sender, tt.target, tt.system)
 			if allowed != tt.allowed {
 				t.Fatalf("expected allowed=%v, got allowed=%v (reason: %s)", tt.allowed, allowed, reason)
 			}
@@ -882,7 +882,7 @@ func TestAuthorizeAgentMessage_HubModeCompatibility(t *testing.T) {
 		hub2 := msgAuthzAgent(t, s, "hub-agent-2", projectID, store.MessageModeHub,
 			[]string{owner.ID})
 		senderIdent := msgAuthzAgentIdentity(hubAgent.ID, projectID, hubAgent.Ancestry)
-		allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, hub2, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, senderIdent, hub2, false)
 		if !allowed {
 			t.Fatalf("hub->hub should be allowed: %s", reason)
 		}
@@ -890,7 +890,7 @@ func TestAuthorizeAgentMessage_HubModeCompatibility(t *testing.T) {
 
 	t.Run("hub->project same project allowed", func(t *testing.T) {
 		senderIdent := msgAuthzAgentIdentity(hubAgent.ID, projectID, hubAgent.Ancestry)
-		allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, projectAgent, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, senderIdent, projectAgent, false)
 		if !allowed {
 			t.Fatalf("hub->project should be allowed: %s", reason)
 		}
@@ -898,7 +898,7 @@ func TestAuthorizeAgentMessage_HubModeCompatibility(t *testing.T) {
 
 	t.Run("project->hub same project allowed", func(t *testing.T) {
 		senderIdent := msgAuthzAgentIdentity(projectAgent.ID, projectID, projectAgent.Ancestry)
-		allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, hubAgent, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, senderIdent, hubAgent, false)
 		if !allowed {
 			t.Fatalf("project->hub should be allowed: %s", reason)
 		}
@@ -906,7 +906,7 @@ func TestAuthorizeAgentMessage_HubModeCompatibility(t *testing.T) {
 
 	t.Run("hub->branch denied (hub does not open branch)", func(t *testing.T) {
 		senderIdent := msgAuthzAgentIdentity(hubAgent.ID, projectID, hubAgent.Ancestry)
-		allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, branchAgent, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, senderIdent, branchAgent, false)
 		if allowed {
 			t.Fatal("hub->branch should be denied (hub does not open branch boundaries)")
 		}
@@ -914,7 +914,7 @@ func TestAuthorizeAgentMessage_HubModeCompatibility(t *testing.T) {
 
 	t.Run("branch->hub denied", func(t *testing.T) {
 		senderIdent := msgAuthzAgentIdentity(branchAgent.ID, projectID, branchAgent.Ancestry)
-		allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, hubAgent, false)
+		allowed, _, _ := srv.authorizeAgentMessage(ctx, senderIdent, hubAgent, false)
 		if allowed {
 			t.Fatal("branch->hub should be denied")
 		}
@@ -924,7 +924,7 @@ func TestAuthorizeAgentMessage_HubModeCompatibility(t *testing.T) {
 		// Grant the user agent.message permission.
 		msgAuthzGrantAgentMessage(t, s, owner.ID, projectID)
 		ownerIdent := msgAuthzUserIdentity(owner.ID)
-		allowed, reason := srv.authorizeAgentMessage(ctx, ownerIdent, hubAgent, false)
+		allowed, reason, _ := srv.authorizeAgentMessage(ctx, ownerIdent, hubAgent, false)
 		if !allowed {
 			t.Fatalf("user->hub should be allowed like project mode: %s", reason)
 		}
@@ -935,7 +935,7 @@ func TestAuthorizeAgentMessage_HubModeCompatibility(t *testing.T) {
 // Cross-project hub agent denied (delivery not yet implemented)
 // ---------------------------------------------------------------------------
 
-func TestAuthorizeAgentMessage_CrossProjectHubDenied(t *testing.T) {
+func TestAuthorizeAgentMessage_CrossProjectHubDenied_WhenFlagOff(t *testing.T) {
 	srv, s, owner, _, projectID := msgAuthzSetup(t)
 	ctx := context.Background()
 
@@ -956,9 +956,11 @@ func TestAuthorizeAgentMessage_CrossProjectHubDenied(t *testing.T) {
 	hubTarget := msgAuthzAgent(t, s, "hub-target-cross", otherProjectID, store.MessageModeHub,
 		[]string{owner.ID})
 
+	// Phase 2: cross-project messaging is denied when the Hub flag is off
+	// (default). The typed evaluator returns cross_project_disabled.
 	senderIdent := msgAuthzAgentIdentity(hubSender.ID, projectID, hubSender.Ancestry)
-	allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, hubTarget, false)
+	allowed, _, _ := srv.authorizeAgentMessage(ctx, senderIdent, hubTarget, false)
 	if allowed {
-		t.Fatal("cross-project hub messaging should be denied (delivery not yet implemented)")
+		t.Fatal("cross-project hub messaging should be denied when Hub flag is off")
 	}
 }

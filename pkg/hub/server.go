@@ -2631,6 +2631,30 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 		ops := s.GetOperationalSettings()
 		return ops != nil && ops.ConversationEnvelopeSwitch()
 	}
+	// Phase 2 D5: inject cross-project message authorization into the broker.
+	// At delivery/retry time, re-evaluate authorization using the current
+	// policy state (not the cached state from enqueue time).
+	proxy.messageAuthorizer = func(ctx context.Context, senderID string, targetAgent *store.Agent) *MessageDecision {
+		// Only reauthorize agent-to-agent messages where sender and target
+		// are in different projects (cross-project). Same-project messages
+		// were already authorized at enqueue time and don't need rechecking.
+		senderAgent, err := s.store.GetAgent(ctx, senderID)
+		if err != nil || senderAgent == nil {
+			// Sender not found or nil — could be a user sender or deleted agent.
+			// User messages don't need cross-project reauthorization.
+			return nil
+		}
+		if senderAgent.ProjectID == targetAgent.ProjectID {
+			// Same project — no cross-project reauthorization needed.
+			return nil
+		}
+		// Cross-project: build an identity wrapper and evaluate.
+		// We use a minimal identity from the stored agent record since the
+		// original credential is not available at retry time.
+		agentIdent := &storedAgentIdentity{agent: senderAgent}
+		decision := s.EvaluateAgentMessage(ctx, agentIdent, targetAgent)
+		return &decision
+	}
 	s.messageBrokerProxy = proxy
 	proxy.Start()
 

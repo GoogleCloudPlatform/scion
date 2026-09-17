@@ -1759,6 +1759,12 @@ type Message struct {
 	ThreadID       string    `json:"threadId,omitempty"`
 	ConversationID string    `json:"conversationId,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
+	// Cross-project provenance (Phase 2, D4).
+	// Server-derived project IDs for the sender and recipient. Nullable for
+	// humans and legacy records. Names are display metadata; IDs are authority.
+	SenderProjectID    *string `json:"senderProjectId,omitempty"`
+	RecipientProjectID *string `json:"recipientProjectId,omitempty"`
+
 	// DispatchState tracks cross-node delivery of the message to the broker:
 	// pending|dispatched|failed. The message row is its own durable dispatch
 	// intent (design §5.2/§6.1).

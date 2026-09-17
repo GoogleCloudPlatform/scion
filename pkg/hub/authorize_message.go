@@ -18,9 +18,155 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// ---------------------------------------------------------------------------
+// Phase 2: Cross-project messaging types and evaluator
+// ---------------------------------------------------------------------------
+
+// MessageDenialCode is a stable, machine-readable denial code for messaging
+// authorization decisions. Codes are lower_snake_case and must not be reused
+// across semantically different denials.
+type MessageDenialCode string
+
+const (
+	MessageDenialNone                    MessageDenialCode = ""
+	MessageDenialCrossProjectDisabled    MessageDenialCode = "cross_project_disabled"
+	MessageDenialCrossProjectSenderMode  MessageDenialCode = "cross_project_sender_mode"
+	MessageDenialCrossProjectTargetMode  MessageDenialCode = "cross_project_target_mode"
+	MessageDenialCrossProjectInboundNone MessageDenialCode = "cross_project_inbound_none"
+	MessageDenialCrossProjectNotMember   MessageDenialCode = "cross_project_origin_not_member"
+	MessageDenialCrossProjectUntrusted   MessageDenialCode = "cross_project_untrusted_origin"
+	MessageDenialCrossProjectUnsupported MessageDenialCode = "cross_project_surface_unsupported"
+)
+
+// MessageDecision captures the outcome of an agent message authorization
+// evaluation. It replaces the (bool, string) return of authorizeAgentMessage
+// with a typed, machine-readable result per design Section 5.
+type MessageDecision struct {
+	Allowed               bool              `json:"allowed"`
+	Code                  MessageDenialCode `json:"code,omitempty"`
+	Reason                string            `json:"reason,omitempty"`
+	CrossProject          bool              `json:"crossProject,omitempty"`
+	HubPolicyRevision     int64             `json:"hubPolicyRevision,omitempty"`
+	ProjectPolicyRevision int64             `json:"projectPolicyRevision,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// D1: Effective membership reader
+// ---------------------------------------------------------------------------
+
+// EffectiveMembershipResult distinguishes a negative membership result from a store
+// error. Both refuse delivery, but infrastructure failure should be retryable.
+type EffectiveMembershipResult struct {
+	IsMember bool
+	Role     string // highest built-in role found: owner, admin, member, or ""
+	Err      error  // non-nil only for infrastructure/store errors
+}
+
+// CheckEffectiveMembership checks whether a user is an active member of a
+// project by examining direct and effective-group role bindings with
+// active-time checks.
+//
+// Membership means holding a built-in member, admin, or owner binding
+// (including valid group-derived member/admin). An owner counts as a member;
+// ownership does not permit piercing a target's mode.
+//
+// Ignored: expired, not-yet-active, revoked, custom additive role bindings.
+// NOT membership: public project visibility, generic read grant, shared
+// conversation, or Hub-admin status.
+//
+// Returns EffectiveMembershipResult with IsMember=true and the highest role if the
+// user is a member, IsMember=false with Err=nil for a definite non-member,
+// or IsMember=false with Err!=nil for infrastructure errors.
+func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID string) EffectiveMembershipResult {
+	now := time.Now()
+
+	// 1. Direct user bindings.
+	directBindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return EffectiveMembershipResult{Err: fmt.Errorf("list direct bindings for user %s: %w", userID, err)}
+	}
+
+	rdCache := make(map[string]*store.RoleDefinition)
+	getRoleDef := func(rdID string) (*store.RoleDefinition, error) {
+		if rd, ok := rdCache[rdID]; ok {
+			return rd, nil
+		}
+		rd, err := s.store.GetRoleDefinition(ctx, rdID)
+		if err != nil {
+			return nil, fmt.Errorf("get role definition %s: %w", rdID, err)
+		}
+		if rd == nil {
+			return nil, fmt.Errorf("role definition %s is nil", rdID)
+		}
+		rdCache[rdID] = rd
+		return rd, nil
+	}
+
+	bestRole := ""
+	for _, rb := range directBindings {
+		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
+			continue
+		}
+		if !isBindingActive(rb, now) {
+			continue
+		}
+		rd, rdErr := getRoleDef(rb.RoleDefinitionID)
+		if rdErr != nil {
+			return EffectiveMembershipResult{Err: rdErr}
+		}
+		// Only built-in membership roles count.
+		if !store.IsBuiltInProjectMembershipRole(rd.Name) {
+			continue
+		}
+		bestRole = higherProjectRole(bestRole, rd.Name)
+	}
+
+	// 2. Group-derived bindings.
+	groupIDs, err := s.store.GetEffectiveGroups(ctx, userID)
+	if err != nil {
+		return EffectiveMembershipResult{Err: fmt.Errorf("get effective groups for user %s: %w", userID, err)}
+	}
+	if len(groupIDs) > 0 {
+		var principals []store.PrincipalRef
+		for _, gid := range groupIDs {
+			principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: gid})
+		}
+		groupBindings, err := s.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+		if err != nil {
+			return EffectiveMembershipResult{Err: fmt.Errorf("list group bindings: %w", err)}
+		}
+		for _, rb := range groupBindings {
+			if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
+				continue
+			}
+			if !isBindingActive(rb, now) {
+				continue
+			}
+			rd, rdErr := getRoleDef(rb.RoleDefinitionID)
+			if rdErr != nil {
+				return EffectiveMembershipResult{Err: rdErr}
+			}
+			// Groups can only confer admin or member, never owner.
+			if rd.Name == store.ProjectRoleOwner {
+				continue
+			}
+			if !store.IsBuiltInProjectMembershipRole(rd.Name) {
+				continue
+			}
+			bestRole = higherProjectRole(bestRole, rd.Name)
+		}
+	}
+
+	if bestRole == "" {
+		return EffectiveMembershipResult{IsMember: false}
+	}
+	return EffectiveMembershipResult{IsMember: true, Role: bestRole}
+}
 
 // authorizeAgentMessage is the single choke point for ALL messaging
 // authorization. It implements the decision logic from design doc Section 5
@@ -49,7 +195,9 @@ import (
 //     are request-derived (authored by a user or agent) and must be
 //     authorized with isSystemPlane=false at both authoring and fire time.
 //
-// Returns (allowed, reason). When allowed is false, reason describes why.
+// Returns (allowed, reason, decision). When allowed is false, reason
+// describes why. For agent-to-agent paths, decision carries a typed
+// MessageDecision with stable denial codes; for user paths it is nil.
 //
 // See docs/messaging-authorization.md for the full decision table and
 // piercing rules.
@@ -58,41 +206,43 @@ func (s *Server) authorizeAgentMessage(
 	senderIdentity Identity,
 	targetAgent *store.Agent,
 	isSystemPlane bool,
-) (allowed bool, reason string) {
+) (allowed bool, reason string, decision *MessageDecision) {
 	if senderIdentity == nil {
-		return false, "no authenticated identity"
+		return false, "no authenticated identity", nil
 	}
 	if targetAgent == nil {
-		return false, "nil target agent"
+		return false, "nil target agent", nil
 	}
 
 	// ---- D8: system-plane messages bypass all mode checks ----
 	if isSystemPlane {
-		return true, "system plane bypass"
+		return true, "system plane bypass", nil
 	}
 
 	// Agent self-message: allow an agent to deliver to itself regardless of mode.
 	// This is NOT system-plane (D8); it is a self-access exemption for harness
 	// integration (sciontool port-expose, etc.).
 	if agentIdent, ok := senderIdentity.(AgentIdentity); ok && agentIdent.ID() == targetAgent.ID {
-		return true, "agent self-message"
+		return true, "agent self-message", nil
 	}
 
 	// ---- D6: super-admin user pierces everything, including none ----
 	if user, ok := senderIdentity.(UserIdentity); ok {
 		if IsUnscopedLocalPlatformAdmin(user) {
-			return true, "super-admin bypass"
+			return true, "super-admin bypass", nil
 		}
 	}
 
 	// Branch by sender type.
 	switch senderIdentity.Type() {
 	case "user", "dev", "federated_user":
-		return s.authorizeUserToAgent(ctx, senderIdentity, targetAgent)
+		allowed, reason := s.authorizeUserToAgent(ctx, senderIdentity, targetAgent)
+		return allowed, reason, nil
 	case "agent":
-		return s.authorizeAgentToAgent(ctx, senderIdentity, targetAgent)
+		d := s.authorizeAgentToAgent(ctx, senderIdentity, targetAgent)
+		return d.Allowed, d.Reason, &d
 	default:
-		return false, fmt.Sprintf("identity type %q may not send messages", senderIdentity.Type())
+		return false, fmt.Sprintf("identity type %q may not send messages", senderIdentity.Type()), nil
 	}
 }
 
@@ -158,64 +308,283 @@ func (s *Server) authorizeUserToAgent(
 // authorizeAgentToAgent implements the agent-sender path of the messaging
 // decision logic. Agents NEVER pierce mode restrictions, even if their origin
 // user is a super-admin or project owner (D6 pinning rule).
+//
+// Returns a MessageDecision with typed denial codes, eliminating the need for
+// callers to re-evaluate via EvaluateAgentMessage.
 func (s *Server) authorizeAgentToAgent(
 	ctx context.Context,
 	senderIdentity Identity,
 	targetAgent *store.Agent,
-) (bool, string) {
+) MessageDecision {
+	return s.EvaluateAgentMessage(ctx, senderIdentity, targetAgent)
+}
+
+// EvaluateAgentMessage is the typed cross-project message evaluator (Phase 2,
+// D2). It implements the full decision logic from design Section 5:
+//
+//  1. Authenticated local agent + current valid sender/receiver records
+//  2. Same project? → existing mode matrix (with hub/project compatibility)
+//  3. Different project? → ALL of the following must pass:
+//     a. Hub cross_project_messaging_enabled is true (authoritative store read)
+//     b. Sender mode == hub
+//     c. Receiver mode is project OR hub
+//     d. Destination project's crossProjectInbound policy allows sender
+//     e. Ancestry is hub-attested (reject federated identities)
+//     f. Root human principal is valid, not disabled/deleted
+//
+// Returns a MessageDecision with stable denial codes.
+func (s *Server) EvaluateAgentMessage(
+	ctx context.Context,
+	senderIdentity Identity,
+	targetAgent *store.Agent,
+) MessageDecision {
+	if targetAgent == nil {
+		return MessageDecision{Reason: "nil target agent"}
+	}
+
 	agentIdent, ok := senderIdentity.(AgentIdentity)
 	if !ok {
-		return false, "invalid agent identity"
+		return MessageDecision{Reason: "invalid agent identity"}
 	}
 
 	// Fetch the sender agent's record for mode, project, ancestry.
 	senderAgent, err := s.store.GetAgent(ctx, agentIdent.ID())
 	if err != nil {
-		slog.Warn("authorizeAgentMessage: failed to fetch sender agent",
+		slog.Warn("EvaluateAgentMessage: failed to fetch sender agent",
 			"sender_id", agentIdent.ID(), "error", err)
-		return false, "failed to fetch sender agent record"
+		return MessageDecision{Reason: "failed to fetch sender agent record"}
+	}
+	if senderAgent == nil {
+		return MessageDecision{Reason: "sender agent record is nil"}
 	}
 
 	// Either side mode == none → DENY
 	if senderAgent.MessageMode == store.MessageModeNone {
-		return false, "sender agent message_mode is none"
+		return MessageDecision{Reason: "sender agent message_mode is none"}
 	}
 	if targetAgent.MessageMode == store.MessageModeNone {
-		return false, "target agent message_mode is none"
+		return MessageDecision{Reason: "target agent message_mode is none"}
 	}
 
-	// Cross-project → DENY (cross-project delivery is a later phase)
-	if senderAgent.ProjectID != targetAgent.ProjectID {
-		return false, "cross-project agent-to-agent messaging denied"
+	// Same-project path: use existing mode matrix.
+	if senderAgent.ProjectID == targetAgent.ProjectID {
+		return s.evaluateSameProjectModes(senderAgent, targetAgent)
 	}
 
-	// Same-project mode compatibility (design §3):
-	// hub/project and hub/hub are allowed (hub joins the project cell);
-	// hub does NOT open branch/lineage boundaries.
-	sMode := senderAgent.MessageMode
-	tMode := targetAgent.MessageMode
+	// Cross-project path: evaluate all required gates.
+	return s.evaluateCrossProject(ctx, agentIdent, senderAgent, targetAgent)
+}
+
+// evaluateSameProjectModes implements the same-project mode compatibility
+// matrix from design Section 3.
+func (s *Server) evaluateSameProjectModes(sender, target *store.Agent) MessageDecision {
+	sMode := sender.MessageMode
+	tMode := target.MessageMode
 
 	// Both in project cell (project or hub) → ALLOW
 	if (sMode == store.MessageModeProject || sMode == store.MessageModeHub) &&
 		(tMode == store.MessageModeProject || tMode == store.MessageModeHub) {
-		return true, "both agents in project/hub communication cell"
+		return MessageDecision{Allowed: true, Reason: "both agents in project/hub communication cell"}
 	}
 
 	// Both branch mode with parent/child relationship → ALLOW
 	if sMode == store.MessageModeBranch && tMode == store.MessageModeBranch {
-		if isDirectParentChild(senderAgent, targetAgent) {
-			return true, "branch mode parent/child relationship"
+		if isDirectParentChild(sender, target) {
+			return MessageDecision{Allowed: true, Reason: "branch mode parent/child relationship"}
 		}
-		return false, "branch mode agents without direct parent/child relationship"
+		return MessageDecision{Reason: "branch mode agents without direct parent/child relationship"}
 	}
 
 	// All other combinations (including lineage mode, mixed modes) → DENY
-	// Lineage-mode agents have NO agent-to-agent edges (D4).
-	// hub does NOT open branch/lineage boundaries.
-	return false, fmt.Sprintf(
-		"agent-to-agent messaging denied: sender mode %q, target mode %q",
-		sMode, tMode,
-	)
+	return MessageDecision{
+		Reason: fmt.Sprintf("agent-to-agent messaging denied: sender mode %q, target mode %q", sMode, tMode),
+	}
+}
+
+// evaluateCrossProject implements the cross-project authorization gates from
+// design Section 5. All gates must pass for the delivery to be authorized.
+func (s *Server) evaluateCrossProject(
+	ctx context.Context,
+	agentIdent AgentIdentity,
+	senderAgent, targetAgent *store.Agent,
+) MessageDecision {
+	decision := MessageDecision{CrossProject: true}
+
+	// Gate (a): Hub cross_project_messaging_enabled must be true.
+	// Read from operational settings (DB-backed cache, periodically refreshed).
+	ops := s.GetOperationalSettings()
+	if ops == nil || !ops.CrossProjectMessagingEnabled() {
+		decision.Code = MessageDenialCrossProjectDisabled
+		decision.Reason = "cross-project messaging is not enabled on this Hub"
+		return decision
+	}
+
+	// Gate (b): Sender mode must be hub.
+	if senderAgent.MessageMode != store.MessageModeHub {
+		decision.Code = MessageDenialCrossProjectSenderMode
+		decision.Reason = fmt.Sprintf("cross-project messaging requires sender mode hub, got %q", senderAgent.MessageMode)
+		return decision
+	}
+
+	// Gate (c): Receiver mode must be project OR hub.
+	if targetAgent.MessageMode != store.MessageModeProject && targetAgent.MessageMode != store.MessageModeHub {
+		decision.Code = MessageDenialCrossProjectTargetMode
+		decision.Reason = fmt.Sprintf("cross-project target must be in project or hub mode, got %q", targetAgent.MessageMode)
+		return decision
+	}
+
+	// Gate (d): Destination project's crossProjectInbound policy.
+	destProject, err := s.store.GetProject(ctx, targetAgent.ProjectID)
+	if err != nil {
+		slog.Warn("EvaluateAgentMessage: failed to fetch destination project",
+			"project_id", targetAgent.ProjectID, "error", err)
+		decision.Reason = "failed to fetch destination project"
+		return decision
+	}
+	if destProject == nil {
+		decision.Reason = "destination project record is nil"
+		return decision
+	}
+
+	inboundPolicy := destProject.CrossProjectInbound
+	if inboundPolicy == "" {
+		inboundPolicy = store.CrossProjectInboundNone
+	}
+	decision.ProjectPolicyRevision = destProject.CrossProjectInboundRevision
+
+	switch inboundPolicy {
+	case store.CrossProjectInboundNone:
+		decision.Code = MessageDenialCrossProjectInboundNone
+		decision.Reason = "destination project does not accept external agent messages"
+		return decision
+
+	case store.CrossProjectInboundAny:
+		// Any local agent from any project is allowed after origin validation.
+
+	case store.CrossProjectInboundMembers:
+		// Members policy requires origin validation AND membership check.
+
+	default:
+		// Unknown policy value → fail closed.
+		decision.Code = MessageDenialCrossProjectInboundNone
+		decision.Reason = fmt.Sprintf("unknown inbound policy %q, failing closed", inboundPolicy)
+		return decision
+	}
+
+	// Gates (e, f): validate ancestry attestation and origin user for all
+	// cross-project sends (both "any" and "members" policies).
+	originUserID, originDenial := s.validateCrossProjectOrigin(ctx, agentIdent)
+	if originDenial != nil {
+		return *originDenial
+	}
+
+	// "members" policy additionally requires membership in the destination project.
+	if inboundPolicy == store.CrossProjectInboundMembers {
+		memberResult := s.CheckEffectiveMembership(ctx, originUserID, targetAgent.ProjectID)
+		if memberResult.Err != nil {
+			slog.Warn("EvaluateAgentMessage: membership check failed",
+				"user_id", originUserID, "project_id", targetAgent.ProjectID,
+				"error", memberResult.Err)
+			// Infrastructure error → retryable denial, not a membership denial.
+			decision.Reason = "membership check failed: " + memberResult.Err.Error()
+			return decision
+		}
+		if !memberResult.IsMember {
+			decision.Code = MessageDenialCrossProjectNotMember
+			decision.Reason = "origin user is not an active member of the destination project"
+			return decision
+		}
+	}
+
+	// All gates passed — cross-project delivery is authorized.
+	decision.Allowed = true
+	decision.Reason = "cross-project messaging authorized"
+	return decision
+}
+
+// validateCrossProjectOrigin implements gates (e) and (f) for cross-project
+// messaging: ancestry must be hub-attested and the root human principal must
+// be valid and active. Called once for both "members" and "any" inbound
+// policies — eliminates the duplication that previously existed between the
+// two branches.
+//
+// Returns (originUserID, nil) on success, or ("", *MessageDecision) with a
+// typed denial on failure.
+func (s *Server) validateCrossProjectOrigin(ctx context.Context, agentIdent AgentIdentity) (string, *MessageDecision) {
+	// Gate (e): Ancestry must be hub-attested (reject federated identities).
+	if !AncestryIsHubAttested(agentIdent) {
+		return "", &MessageDecision{
+			CrossProject: true,
+			Code:         MessageDenialCrossProjectUntrusted,
+			Reason:       "cross-project messaging requires hub-attested ancestry",
+		}
+	}
+
+	// Gate (f): Root human principal must be valid, not disabled/deleted.
+	originUserID := agentIdent.OriginUserID()
+	if originUserID == "" {
+		return "", &MessageDecision{
+			CrossProject: true,
+			Code:         MessageDenialCrossProjectUntrusted,
+			Reason:       "sender agent has no root human principal in ancestry",
+		}
+	}
+
+	originUser, err := s.store.GetUser(ctx, originUserID)
+	if err != nil {
+		slog.Warn("validateCrossProjectOrigin: failed to fetch origin user",
+			"user_id", originUserID, "error", err)
+		return "", &MessageDecision{
+			CrossProject: true,
+			Code:         MessageDenialCrossProjectUntrusted,
+			Reason:       "failed to fetch origin user",
+		}
+	}
+	if originUser == nil {
+		return "", &MessageDecision{
+			CrossProject: true,
+			Code:         MessageDenialCrossProjectUntrusted,
+			Reason:       "origin user record is nil",
+		}
+	}
+	if originUser.Status != "active" {
+		return "", &MessageDecision{
+			CrossProject: true,
+			Code:         MessageDenialCrossProjectUntrusted,
+			Reason:       fmt.Sprintf("origin user is %s, not active", originUser.Status),
+		}
+	}
+
+	return originUserID, nil
+}
+
+// ---------------------------------------------------------------------------
+// storedAgentIdentity adapts a persisted store.Agent record to the
+// AgentIdentity interface. Used by the Message Broker retry path (D5) where
+// the original JWT is not available. The identity is reconstructed from
+// trusted stored data — the persisted ancestry built by the Hub.
+// ---------------------------------------------------------------------------
+
+// Compile-time interface assertion.
+var _ AgentIdentity = (*storedAgentIdentity)(nil)
+
+type storedAgentIdentity struct {
+	agent *store.Agent
+}
+
+func (s *storedAgentIdentity) ID() string                      { return s.agent.ID }
+func (s *storedAgentIdentity) Type() string                    { return "agent" }
+func (s *storedAgentIdentity) ProjectID() string               { return s.agent.ProjectID }
+func (s *storedAgentIdentity) Scopes() []AgentTokenScope       { return nil }
+func (s *storedAgentIdentity) HasScope(_ AgentTokenScope) bool { return false }
+func (s *storedAgentIdentity) Ancestry() []string              { return s.agent.Ancestry }
+func (s *storedAgentIdentity) TokenID() string                 { return "" }
+
+func (s *storedAgentIdentity) OriginUserID() string {
+	if len(s.agent.Ancestry) > 0 {
+		return s.agent.Ancestry[0]
+	}
+	return ""
 }
 
 // isDirectParentChild reports whether two agents have a direct parent/child

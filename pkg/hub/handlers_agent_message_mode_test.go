@@ -540,13 +540,13 @@ func TestSetMessageMode_Quarantine(t *testing.T) {
 		[]string{owner.ID})
 	senderIdent := msgAuthzAgentIdentity(sender.ID, projectID, sender.Ancestry)
 
-	allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, agent, false)
+	allowed, _, _ := srv.authorizeAgentMessage(ctx, senderIdent, agent, false)
 	if allowed {
 		t.Fatal("messaging a none-mode agent should be denied (quarantine)")
 	}
 
 	// System-plane notice should still work (D8).
-	allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, agent, true)
+	allowed, reason, _ := srv.authorizeAgentMessage(ctx, senderIdent, agent, true)
 	if !allowed {
 		t.Fatalf("system-plane delivery should be allowed even for none-mode agent: %s", reason)
 	}
@@ -565,14 +565,14 @@ func TestSetMessageMode_LiveEffect(t *testing.T) {
 
 	// Member cannot message project-mode agent (agent.message removed from member role).
 	memberIdent := msgAuthzUserIdentity(member.ID)
-	allowed, _ := srv.authorizeAgentMessage(ctx, memberIdent, agent, false)
+	allowed, _, _ := srv.authorizeAgentMessage(ctx, memberIdent, agent, false)
 	if allowed {
 		t.Fatal("member without agent.message should be denied messaging project-mode agent")
 	}
 
 	// Owner CAN message project-mode agent (has agent.message via owner role).
 	ownerIdent := msgAuthzUserIdentity(owner.ID)
-	allowed, reason := srv.authorizeAgentMessage(ctx, ownerIdent, agent, false)
+	allowed, reason, _ := srv.authorizeAgentMessage(ctx, ownerIdent, agent, false)
 	if !allowed {
 		t.Fatalf("owner should message project-mode agent: %s", reason)
 	}
@@ -590,7 +590,7 @@ func TestSetMessageMode_LiveEffect(t *testing.T) {
 	}
 
 	// Owner's message attempt -> DENIED after mode change to none (live effect).
-	allowed, _ = srv.authorizeAgentMessage(ctx, ownerIdent, updatedAgent, false)
+	allowed, _, _ = srv.authorizeAgentMessage(ctx, ownerIdent, updatedAgent, false)
 	if allowed {
 		t.Fatal("after mode change to none, message should be denied even for owner")
 	}
