@@ -159,6 +159,10 @@ func (s *Server) handleConversationRoutes(w http.ResponseWriter, r *http.Request
 		s.handleConvListMessages(w, r, id)
 	case "default-agent":
 		s.handleSetDefaultAgent(w, r, id)
+	case "participants":
+		s.handleAddParticipant(w, r, id)
+	case "leave":
+		s.handleLeaveConversation(w, r, id)
 	default:
 		NotFound(w, "Conversation action")
 	}
@@ -331,6 +335,15 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// Default to the caller's project when no project ID is specified.
+	if req.ProjectID == "" {
+		if ai, ok := identity.(AgentIdentity); ok {
+			if callerProject := ai.ProjectID(); callerProject != "" {
+				req.ProjectID = callerProject
+			}
+		}
+	}
+
 	now := time.Now().UTC()
 	conv := &store.Conversation{
 		ID:             api.NewUUID(),
@@ -450,6 +463,107 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 	})
 }
 
+// addParticipantRequest is the request body for adding a participant to a conversation.
+type addParticipantRequest struct {
+	PrincipalKind string `json:"principalKind"`
+	PrincipalID   string `json:"principalId"`
+}
+
+// handleAddParticipant handles POST /api/v1/conversations/{id}/participants.
+func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w, http.MethodPost)
+		return
+	}
+
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Forbidden(w)
+		return
+	}
+
+	// Authorization: caller must be a participant.
+	isParticipant, err := isConversationParticipant(ctx, s.store, id, identity.Type(), identity.ID())
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if !isParticipant {
+		Forbidden(w)
+		return
+	}
+
+	var req addParticipantRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body")
+		return
+	}
+
+	if req.PrincipalKind == "" || req.PrincipalID == "" {
+		BadRequest(w, "principalKind and principalId are required")
+		return
+	}
+
+	now := time.Now().UTC()
+	participant := &store.ConversationParticipant{
+		ID:             api.NewUUID(),
+		ConversationID: id,
+		PrincipalKind:  req.PrincipalKind,
+		PrincipalID:    req.PrincipalID,
+		Role:           "member",
+		JoinedAt:       now,
+	}
+
+	if err := s.store.AddParticipant(ctx, participant); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			writeError(w, http.StatusConflict, "already_exists", "participant already exists", nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, participant)
+}
+
+// handleLeaveConversation handles POST /api/v1/conversations/{id}/leave.
+func (s *Server) handleLeaveConversation(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w, http.MethodPost)
+		return
+	}
+
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Forbidden(w)
+		return
+	}
+
+	// Authorization: caller must be a participant.
+	isParticipant, err := isConversationParticipant(ctx, s.store, id, identity.Type(), identity.ID())
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if !isParticipant {
+		Forbidden(w)
+		return
+	}
+
+	if err := s.store.RemoveParticipant(ctx, id, identity.Type(), identity.ID()); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "participant not found", nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // isConversationParticipant checks whether a principal is an active participant
 // of a conversation. This is the shared authorization helper used across all
 // conversation endpoints that require participant access.
@@ -465,4 +579,3 @@ func isConversationParticipant(ctx context.Context, st store.Store, conversation
 	}
 	return false, nil
 }
-

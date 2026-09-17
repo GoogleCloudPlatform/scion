@@ -42,6 +42,10 @@ var (
 
 	convGetJSON bool
 
+	convParticipantsJSON bool
+
+	convCatchUpSince string
+	convCatchUpJSON  bool
 )
 
 // conversationCmd is the top-level command for conversation management.
@@ -140,6 +144,59 @@ Examples:
 	RunE: runConversationSetDefault,
 }
 
+// conversationParticipantsCmd lists participants in a conversation.
+var conversationParticipantsCmd = &cobra.Command{
+	Use:   "participants <conversation-ref>",
+	Short: "List participants in a conversation",
+	Long: `List participants in a conversation.
+
+Examples:
+  scion conversation participants conv:a1b2c3d4-...
+  scion conversation participants @my-agent --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runConversationParticipants,
+}
+
+// conversationJoinCmd adds a participant to a conversation.
+var conversationJoinCmd = &cobra.Command{
+	Use:   "join <conversation-ref> <principal-kind> <principal-id>",
+	Short: "Add a participant to a conversation",
+	Long: `Add a participant to a conversation.
+
+Examples:
+  scion conversation join conv:a1b2c3d4-... agent 0b56e8d0-...
+  scion conversation join #design-thread user a1b2c3d4-...`,
+	Args: cobra.ExactArgs(3),
+	RunE: runConversationJoin,
+}
+
+// conversationLeaveCmd removes the caller from a conversation.
+var conversationLeaveCmd = &cobra.Command{
+	Use:   "leave <conversation-ref>",
+	Short: "Leave a conversation",
+	Long: `Leave a conversation. Removes the caller from the conversation.
+
+Examples:
+  scion conversation leave conv:a1b2c3d4-...
+  scion conversation leave #design-thread`,
+	Args: cobra.ExactArgs(1),
+	RunE: runConversationLeave,
+}
+
+// conversationCatchUpCmd shows recent messages in a conversation.
+var conversationCatchUpCmd = &cobra.Command{
+	Use:   "catch-up <conversation-ref>",
+	Short: "Show recent messages in a conversation",
+	Long: `Show recent messages in a conversation. Defaults to the last hour.
+
+Examples:
+  scion conversation catch-up conv:a1b2c3d4-...
+  scion conversation catch-up @my-agent --since 30m
+  scion conversation catch-up #design-thread --since 2h --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runConversationCatchUp,
+}
+
 func init() {
 	rootCmd.AddCommand(conversationCmd)
 	conversationCmd.AddCommand(conversationListCmd)
@@ -147,6 +204,10 @@ func init() {
 	conversationCmd.AddCommand(conversationCreateCmd)
 	conversationCmd.AddCommand(conversationGetCmd)
 	conversationCmd.AddCommand(conversationSetDefaultCmd)
+	conversationCmd.AddCommand(conversationParticipantsCmd)
+	conversationCmd.AddCommand(conversationJoinCmd)
+	conversationCmd.AddCommand(conversationLeaveCmd)
+	conversationCmd.AddCommand(conversationCatchUpCmd)
 
 	// List flags (on both parent and list subcommand)
 	for _, cmd := range []*cobra.Command{conversationCmd, conversationListCmd} {
@@ -169,6 +230,13 @@ func init() {
 
 	// Get flags
 	conversationGetCmd.Flags().BoolVar(&convGetJSON, "json", false, "Output in JSON format")
+
+	// Participants flags
+	conversationParticipantsCmd.Flags().BoolVar(&convParticipantsJSON, "json", false, "Output in JSON format")
+
+	// Catch-up flags
+	conversationCatchUpCmd.Flags().StringVar(&convCatchUpSince, "since", "1h", "Show messages from this duration ago (e.g. 30m, 2h)")
+	conversationCatchUpCmd.Flags().BoolVar(&convCatchUpJSON, "json", false, "Output in JSON format")
 }
 
 func runConversationList(cmd *cobra.Command, args []string) error {
@@ -377,6 +445,150 @@ func runConversationSetDefault(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Default agent set to %s for conversation %s.\n", agentID, conversationID)
 	return nil
+}
+
+func runConversationParticipants(cmd *cobra.Command, args []string) error {
+	if convParticipantsJSON {
+		outputFormat = "json"
+	}
+
+	_, client, err := requireHubClient()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+
+	conversationID, err := resolveConversationRef(ctx, client, args[0])
+	if err != nil {
+		return err
+	}
+
+	conv, err := client.Conversations().Get(ctx, conversationID)
+	if err != nil {
+		return fmt.Errorf("failed to get conversation: %w", err)
+	}
+
+	if isJSONOutput() {
+		return outputJSON(conv.Participants)
+	}
+
+	if len(conv.Participants) == 0 {
+		fmt.Println("No participants found.")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "KIND\tID\tROLE\tJOINED")
+	for _, p := range conv.Participants {
+		joined := formatTimeAgo(p.JoinedAt)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", p.PrincipalKind, p.PrincipalID, p.Role, joined)
+	}
+	return tw.Flush()
+}
+
+func runConversationJoin(cmd *cobra.Command, args []string) error {
+	_, client, err := requireHubClient()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+
+	conversationID, err := resolveConversationRef(ctx, client, args[0])
+	if err != nil {
+		return err
+	}
+
+	req := &hubclient.AddParticipantRequest{
+		PrincipalKind: args[1],
+		PrincipalID:   args[2],
+	}
+
+	if _, err := client.Conversations().AddParticipant(ctx, conversationID, req); err != nil {
+		return fmt.Errorf("failed to add participant: %w", err)
+	}
+
+	fmt.Printf("Added %s %s to conversation %s\n", req.PrincipalKind, req.PrincipalID, conversationID)
+	return nil
+}
+
+func runConversationLeave(cmd *cobra.Command, args []string) error {
+	_, client, err := requireHubClient()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+
+	conversationID, err := resolveConversationRef(ctx, client, args[0])
+	if err != nil {
+		return err
+	}
+
+	if err := client.Conversations().Leave(ctx, conversationID); err != nil {
+		return fmt.Errorf("failed to leave conversation: %w", err)
+	}
+
+	fmt.Printf("Left conversation %s\n", conversationID)
+	return nil
+}
+
+func runConversationCatchUp(cmd *cobra.Command, args []string) error {
+	if convCatchUpJSON {
+		outputFormat = "json"
+	}
+
+	_, client, err := requireHubClient()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+
+	conversationID, err := resolveConversationRef(ctx, client, args[0])
+	if err != nil {
+		return err
+	}
+
+	since, err := time.ParseDuration(convCatchUpSince)
+	if err != nil {
+		return fmt.Errorf("invalid --since value %q: %w", convCatchUpSince, err)
+	}
+
+	afterTime := time.Now().UTC().Add(-since).Format(time.RFC3339)
+
+	opts := &hubclient.ConversationMessagesOptions{
+		After: afterTime,
+	}
+
+	result, err := client.Conversations().ListMessages(ctx, conversationID, opts)
+	if err != nil {
+		return fmt.Errorf("failed to list messages: %w", err)
+	}
+
+	if isJSONOutput() {
+		return outputJSON(result)
+	}
+
+	if len(result.Items) == 0 {
+		fmt.Printf("No messages in the last %s.\n", convCatchUpSince)
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tMESSAGE")
+	for _, msg := range result.Items {
+		timeStr := msg.CreatedAt.Format("15:04:05")
+		from := truncateRunes(msg.Sender, 20, true)
+		body := truncateRunes(msg.Msg, 60, true)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", timeStr, from, body)
+	}
+	return tw.Flush()
 }
 
 // resolveConversationRef resolves a conversation reference string to a conversation ID.
