@@ -2421,13 +2421,23 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		allowed, reason := s.authorizeAgentMessage(r.Context(), identity, agent, isSystemPlane)
 		messaging.RecordStep(r.Context(), "message_authorized")
 		if !allowed {
+			// Phase 2 D3: include typed denial code when the evaluator
+			// provides one (cross-project denials).
+			denialCode := ErrCodeForbidden
+			if agentIdent, ok := identity.(AgentIdentity); ok {
+				_ = agentIdent // typed evaluator path
+				decision := s.EvaluateAgentMessage(r.Context(), identity, agent)
+				if decision.Code != "" {
+					denialCode = string(decision.Code)
+				}
+			}
 			slog.Warn("message authorization denied",
 				"sender_type", identity.Type(),
 				"sender_id", identity.ID(),
 				"target_agent", agent.ID,
 				"reason", reason,
 			)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			writeError(w, http.StatusForbidden, denialCode,
 				"Message delivery denied", nil)
 			return
 		}

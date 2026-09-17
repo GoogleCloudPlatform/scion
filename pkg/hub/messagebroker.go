@@ -62,6 +62,13 @@ type MessageBrokerProxy struct {
 	// (B10 contract). When returning true, they deny the write (G2 contract).
 	writeDenyEnabled func() bool
 
+	// messageAuthorizer, when non-nil, is called by deliverToAgent to
+	// reauthorize cross-project messages at delivery/retry time (Phase 2, D5).
+	// The callback receives the sender identity, target agent, and returns a
+	// MessageDecision. A denied message is NOT persisted to recipient-visible
+	// history. Nil means no reauthorization (legacy same-project behavior).
+	messageAuthorizer func(ctx context.Context, senderID string, targetAgent *store.Agent) *MessageDecision
+
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
 	pluginSubscriptions map[string]eventbus.Subscription   // pattern -> plugin-initiated subscription
@@ -713,6 +720,24 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		p.log.Warn("Agent has no runtime broker, skipping broker message delivery",
 			"agentSlug", agentSlug)
 		return
+	}
+
+	// Phase 2 D5: reauthorize cross-project messages at delivery/retry time.
+	// Policy may have changed since the message was enqueued. A denied retry
+	// must NOT publish denied content to recipients through history/SSE.
+	if p.messageAuthorizer != nil && msg.SenderID != "" {
+		decision := p.messageAuthorizer(ctx, msg.SenderID, agent)
+		if decision != nil && !decision.Allowed {
+			p.log.Warn("broker delivery denied at retry/delivery time",
+				"agentSlug", agentSlug,
+				"projectID", projectID,
+				"sender_id", msg.SenderID,
+				"denial_code", decision.Code,
+				"reason", decision.Reason,
+			)
+			// Do NOT persist to recipient-visible history.
+			return
+		}
 	}
 
 	// Persist to message store before delivery attempt (no pending rows).

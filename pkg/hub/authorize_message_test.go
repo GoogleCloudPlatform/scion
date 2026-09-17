@@ -935,7 +935,7 @@ func TestAuthorizeAgentMessage_HubModeCompatibility(t *testing.T) {
 // Cross-project hub agent denied (delivery not yet implemented)
 // ---------------------------------------------------------------------------
 
-func TestAuthorizeAgentMessage_CrossProjectHubDenied(t *testing.T) {
+func TestAuthorizeAgentMessage_CrossProjectHubDenied_WhenFlagOff(t *testing.T) {
 	srv, s, owner, _, projectID := msgAuthzSetup(t)
 	ctx := context.Background()
 
@@ -956,9 +956,11 @@ func TestAuthorizeAgentMessage_CrossProjectHubDenied(t *testing.T) {
 	hubTarget := msgAuthzAgent(t, s, "hub-target-cross", otherProjectID, store.MessageModeHub,
 		[]string{owner.ID})
 
+	// Phase 2: cross-project messaging is denied when the Hub flag is off
+	// (default). The typed evaluator returns cross_project_disabled.
 	senderIdent := msgAuthzAgentIdentity(hubSender.ID, projectID, hubSender.Ancestry)
 	allowed, _ := srv.authorizeAgentMessage(ctx, senderIdent, hubTarget, false)
 	if allowed {
-		t.Fatal("cross-project hub messaging should be denied (delivery not yet implemented)")
+		t.Fatal("cross-project hub messaging should be denied when Hub flag is off")
 	}
 }

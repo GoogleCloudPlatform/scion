@@ -1549,6 +1549,20 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			DispatchState: store.MessageDispatchDispatched,
 			CreatedAt:     time.Now(),
 		}
+
+		// Phase 2 D4: stamp server-derived cross-project provenance.
+		// RecipientProjectID is always the target agent's project.
+		recipientProjectID := agent.ProjectID
+		storeMsg.RecipientProjectID = &recipientProjectID
+		// SenderProjectID is derived from the authenticated sender.
+		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			senderProjID := agentIdent.ProjectID()
+			storeMsg.SenderProjectID = &senderProjID
+		} else if structuredMsg.SenderID != "" {
+			// User sender — no project-level provenance.
+			// SenderProjectID remains nil for humans.
+		}
+
 		// Phase 5 dual-write: resolve-or-create conversation for user/agent → agent messages.
 		// If the CLI already resolved a conversation_id (S4 conversation references),
 		// use it directly instead of re-resolving.
