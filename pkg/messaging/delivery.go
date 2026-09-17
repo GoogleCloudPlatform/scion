@@ -39,13 +39,14 @@ type DeliveryEnvelope struct {
 	Conversation *ConversationInfo `json:"conversation,omitempty"`
 	From         string            `json:"from"`            // PrincipalRef
 	To           []string          `json:"to,omitempty"`    // addressee PrincipalRefs
-	Type         string            `json:"type"`            // "message" | "event"
+	Type         string            `json:"type"`            // "message" | "event" | "mention" | "reply"
 	Event        *EventBody        `json:"event,omitempty"` // Type == "event"
 	Msg          string            `json:"msg"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Urgent       bool              `json:"urgent,omitempty"`
 	Attachments  []string          `json:"attachments,omitempty"`
-	ReplyTo      *string           `json:"reply_to,omitempty"` // msg ID
+	ReplyTo      *string           `json:"reply_to,omitempty"`      // msg ID
+	ReplyContext string            `json:"reply_context,omitempty"` // first 32 chars of replied-to message
 }
 
 // DeliveryOptions captures transport-level options that are not part of the
@@ -71,6 +72,7 @@ func FormatNewDelivery(
 	convInfo *ConversationInfo,
 	opts DeliveryOptions,
 	isMention bool,
+	isReply bool,
 ) string {
 	if opts.Plain || opts.Raw {
 		return msg.Body
@@ -80,7 +82,7 @@ func FormatNewDelivery(
 		Timestamp:    msg.CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		Conversation: convInfo,
 		From:         string(msg.From),
-		Type:         typeString(msg.Kind, isMention),
+		Type:         typeString(msg.Kind, isMention, isReply),
 		Event:        msg.Event,
 		Msg:          msg.Body,
 		Metadata:     msg.Metadata,
@@ -106,6 +108,23 @@ func FormatNewDelivery(
 		env.Attachments = append(env.Attachments, a.Path)
 	}
 
+	// Promote RE-to from metadata to top-level reply_context.
+	if v, ok := msg.Metadata["RE-to"]; ok {
+		env.ReplyContext = v
+		// Remove from metadata to avoid duplication.
+		filtered := make(map[string]string, len(msg.Metadata))
+		for k, mv := range msg.Metadata {
+			if k != "RE-to" {
+				filtered[k] = mv
+			}
+		}
+		if len(filtered) > 0 {
+			env.Metadata = filtered
+		} else {
+			env.Metadata = nil
+		}
+	}
+
 	jsonBytes, err := json.MarshalIndent(env, "", "  ")
 	if err != nil {
 		// Fallback to plain text if JSON marshaling fails.
@@ -115,12 +134,15 @@ func FormatNewDelivery(
 	return deliveryIntro + "\n\n" + beginDelimiter + "\n" + string(jsonBytes) + "\n" + endDelimiter
 }
 
-// typeString maps internal MessageKind and the explicit mention flag to the
-// three-value wire type: "event", "mention", or "message".
-// KindEvent → "event"; isMention → "mention"; everything else → "message".
-func typeString(k MessageKind, isMention bool) string {
+// typeString maps internal MessageKind and the explicit mention/reply flags to
+// the four-value wire type: "event", "mention", "reply", or "message".
+// KindEvent → "event"; isReply → "reply"; isMention → "mention"; else → "message".
+func typeString(k MessageKind, isMention bool, isReply bool) string {
 	if k == KindEvent {
 		return "event"
+	}
+	if isReply {
+		return "reply"
 	}
 	if isMention {
 		return "mention"
