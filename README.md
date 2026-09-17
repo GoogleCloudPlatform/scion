@@ -151,7 +151,7 @@ Visit our **[Documentation Site](https://googlecloudplatform.github.io/scion/)**
 
 ## Project Status
 
-Scion is an actively developed, pre-release project. It is a place to explore emerging agent collaboration patterns and improve the infrastructure they need through practical use.
+Scion is an actively developed, pre-1.0 project. It is a place to explore emerging agent collaboration patterns and improve the infrastructure they need through practical use.
 
 - **Local** — run agents directly from the CLI.
 - **Workstation** — use a local Hub, Runtime Broker, and web UI for one person.
