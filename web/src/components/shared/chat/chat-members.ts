@@ -177,6 +177,12 @@ export class ScionChatMembers extends LitElement {
   @property({ type: Array })
   unreadFromIds: string[] = [];
 
+  /** Filter mode: 'all' shows every member, 'unread' shows only those with unread messages. */
+  @state() private memberFilter: 'all' | 'unread' = 'all';
+
+  /** Sort mode: 'alpha' sorts A-Z by display name, 'activity' sorts by recent activity. */
+  @state() private memberSort: 'alpha' | 'activity' = 'alpha';
+
   /** Agent IDs that recently changed state — drives wobble animation. */
   @state() private recentlyChangedAgents = new Set<string>();
   /** Timers for clearing the recently-changed state after WOBBLE_DURATION_MS. */
@@ -277,6 +283,68 @@ export class ScionChatMembers extends LitElement {
       white-space: pre-line;
       text-align: left;
       max-width: 260px;
+    }
+
+    /* Filter + sort toolbar */
+    .members-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.375rem 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .filter-toggle {
+      display: inline-flex;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.375rem;
+      overflow: hidden;
+      flex: 1;
+    }
+
+    .filter-toggle button {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.125rem;
+      height: 1.5rem;
+      border: none;
+      background: var(--scion-surface, #ffffff);
+      color: var(--scion-text-muted, #64748b);
+      cursor: pointer;
+      padding: 0 0.5rem;
+      font-size: var(--chat-fs-sm);
+      font-family: inherit;
+      font-weight: 500;
+      transition: all 150ms ease;
+      white-space: nowrap;
+      flex: 1;
+      justify-content: center;
+    }
+
+    .filter-toggle button:not(:last-child) {
+      border-right: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .filter-toggle button:hover:not(.active) {
+      background: var(--scion-bg-subtle, #f1f5f9);
+    }
+
+    .filter-toggle button.active {
+      background: var(--scion-primary, #3b82f6);
+      color: white;
+    }
+
+    .filter-toggle button sl-icon {
+      font-size: var(--chat-fs-sm);
+    }
+
+    .sort-btn {
+      flex-shrink: 0;
+    }
+
+    .sort-btn::part(base) {
+      font-size: var(--chat-fs-base);
+      padding: 0.125rem;
     }
 
     .empty-note {
@@ -443,7 +511,7 @@ export class ScionChatMembers extends LitElement {
   /** Click on the host element itself (empty space) triggers a reset. */
   private _handleHostClick = (e: MouseEvent): void => {
     // Only fire when the click lands on the host itself or on the
-    // scrollable container (not on a member item or section label)
+    // scrollable container (not on a member item, section label, or toolbar)
     const path = e.composedPath();
     const clickedMember = path.some(
       (el) => el instanceof HTMLElement && el.classList?.contains('member-item')
@@ -453,33 +521,106 @@ export class ScionChatMembers extends LitElement {
       (el) => el instanceof HTMLElement && el.classList?.contains('section-label')
     );
     if (clickedLabel) return;
+    const clickedToolbar = path.some(
+      (el) => el instanceof HTMLElement && el.classList?.contains('members-toolbar')
+    );
+    if (clickedToolbar) return;
 
     this.dispatchEvent(new CustomEvent('reset-view', { bubbles: true, composed: true }));
   };
 
   override render() {
-    return html` ${this.renderHumans()} ${this.renderAgents()} `;
+    return html` ${this.renderToolbar()} ${this.renderHumans()} ${this.renderAgents()} `;
+  }
+
+  /** Render the filter + sort toolbar at the top of the members sidebar. */
+  private renderToolbar() {
+    return html`
+      <div class="members-toolbar">
+        <div class="filter-toggle">
+          <button
+            class=${this.memberFilter === 'all' ? 'active' : ''}
+            @click=${() => this.setMemberFilter('all')}
+          >
+            All
+          </button>
+          <button
+            class=${this.memberFilter === 'unread' ? 'active' : ''}
+            @click=${() => this.setMemberFilter('unread')}
+          >
+            <sl-icon name="envelope"></sl-icon>
+            Unread
+          </button>
+        </div>
+        <sl-dropdown>
+          <sl-icon-button
+            slot="trigger"
+            name="sort-down"
+            class="sort-btn"
+            label="Sort members"
+          ></sl-icon-button>
+          <sl-menu @sl-select=${this.handleMemberSortSelect}>
+            <sl-menu-label>Sort members</sl-menu-label>
+            <sl-menu-item type="checkbox" value="alpha" ?checked=${this.memberSort === 'alpha'}>
+              Alphabetical
+            </sl-menu-item>
+            <sl-menu-item
+              type="checkbox"
+              value="activity"
+              ?checked=${this.memberSort === 'activity'}
+            >
+              Recent activity
+            </sl-menu-item>
+          </sl-menu>
+        </sl-dropdown>
+      </div>
+    `;
+  }
+
+  /** Set the member filter mode. */
+  private setMemberFilter(filter: 'all' | 'unread'): void {
+    if (this.memberFilter === filter) return;
+    this.memberFilter = filter;
+  }
+
+  /** Handle sort mode selection from the dropdown. */
+  private handleMemberSortSelect(e: Event): void {
+    const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
+    const value = detail?.item?.getAttribute('value');
+    if (value === 'alpha' || value === 'activity') {
+      this.memberSort = value;
+    }
   }
 
   private renderHumans() {
     // Filter out the current user so they don't appear in their own
     // members sidebar.
-    const visible = this.humans.filter((m) => m.id !== this.currentUserId);
+    let visible = this.humans.filter((m) => m.id !== this.currentUserId);
+
+    // Apply unread filter
+    if (this.memberFilter === 'unread') {
+      visible = visible.filter((m) => this.unreadFromIds.includes(m.id));
+    }
+
     const sorted = [...visible].sort((a, b) => {
-      // Active users first, then alphabetical
-      const aActive = a.presenceState === 'active' ? 0 : 1;
-      const bActive = b.presenceState === 'active' ? 0 : 1;
-      if (aActive !== bActive) return aActive - bActive;
+      if (this.memberSort === 'activity') {
+        // Active users first, idle second, then rest
+        const aActive = a.presenceState === 'active' ? 0 : a.presenceState === 'idle' ? 1 : 2;
+        const bActive = b.presenceState === 'active' ? 0 : b.presenceState === 'idle' ? 1 : 2;
+        if (aActive !== bActive) return aActive - bActive;
+        return a.displayName.localeCompare(b.displayName);
+      }
+      // Alphabetical
       return a.displayName.localeCompare(b.displayName);
     });
 
     return html`
       <div class="section-label">People — ${sorted.length}</div>
-      ${
-        sorted.length === 0
-          ? html`<div class="empty-note">No members</div>`
-          : sorted.map((m) => this.renderHuman(m))
-      }
+      ${sorted.length === 0
+        ? html`<div class="empty-note">
+            ${this.memberFilter === 'unread' ? 'No unread' : 'No members'}
+          </div>`
+        : sorted.map((m) => this.renderHuman(m))}
     `;
   }
 
@@ -502,11 +643,9 @@ export class ScionChatMembers extends LitElement {
             presence-state="${m.presenceState || ''}"
           ></scion-chat-avatar>
           ${hasUnread ? html`<div class="unread-dot"></div>` : nothing}
-          ${
-            isTyping
-              ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
-              : nothing
-          }
+          ${isTyping
+            ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
+            : nothing}
         </div>
         <div class="member-info">
           <div class="member-name">${m.displayName}</div>
@@ -517,21 +656,32 @@ export class ScionChatMembers extends LitElement {
   }
 
   private renderAgents() {
-    const sorted = [...this.agents].sort((a, b) => {
-      // Running agents first, then alphabetical
-      const aRunning = a.phase === 'running' ? 0 : 1;
-      const bRunning = b.phase === 'running' ? 0 : 1;
-      if (aRunning !== bRunning) return aRunning - bRunning;
+    let visible = [...this.agents];
+
+    // Apply unread filter
+    if (this.memberFilter === 'unread') {
+      visible = visible.filter((a) => this.unreadFromIds.includes(a.id));
+    }
+
+    const sorted = visible.sort((a, b) => {
+      if (this.memberSort === 'activity') {
+        // Sort by lastActivityEvent timestamp (most recent first)
+        const aTime = a.lastActivityEvent ? new Date(a.lastActivityEvent).getTime() : 0;
+        const bTime = b.lastActivityEvent ? new Date(b.lastActivityEvent).getTime() : 0;
+        if (aTime !== bTime) return bTime - aTime;
+        return a.displayName.localeCompare(b.displayName);
+      }
+      // Alphabetical
       return a.displayName.localeCompare(b.displayName);
     });
 
     return html`
       <div class="section-label">Agents — ${sorted.length}</div>
-      ${
-        sorted.length === 0
-          ? html`<div class="empty-note">No agents</div>`
-          : sorted.map((a) => this.renderAgent(a))
-      }
+      ${sorted.length === 0
+        ? html`<div class="empty-note">
+            ${this.memberFilter === 'unread' ? 'No unread' : 'No agents'}
+          </div>`
+        : sorted.map((a) => this.renderAgent(a))}
     `;
   }
 
@@ -574,38 +724,34 @@ export class ScionChatMembers extends LitElement {
             size="28"
           ></scion-chat-avatar>
           ${hasUnread ? html`<div class="unread-dot"></div>` : nothing}
-          ${
-            isTyping
-              ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
-              : nothing
-          }
+          ${isTyping
+            ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
+            : nothing}
         </div>
         <div class="member-info">
           <div class="member-name">${a.displayName}</div>
           <scion-status-badge status=${badgeStatus} size="small"></scion-status-badge>
         </div>
-        ${
-          a.canAttach !== true
-            ? nothing
-            : html`<a
-                href="/agents/${a.id}/terminal"
-                class="agent-terminal"
-                title="Open terminal in its own window (Ctrl/Cmd-click for a tab)"
-                @click=${(e: MouseEvent) => {
-                  e.stopPropagation();
-                  // Leave modified and non-primary clicks to the browser so
-                  // Ctrl/Cmd-click, Shift-click and middle-click behave as they
-                  // do on any other link.
-                  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
-                    return;
-                  }
-                  e.preventDefault();
-                  openTerminalPopout(a.id);
-                }}
-              >
-                <sl-icon name="terminal" style="font-size: var(--chat-fs-base);"></sl-icon>
-              </a>`
-        }
+        ${a.canAttach !== true
+          ? nothing
+          : html`<a
+              href="/agents/${a.id}/terminal"
+              class="agent-terminal"
+              title="Open terminal in its own window (Ctrl/Cmd-click for a tab)"
+              @click=${(e: MouseEvent) => {
+                e.stopPropagation();
+                // Leave modified and non-primary clicks to the browser so
+                // Ctrl/Cmd-click, Shift-click and middle-click behave as they
+                // do on any other link.
+                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+                  return;
+                }
+                e.preventDefault();
+                openTerminalPopout(a.id);
+              }}
+            >
+              <sl-icon name="terminal" style="font-size: var(--chat-fs-base);"></sl-icon>
+            </a>`}
         <a
           href="/agents/${a.id}"
           target="_blank"
