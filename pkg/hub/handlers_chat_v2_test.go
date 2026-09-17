@@ -4433,3 +4433,64 @@ func TestChatV2_Send_SenderUsesEmailNotDisplayName(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// autoAdvanceSenderReadState regression test (R-1, commit ddeb6f1b)
+// ---------------------------------------------------------------------------
+
+func TestAutoAdvanceSenderReadState(t *testing.T) {
+	store, db := newTestWebChatStoreV2(t)
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+
+	// Construct a minimal Server with webChatStore set.
+	s := &Server{}
+	s.webChatStore = store
+
+	// --- Happy path: after auto-advance, sender's read state equals the sent message ID.
+	s.autoAdvanceSenderReadState(ctx, "sender-1", "topic-1", "msg-42")
+
+	rs, err := store.GetReadState(ctx, "sender-1", "topic-1")
+	if err != nil {
+		t.Fatalf("GetReadState after auto-advance: %v", err)
+	}
+	if rs == nil {
+		t.Fatal("expected non-nil read state after auto-advance")
+	}
+	if rs.LastReadMessageID != "msg-42" {
+		t.Errorf("LastReadMessageID = %q, want %q", rs.LastReadMessageID, "msg-42")
+	}
+
+	// --- Advance again to a newer message.
+	s.autoAdvanceSenderReadState(ctx, "sender-1", "topic-1", "msg-99")
+
+	rs, err = store.GetReadState(ctx, "sender-1", "topic-1")
+	if err != nil {
+		t.Fatalf("GetReadState after second advance: %v", err)
+	}
+	if rs == nil {
+		t.Fatal("expected non-nil read state after second advance")
+	}
+	if rs.LastReadMessageID != "msg-99" {
+		t.Errorf("LastReadMessageID = %q, want %q", rs.LastReadMessageID, "msg-99")
+	}
+
+	// --- Nil/empty guards: should be no-ops (no panic, no state change).
+	s.autoAdvanceSenderReadState(ctx, "", "topic-1", "msg-100")
+	s.autoAdvanceSenderReadState(ctx, "sender-1", "", "msg-100")
+	s.autoAdvanceSenderReadState(ctx, "sender-1", "topic-1", "")
+
+	// Verify state unchanged after guard calls.
+	rs, err = store.GetReadState(ctx, "sender-1", "topic-1")
+	if err != nil {
+		t.Fatalf("GetReadState after guard calls: %v", err)
+	}
+	if rs.LastReadMessageID != "msg-99" {
+		t.Errorf("guard calls should be no-ops: LastReadMessageID = %q, want %q", rs.LastReadMessageID, "msg-99")
+	}
+
+	// --- Nil webChatStore: should not panic.
+	s2 := &Server{}
+	s2.autoAdvanceSenderReadState(ctx, "sender-1", "topic-1", "msg-200")
+}

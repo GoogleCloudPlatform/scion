@@ -1349,3 +1349,75 @@ func TestResolveDMConversation_BroadcastSkipped(t *testing.T) {
 		t.Fatalf("expected empty ConversationID for broadcast, got %q", result.Items[0].ConversationID)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// TypeMention guard regression test (R-1, commit 55c85c76)
+// ---------------------------------------------------------------------------
+
+// TestDeliverToUser_MentionExcludedFromDMActivity verifies that a message with
+// Type=TypeMention does NOT trigger cross-channel DM detection (no phantom DM
+// rows), while an otherwise-identical message with Type=TypeInstruction DOES
+// create DM activity rows.
+func TestDeliverToUser_MentionExcludedFromDMActivity(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	ctx := context.Background()
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	wcs := NewWebChatStore(db, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	defer func() { _ = b.Close() }()
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+	proxy.webChatStore = wcs
+
+	senderID := tid("sender-alice")
+	recipientID := tid("recipient-bob")
+	topic := "project." + projectID + ".user.message"
+
+	// --- Case 1: TypeMention should NOT create DM activity rows.
+	mention := messages.NewMention("user:alice", "user:bob", "you were mentioned", "agent:primary-dev")
+	mention.SenderID = senderID
+	mention.RecipientID = recipientID
+	mention.ThreadID = "space-thread-1" // non-dm ThreadID
+
+	proxy.deliverToUser(ctx, projectID, topic, mention)
+
+	// Verify no DM rows were created for either participant.
+	dms, _ := wcs.ListDMs(ctx, senderID)
+	if len(dms) != 0 {
+		t.Errorf("TypeMention: expected 0 DM rows for sender, got %d", len(dms))
+	}
+	dms, _ = wcs.ListDMs(ctx, recipientID)
+	if len(dms) != 0 {
+		t.Errorf("TypeMention: expected 0 DM rows for recipient, got %d", len(dms))
+	}
+
+	// --- Case 2: TypeInstruction with same shape SHOULD create DM activity rows.
+	instruction := messages.NewInstruction("user:alice", "user:bob", "direct message")
+	instruction.SenderID = senderID
+	instruction.RecipientID = recipientID
+	instruction.ThreadID = "space-thread-2" // non-dm ThreadID
+
+	proxy.deliverToUser(ctx, projectID, topic, instruction)
+
+	// Verify DM rows WERE created for both participants.
+	dms, _ = wcs.ListDMs(ctx, senderID)
+	if len(dms) != 1 {
+		t.Fatalf("TypeInstruction: expected 1 DM row for sender, got %d", len(dms))
+	}
+	dms, _ = wcs.ListDMs(ctx, recipientID)
+	if len(dms) != 1 {
+		t.Fatalf("TypeInstruction: expected 1 DM row for recipient, got %d", len(dms))
+	}
+}
