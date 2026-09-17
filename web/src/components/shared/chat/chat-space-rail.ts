@@ -2169,8 +2169,11 @@ export class ScionChatSpaceRail extends LitElement {
   private renderThreadList(threads: ChatSpaceThread[], projectId: string) {
     const groups = this.getGroups(projectId);
     if (groups.length === 0) {
-      // No groups — render flat list
-      return threads.map((t) => this.renderThread(t, projectId));
+      // No groups — render flat list, but still show group-name input if active
+      return html`
+        ${threads.map((t) => this.renderThread(t, projectId))}
+        ${this.groupNameInput?.projectId === projectId ? this.renderGroupNameInput() : nothing}
+      `;
     }
 
     // Build a lookup of thread id → thread
@@ -2322,7 +2325,7 @@ export class ScionChatSpaceRail extends LitElement {
         class="thread-item ${isSelected ? 'selected' : ''} ${isDragging
           ? 'dragging'
           : ''} ${isDragOver ? 'drag-over' : ''}"
-        ?draggable=${isDraggable}
+        draggable=${isDraggable ? 'true' : nothing}
         @dragstart=${isDraggable
           ? (e: DragEvent) => this.handleThreadDragStart(e, thread.id)
           : nothing}
