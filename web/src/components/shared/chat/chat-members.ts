@@ -540,12 +540,14 @@ export class ScionChatMembers extends LitElement {
         <div class="filter-toggle">
           <button
             class=${this.memberFilter === 'all' ? 'active' : ''}
+            aria-pressed=${this.memberFilter === 'all'}
             @click=${() => this.setMemberFilter('all')}
           >
             All
           </button>
           <button
             class=${this.memberFilter === 'unread' ? 'active' : ''}
+            aria-pressed=${this.memberFilter === 'unread'}
             @click=${() => this.setMemberFilter('unread')}
           >
             <sl-icon name="envelope"></sl-icon>
@@ -666,8 +668,10 @@ export class ScionChatMembers extends LitElement {
     const sorted = visible.sort((a, b) => {
       if (this.memberSort === 'activity') {
         // Sort by lastActivityEvent timestamp (most recent first)
-        const aTime = a.lastActivityEvent ? new Date(a.lastActivityEvent).getTime() : 0;
-        const bTime = b.lastActivityEvent ? new Date(b.lastActivityEvent).getTime() : 0;
+        const aRaw = a.lastActivityEvent ? Date.parse(a.lastActivityEvent) : NaN;
+        const aTime = Number.isNaN(aRaw) ? 0 : aRaw;
+        const bRaw = b.lastActivityEvent ? Date.parse(b.lastActivityEvent) : NaN;
+        const bTime = Number.isNaN(bRaw) ? 0 : bRaw;
         if (aTime !== bTime) return bTime - aTime;
         return a.displayName.localeCompare(b.displayName);
       }
