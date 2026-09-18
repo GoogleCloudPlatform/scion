@@ -1270,7 +1270,16 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, projectSlug, agentSlug s
 				"protocolBinding": "JSONRPC",
 				"protocolVersion": "1.0",
 			},
+			{
+				"url":             agentURL,
+				"protocolBinding": "REST",
+				"protocolVersion": "0.3",
+			},
 		},
+		// v0.3 compatibility flat fields — legacy clients read these directly
+		// instead of supportedInterfaces.
+		"protocolVersion":   "0.3",
+		"preferredTransport": "REST",
 	}
 
 	if cfg.Bridge.Provider.Organization != "" {

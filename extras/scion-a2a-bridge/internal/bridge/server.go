@@ -52,7 +52,8 @@ type Server struct {
 	snapshot   *SnapshotHolder // atomic snapshot of effective config (hot-apply)
 	metrics    *Metrics
 	log        *slog.Logger
-	sdkHandler http.Handler // SDK JSON-RPC handler
+	sdkHandler   http.Handler // SDK JSON-RPC handler
+	v0RESTHandler http.Handler // v0.3 REST compat handler (nil if not configured)
 	// Legacy validators — used only when snapshot is nil (tests, backward compat).
 	uatValidator         *UATValidator
 	jwtValidator         *JWTValidator
@@ -79,6 +80,13 @@ func NewServer(bridge *Bridge, cfg *Config, metrics *Metrics, log *slog.Logger, 
 		s.geExchangeValidator = NewGEExchangeValidator(cfg.Hub.Endpoint, cfg.Auth.GEExchange, log)
 	}
 	return s
+}
+
+// SetV0RESTHandler sets the v0.3 REST compatibility handler. When set,
+// the bridge exposes additional per-agent REST routes that accept v0.3-format
+// requests (snake_case JSON) alongside the existing v1.0 JSON-RPC routes.
+func (s *Server) SetV0RESTHandler(handler http.Handler) {
+	s.v0RESTHandler = handler
 }
 
 // SetSnapshot wires the atomic config snapshot for hot-apply support.
@@ -200,6 +208,15 @@ func (s *Server) Handler() http.Handler {
 	// Legacy per-agent routes (backward compatibility for "grove" naming).
 	mux.HandleFunc("GET /groves/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
 	mux.HandleFunc("POST /groves/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
+
+	// v0.3 REST compat routes — catch-all under per-agent prefix delegates to
+	// the SDK v0.3 REST handler (if configured) after stripping the prefix.
+	// Go 1.22 mux ensures the more-specific agent-card and jsonrpc patterns
+	// above take precedence over this wildcard.
+	if s.v0RESTHandler != nil {
+		mux.HandleFunc("/projects/{projectSlug}/agents/{agentSlug}/{v0rest...}", s.handleV0REST)
+		mux.HandleFunc("/groves/{projectSlug}/agents/{agentSlug}/{v0rest...}", s.handleV0REST)
+	}
 
 	// Health, readiness, and metrics.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -372,6 +389,48 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 
 	// Delegate to SDK JSON-RPC handler.
 	s.sdkHandler.ServeHTTP(w, r)
+}
+
+// handleV0REST validates the project/agent routing and delegates to the v0.3 REST
+// compatibility handler. The per-agent prefix is stripped from the URL path so the
+// SDK handler sees paths like /message:send, /tasks, etc.
+func (s *Server) handleV0REST(w http.ResponseWriter, r *http.Request) {
+	projectSlug := r.PathValue("projectSlug")
+	agentSlug := r.PathValue("agentSlug")
+
+	if !slugRE.MatchString(projectSlug) || !slugRE.MatchString(agentSlug) {
+		http.Error(w, "invalid slug", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.bridge.AuthorizeExposed(projectSlug, agentSlug); err != nil {
+		http.Error(w, "agent not found", http.StatusNotFound)
+		return
+	}
+
+	// Opportunistic sweep: fire at most once per interval per instance.
+	s.bridge.maybeOpportunisticSweep(r.Context())
+
+	// Enforce request body size limit.
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
+
+	// Inject routing context for the executor.
+	ctx := WithRouteInfo(r.Context(), RouteInfo{
+		ProjectSlug: projectSlug,
+		AgentSlug:   agentSlug,
+	})
+
+	// Strip the per-agent prefix so the v0.3 REST handler sees bare paths
+	// like /message:send, /tasks/{id}, etc.
+	v0rest := r.PathValue("v0rest")
+	stripped := *r.URL
+	stripped.Path = "/" + v0rest
+	stripped.RawPath = "" // reset; our paths don't need raw encoding
+
+	r2 := r.Clone(ctx)
+	r2.URL = &stripped
+
+	s.v0RESTHandler.ServeHTTP(w, r2)
 }
 
 // writeJSONRPCError writes a minimal JSON-RPC error response.

@@ -35,6 +35,7 @@ import (
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/prometheus/client_golang/prometheus"
@@ -235,6 +236,12 @@ func main() {
 		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
 	)
 
+	// Create v0.3 REST compat handler for legacy (GE v0.3) clients.
+	v0RESTHandler := a2av0.NewRESTHandler(
+		sdkRequestHandler,
+		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+	)
+
 	// Start A2A HTTP server.
 	listenAddr := cfg.Bridge.ListenAddress
 	if listenAddr == "" {
@@ -242,6 +249,7 @@ func main() {
 	}
 
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"), sdkJSONRPCHandler)
+	srv.SetV0RESTHandler(v0RESTHandler)
 	srv.SetSnapshot(snapshot)
 	if signingKey != nil {
 		srv.SetJWTValidator(bridge.NewJWTValidator(signingKey))
@@ -500,6 +508,12 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
 	)
 
+	// Create v0.3 REST compat handler for legacy (GE v0.3) clients.
+	v0RESTHandler := a2av0.NewRESTHandler(
+		sdkRequestHandler,
+		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+	)
+
 	// 11. Start A2A HTTP server.
 	listenAddr := cfg.Bridge.ListenAddress
 	if listenAddr == "" {
@@ -507,6 +521,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	}
 
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"), sdkJSONRPCHandler)
+	srv.SetV0RESTHandler(v0RESTHandler)
 	srv.SetSnapshot(snapshot)
 	if signingKey != nil {
 		srv.SetJWTValidator(bridge.NewJWTValidator(signingKey))
