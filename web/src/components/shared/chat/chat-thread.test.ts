@@ -53,6 +53,8 @@ vi.mock('../../../client/api.js', () => ({
 
 await import('./chat-thread.js');
 type ScionChatThread = import('./chat-thread.js').ScionChatThread;
+type ChatSendDetail = import('./chat-composer.js').ChatSendDetail;
+type Message = import('../../../shared/types.js').Message;
 
 const CONVERSATION_KEY = 'topic-1';
 
@@ -157,6 +159,146 @@ describe('scion-chat-thread route-to-agent indicator', () => {
     );
     // m1 has recipient=agent:coder → shows "coder"; m2 has no recipient → empty; m3 is agent → empty
     expect(routed).toEqual(['coder', '', '']);
+  });
+});
+
+describe('scion-chat-thread agent recipient reconciliation', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('preserves the optimistic agent recipient when the SSE message uses thread routing', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      _pendingIdempotencyKeys: Set<string>;
+    };
+    internals.messageMap.set('pending-1', {
+      id: 'pending-1',
+      projectId: '',
+      sender: '',
+      senderId: 'user-me',
+      recipient: 'agent:coder',
+      recipientId: 'coder',
+      msg: 'Please help',
+      type: 'chat',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState: 'pending',
+    });
+    internals._pendingIdempotencyKeys.add('pending-1');
+
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'server-1',
+      msg: 'Please help',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: `thread:${CONVERSATION_KEY}`,
+      recipientId: CONVERSATION_KEY,
+      type: 'chat',
+      createdAt: '2026-01-01T00:00:00Z',
+    });
+
+    await vi.waitFor(() => expect(internals.messageMap.has('server-1')).toBe(true));
+    expect(internals.messageMap.get('server-1')?.recipient).toBe('agent:coder');
+    expect(internals.messageMap.get('server-1')?.recipientId).toBe('coder');
+    expect(internals.messageMap.has('pending-1')).toBe(false);
+  });
+
+  it('preserves the optimistic agent recipient when the POST response finds an SSE version', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    el.defaultAgent = 'coder';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    let resolveSend!: (response: Response) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    apiFetch.mockResolvedValue(emptyHistory());
+
+    const sendPromise = internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'Please help',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+    const optimistic = Array.from(internals.messageMap.values()).find(
+      (message) => message.dispatchState === 'pending'
+    );
+    expect(optimistic?.recipient).toBe('agent:coder');
+
+    internals.messageMap.set('server-2', {
+      id: 'server-2',
+      projectId: '',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: `thread:${CONVERSATION_KEY}`,
+      recipientId: CONVERSATION_KEY,
+      msg: 'Please help',
+      type: 'chat',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:00Z',
+    });
+    resolveSend({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ id: 'server-2' }),
+    } as unknown as Response);
+
+    await sendPromise;
+    expect(internals.messageMap.get('server-2')?.recipient).toBe('agent:coder');
+    expect(internals.messageMap.get('server-2')?.recipientId).toBe('coder');
+  });
+
+  it('preserves an existing agent recipient when backfill uses thread routing', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      mergeMessages(messages: Message[]): void;
+    };
+    const existing: Message = {
+      id: 'server-3',
+      projectId: '',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: 'agent:coder',
+      recipientId: 'coder',
+      msg: 'Please help',
+      type: 'chat',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:00Z',
+    };
+    const backfilled: Message = {
+      ...existing,
+      recipient: `thread:${CONVERSATION_KEY}`,
+      recipientId: CONVERSATION_KEY,
+    };
+
+    internals.mergeMessages([existing]);
+    internals.mergeMessages([backfilled]);
+
+    expect(internals.messageMap.get('server-3')?.recipient).toBe('agent:coder');
+    expect(internals.messageMap.get('server-3')?.recipientId).toBe('coder');
   });
 });
 

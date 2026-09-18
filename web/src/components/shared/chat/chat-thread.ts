@@ -1140,6 +1140,13 @@ export class ScionChatThread extends LitElement {
 
   private mergeMessages(newMessages: Message[]): void {
     for (const msg of newMessages) {
+      const existing = this.messageMap.get(msg.id);
+      // Preserve agent recipient from existing message if incoming lacks it
+      // (e.g., backfill or SSE may not carry agent routing info).
+      if (existing?.recipient?.startsWith('agent:') && !msg.recipient?.startsWith('agent:')) {
+        msg.recipient = existing.recipient;
+        msg.recipientId = existing.recipientId;
+      }
       this.messageMap.set(msg.id, msg);
     }
 
@@ -1399,7 +1406,8 @@ export class ScionChatThread extends LitElement {
       attachments?: import('./chat-message.js').AttachmentRefInfo[];
     };
     const detail = (e as CustomEvent).detail as
-      ({ data?: ChatEventData } & ChatEventData) | undefined;
+      | ({ data?: ChatEventData } & ChatEventData)
+      | undefined;
     // stateManager wraps SSE payloads as { state, data }; tolerate a flat detail too.
     const eventData: ChatEventData | undefined = detail?.data ?? detail;
     if (!eventData) {
@@ -1454,7 +1462,13 @@ export class ScionChatThread extends LitElement {
       // remove the temp-keyed optimistic entry to prevent a duplicate flash.
       if (this._pendingIdempotencyKeys.size > 0 && msg.senderId === this.selfUserId()) {
         for (const key of this._pendingIdempotencyKeys) {
-          if (this.messageMap.has(key)) {
+          const opt = this.messageMap.get(key);
+          if (opt) {
+            // Preserve optimistic agent recipient if SSE version lacks it.
+            if (opt.recipient?.startsWith('agent:') && !msg.recipient?.startsWith('agent:')) {
+              msg.recipient = opt.recipient;
+              msg.recipientId = opt.recipientId;
+            }
             this.messageMap.delete(key);
             this._pendingIdempotencyKeys.delete(key);
             break;
@@ -1682,7 +1696,8 @@ export class ScionChatThread extends LitElement {
   private handleV2ReadStateEvent(e: Event): void {
     type ReadStateData = { conversationKey?: string; messageId?: string; readAt?: string };
     const detail = (e as CustomEvent).detail as
-      ({ data?: ReadStateData } & ReadStateData) | undefined;
+      | ({ data?: ReadStateData } & ReadStateData)
+      | undefined;
     const eventData: ReadStateData | undefined = detail?.data ?? detail;
     if (!eventData?.messageId) return;
     if (eventData.conversationKey !== this.conversationKey) return;
@@ -1917,6 +1932,14 @@ export class ScionChatThread extends LitElement {
           const sseVersion = this.messageMap.get(resData.id);
           if (sseVersion) {
             sseVersion.dispatchState = 'dispatched';
+            // Preserve optimistic agent recipient if SSE version lacks it.
+            if (
+              optimistic.recipient?.startsWith('agent:') &&
+              !sseVersion.recipient?.startsWith('agent:')
+            ) {
+              sseVersion.recipient = optimistic.recipient;
+              sseVersion.recipientId = optimistic.recipientId;
+            }
           } else {
             optimistic.id = resData.id;
             optimistic.dispatchState = 'dispatched';
@@ -2367,25 +2390,21 @@ export class ScionChatThread extends LitElement {
           <sl-icon name="reply"></sl-icon>
           Reply
         </div>
-        ${
-          canEditDelete
-            ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuEdit()}>
-                <sl-icon name="pencil"></sl-icon>
-                Edit
-              </div>`
-            : nothing
-        }
-        ${
-          canEditDelete
-            ? html`<div
-                class="context-menu-item danger"
-                @click=${() => this.handleContextMenuDelete()}
-              >
-                <sl-icon name="trash"></sl-icon>
-                Delete
-              </div>`
-            : nothing
-        }
+        ${canEditDelete
+          ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuEdit()}>
+              <sl-icon name="pencil"></sl-icon>
+              Edit
+            </div>`
+          : nothing}
+        ${canEditDelete
+          ? html`<div
+              class="context-menu-item danger"
+              @click=${() => this.handleContextMenuDelete()}
+            >
+              <sl-icon name="trash"></sl-icon>
+              Delete
+            </div>`
+          : nothing}
         <div class="context-menu-item" @click=${() => this.handleContextMenuCopyText()}>
           <sl-icon name="clipboard"></sl-icon>
           Copy text
@@ -2394,19 +2413,14 @@ export class ScionChatThread extends LitElement {
           <sl-icon name="link-45deg"></sl-icon>
           Copy link
         </div>
-        ${
-          this.isSenderAgent(msg) &&
-          !this.isDM &&
-          !(msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgent)
-            ? html`<div
-                class="context-menu-item"
-                @click=${() => this.handleContextMenuSetDefault()}
-              >
-                <sl-icon name="robot"></sl-icon>
-                Make this agent thread default
-              </div>`
-            : nothing
-        }
+        ${this.isSenderAgent(msg) &&
+        !this.isDM &&
+        !(msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgent)
+          ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuSetDefault()}>
+              <sl-icon name="robot"></sl-icon>
+              Make this agent thread default
+            </div>`
+          : nothing}
       </div>
     `;
   }
@@ -2955,16 +2969,14 @@ export class ScionChatThread extends LitElement {
       <div class="thread-container">
         ${this.renderContent()}
         ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
-        ${
-          this.canSend
-            ? html`
-                <scion-chat-composer
-                  .agents=${this.agents}
-                  @chat-send=${this.handleChatSend}
-                ></scion-chat-composer>
-              `
-            : nothing
-        }
+        ${this.canSend
+          ? html`
+              <scion-chat-composer
+                .agents=${this.agents}
+                @chat-send=${this.handleChatSend}
+              ></scion-chat-composer>
+            `
+          : nothing}
         ${this.renderFilePreview()}
       </div>
     `;
@@ -3104,25 +3116,21 @@ export class ScionChatThread extends LitElement {
         @click=${this.handleMessageAreaClick}
       >
         <div class="messages-list">
-          ${
-            this.loadingOlder
-              ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
-              : nothing
-          }
+          ${this.loadingOlder
+            ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
+            : nothing}
           ${this.renderMessages()}
         </div>
-        ${
-          !this.pinnedToBottom
-            ? html`
-                <div class="jump-to-latest">
-                  <button class="jump-btn" @click=${this.handleJumpToLatest}>
-                    <sl-icon name="arrow-down"></sl-icon>
-                    Jump to latest
-                  </button>
-                </div>
-              `
-            : nothing
-        }
+        ${!this.pinnedToBottom
+          ? html`
+              <div class="jump-to-latest">
+                <button class="jump-btn" @click=${this.handleJumpToLatest}>
+                  <sl-icon name="arrow-down"></sl-icon>
+                  Jump to latest
+                </button>
+              </div>
+            `
+          : nothing}
       </div>
     `;
   }
@@ -3289,7 +3297,9 @@ export class ScionChatThread extends LitElement {
           .replyPreview=${replyPreview}
           editedAt=${ext?.editedAt || ''}
           deletedAt=${ext?.deletedAt || ''}
-          senderProjectSlug=${msg.senderProjectId ? this.resolveProjectSlug(msg.senderProjectId) : ''}
+          senderProjectSlug=${msg.senderProjectId
+            ? this.resolveProjectSlug(msg.senderProjectId)
+            : ''}
           @scroll-to-message=${this.handleScrollToMessage}
           @path-link-click=${this.handlePathLinkClick}
         ></scion-chat-message>
