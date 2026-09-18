@@ -1,0 +1,25 @@
+# Release Notes (2026-09-17)
+
+Cross-project agent messaging lands in full (7 phases, from policy store through UI and documentation), reply infrastructure overhauled, and extensive chat send/receive UX polish.
+
+## 🚀 Features
+* **Cross-project agent messaging (#1693, #1705, #1706, #1713, #1726, #1733, #1735):** Complete 7-phase feature enabling agents to message across project boundaries. Phase 0: mode matrix characterization (16 mode pairs), ingress inventory (9 surfaces), canonical DM access extraction. Phase 1: hub message mode enum with non-escalation grant guard, project-level `cross_project_inbound` policy (`none`/`members`/`any`). Phase 2: typed `EvaluateAgentMessage` with stable denial codes, `CheckEffectiveMembership` with group resolution, handler wiring with threaded `MessageDecision`. Phase 3: target resolution API, capabilities API, conversation resolver, cross-project history authorization, CLI `--project` flag and `conv:` replies. Phase 4: hub settings toggle, project inbound policy UI, agent hub mode in create/configure/detail, cross-project denial codes and messageability indicators. Phase 5: multi-target DM fan-out, group/broadcast/plugin boundary enforcement, scheduled message reauthorization, attachment and content surface authorization. Phase 6: documentation with three-control system, cross-project decision tables, 7 denial codes, rollout/rollback.
+* **Reply message infrastructure (#1723, #1694, #1728, #1704):** New `reply` message type with metadata pass-through. Replies route to the sender agent (not thread default). `RE_msg_starting` metadata with first 32 chars of replied-to message. Reply context parsed from history backfill. `reply_context` promoted to top-level `DeliveryEnvelope` field.
+* **Optimistic send UX (#1695):** Input clears on Enter immediately, optimistic message appears with "Sending" indicator, text restored on failure. Composer stays enabled for typing the next message.
+* **Auto-convert large pastes to text attachments (#1714):** Pastes exceeding 1,000 characters automatically converted to text file attachments. Image paste takes precedence.
+* **Members sidebar filter/sort (#1701):** All/Unread toggle and sort dropdown (Alphabetical/Recent Activity) with agent activity by `lastActivityEvent` and human activity by presence state.
+* **Set-default-agent context menu (#1692):** "Make this agent thread default" on right-click of agent messages, dispatches `default-agent-changed` event.
+* **`scion conversation get-message` (#1737):** New subcommand with hub endpoint, participant-based authorization, and IDOR protection.
+* **Container image build/registry wizard (#1725):** Single-node-VM deploy script gains interactive wizard for registry path or local image builds, with runtime broker enablement and SSH-resilient builds.
+
+## 🐛 Fixes
+* **Chat send/receive polish (#1730, #1736, #1719, #1699, #1698, #1700, #1691, #1690, #1689):** Double message flash on send eliminated (idempotency key tracking). Agent-recipient header preserved during SSE reconciliation. Optimistic thread creation without sidebar flash. Thread group rendering fixes (dedup, co-mingling, context menu). Copy as Markdown property names corrected. Thread group creation moved to space menu. Live mention override removed from destination chip.
+* **Self-sent unread and cross-channel DM (#1703):** Self-sent messages no longer mark threads unread. Non-web messages (Discord) now touch DM activity via canonical key.
+* **Native group conversation routing (#1729):** Empty `ExternalRef` on native conversations (created via conversation API) caused a hard 500. Gates legacy `thread:` prefix parse; native conversations route by `ConversationID`.
+* **Auto-register group conversation participants (#1697):** Agents and users auto-registered on send and receive paths using idempotent `EnsureParticipant`.
+* **Hub agent defaults fallback (#1734, #1724, #1696):** Web form harness-config fallback was hardcoded instead of cascading project → hub → hardcoded. File-mode `default_harness_config` was saved but never applied. File-mode settings save dropped the selection (used raw state instead of computed getter). Default harness changed from antigravity to claude.
+* **Empty SourcePath in broker auth file copy (#1720):** Five downstream consumers crashed with `os.Stat("")` when a file secret targeted a well-known auth filename in broker mode. Added empty-SourcePath guards at all five sites across three runtime files.
+* **Admin harness config dropdown scope (#1721):** Dropdown showed project-scoped duplicates. Added `scope=global` filter.
+* **SPA routing for chat URLs (#1702):** Browser refresh on `/chat/space/uuid` returned 404. `tryServeStaticFile` now rejects embedded directories.
+* **Sidebar nav tooltips (#1731):** Collapsed navbar icons now show right-aligned tooltips on hover.
+* **otelslog build blocker (#1722):** `otelslog` v0.14.0 required `otel/log` v0.15.0 but repo pinned v0.21.0 — bumped to v0.20.0. Telemetry tests updated for current API (#1727).
