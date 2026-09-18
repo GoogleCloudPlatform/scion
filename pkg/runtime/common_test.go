@@ -1266,8 +1266,8 @@ func TestEmptySourcePathSkippedInApplyResolvedAuth(t *testing.T) {
 	}
 
 	err := applyResolvedAuth(config,
-		func(k, v string) {},                                   // addEnv
-		func(v api.VolumeMount) {},                             // addVolume
+		func(k, v string) {},       // addEnv
+		func(v api.VolumeMount) {}, // addVolume
 		func(src, dst string, ro, bind bool) { mountedFiles = append(mountedFiles, src) }, // registerMount
 	)
 	if err != nil {
