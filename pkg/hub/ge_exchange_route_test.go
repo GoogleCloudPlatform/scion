@@ -187,10 +187,16 @@ func TestGEExchange_Route_InvalidCredentialFailsClosed(t *testing.T) {
 		t.Fatalf("expected 401 for invalid credential, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var errResp map[string]interface{}
+	// Verify this is the exchange handler's rejection, not the outer middleware.
+	var errResp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err == nil {
-		if code, ok := errResp["error"].(string); ok && code == "unauthorized" {
-			// This would be the outer middleware blocking — wrong
+		if errResp.Error.Code == "unauthorized" &&
+			strings.Contains(errResp.Error.Message, "missing authorization") {
 			t.Fatal("invalid credential returned outer middleware 'unauthorized' instead of exchange-level rejection")
 		}
 	}
@@ -249,12 +255,18 @@ func TestGEExchange_Route_DisabledExchangeRemainsClosedDespiteRouteExemption(t *
 		t.Fatalf("disabled exchange should return 401, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var errResp map[string]interface{}
+	// The error response is {"error":{"code":"not_configured","message":"..."}}.
+	var errResp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
 		t.Fatalf("failed to decode error: %v", err)
 	}
-	if code, ok := errResp["error"].(string); !ok || code != "not_configured" {
-		t.Errorf("expected error code 'not_configured', got %v", errResp["error"])
+	if errResp.Error.Code != "not_configured" {
+		t.Errorf("expected error code 'not_configured', got %q", errResp.Error.Code)
 	}
 }
 

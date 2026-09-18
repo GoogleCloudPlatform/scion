@@ -528,6 +528,8 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	case "/api/v1/auth/cli/device/token": // CLI device flow token polling
 		return true
+	case "/api/v1/auth/integrations/google/exchange": // GE Google credential exchange (pre-auth; handler validates Google credential)
+		return true
 	case "/api/v1/auth/test-login": // Test-login for integration testing (gated by --enable-test-login)
 		return true
 	case "/api/v1/brokers/join": // Broker registration bootstrap (uses join token)
