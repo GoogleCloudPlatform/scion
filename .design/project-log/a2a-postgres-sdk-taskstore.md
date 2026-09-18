@@ -124,9 +124,9 @@ CREATE TABLE a2a_sdk_tasks (
     validation. Pre-migration rows terminalized with fail-closed semantics.
 16. **Heartbeat fence ordering (R3)** — waitForTaskEvent reordered:
     heartbeat→read→verify→return. No post-loss SDK event may be yielded.
-17. **Store wrapper chain (R3)** — SDK→ScopedTaskStore→BarrierTaskStore→
-    PostgresTaskStore. ScopedTaskStore is redundant compatibility only;
-    PostgresTaskStore is the authoritative owner enforcer.
+17. **Store wrapper chain (R3)** — SDK→BarrierTaskStore→PostgresTaskStore.
+    ScopedTaskStore removed (R3) — its in-memory ownership map was redundant
+    with SQL enforcement and grew monotonically without bound.
 
 ## Test provisioning
 
@@ -266,17 +266,36 @@ events and the task row. 3x repeated run verified clean.
 **README pool description:** Changed "separate connection pools" to "single shared
 `*sql.DB` connection pool" with accurate description.
 
-**ScopedTaskStore.ownership — NOT REQUIRED disposition:**
-In standalone mode with `PostgresTaskStore`, `ScopedTaskStore` is a redundant
-compatibility wrapper (design decision #17). Every ownership check performed by
-`ScopedTaskStore.ownership` map is also performed at the SQL level by
-`PostgresTaskStore` (owner_key WHERE clause on every Get/Update/List query).
-The map miss path (`!exists` in `Get`/`Update`) falls through to `inner.Get/Update`
-which hits SQL ownership enforcement. The map is a process-local fast-path
-optimization, not a correctness requirement. Growth is bounded by process lifetime
-(map cleared on restart). At typical standalone workloads (~10k tasks/day), memory
-overhead is ~1 MB/day. The map provides no value that the SQL store doesn't already
-enforce, and bounding it would add complexity without correctness benefit.
+**ScopedTaskStore.ownership — RESOLVED in Round 3:**
+Removed from standalone production path. The in-memory ownership map grew
+monotonically without bound in long-lived processes. PostgresTaskStore
+enforces `owner_key` at the SQL level on every operation. SDK now receives:
+SDK → BarrierTaskStore → PostgresTaskStore (no ScopedTaskStore).
+
+### Review Round 3 (2026-09-18)
+
+Addressed 6 EM findings + security audit + ScopedTaskStore removal.
+
+1. **Migration advisory lock connection scope (Critical):** `migrate()` now uses
+   `*sql.Conn` to pin lock/migration/unlock to a single connection. Test:
+   `TestConcurrentMigrationSerialization` (5 concurrent, no deadlock).
+2. **Legacy terminal mapping (Critical):** `legacyToCanonical` map preserves
+   individual mappings (completed→COMPLETED, canceled→CANCELED, etc.). Test:
+   `TestLegacyTerminalMappingPreservesSemantics`.
+3. **Notifier cleanup scope (Required):** Scoped `DELETE ... WHERE task_id = $1`
+   with canary survival verification.
+4. **Reap error propagation (Required):** `errors.Join` aggregates failures
+   alongside partial successes. Test: `TestReapErrorPropagation`.
+5. **One state predicate (Required):** `terminalStatesSQL` computed once at `init()`
+   from `sdkTerminalStates`. All runtime predicates use this single source.
+6. **Real rollback injection (Required):** CHECK constraint forces transaction
+   rollback. Two-phase test proves atomicity.
+7. **Security: PurgeTaskEvents cleanup (Required):** Eliminated all broad
+   `PurgeTaskEvents` from 12 tests. Each uses scoped DELETE with unique per-run IDs.
+8. **ScopedTaskStore removal (Required):** Removed from standalone path. SDK →
+   BarrierTaskStore → PostgresTaskStore. No in-memory ownership map.
+
+Verification: 280 tests pass (race clean), `go build/vet` clean.
 
 ## Residual risks
 
