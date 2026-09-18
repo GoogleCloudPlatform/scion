@@ -514,12 +514,14 @@ export class ScionPageAgentCreate extends LitElement {
     this.customModelId = '';
 
     const settings = await this.fetchProjectSettings(this.projectId);
-    if (!settings) return;
 
-    if (settings.defaultMaxTurns) this.maxTurns = settings.defaultMaxTurns;
-    if (settings.defaultMaxModelCalls) this.maxModelCalls = settings.defaultMaxModelCalls;
-    if (settings.defaultMaxDuration) this.maxDuration = settings.defaultMaxDuration;
-    const effectiveModel = settings.defaultModel || this.hubDefaultModel;
+    if (settings) {
+      if (settings.defaultMaxTurns) this.maxTurns = settings.defaultMaxTurns;
+      if (settings.defaultMaxModelCalls) this.maxModelCalls = settings.defaultMaxModelCalls;
+      if (settings.defaultMaxDuration) this.maxDuration = settings.defaultMaxDuration;
+    }
+
+    const effectiveModel = settings?.defaultModel || this.hubDefaultModel;
     if (effectiveModel) {
       const derived = this.deriveModelSelection(effectiveModel);
       this.modelSelection = derived.selection;
