@@ -4846,9 +4846,17 @@ func TestAdvisoryLockOwnershipScopedQuery(t *testing.T) {
 	}
 	t.Logf("Phase 1: owned marker holds testLockID → detected=%v (correct)", seesOwned)
 
-	// Release the owned lock and close the connection.
-	ownedConn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", testLockID)
+	// Release the owned lock — assert the unlock returns true.
+	var ownedReleased bool
+	err = ownedConn.QueryRowContext(ctx, "SELECT pg_advisory_unlock($1)", testLockID).Scan(&ownedReleased)
+	if err != nil {
+		t.Fatalf("release owned lock: %v", err)
+	}
+	if !ownedReleased {
+		t.Fatal("owned advisory lock release returned false — lock was not held")
+	}
 	ownedConn.Close()
+	t.Log("Phase 1: owned lock released and connection closed")
 
 	// --- Phase 2: unrelated marker holds the SAME testLockID → query with
 	// owned marker and same lock type/key returns false ---
@@ -4867,13 +4875,11 @@ func TestAdvisoryLockOwnershipScopedQuery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unrelated conn: %v", err)
 	}
-	defer unrelatedConn.Close()
 
 	_, err = unrelatedConn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", testLockID)
 	if err != nil {
 		t.Fatalf("acquire unrelated lock on same key: %v", err)
 	}
-	defer unrelatedConn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", testLockID)
 
 	// Query with owned marker and the SAME lock key — must return false because
 	// the lock is held by the unrelated marker, not the owned one.
@@ -4886,6 +4892,18 @@ func TestAdvisoryLockOwnershipScopedQuery(t *testing.T) {
 		t.Error("Phase 2: ownership-scoped query incorrectly detected unrelated holder of SAME lock key")
 	}
 	t.Logf("Phase 2: unrelated marker holds SAME testLockID → detected=%v (correct: ownership filter works)", seesUnrelated)
+
+	// Release unrelated lock — assert the unlock returns true, then close.
+	var unrelatedReleased bool
+	err = unrelatedConn.QueryRowContext(ctx, "SELECT pg_advisory_unlock($1)", testLockID).Scan(&unrelatedReleased)
+	if err != nil {
+		t.Fatalf("release unrelated lock: %v", err)
+	}
+	if !unrelatedReleased {
+		t.Fatal("unrelated advisory lock release returned false — lock was not held")
+	}
+	unrelatedConn.Close()
+	t.Log("Phase 2: unrelated lock released and connection closed — both connections proven clean")
 }
 
 // --- Finding 5: Index predicate compatibility ---
