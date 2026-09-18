@@ -14,11 +14,12 @@ design notes (internal: `msg-authz-design-notes.md`).
 Every agent has a **message mode** that governs its conversational reach.
 The mode governs an agent's conversational reach — both who can deliver
 messages to the agent and who the agent can deliver messages to. There are
-four modes:
+five modes:
 
 | Mode | Default | Description |
 |------|---------|-------------|
 | `project` | Yes | Bidirectional with all agents and users in the project. |
+| `hub` | | Project cell + cross-project DM delivery to eligible recipients on the same Hub. |
 | `branch` | | Ancestry users + direct parent/child agents (both must be `branch` mode). |
 | `lineage` | | Ancestry users only. Zero agent-to-agent edges. |
 | `none` | | Sealed. No message-plane delivery except from super-admin. |
@@ -45,6 +46,56 @@ No tightening occurs until someone explicitly sets a non-default mode.
 
 ---
 
+## Cross-Project Agent Messaging
+
+Cross-project agent messaging allows agents in different projects on the
+same Hub to exchange direct messages. The feature is **off by default** and
+governed by three independent controls, all of which must permit a message
+for delivery to succeed.
+
+### Three controls
+
+| Control | Field | Default | Who changes it |
+|---------|-------|---------|----------------|
+| Hub availability | `cross_project_messaging_enabled` (boolean) in Hub messaging settings | `false` | Local, unscoped Hub administrator |
+| Agent outbound reach | Agent `messageMode` set to `hub` | `project` | Existing managers, subject to the grant guard below |
+| Receiving project | `crossProjectInbound` on the destination project | `none` | Active direct project owner or local, unscoped Hub administrator |
+
+The **receiving project's inbound policy** is directional:
+
+| Policy | Meaning |
+|--------|---------|
+| `none` | Accept no agent messages from other projects. |
+| `members` | Accept an external agent only when its Hub-attested originating human is currently an active member of this receiving project. |
+| `any` | Accept an eligible agent from any project on this Hub. |
+
+All policies require the external **sender** to use `hub` mode. The
+recipient may use `project` or `hub` mode. A send can succeed while the
+reverse reply is denied. Receiving a message never grants authority to reply.
+
+A `project`-mode recipient can receive and read an authorized cross-project
+DM but cannot reply across projects until an authorized actor grants it
+`hub` mode.
+
+### What cross-project messaging does not grant
+
+- No general membership in the other project.
+- No access to the other project's agents, files, settings, or resources.
+- No cross-Hub communication (that remains on A2A/OIDC).
+- No project group, broadcast, or plugin channel access across projects.
+- The `any` policy does not open `none`, `lineage`, or `branch` recipients.
+
+### Scope
+
+The first release supports cross-project agent DMs, explicitly addressed
+DM fan-out, and scheduled direct messages. Project-owned group
+conversations, native topics, project broadcasts, and plugin channels
+retain their current project boundaries. Foreign project rooms are
+unsupported in the first release; group support is an intended future
+extension.
+
+---
+
 ## Mode Decision Table
 
 ### User to Agent
@@ -53,6 +104,8 @@ No tightening occurs until someone explicitly sets a non-default mode.
 |-------------|-----------|--------|
 | `project` | User holds `agent.message` on the project | ALLOW |
 | `project` | User lacks `agent.message` | DENY |
+| `hub` | User holds `agent.message` on the project | ALLOW |
+| `hub` | User lacks `agent.message` | DENY |
 | `branch` | User is in the agent's ancestry chain | ALLOW |
 | `branch` | User is a project owner | ALLOW |
 | `branch` | Otherwise | DENY |
@@ -62,11 +115,17 @@ No tightening occurs until someone explicitly sets a non-default mode.
 | `none` | User is super-admin | ALLOW |
 | `none` | Otherwise (including project owner) | DENY |
 
-### Agent to Agent
+For human-to-agent delivery, `hub` behaves identically to `project`. The
+`hub` mode grants no new right to message unrelated humans.
+
+### Agent to Agent (same project)
 
 | Sender mode | Target mode | Condition | Result |
 |-------------|-------------|-----------|--------|
 | `project` | `project` | Same project | ALLOW |
+| `project` | `hub` | Same project | ALLOW |
+| `hub` | `project` | Same project | ALLOW |
+| `hub` | `hub` | Same project | ALLOW |
 | `branch` | `branch` | Direct parent/child relationship | ALLOW |
 | `branch` | `branch` | Not direct parent/child | DENY |
 | `lineage` | any | _(lineage agents have no agent-to-agent edges)_ | DENY |
@@ -74,6 +133,27 @@ No tightening occurs until someone explicitly sets a non-default mode.
 | `none` | any | Sealed | DENY |
 | any | `none` | Sealed | DENY |
 | Mixed (`project`/`branch`) | | Mode mismatch | DENY |
+
+Within the same project, `hub` behaves identically to `project` — it joins
+the same communication cell. The `hub` mode only gains additional
+cross-project reach described below.
+
+### Agent to Agent (cross-project)
+
+For agents in **different** projects, only `hub`-mode senders may attempt
+delivery. All gates must pass:
+
+| Gate | Check | Denial code |
+|------|-------|-------------|
+| Hub enabled | `cross_project_messaging_enabled` is `true` | `cross_project_disabled` |
+| Sender mode | Sender must be `hub` | `cross_project_sender_mode` |
+| Target mode | Target must be `project` or `hub` | `cross_project_target_mode` |
+| Inbound policy | Destination project's `crossProjectInbound` permits sender | `cross_project_inbound_none` |
+| Origin trust | Sender's Hub-attested ancestry is valid | `cross_project_untrusted_origin` |
+| Membership (if `members`) | Origin human is an active member of destination project | `cross_project_origin_not_member` |
+
+A `project`-mode sender cannot send cross-project messages, even to reply
+in an existing cross-project DM.
 
 ### System to Agent
 
@@ -109,12 +189,14 @@ workflows.
 Piercing allows certain users to reach agents in restricted modes. Piercing
 is evaluated on the **human principal at delivery time**.
 
-| Principal | Pierces `project` | Pierces `branch` | Pierces `lineage` | Pierces `none` |
-|-----------|:-:|:-:|:-:|:-:|
-| Super-admin | Yes | Yes | Yes | Yes |
-| Project owner | Yes | Yes | Yes | No |
-| Ancestry user | Yes | Yes | Yes | No |
-| Project member (non-owner) | Yes | No | No | No |
+| Principal | Pierces `project` | Pierces `hub` | Pierces `branch` | Pierces `lineage` | Pierces `none` |
+|-----------|:-:|:-:|:-:|:-:|:-:|
+| Super-admin | Yes | Yes | Yes | Yes | Yes |
+| Project owner | Yes | Yes | Yes | Yes | No |
+| Ancestry user | Yes | Yes | Yes | Yes | No |
+| Project member (non-owner) | Yes | Yes | No | No | No |
+
+`hub` mode follows the same piercing rules as `project` mode.
 
 ### Critical constraints
 
@@ -193,6 +275,190 @@ with no preconditions:
 
 ---
 
+## Hub Mode Grant Guard
+
+Granting `hub` mode is subject to a non-escalation rule that prevents
+unauthorized agents from widening their own or others' messaging reach.
+
+### Agent callers
+
+An agent may grant `hub` mode to another agent only when **all** of these
+conditions are met:
+
+1. The calling agent is **full-role** (checked from its stored record).
+2. The calling agent is **already in `hub` mode** (checked from its stored record).
+3. The calling agent holds the required `project:agent:set_message_mode` scope.
+4. The target agent is in the **same project** as the caller.
+
+A full-role `project`-mode agent cannot grant `hub` to itself, a peer, or
+a child. A `hub`-mode agent without full role cannot grant it either. This
+applies to all paths that change effective mode: explicit mode changes,
+template resolution, parent inheritance, default/reset resolution,
+cascades, and dry-run previews.
+
+### Human callers
+
+Human callers with existing `set_message_mode` authorization (project
+owners, super-admins, lineage owners) can seed `hub` mode on agents. This
+human-authorized seed is needed to establish the first `hub`-mode agent in
+a project.
+
+### Behavior when Hub is disabled
+
+Mode values may be configured while the Hub feature is off. The API/UI
+report that the stored mode is inactive for external messaging. With the
+switch off, a `hub` agent retains its same-project `project` behavior.
+Enabling the Hub switch activates the stored modes without requiring
+reconfiguration.
+
+---
+
+## Cross-Project DM Read Access
+
+Cross-project conversation history is accessible to both endpoints when:
+
+1. Both agents have valid, non-deleted records.
+2. The Hub feature is enabled.
+3. Both endpoints are in `project` or `hub` mode, with at least one in `hub`.
+4. At least one permitted sending direction exists for the pair.
+
+This means a `project`-mode recipient can list and read its incoming
+cross-project DM even though it cannot reply. A hub-to-project downgrade
+alone does not close reads if the reverse hub-to-project edge still exists.
+
+**Hub disable** closes all cross-project agent history/list/resolve/stream
+access. Stored messages and authorized human audit views are retained.
+
+**Project policy changes** govern new incoming content. Previously accepted
+history remains readable while the other direction is still allowed.
+
+---
+
+## Cross-Project Denial Codes
+
+When a cross-project message is denied, the server returns a stable,
+machine-readable denial code:
+
+| Code | Meaning |
+|------|---------|
+| `cross_project_disabled` | Cross-project messaging is disabled by the Hub administrator. |
+| `cross_project_sender_mode` | The sender must be in `hub` mode to send across projects. |
+| `cross_project_target_mode` | The recipient must be in `project` or `hub` mode. |
+| `cross_project_inbound_none` | The recipient's project does not accept external agent messages. |
+| `cross_project_origin_not_member` | The sender's originating user is not an active member of the recipient's project. |
+| `cross_project_untrusted_origin` | The sender's identity origin could not be verified (missing ancestry, non-human root, federated identity, deleted/disabled user). |
+| `cross_project_surface_unsupported` | Cross-project messaging is not supported for this conversation type (e.g., group rooms). |
+
+Denial codes are returned in the `MessageDecision.Code` field and in API
+error responses. The UI maps these codes to user-visible explanations.
+
+---
+
+## API Reference: Project Messaging Policy
+
+### Endpoints
+
+```
+GET  /api/v1/projects/{id}/messaging-policy
+PUT  /api/v1/projects/{id}/messaging-policy
+```
+
+### GET Response
+
+```json
+{
+    "crossProjectInbound": "none",
+    "revision": 1,
+    "effectiveCrossProjectInbound": "none",
+    "hubCrossProjectEnabled": false,
+    "capabilities": {
+        "crossProjectConversationKinds": ["direct"]
+    }
+}
+```
+
+### PUT Request
+
+```json
+{
+    "crossProjectInbound": "members",
+    "expectedRevision": 1
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `crossProjectInbound` | string | Yes | One of: `none`, `members`, `any` |
+| `expectedRevision` | int64 | Yes | CAS revision for optimistic concurrency; returns 409 on conflict |
+
+### Authorization
+
+| Caller | Result |
+|--------|--------|
+| Active direct project owner | ALLOWED |
+| Local, unscoped Hub administrator | ALLOWED |
+| Project admin (non-owner) | DENIED |
+| All other callers | DENIED |
+
+---
+
+## API Reference: Messaging Capabilities
+
+### Endpoint
+
+```
+GET /api/v1/messaging/capabilities
+```
+
+Returns the Hub's current cross-project messaging capabilities without
+exposing settings or topology.
+
+### Response
+
+```json
+{
+    "hubEnabled": true,
+    "supportedModes": ["none", "lineage", "branch", "project", "hub"],
+    "crossProjectConversationKinds": ["direct"]
+}
+```
+
+---
+
+## API Reference: Target Resolution
+
+### Endpoint
+
+```
+GET /api/v1/messaging/targets/resolve?project=<id-or-slug>&agent=<id-or-slug>
+```
+
+Read-only exact target lookup with privacy-preserving 404 responses.
+Returns minimal identity and directional reachability without requiring
+broad foreign project read access.
+
+### Response
+
+```json
+{
+    "agent": {
+        "id": "<uuid>",
+        "slug": "reviewer",
+        "projectId": "<uuid>",
+        "projectSlug": "tools"
+    },
+    "messageability": {
+        "canMessage": true,
+        "canReachViewer": false,
+        "replyReason": "cross_project_inbound_none"
+    }
+}
+```
+
+Undisclosed and nonexistent targets return indistinguishable 404 responses.
+
+---
+
 ## API Reference: set_message_mode
 
 Changes the message mode of an agent and optionally cascades to all
@@ -216,7 +482,7 @@ POST /api/v1/projects/{pid}/agents/{aid}/action/set_message_mode
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `mode` | string | Yes | One of: `none`, `lineage`, `branch`, `project` |
+| `mode` | string | Yes | One of: `none`, `lineage`, `branch`, `project`, `hub` |
 | `cascade` | bool | No | If true, apply the mode to all descendants of this agent |
 
 ### Response
@@ -253,6 +519,11 @@ POST /api/v1/projects/{pid}/agents/{aid}/action/set_message_mode
 | Agent callers (non-full role) | DENIED | D7: insufficient role |
 | Project admin (non-owner) | DENIED | D7: admin cannot unseal `none` agents |
 | UATs (any scope) | DENIED | D7: no UAT scope exists for this action |
+
+**Hub mode grant guard.** When the requested mode is `hub`, agent callers
+must additionally be currently full-role **and** already in `hub` mode. A
+full/project agent cannot grant `hub`. See [Hub Mode Grant Guard](#hub-mode-grant-guard)
+for details.
 
 ### Semantics
 
@@ -325,7 +596,7 @@ The messaging authorization system is governed by ten design decisions
 |----|---------|
 | D1 | `message` is a first-class axis, split from lifecycle/attach |
 | D2 | User-side messaging grant is project-coarse (relay rule) |
-| D3+D9 | Four-tier mode system: none, lineage, branch, project |
+| D3+D9 | Five-tier mode system: none, lineage, branch, project, hub |
 | D4 | Lineage mode: strict user-to-agent only, no agent-to-agent edges |
 | D5 | Mode is fully orthogonal to agent role |
 | D6 | Piercing rules: super-admin pierces all; owner/ancestry pierce lineage/branch; user-identity-only |
@@ -333,6 +604,10 @@ The messaging authorization system is governed by ten design decisions
 | D8 | System plane exempt from all mode checks |
 | D9 | Branch mode uses 1-degree parent/child edges; relay closure = branch cell |
 | D10 | Modes are mutable; mutation is foundational to the design |
+| D11 | Hub mode: project cell + cross-project DMs; recipient may be project or hub mode |
+| D12 | Hub mode grant: agent caller must be full-role and already hub-mode (non-escalation) |
+| D13 | Cross-project DMs only in first release; group expansion must remain possible |
+| D14 | Hub disable blocks cross-project sends and agent history access; retains records |
 
 For the full decision record with rationale, see the
 design notes (internal: `msg-authz-design-notes.md`).
@@ -344,8 +619,8 @@ design notes (internal: `msg-authz-design-notes.md`).
 ### `scion start --message-mode <mode>`
 
 Sets the initial message mode when creating an agent. Overrides template
-and parent inheritance. Valid modes: `none`, `lineage`, `branch`, `project`.
-Hub-only (ignored in local mode).
+and parent inheritance. Valid modes: `none`, `lineage`, `branch`, `project`,
+`hub`. Hub-only (ignored in local mode).
 
 ### `scion create --message-mode <mode>`
 
@@ -360,7 +635,79 @@ Flags:
 - `--cascade` — apply the mode change to all descendant agents
 - `--dry-run` — preview cascade effects without applying changes
 
+When the requested mode is `hub`, the hub mode grant guard applies for
+agent callers (see [Hub Mode Grant Guard](#hub-mode-grant-guard)).
 Hub-only. Returns an error when Hub is not available.
+
+### Cross-project messaging commands
+
+```sh
+# Send a message to an agent in another project
+scion message --project <target-project> @<agent> "message"
+
+# List conversations including cross-project DMs
+scion conversation list --project <project>
+
+# Get conversation with a cross-project agent
+scion conversation get --project <target-project> @<agent>
+
+# View cross-project conversation messages
+scion conversation messages --project <target-project> @<agent> --limit 50
+
+# Reply to a cross-project conversation by ID
+scion message conv:<conversation-uuid> "message"
+
+# Qualified fan-out to agents in multiple projects
+scion message @<project-slug>/<agent-slug> @<other-project>/<other-agent> "message"
+```
+
+### Hub and project messaging administration
+
+```sh
+# View Hub messaging settings
+scion hub messaging get
+
+# Enable cross-project messaging on the Hub
+scion hub messaging set --cross-project enabled
+
+# View a project's inbound policy
+scion project messaging get --project <project>
+
+# Set a project's inbound policy (uses CAS)
+scion project messaging set --project <project> --inbound members
+```
+
+These administration commands are human-only and unavailable in agent mode.
+
+---
+
+## Rollout and Rollback
+
+### Rollout
+
+1. Deploy schema migrations and compatible readers/writers with the Hub
+   flag set to `false`. New endpoints may report unavailable until their
+   enforcing phase lands.
+2. Upgrade all Hub replicas before enabling the flag. Mixed-version
+   enabled deployments are unsupported.
+3. Use two designated test projects: set `members` on one, opt a
+   designated sender into `hub` mode. Demonstrate DM delivery and denied
+   reply, then grant the recipient `hub` mode and demonstrate the allowed
+   reverse edge.
+4. Verify membership removal and Hub disable against a queued message.
+5. Keep default settings unchanged for all other projects/agents.
+
+### Rollback
+
+Turn the Hub flag off first. This stops subsequent cross-project decisions
+and closes external agent conversation access. Retain message/audit records
+and configured project policies for later recovery. Already-delivered
+content remains outside recall.
+
+Prefer rolling back application behavior while retaining additive schema.
+Before downgrading to a binary predating the `hub` enum, export
+configuration, disable the feature, and use an explicit migration to map
+`hub` agents to `project` if required by the old reader.
 
 ---
 
@@ -369,9 +716,30 @@ Hub-only. Returns an error when Hub is not available.
 | Concept | File |
 |---------|------|
 | Mode decision logic | `pkg/hub/authorize_message.go` |
+| Cross-project evaluator | `pkg/hub/authorize_message.go` (`evaluateCrossProject`, `validateCrossProjectOrigin`, `CheckEffectiveMembership`) |
+| Hub mode grant guard | `pkg/hub/authorize_message_mode_grant.go` |
+| Project messaging policy | `pkg/hub/project_messaging_policy.go` |
+| Hub operational settings | `pkg/hub/operational_settings.go` (`CrossProjectMessagingEnabled`) |
+| Hub admin messaging settings | `pkg/hub/admin_messaging.go` |
+| Target resolution | `pkg/hub/handlers_messaging_targets.go` |
+| Messaging capabilities | `pkg/hub/handlers_messaging_capabilities.go` |
+| Conversation resolver | `pkg/hub/handlers_conversation_resolve.go` |
+| Conversation send | `pkg/hub/handlers_conversation_send.go` |
+| Scheduled message auth | `pkg/hub/authorize_scheduled_message.go` |
+| Fan-out and boundaries | `pkg/hub/handlers_agent_messaging.go` |
 | set_message_mode handler | `pkg/hub/handlers_agent_message_mode.go` |
 | Permission registry | `pkg/hub/permissions/registry.go` |
 | Role seeds (admin exclusion) | `pkg/hub/seed.go` |
 | MessageMode constants | `pkg/store/models.go` |
 | set-message-mode CLI command | `cmd/set_message_mode.go` |
 | Hub client SetMessageMode | `pkg/hubclient/agents.go` |
+| Hub client messaging SDK | `pkg/hubclient/messaging.go` |
+| Conversation CLI commands | `cmd/conversation.go` |
+| Hub messaging CLI commands | `cmd/hub_messaging.go` |
+| Project messaging CLI commands | `cmd/project_messaging.go` |
+| CLI mode allowlist | `cmd/cli_mode.go` |
+| Denial code types (frontend) | `web/src/shared/message-mode.ts` |
+| Cross-project UI badges | `web/src/components/shared/agent-message-viewer.ts` |
+| Hub settings toggle | `web/src/components/pages/admin-server-config.ts` |
+| Project inbound policy UI | `web/src/components/pages/project-settings.ts` |
+| Agent hub mode UI | `web/src/components/pages/agent-create.ts`, `agent-configure.ts`, `agent-detail.ts` |
