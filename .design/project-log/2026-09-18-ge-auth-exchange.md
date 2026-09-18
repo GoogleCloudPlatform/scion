@@ -320,3 +320,41 @@ Hub `go.mod`: No changes.
   `origin/main` `21c380344` reproduced the same named failures, classifying
   them as current-main baseline rather than this branch. No baseline tidy or
   changes from unmerged PR #1744 were imported.
+
+## Current-main CI composition fixes (`scion/dev-auth-ci-composition-fix`)
+
+- Created new temporary branch descended from accepted auth candidate
+  `9439dfdb4fac498d6c3d217ed3af8fb28bdafdd0`.
+- Merged current main `b5b2590684d9a824e396632bad53d2d31201361d` normally
+  in merge commit `6e437b1bb43b985cbc499f146ce3008c283093ac` (2 parents:
+  `9439dfdb4` and `b5b259068`), preserving published PR history and leaving
+  `scion/dev-ge-auth` ref untouched.
+- Resolved A2A compile job `105659986410`: deduplicated
+  `mockHubClient.Messaging` in
+  `extras/scion-a2a-bridge/internal/bridge/followup_test.go` by removing
+  the redundant second declaration introduced by merging PR #1744 while
+  preserving the line 163 declaration and mock behavior.
+- Resolved Build-Test job `105659451714`: allowlisted
+  `^extras/scion-a2a-bridge/internal/bridge/v0_compat_test.go$` in
+  `hack/check-project-compat-literals.sh` under compatibility test fixtures,
+  matching repository policy for intentional legacy compatibility alias tests
+  without renaming tests or weakening the guard.
+- Verification gates:
+  - `make fmt-check` and `git diff --check`: clean (Go 1.26.1 formatting).
+  - `make compat-literals`: clean (0 violations).
+  - Root `go vet ./...` and `go build ./...`: clean.
+  - Bridge `go vet ./...` and `go build ./...`: clean.
+  - Bridge tests: full bridge suite (`extras/scion-a2a-bridge/...`) PASS (35.2s),
+    v0 compat tests with `-race` PASS (3.5s), focused bridge GE tests normal
+    (9.8s) and `-race` (11.0s) PASS.
+  - Hub GE tests: focused GE/Google validator tests normal (1.6s, 64 tests) and
+    `-race` (11.6s) PASS.
+  - Scoped lint: `golangci-lint run --new-from-rev=main` reports 0 issues.
+- Read-only inspection of HA (`77550f0e`) and Transport (`c82fdab`):
+  - HA (`77550f0e`): duplicate mock in `followup_test.go` WILL arise upon merge
+    with main (HA added `Messaging()` at line 173; main at line 180). Compat
+    allowlist will NOT arise (zero legacy grove literals introduced).
+  - Transport (`c82fdab`): duplicate mock in `followup_test.go` WILL arise upon
+    merge with main (Transport added `Messaging()` at line 165; main at line 180).
+    Compat allowlist will NOT arise (zero legacy grove literals introduced).
+

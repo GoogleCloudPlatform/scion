@@ -177,7 +177,6 @@ func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, 
 func (m *mockHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclient.DiscoverSkillsDirectoryRequest) (*hubclient.DiscoverSkillsDirectoryResponse, error) {
 	return nil, nil
 }
-func (m *mockHubClient) Messaging() hubclient.MessagingService { return nil }
 
 // --- Test helpers ---
 

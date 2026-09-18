@@ -61,6 +61,7 @@ allowed_paths=(
   "^extras/scion-a2a-bridge/internal/bridge/middleware_test.go$"
   "^extras/scion-a2a-bridge/internal/bridge/server_test.go$"
   "^extras/scion-a2a-bridge/internal/bridge/stream_test.go$"
+  "^extras/scion-a2a-bridge/internal/bridge/v0_compat_test.go$"
   "^extras/scion-a2a-bridge/internal/state/state_test.go$"
   "^extras/scion-chat-app/internal/chatapp/commands_test.go$"
   "^extras/scion-chat-app/internal/chatapp/notifications_test.go$"
