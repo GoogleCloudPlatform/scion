@@ -389,3 +389,52 @@ regression asserts explicit `pg_advisory_unlock` boolean results (both
 - SSE stream locality: streams are process-local.
 - `go.mod`/`go.sum` updated for `grpc-gateway` and OTel version bumps
   (all indirect, no new direct deps).
+
+### Post-acceptance lifecycle correction (2026-09-18)
+
+The #1620 combined topology found three defects in accepted HA tip `23911e5`
+(the relevant code is identical at reviewed parent `ebcf4d4`). The temporary
+branch was created from that exact tip without advancing
+`scion/dev-a2a-taskstore`.
+
+- `919fcb1` is the committed RED for input-required return, continuation cursor
+  replay, and caller/project/agent ownership negatives. `fd2f04a` corrects those
+  boundaries using authenticated `RouteInfo` + `CallerIdentity` and
+  `GetOwnedTaskSnapshotAndCursor`.
+- `422b8f3` is the controlled cancel-convergence RED. On exact `23911e5` and
+  intermediate `fd2f04a`, the SDK snapshot became canceled while the original
+  lease remained, no final bridge event existed, the waiter exceeded the
+  semantics-derived three-second propagation bound, and a late reply appended
+  two events. Wrapper prototype `75fd9de` proved the mechanism but is
+  intentionally superseded because it retained a crash window.
+- `e5918d3` moves canceled snapshot/version CAS, lease release, task-scoped
+  deduplicated final-event insertion, and cursor advancement into one PostgreSQL
+  transaction. `a38768f` injects a real event constraint failure and proves the
+  state/version/lease/cursor and event log all roll back. `f503e13` ensures a
+  waiter whose lease was atomically released can emit only the matching canceled
+  final boundary. Late broker replies are fenced without changing other terminal
+  policy.
+- Production proofs use two independent bridge processes sharing real
+  PostgreSQL. Wrong caller/project/agent cannot cancel, read, or advance cursor;
+  the original waiter returns canceled, the lease is released, terminal
+  resubscribe is coherent, and the original Hub send is not replayed.
+
+Final-tip verification used task-owned schema `final_correction_20260918`:
+
+```text
+lifecycle + atomic cancel suite, count=3: PASS (34.406s)
+lifecycle + atomic cancel suite, -race: PASS (12.539s)
+accepted cross-replica/cursor/ownership/reaper set: PASS (34.243s)
+same accepted regression set, -race: PASS (35.724s)
+full module go test ./...: PASS (bridge 86.756s)
+full module go test -race ./...: PASS (bridge 89.318s)
+go vet ./internal/bridge: PASS
+go build -buildvcs=false ./...: PASS
+pre-existing schema canary: preexisting|must-survive
+```
+
+The fixture-only closed-SSE-channel observation and 700ms crash-wait timing are
+separate from these confirmed product defects and are not counted as product
+PASS/FAIL evidence. No live cloud calls were made; external-live remains false.
+The correction proves task-scoped cursor/dedup behavior, not global exactly-once
+semantics.
