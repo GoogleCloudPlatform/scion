@@ -110,7 +110,7 @@ check-authorization-catalog:
 	@./hack/check-authorization-catalog.sh
 
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog
+check-custom: compat-literals check-authz-guards check-setenv-guard check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog
 	@echo "All custom checks passed."
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
