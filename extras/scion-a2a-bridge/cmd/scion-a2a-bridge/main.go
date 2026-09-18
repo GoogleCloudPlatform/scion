@@ -161,6 +161,19 @@ func main() {
 
 	transportSrc, transportMode := resolveTransportAuth(log)
 
+	// Build GE validator options from transport auth. These are forwarded to
+	// BuildSnapshot so the geGoogle snapshot validator receives Cloud Run / IAP
+	// headers on Hub exchange requests. Also used for broker overlay rebuilds.
+	var geOpts []bridge.GEValidatorOption
+	if transportSrc != nil {
+		geOpts = append(geOpts, bridge.WithGETransportAuth(transportSrc, transportMode))
+	}
+
+	// Rebuild snapshot with transport auth now that it's resolved.
+	// The initial BuildSnapshot at line ~130 was created before transport
+	// resolution and therefore lacked GE transport options.
+	snapshot.Store(bridge.BuildSnapshot(*cfg, geOpts...))
+
 	hubOpts := []hubclient.Option{hubclient.WithAuthenticator(adminAuth)}
 	if transportSrc != nil {
 		hubOpts = append(hubOpts, hubclient.WithTransportAuth(transportSrc, transportMode))
@@ -206,7 +219,7 @@ func main() {
 
 	// Wire admin config management: snapshot + base config + state dir.
 	b.SetSnapshot(snapshot)
-	broker.SetAdminConfig(&baseCfg, snapshot, stateDir)
+	broker.SetAdminConfig(&baseCfg, snapshot, stateDir, geOpts...)
 
 	// Create SDK executor and request handler.
 	// Use a route-key authenticator so the in-memory task store associates tasks
@@ -439,6 +452,12 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 
 	transportSrc, transportMode := resolveTransportAuth(log)
 
+	// Build GE validator options from transport auth for snapshot composition.
+	var geOpts []bridge.GEValidatorOption
+	if transportSrc != nil {
+		geOpts = append(geOpts, bridge.WithGETransportAuth(transportSrc, transportMode))
+	}
+
 	hubOpts := []hubclient.Option{hubclient.WithAuthenticator(adminAuth)}
 	if transportSrc != nil {
 		hubOpts = append(hubOpts, hubclient.WithTransportAuth(transportSrc, transportMode))
@@ -453,9 +472,9 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 
 	metrics := bridge.NewMetrics(prometheus.DefaultRegisterer)
 
-	// 7. Build config snapshot (base YAML + runtime overrides).
+	// 7. Build config snapshot with transport auth (base YAML + runtime overrides).
 	baseCfg := *cfg
-	snapshot := bridge.NewSnapshotHolder(bridge.BuildSnapshot(*cfg))
+	snapshot := bridge.NewSnapshotHolder(bridge.BuildSnapshot(*cfg, geOpts...))
 
 	// 8. Create core bridge (pass transport auth so per-caller clients inherit it).
 	var bridgeOpts []bridge.BridgeOption
@@ -474,7 +493,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	brokerServer.SetHandler(b.HandleBrokerMessage)
 	b.SetBroker(brokerServer)
 	b.SetSnapshot(snapshot)
-	brokerServer.SetAdminConfig(&baseCfg, snapshot, "")
+	brokerServer.SetAdminConfig(&baseCfg, snapshot, "", geOpts...)
 
 	// 9. Set up reconfigure callback for runtime config changes.
 	rt.SetReconfigure(func(newCfg map[string]string) error {
@@ -483,7 +502,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 		if apiKey := os.Getenv("A2A_API_KEY"); apiKey != "" {
 			cfg.Auth.APIKey = apiKey
 		}
-		snap := bridge.BuildSnapshot(*cfg)
+		snap := bridge.BuildSnapshot(*cfg, geOpts...)
 		snapshot.Store(snap)
 		return nil
 	})

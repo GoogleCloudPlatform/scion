@@ -343,10 +343,12 @@ func BuildAuthValidators(cfg *Config, geOpts ...GEValidatorOption) AuthValidator
 }
 
 // BuildSnapshot creates a complete ConfigSnapshot from the effective config.
-func BuildSnapshot(cfg Config) *ConfigSnapshot {
+// The optional geOpts are forwarded to BuildAuthValidators for the geGoogle
+// auth scheme (e.g. WithGETransportAuth for Cloud Run / IAP).
+func BuildSnapshot(cfg Config, geOpts ...GEValidatorOption) *ConfigSnapshot {
 	snap := &ConfigSnapshot{
 		Config: cfg,
-		Auth:   BuildAuthValidators(&cfg),
+		Auth:   BuildAuthValidators(&cfg, geOpts...),
 	}
 	if cfg.RateLimit.Enabled {
 		rate := cfg.RateLimit.RequestsPerSec

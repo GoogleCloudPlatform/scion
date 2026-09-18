@@ -92,15 +92,18 @@ func newV0TestServer(t *testing.T, scheme, apiKey string, v0handler http.Handler
 type mockHubServer struct {
 	*httptest.Server
 
-	mu              sync.Mutex
-	sentMessages    []mockSentMessage
-	exchangeCalls   int
-	exchangeHandler http.HandlerFunc // optional override for exchange endpoint
+	mu               sync.Mutex
+	sentMessages     []mockSentMessage
+	exchangeCalls    int
+	exchangeHeaders  []http.Header     // captured headers from each exchange call
+	messageHeaders   []http.Header     // captured headers from each message send
+	exchangeHandler  http.HandlerFunc  // optional override for exchange endpoint
 }
 
 type mockSentMessage struct {
 	AgentID string
 	Body    json.RawMessage
+	AuthHeader string // Authorization header value from the send request
 }
 
 func newMockHubServer(t *testing.T) *mockHubServer {
@@ -128,16 +131,19 @@ func newMockHubServer(t *testing.T) *mockHubServer {
 				},
 				"totalCount": 1,
 			})
-		case r.Method == "POST" && strings.Contains(r.URL.Path, "/messages"):
-			// Message send: capture the message and return success.
+		case r.Method == "POST" && strings.Contains(r.URL.Path, "/message"):
+			// Message send: capture the message, auth header, and return success.
+			// Note: Hub API uses /message (singular), not /messages.
 			body, _ := io.ReadAll(r.Body)
 			agentID := strings.TrimPrefix(r.URL.Path, "/api/v1/agents/")
-			agentID = strings.TrimSuffix(agentID, "/messages")
+			agentID = strings.TrimSuffix(agentID, "/message")
 			m.mu.Lock()
 			m.sentMessages = append(m.sentMessages, mockSentMessage{
-				AgentID: agentID,
-				Body:    body,
+				AgentID:    agentID,
+				Body:       body,
+				AuthHeader: r.Header.Get("Authorization"),
 			})
+			m.messageHeaders = append(m.messageHeaders, r.Header.Clone())
 			m.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -147,6 +153,7 @@ func newMockHubServer(t *testing.T) *mockHubServer {
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/auth/integrations/google/exchange"):
 			m.mu.Lock()
 			m.exchangeCalls++
+			m.exchangeHeaders = append(m.exchangeHeaders, r.Header.Clone())
 			handler := m.exchangeHandler
 			m.mu.Unlock()
 			if handler != nil {
@@ -180,6 +187,20 @@ func (m *mockHubServer) SentMessages() []mockSentMessage {
 	out := make([]mockSentMessage, len(m.sentMessages))
 	copy(out, m.sentMessages)
 	return out
+}
+
+func (m *mockHubServer) ExchangeHeaders() []http.Header {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]http.Header, len(m.exchangeHeaders))
+	copy(out, m.exchangeHeaders)
+	return out
+}
+
+func (m *mockHubServer) ExchangeCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.exchangeCalls
 }
 
 // newIntegrationTestServer creates a full bridge test server with a real SDK
@@ -650,7 +671,7 @@ func TestDiscovery_DirectPOST_AgentRoot(t *testing.T) {
 	_, ts, _ := newIntegrationTestServer(t, hub, "none", "")
 
 	// Send a tasks/get request via direct POST — no /jsonrpc suffix.
-	payload := `{"jsonrpc":"2.0","id":1,"method":"tasks/get","params":{"id":"nonexistent"}}`
+	payload := `{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"nonexistent"}}`
 	status, body := doRPCRaw(t, ts, "/projects/proj1/agents/agent1", payload, nil)
 
 	if status != http.StatusOK {
@@ -669,7 +690,7 @@ func TestDiscovery_DirectPOST_GrovesAlias(t *testing.T) {
 	hub := newMockHubServer(t)
 	_, ts, _ := newIntegrationTestServer(t, hub, "none", "")
 
-	payload := `{"jsonrpc":"2.0","id":1,"method":"tasks/get","params":{"id":"nonexistent"}}`
+	payload := `{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"nonexistent"}}`
 	status, body := doRPCRaw(t, ts, "/groves/proj1/agents/agent1", payload, nil)
 
 	if status != http.StatusOK {
@@ -730,6 +751,10 @@ func TestCallerHubClient_GEExchangeTokenType(t *testing.T) {
 // can send a message through the real executor path. This was broken before the
 // ge_exchange case was added to callerHubClient — the executor would fail with
 // "creating per-caller hub client: unknown token type: ge_exchange".
+//
+// Hard assertions: the exchange endpoint MUST be called, the Hub MUST receive
+// the message dispatch, and the per-caller bearer token MUST be the exchanged
+// Hub token (not the original Google credential).
 func TestGEExchange_ExecutorPath_Regression(t *testing.T) {
 	hub := newMockHubServer(t)
 	_, ts, _ := newIntegrationTestServer(t, hub, "geGoogle", "")
@@ -738,11 +763,12 @@ func TestGEExchange_ExecutorPath_Regression(t *testing.T) {
 	payload := `{
 		"jsonrpc": "2.0",
 		"id": "regression-1",
-		"method": "message/send",
+		"method": "SendMessage",
 		"params": {
 			"message": {
-				"role": "user",
-				"parts": [{"type": "text", "text": "Hello from GE caller"}]
+				"messageId": "msg-ge-001",
+				"role": "ROLE_USER",
+				"parts": [{"text": "Hello from GE caller"}]
 			}
 		}
 	}`
@@ -753,27 +779,31 @@ func TestGEExchange_ExecutorPath_Regression(t *testing.T) {
 		t.Fatalf("GE message/send status = %d, want 200; body: %s", status, body)
 	}
 
-	// The exchange endpoint should have been called.
-	if hub.exchangeCalls == 0 {
-		t.Error("mock Hub exchange endpoint was never called")
+	// Hard assertion: the exchange endpoint MUST have been called.
+	if hub.ExchangeCallCount() == 0 {
+		t.Fatal("mock Hub exchange endpoint was never called — GE auth not wired")
 	}
 
-	// The mock Hub should have received a message via the per-caller client.
+	// Hard assertion: the Hub MUST have received a dispatched message.
 	msgs := hub.SentMessages()
 	if len(msgs) == 0 {
-		// The executor may time out waiting for events, but the message should
-		// have been sent to the Hub.
-		t.Log("no messages captured by mock Hub (executor may have timed out waiting for events)")
+		t.Fatal("mock Hub received no messages — executor dispatch failed")
 	}
 
-	// The response should be valid JSON-RPC (even if it's an error/timeout,
-	// it should not be the "unknown token type" error).
+	// Hard assertion: the per-caller Hub request MUST use the exchanged Hub
+	// token, NOT the original Google credential.
+	if msgs[0].AuthHeader != "Bearer hub-token-from-exchange" {
+		t.Fatalf("per-caller Hub send used wrong auth: got %q, want %q",
+			msgs[0].AuthHeader, "Bearer hub-token-from-exchange")
+	}
+
+	// The response must be valid JSON-RPC.
 	var resp map[string]interface{}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		t.Fatalf("response is not valid JSON: %v", err)
 	}
 	if resp["jsonrpc"] != "2.0" {
-		t.Errorf("response is not JSON-RPC 2.0: %s", string(body))
+		t.Fatalf("response is not JSON-RPC 2.0: %s", string(body))
 	}
 	// Verify no "unknown token type" error.
 	if errObj, ok := resp["error"]; ok {
@@ -796,11 +826,12 @@ func TestJSONRPC_RealHandler_MessageSend(t *testing.T) {
 	payload := `{
 		"jsonrpc": "2.0",
 		"id": "req-1",
-		"method": "message/send",
+		"method": "SendMessage",
 		"params": {
 			"message": {
-				"role": "user",
-				"parts": [{"type": "text", "text": "Hello, agent!"}]
+				"messageId": "msg-send-001",
+				"role": "ROLE_USER",
+				"parts": [{"text": "Hello, agent!"}]
 			}
 		}
 	}`
@@ -811,14 +842,25 @@ func TestJSONRPC_RealHandler_MessageSend(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.Unmarshal(body, &resp)
-	if resp["jsonrpc"] != "2.0" {
-		t.Errorf("response jsonrpc = %v, want 2.0", resp["jsonrpc"])
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
 	}
-	// Should have either a result (task) or an error (timeout waiting for events).
-	// Either way, the executor ran and the Hub was called.
+	if resp["jsonrpc"] != "2.0" {
+		t.Fatalf("response jsonrpc = %v, want 2.0", resp["jsonrpc"])
+	}
+
+	// Hard assertion: the executor MUST have dispatched to the Hub.
+	msgs := hub.SentMessages()
+	if len(msgs) == 0 {
+		t.Fatal("mock Hub received no messages — executor dispatch broken")
+	}
+	if msgs[0].AgentID != "agent-001" {
+		t.Errorf("dispatched to agent %q, want agent-001", msgs[0].AgentID)
+	}
+
+	// Response must contain result (task with status).
 	if resp["result"] == nil && resp["error"] == nil {
-		t.Error("response has neither result nor error")
+		t.Fatal("response has neither result nor error")
 	}
 }
 
@@ -827,7 +869,7 @@ func TestJSONRPC_RealHandler_TasksGet(t *testing.T) {
 	_, ts, _ := newIntegrationTestServer(t, hub, "none", "")
 
 	// tasks/get goes through the SDK task store, not the executor.
-	payload := `{"jsonrpc":"2.0","id":"req-3","method":"tasks/get","params":{"id":"task-001"}}`
+	payload := `{"jsonrpc":"2.0","id":"req-3","method":"GetTask","params":{"id":"task-001"}}`
 	status, body := doRPCRaw(t, ts, "/projects/proj1/agents/agent1/jsonrpc", payload, nil)
 
 	if status != http.StatusOK {
@@ -849,7 +891,7 @@ func TestJSONRPC_RealHandler_TasksCancel(t *testing.T) {
 	hub := newMockHubServer(t)
 	_, ts, _ := newIntegrationTestServer(t, hub, "none", "")
 
-	payload := `{"jsonrpc":"2.0","id":"req-4","method":"tasks/cancel","params":{"id":"task-001"}}`
+	payload := `{"jsonrpc":"2.0","id":"req-4","method":"CancelTask","params":{"id":"task-001"}}`
 	status, body := doRPCRaw(t, ts, "/projects/proj1/agents/agent1/jsonrpc", payload, nil)
 
 	if status != http.StatusOK {
@@ -871,11 +913,12 @@ func TestJSONRPC_RealHandler_MessageStream(t *testing.T) {
 	payload := `{
 		"jsonrpc": "2.0",
 		"id": "req-2",
-		"method": "message/stream",
+		"method": "SendStreamingMessage",
 		"params": {
 			"message": {
-				"role": "user",
-				"parts": [{"type": "text", "text": "stream this"}]
+				"messageId": "msg-stream-001",
+				"role": "ROLE_USER",
+				"parts": [{"text": "stream this"}]
 			}
 		}
 	}`
@@ -906,7 +949,7 @@ func TestJSONRPC_RealHandler_TasksResubscribe(t *testing.T) {
 	hub := newMockHubServer(t)
 	_, ts, _ := newIntegrationTestServer(t, hub, "none", "")
 
-	payload := `{"jsonrpc":"2.0","id":"req-5","method":"tasks/resubscribe","params":{"id":"task-001"}}`
+	payload := `{"jsonrpc":"2.0","id":"req-5","method":"SubscribeToTask","params":{"id":"task-001"}}`
 	req, _ := http.NewRequest("POST", ts.URL+"/projects/proj1/agents/agent1/jsonrpc",
 		strings.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
@@ -954,7 +997,7 @@ func TestJSONRPC_DiscoveryAlias_GrovesPath(t *testing.T) {
 	hub := newMockHubServer(t)
 	_, ts, _ := newIntegrationTestServer(t, hub, "none", "")
 
-	payload := `{"jsonrpc":"2.0","id":"req-grove","method":"tasks/get","params":{"id":"nonexistent"}}`
+	payload := `{"jsonrpc":"2.0","id":"req-grove","method":"GetTask","params":{"id":"nonexistent"}}`
 	status, body := doRPCRaw(t, ts, "/groves/proj1/agents/agent1/jsonrpc", payload, nil)
 
 	if status != http.StatusOK {
@@ -1191,6 +1234,161 @@ func TestGEExchangeValidator_TransportAuth_NotSet_NoHeaders(t *testing.T) {
 }
 
 // ===========================================================================
+// Snapshot-backed production middleware: transport auth end-to-end
+// ===========================================================================
+
+// newSnapshotIntegrationTestServer creates a full bridge test server that uses
+// the snapshot-backed auth middleware (the production code path). The snapshot's
+// GE validator is constructed with the given geOpts, proving that transport auth
+// flows through BuildSnapshot → BuildAuthValidators → GEExchangeValidator.
+func newSnapshotIntegrationTestServer(t *testing.T, hub *mockHubServer, geOpts ...GEValidatorOption) (*Server, *httptest.Server) {
+	t.Helper()
+
+	dir := t.TempDir()
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	cfg := &Config{
+		Bridge: BridgeConfig{ExternalURL: "https://bridge.example.com"},
+		Hub:    HubConfig{Endpoint: hub.URL, User: "admin@test"},
+		Auth:   AuthConfig{Scheme: "geGoogle", GEExchange: GEExchangeConfig{CredentialType: "id_token", CacheTTL: 60 * time.Second}},
+		Projects: []ProjectConfig{
+			{Slug: "proj1", ExposedAgents: []string{"agent1"}},
+		},
+		Timeouts: TimeoutConfig{SendMessage: 3 * time.Second},
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	adminClient, err := hubclient.New(hub.URL, hubclient.WithBearerToken("admin-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(store, adminClient, nil, cfg, nil, log)
+
+	// Build SDK handler pipeline.
+	executor := NewScionExecutor(b, log)
+	routeAuth := RouteKeyAuthenticator()
+	innerStore := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{Authenticator: routeAuth})
+	scopedStore := NewScopedTaskStore(innerStore)
+	sdkRequestHandler := a2asrv.NewHandler(
+		executor,
+		a2asrv.WithLogger(log),
+		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{Streaming: true}),
+		a2asrv.WithAgentInactivityTimeout(2*time.Second),
+		a2asrv.WithTaskStore(scopedStore),
+	)
+	b.SetSDKRequestHandler(sdkRequestHandler)
+	sdkJSONRPCHandler := a2asrv.NewJSONRPCHandler(sdkRequestHandler)
+
+	srv := NewServer(b, cfg, nil, log, sdkJSONRPCHandler)
+
+	// Build the snapshot WITH transport auth (this is the production path).
+	snap := BuildSnapshot(*cfg, geOpts...)
+	snapHolder := NewSnapshotHolder(snap)
+	srv.SetSnapshot(snapHolder)
+
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	return srv, ts
+}
+
+// TestSnapshotMiddleware_TransportAuth_InitialComposition proves that the
+// snapshot-backed GE validator in the production middleware receives transport
+// auth options. The exchange request to Hub must carry the X-Serverless-Authorization
+// header from the transport auth source.
+func TestSnapshotMiddleware_TransportAuth_InitialComposition(t *testing.T) {
+	hub := newMockHubServer(t)
+	mockSrc := &mockTokenSource{token: "snapshot-transport-token"}
+
+	_, ts := newSnapshotIntegrationTestServer(t, hub,
+		WithGETransportAuth(mockSrc, 2)) // HeaderServerlessAuthorization
+
+	// Send a request through the production middleware.
+	payload := `{"jsonrpc":"2.0","id":"snap-1","method":"GetTask","params":{"id":"t1"}}`
+	status, _ := doRPCRaw(t, ts, "/projects/proj1/agents/agent1/jsonrpc", payload,
+		map[string]string{"Authorization": "Bearer user-google-cred"})
+
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+
+	// Hard assertion: the exchange call to Hub MUST have the transport header.
+	if hub.ExchangeCallCount() == 0 {
+		t.Fatal("exchange endpoint was not called — snapshot middleware not wired")
+	}
+	headers := hub.ExchangeHeaders()
+	xSA := headers[0].Get("X-Serverless-Authorization")
+	if xSA == "" {
+		t.Fatal("exchange request missing X-Serverless-Authorization — transport auth not wired in snapshot")
+	}
+	if !strings.Contains(xSA, "snapshot-transport-token") {
+		t.Fatalf("X-Serverless-Authorization = %q, want to contain snapshot-transport-token", xSA)
+	}
+}
+
+// TestSnapshotMiddleware_TransportAuth_AfterSnapshotReplacement proves that
+// transport auth survives snapshot replacement (hot-reload / reconfigure).
+// This simulates what happens when the broker pushes a new admin config.
+func TestSnapshotMiddleware_TransportAuth_AfterSnapshotReplacement(t *testing.T) {
+	hub := newMockHubServer(t)
+	mockSrc := &mockTokenSource{token: "reload-transport-token"}
+	geOpts := []GEValidatorOption{WithGETransportAuth(mockSrc, 2)}
+
+	srv, ts := newSnapshotIntegrationTestServer(t, hub, geOpts...)
+
+	// First request — validates initial snapshot has transport auth.
+	payload := `{"jsonrpc":"2.0","id":"r1","method":"GetTask","params":{"id":"t1"}}`
+	status, _ := doRPCRaw(t, ts, "/projects/proj1/agents/agent1/jsonrpc", payload,
+		map[string]string{"Authorization": "Bearer cred-1"})
+	if status != http.StatusOK {
+		t.Fatalf("initial request status = %d, want 200", status)
+	}
+	if hub.ExchangeCallCount() != 1 {
+		t.Fatalf("exchange calls = %d, want 1", hub.ExchangeCallCount())
+	}
+
+	// Simulate hot-reload: rebuild snapshot with same geOpts (as broker does).
+	newCfg := Config{
+		Bridge: BridgeConfig{ExternalURL: "https://bridge-new.example.com"},
+		Hub:    HubConfig{Endpoint: hub.URL, User: "admin@test"},
+		Auth:   AuthConfig{Scheme: "geGoogle", GEExchange: GEExchangeConfig{CredentialType: "id_token", CacheTTL: 60 * time.Second}},
+		Projects: []ProjectConfig{
+			{Slug: "proj1", ExposedAgents: []string{"agent1"}},
+		},
+	}
+	newSnap := BuildSnapshot(newCfg, geOpts...)
+	srv.snapshot.Store(newSnap)
+
+	// Second request — the new snapshot must also have transport auth.
+	payload2 := `{"jsonrpc":"2.0","id":"r2","method":"GetTask","params":{"id":"t2"}}`
+	status2, _ := doRPCRaw(t, ts, "/projects/proj1/agents/agent1/jsonrpc", payload2,
+		map[string]string{"Authorization": "Bearer cred-2"})
+	if status2 != http.StatusOK {
+		t.Fatalf("post-reload request status = %d, want 200", status2)
+	}
+
+	// The new snapshot's validator should have called exchange with transport headers.
+	if hub.ExchangeCallCount() < 2 {
+		t.Fatalf("exchange calls after reload = %d, want >= 2", hub.ExchangeCallCount())
+	}
+	headers := hub.ExchangeHeaders()
+	lastHeader := headers[len(headers)-1]
+	xSA := lastHeader.Get("X-Serverless-Authorization")
+	if xSA == "" {
+		t.Fatal("post-reload exchange missing X-Serverless-Authorization — transport auth lost on snapshot rebuild")
+	}
+	if !strings.Contains(xSA, "reload-transport-token") {
+		t.Fatalf("post-reload X-Serverless-Authorization = %q, want to contain reload-transport-token", xSA)
+	}
+}
+
+// ===========================================================================
 // Cache — expired response caching (fail closed)
 // ===========================================================================
 
@@ -1321,4 +1519,3 @@ func TestGEExchangeValidator_LRUEviction_ConcurrentAccess(t *testing.T) {
 		t.Errorf("cache len = %d, want 50", v.CacheLen())
 	}
 }
-
