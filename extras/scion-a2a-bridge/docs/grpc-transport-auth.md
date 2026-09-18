@@ -213,7 +213,7 @@ silently degraded):
 
 ## Bridge-Side Server Authentication
 
-The bridge's gRPC server must validate incoming tokens on all control methods:
+The bridge's gRPC server validates incoming tokens on all control methods:
 
 - **Configure** — administrative; must be authenticated
 - **Publish** — delivers messages; must be authenticated
@@ -227,6 +227,70 @@ token from the `authorization` metadata header and validate it before
 allowing the RPC to proceed. Single-port h2c mode does not create an
 unauthenticated branch — both the gRPC and HTTP paths are independently
 protected.
+
+### Bridge Server Environment Variables
+
+The bridge reads server-side gRPC auth configuration from environment
+variables at startup. Configuration is validated fail-closed — invalid
+combinations cause immediate process exit.
+
+| Variable | Values | Required | Description |
+|----------|--------|----------|-------------|
+| `GRPC_AUTH_MODE` | `google_id_token`, `hmac`, `local_dev` | conditional | Auth mode. Required for non-local listen addresses. |
+| `GRPC_AUTH_AUDIENCE` | URL string | conditional | Expected audience claim. Required for `google_id_token` and `hmac`. |
+| `GRPC_AUTH_SUBJECTS` | comma-separated emails | conditional | Authorized service account emails. Required for `google_id_token`. |
+| `GRPC_AUTH_HMAC_KEY` | base64 string | conditional | HMAC signing key (base64-encoded). Required for `hmac`. |
+| `GRPC_TLS_CERT` | file path | no | Server TLS certificate (Kubernetes only; ignored in mux mode). |
+| `GRPC_TLS_KEY` | file path | no | Server TLS private key (Kubernetes only; ignored in mux mode). |
+| `GRPC_TLS_CLIENT_CA` | file path | no | Client CA for mTLS verification (Kubernetes only; ignored in mux mode). |
+
+### Cloud Run Example
+
+```bash
+# Cloud Run — google_id_token mode, no server TLS (platform-terminated)
+GRPC_AUTH_MODE=google_id_token
+GRPC_AUTH_AUDIENCE=https://bridge-abc123-uc.a.run.app
+GRPC_AUTH_SUBJECTS=hub-sa@project.iam.gserviceaccount.com
+```
+
+### Kubernetes Example
+
+```bash
+# Kubernetes — google_id_token + native mTLS
+GRPC_AUTH_MODE=google_id_token
+GRPC_AUTH_AUDIENCE=https://a2a-bridge.scion.svc.cluster.local
+GRPC_AUTH_SUBJECTS=hub-sa@project.iam.gserviceaccount.com
+GRPC_TLS_CERT=/etc/certs/server.pem
+GRPC_TLS_KEY=/etc/certs/server-key.pem
+GRPC_TLS_CLIENT_CA=/etc/certs/ca.pem
+```
+
+### Principal Authorization (Hub vs. GE Invoker)
+
+On Cloud Run, both the Hub service account and the GE Discovery Engine
+service account may have `roles/run.invoker` permission on the bridge.
+Cloud Run invocation permission alone does **not** authorize gRPC control
+RPCs. The bridge's `GoogleIDTokenValidator` additionally validates:
+
+1. The token's `email` claim is in `GRPC_AUTH_SUBJECTS`
+2. The `email_verified` claim is `true`
+
+This means a valid Google ID token from the GE invoker SA will be
+rejected for all gRPC control methods (Configure, Publish, Subscribe,
+Unsubscribe, GetInfo, HealthCheck) unless that SA is explicitly listed
+in `GRPC_AUTH_SUBJECTS`. This separation is verified by the negative
+test `TestGoogleIDTokenValidator_GEInvoker_CannotCallControlRPCs`.
+
+### TLS and Mux-Port Separation
+
+When `MUX_PORTS=true` or `K_SERVICE` is set (Cloud Run), the bridge
+serves gRPC over h2c (cleartext HTTP/2) via `grpcServer.ServeHTTP`.
+Native gRPC TLS credentials (`grpc.Creds`) are **not applied** in this
+mode — Cloud Run terminates TLS at the platform ingress.
+
+When `MUX_PORTS` is not set (Kubernetes dedicated listener), native TLS
+credentials are applied to the dedicated gRPC listener. Auth interceptors
+apply in both modes.
 
 ## Credential Lifecycle
 

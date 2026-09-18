@@ -74,17 +74,24 @@ func NewAdapterFromEntry(entry plugin.PluginEntry, logger *slog.Logger) (plugin.
 }
 
 // resolveAuthenticator creates a PerCallAuthenticator based on PluginEntry
-// auth fields. Returns nil when no auth is configured (backward compatible).
+// auth fields. Fails closed for remote addresses without explicit auth.
 func resolveAuthenticator(entry plugin.PluginEntry, logger *slog.Logger) (PerCallAuthenticator, error) {
 	switch entry.AuthType {
 	case "", "none":
-		// No auth — backward compatible for localhost/h2c.
-		if entry.AuthType == "" && !isLocalAddress(entry.Address) {
-			logger.Warn("gRPC broker plugin has no auth_type configured for remote address; "+
-				"connection will be unauthenticated",
-				"address", entry.Address)
+		if isLocalAddress(entry.Address) {
+			// Local addresses are allowed without auth (h2c dev mode).
+			return nil, nil
 		}
-		return nil, nil
+		if entry.AuthType == "none" {
+			// Explicit "none" for remote is rejected — fail closed.
+			return nil, fmt.Errorf("auth_type %q is not allowed for remote address %q; "+
+				"use %q or configure TLS with mTLS client identity",
+				"none", entry.Address, AuthTypeGoogleIDToken)
+		}
+		// Missing auth_type for remote address — fail closed.
+		return nil, fmt.Errorf("auth_type is required for remote gRPC address %q; "+
+			"set auth_type to %q with auth_audience, or use a local address for development",
+			entry.Address, AuthTypeGoogleIDToken)
 
 	case AuthTypeGoogleIDToken:
 		if entry.AuthAudience == "" {
