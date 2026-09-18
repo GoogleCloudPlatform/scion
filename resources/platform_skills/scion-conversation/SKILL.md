@@ -41,112 +41,26 @@ Conversation subcommands accept three reference formats:
 Bare UUIDs are not accepted. Always include the `conv:` prefix when addressing
 a conversation by ID.
 
-## Subcommand Reference
+## Functional Capabilities
 
-### List conversations
+**Reading:** `list`, `get`, `messages`, `catch-up`, and `get-message` let you
+discover accessible conversations, inspect their metadata, and read all,
+recent, or individual messages. Prefer structured output when another command
+or agent will consume the result.
 
-```bash
-scion conversation list
-scion conversation list --kind group --surface native --project <project-id> --limit 20
-scion conversation list --json
-```
+**Administration:** `create`, `join`, `leave`, `participants`, and
+`set-default` create coordination spaces and manage their membership and
+default agent. A conversation name is the positional argument to `create`, not
+a `--title` flag. `join` is not idempotent: adding an existing participant
+returns HTTP 409, so check `participants` first when membership is uncertain.
 
-`list` shows conversations you participate in. Filter with `--kind`,
-`--surface`, or `--project`; control the result count with `--limit`; and use
-`--json` for machine-readable output.
-
-### Get conversation details
-
-```bash
-scion conversation get conv:a1b2c3d4-...
-scion conversation get @my-agent --json
-```
-
-`get <conv-ref>` shows conversation metadata, kind, surface, and participants.
-
-### Create a group conversation
-
-```bash
-scion conversation create "project-x coordination"
-scion conversation create "project-x coordination" --project <project-id> --json
-```
-
-The name is the positional argument, not a `--title` flag. Use `--project` to
-select a project or `--json` to capture the created conversation details.
-
-### View message history
-
-```bash
-scion conversation messages conv:a1b2c3d4-...
-scion conversation messages conv:a1b2c3d4-... --limit 50
-scion conversation messages conv:a1b2c3d4-... --after 2026-09-18T10:00:00Z --json
-scion conversation messages conv:a1b2c3d4-... --before 2026-09-18T12:00:00Z
-```
-
-`messages <conv-ref>` reads messages in a conversation. Use `--limit` to bound
-the results and `--before` or `--after` with RFC3339 timestamps to navigate
-history. Use `--json` for machine-readable output.
-
-### Catch up on recent messages
-
-```bash
-scion conversation catch-up conv:a1b2c3d4-...
-scion conversation catch-up conv:a1b2c3d4-... --since 30m --json
-```
-
-`catch-up <conv-ref>` shows messages from the last hour by default. Use
-`--since` to select another duration and `--json` for machine-readable output.
-
-### List participants
-
-```bash
-scion conversation participants conv:a1b2c3d4-...
-scion conversation participants conv:a1b2c3d4-... --json
-```
-
-`participants <conv-ref>` lists the conversation's participants.
-
-### Add a participant
-
-```bash
-scion conversation join conv:a1b2c3d4-... agent <agent-id>
-scion conversation join conv:a1b2c3d4-... user <user-id>
-```
-
-`join <conv-ref> <principal-kind> <principal-id>` requires all three arguments.
-The principal kind must be `agent` or `user`. This command is not idempotent:
-it returns HTTP 409 if the participant already exists. Check participants
-before adding someone when duplicate membership is possible.
-
-### Leave a conversation
-
-```bash
-scion conversation leave conv:a1b2c3d4-...
-```
-
-`leave <conv-ref>` removes the caller from the conversation.
-
-### Get a specific message
-
-```bash
-scion conversation get-message conv:a1b2c3d4-... <message-id>
-scion conversation get-message conv:a1b2c3d4-... <message-id> --json
-```
-
-`get-message <conv-ref> <message-id>` requires both arguments and reads one
-message. Use `--json` for machine-readable output.
-
-### Set the default agent
-
-```bash
-scion conversation set-default conv:a1b2c3d4-... <agent-id>
-```
-
-`set-default <conv-ref> <agent-id>` sets the conversation's default agent.
+Run `scion conversation --help` for the full command reference and
+`scion conversation <subcommand> --help` for authoritative usage, arguments,
+and flags for an individual subcommand.
 
 ## Common Patterns
 
-### Reply to an inbound message
+### Reply in the original conversation
 
 Read the inbound envelope's `conversation.id`, add the `conv:` prefix, and send
 the reply with `scion message`:
@@ -164,21 +78,13 @@ skill for the complete routing rules.
 scion conversation create "project-x coordination" --json
 ```
 
-Capture the returned ID and share it as `conv:<id>` with the participating
-agents.
+Capture the returned ID and share it as `conv:<id>` with participants.
 
-### Monitor a conversation
+### Catch up and manage membership
 
-```bash
-scion conversation catch-up conv:a1b2c3d4-...
-```
-
-### Check before adding a participant
-
-```bash
-scion conversation participants conv:a1b2c3d4-...
-scion conversation join conv:a1b2c3d4-... agent <agent-id>
-```
+Use `catch-up` to review recent activity without rereading the full history.
+Before adding a participant whose membership is uncertain, inspect
+`participants`; call `join` only when they are absent.
 
 ## Relationship to `scion message`
 
