@@ -66,6 +66,14 @@ func makeTask(id string) *a2a.Task {
 	}
 }
 
+func TestBarrier_CreateNilTaskReturnsInnerError(t *testing.T) {
+	store := NewBarrierTaskStore(&PostgresTaskStore{})
+
+	_, err := store.Create(context.Background(), nil)
+
+	require.ErrorIs(t, err, a2a.ErrInvalidRequest)
+}
+
 // barrierTestDatabaseURL returns the test database URL or skips the test.
 func barrierTestDatabaseURL(t *testing.T) string {
 	t.Helper()
