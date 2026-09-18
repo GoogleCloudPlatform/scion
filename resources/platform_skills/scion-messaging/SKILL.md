@@ -34,7 +34,8 @@ Choosing the right recipient is critical to avoid spam and ensure the message re
   user's native-surface DM conversation, a *different* conversation from the
   one the message came from. Reply with `@<email>` only when you are
   deliberately starting a new, separate DM — not when replying to something
-  you were addressed in.
+  you were addressed in. View its details with
+  `scion conversation get conv:<uuid>`; see the `scion-conversation` skill.
 
 ### Mentions
 
@@ -118,6 +119,10 @@ In projects with multiple users:
 - Reply to direct messages from each user independently.
 - Do not repeat messages in a group for each user you've interacted with in that group, assume they can see it, use mentions if you want to draw a specific user's attention to a message.
 - Handle each user's requests within their own context.
+
+For managing conversation metadata, participants, and message history, see the
+`scion-conversation` skill. The `scion conversation` command handles reading
+and administration; `scion message` handles sending.
 
 ## Message Length Limit
 
