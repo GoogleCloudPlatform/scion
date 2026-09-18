@@ -107,10 +107,10 @@ func (e *testExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorConte
 
 // hubSendCapture records a captured Hub send for test inspection.
 type hubSendCapture struct {
-	AgentID  string                      `json:"agentID"`
-	TaskID   string                      `json:"taskID"`
-	Message  *messages.StructuredMessage `json:"message"`
-	CapturedAt time.Time                 `json:"capturedAt"`
+	AgentID    string                      `json:"agentID"`
+	TaskID     string                      `json:"taskID"`
+	Message    *messages.StructuredMessage `json:"message"`
+	CapturedAt time.Time                   `json:"capturedAt"`
 }
 
 // mockProductionHub is a thread-safe mock Hub client for production mode.
@@ -123,9 +123,9 @@ type mockProductionHub struct {
 func newMockProductionHub(projectSlug, agentSlug string) *mockProductionHub {
 	h := &mockProductionHub{}
 	h.agents = &mockProdAgentService{
-		hub:          h,
-		projectSlug:  projectSlug,
-		agentSlug:    agentSlug,
+		hub:         h,
+		projectSlug: projectSlug,
+		agentSlug:   agentSlug,
 	}
 	return h
 }
@@ -241,20 +241,20 @@ type mockProdHubClient struct {
 	agents *mockProdAgentService
 }
 
-func (m *mockProdHubClient) Agents() hubclient.AgentService               { return m.agents }
-func (m *mockProdHubClient) ProjectAgents(string) hubclient.AgentService  { return m.agents }
-func (m *mockProdHubClient) Projects() hubclient.ProjectService           { return nil }
+func (m *mockProdHubClient) Agents() hubclient.AgentService                 { return m.agents }
+func (m *mockProdHubClient) ProjectAgents(string) hubclient.AgentService    { return m.agents }
+func (m *mockProdHubClient) Projects() hubclient.ProjectService             { return nil }
 func (m *mockProdHubClient) RuntimeBrokers() hubclient.RuntimeBrokerService { return nil }
-func (m *mockProdHubClient) Templates() hubclient.TemplateService         { return nil }
+func (m *mockProdHubClient) Templates() hubclient.TemplateService           { return nil }
 func (m *mockProdHubClient) HarnessConfigs() hubclient.HarnessConfigService { return nil }
-func (m *mockProdHubClient) Workspace() hubclient.WorkspaceService        { return nil }
-func (m *mockProdHubClient) Users() hubclient.UserService                 { return nil }
-func (m *mockProdHubClient) Env() hubclient.EnvService                    { return nil }
-func (m *mockProdHubClient) Secrets() hubclient.SecretService             { return nil }
-func (m *mockProdHubClient) Auth() hubclient.AuthService                  { return nil }
-func (m *mockProdHubClient) Notifications() hubclient.NotificationService { return nil }
-func (m *mockProdHubClient) Tokens() hubclient.TokenService               { return nil }
-func (m *mockProdHubClient) Subscriptions() hubclient.SubscriptionService { return nil }
+func (m *mockProdHubClient) Workspace() hubclient.WorkspaceService          { return nil }
+func (m *mockProdHubClient) Users() hubclient.UserService                   { return nil }
+func (m *mockProdHubClient) Env() hubclient.EnvService                      { return nil }
+func (m *mockProdHubClient) Secrets() hubclient.SecretService               { return nil }
+func (m *mockProdHubClient) Auth() hubclient.AuthService                    { return nil }
+func (m *mockProdHubClient) Notifications() hubclient.NotificationService   { return nil }
+func (m *mockProdHubClient) Tokens() hubclient.TokenService                 { return nil }
+func (m *mockProdHubClient) Subscriptions() hubclient.SubscriptionService   { return nil }
 func (m *mockProdHubClient) SubscriptionTemplates() hubclient.SubscriptionTemplateService {
 	return nil
 }

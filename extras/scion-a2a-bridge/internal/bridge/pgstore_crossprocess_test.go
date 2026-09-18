@@ -1178,8 +1178,12 @@ func TestPostgresTaskStoreCrossProcessCallerIsolation(t *testing.T) {
 		},
 	})
 	var sendResp struct {
-		StatusUpdate *struct{ TaskID string `json:"taskId"` } `json:"statusUpdate"`
-		Task         *struct{ ID string `json:"id"` }        `json:"task"`
+		StatusUpdate *struct {
+			TaskID string `json:"taskId"`
+		} `json:"statusUpdate"`
+		Task *struct {
+			ID string `json:"id"`
+		} `json:"task"`
 	}
 	json.Unmarshal(sendResult, &sendResp)
 	var aliceTaskID string
@@ -1219,8 +1223,12 @@ func TestPostgresTaskStoreCrossProcessCallerIsolation(t *testing.T) {
 		},
 	})
 	var sendResp2 struct {
-		StatusUpdate *struct{ TaskID string `json:"taskId"` } `json:"statusUpdate"`
-		Task         *struct{ ID string `json:"id"` }        `json:"task"`
+		StatusUpdate *struct {
+			TaskID string `json:"taskId"`
+		} `json:"statusUpdate"`
+		Task *struct {
+			ID string `json:"id"`
+		} `json:"task"`
 	}
 	json.Unmarshal(sendResult2, &sendResp2)
 	var bobTaskID string
@@ -1604,12 +1612,12 @@ func TestPostgresTaskStoreRetentionThroughRunSweep(t *testing.T) {
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	defer shutdownCancel()
 	b := &Bridge{
-		store:       pgStore,
-		log:         slog.Default(),
-		config:      &Config{},
-		activeTasks: make(map[string]activeTaskEntry),
-		agentTasks:  make(map[string][]string),
-		push:        NewPushDispatcher(pgStore, &Config{}, slog.Default(), shutdownCtx),
+		store:        pgStore,
+		log:          slog.Default(),
+		config:       &Config{},
+		activeTasks:  make(map[string]activeTaskEntry),
+		agentTasks:   make(map[string][]string),
+		push:         NewPushDispatcher(pgStore, &Config{}, slog.Default(), shutdownCtx),
 		sdkTaskStore: sdkStore,
 	}
 
