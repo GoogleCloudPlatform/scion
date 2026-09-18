@@ -22,6 +22,15 @@ Cloud Run enforces a two-tier identity boundary:
 ### Principal Separation Invariant
 - **Hub Service Account (`hub-sa@...`):** Authorized in `GRPC_AUTH_SUBJECTS` to invoke control methods (`Configure`, `Publish`, `Subscribe`, `Unsubscribe`, `HealthCheck`, `GetInfo`).
 - **GE Discovery Engine Invoker (`ge-invoker@...`):** Granted Cloud Run `roles/run.invoker` to reach the HTTPS endpoint, but strictly NOT listed in `GRPC_AUTH_SUBJECTS`. Attempting to invoke gRPC control RPCs with the GE invoker identity is rejected with `codes.PermissionDenied`.
+- **Required IAM restriction:** The example uses `run.googleapis.com/ingress: all`, so the service is reachable at the network layer. Grant `roles/run.invoker` only to the expected Hub and GE invoker service accounts, keep those principals distinct, and never grant it to `allUsers` or `allAuthenticatedUsers`. Cloud Run IAM is the platform boundary; the bridge's JWT validation must remain enabled as application-level defense in depth.
+
+### Substitute an Immutable Image Digest
+Both example manifests intentionally contain an all-zero `sha256` placeholder that cannot be deployed. Before applying either manifest:
+
+1. Build and push the bridge image under a release tag.
+2. Resolve the registry-reported digest, for example with `gcloud artifacts docker images describe IMAGE_URI:TAG --format='value(image_summary.digest)'`.
+3. Replace the entire `gcr.io/scion-prod/scion-a2a-bridge@sha256:000...000` value in the target manifest with `IMAGE_URI@sha256:<64-hex-digest>`. Do not replace it with `:latest` or another mutable tag.
+4. Run `go test ./integration -run 'Test(CloudRun|Kubernetes)ManifestValidation' -count=1` from `extras/scion-a2a-bridge`, then apply the manifest through the normal reviewed deployment process.
 
 ### Shared Storage
 All instances connect to a central PostgreSQL 15 database instance (e.g. Cloud SQL with Cloud SQL Auth Proxy sidecar or private IP VPC connector). Leases and state are managed via `a2a_sdk_tasks`.
@@ -47,12 +56,14 @@ All instances connect to a central PostgreSQL 15 database instance (e.g. Cloud S
 - **Deployment:** Defined with `replicas: 2` (or greater) using `RollingUpdate` strategy (`maxSurge: 1`, `maxUnavailable: 0`).
 - **Service:** Headless or ClusterIP Service exposing port 8080 with `appProtocol: kubernetes.io/h2c`.
 - **Ingress:** Ingress controller (GKE Ingress, NGINX, or Istio) terminating TLS and routing to Service.
+- **TLS Example:** The manifest maps `bridge.example.com` to TLS secret `scion-a2a-bridge-tls`; replace both the rule/TLS host and secret name with provisioned values before applying it.
 
 ### Credentials & Identity
 - **PostgreSQL Connection:** Secret `a2a-postgres-secret` containing `database-url`.
 - **Identity Options:**
   - Google ID Token validation via GKE Workload Identity.
   - Native mTLS with certificates mounted from secrets (`GRPC_TLS_CERT`, `GRPC_TLS_KEY`, `GRPC_TLS_CLIENT_CA`) when running dedicated gRPC listeners.
+- **GE invoker boundary:** Keep the GE invoker principal distinct from every Hub control principal. Configure an identity-aware Ingress/Gateway, service-mesh authorization policy, or equivalent control to admit that GE principal; use Workload Identity where an in-cluster workload identity participates in the path. The example manifest contains only the routing/TLS shape and a prerequisite comment—it does not install or claim live enforcement of a provider-specific authorization policy. Application-level bearer/JWT validation remains required.
 
 ### Health, Rollback, and Cleanup
 - **Probes:** `readinessProbe` and `livenessProbe` checking HTTP `/healthz`.

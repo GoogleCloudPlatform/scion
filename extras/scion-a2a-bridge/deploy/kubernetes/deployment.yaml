@@ -23,7 +23,9 @@ spec:
     spec:
       containers:
         - name: bridge
-          image: gcr.io/scion-prod/scion-a2a-bridge:latest
+          # PLACEHOLDER ONLY: substitute the deployed image's immutable digest as
+          # described in docs/deployment.md; the all-zero digest cannot be pulled.
+          image: gcr.io/scion-prod/scion-a2a-bridge@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           ports:
             - name: http-h2c
@@ -89,9 +91,16 @@ kind: Ingress
 metadata:
   name: scion-a2a-bridge
   annotations:
+    # SECURITY PREREQUISITE: configure the chosen Ingress/Gateway authorization
+    # layer (and Workload Identity where applicable) to admit only the distinct
+    # GE invoker principal. This example documents, but does not install, that policy.
     kubernetes.io/ingress.class: "gce"
     networking.gke.io/v1beta1.FrontendConfig: "scion-a2a-frontend-config"
 spec:
+  tls:
+    - hosts:
+        - bridge.example.com
+      secretName: scion-a2a-bridge-tls
   rules:
     - host: bridge.example.com
       http:

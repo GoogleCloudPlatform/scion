@@ -1,15 +1,15 @@
 # Final Deterministic Integration Harness (#1620)
 
 **Date:** 2026-09-18
-**Branch:** `scion/dev-postmerge-integration-harness`
+**Branch:** `scion/dev-postmerge-integration-harness-final-fixes`
 **Issue:** #1620
-**Base:** `7c0e3a26856136975a479715724db37fabde1bfa` (exact upstream main tip with PRs #1741, #1742, #1743 merged)
+**Merge base:** `0c07fdee3eefac5a21f93878211bf507b2e5c6a7` (current merged `main`, including PR #1746)
 
 ## Summary
 
 Ported the complete, deterministic, real-process integration test harness for Gemini Enterprise A2A (#1620) onto merged `main`. The integration harness executes against real subprocess topologies (Hub, Bridge replicas, Alternator proxy, Fake Google JWKS) with real loopback networking, authenticated gRPC transport, and real PostgreSQL database instances.
 
-Zero production Go code was modified, preserving the post-merge tree integrity. All local deterministic test layers pass cleanly under single-run (18/18 tests), `-race`, and `-count=3` stress loops. A dedicated fail-closed CI entry and runner script provision PostgreSQL 15 and fail closed if the database is missing. Example deployment manifests for Cloud Run and Kubernetes are verified via deterministic dry-run parsing tests. External live deployment and external Gemini Enterprise envelope capture remain marked `external-live-only` / `passing: false` in `testdata/acceptance_layers.json`.
+Zero production Go code was modified, preserving the post-merge tree integrity. All 20 local deterministic test cases pass cleanly under the retained single-run, `-race`, and `-count=3` evidence. A dedicated fail-closed CI entry and runner script provision PostgreSQL 15 and fail closed if the database is missing. Example deployment manifests for Cloud Run and Kubernetes are verified via deterministic dry-run parsing tests. External live deployment and external Gemini Enterprise envelope capture remain marked `external-live-only` / `passing: false` in `testdata/acceptance_layers.json`.
 
 ## Scope & Boundaries Followed
 
@@ -36,7 +36,7 @@ Zero production Go code was modified, preserving the post-merge tree integrity. 
 | **Layer 6** | Matrix & Docs Reflection | PASS | `TestAcceptanceLayersMatchProvenScope`, `TestFixtureMatricesContainApprovedCategories`, `testdata/acceptance_layers.json` (reflects real evidence; external GE live capture remains false). |
 | **Layer 7** | Cloud Run Deployment Config | LOCAL PASS (Parent partial) | `TestCloudRunManifestValidation`, `deploy/cloudrun/service.yaml`, `docs/deployment.md` (`minScale: 2`, `h2c` port 8080, dual headers, `hub-sa` vs `ge-invoker` isolation, health/rollback/cleanup). External live deployment remains `external-live-only` / `passing: false`. |
 | **Layer 8** | Kubernetes Deployment Config | LOCAL PASS (Parent partial) | `TestKubernetesManifestValidation`, `deploy/kubernetes/deployment.yaml`, `docs/deployment.md` (2+ replicas, RollingUpdate, `a2a-postgres-secret`, Service with `kubernetes.io/h2c`, Ingress, health/rollback/cleanup). External live deployment remains `external-live-only` / `passing: false`. |
-| **Layer 9** | CI Automated Integration | PASS | `CIAutomatedPostgresIntegration`, `make test-a2a-integration`, `./scripts/run-integration-ci.sh`, `.github/workflows/extras-ci.yml` (provisions PostgreSQL 15, sets `TEST_DATABASE_URL`, fails closed if DB missing). |
+| **Layer 9** | CI Automated Integration | PASS | `CIAutomatedPostgresIntegration`, `make test-a2a-integration`, `extras/scion-a2a-bridge/scripts/run-integration-ci.sh`, `.github/workflows/extras-ci.yml` (provisions PostgreSQL 15, sets `TEST_DATABASE_URL`, fails closed if DB missing). The workflow is configured and locally validated; no remote GitHub Actions execution is claimed. |
 
 ## Test Verification Runs
 
@@ -123,8 +123,10 @@ ok  	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state
 ```
 
 ### Upstream Merge DAG
-Current upstream `main` (`0c07fdee3eefac5a21f93878211bf507b2e5c6a7`, incorporating PR #1746) is cleanly merged into `scion/dev-postmerge-integration-harness` via merge commit `98c996a5`:
+Current merged `main` and the exact branch merge-base are `0c07fdee3eefac5a21f93878211bf507b2e5c6a7` (incorporating PR #1746). That commit entered the accepted candidate's unchanged DAG as parent 2 of merge commit `98c996a5`; the correction starts from immutable candidate `e9b34d2af827cc5bc9ffc5b3d671591f324c0d70`:
 ```
+* e9b34d2a fix(ge-a2a): require TEST_DATABASE_URL and fail closed without fallback (#1620)
+* 756f0aa3 docs(ge-a2a): record merged main DAG and full bridge suite pass (#1620)
 *   98c996a5 Merge remote-tracking branch 'origin/main' into scion/dev-postmerge-integration-harness
 | \
 | * 0c07fdee fix(a2a-bridge): remove duplicate mock Messaging declaration (#1746)
@@ -151,7 +153,28 @@ Current upstream `main` (`0c07fdee3eefac5a21f93878211bf507b2e5c6a7`, incorporati
 - `extras/scion-a2a-bridge/integration/harness_behavior_test.go`
 - `extras/scion-a2a-bridge/integration/postgres_harness_test.go`
 - `extras/scion-a2a-bridge/integration/redaction_harness_test.go`
-- `extras/scion-a2a-bridge/integration/scripts/run-integration-ci.sh`
+- `extras/scion-a2a-bridge/scripts/run-integration-ci.sh`
 - `extras/scion-a2a-bridge/integration/topology_harness_test.go`
 - `extras/scion-a2a-bridge/integration/testdata/*`
 - `.design/project-log/ge-a2a-auth-transport-integration-1620.md`
+
+## Final Gate Finding Resolution
+
+| Finding | Resolution |
+|---|---|
+| Cloud Run `ingress: all` prerequisite | Resolved in the adjacent manifest comment and deployment guide: restrict `roles/run.invoker` to the distinct Hub and GE service accounts; never grant public principals; retain application JWT validation. |
+| Mutable example images | Resolved: both manifests use explicit all-zero, nondeployable `@sha256:<64 hex>` placeholders, with substitution steps. Manifest tests reject `:latest` and require digest-form references. |
+| Kubernetes TLS and GE principal | Resolved: the Ingress example has a TLS host/secret, tests assert host routing and TLS-host agreement, and comments/docs assign GE-principal enforcement to an identity-aware Ingress/Gateway, service-mesh policy, Workload Identity, or equivalent without claiming live enforcement. |
+| Cloud Run GE/Hub separation | Resolved: manifest validation requires a nonempty `GE_INVOKER_SERVICE_ACCOUNT` distinct from every comma-separated `GRPC_AUTH_SUBJECTS` principal. Dual-header wire proof remains attributed to transport integration tests and documentation, not YAML parsing. |
+| Project-log history/path accuracy | Resolved: runner path is `extras/scion-a2a-bridge/scripts/run-integration-ci.sh`; merge-base/current-main narrative is `0c07fdee`, with the existing merge DAG preserved exactly. |
+| Durable report accuracy | Resolved in `/scion-volumes/scratchpad/projects/ge-a2a/dev-postmerge-integration-harness-report.md` after the correction commit and durability push, including the exact successor SHA and current-main diff count. |
+| Security Info findings | Dispositioned with no runtime changes: the `http.DefaultTransport` mutation occurs only in an isolated test helper subprocess, so process isolation is the correctness boundary; ephemeral CI-only `scion/scion` PostgreSQL credentials are not reusable secrets; Kubernetes GE-principal documentation is resolved above. |
+
+## Final Bounded Verification
+
+- RED proof before manifest edits: `go test ./integration -run 'Test(CloudRun|Kubernetes)ManifestValidation' -count=1` failed on both `:latest` image references.
+- Focused normal/YAML parse: the same command passed (`ok`, 0.138s); both YAML files were unmarshaled with `gopkg.in/yaml.v3` and all structural assertions passed.
+- Focused race: `go test -race ./integration -run 'Test(CloudRun|Kubernetes)ManifestValidation' -count=1` passed (`ok`, 1.452s).
+- One normal real-PostgreSQL run: `TEST_DATABASE_URL='postgres://scion:scion@127.0.0.1:5432/a2a_test?sslmode=disable' TEST_REQUIRE_DATABASE=1 go test -v ./integration -count=1` passed all 20 tests (`ok`, 13.753s). The local PostgreSQL 15 process was stopped afterward.
+- `make fmt-check`, `make compat-literals`, `git diff --check 0c07fdee...HEAD`, and `git diff --check` all exited 0.
+- `git diff --name-only e9b34d2a...` confirms the correction changes only manifests, their focused validation test, deployment documentation, and this project log; runtime topology tests and production Go remain untouched.

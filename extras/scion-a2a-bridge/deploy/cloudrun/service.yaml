@@ -3,6 +3,10 @@ kind: Service
 metadata:
   name: scion-a2a-bridge
   annotations:
+    # SECURITY PREREQUISITE: Because ingress is public at the network layer, grant
+    # roles/run.invoker only to the distinct Hub and GE invoker service accounts
+    # described in docs/deployment.md. Never grant allUsers/allAuthenticatedUsers.
+    # The bridge's application-level JWT validation remains required as defense in depth.
     run.googleapis.com/ingress: all
     run.googleapis.com/description: "A2A Bridge multi-instance HA deployment with dual-header authentication"
 spec:
@@ -18,7 +22,9 @@ spec:
       containerConcurrency: 80
       timeoutSeconds: 300
       containers:
-        - image: gcr.io/scion-prod/scion-a2a-bridge:latest
+        # PLACEHOLDER ONLY: substitute the deployed image's immutable digest as
+        # described in docs/deployment.md; the all-zero digest cannot be deployed.
+        - image: gcr.io/scion-prod/scion-a2a-bridge@sha256:0000000000000000000000000000000000000000000000000000000000000000
           ports:
             # h2c enables HTTP/2 cleartext transport behind Cloud Run TLS termination
             - name: h2c

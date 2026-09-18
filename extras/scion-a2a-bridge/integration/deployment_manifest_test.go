@@ -19,7 +19,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -46,6 +48,7 @@ func TestCloudRunManifestValidation(t *testing.T) {
 				} `yaml:"metadata"`
 				Spec struct {
 					Containers []struct {
+						Image string `yaml:"image"`
 						Ports []struct {
 							Name          string `yaml:"name"`
 							ContainerPort int    `yaml:"containerPort"`
@@ -99,6 +102,7 @@ func TestCloudRunManifestValidation(t *testing.T) {
 		t.Fatal("no containers specified in manifest")
 	}
 	container := root.Spec.Template.Spec.Containers[0]
+	requireImmutableImage(t, container.Image)
 
 	var foundH2C bool
 	for _, port := range container.Ports {
@@ -130,6 +134,15 @@ func TestCloudRunManifestValidation(t *testing.T) {
 	}
 	if envMap["GRPC_AUTH_SUBJECTS"] == "" {
 		t.Error("GRPC_AUTH_SUBJECTS must not be empty")
+	}
+	geInvoker := strings.TrimSpace(envMap["GE_INVOKER_SERVICE_ACCOUNT"])
+	if geInvoker == "" {
+		t.Error("GE_INVOKER_SERVICE_ACCOUNT must not be empty")
+	}
+	for _, hubPrincipal := range strings.Split(envMap["GRPC_AUTH_SUBJECTS"], ",") {
+		if geInvoker == strings.TrimSpace(hubPrincipal) {
+			t.Errorf("GE_INVOKER_SERVICE_ACCOUNT %q must be distinct from every GRPC_AUTH_SUBJECTS principal", geInvoker)
+		}
 	}
 
 	if container.StartupProbe == nil || container.StartupProbe.HTTPGet.Path != "/healthz" {
@@ -168,10 +181,31 @@ func TestKubernetesManifestValidation(t *testing.T) {
 					Port        int    `yaml:"port"`
 					AppProtocol string `yaml:"appProtocol"`
 				} `yaml:"ports"`
+				Rules []struct {
+					Host string `yaml:"host"`
+					HTTP struct {
+						Paths []struct {
+							Path    string `yaml:"path"`
+							Backend struct {
+								Service struct {
+									Name string `yaml:"name"`
+									Port struct {
+										Number int `yaml:"number"`
+									} `yaml:"port"`
+								} `yaml:"service"`
+							} `yaml:"backend"`
+						} `yaml:"paths"`
+					} `yaml:"http"`
+				} `yaml:"rules"`
+				TLS []struct {
+					Hosts      []string `yaml:"hosts"`
+					SecretName string   `yaml:"secretName"`
+				} `yaml:"tls"`
 				Template struct {
 					Spec struct {
 						Containers []struct {
 							Name  string `yaml:"name"`
+							Image string `yaml:"image"`
 							Ports []struct {
 								ContainerPort int `yaml:"containerPort"`
 							} `yaml:"ports"`
@@ -222,6 +256,7 @@ func TestKubernetesManifestValidation(t *testing.T) {
 				t.Fatal("Deployment has no containers")
 			}
 			c := doc.Spec.Template.Spec.Containers[0]
+			requireImmutableImage(t, c.Image)
 			var foundSecretRef bool
 			for _, env := range c.Env {
 				if env.Name == "DATABASE_URL" && env.ValueFrom != nil && env.ValueFrom.SecretKeyRef.Name == "a2a-postgres-secret" {
@@ -252,10 +287,43 @@ func TestKubernetesManifestValidation(t *testing.T) {
 			}
 		case "Ingress":
 			foundIngress = true
+			if len(doc.Spec.Rules) == 0 || doc.Spec.Rules[0].Host == "" {
+				t.Fatal("Ingress must define a nonempty host routing rule")
+			}
+			rule := doc.Spec.Rules[0]
+			if len(rule.HTTP.Paths) == 0 || rule.HTTP.Paths[0].Path != "/" ||
+				rule.HTTP.Paths[0].Backend.Service.Name != "scion-a2a-bridge" ||
+				rule.HTTP.Paths[0].Backend.Service.Port.Number != 8080 {
+				t.Errorf("Ingress host %q must route / to scion-a2a-bridge:8080", rule.Host)
+			}
+			var foundMatchingTLSHost bool
+			for _, tls := range doc.Spec.TLS {
+				if tls.SecretName == "" {
+					t.Error("Ingress TLS secretName must not be empty")
+				}
+				for _, host := range tls.Hosts {
+					if host == rule.Host {
+						foundMatchingTLSHost = true
+					}
+				}
+			}
+			if !foundMatchingTLSHost {
+				t.Errorf("Ingress TLS hosts must include routing host %q", rule.Host)
+			}
 		}
 	}
 
 	if !foundDeployment || !foundService || !foundIngress {
 		t.Fatalf("expected Deployment, Service, and Ingress in manifest; got kinds: %v", kinds)
+	}
+}
+
+func requireImmutableImage(t *testing.T, image string) {
+	t.Helper()
+	if strings.HasSuffix(image, ":latest") {
+		t.Fatalf("container image %q must not use :latest", image)
+	}
+	if !regexp.MustCompile(`@sha256:[0-9a-f]{64}$`).MatchString(image) {
+		t.Fatalf("container image %q must use an immutable sha256 digest reference", image)
 	}
 }
