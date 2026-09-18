@@ -25,6 +25,9 @@ for short-lived Hub user access tokens.
 | `3354ea8` | docs: update project log with durable store, validator fixes, v0.3 compat |
 | `01d3557` | fix(hub,bridge): resolve all critical/required review findings (#1616, #1617) |
 | `b0dc610` | fix: authzop catalog + GE JSON-RPC wire compatibility tests (#1616, #1617) |
+| `d1340ac` | docs: update project log with review-auth-1 finding dispositions (#1616, #1617) |
+| `b86fe45` | fix(hub,bridge): resolve review-auth-2 findings (#1616, #1617) |
+| `0695f75` | fix(bridge): wire transport auth to snapshot validator + harden dispatch tests (#1616, #1617) |
 
 ## Hub — `POST /api/v1/auth/integrations/google/exchange` (#1616)
 
@@ -200,10 +203,10 @@ Hub `go.mod`: No changes.
 
 | # | Finding | Resolution | Evidence |
 |---|---------|------------|----------|
-| B2-C1 | Missing `ge_exchange` in `callerHubClient` | **Resolved**: added `case "ge_exchange":` — creates per-caller Hub client with bearer token + transport auth | `TestCallerHubClient_GEExchangeTokenType`, `TestGEExchange_ExecutorPath_Regression` |
-| B2-R2 | Synthetic JSON-RPC tests | **Resolved**: complete rewrite with `newIntegrationTestServer` → real SDK handler + executor + mock Hub | `TestJSONRPC_RealHandler_*` (6 tests) |
+| B2-C1 | Missing `ge_exchange` in `callerHubClient` | **Resolved**: added `case "ge_exchange":` — creates per-caller Hub client with bearer token + transport auth | `TestCallerHubClient_GEExchangeTokenType`, `TestGEExchange_ExecutorPath_Regression` (hard-asserts Hub received message + correct bearer token) |
+| B2-R2 | Synthetic JSON-RPC tests | **Resolved**: complete rewrite with `newIntegrationTestServer` → real SDK handler + executor + mock Hub; SDK v2 wire format (messageId, ROLE_USER, text parts); hard dispatch assertions (t.Fatal) | `TestJSONRPC_RealHandler_*` (6 tests), `TestGEExchange_ExecutorPath_Regression` |
 | B2-R3 | Missing discovery aliases + direct POST | **Resolved**: `/.well-known/agent.json` routes, direct POST routes, auth exemption | `TestDiscovery_*` (6 tests) |
-| B2-R4 | Transport auth not wired to GE validator | **Resolved**: `WithGETransportAuth` functional option, `SetGETransportAuth` method, wired in main.go | `TestGEExchangeValidator_TransportAuth_*` (2 tests) |
+| B2-R4 | Transport auth not wired to GE validator / snapshot validator | **Resolved**: `BuildSnapshot` accepts `...GEValidatorOption`; `broker.go` stores+forwards geOpts; `main.go` all 4 call sites forward geOpts | `TestGEExchangeValidator_TransportAuth_*` (2 tests) + `TestSnapshotMiddleware_TransportAuth_InitialComposition`, `TestSnapshotMiddleware_TransportAuth_AfterSnapshotReplacement` |
 | B2-R5 | O(N) eviction → LRU | **Resolved**: `container/list` + map for O(1) eviction | `TestGEExchangeValidator_EvictLRU`, `TestGEExchangeValidator_LRUEviction_ConcurrentAccess` |
 | B2-R6 | Expired response caching | **Resolved**: fail closed when remaining ≤ 0 | `TestGEExchangeValidator_Expired*_FailsClosed`, `TestGEExchangeValidator_ZeroExpiry_FailsClosed` |
 | B2-N1 | `SetSDKHandler` on Server | **Resolved**: moved to `export_test.go` | — |
@@ -217,11 +220,15 @@ Hub `go.mod`: No changes.
 | H2-O2 | Dead remaining-lifetime branch | **Resolved**: strict `remaining <= 0` check | `TestProductionValidator_IDToken_ExpiredWithinSkew`, `_PositiveRemaining`, `_LongRemaining` |
 | H2-O3 | User deletion cascade | **Resolved**: `entsql.OnDelete(entsql.Cascade)` annotation | `TestExternalIdentityStore_UserDeleteCascade` |
 
-## Test evidence
+## Test evidence (round 3: `0695f75`)
 
 - Hub: 44+ GE exchange tests + 22 production validator tests (incl. flexInt64) + 14 ent store tests (incl. cascade), all passing
 - Bridge: 35+ GE validator tests (incl. LRU, singleflight) + 35+ v0/wire/integration tests, all passing
+- Snapshot middleware: 2 tests prove transport auth flows through `BuildSnapshot → BuildAuthValidators → GEExchangeValidator` via `Server.Handler()` with non-nil snapshot (initial + hot-reload)
+- Dispatch hard assertions: `TestGEExchange_ExecutorPath_Regression` and `TestJSONRPC_RealHandler_MessageSend` use `t.Fatal` to verify Hub received dispatched messages (not timeout-as-success)
+- SDK v2 wire format: all payloads use `messageId`, `ROLE_USER`, `{"text": "..."}` part format
 - Race detector: all bridge tests pass with `-race`
+- Diff hygiene: `git diff --check` clean
 - authzop `TestMutationClassificationBidirectional` passes with updated catalog entries
 - All broader bridge tests pass (`go test ./internal/bridge/`)
-- Both modules build cleanly (`go build ./...`)
+- Both modules build cleanly (`go build ./...`, `go vet ./...`)
