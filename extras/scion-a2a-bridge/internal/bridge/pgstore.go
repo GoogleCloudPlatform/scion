@@ -796,7 +796,8 @@ func (s *PostgresTaskStore) taskExistsForOwner(ctx context.Context, taskID, owne
 
 // isUniqueViolation checks if the error is a Postgres unique constraint violation.
 func isUniqueViolation(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "duplicate key value violates unique constraint")
+	var sqlStateErr interface{ SQLState() string }
+	return errors.As(err, &sqlStateErr) && sqlStateErr.SQLState() == "23505"
 }
 
 // ClaimExecution atomically claims execution ownership of a task. The ownerID
