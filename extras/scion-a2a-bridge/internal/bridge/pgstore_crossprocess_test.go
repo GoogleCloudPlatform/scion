@@ -37,7 +37,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // testServerProcess manages a subprocess running the a2a-testserver binary.
@@ -700,28 +701,62 @@ func TestPostgresTaskStoreReapDoesNotAffectLongRunning(t *testing.T) {
 
 // TestPostgresTaskStorePurgeTasksAndEvents tests transactional purge of
 // SDK tasks and correlated bridge events.
+//
+// PurgeTasksAndEvents is a global retention API (deletes all terminal tasks
+// older than a cutoff). To preserve exact count assertions (n==1 task, n==2
+// events) on a shared database where concurrent janitors or tests may call
+// the same API, this test runs inside a per-run isolated PostgreSQL schema.
 func TestPostgresTaskStorePurgeTasksAndEvents(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
-	store, err := NewPostgresTaskStore(dbURL)
+	ctx := context.Background()
+
+	// Create an isolated schema for this test run.
+	schemaName := fmt.Sprintf("test_purge_sdk_%d", time.Now().UnixNano())
+	baseDB, err := sql.Open("pgx", dbURL)
 	if err != nil {
-		t.Fatalf("NewPostgresTaskStore: %v", err)
+		t.Fatalf("open base DB: %v", err)
 	}
+	if _, err := baseDB.ExecContext(ctx, "CREATE SCHEMA "+schemaName); err != nil {
+		baseDB.Close()
+		t.Fatalf("create schema %s: %v", schemaName, err)
+	}
+	t.Cleanup(func() {
+		baseDB.ExecContext(context.Background(), "DROP SCHEMA "+schemaName+" CASCADE")
+		baseDB.Close()
+	})
+
+	// Open a store with search_path pinned to the isolated schema.
+	connCfg, err := pgx.ParseConfig(dbURL)
+	if err != nil {
+		t.Fatalf("pgx.ParseConfig: %v", err)
+	}
+	connCfg.RuntimeParams["search_path"] = schemaName
+	regDSN := stdlib.RegisterConnConfig(connCfg)
+	t.Cleanup(func() { stdlib.UnregisterConnConfig(regDSN) })
+
+	// PurgeTasksAndEvents joins a2a_sdk_tasks with a2a_task_events, so the
+	// isolated schema needs both the bridge store and state store tables.
+	isoStateStore, err := state.NewPostgres(regDSN)
+	if err != nil {
+		t.Fatalf("state.NewPostgres (isolated schema %s): %v", schemaName, err)
+	}
+	t.Cleanup(func() { isoStateStore.Close() })
+
+	store, err := NewPostgresTaskStore(regDSN)
+	if err != nil {
+		t.Fatalf("NewPostgresTaskStore (isolated schema %s): %v", schemaName, err)
+	}
+	t.Cleanup(func() { store.Close() })
 
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	purgeID := "purge-" + suffix
 	workingID := "purge-working-" + suffix
 
-	t.Cleanup(func() {
-		store.db.ExecContext(context.Background(), `DELETE FROM a2a_task_events WHERE task_id IN ($1, $2)`, purgeID, workingID)
-		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id IN ($1, $2)`, purgeID, workingID)
-		store.Close()
-	})
-
-	ctx := ctxForRoute("proj-purge", "agent-purge")
+	routeCtx := ctxForRoute("proj-purge", "agent-purge")
 
 	// Create a completed task.
 	task := &a2a.Task{
@@ -729,7 +764,7 @@ func TestPostgresTaskStorePurgeTasksAndEvents(t *testing.T) {
 		ContextID: "ctx-purge",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
 	}
-	if _, err := store.Create(ctx, task); err != nil {
+	if _, err := store.Create(routeCtx, task); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -739,7 +774,7 @@ func TestPostgresTaskStorePurgeTasksAndEvents(t *testing.T) {
 		ContextID: "ctx-purge",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
 	}
-	if _, err := store.Create(ctx, workingTask); err != nil {
+	if _, err := store.Create(routeCtx, workingTask); err != nil {
 		t.Fatalf("Create working: %v", err)
 	}
 
@@ -752,8 +787,8 @@ func TestPostgresTaskStorePurgeTasksAndEvents(t *testing.T) {
 	// Backdate the completed task.
 	store.db.Exec(`UPDATE a2a_sdk_tasks SET updated_at = NOW() - INTERVAL '2 hours' WHERE id = $1`, purgeID)
 
-	// Purge with 1-hour cutoff.
-	tasksPurged, eventsPurged, err := store.PurgeTasksAndEvents(ctx, time.Now().Add(-1*time.Hour))
+	// Purge with 1-hour cutoff — safe because we're in an isolated schema.
+	tasksPurged, eventsPurged, err := store.PurgeTasksAndEvents(routeCtx, time.Now().Add(-1*time.Hour))
 	if err != nil {
 		t.Fatalf("PurgeTasksAndEvents: %v", err)
 	}
@@ -765,13 +800,13 @@ func TestPostgresTaskStorePurgeTasksAndEvents(t *testing.T) {
 	}
 
 	// Verify completed task is gone.
-	_, err = store.Get(ctx, a2a.TaskID(purgeID))
+	_, err = store.Get(routeCtx, a2a.TaskID(purgeID))
 	if err == nil {
 		t.Errorf("expected %s to be deleted", purgeID)
 	}
 
 	// Verify working task is still present.
-	stored, err := store.Get(ctx, a2a.TaskID(workingID))
+	stored, err := store.Get(routeCtx, a2a.TaskID(workingID))
 	if err != nil {
 		t.Fatalf("working task should survive purge: %v", err)
 	}
@@ -1662,22 +1697,35 @@ func TestPostgresTaskStoreCrossProcessCrashRecoveryKill(t *testing.T) {
 	procA.cmd.Wait()
 	t.Logf("Process A (PID %d) killed to simulate crash", procA.pid)
 
-	// Backdate the heartbeat (simulating time passing after crash).
-	storeA.db.Exec(`UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW() - INTERVAL '10 minutes' WHERE id = $1`, taskID)
-
-	// Create storeB (simulating another replica) and reap.
+	// Create storeB (simulating another replica) BEFORE backdating the
+	// heartbeat. This minimizes the window between backdate and reap,
+	// preventing concurrent subprocess janitors from reaping our task first.
 	storeB, err := NewPostgresTaskStore(dbURL)
 	if err != nil {
 		t.Fatalf("storeB: %v", err)
 	}
 	t.Cleanup(func() { storeB.Close() })
 
-	reapedIDs, err := storeB.ReapStaleTasks(ctx, 5*time.Minute)
+	// Backdate the heartbeat to simulate time passing after crash.
+	// Use 10 seconds (with a 5-second reap threshold) rather than 10 minutes
+	// so concurrent subprocess janitors (which use a 30-second threshold)
+	// don't interfere. Backdate right before reap to minimize the window.
+	storeA.db.Exec(`UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW() - INTERVAL '10 seconds' WHERE id = $1`, taskID)
+
+	reapedIDs, err := storeB.ReapStaleTasks(ctx, 5*time.Second)
 	if err != nil {
 		t.Fatalf("ReapStaleTasks: %v", err)
 	}
-	if len(reapedIDs) != 1 {
-		t.Errorf("reaped = %d, want 1", len(reapedIDs))
+	// Verify our task was reaped. On a shared DB other stale tasks may also
+	// be returned, so check membership rather than exact count.
+	var reapedOurs bool
+	for _, id := range reapedIDs {
+		if id == taskID {
+			reapedOurs = true
+		}
+	}
+	if !reapedOurs {
+		t.Errorf("task %q not found in reaped list %v", taskID, reapedIDs)
 	}
 
 	// Verify task is failed and exec_owner is cleared.
@@ -3230,7 +3278,7 @@ func TestTwoReplicaProductionPath_NoLegacyBypass(t *testing.T) {
 
 	// Insert a legacy task in a2a_tasks (the bridge state store) for this agent.
 	// This simulates a stale or attacker-controlled row.
-	legacyTaskID := "legacy-bypass-task-" + string(a2a.NewTaskID())[:8]
+	legacyTaskID := "legacy-bypass-task-" + randomSuffix()
 	stateStore, err := state.NewPostgres(dbURL)
 	if err != nil {
 		t.Fatalf("create state store: %v", err)
@@ -3874,7 +3922,7 @@ func TestProductionContextDerivation(t *testing.T) {
 
 	// Step 3: Verify PostgresTaskStore.Create uses context values correctly.
 	task := &a2a.Task{
-		ID:     a2a.TaskID("ctx-prod-" + string(a2a.NewTaskID())[:8]),
+		ID:     a2a.TaskID("ctx-prod-" + randomSuffix()),
 		Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 	}
 	_, err := store.Create(ctx, task)
@@ -4144,7 +4192,7 @@ func TestLegacyTerminalMappingPreservesSemantics(t *testing.T) {
 		payload := fmt.Sprintf(`{"id":"%s","status":{"state":"%s"},"contextId":"ctx-lm"}`, rowID, legacy)
 		_, err := rawDB.ExecContext(ctx,
 			`INSERT INTO a2a_sdk_tasks (id, context_id, owner_key, version, payload, project_id, agent_slug, caller_user_id, updated_at)
-			 VALUES ($1, 'ctx-lm', $2, 1, $3::jsonb, $4, $5, 'user1', NOW() - INTERVAL '2 hours')`,
+			 VALUES ($1, 'ctx-lm', $2, 1, $3::jsonb, $4, $5, 'user1', NOW())`,
 			rowID, projID+":"+agentSlugVal, payload, projID, agentSlugVal,
 		)
 		if err != nil {
@@ -4186,6 +4234,11 @@ func TestLegacyTerminalMappingPreservesSemantics(t *testing.T) {
 	}
 	t.Log("All normalized legacy rows correctly excluded from active query")
 
+	// Backdate for purge verification — the rows were inserted with NOW() to
+	// survive concurrent PurgeTasksAndEvents calls during mapping verification.
+	rawDB.ExecContext(ctx,
+		"UPDATE a2a_sdk_tasks SET updated_at = NOW() - INTERVAL '2 hours' WHERE project_id = $1", projID)
+
 	// Verify all are purgeable by retention.
 	tasksPurged, _, err := sdkStore.PurgeTasksAndEvents(ctx, time.Now().Add(-1*time.Hour))
 	if err != nil {
@@ -4225,9 +4278,14 @@ func TestAtomicReapTransactionRollback(t *testing.T) {
 	projID := "proj-rb-" + suffix
 	agentSlugVal := "agent-rb-" + suffix
 
+	// Per-run unique constraint name and predicate: only blocks this test's
+	// exact dedup_key, allowing concurrent test invocations and canary writes.
+	constraintName := "test_block_reap_" + suffix
+	dedupKey := "reap:" + taskID // exact dedup_key ReapStaleTasks will use
+
 	t.Cleanup(func() {
 		// Remove the injected constraint if still present.
-		sdkStore.db.ExecContext(ctx, `ALTER TABLE a2a_task_events DROP CONSTRAINT IF EXISTS test_block_reap_event`)
+		sdkStore.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE a2a_task_events DROP CONSTRAINT IF EXISTS %s`, constraintName))
 		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
 		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, taskID)
 		sdkStore.Close()
@@ -4266,13 +4324,12 @@ func TestAtomicReapTransactionRollback(t *testing.T) {
 	).Scan(&origVersion, &origState, &origExecOwner)
 
 	// --- Phase 1: Inject event-insert failure ---
-	// Add a CHECK constraint that rejects any INSERT into a2a_task_events
-	// with dedup_key starting with 'reap:'. This causes the event INSERT
-	// inside reapOneTask's transaction to fail AFTER the state UPDATE,
-	// forcing a full rollback.
+	// Add a CHECK constraint that rejects ONLY this test's exact dedup_key.
+	// Other concurrent test invocations (different suffix) and canary writes
+	// are unaffected because the predicate matches only `dedupKey`.
 	_, err = sdkStore.db.ExecContext(ctx,
-		`ALTER TABLE a2a_task_events ADD CONSTRAINT test_block_reap_event
-		 CHECK (dedup_key IS NULL OR dedup_key NOT LIKE 'reap:reap-rb-%')`)
+		fmt.Sprintf(`ALTER TABLE a2a_task_events ADD CONSTRAINT %s
+		 CHECK (dedup_key IS NULL OR dedup_key != '%s')`, constraintName, dedupKey))
 	if err != nil {
 		t.Fatalf("add blocking constraint: %v", err)
 	}
@@ -4317,7 +4374,7 @@ func TestAtomicReapTransactionRollback(t *testing.T) {
 	}
 
 	// --- Phase 2: Remove failure and retry ---
-	_, err = sdkStore.db.ExecContext(ctx, `ALTER TABLE a2a_task_events DROP CONSTRAINT test_block_reap_event`)
+	_, err = sdkStore.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE a2a_task_events DROP CONSTRAINT %s`, constraintName))
 	if err != nil {
 		t.Fatalf("drop blocking constraint: %v", err)
 	}
@@ -4679,13 +4736,23 @@ func TestConcurrentMigrationSerialization(t *testing.T) {
 	}
 	defer db.Close()
 
+	// On a shared DB, another process's migration may briefly hold the same
+	// advisory lock. Retry a few times to distinguish transient concurrent
+	// locks from genuine leaks.
 	var lockHeld bool
-	err = db.QueryRowContext(context.Background(),
-		`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND objid = $1 AND granted)`,
-		sdkTaskStoreMigrationLockID,
-	).Scan(&lockHeld)
-	if err != nil {
-		t.Fatalf("query lock status: %v", err)
+	for attempt := 0; attempt < 10; attempt++ {
+		lockHeld = false
+		err = db.QueryRowContext(context.Background(),
+			`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND objid = $1 AND granted)`,
+			sdkTaskStoreMigrationLockID,
+		).Scan(&lockHeld)
+		if err != nil {
+			t.Fatalf("query lock status: %v", err)
+		}
+		if !lockHeld {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 	if lockHeld {
 		t.Error("advisory lock still held after all migrations completed — lock leak")
@@ -4803,8 +4870,14 @@ func TestReapErrorPropagation(t *testing.T) {
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	projID := "proj-erragg-" + suffix
 
+	// Per-run unique constraint name and predicate: only blocks one exact
+	// dedup_key, allowing concurrent test invocations and canary writes.
+	constraintName := "test_block_erragg_" + suffix
+	blockTaskID := fmt.Sprintf("erragg-0-%s", suffix)
+	blockDedupKey := "reap:" + blockTaskID
+
 	t.Cleanup(func() {
-		sdkStore.db.ExecContext(ctx, `ALTER TABLE a2a_task_events DROP CONSTRAINT IF EXISTS test_block_erragg`)
+		sdkStore.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE a2a_task_events DROP CONSTRAINT IF EXISTS %s`, constraintName))
 		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, projID)
 		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id LIKE $1`, "erragg-%"+suffix)
 		sdkStore.Close()
@@ -4829,11 +4902,12 @@ func TestReapErrorPropagation(t *testing.T) {
 		sdkStore.db.ExecContext(ctx, `UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW() - INTERVAL '10 minutes' WHERE id = $1`, taskID)
 	}
 
-	// Block event inserts for one specific task to force a partial failure.
-	blockTaskID := fmt.Sprintf("erragg-0-%s", suffix)
+	// Block event inserts for one specific task's dedup_key to force a partial
+	// failure. Other concurrent invocations use a different suffix, so their
+	// dedup_keys won't match this constraint.
 	_, err = sdkStore.db.ExecContext(ctx,
-		fmt.Sprintf(`ALTER TABLE a2a_task_events ADD CONSTRAINT test_block_erragg
-		 CHECK (dedup_key IS NULL OR dedup_key != 'reap:%s')`, blockTaskID))
+		fmt.Sprintf(`ALTER TABLE a2a_task_events ADD CONSTRAINT %s
+		 CHECK (dedup_key IS NULL OR dedup_key != '%s')`, constraintName, blockDedupKey))
 	if err != nil {
 		t.Fatalf("add blocking constraint: %v", err)
 	}

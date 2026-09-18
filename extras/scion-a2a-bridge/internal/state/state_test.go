@@ -17,10 +17,14 @@ package state
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // newTestSQLiteStore creates a temporary SQLiteStore for testing.
@@ -37,7 +41,9 @@ func newTestSQLiteStore(t *testing.T) Store {
 
 // newTestPostgresStore creates a PostgresStore for testing against a real Postgres.
 // Skips the test if TEST_DATABASE_URL is not set.
-func newTestPostgresStore(t *testing.T) Store {
+// suffix is appended to cleanup LIKE patterns so each invocation only deletes
+// its own rows, preserving test isolation on shared databases.
+func newTestPostgresStore(t *testing.T, suffix string) Store {
 	t.Helper()
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
@@ -47,27 +53,33 @@ func newTestPostgresStore(t *testing.T) Store {
 	if err != nil {
 		t.Fatalf("NewPostgres: %v", err)
 	}
-	// Clean up tables between tests to avoid cross-contamination.
+	// Scoped cleanup: only delete rows created by this test invocation.
+	// FK order: push_notification_configs → task_events → tasks → contexts.
+	likePattern := "%" + suffix
 	t.Cleanup(func() {
-		s.db.Exec("DELETE FROM a2a_task_events")
-		s.db.Exec("DELETE FROM a2a_push_notification_configs")
-		s.db.Exec("DELETE FROM a2a_tasks")
-		s.db.Exec("DELETE FROM a2a_contexts")
+		s.db.Exec("DELETE FROM a2a_push_notification_configs WHERE task_id LIKE $1", likePattern)
+		s.db.Exec("DELETE FROM a2a_task_events WHERE task_id LIKE $1", likePattern)
+		s.db.Exec("DELETE FROM a2a_tasks WHERE id LIKE $1", likePattern)
+		s.db.Exec("DELETE FROM a2a_contexts WHERE context_id LIKE $1", likePattern)
 		s.Close()
 	})
 	return s
 }
 
 // runStoreTests runs the full test suite against any Store implementation.
-func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
+// suffix is appended to all IDs to ensure per-run uniqueness on shared databases.
+// For SQLite (temp dir isolation), suffix may be empty.
+func runStoreTests(t *testing.T, suffix string, newStore func(t *testing.T) Store) {
 	t.Run("TaskCRUD", func(t *testing.T) {
 		s := newStore(t)
 		ctx := context.Background()
 		now := time.Now().Truncate(time.Second)
+		taskID := "task-1" + suffix
+		ctxID := "ctx-1" + suffix
 
 		task := &Task{
-			ID:        "task-1",
-			ContextID: "ctx-1",
+			ID:        taskID,
+			ContextID: ctxID,
 			ProjectID: "grove-1",
 			AgentSlug: "agent-1",
 			AgentID:   "agent-id-1",
@@ -81,7 +93,7 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Fatalf("CreateTask: %v", err)
 		}
 
-		got, err := s.GetTask(ctx, "task-1")
+		got, err := s.GetTask(ctx, taskID)
 		if err != nil {
 			t.Fatalf("GetTask: %v", err)
 		}
@@ -95,7 +107,7 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Errorf("AgentSlug = %q, want %q", got.AgentSlug, "agent-1")
 		}
 
-		changed, err := s.UpdateTaskState(ctx, "task-1", "working")
+		changed, err := s.UpdateTaskState(ctx, taskID, "working")
 		if err != nil {
 			t.Fatalf("UpdateTaskState: %v", err)
 		}
@@ -103,7 +115,7 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Error("UpdateTaskState changed = false, want true")
 		}
 
-		got, err = s.GetTask(ctx, "task-1")
+		got, err = s.GetTask(ctx, taskID)
 		if err != nil {
 			t.Fatalf("GetTask after update: %v", err)
 		}
@@ -112,7 +124,7 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 		}
 
 		// Not found.
-		got, err = s.GetTask(ctx, "nonexistent")
+		got, err = s.GetTask(ctx, "nonexistent"+suffix)
 		if err != nil {
 			t.Fatalf("GetTask nonexistent: %v", err)
 		}
@@ -125,19 +137,20 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 		s := newStore(t)
 		ctx := context.Background()
 		now := time.Now().Truncate(time.Second)
+		ctxA := "ctx-a" + suffix
 
-		for _, id := range []string{"t1", "t2", "t3"} {
+		for _, base := range []string{"t1", "t2", "t3"} {
 			s.CreateTask(ctx, &Task{
-				ID: id, ContextID: "ctx-a", ProjectID: "g1", AgentSlug: "a1",
+				ID: base + suffix, ContextID: ctxA, ProjectID: "g1", AgentSlug: "a1",
 				State: "submitted", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 			})
 		}
 		s.CreateTask(ctx, &Task{
-			ID: "t4", ContextID: "ctx-b", ProjectID: "g1", AgentSlug: "a1",
+			ID: "t4" + suffix, ContextID: "ctx-b" + suffix, ProjectID: "g1", AgentSlug: "a1",
 			State: "submitted", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 		})
 
-		tasks, err := s.ListTasksByContext(ctx, "ctx-a")
+		tasks, err := s.ListTasksByContext(ctx, ctxA)
 		if err != nil {
 			t.Fatalf("ListTasksByContext: %v", err)
 		}
@@ -150,17 +163,20 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 		s := newStore(t)
 		ctx := context.Background()
 		now := time.Now().Truncate(time.Second)
+		projID := "g1-agent" + suffix
+		slug1 := "a1" + suffix
+		slug2 := "a2" + suffix
 
 		s.CreateTask(ctx, &Task{
-			ID: "t1", ContextID: "ctx-1", ProjectID: "g1", AgentSlug: "a1",
+			ID: "t1" + suffix, ContextID: "ctx-1" + suffix, ProjectID: projID, AgentSlug: slug1,
 			State: "submitted", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 		})
 		s.CreateTask(ctx, &Task{
-			ID: "t2", ContextID: "ctx-2", ProjectID: "g1", AgentSlug: "a2",
+			ID: "t2" + suffix, ContextID: "ctx-2" + suffix, ProjectID: projID, AgentSlug: slug2,
 			State: "submitted", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 		})
 
-		tasks, err := s.ListTasksByAgent(ctx, "g1", "a1")
+		tasks, err := s.ListTasksByAgent(ctx, projID, slug1)
 		if err != nil {
 			t.Fatalf("ListTasksByAgent: %v", err)
 		}
@@ -173,9 +189,10 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 		s := newStore(t)
 		ctx := context.Background()
 		now := time.Now().Truncate(time.Second)
+		ctxID := "ctx-1" + suffix
 
 		c := &Context{
-			ContextID:  "ctx-1",
+			ContextID:  ctxID,
 			ProjectID:  "grove-1",
 			AgentSlug:  "agent-1",
 			AgentID:    "agent-id-1",
@@ -187,7 +204,7 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Fatalf("CreateContext: %v", err)
 		}
 
-		got, err := s.GetContext(ctx, "ctx-1")
+		got, err := s.GetContext(ctx, ctxID)
 		if err != nil {
 			t.Fatalf("GetContext: %v", err)
 		}
@@ -198,11 +215,11 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Errorf("AgentSlug = %q, want %q", got.AgentSlug, "agent-1")
 		}
 
-		if err := s.TouchContext(ctx, "ctx-1"); err != nil {
+		if err := s.TouchContext(ctx, ctxID); err != nil {
 			t.Fatalf("TouchContext: %v", err)
 		}
 
-		got, err = s.GetContext(ctx, "ctx-1")
+		got, err = s.GetContext(ctx, ctxID)
 		if err != nil {
 			t.Fatalf("GetContext after touch: %v", err)
 		}
@@ -215,16 +232,18 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 		s := newStore(t)
 		ctx := context.Background()
 		now := time.Now().Truncate(time.Second)
+		taskID := "task-push" + suffix
+		pushID := "push-1" + suffix
 
 		// Create parent task first (FK constraint).
 		s.CreateTask(ctx, &Task{
-			ID: "task-1", ContextID: "ctx-1", ProjectID: "g1", AgentSlug: "a1",
+			ID: taskID, ContextID: "ctx-push" + suffix, ProjectID: "g1", AgentSlug: "a1",
 			State: "submitted", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 		})
 
 		cfg := &PushNotificationConfig{
-			ID:        "push-1",
-			TaskID:    "task-1",
+			ID:        pushID,
+			TaskID:    taskID,
 			URL:       "https://example.com/webhook",
 			Token:     "tok123",
 			CreatedAt: now,
@@ -233,7 +252,7 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Fatalf("SetPushConfig: %v", err)
 		}
 
-		configs, err := s.GetPushConfigsByTask(ctx, "task-1")
+		configs, err := s.GetPushConfigsByTask(ctx, taskID)
 		if err != nil {
 			t.Fatalf("GetPushConfigsByTask: %v", err)
 		}
@@ -244,11 +263,11 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Errorf("URL = %q, want %q", configs[0].URL, "https://example.com/webhook")
 		}
 
-		if err := s.DeletePushConfig(ctx, "push-1"); err != nil {
+		if err := s.DeletePushConfig(ctx, pushID); err != nil {
 			t.Fatalf("DeletePushConfig: %v", err)
 		}
 
-		configs, err = s.GetPushConfigsByTask(ctx, "task-1")
+		configs, err = s.GetPushConfigsByTask(ctx, taskID)
 		if err != nil {
 			t.Fatalf("GetPushConfigsByTask after delete: %v", err)
 		}
@@ -261,14 +280,15 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 		s := newStore(t)
 		ctx := context.Background()
 		now := time.Now().Truncate(time.Second)
+		taskID := "cas-1" + suffix
 
 		s.CreateTask(ctx, &Task{
-			ID: "cas-1", ContextID: "ctx-1", ProjectID: "g1", AgentSlug: "a1",
+			ID: taskID, ContextID: "ctx-cas" + suffix, ProjectID: "g1", AgentSlug: "a1",
 			State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 		})
 
 		// First terminal update should succeed.
-		changed, err := s.UpdateTaskState(ctx, "cas-1", "completed")
+		changed, err := s.UpdateTaskState(ctx, taskID, "completed")
 		if err != nil {
 			t.Fatalf("UpdateTaskState (first): %v", err)
 		}
@@ -277,7 +297,7 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 		}
 
 		// Second update to a terminal state should be a no-op.
-		changed, err = s.UpdateTaskState(ctx, "cas-1", "failed")
+		changed, err = s.UpdateTaskState(ctx, taskID, "failed")
 		if err != nil {
 			t.Fatalf("UpdateTaskState (second): %v", err)
 		}
@@ -286,7 +306,7 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 		}
 
 		// Verify state is still completed.
-		task, err := s.GetTask(ctx, "cas-1")
+		task, err := s.GetTask(ctx, taskID)
 		if err != nil {
 			t.Fatalf("GetTask: %v", err)
 		}
@@ -299,9 +319,13 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 		s := newStore(t)
 		ctx := context.Background()
 		now := time.Now().Truncate(time.Second)
+		projID := "g1-find" + suffix
+		slug := "agent-x" + suffix
+		activeID := "active-1" + suffix
+		doneID := "done-1" + suffix
 
 		// No tasks at all — should return nil.
-		task, err := s.FindActiveTaskForAgent(ctx, "g1", "agent-x")
+		task, err := s.FindActiveTaskForAgent(ctx, projID, slug)
 		if err != nil {
 			t.Fatalf("FindActiveTaskForAgent (empty): %v", err)
 		}
@@ -311,23 +335,23 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 
 		// Create one active and one terminal task.
 		s.CreateTask(ctx, &Task{
-			ID: "active-1", ContextID: "ctx-1", ProjectID: "g1", AgentSlug: "agent-x",
+			ID: activeID, ContextID: "ctx-active" + suffix, ProjectID: projID, AgentSlug: slug,
 			State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 		})
 		s.CreateTask(ctx, &Task{
-			ID: "done-1", ContextID: "ctx-2", ProjectID: "g1", AgentSlug: "agent-x",
+			ID: doneID, ContextID: "ctx-done" + suffix, ProjectID: projID, AgentSlug: slug,
 			State: "completed", CreatedAt: now, UpdatedAt: now.Add(-time.Hour), Metadata: "{}",
 		})
 
-		task, err = s.FindActiveTaskForAgent(ctx, "g1", "agent-x")
+		task, err = s.FindActiveTaskForAgent(ctx, projID, slug)
 		if err != nil {
 			t.Fatalf("FindActiveTaskForAgent: %v", err)
 		}
 		if task == nil {
 			t.Fatal("FindActiveTaskForAgent returned nil, expected active task")
 		}
-		if task.ID != "active-1" {
-			t.Errorf("found task ID = %q, want %q", task.ID, "active-1")
+		if task.ID != activeID {
+			t.Errorf("found task ID = %q, want %q", task.ID, activeID)
 		}
 	})
 
@@ -335,43 +359,51 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 		s := newStore(t)
 		ctx := context.Background()
 		now := time.Now().Truncate(time.Second)
+		staleID := "stale-1" + suffix
+		recentID := "recent-1" + suffix
+		doneID := "done-2" + suffix
 
 		// Create a stale active task (updated long ago).
 		staleTime := now.Add(-2 * time.Hour)
 		s.CreateTask(ctx, &Task{
-			ID: "stale-1", ContextID: "ctx-1", ProjectID: "g1", AgentSlug: "a1",
+			ID: staleID, ContextID: "ctx-stale" + suffix, ProjectID: "g1", AgentSlug: "a1",
 			State: "working", CreatedAt: staleTime, UpdatedAt: staleTime, Metadata: "{}",
 		})
 		// Create a recent active task.
 		s.CreateTask(ctx, &Task{
-			ID: "recent-1", ContextID: "ctx-2", ProjectID: "g1", AgentSlug: "a1",
+			ID: recentID, ContextID: "ctx-recent" + suffix, ProjectID: "g1", AgentSlug: "a1",
 			State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 		})
 		// Create a terminal task (should never be returned).
 		s.CreateTask(ctx, &Task{
-			ID: "done-2", ContextID: "ctx-3", ProjectID: "g1", AgentSlug: "a1",
+			ID: doneID, ContextID: "ctx-done2" + suffix, ProjectID: "g1", AgentSlug: "a1",
 			State: "completed", CreatedAt: staleTime, UpdatedAt: staleTime, Metadata: "{}",
 		})
 
 		cutoff := now.Add(-time.Hour)
-		tasks, err := s.ListStaleActiveTasks(ctx, cutoff, 10)
+		tasks, err := s.ListStaleActiveTasks(ctx, cutoff, 1000)
 		if err != nil {
 			t.Fatalf("ListStaleActiveTasks: %v", err)
 		}
-		if len(tasks) != 1 {
-			t.Fatalf("got %d stale tasks, want 1", len(tasks))
+		// May find stale tasks from other concurrent test runs too; check ours is present.
+		var foundStale bool
+		for _, tk := range tasks {
+			if tk.ID == staleID {
+				foundStale = true
+			}
 		}
-		if tasks[0].ID != "stale-1" {
-			t.Errorf("stale task ID = %q, want %q", tasks[0].ID, "stale-1")
+		if !foundStale {
+			t.Fatalf("stale task %q not found in %d results", staleID, len(tasks))
 		}
 	})
 
 	t.Run("AppendAndReadTaskEvents", func(t *testing.T) {
 		s := newStore(t)
 		ctx := context.Background()
+		taskID := "task-ev-1" + suffix
 
 		ev1 := &TaskEvent{
-			TaskID:  "task-ev-1",
+			TaskID:  taskID,
 			Kind:    "status",
 			Payload: json.RawMessage(`{"state":"working"}`),
 			Final:   false,
@@ -385,7 +417,7 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 		}
 
 		ev2 := &TaskEvent{
-			TaskID:  "task-ev-1",
+			TaskID:  taskID,
 			Kind:    "status",
 			Payload: json.RawMessage(`{"state":"completed"}`),
 			Final:   true,
@@ -398,7 +430,7 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Errorf("second event id=%d should be > first id=%d", id2, id1)
 		}
 
-		events, err := s.ReadTaskEvents(ctx, "task-ev-1", 0, 100)
+		events, err := s.ReadTaskEvents(ctx, taskID, 0, 100)
 		if err != nil {
 			t.Fatalf("ReadTaskEvents: %v", err)
 		}
@@ -410,7 +442,7 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 		}
 
 		// Read with afterID should skip the first event.
-		events2, err := s.ReadTaskEvents(ctx, "task-ev-1", id1, 100)
+		events2, err := s.ReadTaskEvents(ctx, taskID, id1, 100)
 		if err != nil {
 			t.Fatalf("ReadTaskEvents with afterID: %v", err)
 		}
@@ -425,13 +457,15 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 	t.Run("AppendTaskEventDedup", func(t *testing.T) {
 		s := newStore(t)
 		ctx := context.Background()
+		taskID := "dedup-task-1" + suffix
+		dedupKey := "unique-key-1" + suffix
 
 		ev := &TaskEvent{
-			TaskID:   "dedup-task-1",
+			TaskID:   taskID,
 			Kind:     "status",
 			Payload:  json.RawMessage(`{"state":"working"}`),
 			Final:    false,
-			DedupKey: "unique-key-1",
+			DedupKey: dedupKey,
 		}
 		id1, err := s.AppendTaskEvent(ctx, ev)
 		if err != nil {
@@ -450,7 +484,7 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Errorf("duplicate dedup insert returned id=%d, want 0", id2)
 		}
 
-		events, err := s.ReadTaskEvents(ctx, "dedup-task-1", 0, 100)
+		events, err := s.ReadTaskEvents(ctx, taskID, 0, 100)
 		if err != nil {
 			t.Fatalf("ReadTaskEvents: %v", err)
 		}
@@ -460,16 +494,55 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 	})
 
 	t.Run("PurgeTaskEvents", func(t *testing.T) {
-		s := newStore(t)
 		ctx := context.Background()
+		taskID := "purge-task-1" + suffix
 
-		// Insert events — they'll have created_at = now.
+		s := newStore(t)
+
+		// PurgeTaskEvents is a global retention API (DELETE WHERE created_at < $1).
+		// On a shared PostgreSQL database, using a future cutoff would destroy
+		// concurrent tests' and canary events. Run inside a per-run isolated
+		// schema so the exact n==1 assertion holds and no external rows are touched.
+		if ps, ok := s.(*PostgresStore); ok {
+			schemaName := fmt.Sprintf("test_purge_%d", time.Now().UnixNano())
+
+			// Create isolated schema via the shared store's pool.
+			if _, err := ps.db.ExecContext(ctx, "CREATE SCHEMA "+schemaName); err != nil {
+				t.Fatalf("create schema %s: %v", schemaName, err)
+			}
+			t.Cleanup(func() {
+				ps.db.ExecContext(context.Background(),
+					"DROP SCHEMA "+schemaName+" CASCADE")
+			})
+
+			// Open a store with search_path pinned to the isolated schema.
+			// The isolated schema gets its own set of migrated tables.
+			url := os.Getenv("TEST_DATABASE_URL")
+			connCfg, err := pgx.ParseConfig(url)
+			if err != nil {
+				t.Fatalf("pgx.ParseConfig: %v", err)
+			}
+			connCfg.RuntimeParams["search_path"] = schemaName
+			regDSN := stdlib.RegisterConnConfig(connCfg)
+			t.Cleanup(func() { stdlib.UnregisterConnConfig(regDSN) })
+
+			isoStore, err := NewPostgres(regDSN)
+			if err != nil {
+				t.Fatalf("NewPostgres (isolated schema %s): %v", schemaName, err)
+			}
+			t.Cleanup(func() { isoStore.Close() })
+
+			s = isoStore // Use isolated store for the rest of this test.
+		}
+
+		// Insert one event.
 		s.AppendTaskEvent(ctx, &TaskEvent{
-			TaskID: "purge-task-1", Kind: "status",
+			TaskID: taskID, Kind: "status",
 			Payload: json.RawMessage(`{}`), Final: false,
 		})
 
-		// Purge events older than the future — should delete everything.
+		// Purge all events — safe because we are in a temp DB (SQLite)
+		// or an isolated schema (PostgreSQL).
 		n, err := s.PurgeTaskEvents(ctx, time.Now().Add(time.Hour))
 		if err != nil {
 			t.Fatalf("PurgeTaskEvents: %v", err)
@@ -478,7 +551,7 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Errorf("PurgeTaskEvents deleted %d, want 1", n)
 		}
 
-		events, _ := s.ReadTaskEvents(ctx, "purge-task-1", 0, 100)
+		events, _ := s.ReadTaskEvents(ctx, taskID, 0, 100)
 		if len(events) != 0 {
 			t.Errorf("got %d events after purge, want 0", len(events))
 		}
@@ -494,7 +567,8 @@ func runStoreTests(t *testing.T, newStore func(t *testing.T) Store) {
 }
 
 func TestSQLiteStore(t *testing.T) {
-	runStoreTests(t, func(t *testing.T) Store {
+	// SQLite uses temp dir isolation; suffix not needed but harmless.
+	runStoreTests(t, "", func(t *testing.T) Store {
 		return newTestSQLiteStore(t)
 	})
 }
@@ -503,8 +577,10 @@ func TestPostgresStore(t *testing.T) {
 	if os.Getenv("TEST_DATABASE_URL") == "" {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
-	runStoreTests(t, func(t *testing.T) Store {
-		return newTestPostgresStore(t)
+	// Per-run suffix ensures test isolation on shared PostgreSQL databases.
+	suffix := fmt.Sprintf("-%d", time.Now().UnixNano())
+	runStoreTests(t, suffix, func(t *testing.T) Store {
+		return newTestPostgresStore(t, suffix)
 	})
 }
 
