@@ -1843,6 +1843,7 @@ func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, aft
 // Query params:
 //   - limit: page size (default 50, max 200)
 //   - cursor: keyset pagination cursor from the previous page's nextCursor (optional)
+//   - around: message ID to center the page around (optional)
 func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Request, key string) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
@@ -1987,10 +1988,73 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		Cursor: q.Get("cursor"),
 	}
 
-	result, err := s.store.ListMessages(ctx, filter, opts)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch messages", nil)
-		return
+	var result *store.ListResult[store.Message]
+	if aroundID := q.Get("around"); aroundID != "" {
+		if _, err := uuid.Parse(aroundID); err != nil {
+			NotFound(w, "Message")
+			return
+		}
+		anchor, err := s.store.GetMessage(ctx, aroundID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				NotFound(w, "Message")
+			} else {
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch message", nil)
+			}
+			return
+		}
+		if anchor.Channel != filter.Channel ||
+			(filter.ConversationID != "" && anchor.ConversationID != filter.ConversationID) ||
+			(filter.ThreadID != "" && anchor.ThreadID != filter.ThreadID) {
+			NotFound(w, "Message")
+			return
+		}
+
+		olderLimit := limit / 2
+		newerLimit := limit - olderLimit - 1
+		older := &store.ListResult[store.Message]{}
+		if olderLimit > 0 {
+			olderFilter := filter
+			olderFilter.Before = anchor.CreatedAt
+			older, err = s.store.ListMessages(ctx, olderFilter, store.ListOptions{Limit: olderLimit})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch messages", nil)
+				return
+			}
+		}
+
+		newer := &store.ListResult[store.Message]{}
+		if newerLimit > 0 {
+			newerFilter := filter
+			newerFilter.After = anchor.CreatedAt
+			newer, err = s.store.ListMessages(ctx, newerFilter, store.ListOptions{
+				Limit:   newerLimit,
+				SortDir: "asc",
+			})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch messages", nil)
+				return
+			}
+		}
+
+		items := make([]store.Message, 0, len(older.Items)+1+len(newer.Items))
+		for i := len(older.Items) - 1; i >= 0; i-- {
+			items = append(items, older.Items[i])
+		}
+		items = append(items, *anchor)
+		items = append(items, newer.Items...)
+		result = &store.ListResult[store.Message]{
+			Items:      items,
+			NextCursor: older.NextCursor,
+			TotalCount: older.TotalCount + 1 + newer.TotalCount,
+		}
+	} else {
+		var err error
+		result, err = s.store.ListMessages(ctx, filter, opts)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch messages", nil)
+			return
+		}
 	}
 
 	if result.Items == nil {

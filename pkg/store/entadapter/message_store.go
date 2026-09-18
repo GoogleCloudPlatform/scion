@@ -277,7 +277,7 @@ func decodeListCursor(cursor, binding string) (time.Time, uuid.UUID, error) {
 }
 
 // ListMessages returns messages matching the given filter, ordered by
-// created_at DESC.
+// created_at descending unless opts.SortDir is "asc".
 func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFilter, opts store.ListOptions) (*store.ListResult[store.Message], error) {
 	query := s.client.Message.Query()
 
@@ -340,6 +340,8 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 		return nil, err
 	}
 
+	ascending := strings.EqualFold(opts.SortDir, "asc")
+
 	// Apply cursor-based keyset pagination.
 	// The cursor is a self-contained base64-encoded string carrying (created, id).
 	// This avoids a DB round-trip and makes pagination resilient to message deletion.
@@ -348,19 +350,35 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 		if err != nil {
 			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}
-		query.Where(message.Or(
-			message.CreatedLT(cursorCreated),
-			message.And(
-				message.CreatedEQ(cursorCreated),
-				message.IDLT(cursorID),
-			),
-		))
+		if ascending {
+			query.Where(message.Or(
+				message.CreatedGT(cursorCreated),
+				message.And(
+					message.CreatedEQ(cursorCreated),
+					message.IDGT(cursorID),
+				),
+			))
+		} else {
+			query.Where(message.Or(
+				message.CreatedLT(cursorCreated),
+				message.And(
+					message.CreatedEQ(cursorCreated),
+					message.IDLT(cursorID),
+				),
+			))
+		}
 	}
 
 	limit := clampLimit(opts.Limit)
+	createdOrder := entsql.OrderDesc()
+	idOrder := entsql.OrderDesc()
+	if ascending {
+		createdOrder = entsql.OrderAsc()
+		idOrder = entsql.OrderAsc()
+	}
 	entities, err := query.
-		Order(message.ByCreated(entsql.OrderDesc())).
-		Order(message.ByID(entsql.OrderDesc())).
+		Order(message.ByCreated(createdOrder)).
+		Order(message.ByID(idOrder)).
 		Limit(limit + 1).
 		All(ctx)
 	if err != nil {

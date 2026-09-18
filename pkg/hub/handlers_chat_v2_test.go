@@ -3030,6 +3030,81 @@ func TestChatV2_History_CursorPaginatesToOlderMessages(t *testing.T) {
 	}
 }
 
+func TestChatV2_History_AroundReturnsAdjacentMessages(t *testing.T) {
+	srv, s, wcs, proj, db := setupSendTest(t)
+	ctx := context.Background()
+
+	topicID := tid("topic-history-around")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "history-around",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
+
+	seedHistoryMessages(t, s, proj.ID, topicID, 11)
+	anchorID := tid(topicID + "-msg-message-005")
+	path := "/api/v1/chat/conversations/" + topicID + "/messages?limit=5&around=" + url.QueryEscape(anchorID)
+	rec := doRequest(t, srv, http.MethodGet, path, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s: expected 200, got %d: %s", path, rec.Code, rec.Body.String())
+	}
+
+	var resp chatHistoryResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, want := len(resp.Messages), 5; got != want {
+		t.Fatalf("message count = %d, want %d", got, want)
+	}
+
+	want := []string{"message-003", "message-004", "message-005", "message-006", "message-007"}
+	for i, msg := range resp.Messages {
+		if msg.Msg != want[i] {
+			t.Errorf("message[%d] = %q, want %q", i, msg.Msg, want[i])
+		}
+	}
+	if resp.NextCursor == "" {
+		t.Error("expected nextCursor for messages older than the around window")
+	}
+}
+
+func TestChatV2_History_AroundRejectsMessageFromAnotherConversation(t *testing.T) {
+	srv, s, wcs, proj, db := setupSendTest(t)
+	ctx := context.Background()
+
+	createTopic := func(name string) string {
+		t.Helper()
+		topicID := tid("topic-history-around-" + name)
+		if err := wcs.CreateTopic(ctx, WebChatTopic{
+			ID:        topicID,
+			ProjectID: proj.ID,
+			Name:      name,
+			CreatedBy: "dev",
+			CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("CreateTopic(%s): %v", name, err)
+		}
+		setTopicConversationID(t, db, s, topicID, proj.ID)
+		return topicID
+	}
+
+	requestedTopicID := createTopic("requested")
+	foreignTopicID := createTopic("foreign")
+	seedHistoryMessages(t, s, proj.ID, foreignTopicID, 1)
+	foreignMessageID := tid(foreignTopicID + "-msg-message-000")
+
+	path := "/api/v1/chat/conversations/" + requestedTopicID + "/messages?around=" + url.QueryEscape(foreignMessageID)
+	rec := doRequest(t, srv, http.MethodGet, path, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("GET %s: expected 404, got %d: %s", path, rec.Code, rec.Body.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Phase-3: Edit/Delete endpoint tests
 // ---------------------------------------------------------------------------
