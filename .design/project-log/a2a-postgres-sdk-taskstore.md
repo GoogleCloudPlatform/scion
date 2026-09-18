@@ -61,6 +61,11 @@ recovery, retention cleanup, and cursor-based pagination.
 | `ReapStaleTasks` | janitor tick + startup recovery | `bridge.go` reapStaleSDKExecutions(), `main.go` serveStandalone() |
 | `PurgeTasksAndEvents` | RunSweep | `bridge.go` RunSweep() |
 | `SetSDKTaskStore` | standalone initialization | `main.go` serveStandalone() |
+| `PrepareBarrier` / `Await` / `Cancel` | Barrier lifecycle in executor | `executor.go` Execute() |
+| `GetByIDAndAgent` | Durable broker correlation | `bridge.go` correlateToTask() |
+| `GetOwnedTaskSnapshotAndCursor` | Durable subscribe | `durable_handler.go` SubscribeToTask() |
+| `NewBarrierTaskStore` | Wraps PostgresTaskStore | `main.go` serveStandalone() |
+| `NewDurableRequestHandler` | Wraps SDK handler | `main.go` serveStandalone() |
 
 ## Schema
 
@@ -74,7 +79,11 @@ CREATE TABLE a2a_sdk_tasks (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     exec_owner TEXT,
-    exec_heartbeat TIMESTAMPTZ
+    exec_heartbeat TIMESTAMPTZ,
+    project_id TEXT NOT NULL DEFAULT '',
+    agent_slug TEXT NOT NULL DEFAULT '',
+    caller_user_id TEXT NOT NULL DEFAULT '',
+    last_event_cursor BIGINT NOT NULL DEFAULT 0
 );
 ```
 
@@ -101,6 +110,23 @@ CREATE TABLE a2a_sdk_tasks (
 11. **Active-task-safe retention** — Standalone mode skips unconditional
     `PurgeTaskEvents`; only terminal task events are purged via
     `PurgeTasksAndEvents` (REQ-2).
+12. **BarrierTaskStore (R3)** — Deterministic create-completion signaling via
+    sync.Once channel-based barrier. Replaces timed retry loop with zero timing
+    assumptions. PrepareBarrier → yield → Await → single ClaimExecution.
+13. **DurableRequestHandler (R3)** — Wraps SDK RequestHandler, intercepting
+    SubscribeToTask with ownership-enforcing durable subscribe. Reads
+    snapshot + last_event_cursor atomically, streams only new events.
+14. **Per-event cursor tracking (R3)** — `_bridgeEventID` carried through SDK
+    event metadata. Update uses `GREATEST(last_event_cursor, eventID)` to
+    advance cursor monotonically to the specific event applied, not MAX(id).
+15. **Durable correlation columns (R3)** — project_id, agent_slug, caller_user_id
+    stored explicitly for cross-replica broker correlation and topic user
+    validation. Pre-migration rows terminalized with fail-closed semantics.
+16. **Heartbeat fence ordering (R3)** — waitForTaskEvent reordered:
+    heartbeat→read→verify→return. No post-loss SDK event may be yielded.
+17. **Store wrapper chain (R3)** — SDK→ScopedTaskStore→BarrierTaskStore→
+    PostgresTaskStore. ScopedTaskStore is redundant compatibility only;
+    PostgresTaskStore is the authoritative owner enforcer.
 
 ## Test provisioning
 
