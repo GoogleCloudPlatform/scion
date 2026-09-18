@@ -1588,6 +1588,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			srv.userTokenService,
 			s, // store.Store embeds ExternalIdentityStore (ent-backed, durable)
 			s,
+			srv.isUserAuthorized, // same domain/invite/allow-registration policy as web login
 			slog.Default(),
 		)
 		slog.Info("GE Google exchange service initialized",

@@ -147,9 +147,22 @@ Bridge `go.mod`:
 
 Hub `go.mod`: No changes.
 
+## Review finding disposition (review at 8047f73)
+
+| # | Severity | Finding | Resolution | Evidence |
+|---|----------|---------|------------|----------|
+| 1 | Critical | JWT exp not cryptographically capped by upstream expiry | **Resolved**: Added `GenerateAccessTokenWithTTL` to `UserTokenService`, wired in `ge_exchange.go` with `min(configured TTL, upstream remaining)` | `TestGEExchange_JWTExpCryptographicallyCapped` — decodes actual minted JWT, validates cryptographic exp ≤ upstream expiry |
+| 2 | Critical | Auto-provisioning bypasses Hub registration policy | **Resolved**: Added `UserAuthChecker` function type, wired `s.isUserAuthorized` in `server.go`, fail-closed default when nil | `TestGEExchange_ProvisioningRejectedByPolicy`, `TestGEExchange_NilAuthCheckerFailsClosed`, `TestGEExchange_ProvisioningAuth_*` (4 tests) |
+| 3 | Required | `resolveAfterConflict` silently adopts mismatched user | **Resolved**: Added `expectedUserID` parameter; validates winner matches expected user ID, fails closed with `errBindingConflict` if mismatch. Orphan user cleanup on provisioning conflict. | `TestGEExchange_OrphanCleanup_OnProvisioningConflict`, `TestGEExchange_ConcurrentFirstLinkage` |
+| 4 | Required | No production validator tests (only interface mock) | **Resolved**: Created `google_credential_validator_test.go` with 18 tests using `httptest.Server` + real `NewGoogleCredentialValidator` through pinned fake transport. Tests RS256 signature verification, JWKS fetch/rotation, CheckRedirect rejection, tokeninfo/userinfo cross-check. | `TestProductionValidator_IDToken_*` (11 tests), `TestProductionValidator_AccessToken_*` (6 tests), `TestProductionValidator_JWKS_*` (1 test) |
+| 5 | Required | Missing exp claim not tested in production validator | **Resolved**: `TestProductionValidator_IDToken_MissingExp` signs a real RS256 JWT without exp, verifies rejection through production code path | `TestProductionValidator_IDToken_MissingExp` |
+| 6 | Required | Tokeninfo schema — pin and test azp/aud (not issued_to/audience) | **Resolved**: `TestProductionValidator_TokenInfoSchema_FieldTypes` with 4 sub-tests: azp authoritative, issued_to fails closed, flexBool string/bool encoding. Response uses `json:"azp"` and `json:"aud"` matching `https://oauth2.googleapis.com/tokeninfo`. | `TestProductionValidator_TokenInfoSchema_FieldTypes/*` |
+| 7 | Required | Singleflight context leak — first caller's ctx cancellation aborts all waiters | **Resolved**: Changed `sfg.Do` → `sfg.DoChan` + `context.WithoutCancel`, each waiter selects on its own `ctx.Done()` independently | `TestGEExchangeValidator_SingleflightContextIsolation` |
+| 10 | Required | `AuthValidators` missing `GEExchangeValidator` for hot-reload | **Resolved**: Added `GEExchangeValidator *GEExchangeValidator` field to `AuthValidators` struct, wired in `BuildAuthValidators` and auth middleware snapshot path | `adminoverlay.go`, `server.go` snapshot fallback |
+
 ## Test evidence
 
-- Hub: 34 GE tests + 13 ent store tests, all passing
-- Bridge: 34 GE validator tests + 9 v0.3 compat tests, all passing
+- Hub: 34 GE exchange tests + 18 production validator tests + 13 ent store tests, all passing
+- Bridge: 35 GE validator tests (incl. singleflight isolation) + 9 v0.3 compat tests, all passing
 - All broader bridge tests pass (`go test ./internal/...`)
 - Both modules build cleanly (`go build ./...`)

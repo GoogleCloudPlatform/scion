@@ -1077,3 +1077,72 @@ func TestGEExchangeValidator_MultipleInvalidations(t *testing.T) {
 		t.Fatalf("callCount=%d, want 3 (each invalidation forces a re-exchange)", c)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Singleflight context isolation (Finding #7) — cancelling one caller's
+// context must not abort the in-flight exchange for other concurrent callers.
+// ---------------------------------------------------------------------------
+
+func TestGEExchangeValidator_SingleflightContextIsolation(t *testing.T) {
+	var hubCallCount int32
+	hub := fakeHubExchange(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hubCallCount, 1)
+		// Simulate a slow exchange — give time for contexts to be cancelled.
+		time.Sleep(200 * time.Millisecond)
+		writeExchangeResponse(w,
+			geExchangeUser{ID: "user-sf", Email: "sf@gmail.com", Role: "user"},
+			"hub-token-sf",
+			time.Now().Add(5*time.Minute),
+			time.Now().Add(55*time.Minute),
+		)
+	})
+	defer hub.Close()
+
+	v := NewGEExchangeValidator(hub.URL, GEExchangeConfig{
+		CredentialType: "id_token",
+		CacheTTL:       60 * time.Second,
+	}, testLogger())
+
+	// Caller 1: will be cancelled after 50ms.
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel1()
+
+	// Caller 2: has a long deadline — should succeed.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+
+	var wg sync.WaitGroup
+	var err1, err2 error
+	var id2 *CallerIdentity
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err1 = v.Validate(ctx1, "same-cred")
+	}()
+	go func() {
+		defer wg.Done()
+		id2, err2 = v.Validate(ctx2, "same-cred")
+	}()
+	wg.Wait()
+
+	// Caller 1 should have been cancelled (context deadline exceeded).
+	if err1 == nil {
+		// It's acceptable if caller 1 succeeded before its context was cancelled
+		// (the exchange was fast enough). But it must NOT have caused caller 2 to fail.
+	}
+
+	// Caller 2 MUST succeed — the in-flight exchange should use a detached context
+	// that is not tied to caller 1's cancellation.
+	if err2 != nil {
+		t.Fatalf("caller 2 failed (should succeed even if caller 1 is cancelled): %v", err2)
+	}
+	if id2.UserID != "user-sf" {
+		t.Errorf("caller 2 user = %q, want %q", id2.UserID, "user-sf")
+	}
+
+	// Only 1 Hub call should have been made (singleflight coalescing).
+	if c := atomic.LoadInt32(&hubCallCount); c != 1 {
+		t.Errorf("hub call count = %d, want 1 (singleflight should coalesce)", c)
+	}
+}

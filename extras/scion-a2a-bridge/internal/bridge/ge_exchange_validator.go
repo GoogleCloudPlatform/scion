@@ -170,15 +170,26 @@ func (v *GEExchangeValidator) Validate(ctx context.Context, credential string) (
 	}
 	v.mu.Unlock()
 
-	// Use singleflight to coalesce concurrent misses for the same credential.
-	result, err, _ := v.sfg.Do(key, func() (interface{}, error) {
-		return v.exchange(ctx, credential, currentVersion)
+	// Use singleflight DoChan to coalesce concurrent misses for the same
+	// credential. DoChan isolates each waiter's context: a cancelled caller
+	// does not abort the in-flight exchange for other waiters.
+	ch := v.sfg.DoChan(key, func() (interface{}, error) {
+		// Use context.WithoutCancel so the shared exchange call is not tied
+		// to any single caller's context lifetime. Each waiter selects on
+		// its own ctx.Done() independently below.
+		detached := context.WithoutCancel(ctx)
+		return v.exchange(detached, credential, currentVersion)
 	})
-	if err != nil {
-		return nil, err
-	}
 
-	return result.(*CallerIdentity), nil
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.(*CallerIdentity), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // exchange performs the actual Hub exchange call and caches the result.

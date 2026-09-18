@@ -17,6 +17,7 @@ package bridge
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -93,10 +94,11 @@ type ConfigSnapshot struct {
 
 // AuthValidators holds the active auth validation functions.
 type AuthValidators struct {
-	Scheme       string
-	UATValidator *UATValidator // non-nil when scheme is hubUAT
-	JWTValidator *JWTValidator // non-nil when scheme is hubJWT
-	APIKey       string        // non-empty when scheme is apiKey or bearer
+	Scheme              string
+	UATValidator        *UATValidator        // non-nil when scheme is hubUAT
+	JWTValidator        *JWTValidator        // non-nil when scheme is hubJWT
+	GEExchangeValidator *GEExchangeValidator // non-nil when scheme is geGoogle
+	APIKey              string               // non-empty when scheme is apiKey or bearer
 }
 
 // SnapshotHolder wraps an atomic pointer to ConfigSnapshot for lock-free reads.
@@ -329,6 +331,9 @@ func BuildAuthValidators(cfg *Config) AuthValidators {
 	case "hubJWT":
 		// JWTValidator requires a signing key which is loaded separately.
 		// It will be set via SetJWTValidator on the Server.
+	case "geGoogle":
+		av.GEExchangeValidator = NewGEExchangeValidator(cfg.Hub.Endpoint, cfg.Auth.GEExchange,
+			slog.Default())
 	case "apiKey", "bearer", "":
 		av.APIKey = cfg.Auth.APIKey
 	}

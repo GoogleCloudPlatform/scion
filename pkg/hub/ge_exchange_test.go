@@ -105,6 +105,25 @@ func (s *fakeUserStore) UpdateUser(_ context.Context, user *store.User) error {
 	return nil
 }
 
+func (s *fakeUserStore) DeleteUser(_ context.Context, id string) error {
+	if _, ok := s.users[id]; !ok {
+		return store.ErrNotFound
+	}
+	// Remove from both maps.
+	user := s.users[id]
+	delete(s.users, id)
+	delete(s.usersByEmail, strings.ToLower(user.Email))
+	return nil
+}
+
+func (s *fakeUserStore) IsUserInvitedOrActive(_ context.Context, email string) (bool, error) {
+	// Returns true if the user exists and is active (simulates invite/active check).
+	if u, ok := s.usersByEmail[strings.ToLower(email)]; ok {
+		return u.Status == "active" || u.Status == "invited", nil
+	}
+	return false, nil
+}
+
 // Stubs for Store interface methods we don't use.
 func (s *fakeUserStore) Close() error                                           { return nil }
 func (s *fakeUserStore) Ping(_ context.Context) error                           { return nil }
@@ -201,20 +220,25 @@ func addUser(s *fakeUserStore, id, email, role, status string) *store.User {
 // Helper to set up a test exchange service.
 // ---------------------------------------------------------------------------
 
+// alwaysAuthorized is a permissive authChecker for tests that don't exercise
+// the authorization policy path.
+func alwaysAuthorized(_ context.Context, _ string) bool { return true }
+
 func newTestExchangeService(validator GoogleCredentialValidator, userStore *fakeUserStore) *GEExchangeService {
 	tokenSvc, _ := NewUserTokenService(UserTokenConfig{
-		AccessTokenDuration: 5 * time.Minute,
+		AccessTokenDuration: DefaultGETokenTTL,
 	})
 	return NewGEExchangeService(
 		GEGoogleExchangeConfig{
 			Enabled:          true,
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
-			TokenTTL:         5 * time.Minute,
+			TokenTTL:         DefaultGETokenTTL,
 		},
 		validator,
 		tokenSvc,
 		newMemExtIDStore(),
 		userStore,
+		alwaysAuthorized,
 		slog.Default(),
 	)
 }
@@ -223,18 +247,19 @@ func newTestExchangeService(validator GoogleCredentialValidator, userStore *fake
 // store for tests that need direct access to binding state.
 func newTestExchangeServiceWithExtStore(validator GoogleCredentialValidator, userStore *fakeUserStore, extStore ExternalIdentityStore) *GEExchangeService {
 	tokenSvc, _ := NewUserTokenService(UserTokenConfig{
-		AccessTokenDuration: 5 * time.Minute,
+		AccessTokenDuration: DefaultGETokenTTL,
 	})
 	return NewGEExchangeService(
 		GEGoogleExchangeConfig{
 			Enabled:          true,
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
-			TokenTTL:         5 * time.Minute,
+			TokenTTL:         DefaultGETokenTTL,
 		},
 		validator,
 		tokenSvc,
 		extStore,
 		userStore,
+		alwaysAuthorized,
 		slog.Default(),
 	)
 }
@@ -428,7 +453,7 @@ func TestGEExchange_MissingTrustConfig(t *testing.T) {
 		GEGoogleExchangeConfig{Enabled: false},
 		validator, tokenSvc,
 		newMemExtIDStore(), userStore,
-		slog.Default(),
+		alwaysAuthorized, slog.Default(),
 	)
 
 	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -554,9 +579,9 @@ func TestGEExchange_StableLinkage_ConflictingSubject(t *testing.T) {
 		GEGoogleExchangeConfig{
 			Enabled:          true,
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
-			TokenTTL:         5 * time.Minute,
+			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, extIDStore, userStore, slog.Default(),
+		validator, tokenSvc, extIDStore, userStore, alwaysAuthorized, slog.Default(),
 	)
 
 	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -647,10 +672,10 @@ func TestGEExchange_WorkspaceEmail_AutoLink(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGEExchange_TokenExpiryCappedByUpstream(t *testing.T) {
-	// Upstream expiry in 2 minutes, but configured TTL is 5 minutes.
-	// The Hub token must be capped at 2 minutes.
+	// Upstream expiry in 30 seconds, but configured TTL is 60 seconds.
+	// The Hub token must be capped at 30 seconds (min of configured and upstream).
 	identity := validGmailIdentity()
-	identity.UpstreamExpiry = time.Now().Add(2 * time.Minute)
+	identity.UpstreamExpiry = time.Now().Add(30 * time.Second)
 	validator := &fakeGoogleValidator{idTokenResult: identity}
 	userStore := newFakeUserStore()
 	svc := newTestExchangeService(validator, userStore)
@@ -668,10 +693,10 @@ func TestGEExchange_TokenExpiryCappedByUpstream(t *testing.T) {
 		t.Fatalf("failed to parse expiresAt: %v", err)
 	}
 
-	// The Hub expiry should be approximately 2 minutes from now (± test execution time).
+	// The Hub expiry should be approximately 30 seconds from now (± test execution time).
 	remaining := time.Until(expiresAt)
-	if remaining > 3*time.Minute {
-		t.Errorf("Hub token expiry not capped by upstream: remaining=%v", remaining)
+	if remaining > 35*time.Second {
+		t.Errorf("Hub token expiry not capped by upstream: remaining=%v, want ≤30s", remaining)
 	}
 }
 
@@ -1129,5 +1154,539 @@ func TestGEExchange_LoginRegression_ProvisionUserPathPreserved(t *testing.T) {
 	}
 	if user.ID != resp.User.ID {
 		t.Errorf("GE user ID (%s) != store user ID (%s)", resp.User.ID, user.ID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Critical #1 regression: JWT exp cryptographically capped.
+//
+// Decodes and cryptographically validates the actual minted Hub JWT, then
+// compares its exp with response expiresAt, upstreamExpiresAt, and the
+// authoritative upstream expiry.
+// ---------------------------------------------------------------------------
+
+func TestGEExchange_JWTExpCryptographicRegression(t *testing.T) {
+	// Create a token service with a known signing key so we can validate the JWT.
+	signingKey := []byte("test-signing-key-32-bytes-long!!")
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{
+		SigningKey:          signingKey,
+		AccessTokenDuration: 15 * time.Minute, // Deliberately longer than TokenTTL
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	upstreamExpiry := time.Now().Add(45 * time.Second) // Less than DefaultGETokenTTL (60s)
+	identity := validGmailIdentity()
+	identity.UpstreamExpiry = upstreamExpiry
+
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+	userStore := newFakeUserStore()
+	svc := NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         DefaultGETokenTTL, // 60s
+		},
+		validator,
+		tokenSvc,
+		newMemExtIDStore(),
+		userStore,
+		alwaysAuthorized,
+		slog.Default(),
+	)
+
+	resp, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "capped-token",
+		CredentialType: "id_token",
+	})
+	if err != nil {
+		t.Fatalf("exchange failed: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", status)
+	}
+
+	// Step 1: Cryptographically validate the minted JWT using the known key.
+	claims, err := tokenSvc.ValidateUserToken(resp.AccessToken)
+	if err != nil {
+		t.Fatalf("minted JWT failed cryptographic validation: %v", err)
+	}
+
+	// Step 2: The JWT exp claim must exist.
+	if claims.Expiry == nil {
+		t.Fatal("minted JWT missing exp claim")
+	}
+	jwtExp := claims.Expiry.Time()
+
+	// Step 3: Parse response timestamps.
+	expiresAt, err := time.Parse(time.RFC3339, resp.ExpiresAt)
+	if err != nil {
+		t.Fatalf("failed to parse expiresAt: %v", err)
+	}
+	upstreamExpiresAt, err := time.Parse(time.RFC3339, resp.UpstreamExpiresAt)
+	if err != nil {
+		t.Fatalf("failed to parse upstreamExpiresAt: %v", err)
+	}
+
+	// Step 4: JWT exp must be ≤ response expiresAt (they should be the same
+	// within clock granularity).
+	if jwtExp.After(expiresAt.Add(2 * time.Second)) {
+		t.Errorf("JWT exp (%v) later than response expiresAt (%v)", jwtExp, expiresAt)
+	}
+
+	// Step 5: JWT exp must be ≤ upstreamExpiresAt (the token must not outlive
+	// the upstream credential).
+	if jwtExp.After(upstreamExpiresAt.Add(2 * time.Second)) {
+		t.Errorf("JWT exp (%v) later than upstream expiry (%v)", jwtExp, upstreamExpiresAt)
+	}
+
+	// Step 6: upstreamExpiresAt in response must match the authoritative
+	// upstream expiry within 1 second.
+	if upstreamExpiresAt.Sub(upstreamExpiry).Abs() > 1*time.Second {
+		t.Errorf("response upstreamExpiresAt (%v) != authoritative upstream (%v)",
+			upstreamExpiresAt, upstreamExpiry)
+	}
+
+	// Step 7: When upstream < configured, the effective TTL must be capped by
+	// upstream remaining (~45s), not the configured TTL (60s).
+	jwtDuration := jwtExp.Sub(time.Now())
+	if jwtDuration > 50*time.Second {
+		t.Errorf("JWT duration (%v) not capped by upstream remaining (~45s)", jwtDuration)
+	}
+
+	// Step 8: Verify the token type and standard claims.
+	if claims.TokenType != TokenTypeAccess {
+		t.Errorf("expected token type %q, got %q", TokenTypeAccess, claims.TokenType)
+	}
+	if claims.ClientType != ClientTypeAPI {
+		t.Errorf("expected client type %q, got %q", ClientTypeAPI, claims.ClientType)
+	}
+}
+
+func TestGEExchange_JWTExpRegression_ConfiguredTTLWins(t *testing.T) {
+	// When upstream remaining is longer than configured TTL, the configured
+	// TTL should cap the token (not the upstream). This tests the other
+	// branch of min(configured, upstream).
+	signingKey := []byte("test-signing-key-32-bytes-long!!")
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{
+		SigningKey:          signingKey,
+		AccessTokenDuration: 15 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	identity := validGmailIdentity()
+	identity.UpstreamExpiry = time.Now().Add(30 * time.Minute) // Much longer than 60s
+
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+	userStore := newFakeUserStore()
+	svc := NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         DefaultGETokenTTL, // 60s
+		},
+		validator, tokenSvc, newMemExtIDStore(), userStore,
+		alwaysAuthorized, slog.Default(),
+	)
+
+	resp, _, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "long-lived-token",
+		CredentialType: "id_token",
+	})
+	if err != nil {
+		t.Fatalf("exchange failed: %v", err)
+	}
+
+	claims, err := tokenSvc.ValidateUserToken(resp.AccessToken)
+	if err != nil {
+		t.Fatalf("minted JWT failed cryptographic validation: %v", err)
+	}
+
+	// JWT duration should be ~60s (configured), not ~30min (upstream).
+	jwtDuration := claims.Expiry.Time().Sub(time.Now())
+	if jwtDuration > 65*time.Second {
+		t.Errorf("JWT duration (%v) exceeds configured TTL (60s) — not properly capped", jwtDuration)
+	}
+	if jwtDuration < 50*time.Second {
+		t.Errorf("JWT duration (%v) too short — expected ~60s", jwtDuration)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Critical #2 regression: provisioning authorization via real policy path.
+//
+// These tests exercise the actual checkUserAuthorized function, not a mocked
+// approval callback. They cover:
+// - Domain restriction: rejects users outside authorized domains
+// - Invite-only mode: rejects uninvited users
+// - Open mode: allows any user
+// - Admin bypass: admin emails always pass
+// ---------------------------------------------------------------------------
+
+func TestGEExchange_ProvisioningAuth_DomainRestricted(t *testing.T) {
+	identity := validGmailIdentity()
+	identity.Email = "user@unauthorized.com"
+	identity.HostedDomain = "unauthorized.com"
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+	userStore := newFakeUserStore()
+
+	// Use real checkUserAuthorized with domain restriction.
+	authChecker := func(_ context.Context, email string) bool {
+		return checkUserAuthorized(context.Background(), email,
+			[]string{"allowed.com"},    // authorized domains
+			[]string{"admin@hub.com"},  // admin emails
+			"domain_restricted",        // access mode
+			userStore,
+		)
+	}
+
+	tokenSvc, _ := NewUserTokenService(UserTokenConfig{
+		AccessTokenDuration: DefaultGETokenTTL,
+	})
+	svc := NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         DefaultGETokenTTL,
+		},
+		validator, tokenSvc, newMemExtIDStore(), userStore,
+		authChecker, slog.Default(),
+	)
+
+	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "domain-rejected-token",
+		CredentialType: "id_token",
+	})
+	if err == nil {
+		t.Fatal("expected error: user outside authorized domain should be rejected")
+	}
+	if status != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", status)
+	}
+
+	// Verify no User was created.
+	if len(userStore.users) != 0 {
+		t.Errorf("expected no users created, got %d", len(userStore.users))
+	}
+}
+
+func TestGEExchange_ProvisioningAuth_DomainAllowed(t *testing.T) {
+	identity := validWorkspaceIdentity()
+	identity.Email = "user@allowed.com"
+	identity.HostedDomain = "allowed.com"
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+	userStore := newFakeUserStore()
+
+	authChecker := func(_ context.Context, email string) bool {
+		return checkUserAuthorized(context.Background(), email,
+			[]string{"allowed.com"},
+			[]string{"admin@hub.com"},
+			"domain_restricted",
+			userStore,
+		)
+	}
+
+	tokenSvc, _ := NewUserTokenService(UserTokenConfig{
+		AccessTokenDuration: DefaultGETokenTTL,
+	})
+	svc := NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         DefaultGETokenTTL,
+		},
+		validator, tokenSvc, newMemExtIDStore(), userStore,
+		authChecker, slog.Default(),
+	)
+
+	resp, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "domain-accepted-token",
+		CredentialType: "id_token",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	if resp.User == nil || resp.User.Email != "user@allowed.com" {
+		t.Error("expected user with allowed domain email")
+	}
+}
+
+func TestGEExchange_ProvisioningAuth_InviteOnly_Rejected(t *testing.T) {
+	identity := validGmailIdentity()
+	identity.Email = "uninvited@gmail.com"
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+	userStore := newFakeUserStore()
+
+	// Use real checkUserAuthorized with invite_only mode.
+	// The fakeUserStore has no invited users, so IsUserInvitedOrActive will fail.
+	authChecker := func(_ context.Context, email string) bool {
+		return checkUserAuthorized(context.Background(), email,
+			nil,                        // no domain restriction
+			[]string{"admin@hub.com"},  // admin emails
+			"invite_only",              // access mode
+			userStore,
+		)
+	}
+
+	tokenSvc, _ := NewUserTokenService(UserTokenConfig{
+		AccessTokenDuration: DefaultGETokenTTL,
+	})
+	svc := NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         DefaultGETokenTTL,
+		},
+		validator, tokenSvc, newMemExtIDStore(), userStore,
+		authChecker, slog.Default(),
+	)
+
+	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "uninvited-token",
+		CredentialType: "id_token",
+	})
+	if err == nil {
+		t.Fatal("expected error: uninvited user should be rejected in invite_only mode")
+	}
+	if status != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", status)
+	}
+	if len(userStore.users) != 0 {
+		t.Errorf("expected no users created, got %d", len(userStore.users))
+	}
+}
+
+func TestGEExchange_ProvisioningAuth_AdminBypass(t *testing.T) {
+	// Admin email must be in an authoritative domain (Gmail) to pass the
+	// email domain gate. The admin bypass then applies at the provisioning
+	// authorization level (checkUserAuthorized).
+	identity := validGmailIdentity()
+	identity.Email = "admin@gmail.com"
+	identity.Subject = "admin-sub-001"
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+	userStore := newFakeUserStore()
+
+	// Use real checkUserAuthorized: even in invite_only mode, admins bypass.
+	authChecker := func(_ context.Context, email string) bool {
+		return checkUserAuthorized(context.Background(), email,
+			nil,                         // no domain restriction
+			[]string{"admin@gmail.com"}, // admin emails
+			"invite_only",               // access mode
+			userStore,
+		)
+	}
+
+	tokenSvc, _ := NewUserTokenService(UserTokenConfig{
+		AccessTokenDuration: DefaultGETokenTTL,
+	})
+	svc := NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         DefaultGETokenTTL,
+		},
+		validator, tokenSvc, newMemExtIDStore(), userStore,
+		authChecker, slog.Default(),
+	)
+
+	resp, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "admin-token",
+		CredentialType: "id_token",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v (admins should bypass invite_only)", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	if resp.User == nil || resp.User.Email != "admin@gmail.com" {
+		t.Error("expected admin user in response")
+	}
+}
+
+func TestGEExchange_ProvisioningAuth_NilAuthChecker_FailsClosed(t *testing.T) {
+	identity := validGmailIdentity()
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+	userStore := newFakeUserStore()
+
+	tokenSvc, _ := NewUserTokenService(UserTokenConfig{
+		AccessTokenDuration: DefaultGETokenTTL,
+	})
+	svc := NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         DefaultGETokenTTL,
+		},
+		validator, tokenSvc, newMemExtIDStore(), userStore,
+		nil, // nil authChecker — must fail closed
+		slog.Default(),
+	)
+
+	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "token",
+		CredentialType: "id_token",
+	})
+	if err == nil {
+		t.Fatal("expected error: nil authChecker must fail closed")
+	}
+	if status != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", status)
+	}
+	if len(userStore.users) != 0 {
+		t.Errorf("expected no users created, got %d", len(userStore.users))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Required #3 regression: conflict resolution with expectedUserID validation
+// and orphan cleanup.
+// ---------------------------------------------------------------------------
+
+// raceExtIDStore simulates a race condition where binding creation fails
+// because a concurrent goroutine wins the race, but the initial lookup
+// (before creation) returns not-found.
+type raceExtIDStore struct {
+	mu            sync.Mutex
+	inner         *memExtIDStore
+	createFails   bool           // when true, Create fails and injects winner
+	winnerBinding *store.ExternalIdentityBinding // injected on first Create failure
+}
+
+func newRaceExtIDStore(winnerBinding *store.ExternalIdentityBinding) *raceExtIDStore {
+	return &raceExtIDStore{
+		inner:         newMemExtIDStore(),
+		createFails:   true,
+		winnerBinding: winnerBinding,
+	}
+}
+
+func (s *raceExtIDStore) GetExternalIdentity(ctx context.Context, provider, issuer, subject string) (*store.ExternalIdentityBinding, error) {
+	return s.inner.GetExternalIdentity(ctx, provider, issuer, subject)
+}
+
+func (s *raceExtIDStore) CreateExternalIdentity(ctx context.Context, binding *store.ExternalIdentityBinding) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.createFails {
+		// Simulate race: another goroutine created the binding first.
+		s.createFails = false
+		// Inject the winner's binding into the inner store.
+		_ = s.inner.CreateExternalIdentity(ctx, s.winnerBinding)
+		return fmt.Errorf("external identity binding already exists (simulated race)")
+	}
+	return s.inner.CreateExternalIdentity(ctx, binding)
+}
+
+func (s *raceExtIDStore) UpdateExternalIdentityEmail(ctx context.Context, id, email string) error {
+	return s.inner.UpdateExternalIdentityEmail(ctx, id, email)
+}
+
+func (s *raceExtIDStore) GetExternalIdentitiesByUserID(ctx context.Context, userID string) ([]*store.ExternalIdentityBinding, error) {
+	return s.inner.GetExternalIdentitiesByUserID(ctx, userID)
+}
+
+func TestGEExchange_ConflictResolution_ExpectedUserMismatch(t *testing.T) {
+	// Simulates a race: user-A exists with email user@gmail.com. The exchange
+	// matches by email to user-A. But a concurrent goroutine wins the binding
+	// creation race and binds the same subject to user-B. resolveAfterConflict
+	// must fail closed because winner.UserID (user-B) != expectedUserID (user-A).
+	userStore := newFakeUserStore()
+	existingUser := addUser(userStore, "user-A", "user@gmail.com", "member", "active")
+	otherUser := addUser(userStore, "user-B", "other@gmail.com", "member", "active")
+
+	winnerBinding := &store.ExternalIdentityBinding{
+		ID:       "winner-binding",
+		Provider: "google",
+		Issuer:   googleCanonicalIssuer,
+		Subject:  "google-sub-123",
+		UserID:   otherUser.ID,
+		Email:    "other@gmail.com",
+	}
+	extStore := newRaceExtIDStore(winnerBinding)
+
+	identity := validGmailIdentity()
+	identity.Email = existingUser.Email
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+	tokenSvc, _ := NewUserTokenService(UserTokenConfig{})
+
+	svc := NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         DefaultGETokenTTL,
+		},
+		validator, tokenSvc, extStore, userStore, alwaysAuthorized, slog.Default(),
+	)
+
+	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "conflict-token",
+		CredentialType: "id_token",
+	})
+	if err == nil {
+		t.Fatal("expected error: conflict resolution should detect user mismatch")
+	}
+	if status != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", status)
+	}
+}
+
+func TestGEExchange_OrphanCleanup_OnProvisioningConflict(t *testing.T) {
+	// Simulates provisioning race: no existing user by email, provisioning
+	// creates a new user, but binding creation fails because a concurrent
+	// goroutine already created the binding for the same subject → different user.
+	// The orphaned provisioned user must be cleaned up.
+	userStore := newFakeUserStore()
+	winnerUser := addUser(userStore, "winner-user", "winner@gmail.com", "member", "active")
+
+	winnerBinding := &store.ExternalIdentityBinding{
+		ID:       "winner-binding",
+		Provider: "google",
+		Issuer:   googleCanonicalIssuer,
+		Subject:  "google-sub-123",
+		UserID:   winnerUser.ID,
+		Email:    "winner@gmail.com",
+	}
+	extStore := newRaceExtIDStore(winnerBinding)
+
+	identity := validGmailIdentity()
+	// Use a different email than winner so no existing user is found by email.
+	identity.Email = "loser@gmail.com"
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+
+	tokenSvc, _ := NewUserTokenService(UserTokenConfig{})
+	svc := NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         DefaultGETokenTTL,
+		},
+		validator, tokenSvc, extStore, userStore, alwaysAuthorized, slog.Default(),
+	)
+
+	resp, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "race-loser-token",
+		CredentialType: "id_token",
+	})
+	if err != nil {
+		t.Fatalf("exchange should succeed (resolve to winner): %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	if resp.User.ID != winnerUser.ID {
+		t.Errorf("expected winner user %s, got %s", winnerUser.ID, resp.User.ID)
+	}
+
+	// Verify orphaned user was cleaned up: the store should contain only the
+	// winner user and no provisioned orphan.
+	if len(userStore.users) != 1 {
+		t.Errorf("expected 1 user (winner only), got %d — orphan not cleaned up", len(userStore.users))
 	}
 }

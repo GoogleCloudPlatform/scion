@@ -55,10 +55,15 @@ func (c *GEGoogleExchangeConfig) IsValid() bool {
 }
 
 // DefaultGETokenTTL is the default Hub access token lifetime for GE exchange.
-const DefaultGETokenTTL = 5 * time.Minute
+// Aligned with the bridge cache default (~60s) per the auth-exchange contract:
+// a shorter token lifetime bounds the revocation window when a Google credential
+// is revoked upstream. The effective TTL is min(this, upstream remaining).
+const DefaultGETokenTTL = 60 * time.Second
 
 // MaxGETokenTTL is the maximum allowed Hub access token lifetime.
-const MaxGETokenTTL = 15 * time.Minute
+// Matches the bridge cache maximum (300s). Longer values widen the revocation
+// window without proportional benefit since the bridge re-validates anyway.
+const MaxGETokenTTL = 5 * time.Minute
 
 // ExternalIdentityBinding is an alias for the store model type.
 // The durable store implementation lives in pkg/store/entadapter backed by
@@ -73,6 +78,11 @@ type ExternalIdentityStore = store.ExternalIdentityStore
 // GEExchangeService — the core exchange logic.
 // ---------------------------------------------------------------------------
 
+// UserAuthChecker checks whether a user email is authorized to access the Hub
+// per the configured domain restrictions, invite-only mode, and admin list.
+// Returns true if the user is authorized.
+type UserAuthChecker func(ctx context.Context, email string) bool
+
 // GEExchangeService handles the credential exchange flow.
 type GEExchangeService struct {
 	config           GEGoogleExchangeConfig
@@ -80,6 +90,7 @@ type GEExchangeService struct {
 	userTokenService *UserTokenService
 	extIDStore       ExternalIdentityStore
 	userStore        store.Store
+	authChecker      UserAuthChecker
 	logger           *slog.Logger
 	nowFunc          func() time.Time
 }
@@ -91,6 +102,7 @@ func NewGEExchangeService(
 	userTokenService *UserTokenService,
 	extIDStore ExternalIdentityStore,
 	userStore store.Store,
+	authChecker UserAuthChecker,
 	logger *slog.Logger,
 ) *GEExchangeService {
 	if config.TokenTTL == 0 {
@@ -99,12 +111,17 @@ func NewGEExchangeService(
 	if config.TokenTTL > MaxGETokenTTL {
 		config.TokenTTL = MaxGETokenTTL
 	}
+	if authChecker == nil {
+		// Fail closed: if no auth checker is provided, reject all provisioning.
+		authChecker = func(ctx context.Context, email string) bool { return false }
+	}
 	return &GEExchangeService{
 		config:           config,
 		validator:        validator,
 		userTokenService: userTokenService,
 		extIDStore:       extIDStore,
 		userStore:        userStore,
+		authChecker:      authChecker,
 		logger:           logger,
 		nowFunc:          time.Now,
 	}
@@ -220,8 +237,8 @@ func (s *GEExchangeService) Exchange(ctx context.Context, req *ExchangeRequest) 
 	now := s.nowFunc()
 	hubExpiry := now.Add(tokenTTL)
 
-	accessToken, _, err := s.userTokenService.GenerateAccessToken(
-		user.ID, user.Email, user.DisplayName, user.Role, ClientTypeAPI,
+	accessToken, _, err := s.userTokenService.GenerateAccessTokenWithTTL(
+		user.ID, user.Email, user.DisplayName, user.Role, ClientTypeAPI, tokenTTL,
 	)
 	if err != nil {
 		s.logger.Error("GE exchange: token generation failed", "error", err)
@@ -358,7 +375,7 @@ func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *Vali
 			CreatedAt: now,
 			UpdatedAt: now,
 		}); err != nil {
-			return s.resolveAfterConflict(ctx, canonicalIssuer, identity, err)
+			return s.resolveAfterConflict(ctx, canonicalIssuer, identity, existingUser.ID, err)
 		}
 
 		s.logger.Info("GE exchange: created new binding for existing user",
@@ -376,7 +393,8 @@ func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *Vali
 	}
 
 	// Create the binding. If a concurrent exchange already created it
-	// (unique constraint violation), resolve via the winning binding.
+	// (unique constraint violation), clean up the orphaned user and resolve
+	// via the winning binding.
 	now := time.Now()
 	if err := s.extIDStore.CreateExternalIdentity(ctx, &ExternalIdentityBinding{
 		ID:        uuid.New().String(),
@@ -388,7 +406,13 @@ func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *Vali
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {
-		return s.resolveAfterConflict(ctx, canonicalIssuer, identity, err)
+		// Clean up the orphaned user we just provisioned — another goroutine
+		// won the race and has a valid user+binding pair.
+		if delErr := s.userStore.DeleteUser(ctx, user.ID); delErr != nil {
+			s.logger.Warn("GE exchange: failed to clean up orphaned user after conflict",
+				"user_id", user.ID, "error", delErr)
+		}
+		return s.resolveAfterConflict(ctx, canonicalIssuer, identity, "", err)
 	}
 
 	return user, nil
@@ -396,9 +420,12 @@ func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *Vali
 
 // resolveAfterConflict handles the case where CreateExternalIdentity failed
 // due to a unique constraint violation (race between concurrent exchanges).
-// It looks up the winning binding and resolves to the winner's user, which
-// ensures deterministic outcome regardless of which goroutine won.
-func (s *GEExchangeService) resolveAfterConflict(ctx context.Context, canonicalIssuer string, identity *ValidatedGoogleIdentity, createErr error) (*store.User, error) {
+// It looks up the winning binding and resolves to the winner's user.
+//
+// If expectedUserID is non-empty (linking to an existing user), the winner's
+// binding must point to the same user — otherwise it fails closed with
+// errBindingConflict to prevent silently adopting a mismatched user.
+func (s *GEExchangeService) resolveAfterConflict(ctx context.Context, canonicalIssuer string, identity *ValidatedGoogleIdentity, expectedUserID string, createErr error) (*store.User, error) {
 	// Retry by looking up the binding the winner created.
 	winner, err := s.extIDStore.GetExternalIdentity(ctx, "google", canonicalIssuer, identity.Subject)
 	if err != nil {
@@ -406,6 +433,15 @@ func (s *GEExchangeService) resolveAfterConflict(ctx context.Context, canonicalI
 		s.logger.Error("GE exchange: binding creation failed and no winning binding found",
 			"create_error", createErr, "lookup_error", err, "sub", identity.Subject)
 		return nil, fmt.Errorf("failed to create identity binding: %w", createErr)
+	}
+
+	// If we expected a specific user (existing-user linkage path), validate
+	// the winner bound to the same user. Fail closed otherwise.
+	if expectedUserID != "" && winner.UserID != expectedUserID {
+		s.logger.Error("GE exchange: conflict resolution mismatch — winner bound to different user",
+			"expected_user_id", expectedUserID, "winner_user_id", winner.UserID,
+			"sub", identity.Subject)
+		return nil, errBindingConflict
 	}
 
 	// Found the winner's binding — resolve to the winner's user.
@@ -423,15 +459,18 @@ func (s *GEExchangeService) resolveAfterConflict(ctx context.Context, canonicalI
 }
 
 // provisionNewUser creates a new user via the normal Hub provisioning path.
-// This function replicates the provisionUser logic from handlers_auth.go
-// but is invoked from the exchange service rather than the HTTP handler.
+// Enforces the same domain/invite/allow-registration policy as the normal
+// Hub login flow via the injected authChecker.
 func (s *GEExchangeService) provisionNewUser(ctx context.Context, identity *ValidatedGoogleIdentity) (*store.User, error) {
 	normalizedEmail := strings.ToLower(identity.Email)
 
-	// Check authorization (domain, invite, allow-list).
-	// We delegate to the server's isUserAuthorized if available, but since we
-	// don't have a Server reference, we check the store directly.
-	// If the user doesn't pass domain/invite checks, they can't be provisioned.
+	// Enforce Hub registration policy (domain, invite-only, allow-list).
+	// Fail closed: authChecker defaults to rejecting all if not provided.
+	if !s.authChecker(ctx, normalizedEmail) {
+		s.logger.Warn("GE exchange: user not authorized for auto-provisioning",
+			"email", normalizedEmail, "sub", identity.Subject)
+		return nil, fmt.Errorf("%w: user not authorized for auto-provisioning", ErrAccessDenied)
+	}
 
 	user := &store.User{
 		ID:          uuid.New().String(),

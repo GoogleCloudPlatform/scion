@@ -556,6 +556,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				return
 			}
 			geV := s.geExchangeValidator
+			if s.snapshot != nil {
+				snap := s.snapshot.Load()
+				if snap.Auth.GEExchangeValidator != nil {
+					geV = snap.Auth.GEExchangeValidator
+				}
+			}
 			if geV == nil {
 				s.log.Error("geGoogle scheme configured but GE exchange validator not initialized")
 				http.Error(w, "internal server error", http.StatusInternalServerError)

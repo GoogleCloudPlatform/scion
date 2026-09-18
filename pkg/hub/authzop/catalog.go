@@ -2707,8 +2707,8 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/ge_exchange.go — GE Google credential exchange
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/ge_exchange.go", Function: "resolveLocalUser", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "GE exchange user provisioning, pre-authorization", Scope: "pkg/hub/ge_exchange.go"}},
 	{File: "pkg/hub/ge_exchange.go", Function: "resolveLocalUser", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "GE exchange user profile update", Scope: "pkg/hub/ge_exchange.go"}},
+	{File: "pkg/hub/ge_exchange.go", Function: "resolveLocalUser", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "GE exchange orphan user cleanup after concurrent binding race", Scope: "pkg/hub/ge_exchange.go"}},
 	{File: "pkg/hub/ge_exchange.go", Function: "provisionNewUser", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "GE exchange new user provisioning", Scope: "pkg/hub/ge_exchange.go"}},
 
 	// -----------------------------------------------------------------------
