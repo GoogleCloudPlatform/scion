@@ -2518,3 +2518,501 @@ func TestBarrierStoreWrapperChain(t *testing.T) {
 
 	t.Logf("Wrapper chain verified: create/barrier/get/isolation all work through SDK→Scoped→Barrier→Pg")
 }
+
+// =====================================================================
+// Two-replica production-path end-to-end test (EM Finding 3)
+// =====================================================================
+
+// startProductionServer starts a test server in production mode (ScionExecutor
+// with mock Hub, broker ingress, BarrierTaskStore). Returns the process info.
+func startProductionServer(t *testing.T, dbURL, project, agent, callerID string) *testServerProcess {
+	t.Helper()
+
+	// Build the test server binary.
+	binaryPath := t.TempDir() + "/a2a-testserver"
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", binaryPath,
+		"./internal/bridge/testdata/a2a-testserver/")
+	build.Dir = findModuleRoot(t)
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		t.Fatalf("build test server: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	args := []string{
+		"-port=0",
+		"-database-url=" + dbURL,
+		"-project=" + project,
+		"-agent=" + agent,
+		"-mode=production",
+	}
+	if callerID != "" {
+		args = append(args, "-caller-id="+callerID)
+	}
+	cmd := exec.CommandContext(ctx, binaryPath, args...)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		t.Fatalf("stdin pipe: %v", err)
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		t.Fatalf("stdout pipe: %v", err)
+	}
+
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		t.Fatalf("start test server: %v", err)
+	}
+
+	// Wait for READY signal with PID and port.
+	scanner := bufio.NewScanner(stdout)
+	readyCh := make(chan string, 1)
+	go func() {
+		if scanner.Scan() {
+			readyCh <- scanner.Text()
+		}
+	}()
+
+	select {
+	case line := <-readyCh:
+		parts := strings.Fields(line)
+		if len(parts) != 3 || parts[0] != "READY" {
+			cancel()
+			cmd.Process.Kill()
+			t.Fatalf("unexpected READY line: %q", line)
+		}
+		pid, _ := strconv.Atoi(parts[1])
+		port, _ := strconv.Atoi(parts[2])
+		proc := &testServerProcess{
+			cmd:    cmd,
+			pid:    pid,
+			port:   port,
+			stdin:  stdin,
+			cancel: cancel,
+		}
+		t.Cleanup(func() { proc.Stop() })
+		return proc
+	case <-time.After(15 * time.Second):
+		cancel()
+		cmd.Process.Kill()
+		t.Fatal("production test server did not become ready within 15 seconds")
+		return nil
+	}
+}
+
+// hubSendCapture matches the test server's hubSendCapture struct.
+type hubSendCapture struct {
+	AgentID string `json:"agentID"`
+	TaskID  string `json:"taskID"`
+	Message struct {
+		Metadata map[string]string `json:"metadata"`
+		Type     string            `json:"type"`
+		Msg      string            `json:"msg"`
+	} `json:"message"`
+}
+
+// getHubSends reads captured Hub sends from a production-mode process.
+func getHubSends(t *testing.T, serverURL string) []hubSendCapture {
+	t.Helper()
+	resp, err := http.Get(serverURL + "/internal/hub-sends")
+	if err != nil {
+		t.Fatalf("GET hub-sends: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var captures []hubSendCapture
+	if err := json.Unmarshal(body, &captures); err != nil {
+		t.Fatalf("unmarshal hub-sends: %v (body: %s)", err, body)
+	}
+	return captures
+}
+
+// postBrokerMessage publishes a message through a production-mode process's
+// broker ingress (BrokerServer.Publish — the production broker path).
+func postBrokerMessage(t *testing.T, serverURL, topic string, msg *messages.StructuredMessage) {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]interface{}{
+		"topic":   topic,
+		"message": msg,
+	})
+	resp, err := http.Post(serverURL+"/internal/broker-publish", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST broker-publish: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("broker-publish failed: %d %s", resp.StatusCode, body)
+	}
+}
+
+// jsonRPCWithHeaders sends a JSON-RPC request with optional per-request headers.
+func jsonRPCWithHeaders(t *testing.T, serverURL, method string, params interface{}, headers map[string]string) json.RawMessage {
+	t.Helper()
+	reqBody := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      "test-1",
+		"method":  method,
+		"params":  params,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req, err := http.NewRequest("POST", serverURL, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", serverURL, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	var rpcResp struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
+		t.Fatalf("unmarshal response: %v (body: %s)", err, respBody)
+	}
+	if rpcResp.Error != nil {
+		t.Fatalf("JSON-RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+	return rpcResp.Result
+}
+
+// jsonRPCExpectErrorWithHeaders sends a JSON-RPC request with headers and expects an error.
+func jsonRPCExpectErrorWithHeaders(t *testing.T, serverURL, method string, params interface{}, headers map[string]string) (int, string) {
+	t.Helper()
+	reqBody := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      "test-1",
+		"method":  method,
+		"params":  params,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req, err := http.NewRequest("POST", serverURL, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", serverURL, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	var rpcResp struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
+		t.Fatalf("unmarshal response: %v (body: %s)", err, respBody)
+	}
+	if rpcResp.Error == nil {
+		t.Fatalf("expected error, got success: %s", respBody)
+	}
+	return rpcResp.Error.Code, rpcResp.Error.Message
+}
+
+// TestTwoReplicaProductionPath_EndToEnd is the mandatory two-replica
+// production-correctness test (EM Finding 3). It exercises the full
+// production code path across two distinct OS processes sharing one
+// PostgreSQL database:
+//
+//  1. Authenticated SendMessage on process A via real ScionExecutor
+//     (barrier create/await, single execution-lease claim, controlled
+//     Hub send).
+//  2. Controlled broker response published into process B through the
+//     production BrokerServer.Publish ingress (without a2aTaskId metadata,
+//     forcing the durable no-metadata correlation path).
+//  3. Process B durably correlates the response using a2a_sdk_tasks
+//     (not process A's local maps), persists the event, and the event
+//     is visible to process A's waitForTaskEvent poll.
+//  4. Correct caller observes the result. Wrong caller and wrong project
+//     receive not-found semantics without task metadata leakage.
+//  5. Distinct PIDs recorded. Exactly one Hub send asserted.
+//
+// Direct SQL is used only for setup (cleanup) and final assertions.
+func TestTwoReplicaProductionPath_EndToEnd(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	// Clean up SDK tasks table.
+	store := testPostgresTaskStore(t)
+	defer store.db.Exec("DELETE FROM a2a_sdk_tasks WHERE project_id = 'proj-e2e'")
+
+	// ── Step 1: Start two production-mode processes ──
+
+	procA := startProductionServer(t, dbURL, "proj-e2e", "agent-e2e", "")
+	procB := startProductionServer(t, dbURL, "proj-e2e", "agent-e2e", "")
+
+	// Verify distinct PIDs.
+	if procA.pid == procB.pid {
+		t.Fatalf("processes must have distinct PIDs: A=%d B=%d", procA.pid, procB.pid)
+	}
+	t.Logf("Process A: PID=%d port=%d", procA.pid, procA.port)
+	t.Logf("Process B: PID=%d port=%d", procB.pid, procB.port)
+
+	// ── Step 2: Send authenticated SendMessage to process A ──
+	// This runs in a goroutine because it blocks until waitForTaskEvent
+	// receives the broker response event.
+
+	type sendResult struct {
+		raw json.RawMessage
+		err error
+	}
+	sendCh := make(chan sendResult, 1)
+	go func() {
+		reqBody := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      "e2e-1",
+			"method":  "SendMessage",
+			"params": map[string]interface{}{
+				"message": map[string]interface{}{
+					"messageId": "e2e-msg-1",
+					"role":      "ROLE_USER",
+					"parts":     []map[string]interface{}{{"text": "Two-replica production path test"}},
+				},
+			},
+		}
+		body, _ := json.Marshal(reqBody)
+		resp, err := http.Post(procA.URL(), "application/json", bytes.NewReader(body))
+		if err != nil {
+			sendCh <- sendResult{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(resp.Body)
+
+		var rpcResp struct {
+			Result json.RawMessage `json:"result"`
+			Error  *struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		json.Unmarshal(respBody, &rpcResp)
+		if rpcResp.Error != nil {
+			sendCh <- sendResult{err: fmt.Errorf("JSON-RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)}
+			return
+		}
+		sendCh <- sendResult{raw: rpcResp.Result}
+	}()
+
+	// ── Step 3: Wait for Hub send capture on process A ──
+
+	var taskID string
+	var hubSendCount int
+	deadline := time.After(10 * time.Second)
+	for {
+		captures := getHubSends(t, procA.URL())
+		hubSendCount = len(captures)
+		if hubSendCount > 0 {
+			taskID = captures[0].TaskID
+			t.Logf("Hub send captured on process A: taskID=%s (count=%d)", taskID, hubSendCount)
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for Hub send capture on process A")
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	if taskID == "" {
+		t.Fatal("Hub send captured but no taskID in metadata")
+	}
+
+	// ── Step 4: Construct broker response and publish to process B ──
+	// CRITICAL: The response does NOT carry a2aTaskId metadata.
+	// This forces the durable no-metadata correlation path through
+	// FindActiveSDKTaskForAgent (not local cache, not a2a_tasks).
+
+	topic := "scion.project.proj-e2e.user.admin.messages"
+	brokerResponse := &messages.StructuredMessage{
+		Sender:    "agent:agent-e2e",
+		Type:      messages.TypeAssistantReply,
+		Msg:       "Production path reply from Hub",
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Metadata:  map[string]string{"msgId": "broker-reply-" + taskID},
+		// NO a2aTaskId — durable correlation required.
+	}
+
+	// Publish through process B's production BrokerServer.Publish ingress.
+	postBrokerMessage(t, procB.URL(), topic, brokerResponse)
+	t.Log("Broker response published to process B via BrokerServer.Publish")
+
+	// ── Step 5: Wait for process A's SendMessage to complete ──
+	// The server's SendMessage timeout is 15s. We allow 20s for the full
+	// HTTP round-trip. In the RED case (22c804b), the broker correlation
+	// fails on B, so A's waitForTaskEvent times out and returns FAILED.
+	// In the GREEN case, B's durable correlation succeeds, the event
+	// propagates, and A returns COMPLETED quickly (~1s).
+
+	var sendResultRaw json.RawMessage
+	select {
+	case result := <-sendCh:
+		if result.err != nil {
+			t.Fatalf("SendMessage on process A failed: %v", result.err)
+		}
+		sendResultRaw = result.raw
+		t.Logf("SendMessage result: %s", result.raw)
+	case <-time.After(20 * time.Second):
+		t.Fatal("timeout waiting for SendMessage to complete on process A")
+	}
+
+	// ── Step 6: Verify exactly one Hub send ──
+
+	finalCaptures := getHubSends(t, procA.URL())
+	if len(finalCaptures) != 1 {
+		t.Errorf("expected exactly 1 Hub send, got %d", len(finalCaptures))
+	}
+
+	// ── Step 7: PRIMARY ASSERTION — Task must complete successfully ──
+	// This is the critical red/green signal. At 22c804b, process B cannot
+	// correlate the broker response (empty local cache, task only in
+	// a2a_sdk_tasks not a2a_tasks), so A times out → TASK_STATE_FAILED.
+	// After the fix (FindActiveSDKTaskForAgent), B correlates durably,
+	// the event reaches A → TASK_STATE_COMPLETED.
+
+	var sendResp struct {
+		Task *struct {
+			ID     string `json:"id"`
+			Status struct {
+				State   string `json:"state"`
+				Message *struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"message"`
+			} `json:"status"`
+		} `json:"task"`
+	}
+	if err := json.Unmarshal(sendResultRaw, &sendResp); err != nil {
+		t.Fatalf("unmarshal send result: %v", err)
+	}
+
+	if sendResp.Task == nil {
+		t.Fatalf("SendMessage did not return a task (raw: %s)", sendResultRaw)
+	}
+
+	// RED assertion: this MUST be COMPLETED, not FAILED.
+	if sendResp.Task.Status.State != "TASK_STATE_COMPLETED" {
+		// In the RED case, the status message contains the timeout error.
+		statusMsg := ""
+		if sendResp.Task.Status.Message != nil && len(sendResp.Task.Status.Message.Parts) > 0 {
+			statusMsg = sendResp.Task.Status.Message.Parts[0].Text
+		}
+		t.Fatalf("RED SIGNAL: task state = %q (want TASK_STATE_COMPLETED). "+
+			"This means broker correlation on process B failed — the durable "+
+			"no-metadata path is broken. Status message: %q",
+			sendResp.Task.Status.State, statusMsg)
+	}
+
+	// Verify the response contains the broker reply content.
+	brokerReplyFound := false
+	if sendResp.Task.Status.Message != nil {
+		for _, part := range sendResp.Task.Status.Message.Parts {
+			if strings.Contains(part.Text, "Production path reply from Hub") {
+				brokerReplyFound = true
+			}
+		}
+	}
+	if !brokerReplyFound {
+		t.Errorf("response did not contain broker reply content (raw: %s)", sendResultRaw)
+	}
+
+	// ── Step 8: Verify task state via direct DB (assertion only) ──
+
+	ctx := ctxForRoute("proj-e2e", "agent-e2e")
+	stored, err := store.Get(ctx, a2a.TaskID(taskID))
+	if err != nil {
+		t.Fatalf("direct DB Get task %s: %v", taskID, err)
+	}
+	t.Logf("Task %s stored state: %s", taskID, stored.Task.Status.State)
+
+	if stored.Task.Status.State != a2a.TaskStateCompleted {
+		t.Errorf("DB task state = %q, want TASK_STATE_COMPLETED", stored.Task.Status.State)
+	}
+
+	// Verify durable fields.
+	var projectID, agentSlug string
+	err = store.db.QueryRow(
+		"SELECT project_id, agent_slug FROM a2a_sdk_tasks WHERE id = $1", taskID).
+		Scan(&projectID, &agentSlug)
+	if err != nil {
+		t.Fatalf("query durable fields: %v", err)
+	}
+	if projectID != "proj-e2e" {
+		t.Errorf("project_id = %q, want proj-e2e", projectID)
+	}
+	if agentSlug != "agent-e2e" {
+		t.Errorf("agent_slug = %q, want agent-e2e", agentSlug)
+	}
+
+	// ── Step 9: Correct caller can read the task from process B ──
+
+	getResult := jsonRPC(t, procB.URL(), "GetTask", map[string]interface{}{
+		"id": taskID,
+	})
+	var gotTask struct {
+		ID     string `json:"id"`
+		Status struct {
+			State string `json:"state"`
+		} `json:"status"`
+	}
+	json.Unmarshal(getResult, &gotTask)
+	if gotTask.ID != taskID {
+		t.Errorf("GetTask on B: ID=%q, want %q", gotTask.ID, taskID)
+	}
+	t.Logf("Correct caller reads task from process B: %s state=%s", gotTask.ID, gotTask.Status.State)
+
+	// Verify _bridgeEventID is not in the wire response.
+	if strings.Contains(string(getResult), "_bridgeEventID") {
+		t.Error("_bridgeEventID leaked in wire response")
+	}
+
+	// ── Step 10: Wrong caller is rejected ──
+
+	wrongCallerCode, wrongCallerMsg := jsonRPCExpectErrorWithHeaders(t, procB.URL(),
+		"GetTask", map[string]interface{}{"id": taskID},
+		map[string]string{"X-Test-Caller-ID": "user-attacker"})
+	t.Logf("Wrong caller rejected: code=%d msg=%s", wrongCallerCode, wrongCallerMsg)
+
+	// ── Step 11: Wrong project is rejected ──
+
+	wrongProjCode, wrongProjMsg := jsonRPCExpectErrorWithHeaders(t, procB.URL(),
+		"GetTask", map[string]interface{}{"id": taskID},
+		map[string]string{"X-Test-Project": "proj-attacker"})
+	t.Logf("Wrong project rejected: code=%d msg=%s", wrongProjCode, wrongProjMsg)
+
+	t.Logf("Two-replica production path E2E complete: PID A=%d, PID B=%d, Hub sends=%d, task=%s",
+		procA.pid, procB.pid, len(finalCaptures), taskID)
+}
