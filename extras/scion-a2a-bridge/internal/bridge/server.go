@@ -54,8 +54,9 @@ type Server struct {
 	log        *slog.Logger
 	sdkHandler http.Handler // SDK JSON-RPC handler
 	// Legacy validators — used only when snapshot is nil (tests, backward compat).
-	uatValidator *UATValidator
-	jwtValidator *JWTValidator
+	uatValidator         *UATValidator
+	jwtValidator         *JWTValidator
+	geExchangeValidator  *GEExchangeValidator
 }
 
 // NewServer creates a new A2A protocol server backed by the SDK.
@@ -74,6 +75,8 @@ func NewServer(bridge *Bridge, cfg *Config, metrics *Metrics, log *slog.Logger, 
 	case "hubJWT":
 		// JWTValidator is initialized later via SetJWTValidator once the
 		// signing key is loaded (it may come from Secret Manager).
+	case "geGoogle":
+		s.geExchangeValidator = NewGEExchangeValidator(cfg.Hub.Endpoint, cfg.Auth.GEExchange, log)
 	}
 	return s
 }
@@ -126,17 +129,17 @@ func ValidateConfig(cfg *Config) error {
 		return fmt.Errorf("hub.user is required")
 	}
 	switch cfg.Auth.Scheme {
-	case "", "apiKey", "bearer", "none", "hubUAT", "hubJWT", "federation":
+	case "", "apiKey", "bearer", "none", "hubUAT", "hubJWT", "federation", "geGoogle":
 		// valid
 	default:
-		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer, none, hubUAT, hubJWT, federation)", cfg.Auth.Scheme)
+		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer, none, hubUAT, hubJWT, federation, geGoogle)", cfg.Auth.Scheme)
 	}
 	if (cfg.Auth.Scheme == "apiKey" || cfg.Auth.Scheme == "bearer") && cfg.Auth.APIKey == "" {
 		return fmt.Errorf("auth.api_key is required when auth.scheme is %q", cfg.Auth.Scheme)
 	}
 	// api_key is required for legacy schemes and the default (empty) scheme.
 	// hubUAT, hubJWT, and federation do not use api_key — they validate per-user/agent credentials instead.
-	if cfg.Auth.APIKey == "" && cfg.Auth.Scheme != "none" && cfg.Auth.Scheme != "hubUAT" && cfg.Auth.Scheme != "hubJWT" && cfg.Auth.Scheme != "federation" {
+	if cfg.Auth.APIKey == "" && cfg.Auth.Scheme != "none" && cfg.Auth.Scheme != "hubUAT" && cfg.Auth.Scheme != "hubJWT" && cfg.Auth.Scheme != "federation" && cfg.Auth.Scheme != "geGoogle" {
 		return fmt.Errorf("auth.api_key is required (set auth.scheme: \"none\" to explicitly disable authentication)")
 	}
 	if cfg.Auth.Scheme == "hubJWT" && cfg.Hub.SigningKey == "" && cfg.Hub.SigningKeySecret == "" {
@@ -170,6 +173,9 @@ func (s *Server) WarnOnOpenAuth() {
 		s.log.Info("bridge auth: hubJWT — per-user Scion JWT authentication enabled")
 	case "federation":
 		s.log.Info("bridge auth: federation — pass-through OIDC federation authentication enabled (hub validates tokens)")
+	case "geGoogle":
+		s.log.Info("bridge auth: geGoogle — GE Google credential exchange via Hub enabled",
+			"credential_type", cfg.Auth.GEExchange.CredentialType)
 	}
 	if cfg.RateLimit.TrustProxy {
 		s.log.Warn("rate_limit.trust_proxy is enabled — X-Forwarded-For is trusted unconditionally, which allows clients to spoof their IP and bypass per-IP rate limits; consider adding network-level proxy restrictions")
@@ -472,6 +478,33 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			caller, err := jwtV.Validate(token)
 			if err != nil {
 				s.log.Debug("JWT validation failed", "error", err)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			ctx := withCallerIdentity(r.Context(), caller)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+
+		case "geGoogle":
+			// GE Google credential exchange: extract the end-user credential
+			// from the documented Authorization: Bearer header and exchange it
+			// with the Hub. The returned Hub access token is used directly for
+			// caller user operations. X-Serverless-Authorization is treated
+			// separately as Cloud Run invoker identity.
+			token := extractBearerToken(r)
+			if token == "" {
+				http.Error(w, "unauthorized: missing bearer token", http.StatusUnauthorized)
+				return
+			}
+			geV := s.geExchangeValidator
+			if geV == nil {
+				s.log.Error("geGoogle scheme configured but GE exchange validator not initialized")
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+			caller, err := geV.Validate(r.Context(), token)
+			if err != nil {
+				s.log.Debug("GE exchange validation failed", "error", err)
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
