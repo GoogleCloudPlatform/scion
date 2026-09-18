@@ -387,14 +387,19 @@ func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *Vali
 
 	// No existing user by email — provision a new user through the normal path.
 	// This requires the same authorization checks as regular login.
-	user, err := s.provisionNewUser(ctx, identity)
+	//
+	// provisionNewUser may return an existing user instead of a newly created
+	// one when a concurrent exchange wins the unique-email race. The
+	// provisioned flag distinguishes the two cases for orphan cleanup below.
+	user, provisioned, err := s.provisionNewUser(ctx, identity)
 	if err != nil {
 		return nil, err
 	}
 
 	// Create the binding. If a concurrent exchange already created it
-	// (unique constraint violation), clean up the orphaned user and resolve
-	// via the winning binding.
+	// (unique constraint violation), resolve via the winning binding and
+	// clean up the orphaned user only if we actually provisioned a NEW user
+	// that differs from the winner's user.
 	now := time.Now()
 	if err := s.extIDStore.CreateExternalIdentity(ctx, &ExternalIdentityBinding{
 		ID:        uuid.New().String(),
@@ -406,13 +411,18 @@ func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *Vali
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {
-		// Clean up the orphaned user we just provisioned — another goroutine
-		// won the race and has a valid user+binding pair.
-		if delErr := s.userStore.DeleteUser(ctx, user.ID); delErr != nil {
-			s.logger.Warn("GE exchange: failed to clean up orphaned user after conflict",
-				"user_id", user.ID, "error", delErr)
+		winner, resolveErr := s.resolveAfterConflict(ctx, canonicalIssuer, identity, "", err)
+		// Orphan cleanup: only delete if we provisioned a new user AND the
+		// winner resolved to a different user. When all concurrent exchanges
+		// converge on the same user (via email-collision resolution), the
+		// user is NOT an orphan even if we lose the binding race.
+		if provisioned && resolveErr == nil && winner != nil && winner.ID != user.ID {
+			if delErr := s.userStore.DeleteUser(ctx, user.ID); delErr != nil {
+				s.logger.Warn("GE exchange: failed to clean up orphaned user after conflict",
+					"user_id", user.ID, "error", delErr)
+			}
 		}
-		return s.resolveAfterConflict(ctx, canonicalIssuer, identity, "", err)
+		return winner, resolveErr
 	}
 
 	return user, nil
@@ -461,7 +471,17 @@ func (s *GEExchangeService) resolveAfterConflict(ctx context.Context, canonicalI
 // provisionNewUser creates a new user via the normal Hub provisioning path.
 // Enforces the same domain/invite/allow-registration policy as the normal
 // Hub login flow via the injected authChecker.
-func (s *GEExchangeService) provisionNewUser(ctx context.Context, identity *ValidatedGoogleIdentity) (*store.User, error) {
+//
+// Returns (user, true, nil) when a new user was created, or
+// (winner, false, nil) when CreateUser lost a unique-email race and the
+// winning user was found. The caller uses the provisioned flag to decide
+// whether orphan cleanup is appropriate.
+//
+// When CreateUser fails with a unique-email constraint violation (concurrent
+// exchange race), re-queries by normalized email. If the winning user is found
+// and passes suspension checks, returns the winner with provisioned=false;
+// otherwise returns the original create error to fail closed.
+func (s *GEExchangeService) provisionNewUser(ctx context.Context, identity *ValidatedGoogleIdentity) (user *store.User, provisioned bool, err error) {
 	normalizedEmail := strings.ToLower(identity.Email)
 
 	// Enforce Hub registration policy (domain, invite-only, allow-list).
@@ -469,10 +489,10 @@ func (s *GEExchangeService) provisionNewUser(ctx context.Context, identity *Vali
 	if !s.authChecker(ctx, normalizedEmail) {
 		s.logger.Warn("GE exchange: user not authorized for auto-provisioning",
 			"email", normalizedEmail, "sub", identity.Subject)
-		return nil, fmt.Errorf("%w: user not authorized for auto-provisioning", ErrAccessDenied)
+		return nil, false, fmt.Errorf("%w: user not authorized for auto-provisioning", ErrAccessDenied)
 	}
 
-	user := &store.User{
+	newUser := &store.User{
 		ID:          uuid.New().String(),
 		Email:       normalizedEmail,
 		DisplayName: identity.DisplayName,
@@ -483,16 +503,34 @@ func (s *GEExchangeService) provisionNewUser(ctx context.Context, identity *Vali
 		LastLogin:   time.Now(),
 	}
 
-	if err := s.userStore.CreateUser(ctx, user); err != nil {
-		return nil, fmt.Errorf("create user: %w", err)
+	if createErr := s.userStore.CreateUser(ctx, newUser); createErr != nil {
+		// Unique-email collision: another concurrent exchange won the race
+		// and created the user first. Re-query by email to find the winner.
+		if errors.Is(createErr, store.ErrAlreadyExists) {
+			winner, lookupErr := s.userStore.GetUserByEmail(ctx, normalizedEmail)
+			if lookupErr != nil {
+				// No winner found — return the original create error (fail closed).
+				s.logger.Error("GE exchange: user creation conflict but no winner found",
+					"email", normalizedEmail, "create_error", createErr, "lookup_error", lookupErr)
+				return nil, false, fmt.Errorf("create user: %w", createErr)
+			}
+			if winner.Status == "suspended" {
+				return nil, false, ErrUserSuspended
+			}
+			s.logger.Info("GE exchange: resolved to existing user after email collision",
+				"email", normalizedEmail, "winner_user_id", winner.ID,
+				"sub", identity.Subject)
+			return winner, false, nil
+		}
+		return nil, false, fmt.Errorf("create user: %w", createErr)
 	}
 
 	s.logger.Info("GE exchange: provisioned new user",
 		"email", normalizedEmail,
-		"user_id", user.ID,
+		"user_id", newUser.ID,
 		"sub", identity.Subject)
 
-	return user, nil
+	return newUser, true, nil
 }
 
 // ---------------------------------------------------------------------------

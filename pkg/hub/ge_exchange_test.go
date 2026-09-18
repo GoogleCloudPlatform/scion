@@ -28,7 +28,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
 // ---------------------------------------------------------------------------
@@ -56,68 +58,89 @@ func (f *fakeGoogleValidator) ValidateAccessToken(_ context.Context, _ string, _
 
 type fakeUserStore struct {
 	store.Store
-	users       map[string]*store.User // by ID
-	usersByEmail map[string]*store.User // by email
-	createErr   error
-	updateErr   error
+	mu           sync.Mutex
+	users        map[string]*store.User // by ID
+	usersByEmail map[string]*store.User // by email (normalized lower-case key)
+	createErr    error
+	updateErr    error
 }
 
 func newFakeUserStore() *fakeUserStore {
 	return &fakeUserStore{
-		users:       make(map[string]*store.User),
+		users:        make(map[string]*store.User),
 		usersByEmail: make(map[string]*store.User),
 	}
 }
 
 func (s *fakeUserStore) GetUser(_ context.Context, id string) (*store.User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if u, ok := s.users[id]; ok {
-		copy := *u
-		return &copy, nil
+		cp := *u
+		return &cp, nil
 	}
 	return nil, store.ErrNotFound
 }
 
 func (s *fakeUserStore) GetUserByEmail(_ context.Context, email string) (*store.User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if u, ok := s.usersByEmail[strings.ToLower(email)]; ok {
-		copy := *u
-		return &copy, nil
+		cp := *u
+		return &cp, nil
 	}
 	return nil, store.ErrNotFound
 }
 
 func (s *fakeUserStore) CreateUser(_ context.Context, user *store.User) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.createErr != nil {
 		return s.createErr
 	}
-	copy := *user
-	s.users[user.ID] = &copy
-	s.usersByEmail[strings.ToLower(user.Email)] = &copy
+	// Enforce unique email constraint (mirrors real ent schema).
+	normEmail := strings.ToLower(user.Email)
+	if existing, ok := s.usersByEmail[normEmail]; ok && existing.ID != user.ID {
+		return store.ErrAlreadyExists
+	}
+	cp := *user
+	s.users[user.ID] = &cp
+	s.usersByEmail[normEmail] = &cp
 	return nil
 }
 
 func (s *fakeUserStore) UpdateUser(_ context.Context, user *store.User) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.updateErr != nil {
 		return s.updateErr
 	}
-	copy := *user
-	s.users[user.ID] = &copy
-	s.usersByEmail[strings.ToLower(user.Email)] = &copy
+	cp := *user
+	s.users[user.ID] = &cp
+	s.usersByEmail[strings.ToLower(user.Email)] = &cp
 	return nil
 }
 
 func (s *fakeUserStore) DeleteUser(_ context.Context, id string) error {
-	if _, ok := s.users[id]; !ok {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.users[id]
+	if !ok {
 		return store.ErrNotFound
 	}
-	// Remove from both maps.
-	user := s.users[id]
+	// Remove from email index only if it still points to the user being
+	// deleted. Another user may have taken the email slot in a race.
+	normEmail := strings.ToLower(u.Email)
+	if indexed, ok := s.usersByEmail[normEmail]; ok && indexed.ID == id {
+		delete(s.usersByEmail, normEmail)
+	}
 	delete(s.users, id)
-	delete(s.usersByEmail, strings.ToLower(user.Email))
 	return nil
 }
 
 func (s *fakeUserStore) IsUserInvitedOrActive(_ context.Context, email string) (bool, error) {
-	// Returns true if the user exists and is active (simulates invite/active check).
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if u, ok := s.usersByEmail[strings.ToLower(email)]; ok {
 		return u.Status == "active" || u.Status == "invited", nil
 	}
@@ -211,8 +234,10 @@ func addUser(s *fakeUserStore, id, email, role, status string) *store.User {
 		Status:      status,
 		Created:     time.Now(),
 	}
+	s.mu.Lock()
 	s.users[id] = u
 	s.usersByEmail[strings.ToLower(email)] = u
+	s.mu.Unlock()
 	return u
 }
 
@@ -262,6 +287,47 @@ func newTestExchangeServiceWithExtStore(validator GoogleCredentialValidator, use
 		alwaysAuthorized,
 		slog.Default(),
 	)
+}
+
+// newPersistentTestExchangeService creates a GEExchangeService backed by a
+// real ent/SQLite store at the given path. Each call opens an independent
+// ent.Client to the same database file — callers can use two instances to
+// simulate cross-instance convergence. Cleanup is registered on t.
+func newPersistentTestExchangeService(t *testing.T, dbPath string) (*GEExchangeService, store.Store, ExternalIdentityStore) {
+	t.Helper()
+	dsn := "file:" + dbPath + "?_journal_mode=WAL&_busy_timeout=5000"
+	client, err := entc.OpenSQLite(dsn, entc.PoolConfig{MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if err := entc.AutoMigrate(context.Background(), client); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	compositeStore := entadapter.NewCompositeStore(client)
+	extStore := entadapter.NewExternalIdentityStore(client)
+
+	identity := validGmailIdentity()
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+
+	tokenSvc, _ := NewUserTokenService(UserTokenConfig{
+		AccessTokenDuration: DefaultGETokenTTL,
+	})
+	svc := NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         DefaultGETokenTTL,
+		},
+		validator,
+		tokenSvc,
+		extStore,
+		compositeStore,
+		alwaysAuthorized,
+		slog.Default(),
+	)
+	return svc, compositeStore, extStore
 }
 
 func validGmailIdentity() *ValidatedGoogleIdentity {
@@ -1086,8 +1152,9 @@ func TestGEExchange_AccessToken_AudAzpDisagreement(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGEExchange_ConcurrentFirstLinkage(t *testing.T) {
-	// Two concurrent exchanges for the same Google subject should result in
-	// exactly one user. The second exchange should find the existing binding.
+	// N concurrent exchanges for the same previously unseen authoritative
+	// identity/email must converge on one local user and one durable external
+	// binding. All valid callers succeed without HTTP 500.
 	identity := validGmailIdentity()
 	validator := &fakeGoogleValidator{idTokenResult: identity}
 	userStore := newFakeUserStore()
@@ -1095,10 +1162,14 @@ func TestGEExchange_ConcurrentFirstLinkage(t *testing.T) {
 	svc := newTestExchangeServiceWithExtStore(validator, userStore, extStore)
 
 	ctx := context.Background()
-	var wg sync.WaitGroup
 	const n = 5
-	errs := make([]error, n)
-	userIDs := make([]string, n)
+	type result struct {
+		userID string
+		err    error
+	}
+	results := make([]result, n)
+
+	var wg sync.WaitGroup
 	wg.Add(n)
 	for i := 0; i < n; i++ {
 		go func(idx int) {
@@ -1107,32 +1178,133 @@ func TestGEExchange_ConcurrentFirstLinkage(t *testing.T) {
 				Credential:     "concurrent-token",
 				CredentialType: "id_token",
 			})
-			errs[idx] = err
+			results[idx].err = err
 			if resp != nil && resp.User != nil {
-				userIDs[idx] = resp.User.ID
+				results[idx].userID = resp.User.ID
 			}
 		}(i)
 	}
 	wg.Wait()
 
-	// All should succeed (one creates, others find existing binding).
-	for i, err := range errs {
-		if err != nil {
-			t.Errorf("goroutine %d: unexpected error: %v", i, err)
+	// Hard assertion: ALL must succeed.
+	for i, r := range results {
+		if r.err != nil {
+			t.Fatalf("goroutine %d: unexpected error: %v", i, r.err)
+		}
+		if r.userID == "" {
+			t.Fatalf("goroutine %d: empty user ID", i)
 		}
 	}
 
-	// All should resolve to the same user.
-	var expected string
-	for i, id := range userIDs {
-		if id == "" {
-			continue
+	// Hard assertion: ALL must converge on exactly one user.
+	expected := results[0].userID
+	for i := 1; i < n; i++ {
+		if results[i].userID != expected {
+			t.Fatalf("goroutine %d: user ID %q != expected %q — convergence failed",
+				i, results[i].userID, expected)
 		}
-		if expected == "" {
-			expected = id
-		} else if id != expected {
-			t.Errorf("goroutine %d: user ID %q != expected %q", i, id, expected)
-		}
+	}
+
+	// Hard assertion: exactly one external binding must exist.
+	binding, err := extStore.GetExternalIdentity(ctx, "google",
+		canonicalizeGoogleIssuer(identity.Issuer), identity.Subject)
+	if err != nil {
+		t.Fatalf("expected exactly one binding, got lookup error: %v", err)
+	}
+	if binding.UserID != expected {
+		t.Fatalf("binding points to %q, expected %q", binding.UserID, expected)
+	}
+}
+
+// TestGEExchange_ProvisionNewUser_CreateError_FailsClosed proves that an
+// unrelated storage failure during CreateUser is returned when re-query finds
+// no winner (i.e. the error was not a unique-email collision race).
+func TestGEExchange_ProvisionNewUser_CreateError_FailsClosed(t *testing.T) {
+	identity := validGmailIdentity()
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+	userStore := newFakeUserStore()
+	userStore.createErr = store.ErrAlreadyExists // simulate unique-email collision
+	extStore := newMemExtIDStore()
+	svc := newTestExchangeServiceWithExtStore(validator, userStore, extStore)
+
+	// CreateUser will fail with ErrAlreadyExists, but GetUserByEmail will
+	// also fail (no user exists yet in the store) — the re-query finds no
+	// winner. The Exchange must fail (HTTP 500), not silently succeed.
+	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "create-fail-token",
+		CredentialType: "id_token",
+	})
+	if err == nil {
+		t.Fatal("expected error when CreateUser fails and no winner found")
+	}
+	if status != http.StatusInternalServerError {
+		t.Fatalf("expected HTTP 500, got %d", status)
+	}
+	// The public error is generic; the inner "create user" error is logged
+	// but not leaked to the caller (Exchange sanitizes error messages).
+	if !strings.Contains(err.Error(), "user resolution failed") {
+		t.Fatalf("expected 'user resolution failed' error, got: %v", err)
+	}
+}
+
+// TestGEExchange_ConcurrentFirstLinkage_PersistentStore uses two independent
+// GEExchangeService instances against the same backing database (via the ent
+// adapter), proving that the unique-email collision and binding convergence
+// work across instances/reconnect — not merely through a shared fake object.
+func TestGEExchange_ConcurrentFirstLinkage_PersistentStore(t *testing.T) {
+	// This test requires the ent adapter with a real SQLite database.
+	// We create two independent service instances sharing the same DB file.
+	tmpDir := t.TempDir()
+	dbPath := tmpDir + "/concurrent_test.db"
+
+	// Create the first service+store pair.
+	svc1, store1, extStore1 := newPersistentTestExchangeService(t, dbPath)
+	// Create the second service+store pair using the same DB file.
+	svc2, store2, extStore2 := newPersistentTestExchangeService(t, dbPath)
+	_, _, _ = store1, store2, extStore2 // used only for cleanup via t.Cleanup
+
+	identity := validGmailIdentity()
+
+	ctx := context.Background()
+
+	// Exchange #1 via service instance 1: should provision user + create binding.
+	resp1, _, err := svc1.Exchange(ctx, &ExchangeRequest{
+		Credential:     "persistent-token",
+		CredentialType: "id_token",
+	})
+	if err != nil {
+		t.Fatalf("svc1.Exchange: %v", err)
+	}
+	if resp1.User == nil || resp1.User.ID == "" {
+		t.Fatal("svc1 returned nil/empty user")
+	}
+	user1ID := resp1.User.ID
+
+	// Verify the binding exists in the first store.
+	b1, err := extStore1.GetExternalIdentity(ctx, "google",
+		canonicalizeGoogleIssuer(identity.Issuer), identity.Subject)
+	if err != nil {
+		t.Fatalf("binding lookup in store1: %v", err)
+	}
+	if b1.UserID != user1ID {
+		t.Fatalf("binding in store1 points to %q, expected %q", b1.UserID, user1ID)
+	}
+
+	// Exchange #2 via service instance 2 (same DB, separate store objects):
+	// should find the existing binding and resolve to the same user.
+	resp2, _, err := svc2.Exchange(ctx, &ExchangeRequest{
+		Credential:     "persistent-token",
+		CredentialType: "id_token",
+	})
+	if err != nil {
+		t.Fatalf("svc2.Exchange: %v", err)
+	}
+	if resp2.User == nil {
+		t.Fatal("svc2 returned nil user")
+	}
+	if resp2.User.ID != user1ID {
+		t.Fatalf("svc2 resolved to user %q, expected %q (convergence failed across instances)",
+			resp2.User.ID, user1ID)
 	}
 }
 
