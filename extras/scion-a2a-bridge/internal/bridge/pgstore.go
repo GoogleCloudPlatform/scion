@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -86,11 +87,19 @@ func (s *PostgresTaskStore) migrate() error {
 			version BIGINT NOT NULL DEFAULT 1,
 			payload JSONB NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			exec_owner TEXT,
+			exec_heartbeat TIMESTAMPTZ
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_a2a_sdk_tasks_owner ON a2a_sdk_tasks(owner_key)`,
 		`CREATE INDEX IF NOT EXISTS idx_a2a_sdk_tasks_context_owner ON a2a_sdk_tasks(context_id, owner_key)`,
 		`CREATE INDEX IF NOT EXISTS idx_a2a_sdk_tasks_updated ON a2a_sdk_tasks(owner_key, updated_at DESC, id DESC)`,
+		// Migration for existing tables: add exec_owner and exec_heartbeat columns.
+		`DO $$ BEGIN
+			ALTER TABLE a2a_sdk_tasks ADD COLUMN IF NOT EXISTS exec_owner TEXT;
+			ALTER TABLE a2a_sdk_tasks ADD COLUMN IF NOT EXISTS exec_heartbeat TIMESTAMPTZ;
+		EXCEPTION WHEN duplicate_column THEN NULL;
+		END $$`,
 	}
 	for _, m := range migrations {
 		if _, err := s.db.Exec(m); err != nil {
@@ -402,6 +411,186 @@ func (s *PostgresTaskStore) taskExistsForOwner(ctx context.Context, taskID, owne
 // isUniqueViolation checks if the error is a Postgres unique constraint violation.
 func isUniqueViolation(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "duplicate key value violates unique constraint")
+}
+
+// ClaimExecution atomically claims execution ownership of a task. The ownerID
+// identifies this replica (typically hostname:pid). Only succeeds if no other
+// replica currently holds the claim, or if the previous holder's heartbeat
+// has expired (older than leaseTimeout). This prevents duplicate execution
+// sends to the Hub.
+func (s *PostgresTaskStore) ClaimExecution(ctx context.Context, taskID, ownerID string, leaseTimeout time.Duration) (bool, error) {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE a2a_sdk_tasks
+		 SET exec_owner = $1, exec_heartbeat = NOW()
+		 WHERE id = $2
+		   AND (exec_owner IS NULL OR exec_heartbeat < NOW() - $3::interval)
+		   AND payload->'status'->>'state' NOT IN ('TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED')`,
+		ownerID, taskID, fmt.Sprintf("%d seconds", int(leaseTimeout.Seconds())),
+	)
+	if err != nil {
+		return false, fmt.Errorf("claim execution: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return n > 0, nil
+}
+
+// HeartbeatExecution refreshes the execution heartbeat for a task, keeping
+// the lease alive during long-running operations. Only succeeds if this
+// replica is the current owner.
+func (s *PostgresTaskStore) HeartbeatExecution(ctx context.Context, taskID, ownerID string) error {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW()
+		 WHERE id = $1 AND exec_owner = $2`,
+		taskID, ownerID,
+	)
+	if err != nil {
+		return fmt.Errorf("heartbeat execution: %w", err)
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return fmt.Errorf("execution lease not held by %s for task %s", ownerID, taskID)
+	}
+	return nil
+}
+
+// ReleaseExecution clears the execution claim after normal completion.
+// Only succeeds if this replica is the current owner.
+func (s *PostgresTaskStore) ReleaseExecution(ctx context.Context, taskID, ownerID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE a2a_sdk_tasks SET exec_owner = NULL, exec_heartbeat = NULL
+		 WHERE id = $1 AND exec_owner = $2`,
+		taskID, ownerID,
+	)
+	if err != nil {
+		return fmt.Errorf("release execution: %w", err)
+	}
+	return nil
+}
+
+// ReapStaleTasks transitions tasks with expired execution leases to a
+// deterministic "failed" state. Only tasks that have an active exec_owner
+// whose exec_heartbeat has expired are eligible — long-running tasks without
+// an execution claim are not affected. This handles crash recovery: if a
+// replica dies mid-execution, the lease expires and another replica's reaper
+// transitions the task to failed, allowing safe user retry.
+//
+// Each transition is atomic via CAS on the version column, so concurrent
+// reapers on multiple replicas produce exactly one winner per task.
+func (s *PostgresTaskStore) ReapStaleTasks(ctx context.Context, leaseTimeout time.Duration) (int, error) {
+	// Find tasks with expired execution leases.
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, owner_key, version, payload, exec_owner FROM a2a_sdk_tasks
+		 WHERE exec_owner IS NOT NULL
+		   AND exec_heartbeat < NOW() - $1::interval
+		   AND payload->'status'->>'state' NOT IN ('TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED')
+		 LIMIT 100`,
+		fmt.Sprintf("%d seconds", int(leaseTimeout.Seconds())),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("list stale SDK tasks: %w", err)
+	}
+	defer rows.Close()
+
+	type staleTask struct {
+		id        string
+		owner     string
+		version   int64
+		payload   []byte
+		execOwner string
+	}
+	var staleTasks []staleTask
+	for rows.Next() {
+		var st staleTask
+		if err := rows.Scan(&st.id, &st.owner, &st.version, &st.payload, &st.execOwner); err != nil {
+			return 0, fmt.Errorf("scan stale task: %w", err)
+		}
+		staleTasks = append(staleTasks, st)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate stale tasks: %w", err)
+	}
+
+	reaped := 0
+	for _, st := range staleTasks {
+		// Unmarshal, transition to failed, re-marshal.
+		var task a2a.Task
+		if err := json.Unmarshal(st.payload, &task); err != nil {
+			continue
+		}
+		task.Status.State = a2a.TaskStateFailed
+		newPayload, err := json.Marshal(&task)
+		if err != nil {
+			continue
+		}
+
+		// Atomic conditional transition: CAS on version AND exec_owner.
+		// Only succeed if the same stale exec_owner still holds the lease
+		// and the version hasn't changed (no concurrent recovery).
+		result, err := s.db.ExecContext(ctx,
+			`UPDATE a2a_sdk_tasks
+			 SET payload = $1, version = version + 1, updated_at = NOW(),
+			     exec_owner = NULL, exec_heartbeat = NULL
+			 WHERE id = $2 AND version = $3 AND exec_owner = $4
+			   AND payload->'status'->>'state' NOT IN ('TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED')`,
+			newPayload, st.id, st.version, st.execOwner,
+		)
+		if err != nil {
+			continue
+		}
+		if n, _ := result.RowsAffected(); n > 0 {
+			reaped++
+		}
+	}
+	return reaped, nil
+}
+
+// PurgeTasksAndEvents deletes terminal SDK tasks and their correlated bridge
+// events older than the given cutoff in a single transaction, maintaining
+// referential consistency between a2a_sdk_tasks and a2a_task_events.
+func (s *PostgresTaskStore) PurgeTasksAndEvents(ctx context.Context, olderThan time.Time) (tasksPurged, eventsPurged int64, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("begin purge tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Delete correlated events for terminal tasks being purged.
+	evResult, err := tx.ExecContext(ctx,
+		`DELETE FROM a2a_task_events
+		 WHERE task_id IN (
+		     SELECT id FROM a2a_sdk_tasks
+		     WHERE updated_at < $1
+		       AND payload->'status'->>'state' IN ('TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED')
+		 )`,
+		olderThan,
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf("purge correlated events: %w", err)
+	}
+	eventsPurged, _ = evResult.RowsAffected()
+
+	// Delete terminal SDK tasks.
+	taskResult, err := tx.ExecContext(ctx,
+		`DELETE FROM a2a_sdk_tasks
+		 WHERE updated_at < $1
+		   AND payload->'status'->>'state' IN ('TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED')`,
+		olderThan,
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf("purge SDK tasks: %w", err)
+	}
+	tasksPurged, _ = taskResult.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("commit purge tx: %w", err)
+	}
+	return tasksPurged, eventsPurged, nil
+}
+
+// OwnerID returns a stable identifier for this replica process, suitable
+// for use as exec_owner. Format: hostname:pid.
+func OwnerID() string {
+	hostname, _ := os.Hostname()
+	return fmt.Sprintf("%s:%d", hostname, os.Getpid())
 }
 
 // encodePgPageToken encodes a cursor as base64(timestamp_taskID).

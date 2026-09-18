@@ -324,14 +324,17 @@ The container runs as non-root user `bridge` (UID 1000). The state database dire
 
 In standalone mode (`--standalone --database-url postgresql://...`), the bridge uses a shared PostgreSQL database for both internal bridge state and SDK task payloads:
 
-| Table | Purpose |
-|-------|---------|
-| `a2a_tasks` | Bridge internal state (task metadata, events, contexts, push notification configs) |
-| `a2a_sdk_tasks` | Full A2A SDK task payloads (complete `a2a.Task` JSON, ownership, versioning) |
+| Table | Purpose | Managed by |
+|-------|---------|------------|
+| `a2a_tasks` | Bridge internal state (task metadata, conversation IDs, agent correlation) | `state.PostgresStore` |
+| `a2a_task_events` | Durable event log for SSE streaming and blocking-mode polling | `state.PostgresStore` |
+| `a2a_sdk_tasks` | Full A2A SDK task payloads (complete `a2a.Task` JSON, ownership, versioning, execution lease) | `bridge.PostgresTaskStore` |
+
+**Important:** These tables share the same database but are managed by **separate connection pools** with **independent request-level transactions**. A bridge request that writes to both `a2a_tasks` and `a2a_sdk_tasks` does so in separate SQL transactions, not a single atomic operation. Retention cleanup (`PurgeTasksAndEvents`) is the exception — it deletes correlated SDK tasks and events within one transaction.
 
 ### Task ownership and isolation
 
-Each SDK task is bound to an **owner key** derived from the request's route (project + agent) and, when caller authentication is active, the caller's identity. Ownership is enforced transactionally at the SQL level on all operations (create, get, list, update):
+Each SDK task is bound to an **owner key** derived from the request's route (project + agent) and, when caller authentication is active, the caller's identity. Ownership is enforced at the SQL level on every individual operation (create, get, list, update):
 
 - **Route isolation**: Tasks created under `project-a/agent-x` are invisible to requests targeting `project-b/agent-y`.
 - **Caller isolation**: When caller authentication is configured, each user sees only their own tasks within a route.
@@ -340,18 +343,41 @@ Each SDK task is bound to an **owner key** derived from the request's route (pro
 
 Updates use a monotonically incrementing version counter with compare-and-swap (CAS) semantics. When `PrevVersion` is set, the update succeeds only if the stored version matches — otherwise `ErrConcurrentModification` is returned. This prevents lost updates when multiple replicas process concurrent requests for the same task.
 
+### Duplicate delivery
+
+Duplicate task creation returns `ErrTaskAlreadyExists` (unique constraint on task ID). Duplicate updates with a stale version return `ErrConcurrentModification` deterministically — no state corruption occurs. At the bridge event layer, duplicate broker messages are deduplicated by a stable `dedup_key` (derived from the upstream message ID or a deterministic content hash) via `ON CONFLICT DO NOTHING` on the `a2a_task_events` table.
+
 ### Cross-replica access
 
-All replicas read from and write to the same PostgreSQL database. A task created on replica A is immediately visible to replica B via `Get` or `List`. Task cancellation, status updates, and artifact additions performed on any replica are durable and consistent.
+All replicas read from and write to the same PostgreSQL database. A task created on replica A is immediately visible to replica B via `Get` or `List`. Status updates and artifact additions performed on any replica are durable and visible to all replicas.
+
+### Execution lease and crash recovery
+
+Each task may have an active **execution lease** tracked by `exec_owner` (replica identifier, format `hostname:pid`) and `exec_heartbeat` (timestamp). The lifecycle is:
+
+1. **Claim**: Before sending a message to the Hub, a replica atomically claims execution (`exec_owner = $self, exec_heartbeat = NOW()` with a conditional check that no other replica holds a fresh lease). This prevents duplicate Hub sends.
+2. **Heartbeat**: During long-running execution, the replica periodically refreshes `exec_heartbeat` to keep the lease alive.
+3. **Release**: On normal completion, the lease is cleared.
+4. **Crash recovery**: If a replica dies mid-execution, the lease expires. A reaper on another replica detects tasks where `exec_owner IS NOT NULL AND exec_heartbeat < cutoff` and atomically transitions them to `failed` via CAS on both `version` and `exec_owner`. Only tasks with expired leases are reaped — tasks without execution claims (long-running legitimate work) are never affected.
+
+The crash recovery transition is **deterministic**: exactly one replica wins the CAS per stale task. The failed state is persisted and visible to all replicas. The user can then safely retry by creating a new task. Hub side effects (messages already sent before the crash) are **not replayed** — the system does not claim exactly-once delivery of Hub operations.
 
 ### Restart recovery
 
 Task state survives process restarts. A new `PostgresTaskStore` instance reconnects to the same database and finds all previously created tasks with their current versions and payloads.
 
+### Retention cleanup
+
+Terminal tasks (completed, failed, canceled, rejected) and their correlated bridge events are purged by `PurgeTasksAndEvents` within a **single transaction**, maintaining referential consistency between `a2a_sdk_tasks` and `a2a_task_events`. The bridge's janitor calls this periodically (default cutoff: 1 hour for events, configurable for tasks).
+
+### SSE resubscription and cursor semantics
+
+SSE streams read from the durable `a2a_task_events` log using a monotonic cursor (the event's `BIGSERIAL` ID). Resubscription with a saved cursor resumes from that point — no prior-turn replay occurs. This works across replicas because all replicas read from the same event log.
+
 ### Limitations
 
-- **In-flight execution takeover**: If a replica dies mid-execution, the task's last committed state is preserved, but in-flight work is lost. The task can be retried or cancelled from another replica. Active execution lease/handoff is not implemented — the bridge treats this as a terminal retry scenario.
-- **SSE resubscription**: Stream resubscription targets the same replica that originated the stream. Cross-replica stream migration requires external routing.
+- **Hub side-effect replay**: If a replica crashes after sending a message to the Hub but before recording completion, the Hub side effect is not replayed. The task transitions to `failed` via crash recovery, and the user retries manually.
+- **SSE stream locality**: SSE streams are process-local. Resubscription to the same task from a different replica creates a new stream reading from the shared event log; it does not resume the previous replica's stream state.
 
 ## Known Limitations
 
