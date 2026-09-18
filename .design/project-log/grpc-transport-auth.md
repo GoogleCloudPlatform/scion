@@ -95,8 +95,8 @@ factory paths, reconnection, and bearer token extraction.
   Hub with dual headers (accepted), Hub with authorization only (accepted)
 - Cloud Run metadata passthrough: x-serverless cannot substitute for
   authorization; authorization authenticates
-- Production factory-to-server end-to-end: `NewAdapterFromEntry` → 
-  `BuildStandaloneServerOptions` → successful RPC + unauthorized rejection
+- Production factory-to-server end-to-end: `NewAdapterFromEntry` to
+  `BuildStandaloneServerOptions`, successful RPC + unauthorized rejection
 - Dual-header option: sends both headers when enabled, only authorization
   when disabled
 
