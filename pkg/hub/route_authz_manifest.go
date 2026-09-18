@@ -93,8 +93,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/templates/": "authenticated", // Template by ID
 
 	// ── GCP service accounts ───────────────────────────────────────────
-	"/api/v1/gcp-service-accounts":  "authenticated", // List GCP service accounts
-	"/api/v1/gcp-service-accounts/": "authenticated", // GCP service account by ID
+	"/api/v1/gcp-service-accounts":      "authenticated", // List GCP service accounts
+	"/api/v1/gcp-service-accounts/":     "authenticated", // GCP service account by ID
+	"/api/v1/gcp-service-accounts/mint": "authenticated", // Mint GCP service account credentials
 
 	// ── Skills ─────────────────────────────────────────────────────────
 	"/api/v1/skills":                    "authenticated", // List/create skills
@@ -217,9 +218,16 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/notifications/": "authenticated", // Notification routes
 
 	// ── Messages ───────────────────────────────────────────────────────
-	"/api/v1/messages":         "authenticated", // List messages
-	"/api/v1/messages/":        "authenticated", // Message routes
-	"/api/v1/message-channels": "authenticated", // Message channels
+	"/api/v1/messages":              "authenticated", // List messages
+	"/api/v1/messages/":             "authenticated", // Message routes
+	"/api/v1/message-channels":      "authenticated", // Message channels
+	"/api/v1/conversations":         "authenticated", // List/create conversations
+	"/api/v1/conversations/":        "authenticated", // Conversation routes
+	"/api/v1/conversations/resolve": "authenticated", // Resolve a conversation reference
+
+	// ── Cross-project messaging ────────────────────────────────────────
+	"/api/v1/messaging/capabilities":    "authenticated", // Messaging feature capabilities
+	"/api/v1/messaging/targets/resolve": "authenticated", // Resolve a message target
 
 	// ── Native chat (conditionally registered) ─────────────────────────
 	"/api/v1/chat/prefs":          "authenticated", // Chat preferences
