@@ -2454,6 +2454,14 @@ var EntryPointExemptions = []EntryPointExemption{
 	// cataloged as credential.token.revoke (RS4/A5: one operation, two entry points).
 	// The catalog uses method-specific entry points; the route metadata uses the base pattern for both.
 	{Pattern: "/api/v1/auth/scopes", Kind: ExemptionAuthenticationOnly, Reason: "List available scopes, self-service", Owner: "route_metadata.go"},
+	// Conversation management API — inline authorization via participant checks.
+	{Pattern: "/api/v1/conversations", Kind: ExemptionAuthenticationOnly, Reason: "Conversation list/create, inline participant-based authorization", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/conversations/", Kind: ExemptionAuthenticationOnly, Reason: "Conversation by ID, inline participant-based authorization", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/conversations/resolve", Kind: ExemptionAuthenticationOnly, Reason: "Conversation resolution, inline authorization", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/gcp-service-accounts/mint", Kind: ExemptionRouteGuarded, Reason: "Hub-scope GCP SA minting, policy-enforced via route_metadata gcp_service_account.create", Owner: "route_metadata.go"},
+	// Cross-project messaging — inline authorization.
+	{Pattern: "/api/v1/messaging/capabilities", Kind: ExemptionAuthenticationOnly, Reason: "Messaging capabilities query, authenticated read-only", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/messaging/targets/resolve", Kind: ExemptionAuthenticationOnly, Reason: "Messaging target resolution, inline policy check", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/metrics/session/", Kind: ExemptionAuthenticationOnly, Reason: "Session metrics, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/users/me/groups", Kind: ExemptionAuthenticationOnly, Reason: "List own group memberships, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/principals/", Kind: ExemptionAuthenticationOnly, Reason: "Resolve principal display name, self-service", Owner: "route_metadata.go"},
@@ -2616,6 +2624,13 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "createHubScopedGCPServiceAccount", Symbol: "CreateGCPServiceAccount", OperationID: "gcp.identity.create"},
 	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "createHubScopedGCPServiceAccount", Symbol: "UpdateGCPServiceAccount", OperationID: "gcp.identity.create"},
 	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "deleteGCPServiceAccountByID", Symbol: "DeleteGCPServiceAccount", OperationID: "gcp.identity.delete"},
+	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "mintHubScopedGCPServiceAccount", Symbol: "SetIAMPolicy", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Hub-scope GCP SA mint: sets IAM policy on new service account", Scope: "pkg/hub/handlers_gcp_identity_scoped.go"}},
+	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "mintHubScopedGCPServiceAccount", Symbol: "SetIAMPolicy", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Hub-scope GCP SA mint: sets IAM policy on new service account", Scope: "pkg/hub/handlers_gcp_identity_scoped.go"}},
+	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "mintHubScopedGCPServiceAccount", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Hub-scope GCP SA mint: creates GCP service account record", Scope: "pkg/hub/handlers_gcp_identity_scoped.go"}},
+	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "mintHubScopedGCPServiceAccount", Symbol: "CreateServiceAccount", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Hub-scope GCP SA mint: creates IAM service account via GCP API", Scope: "pkg/hub/handlers_gcp_identity_scoped.go"}},
+	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "mintHubScopedGCPServiceAccount", Symbol: "DeleteServiceAccount", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Hub-scope GCP SA mint: rollback cleanup on failure", Scope: "pkg/hub/handlers_gcp_identity_scoped.go"}},
+	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "mintHubScopedGCPServiceAccount", Symbol: "DeleteServiceAccount", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Hub-scope GCP SA mint: rollback cleanup on failure", Scope: "pkg/hub/handlers_gcp_identity_scoped.go"}},
+	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "mintHubScopedGCPServiceAccount", Symbol: "DeleteServiceAccount", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Hub-scope GCP SA mint: rollback cleanup on failure", Scope: "pkg/hub/handlers_gcp_identity_scoped.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/useraccesstoken.go — user access token CRUD

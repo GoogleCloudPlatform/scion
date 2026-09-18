@@ -17,6 +17,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1252,6 +1253,10 @@ func TestGEExchange_ProvisionNewUser_CreateError_FailsClosed(t *testing.T) {
 // adapter), proving that the unique-email collision and binding convergence
 // work across instances/reconnect — not merely through a shared fake object.
 func TestGEExchange_ConcurrentFirstLinkage_PersistentStore(t *testing.T) {
+	if !sqliteDriverAvailable() {
+		t.Skip("skipping: requires SQLite driver (excluded by no_sqlite build tag)")
+	}
+
 	// This test requires the ent adapter with a real SQLite database.
 	// We create two independent service instances sharing the same DB file.
 	tmpDir := t.TempDir()
@@ -1306,6 +1311,15 @@ func TestGEExchange_ConcurrentFirstLinkage_PersistentStore(t *testing.T) {
 		t.Fatalf("svc2 resolved to user %q, expected %q (convergence failed across instances)",
 			resp2.User.ID, user1ID)
 	}
+}
+
+func sqliteDriverAvailable() bool {
+	for _, driver := range sql.Drivers() {
+		if driver == "sqlite" {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
