@@ -241,6 +241,9 @@ func TestDatabaseRunNamingAndCleanup(t *testing.T) {
 func TestPostgreSQLSchemaAllocator(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
+		if os.Getenv("TEST_REQUIRE_DATABASE") == "1" || os.Getenv("CI") == "true" {
+			t.Fatal("TEST_DATABASE_URL is required in fail-closed / CI mode")
+		}
 		t.Skip("TEST_DATABASE_URL is not set")
 	}
 	run, err := newDatabaseRunAllocator().newRun(fmt.Sprintf("run-%d", time.Now().UnixNano()))
@@ -269,8 +272,8 @@ func TestAcceptanceLayersMatchProvenScope(t *testing.T) {
 	if err := json.Unmarshal(data, &scaffold); err != nil {
 		t.Fatal(err)
 	}
-	if len(scaffold.Layers) != 8 {
-		t.Fatalf("layers = %d; want 8", len(scaffold.Layers))
+	if len(scaffold.Layers) != 11 {
+		t.Fatalf("layers = %d; want 11", len(scaffold.Layers))
 	}
 	allowed := []string{"passing", "partial", "blocked-on-taskstore", "external-live-only"}
 	wantPassing := map[string]bool{
@@ -282,6 +285,9 @@ func TestAcceptanceLayersMatchProvenScope(t *testing.T) {
 		"TestControlPlanePrincipalIsolation": true,
 		"TestCombinedStartupMatrix":          true,
 		"TestCredentialRedaction":            true,
+		"CloudRunDeploymentConfig":           false,
+		"KubernetesDeploymentConfig":         false,
+		"CIAutomatedPostgresIntegration":     true,
 	}
 	for _, layer := range scaffold.Layers {
 		if layer.Passing != wantPassing[layer.Name] {

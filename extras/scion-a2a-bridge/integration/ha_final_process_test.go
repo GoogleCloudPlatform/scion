@@ -51,7 +51,11 @@ type haFinalTopology struct {
 
 func startHAFinalTopology(t *testing.T) *haFinalTopology {
 	t.Helper()
-	if os.Getenv("TEST_DATABASE_URL") == "" {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		if os.Getenv("TEST_REQUIRE_DATABASE") == "1" || os.Getenv("CI") == "true" {
+			t.Fatal("TEST_DATABASE_URL is required in fail-closed / CI mode")
+		}
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 	topology := newProcessTopology(t, nil)

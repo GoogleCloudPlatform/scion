@@ -58,6 +58,38 @@
       "status": "passing",
       "passing": true,
       "dependencies": ["credential-redactor", "structured-observations"]
+    },
+    {
+      "name": "CloudRunDeploymentConfig",
+      "status": "partial",
+      "passing": false,
+      "dependencies": ["deploy-manifest", "h2c-mux", "shared-postgresql"],
+      "external_live_only": ["live Cloud Run deployment validation"],
+      "sublayers": [
+        {"name": "local-config-dry-run", "status": "passing", "passing": true},
+        {"name": "external-live-deployment", "status": "external-live-only", "passing": false}
+      ]
+    },
+    {
+      "name": "KubernetesDeploymentConfig",
+      "status": "partial",
+      "passing": false,
+      "dependencies": ["deploy-manifest", "k8s-service", "shared-postgresql"],
+      "external_live_only": ["live Kubernetes cluster deployment validation"],
+      "sublayers": [
+        {"name": "local-config-dry-run", "status": "passing", "passing": true},
+        {"name": "external-live-deployment", "status": "external-live-only", "passing": false}
+      ]
+    },
+    {
+      "name": "CIAutomatedPostgresIntegration",
+      "status": "passing",
+      "passing": true,
+      "dependencies": ["github-actions-service", "fail-closed-runner"],
+      "sublayers": [
+        {"name": "local-fail-closed", "status": "passing", "passing": true},
+        {"name": "github-actions-workflow", "status": "passing", "passing": true}
+      ]
     }
   ]
 }

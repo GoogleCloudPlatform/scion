@@ -207,3 +207,40 @@ jobs:
           fi
 
           echo "All $TOTAL extras modules accounted for: $TESTED tested, $EXCLUDED explicitly excluded."
+
+  a2a-bridge-postgres-integration:
+    name: extras/scion-a2a-bridge PostgreSQL Integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: scion
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: a2a_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'extras/scion-a2a-bridge/go.mod'
+          cache: true
+
+      - name: Run Integration Tests
+        working-directory: extras/scion-a2a-bridge
+        env:
+          TEST_DATABASE_URL: postgres://scion:scion@127.0.0.1:5432/a2a_test?sslmode=disable
+          TEST_REQUIRE_DATABASE: "1"
+        run: |
+          ./scripts/run-integration-ci.sh
