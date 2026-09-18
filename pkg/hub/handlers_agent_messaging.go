@@ -591,33 +591,67 @@ func (s *Server) resolveOutboundRouting(
 		} else {
 			switch convResult.Kind {
 			case "group":
-				// DEF-160/161: group conv-ref → thread key addressing.
-				// Parse the external ref to extract the thread ID.
-				_, threadID, parseErr := messaging.ParseThreadConversationExternalRef(convResult.ExternalRef)
-				if parseErr != nil {
-					s.messageLog.Error("DEF-160: cannot parse thread external_ref",
-						"external_ref", convResult.ExternalRef, "error", parseErr)
+				// DEF-160/161: group conv-ref routing. Three cases:
+				//  1. "thread:"-prefixed ExternalRef → legacy group conversation
+				//     with a thread key derived from the external ref.
+				//  2. Empty ExternalRef → native group conversation (created via
+				//     the conversation API); route by ConversationID alone.
+				//  3. Any other non-empty ExternalRef → unexpected format; fail
+				//     closed rather than silently misrouting.
+				if strings.HasPrefix(convResult.ExternalRef, "thread:") {
+					// Legacy path: parse the external ref to extract the thread ID.
+					_, threadID, parseErr := messaging.ParseThreadConversationExternalRef(convResult.ExternalRef)
+					if parseErr != nil {
+						s.messageLog.Error("DEF-160: cannot parse thread external_ref",
+							"external_ref", convResult.ExternalRef, "error", parseErr)
+						writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+							"conversation has unparseable external_ref", nil)
+						return nil, parseErr
+					}
+
+					// DEF-161 (group half): if caller supplied a user recipient, log and
+					// discard it. The thread key is the address, not a user.
+					if recipient != "" || recipientID != "" {
+						s.messageLog.Info("DEF-161: discarding caller-supplied recipient on group conv-ref — thread key is the address",
+							"supplied_recipient", recipient, "supplied_recipient_id", recipientID,
+							"thread_key", threadID, "conversation_id", convResult.ConversationID)
+					}
+
+					// Overwrite recipient with the thread key.
+					recipient = "thread:" + threadID
+					recipientID = threadID
+					if req.ThreadID == "" {
+						req.ThreadID = threadID
+					}
+				} else if convResult.ExternalRef == "" {
+					// Native path: the conversation was created via the native
+					// conversation API and has no legacy thread key. Routing is
+					// by ConversationID (already set in S4). Discard any
+					// caller-supplied user recipient — the conversation is the
+					// address, same as the legacy path (DEF-161).
+					if recipient != "" || recipientID != "" {
+						s.messageLog.Info("DEF-161: discarding caller-supplied recipient on native group conv-ref — conversation is the address",
+							"supplied_recipient", recipient, "supplied_recipient_id", recipientID,
+							"conversation_id", convResult.ConversationID)
+					}
+					// Set the recipient to the conversation ID. The persistence
+					// layer requires a non-empty recipient (ent schema: NotEmpty),
+					// and for native group conversations the conversation itself
+					// is the address — mirroring "thread:<id>" for legacy groups.
+					recipient = "conv:" + convResult.ConversationID
+					recipientID = convResult.ConversationID
+				} else {
+					// Unexpected ExternalRef format — fail closed rather than
+					// silently misrouting to the native path.
+					s.messageLog.Error("DEF-160: unexpected group external_ref format",
+						"external_ref", convResult.ExternalRef, "conversation_id", convResult.ConversationID)
 					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-						"conversation has unparseable external_ref", nil)
-					return nil, parseErr
-				}
-
-				// DEF-161 (group half): if caller supplied a user recipient, log and
-				// discard it. The thread key is the address, not a user.
-				if recipient != "" || recipientID != "" {
-					s.messageLog.Info("DEF-161: discarding caller-supplied recipient on group conv-ref — thread key is the address",
-						"supplied_recipient", recipient, "supplied_recipient_id", recipientID,
-						"thread_key", threadID, "conversation_id", convResult.ConversationID)
-				}
-
-				// Overwrite recipient with the thread key.
-				recipient = "thread:" + threadID
-				recipientID = threadID
-				if req.ThreadID == "" {
-					req.ThreadID = threadID
+						"conversation has unexpected external_ref format", nil)
+					return nil, fmt.Errorf("unexpected external_ref format: %s", convResult.ExternalRef)
 				}
 
 				// Derive channel from surface when empty (DEF-158).
+				// This runs for both legacy and native group conversations.
 				if req.Channel == "" {
 					derivedCh, derivErr := messaging.SurfaceToChannel(convResult.Surface)
 					if derivErr != nil {

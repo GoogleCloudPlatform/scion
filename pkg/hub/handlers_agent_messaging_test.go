@@ -3118,3 +3118,240 @@ func TestAgentMessage_GroupConv_AutoRegistersParticipant(t *testing.T) {
 	require.True(t, agentFound,
 		"agent should be auto-registered as a participant after sending to a group conversation")
 }
+
+// TestOutboundMessage_NativeGroupConvRef verifies that sending an agent
+// outbound message via conversation_ref to a native group conversation
+// (empty ExternalRef) succeeds — not 500 — and produces the correct routing.
+// This is the regression test for the DEF-160 native-group-500 bug.
+func TestOutboundMessage_NativeGroupConvRef(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "native-group-project",
+		Slug: "native-group-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "native-group-agent",
+		Slug:       "native-group-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	srv.chatSendLimiter = newChatSendLimiter()
+
+	// Create a native group conversation with an EMPTY ExternalRef — this is
+	// the shape produced by `scion conversation create`.
+	nativeConv := &store.Conversation{
+		ID:        api.NewUUID(),
+		Kind:      "group",
+		Surface:   "native",
+		ProjectID: &project.ID,
+	}
+	require.NoError(t, s.CreateConversation(ctx, nativeConv))
+
+	// Send via conversation_ref (conv:<uuid>).
+	body, _ := json.Marshal(OutboundMessageRequest{
+		ConversationRef: "conv:" + nativeConv.ID,
+		Msg:             "hello native group",
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+	// The bug: before the fix, this returns 500 because
+	// ParseThreadConversationExternalRef("") fails the "thread:" prefix check.
+	require.Equal(t, http.StatusOK, rr.Code,
+		"native group conversation must not 500; got: %s", rr.Body.String())
+
+	// Verify the response has a message_id.
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	msgID, ok := resp["message_id"].(string)
+	require.True(t, ok && msgID != "", "expected non-empty message_id in response")
+
+	// Verify the persisted message is attributed to the correct conversation.
+	storedMsg, err := s.GetMessage(ctx, msgID)
+	require.NoError(t, err)
+	require.Equal(t, nativeConv.ID, storedMsg.ConversationID,
+		"message must be attributed to the native group conversation")
+
+	// Verify channel was derived from surface "native" → "web" (DEF-158).
+	require.Equal(t, "web", storedMsg.Channel,
+		"channel must be derived from surface 'native' → 'web'")
+
+	// Verify the recipient is set to "conv:<conversationID>" for native group
+	// conversations — the conversation itself is the address (no thread key).
+	require.Equal(t, "conv:"+nativeConv.ID, storedMsg.Recipient,
+		"native group conversation should have conv:<id> recipient")
+	require.Equal(t, nativeConv.ID, storedMsg.RecipientID,
+		"native group conversation should have conversationID as recipientID")
+	require.Empty(t, storedMsg.ThreadID,
+		"native group conversation should have no thread ID")
+}
+
+// TestOutboundMessage_LegacyGroupConvRef verifies that sending an agent
+// outbound message via conversation_ref to a legacy group conversation
+// (with a "thread:"-prefixed ExternalRef) still works exactly as before
+// the native-group fix. This test guards against regressions to the
+// legacy path introduced by the DEF-160 native-group-500 fix.
+func TestOutboundMessage_LegacyGroupConvRef(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "legacy-group-project",
+		Slug: "legacy-group-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "legacy-group-agent",
+		Slug:       "legacy-group-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	srv.chatSendLimiter = newChatSendLimiter()
+
+	// Create a legacy group conversation with a "thread:" ExternalRef.
+	threadID := api.NewUUID()
+	extRef := fmt.Sprintf("thread:%s:%s", project.ID, threadID)
+	legacyConv := &store.Conversation{
+		ID:          api.NewUUID(),
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: extRef,
+		ProjectID:   &project.ID,
+	}
+	require.NoError(t, s.CreateConversation(ctx, legacyConv))
+
+	// Send via conversation_ref (conv:<uuid>) — targets the legacy group.
+	body, _ := json.Marshal(OutboundMessageRequest{
+		ConversationRef: "conv:" + legacyConv.ID,
+		Msg:             "hello legacy group",
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+	require.Equal(t, http.StatusOK, rr.Code,
+		"legacy group conversation must succeed; got: %s", rr.Body.String())
+
+	// Verify the response has a message_id.
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	msgID, ok := resp["message_id"].(string)
+	require.True(t, ok && msgID != "", "expected non-empty message_id in response")
+
+	// Verify the persisted message.
+	storedMsg, err := s.GetMessage(ctx, msgID)
+	require.NoError(t, err)
+	require.Equal(t, legacyConv.ID, storedMsg.ConversationID,
+		"message must be attributed to the legacy group conversation")
+
+	// Verify the legacy thread-key recipient is set (DEF-160/161 behavior).
+	require.Equal(t, "thread:"+threadID, storedMsg.Recipient,
+		"legacy group conversation must have thread-key recipient")
+	require.Equal(t, threadID, storedMsg.RecipientID,
+		"legacy group conversation must have threadID as recipientID")
+	require.Equal(t, threadID, storedMsg.ThreadID,
+		"legacy group conversation must have threadID backfilled")
+
+	// Verify channel was derived from surface "native" → "web" (DEF-158).
+	require.Equal(t, "web", storedMsg.Channel,
+		"channel must be derived from surface 'native' → 'web'")
+}
+
+// TestOutboundMessage_UnexpectedGroupExternalRef verifies that a group
+// conversation with a non-empty, non-"thread:"-prefixed ExternalRef
+// (e.g. from database corruption or a future integration) returns a 500
+// error rather than silently misrouting. This is the regression test for
+// the "fail closed on unexpected ExternalRef" follow-up to DEF-160.
+func TestOutboundMessage_UnexpectedGroupExternalRef(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "unexpected-extref-project",
+		Slug: "unexpected-extref-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "unexpected-extref-agent",
+		Slug:       "unexpected-extref-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	srv.chatSendLimiter = newChatSendLimiter()
+
+	// Create a group conversation with a malformed/unexpected ExternalRef —
+	// neither empty (native) nor "thread:"-prefixed (legacy).
+	bogusConv := &store.Conversation{
+		ID:          api.NewUUID(),
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "bogus:something",
+		ProjectID:   &project.ID,
+	}
+	require.NoError(t, s.CreateConversation(ctx, bogusConv))
+
+	// Send via conversation_ref (conv:<uuid>).
+	body, _ := json.Marshal(OutboundMessageRequest{
+		ConversationRef: "conv:" + bogusConv.ID,
+		Msg:             "hello bogus group",
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+	// Must fail with 500 — the unexpected ExternalRef should be rejected,
+	// not silently routed as if it were a native conversation.
+	require.Equal(t, http.StatusInternalServerError, rr.Code,
+		"unexpected ExternalRef must return 500; got: %s", rr.Body.String())
+
+	// Verify the error response body contains the expected error message.
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	require.Equal(t, ErrCodeInternalError, errResp.Error.Code,
+		"error code should be internal_error")
+	require.Contains(t, errResp.Error.Message, "unexpected external_ref format",
+		"error message should mention unexpected external_ref format")
+}
