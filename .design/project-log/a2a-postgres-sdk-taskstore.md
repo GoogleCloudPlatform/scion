@@ -325,6 +325,56 @@ Verification: All tests pass against real PostgreSQL (100s), `go build/vet`
 clean. Comprehensive `rg` scan confirms zero unpredicated destructive
 statements in all test files.
 
+### Review Round 5 (2026-09-18) — Precision corrections at tip `7151dd2`
+
+Addressed EM's round 5 preflight corrections and final precision addendum.
+
+#### R5-1 through R5-7: Concurrent isolation corrections (committed in `7151dd2`)
+
+1. **state_test.go bare DELETEs → scoped LIKE cleanup**: All bare `DELETE FROM`
+   statements replaced with LIKE-pattern cleanup scoped to per-run suffix.
+2. **DDL constraint names → per-run unique**: Global constraint names made
+   per-run unique with per-task-ID predicates.
+3. **PurgeTaskEvents schema isolation**: Test runs in isolated per-run
+   PostgreSQL schema (CREATE SCHEMA + search_path). Exact `n == 1` preserved.
+4. **PurgeTasksAndEvents schema isolation**: Same approach, both state and
+   bridge store tables migrated in isolated schema.
+5. **UUID v7 collision**: `a2a.NewTaskID()[:8]` → `randomSuffix()`.
+6. **CrashRecoveryKill race**: Timing below janitor threshold + membership check.
+7. **LegacyTerminalMapping race**: Insert with `NOW()`, backdate only for purge.
+
+#### R5-8: Ownership-scoped advisory lock check (this commit)
+
+**Problem:** `TestConcurrentMigrationSerialization` queried `pg_locks` for ANY
+holder of the advisory lock, not just this test's connections. This produces
+false positives when another process's migration holds the same lock.
+
+**Fix:** Tagged all 5 test-owned migration connections with a unique per-run
+`application_name` via `pgx.ParseConfig` + `stdlib.RegisterConnConfig`.
+Lock-leak query changed from unscoped `pg_locks WHERE objid = $1` to
+`pg_locks JOIN pg_stat_activity ON pid WHERE application_name = $2 AND objid = $1`.
+Retry loop eliminated.
+
+**Regression test:** `TestAdvisoryLockOwnershipScopedQuery`:
+- Owned connection (with marker) acquires advisory lock → ownership-scoped
+  query detects it (seesOwned=true)
+- Unrelated connection (different marker) acquires different lock → query
+  does NOT detect it (seesUnrelated=false)
+
+#### Test categorization
+
+**Schema-isolated retention suites** (genuinely isolated per-run schemas):
+- `TestPostgresStore/PurgeTaskEvents` — isolated state store
+- `TestPostgresTaskStorePurgeTasksAndEvents` — isolated bridge + state stores
+
+**Shared-schema concurrent proofs** (all processes share same database):
+- 5-pair concurrent process proof with canary row survival
+- `TestConcurrentMigrationSerialization` with ownership-scoped lock check
+- `TestAdvisoryLockOwnershipScopedQuery` regression
+
+Verification: All tests pass against real PostgreSQL. 5-pair concurrent
+proof with canary byte-for-byte survival. `go build/vet ./...` clean.
+
 ## Residual risks
 
 - Hub side-effect replay: crash after Hub send but before completion record

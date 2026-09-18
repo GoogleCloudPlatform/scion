@@ -4690,22 +4690,37 @@ func TestReapedTaskVisibleCrossReplica(t *testing.T) {
 // NewPostgresTaskStore calls serialize their migrations via the advisory
 // lock, and that the lock is released after each migration completes
 // (subsequent migration succeeds without deadlock).
+//
+// The advisory-lock leak check uses a per-run application_name tag so it
+// queries only this test's connections (via pg_locks JOIN pg_stat_activity),
+// never failing on an unrelated concurrent process's legitimate lock.
 func TestConcurrentMigrationSerialization(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
+	// Tag all migration connections with a unique application_name so the
+	// advisory-lock leak check queries only this invocation's backends.
+	marker := fmt.Sprintf("test_migrate_%d", time.Now().UnixNano())
+	connCfg, err := pgx.ParseConfig(dbURL)
+	if err != nil {
+		t.Fatalf("pgx.ParseConfig: %v", err)
+	}
+	connCfg.RuntimeParams["application_name"] = marker
+	taggedDSN := stdlib.RegisterConnConfig(connCfg)
+	t.Cleanup(func() { stdlib.UnregisterConnConfig(taggedDSN) })
+
 	const concurrency = 5
 	var wg sync.WaitGroup
 	errs := make(chan error, concurrency)
 
-	// Launch concurrent migrations.
+	// Launch concurrent migrations using tagged connections.
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			store, err := NewPostgresTaskStore(dbURL)
+			store, err := NewPostgresTaskStore(taggedDSN)
 			if err != nil {
 				errs <- fmt.Errorf("NewPostgresTaskStore: %w", err)
 				return
@@ -4722,42 +4737,156 @@ func TestConcurrentMigrationSerialization(t *testing.T) {
 	t.Logf("All %d concurrent migrations succeeded (serialized by advisory lock)", concurrency)
 
 	// Verify lock is released: a subsequent migration must succeed without deadlock.
-	afterStore, err := NewPostgresTaskStore(dbURL)
+	afterStore, err := NewPostgresTaskStore(taggedDSN)
 	if err != nil {
 		t.Fatalf("post-concurrent migration failed (lock leak?): %v", err)
 	}
 	afterStore.Close()
 	t.Log("Post-concurrent migration succeeded — no lock leak")
 
-	// Verify the advisory lock is not held.
+	// Ownership-scoped lock check: query pg_locks JOIN pg_stat_activity
+	// filtering to only this test's application_name. An unrelated concurrent
+	// process holding the same advisory lock will NOT cause a false positive.
 	db, err := sql.Open("pgx", dbURL)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	defer db.Close()
 
-	// On a shared DB, another process's migration may briefly hold the same
-	// advisory lock. Retry a few times to distinguish transient concurrent
-	// locks from genuine leaks.
 	var lockHeld bool
-	for attempt := 0; attempt < 10; attempt++ {
-		lockHeld = false
-		err = db.QueryRowContext(context.Background(),
-			`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND objid = $1 AND granted)`,
-			sdkTaskStoreMigrationLockID,
-		).Scan(&lockHeld)
-		if err != nil {
-			t.Fatalf("query lock status: %v", err)
-		}
-		if !lockHeld {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
+	err = db.QueryRowContext(context.Background(),
+		`SELECT EXISTS(
+			SELECT 1 FROM pg_locks l
+			JOIN pg_stat_activity a ON l.pid = a.pid
+			WHERE l.locktype = 'advisory'
+			  AND l.objid = $1
+			  AND l.granted
+			  AND a.application_name = $2
+		)`,
+		sdkTaskStoreMigrationLockID, marker,
+	).Scan(&lockHeld)
+	if err != nil {
+		t.Fatalf("query lock status: %v", err)
 	}
 	if lockHeld {
-		t.Error("advisory lock still held after all migrations completed — lock leak")
+		t.Error("advisory lock still held by test-owned connections — lock leak")
 	}
-	t.Log("Advisory lock correctly released")
+	t.Log("Advisory lock correctly released (ownership-scoped check)")
+}
+
+// TestAdvisoryLockOwnershipScopedQuery is a regression test proving that the
+// ownership-scoped pg_locks query used in TestConcurrentMigrationSerialization
+// correctly detects a held lock owned by the marker and ignores an unrelated
+// holder.
+func TestAdvisoryLockOwnershipScopedQuery(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	ownedMarker := fmt.Sprintf("test_owned_%d", time.Now().UnixNano())
+	unrelatedMarker := fmt.Sprintf("test_unrelated_%d", time.Now().UnixNano())
+
+	// Use a test-specific advisory lock ID to avoid colliding with production.
+	const testLockID = 999999
+
+	// Open an "owned" connection with the owned marker, acquire the lock.
+	ownedCfg, _ := pgx.ParseConfig(dbURL)
+	ownedCfg.RuntimeParams["application_name"] = ownedMarker
+	ownedDSN := stdlib.RegisterConnConfig(ownedCfg)
+	t.Cleanup(func() { stdlib.UnregisterConnConfig(ownedDSN) })
+
+	ownedDB, err := sql.Open("pgx", ownedDSN)
+	if err != nil {
+		t.Fatalf("open owned DB: %v", err)
+	}
+	defer ownedDB.Close()
+
+	// Pin to a single connection for the advisory lock.
+	ownedConn, err := ownedDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("owned conn: %v", err)
+	}
+	defer ownedConn.Close()
+
+	_, err = ownedConn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", testLockID)
+	if err != nil {
+		t.Fatalf("acquire owned lock: %v", err)
+	}
+	defer ownedConn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", testLockID)
+
+	// Open an "unrelated" connection with a different marker, acquire the SAME lock type
+	// but a different key to prove it's ignored.
+	unrelatedCfg, _ := pgx.ParseConfig(dbURL)
+	unrelatedCfg.RuntimeParams["application_name"] = unrelatedMarker
+	unrelatedDSN := stdlib.RegisterConnConfig(unrelatedCfg)
+	t.Cleanup(func() { stdlib.UnregisterConnConfig(unrelatedDSN) })
+
+	unrelatedDB, err := sql.Open("pgx", unrelatedDSN)
+	if err != nil {
+		t.Fatalf("open unrelated DB: %v", err)
+	}
+	defer unrelatedDB.Close()
+
+	unrelatedConn, err := unrelatedDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("unrelated conn: %v", err)
+	}
+	defer unrelatedConn.Close()
+
+	_, err = unrelatedConn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", testLockID+1)
+	if err != nil {
+		t.Fatalf("acquire unrelated lock: %v", err)
+	}
+	defer unrelatedConn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", testLockID+1)
+
+	// Query connection for the check.
+	checkDB, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("open check DB: %v", err)
+	}
+	defer checkDB.Close()
+
+	// The ownership-scoped query must find the owned lock.
+	var seesOwned bool
+	err = checkDB.QueryRowContext(ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM pg_locks l
+			JOIN pg_stat_activity a ON l.pid = a.pid
+			WHERE l.locktype = 'advisory'
+			  AND l.objid = $1
+			  AND l.granted
+			  AND a.application_name = $2
+		)`, testLockID, ownedMarker,
+	).Scan(&seesOwned)
+	if err != nil {
+		t.Fatalf("owned query: %v", err)
+	}
+	if !seesOwned {
+		t.Error("ownership-scoped query did NOT detect the owned lock")
+	}
+
+	// The same query with the owned marker must NOT see the unrelated lock.
+	var seesUnrelated bool
+	err = checkDB.QueryRowContext(ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM pg_locks l
+			JOIN pg_stat_activity a ON l.pid = a.pid
+			WHERE l.locktype = 'advisory'
+			  AND l.objid = $1
+			  AND l.granted
+			  AND a.application_name = $2
+		)`, testLockID+1, ownedMarker,
+	).Scan(&seesUnrelated)
+	if err != nil {
+		t.Fatalf("unrelated query: %v", err)
+	}
+	if seesUnrelated {
+		t.Error("ownership-scoped query incorrectly detected the unrelated lock")
+	}
+
+	t.Logf("Regression: owned lock detected=%v, unrelated lock detected=%v (correct)", seesOwned, seesUnrelated)
 }
 
 // --- Finding 5: Index predicate compatibility ---
