@@ -165,6 +165,10 @@ func (s *Server) handleConversationRoutes(w http.ResponseWriter, r *http.Request
 	case "":
 		s.handleGetConversation(w, r, id)
 	case "messages":
+		if r.Method == http.MethodPost {
+			s.handleCPMConversationSend(w, r, id)
+			return
+		}
 		s.handleConvListMessages(w, r, id)
 	case "default-agent":
 		s.handleSetDefaultAgent(w, r, id)

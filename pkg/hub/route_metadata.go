@@ -222,6 +222,21 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/conversations/", RouteID: "conversations.byId",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/conversations/resolve": {
+		Pattern: "/api/v1/conversations/resolve", RouteID: "conversations.resolve",
+		Classification: RouteAuthenticated,
+	},
+
+	// Cross-project messaging (Phase 3)
+	"/api/v1/messaging/capabilities": {
+		Pattern: "/api/v1/messaging/capabilities", RouteID: "messaging.capabilities",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/messaging/targets/resolve": {
+		Pattern: "/api/v1/messaging/targets/resolve", RouteID: "messaging.targets.resolve",
+		Classification: RouteAuthenticated,
+	},
+
 	"/api/v1/chat/user-prefs": {
 		Pattern: "/api/v1/chat/user-prefs", RouteID: "chat.userPrefs",
 		Classification: RouteAuthenticated,

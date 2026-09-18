@@ -324,7 +324,8 @@ func compileSchemas() {
 		"messaging": {
 			"type": "object",
 			"properties": map[string]interface{}{
-				"conversation_envelope_switch": map[string]interface{}{"type": "boolean"},
+				"conversation_envelope_switch":    map[string]interface{}{"type": "boolean"},
+				"cross_project_messaging_enabled": map[string]interface{}{"type": "boolean"},
 			},
 			"additionalProperties": false,
 		},

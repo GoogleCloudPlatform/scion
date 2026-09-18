@@ -106,6 +106,9 @@ type Client interface {
 	// Invites returns the invite code management operations interface.
 	Invites() InviteService
 
+	// Messaging returns the cross-project messaging operations interface.
+	Messaging() MessagingService
+
 	// ProjectInjectedSkills returns an InjectedSkillsService scoped to a project.
 	ProjectInjectedSkills(projectID string) InjectedSkillsService
 
@@ -151,6 +154,7 @@ type client struct {
 	conversations         *conversationService
 	allowList             *allowListService
 	invites               *inviteService
+	messaging             *messagingService
 }
 
 // New creates a new Hub API client.
@@ -204,6 +208,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.conversations = &conversationService{c: c}
 	c.allowList = &allowListService{c: c}
 	c.invites = &inviteService{c: c}
+	c.messaging = &messagingService{c: c}
 
 	return c, nil
 }
@@ -331,6 +336,11 @@ func (c *client) AllowList() AllowListService {
 // Invites returns the invite code management operations interface.
 func (c *client) Invites() InviteService {
 	return c.invites
+}
+
+// Messaging returns the cross-project messaging operations interface.
+func (c *client) Messaging() MessagingService {
+	return c.messaging
 }
 
 // get performs an HTTP GET request with fallback.
