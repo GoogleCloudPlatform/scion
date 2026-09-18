@@ -408,3 +408,43 @@ func TestExternalIdentityStore_GetByUserID_Empty(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, bindings, 0)
 }
+
+// ---------------------------------------------------------------------------
+// Cascade: deleting a user cascades to delete bindings
+// ---------------------------------------------------------------------------
+
+func TestExternalIdentityStore_UserDeleteCascade(t *testing.T) {
+	ctx := context.Background()
+	s := newTestExtIDStore(t)
+	userID := seedUser(t, ctx, s, "cascade@gmail.com")
+
+	// Create a binding for this user.
+	err := s.CreateExternalIdentity(ctx, &store.ExternalIdentityBinding{
+		Provider: "google",
+		Issuer:   "https://accounts.google.com",
+		Subject:  "cascade-sub-001",
+		UserID:   userID,
+		Email:    "cascade@gmail.com",
+	})
+	require.NoError(t, err)
+
+	// Verify binding exists.
+	got, err := s.GetExternalIdentity(ctx, "google", "https://accounts.google.com", "cascade-sub-001")
+	require.NoError(t, err)
+	assert.Equal(t, userID, got.UserID)
+
+	// Delete the user — cascade should delete the binding.
+	uid, err := uuid.Parse(userID)
+	require.NoError(t, err)
+	err = s.client.User.DeleteOneID(uid).Exec(ctx)
+	require.NoError(t, err)
+
+	// Binding should now be gone.
+	_, err = s.GetExternalIdentity(ctx, "google", "https://accounts.google.com", "cascade-sub-001")
+	assert.Error(t, err, "binding should be deleted by cascade")
+
+	// GetByUserID should return empty.
+	bindings, err := s.GetExternalIdentitiesByUserID(ctx, userID)
+	require.NoError(t, err)
+	assert.Len(t, bindings, 0, "bindings should be empty after cascade delete")
+}

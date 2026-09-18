@@ -30,6 +30,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
@@ -78,13 +79,18 @@ func NewServer(bridge *Bridge, cfg *Config, metrics *Metrics, log *slog.Logger, 
 		// signing key is loaded (it may come from Secret Manager).
 	case "geGoogle":
 		s.geExchangeValidator = NewGEExchangeValidator(cfg.Hub.Endpoint, cfg.Auth.GEExchange, log)
+		// Transport auth is wired via SetGETransportAuth after construction,
+		// since transport resolution may happen separately from server creation.
 	}
 	return s
 }
 
-// SetSDKHandler overrides the SDK JSON-RPC handler (test-only).
-func (s *Server) SetSDKHandler(handler http.Handler) {
-	s.sdkHandler = handler
+// SetGETransportAuth sets the transport auth for the GE exchange validator.
+// This enables Cloud Run / IAP invoker identity headers on Hub exchange requests.
+func (s *Server) SetGETransportAuth(src transportauth.TokenSource, mode transportauth.HeaderMode) {
+	if s.geExchangeValidator != nil {
+		s.geExchangeValidator.SetTransportAuth(src, mode)
+	}
 }
 
 // SetV0RESTHandler sets the v0.3 REST compatibility handler. When set,
@@ -92,6 +98,9 @@ func (s *Server) SetSDKHandler(handler http.Handler) {
 // requests (snake_case JSON) alongside the existing v1.0 JSON-RPC routes.
 func (s *Server) SetV0RESTHandler(handler http.Handler) {
 	s.v0RESTHandler = handler
+	if handler != nil {
+		s.bridge.v0RESTEnabled = true
+	}
 }
 
 // SetSnapshot wires the atomic config snapshot for hot-apply support.
@@ -199,8 +208,9 @@ func (s *Server) WarnOnOpenAuth() {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Top-level well-known agent card (registry).
+	// Top-level well-known agent card (registry) — both standard names.
 	mux.HandleFunc("GET /.well-known/agent-card.json", s.handleWellKnownAgentCard)
+	mux.HandleFunc("GET /.well-known/agent.json", s.handleWellKnownAgentCard)
 
 	// OIDC discovery proxy — publicly exposes the hub's IAP-protected OIDC endpoints.
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCDiscoveryProxy)
@@ -208,16 +218,22 @@ func (s *Server) Handler() http.Handler {
 
 	// Per-agent routes — the SDK handler handles JSON-RPC protocol.
 	mux.HandleFunc("GET /projects/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
+	mux.HandleFunc("GET /projects/{projectSlug}/agents/{agentSlug}/.well-known/agent.json", s.handleAgentCard)
 	mux.HandleFunc("POST /projects/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
+	// Direct POST to agent base URL — GE clients may POST JSON-RPC directly
+	// to the agent root (without /jsonrpc suffix).
+	mux.HandleFunc("POST /projects/{projectSlug}/agents/{agentSlug}", s.handleJSONRPC)
 
 	// Legacy per-agent routes (backward compatibility for "grove" naming).
 	mux.HandleFunc("GET /groves/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
+	mux.HandleFunc("GET /groves/{projectSlug}/agents/{agentSlug}/.well-known/agent.json", s.handleAgentCard)
 	mux.HandleFunc("POST /groves/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
+	mux.HandleFunc("POST /groves/{projectSlug}/agents/{agentSlug}", s.handleJSONRPC)
 
 	// v0.3 REST compat routes — catch-all under per-agent prefix delegates to
 	// the SDK v0.3 REST handler (if configured) after stripping the prefix.
-	// Go 1.22 mux ensures the more-specific agent-card and jsonrpc patterns
-	// above take precedence over this wildcard.
+	// Go 1.22 mux ensures the more-specific agent-card, jsonrpc, and direct POST
+	// patterns above take precedence over this wildcard.
 	if s.v0RESTHandler != nil {
 		mux.HandleFunc("/projects/{projectSlug}/agents/{agentSlug}/{v0rest...}", s.handleV0REST)
 		mux.HandleFunc("/groves/{projectSlug}/agents/{agentSlug}/{v0rest...}", s.handleV0REST)
@@ -466,6 +482,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Public/operational endpoints skip auth.
 		if r.URL.Path == "/.well-known/agent-card.json" ||
+			r.URL.Path == "/.well-known/agent.json" ||
 			r.URL.Path == "/.well-known/openid-configuration" ||
 			r.URL.Path == "/.well-known/jwks.json" ||
 			r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
@@ -473,9 +490,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		// Per-agent card: exactly /projects/{slug}/agents/{slug}/.well-known/agent-card.json
-		// or legacy /groves/{slug}/agents/{slug}/.well-known/agent-card.json
+		// or agent.json, or legacy /groves/{slug}/agents/{slug}/.well-known/agent-card.json
 		segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
-		if len(segments) == 6 && (segments[0] == "projects" || segments[0] == "groves") && segments[2] == "agents" && segments[4] == ".well-known" && segments[5] == "agent-card.json" {
+		if len(segments) == 6 && (segments[0] == "projects" || segments[0] == "groves") && segments[2] == "agents" && segments[4] == ".well-known" && (segments[5] == "agent-card.json" || segments[5] == "agent.json") {
 			next.ServeHTTP(w, r)
 			return
 		}

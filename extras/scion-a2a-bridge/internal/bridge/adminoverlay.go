@@ -320,7 +320,9 @@ func ApplyOverlay(base Config, overlay *AdminOverlay) Config {
 }
 
 // BuildAuthValidators constructs the appropriate validators for the given config.
-func BuildAuthValidators(cfg *Config) AuthValidators {
+// The optional geOpts are forwarded to NewGEExchangeValidator when scheme is
+// geGoogle (e.g. WithGETransportAuth for Cloud Run / IAP).
+func BuildAuthValidators(cfg *Config, geOpts ...GEValidatorOption) AuthValidators {
 	av := AuthValidators{
 		Scheme: cfg.Auth.Scheme,
 	}
@@ -333,7 +335,7 @@ func BuildAuthValidators(cfg *Config) AuthValidators {
 		// It will be set via SetJWTValidator on the Server.
 	case "geGoogle":
 		av.GEExchangeValidator = NewGEExchangeValidator(cfg.Hub.Endpoint, cfg.Auth.GEExchange,
-			slog.Default())
+			slog.Default(), geOpts...)
 	case "apiKey", "bearer", "":
 		av.APIKey = cfg.Auth.APIKey
 	}

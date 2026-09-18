@@ -254,6 +254,10 @@ func main() {
 	if signingKey != nil {
 		srv.SetJWTValidator(bridge.NewJWTValidator(signingKey))
 	}
+	// Wire transport auth into GE exchange validator for Cloud Run / IAP.
+	if transportSrc != nil {
+		srv.SetGETransportAuth(transportSrc, transportMode)
+	}
 	srv.WarnOnOpenAuth()
 
 	httpServer := &http.Server{
@@ -525,6 +529,10 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	srv.SetSnapshot(snapshot)
 	if signingKey != nil {
 		srv.SetJWTValidator(bridge.NewJWTValidator(signingKey))
+	}
+	// Wire transport auth into GE exchange validator for Cloud Run / IAP.
+	if transportSrc != nil {
+		srv.SetGETransportAuth(transportSrc, transportMode)
 	}
 	srv.WarnOnOpenAuth()
 

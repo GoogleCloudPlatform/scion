@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -240,9 +241,12 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 		return nil, fmt.Errorf("%w: time validation failed: %v", ErrGoogleInvalidCredential, err)
 	}
 
-	// Check remaining lifetime — reject tokens with no usable lifetime.
+	// Ensure remaining lifetime is positive. Tokens within the skew window
+	// (validated above) still need positive remaining lifetime to be useful
+	// for minting Hub tokens. The GE exchange further caps at
+	// min(configured TTL, remaining) and rejects TTL ≤ 0.
 	remaining := time.Until(claims.Expiry.Time())
-	if remaining < -googleClockSkew {
+	if remaining <= 0 {
 		return nil, ErrGENoRemainingLifetime
 	}
 
@@ -349,10 +353,10 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 	}
 
 	// Validate expiry from tokeninfo.
-	if tokenInfo.ExpiresIn <= 0 {
+	if int64(tokenInfo.ExpiresIn) <= 0 {
 		return nil, fmt.Errorf("%w: no remaining lifetime from tokeninfo", ErrGENoRemainingLifetime)
 	}
-	upstreamExpiry := time.Now().Add(time.Duration(tokenInfo.ExpiresIn) * time.Second)
+	upstreamExpiry := time.Now().Add(time.Duration(int64(tokenInfo.ExpiresIn)) * time.Second)
 
 	// Step 2: Call Google userinfo for profile data.
 	userInfo, err := v.getUserInfo(ctx, token)
@@ -442,7 +446,8 @@ type googleTokenInfoResponse struct {
 	// because Google's tokeninfo endpoint may return either form.
 	EmailVerified *flexBool `json:"email_verified,omitempty"`
 	// ExpiresIn is the remaining lifetime in seconds.
-	ExpiresIn int64 `json:"expires_in"`
+	// Google's tokeninfo endpoint may return this as a JSON number or string.
+	ExpiresIn flexInt64 `json:"expires_in"`
 	// Scope is the granted OAuth scopes.
 	Scope string `json:"scope"`
 	// AccessType is "online" or "offline".
@@ -466,6 +471,21 @@ func (b *flexBool) UnmarshalJSON(data []byte) error {
 	default:
 		return fmt.Errorf("flexBool: cannot decode %s", string(data))
 	}
+	return nil
+}
+
+// flexInt64 decodes JSON values that may be a number (3600) or a string
+// ("3600"). Google's tokeninfo endpoint sometimes returns expires_in as
+// a string rather than a native JSON number.
+type flexInt64 int64
+
+func (i *flexInt64) UnmarshalJSON(data []byte) error {
+	s := strings.Trim(string(data), `"`)
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return fmt.Errorf("flexInt64: cannot decode %s: %w", string(data), err)
+	}
+	*i = flexInt64(n)
 	return nil
 }
 

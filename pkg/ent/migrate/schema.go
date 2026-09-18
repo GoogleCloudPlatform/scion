@@ -659,7 +659,7 @@ var (
 				Symbol:     "external_identities_users_external_identities",
 				Columns:    []*schema.Column{ExternalIdentitiesColumns[7]},
 				RefColumns: []*schema.Column{UsersColumns[0]},
-				OnDelete:   schema.NoAction,
+				OnDelete:   schema.Cascade,
 			},
 		},
 		Indexes: []*schema.Index{

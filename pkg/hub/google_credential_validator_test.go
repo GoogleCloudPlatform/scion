@@ -879,6 +879,151 @@ func TestProductionValidator_TokenInfoSchema_FieldTypes(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// flexInt64 — expires_in as string through production validator.
+// ---------------------------------------------------------------------------
+
+func TestProductionValidator_AccessToken_ExpiresInAsString(t *testing.T) {
+	// Google's tokeninfo may return expires_in as a JSON string ("3600")
+	// instead of a number (3600). Verify the production validator handles this.
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"azp":            "test-client.apps.googleusercontent.com",
+				"aud":            "test-client.apps.googleusercontent.com",
+				"sub":            "sub-string-expiry",
+				"email":          "user@gmail.com",
+				"email_verified": "true",
+				"expires_in":     "1800", // string form, not number
+				"scope":          "openid email",
+				"access_type":    "online",
+			})
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"sub":            "sub-string-expiry",
+				"email":          "user@gmail.com",
+				"email_verified": true,
+				"name":           "String Expiry User",
+			})
+		}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	identity, err := validator.ValidateAccessToken(t.Context(), "string-expiry-token",
+		[]string{"test-client.apps.googleusercontent.com"})
+	if err != nil {
+		t.Fatalf("ValidateAccessToken with string expires_in failed: %v", err)
+	}
+	if identity.Subject != "sub-string-expiry" {
+		t.Errorf("subject = %q, want %q", identity.Subject, "sub-string-expiry")
+	}
+	// Verify expiry is set (within 30min from now since expires_in=1800).
+	if identity.UpstreamExpiry.IsZero() {
+		t.Error("upstream expiry should be set from string-form expires_in")
+	}
+	expectedExpiry := time.Now().Add(1800 * time.Second)
+	if identity.UpstreamExpiry.Before(expectedExpiry.Add(-5*time.Second)) ||
+		identity.UpstreamExpiry.After(expectedExpiry.Add(5*time.Second)) {
+		t.Errorf("upstream expiry = %v, expected ~%v", identity.UpstreamExpiry, expectedExpiry)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ID Token remaining-lifetime boundary tests.
+// ---------------------------------------------------------------------------
+
+func TestProductionValidator_IDToken_ExpiredWithinSkew(t *testing.T) {
+	// Token that expired 30s ago — within the 2min skew window, so jwt.Validate
+	// passes. But remaining <= 0, so the validator rejects with NoRemainingLifetime.
+	kp := newGCVTestKeyPair("skew-kid")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(gcvJWKSJSON(kp))
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	claims := validIDTokenClaims()
+	claims["exp"] = time.Now().Add(-30 * time.Second).Unix() // expired 30s ago
+	claims["iat"] = time.Now().Add(-35 * time.Minute).Unix()
+	claims["nbf"] = time.Now().Add(-35 * time.Minute).Unix()
+	token := signIDToken(kp, claims)
+
+	validator := newTestValidator(endpoints)
+	_, err := validator.ValidateIDToken(t.Context(), token,
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected error for token expired within skew window")
+	}
+	if !strings.Contains(err.Error(), "no remaining usable lifetime") {
+		t.Errorf("error = %q, expected NoRemainingLifetime", err)
+	}
+}
+
+func TestProductionValidator_IDToken_PositiveRemaining(t *testing.T) {
+	// Token that expires in 10s — positive remaining, should pass.
+	kp := newGCVTestKeyPair("remaining-kid")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(gcvJWKSJSON(kp))
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	claims := validIDTokenClaims()
+	claims["exp"] = time.Now().Add(10 * time.Second).Unix()
+	token := signIDToken(kp, claims)
+
+	validator := newTestValidator(endpoints)
+	identity, err := validator.ValidateIDToken(t.Context(), token,
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err != nil {
+		t.Fatalf("ValidateIDToken failed for token with 10s remaining: %v", err)
+	}
+	if identity.Subject != "google-sub-test-123" {
+		t.Errorf("subject = %q, want %q", identity.Subject, "google-sub-test-123")
+	}
+}
+
+func TestProductionValidator_IDToken_LongRemaining(t *testing.T) {
+	// Token that expires in 2min — well within range, should pass.
+	kp := newGCVTestKeyPair("long-remaining-kid")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(gcvJWKSJSON(kp))
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	claims := validIDTokenClaims()
+	claims["exp"] = time.Now().Add(2 * time.Minute).Unix()
+	token := signIDToken(kp, claims)
+
+	validator := newTestValidator(endpoints)
+	identity, err := validator.ValidateIDToken(t.Context(), token,
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err != nil {
+		t.Fatalf("ValidateIDToken failed for token with 2min remaining: %v", err)
+	}
+	if identity.Subject != "google-sub-test-123" {
+		t.Errorf("subject = %q, want %q", identity.Subject, "google-sub-test-123")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // JWKS DoS verification — bounded rate-limited force-refresh.
 // ---------------------------------------------------------------------------
 

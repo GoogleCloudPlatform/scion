@@ -131,10 +131,15 @@ for short-lived Hub user access tokens.
 - **Cache TTL:** `min(configured, Hub expiry, upstream expiry)`.
 - **Config version invalidation:** `InvalidateCache()` increments version
   and clears cache.
-- **Bounded size:** 10,000 entries with oldest-expiry eviction.
+- **Bounded size:** 10,000 entries with LRU eviction (O(1) via
+  `container/list` doubly-linked list + map).
 - **Singleflight:** `golang.org/x/sync/singleflight` coalesces concurrent
   cache misses for the same credential.
 - **No shared-client fallback:** Hub rejection propagated as-is.
+- **Transport auth:** Functional options `WithGETransportAuth` composes
+  Cloud Run/IAP auth headers on outgoing Hub requests.
+- **Fail closed on expiry:** Expired Hub tokens (remaining ≤ 0) are
+  rejected, never cached.
 
 ## Revocation/cache window and stream-establishment
 
@@ -191,10 +196,32 @@ Hub `go.mod`: No changes.
 | geGoogle hot-reload overlay | **Resolved**: `adminoverlay.go` geGoogle overlay with config version tracking | `01d3557` |
 | Cache TTL reconciliation (~60s contract) | **Resolved**: `DefaultGETokenTTL = 60s`, `MaxGETokenTTL = 5min`, bridge `defaultGECacheTTL = 60s` | `01d3557`, `b0dc610` |
 
+## Review finding disposition (review-auth-bridge-2 — REQUEST CHANGES)
+
+| # | Finding | Resolution | Evidence |
+|---|---------|------------|----------|
+| B2-C1 | Missing `ge_exchange` in `callerHubClient` | **Resolved**: added `case "ge_exchange":` — creates per-caller Hub client with bearer token + transport auth | `TestCallerHubClient_GEExchangeTokenType`, `TestGEExchange_ExecutorPath_Regression` |
+| B2-R2 | Synthetic JSON-RPC tests | **Resolved**: complete rewrite with `newIntegrationTestServer` → real SDK handler + executor + mock Hub | `TestJSONRPC_RealHandler_*` (6 tests) |
+| B2-R3 | Missing discovery aliases + direct POST | **Resolved**: `/.well-known/agent.json` routes, direct POST routes, auth exemption | `TestDiscovery_*` (6 tests) |
+| B2-R4 | Transport auth not wired to GE validator | **Resolved**: `WithGETransportAuth` functional option, `SetGETransportAuth` method, wired in main.go | `TestGEExchangeValidator_TransportAuth_*` (2 tests) |
+| B2-R5 | O(N) eviction → LRU | **Resolved**: `container/list` + map for O(1) eviction | `TestGEExchangeValidator_EvictLRU`, `TestGEExchangeValidator_LRUEviction_ConcurrentAccess` |
+| B2-R6 | Expired response caching | **Resolved**: fail closed when remaining ≤ 0 | `TestGEExchangeValidator_Expired*_FailsClosed`, `TestGEExchangeValidator_ZeroExpiry_FailsClosed` |
+| B2-N1 | `SetSDKHandler` on Server | **Resolved**: moved to `export_test.go` | — |
+| B2-N2 | REST v0.3 advertised unconditionally | **Resolved**: `v0RESTEnabled` flag, conditional advertising | `TestV0REST_AgentCardNoRESTWhenHandlerNil` |
+
+## Review finding disposition (review-auth-hub-2 — APPROVE, 3 observations)
+
+| # | Observation | Resolution | Evidence |
+|---|-------------|------------|----------|
+| H2-O1 | `flexInt64` for `expires_in` | **Resolved**: custom JSON type handling number/string forms | `TestFlexInt64_*` (4 tests), `TestProductionValidator_AccessToken_ExpiresInAsString` |
+| H2-O2 | Dead remaining-lifetime branch | **Resolved**: strict `remaining <= 0` check | `TestProductionValidator_IDToken_ExpiredWithinSkew`, `_PositiveRemaining`, `_LongRemaining` |
+| H2-O3 | User deletion cascade | **Resolved**: `entsql.OnDelete(entsql.Cascade)` annotation | `TestExternalIdentityStore_UserDeleteCascade` |
+
 ## Test evidence
 
-- Hub: 44+ GE exchange tests + 18 production validator tests + 13 ent store tests, all passing
-- Bridge: 35+ GE validator tests (incl. singleflight isolation) + 20 v0.3/wire compat tests, all passing
+- Hub: 44+ GE exchange tests + 22 production validator tests (incl. flexInt64) + 14 ent store tests (incl. cascade), all passing
+- Bridge: 35+ GE validator tests (incl. LRU, singleflight) + 35+ v0/wire/integration tests, all passing
+- Race detector: all bridge tests pass with `-race`
 - authzop `TestMutationClassificationBidirectional` passes with updated catalog entries
 - All broader bridge tests pass (`go test ./internal/bridge/`)
 - Both modules build cleanly (`go build ./...`)

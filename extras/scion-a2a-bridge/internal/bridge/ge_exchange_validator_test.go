@@ -688,12 +688,15 @@ func TestGEExchangeValidator_BoundedCacheEviction(t *testing.T) {
 	v.mu.Lock()
 	for i := 0; i < maxGECacheEntries; i++ {
 		key := fmt.Sprintf("key-%d", i)
-		v.cache[key] = &geCacheEntry{
+		entry := &geCacheEntry{
+			key:           key,
 			identity:      &CallerIdentity{UserID: fmt.Sprintf("u-%d", i)},
 			hubToken:      "tok",
-			expiresAt:     time.Now().Add(time.Duration(i) * time.Second), // Stagger expiry for eviction order.
+			expiresAt:     time.Now().Add(time.Duration(i+1) * time.Second),
 			configVersion: 0,
 		}
+		elem := v.lruList.PushBack(entry) // Oldest at back (first inserted).
+		v.cache[key] = elem
 	}
 	v.mu.Unlock()
 
@@ -713,40 +716,43 @@ func TestGEExchangeValidator_BoundedCacheEviction(t *testing.T) {
 	}
 }
 
-func TestGEExchangeValidator_EvictOldestByExpiry(t *testing.T) {
+func TestGEExchangeValidator_EvictLRU(t *testing.T) {
 	v := NewGEExchangeValidator("http://unused", GEExchangeConfig{
 		CredentialType: "id_token",
 		CacheTTL:       60 * time.Second,
 	}, testLogger())
 
-	// Manually populate with known entries, oldest = "oldest-key".
+	// Manually populate: insert A, B, C in order.
+	// LRU list order (front = MRU, back = LRU): C, B, A
 	v.mu.Lock()
-	v.cache["oldest-key"] = &geCacheEntry{
-		identity:  &CallerIdentity{UserID: "old"},
-		expiresAt: time.Now().Add(-10 * time.Second), // Already past.
+	for _, key := range []string{"key-A", "key-B", "key-C"} {
+		entry := &geCacheEntry{
+			key:       key,
+			identity:  &CallerIdentity{UserID: key},
+			expiresAt: time.Now().Add(60 * time.Second),
+		}
+		elem := v.lruList.PushFront(entry)
+		v.cache[key] = elem
 	}
-	v.cache["middle-key"] = &geCacheEntry{
-		identity:  &CallerIdentity{UserID: "mid"},
-		expiresAt: time.Now().Add(30 * time.Second),
+	// Now access key-A to move it to front (MRU).
+	if elem, ok := v.cache["key-A"]; ok {
+		v.lruList.MoveToFront(elem)
 	}
-	v.cache["newest-key"] = &geCacheEntry{
-		identity:  &CallerIdentity{UserID: "new"},
-		expiresAt: time.Now().Add(60 * time.Second),
-	}
-	v.evictOldest()
+	// LRU order now: A, C, B — B is at the back (LRU).
+	v.evictLRU()
 	v.mu.Unlock()
 
-	// "oldest-key" should have been evicted.
+	// "key-B" should have been evicted (LRU — back of list).
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if _, ok := v.cache["oldest-key"]; ok {
-		t.Error("oldest-key should have been evicted")
+	if _, ok := v.cache["key-B"]; ok {
+		t.Error("key-B should have been evicted (LRU)")
 	}
-	if _, ok := v.cache["middle-key"]; !ok {
-		t.Error("middle-key should still be present")
+	if _, ok := v.cache["key-A"]; !ok {
+		t.Error("key-A should still be present (MRU)")
 	}
-	if _, ok := v.cache["newest-key"]; !ok {
-		t.Error("newest-key should still be present")
+	if _, ok := v.cache["key-C"]; !ok {
+		t.Error("key-C should still be present")
 	}
 }
 

@@ -16,6 +16,7 @@ package bridge
 
 import (
 	"bytes"
+	"container/list"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -27,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -72,17 +74,26 @@ type GEExchangeValidator struct {
 	configuredTTL  time.Duration
 	log            *slog.Logger
 
+	// Transport auth for reaching Hubs behind Cloud Run / IAP.
+	transportSrc  transportauth.TokenSource
+	transportMode transportauth.HeaderMode
+
 	// configVersion is incremented when trust/config changes to invalidate
 	// all cache entries (contract-review point 6).
 	configVersion uint64
 
-	mu    sync.Mutex
-	cache map[string]*geCacheEntry // key: SHA-256(credential + configVersion)
-	sfg   singleflight.Group
+	// LRU cache: mu protects both the map and the LRU list.
+	// The list orders entries from most-recently-used (front) to
+	// least-recently-used (back). Eviction removes from the back.
+	mu       sync.Mutex
+	cache    map[string]*list.Element // key → list element wrapping *geCacheEntry
+	lruList  *list.List              // doubly-linked list for O(1) LRU eviction
+	sfg      singleflight.Group
 }
 
 // geCacheEntry holds a cached exchange result.
 type geCacheEntry struct {
+	key           string // cache key for reverse lookup in map
 	identity      *CallerIdentity
 	hubToken      string
 	expiresAt     time.Time
@@ -105,8 +116,27 @@ type geExchangeUser struct {
 	Role        string `json:"role"`
 }
 
+// GEValidatorOption configures optional GEExchangeValidator behaviour.
+type GEValidatorOption func(*GEExchangeValidator)
+
+// WithGETransportAuth stores the resolved transport-layer OIDC auth so that
+// Hub exchange requests include Cloud Run / IAP invoker identity headers.
+func WithGETransportAuth(src transportauth.TokenSource, mode transportauth.HeaderMode) GEValidatorOption {
+	return func(v *GEExchangeValidator) {
+		v.transportSrc = src
+		v.transportMode = mode
+	}
+}
+
+// WithGEHTTPClient overrides the HTTP client (for testing).
+func WithGEHTTPClient(client *http.Client) GEValidatorOption {
+	return func(v *GEExchangeValidator) {
+		v.httpClient = client
+	}
+}
+
 // NewGEExchangeValidator creates a new GE exchange validator.
-func NewGEExchangeValidator(hubEndpoint string, cfg GEExchangeConfig, log *slog.Logger) *GEExchangeValidator {
+func NewGEExchangeValidator(hubEndpoint string, cfg GEExchangeConfig, log *slog.Logger, opts ...GEValidatorOption) *GEExchangeValidator {
 	ttl := cfg.CacheTTL
 	if ttl <= 0 {
 		ttl = defaultGECacheTTL
@@ -120,19 +150,47 @@ func NewGEExchangeValidator(hubEndpoint string, cfg GEExchangeConfig, log *slog.
 		credType = "id_token" // Default, but should be explicitly configured
 	}
 
-	return &GEExchangeValidator{
+	v := &GEExchangeValidator{
 		hubEndpoint:    hubEndpoint,
 		httpClient:     &http.Client{Timeout: 15 * time.Second},
 		credentialType: credType,
 		configuredTTL:  ttl,
 		log:            log,
-		cache:          make(map[string]*geCacheEntry),
+		cache:          make(map[string]*list.Element),
+		lruList:        list.New(),
 	}
+
+	for _, opt := range opts {
+		opt(v)
+	}
+
+	// Compose transport auth into the HTTP client's transport if configured.
+	if v.transportSrc != nil {
+		base := http.DefaultTransport
+		if v.httpClient.Transport != nil {
+			base = v.httpClient.Transport
+		}
+		v.httpClient.Transport = transportauth.Wrap(base, v.transportSrc, v.transportMode)
+	}
+
+	return v
 }
 
-// SetHTTPClient sets a custom HTTP client (for transport auth / testing).
+// SetHTTPClient sets a custom HTTP client (for testing).
 func (v *GEExchangeValidator) SetHTTPClient(client *http.Client) {
 	v.httpClient = client
+}
+
+// SetTransportAuth applies transport auth (Cloud Run / IAP invoker headers)
+// to the existing HTTP client. Safe to call once before the first Validate.
+func (v *GEExchangeValidator) SetTransportAuth(src transportauth.TokenSource, mode transportauth.HeaderMode) {
+	v.transportSrc = src
+	v.transportMode = mode
+	base := http.DefaultTransport
+	if v.httpClient.Transport != nil {
+		base = v.httpClient.Transport
+	}
+	v.httpClient.Transport = transportauth.Wrap(base, src, mode)
 }
 
 // InvalidateCache increments the config version, causing all existing cache
@@ -144,7 +202,8 @@ func (v *GEExchangeValidator) InvalidateCache() {
 	defer v.mu.Unlock()
 	v.configVersion++
 	// Clear the cache immediately to free memory.
-	v.cache = make(map[string]*geCacheEntry)
+	v.cache = make(map[string]*list.Element)
+	v.lruList.Init()
 }
 
 // Validate exchanges a Google credential with the Hub and returns the
@@ -157,15 +216,18 @@ func (v *GEExchangeValidator) Validate(ctx context.Context, credential string) (
 
 	key := v.cacheKey(credential, currentVersion)
 
-	// Check cache first.
+	// Check cache first (LRU: move to front on hit).
 	v.mu.Lock()
-	if entry, ok := v.cache[key]; ok {
+	if elem, ok := v.cache[key]; ok {
+		entry := elem.Value.(*geCacheEntry)
 		if time.Now().Before(entry.expiresAt) && entry.configVersion == currentVersion {
+			v.lruList.MoveToFront(elem)
 			id := entry.identity
 			v.mu.Unlock()
 			return id, nil
 		}
 		// Expired or stale config version — remove.
+		v.lruList.Remove(elem)
 		delete(v.cache, key)
 	}
 	v.mu.Unlock()
@@ -252,17 +314,25 @@ func (v *GEExchangeValidator) exchange(ctx context.Context, credential string, c
 	}
 
 	// Compute effective cache TTL: min(configured, Hub expiry, upstream expiry).
+	// Fail closed if either remaining lifetime is ≤ 0 (already expired or
+	// clock skew); never cache an expired token.
 	cacheTTL := v.configuredTTL
 	now := time.Now()
 	if !hubExpiry.IsZero() {
 		hubRemaining := time.Until(hubExpiry)
-		if hubRemaining > 0 && hubRemaining < cacheTTL {
+		if hubRemaining <= 0 {
+			return nil, fmt.Errorf("Hub token already expired (remaining: %v)", hubRemaining)
+		}
+		if hubRemaining < cacheTTL {
 			cacheTTL = hubRemaining
 		}
 	}
 	if !upstreamExpiry.IsZero() {
 		upRemaining := time.Until(upstreamExpiry)
-		if upRemaining > 0 && upRemaining < cacheTTL {
+		if upRemaining <= 0 {
+			return nil, fmt.Errorf("upstream credential already expired (remaining: %v)", upRemaining)
+		}
+		if upRemaining < cacheTTL {
 			cacheTTL = upRemaining
 		}
 	}
@@ -277,16 +347,26 @@ func (v *GEExchangeValidator) exchange(ctx context.Context, credential string, c
 
 	// Cache the result with bounded size and TTL.
 	cacheKey := v.cacheKey(credential, configVersion)
-	v.mu.Lock()
-	// Enforce bounded cache size by evicting oldest entries when at capacity.
-	if len(v.cache) >= maxGECacheEntries {
-		v.evictOldest()
-	}
-	v.cache[cacheKey] = &geCacheEntry{
+	entry := &geCacheEntry{
+		key:           cacheKey,
 		identity:      identity,
 		hubToken:      exchangeResp.AccessToken,
 		expiresAt:     now.Add(cacheTTL),
 		configVersion: configVersion,
+	}
+	v.mu.Lock()
+	// If key already exists (concurrent exchange resolved same credential),
+	// update in place and move to front.
+	if elem, ok := v.cache[cacheKey]; ok {
+		v.lruList.MoveToFront(elem)
+		elem.Value = entry
+	} else {
+		// Enforce bounded cache size by evicting LRU entries when at capacity.
+		for len(v.cache) >= maxGECacheEntries {
+			v.evictLRU()
+		}
+		elem := v.lruList.PushFront(entry)
+		v.cache[cacheKey] = elem
 	}
 	v.mu.Unlock()
 
@@ -303,21 +383,16 @@ func (v *GEExchangeValidator) cacheKey(credential string, configVersion uint64) 
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// evictOldest removes the oldest cache entry. Must be called with mu held.
-func (v *GEExchangeValidator) evictOldest() {
-	var oldestKey string
-	var oldestTime time.Time
-	first := true
-	for k, entry := range v.cache {
-		if first || entry.expiresAt.Before(oldestTime) {
-			oldestKey = k
-			oldestTime = entry.expiresAt
-			first = false
-		}
+// evictLRU removes the least-recently-used cache entry (back of list).
+// O(1) operation. Must be called with mu held.
+func (v *GEExchangeValidator) evictLRU() {
+	back := v.lruList.Back()
+	if back == nil {
+		return
 	}
-	if oldestKey != "" {
-		delete(v.cache, oldestKey)
-	}
+	entry := back.Value.(*geCacheEntry)
+	v.lruList.Remove(back)
+	delete(v.cache, entry.key)
 }
 
 // CacheLen returns the number of cached entries (for testing).

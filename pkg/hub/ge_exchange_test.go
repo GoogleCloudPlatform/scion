@@ -1003,6 +1003,59 @@ func TestFlexBool_InStruct(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// flexInt64 tests — Google's tokeninfo may return expires_in as string or number.
+// ---------------------------------------------------------------------------
+
+func TestFlexInt64_Number(t *testing.T) {
+	var i flexInt64
+	if err := json.Unmarshal([]byte(`3600`), &i); err != nil {
+		t.Fatalf("unmarshal number: %v", err)
+	}
+	if int64(i) != 3600 {
+		t.Errorf("got %d, want 3600", i)
+	}
+}
+
+func TestFlexInt64_String(t *testing.T) {
+	var i flexInt64
+	if err := json.Unmarshal([]byte(`"1800"`), &i); err != nil {
+		t.Fatalf("unmarshal string: %v", err)
+	}
+	if int64(i) != 1800 {
+		t.Errorf("got %d, want 1800", i)
+	}
+}
+
+func TestFlexInt64_Invalid(t *testing.T) {
+	var i flexInt64
+	if err := json.Unmarshal([]byte(`"not_a_number"`), &i); err == nil {
+		t.Error("expected error for non-numeric string")
+	}
+}
+
+func TestFlexInt64_InStruct(t *testing.T) {
+	// Test string form of expires_in in the full tokeninfo struct.
+	body := `{"azp":"client","aud":"client","sub":"s","email":"a@gmail.com","email_verified":"true","expires_in":"3600"}`
+	var resp googleTokenInfoResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if int64(resp.ExpiresIn) != 3600 {
+		t.Errorf("expires_in = %d, want 3600", resp.ExpiresIn)
+	}
+
+	// Test number form too.
+	body2 := `{"azp":"client","aud":"client","sub":"s","email":"a@gmail.com","email_verified":"true","expires_in":1800}`
+	var resp2 googleTokenInfoResponse
+	if err := json.Unmarshal([]byte(body2), &resp2); err != nil {
+		t.Fatalf("unmarshal number form: %v", err)
+	}
+	if int64(resp2.ExpiresIn) != 1800 {
+		t.Errorf("expires_in = %d, want 1800", resp2.ExpiresIn)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Access token aud/azp disagreement — strict rejection.
 // ---------------------------------------------------------------------------
 
