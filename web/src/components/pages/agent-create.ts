@@ -421,7 +421,15 @@ export class ScionPageAgentCreate extends LitElement {
 
       const [projectsRes, brokersRes, templates, settingsRes, harnessConfigsRes] =
         await Promise.all([
-          fetch('/api/v1/projects?mine=true&limit=100', { credentials: 'include' }),
+          // Not `mine=true`: on the server that resolves to projects where the
+          // caller holds the project-owner role specifically, but creating an
+          // agent does not require ownership — project-member carries
+          // agent.create, and POST /api/v1/agents authorizes against the target
+          // project, not against ownership. Asking for owned projects hid every
+          // project a member belongs to from this picker, so members could not
+          // create an agent anywhere even though the API would have allowed it.
+          // The unfiltered list is already scoped to what the caller may read.
+          fetch('/api/v1/projects?limit=100', { credentials: 'include' }),
           fetch('/api/v1/runtime-brokers?limit=100', { credentials: 'include' }),
           apiFetchAllPages<Template>(tmplUrl, 'templates'),
           fetch('/api/v1/settings/public', { credentials: 'include' }),
