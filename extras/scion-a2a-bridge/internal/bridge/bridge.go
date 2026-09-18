@@ -1016,6 +1016,11 @@ func (b *Bridge) correlateWithMetadata(ctx context.Context, projectID, agentSlug
 		// Standalone mode: SDK store is authoritative.
 		sdkTask, callerUserID, sdkErr := b.sdkTaskStore.GetByIDAndAgent(ctx, taskID, projectID, agentSlug)
 		if sdkErr == nil && sdkTask != nil {
+			// A terminal SDK snapshot fences late broker delivery. In particular,
+			// no assistant reply may be appended after a cross-replica cancel.
+			if sdkTask.Task.Status.State.Terminal() {
+				return "", fmt.Errorf("task is terminal")
+			}
 			if err := b.validateTopicUser(topic, callerUserID, taskID); err != nil {
 				return "", err
 			}
