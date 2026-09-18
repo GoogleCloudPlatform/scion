@@ -32,6 +32,7 @@ func TestAgentAllowlist_ConversationCommands(t *testing.T) {
 		"conversation.list",
 		"conversation.messages",
 		"conversation.get",
+		"conversation.get-message",
 		"conversation.create",
 		"conversation.set-default",
 		"conversation.participants",

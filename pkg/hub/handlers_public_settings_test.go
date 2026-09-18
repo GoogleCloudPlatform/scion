@@ -93,11 +93,11 @@ func TestPublicSettingsNativeChat(t *testing.T) {
 // hardcoding a harness name.
 func TestPublicSettingsAgentDefaults(t *testing.T) {
 	tests := []struct {
-		name                 string
-		defaults             opsettings.AgentDefaultsSettings
-		wantHarnessConfig    string
-		wantTemplate         string
-		wantModel            string
+		name              string
+		defaults          opsettings.AgentDefaultsSettings
+		wantHarnessConfig string
+		wantTemplate      string
+		wantModel         string
 	}{
 		{
 			name:              "empty defaults",

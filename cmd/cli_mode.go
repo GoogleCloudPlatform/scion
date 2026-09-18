@@ -114,6 +114,7 @@ var agentAllowed = map[string]bool{
 	"conversation.list":           true,
 	"conversation.messages":       true,
 	"conversation.get":            true,
+	"conversation.get-message":    true,
 	"conversation.create":         true,
 	"conversation.set-default":    true,
 	"conversation.participants":   true,

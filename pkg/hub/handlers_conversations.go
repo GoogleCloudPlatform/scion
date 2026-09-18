@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -145,9 +146,10 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 
 // handleConversationRoutes handles requests under /api/v1/conversations/.
 // Routes:
-//   - GET /api/v1/conversations/{id}                 — Get a single conversation
-//   - GET /api/v1/conversations/{id}/messages         — List messages in a conversation
-//   - PUT /api/v1/conversations/{id}/default-agent    — Set the default agent
+//   - GET /api/v1/conversations/{id}                       — Get a single conversation
+//   - GET /api/v1/conversations/{id}/messages              — List messages in a conversation
+//   - GET /api/v1/conversations/{id}/messages/{messageID}  — Get a single message
+//   - PUT /api/v1/conversations/{id}/default-agent          — Set the default agent
 func (s *Server) handleConversationRoutes(w http.ResponseWriter, r *http.Request) {
 	id, action := extractAction(r, "/api/v1/conversations")
 
@@ -158,6 +160,15 @@ func (s *Server) handleConversationRoutes(w http.ResponseWriter, r *http.Request
 			return
 		}
 		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+		return
+	}
+
+	if messageID, ok := strings.CutPrefix(action, "messages/"); ok {
+		if messageID == "" || strings.Contains(messageID, "/") {
+			NotFound(w, "Message")
+			return
+		}
+		s.handleGetConversationMessage(w, r, id, messageID)
 		return
 	}
 
@@ -334,6 +345,58 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// handleGetConversationMessage handles GET /api/v1/conversations/{id}/messages/{messageID}.
+func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Request, conversationID, messageID string) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Forbidden(w)
+		return
+	}
+
+	// Authorization: for direct conversations, use canonical DM key (kind+ID).
+	// For group conversations, use participant rows.
+	conv, err := s.store.GetConversation(ctx, conversationID)
+	if err != nil {
+		writeErrorFromErr(w, err, "Conversation")
+		return
+	}
+
+	if conv.Kind == "direct" {
+		if !authorizeDMRead(conv, identity.Type(), identity.ID()) {
+			Forbidden(w)
+			return
+		}
+	} else {
+		isParticipant, partErr := isConversationParticipant(ctx, s.store, conversationID, identity.Type(), identity.ID())
+		if partErr != nil {
+			writeErrorFromErr(w, partErr, "")
+			return
+		}
+		if !isParticipant {
+			Forbidden(w)
+			return
+		}
+	}
+
+	msg, err := s.store.GetMessage(ctx, messageID)
+	if err != nil {
+		writeErrorFromErr(w, err, "Message")
+		return
+	}
+	if msg.ConversationID != conversationID {
+		NotFound(w, "Message")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, msg)
 }
 
 // handleCreateConversation handles POST /api/v1/conversations.

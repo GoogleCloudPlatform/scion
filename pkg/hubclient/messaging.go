@@ -87,7 +87,7 @@ type TargetResolveResult struct {
 
 // ConversationResolveResult is the response from resolving a conversation reference.
 type ConversationResolveResult struct {
-	Exists       bool               `json:"exists"`
+	Exists       bool                `json:"exists"`
 	Conversation *ConversationDetail `json:"conversation,omitempty"`
 	PeerAgent    *TargetAgentInfo    `json:"peerAgent,omitempty"`
 }

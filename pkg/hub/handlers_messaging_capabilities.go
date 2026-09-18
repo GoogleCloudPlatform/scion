@@ -20,9 +20,9 @@ import (
 
 // messagingCapabilitiesResponse is the response for GET /api/v1/messaging/capabilities.
 type messagingCapabilitiesResponse struct {
-	HubEnabled                     bool     `json:"hubEnabled"`
-	CrossProjectConversationKinds  []string `json:"crossProjectConversationKinds"`
-	SupportedModes                 []string `json:"supportedModes"`
+	HubEnabled                    bool     `json:"hubEnabled"`
+	CrossProjectConversationKinds []string `json:"crossProjectConversationKinds"`
+	SupportedModes                []string `json:"supportedModes"`
 }
 
 // handleMessagingCapabilities handles GET /api/v1/messaging/capabilities.

@@ -34,6 +34,9 @@ type ConversationService interface {
 	// ListMessages returns messages in a conversation.
 	ListMessages(ctx context.Context, conversationID string, opts *ConversationMessagesOptions) (*store.ListResult[store.Message], error)
 
+	// GetMessage retrieves a single message from a conversation.
+	GetMessage(ctx context.Context, conversationID, messageID string) (*store.Message, error)
+
 	// Create creates a new conversation.
 	Create(ctx context.Context, req *CreateConversationRequest) (*ConversationDetail, error)
 
@@ -170,6 +173,15 @@ func (s *conversationService) ListMessages(ctx context.Context, conversationID s
 		result.Items = []store.Message{}
 	}
 	return result, nil
+}
+
+// GetMessage retrieves a single message from a conversation.
+func (s *conversationService) GetMessage(ctx context.Context, conversationID, messageID string) (*store.Message, error) {
+	resp, err := s.c.get(ctx, "/api/v1/conversations/"+url.PathEscape(conversationID)+"/messages/"+url.PathEscape(messageID), nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[store.Message](resp)
 }
 
 // Create creates a new conversation.
