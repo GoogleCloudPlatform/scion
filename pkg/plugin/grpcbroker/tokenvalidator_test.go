@@ -1514,3 +1514,144 @@ func TestGoogleIDTokenValidator_ConcurrentRefreshes_Coalesce(t *testing.T) {
 	assert.Equal(t, int32(1), fetchCount,
 		"concurrent JWKS refreshes should coalesce into a single HTTP fetch")
 }
+
+func TestGoogleIDTokenValidator_FirstCallerCancellationDoesNotAbortSharedFetch(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	const kid = "shared-fetch-key"
+	requestStarted := make(chan struct{})
+	releaseFetch := make(chan struct{})
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		select {
+		case <-releaseFetch:
+			jwk := jose.JSONWebKey{
+				Key:       &key.PublicKey,
+				KeyID:     kid,
+				Algorithm: string(jose.RS256),
+				Use:       "sig",
+			}
+			_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{
+				Keys: []jose.JSONWebKey{jwk},
+			})
+		case <-r.Context().Done():
+		}
+	}))
+	defer jwksServer.Close()
+
+	validator, err := NewGoogleIDTokenValidator(GoogleIDTokenValidatorConfig{
+		Audience: "https://bridge.example.com",
+		JWKSURL:  jwksServer.URL,
+	})
+	require.NoError(t, err)
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstResult := make(chan error, 1)
+	go func() {
+		_, err := validator.getSigningKey(firstCtx, kid)
+		firstResult <- err
+	}()
+	<-requestStarted
+
+	secondResult := make(chan error, 1)
+	go func() {
+		_, err := validator.getSigningKey(context.Background(), kid)
+		secondResult <- err
+	}()
+	// Give the second caller time to join the in-flight singleflight call.
+	time.Sleep(50 * time.Millisecond)
+	cancelFirst()
+
+	select {
+	case err := <-firstResult:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("first caller did not stop waiting after cancellation")
+	}
+
+	close(releaseFetch)
+	select {
+	case err := <-secondResult:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("second caller did not receive the shared fetch result")
+	}
+}
+
+func TestGoogleIDTokenValidator_AllCallersCanceledFetchStillStops(t *testing.T) {
+	requestStarted := make(chan struct{})
+	requestStopped := make(chan struct{})
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-r.Context().Done()
+		close(requestStopped)
+	}))
+	defer jwksServer.Close()
+
+	validator, err := NewGoogleIDTokenValidator(GoogleIDTokenValidatorConfig{
+		Audience: "https://bridge.example.com",
+		JWKSURL:  jwksServer.URL,
+	})
+	require.NoError(t, err)
+	validator.jwksFetchTimeout = 75 * time.Millisecond
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	secondCtx, cancelSecond := context.WithCancel(context.Background())
+	results := make(chan error, 2)
+	go func() {
+		_, err := validator.getSigningKey(firstCtx, "missing-key")
+		results <- err
+	}()
+	<-requestStarted
+	go func() {
+		_, err := validator.getSigningKey(secondCtx, "missing-key")
+		results <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancelFirst()
+	cancelSecond()
+
+	for range 2 {
+		select {
+		case err := <-results:
+			require.ErrorIs(t, err, context.Canceled)
+		case <-time.After(time.Second):
+			t.Fatal("canceled caller did not stop waiting")
+		}
+	}
+
+	select {
+	case <-requestStopped:
+	case <-time.After(time.Second):
+		t.Fatal("detached JWKS fetch outlived its configured timeout")
+	}
+}
+
+func TestGoogleIDTokenValidator_JWKSFetchTimeoutBoundsWork(t *testing.T) {
+	requestStopped := make(chan struct{})
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+		close(requestStopped)
+	}))
+	defer jwksServer.Close()
+
+	validator, err := NewGoogleIDTokenValidator(GoogleIDTokenValidatorConfig{
+		Audience: "https://bridge.example.com",
+		JWKSURL:  jwksServer.URL,
+	})
+	require.NoError(t, err)
+	validator.jwksFetchTimeout = 50 * time.Millisecond
+
+	startedAt := time.Now()
+	_, err = validator.getSigningKey(context.Background(), "missing-key")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(startedAt), time.Second)
+
+	select {
+	case <-requestStopped:
+	case <-time.After(time.Second):
+		t.Fatal("timed-out JWKS request did not stop")
+	}
+}

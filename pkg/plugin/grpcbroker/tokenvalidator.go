@@ -96,6 +96,7 @@ type GoogleIDTokenValidator struct {
 	jwksURL            string
 	logger             *slog.Logger
 	algorithms         []jose.SignatureAlgorithm
+	jwksFetchTimeout   time.Duration
 
 	// mu protects jwks and fetchedAt for short cache reads/writes.
 	// Network I/O (JWKS fetch) happens OUTSIDE this lock.
@@ -148,6 +149,7 @@ func NewGoogleIDTokenValidator(cfg GoogleIDTokenValidatorConfig) (*GoogleIDToken
 		authorizedSubjects: subjects,
 		jwksURL:            jwksURL,
 		logger:             logger.With("component", "google-id-token-validator"),
+		jwksFetchTimeout:   defaultJWKSFetchTimeout,
 		// Google ID tokens are signed with RS256 per Google's OIDC documentation.
 		// No other algorithms are accepted to prevent algorithm confusion attacks.
 		algorithms: []jose.SignatureAlgorithm{
@@ -276,7 +278,7 @@ func (v *GoogleIDTokenValidator) getSigningKey(ctx context.Context, kid string) 
 
 	// 2. Refresh path — coalesce concurrent fetches via singleflight.
 	// Network I/O happens here, OUTSIDE any mutex.
-	result, err, _ := v.fetchGroup.Do("jwks", func() (interface{}, error) {
+	resultCh := v.fetchGroup.DoChan("jwks", func() (interface{}, error) {
 		// Re-check cache inside singleflight — another caller may have
 		// already refreshed while we were waiting to enter.
 		v.mu.RLock()
@@ -289,7 +291,11 @@ func (v *GoogleIDTokenValidator) getSigningKey(ctx context.Context, kid string) 
 			return innerJWKS, nil
 		}
 
-		jwks, err := v.fetchJWKS(ctx)
+		// The shared fetch must not inherit any one caller's cancellation.
+		// Bound the detached work so it cannot outlive all waiters indefinitely.
+		fetchCtx, cancel := context.WithTimeout(context.Background(), v.fetchTimeout())
+		defer cancel()
+		jwks, err := v.fetchJWKS(fetchCtx)
 		if err != nil {
 			return nil, fmt.Errorf("JWKS fetch failed: %w", err)
 		}
@@ -302,11 +308,18 @@ func (v *GoogleIDTokenValidator) getSigningKey(ctx context.Context, kid string) 
 
 		return jwks, nil
 	})
-	if err != nil {
-		return nil, err
+
+	var result singleflight.Result
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result = <-resultCh:
+	}
+	if result.Err != nil {
+		return nil, result.Err
 	}
 
-	jwks := result.(*jose.JSONWebKeySet)
+	jwks := result.Val.(*jose.JSONWebKeySet)
 	keys := jwks.Key(kid)
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("no key found for kid %q", kid)
@@ -316,7 +329,7 @@ func (v *GoogleIDTokenValidator) getSigningKey(ctx context.Context, kid string) 
 
 // fetchJWKS fetches the JWKS from the configured URL.
 func (v *GoogleIDTokenValidator) fetchJWKS(ctx context.Context) (*jose.JSONWebKeySet, error) {
-	client := &http.Client{Timeout: defaultJWKSFetchTimeout}
+	client := &http.Client{Timeout: v.fetchTimeout()}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", v.jwksURL, nil)
 	if err != nil {
@@ -344,6 +357,13 @@ func (v *GoogleIDTokenValidator) fetchJWKS(ctx context.Context) (*jose.JSONWebKe
 	}
 
 	return &jwks, nil
+}
+
+func (v *GoogleIDTokenValidator) fetchTimeout() time.Duration {
+	if v.jwksFetchTimeout > 0 {
+		return v.jwksFetchTimeout
+	}
+	return defaultJWKSFetchTimeout
 }
 
 // keysToPublicKeys extracts the public key from each JSONWebKey.
@@ -566,14 +586,6 @@ func ValidateStandaloneServerConfig(cfg StandaloneServerConfig) error {
 	// Validate TLS field consistency.
 	if err := validateTLSFields(cfg.TLSCertFile, cfg.TLSKeyFile, cfg.TLSClientCAFile); err != nil {
 		errs = append(errs, err.Error())
-	}
-
-	// For non-local addresses without TLS, warn or error.
-	if !isLocal && cfg.TLSCertFile == "" {
-		// On Cloud Run, TLS is terminated by the platform — no server TLS needed.
-		// On Kubernetes, either native TLS or ingress/sidecar is required.
-		// We don't error here since Cloud Run h2c is valid, but the
-		// deployment docs make this explicit.
 	}
 
 	// mTLS client CA without server cert is meaningless.

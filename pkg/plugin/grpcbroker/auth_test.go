@@ -550,7 +550,7 @@ func writePEM(t *testing.T, path, pemType string, der []byte) {
 	t.Helper()
 	f, err := os.Create(path)
 	require.NoError(t, err)
-	defer f.Close()
+	defer func() { require.NoError(t, f.Close()) }()
 	require.NoError(t, pem.Encode(f, &pem.Block{Type: pemType, Bytes: der}))
 }
 

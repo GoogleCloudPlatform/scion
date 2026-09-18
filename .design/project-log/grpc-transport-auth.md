@@ -207,3 +207,43 @@ cd extras/scion-a2a-bridge && go build -buildvcs=false ./cmd/scion-a2a-bridge/
 1. Live Cloud Run / Kubernetes / GCE metadata validation deferred to #1620.
 2. `HealthCheck` swallows auth errors (returns degraded status) — existing
    design, documented and tested.
+
+## PR #1743 bounded pre-merge fixes (2026-09-18)
+
+The accepted transport tip `e9a4c8858cb4ffb88678f51d56a75043e9bf90d9`
+was preserved as the first parent of merge commit
+`a059d453cfae7cf74ff44f21480093b09c11c060`. The second parent is the
+then-current `origin/main` tip
+`21c380344b774fc09a9147f38f9b96be4ca77f34`; the merge was conflict-free.
+No rebase or force-push was used, and the original
+`scion/dev-grpc-transport` ref was not updated.
+
+The upstream review finding at
+`discussion_r4047071974` was confirmed with a red regression: canceling the
+request that led the shared JWKS singleflight aborted the HTTP fetch and made
+an uncanceled coalesced caller fail with `context canceled`. The refresh now
+uses `singleflight.DoChan`; each caller selects on its own context, while the
+coalesced network request uses a detached context bounded by the validator's
+JWKS fetch timeout. This prevents leader-cancellation coupling without leaving
+unbounded work when all callers cancel.
+
+Regressions cover leader cancellation, all waiters canceling, fetch timeout,
+cache/cooldown, unknown-kid suppression, cached-key availability during a
+refresh, and concurrent coalescing. Focused tests passed normally, with the
+race detector, and for 30 repetitions. The complete `grpcbroker`, plugin, and
+nested A2A bridge suites passed, as did Cloud Run ingress/principal negatives
+and dynamic activation auth propagation. Go 1.26.1 `gofmt`, vet, root and
+bridge builds, scoped golangci-lint, and `git diff --check` were clean.
+
+The only lint-only edits were checking `Close` in `auth_test.go` and removing
+the behaviorless empty branch in `tokenvalidator.go`. No tidy command was run,
+and unmerged baseline tidy PR #1744 / commit `07721e83` was not imported or
+duplicated.
+
+An additional `make ci` attempt stopped on legacy literals and conversation
+guard failures already present in the merged `origin/main`, while its
+`test-fast` stage exposed unrelated baseline/environment failures in command,
+config, Hub, authz, runtime, and runtime-broker packages. The transport package
+remained green. `make lint` and `make build` passed; the unrelated failures
+were documented in the durable report and intentionally left out of this
+bounded fix.
