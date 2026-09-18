@@ -103,7 +103,10 @@ func resolveAuthenticator(entry plugin.PluginEntry, logger *slog.Logger) (PerCal
 		}
 		// Require TLS for non-local addresses.
 		requireTLS := !isLocalAddress(entry.Address)
-		return NewTokenSourceCredentials(src, requireTLS), nil
+		// Send dual headers for Cloud Run: X-Serverless-Authorization for
+		// platform invoker auth, Authorization for application-level auth.
+		// Safe for non-Cloud Run targets (extra header is ignored).
+		return NewTokenSourceCredentials(src, requireTLS, WithCloudRunHeader()), nil
 
 	default:
 		return nil, fmt.Errorf("unsupported auth_type %q; supported: %q, %q",

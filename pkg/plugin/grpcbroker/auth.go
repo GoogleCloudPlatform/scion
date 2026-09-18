@@ -34,27 +34,68 @@ import (
 type TokenSourceCredentials struct {
 	source             transportauth.TokenSource
 	requireTLSSecurity bool
+
+	// sendCloudRunHeader controls whether the token is also sent in
+	// X-Serverless-Authorization for Cloud Run platform invoker auth.
+	// When true, the same token is duplicated into both headers:
+	//   - "authorization" → passes through to the bridge app for
+	//     application-level principal validation
+	//   - "x-serverless-authorization" → consumed by Cloud Run for
+	//     platform invoker permission checking; Cloud Run strips this
+	//     header after validation (it never reaches the container)
+	//
+	// This is safe for non-Cloud Run targets: unknown metadata is ignored.
+	sendCloudRunHeader bool
 }
 
 // NewTokenSourceCredentials wraps a TokenSource as gRPC per-RPC credentials.
 // When requireTLS is true, gRPC enforces transport security (TLS) on every
 // call. Set to false only for local/h2c development connections.
-func NewTokenSourceCredentials(source transportauth.TokenSource, requireTLS bool) *TokenSourceCredentials {
-	return &TokenSourceCredentials{
+// When sendCloudRunHeader is true, the token is also sent in
+// X-Serverless-Authorization for Cloud Run platform auth.
+func NewTokenSourceCredentials(source transportauth.TokenSource, requireTLS bool, opts ...TokenSourceOption) *TokenSourceCredentials {
+	c := &TokenSourceCredentials{
 		source:             source,
 		requireTLSSecurity: requireTLS,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
-// GetRequestMetadata returns the authorization header for each RPC call.
+// TokenSourceOption configures optional TokenSourceCredentials behavior.
+type TokenSourceOption func(*TokenSourceCredentials)
+
+// WithCloudRunHeader enables sending the token in both "authorization" and
+// "x-serverless-authorization" headers. On Cloud Run, the platform validates
+// and strips X-Serverless-Authorization; Authorization passes through to the
+// bridge application for principal validation.
+func WithCloudRunHeader() TokenSourceOption {
+	return func(c *TokenSourceCredentials) {
+		c.sendCloudRunHeader = true
+	}
+}
+
+// GetRequestMetadata returns the authorization header(s) for each RPC call.
+// When Cloud Run mode is enabled, returns both authorization and
+// x-serverless-authorization with the same bearer token.
 func (c *TokenSourceCredentials) GetRequestMetadata(ctx context.Context, uri ...string) (map[string]string, error) {
 	token, err := c.source.Token()
 	if err != nil {
 		return nil, fmt.Errorf("grpc auth: token fetch: %w", err)
 	}
-	return map[string]string{
-		"authorization": "Bearer " + token,
-	}, nil
+	bearer := "Bearer " + token
+	md := map[string]string{
+		"authorization": bearer,
+	}
+	if c.sendCloudRunHeader {
+		// Cloud Run consumes X-Serverless-Authorization for platform invoker
+		// auth and strips it. The standard Authorization header passes through
+		// to the container for application-level validation.
+		md["x-serverless-authorization"] = bearer
+	}
+	return md, nil
 }
 
 // RequireTransportSecurity reports whether TLS is required.

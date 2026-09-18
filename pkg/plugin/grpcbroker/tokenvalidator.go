@@ -57,10 +57,14 @@ type GoogleIDTokenValidatorConfig struct {
 	Audience string
 
 	// AuthorizedSubjects is the set of authorized service account emails
-	// (the "sub" or "email" claim). When non-empty, only tokens from these
-	// principals are accepted. When empty, any valid Google token with the
-	// correct audience is accepted (suitable only when the audience is
-	// purpose-specific and cannot be obtained by unrelated services).
+	// (matched against the "email" claim, not "sub"). For Google Cloud
+	// service accounts, the email is the stable human-readable identifier
+	// (e.g., "hub-sa@project.iam.gserviceaccount.com"), while "sub" is
+	// the SA's opaque numeric unique ID. Authorization is performed against
+	// the email because it is the meaningful principal identifier in IAM
+	// policy and audit logs.
+	//
+	// Required — tokens from principals not in this list are rejected.
 	AuthorizedSubjects []string
 
 	// JWKSURL overrides the Google JWKS endpoint (for testing).
@@ -126,9 +130,10 @@ func NewGoogleIDTokenValidator(cfg GoogleIDTokenValidatorConfig) (*GoogleIDToken
 		authorizedSubjects: subjects,
 		jwksURL:            jwksURL,
 		logger:             logger.With("component", "google-id-token-validator"),
+		// Google ID tokens are signed with RS256 per Google's OIDC documentation.
+		// No other algorithms are accepted to prevent algorithm confusion attacks.
 		algorithms: []jose.SignatureAlgorithm{
 			jose.RS256,
-			jose.ES256,
 		},
 	}, nil
 }
@@ -183,9 +188,12 @@ func (v *GoogleIDTokenValidator) ValidateToken(ctx context.Context, tokenString 
 			claims.Audience, v.audience)
 	}
 
-	// 7. Validate time (expiry and not-before).
+	// 7. Validate time (expiry is mandatory; not-before is optional).
+	if claims.Expiry == nil {
+		return status.Error(codes.Unauthenticated, "token has no expiry (exp claim is required)")
+	}
 	now := time.Now()
-	if claims.Expiry != nil && now.After(claims.Expiry.Time()) {
+	if now.After(claims.Expiry.Time()) {
 		return status.Error(codes.Unauthenticated, "token is expired")
 	}
 	if claims.NotBefore != nil && now.Before(claims.NotBefore.Time()) {
@@ -294,10 +302,13 @@ func keysToPublicKeys(keys []jose.JSONWebKey) []interface{} {
 }
 
 // HMACTokenValidator validates HMAC-signed JWT tokens for environments where
-// the bridge and Hub share a symmetric signing key. This is the simpler
-// alternative to Google ID tokens for localhost/dev deployments.
+// the bridge and Hub share a symmetric signing key. This validator is not
+// wired into the production standalone bridge config path (no matching
+// client-side HMAC JWT minting exists in the factory). It is retained for
+// testing and potential future use with an explicit HMAC client credential.
 type HMACTokenValidator struct {
 	key                []byte
+	expectedIssuer     string
 	expectedAudience   string
 	authorizedSubjects map[string]bool
 }
@@ -307,11 +318,14 @@ type HMACTokenValidatorConfig struct {
 	// Key is the shared HMAC signing key (raw bytes).
 	Key []byte
 
-	// Audience is the expected audience claim.
+	// Issuer is the expected issuer claim. Required.
+	Issuer string
+
+	// Audience is the expected audience claim. Required.
 	Audience string
 
 	// AuthorizedSubjects limits which subjects (sub claim) are accepted.
-	// When empty, any valid token with the correct audience is accepted.
+	// Required — at least one authorized subject must be specified.
 	AuthorizedSubjects []string
 }
 
@@ -320,8 +334,14 @@ func NewHMACTokenValidator(cfg HMACTokenValidatorConfig) (*HMACTokenValidator, e
 	if len(cfg.Key) == 0 {
 		return nil, fmt.Errorf("HMAC key is required")
 	}
+	if cfg.Issuer == "" {
+		return nil, fmt.Errorf("issuer is required for HMAC validator")
+	}
 	if cfg.Audience == "" {
 		return nil, fmt.Errorf("audience is required")
+	}
+	if len(cfg.AuthorizedSubjects) == 0 {
+		return nil, fmt.Errorf("at least one authorized subject is required for HMAC validator")
 	}
 	subjects := make(map[string]bool, len(cfg.AuthorizedSubjects))
 	for _, s := range cfg.AuthorizedSubjects {
@@ -329,13 +349,14 @@ func NewHMACTokenValidator(cfg HMACTokenValidatorConfig) (*HMACTokenValidator, e
 	}
 	return &HMACTokenValidator{
 		key:                cfg.Key,
+		expectedIssuer:     cfg.Issuer,
 		expectedAudience:   cfg.Audience,
 		authorizedSubjects: subjects,
 	}, nil
 }
 
-// ValidateToken verifies an HMAC-signed JWT's signature, audience, expiry,
-// and authorized subject.
+// ValidateToken verifies an HMAC-signed JWT's signature, issuer, audience,
+// expiry, and authorized subject.
 func (v *HMACTokenValidator) ValidateToken(_ context.Context, tokenString string) error {
 	tok, err := jwt.ParseSigned(tokenString, []jose.SignatureAlgorithm{jose.HS256})
 	if err != nil {
@@ -347,6 +368,12 @@ func (v *HMACTokenValidator) ValidateToken(_ context.Context, tokenString string
 		return status.Errorf(codes.Unauthenticated, "token signature verification failed: %v", err)
 	}
 
+	// Validate issuer.
+	if claims.Issuer != v.expectedIssuer {
+		return status.Errorf(codes.Unauthenticated, "issuer mismatch: token has %q, expected %q",
+			claims.Issuer, v.expectedIssuer)
+	}
+
 	// Validate audience.
 	aud := jwt.Audience(claims.Audience)
 	if !aud.Contains(v.expectedAudience) {
@@ -354,24 +381,25 @@ func (v *HMACTokenValidator) ValidateToken(_ context.Context, tokenString string
 			claims.Audience, v.expectedAudience)
 	}
 
-	// Validate time.
+	// Validate time (expiry is mandatory).
+	if claims.Expiry == nil {
+		return status.Error(codes.Unauthenticated, "token has no expiry (exp claim is required)")
+	}
 	now := time.Now()
-	if claims.Expiry != nil && now.After(claims.Expiry.Time()) {
+	if now.After(claims.Expiry.Time()) {
 		return status.Error(codes.Unauthenticated, "token is expired")
 	}
 	if claims.NotBefore != nil && now.Before(claims.NotBefore.Time()) {
 		return status.Error(codes.Unauthenticated, "token is not yet valid")
 	}
 
-	// Authorize subject.
-	if len(v.authorizedSubjects) > 0 {
-		sub := claims.Subject
-		if sub == "" {
-			return status.Error(codes.PermissionDenied, "token has no subject claim")
-		}
-		if !v.authorizedSubjects[sub] {
-			return status.Errorf(codes.PermissionDenied, "subject %q is not authorized", sub)
-		}
+	// Authorize subject (mandatory).
+	sub := claims.Subject
+	if sub == "" {
+		return status.Error(codes.PermissionDenied, "token has no subject claim")
+	}
+	if !v.authorizedSubjects[sub] {
+		return status.Errorf(codes.PermissionDenied, "subject %q is not authorized", sub)
 	}
 
 	return nil
@@ -384,10 +412,8 @@ type StandaloneAuthMode string
 
 const (
 	// AuthModeGoogleIDToken uses Google OIDC ID tokens validated via JWKS.
+	// This is the production auth mode for Cloud Run and Kubernetes.
 	AuthModeGoogleIDToken StandaloneAuthMode = "google_id_token"
-
-	// AuthModeHMAC uses HMAC-signed JWTs with a shared signing key.
-	AuthModeHMAC StandaloneAuthMode = "hmac"
 
 	// AuthModeLocalDev allows unauthenticated access for localhost-only dev.
 	AuthModeLocalDev StandaloneAuthMode = "local_dev"
@@ -396,20 +422,18 @@ const (
 // StandaloneServerConfig holds the full configuration for a standalone bridge's
 // gRPC server, including authentication mode, TLS, and authorized principals.
 type StandaloneServerConfig struct {
-	// AuthMode selects the authentication mode.
+	// AuthMode selects the authentication mode. Supported:
+	//   - "google_id_token" — JWKS-based Google OIDC ID token validation (production)
+	//   - "local_dev" — unauthenticated, localhost only (development)
+	//   - "" — empty is equivalent to local_dev for local addresses, rejected for remote
 	AuthMode StandaloneAuthMode
 
-	// Audience is the expected audience claim (required for all auth modes
-	// except local_dev).
+	// Audience is the expected audience claim. Required for google_id_token.
 	Audience string
 
-	// AuthorizedSubjects is the set of authorized service account emails
-	// (for google_id_token) or subjects (for hmac). Required for
-	// google_id_token mode.
+	// AuthorizedSubjects is the set of authorized service account emails.
+	// Required for google_id_token mode.
 	AuthorizedSubjects []string
-
-	// HMACKey is the shared signing key for hmac mode.
-	HMACKey []byte
 
 	// JWKSURL overrides the Google JWKS endpoint (for testing).
 	JWKSURL string
@@ -444,14 +468,6 @@ func ValidateStandaloneServerConfig(cfg StandaloneServerConfig) error {
 				"specify the Hub service account email(s)")
 		}
 
-	case AuthModeHMAC:
-		if cfg.Audience == "" {
-			errs = append(errs, "audience is required for hmac auth mode")
-		}
-		if len(cfg.HMACKey) == 0 {
-			errs = append(errs, "hmac_key is required for hmac auth mode")
-		}
-
 	case AuthModeLocalDev:
 		if !isLocal {
 			errs = append(errs, fmt.Sprintf("local_dev auth mode is only allowed for "+
@@ -461,13 +477,13 @@ func ValidateStandaloneServerConfig(cfg StandaloneServerConfig) error {
 	case "":
 		if !isLocal {
 			errs = append(errs, "auth_mode is required for non-local listen addresses; "+
-				"set to google_id_token, hmac, or use a local address for development")
+				"set to google_id_token or use a local address for development")
 		}
 		// Empty + local is allowed (implicit local_dev).
 
 	default:
 		errs = append(errs, fmt.Sprintf("unsupported auth_mode %q; supported: "+
-			"google_id_token, hmac, local_dev", cfg.AuthMode))
+			"google_id_token, local_dev", cfg.AuthMode))
 	}
 
 	// Validate TLS field consistency.
@@ -528,17 +544,6 @@ func BuildStandaloneServerOptions(cfg StandaloneServerConfig) ([]grpc.ServerOpti
 		})
 		if err != nil {
 			return nil, fmt.Errorf("google ID token validator: %w", err)
-		}
-		validator = v
-
-	case AuthModeHMAC:
-		v, err := NewHMACTokenValidator(HMACTokenValidatorConfig{
-			Key:                cfg.HMACKey,
-			Audience:           cfg.Audience,
-			AuthorizedSubjects: cfg.AuthorizedSubjects,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("HMAC token validator: %w", err)
 		}
 		validator = v
 

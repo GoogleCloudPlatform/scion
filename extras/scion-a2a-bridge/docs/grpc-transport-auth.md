@@ -57,6 +57,11 @@ Credentials (off-GCE) to obtain audience-correct Google OIDC ID tokens.
 Tokens are cached and refreshed automatically before expiry — no restart
 or secret rotation is needed.
 
+For Cloud Run targets, the Hub sends the same token in both
+`Authorization` (for application-level auth) and `X-Serverless-Authorization`
+(for Cloud Run platform invoker auth). See "Cloud Run Dual-Header Semantics"
+below.
+
 ### With TLS for Kubernetes
 
 ```yaml
@@ -236,10 +241,9 @@ combinations cause immediate process exit.
 
 | Variable | Values | Required | Description |
 |----------|--------|----------|-------------|
-| `GRPC_AUTH_MODE` | `google_id_token`, `hmac`, `local_dev` | conditional | Auth mode. Required for non-local listen addresses. |
-| `GRPC_AUTH_AUDIENCE` | URL string | conditional | Expected audience claim. Required for `google_id_token` and `hmac`. |
+| `GRPC_AUTH_MODE` | `google_id_token`, `local_dev` | conditional | Auth mode. Required for non-local listen addresses. |
+| `GRPC_AUTH_AUDIENCE` | URL string | conditional | Expected audience claim. Required for `google_id_token`. |
 | `GRPC_AUTH_SUBJECTS` | comma-separated emails | conditional | Authorized service account emails. Required for `google_id_token`. |
-| `GRPC_AUTH_HMAC_KEY` | base64 string | conditional | HMAC signing key (base64-encoded). Required for `hmac`. |
 | `GRPC_TLS_CERT` | file path | no | Server TLS certificate (Kubernetes only; ignored in mux mode). |
 | `GRPC_TLS_KEY` | file path | no | Server TLS private key (Kubernetes only; ignored in mux mode). |
 | `GRPC_TLS_CLIENT_CA` | file path | no | Client CA for mTLS verification (Kubernetes only; ignored in mux mode). |
@@ -281,6 +285,29 @@ Unsubscribe, GetInfo, HealthCheck) unless that SA is explicitly listed
 in `GRPC_AUTH_SUBJECTS`. This separation is verified by the negative
 test `TestGoogleIDTokenValidator_GEInvoker_CannotCallControlRPCs`.
 
+### Cloud Run Dual-Header Semantics
+
+On Cloud Run, the Hub client sends the same Google ID token in two headers:
+
+- **`X-Serverless-Authorization: Bearer <token>`** — consumed by the Cloud Run
+  platform for invoker permission checking. Cloud Run validates this header
+  and strips it; it never reaches the container.
+- **`authorization: Bearer <token>`** — passes through to the container for
+  application-level principal validation by the bridge's gRPC interceptor.
+
+This is Cloud Run's documented behavior: when both headers are present, only
+`X-Serverless-Authorization` is platform-checked and removed. The standard
+`Authorization` header remains intact for the application.
+
+The client factory (`auth_type: google_id_token`) enables this automatically
+via `WithCloudRunHeader()`. This is safe for non-Cloud Run targets — the
+extra `x-serverless-authorization` metadata is ignored by gRPC servers.
+
+**Security invariant**: The bridge's gRPC interceptor reads only from the
+`authorization` metadata key. Even if `x-serverless-authorization` somehow
+reached the container, it cannot substitute for application-level auth.
+This is verified by the test `TestCloudRunIngressMetadataPassthrough`.
+
 ### TLS and Mux-Port Separation
 
 When `MUX_PORTS=true` or `K_SERVICE` is set (Cloud Run), the bridge
@@ -321,6 +348,11 @@ apply in both modes.
 | Wrong client cert fails closed | ✅ Verified (unit tests) |
 | Missing client cert fails closed | ✅ Verified (unit tests) |
 | Factory wires auth from config | ✅ Verified (unit tests) |
+| Production factory-to-server end-to-end | ✅ Verified (integration test) |
+| Cloud Run dual-header (auth + x-serverless) | ✅ Verified (unit tests) |
+| GE invoker with only x-serverless-auth rejected | ✅ Verified (ingress simulation test) |
+| Stripped platform header cannot auth | ✅ Verified (metadata passthrough test) |
+| Token exp claim required | ✅ Verified (unit tests) |
 | Cloud Run audience-correct ID token | ⚠️ Not live-validated (requires deployed Cloud Run service) |
 | Cloud Run h2c mux routing | ⚠️ Not live-validated |
 | Kubernetes native TLS end-to-end | ⚠️ Not live-validated (requires K8s cluster with certs) |

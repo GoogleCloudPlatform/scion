@@ -617,18 +617,17 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 //
 // Environment variables:
 //
-//	GRPC_AUTH_MODE       - google_id_token | hmac | local_dev (default: empty)
+//	GRPC_AUTH_MODE       - google_id_token | local_dev (default: empty)
 //	GRPC_AUTH_AUDIENCE   - expected audience claim
 //	GRPC_AUTH_SUBJECTS   - comma-separated authorized subject emails
-//	GRPC_AUTH_HMAC_KEY   - base64-encoded HMAC key (for hmac mode)
 //	GRPC_TLS_CERT        - path to server TLS certificate (Kubernetes only)
 //	GRPC_TLS_KEY         - path to server TLS key (Kubernetes only)
 //	GRPC_TLS_CLIENT_CA   - path to client CA for mTLS (Kubernetes only)
 func resolveGRPCServerAuth(muxPorts bool, log *slog.Logger) grpcbroker.StandaloneServerConfig {
 	cfg := grpcbroker.StandaloneServerConfig{
-		AuthMode:  grpcbroker.StandaloneAuthMode(os.Getenv("GRPC_AUTH_MODE")),
-		Audience:  os.Getenv("GRPC_AUTH_AUDIENCE"),
-		Logger:    log,
+		AuthMode: grpcbroker.StandaloneAuthMode(os.Getenv("GRPC_AUTH_MODE")),
+		Audience: os.Getenv("GRPC_AUTH_AUDIENCE"),
+		Logger:   log,
 	}
 
 	if subjects := os.Getenv("GRPC_AUTH_SUBJECTS"); subjects != "" {
@@ -636,15 +635,6 @@ func resolveGRPCServerAuth(muxPorts bool, log *slog.Logger) grpcbroker.Standalon
 		for i, s := range cfg.AuthorizedSubjects {
 			cfg.AuthorizedSubjects[i] = strings.TrimSpace(s)
 		}
-	}
-
-	if hmacKeyB64 := os.Getenv("GRPC_AUTH_HMAC_KEY"); hmacKeyB64 != "" {
-		key, err := base64.StdEncoding.DecodeString(hmacKeyB64)
-		if err != nil {
-			log.Error("GRPC_AUTH_HMAC_KEY is not valid base64", "error", err)
-			os.Exit(1)
-		}
-		cfg.HMACKey = key
 	}
 
 	// TLS is only relevant for the dedicated gRPC listener (Kubernetes).
