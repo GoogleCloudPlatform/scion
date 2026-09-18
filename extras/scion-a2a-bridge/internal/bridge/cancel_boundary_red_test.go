@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 )
 
 // TestCrossReplicaCancelTerminatesOriginalWaiter is the production-path proof
@@ -143,5 +145,95 @@ func TestCrossReplicaCancelTerminatesOriginalWaiter(t *testing.T) {
 	captures := getHubSends(t, procA.URL())
 	if len(captures) != 1 {
 		t.Errorf("original Hub send replayed: replica_a_captures=%d", len(captures))
+	}
+}
+
+func TestCanceledUpdateAtomicRollbackAndOwnership(t *testing.T) {
+	if os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	store := testPostgresTaskStore(t)
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "cancel-rollback-" + suffix
+	constraintName := "test_block_cancel_" + suffix
+	dedupKey := "sdk-cancel:" + taskID
+	ctx := ctxForRouteAndCaller("cancel-rollback-project-"+suffix, "cancel-agent", "cancel-owner")
+
+	t.Cleanup(func() {
+		store.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE a2a_task_events DROP CONSTRAINT IF EXISTS %s`, constraintName))
+		store.db.ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id=$1`, taskID)
+		store.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id=$1`, taskID)
+	})
+
+	task := &a2a.Task{ID: a2a.TaskID(taskID), Status: a2a.TaskStatus{State: a2a.TaskStateWorking}}
+	version, err := store.Create(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseOwner := "cancel-rollback-owner:" + suffix
+	claimed, err := store.ClaimExecution(ctx, taskID, leaseOwner, time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("claim=%v err=%v", claimed, err)
+	}
+	canceled := *task
+	canceled.Status.State = a2a.TaskStateCanceled
+
+	// A mismatched authenticated caller cannot transition the task or advance
+	// its cursor before the atomic path is exercised.
+	wrongCtx := ctxForRouteAndCaller("cancel-rollback-project-"+suffix, "cancel-agent", "attacker")
+	if _, err := store.Update(wrongCtx, &taskstore.UpdateRequest{
+		Task: &canceled, PrevVersion: version,
+	}); err == nil {
+		t.Fatal("wrong owner canceled task")
+	}
+
+	if _, err := store.db.ExecContext(ctx,
+		fmt.Sprintf(`ALTER TABLE a2a_task_events ADD CONSTRAINT %s
+			CHECK (dedup_key IS NULL OR dedup_key != '%s')`, constraintName, dedupKey)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(ctx, &taskstore.UpdateRequest{
+		Task: &canceled, PrevVersion: version,
+	}); err == nil {
+		t.Fatal("cancel update succeeded despite injected final-event failure")
+	}
+
+	var gotVersion, cursor int64
+	var gotState, gotOwner string
+	if err := store.db.QueryRowContext(ctx, `SELECT version, payload->'status'->>'state',
+		COALESCE(exec_owner, ''), last_event_cursor FROM a2a_sdk_tasks WHERE id=$1`, taskID).
+		Scan(&gotVersion, &gotState, &gotOwner, &cursor); err != nil {
+		t.Fatal(err)
+	}
+	if gotVersion != int64(version) || gotState != "TASK_STATE_WORKING" || gotOwner != leaseOwner || cursor != 0 {
+		t.Fatalf("cancel rollback failed: version=%d state=%s owner=%q cursor=%d", gotVersion, gotState, gotOwner, cursor)
+	}
+	var eventCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM a2a_task_events WHERE task_id=$1`, taskID).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 0 {
+		t.Fatalf("cancel rollback left %d events", eventCount)
+	}
+
+	if _, err := store.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE a2a_task_events DROP CONSTRAINT %s`, constraintName)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(ctx, &taskstore.UpdateRequest{
+		Task: &canceled, PrevVersion: version,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var final bool
+	if err := store.db.QueryRowContext(ctx, `SELECT s.version, s.payload->'status'->>'state',
+		COALESCE(s.exec_owner, ''), s.last_event_cursor, e.final
+		FROM a2a_sdk_tasks s JOIN a2a_task_events e ON e.id=s.last_event_cursor
+		WHERE s.id=$1 AND e.task_id=s.id AND e.dedup_key=$2`, taskID, dedupKey).
+		Scan(&gotVersion, &gotState, &gotOwner, &cursor, &final); err != nil {
+		t.Fatal(err)
+	}
+	if gotVersion != int64(version)+1 || gotState != "TASK_STATE_CANCELED" || gotOwner != "" || cursor == 0 || !final {
+		t.Fatalf("atomic cancel incoherent: version=%d state=%s owner=%q cursor=%d final=%v",
+			gotVersion, gotState, gotOwner, cursor, final)
 	}
 }
