@@ -14,7 +14,7 @@ Zero production Go code was modified, preserving the post-merge tree integrity. 
 ## Scope & Boundaries Followed
 
 1. **Zero production Go changes:** No changes to `pkg/`, `cmd/`, or `extras/scion-a2a-bridge/internal/`. No `Milliseconds()` addition to `pgstore.go`.
-2. **Diagnostic mock isolation:** Line 166 of `extras/scion-a2a-bridge/internal/bridge/followup_test.go` was kept completely untouched in this branch (managed on `scion/dev-postmerge-mock-dedup`).
+2. **Resolved diagnostic mock dedup (#1746):** Upstream PR #1746 merged the duplicate mock resolution on `extras/scion-a2a-bridge/internal/bridge/followup_test.go:166` into `main` at `0c07fdee3eefac5a21f93878211bf507b2e5c6a7`. Current `main` is merged cleanly into this branch with zero conflicts, allowing the full bridge package suite (`go test ./...`) to pass cleanly end-to-end.
 3. **Deterministic lease and crash synchronization:** Replaced the legacy sleep in `TestCrashLeaseBoundary` with bounded active PostgreSQL polling on `exec_heartbeat < NOW() - interval '2 seconds'`. Replaced the post-terminal sleep with deterministic observable synchronization (`/__test/janitor-cycle`) across both replicas, with causal regression assertions verifying `reapedCount == 0` and zero Hub message replay before manual retry. `/__test/janitor-cycle` executes a deterministic maintenance pass (`ReapStaleTasks` then `RunSweep`). Scoped no-replay evidence is verified as terminal fencing plus post-terminal maintenance pass and unchanged Hub counter (not a global poll/executor callback barrier). Crash behavior is precisely verified as durable stale-task failure/reap plus visible terminal event and no automatic Hub replay (no successful execution reclaim is claimed).
 4. **Exact cursor/reconnect verification:** Proved intermediate event absence from snapshot history, verified `a2a_task_events.id > a2a_sdk_tasks.last_event_cursor`, single stream delivery, absence of duplicate replay, and verified `_bridgeEventID` never leaks.
 5. **gRPC BrokerService 6 Unary Methods:** `controlRPCErrors` explicitly verifies the six unary methods of `proto/broker/v1` `BrokerService`: `Configure`, `Publish`, `Subscribe`, `Unsubscribe`, `HealthCheck`, and `GetInfo`.
@@ -107,12 +107,31 @@ Pre-test canary sentinel 'canary-1' verified: 'must-survive'
 Post-test canary sentinel 'canary-1' matches pre-test baseline: 'must-survive'
 ```
 
-### Runner Negative and Fail-Closed Proofs
-- **Absent DB:** `TEST_DATABASE_URL="postgres://[user]:[password]@127.0.0.1:5433/a2a_test?sslmode=disable" ./extras/scion-a2a-bridge/scripts/run-integration-ci.sh` -> exit code `1` (`::error::PostgreSQL is unreachable via psql or TEST_DATABASE_URL is invalid. Fails closed.`).
-- **Missing psql:** `bash -c 'mkdir -p /tmp/no_psql_bin && for f in bash dirname pwd sed grep mktemp cat rm go; do ln -sf $(which $f) /tmp/no_psql_bin/$f; done && PATH=/tmp/no_psql_bin ./extras/scion-a2a-bridge/scripts/run-integration-ci.sh'` -> exit code `1` (`::error::psql is required for the CI entrypoint but was not found in PATH. Fails closed.`).
-- **Injected Skip Detection:** `TEST_TRIGGER_INJECTED_SKIP=1 ./extras/scion-a2a-bridge/scripts/run-integration-ci.sh` -> exit code `1` (`::error::Phase 1: Standard Integration Suite detected forbidden test skip(s): - SKIPPED: TestInjectedSkipFixture`).
-- **Canary Mutation Detection:** `TEST_TRIGGER_CANARY_MUTATION=1 ./extras/scion-a2a-bridge/scripts/run-integration-ci.sh` -> exit code `1` (`::error::Canary sentinel 'canary-1' was mutated or deleted after test phases (got 'mutated', want 'must-survive'). Fails closed.`).
-- **Positive Run:** `./extras/scion-a2a-bridge/scripts/run-integration-ci.sh` -> exit code `0`.
+### Full Bridge Package Suite
+```
+$ cd extras/scion-a2a-bridge && go test ./...
+?   	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/cmd/scion-a2a-bridge	[no test files]
+ok  	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/integration	10.044s
+ok  	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/bridge	35.422s
+?   	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/identity	[no test files]
+ok  	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state	(cached)
+
+$ cd extras/scion-a2a-bridge && go test -race -count=1 ./internal/...
+ok  	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/bridge	36.900s
+?   	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/identity	[no test files]
+ok  	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state	1.542s
+```
+
+### Upstream Merge DAG
+Current upstream `main` (`0c07fdee3eefac5a21f93878211bf507b2e5c6a7`, incorporating PR #1746) is cleanly merged into `scion/dev-postmerge-integration-harness` via merge commit `98c996a5`:
+```
+*   98c996a5 Merge remote-tracking branch 'origin/main' into scion/dev-postmerge-integration-harness
+| \
+| * 0c07fdee fix(a2a-bridge): remove duplicate mock Messaging declaration (#1746)
+* | b86ccc32 test(ge-a2a): redact runner DSN, require psql, enforce canary baseline, and detect test skips (#1620)
+* | 6e583e90 test(ge-a2a): add skipped acceptance detection negative test and refine maintenance pass wording (#1620)
+* | b93a54ee test(ge-a2a): add fail-closed PG CI runner, deployment manifests, and validation (#1620)
+```
 
 ## Files Committed
 - `.github/workflows/extras-ci.yml` (added `a2a-bridge-postgres-integration` job with PostgreSQL 15 service)
