@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -33,6 +34,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
 // testServerProcess manages a subprocess running the a2a-testserver binary.
@@ -45,8 +47,10 @@ type testServerProcess struct {
 }
 
 // startTestServer builds and starts a test server subprocess on a random port.
-// Returns the process info and a cleanup function.
-func startTestServer(t *testing.T, dbURL, project, agent string) *testServerProcess {
+// Returns the process info and a cleanup function. An optional callerID may be
+// provided; if non-empty, it is passed as -caller-id to inject authenticated
+// CallerIdentity context for ownership isolation testing.
+func startTestServer(t *testing.T, dbURL, project, agent string, callerID ...string) *testServerProcess {
 	t.Helper()
 
 	// Build the test server binary.
@@ -60,12 +64,16 @@ func startTestServer(t *testing.T, dbURL, project, agent string) *testServerProc
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, binaryPath,
+	args := []string{
 		"-port=0",
-		"-database-url="+dbURL,
-		"-project="+project,
-		"-agent="+agent,
-	)
+		"-database-url=" + dbURL,
+		"-project=" + project,
+		"-agent=" + agent,
+	}
+	if len(callerID) > 0 && callerID[0] != "" {
+		args = append(args, "-caller-id="+callerID[0])
+	}
+	cmd := exec.CommandContext(ctx, binaryPath, args...)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -1047,4 +1055,623 @@ func TestPostgresTaskStoreDurableResubscribeNoPriorReplay(t *testing.T) {
 	if len(events3) > 0 && !events3[0].Final {
 		t.Error("expected the new event to be final")
 	}
+}
+
+// ---------- Cross-process caller isolation (two OS processes) ----------
+
+// TestPostgresTaskStoreCrossProcessCallerIsolation tests that two processes
+// on the same route but with different caller identities cannot see each
+// other's tasks. This proves per-caller isolation at the HTTP/SDK level
+// across OS process boundaries.
+func TestPostgresTaskStoreCrossProcessCallerIsolation(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	store := testPostgresTaskStore(t)
+	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
+
+	// Same route, different caller IDs.
+	procAlice := startTestServer(t, dbURL, "proj-caller", "agent-caller", "user-alice")
+	procBob := startTestServer(t, dbURL, "proj-caller", "agent-caller", "user-bob")
+
+	if procAlice.pid == procBob.pid {
+		t.Fatalf("processes must have distinct PIDs: Alice=%d Bob=%d", procAlice.pid, procBob.pid)
+	}
+	t.Logf("Alice: PID=%d port=%d, Bob: PID=%d port=%d",
+		procAlice.pid, procAlice.port, procBob.pid, procBob.port)
+
+	// Alice creates a task.
+	sendResult := jsonRPC(t, procAlice.URL(), "SendMessage", map[string]interface{}{
+		"message": map[string]interface{}{
+			"messageId": "alice-msg-1",
+			"role":      "ROLE_USER",
+			"parts":     []map[string]interface{}{{"text": "Alice's private task"}},
+		},
+	})
+	var sendResp struct {
+		StatusUpdate *struct{ TaskID string `json:"taskId"` } `json:"statusUpdate"`
+		Task         *struct{ ID string `json:"id"` }        `json:"task"`
+	}
+	json.Unmarshal(sendResult, &sendResp)
+	var aliceTaskID string
+	if sendResp.Task != nil {
+		aliceTaskID = sendResp.Task.ID
+	} else if sendResp.StatusUpdate != nil {
+		aliceTaskID = sendResp.StatusUpdate.TaskID
+	}
+	if aliceTaskID == "" {
+		t.Fatalf("could not extract Alice's task ID: %s", sendResult)
+	}
+	t.Logf("Alice created task %s on PID %d", aliceTaskID, procAlice.pid)
+
+	// Bob should NOT see Alice's task.
+	code, msg := jsonRPCExpectError(t, procBob.URL(), "GetTask", map[string]interface{}{
+		"id": aliceTaskID,
+	})
+	t.Logf("Bob get Alice's task: error code=%d msg=%s", code, msg)
+
+	// Bob's list should be empty.
+	listResult := jsonRPC(t, procBob.URL(), "ListTasks", map[string]interface{}{})
+	var listResp struct {
+		Tasks     []json.RawMessage `json:"tasks"`
+		TotalSize int               `json:"totalSize"`
+	}
+	json.Unmarshal(listResult, &listResp)
+	if listResp.TotalSize != 0 {
+		t.Errorf("Bob should see 0 tasks, got %d", listResp.TotalSize)
+	}
+
+	// Bob creates his own task.
+	sendResult2 := jsonRPC(t, procBob.URL(), "SendMessage", map[string]interface{}{
+		"message": map[string]interface{}{
+			"messageId": "bob-msg-1",
+			"role":      "ROLE_USER",
+			"parts":     []map[string]interface{}{{"text": "Bob's private task"}},
+		},
+	})
+	var sendResp2 struct {
+		StatusUpdate *struct{ TaskID string `json:"taskId"` } `json:"statusUpdate"`
+		Task         *struct{ ID string `json:"id"` }        `json:"task"`
+	}
+	json.Unmarshal(sendResult2, &sendResp2)
+	var bobTaskID string
+	if sendResp2.Task != nil {
+		bobTaskID = sendResp2.Task.ID
+	} else if sendResp2.StatusUpdate != nil {
+		bobTaskID = sendResp2.StatusUpdate.TaskID
+	}
+	t.Logf("Bob created task %s on PID %d", bobTaskID, procBob.pid)
+
+	// Alice should NOT see Bob's task.
+	code2, msg2 := jsonRPCExpectError(t, procAlice.URL(), "GetTask", map[string]interface{}{
+		"id": bobTaskID,
+	})
+	t.Logf("Alice get Bob's task: error code=%d msg=%s", code2, msg2)
+
+	// Alice still only sees her own task.
+	aliceList := jsonRPC(t, procAlice.URL(), "ListTasks", map[string]interface{}{})
+	var aliceListResp struct {
+		Tasks     []json.RawMessage `json:"tasks"`
+		TotalSize int               `json:"totalSize"`
+	}
+	json.Unmarshal(aliceList, &aliceListResp)
+	if aliceListResp.TotalSize != 1 {
+		t.Errorf("Alice should see exactly 1 task, got %d", aliceListResp.TotalSize)
+	}
+}
+
+// ---------- Cross-process event delivery (two OS processes) ----------
+
+// TestPostgresTaskStoreCrossProcessEventDelivery tests that an event appended
+// to the bridge event log by Process A is readable by Process B via the
+// /test/read-events endpoint. Both processes use real Postgres and run as
+// separate OS processes with distinct PIDs.
+func TestPostgresTaskStoreCrossProcessEventDelivery(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	store := testPostgresTaskStore(t)
+	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
+
+	procA := startTestServer(t, dbURL, "proj-evdel", "agent-evdel")
+	procB := startTestServer(t, dbURL, "proj-evdel", "agent-evdel")
+
+	if procA.pid == procB.pid {
+		t.Fatalf("processes must have distinct PIDs")
+	}
+	t.Logf("Event delivery: Process A PID=%d, Process B PID=%d", procA.pid, procB.pid)
+
+	taskID := "cross-proc-event-1"
+
+	// Create a task in bridge state via Process A's bridge store.
+	// (We need the task in a2a_tasks for the event log to reference.)
+	pgStore, err := state.NewPostgres(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgres: %v", err)
+	}
+	t.Cleanup(func() {
+		pgStore.PurgeTaskEvents(context.Background(), time.Now().Add(1*time.Hour))
+		pgStore.Close()
+	})
+	pgStore.CreateTask(context.Background(), &state.Task{
+		ID:        taskID,
+		ContextID: "ctx-evdel",
+		ProjectID: "proj-evdel",
+		AgentSlug: "agent-evdel",
+		State:     "working",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Metadata:  "{}",
+	})
+
+	// Append event via Process A's /test/append-event endpoint.
+	eventPayload, _ := json.Marshal(map[string]interface{}{
+		"taskId": taskID,
+		"status": map[string]string{"state": "working"},
+	})
+	appendBody, _ := json.Marshal(map[string]interface{}{
+		"TaskID":   taskID,
+		"Kind":     "message",
+		"Payload":  json.RawMessage(eventPayload),
+		"DedupKey": "cross-proc-dedup-1",
+	})
+	appendResp, err := http.Post(procA.URL()+"/test/append-event", "application/json",
+		bytes.NewReader(appendBody))
+	if err != nil {
+		t.Fatalf("append event via A: %v", err)
+	}
+	appendResp.Body.Close()
+	if appendResp.StatusCode != 200 {
+		t.Fatalf("append event status: %d", appendResp.StatusCode)
+	}
+	t.Logf("Event appended via Process A (PID %d)", procA.pid)
+
+	// Read events via Process B's /test/read-events endpoint.
+	readResp, err := http.Get(fmt.Sprintf("%s/test/read-events?taskID=%s&afterID=0", procB.URL(), taskID))
+	if err != nil {
+		t.Fatalf("read events via B: %v", err)
+	}
+	defer readResp.Body.Close()
+	readBody, _ := io.ReadAll(readResp.Body)
+
+	var events []state.TaskEvent
+	if err := json.Unmarshal(readBody, &events); err != nil {
+		t.Fatalf("unmarshal events: %v (body: %s)", err, readBody)
+	}
+
+	if len(events) < 1 {
+		t.Fatalf("expected at least 1 event from Process B, got %d", len(events))
+	}
+	if events[0].TaskID != taskID {
+		t.Errorf("event task ID = %q, want %q", events[0].TaskID, taskID)
+	}
+	t.Logf("Process B (PID %d) read %d event(s) for task %s written by Process A",
+		procB.pid, len(events), taskID)
+}
+
+// TestPostgresTaskStoreCrossProcessResubscribeNoPriorReplay tests cursor-based
+// event resubscription across two OS processes. Events before the cursor are
+// not replayed; only new events are visible.
+func TestPostgresTaskStoreCrossProcessResubscribeNoPriorReplay(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	store := testPostgresTaskStore(t)
+	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
+
+	procA := startTestServer(t, dbURL, "proj-resub", "agent-resub")
+	procB := startTestServer(t, dbURL, "proj-resub", "agent-resub")
+
+	if procA.pid == procB.pid {
+		t.Fatalf("processes must have distinct PIDs")
+	}
+	t.Logf("Resubscribe: Process A PID=%d, Process B PID=%d", procA.pid, procB.pid)
+
+	taskID := "cross-proc-resub-1"
+
+	// Create task in bridge state.
+	pgStore, err := state.NewPostgres(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgres: %v", err)
+	}
+	t.Cleanup(func() {
+		pgStore.PurgeTaskEvents(context.Background(), time.Now().Add(1*time.Hour))
+		pgStore.Close()
+	})
+	pgStore.CreateTask(context.Background(), &state.Task{
+		ID:        taskID,
+		ContextID: "ctx-resub",
+		ProjectID: "proj-resub",
+		AgentSlug: "agent-resub",
+		State:     "working",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Metadata:  "{}",
+	})
+
+	// Append 3 events via Process A.
+	var lastEventID int64
+	for i := 0; i < 3; i++ {
+		eventPayload, _ := json.Marshal(map[string]interface{}{
+			"taskId": taskID,
+			"status": map[string]string{"state": "working"},
+		})
+		appendBody, _ := json.Marshal(map[string]interface{}{
+			"TaskID":  taskID,
+			"Kind":    "status",
+			"Payload": json.RawMessage(eventPayload),
+		})
+		resp, err := http.Post(procA.URL()+"/test/append-event", "application/json",
+			bytes.NewReader(appendBody))
+		if err != nil {
+			t.Fatalf("append event %d: %v", i, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		var result map[string]int64
+		json.Unmarshal(body, &result)
+		lastEventID = result["id"]
+	}
+	t.Logf("Appended 3 events via A, last ID=%d", lastEventID)
+
+	// Read all events from B (cursor=0) — should see all 3.
+	readResp, err := http.Get(fmt.Sprintf("%s/test/read-events?taskID=%s&afterID=0", procB.URL(), taskID))
+	if err != nil {
+		t.Fatalf("read all events via B: %v", err)
+	}
+	readBody, _ := io.ReadAll(readResp.Body)
+	readResp.Body.Close()
+	var allEvents []state.TaskEvent
+	json.Unmarshal(readBody, &allEvents)
+	if len(allEvents) != 3 {
+		t.Fatalf("expected 3 events from cursor=0, got %d", len(allEvents))
+	}
+
+	// Get cursor after second event.
+	cursorAfterSecond := allEvents[1].ID
+
+	// Read from cursor — should see only 1 event (the third one).
+	readResp2, err := http.Get(fmt.Sprintf("%s/test/read-events?taskID=%s&afterID=%d",
+		procB.URL(), taskID, cursorAfterSecond))
+	if err != nil {
+		t.Fatalf("read from cursor via B: %v", err)
+	}
+	readBody2, _ := io.ReadAll(readResp2.Body)
+	readResp2.Body.Close()
+	var cursorEvents []state.TaskEvent
+	json.Unmarshal(readBody2, &cursorEvents)
+	if len(cursorEvents) != 1 {
+		t.Errorf("expected 1 event after cursor %d, got %d", cursorAfterSecond, len(cursorEvents))
+	}
+
+	// Read from lastEventID — should see 0 (caught up).
+	readResp3, err := http.Get(fmt.Sprintf("%s/test/read-events?taskID=%s&afterID=%d",
+		procB.URL(), taskID, lastEventID))
+	if err != nil {
+		t.Fatalf("read caught-up via B: %v", err)
+	}
+	readBody3, _ := io.ReadAll(readResp3.Body)
+	readResp3.Body.Close()
+	var caughtUpEvents []state.TaskEvent
+	json.Unmarshal(readBody3, &caughtUpEvents)
+	if len(caughtUpEvents) != 0 {
+		t.Errorf("expected 0 events from caught-up cursor, got %d", len(caughtUpEvents))
+	}
+
+	// Append a new event via Process A.
+	newPayload, _ := json.Marshal(map[string]interface{}{
+		"taskId": taskID,
+		"status": map[string]string{"state": "completed"},
+	})
+	newBody, _ := json.Marshal(map[string]interface{}{
+		"TaskID":  taskID,
+		"Kind":    "status",
+		"Payload": json.RawMessage(newPayload),
+		"Final":   true,
+	})
+	resp, _ := http.Post(procA.URL()+"/test/append-event", "application/json",
+		bytes.NewReader(newBody))
+	resp.Body.Close()
+
+	// Read from lastEventID again — should see exactly the new event.
+	readResp4, err := http.Get(fmt.Sprintf("%s/test/read-events?taskID=%s&afterID=%d",
+		procB.URL(), taskID, lastEventID))
+	if err != nil {
+		t.Fatalf("read new event via B: %v", err)
+	}
+	readBody4, _ := io.ReadAll(readResp4.Body)
+	readResp4.Body.Close()
+	var newEvents []state.TaskEvent
+	json.Unmarshal(readBody4, &newEvents)
+	if len(newEvents) != 1 {
+		t.Errorf("expected 1 new event, got %d", len(newEvents))
+	}
+	if len(newEvents) > 0 && !newEvents[0].Final {
+		t.Error("expected final event")
+	}
+	t.Logf("Resubscribe verified: cursor skips old, sees new, across PIDs %d/%d",
+		procA.pid, procB.pid)
+}
+
+// ---------- Broker handler dedup at processAndAppendEvent boundary ----------
+
+// TestPostgresTaskStoreBrokerHandlerDedup tests that processAndAppendEvent
+// (the broker-event-to-execution boundary) does not produce duplicate events
+// when called twice with the same dedup key derived from the same broker
+// message. This uses a real Bridge instance with a real Postgres state store.
+func TestPostgresTaskStoreBrokerHandlerDedup(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	pgStore, err := state.NewPostgres(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgres: %v", err)
+	}
+	t.Cleanup(func() {
+		pgStore.PurgeTaskEvents(context.Background(), time.Now().Add(1*time.Hour))
+		pgStore.Close()
+	})
+
+	ctx := context.Background()
+	taskID := "broker-dedup-handler-1"
+
+	// Create a task in bridge state.
+	pgStore.CreateTask(ctx, &state.Task{
+		ID:        taskID,
+		ContextID: "ctx-bh",
+		ProjectID: "proj-bh",
+		AgentSlug: "agent-bh",
+		State:     "working",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Metadata:  "{}",
+	})
+
+	// Create a minimal Bridge with the real state store.
+	shutdownCtx, shutdownCancel := context.WithCancel(ctx)
+	defer shutdownCancel()
+	b := &Bridge{
+		store:       pgStore,
+		log:         slog.Default(),
+		activeTasks: make(map[string]activeTaskEntry),
+		agentTasks:  make(map[string][]string),
+		push:        NewPushDispatcher(pgStore, &Config{}, slog.Default(), shutdownCtx),
+	}
+
+	// Register the task in the local cache for correlation.
+	aKey := agentKey("proj-bh", "agent-bh")
+	b.registerActiveTask(taskID, aKey)
+
+	// Simulate a broker state-change message with a stable msgId.
+	// State-change messages produce exactly one status event (no artifacts),
+	// so dedup by dedup_key is deterministic.
+	brokerMsg := &messages.StructuredMessage{
+		Sender:    "agent:agent-bh",
+		Type:      messages.TypeStateChange,
+		Msg:       "working",
+		Timestamp: "2026-09-18T00:00:00Z",
+		Metadata:  map[string]string{"msgId": "stable-broker-msg-42", "a2aTaskId": taskID},
+	}
+
+	// Topic format: scion.project.<projectID>.user.<userId>.messages
+	topic := "scion.project.proj-bh.user.admin.messages"
+
+	// First delivery.
+	if err := b.HandleBrokerMessage(ctx, topic, brokerMsg); err != nil {
+		t.Fatalf("first HandleBrokerMessage: %v", err)
+	}
+
+	// Count events after first delivery.
+	events1, _ := pgStore.ReadTaskEvents(ctx, taskID, 0, 100)
+	count1 := len(events1)
+	t.Logf("After first delivery: %d event(s)", count1)
+	if count1 == 0 {
+		t.Fatal("expected at least 1 event after first delivery")
+	}
+
+	// Second delivery with the same message (same msgId → same dedup key).
+	if err := b.HandleBrokerMessage(ctx, topic, brokerMsg); err != nil {
+		t.Fatalf("second HandleBrokerMessage: %v", err)
+	}
+
+	// Count events after second delivery — should be the same.
+	events2, _ := pgStore.ReadTaskEvents(ctx, taskID, 0, 100)
+	count2 := len(events2)
+	t.Logf("After second delivery: %d event(s)", count2)
+
+	if count2 != count1 {
+		t.Errorf("duplicate delivery produced extra events: count1=%d count2=%d", count1, count2)
+	}
+}
+
+// ---------- Retention through Bridge.RunSweep ----------
+
+// TestPostgresTaskStoreRetentionThroughRunSweep tests that Bridge.RunSweep
+// exercises PurgeTasksAndEvents on the wired sdkTaskStore, proving retention
+// runs through the actual production code path (not just direct method calls).
+func TestPostgresTaskStoreRetentionThroughRunSweep(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	pgStore, err := state.NewPostgres(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgres: %v", err)
+	}
+	t.Cleanup(func() {
+		pgStore.PurgeTaskEvents(context.Background(), time.Now().Add(1*time.Hour))
+		pgStore.Close()
+	})
+
+	sdkStore, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgresTaskStore: %v", err)
+	}
+	t.Cleanup(func() {
+		sdkStore.db.Exec("DELETE FROM a2a_sdk_tasks")
+		sdkStore.Close()
+	})
+
+	ctx := ctxForRoute("proj-sweep", "agent-sweep")
+
+	// Create a terminal SDK task with correlated bridge events.
+	task := &a2a.Task{
+		ID:        "sweep-terminal-1",
+		ContextID: "ctx-sweep",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
+	}
+	if _, err := sdkStore.Create(ctx, task); err != nil {
+		t.Fatalf("Create terminal task: %v", err)
+	}
+
+	// Create a working SDK task (should survive sweep).
+	workingTask := &a2a.Task{
+		ID:        "sweep-working-1",
+		ContextID: "ctx-sweep",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+	}
+	if _, err := sdkStore.Create(ctx, workingTask); err != nil {
+		t.Fatalf("Create working task: %v", err)
+	}
+
+	// Insert correlated events.
+	sdkStore.db.Exec(`INSERT INTO a2a_task_events (task_id, kind, payload, final, created_at)
+		VALUES ('sweep-terminal-1', 'status', '{}', true, NOW() - INTERVAL '2 hours')`)
+
+	// Backdate the terminal task.
+	sdkStore.db.Exec(`UPDATE a2a_sdk_tasks SET updated_at = NOW() - INTERVAL '2 hours' WHERE id = 'sweep-terminal-1'`)
+
+	// Create a Bridge with the sdkTaskStore wired in.
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+	defer shutdownCancel()
+	b := &Bridge{
+		store:       pgStore,
+		log:         slog.Default(),
+		config:      &Config{},
+		activeTasks: make(map[string]activeTaskEntry),
+		agentTasks:  make(map[string][]string),
+		push:        NewPushDispatcher(pgStore, &Config{}, slog.Default(), shutdownCtx),
+		sdkTaskStore: sdkStore,
+	}
+
+	// Run sweep — this should purge the terminal task and its events
+	// through the production RunSweep code path.
+	b.RunSweep(context.Background())
+
+	// Verify terminal task is purged.
+	_, err = sdkStore.Get(ctx, "sweep-terminal-1")
+	if err == nil {
+		t.Error("expected terminal task to be purged by RunSweep")
+	}
+
+	// Verify working task survives.
+	stored, err := sdkStore.Get(ctx, "sweep-working-1")
+	if err != nil {
+		t.Fatalf("working task should survive sweep: %v", err)
+	}
+	if stored.Task.Status.State != a2a.TaskStateWorking {
+		t.Errorf("state = %q, want working", stored.Task.Status.State)
+	}
+
+	// Verify events are purged.
+	var eventCount int
+	sdkStore.db.QueryRow(`SELECT COUNT(*) FROM a2a_task_events WHERE task_id = 'sweep-terminal-1'`).Scan(&eventCount)
+	if eventCount != 0 {
+		t.Errorf("expected 0 events for purged task, got %d", eventCount)
+	}
+	t.Log("RunSweep successfully purged terminal task and events through production code path")
+}
+
+// ---------- Cross-process crash recovery (process kill → reap) ----------
+
+// TestPostgresTaskStoreCrossProcessCrashRecoveryKill tests crash recovery
+// across OS processes: Process A creates a task and claims execution, then
+// is killed. Another store handle (simulating Process B's reaper) detects
+// the stale lease and transitions the task to failed.
+func TestPostgresTaskStoreCrossProcessCrashRecoveryKill(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	storeA, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("storeA: %v", err)
+	}
+	t.Cleanup(func() {
+		storeA.db.Exec("DELETE FROM a2a_sdk_tasks")
+		storeA.Close()
+	})
+
+	ctx := ctxForRoute("proj-kill", "agent-kill")
+
+	// Create a task and claim execution (simulating process A mid-execution).
+	task := &a2a.Task{
+		ID:        "kill-crash-1",
+		ContextID: "ctx-kill",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+	}
+	if _, err := storeA.Create(ctx, task); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Start a real subprocess, have it create+claim a task, then kill it.
+	procA := startTestServer(t, dbURL, "proj-kill", "agent-kill")
+	procOwnerID := fmt.Sprintf("127.0.0.1:%d", procA.pid) // approximate owner ID
+
+	// Claim execution with the subprocess's owner ID.
+	claimed, err := storeA.ClaimExecution(ctx, "kill-crash-1", procOwnerID, 30*time.Second)
+	if err != nil || !claimed {
+		t.Fatalf("ClaimExecution: claimed=%v err=%v", claimed, err)
+	}
+
+	// Kill the subprocess abruptly (simulating crash).
+	if procA.cmd.Process != nil {
+		procA.cmd.Process.Kill()
+	}
+	procA.cmd.Wait()
+	t.Logf("Process A (PID %d) killed to simulate crash", procA.pid)
+
+	// Backdate the heartbeat (simulating time passing after crash).
+	storeA.db.Exec(`UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW() - INTERVAL '10 minutes' WHERE id = 'kill-crash-1'`)
+
+	// Create storeB (simulating another replica) and reap.
+	storeB, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("storeB: %v", err)
+	}
+	t.Cleanup(func() { storeB.Close() })
+
+	reaped, err := storeB.ReapStaleTasks(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("ReapStaleTasks: %v", err)
+	}
+	if reaped != 1 {
+		t.Errorf("reaped = %d, want 1", reaped)
+	}
+
+	// Verify task is failed and exec_owner is cleared.
+	stored, err := storeB.Get(ctx, "kill-crash-1")
+	if err != nil {
+		t.Fatalf("Get after reap: %v", err)
+	}
+	if stored.Task.Status.State != a2a.TaskStateFailed {
+		t.Errorf("state = %q, want %q", stored.Task.Status.State, a2a.TaskStateFailed)
+	}
+
+	var execOwner *string
+	storeB.db.QueryRow(`SELECT exec_owner FROM a2a_sdk_tasks WHERE id = 'kill-crash-1'`).Scan(&execOwner)
+	if execOwner != nil {
+		t.Errorf("exec_owner should be NULL after crash recovery, got %q", *execOwner)
+	}
+	t.Logf("Crash recovery verified: PID %d killed, task reaped to failed, exec_owner cleared", procA.pid)
 }

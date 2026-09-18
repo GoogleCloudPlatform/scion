@@ -490,6 +490,18 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	defer pgTaskStore.Close()
 	log.Info("Postgres SDK task store initialized")
 
+	// Wire the SDK task store into the bridge for execution leases,
+	// reaping stale execution claims, and retention cleanup.
+	b.SetSDKTaskStore(pgTaskStore)
+
+	// Startup recovery: reap any stale execution leases left by
+	// previous instances that crashed mid-execution.
+	if reaped, err := pgTaskStore.ReapStaleTasks(context.Background(), 2*cfg.Timeouts.SendMessage); err != nil {
+		log.Error("startup: failed to reap stale SDK execution leases", "error", err)
+	} else if reaped > 0 {
+		log.Warn("startup: reaped stale SDK execution leases from previous crash", "count", reaped)
+	}
+
 	sdkRequestHandler := a2asrv.NewHandler(
 		executor,
 		a2asrv.WithLogger(log.With("component", "a2a-sdk")),

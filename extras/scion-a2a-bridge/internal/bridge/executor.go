@@ -138,6 +138,34 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		e.bridge.registerActiveTask(string(taskID), aKey)
 		defer e.bridge.unregisterActiveTask(string(taskID), aKey)
 
+		// Claim execution lease before Hub send to prevent duplicate sends.
+		// The lease tracks which replica is executing this task; if we crash,
+		// the janitor reaps tasks with expired leases.
+		if e.bridge.sdkTaskStore != nil {
+			ownerID := OwnerID()
+			leaseTimeout := e.bridge.config.Timeouts.SendMessage
+			if leaseTimeout == 0 {
+				leaseTimeout = 120 * time.Second
+			}
+			claimed, claimErr := e.bridge.sdkTaskStore.ClaimExecution(ctx, string(taskID), ownerID, leaseTimeout)
+			if claimErr != nil {
+				e.log.Error("failed to claim execution lease", "error", claimErr, "task_id", taskID)
+				// Non-fatal: proceed without lease protection in degraded mode.
+			} else if !claimed {
+				e.log.Warn("execution lease already held by another replica", "task_id", taskID)
+				failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Task execution already in progress on another replica"))
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+				return
+			} else {
+				// Release the lease on completion (normal or error).
+				defer func() {
+					if releaseErr := e.bridge.sdkTaskStore.ReleaseExecution(context.Background(), string(taskID), ownerID); releaseErr != nil {
+						e.log.Error("failed to release execution lease", "error", releaseErr, "task_id", taskID)
+					}
+				}()
+			}
+		}
+
 		// Send to Hub using the per-user or admin client.
 		if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 			e.log.Error("failed to send message to agent", "error", err, "task_id", taskID, "agent_id", agentCtx.AgentID)
@@ -161,7 +189,7 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			timeout = 120 * time.Second
 		}
 
-		ev, err := e.bridge.waitForTaskEvent(ctx, string(taskID), timeout)
+		ev, err := e.bridge.waitForTaskEvent(ctx, string(taskID), timeout, e.bridge.sdkTaskStore)
 		if err != nil {
 			var failMsg *a2a.Message
 			if errors.Is(err, ErrTimeout) {

@@ -368,7 +368,7 @@ Task state survives process restarts. A new `PostgresTaskStore` instance reconne
 
 ### Retention cleanup
 
-Terminal tasks (completed, failed, canceled, rejected) and their correlated bridge events are purged by `PurgeTasksAndEvents` within a **single transaction**, maintaining referential consistency between `a2a_sdk_tasks` and `a2a_task_events`. The bridge's janitor calls this periodically (default cutoff: 1 hour for events, configurable for tasks).
+Terminal tasks (completed, failed, canceled, rejected) and their correlated bridge events are purged by `PurgeTasksAndEvents` within a **single transaction**, maintaining referential consistency between `a2a_sdk_tasks` and `a2a_task_events`. The bridge's `RunSweep` calls this periodically (default cutoff: 1 hour). The janitor also calls `ReapStaleTasks` on each tick to transition tasks with expired execution leases to `failed`.
 
 ### SSE resubscription and cursor semantics
 

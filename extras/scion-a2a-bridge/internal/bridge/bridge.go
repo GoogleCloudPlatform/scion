@@ -85,6 +85,11 @@ type Bridge struct {
 	// oidcCache caches proxied OIDC discovery and JWKS responses from the hub.
 	oidcCache *oidcProxyCache
 
+	// sdkTaskStore is the durable SDK task store (PostgresTaskStore) used in
+	// standalone mode for execution leases, reaping, and retention. nil in
+	// plugin mode.
+	sdkTaskStore *PostgresTaskStore
+
 	// oidcClientOnce ensures the shared OIDC HTTP client is created exactly once.
 	oidcClientOnce sync.Once
 	// oidcClient is the cached HTTP client for reaching the hub's OIDC endpoints.
@@ -181,7 +186,24 @@ func (b *Bridge) janitor() {
 		case <-ticker.C:
 			b.reapStaleTasks(b.shutdownCtx, maxAge)
 			b.evictStaleAgentCache()
+			b.reapStaleSDKExecutions(b.shutdownCtx, maxAge)
 		}
+	}
+}
+
+// reapStaleSDKExecutions reaps SDK tasks with expired execution leases.
+// No-op when sdkTaskStore is nil (plugin mode).
+func (b *Bridge) reapStaleSDKExecutions(ctx context.Context, leaseTimeout time.Duration) {
+	if b.sdkTaskStore == nil {
+		return
+	}
+	reaped, err := b.sdkTaskStore.ReapStaleTasks(ctx, leaseTimeout)
+	if err != nil {
+		b.log.Error("janitor: reaping stale SDK execution leases", "error", err)
+		return
+	}
+	if reaped > 0 {
+		b.log.Warn("janitor: reaped stale SDK execution leases", "count", reaped)
 	}
 }
 
@@ -251,6 +273,19 @@ func (b *Bridge) RunSweep(ctx context.Context) {
 	} else if purged > 0 {
 		b.log.Info("purged old task events", "count", purged)
 	}
+
+	// Purge terminal SDK tasks and their correlated events in a single
+	// transaction (referential consistency between a2a_sdk_tasks and
+	// a2a_task_events). No-op when sdkTaskStore is nil (plugin mode).
+	if b.sdkTaskStore != nil {
+		cutoff := time.Now().Add(-1 * time.Hour)
+		tp, ep, err := b.sdkTaskStore.PurgeTasksAndEvents(ctx, cutoff)
+		if err != nil {
+			b.log.Error("failed to purge SDK tasks/events", "error", err)
+		} else if tp > 0 || ep > 0 {
+			b.log.Info("purged terminal SDK tasks and events", "tasks", tp, "events", ep)
+		}
+	}
 }
 
 // maybeOpportunisticSweep fires a best-effort sweep if the throttle interval
@@ -294,6 +329,14 @@ func (b *Bridge) SetNotifier(n *Notifier) {
 	b.notifier = n
 }
 
+// SetSDKTaskStore wires the durable SDK task store for execution leases,
+// reaping, and retention. When set, the janitor will also reap stale SDK
+// execution leases and purge terminal SDK tasks/events. In non-standalone
+// (plugin) mode this is nil and no SDK-level lifecycle management runs.
+func (b *Bridge) SetSDKTaskStore(store *PostgresTaskStore) {
+	b.sdkTaskStore = store
+}
+
 // SetSnapshot wires the atomic config snapshot for hot-apply support.
 func (b *Bridge) SetSnapshot(snap *SnapshotHolder) {
 	b.snapshot = snap
@@ -322,13 +365,23 @@ func agentKey(projectID, agentSlug string) string {
 // waitForTaskEvent polls the event log for a response event on the given task,
 // with adaptive backoff. Returns the first response (content/message) event or
 // a final event, whichever comes first.
-func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout time.Duration) (*state.TaskEvent, error) {
+//
+// When sdkStore is provided and non-nil, the execution heartbeat is refreshed
+// on each poll cycle to keep the lease alive during long-running Hub execution.
+func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout time.Duration, sdkStore ...*PostgresTaskStore) (*state.TaskEvent, error) {
 	var cursor int64
 	interval := 100 * time.Millisecond
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	pollTimer := time.NewTimer(interval)
 	defer pollTimer.Stop()
+
+	// Resolve optional SDK store for heartbeat.
+	var heartbeatStore *PostgresTaskStore
+	if len(sdkStore) > 0 {
+		heartbeatStore = sdkStore[0]
+	}
+	ownerID := OwnerID()
 
 	// Register for NOTIFY acceleration (no-op if notifier is nil).
 	var notifyCh <-chan struct{}
@@ -350,6 +403,13 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 			}
 			if ev.Final {
 				return &ev, nil
+			}
+		}
+
+		// Heartbeat execution lease on each poll cycle to keep it alive.
+		if heartbeatStore != nil {
+			if hbErr := heartbeatStore.HeartbeatExecution(ctx, taskID, ownerID); hbErr != nil {
+				b.log.Warn("execution heartbeat failed", "task_id", taskID, "error", hbErr)
 			}
 		}
 
