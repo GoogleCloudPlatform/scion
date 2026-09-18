@@ -20,8 +20,11 @@ BRIDGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 echo "=== A2A Bridge Deterministic PostgreSQL Integration Runner ==="
 
-# Default PostgreSQL URL if unset; credentials are NEVER echoed
-export TEST_DATABASE_URL="${TEST_DATABASE_URL:-postgres://scion:scion@127.0.0.1:5432/a2a_test?sslmode=disable}"
+# Require TEST_DATABASE_URL; fails closed immediately if unset or empty
+if [[ -z "${TEST_DATABASE_URL:-}" ]]; then
+  echo "::error::TEST_DATABASE_URL environment variable is unset or empty. CI runner fails closed." >&2
+  exit 1
+fi
 export TEST_REQUIRE_DATABASE="1"
 
 echo "Using TEST_DATABASE_URL=[REDACTED]"
