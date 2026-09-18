@@ -438,3 +438,68 @@ separate from these confirmed product defects and are not counted as product
 PASS/FAIL evidence. No live cloud calls were made; external-live remains false.
 The correction proves task-scoped cursor/dedup behavior, not global exactly-once
 semantics.
+
+### Sixth-cycle upstream review follow-up (2026-09-18)
+
+The follow-up branch `scion/dev-a2a-ha-lifecycle-pr-fixes` was created directly
+from immutable correction `70c47cda668c87e7cc6556b63f82c0204d56141c`.
+Current `origin/main` was exactly
+`21c380344b774fc09a9147f38f9b96be4ca77f34`; it was merged normally in
+`80f43eacccf5414b9bb668a805ecca3f0616f82c`. The merge had no textual
+conflicts. Its six changed files were unrelated root-module formatting under
+`pkg/hub` and `pkg/hubclient`; there was no A2A bridge, nested-module, or
+dependency overlap. The unmerged baseline-tidy comparison at `07721e83` was
+not imported, and `go.mod`/`go.sum` remain unchanged.
+
+Two bounded corrections were made with committed RED evidence:
+
+- `7fa428e56` reproduces `BarrierTaskStore.Create(ctx, nil)` panicking after
+  `PostgresTaskStore.Create` returns wrapped `a2a.ErrInvalidRequest`;
+  `f9a23493f` returns the inner result before reading `task.ID`. Public-path
+  tracing through `jsonrpcHandler.ServeHTTP` -> `onSendMessage` ->
+  `defaultRequestHandler.handleSendMessage` -> `ScionExecutor.Execute` ->
+  `a2a.NewSubmittedTask` -> SDK `taskupdate.Manager.saveVersionedTask` shows
+  that a public JSON-RPC request cannot supply this nil store argument: malformed
+  or nil messages are rejected and the executor yields a non-nil task. The
+  correction therefore hardens the internal store contract and prevents a
+  direct/internal caller panic; it does not close a demonstrated remotely
+  triggerable daemon-crash path.
+- `81efa555d` proves string matching misses a wrapped PostgreSQL SQLSTATE 23505
+  and falsely accepts both unrelated duplicate-key text and a SQLSTATE 23503
+  carrying that text. `555bc3470` classifies through `errors.As` and the
+  driver's `SQLState()` contract. The existing real-PostgreSQL duplicate-create
+  regression also passes, proving actual driver error mapping to
+  `taskstore.ErrTaskAlreadyExists`.
+
+Go 1.26.1 `gofmt` was applied to the two attributed files
+`pgstore_crossprocess_test.go` and `testdata/a2a-testserver/main.go` in
+`97c9cd187`; `gofmt -l .` then reported no files for the whole bridge module.
+No `time.After` change was made because Go 1.26 removes the alleged timer leak
+and allocation optimization is outside scope. No Artifact nil check was added:
+Artifact is a value struct and ranging nil `Parts` is safe.
+
+Fresh real-PostgreSQL 15.19 verification used a task-local loopback daemon and
+an unrelated task/event canary. The canary's before/after payload hashes were
+identical (`42064f3eefa2a11c25b35c1e3f52fd23` and
+`31082dfd852e84b48454c90f4f755dad`). Results:
+
+```text
+nil barrier focused RED: expected panic at barrier_store.go:96
+nil barrier focused GREEN: PASS
+SQLSTATE focused RED: all three required cases failed under string matching
+SQLSTATE + real duplicate-create GREEN: PASS (0.058s)
+lifecycle/cancel/rollback/ownership, count=3: PASS (36.497s)
+same lifecycle set, -race: PASS (12.939s)
+cross-process/cursor/ownership/reaper set: PASS (36.026s)
+same accepted regression set, -race: PASS (36.969s)
+full bridge/state: PASS (90.350s / 0.429s)
+full bridge/state, -race: PASS (91.959s / 1.467s)
+go vet ./...: PASS
+go build -buildvcs=false ./...: PASS
+Go 1.26.1 module-wide format and git diff --check: PASS
+```
+
+The original `origin/scion/dev-a2a-taskstore` ref remained exactly
+`23911e531c4d3cb8f9d96d8b111a8329db3822e3`. The implementation-and-format tip
+before this log update is `97c9cd187e6a01dda4b685b3954523dc0cc3cd5e`;
+the pushed final ref is recorded in the durable sixth-cycle report.
