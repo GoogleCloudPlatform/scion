@@ -418,3 +418,503 @@ func TestV0REST_QueryStringPreserved(t *testing.T) {
 		t.Errorf("query string = %q, want %q", capturedQuery, "historyLength=5&contextId=ctx-1")
 	}
 }
+
+// ===========================================================================
+// Required #8: GE JSON-RPC wire compatibility proof.
+//
+// These tests exercise actual A2A operation payloads through production routes
+// to verify wire-level compatibility: JSON-RPC envelope parsing, v0.3 REST
+// body forwarding, discovery aliases, and multi-turn cursor context.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// JSON-RPC v1.0 — message/send, message/stream, tasks/get, tasks/cancel,
+// tasks/resubscribe through /jsonrpc endpoint
+// ---------------------------------------------------------------------------
+
+func TestJSONRPC_WireFormat_MessageSend(t *testing.T) {
+	var capturedBody json.RawMessage
+	sdkHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		capturedBody = body
+		// Echo a valid JSON-RPC response.
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"jsonrpc":"2.0","id":"req-1","result":{"id":"task-001","contextId":"ctx-001","status":{"state":"completed"},"artifacts":[{"parts":[{"type":"text","text":"hello"}]}]}}`))
+	})
+
+	srv, _ := newV0TestServer(t, "none", "", nil)
+	// Override the SDK handler for JSON-RPC testing.
+	srv.SetSDKHandler(sdkHandler)
+	handler := srv.Handler()
+
+	// A2A v1.0 message/send JSON-RPC envelope.
+	payload := `{
+		"jsonrpc": "2.0",
+		"id": "req-1",
+		"method": "message/send",
+		"params": {
+			"message": {
+				"role": "user",
+				"parts": [{"type": "text", "text": "Hello, agent!"}]
+			}
+		}
+	}`
+
+	req := httptest.NewRequest("POST", "/projects/proj1/agents/agent1/jsonrpc",
+		strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	// Verify the JSON-RPC envelope was forwarded to the SDK handler.
+	var envelope map[string]interface{}
+	if err := json.Unmarshal(capturedBody, &envelope); err != nil {
+		t.Fatalf("SDK handler received invalid JSON: %v", err)
+	}
+	if envelope["method"] != "message/send" {
+		t.Errorf("method = %v, want message/send", envelope["method"])
+	}
+	if envelope["jsonrpc"] != "2.0" {
+		t.Errorf("jsonrpc = %v, want 2.0", envelope["jsonrpc"])
+	}
+
+	// Verify the response is valid JSON-RPC.
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response is invalid JSON: %v", err)
+	}
+	if resp["jsonrpc"] != "2.0" {
+		t.Errorf("response jsonrpc = %v, want 2.0", resp["jsonrpc"])
+	}
+	result := resp["result"].(map[string]interface{})
+	if result["contextId"] != "ctx-001" {
+		t.Errorf("contextId = %v, want ctx-001", result["contextId"])
+	}
+}
+
+func TestJSONRPC_WireFormat_MessageStream(t *testing.T) {
+	sdkHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var envelope map[string]interface{}
+		json.Unmarshal(body, &envelope)
+		if envelope["method"] != "message/stream" {
+			t.Errorf("method = %v, want message/stream", envelope["method"])
+		}
+		// Simulate SSE streaming response.
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":\"req-2\",\"result\":{\"id\":\"task-002\",\"status\":{\"state\":\"working\"}}}\n\n"))
+	})
+
+	srv, _ := newV0TestServer(t, "none", "", nil)
+	srv.SetSDKHandler(sdkHandler)
+	handler := srv.Handler()
+
+	payload := `{
+		"jsonrpc": "2.0",
+		"id": "req-2",
+		"method": "message/stream",
+		"params": {
+			"message": {
+				"role": "user",
+				"parts": [{"type": "text", "text": "stream this"}]
+			}
+		}
+	}`
+
+	req := httptest.NewRequest("POST", "/projects/proj1/agents/agent1/jsonrpc",
+		strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+}
+
+func TestJSONRPC_WireFormat_TasksGet(t *testing.T) {
+	sdkHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var envelope map[string]interface{}
+		json.Unmarshal(body, &envelope)
+		if envelope["method"] != "tasks/get" {
+			t.Errorf("method = %v, want tasks/get", envelope["method"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"jsonrpc":"2.0","id":"req-3","result":{"id":"task-001","status":{"state":"completed"}}}`))
+	})
+
+	srv, _ := newV0TestServer(t, "none", "", nil)
+	srv.SetSDKHandler(sdkHandler)
+	handler := srv.Handler()
+
+	payload := `{
+		"jsonrpc": "2.0",
+		"id": "req-3",
+		"method": "tasks/get",
+		"params": {"id": "task-001"}
+	}`
+
+	req := httptest.NewRequest("POST", "/projects/proj1/agents/agent1/jsonrpc",
+		strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestJSONRPC_WireFormat_TasksCancel(t *testing.T) {
+	sdkHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var envelope map[string]interface{}
+		json.Unmarshal(body, &envelope)
+		if envelope["method"] != "tasks/cancel" {
+			t.Errorf("method = %v, want tasks/cancel", envelope["method"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"jsonrpc":"2.0","id":"req-4","result":{"id":"task-001","status":{"state":"canceled"}}}`))
+	})
+
+	srv, _ := newV0TestServer(t, "none", "", nil)
+	srv.SetSDKHandler(sdkHandler)
+	handler := srv.Handler()
+
+	payload := `{
+		"jsonrpc": "2.0",
+		"id": "req-4",
+		"method": "tasks/cancel",
+		"params": {"id": "task-001"}
+	}`
+
+	req := httptest.NewRequest("POST", "/projects/proj1/agents/agent1/jsonrpc",
+		strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestJSONRPC_WireFormat_TasksResubscribe(t *testing.T) {
+	sdkHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var envelope map[string]interface{}
+		json.Unmarshal(body, &envelope)
+		if envelope["method"] != "tasks/resubscribe" {
+			t.Errorf("method = %v, want tasks/resubscribe", envelope["method"])
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":\"req-5\"}\n\n"))
+	})
+
+	srv, _ := newV0TestServer(t, "none", "", nil)
+	srv.SetSDKHandler(sdkHandler)
+	handler := srv.Handler()
+
+	payload := `{
+		"jsonrpc": "2.0",
+		"id": "req-5",
+		"method": "tasks/resubscribe",
+		"params": {"id": "task-001"}
+	}`
+
+	req := httptest.NewRequest("POST", "/projects/proj1/agents/agent1/jsonrpc",
+		strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// JSON-RPC — discovery aliases (/groves/ ↔ /projects/)
+// ---------------------------------------------------------------------------
+
+func TestJSONRPC_DiscoveryAlias_GrovesPath(t *testing.T) {
+	var capturedBody json.RawMessage
+	sdkHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		capturedBody = body
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"jsonrpc":"2.0","id":"req-grove","result":{}}`))
+	})
+
+	srv, _ := newV0TestServer(t, "none", "", nil)
+	srv.SetSDKHandler(sdkHandler)
+	handler := srv.Handler()
+
+	payload := `{"jsonrpc":"2.0","id":"req-grove","method":"message/send","params":{"message":{"role":"user","parts":[{"type":"text","text":"via grove"}]}}}`
+
+	// Use /groves/ path instead of /projects/.
+	req := httptest.NewRequest("POST", "/groves/proj1/agents/agent1/jsonrpc",
+		strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	var envelope map[string]interface{}
+	if err := json.Unmarshal(capturedBody, &envelope); err != nil {
+		t.Fatalf("SDK handler received invalid JSON via /groves/: %v", err)
+	}
+	if envelope["method"] != "message/send" {
+		t.Errorf("method = %v, want message/send (via /groves/ alias)", envelope["method"])
+	}
+}
+
+func TestJSONRPC_DiscoveryAlias_AgentCard(t *testing.T) {
+	stub := &v0StubHandler{}
+	srv, _ := newV0TestServer(t, "none", "", stub)
+	handler := srv.Handler()
+
+	// Agent card via /groves/ should work.
+	req := httptest.NewRequest("GET", "/groves/proj1/agents/agent1/.well-known/agent-card.json", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("agent card via /groves/ status = %d, want 200", w.Code)
+	}
+
+	var card map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &card); err != nil {
+		t.Fatalf("failed to parse agent card: %v", err)
+	}
+	if card["name"] == nil {
+		t.Error("agent card missing 'name' field")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// JSON-RPC — multi-turn cursor (contextId tracking)
+// ---------------------------------------------------------------------------
+
+func TestJSONRPC_MultiTurnCursor_ContextIdPreserved(t *testing.T) {
+	var capturedContextID string
+	sdkHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var envelope map[string]interface{}
+		json.Unmarshal(body, &envelope)
+
+		params := envelope["params"].(map[string]interface{})
+		if cid, ok := params["contextId"]; ok {
+			capturedContextID = cid.(string)
+		}
+
+		// Return a task with the same contextId.
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      envelope["id"],
+			"result": map[string]interface{}{
+				"id":        "task-mt-001",
+				"contextId": capturedContextID,
+				"status":    map[string]string{"state": "completed"},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	srv, _ := newV0TestServer(t, "none", "", nil)
+	srv.SetSDKHandler(sdkHandler)
+	handler := srv.Handler()
+
+	// First message — establishes context.
+	payload1 := `{
+		"jsonrpc": "2.0",
+		"id": "req-mt-1",
+		"method": "message/send",
+		"params": {
+			"message": {
+				"role": "user",
+				"parts": [{"type": "text", "text": "first turn"}]
+			}
+		}
+	}`
+
+	req := httptest.NewRequest("POST", "/projects/proj1/agents/agent1/jsonrpc",
+		strings.NewReader(payload1))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("first turn status = %d, want 200", w.Code)
+	}
+
+	// Second message — references the contextId from first turn.
+	payload2 := `{
+		"jsonrpc": "2.0",
+		"id": "req-mt-2",
+		"method": "message/send",
+		"params": {
+			"contextId": "ctx-mt-001",
+			"message": {
+				"role": "user",
+				"parts": [{"type": "text", "text": "second turn"}]
+			}
+		}
+	}`
+
+	req2 := httptest.NewRequest("POST", "/projects/proj1/agents/agent1/jsonrpc",
+		strings.NewReader(payload2))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second turn status = %d, want 200", w2.Code)
+	}
+
+	// Verify the contextId was forwarded to the SDK handler.
+	if capturedContextID != "ctx-mt-001" {
+		t.Errorf("contextId = %q, want ctx-mt-001", capturedContextID)
+	}
+
+	// Verify the response preserves the contextId.
+	var resp map[string]interface{}
+	json.Unmarshal(w2.Body.Bytes(), &resp)
+	result := resp["result"].(map[string]interface{})
+	if result["contextId"] != "ctx-mt-001" {
+		t.Errorf("response contextId = %v, want ctx-mt-001", result["contextId"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// v0.3 REST — actual A2A operation payloads forwarded to handler
+// ---------------------------------------------------------------------------
+
+func TestV0REST_WireFormat_MessageSend(t *testing.T) {
+	var capturedBody json.RawMessage
+	var capturedPath string
+	var capturedMethod string
+	bodyCapture := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		capturedMethod = r.Method
+		body, _ := io.ReadAll(r.Body)
+		capturedBody = body
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"task-rest-001","contextId":"ctx-rest-001","status":{"state":"completed"}}`))
+	})
+
+	srv, _ := newV0TestServer(t, "none", "", bodyCapture)
+	handler := srv.Handler()
+
+	// v0.3 REST message:send with actual A2A payload.
+	payload := `{
+		"message": {
+			"role": "user",
+			"parts": [{"type": "text", "text": "v0.3 REST message"}]
+		}
+	}`
+
+	req := httptest.NewRequest("POST", "/projects/proj1/agents/agent1/message:send",
+		strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if capturedPath != "/message:send" {
+		t.Errorf("stripped path = %q, want /message:send", capturedPath)
+	}
+	if capturedMethod != "POST" {
+		t.Errorf("method = %q, want POST", capturedMethod)
+	}
+
+	// Verify the A2A payload was forwarded intact.
+	var body map[string]interface{}
+	if err := json.Unmarshal(capturedBody, &body); err != nil {
+		t.Fatalf("handler received invalid JSON: %v", err)
+	}
+	msg := body["message"].(map[string]interface{})
+	if msg["role"] != "user" {
+		t.Errorf("message.role = %v, want user", msg["role"])
+	}
+}
+
+func TestV0REST_WireFormat_MultiTurnContextId(t *testing.T) {
+	var capturedContextID string
+	contextCapture := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]interface{}
+		json.Unmarshal(body, &payload)
+		if cid, ok := payload["contextId"]; ok {
+			capturedContextID = cid.(string)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"task-mt","contextId":"` + capturedContextID + `","status":{"state":"completed"}}`))
+	})
+
+	srv, _ := newV0TestServer(t, "none", "", contextCapture)
+	handler := srv.Handler()
+
+	payload := `{
+		"contextId": "ctx-multi-turn-42",
+		"message": {
+			"role": "user",
+			"parts": [{"type": "text", "text": "follow-up turn"}]
+		}
+	}`
+
+	req := httptest.NewRequest("POST", "/projects/proj1/agents/agent1/message:send",
+		strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if capturedContextID != "ctx-multi-turn-42" {
+		t.Errorf("contextId = %q, want ctx-multi-turn-42", capturedContextID)
+	}
+}
+
+func TestV0REST_WireFormat_DirectPOST(t *testing.T) {
+	var capturedPath string
+	directCapture := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"task-direct","status":{"state":"completed"}}`))
+	})
+
+	srv, _ := newV0TestServer(t, "none", "", directCapture)
+	handler := srv.Handler()
+
+	// Direct POST to a custom sub-path — verifies catch-all routing.
+	payload := `{"id":"task-direct"}`
+	req := httptest.NewRequest("POST", "/projects/proj1/agents/agent1/tasks/task-123:cancel",
+		strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if capturedPath != "/tasks/task-123:cancel" {
+		t.Errorf("stripped path = %q, want /tasks/task-123:cancel", capturedPath)
+	}
+}

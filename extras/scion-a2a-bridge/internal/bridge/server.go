@@ -82,6 +82,11 @@ func NewServer(bridge *Bridge, cfg *Config, metrics *Metrics, log *slog.Logger, 
 	return s
 }
 
+// SetSDKHandler overrides the SDK JSON-RPC handler (test-only).
+func (s *Server) SetSDKHandler(handler http.Handler) {
+	s.sdkHandler = handler
+}
+
 // SetV0RESTHandler sets the v0.3 REST compatibility handler. When set,
 // the bridge exposes additional per-agent REST routes that accept v0.3-format
 // requests (snake_case JSON) alongside the existing v1.0 JSON-RPC routes.
