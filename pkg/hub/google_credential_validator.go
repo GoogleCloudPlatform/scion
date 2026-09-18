@@ -1,0 +1,653 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
+)
+
+// ---------------------------------------------------------------------------
+// Google credential validator — verifies end-user Google ID tokens and access
+// tokens for the GE exchange endpoint. Implements fail-closed validation per
+// the auth-exchange-contract.
+// ---------------------------------------------------------------------------
+
+// Pinned Google OIDC constants.
+const (
+	// googleIssuerHTTPS is the canonical HTTPS issuer for Google OIDC.
+	googleIssuerHTTPS = "https://accounts.google.com"
+	// googleIssuerBare is the bare variant Google sometimes uses.
+	googleIssuerBare = "accounts.google.com"
+	// googleJWKSURL is the JWKS endpoint for Google's public signing keys.
+	googleJWKSURL = "https://www.googleapis.com/oauth2/v3/certs"
+	// googleTokenInfoURL is the Google token info endpoint for access tokens.
+	// Per https://googleapis.dev/nodejs/google-auth-library/latest/classes/OAuth2Client.html
+	// this endpoint returns audience, issued_to, scope, expires_in, access_type.
+	googleTokenInfoURL = "https://oauth2.googleapis.com/tokeninfo"
+	// googleUserInfoURL is the Google userinfo endpoint for profile/email.
+	googleUserInfoURL = "https://www.googleapis.com/oauth2/v3/userinfo"
+	// googleCanonicalIssuer is the canonical issuer form used for persistence.
+	googleCanonicalIssuer = googleIssuerHTTPS
+)
+
+// Maximum allowed clock skew when validating Google token timestamps.
+const googleClockSkew = 2 * time.Minute
+
+// GoogleCredentialType is an explicit credential type for the exchange.
+type GoogleCredentialType string
+
+const (
+	GoogleCredentialIDToken     GoogleCredentialType = "id_token"
+	GoogleCredentialAccessToken GoogleCredentialType = "access_token"
+)
+
+// ValidatedGoogleIdentity holds the verified identity extracted from a Google
+// credential after full validation. All fields are authoritative.
+type ValidatedGoogleIdentity struct {
+	// Subject is the stable Google account identifier (sub claim).
+	Subject string
+	// Email is the verified email address.
+	Email string
+	// EmailVerified indicates the email was verified by Google.
+	EmailVerified bool
+	// DisplayName from the identity provider (optional).
+	DisplayName string
+	// AvatarURL from the identity provider (optional).
+	AvatarURL string
+	// Issuer is the canonical Google issuer URL.
+	Issuer string
+	// Audience is the OAuth client ID the credential was issued to.
+	Audience string
+	// UpstreamExpiry is the authoritative expiry from Google.
+	UpstreamExpiry time.Time
+	// HostedDomain is the Google Workspace hd claim (empty for consumer accounts).
+	HostedDomain string
+	// IsServiceAccount indicates whether this is a service account identity.
+	IsServiceAccount bool
+}
+
+// GoogleCredentialValidator validates Google credentials (ID tokens or access
+// tokens) and extracts verified identity information.
+type GoogleCredentialValidator interface {
+	// ValidateIDToken cryptographically verifies a Google ID token and returns
+	// the validated identity. It checks signature, issuer, audience (must be in
+	// allowedClientIDs), expiry, stable sub, and verified email.
+	ValidateIDToken(ctx context.Context, token string, allowedClientIDs []string) (*ValidatedGoogleIdentity, error)
+
+	// ValidateAccessToken validates a Google access token using the tokeninfo
+	// endpoint and userinfo endpoint, cross-checks stable fields, and returns
+	// the validated identity.
+	ValidateAccessToken(ctx context.Context, token string, allowedClientIDs []string) (*ValidatedGoogleIdentity, error)
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+var (
+	ErrGoogleInvalidCredential  = errors.New("invalid Google credential")
+	ErrGoogleExpiredCredential  = errors.New("expired Google credential")
+	ErrGoogleUntrustedAudience  = errors.New("untrusted Google client ID")
+	ErrGoogleUntrustedIssuer    = errors.New("untrusted Google issuer")
+	ErrGoogleUnverifiedEmail    = errors.New("Google email not verified")
+	ErrGoogleMissingSubject     = errors.New("missing Google subject")
+	ErrGoogleServiceAccount     = errors.New("service account credentials not accepted")
+	ErrGoogleFieldDisagreement  = errors.New("Google token metadata fields disagree")
+	ErrGoogleMissingField       = errors.New("required field missing from Google response")
+	ErrGoogleUpstreamError      = errors.New("Google upstream validation failed")
+	ErrGENotConfigured          = errors.New("GE Google exchange not configured")
+	ErrGEUnsupportedCredType    = errors.New("unsupported credential type")
+	ErrGENoRemainingLifetime    = errors.New("credential has no remaining usable lifetime")
+)
+
+// ---------------------------------------------------------------------------
+// Production implementation
+// ---------------------------------------------------------------------------
+
+// googleCredentialValidator implements GoogleCredentialValidator using real
+// Google endpoints for production use.
+type googleCredentialValidator struct {
+	httpClient *http.Client
+	jwksCache  *googleJWKSCache
+}
+
+// NewGoogleCredentialValidator creates a production Google credential validator.
+func NewGoogleCredentialValidator(httpClient *http.Client) GoogleCredentialValidator {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
+	}
+	return &googleCredentialValidator{
+		httpClient: httpClient,
+		jwksCache:  newGoogleJWKSCache(httpClient),
+	}
+}
+
+// ValidateIDToken performs cryptographic signature verification of a Google
+// ID token using Google's public JWKS keys. Verifies:
+//   - RSA/EC signature via Google's published JWKS
+//   - Issuer is accounts.google.com (both forms)
+//   - Audience is in allowedClientIDs
+//   - Expiry/not-before/issued-at with bounded skew
+//   - Non-empty stable sub
+//   - email_verified == true
+//   - Not a service account
+func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token string, allowedClientIDs []string) (*ValidatedGoogleIdentity, error) {
+	if len(allowedClientIDs) == 0 {
+		return nil, fmt.Errorf("%w: no allowed client IDs configured", ErrGENotConfigured)
+	}
+
+	// Fetch Google JWKS for signature verification.
+	jwks, err := v.jwksCache.get(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: failed to fetch Google JWKS: %v", ErrGoogleUpstreamError, err)
+	}
+
+	// Parse and verify the JWT signature.
+	parsedToken, err := jwt.ParseSigned(token, []jose.SignatureAlgorithm{
+		jose.RS256, jose.ES256,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrGoogleInvalidCredential, err)
+	}
+
+	// Try each key from the JWKS until one verifies.
+	var claims googleIDTokenClaims
+	verified := false
+	for _, key := range jwks.Keys {
+		if err := parsedToken.Claims(key, &claims); err == nil {
+			verified = true
+			break
+		}
+	}
+	if !verified {
+		return nil, fmt.Errorf("%w: signature verification failed", ErrGoogleInvalidCredential)
+	}
+
+	// Validate issuer — accept both Google issuer forms.
+	if claims.Issuer != googleIssuerHTTPS && claims.Issuer != googleIssuerBare {
+		return nil, fmt.Errorf("%w: got %q", ErrGoogleUntrustedIssuer, claims.Issuer)
+	}
+
+	// Validate audience — must be exactly one of the allowed client IDs.
+	if !isAllowedAudience(claims.Audience, allowedClientIDs) {
+		return nil, fmt.Errorf("%w: audience not in allowed set", ErrGoogleUntrustedAudience)
+	}
+
+	// Validate time claims with bounded skew.
+	now := time.Now()
+	expected := jwt.Expected{
+		Time: now,
+	}
+	if err := claims.Claims.Validate(expected); err != nil {
+		// Check if it's an expiry issue vs other issue
+		if claims.Expiry != nil && claims.Expiry.Time().Before(now.Add(-googleClockSkew)) {
+			return nil, fmt.Errorf("%w: %v", ErrGoogleExpiredCredential, err)
+		}
+		return nil, fmt.Errorf("%w: time validation failed: %v", ErrGoogleInvalidCredential, err)
+	}
+
+	// Check remaining lifetime — reject tokens with no usable lifetime.
+	if claims.Expiry != nil {
+		remaining := time.Until(claims.Expiry.Time())
+		if remaining < -googleClockSkew {
+			return nil, ErrGENoRemainingLifetime
+		}
+	}
+
+	// Validate stable subject.
+	if claims.Subject == "" {
+		return nil, ErrGoogleMissingSubject
+	}
+
+	// Validate verified email.
+	if claims.Email == "" {
+		return nil, fmt.Errorf("%w: no email claim", ErrGoogleMissingField)
+	}
+	if !claims.EmailVerified {
+		return nil, ErrGoogleUnverifiedEmail
+	}
+
+	// Reject service accounts (identified by email suffix).
+	if isGoogleServiceAccount(claims.Email) {
+		return nil, ErrGoogleServiceAccount
+	}
+
+	var expiry time.Time
+	if claims.Expiry != nil {
+		expiry = claims.Expiry.Time()
+	}
+
+	// Extract audience — use the first audience element (the client ID).
+	var audience string
+	if len(claims.Audience) > 0 {
+		audience = string(claims.Audience[0])
+	}
+
+	return &ValidatedGoogleIdentity{
+		Subject:          claims.Subject,
+		Email:            claims.Email,
+		EmailVerified:    claims.EmailVerified,
+		DisplayName:      claims.Name,
+		AvatarURL:        claims.Picture,
+		Issuer:           googleCanonicalIssuer,
+		Audience:         audience,
+		UpstreamExpiry:   expiry,
+		HostedDomain:     claims.HD,
+		IsServiceAccount: false,
+	}, nil
+}
+
+// ValidateAccessToken validates a Google access token by:
+// 1. Calling Google's tokeninfo endpoint to get audience/issued_to/expiry
+// 2. Calling Google's userinfo endpoint to get email/sub/profile
+// 3. Cross-checking sub between both responses
+// 4. Validating the issued-to client is in allowedClientIDs
+//
+// Per contract-review point 3: aud and azp/issued_to are not interchangeable.
+// We pin to Google's tokeninfo endpoint which returns:
+//   - azp: the client that obtained the token (authoritative issued-to)
+//   - aud: the intended audience
+//   - sub: stable subject identifier
+//   - exp: expiry in seconds since epoch
+//   - email: email address
+//   - email_verified: boolean
+//
+// The authoritative issued-client field is `azp` (authorized party).
+// If `aud` is also present and differs from `azp`, both must be in
+// allowedClientIDs or the request fails closed.
+func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, token string, allowedClientIDs []string) (*ValidatedGoogleIdentity, error) {
+	if len(allowedClientIDs) == 0 {
+		return nil, fmt.Errorf("%w: no allowed client IDs configured", ErrGENotConfigured)
+	}
+
+	// Step 1: Call Google tokeninfo endpoint.
+	tokenInfo, err := v.getTokenInfo(ctx, token)
+	if err != nil {
+		return nil, fmt.Errorf("%w: tokeninfo call failed: %v", ErrGoogleUpstreamError, err)
+	}
+
+	// Validate that tokeninfo returned required fields.
+	if tokenInfo.AZP == "" {
+		return nil, fmt.Errorf("%w: azp (authorized party) missing from tokeninfo", ErrGoogleMissingField)
+	}
+
+	// The authoritative issued-client is azp. It must be in allowedClientIDs.
+	if !containsString(allowedClientIDs, tokenInfo.AZP) {
+		return nil, fmt.Errorf("%w: azp %q not in allowed set", ErrGoogleUntrustedAudience, tokenInfo.AZP)
+	}
+
+	// If aud is also present and different from azp, it must also be allowed.
+	// Per contract-review: do not treat aud/azp as interchangeable fallbacks.
+	if tokenInfo.AUD != "" && tokenInfo.AUD != tokenInfo.AZP {
+		if !containsString(allowedClientIDs, tokenInfo.AUD) {
+			return nil, fmt.Errorf("%w: aud %q differs from azp %q and is not in allowed set",
+				ErrGoogleUntrustedAudience, tokenInfo.AUD, tokenInfo.AZP)
+		}
+	}
+
+	// Validate expiry from tokeninfo.
+	if tokenInfo.ExpiresIn <= 0 {
+		return nil, fmt.Errorf("%w: no remaining lifetime from tokeninfo", ErrGENoRemainingLifetime)
+	}
+	upstreamExpiry := time.Now().Add(time.Duration(tokenInfo.ExpiresIn) * time.Second)
+
+	// Step 2: Call Google userinfo for profile data.
+	userInfo, err := v.getUserInfo(ctx, token)
+	if err != nil {
+		return nil, fmt.Errorf("%w: userinfo call failed: %v", ErrGoogleUpstreamError, err)
+	}
+
+	// Validate required userinfo fields.
+	if userInfo.Sub == "" {
+		return nil, fmt.Errorf("%w: sub missing from userinfo", ErrGoogleMissingField)
+	}
+	if userInfo.Email == "" {
+		return nil, fmt.Errorf("%w: email missing from userinfo", ErrGoogleMissingField)
+	}
+	if !userInfo.EmailVerified {
+		return nil, ErrGoogleUnverifiedEmail
+	}
+
+	// Step 3: Cross-check sub between tokeninfo and userinfo.
+	// Per contract-review: cross-check stable sub, not only email.
+	if tokenInfo.Sub != "" && tokenInfo.Sub != userInfo.Sub {
+		return nil, fmt.Errorf("%w: sub from tokeninfo (%q) != userinfo (%q)",
+			ErrGoogleFieldDisagreement, tokenInfo.Sub, userInfo.Sub)
+	}
+	// Cross-check email where both provide it.
+	if tokenInfo.Email != "" && strings.ToLower(tokenInfo.Email) != strings.ToLower(userInfo.Email) {
+		return nil, fmt.Errorf("%w: email from tokeninfo (%q) != userinfo (%q)",
+			ErrGoogleFieldDisagreement, tokenInfo.Email, userInfo.Email)
+	}
+	// Cross-check email_verified where tokeninfo provides it.
+	if tokenInfo.EmailVerified != nil && *tokenInfo.EmailVerified != userInfo.EmailVerified {
+		return nil, fmt.Errorf("%w: email_verified disagrees between tokeninfo and userinfo",
+			ErrGoogleFieldDisagreement)
+	}
+
+	// Reject service accounts.
+	if isGoogleServiceAccount(userInfo.Email) {
+		return nil, ErrGoogleServiceAccount
+	}
+
+	return &ValidatedGoogleIdentity{
+		Subject:          userInfo.Sub,
+		Email:            userInfo.Email,
+		EmailVerified:    userInfo.EmailVerified,
+		DisplayName:      userInfo.Name,
+		AvatarURL:        userInfo.Picture,
+		Issuer:           googleCanonicalIssuer,
+		Audience:         tokenInfo.AZP,
+		UpstreamExpiry:   upstreamExpiry,
+		HostedDomain:     userInfo.HD,
+		IsServiceAccount: false,
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Google API response types
+// ---------------------------------------------------------------------------
+
+// googleIDTokenClaims are the JWT claims in a Google ID token.
+type googleIDTokenClaims struct {
+	jwt.Claims
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
+	Name          string `json:"name"`
+	Picture       string `json:"picture"`
+	HD            string `json:"hd"` // Hosted domain for Workspace accounts
+}
+
+// googleTokenInfoResponse is the response from Google's tokeninfo endpoint.
+// Documented at https://googleapis.dev/nodejs/google-auth-library/latest/classes/OAuth2Client.html
+// and https://developers.google.com/resources/api-libraries/documentation/oauth2/v2/java/latest/com/google/api/services/oauth2/model/Tokeninfo.html
+//
+// Per contract-review: azp is the authoritative issued-client field.
+// aud and azp are distinct documented fields and are not interchangeable.
+type googleTokenInfoResponse struct {
+	// AZP is the authorized party — the client that obtained the token.
+	// This is the authoritative issued-to client field.
+	AZP string `json:"azp"`
+	// AUD is the intended audience. May differ from AZP in some flows.
+	AUD string `json:"aud"`
+	// Sub is the stable subject identifier.
+	Sub string `json:"sub"`
+	// Email is the email address.
+	Email string `json:"email"`
+	// EmailVerified is whether the email is verified (string "true"/"false" in tokeninfo).
+	EmailVerified *bool `json:"email_verified,omitempty"`
+	// ExpiresIn is the remaining lifetime in seconds.
+	ExpiresIn int64 `json:"expires_in"`
+	// Scope is the granted OAuth scopes.
+	Scope string `json:"scope"`
+	// AccessType is "online" or "offline".
+	AccessType string `json:"access_type"`
+	// Error description if the token is invalid.
+	Error string `json:"error_description"`
+}
+
+// googleUserInfoResponse is the response from Google's userinfo endpoint.
+type googleUserInfoResponse struct {
+	Sub           string `json:"sub"`
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
+	Name          string `json:"name"`
+	Picture       string `json:"picture"`
+	HD            string `json:"hd"` // Hosted domain
+}
+
+// ---------------------------------------------------------------------------
+// Google API calls
+// ---------------------------------------------------------------------------
+
+func (v *googleCredentialValidator) getTokenInfo(ctx context.Context, token string) (*googleTokenInfoResponse, error) {
+	// POST to tokeninfo endpoint with access_token in the body.
+	// Do NOT pass the token as a query parameter to avoid logging exposure.
+	req, err := http.NewRequestWithContext(ctx, "POST", googleTokenInfoURL,
+		strings.NewReader("access_token="+token))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := v.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("tokeninfo request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+	if err != nil {
+		return nil, fmt.Errorf("tokeninfo read failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("tokeninfo returned %d", resp.StatusCode)
+	}
+
+	var info googleTokenInfoResponse
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, fmt.Errorf("tokeninfo decode failed: %w", err)
+	}
+
+	if info.Error != "" {
+		return nil, fmt.Errorf("tokeninfo error: %s", info.Error)
+	}
+
+	return &info, nil
+}
+
+func (v *googleCredentialValidator) getUserInfo(ctx context.Context, token string) (*googleUserInfoResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", googleUserInfoURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := v.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("userinfo request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+	if err != nil {
+		return nil, fmt.Errorf("userinfo read failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("userinfo returned %d", resp.StatusCode)
+	}
+
+	var info googleUserInfoResponse
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, fmt.Errorf("userinfo decode failed: %w", err)
+	}
+
+	return &info, nil
+}
+
+// ---------------------------------------------------------------------------
+// JWKS cache for Google ID token verification
+// ---------------------------------------------------------------------------
+
+type googleJWKSCache struct {
+	mu         sync.RWMutex
+	keys       *jose.JSONWebKeySet
+	fetchedAt  time.Time
+	ttl        time.Duration
+	httpClient *http.Client
+}
+
+func newGoogleJWKSCache(client *http.Client) *googleJWKSCache {
+	return &googleJWKSCache{
+		ttl:        time.Hour,
+		httpClient: client,
+	}
+}
+
+func (c *googleJWKSCache) get(ctx context.Context) (*jose.JSONWebKeySet, error) {
+	c.mu.RLock()
+	if c.keys != nil && time.Since(c.fetchedAt) < c.ttl {
+		keys := c.keys
+		c.mu.RUnlock()
+		return keys, nil
+	}
+	staleKeys := c.keys
+	c.mu.RUnlock()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Double-check after acquiring write lock.
+	if c.keys != nil && time.Since(c.fetchedAt) < c.ttl {
+		return c.keys, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", googleJWKSURL, nil)
+	if err != nil {
+		if staleKeys != nil {
+			slog.Warn("Google JWKS refresh failed, using stale cache", "error", err)
+			return staleKeys, nil
+		}
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if staleKeys != nil {
+			slog.Warn("Google JWKS refresh failed, using stale cache", "error", err)
+			return staleKeys, nil
+		}
+		return nil, fmt.Errorf("JWKS fetch failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		if staleKeys != nil {
+			slog.Warn("Google JWKS refresh returned non-200, using stale cache",
+				"status", resp.StatusCode)
+			return staleKeys, nil
+		}
+		return nil, fmt.Errorf("JWKS fetch returned %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
+	if err != nil {
+		if staleKeys != nil {
+			return staleKeys, nil
+		}
+		return nil, fmt.Errorf("JWKS read failed: %w", err)
+	}
+
+	var jwks jose.JSONWebKeySet
+	if err := json.Unmarshal(body, &jwks); err != nil {
+		if staleKeys != nil {
+			return staleKeys, nil
+		}
+		return nil, fmt.Errorf("JWKS decode failed: %w", err)
+	}
+
+	c.keys = &jwks
+	c.fetchedAt = time.Now()
+	return c.keys, nil
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// canonicalizeGoogleIssuer normalizes both known Google issuer forms to the
+// canonical HTTPS form for persistence. This prevents one Google account from
+// acquiring two external identity rows via different issuer spellings.
+func canonicalizeGoogleIssuer(issuer string) string {
+	if issuer == googleIssuerBare || issuer == googleIssuerHTTPS {
+		return googleCanonicalIssuer
+	}
+	return issuer
+}
+
+// isAllowedAudience checks if any audience in the token matches an allowed
+// client ID.
+func isAllowedAudience(audiences jwt.Audience, allowed []string) bool {
+	for _, aud := range audiences {
+		if containsString(allowed, string(aud)) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsString checks if a string slice contains the target.
+func containsString(slice []string, target string) bool {
+	for _, s := range slice {
+		if s == target {
+			return true
+		}
+	}
+	return false
+}
+
+// isGoogleServiceAccount detects Google service account emails by their
+// characteristic suffixes.
+func isGoogleServiceAccount(email string) bool {
+	email = strings.ToLower(email)
+	return strings.HasSuffix(email, ".iam.gserviceaccount.com") ||
+		strings.HasSuffix(email, "@appspot.gserviceaccount.com") ||
+		strings.HasSuffix(email, "@developer.gserviceaccount.com") ||
+		strings.HasSuffix(email, "@system.gserviceaccount.com")
+}
+
+// isAuthoritativeEmailDomain checks if the email domain is authoritative per
+// contract-review point 1: only Gmail or verified Google Workspace (hd claim)
+// emails are authoritative for automatic first-time user bootstrap.
+//
+// Third-party email domains (e.g. a custom domain on a personal Google account
+// without Workspace) are NOT authoritative because email_verified can remain
+// true even after the mailbox ownership changes.
+func isAuthoritativeEmailDomain(email, hostedDomain string) bool {
+	email = strings.ToLower(email)
+
+	// Gmail addresses are authoritative — Google controls the domain.
+	if strings.HasSuffix(email, "@gmail.com") || strings.HasSuffix(email, "@googlemail.com") {
+		return true
+	}
+
+	// Google Workspace accounts with a verified hd claim are authoritative —
+	// the organization controls the domain through Workspace.
+	if hostedDomain != "" {
+		atIdx := strings.LastIndex(email, "@")
+		if atIdx >= 0 {
+			domain := email[atIdx+1:]
+			if strings.EqualFold(domain, hostedDomain) {
+				return true
+			}
+		}
+	}
+
+	return false
+}

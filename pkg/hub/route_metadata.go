@@ -98,6 +98,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/auth/providers", RouteID: "auth.providers",
 		Classification: RoutePublic,
 	},
+	"/api/v1/auth/integrations/google/exchange": {
+		Pattern: "/api/v1/auth/integrations/google/exchange", RouteID: "auth.integrations.google.exchange",
+		Classification: RoutePublic,
+	},
 	"/api/v1/auth/invite/redeem": {
 		Pattern: "/api/v1/auth/invite/redeem", RouteID: "auth.invite.redeem",
 		Classification: RoutePublic,
