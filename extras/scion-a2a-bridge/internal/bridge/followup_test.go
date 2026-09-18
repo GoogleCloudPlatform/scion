@@ -170,6 +170,7 @@ func (m *mockHubClient) ProjectPreStartHooks(projectID string) hubclient.Project
 	return nil
 }
 func (m *mockHubClient) HubPreStartHooks() hubclient.HubPreStartHookService { return nil }
+func (m *mockHubClient) Messaging() hubclient.MessagingService              { return nil }
 func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil
 }

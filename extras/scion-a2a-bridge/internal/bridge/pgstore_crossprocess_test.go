@@ -1967,7 +1967,7 @@ func TestRegressionREQ2_ActiveTaskEventsNotPurged(t *testing.T) {
 // TestProductionPath_ScionExecutorSendMessage exercises the production
 // ScionExecutor code path via a real cross-process test server, verifying
 // that tasks created via the A2A JSON-RPC SendMessage flow through the
-// executor's lease claim, SDK store create, and status transitions.
+// executor's SDK store create and status transitions.
 func TestProductionPath_ScionExecutorSendMessage(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
@@ -1981,70 +1981,51 @@ func TestProductionPath_ScionExecutorSendMessage(t *testing.T) {
 	// without requiring a real Hub, exercising the SDK task store.
 	proc := startTestServer(t, dbURL, "proj-prod", "agent-prod")
 
-	// Send a real A2A JSON-RPC SendMessage request.
-	reqBody, _ := json.Marshal(map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "message/send",
-		"params": map[string]interface{}{
-			"message": map[string]interface{}{
-				"role": "user",
-				"parts": []map[string]interface{}{
-					{"text": "Hello from production path test"},
-				},
+	// Use the standard jsonRPC helper (method = "SendMessage").
+	result := jsonRPC(t, proc.URL(), "SendMessage", map[string]interface{}{
+		"message": map[string]interface{}{
+			"messageId": "prod-path-msg-1",
+			"role":      "ROLE_USER",
+			"parts": []map[string]interface{}{
+				{"text": "Hello from production path test"},
 			},
 		},
 	})
 
-	resp, err := http.Post(proc.URL(), "application/json", bytes.NewReader(reqBody))
-	if err != nil {
-		t.Fatalf("SendMessage request: %v", err)
+	// SendMessage returns a StreamResponse wrapping an event.
+	var sendResp struct {
+		StatusUpdate *struct {
+			TaskID string `json:"taskId"`
+			State  string `json:"state"`
+		} `json:"statusUpdate"`
+		Task *struct {
+			ID string `json:"id"`
+		} `json:"task"`
 	}
-	respBody, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		t.Fatalf("unexpected status %d: %s", resp.StatusCode, respBody)
+	if err := json.Unmarshal(result, &sendResp); err != nil {
+		t.Fatalf("unmarshal send result: %v (raw: %s)", err, result)
 	}
-
-	// Parse the JSON-RPC response.
-	var rpcResp struct {
-		Result json.RawMessage `json:"result"`
-		Error  json.RawMessage `json:"error"`
+	var taskID string
+	if sendResp.Task != nil {
+		taskID = sendResp.Task.ID
+	} else if sendResp.StatusUpdate != nil {
+		taskID = sendResp.StatusUpdate.TaskID
 	}
-	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
-		t.Fatalf("unmarshal response: %v", err)
+	if taskID == "" {
+		t.Fatalf("could not extract task ID from send result: %s", result)
 	}
-	if rpcResp.Error != nil {
-		t.Fatalf("JSON-RPC error: %s", rpcResp.Error)
-	}
-
-	// Extract task ID from the result.
-	var result struct {
-		ID     string `json:"id"`
-		Status struct {
-			State string `json:"state"`
-		} `json:"status"`
-	}
-	if err := json.Unmarshal(rpcResp.Result, &result); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-
-	if result.ID == "" {
-		t.Fatal("expected non-empty task ID from SendMessage")
-	}
-	t.Logf("Production path: SendMessage created task %s, state=%s", result.ID, result.Status.State)
+	t.Logf("Production path: SendMessage created task %s", taskID)
 
 	// Verify the task exists in the Postgres SDK store.
 	ctx := ctxForRoute("proj-prod", "agent-prod")
-	stored, err := store.Get(ctx, a2a.TaskID(result.ID))
+	stored, err := store.Get(ctx, a2a.TaskID(taskID))
 	if err != nil {
 		t.Fatalf("Get task from store: %v", err)
 	}
 	if stored.Task.Status.State != a2a.TaskStateCompleted {
 		t.Errorf("stored state = %q, want completed", stored.Task.Status.State)
 	}
-	t.Logf("Production path verified: task %s stored with state %s", result.ID, stored.Task.Status.State)
+	t.Logf("Production path verified: task %s stored with state %s", taskID, stored.Task.Status.State)
 }
 
 // TestDeterministicArtifactDedup verifies that TranslateScionToA2A produces
