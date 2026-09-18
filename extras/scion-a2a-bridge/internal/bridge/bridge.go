@@ -400,6 +400,24 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 		heartbeatStore = sdkStore[0]
 	}
 	ownerID := OwnerID()
+	if heartbeatStore != nil {
+		// Continuations must start strictly after the last event reflected in
+		// this task's durable snapshot. Derive the same owner key used by the
+		// task store from authenticated route/caller context; never authorize
+		// from a local cache or a process/global cursor.
+		ownerKey, ok, err := buildOwnerKey(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("derive task owner: %w", err)
+		}
+		if !ok {
+			return nil, fmt.Errorf("task owner unavailable")
+		}
+		_, durableCursor, err := heartbeatStore.GetOwnedTaskSnapshotAndCursor(ctx, taskID, ownerKey)
+		if err != nil {
+			return nil, fmt.Errorf("load owned task cursor: %w", err)
+		}
+		cursor = durableCursor
+	}
 
 	// Register for NOTIFY acceleration (no-op if notifier is nil).
 	var notifyCh <-chan struct{}
@@ -473,11 +491,18 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 	}
 }
 
-// isResponseEvent returns true if the event is a content/message event
-// (as opposed to a status-only event). These are the events that carry
-// the agent's response content back to the blocking caller.
+// isResponseEvent returns true for content events and for input-required
+// status. Input-required is a nonterminal response boundary: the caller must
+// regain control so it can continue the same task with additional input.
 func isResponseEvent(ev state.TaskEvent) bool {
-	return ev.Kind == "message" || ev.Kind == "artifact"
+	if ev.Kind == "message" || ev.Kind == "artifact" {
+		return true
+	}
+	if ev.Kind != "status" {
+		return false
+	}
+	var update TaskStatusUpdate
+	return json.Unmarshal(ev.Payload, &update) == nil && update.Status.State == TaskStateInputRequired
 }
 
 // taskEventToTaskResult converts a stored TaskEvent to a TaskResult for
