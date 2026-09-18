@@ -28,6 +28,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -96,9 +97,15 @@ type GoogleIDTokenValidator struct {
 	logger             *slog.Logger
 	algorithms         []jose.SignatureAlgorithm
 
+	// mu protects jwks and fetchedAt for short cache reads/writes.
+	// Network I/O (JWKS fetch) happens OUTSIDE this lock.
 	mu        sync.RWMutex
 	jwks      *jose.JSONWebKeySet
 	fetchedAt time.Time
+
+	// fetchGroup coalesces concurrent JWKS refreshes so that only one
+	// network request is in-flight at a time; all waiters share the result.
+	fetchGroup singleflight.Group
 }
 
 // googleIDTokenClaims is the claims shape for Google ID tokens.
@@ -231,56 +238,75 @@ func (v *GoogleIDTokenValidator) ValidateToken(ctx context.Context, tokenString 
 	return nil
 }
 
-// getSigningKey fetches and caches Google's JWKS, returning keys matching kid.
-// It enforces a cooldown (minJWKSRefreshInterval) on re-fetches to prevent
-// DoS via unknown kid stampede: if the JWKS was fetched recently and the kid
-// is still not found, an error is returned immediately without re-fetching.
+// getSigningKey returns the public keys matching kid from the cached JWKS.
+//
+// Fast path: a read lock checks the cache; if the kid is found, keys are
+// returned immediately without blocking, regardless of cache age. A cache
+// hit with a stale timestamp is always safe because JWT signature verification
+// will fail if the key material has been rotated by Google.
+//
+// Refresh path: when the kid is NOT in the cache (or no cache exists), a
+// singleflight call coalesces concurrent refreshes so only one goroutine
+// performs the HTTP fetch. The fetch runs OUTSIDE any mutex; only the short
+// cache-swap happens under a write lock.
+//
+// Cooldown: if the JWKS was fetched within minJWKSRefreshInterval and the kid
+// is still not found, the error is returned immediately to prevent DoS via
+// unknown-kid stampede.
 func (v *GoogleIDTokenValidator) getSigningKey(ctx context.Context, kid string) ([]interface{}, error) {
+	// 1. Fast path — read lock only, no network I/O. If the kid is in the
+	// cache, return immediately regardless of cache age.
 	v.mu.RLock()
 	cachedJWKS := v.jwks
 	fetchAge := time.Since(v.fetchedAt)
 	v.mu.RUnlock()
 
-	if cachedJWKS != nil && fetchAge < defaultJWKSRefreshInterval {
+	if cachedJWKS != nil {
 		keys := cachedJWKS.Key(kid)
 		if len(keys) > 0 {
 			return keysToPublicKeys(keys), nil
 		}
-		// Key not found. If fetched within cooldown, refuse to re-fetch
-		// to prevent unknown-kid stampede attacks.
+		// Key not found. If within cooldown, refuse to re-fetch.
 		if fetchAge < minJWKSRefreshInterval {
 			return nil, fmt.Errorf("no key found for kid %q (JWKS cache is fresh; next refresh in %v)",
 				kid, minJWKSRefreshInterval-fetchAge)
 		}
-		// Fall through to re-fetch — cooldown has elapsed.
+		// Cooldown elapsed — fall through to refresh.
 	}
 
-	// Fetch fresh JWKS.
-	v.mu.Lock()
-	defer v.mu.Unlock()
+	// 2. Refresh path — coalesce concurrent fetches via singleflight.
+	// Network I/O happens here, OUTSIDE any mutex.
+	result, err, _ := v.fetchGroup.Do("jwks", func() (interface{}, error) {
+		// Re-check cache inside singleflight — another caller may have
+		// already refreshed while we were waiting to enter.
+		v.mu.RLock()
+		innerAge := time.Since(v.fetchedAt)
+		innerJWKS := v.jwks
+		v.mu.RUnlock()
 
-	// Double-check after acquiring write lock — another goroutine may have
-	// fetched while we waited.
-	fetchAge = time.Since(v.fetchedAt)
-	if v.jwks != nil && fetchAge < defaultJWKSRefreshInterval {
-		keys := v.jwks.Key(kid)
-		if len(keys) > 0 {
-			return keysToPublicKeys(keys), nil
+		if innerJWKS != nil && innerAge < minJWKSRefreshInterval {
+			// Another goroutine just refreshed; return that cache.
+			return innerJWKS, nil
 		}
-		// Under cooldown, return error without re-fetching.
-		if fetchAge < minJWKSRefreshInterval {
-			return nil, fmt.Errorf("no key found for kid %q (JWKS cache is fresh; next refresh in %v)",
-				kid, minJWKSRefreshInterval-fetchAge)
-		}
-	}
 
-	jwks, err := v.fetchJWKS(ctx)
+		jwks, err := v.fetchJWKS(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("JWKS fetch failed: %w", err)
+		}
+
+		// Short write lock to swap the cache.
+		v.mu.Lock()
+		v.jwks = jwks
+		v.fetchedAt = time.Now()
+		v.mu.Unlock()
+
+		return jwks, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("JWKS fetch failed: %w", err)
+		return nil, err
 	}
-	v.jwks = jwks
-	v.fetchedAt = time.Now()
 
+	jwks := result.(*jose.JSONWebKeySet)
 	keys := jwks.Key(kid)
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("no key found for kid %q", kid)

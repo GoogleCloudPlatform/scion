@@ -123,17 +123,27 @@ factory paths, reconnection, and bearer token extraction.
    auth mode would silently accept unauthenticated connections on all
    interfaces.
 
-3. **JWKS refetch cooldown** (`tokenvalidator.go`): Added
-   `minJWKSRefreshInterval` (1 minute) cooldown. If the JWKS was fetched
-   within the cooldown and a kid is not found, the error is returned
-   immediately without re-fetching, preventing DoS via unknown-kid
-   stampede. Also added `io.LimitReader` (1 MiB) on the JWKS response
-   body to bound memory allocation.
+3. **JWKS singleflight + cooldown** (`tokenvalidator.go`): Refactored
+   `getSigningKey` so network I/O (JWKS fetch) happens OUTSIDE the
+   validator mutex. Concurrent refreshes are coalesced via
+   `singleflight.Group`. Cache reads use a short `RLock`; cache updates
+   use a short `Lock` after the fetch completes. Cached valid-key
+   lookups return immediately even during a slow refresh. Added
+   `minJWKSRefreshInterval` (1 minute) cooldown to prevent DoS via
+   unknown-kid stampede — if the kid is not found within the cooldown,
+   the error is returned without re-fetching. Also added `io.LimitReader`
+   (1 MiB) on the JWKS response body to bound memory allocation.
 
 4. **Dynamic activation auth fields** (`handlers_integrations.go`):
    Added `AuthType` and `AuthAudience` to the `PluginEntry` constructed
    in `activateInstalledIntegration`, so dynamically activated plugins
-   inherit authentication settings from `settings.yaml`.
+   inherit authentication settings from `settings.yaml`. The mock
+   `IntegrationManager` in the hub test suite now captures the full
+   `PluginEntry` in `loadOneEntries` for assertion.
+
+5. **Mux comment correction** (`main.go`): Fixed misleading comment that
+   described the mux-mode listen address as "always local" — it is a
+   wildcard bind requiring auth.
 
 ### Regression tests added
 
@@ -145,7 +155,14 @@ factory paths, reconnection, and bearer token extraction.
 - `TestValidateStandaloneServerConfig_WildcardListen_GoogleIDToken_Accepted`
 - `TestGoogleIDTokenValidator_JWKSCooldown_PreventsStampede` — verifies
   5 unknown-kid attempts trigger zero additional JWKS fetches
-- `TestActivateInstalledIntegration_AuthFieldsPropagated`
+- `TestGoogleIDTokenValidator_CachedKey_NotBlockedBySlowRefresh` —
+  proves cached valid-key verification returns immediately while a slow
+  JWKS refresh is in-flight
+- `TestGoogleIDTokenValidator_ConcurrentRefreshes_Coalesce` — proves 10
+  concurrent refreshes result in 1 HTTP fetch
+- `TestActivateInstalledIntegration_AuthFieldsPropagatedToLoadOne` —
+  real `pkg/hub` regression test exercising `Server.activateInstalledIntegration`
+  and asserting `LoadOne` receives `AuthType`/`AuthAudience`
 
 ## Boundaries
 
@@ -159,17 +176,21 @@ factory paths, reconnection, and bearer token extraction.
 
 ```
 go test ./pkg/plugin/grpcbroker/... -count=1
-ok  github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker  1.113s
+ok  github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker  1.176s
 
 go test ./pkg/plugin/... -count=1
-ok  github.com/GoogleCloudPlatform/scion/pkg/plugin           0.013s
-ok  github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker 1.354s
+ok  github.com/GoogleCloudPlatform/scion/pkg/plugin           0.014s
+ok  github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker 1.213s
 ok  github.com/GoogleCloudPlatform/scion/pkg/plugin/refbroker  0.213s
+
+# Hub activation test:
+go test ./pkg/hub/ -count=1 -run TestActivateInstalledIntegration
+ok  github.com/GoogleCloudPlatform/scion/pkg/hub  0.115s
 
 # Bridge test suite:
 cd extras/scion-a2a-bridge && go test ./... -count=1
-ok  .../internal/bridge  23.373s
-ok  .../internal/state    0.234s
+ok  .../internal/bridge  23.194s
+ok  .../internal/state    0.262s
 
 go vet ./pkg/plugin/... ./pkg/config/... ./pkg/hub/...
 (clean)

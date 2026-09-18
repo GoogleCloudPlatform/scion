@@ -658,8 +658,9 @@ func resolveGRPCServerAuth(muxPorts bool, log *slog.Logger) grpcbroker.Standalon
 		}
 		cfg.ListenAddress = ":" + grpcPort
 	} else {
-		// In mux mode, the listen address is the HTTP port — always local
-		// from the container's perspective (Cloud Run provides the PORT env).
+		// In mux mode, the listen address is the HTTP port — a wildcard
+		// bind (non-local), so auth is required unless explicitly set to
+		// local_dev. Cloud Run provides the PORT env.
 		listenAddr := ":8080"
 		if port := os.Getenv("PORT"); port != "" {
 			listenAddr = ":" + port

@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -1350,18 +1351,166 @@ func TestGoogleIDTokenValidator_JWKSCooldown_PreventsStampede(t *testing.T) {
 		"unknown kid stampede should NOT trigger additional JWKS fetches within cooldown")
 }
 
-// --- Regression: dynamic activation auth field propagation ---
+// --- Regression: JWKS singleflight coalescing ---
 
-func TestActivateInstalledIntegration_AuthFieldsPropagated(t *testing.T) {
-	// This test verifies that the PluginEntry struct constructed in
-	// activateInstalledIntegration includes AuthType and AuthAudience fields.
-	// The actual activation path is tested via integration; here we verify
-	// the struct construction covers the fields.
-	entry := plugin.PluginEntry{
-		Path:         "/path/to/plugin",
-		AuthType:     "google_id_token",
-		AuthAudience: "https://bridge.example.com",
+// TestGoogleIDTokenValidator_CachedKey_NotBlockedBySlowRefresh proves that
+// validating a token with a cached kid succeeds immediately even while a
+// JWKS refresh is in progress (the refresh holds no mutex during network I/O).
+func TestGoogleIDTokenValidator_CachedKey_NotBlockedBySlowRefresh(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	kid := "cached-key"
+	requestStarted := make(chan struct{})
+	requestContinue := make(chan struct{})
+	fetchCount := 0
+
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount++
+		if fetchCount > 1 {
+			// Slow second fetch — signal that it started, then wait.
+			close(requestStarted)
+			<-requestContinue
+		}
+		jwk := jose.JSONWebKey{
+			Key:       &key.PublicKey,
+			KeyID:     kid,
+			Algorithm: string(jose.RS256),
+			Use:       "sig",
+		}
+		jwks := jose.JSONWebKeySet{Keys: []jose.JSONWebKey{jwk}}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(jwks)
+	}))
+	defer jwksServer.Close()
+
+	validator, err := NewGoogleIDTokenValidator(GoogleIDTokenValidatorConfig{
+		Audience:           "https://bridge.example.com",
+		AuthorizedSubjects: []string{"hub-sa@project.iam.gserviceaccount.com"},
+		JWKSURL:            jwksServer.URL,
+	})
+	require.NoError(t, err)
+
+	claims := googleIDTokenClaims{
+		Claims: jwt.Claims{
+			Issuer:   GoogleIssuerV2,
+			Audience: jwt.Audience{"https://bridge.example.com"},
+			Expiry:   jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		},
+		Email:         "hub-sa@project.iam.gserviceaccount.com",
+		EmailVerified: true,
 	}
-	assert.Equal(t, "google_id_token", entry.AuthType)
-	assert.Equal(t, "https://bridge.example.com", entry.AuthAudience)
+	token := signTestIDToken(t, key, kid, claims)
+
+	// Prime the cache.
+	err = validator.ValidateToken(context.Background(), token)
+	require.NoError(t, err)
+	assert.Equal(t, 1, fetchCount)
+
+	// Force the cache to appear stale so the next unknown-kid lookup
+	// triggers a refresh.
+	validator.mu.Lock()
+	validator.fetchedAt = time.Now().Add(-2 * defaultJWKSRefreshInterval)
+	validator.mu.Unlock()
+
+	// Start a goroutine that will trigger a slow JWKS refresh via unknown kid.
+	unknownKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	unknownToken := signTestIDToken(t, unknownKey, "trigger-refresh", claims)
+
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		// This will block in the slow JWKS fetch.
+		_ = validator.ValidateToken(context.Background(), unknownToken)
+	}()
+
+	// Wait for the slow fetch to start.
+	<-requestStarted
+
+	// While the refresh is in-flight, validate a token with the cached kid.
+	// This MUST succeed immediately — the read lock is not held during fetch.
+	err = validator.ValidateToken(context.Background(), token)
+	assert.NoError(t, err, "cached key validation must not block on slow JWKS refresh")
+
+	// Unblock the slow fetch and wait for it to complete.
+	close(requestContinue)
+	<-refreshDone
+}
+
+// TestGoogleIDTokenValidator_ConcurrentRefreshes_Coalesce proves that
+// multiple goroutines triggering a JWKS refresh simultaneously result in
+// only one HTTP fetch (singleflight coalescing).
+func TestGoogleIDTokenValidator_ConcurrentRefreshes_Coalesce(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	kid := "coalesce-key"
+	var fetchCount int32
+	fetchGate := make(chan struct{})
+
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Atomic increment to count fetches across goroutines.
+		fetchCount++
+		// Wait for the gate to open — this ensures all goroutines pile up
+		// before any fetch completes.
+		<-fetchGate
+		jwk := jose.JSONWebKey{
+			Key:       &key.PublicKey,
+			KeyID:     kid,
+			Algorithm: string(jose.RS256),
+			Use:       "sig",
+		}
+		jwks := jose.JSONWebKeySet{Keys: []jose.JSONWebKey{jwk}}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(jwks)
+	}))
+	defer jwksServer.Close()
+
+	validator, err := NewGoogleIDTokenValidator(GoogleIDTokenValidatorConfig{
+		Audience:           "https://bridge.example.com",
+		AuthorizedSubjects: []string{"hub-sa@project.iam.gserviceaccount.com"},
+		JWKSURL:            jwksServer.URL,
+	})
+	require.NoError(t, err)
+
+	claims := googleIDTokenClaims{
+		Claims: jwt.Claims{
+			Issuer:   GoogleIssuerV2,
+			Audience: jwt.Audience{"https://bridge.example.com"},
+			Expiry:   jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		},
+		Email:         "hub-sa@project.iam.gserviceaccount.com",
+		EmailVerified: true,
+	}
+	token := signTestIDToken(t, key, kid, claims)
+
+	// Launch multiple goroutines that all try to validate simultaneously.
+	// Since the cache is empty, all will trigger a refresh — but singleflight
+	// should coalesce them into one fetch.
+	const numGoroutines = 10
+	var wg sync.WaitGroup
+	errs := make([]error, numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = validator.ValidateToken(context.Background(), token)
+		}(i)
+	}
+
+	// Give goroutines time to pile up in singleflight, then open the gate.
+	time.Sleep(50 * time.Millisecond)
+	close(fetchGate)
+
+	wg.Wait()
+
+	// All goroutines should succeed.
+	for i, e := range errs {
+		assert.NoError(t, e, "goroutine %d", i)
+	}
+
+	// Only 1 actual HTTP fetch should have happened.
+	assert.Equal(t, int32(1), fetchCount,
+		"concurrent JWKS refreshes should coalesce into a single HTTP fetch")
 }

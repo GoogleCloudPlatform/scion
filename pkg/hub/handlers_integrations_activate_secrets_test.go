@@ -296,3 +296,52 @@ func TestLoadTeamsConfig_DoesNotMigrateSecrets(t *testing.T) {
 		t.Errorf("manifest generation must not write to the secret backend, got %+v", sb.sets)
 	}
 }
+
+// TestActivateInstalledIntegration_AuthFieldsPropagatedToLoadOne is a
+// regression test verifying that activateInstalledIntegration propagates
+// AuthType and AuthAudience from the settings entry through to the
+// PluginEntry received by IntegrationManager.LoadOne. Without this,
+// dynamically activated plugins lose their authentication settings and
+// the Hub-to-Bridge gRPC transport falls back to unauthenticated.
+func TestActivateInstalledIntegration_AuthFieldsPropagatedToLoadOne(t *testing.T) {
+	srv, mgr := newActivationServer(t, nil)
+
+	entry := &config.V1PluginEntry{
+		Path:         "./a2a-bridge",
+		SelfManaged:  true,
+		Mode:         "grpc",
+		Address:      "bridge.example.com:443",
+		AuthType:     "google_id_token",
+		AuthAudience: "https://bridge.example.com",
+	}
+
+	err := srv.activateInstalledIntegration(context.Background(), mgr, "a2a-bridge", entry)
+	if err != nil {
+		t.Fatalf("activateInstalledIntegration: %v", err)
+	}
+
+	if len(mgr.loadOneCalls) != 1 {
+		t.Fatalf("expected 1 LoadOne call, got %d", len(mgr.loadOneCalls))
+	}
+	if mgr.loadOneCalls[0] != "a2a-bridge" {
+		t.Errorf("LoadOne name = %q, want %q", mgr.loadOneCalls[0], "a2a-bridge")
+	}
+	if len(mgr.loadOneEntries) != 1 {
+		t.Fatalf("expected 1 LoadOne entry, got %d", len(mgr.loadOneEntries))
+	}
+
+	got := mgr.loadOneEntries[0]
+	if got.AuthType != "google_id_token" {
+		t.Errorf("PluginEntry.AuthType = %q, want %q", got.AuthType, "google_id_token")
+	}
+	if got.AuthAudience != "https://bridge.example.com" {
+		t.Errorf("PluginEntry.AuthAudience = %q, want %q", got.AuthAudience, "https://bridge.example.com")
+	}
+	// Also verify other fields propagated correctly.
+	if got.Mode != "grpc" {
+		t.Errorf("PluginEntry.Mode = %q, want %q", got.Mode, "grpc")
+	}
+	if got.Address != "bridge.example.com:443" {
+		t.Errorf("PluginEntry.Address = %q, want %q", got.Address, "bridge.example.com:443")
+	}
+}
