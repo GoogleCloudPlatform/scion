@@ -1582,12 +1582,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Initialize GE Google credential exchange service.
 	if cfg.GEGoogleExchange.IsValid() {
 		geValidator := NewGoogleCredentialValidator(nil)
-		geExtIDStore := NewMemoryExternalIdentityStore()
 		srv.geExchangeService = NewGEExchangeService(
 			cfg.GEGoogleExchange,
 			geValidator,
 			srv.userTokenService,
-			geExtIDStore,
+			s, // store.Store embeds ExternalIdentityStore (ent-backed, durable)
 			s,
 			slog.Default(),
 		)

@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
@@ -24,14 +25,15 @@ import (
 // UserQuery is the builder for querying User entities.
 type UserQuery struct {
 	config
-	ctx                *QueryContext
-	order              []user.OrderOption
-	inters             []Interceptor
-	predicates         []predicate.User
-	withOwnedGroups    *GroupQuery
-	withMemberships    *GroupMembershipQuery
-	withPolicyBindings *PolicyBindingQuery
-	modifiers          []func(*sql.Selector)
+	ctx                    *QueryContext
+	order                  []user.OrderOption
+	inters                 []Interceptor
+	predicates             []predicate.User
+	withOwnedGroups        *GroupQuery
+	withMemberships        *GroupMembershipQuery
+	withPolicyBindings     *PolicyBindingQuery
+	withExternalIdentities *ExternalIdentityQuery
+	modifiers              []func(*sql.Selector)
 	// intermediate query (i.e. traversal path).
 	sql  *sql.Selector
 	path func(context.Context) (*sql.Selector, error)
@@ -127,6 +129,28 @@ func (_q *UserQuery) QueryPolicyBindings() *PolicyBindingQuery {
 			sqlgraph.From(user.Table, user.FieldID, selector),
 			sqlgraph.To(policybinding.Table, policybinding.FieldID),
 			sqlgraph.Edge(sqlgraph.O2M, true, user.PolicyBindingsTable, user.PolicyBindingsColumn),
+		)
+		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
+		return fromU, nil
+	}
+	return query
+}
+
+// QueryExternalIdentities chains the current query on the "external_identities" edge.
+func (_q *UserQuery) QueryExternalIdentities() *ExternalIdentityQuery {
+	query := (&ExternalIdentityClient{config: _q.config}).Query()
+	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
+		if err := _q.prepareQuery(ctx); err != nil {
+			return nil, err
+		}
+		selector := _q.sqlQuery(ctx)
+		if err := selector.Err(); err != nil {
+			return nil, err
+		}
+		step := sqlgraph.NewStep(
+			sqlgraph.From(user.Table, user.FieldID, selector),
+			sqlgraph.To(externalidentity.Table, externalidentity.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, user.ExternalIdentitiesTable, user.ExternalIdentitiesColumn),
 		)
 		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
 		return fromU, nil
@@ -321,14 +345,15 @@ func (_q *UserQuery) Clone() *UserQuery {
 		return nil
 	}
 	return &UserQuery{
-		config:             _q.config,
-		ctx:                _q.ctx.Clone(),
-		order:              append([]user.OrderOption{}, _q.order...),
-		inters:             append([]Interceptor{}, _q.inters...),
-		predicates:         append([]predicate.User{}, _q.predicates...),
-		withOwnedGroups:    _q.withOwnedGroups.Clone(),
-		withMemberships:    _q.withMemberships.Clone(),
-		withPolicyBindings: _q.withPolicyBindings.Clone(),
+		config:                 _q.config,
+		ctx:                    _q.ctx.Clone(),
+		order:                  append([]user.OrderOption{}, _q.order...),
+		inters:                 append([]Interceptor{}, _q.inters...),
+		predicates:             append([]predicate.User{}, _q.predicates...),
+		withOwnedGroups:        _q.withOwnedGroups.Clone(),
+		withMemberships:        _q.withMemberships.Clone(),
+		withPolicyBindings:     _q.withPolicyBindings.Clone(),
+		withExternalIdentities: _q.withExternalIdentities.Clone(),
 		// clone intermediate query.
 		sql:  _q.sql.Clone(),
 		path: _q.path,
@@ -365,6 +390,17 @@ func (_q *UserQuery) WithPolicyBindings(opts ...func(*PolicyBindingQuery)) *User
 		opt(query)
 	}
 	_q.withPolicyBindings = query
+	return _q
+}
+
+// WithExternalIdentities tells the query-builder to eager-load the nodes that are connected to
+// the "external_identities" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *UserQuery) WithExternalIdentities(opts ...func(*ExternalIdentityQuery)) *UserQuery {
+	query := (&ExternalIdentityClient{config: _q.config}).Query()
+	for _, opt := range opts {
+		opt(query)
+	}
+	_q.withExternalIdentities = query
 	return _q
 }
 
@@ -446,10 +482,11 @@ func (_q *UserQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*User, e
 	var (
 		nodes       = []*User{}
 		_spec       = _q.querySpec()
-		loadedTypes = [3]bool{
+		loadedTypes = [4]bool{
 			_q.withOwnedGroups != nil,
 			_q.withMemberships != nil,
 			_q.withPolicyBindings != nil,
+			_q.withExternalIdentities != nil,
 		}
 	)
 	_spec.ScanValues = func(columns []string) ([]any, error) {
@@ -491,6 +528,13 @@ func (_q *UserQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*User, e
 		if err := _q.loadPolicyBindings(ctx, query, nodes,
 			func(n *User) { n.Edges.PolicyBindings = []*PolicyBinding{} },
 			func(n *User, e *PolicyBinding) { n.Edges.PolicyBindings = append(n.Edges.PolicyBindings, e) }); err != nil {
+			return nil, err
+		}
+	}
+	if query := _q.withExternalIdentities; query != nil {
+		if err := _q.loadExternalIdentities(ctx, query, nodes,
+			func(n *User) { n.Edges.ExternalIdentities = []*ExternalIdentity{} },
+			func(n *User, e *ExternalIdentity) { n.Edges.ExternalIdentities = append(n.Edges.ExternalIdentities, e) }); err != nil {
 			return nil, err
 		}
 	}
@@ -591,6 +635,36 @@ func (_q *UserQuery) loadPolicyBindings(ctx context.Context, query *PolicyBindin
 		node, ok := nodeids[*fk]
 		if !ok {
 			return fmt.Errorf(`unexpected referenced foreign-key "user_id" returned %v for node %v`, *fk, n.ID)
+		}
+		assign(node, n)
+	}
+	return nil
+}
+func (_q *UserQuery) loadExternalIdentities(ctx context.Context, query *ExternalIdentityQuery, nodes []*User, init func(*User), assign func(*User, *ExternalIdentity)) error {
+	fks := make([]driver.Value, 0, len(nodes))
+	nodeids := make(map[uuid.UUID]*User)
+	for i := range nodes {
+		fks = append(fks, nodes[i].ID)
+		nodeids[nodes[i].ID] = nodes[i]
+		if init != nil {
+			init(nodes[i])
+		}
+	}
+	if len(query.ctx.Fields) > 0 {
+		query.ctx.AppendFieldOnce(externalidentity.FieldUserID)
+	}
+	query.Where(predicate.ExternalIdentity(func(s *sql.Selector) {
+		s.Where(sql.InValues(s.C(user.ExternalIdentitiesColumn), fks...))
+	}))
+	neighbors, err := query.All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range neighbors {
+		fk := n.UserID
+		node, ok := nodeids[fk]
+		if !ok {
+			return fmt.Errorf(`unexpected referenced foreign-key "user_id" returned %v for node %v`, fk, n.ID)
 		}
 		assign(node, n)
 	}

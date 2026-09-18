@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -61,116 +60,14 @@ const DefaultGETokenTTL = 5 * time.Minute
 // MaxGETokenTTL is the maximum allowed Hub access token lifetime.
 const MaxGETokenTTL = 15 * time.Minute
 
-// ---------------------------------------------------------------------------
-// External Identity Binding — persisted (provider, issuer, sub) → user_id.
-// ---------------------------------------------------------------------------
+// ExternalIdentityBinding is an alias for the store model type.
+// The durable store implementation lives in pkg/store/entadapter backed by
+// the ExternalIdentity ent schema with a unique composite index on
+// (provider, issuer, subject) for conflict-safe concurrent binding.
+type ExternalIdentityBinding = store.ExternalIdentityBinding
 
-// ExternalIdentityBinding represents a persistent mapping from an external
-// identity provider's (provider, issuer, subject) triple to a local Hub user.
-type ExternalIdentityBinding struct {
-	ID        string    `json:"id"`
-	Provider  string    `json:"provider"`  // e.g., "google"
-	Issuer    string    `json:"issuer"`    // canonical issuer URL
-	Subject   string    `json:"subject"`   // stable provider subject
-	UserID    string    `json:"userId"`    // FK to User.ID
-	Email     string    `json:"email"`     // email at binding time (informational)
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
-}
-
-// ExternalIdentityStore provides persistence for external identity bindings.
-// In this initial implementation, bindings are stored in-memory with the
-// expectation of migrating to the ent schema when the external identity table
-// is added via proper database migration.
-type ExternalIdentityStore interface {
-	// GetExternalIdentity looks up a binding by (provider, issuer, subject).
-	// Returns store.ErrNotFound if no binding exists.
-	GetExternalIdentity(ctx context.Context, provider, issuer, subject string) (*ExternalIdentityBinding, error)
-
-	// CreateExternalIdentity atomically creates a new binding.
-	// Returns an error if a binding for this (provider, issuer, subject)
-	// already exists or if the user_id conflicts.
-	CreateExternalIdentity(ctx context.Context, binding *ExternalIdentityBinding) error
-
-	// UpdateExternalIdentityEmail updates the email field of an existing binding.
-	UpdateExternalIdentityEmail(ctx context.Context, id, email string) error
-
-	// GetExternalIdentitiesByUserID returns all bindings for a given user.
-	GetExternalIdentitiesByUserID(ctx context.Context, userID string) ([]*ExternalIdentityBinding, error)
-}
-
-// ---------------------------------------------------------------------------
-// In-memory implementation for initial deployment and testing.
-// ---------------------------------------------------------------------------
-
-// MemoryExternalIdentityStore is a thread-safe in-memory implementation
-// of ExternalIdentityStore.
-type MemoryExternalIdentityStore struct {
-	mu       sync.Mutex
-	bindings map[string]*ExternalIdentityBinding // key: provider:issuer:subject
-	byUser   map[string][]*ExternalIdentityBinding
-}
-
-// NewMemoryExternalIdentityStore creates a new in-memory store.
-func NewMemoryExternalIdentityStore() *MemoryExternalIdentityStore {
-	return &MemoryExternalIdentityStore{
-		bindings: make(map[string]*ExternalIdentityBinding),
-		byUser:   make(map[string][]*ExternalIdentityBinding),
-	}
-}
-
-func extIDKey(provider, issuer, subject string) string {
-	return provider + ":" + issuer + ":" + subject
-}
-
-func (s *MemoryExternalIdentityStore) GetExternalIdentity(_ context.Context, provider, issuer, subject string) (*ExternalIdentityBinding, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := extIDKey(provider, issuer, subject)
-	if b, ok := s.bindings[key]; ok {
-		copy := *b
-		return &copy, nil
-	}
-	return nil, store.ErrNotFound
-}
-
-func (s *MemoryExternalIdentityStore) CreateExternalIdentity(_ context.Context, binding *ExternalIdentityBinding) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := extIDKey(binding.Provider, binding.Issuer, binding.Subject)
-	if _, ok := s.bindings[key]; ok {
-		return fmt.Errorf("external identity binding already exists for %s", key)
-	}
-	copy := *binding
-	s.bindings[key] = &copy
-	s.byUser[binding.UserID] = append(s.byUser[binding.UserID], &copy)
-	return nil
-}
-
-func (s *MemoryExternalIdentityStore) UpdateExternalIdentityEmail(_ context.Context, id, email string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, b := range s.bindings {
-		if b.ID == id {
-			b.Email = email
-			b.UpdatedAt = time.Now()
-			return nil
-		}
-	}
-	return store.ErrNotFound
-}
-
-func (s *MemoryExternalIdentityStore) GetExternalIdentitiesByUserID(_ context.Context, userID string) ([]*ExternalIdentityBinding, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	bindings := s.byUser[userID]
-	result := make([]*ExternalIdentityBinding, len(bindings))
-	for i, b := range bindings {
-		copy := *b
-		result[i] = &copy
-	}
-	return result, nil
-}
+// ExternalIdentityStore is an alias for the store interface.
+type ExternalIdentityStore = store.ExternalIdentityStore
 
 // ---------------------------------------------------------------------------
 // GEExchangeService — the core exchange logic.
@@ -447,7 +344,9 @@ func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *Vali
 			return nil, ErrUserSuspended
 		}
 
-		// Create the binding atomically.
+		// Create the binding atomically. If a concurrent exchange already
+		// created it (unique constraint violation), fall back to the winner's
+		// binding — this is the conflict-safe race-resolution path.
 		now := time.Now()
 		if err := s.extIDStore.CreateExternalIdentity(ctx, &ExternalIdentityBinding{
 			ID:        uuid.New().String(),
@@ -459,8 +358,7 @@ func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *Vali
 			CreatedAt: now,
 			UpdatedAt: now,
 		}); err != nil {
-			s.logger.Error("GE exchange: failed to create binding", "error", err)
-			return nil, fmt.Errorf("failed to create identity binding: %w", err)
+			return s.resolveAfterConflict(ctx, canonicalIssuer, identity, err)
 		}
 
 		s.logger.Info("GE exchange: created new binding for existing user",
@@ -477,7 +375,8 @@ func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *Vali
 		return nil, err
 	}
 
-	// Create the binding.
+	// Create the binding. If a concurrent exchange already created it
+	// (unique constraint violation), resolve via the winning binding.
 	now := time.Now()
 	if err := s.extIDStore.CreateExternalIdentity(ctx, &ExternalIdentityBinding{
 		ID:        uuid.New().String(),
@@ -489,11 +388,37 @@ func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *Vali
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {
-		s.logger.Error("GE exchange: failed to create binding for new user", "error", err)
-		// The user was created but binding failed — this is a partial state.
-		// The user exists and can be bound on next login attempt.
+		return s.resolveAfterConflict(ctx, canonicalIssuer, identity, err)
 	}
 
+	return user, nil
+}
+
+// resolveAfterConflict handles the case where CreateExternalIdentity failed
+// due to a unique constraint violation (race between concurrent exchanges).
+// It looks up the winning binding and resolves to the winner's user, which
+// ensures deterministic outcome regardless of which goroutine won.
+func (s *GEExchangeService) resolveAfterConflict(ctx context.Context, canonicalIssuer string, identity *ValidatedGoogleIdentity, createErr error) (*store.User, error) {
+	// Retry by looking up the binding the winner created.
+	winner, err := s.extIDStore.GetExternalIdentity(ctx, "google", canonicalIssuer, identity.Subject)
+	if err != nil {
+		// Binding still not found: this was a genuine error, not a race.
+		s.logger.Error("GE exchange: binding creation failed and no winning binding found",
+			"create_error", createErr, "lookup_error", err, "sub", identity.Subject)
+		return nil, fmt.Errorf("failed to create identity binding: %w", createErr)
+	}
+
+	// Found the winner's binding — resolve to the winner's user.
+	user, err := s.userStore.GetUser(ctx, winner.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("bound user not found after conflict resolution: %w", err)
+	}
+	if user.Status == "suspended" {
+		return nil, ErrUserSuspended
+	}
+
+	s.logger.Info("GE exchange: resolved to existing binding after race",
+		"sub", identity.Subject, "user_id", user.ID)
 	return user, nil
 }
 

@@ -80,6 +80,7 @@ type CompositeStore struct {
 	*MutationAuditStore
 	*QuotaStore
 	*AccessConstraintStore
+	*ExternalIdentityStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -157,6 +158,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		MutationAuditStore:       NewMutationAuditStore(client),
 		QuotaStore:               NewQuotaStore(client),
 		AccessConstraintStore:    NewAccessConstraintStore(client),
+		ExternalIdentityStore:   NewExternalIdentityStore(client),
 		client:                   client,
 	}
 }

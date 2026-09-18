@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -112,6 +113,76 @@ func (s *fakeUserStore) WithTx(_ context.Context, fn func(tx store.Store) error)
 	return fn(s)
 }
 
+// ---------------------------------------------------------------------------
+// In-memory ExternalIdentityStore for tests.
+// ---------------------------------------------------------------------------
+
+type memExtIDStore struct {
+	mu       sync.Mutex
+	bindings map[string]*store.ExternalIdentityBinding // key: provider:issuer:subject
+	byUser   map[string][]*store.ExternalIdentityBinding
+}
+
+func newMemExtIDStore() *memExtIDStore {
+	return &memExtIDStore{
+		bindings: make(map[string]*store.ExternalIdentityBinding),
+		byUser:   make(map[string][]*store.ExternalIdentityBinding),
+	}
+}
+
+func memExtIDKey(provider, issuer, subject string) string {
+	return provider + ":" + issuer + ":" + subject
+}
+
+func (s *memExtIDStore) GetExternalIdentity(_ context.Context, provider, issuer, subject string) (*store.ExternalIdentityBinding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := memExtIDKey(provider, issuer, subject)
+	if b, ok := s.bindings[key]; ok {
+		cp := *b
+		return &cp, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (s *memExtIDStore) CreateExternalIdentity(_ context.Context, binding *store.ExternalIdentityBinding) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := memExtIDKey(binding.Provider, binding.Issuer, binding.Subject)
+	if _, ok := s.bindings[key]; ok {
+		return fmt.Errorf("external identity binding already exists for %s", key)
+	}
+	cp := *binding
+	s.bindings[key] = &cp
+	s.byUser[binding.UserID] = append(s.byUser[binding.UserID], &cp)
+	return nil
+}
+
+func (s *memExtIDStore) UpdateExternalIdentityEmail(_ context.Context, id, email string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, b := range s.bindings {
+		if b.ID == id {
+			b.Email = email
+			b.UpdatedAt = time.Now()
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (s *memExtIDStore) GetExternalIdentitiesByUserID(_ context.Context, userID string) ([]*store.ExternalIdentityBinding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bindings := s.byUser[userID]
+	result := make([]*store.ExternalIdentityBinding, len(bindings))
+	for i, b := range bindings {
+		cp := *b
+		result[i] = &cp
+	}
+	return result, nil
+}
+
 func addUser(s *fakeUserStore, id, email, role, status string) *store.User {
 	u := &store.User{
 		ID:          id,
@@ -142,7 +213,27 @@ func newTestExchangeService(validator GoogleCredentialValidator, userStore *fake
 		},
 		validator,
 		tokenSvc,
-		NewMemoryExternalIdentityStore(),
+		newMemExtIDStore(),
+		userStore,
+		slog.Default(),
+	)
+}
+
+// newTestExchangeServiceWithExtStore allows injecting a specific external identity
+// store for tests that need direct access to binding state.
+func newTestExchangeServiceWithExtStore(validator GoogleCredentialValidator, userStore *fakeUserStore, extStore ExternalIdentityStore) *GEExchangeService {
+	tokenSvc, _ := NewUserTokenService(UserTokenConfig{
+		AccessTokenDuration: 5 * time.Minute,
+	})
+	return NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         5 * time.Minute,
+		},
+		validator,
+		tokenSvc,
+		extStore,
 		userStore,
 		slog.Default(),
 	)
@@ -336,7 +427,7 @@ func TestGEExchange_MissingTrustConfig(t *testing.T) {
 	svc := NewGEExchangeService(
 		GEGoogleExchangeConfig{Enabled: false},
 		validator, tokenSvc,
-		NewMemoryExternalIdentityStore(), userStore,
+		newMemExtIDStore(), userStore,
 		slog.Default(),
 	)
 
@@ -448,7 +539,7 @@ func TestGEExchange_StableLinkage_ConflictingSubject(t *testing.T) {
 	existingUser := addUser(userStore, "user-1", "user@gmail.com", "member", "active")
 
 	// Pre-create a binding with a different subject for the same user.
-	extIDStore := NewMemoryExternalIdentityStore()
+	extIDStore := newMemExtIDStore()
 	_ = extIDStore.CreateExternalIdentity(context.Background(), &ExternalIdentityBinding{
 		ID:       "binding-1",
 		Provider: "google",
@@ -769,12 +860,12 @@ func TestGEExchangeHandler_MethodNotAllowed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// MemoryExternalIdentityStore tests.
+// In-memory ExternalIdentityStore tests (validates test double and store contract).
 // ---------------------------------------------------------------------------
 
 func TestMemoryExternalIdentityStore(t *testing.T) {
 	ctx := context.Background()
-	extStore := NewMemoryExternalIdentityStore()
+	extStore := newMemExtIDStore()
 
 	// Create a binding.
 	binding := &ExternalIdentityBinding{
@@ -828,6 +919,184 @@ func TestMemoryExternalIdentityStore(t *testing.T) {
 	_, err = extStore.GetExternalIdentity(ctx, "google", googleCanonicalIssuer, "nonexistent")
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// flexBool JSON decoding tests.
+// ---------------------------------------------------------------------------
+
+func TestFlexBool_Boolean(t *testing.T) {
+	var b flexBool
+	if err := json.Unmarshal([]byte(`true`), &b); err != nil {
+		t.Fatalf("unmarshal true: %v", err)
+	}
+	if !bool(b) {
+		t.Error("expected true")
+	}
+	if err := json.Unmarshal([]byte(`false`), &b); err != nil {
+		t.Fatalf("unmarshal false: %v", err)
+	}
+	if bool(b) {
+		t.Error("expected false")
+	}
+}
+
+func TestFlexBool_String(t *testing.T) {
+	var b flexBool
+	if err := json.Unmarshal([]byte(`"true"`), &b); err != nil {
+		t.Fatalf("unmarshal \"true\": %v", err)
+	}
+	if !bool(b) {
+		t.Error("expected true from string")
+	}
+	if err := json.Unmarshal([]byte(`"false"`), &b); err != nil {
+		t.Fatalf("unmarshal \"false\": %v", err)
+	}
+	if bool(b) {
+		t.Error("expected false from string")
+	}
+}
+
+func TestFlexBool_Invalid(t *testing.T) {
+	var b flexBool
+	if err := json.Unmarshal([]byte(`"yes"`), &b); err == nil {
+		t.Error("expected error for invalid value")
+	}
+}
+
+func TestFlexBool_InStruct(t *testing.T) {
+	// Simulates Google tokeninfo returning email_verified as string.
+	body := `{"email_verified":"true","azp":"client-1","aud":"client-1","sub":"sub-1","email":"a@gmail.com","expires_in":3600}`
+	var resp googleTokenInfoResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.EmailVerified == nil || !bool(*resp.EmailVerified) {
+		t.Error("expected email_verified=true from string form")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Access token aud/azp disagreement — strict rejection.
+// ---------------------------------------------------------------------------
+
+func TestGEExchange_AccessToken_AudAzpDisagreement(t *testing.T) {
+	// Even if both aud and azp are individually in the allowed set,
+	// disagreement must be rejected (confused-deputy prevention).
+	validator := &fakeGoogleValidator{
+		accessTokenErr: fmt.Errorf("%w: aud %q differs from azp %q",
+			ErrGoogleFieldDisagreement, "client-A", "client-B"),
+	}
+	userStore := newFakeUserStore()
+	svc := newTestExchangeService(validator, userStore)
+
+	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "split-aud-azp-token",
+		CredentialType: "access_token",
+	})
+	if err == nil {
+		t.Fatal("expected error for aud/azp disagreement")
+	}
+	if status != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent first linkage (exchange-level, using in-memory store).
+// ---------------------------------------------------------------------------
+
+func TestGEExchange_ConcurrentFirstLinkage(t *testing.T) {
+	// Two concurrent exchanges for the same Google subject should result in
+	// exactly one user. The second exchange should find the existing binding.
+	identity := validGmailIdentity()
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	svc := newTestExchangeServiceWithExtStore(validator, userStore, extStore)
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	const n = 5
+	errs := make([]error, n)
+	userIDs := make([]string, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			resp, _, err := svc.Exchange(ctx, &ExchangeRequest{
+				Credential:     "concurrent-token",
+				CredentialType: "id_token",
+			})
+			errs[idx] = err
+			if resp != nil && resp.User != nil {
+				userIDs[idx] = resp.User.ID
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// All should succeed (one creates, others find existing binding).
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: unexpected error: %v", i, err)
+		}
+	}
+
+	// All should resolve to the same user.
+	var expected string
+	for i, id := range userIDs {
+		if id == "" {
+			continue
+		}
+		if expected == "" {
+			expected = id
+		} else if id != expected {
+			t.Errorf("goroutine %d: user ID %q != expected %q", i, id, expected)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Changed email / no-relink test at exchange level.
+// ---------------------------------------------------------------------------
+
+func TestGEExchange_ChangedEmail_NoRelink(t *testing.T) {
+	// After a binding is created, changing the email in a subsequent exchange
+	// should update the informational email but NOT change the user mapping.
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+
+	identity1 := validGmailIdentity()
+	identity1.Email = "old@gmail.com"
+	validator := &fakeGoogleValidator{idTokenResult: identity1}
+	svc := newTestExchangeServiceWithExtStore(validator, userStore, extStore)
+
+	// First exchange — creates user + binding.
+	resp1, _, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "token-1",
+		CredentialType: "id_token",
+	})
+	if err != nil {
+		t.Fatalf("first exchange: %v", err)
+	}
+
+	// Second exchange — same sub, different email.
+	identity2 := validGmailIdentity()
+	identity2.Email = "new@gmail.com"
+	validator.idTokenResult = identity2
+	resp2, _, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "token-2",
+		CredentialType: "id_token",
+	})
+	if err != nil {
+		t.Fatalf("second exchange: %v", err)
+	}
+
+	// Same user must be returned (stable linkage, no relink).
+	if resp1.User.ID != resp2.User.ID {
+		t.Errorf("email change caused relink: user %s → %s", resp1.User.ID, resp2.User.ID)
 	}
 }
 

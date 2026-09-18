@@ -638,6 +638,43 @@ var (
 			},
 		},
 	}
+	// ExternalIdentitiesColumns holds the columns for the "external_identities" table.
+	ExternalIdentitiesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "provider", Type: field.TypeString},
+		{Name: "issuer", Type: field.TypeString},
+		{Name: "subject", Type: field.TypeString},
+		{Name: "email", Type: field.TypeString, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "user_id", Type: field.TypeUUID},
+	}
+	// ExternalIdentitiesTable holds the schema information for the "external_identities" table.
+	ExternalIdentitiesTable = &schema.Table{
+		Name:       "external_identities",
+		Columns:    ExternalIdentitiesColumns,
+		PrimaryKey: []*schema.Column{ExternalIdentitiesColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "external_identities_users_external_identities",
+				Columns:    []*schema.Column{ExternalIdentitiesColumns[7]},
+				RefColumns: []*schema.Column{UsersColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "externalidentity_provider_issuer_subject",
+				Unique:  true,
+				Columns: []*schema.Column{ExternalIdentitiesColumns[1], ExternalIdentitiesColumns[2], ExternalIdentitiesColumns[3]},
+			},
+			{
+				Name:    "externalidentity_user_id",
+				Unique:  false,
+				Columns: []*schema.Column{ExternalIdentitiesColumns[7]},
+			},
+		},
+	}
 	// GcpServiceAccountsColumns holds the columns for the "gcp_service_accounts" table.
 	GcpServiceAccountsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2062,6 +2099,7 @@ var (
 		DelegationEdgesTable,
 		EntitlementBindingsTable,
 		EnvVarsTable,
+		ExternalIdentitiesTable,
 		GcpServiceAccountsTable,
 		GithubResolutionCacheTable,
 		GithubInstallationsTable,
@@ -2139,6 +2177,10 @@ func init() {
 	EntitlementBindingsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	EnvVarsTable.Annotation = &entsql.Annotation{
 		Table: "env_vars",
+	}
+	ExternalIdentitiesTable.ForeignKeys[0].RefTable = UsersTable
+	ExternalIdentitiesTable.Annotation = &entsql.Annotation{
+		Table: "external_identities",
 	}
 	GcpServiceAccountsTable.Annotation = &entsql.Annotation{
 		Table: "gcp_service_accounts",

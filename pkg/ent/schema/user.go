@@ -105,5 +105,6 @@ func (User) Edges() []ent.Edge {
 			Ref("user"),
 		edge.From("policy_bindings", PolicyBinding.Type).
 			Ref("user"),
+		edge.To("external_identities", ExternalIdentity.Type),
 	}
 }

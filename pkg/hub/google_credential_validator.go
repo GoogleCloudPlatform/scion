@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -138,7 +139,15 @@ type googleCredentialValidator struct {
 // NewGoogleCredentialValidator creates a production Google credential validator.
 func NewGoogleCredentialValidator(httpClient *http.Client) GoogleCredentialValidator {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 10 * time.Second}
+		httpClient = &http.Client{
+			Timeout: 10 * time.Second,
+			// Do not follow redirects — we call pinned Google endpoints only.
+			// A redirect from these endpoints would indicate a misconfiguration
+			// or MITM attempt.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return fmt.Errorf("redirect not allowed to pinned Google endpoint: %s", req.URL)
+			},
+		}
 	}
 	return &googleCredentialValidator{
 		httpClient: httpClient,
@@ -183,6 +192,22 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 			break
 		}
 	}
+
+	// If no cached key verified, force-refresh JWKS (the signing key may have
+	// rotated) and retry once.
+	if !verified {
+		refreshedJWKS, err := v.jwksCache.forceRefresh(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("%w: signature verification failed and JWKS refresh failed: %v",
+				ErrGoogleInvalidCredential, err)
+		}
+		for _, key := range refreshedJWKS.Keys {
+			if err := parsedToken.Claims(key, &claims); err == nil {
+				verified = true
+				break
+			}
+		}
+	}
 	if !verified {
 		return nil, fmt.Errorf("%w: signature verification failed", ErrGoogleInvalidCredential)
 	}
@@ -197,6 +222,11 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 		return nil, fmt.Errorf("%w: audience not in allowed set", ErrGoogleUntrustedAudience)
 	}
 
+	// Require exp claim — ID tokens without expiry are invalid.
+	if claims.Expiry == nil {
+		return nil, fmt.Errorf("%w: missing exp claim", ErrGoogleInvalidCredential)
+	}
+
 	// Validate time claims with bounded skew.
 	now := time.Now()
 	expected := jwt.Expected{
@@ -204,18 +234,16 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 	}
 	if err := claims.Claims.Validate(expected); err != nil {
 		// Check if it's an expiry issue vs other issue
-		if claims.Expiry != nil && claims.Expiry.Time().Before(now.Add(-googleClockSkew)) {
+		if claims.Expiry.Time().Before(now.Add(-googleClockSkew)) {
 			return nil, fmt.Errorf("%w: %v", ErrGoogleExpiredCredential, err)
 		}
 		return nil, fmt.Errorf("%w: time validation failed: %v", ErrGoogleInvalidCredential, err)
 	}
 
 	// Check remaining lifetime — reject tokens with no usable lifetime.
-	if claims.Expiry != nil {
-		remaining := time.Until(claims.Expiry.Time())
-		if remaining < -googleClockSkew {
-			return nil, ErrGENoRemainingLifetime
-		}
+	remaining := time.Until(claims.Expiry.Time())
+	if remaining < -googleClockSkew {
+		return nil, ErrGENoRemainingLifetime
 	}
 
 	// Validate stable subject.
@@ -227,7 +255,7 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 	if claims.Email == "" {
 		return nil, fmt.Errorf("%w: no email claim", ErrGoogleMissingField)
 	}
-	if !claims.EmailVerified {
+	if !bool(claims.EmailVerified) {
 		return nil, ErrGoogleUnverifiedEmail
 	}
 
@@ -236,21 +264,32 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 		return nil, ErrGoogleServiceAccount
 	}
 
-	var expiry time.Time
-	if claims.Expiry != nil {
-		expiry = claims.Expiry.Time()
-	}
+	expiry := claims.Expiry.Time()
 
-	// Extract audience — use the first audience element (the client ID).
+	// Extract audience — use azp if present (authoritative issued-client),
+	// otherwise the single audience element. Reject multi-valued aud without azp.
 	var audience string
-	if len(claims.Audience) > 0 {
+	if claims.AZP != "" {
+		audience = claims.AZP
+		// If aud is also present and differs from azp, reject (disagreement).
+		if len(claims.Audience) > 0 {
+			for _, aud := range claims.Audience {
+				if string(aud) != claims.AZP {
+					return nil, fmt.Errorf("%w: aud %q differs from azp %q",
+						ErrGoogleFieldDisagreement, aud, claims.AZP)
+				}
+			}
+		}
+	} else if len(claims.Audience) == 1 {
 		audience = string(claims.Audience[0])
+	} else if len(claims.Audience) > 1 {
+		return nil, fmt.Errorf("%w: multi-valued aud without azp", ErrGoogleInvalidCredential)
 	}
 
 	return &ValidatedGoogleIdentity{
 		Subject:          claims.Subject,
 		Email:            claims.Email,
-		EmailVerified:    claims.EmailVerified,
+		EmailVerified:    bool(claims.EmailVerified),
 		DisplayName:      claims.Name,
 		AvatarURL:        claims.Picture,
 		Issuer:           googleCanonicalIssuer,
@@ -300,13 +339,13 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 		return nil, fmt.Errorf("%w: azp %q not in allowed set", ErrGoogleUntrustedAudience, tokenInfo.AZP)
 	}
 
-	// If aud is also present and different from azp, it must also be allowed.
-	// Per contract-review: do not treat aud/azp as interchangeable fallbacks.
+	// Per contract-review: reject disagreement among client-identifying fields.
+	// If aud is present and differs from azp, reject unconditionally — even if
+	// both are individually allowlisted. This prevents confused-deputy attacks
+	// where a token with split aud/azp passes validation.
 	if tokenInfo.AUD != "" && tokenInfo.AUD != tokenInfo.AZP {
-		if !containsString(allowedClientIDs, tokenInfo.AUD) {
-			return nil, fmt.Errorf("%w: aud %q differs from azp %q and is not in allowed set",
-				ErrGoogleUntrustedAudience, tokenInfo.AUD, tokenInfo.AZP)
-		}
+		return nil, fmt.Errorf("%w: aud %q differs from azp %q",
+			ErrGoogleFieldDisagreement, tokenInfo.AUD, tokenInfo.AZP)
 	}
 
 	// Validate expiry from tokeninfo.
@@ -328,7 +367,7 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 	if userInfo.Email == "" {
 		return nil, fmt.Errorf("%w: email missing from userinfo", ErrGoogleMissingField)
 	}
-	if !userInfo.EmailVerified {
+	if !bool(userInfo.EmailVerified) {
 		return nil, ErrGoogleUnverifiedEmail
 	}
 
@@ -344,7 +383,7 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 			ErrGoogleFieldDisagreement, tokenInfo.Email, userInfo.Email)
 	}
 	// Cross-check email_verified where tokeninfo provides it.
-	if tokenInfo.EmailVerified != nil && *tokenInfo.EmailVerified != userInfo.EmailVerified {
+	if tokenInfo.EmailVerified != nil && bool(*tokenInfo.EmailVerified) != bool(userInfo.EmailVerified) {
 		return nil, fmt.Errorf("%w: email_verified disagrees between tokeninfo and userinfo",
 			ErrGoogleFieldDisagreement)
 	}
@@ -357,7 +396,7 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 	return &ValidatedGoogleIdentity{
 		Subject:          userInfo.Sub,
 		Email:            userInfo.Email,
-		EmailVerified:    userInfo.EmailVerified,
+		EmailVerified:    bool(userInfo.EmailVerified),
 		DisplayName:      userInfo.Name,
 		AvatarURL:        userInfo.Picture,
 		Issuer:           googleCanonicalIssuer,
@@ -375,11 +414,12 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 // googleIDTokenClaims are the JWT claims in a Google ID token.
 type googleIDTokenClaims struct {
 	jwt.Claims
-	Email         string `json:"email"`
-	EmailVerified bool   `json:"email_verified"`
-	Name          string `json:"name"`
-	Picture       string `json:"picture"`
-	HD            string `json:"hd"` // Hosted domain for Workspace accounts
+	Email         string   `json:"email"`
+	EmailVerified flexBool `json:"email_verified"`
+	Name          string   `json:"name"`
+	Picture       string   `json:"picture"`
+	HD            string   `json:"hd"`  // Hosted domain for Workspace accounts
+	AZP           string   `json:"azp"` // Authorized party (may differ from aud in some flows)
 }
 
 // googleTokenInfoResponse is the response from Google's tokeninfo endpoint.
@@ -398,8 +438,9 @@ type googleTokenInfoResponse struct {
 	Sub string `json:"sub"`
 	// Email is the email address.
 	Email string `json:"email"`
-	// EmailVerified is whether the email is verified (string "true"/"false" in tokeninfo).
-	EmailVerified *bool `json:"email_verified,omitempty"`
+	// EmailVerified decodes from either boolean or string ("true"/"false")
+	// because Google's tokeninfo endpoint may return either form.
+	EmailVerified *flexBool `json:"email_verified,omitempty"`
 	// ExpiresIn is the remaining lifetime in seconds.
 	ExpiresIn int64 `json:"expires_in"`
 	// Scope is the granted OAuth scopes.
@@ -410,14 +451,32 @@ type googleTokenInfoResponse struct {
 	Error string `json:"error_description"`
 }
 
+// flexBool decodes JSON values that may be boolean (true/false) or string
+// ("true"/"false"). Google's tokeninfo endpoint sometimes returns
+// email_verified as a string rather than a native boolean.
+type flexBool bool
+
+func (b *flexBool) UnmarshalJSON(data []byte) error {
+	s := strings.Trim(string(data), `"`)
+	switch s {
+	case "true":
+		*b = true
+	case "false":
+		*b = false
+	default:
+		return fmt.Errorf("flexBool: cannot decode %s", string(data))
+	}
+	return nil
+}
+
 // googleUserInfoResponse is the response from Google's userinfo endpoint.
 type googleUserInfoResponse struct {
-	Sub           string `json:"sub"`
-	Email         string `json:"email"`
-	EmailVerified bool   `json:"email_verified"`
-	Name          string `json:"name"`
-	Picture       string `json:"picture"`
-	HD            string `json:"hd"` // Hosted domain
+	Sub           string   `json:"sub"`
+	Email         string   `json:"email"`
+	EmailVerified flexBool `json:"email_verified"`
+	Name          string   `json:"name"`
+	Picture       string   `json:"picture"`
+	HD            string   `json:"hd"` // Hosted domain
 }
 
 // ---------------------------------------------------------------------------
@@ -427,8 +486,10 @@ type googleUserInfoResponse struct {
 func (v *googleCredentialValidator) getTokenInfo(ctx context.Context, token string) (*googleTokenInfoResponse, error) {
 	// POST to tokeninfo endpoint with access_token in the body.
 	// Do NOT pass the token as a query parameter to avoid logging exposure.
+	// Use proper URL encoding for the form body value.
+	formData := url.Values{"access_token": {token}}
 	req, err := http.NewRequestWithContext(ctx, "POST", googleTokenInfoURL,
-		strings.NewReader("access_token="+token))
+		strings.NewReader(formData.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -500,16 +561,21 @@ type googleJWKSCache struct {
 	keys       *jose.JSONWebKeySet
 	fetchedAt  time.Time
 	ttl        time.Duration
+	maxStale   time.Duration // Maximum age of stale cache before hard-failing.
 	httpClient *http.Client
 }
 
 func newGoogleJWKSCache(client *http.Client) *googleJWKSCache {
 	return &googleJWKSCache{
 		ttl:        time.Hour,
+		maxStale:   24 * time.Hour, // Bounded stale fallback: max 24h.
 		httpClient: client,
 	}
 }
 
+// get returns the cached JWKS, refreshing if the cache is expired.
+// Uses a bounded stale fallback: stale keys are accepted for up to maxStale
+// duration when a refresh fails, after which the cache hard-fails.
 func (c *googleJWKSCache) get(ctx context.Context) (*jose.JSONWebKeySet, error) {
 	c.mu.RLock()
 	if c.keys != nil && time.Since(c.fetchedAt) < c.ttl {
@@ -518,8 +584,28 @@ func (c *googleJWKSCache) get(ctx context.Context) (*jose.JSONWebKeySet, error) 
 		return keys, nil
 	}
 	staleKeys := c.keys
+	staleAge := time.Since(c.fetchedAt)
 	c.mu.RUnlock()
 
+	return c.refresh(ctx, staleKeys, staleAge)
+}
+
+// forceRefresh unconditionally fetches fresh JWKS (used when a token's kid
+// doesn't match any cached key). Only calls the remote if the cache is older
+// than a minimum interval to avoid excessive fetches.
+func (c *googleJWKSCache) forceRefresh(ctx context.Context) (*jose.JSONWebKeySet, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Rate-limit force refreshes: don't refetch if we fetched within the last 30s.
+	if c.keys != nil && time.Since(c.fetchedAt) < 30*time.Second {
+		return c.keys, nil
+	}
+
+	return c.fetchLocked(ctx)
+}
+
+func (c *googleJWKSCache) refresh(ctx context.Context, staleKeys *jose.JSONWebKeySet, staleAge time.Duration) (*jose.JSONWebKeySet, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -528,47 +614,43 @@ func (c *googleJWKSCache) get(ctx context.Context) (*jose.JSONWebKeySet, error) 
 		return c.keys, nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", googleJWKSURL, nil)
+	keys, err := c.fetchLocked(ctx)
 	if err != nil {
-		if staleKeys != nil {
-			slog.Warn("Google JWKS refresh failed, using stale cache", "error", err)
+		// Bounded stale fallback: accept stale keys only up to maxStale.
+		if staleKeys != nil && staleAge < c.maxStale {
+			slog.Warn("Google JWKS refresh failed, using bounded stale cache",
+				"error", err, "stale_age", staleAge)
 			return staleKeys, nil
 		}
+		return nil, err
+	}
+	return keys, nil
+}
+
+// fetchLocked fetches JWKS from Google. Must be called with mu held.
+func (c *googleJWKSCache) fetchLocked(ctx context.Context) (*jose.JSONWebKeySet, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", googleJWKSURL, nil)
+	if err != nil {
 		return nil, err
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		if staleKeys != nil {
-			slog.Warn("Google JWKS refresh failed, using stale cache", "error", err)
-			return staleKeys, nil
-		}
 		return nil, fmt.Errorf("JWKS fetch failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		if staleKeys != nil {
-			slog.Warn("Google JWKS refresh returned non-200, using stale cache",
-				"status", resp.StatusCode)
-			return staleKeys, nil
-		}
 		return nil, fmt.Errorf("JWKS fetch returned %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
 	if err != nil {
-		if staleKeys != nil {
-			return staleKeys, nil
-		}
 		return nil, fmt.Errorf("JWKS read failed: %w", err)
 	}
 
 	var jwks jose.JSONWebKeySet
 	if err := json.Unmarshal(body, &jwks); err != nil {
-		if staleKeys != nil {
-			return staleKeys, nil
-		}
 		return nil, fmt.Errorf("JWKS decode failed: %w", err)
 	}
 

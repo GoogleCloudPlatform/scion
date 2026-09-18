@@ -58,9 +58,11 @@ type UserEdges struct {
 	Memberships []*GroupMembership `json:"memberships,omitempty"`
 	// PolicyBindings holds the value of the policy_bindings edge.
 	PolicyBindings []*PolicyBinding `json:"policy_bindings,omitempty"`
+	// ExternalIdentities holds the value of the external_identities edge.
+	ExternalIdentities []*ExternalIdentity `json:"external_identities,omitempty"`
 	// loadedTypes holds the information for reporting if a
 	// type was loaded (or requested) in eager-loading or not.
-	loadedTypes [3]bool
+	loadedTypes [4]bool
 }
 
 // OwnedGroupsOrErr returns the OwnedGroups value or an error if the edge
@@ -88,6 +90,15 @@ func (e UserEdges) PolicyBindingsOrErr() ([]*PolicyBinding, error) {
 		return e.PolicyBindings, nil
 	}
 	return nil, &NotLoadedError{edge: "policy_bindings"}
+}
+
+// ExternalIdentitiesOrErr returns the ExternalIdentities value or an error if the edge
+// was not loaded in eager-loading.
+func (e UserEdges) ExternalIdentitiesOrErr() ([]*ExternalIdentity, error) {
+	if e.loadedTypes[3] {
+		return e.ExternalIdentities, nil
+	}
+	return nil, &NotLoadedError{edge: "external_identities"}
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -230,6 +241,11 @@ func (_m *User) QueryMemberships() *GroupMembershipQuery {
 // QueryPolicyBindings queries the "policy_bindings" edge of the User entity.
 func (_m *User) QueryPolicyBindings() *PolicyBindingQuery {
 	return NewUserClient(_m.config).QueryPolicyBindings(_m)
+}
+
+// QueryExternalIdentities queries the "external_identities" edge of the User entity.
+func (_m *User) QueryExternalIdentities() *ExternalIdentityQuery {
+	return NewUserClient(_m.config).QueryExternalIdentities(_m)
 }
 
 // Update returns a builder for updating this User.
