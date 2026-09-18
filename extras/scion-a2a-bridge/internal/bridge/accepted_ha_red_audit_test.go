@@ -24,6 +24,12 @@ func TestProductionLifecycleInputRequiredContinuationAndTerminal(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 	project := "accepted-ha-input-" + randomSuffix()
+	cleanupStore := testPostgresTaskStore(t)
+	t.Cleanup(func() {
+		cleanupStore.db.ExecContext(context.Background(), `DELETE FROM a2a_task_events
+			WHERE task_id IN (SELECT id FROM a2a_sdk_tasks WHERE project_id=$1)`, project)
+		cleanupStore.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id=$1`, project)
+	})
 	procA := startProductionServer(t, dbURL, project, "agent-input", "")
 	procB := startProductionServer(t, dbURL, project, "agent-input", "")
 	type result struct {

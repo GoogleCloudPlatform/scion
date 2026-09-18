@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -84,6 +85,11 @@ func TestCrossReplicaCancelTerminatesOriginalWaiter(t *testing.T) {
 	}
 
 	store := testPostgresTaskStore(t)
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_task_events
+			WHERE task_id IN (SELECT id FROM a2a_sdk_tasks WHERE project_id=$1)`, project)
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id=$1`, project)
+	})
 	var state, leaseOwner string
 	var cursor int64
 	if err := store.db.QueryRow(`SELECT payload->'status'->>'state', COALESCE(exec_owner, ''), last_event_cursor
