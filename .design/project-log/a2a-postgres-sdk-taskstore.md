@@ -136,6 +136,60 @@ TEST_DATABASE_URL="postgresql://scion:scion@localhost:5432/a2a_test?sslmode=disa
   go test -v -count=1 -run TestPostgresTaskStore ./internal/bridge/
 ```
 
+## Milestone: Two-Replica Production Proof (RED-to-GREEN)
+
+**Commits:** `4984163` (RED), `bde0bd2` (GREEN)
+**Proof artifact:** `/scion-volumes/scratchpad/projects/ge-a2a/taskstore-production-proof.md`
+
+Added `TestTwoReplicaProductionPath_EndToEnd` — a two-process end-to-end test
+proving the durable no-metadata broker correlation path works across distinct
+OS processes sharing one PostgreSQL database.
+
+**RED (4984163):** Process B's `correlateToTask` fails (empty local cache,
+task only in `a2a_sdk_tasks` not `a2a_tasks`) -> A times out -> TASK_STATE_FAILED.
+
+**GREEN (bde0bd2):** `FindActiveSDKTaskForAgent` queries `a2a_sdk_tasks` for
+unambiguous project+agent match -> B correlates durably -> A receives event ->
+TASK_STATE_COMPLETED.
+
+Changes:
+- `pgstore.go`: Added `FindActiveSDKTaskForAgent` for durable no-metadata correlation
+- `bridge.go`: Rewrote `correlateToTask` no-metadata path (local cache never authorizes alone)
+- `testdata/a2a-testserver/main.go`: Added `-mode=production` (ScionExecutor + mock Hub)
+- `pgstore_crossprocess_test.go`: Added production helpers + E2E test
+
+Verification: race-clean, 3/3 repeated runs, all 7 cross-process tests pass,
+`go build/vet ./...` clean, clean rebase onto `370a026`.
+
+### Expanded Production Proof (24a741b)
+
+Addressed 6 EM findings. See `/scion-volumes/scratchpad/projects/ge-a2a/taskstore-production-proof.md`.
+
+1. **Ambiguity fail-closed**: `FindActiveSDKTaskForAgent` uniqueness check always runs
+   before accepting any cached nominee. 2 active tasks → rejection, 0 events.
+2. **No legacy bypass**: SDK store authoritative when `sdkTaskStore != nil`. Legacy
+   `a2a_tasks` only used in plugin mode (`sdkTaskStore == nil`).
+3. **Streaming/resubscribe**: SSE `SubscribeToTask` on both replicas. Snapshot
+   reflects current state, no replay, no `_bridgeEventID` leak.
+4. **Negative streaming ownership**: Wrong caller/project get error -32001,
+   no task metadata leakage.
+5. **`_bridgeEventID` stripping**: DurableRequestHandler strips from all 5
+   user-visible methods (GetTask, ListTasks, CancelTask, SendMessage,
+   SendStreamingMessage). Hard wire-level assertions.
+6. **Production context trace**: Unit test proves `WithRouteInfo` → `RouteInfoFrom`
+   and `WithCallerIdentity` → `buildOwnerKey` → `PostgresTaskStore.Create` stores
+   correct columns.
+
+Changes:
+- `bridge.go`: Refactored `correlateToTask` into `correlateWithMetadata` /
+  `correlateWithoutMetadata` / `validateTopicUser`. No legacy bypass when SDK set.
+- `durable_handler.go`: Added `_bridgeEventID` stripping to all user-visible paths.
+- `pgstore_crossprocess_test.go`: 6 new tests (ambiguity, legacy bypass, streaming,
+  negative streaming, metadata stripping, production context).
+
+Verification: all 13 tests pass (7 original + 6 new), race-clean, `go build/vet`
+clean.
+
 ## Residual risks
 
 - Hub side-effect replay: crash after Hub send but before completion record
