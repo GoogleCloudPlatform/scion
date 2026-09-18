@@ -325,11 +325,11 @@ Verification: All tests pass against real PostgreSQL (100s), `go build/vet`
 clean. Comprehensive `rg` scan confirms zero unpredicated destructive
 statements in all test files.
 
-### Review Round 5 (2026-09-18) — Precision corrections at tip `7151dd2`
+### Manager preflight corrections (2026-09-18) — after round 4 candidate evidence
 
-Addressed EM's round 5 preflight corrections and final precision addendum.
+Precision corrections required by EM preflight before review round 5 consumption.
 
-#### R5-1 through R5-7: Concurrent isolation corrections (committed in `7151dd2`)
+#### Corrections at `7151dd2`:
 
 1. **state_test.go bare DELETEs → scoped LIKE cleanup**: All bare `DELETE FROM`
    statements replaced with LIKE-pattern cleanup scoped to per-run suffix.
@@ -343,23 +343,24 @@ Addressed EM's round 5 preflight corrections and final precision addendum.
 6. **CrashRecoveryKill race**: Timing below janitor threshold + membership check.
 7. **LegacyTerminalMapping race**: Insert with `NOW()`, backdate only for purge.
 
-#### R5-8: Ownership-scoped advisory lock check (this commit)
+#### Correction at `4f535ad`:
 
-**Problem:** `TestConcurrentMigrationSerialization` queried `pg_locks` for ANY
-holder of the advisory lock, not just this test's connections. This produces
-false positives when another process's migration holds the same lock.
+**Ownership-scoped advisory lock check:** Tagged all 5 test-owned migration
+connections with a unique per-run `application_name` via `pgx.ParseConfig` +
+`stdlib.RegisterConnConfig`. Lock-leak query changed from unscoped
+`pg_locks WHERE objid = $1` to `pg_locks JOIN pg_stat_activity ON pid
+WHERE application_name = $2 AND objid = $1`. Retry loop eliminated.
 
-**Fix:** Tagged all 5 test-owned migration connections with a unique per-run
-`application_name` via `pgx.ParseConfig` + `stdlib.RegisterConnConfig`.
-Lock-leak query changed from unscoped `pg_locks WHERE objid = $1` to
-`pg_locks JOIN pg_stat_activity ON pid WHERE application_name = $2 AND objid = $1`.
-Retry loop eliminated.
+#### Correction at current tip:
 
-**Regression test:** `TestAdvisoryLockOwnershipScopedQuery`:
-- Owned connection (with marker) acquires advisory lock → ownership-scoped
-  query detects it (seesOwned=true)
-- Unrelated connection (different marker) acquires different lock → query
-  does NOT detect it (seesUnrelated=false)
+**Regression test proof flaw:** `TestAdvisoryLockOwnershipScopedQuery` previously
+held the unrelated connection on `testLockID+1` (different key), so the `objid`
+filter alone explained `seesUnrelated=false`. Corrected to two sequential phases
+using the SAME `testLockID` — only the `application_name` ownership filter
+distinguishes them:
+- Phase 1: owned marker acquires testLockID → query detects it → release
+- Phase 2: unrelated marker acquires SAME testLockID → query with owned marker
+  and same lock type/key returns false → release
 
 #### Test categorization
 
@@ -370,10 +371,7 @@ Retry loop eliminated.
 **Shared-schema concurrent proofs** (all processes share same database):
 - 5-pair concurrent process proof with canary row survival
 - `TestConcurrentMigrationSerialization` with ownership-scoped lock check
-- `TestAdvisoryLockOwnershipScopedQuery` regression
-
-Verification: All tests pass against real PostgreSQL. 5-pair concurrent
-proof with canary byte-for-byte survival. `go build/vet ./...` clean.
+- `TestAdvisoryLockOwnershipScopedQuery` two-phase same-key regression
 
 ## Residual risks
 

@@ -4777,7 +4777,14 @@ func TestConcurrentMigrationSerialization(t *testing.T) {
 // TestAdvisoryLockOwnershipScopedQuery is a regression test proving that the
 // ownership-scoped pg_locks query used in TestConcurrentMigrationSerialization
 // correctly detects a held lock owned by the marker and ignores an unrelated
-// holder.
+// holder of the SAME lock key.
+//
+// Two sequential phases use the SAME testLockID so the objid/key filter is
+// constant — only the application_name ownership filter distinguishes them:
+//
+//	Phase 1: owned marker acquires testLockID → query detects it → release
+//	Phase 2: unrelated marker acquires testLockID → query with owned marker
+//	          and same lock type/key returns false → release
 func TestAdvisoryLockOwnershipScopedQuery(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
@@ -4791,7 +4798,23 @@ func TestAdvisoryLockOwnershipScopedQuery(t *testing.T) {
 	// Use a test-specific advisory lock ID to avoid colliding with production.
 	const testLockID = 999999
 
-	// Open an "owned" connection with the owned marker, acquire the lock.
+	// Shared check connection (no special application_name).
+	checkDB, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("open check DB: %v", err)
+	}
+	defer checkDB.Close()
+
+	ownershipQuery := `SELECT EXISTS(
+		SELECT 1 FROM pg_locks l
+		JOIN pg_stat_activity a ON l.pid = a.pid
+		WHERE l.locktype = 'advisory'
+		  AND l.objid = $1
+		  AND l.granted
+		  AND a.application_name = $2
+	)`
+
+	// --- Phase 1: owned marker holds testLockID → query detects it ---
 	ownedCfg, _ := pgx.ParseConfig(dbURL)
 	ownedCfg.RuntimeParams["application_name"] = ownedMarker
 	ownedDSN := stdlib.RegisterConnConfig(ownedCfg)
@@ -4803,21 +4826,32 @@ func TestAdvisoryLockOwnershipScopedQuery(t *testing.T) {
 	}
 	defer ownedDB.Close()
 
-	// Pin to a single connection for the advisory lock.
 	ownedConn, err := ownedDB.Conn(ctx)
 	if err != nil {
 		t.Fatalf("owned conn: %v", err)
 	}
-	defer ownedConn.Close()
 
 	_, err = ownedConn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", testLockID)
 	if err != nil {
 		t.Fatalf("acquire owned lock: %v", err)
 	}
-	defer ownedConn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", testLockID)
 
-	// Open an "unrelated" connection with a different marker, acquire the SAME lock type
-	// but a different key to prove it's ignored.
+	var seesOwned bool
+	err = checkDB.QueryRowContext(ctx, ownershipQuery, testLockID, ownedMarker).Scan(&seesOwned)
+	if err != nil {
+		t.Fatalf("owned query: %v", err)
+	}
+	if !seesOwned {
+		t.Error("Phase 1: ownership-scoped query did NOT detect the owned lock")
+	}
+	t.Logf("Phase 1: owned marker holds testLockID → detected=%v (correct)", seesOwned)
+
+	// Release the owned lock and close the connection.
+	ownedConn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", testLockID)
+	ownedConn.Close()
+
+	// --- Phase 2: unrelated marker holds the SAME testLockID → query with
+	// owned marker and same lock type/key returns false ---
 	unrelatedCfg, _ := pgx.ParseConfig(dbURL)
 	unrelatedCfg.RuntimeParams["application_name"] = unrelatedMarker
 	unrelatedDSN := stdlib.RegisterConnConfig(unrelatedCfg)
@@ -4835,58 +4869,23 @@ func TestAdvisoryLockOwnershipScopedQuery(t *testing.T) {
 	}
 	defer unrelatedConn.Close()
 
-	_, err = unrelatedConn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", testLockID+1)
+	_, err = unrelatedConn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", testLockID)
 	if err != nil {
-		t.Fatalf("acquire unrelated lock: %v", err)
+		t.Fatalf("acquire unrelated lock on same key: %v", err)
 	}
-	defer unrelatedConn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", testLockID+1)
+	defer unrelatedConn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", testLockID)
 
-	// Query connection for the check.
-	checkDB, err := sql.Open("pgx", dbURL)
-	if err != nil {
-		t.Fatalf("open check DB: %v", err)
-	}
-	defer checkDB.Close()
-
-	// The ownership-scoped query must find the owned lock.
-	var seesOwned bool
-	err = checkDB.QueryRowContext(ctx,
-		`SELECT EXISTS(
-			SELECT 1 FROM pg_locks l
-			JOIN pg_stat_activity a ON l.pid = a.pid
-			WHERE l.locktype = 'advisory'
-			  AND l.objid = $1
-			  AND l.granted
-			  AND a.application_name = $2
-		)`, testLockID, ownedMarker,
-	).Scan(&seesOwned)
-	if err != nil {
-		t.Fatalf("owned query: %v", err)
-	}
-	if !seesOwned {
-		t.Error("ownership-scoped query did NOT detect the owned lock")
-	}
-
-	// The same query with the owned marker must NOT see the unrelated lock.
+	// Query with owned marker and the SAME lock key — must return false because
+	// the lock is held by the unrelated marker, not the owned one.
 	var seesUnrelated bool
-	err = checkDB.QueryRowContext(ctx,
-		`SELECT EXISTS(
-			SELECT 1 FROM pg_locks l
-			JOIN pg_stat_activity a ON l.pid = a.pid
-			WHERE l.locktype = 'advisory'
-			  AND l.objid = $1
-			  AND l.granted
-			  AND a.application_name = $2
-		)`, testLockID+1, ownedMarker,
-	).Scan(&seesUnrelated)
+	err = checkDB.QueryRowContext(ctx, ownershipQuery, testLockID, ownedMarker).Scan(&seesUnrelated)
 	if err != nil {
 		t.Fatalf("unrelated query: %v", err)
 	}
 	if seesUnrelated {
-		t.Error("ownership-scoped query incorrectly detected the unrelated lock")
+		t.Error("Phase 2: ownership-scoped query incorrectly detected unrelated holder of SAME lock key")
 	}
-
-	t.Logf("Regression: owned lock detected=%v, unrelated lock detected=%v (correct)", seesOwned, seesUnrelated)
+	t.Logf("Phase 2: unrelated marker holds SAME testLockID → detected=%v (correct: ownership filter works)", seesUnrelated)
 }
 
 // --- Finding 5: Index predicate compatibility ---
