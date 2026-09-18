@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -32,6 +33,8 @@ const (
 
 	// DefaultTimeout is the HTTP timeout for fetching the manifest.
 	DefaultTimeout = 5 * time.Second
+
+	maxManifestSize = 1 << 20
 )
 
 // ChannelInfo represents a single release channel's latest version.
@@ -104,11 +107,53 @@ func FetchManifest(ctx context.Context, opts ...Option) (*Manifest, error) {
 		return nil, fmt.Errorf("fetch release manifest: unexpected HTTP status %s", resp.Status)
 	}
 
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("read release manifest: %w", err)
+	}
+	if len(body) > maxManifestSize {
+		return nil, fmt.Errorf("read release manifest: response exceeds %d bytes", maxManifestSize)
+	}
+
 	var manifest Manifest
-	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
+	if err := json.Unmarshal(body, &manifest); err != nil {
 		return nil, fmt.Errorf("decode release manifest: %w", err)
 	}
 	return &manifest, nil
+}
+
+// CheckForUpdate reports whether currentVersion has a newer release in its channel.
+func CheckForUpdate(ctx context.Context, currentVersion string, opts ...Option) (*UpdateInfo, error) {
+	channel := DetectChannel(currentVersion)
+	result := &UpdateInfo{
+		CurrentVersion: currentVersion,
+		Channel:        channel,
+	}
+	if channel == "" {
+		return result, nil
+	}
+
+	manifest, err := FetchManifest(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("check for update: %w", err)
+	}
+
+	latest := manifest.Channels[channel]
+	result.LatestVersion = latest.Version
+	result.ReleaseURL = latest.URL
+	if latest.Version == "" {
+		return result, nil
+	}
+
+	if channel == "nightly" {
+		result.UpdateAvailable = currentVersion < latest.Version
+	} else {
+		result.UpdateAvailable = semver.Compare(
+			withVersionPrefix(currentVersion),
+			withVersionPrefix(latest.Version),
+		) < 0
+	}
+	return result, nil
 }
 
 // DetectChannel returns the release channel associated with version.
