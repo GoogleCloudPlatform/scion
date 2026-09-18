@@ -160,6 +160,7 @@ func (m *mockHubClient) Messages() hubclient.MessageService                     
 func (m *mockHubClient) Conversations() hubclient.ConversationService                 { return nil }
 func (m *mockHubClient) AllowList() hubclient.AllowListService                        { return nil }
 func (m *mockHubClient) Invites() hubclient.InviteService                             { return nil }
+func (m *mockHubClient) Messaging() hubclient.MessagingService                        { return nil }
 func (m *mockHubClient) Skills() hubclient.SkillService                               { return nil }
 func (m *mockHubClient) SkillRegistries() hubclient.SkillRegistryService              { return nil }
 func (m *mockHubClient) ProjectInjectedSkills(projectID string) hubclient.InjectedSkillsService {
