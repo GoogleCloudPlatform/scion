@@ -297,6 +297,34 @@ Addressed 6 EM findings + security audit + ScopedTaskStore removal.
 
 Verification: 280 tests pass (race clean), `go build/vet` clean.
 
+### Review Round 4 (2026-09-18) — Correction at tip `772fbd1`
+
+Addressed 1 Required finding + 1 Nit from round 4 review.
+
+1. **Unscoped test cleanup (Required — RESOLVED):** Eliminated all bare
+   `DELETE FROM a2a_sdk_tasks` and `DELETE FROM a2a_task_events` (19+ sites
+   across `pgstore_test.go` and `pgstore_crossprocess_test.go`). Additionally
+   fixed 7 static LIKE patterns and 12 static project_id predicates. All
+   cleanup now uses `WHERE id = $1`, `WHERE project_id = $1`, or
+   `WHERE task_id = $1` with per-run unique predicates generated via
+   `time.Now().UnixNano()` or `randomSuffix()`.
+
+2. **Startup reap logging nit (Nit — RESOLVED prior):** `main.go:508-516`
+   already uses independent `if` checks (not `if/else if`), matching the
+   janitor pattern in `bridge.go`.
+
+3. **Canary assertion added:** `TestPostgresTaskStoreCanarySurvival` creates
+   a canary row, performs scoped cleanup of an unrelated row, and verifies
+   the canary survived.
+
+4. **Indirect destructive helper scan:** Verified zero `PurgeTaskEvents`
+   calls in test cleanup, zero `TRUNCATE`, zero shared cleanup functions
+   with broad scope.
+
+Verification: All tests pass against real PostgreSQL (100s), `go build/vet`
+clean. Comprehensive `rg` scan confirms zero unpredicated destructive
+statements in all test files.
+
 ## Residual risks
 
 - Hub side-effect replay: crash after Hub send but before completion record

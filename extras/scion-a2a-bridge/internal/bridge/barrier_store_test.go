@@ -79,8 +79,11 @@ func barrierTestDatabaseURL(t *testing.T) string {
 // TestBarrier_CreateBeforeAwait verifies that Await returns immediately when
 // Create has already signaled.
 func TestBarrier_CreateBeforeAwait(t *testing.T) {
-	barrierStore, _, ctx := setupBarrierTest(t)
+	barrierStore, pgStore, ctx := setupBarrierTest(t)
 	taskID := "barrier-create-before-" + randomSuffix()
+	t.Cleanup(func() {
+		pgStore.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
 
 	barrier := barrierStore.PrepareBarrier(taskID)
 	defer barrier.Cancel()
@@ -96,8 +99,11 @@ func TestBarrier_CreateBeforeAwait(t *testing.T) {
 
 // TestBarrier_AwaitBeforeCreate verifies that Await blocks until Create signals.
 func TestBarrier_AwaitBeforeCreate(t *testing.T) {
-	barrierStore, _, ctx := setupBarrierTest(t)
+	barrierStore, pgStore, ctx := setupBarrierTest(t)
 	taskID := "barrier-await-before-" + randomSuffix()
+	t.Cleanup(func() {
+		pgStore.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
 
 	barrier := barrierStore.PrepareBarrier(taskID)
 	defer barrier.Cancel()
@@ -146,8 +152,11 @@ func TestBarrier_CancelCleanup(t *testing.T) {
 
 // TestBarrier_CreateError verifies that Create errors propagate through Await.
 func TestBarrier_CreateError(t *testing.T) {
-	barrierStore, _, ctx := setupBarrierTest(t)
+	barrierStore, pgStore, ctx := setupBarrierTest(t)
 	taskID := "barrier-create-error-" + randomSuffix()
+	t.Cleanup(func() {
+		pgStore.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
 
 	// First create the task so second Create returns ErrTaskAlreadyExists.
 	_, err := barrierStore.Create(ctx, makeTask(taskID))
@@ -186,8 +195,11 @@ func TestBarrier_YieldFalsePath(t *testing.T) {
 // TestBarrier_DuplicateCreate verifies that sync.Once prevents double-close
 // panics under concurrent Create calls.
 func TestBarrier_DuplicateCreate(t *testing.T) {
-	barrierStore, _, ctx := setupBarrierTest(t)
+	barrierStore, pgStore, ctx := setupBarrierTest(t)
 	taskID := "barrier-dup-create-" + randomSuffix()
+	t.Cleanup(func() {
+		pgStore.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
 
 	barrier := barrierStore.PrepareBarrier(taskID)
 	defer barrier.Cancel()
@@ -217,6 +229,9 @@ func TestBarrier_DuplicateCreate(t *testing.T) {
 func TestBarrier_DuplicateCreateSameOwnerVerification(t *testing.T) {
 	barrierStore, pgStore, ctx := setupBarrierTest(t)
 	taskID := "barrier-dup-verify-" + randomSuffix()
+	t.Cleanup(func() {
+		pgStore.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
 
 	// First create succeeds.
 	_, err := barrierStore.Create(ctx, makeTask(taskID))
@@ -236,5 +251,5 @@ func TestBarrier_DuplicateCreateSameOwnerVerification(t *testing.T) {
 }
 
 func randomSuffix() string {
-	return string(a2a.NewTaskID())[:8]
+	return string(a2a.NewTaskID())[:16]
 }

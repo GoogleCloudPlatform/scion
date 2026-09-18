@@ -503,10 +503,16 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 
 	// Startup recovery: reap any stale execution leases left by
 	// previous instances that crashed mid-execution.
-	if reapedIDs, err := pgTaskStore.ReapStaleTasks(context.Background(), 2*cfg.Timeouts.SendMessage); err != nil {
-		log.Error("startup: failed to reap stale SDK execution leases", "error", err)
-	} else if len(reapedIDs) > 0 {
-		log.Warn("startup: reaped stale SDK execution leases from previous crash", "count", len(reapedIDs), "task_ids", reapedIDs)
+	// ReapStaleTasks may return partial successes alongside aggregated errors.
+	// Log both independently, matching the janitor path in bridge.go.
+	{
+		reapedIDs, err := pgTaskStore.ReapStaleTasks(context.Background(), 2*cfg.Timeouts.SendMessage)
+		if len(reapedIDs) > 0 {
+			log.Warn("startup: reaped stale SDK execution leases from previous crash", "count", len(reapedIDs), "task_ids", reapedIDs)
+		}
+		if err != nil {
+			log.Error("startup: errors reaping stale SDK execution leases", "error", err)
+		}
 	}
 
 	// SDK receives: SDK → BarrierTaskStore → PostgresTaskStore.

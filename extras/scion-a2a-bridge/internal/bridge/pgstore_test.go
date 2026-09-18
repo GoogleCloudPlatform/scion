@@ -21,6 +21,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
@@ -28,6 +29,8 @@ import (
 
 // testPostgresTaskStore creates a PostgresTaskStore for testing.
 // Skips the test if TEST_DATABASE_URL is not set.
+// Each test using this helper is responsible for its own scoped cleanup
+// of created rows. The helper only manages the connection lifecycle.
 func testPostgresTaskStore(t *testing.T) *PostgresTaskStore {
 	t.Helper()
 	url := os.Getenv("TEST_DATABASE_URL")
@@ -39,7 +42,6 @@ func testPostgresTaskStore(t *testing.T) *PostgresTaskStore {
 		t.Fatalf("NewPostgresTaskStore: %v", err)
 	}
 	t.Cleanup(func() {
-		store.db.Exec("DELETE FROM a2a_sdk_tasks")
 		store.Close()
 	})
 	return store
@@ -50,8 +52,15 @@ func TestPostgresTaskStoreCreateAndGet(t *testing.T) {
 	store := testPostgresTaskStore(t)
 	ctx := ctxForRoute("proj-a", "agent-1")
 
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "pg-task-" + suffix
+
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
+
 	task := &a2a.Task{
-		ID:        "pg-task-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-1",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 	}
@@ -65,12 +74,12 @@ func TestPostgresTaskStoreCreateAndGet(t *testing.T) {
 	}
 
 	// Same owner can Get.
-	stored, err := store.Get(ctx, "pg-task-1")
+	stored, err := store.Get(ctx, a2a.TaskID(taskID))
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if stored.Task.ID != "pg-task-1" {
-		t.Errorf("task ID = %q, want %q", stored.Task.ID, "pg-task-1")
+	if stored.Task.ID != a2a.TaskID(taskID) {
+		t.Errorf("task ID = %q, want %q", stored.Task.ID, taskID)
 	}
 	if stored.Version != 1 {
 		t.Errorf("version = %d, want 1", stored.Version)
@@ -85,8 +94,15 @@ func TestPostgresTaskStoreDuplicateCreate(t *testing.T) {
 	store := testPostgresTaskStore(t)
 	ctx := ctxForRoute("proj-a", "agent-1")
 
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "pg-dup-" + suffix
+
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
+
 	task := &a2a.Task{
-		ID:        "pg-dup-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-1",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 	}
@@ -106,8 +122,15 @@ func TestPostgresTaskStoreUpdateCAS(t *testing.T) {
 	store := testPostgresTaskStore(t)
 	ctx := ctxForRoute("proj-a", "agent-1")
 
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "pg-cas-" + suffix
+
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
+
 	task := &a2a.Task{
-		ID:        "pg-cas-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-1",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 	}
@@ -118,7 +141,7 @@ func TestPostgresTaskStoreUpdateCAS(t *testing.T) {
 
 	// Update with correct version.
 	updatedTask := &a2a.Task{
-		ID:        "pg-cas-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-1",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
 	}
@@ -136,7 +159,7 @@ func TestPostgresTaskStoreUpdateCAS(t *testing.T) {
 	// Update with stale version should fail.
 	_, err = store.Update(ctx, &taskstore.UpdateRequest{
 		Task: &a2a.Task{
-			ID:        "pg-cas-1",
+			ID:        a2a.TaskID(taskID),
 			ContextID: "ctx-1",
 			Status:    a2a.TaskStatus{State: a2a.TaskStateFailed},
 		},
@@ -147,7 +170,7 @@ func TestPostgresTaskStoreUpdateCAS(t *testing.T) {
 	}
 
 	// Verify state didn't change.
-	stored, _ := store.Get(ctx, "pg-cas-1")
+	stored, _ := store.Get(ctx, a2a.TaskID(taskID))
 	if stored.Task.Status.State != a2a.TaskStateWorking {
 		t.Errorf("state = %q, want %q (CAS should have rejected stale update)", stored.Task.Status.State, a2a.TaskStateWorking)
 	}
@@ -161,13 +184,17 @@ func TestPostgresTaskStoreCrossReplicaCreateReadList(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "cross-replica-" + suffix
+	ctxID := "ctx-shared-" + suffix
+
 	// Two separate stores simulating two replicas sharing the same Postgres.
 	storeA, err := NewPostgresTaskStore(url)
 	if err != nil {
 		t.Fatalf("NewPostgresTaskStore (A): %v", err)
 	}
 	t.Cleanup(func() {
-		storeA.db.Exec("DELETE FROM a2a_sdk_tasks")
+		storeA.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
 		storeA.Close()
 	})
 
@@ -181,8 +208,8 @@ func TestPostgresTaskStoreCrossReplicaCreateReadList(t *testing.T) {
 
 	// Create on replica A.
 	task := &a2a.Task{
-		ID:        "cross-replica-1",
-		ContextID: "ctx-shared",
+		ID:        a2a.TaskID(taskID),
+		ContextID: ctxID,
 		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 		History: []*a2a.Message{
 			a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("Hello from replica A")),
@@ -193,12 +220,12 @@ func TestPostgresTaskStoreCrossReplicaCreateReadList(t *testing.T) {
 	}
 
 	// Read from replica B.
-	stored, err := storeB.Get(ctx, "cross-replica-1")
+	stored, err := storeB.Get(ctx, a2a.TaskID(taskID))
 	if err != nil {
 		t.Fatalf("Get on B: %v", err)
 	}
-	if stored.Task.ID != "cross-replica-1" {
-		t.Errorf("task ID = %q, want %q", stored.Task.ID, "cross-replica-1")
+	if stored.Task.ID != a2a.TaskID(taskID) {
+		t.Errorf("task ID = %q, want %q", stored.Task.ID, taskID)
 	}
 	if len(stored.Task.History) != 1 {
 		t.Fatalf("history len = %d, want 1", len(stored.Task.History))
@@ -208,7 +235,7 @@ func TestPostgresTaskStoreCrossReplicaCreateReadList(t *testing.T) {
 	}
 
 	// List from replica B.
-	listResp, err := storeB.List(ctx, &a2a.ListTasksRequest{ContextID: "ctx-shared"})
+	listResp, err := storeB.List(ctx, &a2a.ListTasksRequest{ContextID: ctxID})
 	if err != nil {
 		t.Fatalf("List on B: %v", err)
 	}
@@ -225,12 +252,15 @@ func TestPostgresTaskStoreCrossReplicaCancelContinue(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "cross-cancel-" + suffix
+
 	storeA, err := NewPostgresTaskStore(url)
 	if err != nil {
 		t.Fatalf("storeA: %v", err)
 	}
 	t.Cleanup(func() {
-		storeA.db.Exec("DELETE FROM a2a_sdk_tasks")
+		storeA.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
 		storeA.Close()
 	})
 
@@ -244,7 +274,7 @@ func TestPostgresTaskStoreCrossReplicaCancelContinue(t *testing.T) {
 
 	// Create task on A.
 	task := &a2a.Task{
-		ID:        "cross-cancel-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-cc",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 	}
@@ -255,7 +285,7 @@ func TestPostgresTaskStoreCrossReplicaCancelContinue(t *testing.T) {
 
 	// Continue (update) from B.
 	updatedTask := &a2a.Task{
-		ID:        "cross-cancel-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-cc",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
 	}
@@ -269,7 +299,7 @@ func TestPostgresTaskStoreCrossReplicaCancelContinue(t *testing.T) {
 
 	// Cancel from A (update to canceled state).
 	cancelTask := &a2a.Task{
-		ID:        "cross-cancel-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-cc",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateCanceled},
 	}
@@ -282,7 +312,7 @@ func TestPostgresTaskStoreCrossReplicaCancelContinue(t *testing.T) {
 	}
 
 	// Verify from B.
-	stored, _ := storeB.Get(ctx, "cross-cancel-1")
+	stored, _ := storeB.Get(ctx, a2a.TaskID(taskID))
 	if stored.Task.Status.State != a2a.TaskStateCanceled {
 		t.Errorf("state = %q, want %q", stored.Task.Status.State, a2a.TaskStateCanceled)
 	}
@@ -292,11 +322,18 @@ func TestPostgresTaskStoreCrossReplicaCancelContinue(t *testing.T) {
 func TestPostgresTaskStoreRouteIsolation(t *testing.T) {
 	store := testPostgresTaskStore(t)
 
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "pg-iso-" + suffix
+
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
+
 	ctxA := ctxForRoute("proj-a", "agent-1")
 	ctxB := ctxForRoute("proj-b", "agent-2")
 
 	task := &a2a.Task{
-		ID:        "pg-iso-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-1",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 	}
@@ -305,7 +342,7 @@ func TestPostgresTaskStoreRouteIsolation(t *testing.T) {
 	}
 
 	// Different route cannot Get.
-	_, err := store.Get(ctxB, "pg-iso-1")
+	_, err := store.Get(ctxB, a2a.TaskID(taskID))
 	if !errors.Is(err, a2a.ErrTaskNotFound) {
 		t.Errorf("error = %v, want ErrTaskNotFound", err)
 	}
@@ -313,7 +350,7 @@ func TestPostgresTaskStoreRouteIsolation(t *testing.T) {
 	// Different route cannot Update.
 	_, err = store.Update(ctxB, &taskstore.UpdateRequest{
 		Task: &a2a.Task{
-			ID:        "pg-iso-1",
+			ID:        a2a.TaskID(taskID),
 			ContextID: "ctx-1",
 			Status:    a2a.TaskStatus{State: a2a.TaskStateFailed},
 		},
@@ -328,13 +365,22 @@ func TestPostgresTaskStoreRouteIsolation(t *testing.T) {
 func TestPostgresTaskStoreCallerIsolation(t *testing.T) {
 	store := testPostgresTaskStore(t)
 
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	aliceTaskID := "pg-caller-iso-alice-" + suffix
+	bobTaskID := "pg-caller-iso-bob-" + suffix
+	ctxID := "ctx-caller-" + suffix
+
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id IN ($1, $2)`, aliceTaskID, bobTaskID)
+	})
+
 	ctxAlice := ctxForRouteAndCaller("proj-a", "agent-1", "alice-id")
 	ctxBob := ctxForRouteAndCaller("proj-a", "agent-1", "bob-id")
 
 	// Alice creates a task.
 	task := &a2a.Task{
-		ID:        "pg-caller-iso-1",
-		ContextID: "ctx-1",
+		ID:        a2a.TaskID(aliceTaskID),
+		ContextID: ctxID,
 		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 	}
 	if _, err := store.Create(ctxAlice, task); err != nil {
@@ -342,24 +388,24 @@ func TestPostgresTaskStoreCallerIsolation(t *testing.T) {
 	}
 
 	// Alice can Get.
-	stored, err := store.Get(ctxAlice, "pg-caller-iso-1")
+	stored, err := store.Get(ctxAlice, a2a.TaskID(aliceTaskID))
 	if err != nil {
 		t.Fatalf("Get (Alice): %v", err)
 	}
-	if stored.Task.ID != "pg-caller-iso-1" {
-		t.Errorf("task ID = %q, want %q", stored.Task.ID, "pg-caller-iso-1")
+	if stored.Task.ID != a2a.TaskID(aliceTaskID) {
+		t.Errorf("task ID = %q, want %q", stored.Task.ID, aliceTaskID)
 	}
 
 	// Bob cannot Get.
-	_, err = store.Get(ctxBob, "pg-caller-iso-1")
+	_, err = store.Get(ctxBob, a2a.TaskID(aliceTaskID))
 	if !errors.Is(err, a2a.ErrTaskNotFound) {
 		t.Errorf("error = %v, want ErrTaskNotFound", err)
 	}
 
 	// Bob creates his own task.
 	bobTask := &a2a.Task{
-		ID:        "pg-caller-iso-2",
-		ContextID: "ctx-1",
+		ID:        a2a.TaskID(bobTaskID),
+		ContextID: ctxID,
 		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 	}
 	if _, err := store.Create(ctxBob, bobTask); err != nil {
@@ -367,29 +413,29 @@ func TestPostgresTaskStoreCallerIsolation(t *testing.T) {
 	}
 
 	// Alice's List should only return her task.
-	listResp, err := store.List(ctxAlice, &a2a.ListTasksRequest{ContextID: "ctx-1"})
+	listResp, err := store.List(ctxAlice, &a2a.ListTasksRequest{ContextID: ctxID})
 	if err != nil {
 		t.Fatalf("List (Alice): %v", err)
 	}
-	if len(listResp.Tasks) != 1 || listResp.Tasks[0].ID != "pg-caller-iso-1" {
+	if len(listResp.Tasks) != 1 || listResp.Tasks[0].ID != a2a.TaskID(aliceTaskID) {
 		var ids []string
 		for _, tk := range listResp.Tasks {
 			ids = append(ids, string(tk.ID))
 		}
-		t.Errorf("Alice's List = %v, want [pg-caller-iso-1]", ids)
+		t.Errorf("Alice's List = %v, want [%s]", ids, aliceTaskID)
 	}
 
 	// Bob's List should only return his task.
-	listResp, err = store.List(ctxBob, &a2a.ListTasksRequest{ContextID: "ctx-1"})
+	listResp, err = store.List(ctxBob, &a2a.ListTasksRequest{ContextID: ctxID})
 	if err != nil {
 		t.Fatalf("List (Bob): %v", err)
 	}
-	if len(listResp.Tasks) != 1 || listResp.Tasks[0].ID != "pg-caller-iso-2" {
+	if len(listResp.Tasks) != 1 || listResp.Tasks[0].ID != a2a.TaskID(bobTaskID) {
 		var ids []string
 		for _, tk := range listResp.Tasks {
 			ids = append(ids, string(tk.ID))
 		}
-		t.Errorf("Bob's List = %v, want [pg-caller-iso-2]", ids)
+		t.Errorf("Bob's List = %v, want [%s]", ids, bobTaskID)
 	}
 }
 
@@ -399,8 +445,15 @@ func TestPostgresTaskStoreConcurrentCAS(t *testing.T) {
 	store := testPostgresTaskStore(t)
 	ctx := ctxForRoute("proj-cas", "agent-cas")
 
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "pg-conc-cas-" + suffix
+
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
+
 	task := &a2a.Task{
-		ID:        "pg-conc-cas-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-1",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 	}
@@ -422,7 +475,7 @@ func TestPostgresTaskStoreConcurrentCAS(t *testing.T) {
 			defer wg.Done()
 			_, err := store.Update(ctx, &taskstore.UpdateRequest{
 				Task: &a2a.Task{
-					ID:        "pg-conc-cas-1",
+					ID:        a2a.TaskID(taskID),
 					ContextID: "ctx-1",
 					Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
 				},
@@ -457,18 +510,18 @@ func TestPostgresTaskStoreRestartRecovery(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "restart-" + suffix
+
 	// Phase 1: create task.
 	store1, err := NewPostgresTaskStore(url)
 	if err != nil {
 		t.Fatalf("store1: %v", err)
 	}
-	t.Cleanup(func() {
-		store1.db.Exec("DELETE FROM a2a_sdk_tasks")
-	})
 
 	ctx := ctxForRoute("proj-restart", "agent-restart")
 	task := &a2a.Task{
-		ID:        "restart-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-r",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
 		History: []*a2a.Message{
@@ -485,9 +538,13 @@ func TestPostgresTaskStoreRestartRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store2: %v", err)
 	}
-	t.Cleanup(func() { store2.Close() })
+	t.Cleanup(func() {
+		// Scoped cleanup using the open store2 connection (store1 is closed).
+		store2.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+		store2.Close()
+	})
 
-	stored, err := store2.Get(ctx, "restart-1")
+	stored, err := store2.Get(ctx, a2a.TaskID(taskID))
 	if err != nil {
 		t.Fatalf("Get after restart: %v", err)
 	}
@@ -569,13 +626,19 @@ func TestPostgresTaskStoreNoRouteRejected(t *testing.T) {
 // TestPostgresTaskStoreListPagination verifies cursor-based pagination.
 func TestPostgresTaskStoreListPagination(t *testing.T) {
 	store := testPostgresTaskStore(t)
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	ctxID := "ctx-page-" + suffix
 	ctx := ctxForRoute("proj-page", "agent-page")
 
+	var taskIDs []string
 	// Create 5 tasks.
 	for i := 0; i < 5; i++ {
+		tid := fmt.Sprintf("pg-page-%d-%s", i, suffix)
+		taskIDs = append(taskIDs, tid)
 		task := &a2a.Task{
-			ID:        a2a.TaskID(fmt.Sprintf("pg-page-%d", i)),
-			ContextID: "ctx-page",
+			ID:        a2a.TaskID(tid),
+			ContextID: ctxID,
 			Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 		}
 		if _, err := store.Create(ctx, task); err != nil {
@@ -583,9 +646,15 @@ func TestPostgresTaskStoreListPagination(t *testing.T) {
 		}
 	}
 
+	t.Cleanup(func() {
+		for _, tid := range taskIDs {
+			store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, tid)
+		}
+	})
+
 	// List first page (2 items).
 	resp1, err := store.List(ctx, &a2a.ListTasksRequest{
-		ContextID: "ctx-page",
+		ContextID: ctxID,
 		PageSize:  2,
 	})
 	if err != nil {
@@ -603,7 +672,7 @@ func TestPostgresTaskStoreListPagination(t *testing.T) {
 
 	// List second page.
 	resp2, err := store.List(ctx, &a2a.ListTasksRequest{
-		ContextID: "ctx-page",
+		ContextID: ctxID,
 		PageSize:  2,
 		PageToken: resp1.NextPageToken,
 	})
@@ -616,7 +685,7 @@ func TestPostgresTaskStoreListPagination(t *testing.T) {
 
 	// List third page (should have 1 item).
 	resp3, err := store.List(ctx, &a2a.ListTasksRequest{
-		ContextID: "ctx-page",
+		ContextID: ctxID,
 		PageSize:  2,
 		PageToken: resp2.NextPageToken,
 	})
@@ -637,8 +706,15 @@ func TestPostgresTaskStoreHistoryPreservation(t *testing.T) {
 	store := testPostgresTaskStore(t)
 	ctx := ctxForRoute("proj-hist", "agent-hist")
 
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "pg-hist-" + suffix
+
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
+
 	task := &a2a.Task{
-		ID:        "pg-hist-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-hist",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
 		History: []*a2a.Message{
@@ -648,8 +724,8 @@ func TestPostgresTaskStoreHistoryPreservation(t *testing.T) {
 		},
 		Artifacts: []*a2a.Artifact{
 			{
-				ID: "art-1",
-				Parts:      a2a.ContentParts{a2a.NewTextPart("Artifact content")},
+				ID:    "art-1",
+				Parts: a2a.ContentParts{a2a.NewTextPart("Artifact content")},
 			},
 		},
 	}
@@ -658,7 +734,7 @@ func TestPostgresTaskStoreHistoryPreservation(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	stored, err := store.Get(ctx, "pg-hist-1")
+	stored, err := store.Get(ctx, a2a.TaskID(taskID))
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -669,4 +745,52 @@ func TestPostgresTaskStoreHistoryPreservation(t *testing.T) {
 	if len(stored.Task.Artifacts) != 1 {
 		t.Errorf("artifacts len = %d, want 1", len(stored.Task.Artifacts))
 	}
+}
+
+// TestPostgresTaskStoreCanarySurvival verifies that scoped cleanup in other
+// tests does not destroy unrelated rows (canary proof of test isolation).
+func TestPostgresTaskStoreCanarySurvival(t *testing.T) {
+	store := testPostgresTaskStore(t)
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	canaryID := "canary-task-" + suffix
+	testID := "non-canary-" + suffix
+
+	ctx := ctxForRoute("proj-canary", "agent-canary")
+
+	// Insert canary row.
+	canary := &a2a.Task{
+		ID:        a2a.TaskID(canaryID),
+		ContextID: "ctx-canary",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
+	}
+	if _, err := store.Create(ctx, canary); err != nil {
+		t.Fatalf("Create canary: %v", err)
+	}
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, canaryID)
+	})
+
+	// Insert a separate test row and clean it up with scoped DELETE.
+	testTask := &a2a.Task{
+		ID:        a2a.TaskID(testID),
+		ContextID: "ctx-canary",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
+	}
+	if _, err := store.Create(ctx, testTask); err != nil {
+		t.Fatalf("Create test task: %v", err)
+	}
+
+	// Scoped cleanup — only deletes testID, not canaryID.
+	store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, testID)
+
+	// Canary must survive the scoped cleanup.
+	stored, err := store.Get(ctx, a2a.TaskID(canaryID))
+	if err != nil {
+		t.Fatalf("Canary was destroyed by scoped cleanup! Get error: %v", err)
+	}
+	if stored.Task.ID != a2a.TaskID(canaryID) {
+		t.Errorf("canary ID = %q, want %q", stored.Task.ID, canaryID)
+	}
+	t.Logf("Canary survived: %s (test row %s was cleaned up)", canaryID, testID)
 }

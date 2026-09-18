@@ -248,13 +248,17 @@ func TestPostgresTaskStoreCrossProcessCreateGetListCancel(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set — skipping cross-process Postgres test")
 	}
 
-	// Clean up SDK tasks table before and after.
+	// Per-run unique project to avoid cleanup interference under concurrent runs.
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	projID := "proj-cp-" + suffix
+
+	// Clean up SDK tasks scoped to this test's project.
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
+	defer store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, projID)
 
 	// Start two separate OS processes.
-	procA := startTestServer(t, dbURL, "proj-cp", "agent-cp")
-	procB := startTestServer(t, dbURL, "proj-cp", "agent-cp")
+	procA := startTestServer(t, dbURL, projID, "agent-cp")
+	procB := startTestServer(t, dbURL, projID, "agent-cp")
 
 	// Verify distinct PIDs.
 	if procA.pid == procB.pid {
@@ -410,13 +414,18 @@ func TestPostgresTaskStoreCrossProcessOwnershipIsolation(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
+	// Per-run unique projects to avoid cleanup interference under concurrent runs.
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	projAlpha := "project-alpha-" + suffix
+	projBeta := "project-beta-" + suffix
+
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
+	defer store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id IN ($1, $2)`, projAlpha, projBeta)
 
 	// Process A: project-alpha / agent-alpha
-	procA := startTestServer(t, dbURL, "project-alpha", "agent-alpha")
+	procA := startTestServer(t, dbURL, projAlpha, "agent-alpha")
 	// Process B: project-beta / agent-beta (different ownership)
-	procB := startTestServer(t, dbURL, "project-beta", "agent-beta")
+	procB := startTestServer(t, dbURL, projBeta, "agent-beta")
 
 	if procA.pid == procB.pid {
 		t.Fatalf("processes must have distinct PIDs")
@@ -480,8 +489,15 @@ func TestPostgresTaskStoreExecutionLease(t *testing.T) {
 	store := testPostgresTaskStore(t)
 	ctx := ctxForRoute("proj-lease", "agent-lease")
 
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "lease-" + suffix
+
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
+
 	task := &a2a.Task{
-		ID:        "lease-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-1",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 	}
@@ -493,7 +509,7 @@ func TestPostgresTaskStoreExecutionLease(t *testing.T) {
 	ownerB := "host-b:2002"
 
 	// Claim by A should succeed.
-	claimed, err := store.ClaimExecution(ctx, "lease-1", ownerA, 30*time.Second)
+	claimed, err := store.ClaimExecution(ctx, taskID, ownerA, 30*time.Second)
 	if err != nil {
 		t.Fatalf("ClaimExecution A: %v", err)
 	}
@@ -502,7 +518,7 @@ func TestPostgresTaskStoreExecutionLease(t *testing.T) {
 	}
 
 	// Concurrent claim by B should fail (A's lease is fresh).
-	claimed, err = store.ClaimExecution(ctx, "lease-1", ownerB, 30*time.Second)
+	claimed, err = store.ClaimExecution(ctx, taskID, ownerB, 30*time.Second)
 	if err != nil {
 		t.Fatalf("ClaimExecution B: %v", err)
 	}
@@ -511,23 +527,23 @@ func TestPostgresTaskStoreExecutionLease(t *testing.T) {
 	}
 
 	// Heartbeat by A should succeed.
-	if err := store.HeartbeatExecution(ctx, "lease-1", ownerA); err != nil {
+	if err := store.HeartbeatExecution(ctx, taskID, ownerA); err != nil {
 		t.Fatalf("HeartbeatExecution A: %v", err)
 	}
 
 	// Heartbeat by B should fail (not the owner).
-	err = store.HeartbeatExecution(ctx, "lease-1", ownerB)
+	err = store.HeartbeatExecution(ctx, taskID, ownerB)
 	if err == nil {
 		t.Fatal("expected heartbeat by B to fail")
 	}
 
 	// Release by A should succeed.
-	if err := store.ReleaseExecution(ctx, "lease-1", ownerA); err != nil {
+	if err := store.ReleaseExecution(ctx, taskID, ownerA); err != nil {
 		t.Fatalf("ReleaseExecution A: %v", err)
 	}
 
 	// Now B can claim.
-	claimed, err = store.ClaimExecution(ctx, "lease-1", ownerB, 30*time.Second)
+	claimed, err = store.ClaimExecution(ctx, taskID, ownerB, 30*time.Second)
 	if err != nil {
 		t.Fatalf("ClaimExecution B after release: %v", err)
 	}
@@ -550,22 +566,28 @@ func TestPostgresTaskStoreCrashRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("storeA: %v", err)
 	}
-	t.Cleanup(func() {
-		storeA.db.Exec("DELETE FROM a2a_sdk_tasks")
-		storeA.Close()
-	})
 
 	storeB, err := NewPostgresTaskStore(dbURL)
 	if err != nil {
 		t.Fatalf("storeB: %v", err)
 	}
-	t.Cleanup(func() { storeB.Close() })
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "crash-" + suffix
+	retryID := "crash-retry-" + suffix
+
+	t.Cleanup(func() {
+		storeA.db.ExecContext(context.Background(), `DELETE FROM a2a_task_events WHERE task_id IN ($1, $2)`, taskID, retryID)
+		storeA.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id IN ($1, $2)`, taskID, retryID)
+		storeA.Close()
+		storeB.Close()
+	})
 
 	ctx := ctxForRoute("proj-crash", "agent-crash")
 
 	// Create a task and claim execution on store A.
 	task := &a2a.Task{
-		ID:        "crash-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-crash",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
 	}
@@ -574,14 +596,14 @@ func TestPostgresTaskStoreCrashRecovery(t *testing.T) {
 	}
 
 	ownerA := "crashed-host:9999"
-	claimed, err := storeA.ClaimExecution(ctx, "crash-1", ownerA, 30*time.Second)
+	claimed, err := storeA.ClaimExecution(ctx, taskID, ownerA, 30*time.Second)
 	if err != nil || !claimed {
 		t.Fatalf("ClaimExecution: claimed=%v err=%v", claimed, err)
 	}
 
 	// Simulate crash: backdoor the heartbeat to be in the past.
 	_, err = storeA.db.Exec(
-		`UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW() - INTERVAL '10 minutes' WHERE id = 'crash-1'`,
+		`UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW() - INTERVAL '10 minutes' WHERE id = $1`, taskID,
 	)
 	if err != nil {
 		t.Fatalf("backdate heartbeat: %v", err)
@@ -597,7 +619,7 @@ func TestPostgresTaskStoreCrashRecovery(t *testing.T) {
 	}
 
 	// Verify task is now failed.
-	stored, err := storeB.Get(ctx, "crash-1")
+	stored, err := storeB.Get(ctx, a2a.TaskID(taskID))
 	if err != nil {
 		t.Fatalf("Get after reap: %v", err)
 	}
@@ -607,14 +629,14 @@ func TestPostgresTaskStoreCrashRecovery(t *testing.T) {
 
 	// Verify execution claim is cleared.
 	var execOwner *string
-	storeB.db.QueryRow(`SELECT exec_owner FROM a2a_sdk_tasks WHERE id = 'crash-1'`).Scan(&execOwner)
+	storeB.db.QueryRow(`SELECT exec_owner FROM a2a_sdk_tasks WHERE id = $1`, taskID).Scan(&execOwner)
 	if execOwner != nil {
 		t.Errorf("exec_owner should be NULL after reap, got %q", *execOwner)
 	}
 
 	// Verify user can retry: create a new task from store B.
 	retryTask := &a2a.Task{
-		ID:        "crash-1-retry",
+		ID:        a2a.TaskID(retryID),
 		ContextID: "ctx-crash",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 	}
@@ -622,7 +644,7 @@ func TestPostgresTaskStoreCrashRecovery(t *testing.T) {
 		t.Fatalf("Create retry task: %v", err)
 	}
 	ownerB := "recovery-host:1234"
-	claimed, err = storeB.ClaimExecution(ctx, "crash-1-retry", ownerB, 30*time.Second)
+	claimed, err = storeB.ClaimExecution(ctx, retryID, ownerB, 30*time.Second)
 	if err != nil || !claimed {
 		t.Fatalf("ClaimExecution retry: claimed=%v err=%v", claimed, err)
 	}
@@ -635,9 +657,16 @@ func TestPostgresTaskStoreReapDoesNotAffectLongRunning(t *testing.T) {
 	store := testPostgresTaskStore(t)
 	ctx := ctxForRoute("proj-longrun", "agent-longrun")
 
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "longrun-" + suffix
+
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
+
 	// Create a task in working state WITHOUT an execution claim.
 	task := &a2a.Task{
-		ID:        "longrun-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-lr",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
 	}
@@ -646,7 +675,7 @@ func TestPostgresTaskStoreReapDoesNotAffectLongRunning(t *testing.T) {
 	}
 
 	// Backdate the updated_at to make it look old.
-	store.db.Exec(`UPDATE a2a_sdk_tasks SET updated_at = NOW() - INTERVAL '1 hour' WHERE id = 'longrun-1'`)
+	store.db.Exec(`UPDATE a2a_sdk_tasks SET updated_at = NOW() - INTERVAL '1 hour' WHERE id = $1`, taskID)
 
 	// Reap should find nothing (no exec_owner set).
 	reapedIDs, err := store.ReapStaleTasks(ctx, 5*time.Minute)
@@ -658,7 +687,7 @@ func TestPostgresTaskStoreReapDoesNotAffectLongRunning(t *testing.T) {
 	}
 
 	// Verify task is still working.
-	stored, err := store.Get(ctx, "longrun-1")
+	stored, err := store.Get(ctx, a2a.TaskID(taskID))
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -681,9 +710,14 @@ func TestPostgresTaskStorePurgeTasksAndEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresTaskStore: %v", err)
 	}
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	purgeID := "purge-" + suffix
+	workingID := "purge-working-" + suffix
+
 	t.Cleanup(func() {
-		store.db.Exec("DELETE FROM a2a_sdk_tasks")
-		store.db.Exec("DELETE FROM a2a_task_events")
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_task_events WHERE task_id IN ($1, $2)`, purgeID, workingID)
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id IN ($1, $2)`, purgeID, workingID)
 		store.Close()
 	})
 
@@ -691,7 +725,7 @@ func TestPostgresTaskStorePurgeTasksAndEvents(t *testing.T) {
 
 	// Create a completed task.
 	task := &a2a.Task{
-		ID:        "purge-1",
+		ID:        a2a.TaskID(purgeID),
 		ContextID: "ctx-purge",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
 	}
@@ -701,7 +735,7 @@ func TestPostgresTaskStorePurgeTasksAndEvents(t *testing.T) {
 
 	// Create a working task (should NOT be purged).
 	workingTask := &a2a.Task{
-		ID:        "purge-working",
+		ID:        a2a.TaskID(workingID),
 		ContextID: "ctx-purge",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
 	}
@@ -711,12 +745,12 @@ func TestPostgresTaskStorePurgeTasksAndEvents(t *testing.T) {
 
 	// Insert correlated events directly.
 	store.db.Exec(`INSERT INTO a2a_task_events (task_id, kind, payload, final, created_at)
-		VALUES ('purge-1', 'status', '{}', true, NOW() - INTERVAL '2 hours')`)
+		VALUES ($1, 'status', '{}', true, NOW() - INTERVAL '2 hours')`, purgeID)
 	store.db.Exec(`INSERT INTO a2a_task_events (task_id, kind, payload, final, created_at)
-		VALUES ('purge-1', 'message', '{}', false, NOW() - INTERVAL '2 hours')`)
+		VALUES ($1, 'message', '{}', false, NOW() - INTERVAL '2 hours')`, purgeID)
 
 	// Backdate the completed task.
-	store.db.Exec(`UPDATE a2a_sdk_tasks SET updated_at = NOW() - INTERVAL '2 hours' WHERE id = 'purge-1'`)
+	store.db.Exec(`UPDATE a2a_sdk_tasks SET updated_at = NOW() - INTERVAL '2 hours' WHERE id = $1`, purgeID)
 
 	// Purge with 1-hour cutoff.
 	tasksPurged, eventsPurged, err := store.PurgeTasksAndEvents(ctx, time.Now().Add(-1*time.Hour))
@@ -731,13 +765,13 @@ func TestPostgresTaskStorePurgeTasksAndEvents(t *testing.T) {
 	}
 
 	// Verify completed task is gone.
-	_, err = store.Get(ctx, "purge-1")
+	_, err = store.Get(ctx, a2a.TaskID(purgeID))
 	if err == nil {
-		t.Error("expected purge-1 to be deleted")
+		t.Errorf("expected %s to be deleted", purgeID)
 	}
 
 	// Verify working task is still present.
-	stored, err := store.Get(ctx, "purge-working")
+	stored, err := store.Get(ctx, a2a.TaskID(workingID))
 	if err != nil {
 		t.Fatalf("working task should survive purge: %v", err)
 	}
@@ -747,7 +781,7 @@ func TestPostgresTaskStorePurgeTasksAndEvents(t *testing.T) {
 
 	// Verify no events remain for the purged task.
 	var eventCount int
-	store.db.QueryRow(`SELECT COUNT(*) FROM a2a_task_events WHERE task_id = 'purge-1'`).Scan(&eventCount)
+	store.db.QueryRow(`SELECT COUNT(*) FROM a2a_task_events WHERE task_id = $1`, purgeID).Scan(&eventCount)
 	if eventCount != 0 {
 		t.Errorf("expected 0 events for purged task, got %d", eventCount)
 	}
@@ -761,9 +795,16 @@ func TestPostgresTaskStoreDuplicateDeliveryIdempotency(t *testing.T) {
 	store := testPostgresTaskStore(t)
 	ctx := ctxForRoute("proj-dedup", "agent-dedup")
 
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "dedup-" + suffix
+
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
+
 	// Test 1: Duplicate Create returns ErrTaskAlreadyExists.
 	task := &a2a.Task{
-		ID:        "dedup-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-dedup",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 	}
@@ -778,7 +819,7 @@ func TestPostgresTaskStoreDuplicateDeliveryIdempotency(t *testing.T) {
 
 	// Test 2: Same update applied twice — second attempt gets ConcurrentModification.
 	updatedTask := &a2a.Task{
-		ID:        "dedup-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-dedup",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
 	}
@@ -800,7 +841,7 @@ func TestPostgresTaskStoreDuplicateDeliveryIdempotency(t *testing.T) {
 	}
 
 	// Version should be exactly v2, not v2+1.
-	stored, _ := store.Get(ctx, "dedup-1")
+	stored, _ := store.Get(ctx, a2a.TaskID(taskID))
 	if stored.Version != v2 {
 		t.Errorf("version = %d, want %d (no state corruption from duplicate)", stored.Version, v2)
 	}
@@ -1076,12 +1117,16 @@ func TestPostgresTaskStoreCrossProcessCallerIsolation(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
+	// Per-run unique project to avoid cleanup interference under concurrent runs.
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	projID := "proj-caller-" + suffix
+
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
+	defer store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, projID)
 
 	// Same route, different caller IDs.
-	procAlice := startTestServer(t, dbURL, "proj-caller", "agent-caller", "user-alice")
-	procBob := startTestServer(t, dbURL, "proj-caller", "agent-caller", "user-bob")
+	procAlice := startTestServer(t, dbURL, projID, "agent-caller", "user-alice")
+	procBob := startTestServer(t, dbURL, projID, "agent-caller", "user-bob")
 
 	if procAlice.pid == procBob.pid {
 		t.Fatalf("processes must have distinct PIDs: Alice=%d Bob=%d", procAlice.pid, procBob.pid)
@@ -1577,16 +1622,22 @@ func TestPostgresTaskStoreCrossProcessCrashRecoveryKill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("storeA: %v", err)
 	}
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "kill-crash-" + suffix
+	projID := "proj-kill-" + suffix
+
 	t.Cleanup(func() {
-		storeA.db.Exec("DELETE FROM a2a_sdk_tasks")
+		storeA.db.ExecContext(context.Background(), `DELETE FROM a2a_task_events WHERE task_id = $1`, taskID)
+		storeA.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, projID)
 		storeA.Close()
 	})
 
-	ctx := ctxForRoute("proj-kill", "agent-kill")
+	ctx := ctxForRoute(projID, "agent-kill")
 
 	// Create a task and claim execution (simulating process A mid-execution).
 	task := &a2a.Task{
-		ID:        "kill-crash-1",
+		ID:        a2a.TaskID(taskID),
 		ContextID: "ctx-kill",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
 	}
@@ -1599,7 +1650,7 @@ func TestPostgresTaskStoreCrossProcessCrashRecoveryKill(t *testing.T) {
 	procOwnerID := fmt.Sprintf("127.0.0.1:%d", procA.pid) // approximate owner ID
 
 	// Claim execution with the subprocess's owner ID.
-	claimed, err := storeA.ClaimExecution(ctx, "kill-crash-1", procOwnerID, 30*time.Second)
+	claimed, err := storeA.ClaimExecution(ctx, taskID, procOwnerID, 30*time.Second)
 	if err != nil || !claimed {
 		t.Fatalf("ClaimExecution: claimed=%v err=%v", claimed, err)
 	}
@@ -1612,7 +1663,7 @@ func TestPostgresTaskStoreCrossProcessCrashRecoveryKill(t *testing.T) {
 	t.Logf("Process A (PID %d) killed to simulate crash", procA.pid)
 
 	// Backdate the heartbeat (simulating time passing after crash).
-	storeA.db.Exec(`UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW() - INTERVAL '10 minutes' WHERE id = 'kill-crash-1'`)
+	storeA.db.Exec(`UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW() - INTERVAL '10 minutes' WHERE id = $1`, taskID)
 
 	// Create storeB (simulating another replica) and reap.
 	storeB, err := NewPostgresTaskStore(dbURL)
@@ -1630,7 +1681,7 @@ func TestPostgresTaskStoreCrossProcessCrashRecoveryKill(t *testing.T) {
 	}
 
 	// Verify task is failed and exec_owner is cleared.
-	stored, err := storeB.Get(ctx, "kill-crash-1")
+	stored, err := storeB.Get(ctx, a2a.TaskID(taskID))
 	if err != nil {
 		t.Fatalf("Get after reap: %v", err)
 	}
@@ -1639,7 +1690,7 @@ func TestPostgresTaskStoreCrossProcessCrashRecoveryKill(t *testing.T) {
 	}
 
 	var execOwner *string
-	storeB.db.QueryRow(`SELECT exec_owner FROM a2a_sdk_tasks WHERE id = 'kill-crash-1'`).Scan(&execOwner)
+	storeB.db.QueryRow(`SELECT exec_owner FROM a2a_sdk_tasks WHERE id = $1`, taskID).Scan(&execOwner)
 	if execOwner != nil {
 		t.Errorf("exec_owner should be NULL after crash recovery, got %q", *execOwner)
 	}
@@ -1661,8 +1712,13 @@ func TestRegressionCRIT2_CreateClaimRace(t *testing.T) {
 	store := testPostgresTaskStore(t)
 	ctx := ctxForRoute("proj-crit2", "agent-crit2")
 
-	taskID := "crit2-race-1"
+	suffix := randomSuffix()
+	taskID := "crit2-race-" + suffix
 	ownerID := "test-owner:crit2"
+
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
 
 	// Pre-fix behavior: ClaimExecution on a nonexistent row returns (false, nil) —
 	// not claimed, no error. Without retry, the executor would proceed without a lease.
@@ -1711,7 +1767,7 @@ func TestRegressionCRIT2_CreateClaimRace(t *testing.T) {
 		t.Fatal("CRIT-2 fix failed: claim never succeeded after retry loop")
 	}
 
-	// Cleanup
+	// Release the lease (task row cleaned up by t.Cleanup).
 	store.ReleaseExecution(ctx, taskID, ownerID)
 }
 
@@ -1725,11 +1781,23 @@ func TestRegressionCRIT3_ClaimErrorFailsClosed(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
-	store := testPostgresTaskStore(t)
+	// Use a dedicated store for this test since we close its DB pool.
+	// A separate cleanup store deletes the task after the test.
+	store, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgresTaskStore: %v", err)
+	}
+
+	cleanupStore := testPostgresTaskStore(t)
 	ctx := ctxForRoute("proj-crit3", "agent-crit3")
 
-	taskID := "crit3-failclosed-1"
+	suffix := randomSuffix()
+	taskID := "crit3-failclosed-" + suffix
 	ownerID := "test-owner:crit3"
+
+	t.Cleanup(func() {
+		cleanupStore.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+	})
 
 	// Create the task first.
 	task := &a2a.Task{
@@ -1992,12 +2060,16 @@ func TestProductionPath_ScionExecutorSendMessage(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
+	// Per-run unique project to avoid cleanup interference under concurrent runs.
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	projID := "proj-prod-" + suffix
+
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
+	defer store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, projID)
 
 	// Start a test server — its testExecutor creates, works, and completes tasks
 	// without requiring a real Hub, exercising the SDK task store.
-	proc := startTestServer(t, dbURL, "proj-prod", "agent-prod")
+	proc := startTestServer(t, dbURL, projID, "agent-prod")
 
 	// Use the standard jsonRPC helper (method = "SendMessage").
 	result := jsonRPC(t, proc.URL(), "SendMessage", map[string]interface{}{
@@ -2035,7 +2107,7 @@ func TestProductionPath_ScionExecutorSendMessage(t *testing.T) {
 	t.Logf("Production path: SendMessage created task %s", taskID)
 
 	// Verify the task exists in the Postgres SDK store.
-	ctx := ctxForRoute("proj-prod", "agent-prod")
+	ctx := ctxForRoute(projID, "agent-prod")
 	stored, err := store.Get(ctx, a2a.TaskID(taskID))
 	if err != nil {
 		t.Fatalf("Get task from store: %v", err)
@@ -2103,11 +2175,16 @@ func TestDeterministicArtifactDedup(t *testing.T) {
 // from the context (Constraint 1, C4-wrapper, EM binding constraint 2 test 5).
 func TestStoredDurableFields(t *testing.T) {
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
+	suffix := randomSuffix()
+	tidUser := "durable-fields-user-" + suffix
+	tidAdmin := "durable-fields-admin-" + suffix
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id IN ($1, $2)`, tidUser, tidAdmin)
+	})
 
 	t.Run("user caller", func(t *testing.T) {
 		ctx := ctxForRouteAndCaller("p1", "a1", "uid-123")
-		tid := "durable-fields-user-" + randomSuffix()
+		tid := tidUser
 		task := makeTask(tid)
 		_, err := store.Create(ctx, task)
 		if err != nil {
@@ -2140,7 +2217,7 @@ func TestStoredDurableFields(t *testing.T) {
 
 	t.Run("admin caller no identity", func(t *testing.T) {
 		ctx := ctxForRoute("p2", "a2")
-		tid := "durable-fields-admin-" + randomSuffix()
+		tid := tidAdmin
 		task := makeTask(tid)
 		_, err := store.Create(ctx, task)
 		if err != nil {
@@ -2174,10 +2251,12 @@ func TestStoredDurableFields(t *testing.T) {
 // TestGetByIDAndAgent verifies durable cross-replica correlation (Constraint 1).
 func TestGetByIDAndAgent(t *testing.T) {
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
 
 	ctx := ctxForRouteAndCaller("proj-c1", "agent-c1", "user-c1")
 	tid := "correlation-test-" + randomSuffix()
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, tid)
+	})
 	task := makeTask(tid)
 	_, err := store.Create(ctx, task)
 	if err != nil {
@@ -2230,10 +2309,12 @@ func TestGetByIDAndAgent(t *testing.T) {
 // read for durable subscribe (Constraint 3).
 func TestGetOwnedTaskSnapshotAndCursor(t *testing.T) {
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
 
 	ctx := ctxForRouteAndCaller("proj-snap", "agent-snap", "user-snap")
 	tid := "snapshot-test-" + randomSuffix()
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, tid)
+	})
 	task := makeTask(tid)
 	_, err := store.Create(ctx, task)
 	if err != nil {
@@ -2272,11 +2353,13 @@ func TestGetOwnedTaskSnapshotAndCursor(t *testing.T) {
 // last_event_cursor to the specific _bridgeEventID (Constraint 4).
 func TestLastEventCursor_PerEventAdvance(t *testing.T) {
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
-	defer store.db.Exec("DELETE FROM a2a_task_events")
 
 	ctx := ctxForRouteAndCaller("proj-cursor", "agent-cursor", "user-cursor")
 	tid := "cursor-test-" + randomSuffix()
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_task_events WHERE task_id = $1`, tid)
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, tid)
+	})
 	task := makeTask(tid)
 	_, err := store.Create(ctx, task)
 	if err != nil {
@@ -2348,10 +2431,12 @@ func TestLastEventCursor_PerEventAdvance(t *testing.T) {
 // cursor regression when events are processed out of order.
 func TestLastEventCursor_MonotonicAdvance(t *testing.T) {
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
 
 	ctx := ctxForRouteAndCaller("proj-mono", "agent-mono", "user-mono")
 	tid := "mono-test-" + randomSuffix()
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, tid)
+	})
 	task := makeTask(tid)
 	_, err := store.Create(ctx, task)
 	if err != nil {
@@ -2474,13 +2559,15 @@ func testEventStore(t *testing.T) *state.PostgresStore {
 // ScopedTaskStore → BarrierTaskStore → PostgresTaskStore (Constraint C4-wrapper).
 func TestBarrierStoreWrapperChain(t *testing.T) {
 	pgStore := testPostgresTaskStore(t)
-	defer pgStore.db.Exec("DELETE FROM a2a_sdk_tasks")
 
 	barrierStore := NewBarrierTaskStore(pgStore)
 	scopedStore := NewScopedTaskStore(barrierStore)
 
 	ctx := ctxForRouteAndCaller("proj-chain", "agent-chain", "user-chain")
 	tid := "chain-test-" + randomSuffix()
+	t.Cleanup(func() {
+		pgStore.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, tid)
+	})
 	task := makeTask(tid)
 
 	// Create through the full chain.
@@ -2782,14 +2869,15 @@ func TestTwoReplicaProductionPath_EndToEnd(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
-	// Clean up SDK tasks table.
+	// Per-run unique project to avoid cleanup interference under concurrent runs.
+	proj := "proj-e2e-" + randomSuffix()
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks WHERE project_id = 'proj-e2e'")
+	defer store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, proj)
 
 	// ── Step 1: Start two production-mode processes ──
 
-	procA := startProductionServer(t, dbURL, "proj-e2e", "agent-e2e", "")
-	procB := startProductionServer(t, dbURL, "proj-e2e", "agent-e2e", "")
+	procA := startProductionServer(t, dbURL, proj, "agent-e2e", "")
+	procB := startProductionServer(t, dbURL, proj, "agent-e2e", "")
 
 	// Verify distinct PIDs.
 	if procA.pid == procB.pid {
@@ -2873,7 +2961,7 @@ func TestTwoReplicaProductionPath_EndToEnd(t *testing.T) {
 	// This forces the durable no-metadata correlation path through
 	// FindActiveSDKTaskForAgent (not local cache, not a2a_tasks).
 
-	topic := "scion.project.proj-e2e.user.admin.messages"
+	topic := fmt.Sprintf("scion.project.%s.user.admin.messages", proj)
 	brokerResponse := &messages.StructuredMessage{
 		Sender:    "agent:agent-e2e",
 		Type:      messages.TypeAssistantReply,
@@ -2969,7 +3057,7 @@ func TestTwoReplicaProductionPath_EndToEnd(t *testing.T) {
 
 	// ── Step 8: Verify task state via direct DB (assertion only) ──
 
-	ctx := ctxForRoute("proj-e2e", "agent-e2e")
+	ctx := ctxForRoute(proj, "agent-e2e")
 	stored, err := store.Get(ctx, a2a.TaskID(taskID))
 	if err != nil {
 		t.Fatalf("direct DB Get task %s: %v", taskID, err)
@@ -2988,8 +3076,8 @@ func TestTwoReplicaProductionPath_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query durable fields: %v", err)
 	}
-	if projectID != "proj-e2e" {
-		t.Errorf("project_id = %q, want proj-e2e", projectID)
+	if projectID != proj {
+		t.Errorf("project_id = %q, want %s", projectID, proj)
 	}
 	if agentSlug != "agent-e2e" {
 		t.Errorf("agent_slug = %q, want agent-e2e", agentSlug)
@@ -3056,18 +3144,25 @@ func TestTwoReplicaProductionPath_AmbiguityFailClosed(t *testing.T) {
 	}
 
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks WHERE project_id = 'proj-ambig'")
-	defer store.db.Exec("DELETE FROM a2a_task_events WHERE task_id LIKE 'ambig-%'")
+
+	suffix := randomSuffix()
+	projID := "proj-ambig-" + suffix
+	tid1 := "ambig-task-1-" + suffix
+	tid2 := "ambig-task-2-" + suffix
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_task_events WHERE task_id IN ($1, $2)`, tid1, tid2)
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id IN ($1, $2)`, tid1, tid2)
+	})
 
 	// Pre-seed two active (working-state) tasks for the same project/agent
 	// directly in the database. Both are non-terminal (working state).
-	ctx := ctxForRouteAndCaller("proj-ambig", "agent-ambig", "user-ambig")
+	ctx := ctxForRouteAndCaller(projID, "agent-ambig", "user-ambig")
 	task1 := &a2a.Task{
-		ID:     "ambig-task-1",
+		ID:     a2a.TaskID(tid1),
 		Status: a2a.TaskStatus{State: a2a.TaskStateWorking},
 	}
 	task2 := &a2a.Task{
-		ID:     "ambig-task-2",
+		ID:     a2a.TaskID(tid2),
 		Status: a2a.TaskStatus{State: a2a.TaskStateWorking},
 	}
 	_, err := store.Create(ctx, task1)
@@ -3080,13 +3175,13 @@ func TestTwoReplicaProductionPath_AmbiguityFailClosed(t *testing.T) {
 	}
 
 	// Start one production-mode process (B receives broker message).
-	procB := startProductionServer(t, dbURL, "proj-ambig", "agent-ambig", "")
+	procB := startProductionServer(t, dbURL, projID, "agent-ambig", "")
 	t.Logf("Process B: PID=%d port=%d", procB.pid, procB.port)
 
 	// Publish broker message WITHOUT a2aTaskId. This forces the no-metadata
 	// correlation path through FindActiveSDKTaskForAgent, which should fail
 	// closed because two active tasks exist (ambiguous).
-	topic := "scion.project.proj-ambig.user.admin.messages"
+	topic := fmt.Sprintf("scion.project.%s.user.admin.messages", projID)
 	brokerMsg := &messages.StructuredMessage{
 		Sender:    "agent:agent-ambig",
 		Type:      messages.TypeAssistantReply,
@@ -3104,7 +3199,7 @@ func TestTwoReplicaProductionPath_AmbiguityFailClosed(t *testing.T) {
 
 	var eventCount int
 	err = store.db.QueryRow(
-		"SELECT COUNT(*) FROM a2a_task_events WHERE task_id IN ('ambig-task-1', 'ambig-task-2')").
+		"SELECT COUNT(*) FROM a2a_task_events WHERE task_id IN ($1, $2)", tid1, tid2).
 		Scan(&eventCount)
 	if err != nil {
 		t.Fatalf("query events: %v", err)
@@ -3129,8 +3224,9 @@ func TestTwoReplicaProductionPath_NoLegacyBypass(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
+	proj := "proj-legacy-" + randomSuffix()
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks WHERE project_id = 'proj-legacy'")
+	defer store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, proj)
 
 	// Insert a legacy task in a2a_tasks (the bridge state store) for this agent.
 	// This simulates a stale or attacker-controlled row.
@@ -3143,7 +3239,7 @@ func TestTwoReplicaProductionPath_NoLegacyBypass(t *testing.T) {
 	now := time.Now()
 	err = stateStore.CreateTask(context.Background(), &state.Task{
 		ID:           legacyTaskID,
-		ProjectID:    "proj-legacy",
+		ProjectID:    proj,
 		AgentSlug:    "agent-legacy",
 		State:        "working",
 		CallerUserID: "attacker-user",
@@ -3156,13 +3252,13 @@ func TestTwoReplicaProductionPath_NoLegacyBypass(t *testing.T) {
 	defer stateStore.DB().Exec("DELETE FROM a2a_tasks WHERE id = $1", legacyTaskID)
 
 	// Start production-mode process (has sdkTaskStore, so SDK is authoritative).
-	procB := startProductionServer(t, dbURL, "proj-legacy", "agent-legacy", "")
+	procB := startProductionServer(t, dbURL, proj, "agent-legacy", "")
 	t.Logf("Process B: PID=%d port=%d", procB.pid, procB.port)
 
 	// Test 1: metadata-bearing message with legacy task ID should be rejected.
 	// The SDK store doesn't have this task, so it should fail closed even though
 	// legacy a2a_tasks has it.
-	topic := "scion.project.proj-legacy.user.admin.messages"
+	topic := fmt.Sprintf("scion.project.%s.user.admin.messages", proj)
 	metadataMsg := &messages.StructuredMessage{
 		Sender:    "agent:agent-legacy",
 		Type:      messages.TypeAssistantReply,
@@ -3291,11 +3387,12 @@ func TestTwoReplicaProductionPath_StreamingResubscribe(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
+	proj := "proj-stream-" + randomSuffix()
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks WHERE project_id = 'proj-stream'")
+	defer store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, proj)
 
-	procA := startProductionServer(t, dbURL, "proj-stream", "agent-stream", "")
-	procB := startProductionServer(t, dbURL, "proj-stream", "agent-stream", "")
+	procA := startProductionServer(t, dbURL, proj, "agent-stream", "")
+	procB := startProductionServer(t, dbURL, proj, "agent-stream", "")
 
 	if procA.pid == procB.pid {
 		t.Fatalf("processes must have distinct PIDs: A=%d B=%d", procA.pid, procB.pid)
@@ -3362,7 +3459,7 @@ func TestTwoReplicaProductionPath_StreamingResubscribe(t *testing.T) {
 	}
 
 	// Publish broker response to B.
-	topic := "scion.project.proj-stream.user.admin.messages"
+	topic := fmt.Sprintf("scion.project.%s.user.admin.messages", proj)
 	brokerResp := &messages.StructuredMessage{
 		Sender:    "agent:agent-stream",
 		Type:      messages.TypeAssistantReply,
@@ -3458,13 +3555,14 @@ func TestTwoReplicaProductionPath_StreamingOwnershipNegative(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
+	proj := "proj-strmneg-" + randomSuffix()
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks WHERE project_id = 'proj-strmneg'")
+	defer store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, proj)
 
 	// Create a task without global CallerIdentity (avoids per-caller Hub client
 	// creation which would bypass the mock Hub). Ownership is tested via
 	// per-request X-Test-Caller-ID headers on GetTask/SubscribeToTask.
-	procA := startProductionServer(t, dbURL, "proj-strmneg", "agent-strmneg", "")
+	procA := startProductionServer(t, dbURL, proj, "agent-strmneg", "")
 	t.Logf("Process A: PID=%d port=%d", procA.pid, procA.port)
 
 	// Send message to create the task.
@@ -3518,7 +3616,7 @@ func TestTwoReplicaProductionPath_StreamingOwnershipNegative(t *testing.T) {
 	}
 
 	// Complete the task by publishing broker response.
-	topic := "scion.project.proj-strmneg.user.admin.messages"
+	topic := fmt.Sprintf("scion.project.%s.user.admin.messages", proj)
 	brokerResp := &messages.StructuredMessage{
 		Sender:    "agent:agent-strmneg",
 		Type:      messages.TypeAssistantReply,
@@ -3539,7 +3637,7 @@ func TestTwoReplicaProductionPath_StreamingOwnershipNegative(t *testing.T) {
 	}
 
 	// Start a second production-mode process (B).
-	procB := startProductionServer(t, dbURL, "proj-strmneg", "agent-strmneg", "")
+	procB := startProductionServer(t, dbURL, proj, "agent-strmneg", "")
 	t.Logf("Process B: PID=%d port=%d", procB.pid, procB.port)
 
 	// Test: Wrong caller subscribes → should get error SSE event, no task data.
@@ -3595,11 +3693,12 @@ func TestTwoReplicaProductionPath_BridgeEventIDStripped(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
+	proj := "proj-strip-" + randomSuffix()
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks WHERE project_id = 'proj-strip'")
+	defer store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, proj)
 
-	procA := startProductionServer(t, dbURL, "proj-strip", "agent-strip", "")
-	procB := startProductionServer(t, dbURL, "proj-strip", "agent-strip", "")
+	procA := startProductionServer(t, dbURL, proj, "agent-strip", "")
+	procB := startProductionServer(t, dbURL, proj, "agent-strip", "")
 
 	t.Logf("Process A: PID=%d, Process B: PID=%d", procA.pid, procB.pid)
 
@@ -3650,7 +3749,7 @@ func TestTwoReplicaProductionPath_BridgeEventIDStripped(t *testing.T) {
 	}
 
 	// Complete via broker.
-	topic := "scion.project.proj-strip.user.admin.messages"
+	topic := fmt.Sprintf("scion.project.%s.user.admin.messages", proj)
 	postBrokerMessage(t, procB.URL(), topic, &messages.StructuredMessage{
 		Sender:    "agent:agent-strip",
 		Type:      messages.TypeAssistantReply,
@@ -3747,12 +3846,13 @@ func TestProductionContextDerivation(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
+	proj := "proj-ctx-prod-" + randomSuffix()
 	store := testPostgresTaskStore(t)
-	defer store.db.Exec("DELETE FROM a2a_sdk_tasks WHERE project_id = 'proj-ctx-prod'")
+	defer store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, proj)
 
 	// Step 1: Verify WithRouteInfo and WithCallerIdentity produce correct context.
 	ctx := context.Background()
-	routeInfo := RouteInfo{ProjectSlug: "proj-ctx-prod", AgentSlug: "agent-ctx-prod"}
+	routeInfo := RouteInfo{ProjectSlug: proj, AgentSlug: "agent-ctx-prod"}
 	callerID := &CallerIdentity{UserID: "user-ctx-prod", TokenType: "uat"}
 	ctx = WithRouteInfo(ctx, routeInfo)
 	ctx = WithCallerIdentity(ctx, callerID)
@@ -3762,7 +3862,7 @@ func TestProductionContextDerivation(t *testing.T) {
 	// callerIdentityFromContext (caller.go:93) — we use the exported RouteInfoFrom
 	// and verify callerIdentity via buildOwnerKey.
 	gotRoute, ok := RouteInfoFrom(ctx)
-	if !ok || gotRoute.ProjectSlug != "proj-ctx-prod" || gotRoute.AgentSlug != "agent-ctx-prod" {
+	if !ok || gotRoute.ProjectSlug != proj || gotRoute.AgentSlug != "agent-ctx-prod" {
 		t.Fatalf("RouteInfoFrom returned unexpected: %+v ok=%v", gotRoute, ok)
 	}
 	// Verify CallerIdentity is accessible via buildOwnerKey (same path as Create).
@@ -3792,8 +3892,8 @@ func TestProductionContextDerivation(t *testing.T) {
 		t.Fatalf("query durable row: %v", err)
 	}
 
-	if projectID != "proj-ctx-prod" {
-		t.Errorf("project_id = %q, want proj-ctx-prod", projectID)
+	if projectID != proj {
+		t.Errorf("project_id = %q, want %s", projectID, proj)
 	}
 	if agentSlug != "agent-ctx-prod" {
 		t.Errorf("agent_slug = %q, want agent-ctx-prod", agentSlug)
