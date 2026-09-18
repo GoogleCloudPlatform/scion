@@ -93,6 +93,9 @@ func (cb *CreateBarrier) Cancel() {
 // attempts (e.g., SDK retry after ErrTaskAlreadyExists) never double-close.
 func (b *BarrierTaskStore) Create(ctx context.Context, task *a2a.Task) (taskstore.TaskVersion, error) {
 	version, err := b.inner.Create(ctx, task)
+	if task == nil {
+		return version, err
+	}
 	if v, ok := b.barriers.Load(string(task.ID)); ok {
 		cb := v.(*CreateBarrier)
 		cb.once.Do(func() {
