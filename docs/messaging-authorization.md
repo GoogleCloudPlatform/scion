@@ -141,7 +141,7 @@ cross-project reach described below.
 ### Agent to Agent (cross-project)
 
 For agents in **different** projects, only `hub`-mode senders may attempt
-delivery. All three gates must pass:
+delivery. All gates must pass:
 
 | Gate | Check | Denial code |
 |------|-------|-------------|
@@ -369,7 +369,8 @@ PUT  /api/v1/projects/{id}/messaging-policy
 {
     "crossProjectInbound": "none",
     "revision": 1,
-    "hubEnabled": false,
+    "effectiveCrossProjectInbound": "none",
+    "hubCrossProjectEnabled": false,
     "capabilities": {
         "crossProjectConversationKinds": ["direct"]
     }
