@@ -432,6 +432,7 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 	}
 
 	for {
+		canceledLeaseRelease := false
 		// STEP 1: Verify ownership BEFORE reading (Constraint 5).
 		// CRIT-4: If heartbeat fails (lease lost, reaped, or stolen by
 		// another replica), abort immediately. No post-loss event may be yielded.
@@ -441,9 +442,10 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 				// event. The authenticated task owner may consume that one terminal
 				// boundary after lease release; every other lease loss still aborts.
 				stored, _, snapshotErr := heartbeatStore.GetOwnedTaskSnapshotAndCursor(ctx, taskID, ownerKey)
-				if snapshotErr != nil || stored.Task.Status.State != a2a.TaskStateCanceled {
+				if snapshotErr != nil || stored == nil || stored.Task == nil || stored.Task.Status.State != a2a.TaskStateCanceled {
 					return nil, fmt.Errorf("lease lost before read for task %s: %w", taskID, hbErr)
 				}
+				canceledLeaseRelease = true
 			}
 		}
 
@@ -454,12 +456,15 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 		}
 		for _, ev := range events {
 			cursor = ev.ID
+			if canceledLeaseRelease && !isCanceledEvent(ev) {
+				continue
+			}
 			if isResponseEvent(ev) || ev.Final {
 				// STEP 3: Verify ownership IMMEDIATELY before returning.
 				if heartbeatStore != nil {
 					if hbErr := heartbeatStore.HeartbeatExecution(ctx, taskID, ownerID); hbErr != nil {
 						stored, _, snapshotErr := heartbeatStore.GetOwnedTaskSnapshotAndCursor(ctx, taskID, ownerKey)
-						if snapshotErr != nil || stored.Task.Status.State != a2a.TaskStateCanceled || !ev.Final {
+						if snapshotErr != nil || stored == nil || stored.Task == nil || stored.Task.Status.State != a2a.TaskStateCanceled || !isCanceledEvent(ev) {
 							return nil, fmt.Errorf("lease lost before emit for task %s: %w", taskID, hbErr)
 						}
 					}
@@ -516,6 +521,14 @@ func isResponseEvent(ev state.TaskEvent) bool {
 	}
 	var update TaskStatusUpdate
 	return json.Unmarshal(ev.Payload, &update) == nil && update.Status.State == TaskStateInputRequired
+}
+
+func isCanceledEvent(ev state.TaskEvent) bool {
+	if ev.Kind != "status" || !ev.Final {
+		return false
+	}
+	var update TaskStatusUpdate
+	return json.Unmarshal(ev.Payload, &update) == nil && update.Status.State == TaskStateCanceled
 }
 
 // taskEventToTaskResult converts a stored TaskEvent to a TaskResult for
