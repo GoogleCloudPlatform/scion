@@ -964,6 +964,8 @@ type Server struct {
 
 	// GE Google credential exchange service (nil = exchange disabled).
 	geExchangeService *GEExchangeService
+	// GE exchange endpoint rate limiter (per-client-IP token bucket).
+	geExchangeRateLimiter *geExchangeRateLimiter
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -1591,6 +1593,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			srv.isUserAuthorized, // same domain/invite/allow-registration policy as web login
 			slog.Default(),
 		)
+		srv.geExchangeRateLimiter = newGEExchangeRateLimiter()
 		slog.Info("GE Google exchange service initialized",
 			"allowed_client_ids", len(cfg.GEGoogleExchange.AllowedClientIDs))
 	}
@@ -3687,6 +3690,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	}
 	if s.oidcTokenRateLimiter != nil {
 		s.oidcTokenRateLimiter.StartCleanup(ctx)
+	}
+	if s.geExchangeRateLimiter != nil {
+		s.geExchangeRateLimiter.StartCleanup(ctx)
 	}
 
 	// Start OIDC key cleanup loop to remove expired rotated keys from JWKS.

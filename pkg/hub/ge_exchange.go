@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -538,10 +539,32 @@ func (s *GEExchangeService) provisionNewUser(ctx context.Context, identity *Vali
 // ---------------------------------------------------------------------------
 
 // handleGEGoogleExchange handles POST /api/v1/auth/integrations/google/exchange.
+//
+// Endpoint-specific defenses (applied before credential validation):
+//   - Body size: http.MaxBytesReader caps the body at geExchangeMaxBodyBytes
+//     (8 KB). Oversize requests return 413 without invoking the Google
+//     validator, user store, or binding store.
+//   - Rate limit: per-client-IP token bucket (geExchangeRateLimiter) enforced
+//     before credential validation or outbound Google requests. Returns 429
+//     with Retry-After header. Client IP extraction uses safe trusted-proxy
+//     semantics via geExchangeClientIP.
 func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
+	}
+
+	// Rate limit — before any credential validation or outbound calls.
+	if s.geExchangeRateLimiter != nil {
+		trustedNets := parseTrustedProxies(s.config.TrustedProxies)
+		clientIP := geExchangeClientIP(r, trustedNets)
+		allowed, retryAfter := s.geExchangeRateLimiter.Allow(clientIP)
+		if !allowed {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited,
+				fmt.Sprintf("rate limit exceeded; retry in %ds", retryAfter), nil)
+			return
+		}
 	}
 
 	if s.geExchangeService == nil {
@@ -550,8 +573,16 @@ func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Body size limit — before JSON decode/validation.
+	r.Body = http.MaxBytesReader(w, r.Body, geExchangeMaxBodyBytes)
+
 	var req ExchangeRequest
 	if err := readJSON(r, &req); err != nil {
+		if isMaxBytesError(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, ErrCodeInvalidRequest,
+				"request body too large", nil)
+			return
+		}
 		BadRequest(w, "invalid request body")
 		return
 	}
@@ -574,4 +605,11 @@ func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, statusCode, resp)
+}
+
+// isMaxBytesError checks whether an error is an *http.MaxBytesError (body
+// exceeded the limit set by MaxBytesReader).
+func isMaxBytesError(err error) bool {
+	var maxBytesErr *http.MaxBytesError
+	return errors.Is(err, http.ErrBodyReadAfterClose) || errors.As(err, &maxBytesErr)
 }
