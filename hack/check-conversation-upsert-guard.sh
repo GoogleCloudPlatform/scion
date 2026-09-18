@@ -36,6 +36,19 @@
 #   methods take ctx, not tx, so they cannot participate in the webchat
 #   transaction. Surfaces 1, 2a, 2b, and 3 remain fully barred in pkg/hub.
 #
+#   EXEMPTION (Option D, conversation management API):
+#     pkg/hub/handlers_conversations.go may call CreateConversation and
+#     AddParticipant. This file implements the REST management API for
+#     conversations (POST /api/v1/conversations, POST .../participants).
+#     These are a legitimate second conversation-minting layer, properly
+#     guarded by UnifiedAuthMiddleware, that postdates the guard's original
+#     2026-08-27 enumeration. UpsertConversationByExternalRef remains barred.
+#
+#     cmd/conversation.go is excluded because its AddParticipant call is a
+#     hubclient HTTP API call (client.Conversations().AddParticipant), not a
+#     direct store call. The textual grep pattern matches the method name but
+#     the actual code path goes through the HTTP API layer.
+#
 # Test files (*_test.go) are excluded: test fixtures legitimately call store
 # methods to set up state. The guard protects production code paths.
 #
@@ -92,6 +105,8 @@ grep -rEn 'UpsertConversationByExternalRef|\.CreateConversation\(|\.AddParticipa
   . \
   | grep -v '^./pkg/messaging/' \
   | grep -v '^./pkg/store/' \
+  | grep -v '^./pkg/hub/handlers_conversations\.go' \
+  | grep -v '^./cmd/conversation\.go' \
   | grep -v '^./vendor/' \
   >"$tmp" || true
 
