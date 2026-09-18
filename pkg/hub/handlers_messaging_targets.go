@@ -167,10 +167,10 @@ type peerAgentIdentity struct {
 	agent *store.Agent
 }
 
-func (w *peerAgentIdentity) Type() string             { return "agent" }
-func (w *peerAgentIdentity) ID() string               { return w.agent.ID }
-func (w *peerAgentIdentity) ProjectID() string         { return w.agent.ProjectID }
-func (w *peerAgentIdentity) Scopes() []AgentTokenScope { return nil }
+func (w *peerAgentIdentity) Type() string                    { return "agent" }
+func (w *peerAgentIdentity) ID() string                      { return w.agent.ID }
+func (w *peerAgentIdentity) ProjectID() string               { return w.agent.ProjectID }
+func (w *peerAgentIdentity) Scopes() []AgentTokenScope       { return nil }
 func (w *peerAgentIdentity) HasScope(_ AgentTokenScope) bool { return false }
 func (w *peerAgentIdentity) Ancestry() []string {
 	return w.agent.Ancestry
