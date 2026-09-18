@@ -28,6 +28,8 @@ for short-lived Hub user access tokens.
 | `d1340ac` | docs: update project log with review-auth-1 finding dispositions (#1616, #1617) |
 | `b86fe45` | fix(hub,bridge): resolve review-auth-2 findings (#1616, #1617) |
 | `0695f75` | fix(bridge): wire transport auth to snapshot validator + harden dispatch tests (#1616, #1617) |
+| `58df399` | docs: update project log with round 3 rebase onto origin/main 346b1f7 (#1616, #1617) |
+| `e099d85` | fix(hub): concurrent first-linkage provisioning collision (H3-R1) (#1616) |
 
 ## Hub — `POST /api/v1/auth/integrations/google/exchange` (#1616)
 
@@ -212,6 +214,12 @@ Hub `go.mod`: No changes.
 | B2-N1 | `SetSDKHandler` on Server | **Resolved**: moved to `export_test.go` | — |
 | B2-N2 | REST v0.3 advertised unconditionally | **Resolved**: `v0RESTEnabled` flag, conditional advertising | `TestV0REST_AgentCardNoRESTWhenHandlerNil` |
 
+## Review finding disposition (review-auth-hub-3 at `58df399` — REQUEST CHANGES)
+
+| # | Finding | Resolution | Evidence |
+|---|---------|------------|----------|
+| H3-R1 | Concurrent first-linkage provisioning collision — two simultaneous exchanges for unseen identity/email cause "bound user not found" | **Resolved**: `provisionNewUser` returns `(user, provisioned bool, err)`; on `store.ErrAlreadyExists` re-queries by email to find winner; orphan cleanup only when `provisioned && winner.ID != user.ID`; `fakeUserStore` mutex + unique email constraint | `TestGEExchange_ConcurrentFirstLinkage` (5 goroutines, hard assertions), `TestGEExchange_ConcurrentFirstLinkage_PersistentStore` (SQLite, two service instances), `TestGEExchange_ProvisionNewUser_CreateError_FailsClosed` (HTTP 500 when no winner) |
+
 ## Review finding disposition (review-auth-hub-2 — APPROVE, 3 observations)
 
 | # | Observation | Resolution | Evidence |
@@ -219,6 +227,16 @@ Hub `go.mod`: No changes.
 | H2-O1 | `flexInt64` for `expires_in` | **Resolved**: custom JSON type handling number/string forms | `TestFlexInt64_*` (4 tests), `TestProductionValidator_AccessToken_ExpiresInAsString` |
 | H2-O2 | Dead remaining-lifetime branch | **Resolved**: strict `remaining <= 0` check | `TestProductionValidator_IDToken_ExpiredWithinSkew`, `_PositiveRemaining`, `_LongRemaining` |
 | H2-O3 | User deletion cascade | **Resolved**: `entsql.OnDelete(entsql.Cascade)` annotation | `TestExternalIdentityStore_UserDeleteCascade` |
+
+## Test evidence (round 4 H3-R1 fix: `e099d85`)
+
+- **H3-R1 concurrent first-linkage provisioning collision:** Fixed multi-layered race — (1) `fakeUserStore` lacked mutex/unique email constraint, (2) `provisionNewUser` didn't handle email-collision race, (3) orphan cleanup deleted winning user when provisioner lost binding race
+- **Production code:** `provisionNewUser` returns `(user, provisioned bool, err)` — on `store.ErrAlreadyExists`, re-queries by email to find collision winner; orphan cleanup gated by `provisioned && winner.ID != user.ID`
+- **Test fakes:** `fakeUserStore` gains `sync.Mutex` on all map operations + unique email constraint enforcement via `usersByEmail` index
+- **New tests:** `TestGEExchange_ConcurrentFirstLinkage` (5 goroutines, hard assertions on convergence), `TestGEExchange_ConcurrentFirstLinkage_PersistentStore` (SQLite via `entc.OpenSQLite` + `entadapter.NewCompositeStore`, two independent service instances), `TestGEExchange_ProvisionNewUser_CreateError_FailsClosed` (HTTP 500 when re-query finds no winner)
+- **50× race-clean:** `go test -count=50 -race -run 'TestGEExchange_ConcurrentFirstLinkage$' ./pkg/hub/` — all 50 pass, 0 data races
+- All existing Hub GE tests continue to pass (74 tests total)
+- Bridge suite unmodified, continues to pass
 
 ## Test evidence (round 3 rebase: `deee990`)
 
