@@ -3062,7 +3062,7 @@ func TestChatV2_History_AroundReturnsAdjacentMessages(t *testing.T) {
 		t.Fatalf("message count = %d, want %d", got, want)
 	}
 
-	want := []string{"message-003", "message-004", "message-005", "message-006", "message-007"}
+	want := []string{"message-007", "message-006", "message-005", "message-004", "message-003"}
 	for i, msg := range resp.Messages {
 		if msg.Msg != want[i] {
 			t.Errorf("message[%d] = %q, want %q", i, msg.Msg, want[i])

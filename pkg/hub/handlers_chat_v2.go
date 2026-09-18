@@ -2038,11 +2038,11 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 
 		items := make([]store.Message, 0, len(older.Items)+1+len(newer.Items))
-		for i := len(older.Items) - 1; i >= 0; i-- {
-			items = append(items, older.Items[i])
+		for i := len(newer.Items) - 1; i >= 0; i-- {
+			items = append(items, newer.Items[i])
 		}
 		items = append(items, *anchor)
-		items = append(items, newer.Items...)
+		items = append(items, older.Items...)
 		result = &store.ListResult[store.Message]{
 			Items:      items,
 			NextCursor: older.NextCursor,

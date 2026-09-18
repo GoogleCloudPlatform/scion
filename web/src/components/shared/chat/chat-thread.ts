@@ -2428,7 +2428,7 @@ export class ScionChatThread extends LitElement {
         this.v2ReplyPreviewMap.set(msgId, preview);
       }
 
-      this.nextCursor = data.nextCursor ?? null;
+      this.nextCursor = data.nextCursor || null;
       this.hasOlderMessages = this.nextCursor !== null;
       this.viewingAroundMessage = true;
       this.pinnedToBottom = false;
