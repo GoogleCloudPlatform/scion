@@ -13,6 +13,16 @@ Enterprise users to authenticate to the A2A bridge using their Google
 credentials (ID tokens or access tokens), which are validated and exchanged
 for short-lived Hub user access tokens.
 
+## Commits
+
+| SHA | Description |
+|-----|-------------|
+| `57d066d` | feat(hub): GE Google credential exchange endpoint (#1616) |
+| `752a4f6` | feat(bridge): GE Google credential exchange auth scheme (#1617) |
+| `dadf9f0` | docs: project log entry for GE auth exchange |
+| `81de652` | feat(hub): durable external identity store + validator security fixes (#1616) |
+| `54a5dae` | feat(bridge): v0.3 REST protocol compatibility via SDK a2acompat (#1617) |
+
 ## Hub — `POST /api/v1/auth/integrations/google/exchange` (#1616)
 
 ### Files added
@@ -22,62 +32,93 @@ for short-lived Hub user access tokens.
   expiry, stable subject, verified email, and SA rejection. Access tokens
   validated via `POST https://oauth2.googleapis.com/tokeninfo` with `azp`
   as authoritative issued-client field plus userinfo cross-check.
-- `pkg/hub/ge_exchange.go` — Exchange service, external identity binding
-  store, user resolution/provisioning, and HTTP handler.
-- `pkg/hub/ge_exchange_test.go` — 27 tests covering all acceptance cases.
+  Security fixes applied: no-redirect HTTP client, URL-encoded form body,
+  flexBool for email_verified, required exp, azp policy, unconditional
+  aud/azp disagreement rejection, bounded JWKS stale + force-refresh.
+- `pkg/hub/ge_exchange.go` — Exchange service, external identity binding,
+  user resolution/provisioning, conflict-safe concurrent binding resolution,
+  and HTTP handler.
+- `pkg/hub/ge_exchange_test.go` — 34 tests covering all acceptance cases.
+- `pkg/ent/schema/externalidentity.go` — ExternalIdentity ent schema with
+  unique composite index on (provider, issuer, subject).
+- `pkg/store/entadapter/externalidentity_store.go` — Ent-backed durable
+  store implementing ExternalIdentityStore interface.
+- `pkg/store/entadapter/externalidentity_store_test.go` — 13 store tests.
 
 ### Files modified
 - `pkg/hub/server.go` — Config struct, service init, route registration.
 - `pkg/hub/route_metadata.go` — RoutePublic classification entry.
 - `pkg/hub/authzop/catalog.go` — Public endpoint exemption + mutation
   exemptions for binding/provisioning operations.
+- `pkg/ent/schema/user.go` — Added `external_identities` reverse edge.
+- `pkg/store/store.go` — Added `ExternalIdentityStore` interface and model.
+- `pkg/store/entadapter/composite.go` — Added ExternalIdentityStore.
+- `pkg/ent/*.go` — Regenerated ent code (20 files).
 
 ### Key design decisions
+- **Durable external identity store:** Ent-backed with unique composite
+  index on (provider, issuer, subject). Auto-migrated on startup. Bindings
+  persist across Hub restarts.
+- **Conflict-safe concurrent binding:** On unique constraint violation
+  during creation, `resolveAfterConflict()` looks up the winning binding
+  and resolves to the winner's user. Tested with 5-goroutine race.
 - **Authoritative email domain guard:** Only Gmail (`gmail.com`,
   `googlemail.com`) or verified Workspace (`hd` claim) emails may
   auto-bootstrap external identity bindings. Other domains fail closed.
 - **Issuer canonicalization:** Both `accounts.google.com` and
   `https://accounts.google.com` normalize to the canonical HTTPS form.
+  Store does exact match; canonicalization is caller responsibility.
 - **Access token metadata:** `azp` is the authoritative issued-client
-  field. Disagreement among any populated client-identifying fields
-  (`aud`, `azp`, `issued_to`) causes rejection.
+  field. aud/azp disagreement unconditionally rejected.
 - **Token expiry capping:** Hub token TTL is `min(configured, upstream
-  remaining)`. Both `expiresAt` and `upstreamExpiresAt` are mandatory
-  in the response.
-- **In-memory external identity store:** Used `MemoryExternalIdentityStore`
-  to avoid ent schema codegen diff. Migration path to ent documented.
+  remaining)`. Both `expiresAt` and `upstreamExpiresAt` mandatory.
 - **No login regression:** Normal Hub web Google login does not create
   integration bindings via the weaker UserInfo-only flow.
+- **flexBool type:** Handles both boolean and string `"true"`/`"false"`
+  forms from Google APIs' inconsistent JSON encoding.
+- **JWKS cache:** Bounded stale at 24h max. Force-refresh on unknown kid
+  with 30s rate limit to prevent excessive fetches.
 
-## Bridge — `geGoogle` auth scheme (#1617)
+## Bridge — `geGoogle` auth scheme + v0.3 REST compat (#1617)
 
 ### Files added
 - `extras/scion-a2a-bridge/internal/bridge/ge_exchange_validator.go` —
   Bounded cache with singleflight coalescing, config version invalidation.
 - `extras/scion-a2a-bridge/internal/bridge/ge_exchange_validator_test.go` —
-  30 tests covering all acceptance cases.
+  34 tests covering all acceptance cases.
+- `extras/scion-a2a-bridge/internal/bridge/v0_compat_test.go` — 9 HTTP-level
+  tests for v0.3 REST compatibility.
 
 ### Files modified
 - `extras/scion-a2a-bridge/internal/bridge/config.go` — `GEExchangeConfig`
   struct with `CredentialType` and `CacheTTL` fields.
 - `extras/scion-a2a-bridge/internal/bridge/server.go` — `geGoogle` scheme
-  in validation, initialization, middleware, and logging.
-- `extras/scion-a2a-bridge/go.mod` / `go.sum` — transitive indirect bumps
-  from `go mod tidy` (no new direct dependencies).
+  in validation, initialization, middleware, logging; v0.3 REST catch-all
+  routes; `handleV0REST` prefix-stripping handler.
+- `extras/scion-a2a-bridge/internal/bridge/bridge.go` — Dual-format agent
+  card with v1.0 JSONRPC + v0.3 REST interfaces and legacy flat fields.
+- `extras/scion-a2a-bridge/cmd/scion-a2a-bridge/main.go` — v0.3 REST
+  handler creation via `a2av0.NewRESTHandler` in both code paths.
+- `extras/scion-a2a-bridge/go.mod` — Added `a2acompat/a2av0` transitive
+  dependency (`github.com/a2aproject/a2a-go v0.3.15` indirect).
+- `extras/scion-a2a-bridge/go.sum` — Updated checksums.
 
 ### Key design decisions
+- **v0.3 REST via SDK:** Uses official `a2acompat/a2av0.NewRESTHandler`
+  from the SDK. Catch-all wildcard routes strip per-agent prefix; Go 1.22
+  mux ensures specific agent-card/jsonrpc routes take precedence.
+- **Dual-format agent card:** `supportedInterfaces` includes both v1.0
+  JSONRPC and v0.3 REST. Legacy flat fields (`url`, `protocolVersion`,
+  `preferredTransport`) included for v0.3 client compatibility.
 - **Cache key:** `SHA-256(credential + configVersion)` — raw tokens never
   stored as map keys or logged.
 - **Cache TTL:** `min(configured, Hub expiry, upstream expiry)`.
 - **Config version invalidation:** `InvalidateCache()` increments version
-  and clears cache. Trust/config changes (allowed client IDs, credential
-  mode, Hub endpoint) are handled atomically.
+  and clears cache.
 - **Bounded size:** 10,000 entries with oldest-expiry eviction.
 - **Singleflight:** `golang.org/x/sync/singleflight` coalesces concurrent
   cache misses for the same credential.
-- **No shared-client fallback:** Hub rejection is propagated as-is.
-- **Hub token passthrough:** Hub-issued access token stored in
-  `CallerIdentity.RawToken` for direct use in downstream Hub API calls.
+- **No shared-client fallback:** Hub rejection propagated as-is.
 
 ## Revocation/cache window and stream-establishment
 
@@ -87,47 +128,28 @@ The bridge cache creates a bounded revocation window:
   Google credential expiry)`. Default configured TTL is 60s, max 300s.
 - **Revocation propagation:** When a Google credential is revoked upstream,
   the bridge continues to accept the cached identity until the cache entry
-  expires. This is a deliberate trade-off for performance: full revalidation
-  on every request would require a Hub round-trip per A2A call.
-- **Stream establishment:** SSE streaming connections are authenticated at
+  expires. Deliberate trade-off for performance.
+- **Stream establishment:** SSE streaming connections authenticated at
   establishment time. A stream established during the cache window will
-  remain open even if the credential is subsequently revoked. The stream
-  lifetime is bounded by SSE keepalive timeout and bridge restart.
-- **Cold replicas:** New bridge replicas have empty caches and must exchange
-  every credential on first access. In a multi-replica deployment, there is
-  no cross-replica cache sharing — each replica independently exchanges
-  with the Hub.
-- **Config invalidation:** When the bridge operator changes trust
-  configuration (allowed client IDs, credential type, Hub endpoint), calling
-  `InvalidateCache()` immediately clears all cached entries and forces
-  re-exchange on next access.
+  remain open even if the credential is subsequently revoked. Bounded by
+  SSE keepalive timeout and bridge task inactivity timeout.
+- **Cold replicas:** New bridge replicas have empty caches; first request
+  validates via Hub. No cross-replica cache sharing.
+- **Config invalidation:** Trust configuration changes immediately clear
+  all cached entries via `InvalidateCache()`.
 
-## OAuth client setup
+## Module changes
 
-- **Dedicated client:** Create a dedicated Google OAuth client ID for GE
-  Bridge authentication. Add it to the Hub's `AllowedClientIDs` list. This
-  provides the strongest security boundary — tokens issued to other clients
-  are rejected.
-- **Shared client:** If a shared OAuth client must be used, add all client
-  IDs to the `AllowedClientIDs` list. The Hub validates `azp` against this
-  list for both ID tokens and access tokens.
-- **No default client:** The Hub does not provide a default/builtin client
-  ID. The `AllowedClientIDs` list must be non-empty when the exchange is
-  enabled.
+Bridge `go.mod`:
+- `github.com/a2aproject/a2a-go v0.3.15` — **new indirect** (required by
+  SDK `a2acompat/a2av0` package)
+- Minor indirect version bumps from `go mod tidy` (grpc-gateway, otel)
 
-## SDK a2av0 compatibility evaluation
-
-The `a2a-go/v2` SDK provides `a2acompat/a2av0` (package
-`github.com/a2aproject/a2a-go/v2/a2acompat/a2av0`) with v0.3-compatible
-`NewRESTHandler` and `NewJSONRPCHandler` functions. This is the official
-path for Go v1/v0.3 client compatibility. The bridge currently does not
-use a bespoke `v0compat.go`; if v0.3 support is needed, the SDK package
-should be preferred.
+Hub `go.mod`: No changes.
 
 ## Test evidence
 
-- Hub: 27 tests, all passing (commit 57d066d)
-- Bridge: 30 tests, all passing (commit 752a4f6)
-- `make ci` not runnable from bridge subtree (requires root workspace
-  toolchain); `go build -buildvcs=false ./...` and `go test -count=1
-  -run TestGEExchange ./pkg/hub/` both pass at final tip.
+- Hub: 34 GE tests + 13 ent store tests, all passing
+- Bridge: 34 GE validator tests + 9 v0.3 compat tests, all passing
+- All broader bridge tests pass (`go test ./internal/...`)
+- Both modules build cleanly (`go build ./...`)
