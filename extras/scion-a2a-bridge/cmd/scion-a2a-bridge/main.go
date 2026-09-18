@@ -496,6 +496,17 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	// reaping stale execution claims, and retention cleanup.
 	b.SetSDKTaskStore(pgTaskStore)
 
+	// Constraint 2: Create barrier store for deterministic create-completion
+	// signaling between consumer (store.Create) and producer (ClaimExecution).
+	barrierStore := bridge.NewBarrierTaskStore(pgTaskStore)
+	b.SetBarrierStore(barrierStore)
+
+	// Constraint C4-wrapper: ScopedTaskStore wraps BarrierTaskStore for
+	// redundant in-memory ownership checks. PostgresTaskStore remains the
+	// authoritative owner enforcer; ScopedTaskStore must never make
+	// correctness depend on its map.
+	scopedStore := bridge.NewScopedTaskStore(barrierStore)
+
 	// Startup recovery: reap any stale execution leases left by
 	// previous instances that crashed mid-execution.
 	if reapedIDs, err := pgTaskStore.ReapStaleTasks(context.Background(), 2*cfg.Timeouts.SendMessage); err != nil {
@@ -504,6 +515,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 		log.Warn("startup: reaped stale SDK execution leases from previous crash", "count", len(reapedIDs), "task_ids", reapedIDs)
 	}
 
+	// SDK receives the full wrapper chain: SDK → ScopedTaskStore → BarrierTaskStore → PostgresTaskStore
 	sdkRequestHandler := a2asrv.NewHandler(
 		executor,
 		a2asrv.WithLogger(log.With("component", "a2a-sdk")),
@@ -512,12 +524,16 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 			PushNotifications: false,
 		}),
 		a2asrv.WithAgentInactivityTimeout(cfg.Timeouts.SendMessage),
-		a2asrv.WithTaskStore(pgTaskStore),
+		a2asrv.WithTaskStore(scopedStore),
 	)
 	b.SetSDKRequestHandler(sdkRequestHandler)
 
+	// Constraint 3: DurableRequestHandler wraps the SDK handler for
+	// ownership-enforcing durable subscribe that bypasses localManager.Resubscribe.
+	durableHandler := bridge.NewDurableRequestHandler(sdkRequestHandler, pgTaskStore, store, notifier)
+
 	sdkJSONRPCHandler := a2asrv.NewJSONRPCHandler(
-		sdkRequestHandler,
+		durableHandler,
 		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
 	)
 

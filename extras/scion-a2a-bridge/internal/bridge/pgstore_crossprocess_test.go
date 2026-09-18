@@ -2077,3 +2077,444 @@ func TestDeterministicArtifactDedup(t *testing.T) {
 
 	t.Logf("Deterministic dedup verified: msg=%s, art=%s", msg1.MessageID[:8], art1[0].ArtifactID[:8])
 }
+
+// --- Constraint-level tests (R3 PROPOSED model) ---
+
+// TestStoredDurableFields verifies that PostgresTaskStore.Create correctly
+// derives and stores project_id, agent_slug, caller_user_id, and owner_key
+// from the context (Constraint 1, C4-wrapper, EM binding constraint 2 test 5).
+func TestStoredDurableFields(t *testing.T) {
+	store := testPostgresTaskStore(t)
+	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
+
+	t.Run("user caller", func(t *testing.T) {
+		ctx := ctxForRouteAndCaller("p1", "a1", "uid-123")
+		tid := "durable-fields-user-" + randomSuffix()
+		task := makeTask(tid)
+		_, err := store.Create(ctx, task)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+
+		// Verify stored columns via direct SQL.
+		var projectID, agentSlug, ownerKey, callerUserID string
+		err = store.db.QueryRow(
+			`SELECT project_id, agent_slug, owner_key, caller_user_id
+			 FROM a2a_sdk_tasks WHERE id = $1`, tid).
+			Scan(&projectID, &agentSlug, &ownerKey, &callerUserID)
+		if err != nil {
+			t.Fatalf("query stored fields: %v", err)
+		}
+		if projectID != "p1" {
+			t.Errorf("project_id = %q, want p1", projectID)
+		}
+		if agentSlug != "a1" {
+			t.Errorf("agent_slug = %q, want a1", agentSlug)
+		}
+		if ownerKey != "p1:a1:uid-123" {
+			t.Errorf("owner_key = %q, want p1:a1:uid-123", ownerKey)
+		}
+		if callerUserID != "uid-123" {
+			t.Errorf("caller_user_id = %q, want uid-123", callerUserID)
+		}
+		t.Logf("User caller fields: project=%s agent=%s owner=%s caller=%s", projectID, agentSlug, ownerKey, callerUserID)
+	})
+
+	t.Run("admin caller no identity", func(t *testing.T) {
+		ctx := ctxForRoute("p2", "a2")
+		tid := "durable-fields-admin-" + randomSuffix()
+		task := makeTask(tid)
+		_, err := store.Create(ctx, task)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+
+		var projectID, agentSlug, ownerKey, callerUserID string
+		err = store.db.QueryRow(
+			`SELECT project_id, agent_slug, owner_key, caller_user_id
+			 FROM a2a_sdk_tasks WHERE id = $1`, tid).
+			Scan(&projectID, &agentSlug, &ownerKey, &callerUserID)
+		if err != nil {
+			t.Fatalf("query stored fields: %v", err)
+		}
+		if projectID != "p2" {
+			t.Errorf("project_id = %q, want p2", projectID)
+		}
+		if agentSlug != "a2" {
+			t.Errorf("agent_slug = %q, want a2", agentSlug)
+		}
+		if ownerKey != "p2:a2" {
+			t.Errorf("owner_key = %q, want p2:a2", ownerKey)
+		}
+		if callerUserID != "" {
+			t.Errorf("caller_user_id = %q, want empty", callerUserID)
+		}
+		t.Logf("Admin caller fields: project=%s agent=%s owner=%s caller=%q", projectID, agentSlug, ownerKey, callerUserID)
+	})
+}
+
+// TestGetByIDAndAgent verifies durable cross-replica correlation (Constraint 1).
+func TestGetByIDAndAgent(t *testing.T) {
+	store := testPostgresTaskStore(t)
+	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
+
+	ctx := ctxForRouteAndCaller("proj-c1", "agent-c1", "user-c1")
+	tid := "correlation-test-" + randomSuffix()
+	task := makeTask(tid)
+	_, err := store.Create(ctx, task)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	t.Run("matching project and agent", func(t *testing.T) {
+		stored, callerUID, err := store.GetByIDAndAgent(ctx, tid, "proj-c1", "agent-c1")
+		if err != nil {
+			t.Fatalf("GetByIDAndAgent: %v", err)
+		}
+		if stored.Task.ID != a2a.TaskID(tid) {
+			t.Errorf("task ID = %q, want %q", stored.Task.ID, tid)
+		}
+		if callerUID != "user-c1" {
+			t.Errorf("caller_user_id = %q, want user-c1", callerUID)
+		}
+	})
+
+	t.Run("wrong project", func(t *testing.T) {
+		_, _, err := store.GetByIDAndAgent(ctx, tid, "wrong-proj", "agent-c1")
+		if err == nil {
+			t.Error("expected error for wrong project, got nil")
+		}
+	})
+
+	t.Run("wrong agent", func(t *testing.T) {
+		_, _, err := store.GetByIDAndAgent(ctx, tid, "proj-c1", "wrong-agent")
+		if err == nil {
+			t.Error("expected error for wrong agent, got nil")
+		}
+	})
+
+	t.Run("empty project rejected", func(t *testing.T) {
+		_, _, err := store.GetByIDAndAgent(ctx, tid, "", "agent-c1")
+		if err == nil {
+			t.Error("expected error for empty projectID, got nil")
+		}
+	})
+
+	t.Run("empty agent rejected", func(t *testing.T) {
+		_, _, err := store.GetByIDAndAgent(ctx, tid, "proj-c1", "")
+		if err == nil {
+			t.Error("expected error for empty agentSlug, got nil")
+		}
+	})
+}
+
+// TestGetOwnedTaskSnapshotAndCursor verifies ownership-enforcing snapshot+cursor
+// read for durable subscribe (Constraint 3).
+func TestGetOwnedTaskSnapshotAndCursor(t *testing.T) {
+	store := testPostgresTaskStore(t)
+	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
+
+	ctx := ctxForRouteAndCaller("proj-snap", "agent-snap", "user-snap")
+	tid := "snapshot-test-" + randomSuffix()
+	task := makeTask(tid)
+	_, err := store.Create(ctx, task)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	t.Run("correct owner", func(t *testing.T) {
+		stored, cursor, err := store.GetOwnedTaskSnapshotAndCursor(ctx, tid, "proj-snap:agent-snap:user-snap")
+		if err != nil {
+			t.Fatalf("GetOwnedTaskSnapshotAndCursor: %v", err)
+		}
+		if stored.Task.ID != a2a.TaskID(tid) {
+			t.Errorf("task ID = %q, want %q", stored.Task.ID, tid)
+		}
+		if cursor != 0 {
+			t.Errorf("cursor = %d, want 0 (fresh task)", cursor)
+		}
+	})
+
+	t.Run("wrong owner", func(t *testing.T) {
+		_, _, err := store.GetOwnedTaskSnapshotAndCursor(ctx, tid, "wrong:owner:key")
+		if err == nil {
+			t.Error("expected error for wrong owner, got nil")
+		}
+	})
+
+	t.Run("empty owner rejected", func(t *testing.T) {
+		_, _, err := store.GetOwnedTaskSnapshotAndCursor(ctx, tid, "")
+		if err == nil {
+			t.Error("expected error for empty ownerKey, got nil")
+		}
+	})
+}
+
+// TestLastEventCursor_PerEventAdvance verifies that Update advances
+// last_event_cursor to the specific _bridgeEventID (Constraint 4).
+func TestLastEventCursor_PerEventAdvance(t *testing.T) {
+	store := testPostgresTaskStore(t)
+	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
+	defer store.db.Exec("DELETE FROM a2a_task_events")
+
+	ctx := ctxForRouteAndCaller("proj-cursor", "agent-cursor", "user-cursor")
+	tid := "cursor-test-" + randomSuffix()
+	task := makeTask(tid)
+	_, err := store.Create(ctx, task)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Simulate two bridge events committed to a2a_task_events.
+	eventStore := testEventStore(t)
+	e1, err := eventStore.AppendTaskEvent(ctx, &state.TaskEvent{
+		TaskID:  tid,
+		Kind:    "status",
+		Payload: json.RawMessage(`{"status":{"state":"working"}}`),
+	})
+	if err != nil {
+		t.Fatalf("AppendTaskEvent e1: %v", err)
+	}
+	e2, err := eventStore.AppendTaskEvent(ctx, &state.TaskEvent{
+		TaskID:  tid,
+		Kind:    "message",
+		Payload: json.RawMessage(`{"status":{"state":"completed","message":{"parts":[{"text":"done"}]}}}`),
+		Final:   true,
+	})
+	if err != nil {
+		t.Fatalf("AppendTaskEvent e2: %v", err)
+	}
+
+	// Process only E1 via store.Update with _bridgeEventID = e1.
+	updatedTask := *task
+	updatedTask.Status.State = a2a.TaskStateWorking
+	updateEvent := &a2a.TaskStatusUpdateEvent{
+		TaskID: a2a.TaskID(tid),
+		Status: a2a.TaskStatus{State: a2a.TaskStateWorking},
+	}
+	updateEvent.SetMeta(bridgeEventIDKey, e1)
+
+	_, err = store.Update(ctx, &taskstore.UpdateRequest{
+		Task:        &updatedTask,
+		Event:       updateEvent,
+		PrevVersion: 1,
+	})
+	if err != nil {
+		t.Fatalf("Update with E1: %v", err)
+	}
+
+	// Verify cursor = E1, not E2.
+	_, cursor, err := store.GetOwnedTaskSnapshotAndCursor(ctx, tid, "proj-cursor:agent-cursor:user-cursor")
+	if err != nil {
+		t.Fatalf("GetOwnedTaskSnapshotAndCursor: %v", err)
+	}
+	if cursor != e1 {
+		t.Errorf("last_event_cursor = %d, want %d (E1). E2=%d", cursor, e1, e2)
+	}
+
+	// Stream events > cursor — E2 must be delivered.
+	events, err := eventStore.ReadTaskEvents(ctx, tid, cursor, 50)
+	if err != nil {
+		t.Fatalf("ReadTaskEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event > cursor, got %d", len(events))
+	}
+	if events[0].ID != e2 {
+		t.Errorf("expected event ID %d, got %d", e2, events[0].ID)
+	}
+	t.Logf("Per-event cursor verified: cursor=%d, streamed E2=%d", cursor, e2)
+}
+
+// TestLastEventCursor_MonotonicAdvance verifies that GREATEST prevents
+// cursor regression when events are processed out of order.
+func TestLastEventCursor_MonotonicAdvance(t *testing.T) {
+	store := testPostgresTaskStore(t)
+	defer store.db.Exec("DELETE FROM a2a_sdk_tasks")
+
+	ctx := ctxForRouteAndCaller("proj-mono", "agent-mono", "user-mono")
+	tid := "mono-test-" + randomSuffix()
+	task := makeTask(tid)
+	_, err := store.Create(ctx, task)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Process E2 (id=200) before E1 (id=100) out of order.
+	updatedTask := *task
+	updatedTask.Status.State = a2a.TaskStateWorking
+
+	// E2 first.
+	ev2 := &a2a.TaskStatusUpdateEvent{
+		TaskID: a2a.TaskID(tid),
+		Status: a2a.TaskStatus{State: a2a.TaskStateWorking},
+	}
+	ev2.SetMeta(bridgeEventIDKey, int64(200))
+	_, err = store.Update(ctx, &taskstore.UpdateRequest{
+		Task:        &updatedTask,
+		Event:       ev2,
+		PrevVersion: 1,
+	})
+	if err != nil {
+		t.Fatalf("Update with E2: %v", err)
+	}
+
+	// E1 second — cursor should NOT regress.
+	ev1 := &a2a.TaskStatusUpdateEvent{
+		TaskID: a2a.TaskID(tid),
+		Status: a2a.TaskStatus{State: a2a.TaskStateWorking},
+	}
+	ev1.SetMeta(bridgeEventIDKey, int64(100))
+	_, err = store.Update(ctx, &taskstore.UpdateRequest{
+		Task:        &updatedTask,
+		Event:       ev1,
+		PrevVersion: 2,
+	})
+	if err != nil {
+		t.Fatalf("Update with E1: %v", err)
+	}
+
+	// Verify cursor = 200 (GREATEST), not 100.
+	_, cursor, err := store.GetOwnedTaskSnapshotAndCursor(ctx, tid, "proj-mono:agent-mono:user-mono")
+	if err != nil {
+		t.Fatalf("GetOwnedTaskSnapshotAndCursor: %v", err)
+	}
+	if cursor != 200 {
+		t.Errorf("last_event_cursor = %d, want 200 (GREATEST prevents regression)", cursor)
+	}
+	t.Logf("Monotonic cursor verified: cursor=%d after out-of-order processing", cursor)
+}
+
+// TestExtractUserIDFromTopic verifies topic user extraction for broker
+// topic validation (Constraint 1).
+func TestExtractUserIDFromTopic(t *testing.T) {
+	tests := []struct {
+		name     string
+		topic    string
+		expected string
+	}{
+		{"user topic", "scion.project.p1.user.u123.messages", "u123"},
+		{"agent topic", "scion.project.p1.agent.a1.messages", ""},
+		{"malformed", "invalid", ""},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractUserIDFromTopic(tt.topic)
+			if got != tt.expected {
+				t.Errorf("extractUserIDFromTopic(%q) = %q, want %q", tt.topic, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestBridgeEventIDNotInWireResponse verifies that _bridgeEventID is not
+// exposed in user-visible output (EM binding constraint 2).
+func TestBridgeEventIDNotInWireResponse(t *testing.T) {
+	task := &a2a.Task{
+		ID:     "wire-test-1",
+		Status: a2a.TaskStatus{State: a2a.TaskStateCompleted},
+	}
+	// Simulate setting _bridgeEventID on the task.
+	task.SetMeta(bridgeEventIDKey, int64(42))
+
+	// stripBridgeEventID should remove it.
+	stripBridgeEventID(task)
+
+	if m := task.Meta(); m != nil {
+		if _, ok := m[bridgeEventIDKey]; ok {
+			t.Error("_bridgeEventID should be stripped from task metadata")
+		}
+	}
+
+	// Verify JSON serialization doesn't contain the key.
+	data, err := json.Marshal(task)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), bridgeEventIDKey) {
+		t.Errorf("serialized task contains %s: %s", bridgeEventIDKey, data)
+	}
+}
+
+// testEventStore returns a state.PostgresStore for the test database.
+func testEventStore(t *testing.T) *state.PostgresStore {
+	t.Helper()
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	s, err := state.NewPostgres(url)
+	if err != nil {
+		t.Fatalf("NewPostgres: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+// TestBarrierStoreWrapperChain verifies the complete wrapper chain:
+// ScopedTaskStore → BarrierTaskStore → PostgresTaskStore (Constraint C4-wrapper).
+func TestBarrierStoreWrapperChain(t *testing.T) {
+	pgStore := testPostgresTaskStore(t)
+	defer pgStore.db.Exec("DELETE FROM a2a_sdk_tasks")
+
+	barrierStore := NewBarrierTaskStore(pgStore)
+	scopedStore := NewScopedTaskStore(barrierStore)
+
+	ctx := ctxForRouteAndCaller("proj-chain", "agent-chain", "user-chain")
+	tid := "chain-test-" + randomSuffix()
+	task := makeTask(tid)
+
+	// Create through the full chain.
+	barrier := barrierStore.PrepareBarrier(tid)
+	defer barrier.Cancel()
+
+	version, err := scopedStore.Create(ctx, task)
+	if err != nil {
+		t.Fatalf("Create through chain: %v", err)
+	}
+	if version != 1 {
+		t.Errorf("version = %d, want 1", version)
+	}
+
+	// Barrier should have been signaled.
+	err = barrier.Await(ctx)
+	if err != nil {
+		t.Fatalf("Await after Create: %v", err)
+	}
+
+	// Verify durable fields persisted through chain.
+	var projectID, agentSlug, ownerKey, callerUserID string
+	err = pgStore.db.QueryRow(
+		`SELECT project_id, agent_slug, owner_key, caller_user_id
+		 FROM a2a_sdk_tasks WHERE id = $1`, tid).
+		Scan(&projectID, &agentSlug, &ownerKey, &callerUserID)
+	if err != nil {
+		t.Fatalf("query stored fields: %v", err)
+	}
+	if projectID != "proj-chain" || agentSlug != "agent-chain" || callerUserID != "user-chain" {
+		t.Errorf("fields = (%q, %q, %q), want (proj-chain, agent-chain, user-chain)",
+			projectID, agentSlug, callerUserID)
+	}
+	if ownerKey != "proj-chain:agent-chain:user-chain" {
+		t.Errorf("owner_key = %q, want proj-chain:agent-chain:user-chain", ownerKey)
+	}
+
+	// Get and Update through chain still work.
+	stored, err := scopedStore.Get(ctx, a2a.TaskID(tid))
+	if err != nil {
+		t.Fatalf("Get through chain: %v", err)
+	}
+	if stored.Task.ID != a2a.TaskID(tid) {
+		t.Errorf("Get task ID = %q, want %q", stored.Task.ID, tid)
+	}
+
+	// Cross-caller isolation: different caller cannot see the task.
+	wrongCtx := ctxForRouteAndCaller("proj-chain", "agent-chain", "other-user")
+	_, err = scopedStore.Get(wrongCtx, a2a.TaskID(tid))
+	if err == nil {
+		t.Error("expected error for wrong caller, got nil")
+	}
+
+	t.Logf("Wrapper chain verified: create/barrier/get/isolation all work through SDK→Scoped→Barrier→Pg")
+}

@@ -86,6 +86,11 @@ func NewPostgresTaskStoreWithDB(db *sql.DB) (*PostgresTaskStore, error) {
 	return s, nil
 }
 
+// bridgeEventIDKey is the metadata key used to carry the exact bridge
+// TaskEvent autoincrement ID through the SDK event pipeline. Used by
+// Update to advance last_event_cursor per-event (Constraint 4).
+const bridgeEventIDKey = "_bridgeEventID"
+
 // Close closes the underlying connection pool only if this store owns it.
 // When the pool is shared (created via NewPostgresTaskStoreWithDB), Close
 // is a no-op — the pool owner is responsible for closing it.
@@ -94,6 +99,73 @@ func (s *PostgresTaskStore) Close() error {
 		return s.db.Close()
 	}
 	return nil
+}
+
+// GetByIDAndAgent retrieves a task by ID with project+agent validation.
+// Used by correlateToTask for durable cross-replica correlation (Constraint 1).
+// Rejects empty projectID/agentSlug at the function level — rows with empty
+// defaults (pre-migration) never match.
+func (s *PostgresTaskStore) GetByIDAndAgent(ctx context.Context, taskID, projectID, agentSlug string) (*taskstore.StoredTask, string, error) {
+	if projectID == "" || agentSlug == "" {
+		return nil, "", fmt.Errorf("empty correlation key: %w", a2a.ErrTaskNotFound)
+	}
+	var payload []byte
+	var version int64
+	var callerUserID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT payload, version, caller_user_id FROM a2a_sdk_tasks
+		 WHERE id = $1 AND project_id = $2 AND agent_slug = $3`,
+		taskID, projectID, agentSlug,
+	).Scan(&payload, &version, &callerUserID)
+	if err == sql.ErrNoRows {
+		return nil, "", a2a.ErrTaskNotFound
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("get SDK task by agent: %w", err)
+	}
+	var task a2a.Task
+	if err := json.Unmarshal(payload, &task); err != nil {
+		return nil, "", fmt.Errorf("unmarshal SDK task: %w", err)
+	}
+	return &taskstore.StoredTask{
+		Task:    &task,
+		Version: taskstore.TaskVersion(version),
+	}, callerUserID, nil
+}
+
+// GetOwnedTaskSnapshotAndCursor retrieves the task snapshot and its
+// last_event_cursor in a single query, enforcing owner_key ownership.
+// Used by DurableRequestHandler.SubscribeToTask (Constraint 3).
+// Returns ErrTaskNotFound on mismatch — no metadata leak.
+func (s *PostgresTaskStore) GetOwnedTaskSnapshotAndCursor(
+	ctx context.Context, taskID string, ownerKey string,
+) (*taskstore.StoredTask, int64, error) {
+	if ownerKey == "" {
+		return nil, 0, fmt.Errorf("empty owner_key: %w", a2a.ErrUnauthenticated)
+	}
+	var payload []byte
+	var version int64
+	var cursor int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT payload, version, last_event_cursor
+		 FROM a2a_sdk_tasks
+		 WHERE id = $1 AND owner_key = $2`,
+		taskID, ownerKey,
+	).Scan(&payload, &version, &cursor)
+	if err == sql.ErrNoRows {
+		return nil, 0, a2a.ErrTaskNotFound
+	}
+	if err != nil {
+		return nil, 0, fmt.Errorf("get owned task snapshot: %w", err)
+	}
+	var task a2a.Task
+	if err := json.Unmarshal(payload, &task); err != nil {
+		return nil, 0, fmt.Errorf("unmarshal SDK task: %w", err)
+	}
+	return &taskstore.StoredTask{
+		Task:    &task,
+		Version: taskstore.TaskVersion(version),
+	}, cursor, nil
 }
 
 // sdkTaskStoreMigrationLockID is a Postgres advisory lock ID used to
@@ -117,7 +189,11 @@ func (s *PostgresTaskStore) migrate() error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			exec_owner TEXT,
-			exec_heartbeat TIMESTAMPTZ
+			exec_heartbeat TIMESTAMPTZ,
+			project_id TEXT NOT NULL DEFAULT '',
+			agent_slug TEXT NOT NULL DEFAULT '',
+			caller_user_id TEXT NOT NULL DEFAULT '',
+			last_event_cursor BIGINT NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_a2a_sdk_tasks_owner ON a2a_sdk_tasks(owner_key)`,
 		`CREATE INDEX IF NOT EXISTS idx_a2a_sdk_tasks_context_owner ON a2a_sdk_tasks(context_id, owner_key)`,
@@ -130,6 +206,28 @@ func (s *PostgresTaskStore) migrate() error {
 			ALTER TABLE a2a_sdk_tasks ADD COLUMN IF NOT EXISTS exec_heartbeat TIMESTAMPTZ;
 		EXCEPTION WHEN duplicate_column THEN NULL;
 		END $$`,
+		// Constraint 1: Add durable correlation columns for cross-replica ownership.
+		`ALTER TABLE a2a_sdk_tasks ADD COLUMN IF NOT EXISTS project_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE a2a_sdk_tasks ADD COLUMN IF NOT EXISTS agent_slug TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE a2a_sdk_tasks ADD COLUMN IF NOT EXISTS caller_user_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE a2a_sdk_tasks ADD COLUMN IF NOT EXISTS last_event_cursor BIGINT NOT NULL DEFAULT 0`,
+		// Constraint 7: Terminalize pre-migration rows with empty correlation columns.
+		// Fail closed — rows with empty project_id/agent_slug can never be authorized.
+		`UPDATE a2a_sdk_tasks
+		 SET payload = jsonb_set(
+		         jsonb_set(payload, '{status,state}', '"failed"'::jsonb),
+		         '{status,message}',
+		         '{"role":"agent","parts":[{"text":"Terminalized during schema migration"}]}'::jsonb
+		     ),
+		     exec_owner = NULL,
+		     exec_heartbeat = NULL,
+		     version = version + 1
+		 WHERE project_id = '' AND agent_slug = ''
+		   AND payload->'status'->>'state' NOT IN ('completed', 'canceled', 'failed')`,
+		// Partial index for cross-replica correlation lookups.
+		`CREATE INDEX IF NOT EXISTS idx_a2a_sdk_tasks_agent
+		     ON a2a_sdk_tasks(project_id, agent_slug)
+		     WHERE payload->'status'->>'state' NOT IN ('completed','canceled','failed')`,
 	}
 	for _, m := range migrations {
 		if _, err := s.db.Exec(m); err != nil {
@@ -171,13 +269,27 @@ func (s *PostgresTaskStore) Create(ctx context.Context, task *a2a.Task) (tasksto
 		return taskstore.TaskVersionMissing, fmt.Errorf("marshal task: %w", err)
 	}
 
+	// Derive durable correlation fields from context (Constraint 1, C4-wrapper).
+	// context.WithoutCancel preserves values, so RouteInfo and CallerIdentity
+	// are available in the consumer goroutine's detached context.
+	var projectID, agentSlug, callerUserID string
+	if route, ok := RouteInfoFrom(ctx); ok {
+		projectID = route.ProjectSlug
+		agentSlug = route.AgentSlug
+	}
+	if caller := callerIdentityFromContext(ctx); caller != nil {
+		callerUserID = caller.UserID
+	}
+
 	const version = taskstore.TaskVersion(1)
 	now := time.Now().UTC()
 
 	_, execErr := s.db.ExecContext(ctx,
-		`INSERT INTO a2a_sdk_tasks (id, context_id, owner_key, version, payload, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		`INSERT INTO a2a_sdk_tasks (id, context_id, owner_key, version, payload, created_at, updated_at,
+		     project_id, agent_slug, caller_user_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		string(task.ID), task.ContextID, owner, int64(version), payload, now, now,
+		projectID, agentSlug, callerUserID,
 	)
 	if execErr != nil {
 		if isUniqueViolation(execErr) {
@@ -207,15 +319,34 @@ func (s *PostgresTaskStore) Update(ctx context.Context, req *taskstore.UpdateReq
 
 	now := time.Now().UTC()
 
+	// Constraint 4: Extract the bridge event ID from the SDK event's metadata.
+	// This is the exact autoincrement ID from a2a_task_events, carried through
+	// the SDK pipeline via _bridgeEventID. We advance last_event_cursor to
+	// this specific event (not MAX(id)) to prevent skipping concurrent events.
+	var eventCursor int64
+	if req.Event != nil {
+		if mc, ok := req.Event.(interface{ Meta() map[string]any }); ok {
+			if m := mc.Meta(); m != nil {
+				switch v := m[bridgeEventIDKey].(type) {
+				case int64:
+					eventCursor = v
+				case float64:
+					eventCursor = int64(v)
+				}
+			}
+		}
+	}
+
 	// Use CAS: only update if the version matches (when PrevVersion is tracked).
 	if req.PrevVersion != taskstore.TaskVersionMissing {
 		var newVersion int64
 		err := s.db.QueryRowContext(ctx,
 			`UPDATE a2a_sdk_tasks
-			 SET payload = $1, version = version + 1, updated_at = $2, context_id = $3
+			 SET payload = $1, version = version + 1, updated_at = $2, context_id = $3,
+			     last_event_cursor = GREATEST(last_event_cursor, $7)
 			 WHERE id = $4 AND owner_key = $5 AND version = $6
 			 RETURNING version`,
-			payload, now, req.Task.ContextID, string(req.Task.ID), owner, int64(req.PrevVersion),
+			payload, now, req.Task.ContextID, string(req.Task.ID), owner, int64(req.PrevVersion), eventCursor,
 		).Scan(&newVersion)
 		if err == sql.ErrNoRows {
 			// Distinguish between "not found" and "version mismatch".
@@ -238,10 +369,11 @@ func (s *PostgresTaskStore) Update(ctx context.Context, req *taskstore.UpdateReq
 	var newVersion int64
 	err = s.db.QueryRowContext(ctx,
 		`UPDATE a2a_sdk_tasks
-		 SET payload = $1, version = version + 1, updated_at = $2, context_id = $3
+		 SET payload = $1, version = version + 1, updated_at = $2, context_id = $3,
+		     last_event_cursor = GREATEST(last_event_cursor, $6)
 		 WHERE id = $4 AND owner_key = $5
 		 RETURNING version`,
-		payload, now, req.Task.ContextID, string(req.Task.ID), owner,
+		payload, now, req.Task.ContextID, string(req.Task.ID), owner, eventCursor,
 	).Scan(&newVersion)
 	if err == sql.ErrNoRows {
 		return taskstore.TaskVersionMissing, a2a.ErrTaskNotFound

@@ -94,11 +94,20 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			return
 		}
 
+		// Constraint 2: Prepare barrier before yielding the initial task.
+		// The barrier provides deterministic signaling between the consumer
+		// (store.Create) and producer (ClaimExecution) goroutines.
+		var barrier *CreateBarrier
+		if bs := e.bridge.barrierStore; bs != nil {
+			barrier = bs.PrepareBarrier(string(taskID))
+			defer barrier.Cancel() // cleanup on every exit path
+		}
+
 		// Emit submitted task.
 		if execCtx.StoredTask == nil {
 			task := a2a.NewSubmittedTask(execCtx, execCtx.Message)
 			if !yield(task, nil) {
-				return
+				return // defer barrier.Cancel() runs
 			}
 		}
 
@@ -145,9 +154,9 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		// CRIT-3: All claim errors fail closed. No Hub side effects without
 		// a confirmed lease. "Degraded mode" bypass is forbidden.
 		//
-		// CRIT-2: For new task submissions, the SDK's store.Create runs
-		// asynchronously via the event consumer goroutine. The row might not
-		// exist when we first try to claim. Retry briefly to let Create commit.
+		// Constraint 2: For new task submissions, the barrier replaces the
+		// retry loop. BarrierTaskStore.Await blocks until Create commits,
+		// then a single ClaimExecution attempt succeeds.
 		if e.bridge.sdkTaskStore != nil {
 			ownerID := OwnerID()
 			leaseTimeout := e.bridge.config.Timeouts.SendMessage
@@ -155,28 +164,18 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 				leaseTimeout = 120 * time.Second
 			}
 
-			var claimed bool
-			var claimErr error
-			maxAttempts := 1
-			if execCtx.StoredTask == nil {
-				// New task: Create is in flight asynchronously.
-				maxAttempts = 50 // up to ~1s
+			// Wait for barrier if this is a new task (Create in flight).
+			if barrier != nil && execCtx.StoredTask == nil {
+				if barrierErr := barrier.Await(ctx); barrierErr != nil {
+					e.log.Error("barrier await failed", "error", barrierErr, "task_id", taskID)
+					failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Task creation failed: "+barrierErr.Error()))
+					yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+					return
+				}
 			}
-			for attempt := 0; attempt < maxAttempts; attempt++ {
-				claimed, claimErr = e.bridge.sdkTaskStore.ClaimExecution(ctx, string(taskID), ownerID, leaseTimeout)
-				if claimErr != nil {
-					break // DB error — fail closed below
-				}
-				if claimed {
-					break // success
-				}
-				if execCtx.StoredTask == nil && attempt < maxAttempts-1 {
-					// Row might not exist yet; wait for async Create.
-					time.Sleep(20 * time.Millisecond)
-					continue
-				}
-				break // follow-up task or retries exhausted
-			}
+
+			// Single ClaimExecution attempt — row guaranteed to exist after barrier.
+			claimed, claimErr := e.bridge.sdkTaskStore.ClaimExecution(ctx, string(taskID), ownerID, leaseTimeout)
 
 			if claimErr != nil {
 				// CRIT-3: Fail closed on any DB error. Never proceed to Hub send.
@@ -250,7 +249,11 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 }
 
 // taskEventToSDKEvent converts a stored TaskEvent to an SDK a2a.Event.
+// Constraint 4: Embeds the bridge event's autoincrement ID (_bridgeEventID)
+// into the SDK event metadata so that PostgresTaskStore.Update can advance
+// last_event_cursor to the exact event applied (not MAX(id)).
 func taskEventToSDKEvent(execCtx *a2asrv.ExecutorContext, ev *state.TaskEvent) (a2a.Event, error) {
+	var sdkEvent a2a.Event
 	switch ev.Kind {
 	case "message":
 		var su TaskStatusUpdate
@@ -273,14 +276,14 @@ func taskEventToSDKEvent(execCtx *a2asrv.ExecutorContext, ev *state.TaskEvent) (
 			sdkParts = append(sdkParts, a2a.NewTextPart("[empty response]"))
 		}
 		statusMsg := a2a.NewMessageForTask(a2a.MessageRoleAgent, execCtx, sdkParts...)
-		return a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, statusMsg), nil
+		sdkEvent = a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, statusMsg)
 	case "status":
 		var su TaskStatusUpdate
 		if err := json.Unmarshal(ev.Payload, &su); err != nil {
 			return nil, fmt.Errorf("unmarshal status event: %w", err)
 		}
 		sdkState := mapBridgeStateToSDK(su.Status.State)
-		return a2a.NewStatusUpdateEvent(execCtx, sdkState, nil), nil
+		sdkEvent = a2a.NewStatusUpdateEvent(execCtx, sdkState, nil)
 	case "artifact":
 		var au TaskArtifactUpdate
 		if err := json.Unmarshal(ev.Payload, &au); err != nil {
@@ -296,13 +299,20 @@ func taskEventToSDKEvent(execCtx *a2asrv.ExecutorContext, ev *state.TaskEvent) (
 			}
 		}
 		if len(artParts) == 0 {
-			return a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil
+			sdkEvent = a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil)
+		} else {
+			artMsg := a2a.NewMessageForTask(a2a.MessageRoleAgent, execCtx, artParts...)
+			sdkEvent = a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, artMsg)
 		}
-		artMsg := a2a.NewMessageForTask(a2a.MessageRoleAgent, execCtx, artParts...)
-		return a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, artMsg), nil
 	default:
 		return nil, fmt.Errorf("unknown event kind: %s", ev.Kind)
 	}
+
+	// Carry the exact bridge event ID through the SDK pipeline.
+	if mc, ok := sdkEvent.(interface{ SetMeta(string, any) }); ok {
+		mc.SetMeta(bridgeEventIDKey, ev.ID)
+	}
+	return sdkEvent, nil
 }
 
 // mapBridgeStateToSDK maps bridge task states to SDK task states.

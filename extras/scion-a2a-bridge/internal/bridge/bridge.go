@@ -90,6 +90,11 @@ type Bridge struct {
 	// plugin mode.
 	sdkTaskStore *PostgresTaskStore
 
+	// barrierStore wraps sdkTaskStore with deterministic create-completion
+	// barriers. The executor uses it to wait for store.Create to commit
+	// before attempting ClaimExecution (Constraint 2). nil in plugin mode.
+	barrierStore *BarrierTaskStore
+
 	// oidcClientOnce ensures the shared OIDC HTTP client is created exactly once.
 	oidcClientOnce sync.Once
 	// oidcClient is the cached HTTP client for reaching the hub's OIDC endpoints.
@@ -359,6 +364,12 @@ func (b *Bridge) SetSDKTaskStore(store *PostgresTaskStore) {
 	b.sdkTaskStore = store
 }
 
+// SetBarrierStore wires the barrier task store for deterministic
+// create-completion signaling. Called during standalone mode initialization.
+func (b *Bridge) SetBarrierStore(store *BarrierTaskStore) {
+	b.barrierStore = store
+}
+
 // SetSnapshot wires the atomic config snapshot for hot-apply support.
 func (b *Bridge) SetSnapshot(snap *SnapshotHolder) {
 	b.snapshot = snap
@@ -414,27 +425,30 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 	}
 
 	for {
+		// STEP 1: Verify ownership BEFORE reading (Constraint 5).
+		// CRIT-4: If heartbeat fails (lease lost, reaped, or stolen by
+		// another replica), abort immediately. No post-loss event may be yielded.
+		if heartbeatStore != nil {
+			if hbErr := heartbeatStore.HeartbeatExecution(ctx, taskID, ownerID); hbErr != nil {
+				return nil, fmt.Errorf("lease lost before read for task %s: %w", taskID, hbErr)
+			}
+		}
+
+		// STEP 2: Read events (ownership verified in step 1).
 		events, err := b.store.ReadTaskEvents(ctx, taskID, cursor, 10)
 		if err != nil {
 			return nil, fmt.Errorf("reading task events: %w", err)
 		}
 		for _, ev := range events {
 			cursor = ev.ID
-			if isResponseEvent(ev) {
+			if isResponseEvent(ev) || ev.Final {
+				// STEP 3: Verify ownership IMMEDIATELY before returning.
+				if heartbeatStore != nil {
+					if hbErr := heartbeatStore.HeartbeatExecution(ctx, taskID, ownerID); hbErr != nil {
+						return nil, fmt.Errorf("lease lost before emit for task %s: %w", taskID, hbErr)
+					}
+				}
 				return &ev, nil
-			}
-			if ev.Final {
-				return &ev, nil
-			}
-		}
-
-		// Heartbeat execution lease on each poll cycle to keep it alive.
-		// CRIT-4: If heartbeat fails (lease lost, reaped, or stolen by
-		// another replica), abort immediately. Continuing would produce
-		// split-brain duplicate execution or zombie task resurrection.
-		if heartbeatStore != nil {
-			if hbErr := heartbeatStore.HeartbeatExecution(ctx, taskID, ownerID); hbErr != nil {
-				return nil, fmt.Errorf("execution lease lost for task %s: %w", taskID, hbErr)
 			}
 		}
 
@@ -451,6 +465,7 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 			continue
 		}
 
+		// STEP 4: Wait for notification or poll timer.
 		select {
 		case <-notifyCh:
 			// NOTIFY woke us — immediately re-read (reset backoff).
@@ -951,8 +966,8 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 		return nil
 	}
 
-	// Correlate to taskID.
-	taskID, err := b.correlateToTask(ctx, projectID, agentSlug, msg)
+	// Correlate to taskID (pass topic for user validation).
+	taskID, err := b.correlateToTask(ctx, projectID, agentSlug, topic, msg)
 	if err != nil {
 		b.log.Debug("could not correlate broker message to task", "error", err, "topic", topic, "sender", msg.Sender)
 		return nil
@@ -970,10 +985,12 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 }
 
 // correlateToTask determines the taskID for a broker message, using metadata
-// or falling back to DB lookup.
-func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug string, msg *messages.StructuredMessage) (string, error) {
+// or falling back to DB lookup. The topic parameter is used for user/caller
+// validation (Constraint 1).
+func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug, topic string, msg *messages.StructuredMessage) (string, error) {
 	// If the message carries a task correlation ID, verify ownership.
 	if taskID := msg.Metadata["a2aTaskId"]; taskID != "" {
+		// Path 1: bridge state store (plugin mode, a2a_tasks).
 		task, err := b.store.GetTask(ctx, taskID)
 		if err == nil && task != nil {
 			if task.AgentSlug != agentSlug {
@@ -983,15 +1000,25 @@ func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug strin
 			}
 			return taskID, nil
 		}
-		// Task not found in bridge state (a2a_tasks). In standalone SDK
-		// mode, tasks exist only in a2a_sdk_tasks. Check the local active
-		// task cache — we trust a2aTaskId because the executor sets it.
-		b.tasksMu.RLock()
-		_, inCache := b.activeTasks[taskID]
-		b.tasksMu.RUnlock()
-		if inCache {
-			return taskID, nil
+
+		// Path 2: DURABLE fallback to a2a_sdk_tasks (standalone mode).
+		// Validates project_id + agent_slug — rows with empty defaults never match.
+		if b.sdkTaskStore != nil {
+			sdkTask, callerUserID, sdkErr := b.sdkTaskStore.GetByIDAndAgent(ctx, taskID, projectID, agentSlug)
+			if sdkErr == nil && sdkTask != nil {
+				// Validate topic user matches stored caller (Constraint 1).
+				if topicUserID := extractUserIDFromTopic(topic); topicUserID != "" {
+					if callerUserID != "" && topicUserID != callerUserID {
+						b.log.Warn("dropping message: topic user mismatch",
+							"topic_user", topicUserID, "stored_caller", callerUserID, "task_id", taskID)
+						return "", fmt.Errorf("topic user mismatch for task %s", taskID)
+					}
+				}
+				return taskID, nil
+			}
 		}
+
+		// No durable match — fail closed. Local cache NEVER authorizes.
 		return "", fmt.Errorf("unknown task: %s", taskID)
 	}
 
@@ -1022,6 +1049,19 @@ func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug strin
 	b.log.Debug("correlating broker message by agent slug from DB fallback",
 		"agent", agentSlug, "project", projectID, "task_id", task.ID)
 	return task.ID, nil
+}
+
+// extractUserIDFromTopic extracts the user ID from a broker topic.
+// Returns "" for non-user topics or parse failures.
+func extractUserIDFromTopic(topic string) string {
+	parsed, err := projectcompat.ParseTopic(topic)
+	if err != nil {
+		return ""
+	}
+	if parsed.Kind == projectcompat.TopicKindUser {
+		return parsed.Actor
+	}
+	return ""
 }
 
 // processAndAppendEvent translates a broker message to an event, appends it to
