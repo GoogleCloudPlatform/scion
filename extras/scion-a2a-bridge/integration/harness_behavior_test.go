@@ -301,3 +301,15 @@ func TestAcceptanceLayersMatchProvenScope(t *testing.T) {
 		}
 	}
 }
+
+func TestSkippedAcceptanceDetectionNegative(t *testing.T) {
+	invalidJSON := `{"schema":"scion.test.ge-a2a.acceptance-layers/v1","layers":[{"name":"TestTwoReplicaUserLifecycle","status":"skipped","passing":false}]}`
+	var scaffold acceptanceScaffold
+	if err := json.Unmarshal([]byte(invalidJSON), &scaffold); err != nil {
+		t.Fatal(err)
+	}
+	allowed := []string{"passing", "partial", "blocked-on-taskstore", "external-live-only"}
+	if slices.Contains(allowed, scaffold.Layers[0].Status) {
+		t.Fatal("expected status 'skipped' to be rejected by allowed statuses")
+	}
+}
