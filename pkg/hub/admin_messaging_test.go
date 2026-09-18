@@ -446,7 +446,9 @@ func TestHandleAdminMessaging_AC97d_NullResetReturnsDefault(t *testing.T) {
 	if err := json.Unmarshal(storedSetting.Value, &stored); err != nil {
 		t.Fatalf("failed to unmarshal stored messaging section: %v", err)
 	}
-	if stored.ConversationEnvelopeSwitch == nil || !*stored.ConversationEnvelopeSwitch {
-		t.Errorf("expected stored conversation_envelope_switch=true (compiled default), got %v", stored.ConversationEnvelopeSwitch)
+	if stored.ConversationEnvelopeSwitch == nil {
+		t.Errorf("expected stored conversation_envelope_switch=true (compiled default), got nil")
+	} else if !*stored.ConversationEnvelopeSwitch {
+		t.Errorf("expected stored conversation_envelope_switch=true (compiled default), got false")
 	}
 }
