@@ -16,6 +16,9 @@
 package update
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -76,6 +79,38 @@ func WithHTTPClient(c *http.Client) Option {
 	return func(o *options) { o.httpClient = c }
 }
 
+// FetchManifest retrieves and parses the release manifest.
+func FetchManifest(ctx context.Context, opts ...Option) (*Manifest, error) {
+	config := newOptions(opts...)
+	requestCtx, cancel := context.WithTimeout(ctx, config.timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, config.manifestURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create release manifest request: %w", err)
+	}
+
+	client := config.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch release manifest: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("fetch release manifest: unexpected HTTP status %s", resp.Status)
+	}
+
+	var manifest Manifest
+	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
+		return nil, fmt.Errorf("decode release manifest: %w", err)
+	}
+	return &manifest, nil
+}
+
 // DetectChannel returns the release channel associated with version.
 func DetectChannel(version string) string {
 	switch {
@@ -97,4 +132,15 @@ func withVersionPrefix(version string) string {
 		return version
 	}
 	return "v" + version
+}
+
+func newOptions(opts ...Option) options {
+	config := options{
+		manifestURL: DefaultManifestURL,
+		timeout:     DefaultTimeout,
+	}
+	for _, opt := range opts {
+		opt(&config)
+	}
+	return config
 }

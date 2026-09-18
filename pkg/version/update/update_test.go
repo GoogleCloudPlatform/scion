@@ -14,7 +14,14 @@
 
 package update
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestDetectChannel(t *testing.T) {
 	tests := []struct {
@@ -40,4 +47,69 @@ func TestDetectChannel(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFetchManifest(t *testing.T) {
+	t.Run("valid JSON", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{
+				"channels": {
+					"stable": {
+						"version": "v1.0.0",
+						"date": "2026-09-15T00:00:00Z",
+						"url": "https://example.com/v1.0.0"
+					}
+				}
+			}`))
+		}))
+		defer server.Close()
+
+		manifest, err := FetchManifest(context.Background(), WithManifestURL(server.URL))
+		if err != nil {
+			t.Fatalf("FetchManifest() error = %v", err)
+		}
+		got := manifest.Channels["stable"]
+		if got.Version != "v1.0.0" || got.Date != "2026-09-15T00:00:00Z" || got.URL != "https://example.com/v1.0.0" {
+			t.Fatalf("FetchManifest() stable channel = %+v, want manifest values", got)
+		}
+	})
+
+	t.Run("invalid JSON", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"channels":`))
+		}))
+		defer server.Close()
+
+		if _, err := FetchManifest(context.Background(), WithManifestURL(server.URL)); err == nil {
+			t.Fatal("FetchManifest() error = nil, want JSON parsing error")
+		}
+	})
+
+	t.Run("HTTP error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		}))
+		defer server.Close()
+
+		if _, err := FetchManifest(context.Background(), WithManifestURL(server.URL)); err == nil {
+			t.Fatal("FetchManifest() error = nil, want HTTP status error")
+		}
+	})
+
+	t.Run("configured timeout", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			time.Sleep(100 * time.Millisecond)
+			_, _ = w.Write([]byte(`{"channels":{}}`))
+		}))
+		defer server.Close()
+
+		_, err := FetchManifest(
+			context.Background(),
+			WithManifestURL(server.URL),
+			WithTimeout(time.Millisecond),
+		)
+		if err == nil || !strings.Contains(err.Error(), "fetch release manifest") {
+			t.Fatalf("FetchManifest() error = %v, want descriptive timeout error", err)
+		}
+	})
 }
