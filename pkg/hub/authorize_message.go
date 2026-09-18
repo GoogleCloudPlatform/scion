@@ -45,7 +45,7 @@ const (
 	MessageDenialCrossProjectAttachUnsupported   MessageDenialCode = "cross_project_attachment_unsupported"
 	MessageDenialCrossProjectScheduledDenied     MessageDenialCode = "cross_project_scheduled_denied"
 	MessageDenialCrossProjectScheduledDisabled   MessageDenialCode = "cross_project_scheduled_disabled"
-	MessageDenialCrossProjectScheduledTarget     MessageDenialCode = "cross_project_scheduled_target"      // reserved: scheduled message target validation
+	MessageDenialCrossProjectScheduledTarget     MessageDenialCode = "cross_project_scheduled_target" // reserved: scheduled message target validation
 	MessageDenialCrossProjectContentUnauthorized MessageDenialCode = "cross_project_content_unauthorized"
 	MessageDenialScheduledCreatorDeleted         MessageDenialCode = "scheduled_message_creator_deleted"  // reserved: creator lifecycle checks
 	MessageDenialScheduledCreatorInactive        MessageDenialCode = "scheduled_message_creator_inactive" // reserved: creator lifecycle checks
