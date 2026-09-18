@@ -169,6 +169,10 @@ export class ScionChatMembers extends LitElement {
   @property({ attribute: 'dm-peer-id' })
   dmPeerId = '';
 
+  /** Slug of the agent used by default for the current thread. */
+  @property({ attribute: 'default-agent-slug' })
+  defaultAgentSlug = '';
+
   /** IDs of members currently typing — shows a dot overlay on their avatar. */
   @property({ type: Array })
   typingUserIds: string[] = [];
@@ -246,6 +250,14 @@ export class ScionChatMembers extends LitElement {
     .member-role {
       font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #94a3b8);
+    }
+
+    .default-agent-label {
+      font-size: var(--chat-fs-xs, 0.625rem);
+      font-weight: 600;
+      color: var(--scion-primary, #3b82f6);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
     }
 
     .agent-terminal,
@@ -704,6 +716,7 @@ export class ScionChatMembers extends LitElement {
     const isActive = this.dmPeerId === a.id;
     const isTyping = this.typingUserIds.includes(a.id);
     const hasUnread = this.unreadFromIds.includes(a.id);
+    const isDefault = this.defaultAgentSlug && a.slug === this.defaultAgentSlug;
 
     // Build tooltip: status detail (line 1) + updated time (line 2). The
     // detail message is the same text the agent detail page shows, and
@@ -734,6 +747,7 @@ export class ScionChatMembers extends LitElement {
         </div>
         <div class="member-info">
           <div class="member-name">${a.displayName}</div>
+          ${isDefault ? html`<span class="default-agent-label">thread default</span>` : nothing}
           <scion-status-badge status=${badgeStatus} size="small"></scion-status-badge>
         </div>
         ${a.canAttach !== true

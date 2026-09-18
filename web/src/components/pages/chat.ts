@@ -2813,6 +2813,7 @@ export class ScionPageChat extends LitElement {
             .unreadFromIds=${this.v2UnreadFromIds}
             current-user-id="${this.pageData?.user?.id || ''}"
             dm-peer-id="${this.v2Conversation?.isDM ? this.v2Conversation.peerId : ''}"
+            default-agent-slug="${this.v2Conversation?.defaultAgent || ''}"
             @member-click=${this.handleMemberClick}
             @reset-view=${this.handleResetView}
           ></scion-chat-members>
