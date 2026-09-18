@@ -207,12 +207,12 @@ func (b *Bridge) reapStaleSDKExecutions(ctx context.Context, leaseTimeout time.D
 		return
 	}
 	reapedIDs, err := b.sdkTaskStore.ReapStaleTasks(ctx, leaseTimeout)
-	if err != nil {
-		b.log.Error("janitor: reaping stale SDK execution leases", "error", err)
-		return
-	}
+	// ReapStaleTasks may return partial successes alongside aggregated errors.
 	if len(reapedIDs) > 0 {
 		b.log.Warn("janitor: reaped stale SDK execution leases", "count", len(reapedIDs), "task_ids", reapedIDs)
+	}
+	if err != nil {
+		b.log.Error("janitor: errors reaping stale SDK execution leases", "error", err)
 	}
 }
 

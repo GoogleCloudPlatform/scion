@@ -501,12 +501,6 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	barrierStore := bridge.NewBarrierTaskStore(pgTaskStore)
 	b.SetBarrierStore(barrierStore)
 
-	// Constraint C4-wrapper: ScopedTaskStore wraps BarrierTaskStore for
-	// redundant in-memory ownership checks. PostgresTaskStore remains the
-	// authoritative owner enforcer; ScopedTaskStore must never make
-	// correctness depend on its map.
-	scopedStore := bridge.NewScopedTaskStore(barrierStore)
-
 	// Startup recovery: reap any stale execution leases left by
 	// previous instances that crashed mid-execution.
 	if reapedIDs, err := pgTaskStore.ReapStaleTasks(context.Background(), 2*cfg.Timeouts.SendMessage); err != nil {
@@ -515,7 +509,11 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 		log.Warn("startup: reaped stale SDK execution leases from previous crash", "count", len(reapedIDs), "task_ids", reapedIDs)
 	}
 
-	// SDK receives the full wrapper chain: SDK → ScopedTaskStore → BarrierTaskStore → PostgresTaskStore
+	// SDK receives: SDK → BarrierTaskStore → PostgresTaskStore.
+	// PostgresTaskStore is the authoritative owner enforcer — it derives and
+	// checks owner_key on every Create/Get/Update/List at the SQL level.
+	// No ScopedTaskStore: its in-memory ownership map was redundant with SQL
+	// enforcement and grew monotonically without bound in long-lived processes.
 	sdkRequestHandler := a2asrv.NewHandler(
 		executor,
 		a2asrv.WithLogger(log.With("component", "a2a-sdk")),
@@ -524,7 +522,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 			PushNotifications: false,
 		}),
 		a2asrv.WithAgentInactivityTimeout(cfg.Timeouts.SendMessage),
-		a2asrv.WithTaskStore(scopedStore),
+		a2asrv.WithTaskStore(barrierStore),
 	)
 	b.SetSDKRequestHandler(sdkRequestHandler)
 

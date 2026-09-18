@@ -40,6 +40,8 @@ func testDatabaseURL(t *testing.T) string {
 
 // TestNotifyAcceleratesDelivery verifies that NOTIFY reduces latency
 // for event delivery compared to pure polling. Requires a real Postgres.
+// Uses unique task IDs per run with scoped cleanup. A canary row proves
+// cleanup does not disturb unrelated data.
 func TestNotifyAcceleratesDelivery(t *testing.T) {
 	dbURL := testDatabaseURL(t)
 
@@ -56,9 +58,27 @@ func TestNotifyAcceleratesDelivery(t *testing.T) {
 	// Use a unique task ID per run to avoid duplicate key errors
 	// when running against a shared/dirty database.
 	taskID := fmt.Sprintf("notify-accel-%d", time.Now().UnixNano())
+	canaryTaskID := fmt.Sprintf("canary-%d", time.Now().UnixNano())
 
-	// Create a task so AppendTaskEvent has a valid task_id to reference.
+	// Create a canary task+event that must survive our cleanup.
 	now := time.Now()
+	if err := store.CreateTask(ctx, &state.Task{
+		ID: canaryTaskID, ContextID: "ctx-canary", ProjectID: "p1", AgentSlug: "agent1",
+		State: TaskStateWorking, CreatedAt: now, UpdatedAt: now, Metadata: "{}",
+	}); err != nil {
+		t.Fatalf("CreateTask canary: %v", err)
+	}
+	canaryPayload, _ := json.Marshal(TaskStatusUpdate{
+		TaskID: canaryTaskID,
+		Status: TaskStatus{State: TaskStateWorking},
+	})
+	store.AppendTaskEvent(ctx, &state.TaskEvent{
+		TaskID:  canaryTaskID,
+		Kind:    "message",
+		Payload: canaryPayload,
+	})
+
+	// Create the test fixture task.
 	if err := store.CreateTask(ctx, &state.Task{
 		ID: taskID, ContextID: "ctx-1", ProjectID: "p1", AgentSlug: "agent1",
 		State: TaskStateWorking, CreatedAt: now, UpdatedAt: now, Metadata: "{}",
@@ -66,10 +86,18 @@ func TestNotifyAcceleratesDelivery(t *testing.T) {
 		t.Fatalf("CreateTask: %v", err)
 	}
 	defer func() {
-		// Clean up both events and the task row itself, scoped to
-		// exactly the rows this test created.
-		store.PurgeTaskEvents(ctx, time.Now().Add(time.Hour))
+		// Scoped cleanup: delete only the rows this test created.
+		store.DB().ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, taskID)
 		store.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, taskID)
+
+		// Verify canary survived.
+		canaryEvents, _ := store.ReadTaskEvents(ctx, canaryTaskID, 0, 10)
+		if len(canaryEvents) == 0 {
+			t.Error("canary event was destroyed by cleanup — scope violation")
+		}
+		// Clean up canary.
+		store.DB().ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, canaryTaskID)
+		store.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, canaryTaskID)
 	}()
 
 	// Register a waiter (this starts the LISTEN connection lazily).

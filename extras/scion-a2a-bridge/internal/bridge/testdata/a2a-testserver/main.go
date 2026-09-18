@@ -432,10 +432,10 @@ func setupProductionMode(sdkStore *bridge.PostgresTaskStore, log *slog.Logger) (
 	b := bridge.New(pgStore, hubClient, nil, cfg, nil, log)
 	b.SetSDKTaskStore(sdkStore)
 
-	// BarrierTaskStore + ScopedTaskStore wrapper chain.
+	// BarrierTaskStore wraps PostgresTaskStore for deterministic barrier.
+	// No ScopedTaskStore — PostgresTaskStore is the authoritative owner enforcer.
 	barrierStore := bridge.NewBarrierTaskStore(sdkStore)
 	b.SetBarrierStore(barrierStore)
-	scopedStore := bridge.NewScopedTaskStore(barrierStore)
 
 	// BrokerServer with production handler for broker ingress testing.
 	brokerServer := bridge.NewBrokerServer(b.HandleBrokerMessage, log, context.Background())
@@ -444,9 +444,9 @@ func setupProductionMode(sdkStore *bridge.PostgresTaskStore, log *slog.Logger) (
 	// ScionExecutor using the production Bridge.
 	executor := bridge.NewScionExecutor(b, log)
 
-	// SDK handler through the full wrapper chain.
+	// SDK handler — PostgresTaskStore enforces owner_key at SQL level.
 	handler := a2asrv.NewHandler(executor,
-		a2asrv.WithTaskStore(scopedStore),
+		a2asrv.WithTaskStore(barrierStore),
 		a2asrv.WithLogger(log),
 	)
 

@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -95,6 +96,9 @@ const bridgeEventIDKey = "_bridgeEventID"
 // payload. All SQL predicates that distinguish active from terminal tasks
 // MUST use these exact uppercase strings — they match the SDK's
 // TaskState.String() output persisted by json.Marshal.
+//
+// After migration normalization, legacy lowercase values are mapped to
+// their canonical counterparts. Runtime predicates use only this list.
 var sdkTerminalStates = []string{
 	"TASK_STATE_COMPLETED",
 	"TASK_STATE_FAILED",
@@ -102,35 +106,26 @@ var sdkTerminalStates = []string{
 	"TASK_STATE_REJECTED",
 }
 
-// sdkTerminalStatesSQL returns a comma-separated, single-quoted list for
-// use in SQL IN/NOT IN clauses: ('TASK_STATE_COMPLETED','TASK_STATE_FAILED',...).
-func sdkTerminalStatesSQL() string {
+// terminalStatesSQL is the pre-computed SQL predicate fragment for
+// terminal state IN/NOT IN clauses. Computed once at init time.
+var terminalStatesSQL string
+
+func init() {
 	quoted := make([]string, len(sdkTerminalStates))
 	for i, s := range sdkTerminalStates {
 		quoted[i] = "'" + s + "'"
 	}
-	return strings.Join(quoted, ",")
+	terminalStatesSQL = strings.Join(quoted, ",")
 }
 
-// legacyTerminalStates are the lowercase values written by pre-migration
-// code or migration terminalization. They must also be recognized as
-// terminal by active-task queries and retention purge.
-var legacyTerminalStates = []string{
-	"completed",
-	"canceled",
-	"failed",
-	"rejected",
-}
-
-// allTerminalStatesSQL returns a SQL-safe list including both canonical
-// uppercase and legacy lowercase terminal states.
-func allTerminalStatesSQL() string {
-	all := append(append([]string{}, sdkTerminalStates...), legacyTerminalStates...)
-	quoted := make([]string, len(all))
-	for i, s := range all {
-		quoted[i] = "'" + s + "'"
-	}
-	return strings.Join(quoted, ",")
+// legacyToCanonical maps pre-migration lowercase terminal states to
+// their canonical uppercase equivalents. Used only during migration
+// normalization — runtime predicates use sdkTerminalStates exclusively.
+var legacyToCanonical = map[string]string{
+	"completed": "TASK_STATE_COMPLETED",
+	"canceled":  "TASK_STATE_CANCELED",
+	"failed":    "TASK_STATE_FAILED",
+	"rejected":  "TASK_STATE_REJECTED",
 }
 
 // Close closes the underlying connection pool only if this store owns it.
@@ -224,7 +219,7 @@ func (s *PostgresTaskStore) FindActiveSDKTaskForAgent(ctx context.Context, proje
 		 WHERE project_id = $1 AND agent_slug = $2
 		   AND payload->'status'->>'state' NOT IN (%s)
 		 ORDER BY created_at DESC
-		 LIMIT 2`, allTerminalStatesSQL()),
+		 LIMIT 2`, terminalStatesSQL),
 		projectID, agentSlug,
 	)
 	if err != nil {
@@ -260,11 +255,45 @@ func (s *PostgresTaskStore) FindActiveSDKTaskForAgent(ctx context.Context, proje
 const sdkTaskStoreMigrationLockID = 827419618 // arbitrary stable int
 
 func (s *PostgresTaskStore) migrate() error {
-	// Acquire advisory lock to prevent DDL races across replicas.
-	if _, err := s.db.Exec(`SELECT pg_advisory_lock($1)`, sdkTaskStoreMigrationLockID); err != nil {
+	// Pin a single connection for the entire lock/migration/unlock lifecycle.
+	// pg_advisory_lock is session-scoped — using pool-level Exec could
+	// acquire and unlock on different connections, leaking the lock.
+	conn, err := s.db.Conn(context.Background())
+	if err != nil {
+		return fmt.Errorf("acquire migration conn: %w", err)
+	}
+	defer conn.Close()
+
+	// Acquire advisory lock on the pinned connection.
+	if _, err := conn.ExecContext(context.Background(), `SELECT pg_advisory_lock($1)`, sdkTaskStoreMigrationLockID); err != nil {
 		return fmt.Errorf("acquire migration lock: %w", err)
 	}
-	defer s.db.Exec(`SELECT pg_advisory_unlock($1)`, sdkTaskStoreMigrationLockID)
+	defer conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, sdkTaskStoreMigrationLockID)
+
+	// Build normalization statements for each legacy→canonical mapping.
+	// Each lowercase terminal state is mapped to its correct canonical
+	// counterpart — completed→TASK_STATE_COMPLETED, etc. — not all to failed.
+	var legacyNormStatements []string
+	for legacy, canonical := range legacyToCanonical {
+		legacyNormStatements = append(legacyNormStatements,
+			fmt.Sprintf(`UPDATE a2a_sdk_tasks
+			 SET payload = jsonb_set(payload, '{status,state}', '"%s"'::jsonb),
+			     version = version + 1
+			 WHERE payload->'status'->>'state' = '%s'`, canonical, legacy),
+		)
+	}
+
+	// All terminal states for the terminalization WHERE clause: both canonical
+	// and legacy values must be excluded (legacy rows should not be re-terminalized
+	// if they're already terminal, even in lowercase form).
+	allTerminals := make([]string, 0, len(sdkTerminalStates)+len(legacyToCanonical))
+	for _, s := range sdkTerminalStates {
+		allTerminals = append(allTerminals, "'"+s+"'")
+	}
+	for legacy := range legacyToCanonical {
+		allTerminals = append(allTerminals, "'"+legacy+"'")
+	}
+	allTerminalsSQL := strings.Join(allTerminals, ",")
 
 	migrations := []string{
 		`CREATE TABLE IF NOT EXISTS a2a_sdk_tasks (
@@ -300,7 +329,7 @@ func (s *PostgresTaskStore) migrate() error {
 		`ALTER TABLE a2a_sdk_tasks ADD COLUMN IF NOT EXISTS last_event_cursor BIGINT NOT NULL DEFAULT 0`,
 		// Constraint 7: Terminalize pre-migration rows with empty correlation columns.
 		// Fail closed — rows with empty project_id/agent_slug can never be authorized.
-		// Uses allTerminalStatesSQL to exclude both canonical and legacy terminal states.
+		// Empty-ownership active rows are deliberately set to TASK_STATE_FAILED.
 		fmt.Sprintf(`UPDATE a2a_sdk_tasks
 		 SET payload = jsonb_set(
 		         jsonb_set(payload, '{status,state}', '"TASK_STATE_FAILED"'::jsonb),
@@ -311,24 +340,23 @@ func (s *PostgresTaskStore) migrate() error {
 		     exec_heartbeat = NULL,
 		     version = version + 1
 		 WHERE project_id = '' AND agent_slug = ''
-		   AND payload->'status'->>'state' NOT IN (%s)`, allTerminalStatesSQL()),
-		// Normalize legacy lowercase terminal states to canonical uppercase.
-		// Safe to run repeatedly — WHERE clause only matches lowercase values.
-		`UPDATE a2a_sdk_tasks
-		 SET payload = jsonb_set(payload, '{status,state}', '"TASK_STATE_FAILED"'::jsonb),
-		     version = version + 1
-		 WHERE payload->'status'->>'state' IN ('completed', 'canceled', 'failed', 'rejected')`,
-		// Drop the old partial index (which used wrong lowercase predicates)
-		// and recreate with canonical uppercase values. Idempotent: the DROP
-		// is a no-op if the index doesn't exist, and CREATE IF NOT EXISTS
-		// handles the already-correct case.
+		   AND payload->'status'->>'state' NOT IN (%s)`, allTerminalsSQL),
+	}
+
+	// Append per-state legacy normalization (completed→COMPLETED, etc.).
+	migrations = append(migrations, legacyNormStatements...)
+
+	// Drop the old partial index (which may use wrong lowercase predicates)
+	// and recreate with canonical uppercase values.
+	migrations = append(migrations,
 		`DROP INDEX IF EXISTS idx_a2a_sdk_tasks_agent`,
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_a2a_sdk_tasks_agent
 		     ON a2a_sdk_tasks(project_id, agent_slug)
-		     WHERE payload->'status'->>'state' NOT IN (%s)`, sdkTerminalStatesSQL()),
-	}
+		     WHERE payload->'status'->>'state' NOT IN (%s)`, terminalStatesSQL),
+	)
+
 	for _, m := range migrations {
-		if _, err := s.db.Exec(m); err != nil {
+		if _, err := conn.ExecContext(context.Background(), m); err != nil {
 			return fmt.Errorf("exec migration: %w", err)
 		}
 	}
@@ -680,11 +708,11 @@ func isUniqueViolation(err error) bool {
 // sends to the Hub.
 func (s *PostgresTaskStore) ClaimExecution(ctx context.Context, taskID, ownerID string, leaseTimeout time.Duration) (bool, error) {
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE a2a_sdk_tasks
+		fmt.Sprintf(`UPDATE a2a_sdk_tasks
 		 SET exec_owner = $1, exec_heartbeat = NOW()
 		 WHERE id = $2
 		   AND (exec_owner IS NULL OR exec_heartbeat < NOW() - $3::interval)
-		   AND payload->'status'->>'state' NOT IN ('TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED')`,
+		   AND payload->'status'->>'state' NOT IN (%s)`, terminalStatesSQL),
 		ownerID, taskID, fmt.Sprintf("%d seconds", int(leaseTimeout.Seconds())),
 	)
 	if err != nil {
@@ -753,7 +781,7 @@ func (s *PostgresTaskStore) ReapStaleTasks(ctx context.Context, leaseTimeout tim
 		 WHERE exec_owner IS NOT NULL
 		   AND exec_heartbeat < NOW() - $1::interval
 		   AND payload->'status'->>'state' NOT IN (%s)
-		 LIMIT 100`, allTerminalStatesSQL()),
+		 LIMIT 100`, terminalStatesSQL),
 		fmt.Sprintf("%d seconds", int(leaseTimeout.Seconds())),
 	)
 	if err != nil {
@@ -781,16 +809,21 @@ func (s *PostgresTaskStore) ReapStaleTasks(ctx context.Context, leaseTimeout tim
 	}
 
 	var reapedIDs []string
+	var reapErrs []error
 	for _, st := range staleTasks {
-		reaped, err := s.reapOneTask(ctx, st.id, st.version, st.payload, st.execOwner)
-		if err != nil {
-			continue // CAS lost or transient error; next janitor tick retries
+		reaped, reapErr := s.reapOneTask(ctx, st.id, st.version, st.payload, st.execOwner)
+		if reapErr != nil {
+			// CAS loss returns (false, nil) — this is a genuine error.
+			reapErrs = append(reapErrs, fmt.Errorf("task %s: %w", st.id, reapErr))
+			continue
 		}
 		if reaped {
 			reapedIDs = append(reapedIDs, st.id)
 		}
 	}
-	return reapedIDs, nil
+	// Return partial successes alongside aggregated errors so the caller
+	// can log failures and retry on the next tick.
+	return reapedIDs, errors.Join(reapErrs...)
 }
 
 // reapOneTask atomically transitions a single stale task to failed and
@@ -832,7 +865,7 @@ func (s *PostgresTaskStore) reapOneTask(ctx context.Context, taskID string, vers
 		 SET payload = $1, version = version + 1, updated_at = NOW(),
 		     exec_owner = NULL, exec_heartbeat = NULL
 		 WHERE id = $2 AND version = $3 AND exec_owner = $4
-		   AND payload->'status'->>'state' NOT IN (%s)`, allTerminalStatesSQL()),
+		   AND payload->'status'->>'state' NOT IN (%s)`, terminalStatesSQL),
 		newPayload, taskID, version, execOwner,
 	)
 	if err != nil {
@@ -875,14 +908,14 @@ func (s *PostgresTaskStore) PurgeTasksAndEvents(ctx context.Context, olderThan t
 	defer tx.Rollback()
 
 	// Delete correlated events for terminal tasks being purged.
-	// Uses allTerminalStatesSQL to cover both canonical and legacy lowercase states.
+	// Uses terminalStatesSQL (canonical states only — legacy normalized during migration).
 	evResult, err := tx.ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM a2a_task_events
 		 WHERE task_id IN (
 		     SELECT id FROM a2a_sdk_tasks
 		     WHERE updated_at < $1
 		       AND payload->'status'->>'state' IN (%s)
-		 )`, allTerminalStatesSQL()),
+		 )`, terminalStatesSQL),
 		olderThan,
 	)
 	if err != nil {
@@ -894,7 +927,7 @@ func (s *PostgresTaskStore) PurgeTasksAndEvents(ctx context.Context, olderThan t
 	taskResult, err := tx.ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM a2a_sdk_tasks
 		 WHERE updated_at < $1
-		   AND payload->'status'->>'state' IN (%s)`, allTerminalStatesSQL()),
+		   AND payload->'status'->>'state' IN (%s)`, terminalStatesSQL),
 		olderThan,
 	)
 	if err != nil {

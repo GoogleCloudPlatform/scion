@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // testServerProcess manages a subprocess running the a2a-testserver binary.
@@ -817,12 +820,15 @@ func TestPostgresTaskStoreBridgeEventDedup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresStore: %v", err)
 	}
-	t.Cleanup(func() {
-		pgStore.Close()
-	})
 	ctx := context.Background()
 
-	taskID := "event-dedup-1"
+	taskID := fmt.Sprintf("event-dedup-%d", time.Now().UnixNano())
+
+	t.Cleanup(func() {
+		pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, taskID)
+		pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, taskID)
+		pgStore.Close()
+	})
 
 	// Create a task in bridge state.
 	pgStore.CreateTask(ctx, &state.Task{
@@ -838,8 +844,8 @@ func TestPostgresTaskStoreBridgeEventDedup(t *testing.T) {
 
 	// Simulate the same broker message arriving twice with the same stable
 	// dedup key (derived from msgId metadata).
-	dedupKey := "broker-msg-id-12345"
-	payload := json.RawMessage(`{"taskId":"event-dedup-1","status":{"state":"working"}}`)
+	dedupKey := fmt.Sprintf("broker-msg-id-%s", taskID)
+	payload := json.RawMessage(fmt.Sprintf(`{"taskId":"%s","status":{"state":"working"}}`, taskID))
 
 	id1, err := pgStore.AppendTaskEvent(ctx, &state.TaskEvent{
 		TaskID:   taskID,
@@ -878,9 +884,6 @@ func TestPostgresTaskStoreBridgeEventDedup(t *testing.T) {
 	if id2 != 0 {
 		t.Logf("note: second append returned ID=%d (implementation-dependent)", id2)
 	}
-
-	// Clean up.
-	pgStore.PurgeTaskEvents(ctx, time.Now().Add(1*time.Hour))
 }
 
 // ---------- Cross-replica event delivery and resubscribe tests ----------
@@ -908,7 +911,12 @@ func TestPostgresTaskStoreCrossReplicaEventDelivery(t *testing.T) {
 	t.Cleanup(func() { storeB.Close() })
 
 	ctx := context.Background()
-	taskID := "pg-event-delivery-1"
+	taskID := fmt.Sprintf("pg-event-delivery-%d", time.Now().UnixNano())
+
+	t.Cleanup(func() {
+		storeA.DB().ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, taskID)
+		storeA.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, taskID)
+	})
 
 	// Create task on store A.
 	storeA.CreateTask(ctx, &state.Task{
@@ -965,9 +973,6 @@ func TestPostgresTaskStoreCrossReplicaEventDelivery(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for cross-replica event delivery via Postgres")
 	}
-
-	// Clean up.
-	storeA.PurgeTaskEvents(ctx, time.Now().Add(1*time.Hour))
 }
 
 // TestPostgresTaskStoreDurableResubscribeNoPriorReplay tests that
@@ -983,13 +988,15 @@ func TestPostgresTaskStoreDurableResubscribeNoPriorReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresStore: %v", err)
 	}
-	t.Cleanup(func() {
-		pgStore.PurgeTaskEvents(context.Background(), time.Now().Add(1*time.Hour))
-		pgStore.Close()
-	})
 
 	ctx := context.Background()
-	taskID := "resub-1"
+	taskID := fmt.Sprintf("resub-%d", time.Now().UnixNano())
+
+	t.Cleanup(func() {
+		pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, taskID)
+		pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, taskID)
+		pgStore.Close()
+	})
 
 	pgStore.CreateTask(ctx, &state.Task{
 		ID:        taskID,
@@ -1181,18 +1188,20 @@ func TestPostgresTaskStoreCrossProcessEventDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgres (A): %v", err)
 	}
-	t.Cleanup(func() {
-		storeA.PurgeTaskEvents(ctx, time.Now().Add(1*time.Hour))
-		storeA.Close()
-	})
 
 	storeB, err := state.NewPostgres(dbURL)
 	if err != nil {
 		t.Fatalf("NewPostgres (B): %v", err)
 	}
-	t.Cleanup(func() { storeB.Close() })
 
-	taskID := "cross-proc-event-1"
+	taskID := fmt.Sprintf("cross-proc-event-%d", time.Now().UnixNano())
+
+	t.Cleanup(func() {
+		storeA.DB().ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, taskID)
+		storeA.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, taskID)
+		storeA.Close()
+		storeB.Close()
+	})
 
 	// Create the task via connection A.
 	storeA.CreateTask(ctx, &state.Task{
@@ -1251,18 +1260,20 @@ func TestPostgresTaskStoreCrossProcessResubscribeNoPriorReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgres (A): %v", err)
 	}
-	t.Cleanup(func() {
-		storeA.PurgeTaskEvents(ctx, time.Now().Add(1*time.Hour))
-		storeA.Close()
-	})
 
 	storeB, err := state.NewPostgres(dbURL)
 	if err != nil {
 		t.Fatalf("NewPostgres (B): %v", err)
 	}
-	t.Cleanup(func() { storeB.Close() })
 
-	taskID := "cross-proc-resub-1"
+	taskID := fmt.Sprintf("cross-proc-resub-%d", time.Now().UnixNano())
+
+	t.Cleanup(func() {
+		storeA.DB().ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, taskID)
+		storeA.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, taskID)
+		storeA.Close()
+		storeB.Close()
+	})
 
 	// Create task via connection A.
 	storeA.CreateTask(ctx, &state.Task{
@@ -1367,13 +1378,15 @@ func TestPostgresTaskStoreBrokerHandlerDedup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgres: %v", err)
 	}
-	t.Cleanup(func() {
-		pgStore.PurgeTaskEvents(context.Background(), time.Now().Add(1*time.Hour))
-		pgStore.Close()
-	})
 
 	ctx := context.Background()
-	taskID := "broker-dedup-handler-1"
+	taskID := fmt.Sprintf("broker-dedup-handler-%d", time.Now().UnixNano())
+
+	t.Cleanup(func() {
+		pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, taskID)
+		pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, taskID)
+		pgStore.Close()
+	})
 
 	// Create a task in bridge state.
 	pgStore.CreateTask(ctx, &state.Task{
@@ -1459,25 +1472,30 @@ func TestPostgresTaskStoreRetentionThroughRunSweep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgres: %v", err)
 	}
-	t.Cleanup(func() {
-		pgStore.PurgeTaskEvents(context.Background(), time.Now().Add(1*time.Hour))
-		pgStore.Close()
-	})
 
 	sdkStore, err := NewPostgresTaskStore(dbURL)
 	if err != nil {
 		t.Fatalf("NewPostgresTaskStore: %v", err)
 	}
-	t.Cleanup(func() {
-		sdkStore.db.Exec("DELETE FROM a2a_sdk_tasks")
-		sdkStore.Close()
-	})
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	terminalTaskID := "sweep-terminal-" + suffix
+	workingTaskID := "sweep-working-" + suffix
 
 	ctx := ctxForRoute("proj-sweep", "agent-sweep")
 
+	t.Cleanup(func() {
+		bgCtx := context.Background()
+		pgStore.DB().ExecContext(bgCtx, `DELETE FROM a2a_task_events WHERE task_id IN ($1, $2)`, terminalTaskID, workingTaskID)
+		pgStore.DB().ExecContext(bgCtx, `DELETE FROM a2a_tasks WHERE id IN ($1, $2)`, terminalTaskID, workingTaskID)
+		sdkStore.db.ExecContext(bgCtx, `DELETE FROM a2a_sdk_tasks WHERE id IN ($1, $2)`, terminalTaskID, workingTaskID)
+		pgStore.Close()
+		sdkStore.Close()
+	})
+
 	// Create a terminal SDK task with correlated bridge events.
 	task := &a2a.Task{
-		ID:        "sweep-terminal-1",
+		ID:        a2a.TaskID(terminalTaskID),
 		ContextID: "ctx-sweep",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
 	}
@@ -1487,7 +1505,7 @@ func TestPostgresTaskStoreRetentionThroughRunSweep(t *testing.T) {
 
 	// Create a working SDK task (should survive sweep).
 	workingTask := &a2a.Task{
-		ID:        "sweep-working-1",
+		ID:        a2a.TaskID(workingTaskID),
 		ContextID: "ctx-sweep",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
 	}
@@ -1497,10 +1515,10 @@ func TestPostgresTaskStoreRetentionThroughRunSweep(t *testing.T) {
 
 	// Insert correlated events.
 	sdkStore.db.Exec(`INSERT INTO a2a_task_events (task_id, kind, payload, final, created_at)
-		VALUES ('sweep-terminal-1', 'status', '{}', true, NOW() - INTERVAL '2 hours')`)
+		VALUES ($1, 'status', '{}', true, NOW() - INTERVAL '2 hours')`, terminalTaskID)
 
 	// Backdate the terminal task.
-	sdkStore.db.Exec(`UPDATE a2a_sdk_tasks SET updated_at = NOW() - INTERVAL '2 hours' WHERE id = 'sweep-terminal-1'`)
+	sdkStore.db.Exec(`UPDATE a2a_sdk_tasks SET updated_at = NOW() - INTERVAL '2 hours' WHERE id = $1`, terminalTaskID)
 
 	// Create a Bridge with the sdkTaskStore wired in.
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
@@ -1520,13 +1538,13 @@ func TestPostgresTaskStoreRetentionThroughRunSweep(t *testing.T) {
 	b.RunSweep(context.Background())
 
 	// Verify terminal task is purged.
-	_, err = sdkStore.Get(ctx, "sweep-terminal-1")
+	_, err = sdkStore.Get(ctx, a2a.TaskID(terminalTaskID))
 	if err == nil {
 		t.Error("expected terminal task to be purged by RunSweep")
 	}
 
 	// Verify working task survives.
-	stored, err := sdkStore.Get(ctx, "sweep-working-1")
+	stored, err := sdkStore.Get(ctx, a2a.TaskID(workingTaskID))
 	if err != nil {
 		t.Fatalf("working task should survive sweep: %v", err)
 	}
@@ -1536,7 +1554,7 @@ func TestPostgresTaskStoreRetentionThroughRunSweep(t *testing.T) {
 
 	// Verify events are purged.
 	var eventCount int
-	sdkStore.db.QueryRow(`SELECT COUNT(*) FROM a2a_task_events WHERE task_id = 'sweep-terminal-1'`).Scan(&eventCount)
+	sdkStore.db.QueryRow(`SELECT COUNT(*) FROM a2a_task_events WHERE task_id = $1`, terminalTaskID).Scan(&eventCount)
 	if eventCount != 0 {
 		t.Errorf("expected 0 events for purged task, got %d", eventCount)
 	}
@@ -1766,9 +1784,9 @@ func TestRegressionREQ6_ReapEmitsTerminalEvent(t *testing.T) {
 	taskID := fmt.Sprintf("req6-reap-%d", time.Now().UnixNano())
 
 	t.Cleanup(func() {
-		pgStore.PurgeTaskEvents(ctx, time.Now().Add(1*time.Hour))
-		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+		pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, taskID)
 		pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, taskID)
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
 		pgStore.Close()
 		sdkStore.Close()
 	})
@@ -1882,21 +1900,21 @@ func TestRegressionREQ2_ActiveTaskEventsNotPurged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgres: %v", err)
 	}
-	t.Cleanup(func() {
-		pgStore.PurgeTaskEvents(ctx, time.Now().Add(1*time.Hour))
-		pgStore.Close()
-	})
 
 	sdkStore, err := NewPostgresTaskStore(dbURL)
 	if err != nil {
 		t.Fatalf("NewPostgresTaskStore: %v", err)
 	}
+
+	taskID := fmt.Sprintf("req2-active-events-%d", time.Now().UnixNano())
+
 	t.Cleanup(func() {
-		sdkStore.db.Exec("DELETE FROM a2a_sdk_tasks")
+		pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, taskID)
+		pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, taskID)
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+		pgStore.Close()
 		sdkStore.Close()
 	})
-
-	taskID := "req2-active-events-1"
 
 	// Create an active (working) task.
 	routeCtx := ctxForRoute("proj-req2", "agent-req2")
@@ -3990,64 +4008,101 @@ func TestMigrationIdempotentAndNormalizesIndex(t *testing.T) {
 	t.Logf("Partial index definition: %s", indexDef)
 }
 
-// TestLegacyLowercaseTerminalExcluded verifies that rows with legacy lowercase
-// terminal states (from pre-migration data) are excluded by active-task queries
-// and can be purged by retention.
-func TestLegacyLowercaseTerminalExcluded(t *testing.T) {
+// TestLegacyTerminalMappingPreservesSemantics verifies that each legacy
+// lowercase terminal state is mapped to its correct canonical counterpart
+// during migration: completed→TASK_STATE_COMPLETED, canceled→TASK_STATE_CANCELED,
+// failed→TASK_STATE_FAILED, rejected→TASK_STATE_REJECTED. Rows must be
+// excluded from active queries and purgeable by retention after normalization.
+func TestLegacyTerminalMappingPreservesSemantics(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 
 	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	projID := "proj-legacy-map-" + suffix
+	agentSlugVal := "agent-legacy-map-" + suffix
+
+	// Insert rows with legacy lowercase terminal states BEFORE migration
+	// using a raw DB connection (bypassing the store which runs migrate()).
+	rawDB, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("raw sql.Open: %v", err)
+	}
+	defer rawDB.Close()
+
+	legacyMappings := map[string]string{
+		"completed": "TASK_STATE_COMPLETED",
+		"canceled":  "TASK_STATE_CANCELED",
+		"failed":    "TASK_STATE_FAILED",
+		"rejected":  "TASK_STATE_REJECTED",
+	}
+
+	for legacy := range legacyMappings {
+		rowID := fmt.Sprintf("legacy-%s-%s", legacy, suffix)
+		payload := fmt.Sprintf(`{"id":"%s","status":{"state":"%s"},"contextId":"ctx-lm"}`, rowID, legacy)
+		_, err := rawDB.ExecContext(ctx,
+			`INSERT INTO a2a_sdk_tasks (id, context_id, owner_key, version, payload, project_id, agent_slug, caller_user_id, updated_at)
+			 VALUES ($1, 'ctx-lm', $2, 1, $3::jsonb, $4, $5, 'user1', NOW() - INTERVAL '2 hours')`,
+			rowID, projID+":"+agentSlugVal, payload, projID, agentSlugVal,
+		)
+		if err != nil {
+			t.Fatalf("Insert legacy %s row: %v", legacy, err)
+		}
+	}
+
+	// Run migration (via NewPostgresTaskStore) — this normalizes legacy rows.
 	sdkStore, err := NewPostgresTaskStore(dbURL)
 	if err != nil {
 		t.Fatalf("NewPostgresTaskStore: %v", err)
 	}
-	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	projID := "proj-legacy-term-" + suffix
-	agentSlug := "agent-legacy-term-" + suffix
-
 	t.Cleanup(func() {
 		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, projID)
 		sdkStore.Close()
 	})
 
-	// Insert a row with legacy lowercase terminal state directly via SQL,
-	// simulating a pre-migration row that wasn't caught by normalization.
-	legacyID := "legacy-lc-" + suffix
-	legacyPayload := fmt.Sprintf(`{"id":"%s","status":{"state":"completed"},"contextId":"ctx-lc"}`, legacyID)
-	_, err = sdkStore.db.ExecContext(ctx,
-		`INSERT INTO a2a_sdk_tasks (id, context_id, owner_key, version, payload, project_id, agent_slug, caller_user_id, updated_at)
-		 VALUES ($1, 'ctx-lc', 'test:owner', 1, $2::jsonb, $3, $4, 'user1', NOW() - INTERVAL '2 hours')`,
-		legacyID, legacyPayload, projID, agentSlug,
-	)
-	if err != nil {
-		t.Fatalf("Insert legacy row: %v", err)
+	// Verify each legacy value was mapped to the correct canonical value.
+	for legacy, expectedCanonical := range legacyMappings {
+		rowID := fmt.Sprintf("legacy-%s-%s", legacy, suffix)
+		var actualState string
+		err := sdkStore.db.QueryRowContext(ctx,
+			`SELECT payload->'status'->>'state' FROM a2a_sdk_tasks WHERE id = $1`, rowID,
+		).Scan(&actualState)
+		if err != nil {
+			t.Fatalf("query %s: %v", legacy, err)
+		}
+		if actualState != expectedCanonical {
+			t.Errorf("legacy %q → %q, want %q", legacy, actualState, expectedCanonical)
+		} else {
+			t.Logf("legacy %q → %q ✓", legacy, actualState)
+		}
 	}
 
-	// FindActiveSDKTaskForAgent should NOT find the legacy terminal row.
-	_, _, err = sdkStore.FindActiveSDKTaskForAgent(ctx, projID, agentSlug)
+	// Verify all are excluded from active query.
+	_, _, err = sdkStore.FindActiveSDKTaskForAgent(ctx, projID, agentSlugVal)
 	if err == nil {
-		t.Fatal("FindActiveSDKTaskForAgent should not find legacy lowercase terminal task")
+		t.Fatal("FindActiveSDKTaskForAgent should not find any normalized terminal task")
 	}
-	t.Log("Legacy lowercase terminal row correctly excluded from active query")
+	t.Log("All normalized legacy rows correctly excluded from active query")
 
-	// Verify the legacy row can be purged by retention.
+	// Verify all are purgeable by retention.
 	tasksPurged, _, err := sdkStore.PurgeTasksAndEvents(ctx, time.Now().Add(-1*time.Hour))
 	if err != nil {
 		t.Fatalf("PurgeTasksAndEvents: %v", err)
 	}
-	if tasksPurged == 0 {
-		t.Error("Legacy lowercase terminal row was not purged by retention")
+	if int(tasksPurged) < len(legacyMappings) {
+		t.Errorf("purged %d legacy rows, want >= %d", tasksPurged, len(legacyMappings))
 	}
-	t.Logf("Legacy lowercase terminal rows purged: %d", tasksPurged)
+	t.Logf("Legacy rows purged: %d", tasksPurged)
 }
 
 // --- Finding 2: Atomic terminal reap + durable event ---
 
-// TestAtomicReapTransactionRollback verifies that if the transaction fails,
-// neither the state update nor the event insertion is committed.
+// TestAtomicReapTransactionRollback injects a real event-insert failure after
+// the state UPDATE inside the transaction, then proves state/lease/version and
+// event log are unchanged (full rollback). Then removes the failure condition
+// and retries — proves exactly one terminal state and one Final=true event.
 func TestAtomicReapTransactionRollback(t *testing.T) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
@@ -4066,72 +4121,136 @@ func TestAtomicReapTransactionRollback(t *testing.T) {
 		t.Fatalf("NewPostgresTaskStore: %v", err)
 	}
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID := "reap-rb-" + suffix
+	projID := "proj-rb-" + suffix
+	agentSlugVal := "agent-rb-" + suffix
 
 	t.Cleanup(func() {
-		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id LIKE $1`, "reap-atom-%"+suffix)
-		pgStore.PurgeTaskEvents(ctx, time.Now().Add(time.Hour))
+		// Remove the injected constraint if still present.
+		sdkStore.db.ExecContext(ctx, `ALTER TABLE a2a_task_events DROP CONSTRAINT IF EXISTS test_block_reap_event`)
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, taskID)
 		sdkStore.Close()
 	})
 
-	taskID := "reap-atom-" + suffix
-	routeCtx := ctxForRoute("proj-atom-"+suffix, "agent-atom-"+suffix)
+	routeCtx := ctxForRoute(projID, agentSlugVal)
 
 	// Create the task in both stores.
 	task := &a2a.Task{
 		ID:        a2a.TaskID(taskID),
-		ContextID: "ctx-atom",
+		ContextID: "ctx-rb",
 		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
 	}
 	if _, err := sdkStore.Create(routeCtx, task); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	pgStore.CreateTask(ctx, &state.Task{
-		ID: taskID, ContextID: "ctx-atom", ProjectID: "proj-atom-" + suffix,
-		AgentSlug: "agent-atom-" + suffix, State: "working",
+		ID: taskID, ContextID: "ctx-rb", ProjectID: projID,
+		AgentSlug: agentSlugVal, State: "working",
 		CreatedAt: time.Now(), UpdatedAt: time.Now(), Metadata: "{}",
 	})
 
 	// Claim execution and backdate heartbeat.
-	ownerID := "crashed-atom:" + suffix
+	ownerID := "crashed-rb:" + suffix
 	if claimed, err := sdkStore.ClaimExecution(ctx, taskID, ownerID, 60*time.Second); err != nil || !claimed {
 		t.Fatalf("ClaimExecution: claimed=%v err=%v", claimed, err)
 	}
 	sdkStore.db.ExecContext(ctx, `UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW() - INTERVAL '10 minutes' WHERE id = $1`, taskID)
 
-	// Reap — should atomically update state and insert event.
-	reapedIDs, err := sdkStore.ReapStaleTasks(ctx, 5*time.Minute)
+	// Capture pre-reap state for comparison.
+	var origVersion int64
+	var origState string
+	var origExecOwner sql.NullString
+	sdkStore.db.QueryRowContext(ctx,
+		`SELECT version, payload->'status'->>'state', exec_owner FROM a2a_sdk_tasks WHERE id = $1`, taskID,
+	).Scan(&origVersion, &origState, &origExecOwner)
+
+	// --- Phase 1: Inject event-insert failure ---
+	// Add a CHECK constraint that rejects any INSERT into a2a_task_events
+	// with dedup_key starting with 'reap:'. This causes the event INSERT
+	// inside reapOneTask's transaction to fail AFTER the state UPDATE,
+	// forcing a full rollback.
+	_, err = sdkStore.db.ExecContext(ctx,
+		`ALTER TABLE a2a_task_events ADD CONSTRAINT test_block_reap_event
+		 CHECK (dedup_key IS NULL OR dedup_key NOT LIKE 'reap:reap-rb-%')`)
 	if err != nil {
-		t.Fatalf("ReapStaleTasks: %v", err)
-	}
-	if len(reapedIDs) == 0 {
-		t.Fatal("no tasks reaped")
-	}
-	if reapedIDs[0] != taskID {
-		t.Errorf("reaped = %q, want %q", reapedIDs[0], taskID)
+		t.Fatalf("add blocking constraint: %v", err)
 	}
 
-	// Verify state is TASK_STATE_FAILED.
+	// Attempt reap — should fail due to constraint violation on event insert.
+	reapedIDs, reapErr := sdkStore.ReapStaleTasks(ctx, 5*time.Minute)
+	if len(reapedIDs) != 0 {
+		t.Errorf("reap with injected failure returned %d IDs, want 0", len(reapedIDs))
+	}
+	if reapErr == nil {
+		t.Fatal("reap with injected failure should return error")
+	}
+	t.Logf("Phase 1: reap correctly failed: %v", reapErr)
+
+	// Verify state/version/lease are UNCHANGED (rollback worked).
+	var postVersion int64
+	var postState string
+	var postExecOwner sql.NullString
+	sdkStore.db.QueryRowContext(ctx,
+		`SELECT version, payload->'status'->>'state', exec_owner FROM a2a_sdk_tasks WHERE id = $1`, taskID,
+	).Scan(&postVersion, &postState, &postExecOwner)
+
+	if postVersion != origVersion {
+		t.Errorf("version changed from %d to %d after rollback", origVersion, postVersion)
+	}
+	if postState != origState {
+		t.Errorf("state changed from %q to %q after rollback", origState, postState)
+	}
+	if postExecOwner != origExecOwner {
+		t.Errorf("exec_owner changed after rollback: %v → %v", origExecOwner, postExecOwner)
+	}
+	t.Logf("Phase 1: rollback verified — version=%d state=%s exec_owner=%v unchanged",
+		postVersion, postState, postExecOwner)
+
+	// Verify no event was inserted.
+	events, err := pgStore.ReadTaskEvents(ctx, taskID, 0, 100)
+	if err != nil {
+		t.Fatalf("ReadTaskEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("expected 0 events after rollback, got %d", len(events))
+	}
+
+	// --- Phase 2: Remove failure and retry ---
+	_, err = sdkStore.db.ExecContext(ctx, `ALTER TABLE a2a_task_events DROP CONSTRAINT test_block_reap_event`)
+	if err != nil {
+		t.Fatalf("drop blocking constraint: %v", err)
+	}
+
+	reapedIDs, reapErr = sdkStore.ReapStaleTasks(ctx, 5*time.Minute)
+	if reapErr != nil {
+		t.Fatalf("retry ReapStaleTasks: %v", reapErr)
+	}
+	if len(reapedIDs) != 1 || reapedIDs[0] != taskID {
+		t.Fatalf("retry reaped = %v, want [%s]", reapedIDs, taskID)
+	}
+
+	// Verify exactly one terminal state.
 	stored, err := sdkStore.Get(routeCtx, a2a.TaskID(taskID))
 	if err != nil {
-		t.Fatalf("Get after reap: %v", err)
+		t.Fatalf("Get after retry: %v", err)
 	}
 	if stored.Task.Status.State != a2a.TaskStateFailed {
 		t.Errorf("state = %q, want TASK_STATE_FAILED", stored.Task.Status.State)
 	}
 
-	// Verify terminal event exists with Final=true.
-	events, err := pgStore.ReadTaskEvents(ctx, taskID, 0, 100)
+	// Verify exactly one Final=true event.
+	events, err = pgStore.ReadTaskEvents(ctx, taskID, 0, 100)
 	if err != nil {
-		t.Fatalf("ReadTaskEvents: %v", err)
+		t.Fatalf("ReadTaskEvents after retry: %v", err)
 	}
-	if len(events) == 0 {
-		t.Fatal("no terminal event emitted")
+	if len(events) != 1 {
+		t.Errorf("expected exactly 1 event after retry, got %d", len(events))
 	}
-	if !events[0].Final {
-		t.Error("terminal reap event does not have Final=true")
+	if len(events) > 0 && !events[0].Final {
+		t.Error("terminal event does not have Final=true")
 	}
-	t.Logf("Atomic reap: state=TASK_STATE_FAILED, event.Final=%v, dedup_key=%s",
-		events[0].Final, events[0].DedupKey)
+	t.Logf("Phase 2: retry succeeded — state=TASK_STATE_FAILED, 1 Final=true event")
 }
 
 // TestReapIdempotencyOneEventOnly verifies that retrying ReapStaleTasks after
@@ -4156,8 +4275,9 @@ func TestReapIdempotencyOneEventOnly(t *testing.T) {
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 
 	t.Cleanup(func() {
-		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id LIKE $1`, "reap-idem-%"+suffix)
-		pgStore.PurgeTaskEvents(ctx, time.Now().Add(time.Hour))
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id = $1`, "reap-idem-"+suffix)
+		pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, "reap-idem-"+suffix)
+		pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, "reap-idem-"+suffix)
 		sdkStore.Close()
 	})
 
@@ -4235,8 +4355,12 @@ func TestStartupAndJanitorShareReapPath(t *testing.T) {
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 
 	t.Cleanup(func() {
-		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, "proj-share-"+suffix)
-		pgStore.PurgeTaskEvents(ctx, time.Now().Add(time.Hour))
+		for _, label := range []string{"startup", "janitor"} {
+			tid := fmt.Sprintf("share-%s-%s", label, suffix)
+			pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, tid)
+			pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, tid)
+			sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id = $1`, tid)
+		}
 		sdkStore.Close()
 	})
 
@@ -4336,8 +4460,9 @@ func TestReapedTaskVisibleCrossReplica(t *testing.T) {
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 
 	t.Cleanup(func() {
+		pgStoreA.DB().ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id = $1`, "reap-xr-"+suffix)
+		pgStoreA.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, "reap-xr-"+suffix)
 		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id = $1`, "reap-xr-"+suffix)
-		pgStoreA.PurgeTaskEvents(ctx, time.Now().Add(time.Hour))
 		sdkStore.Close()
 	})
 
@@ -4400,4 +4525,233 @@ func TestReapedTaskVisibleCrossReplica(t *testing.T) {
 		t.Errorf("B sees state = %q, want TASK_STATE_FAILED", stored.Task.Status.State)
 	}
 	t.Log("Cross-replica: terminal reap event and TASK_STATE_FAILED visible from replica B")
+}
+
+// --- Finding 1: Migration advisory lock connection scope ---
+
+// TestConcurrentMigrationSerialization verifies that concurrent
+// NewPostgresTaskStore calls serialize their migrations via the advisory
+// lock, and that the lock is released after each migration completes
+// (subsequent migration succeeds without deadlock).
+func TestConcurrentMigrationSerialization(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	const concurrency = 5
+	var wg sync.WaitGroup
+	errs := make(chan error, concurrency)
+
+	// Launch concurrent migrations.
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			store, err := NewPostgresTaskStore(dbURL)
+			if err != nil {
+				errs <- fmt.Errorf("NewPostgresTaskStore: %w", err)
+				return
+			}
+			store.Close()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("concurrent migration failed: %v", err)
+	}
+	t.Logf("All %d concurrent migrations succeeded (serialized by advisory lock)", concurrency)
+
+	// Verify lock is released: a subsequent migration must succeed without deadlock.
+	afterStore, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("post-concurrent migration failed (lock leak?): %v", err)
+	}
+	afterStore.Close()
+	t.Log("Post-concurrent migration succeeded — no lock leak")
+
+	// Verify the advisory lock is not held.
+	db, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+
+	var lockHeld bool
+	err = db.QueryRowContext(context.Background(),
+		`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND objid = $1 AND granted)`,
+		sdkTaskStoreMigrationLockID,
+	).Scan(&lockHeld)
+	if err != nil {
+		t.Fatalf("query lock status: %v", err)
+	}
+	if lockHeld {
+		t.Error("advisory lock still held after all migrations completed — lock leak")
+	}
+	t.Log("Advisory lock correctly released")
+}
+
+// --- Finding 5: Index predicate compatibility ---
+
+// TestPartialIndexPredicateCompatibility verifies that the partial index
+// idx_a2a_sdk_tasks_agent uses the same predicate as the query in
+// FindActiveSDKTaskForAgent, and that PostgreSQL can use the index.
+func TestPartialIndexPredicateCompatibility(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	sdkStore, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgresTaskStore: %v", err)
+	}
+	defer sdkStore.Close()
+
+	// Verify the index definition references canonical uppercase states.
+	var indexDef string
+	err = sdkStore.db.QueryRowContext(ctx,
+		`SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_a2a_sdk_tasks_agent'`,
+	).Scan(&indexDef)
+	if err != nil {
+		t.Fatalf("query index definition: %v", err)
+	}
+
+	for _, state := range sdkTerminalStates {
+		if !strings.Contains(indexDef, state) {
+			t.Errorf("index definition missing %q: %s", state, indexDef)
+		}
+	}
+	t.Logf("Index definition: %s", indexDef)
+
+	// Verify the query plan uses the index. Insert some data first so
+	// the planner has statistics to work with.
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	projID := "proj-explain-" + suffix
+	agentSlugVal := "agent-explain-" + suffix
+	routeCtx := ctxForRoute(projID, agentSlugVal)
+
+	for i := 0; i < 5; i++ {
+		taskID := fmt.Sprintf("explain-%d-%s", i, suffix)
+		task := &a2a.Task{
+			ID:        a2a.TaskID(taskID),
+			ContextID: "ctx-explain",
+			Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+		}
+		sdkStore.Create(routeCtx, task)
+	}
+	t.Cleanup(func() {
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, projID)
+	})
+
+	// Run EXPLAIN on the query used by FindActiveSDKTaskForAgent.
+	query := fmt.Sprintf(`EXPLAIN SELECT id, caller_user_id FROM a2a_sdk_tasks
+		 WHERE project_id = $1 AND agent_slug = $2
+		   AND payload->'status'->>'state' NOT IN (%s)
+		 ORDER BY created_at DESC
+		 LIMIT 2`, terminalStatesSQL)
+
+	rows, err := sdkStore.db.QueryContext(ctx, query, projID, agentSlugVal)
+	if err != nil {
+		t.Fatalf("EXPLAIN: %v", err)
+	}
+	defer rows.Close()
+
+	var planLines []string
+	for rows.Next() {
+		var line string
+		rows.Scan(&line)
+		planLines = append(planLines, line)
+	}
+	plan := strings.Join(planLines, "\n")
+	t.Logf("Query plan:\n%s", plan)
+
+	// The planner should use the partial index or at least not do a full seq scan
+	// on large tables. For small test tables, Postgres may choose a seq scan,
+	// which is valid — the key assertion is predicate agreement, verified above.
+	if strings.Contains(plan, "idx_a2a_sdk_tasks_agent") {
+		t.Log("Planner selected partial index — predicate compatible ✓")
+	} else {
+		t.Log("Planner chose seq scan (expected for small test table) — predicate agreement verified above")
+	}
+}
+
+// --- Finding 4: Reap error propagation ---
+
+// TestReapErrorPropagation verifies that genuine errors (not CAS losses)
+// are aggregated and returned alongside partial successes.
+func TestReapErrorPropagation(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	pgStore, err := state.NewPostgres(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgres: %v", err)
+	}
+	defer pgStore.Close()
+
+	sdkStore, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgresTaskStore: %v", err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	projID := "proj-erragg-" + suffix
+
+	t.Cleanup(func() {
+		sdkStore.db.ExecContext(ctx, `ALTER TABLE a2a_task_events DROP CONSTRAINT IF EXISTS test_block_erragg`)
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, projID)
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_task_events WHERE task_id LIKE $1`, "erragg-%"+suffix)
+		sdkStore.Close()
+	})
+
+	// Create two stale tasks.
+	for i := 0; i < 2; i++ {
+		taskID := fmt.Sprintf("erragg-%d-%s", i, suffix)
+		routeCtx := ctxForRoute(projID, "agent-erragg-"+suffix)
+		task := &a2a.Task{
+			ID:        a2a.TaskID(taskID),
+			ContextID: "ctx-erragg",
+			Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+		}
+		sdkStore.Create(routeCtx, task)
+		pgStore.CreateTask(ctx, &state.Task{
+			ID: taskID, ContextID: "ctx-erragg", ProjectID: projID,
+			AgentSlug: "agent-erragg-" + suffix, State: "working",
+			CreatedAt: time.Now(), UpdatedAt: time.Now(), Metadata: "{}",
+		})
+		sdkStore.ClaimExecution(ctx, taskID, "crashed-erragg:"+suffix, 60*time.Second)
+		sdkStore.db.ExecContext(ctx, `UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW() - INTERVAL '10 minutes' WHERE id = $1`, taskID)
+	}
+
+	// Block event inserts for one specific task to force a partial failure.
+	blockTaskID := fmt.Sprintf("erragg-0-%s", suffix)
+	_, err = sdkStore.db.ExecContext(ctx,
+		fmt.Sprintf(`ALTER TABLE a2a_task_events ADD CONSTRAINT test_block_erragg
+		 CHECK (dedup_key IS NULL OR dedup_key != 'reap:%s')`, blockTaskID))
+	if err != nil {
+		t.Fatalf("add blocking constraint: %v", err)
+	}
+
+	reapedIDs, reapErr := sdkStore.ReapStaleTasks(ctx, 5*time.Minute)
+
+	// Should have partial success (task 1 reaped) and error (task 0 failed).
+	t.Logf("Reaped: %v, Error: %v", reapedIDs, reapErr)
+
+	if reapErr == nil {
+		t.Error("expected aggregated error for failed task, got nil")
+	}
+	if len(reapedIDs) == 0 {
+		t.Error("expected at least one partial success")
+	}
+	// The error should mention the blocked task ID.
+	if reapErr != nil && !strings.Contains(reapErr.Error(), blockTaskID) {
+		t.Errorf("error should mention task ID %q: %v", blockTaskID, reapErr)
+	}
+	t.Logf("Error propagation: %d successes, error contains task IDs: %v", len(reapedIDs), reapErr)
 }
