@@ -158,7 +158,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		MutationAuditStore:       NewMutationAuditStore(client),
 		QuotaStore:               NewQuotaStore(client),
 		AccessConstraintStore:    NewAccessConstraintStore(client),
-		ExternalIdentityStore:   NewExternalIdentityStore(client),
+		ExternalIdentityStore:    NewExternalIdentityStore(client),
 		client:                   client,
 	}
 }

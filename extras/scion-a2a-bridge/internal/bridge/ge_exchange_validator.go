@@ -85,10 +85,10 @@ type GEExchangeValidator struct {
 	// LRU cache: mu protects both the map and the LRU list.
 	// The list orders entries from most-recently-used (front) to
 	// least-recently-used (back). Eviction removes from the back.
-	mu       sync.Mutex
-	cache    map[string]*list.Element // key → list element wrapping *geCacheEntry
-	lruList  *list.List              // doubly-linked list for O(1) LRU eviction
-	sfg      singleflight.Group
+	mu      sync.Mutex
+	cache   map[string]*list.Element // key → list element wrapping *geCacheEntry
+	lruList *list.List               // doubly-linked list for O(1) LRU eviction
+	sfg     singleflight.Group
 }
 
 // geCacheEntry holds a cached exchange result.

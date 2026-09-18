@@ -201,7 +201,9 @@ func TestProductionValidator_IDToken_ValidSignature(t *testing.T) {
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(gcvJWKSJSON(kp))
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			t.Error("tokeninfo should not be called for ID token validation")
@@ -250,7 +252,9 @@ func TestProductionValidator_IDToken_InvalidSignature(t *testing.T) {
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(gcvJWKSJSON(kp2)) // wrong key
+			if _, err := w.Write(gcvJWKSJSON(kp2)); err != nil { // wrong key
+				t.Errorf("write JWKS response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
@@ -275,7 +279,9 @@ func TestProductionValidator_IDToken_MissingExp(t *testing.T) {
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(gcvJWKSJSON(kp))
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
@@ -302,7 +308,9 @@ func TestProductionValidator_IDToken_ExpiredToken(t *testing.T) {
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(gcvJWKSJSON(kp))
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
@@ -328,7 +336,9 @@ func TestProductionValidator_IDToken_WrongAudience(t *testing.T) {
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(gcvJWKSJSON(kp))
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
@@ -355,7 +365,9 @@ func TestProductionValidator_IDToken_ServiceAccount(t *testing.T) {
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(gcvJWKSJSON(kp))
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
@@ -382,7 +394,9 @@ func TestProductionValidator_IDToken_UnverifiedEmail(t *testing.T) {
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(gcvJWKSJSON(kp))
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
@@ -415,10 +429,14 @@ func TestProductionValidator_IDToken_JWKSForceRefresh(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			if callCount == 1 {
 				// First call: only old key
-				w.Write(gcvJWKSJSON(kp1))
+				if _, err := w.Write(gcvJWKSJSON(kp1)); err != nil {
+					t.Errorf("write initial JWKS response: %v", err)
+				}
 			} else {
 				// Force refresh: include new key
-				w.Write(gcvJWKSJSON(kp1, kp2))
+				if _, err := w.Write(gcvJWKSJSON(kp1, kp2)); err != nil {
+					t.Errorf("write refreshed JWKS response: %v", err)
+				}
 			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
@@ -487,7 +505,9 @@ func TestProductionValidator_IDToken_BareIssuerAccepted(t *testing.T) {
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(gcvJWKSJSON(kp))
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
@@ -515,7 +535,9 @@ func TestProductionValidator_IDToken_AudAzpDisagreement(t *testing.T) {
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(gcvJWKSJSON(kp))
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
@@ -553,7 +575,7 @@ func TestProductionValidator_AccessToken_ValidExchange(t *testing.T) {
 				t.Errorf("tokeninfo method = %s, want POST", r.Method)
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
 				"azp":            "test-client-id.apps.googleusercontent.com",
 				"aud":            "test-client-id.apps.googleusercontent.com",
 				"sub":            "google-sub-access-456",
@@ -562,18 +584,22 @@ func TestProductionValidator_AccessToken_ValidExchange(t *testing.T) {
 				"expires_in":     3600,
 				"scope":          "openid email profile",
 				"access_type":    "online",
-			})
+			}); err != nil {
+				t.Errorf("encode tokeninfo response: %v", err)
+			}
 		}),
 		// userinfo endpoint
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
 				"sub":            "google-sub-access-456",
 				"email":          "user@gmail.com",
 				"email_verified": true, // Boolean form
 				"name":           "Access User",
 				"picture":        "https://example.com/photo.jpg",
-			})
+			}); err != nil {
+				t.Errorf("encode userinfo response: %v", err)
+			}
 		}),
 	)
 	defer endpoints.close()
@@ -604,13 +630,15 @@ func TestProductionValidator_AccessToken_AzpAudDisagreement(t *testing.T) {
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
 				"azp":        "client-A.apps.googleusercontent.com",
 				"aud":        "client-B.apps.googleusercontent.com", // disagreement
 				"sub":        "sub-1",
 				"email":      "user@gmail.com",
 				"expires_in": 3600,
-			})
+			}); err != nil {
+				t.Errorf("encode tokeninfo response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 	)
@@ -632,13 +660,15 @@ func TestProductionValidator_AccessToken_MissingAzp(t *testing.T) {
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
 				// No azp field
 				"aud":        "test-client-id.apps.googleusercontent.com",
 				"sub":        "sub-1",
 				"email":      "user@gmail.com",
 				"expires_in": 3600,
-			})
+			}); err != nil {
+				t.Errorf("encode tokeninfo response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 	)
@@ -660,22 +690,26 @@ func TestProductionValidator_AccessToken_SubDisagreement(t *testing.T) {
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
 				"azp":        "test-client-id.apps.googleusercontent.com",
 				"aud":        "test-client-id.apps.googleusercontent.com",
 				"sub":        "sub-from-tokeninfo",
 				"email":      "user@gmail.com",
 				"expires_in": 3600,
-			})
+			}); err != nil {
+				t.Errorf("encode tokeninfo response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
 				"sub":            "sub-from-userinfo", // different!
 				"email":          "user@gmail.com",
 				"email_verified": true,
 				"name":           "User",
-			})
+			}); err != nil {
+				t.Errorf("encode userinfo response: %v", err)
+			}
 		}),
 	)
 	defer endpoints.close()
@@ -696,12 +730,14 @@ func TestProductionValidator_AccessToken_ExpiredToken(t *testing.T) {
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
 				"azp":        "test-client-id.apps.googleusercontent.com",
 				"aud":        "test-client-id.apps.googleusercontent.com",
 				"sub":        "sub-1",
 				"expires_in": 0, // no remaining lifetime
-			})
+			}); err != nil {
+				t.Errorf("encode tokeninfo response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 	)
@@ -723,21 +759,25 @@ func TestProductionValidator_AccessToken_ServiceAccount(t *testing.T) {
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
 				"azp":        "test-client-id.apps.googleusercontent.com",
 				"aud":        "test-client-id.apps.googleusercontent.com",
 				"sub":        "sa-sub",
 				"email":      "sa@my-project.iam.gserviceaccount.com",
 				"expires_in": 3600,
-			})
+			}); err != nil {
+				t.Errorf("encode tokeninfo response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
 				"sub":            "sa-sub",
 				"email":          "sa@my-project.iam.gserviceaccount.com",
 				"email_verified": true,
-			})
+			}); err != nil {
+				t.Errorf("encode userinfo response: %v", err)
+			}
 		}),
 	)
 	defer endpoints.close()
@@ -780,7 +820,7 @@ func TestProductionValidator_TokenInfoSchema_FieldTypes(t *testing.T) {
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				// Representative response with all documented fields.
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				if err := json.NewEncoder(w).Encode(map[string]interface{}{
 					"azp":            "authorized-client.apps.googleusercontent.com",
 					"aud":            "authorized-client.apps.googleusercontent.com",
 					"sub":            "sub-schema-test",
@@ -789,16 +829,20 @@ func TestProductionValidator_TokenInfoSchema_FieldTypes(t *testing.T) {
 					"expires_in":     1800,
 					"scope":          "openid https://www.googleapis.com/auth/userinfo.email",
 					"access_type":    "online",
-				})
+				}); err != nil {
+					t.Errorf("encode tokeninfo response: %v", err)
+				}
 			}),
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				if err := json.NewEncoder(w).Encode(map[string]interface{}{
 					"sub":            "sub-schema-test",
 					"email":          "user@gmail.com",
 					"email_verified": true,
 					"name":           "Schema User",
-				})
+				}); err != nil {
+					t.Errorf("encode userinfo response: %v", err)
+				}
 			}),
 		)
 		defer endpoints.close()
@@ -823,13 +867,15 @@ func TestProductionValidator_TokenInfoSchema_FieldTypes(t *testing.T) {
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				if err := json.NewEncoder(w).Encode(map[string]interface{}{
 					"issued_to":  "test-client.apps.googleusercontent.com", // wrong field name
 					"audience":   "test-client.apps.googleusercontent.com", // wrong field name
 					"sub":        "sub-1",
 					"email":      "user@gmail.com",
 					"expires_in": 3600,
-				})
+				}); err != nil {
+					t.Errorf("encode tokeninfo response: %v", err)
+				}
 			}),
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		)
@@ -889,7 +935,7 @@ func TestProductionValidator_AccessToken_ExpiresInAsString(t *testing.T) {
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
 				"azp":            "test-client.apps.googleusercontent.com",
 				"aud":            "test-client.apps.googleusercontent.com",
 				"sub":            "sub-string-expiry",
@@ -898,16 +944,20 @@ func TestProductionValidator_AccessToken_ExpiresInAsString(t *testing.T) {
 				"expires_in":     "1800", // string form, not number
 				"scope":          "openid email",
 				"access_type":    "online",
-			})
+			}); err != nil {
+				t.Errorf("encode tokeninfo response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
 				"sub":            "sub-string-expiry",
 				"email":          "user@gmail.com",
 				"email_verified": true,
 				"name":           "String Expiry User",
-			})
+			}); err != nil {
+				t.Errorf("encode userinfo response: %v", err)
+			}
 		}),
 	)
 	defer endpoints.close()
@@ -943,7 +993,9 @@ func TestProductionValidator_IDToken_ExpiredWithinSkew(t *testing.T) {
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(gcvJWKSJSON(kp))
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
@@ -973,7 +1025,9 @@ func TestProductionValidator_IDToken_PositiveRemaining(t *testing.T) {
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(gcvJWKSJSON(kp))
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
@@ -1001,7 +1055,9 @@ func TestProductionValidator_IDToken_LongRemaining(t *testing.T) {
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(gcvJWKSJSON(kp))
+			if _, err := w.Write(gcvJWKSJSON(kp)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
@@ -1035,7 +1091,9 @@ func TestProductionValidator_JWKS_ForceRefreshRateLimited(t *testing.T) {
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			fetchCount++
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(gcvJWKSJSON(kp1))
+			if _, err := w.Write(gcvJWKSJSON(kp1)); err != nil {
+				t.Errorf("write JWKS response: %v", err)
+			}
 		}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
@@ -1059,8 +1117,10 @@ func TestProductionValidator_JWKS_ForceRefreshRateLimited(t *testing.T) {
 	unknownKP := newGCVTestKeyPair("unknown-kid")
 	for i := 0; i < 10; i++ {
 		unknownToken := signIDToken(unknownKP, validIDTokenClaims())
-		validator.ValidateIDToken(t.Context(), unknownToken,
-			[]string{"test-client-id.apps.googleusercontent.com"})
+		if _, err := validator.ValidateIDToken(t.Context(), unknownToken,
+			[]string{"test-client-id.apps.googleusercontent.com"}); err == nil {
+			t.Errorf("validation %d unexpectedly accepted token with unknown key", i)
+		}
 	}
 
 	// Should have at most 2 additional fetches: the initial get() call + one

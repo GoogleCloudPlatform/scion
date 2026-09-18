@@ -92,17 +92,17 @@ func newV0TestServer(t *testing.T, scheme, apiKey string, v0handler http.Handler
 type mockHubServer struct {
 	*httptest.Server
 
-	mu               sync.Mutex
-	sentMessages     []mockSentMessage
-	exchangeCalls    int
-	exchangeHeaders  []http.Header     // captured headers from each exchange call
-	messageHeaders   []http.Header     // captured headers from each message send
-	exchangeHandler  http.HandlerFunc  // optional override for exchange endpoint
+	mu              sync.Mutex
+	sentMessages    []mockSentMessage
+	exchangeCalls   int
+	exchangeHeaders []http.Header    // captured headers from each exchange call
+	messageHeaders  []http.Header    // captured headers from each message send
+	exchangeHandler http.HandlerFunc // optional override for exchange endpoint
 }
 
 type mockSentMessage struct {
-	AgentID string
-	Body    json.RawMessage
+	AgentID    string
+	Body       json.RawMessage
 	AuthHeader string // Authorization header value from the send request
 }
 
@@ -1198,9 +1198,9 @@ type mockTokenSource struct {
 	token string
 }
 
-func (m *mockTokenSource) Token() (string, error) { return m.token, nil }
+func (m *mockTokenSource) Token() (string, error)           { return m.token, nil }
 func (m *mockTokenSource) SetToken(t string, exp time.Time) {}
-func (m *mockTokenSource) Expiry() time.Time { return time.Now().Add(1 * time.Hour) }
+func (m *mockTokenSource) Expiry() time.Time                { return time.Now().Add(1 * time.Hour) }
 
 func TestGEExchangeValidator_TransportAuth_NotSet_NoHeaders(t *testing.T) {
 	var capturedHeaders http.Header

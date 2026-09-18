@@ -2151,11 +2151,11 @@ type AccessConstraintStore interface {
 // identity linkage.
 type ExternalIdentityBinding struct {
 	ID        string    `json:"id"`
-	Provider  string    `json:"provider"`  // e.g. "google"
-	Issuer    string    `json:"issuer"`    // canonical issuer URL
-	Subject   string    `json:"subject"`   // stable provider subject
-	UserID    string    `json:"userId"`    // FK to User.ID
-	Email     string    `json:"email"`     // email at binding time (informational)
+	Provider  string    `json:"provider"` // e.g. "google"
+	Issuer    string    `json:"issuer"`   // canonical issuer URL
+	Subject   string    `json:"subject"`  // stable provider subject
+	UserID    string    `json:"userId"`   // FK to User.ID
+	Email     string    `json:"email"`    // email at binding time (informational)
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }

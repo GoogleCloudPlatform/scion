@@ -111,19 +111,19 @@ type GoogleCredentialValidator interface {
 // ---------------------------------------------------------------------------
 
 var (
-	ErrGoogleInvalidCredential  = errors.New("invalid Google credential")
-	ErrGoogleExpiredCredential  = errors.New("expired Google credential")
-	ErrGoogleUntrustedAudience  = errors.New("untrusted Google client ID")
-	ErrGoogleUntrustedIssuer    = errors.New("untrusted Google issuer")
-	ErrGoogleUnverifiedEmail    = errors.New("Google email not verified")
-	ErrGoogleMissingSubject     = errors.New("missing Google subject")
-	ErrGoogleServiceAccount     = errors.New("service account credentials not accepted")
-	ErrGoogleFieldDisagreement  = errors.New("Google token metadata fields disagree")
-	ErrGoogleMissingField       = errors.New("required field missing from Google response")
-	ErrGoogleUpstreamError      = errors.New("Google upstream validation failed")
-	ErrGENotConfigured          = errors.New("GE Google exchange not configured")
-	ErrGEUnsupportedCredType    = errors.New("unsupported credential type")
-	ErrGENoRemainingLifetime    = errors.New("credential has no remaining usable lifetime")
+	ErrGoogleInvalidCredential = errors.New("invalid Google credential")
+	ErrGoogleExpiredCredential = errors.New("expired Google credential")
+	ErrGoogleUntrustedAudience = errors.New("untrusted Google client ID")
+	ErrGoogleUntrustedIssuer   = errors.New("untrusted Google issuer")
+	ErrGoogleUnverifiedEmail   = errors.New("google email not verified")
+	ErrGoogleMissingSubject    = errors.New("missing Google subject")
+	ErrGoogleServiceAccount    = errors.New("service account credentials not accepted")
+	ErrGoogleFieldDisagreement = errors.New("google token metadata fields disagree")
+	ErrGoogleMissingField      = errors.New("required field missing from Google response")
+	ErrGoogleUpstreamError     = errors.New("google upstream validation failed")
+	ErrGENotConfigured         = errors.New("GE Google exchange not configured")
+	ErrGEUnsupportedCredType   = errors.New("unsupported credential type")
+	ErrGENoRemainingLifetime   = errors.New("credential has no remaining usable lifetime")
 )
 
 // ---------------------------------------------------------------------------
@@ -233,7 +233,7 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 	expected := jwt.Expected{
 		Time: now,
 	}
-	if err := claims.Claims.Validate(expected); err != nil {
+	if err := claims.Validate(expected); err != nil {
 		// Check if it's an expiry issue vs other issue
 		if claims.Expiry.Time().Before(now.Add(-googleClockSkew)) {
 			return nil, fmt.Errorf("%w: %v", ErrGoogleExpiredCredential, err)
@@ -382,7 +382,7 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 			ErrGoogleFieldDisagreement, tokenInfo.Sub, userInfo.Sub)
 	}
 	// Cross-check email where both provide it.
-	if tokenInfo.Email != "" && strings.ToLower(tokenInfo.Email) != strings.ToLower(userInfo.Email) {
+	if tokenInfo.Email != "" && !strings.EqualFold(tokenInfo.Email, userInfo.Email) {
 		return nil, fmt.Errorf("%w: email from tokeninfo (%q) != userinfo (%q)",
 			ErrGoogleFieldDisagreement, tokenInfo.Email, userInfo.Email)
 	}

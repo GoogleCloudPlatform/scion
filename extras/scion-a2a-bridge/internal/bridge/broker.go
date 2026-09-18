@@ -44,10 +44,10 @@ type BrokerServer struct {
 	configured    bool
 
 	// Admin config management fields (Phase 3).
-	baseConfig *Config              // base YAML config loaded at boot (immutable after init)
-	snapshot   *SnapshotHolder      // atomic snapshot of effective config
-	stateDir   string               // directory for admin-overlay.json persistence
-	geOpts     []GEValidatorOption  // forwarded to BuildSnapshot for geGoogle auth (e.g. transport auth)
+	baseConfig *Config             // base YAML config loaded at boot (immutable after init)
+	snapshot   *SnapshotHolder     // atomic snapshot of effective config
+	stateDir   string              // directory for admin-overlay.json persistence
+	geOpts     []GEValidatorOption // forwarded to BuildSnapshot for geGoogle auth (e.g. transport auth)
 }
 
 var _ plugin.MessageBrokerPluginInterface = (*BrokerServer)(nil)

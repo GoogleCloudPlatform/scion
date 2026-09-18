@@ -48,17 +48,17 @@ func BridgePathPatterns() []logging.PathPattern {
 
 // Server is the A2A HTTP server that routes requests to the SDK handler.
 type Server struct {
-	bridge     *Bridge
-	config     *Config         // base config (kept for backward compat in non-snapshot paths)
-	snapshot   *SnapshotHolder // atomic snapshot of effective config (hot-apply)
-	metrics    *Metrics
-	log        *slog.Logger
-	sdkHandler   http.Handler // SDK JSON-RPC handler
+	bridge        *Bridge
+	config        *Config         // base config (kept for backward compat in non-snapshot paths)
+	snapshot      *SnapshotHolder // atomic snapshot of effective config (hot-apply)
+	metrics       *Metrics
+	log           *slog.Logger
+	sdkHandler    http.Handler // SDK JSON-RPC handler
 	v0RESTHandler http.Handler // v0.3 REST compat handler (nil if not configured)
 	// Legacy validators — used only when snapshot is nil (tests, backward compat).
-	uatValidator         *UATValidator
-	jwtValidator         *JWTValidator
-	geExchangeValidator  *GEExchangeValidator
+	uatValidator        *UATValidator
+	jwtValidator        *JWTValidator
+	geExchangeValidator *GEExchangeValidator
 }
 
 // NewServer creates a new A2A protocol server backed by the SDK.

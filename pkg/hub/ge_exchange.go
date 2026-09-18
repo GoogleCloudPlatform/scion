@@ -273,12 +273,12 @@ var (
 // resolveLocalUser resolves a validated Google identity to a local Hub user
 // via the external identity binding system. The flow is:
 //
-// 1. Look up existing binding by (provider, canonical issuer, sub).
-// 2. If found: verify the bound user exists and is not suspended, update
-//    email if changed. Return the user.
-// 3. If not found: attempt first-time bootstrap via email, guarded by
-//    authoritative email domain requirement.
-// 4. Create atomic binding and return user.
+//  1. Look up existing binding by (provider, canonical issuer, sub).
+//  2. If found: verify the bound user exists and is not suspended, update
+//     email if changed. Return the user.
+//  3. If not found: attempt first-time bootstrap via email, guarded by
+//     authoritative email domain requirement.
+//  4. Create atomic binding and return user.
 func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *ValidatedGoogleIdentity) (*store.User, error) {
 	canonicalIssuer := canonicalizeGoogleIssuer(identity.Issuer)
 
@@ -307,7 +307,7 @@ func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *Vali
 				"sub", identity.Subject, "user_id", user.ID)
 			_ = s.extIDStore.UpdateExternalIdentityEmail(ctx, binding.ID, normalizedEmail)
 			// Also update the user's profile email if it matches the old binding email.
-			if strings.ToLower(user.Email) == strings.ToLower(binding.Email) {
+			if strings.EqualFold(user.Email, binding.Email) {
 				user.Email = normalizedEmail
 				_ = s.userStore.UpdateUser(ctx, user)
 			}

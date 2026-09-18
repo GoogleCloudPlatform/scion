@@ -28,7 +28,6 @@ import (
 	"time"
 )
 
-
 // ---------------------------------------------------------------------------
 // countingGoogleValidator — tracks call counts for zero-call assertions.
 // ---------------------------------------------------------------------------
@@ -526,13 +525,13 @@ func TestNormalizeIPForRateLimit(t *testing.T) {
 		want  string
 	}{
 		{"192.0.2.1", "192.0.2.1"},
-		{"::ffff:192.0.2.1", "192.0.2.1"},        // IPv4-mapped IPv6
-		{"2001:db8::1", "2001:db8::1"},            // pure IPv6
-		{"::ffff:10.0.0.1", "10.0.0.1"},           // IPv4-mapped
-		{"not-an-ip", "not-an-ip"},                 // unparseable
-		{"", ""},                                   // empty
-		{"::1", "::1"},                             // loopback
-		{"127.0.0.1", "127.0.0.1"},                // IPv4 loopback
+		{"::ffff:192.0.2.1", "192.0.2.1"}, // IPv4-mapped IPv6
+		{"2001:db8::1", "2001:db8::1"},    // pure IPv6
+		{"::ffff:10.0.0.1", "10.0.0.1"},   // IPv4-mapped
+		{"not-an-ip", "not-an-ip"},        // unparseable
+		{"", ""},                          // empty
+		{"::1", "::1"},                    // loopback
+		{"127.0.0.1", "127.0.0.1"},        // IPv4 loopback
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {

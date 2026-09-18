@@ -668,7 +668,7 @@ func TestGEExchangeValidator_BoundedCacheEviction(t *testing.T) {
 		json.Unmarshal(body, &req)
 		writeExchangeResponse(w,
 			geExchangeUser{ID: "user-" + req["credential"], Email: "e@gmail.com", Role: "user"},
-			"tok-" + req["credential"],
+			"tok-"+req["credential"],
 			time.Now().Add(5*time.Minute),
 			time.Now().Add(55*time.Minute),
 		)

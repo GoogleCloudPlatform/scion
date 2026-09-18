@@ -281,3 +281,42 @@ Hub `go.mod`: No changes.
 - Build/vet/diff-check all clean
 - All broader bridge tests pass (`go test ./internal/bridge/`)
 - Both modules build cleanly (`go build ./...`, `go vet ./...`)
+
+## Upstream PR #1741 pre-merge fixes (`scion/dev-ge-auth-pr-fixes`)
+
+- Created the temporary fix branch at the exact accepted auth tip
+  `2f2e4fe212e8b4effb6af6d6541700c3478feb14`; the published
+  `scion/dev-ge-auth` ref was not modified.
+- Merged current `origin/main` `21c380344b774fc09a9147f38f9b96be4ca77f34`
+  normally in merge commit `52a0488684ae7fbbee2acd332a4e29f757fad4c6`.
+  The merge was conflict-free and imported only the six upstream gofmt fixes;
+  there was no semantic overlap with the auth implementation.
+- Dispositioned upstream comment `4047077030` without a startup refactor. The
+  standard and standalone paths both resolve the same transport source/mode and
+  propagate it into GE validator options, initial and replacement snapshots,
+  broker admin configuration, per-caller Hub clients, and the server validator.
+  Their surrounding startup differs intentionally (SQLite versus Postgres,
+  plugin versus runtime broker, overlays versus runtime reconfiguration). The
+  duplication therefore creates maintainability risk but no divergent
+  production behavior in this change; extracting the whole server lifecycle
+  would be a broad, high-risk pre-merge refactor.
+- Resolved all 15 reported lint locations: checked `Write`, `Encode`, and the
+  intentionally failing `ValidateIDToken` calls; used `strings.EqualFold`,
+  lowercase sentinel error text, the promoted `claims.Validate` method, and
+  `time.Until`. Successive lint passes exposed additional unchecked response
+  writes in the same already-touched validator test file; those were resolved
+  with the same non-fatal test error reporting. Final exact lint equivalent:
+  `golangci-lint run --new-from-merge-base=origin/main --concurrency=1 ./...`
+  reports zero issues.
+- Applied Go 1.26.1 `gofmt` to the 11 attributed files. Inspection with
+  `git diff --ignore-all-space` confirmed that changes outside the lint fixes
+  are formatting/alignment only.
+- Focused Hub GE auth/route/validator tests pass normally, with `-race`, and at
+  `-count=10`. Focused bridge GE/auth/v0 tests pass normally, with `-race`, and
+  at `-count=10`; the full bridge module and all store packages pass. Root and
+  bridge vet/build, repository fmt-check, and diff-check pass.
+- The broad Hub suite remains red in unrelated messaging/authz/route-catalog
+  tests. An identical same-environment run in a detached worktree at exact
+  `origin/main` `21c380344` reproduced the same named failures, classifying
+  them as current-main baseline rather than this branch. No baseline tidy or
+  changes from unmerged PR #1744 were imported.
