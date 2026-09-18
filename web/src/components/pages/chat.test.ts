@@ -40,9 +40,13 @@ vi.mock('../../client/main.js', () => ({
   stateManager: new EventTarget(),
 }));
 
-vi.mock('../../client/api.js', () => ({
-  apiFetch: vi.fn(() => Promise.resolve(new Response('{}', { status: 200 }))),
-}));
+vi.mock('../../client/api.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../client/api.js')>();
+  return {
+    ...actual,
+    apiFetch: vi.fn(() => Promise.resolve(new Response('{}', { status: 200 }))),
+  };
+});
 
 let ScionPageChat: any;
 
@@ -538,6 +542,18 @@ describe('chat page — promote DM dialog', () => {
         JSON.stringify({ error: { code: 'PROMOTION_FAILED', message: 'Promotion unavailable' } }),
         { status: 422 }
       )
+    );
+
+    await el.executePromote();
+
+    expect(showPromoteToast).toHaveBeenCalledWith('Promotion unavailable', 'danger');
+  });
+
+  it('shows a string backend error message', async () => {
+    const el = pageOnAgentDM();
+    const showPromoteToast = vi.spyOn(el, 'showPromoteToast').mockImplementation(() => undefined);
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(JSON.stringify({ error: 'Promotion unavailable' }), { status: 422 })
     );
 
     await el.executePromote();

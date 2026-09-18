@@ -55,7 +55,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Capabilities, Agent } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
-import { apiFetch } from '../../client/api.js';
+import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, stateManager } from '../../client/main.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
@@ -3155,22 +3155,17 @@ export class ScionPageChat extends LitElement {
         }
       );
       if (!res.ok) {
-        const body = (await res.json().catch(() => ({ error: {} }))) as {
-          error?: { code?: string; message?: string };
-        };
+        const err = await parseApiError(res, `Promotion failed (${res.status})`);
         if (res.status === 409) {
           const msg =
-            body.error?.code === 'IN_FLIGHT_MESSAGES'
+            err.code === 'IN_FLIGHT_MESSAGES'
               ? 'Agent is still responding. Try again in a few seconds.'
-              : body.error?.code === 'NAME_CONFLICT'
+              : err.code === 'NAME_CONFLICT'
                 ? 'A thread with that name already exists.'
-                : body.error?.message || 'Conflict — please try again.';
+                : err.message || 'Conflict — please try again.';
           this.showPromoteToast(msg, 'warning');
         } else {
-          this.showPromoteToast(
-            body.error?.message || `Promotion failed (${res.status})`,
-            'danger'
-          );
+          this.showPromoteToast(err.message, 'danger');
         }
         return;
       }
