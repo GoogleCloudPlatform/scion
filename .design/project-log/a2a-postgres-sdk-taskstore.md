@@ -358,9 +358,13 @@ held the unrelated connection on `testLockID+1` (different key), so the `objid`
 filter alone explained `seesUnrelated=false`. Corrected to two sequential phases
 using the SAME `testLockID` — only the `application_name` ownership filter
 distinguishes them:
-- Phase 1: owned marker acquires testLockID → query detects it → release
+- Phase 1: owned marker acquires testLockID → query detects it →
+  `pg_advisory_unlock` with `QueryRowContext.Scan(&released)` asserts
+  `released==true` → conn closed
 - Phase 2: unrelated marker acquires SAME testLockID → query with owned marker
-  and same lock type/key returns false → release
+  and same lock type/key returns false → `pg_advisory_unlock` with
+  `QueryRowContext.Scan(&released)` asserts `released==true` → conn closed
+- Both connections proven clean; no deferred silent unlocks
 
 #### Test categorization
 
@@ -372,6 +376,11 @@ distinguishes them:
 - 5-pair concurrent process proof with canary row survival
 - `TestConcurrentMigrationSerialization` with ownership-scoped lock check
 - `TestAdvisoryLockOwnershipScopedQuery` two-phase same-key regression
+
+Verification at tip `ebcf4d4`: All tests pass against real PostgreSQL.
+5-pair concurrent proof with canary byte-for-byte survival. Ownership
+regression asserts explicit `pg_advisory_unlock` boolean results (both
+`released==true`, no deferred silent unlocks). `go build/vet ./...` clean.
 
 ## Residual risks
 
