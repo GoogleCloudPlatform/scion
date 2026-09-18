@@ -149,6 +149,23 @@ func deleteBridgeMeta(v any) {
 	}
 }
 
+// stripBridgeEventIDFromEvent removes _bridgeEventID from an individual
+// event's metadata. For *a2a.Task events, also strips from the task's
+// history messages. For other event types (TaskStatusUpdateEvent, etc.),
+// strips from the event's own metadata and any embedded message.
+func stripBridgeEventIDFromEvent(ev a2a.Event) {
+	if ev == nil {
+		return
+	}
+	switch e := ev.(type) {
+	case *a2a.Task:
+		stripBridgeEventID(e)
+	default:
+		// Strip from the event's own metadata.
+		deleteBridgeMeta(e)
+	}
+}
+
 // taskEventToSDKResubscribeEvent converts a stored TaskEvent to an SDK event
 // for the durable subscribe stream. Unlike taskEventToSDKEvent (which uses
 // an ExecutorContext), this creates standalone events from the raw event data.
@@ -222,26 +239,64 @@ func taskEventToSDKResubscribeEvent(taskID a2a.TaskID, ev *state.TaskEvent) (a2a
 	}
 }
 
-// --- Delegate all other methods to the inner handler ---
+// --- Strip _bridgeEventID from all user-visible paths ---
+//
+// Internal _bridgeEventID metadata is used for cursor tracking between
+// processAndAppendEvent and PostgresTaskStore.Update. It must never appear
+// in any user-visible response: GetTask, ListTasks, CancelTask, SendMessage,
+// SendStreamingMessage, or SubscribeToTask (already handled above).
 
 func (h *DurableRequestHandler) GetTask(ctx context.Context, req *a2a.GetTaskRequest) (*a2a.Task, error) {
-	return h.inner.GetTask(ctx, req)
+	task, err := h.inner.GetTask(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	stripBridgeEventID(task)
+	return task, nil
 }
 
 func (h *DurableRequestHandler) ListTasks(ctx context.Context, req *a2a.ListTasksRequest) (*a2a.ListTasksResponse, error) {
-	return h.inner.ListTasks(ctx, req)
+	resp, err := h.inner.ListTasks(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if resp != nil {
+		for _, task := range resp.Tasks {
+			stripBridgeEventID(task)
+		}
+	}
+	return resp, nil
 }
 
 func (h *DurableRequestHandler) CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
-	return h.inner.CancelTask(ctx, req)
+	task, err := h.inner.CancelTask(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	stripBridgeEventID(task)
+	return task, nil
 }
 
 func (h *DurableRequestHandler) SendMessage(ctx context.Context, req *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
-	return h.inner.SendMessage(ctx, req)
+	result, err := h.inner.SendMessage(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	stripBridgeEventIDFromEvent(result)
+	return result, nil
 }
 
 func (h *DurableRequestHandler) SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
-	return h.inner.SendStreamingMessage(ctx, req)
+	return func(yield func(a2a.Event, error) bool) {
+		for ev, err := range h.inner.SendStreamingMessage(ctx, req) {
+			if ev != nil {
+				stripBridgeEventIDFromEvent(ev)
+			}
+			if !yield(ev, err) {
+				return
+			}
+		}
+	}
 }
 
 func (h *DurableRequestHandler) GetTaskPushConfig(ctx context.Context, req *a2a.GetTaskPushConfigRequest) (*a2a.PushConfig, error) {

@@ -987,92 +987,103 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 // correlateToTask determines the taskID for a broker message, using metadata
 // or falling back to DB lookup. The topic parameter is used for user/caller
 // validation (Constraint 1).
+//
+// When sdkTaskStore is set (standalone mode), the SDK store is authoritative:
+// no legacy a2a_tasks fallback is attempted. Legacy fallback is only used
+// when sdkTaskStore is nil (plugin mode).
 func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug, topic string, msg *messages.StructuredMessage) (string, error) {
-	// If the message carries a task correlation ID, verify ownership.
 	if taskID := msg.Metadata["a2aTaskId"]; taskID != "" {
-		// Path 1: bridge state store (plugin mode, a2a_tasks).
-		task, err := b.store.GetTask(ctx, taskID)
-		if err == nil && task != nil {
-			if task.AgentSlug != agentSlug {
-				b.log.Warn("dropping cross-agent a2aTaskId injection",
-					"task_agent", task.AgentSlug, "msg_agent", agentSlug, "task_id", taskID)
-				return "", fmt.Errorf("cross-agent injection for task %s", taskID)
+		return b.correlateWithMetadata(ctx, projectID, agentSlug, topic, taskID)
+	}
+	return b.correlateWithoutMetadata(ctx, projectID, agentSlug, topic)
+}
+
+// correlateWithMetadata handles broker messages that carry a2aTaskId.
+// When SDK store is authoritative, it is checked first; a legacy row cannot
+// bypass SDK caller/route validation.
+func (b *Bridge) correlateWithMetadata(ctx context.Context, projectID, agentSlug, topic, taskID string) (string, error) {
+	if b.sdkTaskStore != nil {
+		// Standalone mode: SDK store is authoritative.
+		sdkTask, callerUserID, sdkErr := b.sdkTaskStore.GetByIDAndAgent(ctx, taskID, projectID, agentSlug)
+		if sdkErr == nil && sdkTask != nil {
+			if err := b.validateTopicUser(topic, callerUserID, taskID); err != nil {
+				return "", err
 			}
 			return taskID, nil
 		}
-
-		// Path 2: DURABLE fallback to a2a_sdk_tasks (standalone mode).
-		// Validates project_id + agent_slug — rows with empty defaults never match.
-		if b.sdkTaskStore != nil {
-			sdkTask, callerUserID, sdkErr := b.sdkTaskStore.GetByIDAndAgent(ctx, taskID, projectID, agentSlug)
-			if sdkErr == nil && sdkTask != nil {
-				// Validate topic user matches stored caller (Constraint 1).
-				if topicUserID := extractUserIDFromTopic(topic); topicUserID != "" {
-					if callerUserID != "" && topicUserID != callerUserID {
-						b.log.Warn("dropping message: topic user mismatch",
-							"topic_user", topicUserID, "stored_caller", callerUserID, "task_id", taskID)
-						return "", fmt.Errorf("topic user mismatch for task %s", taskID)
-					}
-				}
-				return taskID, nil
-			}
-		}
-
-		// No durable match — fail closed. Local cache NEVER authorizes.
+		// SDK miss/error → fail closed. A stale or attacker-controlled
+		// legacy row must not bypass SDK validation.
+		b.log.Debug("SDK metadata correlation failed, fail closed",
+			"task_id", taskID, "project", projectID, "agent", agentSlug)
 		return "", fmt.Errorf("unknown task: %s", taskID)
 	}
 
-	// No a2aTaskId — correlate by project/agent.
-	// Local cache may nominate a candidate, but it NEVER authorizes alone.
-	// The candidate must be revalidated against the authoritative SDK store.
-	aKey := agentKey(projectID, agentSlug)
+	// Plugin mode (sdkTaskStore == nil): legacy store only.
+	task, err := b.store.GetTask(ctx, taskID)
+	if err == nil && task != nil {
+		if task.AgentSlug != agentSlug {
+			b.log.Warn("dropping cross-agent a2aTaskId injection",
+				"task_agent", task.AgentSlug, "msg_agent", agentSlug, "task_id", taskID)
+			return "", fmt.Errorf("cross-agent injection for task %s", taskID)
+		}
+		return taskID, nil
+	}
+	return "", fmt.Errorf("unknown task: %s", taskID)
+}
 
-	// Path A: Durable SDK store lookup (standalone mode).
-	// This is the authoritative path for SDK-only tasks.
+// correlateWithoutMetadata handles broker messages without a2aTaskId.
+// Uses durable SDK store lookup with ambiguity-safe uniqueness check.
+// Local cache may accelerate the lookup but NEVER authorizes alone.
+func (b *Bridge) correlateWithoutMetadata(ctx context.Context, projectID, agentSlug, topic string) (string, error) {
 	if b.sdkTaskStore != nil {
-		// Local cache may nominate a candidate for revalidation.
-		var candidate string
+		// Standalone mode: authoritative durable uniqueness check.
+		// Always call FindActiveSDKTaskForAgent first to enforce uniqueness.
+		// This fails closed on ambiguity (multiple active tasks) and on
+		// empty project/agent keys.
+		sdkTaskID, callerUserID, sdkErr := b.sdkTaskStore.FindActiveSDKTaskForAgent(ctx, projectID, agentSlug)
+		if sdkErr != nil {
+			b.log.Debug("SDK no-metadata correlation failed, fail closed",
+				"error", sdkErr, "project", projectID, "agent", agentSlug)
+			return "", fmt.Errorf("no active SDK tasks for agent %s in project %s: %w", agentSlug, projectID, sdkErr)
+		}
+
+		// Local cache can accelerate: if the cached candidate matches the
+		// unique durable result, we skip the topic user revalidation since
+		// FindActiveSDKTaskForAgent already confirmed uniqueness.
+		aKey := agentKey(projectID, agentSlug)
 		b.tasksMu.RLock()
+		var cachedMatch bool
 		if ids := b.agentTasks[aKey]; len(ids) > 0 {
-			candidate = ids[len(ids)-1]
+			cachedMatch = ids[len(ids)-1] == sdkTaskID
 		}
 		b.tasksMu.RUnlock()
 
-		if candidate != "" {
-			// Revalidate candidate against durable store.
-			sdkTask, callerUserID, sdkErr := b.sdkTaskStore.GetByIDAndAgent(ctx, candidate, projectID, agentSlug)
-			if sdkErr == nil && sdkTask != nil {
-				// Validate topic user.
-				if topicUserID := extractUserIDFromTopic(topic); topicUserID != "" {
-					if callerUserID != "" && topicUserID != callerUserID {
-						b.log.Warn("dropping message: topic user mismatch (no-metadata candidate)",
-							"topic_user", topicUserID, "stored_caller", callerUserID, "task_id", candidate)
-						return "", fmt.Errorf("topic user mismatch for task %s", candidate)
-					}
-				}
-				return candidate, nil
-			}
-			// Candidate not found in durable store — fall through to full lookup.
+		if cachedMatch {
+			b.log.Debug("no-metadata correlation: cache hit matches durable unique result",
+				"task_id", sdkTaskID, "project", projectID, "agent", agentSlug)
 		}
 
-		// No valid candidate — durable unambiguous lookup.
-		sdkTaskID, callerUserID, sdkErr := b.sdkTaskStore.FindActiveSDKTaskForAgent(ctx, projectID, agentSlug)
-		if sdkErr == nil && sdkTaskID != "" {
-			// Validate topic user.
-			if topicUserID := extractUserIDFromTopic(topic); topicUserID != "" {
-				if callerUserID != "" && topicUserID != callerUserID {
-					b.log.Warn("dropping message: topic user mismatch (no-metadata durable)",
-						"topic_user", topicUserID, "stored_caller", callerUserID, "task_id", sdkTaskID)
-					return "", fmt.Errorf("topic user mismatch for task %s", sdkTaskID)
-				}
-			}
-			return sdkTaskID, nil
+		// Validate topic user against stored caller.
+		if err := b.validateTopicUser(topic, callerUserID, sdkTaskID); err != nil {
+			return "", err
 		}
-		// Fall through to legacy a2a_tasks path for plugin-mode compatibility.
+		return sdkTaskID, nil
 	}
 
-	// Path B: Legacy bridge state store (plugin mode, a2a_tasks).
-	// Also serves as fallback when sdkTaskStore is nil.
+	// Plugin mode (sdkTaskStore == nil): legacy store only.
+	// Check local cache first (fast path).
+	aKey := agentKey(projectID, agentSlug)
+	b.tasksMu.RLock()
+	taskIDs := append([]string(nil), b.agentTasks[aKey]...)
+	b.tasksMu.RUnlock()
+
+	if len(taskIDs) > 0 {
+		b.log.Debug("correlating broker message by agent slug from local cache (plugin mode)",
+			"agent", agentSlug, "project", projectID, "active_tasks", len(taskIDs))
+		return taskIDs[len(taskIDs)-1], nil
+	}
+
+	// Slow path: query legacy DB.
 	task, err := b.store.FindActiveTaskForAgent(ctx, projectID, agentSlug)
 	if err != nil {
 		return "", fmt.Errorf("DB lookup failed: %w", err)
@@ -1084,6 +1095,21 @@ func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug, topi
 	b.log.Debug("correlating broker message by agent slug from legacy DB",
 		"agent", agentSlug, "project", projectID, "task_id", task.ID)
 	return task.ID, nil
+}
+
+// validateTopicUser checks that the topic's user matches the stored caller.
+// Returns nil if validation passes or is not applicable.
+func (b *Bridge) validateTopicUser(topic, callerUserID, taskID string) error {
+	topicUserID := extractUserIDFromTopic(topic)
+	if topicUserID == "" {
+		return nil
+	}
+	if callerUserID != "" && topicUserID != callerUserID {
+		b.log.Warn("dropping message: topic user mismatch",
+			"topic_user", topicUserID, "stored_caller", callerUserID, "task_id", taskID)
+		return fmt.Errorf("topic user mismatch for task %s", taskID)
+	}
+	return nil
 }
 
 // extractUserIDFromTopic extracts the user ID from a broker topic.
