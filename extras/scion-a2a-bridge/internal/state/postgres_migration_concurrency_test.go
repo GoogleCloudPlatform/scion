@@ -93,6 +93,7 @@ func TestConcurrentPostgresStateMigrations(t *testing.T) {
 	for err := range errs {
 		t.Errorf("concurrent migration: %v", err)
 	}
+	assertNoMigrationAdvisoryLocks(t, dsn, "state-migrate-goroutines")
 }
 
 func TestPostgresStateMigrationTwoProductionProcesses(t *testing.T) {
@@ -136,6 +137,7 @@ func TestPostgresStateMigrationTwoProductionProcesses(t *testing.T) {
 			t.Errorf("helper %d (pid %d): %v\n%s", index, h.cmd.Process.Pid, err, h.output.String())
 		}
 	}
+	assertNoMigrationAdvisoryLocks(t, dsn, "state-migrate-process")
 }
 
 func TestPostgresStateMigrationLockScopesByDatabaseAndSchema(t *testing.T) {
@@ -262,6 +264,7 @@ func TestPostgresStateMigrationFailureAndProcessCancellationReleaseLock(t *testi
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
+	assertNoMigrationAdvisoryLocks(t, dsn, "state-migrate-cleanup")
 }
 
 func TestPostgresStateMigrationExistingDataIdempotent(t *testing.T) {
@@ -324,4 +327,27 @@ func newMigrationSchemaDSN(t *testing.T, label, applicationName string) string {
 	dsnURL.RawQuery = query.Encode()
 	t.Logf("database=%s schema=%s search_path=%s application_name=%s", cfg.Database, schema, schema, applicationName)
 	return dsnURL.String()
+}
+
+func assertNoMigrationAdvisoryLocks(t *testing.T, dsn, applicationName string) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	var held int
+	if err := conn.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM pg_locks AS locks
+		JOIN pg_stat_activity AS activity ON activity.pid = locks.pid
+		WHERE locks.locktype = 'advisory'
+		  AND locks.granted
+		  AND activity.application_name = $1`, applicationName).Scan(&held); err != nil {
+		t.Fatal(err)
+	}
+	if held != 0 {
+		t.Fatalf("application %q retains %d advisory locks", applicationName, held)
+	}
 }
