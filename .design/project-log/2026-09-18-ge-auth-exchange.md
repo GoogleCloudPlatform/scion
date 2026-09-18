@@ -17,11 +17,14 @@ for short-lived Hub user access tokens.
 
 | SHA | Description |
 |-----|-------------|
-| `57d066d` | feat(hub): GE Google credential exchange endpoint (#1616) |
-| `752a4f6` | feat(bridge): GE Google credential exchange auth scheme (#1617) |
-| `dadf9f0` | docs: project log entry for GE auth exchange |
-| `81de652` | feat(hub): durable external identity store + validator security fixes (#1616) |
-| `54a5dae` | feat(bridge): v0.3 REST protocol compatibility via SDK a2acompat (#1617) |
+| `1973a64` | feat(hub): GE Google credential exchange endpoint (#1616) |
+| `7885703` | feat(bridge): GE Google credential exchange auth scheme (#1617) |
+| `db6350e` | docs: project log entry for GE auth exchange |
+| `bf69c9e` | feat(hub): durable external identity store + validator security fixes (#1616) |
+| `59de2dc` | feat(bridge): v0.3 REST protocol compatibility via SDK a2acompat (#1617) |
+| `3354ea8` | docs: update project log with durable store, validator fixes, v0.3 compat |
+| `01d3557` | fix(hub,bridge): resolve all critical/required review findings (#1616, #1617) |
+| `b0dc610` | fix: authzop catalog + GE JSON-RPC wire compatibility tests (#1616, #1617) |
 
 ## Hub — `POST /api/v1/auth/integrations/google/exchange` (#1616)
 
@@ -38,7 +41,11 @@ for short-lived Hub user access tokens.
 - `pkg/hub/ge_exchange.go` — Exchange service, external identity binding,
   user resolution/provisioning, conflict-safe concurrent binding resolution,
   and HTTP handler.
-- `pkg/hub/ge_exchange_test.go` — 34 tests covering all acceptance cases.
+- `pkg/hub/google_credential_validator_test.go` — 18 production validator
+  tests with pinned fake transport (`googleURLRewriter` RoundTripper).
+- `pkg/hub/ge_exchange_test.go` — 44+ tests covering all acceptance cases
+  plus JWT exp regression, provisioning auth, conflict resolution, and
+  orphan cleanup.
 - `pkg/ent/schema/externalidentity.go` — ExternalIdentity ent schema with
   unique composite index on (provider, issuer, subject).
 - `pkg/store/entadapter/externalidentity_store.go` — Ent-backed durable
@@ -48,8 +55,10 @@ for short-lived Hub user access tokens.
 ### Files modified
 - `pkg/hub/server.go` — Config struct, service init, route registration.
 - `pkg/hub/route_metadata.go` — RoutePublic classification entry.
+- `pkg/hub/usertoken.go` — Added `GenerateAccessTokenWithTTL` method.
 - `pkg/hub/authzop/catalog.go` — Public endpoint exemption + mutation
-  exemptions for binding/provisioning operations.
+  exemptions: 2×UpdateUser (email + profile), DeleteUser (orphan cleanup),
+  CreateUser (provisioning).
 - `pkg/ent/schema/user.go` — Added `external_identities` reverse edge.
 - `pkg/store/store.go` — Added `ExternalIdentityStore` interface and model.
 - `pkg/store/entadapter/composite.go` — Added ExternalIdentityStore.
@@ -83,18 +92,25 @@ for short-lived Hub user access tokens.
 
 ### Files added
 - `extras/scion-a2a-bridge/internal/bridge/ge_exchange_validator.go` —
-  Bounded cache with singleflight coalescing, config version invalidation.
+  Bounded cache with singleflight DoChan + `context.WithoutCancel`,
+  config version invalidation.
 - `extras/scion-a2a-bridge/internal/bridge/ge_exchange_validator_test.go` —
-  34 tests covering all acceptance cases.
-- `extras/scion-a2a-bridge/internal/bridge/v0_compat_test.go` — 9 HTTP-level
-  tests for v0.3 REST compatibility.
+  35+ tests covering all acceptance cases including singleflight caller
+  cancellation isolation.
+- `extras/scion-a2a-bridge/internal/bridge/v0_compat_test.go` — 20 tests:
+  9 v0.3 HTTP-level + 11 GE JSON-RPC wire compatibility (message/send,
+  message/stream, tasks/get/cancel/resubscribe, discovery aliases,
+  multi-turn cursor, v0.3 REST body forwarding).
 
 ### Files modified
 - `extras/scion-a2a-bridge/internal/bridge/config.go` — `GEExchangeConfig`
   struct with `CredentialType` and `CacheTTL` fields.
+- `extras/scion-a2a-bridge/internal/bridge/adminoverlay.go` — Added
+  `geGoogle` hot-reload overlay with config version tracking.
 - `extras/scion-a2a-bridge/internal/bridge/server.go` — `geGoogle` scheme
   in validation, initialization, middleware, logging; v0.3 REST catch-all
-  routes; `handleV0REST` prefix-stripping handler.
+  routes; `handleV0REST` prefix-stripping handler; `SetSDKHandler` for
+  test-only SDK handler override.
 - `extras/scion-a2a-bridge/internal/bridge/bridge.go` — Dual-format agent
   card with v1.0 JSONRPC + v0.3 REST interfaces and legacy flat fields.
 - `extras/scion-a2a-bridge/cmd/scion-a2a-bridge/main.go` — v0.3 REST
@@ -125,7 +141,8 @@ for short-lived Hub user access tokens.
 The bridge cache creates a bounded revocation window:
 
 - **Maximum window:** `min(configured TTL, Hub token expiry, upstream
-  Google credential expiry)`. Default configured TTL is 60s, max 300s.
+  Google credential expiry)`. Default configured TTL is 60s; Hub default
+  token TTL is 60s; max configurable TTL is 5min.
 - **Revocation propagation:** When a Google credential is revoked upstream,
   the bridge continues to accept the cached identity until the cache entry
   expires. Deliberate trade-off for performance.
@@ -147,22 +164,37 @@ Bridge `go.mod`:
 
 Hub `go.mod`: No changes.
 
-## Review finding disposition (review at 8047f73)
+## Review finding disposition (review-auth-1 at 8047f73, fixed in 01d3557 + b0dc610)
 
-| # | Severity | Finding | Resolution | Evidence |
-|---|----------|---------|------------|----------|
-| 1 | Critical | JWT exp not cryptographically capped by upstream expiry | **Resolved**: Added `GenerateAccessTokenWithTTL` to `UserTokenService`, wired in `ge_exchange.go` with `min(configured TTL, upstream remaining)` | `TestGEExchange_JWTExpCryptographicallyCapped` — decodes actual minted JWT, validates cryptographic exp ≤ upstream expiry |
-| 2 | Critical | Auto-provisioning bypasses Hub registration policy | **Resolved**: Added `UserAuthChecker` function type, wired `s.isUserAuthorized` in `server.go`, fail-closed default when nil | `TestGEExchange_ProvisioningRejectedByPolicy`, `TestGEExchange_NilAuthCheckerFailsClosed`, `TestGEExchange_ProvisioningAuth_*` (4 tests) |
-| 3 | Required | `resolveAfterConflict` silently adopts mismatched user | **Resolved**: Added `expectedUserID` parameter; validates winner matches expected user ID, fails closed with `errBindingConflict` if mismatch. Orphan user cleanup on provisioning conflict. | `TestGEExchange_OrphanCleanup_OnProvisioningConflict`, `TestGEExchange_ConcurrentFirstLinkage` |
-| 4 | Required | No production validator tests (only interface mock) | **Resolved**: Created `google_credential_validator_test.go` with 18 tests using `httptest.Server` + real `NewGoogleCredentialValidator` through pinned fake transport. Tests RS256 signature verification, JWKS fetch/rotation, CheckRedirect rejection, tokeninfo/userinfo cross-check. | `TestProductionValidator_IDToken_*` (11 tests), `TestProductionValidator_AccessToken_*` (6 tests), `TestProductionValidator_JWKS_*` (1 test) |
-| 5 | Required | Missing exp claim not tested in production validator | **Resolved**: `TestProductionValidator_IDToken_MissingExp` signs a real RS256 JWT without exp, verifies rejection through production code path | `TestProductionValidator_IDToken_MissingExp` |
-| 6 | Required | Tokeninfo schema — pin and test azp/aud (not issued_to/audience) | **Resolved**: `TestProductionValidator_TokenInfoSchema_FieldTypes` with 4 sub-tests: azp authoritative, issued_to fails closed, flexBool string/bool encoding. Response uses `json:"azp"` and `json:"aud"` matching `https://oauth2.googleapis.com/tokeninfo`. | `TestProductionValidator_TokenInfoSchema_FieldTypes/*` |
-| 7 | Required | Singleflight context leak — first caller's ctx cancellation aborts all waiters | **Resolved**: Changed `sfg.Do` → `sfg.DoChan` + `context.WithoutCancel`, each waiter selects on its own `ctx.Done()` independently | `TestGEExchangeValidator_SingleflightContextIsolation` |
-| 10 | Required | `AuthValidators` missing `GEExchangeValidator` for hot-reload | **Resolved**: Added `GEExchangeValidator *GEExchangeValidator` field to `AuthValidators` struct, wired in `BuildAuthValidators` and auth middleware snapshot path | `adminoverlay.go`, `server.go` snapshot fallback |
+### Critical findings
+
+| # | Finding | Resolution | Evidence |
+|---|---------|------------|----------|
+| C1 | JWT exp not capped by min(configured, upstream remaining) | **Resolved**: `GenerateAccessTokenWithTTL` caps at `min(DefaultGETokenTTL, upstream remaining)`; `DefaultGETokenTTL = 60s`, `MaxGETokenTTL = 5min` | `TestGEExchange_JWTExpCryptographicRegression`, `TestGEExchange_JWTExpRegression_ConfiguredTTLWins`, `TestGEExchange_TokenExpiryCappedByUpstream` |
+| C2 | Auto-provisioning bypasses Hub registration policy | **Resolved**: `provisionNewUser` calls `s.authChecker(ctx, email)` before `CreateUser`; `server.go` wires `srv.isUserAuthorized` | `TestGEExchange_ProvisioningAuth_DomainRestricted`, `_DomainAllowed`, `_InviteOnly_Rejected`, `_AdminBypass`, `_NilAuthChecker_FailsClosed` |
+
+### Required findings
+
+| # | Finding | Resolution | Evidence |
+|---|---------|------------|----------|
+| R3 | `resolveAfterConflict` silently adopts mismatched user; no orphan cleanup | **Resolved**: `expectedUserID` validation + `DeleteUser` orphan cleanup; authzop catalog updated with 2×UpdateUser + DeleteUser | `TestGEExchange_ConflictResolution_ExpectedUserMismatch`, `TestGEExchange_OrphanCleanup_OnProvisioningConflict` |
+| R4 | No production validator tests | **Resolved**: 18 tests with `googleURLRewriter` RoundTripper intercepting production Google URLs → httptest servers | `TestProductionValidator_IDToken_*` (7), `TestProductionValidator_AccessToken_*` (6), `TestProductionValidator_IDToken_JWKSForceRefresh`, etc. |
+| R5 | Missing exp regression test | **Resolved**: Cryptographic JWT validation — parses minted JWT with go-jose, asserts `jwt_exp == response.expires_at ≤ upstream_expiry` | `TestGEExchange_JWTExpCryptographicRegression`, `TestGEExchange_JWTExpRegression_ConfiguredTTLWins` |
+| R6 | Tokeninfo schema — `issued_to`/`audience` vs `azp`/`aud` | **Resolved**: `googleTokenInfoResponse` uses `json:"azp"` and `json:"aud"` matching `https://oauth2.googleapis.com/tokeninfo`; production validator tests pin exact schema | `TestProductionValidator_AccessToken_TokenInfoEndpoint` |
+| R7 | Singleflight context leak — `Do` → `DoChan` | **Resolved**: `DoChan` + `context.WithoutCancel`; each waiter selects on its own ctx | `TestGEExchangeValidator_Singleflight_CallerCancellation` |
+| R8 | No GE JSON-RPC wire compatibility tests | **Resolved**: 11 tests covering message/send, message/stream, tasks/get/cancel/resubscribe, discovery aliases, multi-turn cursor, v0.3 REST | `TestJSONRPC_WireFormat_*` (5), `TestJSONRPC_DiscoveryAlias_*` (2), `TestJSONRPC_MultiTurnCursor_*` (1), `TestV0REST_WireFormat_*` (3) |
+
+### Additional
+
+| Finding | Resolution | Evidence |
+|---------|------------|----------|
+| geGoogle hot-reload overlay | **Resolved**: `adminoverlay.go` geGoogle overlay with config version tracking | `01d3557` |
+| Cache TTL reconciliation (~60s contract) | **Resolved**: `DefaultGETokenTTL = 60s`, `MaxGETokenTTL = 5min`, bridge `defaultGECacheTTL = 60s` | `01d3557`, `b0dc610` |
 
 ## Test evidence
 
-- Hub: 34 GE exchange tests + 18 production validator tests + 13 ent store tests, all passing
-- Bridge: 35 GE validator tests (incl. singleflight isolation) + 9 v0.3 compat tests, all passing
-- All broader bridge tests pass (`go test ./internal/...`)
+- Hub: 44+ GE exchange tests + 18 production validator tests + 13 ent store tests, all passing
+- Bridge: 35+ GE validator tests (incl. singleflight isolation) + 20 v0.3/wire compat tests, all passing
+- authzop `TestMutationClassificationBidirectional` passes with updated catalog entries
+- All broader bridge tests pass (`go test ./internal/bridge/`)
 - Both modules build cleanly (`go build ./...`)
