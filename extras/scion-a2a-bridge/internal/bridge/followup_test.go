@@ -163,6 +163,7 @@ func (m *mockHubClient) Invites() hubclient.InviteService                       
 func (m *mockHubClient) Messaging() hubclient.MessagingService                        { return nil }
 func (m *mockHubClient) Skills() hubclient.SkillService                               { return nil }
 func (m *mockHubClient) SkillRegistries() hubclient.SkillRegistryService              { return nil }
+func (m *mockHubClient) Messaging() hubclient.MessagingService                        { return nil }
 func (m *mockHubClient) ProjectInjectedSkills(projectID string) hubclient.InjectedSkillsService {
 	return nil
 }

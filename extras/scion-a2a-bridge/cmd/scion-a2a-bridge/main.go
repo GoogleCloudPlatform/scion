@@ -327,7 +327,19 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	brokerServer := bridge.NewBrokerServer(nil, log.With("component", "broker"), ctx)
 	grpcBrokerServer := grpcbroker.NewServer(brokerServer)
 
-	grpcServer := grpc.NewServer()
+	// Resolve gRPC server auth configuration from environment.
+	grpcAuthCfg := resolveGRPCServerAuth(muxPorts, log)
+	grpcServerOpts, err := grpcbroker.BuildStandaloneServerOptions(grpcAuthCfg)
+	if err != nil {
+		log.Error("failed to build gRPC server options", "error", err)
+		os.Exit(1)
+	}
+
+	// When muxPorts is active (Cloud Run h2c), native TLS credentials must
+	// NOT be applied — Cloud Run terminates TLS at the platform level.
+	// The grpc.Creds option only applies to the dedicated gRPC listener.
+	// Auth interceptors (from grpcServerOpts) apply to both paths.
+	grpcServer := grpc.NewServer(grpcServerOpts...)
 	brokerv1.RegisterBrokerServiceServer(grpcServer, grpcBrokerServer)
 	healthServer := health.NewServer()
 	healthpb.RegisterHealthServer(grpcServer, healthServer)
@@ -595,6 +607,83 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	notifier.Stop()
 	b.Shutdown()
 	log.Info("scion-a2a-bridge stopped (standalone)")
+}
+
+// resolveGRPCServerAuth builds a StandaloneServerConfig from environment
+// variables and validates it at startup. When muxPorts is true (Cloud Run h2c),
+// TLS fields are ignored because Cloud Run terminates TLS at the platform level
+// — the grpcServer will use h2c (cleartext HTTP/2) via ServeHTTP, and native
+// gRPC TLS credentials are incompatible with that path.
+//
+// Environment variables:
+//
+//	GRPC_AUTH_MODE       - google_id_token | local_dev (default: empty)
+//	GRPC_AUTH_AUDIENCE   - expected audience claim
+//	GRPC_AUTH_SUBJECTS   - comma-separated authorized subject emails
+//	GRPC_TLS_CERT        - path to server TLS certificate (Kubernetes only)
+//	GRPC_TLS_KEY         - path to server TLS key (Kubernetes only)
+//	GRPC_TLS_CLIENT_CA   - path to client CA for mTLS (Kubernetes only)
+func resolveGRPCServerAuth(muxPorts bool, log *slog.Logger) grpcbroker.StandaloneServerConfig {
+	cfg := grpcbroker.StandaloneServerConfig{
+		AuthMode: grpcbroker.StandaloneAuthMode(os.Getenv("GRPC_AUTH_MODE")),
+		Audience: os.Getenv("GRPC_AUTH_AUDIENCE"),
+		Logger:   log,
+	}
+
+	if subjects := os.Getenv("GRPC_AUTH_SUBJECTS"); subjects != "" {
+		cfg.AuthorizedSubjects = strings.Split(subjects, ",")
+		for i, s := range cfg.AuthorizedSubjects {
+			cfg.AuthorizedSubjects[i] = strings.TrimSpace(s)
+		}
+	}
+
+	// TLS is only relevant for the dedicated gRPC listener (Kubernetes).
+	// When muxPorts is true (Cloud Run h2c), TLS is terminated by the
+	// platform and the grpcServer serves cleartext HTTP/2 — native gRPC
+	// TLS credentials must NOT be applied.
+	if !muxPorts {
+		cfg.TLSCertFile = os.Getenv("GRPC_TLS_CERT")
+		cfg.TLSKeyFile = os.Getenv("GRPC_TLS_KEY")
+		cfg.TLSClientCAFile = os.Getenv("GRPC_TLS_CLIENT_CA")
+	} else if os.Getenv("GRPC_TLS_CERT") != "" {
+		log.Warn("GRPC_TLS_CERT is ignored in mux-ports mode (Cloud Run h2c); " +
+			"TLS is terminated by the platform")
+	}
+
+	// Set listen address for fail-closed validation.
+	if !muxPorts {
+		grpcPort := "50051"
+		if p := os.Getenv("GRPC_PORT"); p != "" {
+			grpcPort = p
+		}
+		cfg.ListenAddress = ":" + grpcPort
+	} else {
+		// In mux mode, the listen address is the HTTP port — a wildcard
+		// bind (non-local), so auth is required unless explicitly set to
+		// local_dev. Cloud Run provides the PORT env.
+		listenAddr := ":8080"
+		if port := os.Getenv("PORT"); port != "" {
+			listenAddr = ":" + port
+		}
+		cfg.ListenAddress = listenAddr
+	}
+
+	// Validate config at startup — fail closed on invalid config.
+	if err := grpcbroker.ValidateStandaloneServerConfig(cfg); err != nil {
+		log.Error("gRPC server auth config validation failed", "error", err)
+		os.Exit(1)
+	}
+
+	log.Info("gRPC server auth configured",
+		"auth_mode", cfg.AuthMode,
+		"audience", cfg.Audience,
+		"authorized_subjects", len(cfg.AuthorizedSubjects),
+		"tls_cert", cfg.TLSCertFile != "",
+		"tls_client_ca", cfg.TLSClientCAFile != "",
+		"mux_ports", muxPorts,
+	)
+
+	return cfg
 }
 
 // resolveTransportAuth resolves the transport-layer OIDC token source and

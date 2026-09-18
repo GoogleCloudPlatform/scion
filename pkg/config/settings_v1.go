@@ -504,6 +504,17 @@ type V1PluginEntry struct {
 	TLSCAFile string `json:"tls_ca_file,omitempty" yaml:"tls_ca_file,omitempty" koanf:"tls_ca_file"`
 	// TLSSkipVerify disables TLS certificate verification (for development).
 	TLSSkipVerify bool `json:"tls_skip_verify,omitempty" yaml:"tls_skip_verify,omitempty" koanf:"tls_skip_verify"`
+
+	// AuthType selects the per-RPC authentication mode for gRPC connections.
+	// Supported values: "" or "none" (no auth), "google_id_token" (Google OIDC
+	// ID token via metadata server or ADC). Required for authenticated remote
+	// gRPC transport (Cloud Run, Kubernetes).
+	AuthType string `json:"auth_type,omitempty" yaml:"auth_type,omitempty" koanf:"auth_type"`
+
+	// AuthAudience is the target audience for ID tokens when AuthType is
+	// "google_id_token". For Cloud Run, this is the service URL. For
+	// Kubernetes, this is the bridge's expected audience claim.
+	AuthAudience string `json:"auth_audience,omitempty" yaml:"auth_audience,omitempty" koanf:"auth_audience"`
 }
 
 // V1ServerHubConfig holds the Hub API server settings (when running scion-server).
