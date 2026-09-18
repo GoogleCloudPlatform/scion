@@ -467,6 +467,22 @@ func serveHABridgeProcess(t *testing.T, address, replica string) {
 			grpcServer.ServeHTTP(w, r)
 			return
 		}
+		if r.URL.Path == "/__test/janitor-cycle" {
+			ctx := r.Context()
+			reaped, err := sdkStore.ReapStaleTasks(ctx, 2*time.Second)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			b.RunSweep(ctx)
+			writeTestJSON(w, http.StatusOK, map[string]any{
+				"status":      "ok",
+				"replica":     replica,
+				"reapedCount": len(reaped),
+				"timestamp":   time.Now().UTC().Format(time.RFC3339Nano),
+			})
+			return
+		}
 		httpHandler.ServeHTTP(w, r)
 	}), &http2.Server{})
 	serveHTTPProcess(t, address, muxed)

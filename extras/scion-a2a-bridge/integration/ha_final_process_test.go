@@ -583,7 +583,32 @@ func TestCrashLeaseBoundary(t *testing.T) {
 	if !bytes.Contains(terminal, []byte("TASK_STATE_FAILED")) {
 		t.Fatalf("other replica did not observe durable failed terminal event: %s", terminal)
 	}
-	time.Sleep(300 * time.Millisecond)
+	// Deterministically synchronize via post-terminal janitor/poll cycle across both replicas.
+	// This proves a full maintenance/janitor pass has completed post-terminal before asserting
+	// that no automatic replay was dispatched to the Hub.
+	type janitorResult struct {
+		Status      string `json:"status"`
+		Replica     string `json:"replica"`
+		ReapedCount int    `json:"reapedCount"`
+		Timestamp   string `json:"timestamp"`
+	}
+	janitorA := getJSON[janitorResult](t, h.bridgeA.URL()+"/__test/janitor-cycle")
+	if janitorA.Status != "ok" {
+		t.Fatalf("bridge A janitor cycle failed: %+v", janitorA)
+	}
+	janitorB := getJSON[janitorResult](t, h.bridgeB.URL()+"/__test/janitor-cycle")
+	if janitorB.Status != "ok" {
+		t.Fatalf("bridge B janitor cycle failed: %+v", janitorB)
+	}
+	// Regression assertion making synchronization causal: the post-terminal janitor pass
+	// must observe zero newly reaped active tasks (the crashed task was already terminal).
+	if janitorA.ReapedCount != 0 {
+		t.Fatalf("post-terminal janitor on bridge A reaped %d tasks, want 0", janitorA.ReapedCount)
+	}
+	if janitorB.ReapedCount != 0 {
+		t.Fatalf("post-terminal janitor on bridge B reaped %d tasks, want 0", janitorB.ReapedCount)
+	}
+	// Verify that completing the janitor cycles caused zero additional messages to the Hub.
 	if gotStats := getJSON[hubProcessStats](t, h.hub.URL()+"/__test/stats"); gotStats.Messages != 1 {
 		t.Fatalf("crash triggered automatic Hub replay: messages=%d", gotStats.Messages)
 	}
