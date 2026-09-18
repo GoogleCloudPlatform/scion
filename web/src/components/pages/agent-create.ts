@@ -91,6 +91,8 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private autoExposePortsEnabled = false;
   @state() private hubDefaultRuntimeBroker = '';
   @state() private hubDefaultHarnessConfig = '';
+  @state() private hubDefaultTemplate = '';
+  @state() private hubDefaultModel = '';
   @state() private autoExposePortsMode = 'allowlist';
   @state() private autoExposePortsList = '';
   @state() private autoExposePortsInterval = '3s';
@@ -445,11 +447,15 @@ export class ScionPageAgentCreate extends LitElement {
           autoExposePortsEnabled?: boolean;
           defaultRuntimeBroker?: string;
           defaultHarnessConfig?: string;
+          defaultTemplate?: string;
+          defaultModel?: string;
         };
         this.telemetryEnabled = data.telemetryEnabled ?? false;
         this.autoExposePortsEnabled = data.autoExposePortsEnabled ?? false;
         this.hubDefaultRuntimeBroker = data.defaultRuntimeBroker ?? '';
         this.hubDefaultHarnessConfig = data.defaultHarnessConfig ?? '';
+        this.hubDefaultTemplate = data.defaultTemplate ?? '';
+        this.hubDefaultModel = data.defaultModel ?? '';
       }
 
       if (harnessConfigsRes.ok) {
@@ -508,13 +514,16 @@ export class ScionPageAgentCreate extends LitElement {
     this.customModelId = '';
 
     const settings = await this.fetchProjectSettings(this.projectId);
-    if (!settings) return;
 
-    if (settings.defaultMaxTurns) this.maxTurns = settings.defaultMaxTurns;
-    if (settings.defaultMaxModelCalls) this.maxModelCalls = settings.defaultMaxModelCalls;
-    if (settings.defaultMaxDuration) this.maxDuration = settings.defaultMaxDuration;
-    if (settings.defaultModel) {
-      const derived = this.deriveModelSelection(settings.defaultModel);
+    if (settings) {
+      if (settings.defaultMaxTurns) this.maxTurns = settings.defaultMaxTurns;
+      if (settings.defaultMaxModelCalls) this.maxModelCalls = settings.defaultMaxModelCalls;
+      if (settings.defaultMaxDuration) this.maxDuration = settings.defaultMaxDuration;
+    }
+
+    const effectiveModel = settings?.defaultModel || this.hubDefaultModel;
+    if (effectiveModel) {
+      const derived = this.deriveModelSelection(effectiveModel);
       this.modelSelection = derived.selection;
       this.customModelId = derived.customId;
     }
@@ -608,7 +617,7 @@ export class ScionPageAgentCreate extends LitElement {
     const visible = this.filteredTemplates;
 
     const settings = this.projectId ? await this.fetchProjectSettings(this.projectId) : null;
-    const harnessDefault = settings?.defaultHarnessConfig || this.hubDefaultHarnessConfig || 'antigravity';
+    const harnessDefault = settings?.defaultHarnessConfig || this.hubDefaultHarnessConfig || 'claude';
 
     const harnessFor = (t: { defaultHarnessConfig?: string; harness?: string }) =>
       t.defaultHarnessConfig || t.harness || harnessDefault;
@@ -621,6 +630,18 @@ export class ScionPageAgentCreate extends LitElement {
       if (match) {
         this.templateId = match.id;
         this.setHarnessFromValue(harnessFor(match));
+        templateResolved = true;
+      }
+    }
+
+    // Hub-level default template fallback: try before the generic 'default' slug.
+    if (!templateResolved && this.hubDefaultTemplate) {
+      const hubMatch = visible.find(
+        (t) => t.name === this.hubDefaultTemplate || t.slug === this.hubDefaultTemplate
+      );
+      if (hubMatch) {
+        this.templateId = hubMatch.id;
+        this.setHarnessFromValue(harnessFor(hubMatch));
         templateResolved = true;
       }
     }
