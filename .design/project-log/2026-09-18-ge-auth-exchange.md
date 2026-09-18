@@ -3,7 +3,7 @@
 **Date:** 2026-09-18
 **Branch:** `scion/dev-ge-auth`
 **Issues:** #1616 (Hub), #1617 (Bridge)
-**Base:** `b2856682fbd2ed43588c759cfb8e54e90556becf`
+**Base:** `346b1f74ceaf541b2a8838c7b14b6a68ec73baa3` (rebased onto origin/main — conflict-free, zero file overlap)
 
 ## Summary
 
@@ -220,15 +220,14 @@ Hub `go.mod`: No changes.
 | H2-O2 | Dead remaining-lifetime branch | **Resolved**: strict `remaining <= 0` check | `TestProductionValidator_IDToken_ExpiredWithinSkew`, `_PositiveRemaining`, `_LongRemaining` |
 | H2-O3 | User deletion cascade | **Resolved**: `entsql.OnDelete(entsql.Cascade)` annotation | `TestExternalIdentityStore_UserDeleteCascade` |
 
-## Test evidence (round 3: `0695f75`)
+## Test evidence (round 3 rebase: `deee990`)
 
-- Hub: 44+ GE exchange tests + 22 production validator tests (incl. flexInt64) + 14 ent store tests (incl. cascade), all passing
-- Bridge: 35+ GE validator tests (incl. LRU, singleflight) + 35+ v0/wire/integration tests, all passing
+- Freshness rebase onto `origin/main` `346b1f7` — conflict-free, zero file overlap, no semantic conflict resolution
+- Hub: 44+ GE exchange tests + 22 production validator tests (incl. flexInt64) + 14 ent store tests (incl. cascade), all passing post-rebase
+- Bridge: full suite passes (34.8s), race detector clean (35.9s)
 - Snapshot middleware: 2 tests prove transport auth flows through `BuildSnapshot → BuildAuthValidators → GEExchangeValidator` via `Server.Handler()` with non-nil snapshot (initial + hot-reload)
 - Dispatch hard assertions: `TestGEExchange_ExecutorPath_Regression` and `TestJSONRPC_RealHandler_MessageSend` use `t.Fatal` to verify Hub received dispatched messages (not timeout-as-success)
 - SDK v2 wire format: all payloads use `messageId`, `ROLE_USER`, `{"text": "..."}` part format
-- Race detector: all bridge tests pass with `-race`
-- Diff hygiene: `git diff --check` clean
-- authzop `TestMutationClassificationBidirectional` passes with updated catalog entries
+- Build/vet/diff-check all clean
 - All broader bridge tests pass (`go test ./internal/bridge/`)
 - Both modules build cleanly (`go build ./...`, `go vet ./...`)
