@@ -91,6 +91,48 @@ func NewPostgresTaskStoreWithDB(db *sql.DB) (*PostgresTaskStore, error) {
 // Update to advance last_event_cursor per-event (Constraint 4).
 const bridgeEventIDKey = "_bridgeEventID"
 
+// sdkTerminalStates are the canonical SDK task states stored in JSONB
+// payload. All SQL predicates that distinguish active from terminal tasks
+// MUST use these exact uppercase strings — they match the SDK's
+// TaskState.String() output persisted by json.Marshal.
+var sdkTerminalStates = []string{
+	"TASK_STATE_COMPLETED",
+	"TASK_STATE_FAILED",
+	"TASK_STATE_CANCELED",
+	"TASK_STATE_REJECTED",
+}
+
+// sdkTerminalStatesSQL returns a comma-separated, single-quoted list for
+// use in SQL IN/NOT IN clauses: ('TASK_STATE_COMPLETED','TASK_STATE_FAILED',...).
+func sdkTerminalStatesSQL() string {
+	quoted := make([]string, len(sdkTerminalStates))
+	for i, s := range sdkTerminalStates {
+		quoted[i] = "'" + s + "'"
+	}
+	return strings.Join(quoted, ",")
+}
+
+// legacyTerminalStates are the lowercase values written by pre-migration
+// code or migration terminalization. They must also be recognized as
+// terminal by active-task queries and retention purge.
+var legacyTerminalStates = []string{
+	"completed",
+	"canceled",
+	"failed",
+	"rejected",
+}
+
+// allTerminalStatesSQL returns a SQL-safe list including both canonical
+// uppercase and legacy lowercase terminal states.
+func allTerminalStatesSQL() string {
+	all := append(append([]string{}, sdkTerminalStates...), legacyTerminalStates...)
+	quoted := make([]string, len(all))
+	for i, s := range all {
+		quoted[i] = "'" + s + "'"
+	}
+	return strings.Join(quoted, ",")
+}
+
 // Close closes the underlying connection pool only if this store owns it.
 // When the pool is shared (created via NewPostgresTaskStoreWithDB), Close
 // is a no-op — the pool owner is responsible for closing it.
@@ -178,11 +220,11 @@ func (s *PostgresTaskStore) FindActiveSDKTaskForAgent(ctx context.Context, proje
 		return "", "", fmt.Errorf("empty correlation key: %w", a2a.ErrTaskNotFound)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, caller_user_id FROM a2a_sdk_tasks
+		fmt.Sprintf(`SELECT id, caller_user_id FROM a2a_sdk_tasks
 		 WHERE project_id = $1 AND agent_slug = $2
-		   AND payload->'status'->>'state' NOT IN ('completed', 'canceled', 'failed', 'rejected')
+		   AND payload->'status'->>'state' NOT IN (%s)
 		 ORDER BY created_at DESC
-		 LIMIT 2`,
+		 LIMIT 2`, allTerminalStatesSQL()),
 		projectID, agentSlug,
 	)
 	if err != nil {
@@ -258,9 +300,10 @@ func (s *PostgresTaskStore) migrate() error {
 		`ALTER TABLE a2a_sdk_tasks ADD COLUMN IF NOT EXISTS last_event_cursor BIGINT NOT NULL DEFAULT 0`,
 		// Constraint 7: Terminalize pre-migration rows with empty correlation columns.
 		// Fail closed — rows with empty project_id/agent_slug can never be authorized.
-		`UPDATE a2a_sdk_tasks
+		// Uses allTerminalStatesSQL to exclude both canonical and legacy terminal states.
+		fmt.Sprintf(`UPDATE a2a_sdk_tasks
 		 SET payload = jsonb_set(
-		         jsonb_set(payload, '{status,state}', '"failed"'::jsonb),
+		         jsonb_set(payload, '{status,state}', '"TASK_STATE_FAILED"'::jsonb),
 		         '{status,message}',
 		         '{"role":"agent","parts":[{"text":"Terminalized during schema migration"}]}'::jsonb
 		     ),
@@ -268,11 +311,21 @@ func (s *PostgresTaskStore) migrate() error {
 		     exec_heartbeat = NULL,
 		     version = version + 1
 		 WHERE project_id = '' AND agent_slug = ''
-		   AND payload->'status'->>'state' NOT IN ('completed', 'canceled', 'failed')`,
-		// Partial index for cross-replica correlation lookups.
-		`CREATE INDEX IF NOT EXISTS idx_a2a_sdk_tasks_agent
+		   AND payload->'status'->>'state' NOT IN (%s)`, allTerminalStatesSQL()),
+		// Normalize legacy lowercase terminal states to canonical uppercase.
+		// Safe to run repeatedly — WHERE clause only matches lowercase values.
+		`UPDATE a2a_sdk_tasks
+		 SET payload = jsonb_set(payload, '{status,state}', '"TASK_STATE_FAILED"'::jsonb),
+		     version = version + 1
+		 WHERE payload->'status'->>'state' IN ('completed', 'canceled', 'failed', 'rejected')`,
+		// Drop the old partial index (which used wrong lowercase predicates)
+		// and recreate with canonical uppercase values. Idempotent: the DROP
+		// is a no-op if the index doesn't exist, and CREATE IF NOT EXISTS
+		// handles the already-correct case.
+		`DROP INDEX IF EXISTS idx_a2a_sdk_tasks_agent`,
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_a2a_sdk_tasks_agent
 		     ON a2a_sdk_tasks(project_id, agent_slug)
-		     WHERE payload->'status'->>'state' NOT IN ('completed','canceled','failed')`,
+		     WHERE payload->'status'->>'state' NOT IN (%s)`, sdkTerminalStatesSQL()),
 	}
 	for _, m := range migrations {
 		if _, err := s.db.Exec(m); err != nil {
@@ -674,24 +727,33 @@ func (s *PostgresTaskStore) ReleaseExecution(ctx context.Context, taskID, ownerI
 }
 
 // ReapStaleTasks transitions tasks with expired execution leases to a
-// deterministic "failed" state. Only tasks that have an active exec_owner
-// whose exec_heartbeat has expired are eligible — long-running tasks without
-// an execution claim are not affected. This handles crash recovery: if a
-// replica dies mid-execution, the lease expires and another replica's reaper
-// transitions the task to failed, allowing safe user retry.
+// deterministic "failed" state AND inserts a durable Final=true failure
+// event into a2a_task_events — both within a single transaction per task.
 //
-// Each transition is atomic via CAS on the version column, so concurrent
-// reapers on multiple replicas produce exactly one winner per task.
-// Returns the count and IDs of reaped tasks so the caller can emit terminal
-// failure events to the event log (REQ-6).
+// Only tasks that have an active exec_owner whose exec_heartbeat has
+// expired are eligible — long-running tasks without an execution claim
+// are not affected. This handles crash recovery: if a replica dies
+// mid-execution, the lease expires and another replica's reaper
+// transitions the task to failed.
+//
+// Each transition is atomic via CAS on the version column within a
+// single transaction that also inserts the terminal event with a
+// dedup_key of "reap:<taskID>". This eliminates the crash window
+// between state update and event insertion. Concurrent reapers on
+// multiple replicas produce exactly one winner per task due to CAS.
+// Retry after crash is safe: the CAS guard prevents double-transition,
+// and the dedup_key prevents duplicate events.
+//
+// Returns the IDs of reaped tasks. Both startup recovery and periodic
+// janitor MUST use this single method.
 func (s *PostgresTaskStore) ReapStaleTasks(ctx context.Context, leaseTimeout time.Duration) ([]string, error) {
 	// Find tasks with expired execution leases.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, owner_key, version, payload, exec_owner FROM a2a_sdk_tasks
+		fmt.Sprintf(`SELECT id, owner_key, version, payload, exec_owner FROM a2a_sdk_tasks
 		 WHERE exec_owner IS NOT NULL
 		   AND exec_heartbeat < NOW() - $1::interval
-		   AND payload->'status'->>'state' NOT IN ('TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED')
-		 LIMIT 100`,
+		   AND payload->'status'->>'state' NOT IN (%s)
+		 LIMIT 100`, allTerminalStatesSQL()),
 		fmt.Sprintf("%d seconds", int(leaseTimeout.Seconds())),
 	)
 	if err != nil {
@@ -720,36 +782,86 @@ func (s *PostgresTaskStore) ReapStaleTasks(ctx context.Context, leaseTimeout tim
 
 	var reapedIDs []string
 	for _, st := range staleTasks {
-		// Unmarshal, transition to failed, re-marshal.
-		var task a2a.Task
-		if err := json.Unmarshal(st.payload, &task); err != nil {
-			continue
-		}
-		task.Status.State = a2a.TaskStateFailed
-		newPayload, err := json.Marshal(&task)
+		reaped, err := s.reapOneTask(ctx, st.id, st.version, st.payload, st.execOwner)
 		if err != nil {
-			continue
+			continue // CAS lost or transient error; next janitor tick retries
 		}
-
-		// Atomic conditional transition: CAS on version AND exec_owner.
-		// Only succeed if the same stale exec_owner still holds the lease
-		// and the version hasn't changed (no concurrent recovery).
-		result, err := s.db.ExecContext(ctx,
-			`UPDATE a2a_sdk_tasks
-			 SET payload = $1, version = version + 1, updated_at = NOW(),
-			     exec_owner = NULL, exec_heartbeat = NULL
-			 WHERE id = $2 AND version = $3 AND exec_owner = $4
-			   AND payload->'status'->>'state' NOT IN ('TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED')`,
-			newPayload, st.id, st.version, st.execOwner,
-		)
-		if err != nil {
-			continue
-		}
-		if n, _ := result.RowsAffected(); n > 0 {
+		if reaped {
 			reapedIDs = append(reapedIDs, st.id)
 		}
 	}
 	return reapedIDs, nil
+}
+
+// reapOneTask atomically transitions a single stale task to failed and
+// inserts the terminal failure event, all within one transaction.
+func (s *PostgresTaskStore) reapOneTask(ctx context.Context, taskID string, version int64, payload []byte, execOwner string) (bool, error) {
+	// Unmarshal, transition to failed, re-marshal.
+	var task a2a.Task
+	if err := json.Unmarshal(payload, &task); err != nil {
+		return false, fmt.Errorf("unmarshal stale task: %w", err)
+	}
+	task.Status.State = a2a.TaskStateFailed
+	newPayload, err := json.Marshal(&task)
+	if err != nil {
+		return false, fmt.Errorf("marshal failed task: %w", err)
+	}
+
+	// Build the terminal failure event payload.
+	failPayload, err := json.Marshal(TaskStatusUpdate{
+		TaskID: taskID,
+		Status: TaskStatus{State: TaskStateFailed, Message: &Message{
+			Role:  "agent",
+			Parts: []Part{{Text: "Execution lease expired; replica presumed crashed"}},
+		}},
+	})
+	if err != nil {
+		return false, fmt.Errorf("marshal reap event: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin reap tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// CAS update: only succeed if version and exec_owner still match
+	// and the task is still non-terminal.
+	result, err := tx.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE a2a_sdk_tasks
+		 SET payload = $1, version = version + 1, updated_at = NOW(),
+		     exec_owner = NULL, exec_heartbeat = NULL
+		 WHERE id = $2 AND version = $3 AND exec_owner = $4
+		   AND payload->'status'->>'state' NOT IN (%s)`, allTerminalStatesSQL()),
+		newPayload, taskID, version, execOwner,
+	)
+	if err != nil {
+		return false, fmt.Errorf("reap CAS update: %w", err)
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return false, nil // CAS lost — another replica won
+	}
+
+	// Insert terminal failure event with Final=true in the same transaction.
+	// Dedup key prevents duplicate events on retry.
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO a2a_task_events (task_id, kind, payload, final, dedup_key, created_at)
+		 VALUES ($1, $2, $3, $4, $5, NOW())
+		 ON CONFLICT (task_id, dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING`,
+		taskID, "status", json.RawMessage(failPayload), true, fmt.Sprintf("reap:%s", taskID),
+	)
+	if err != nil {
+		return false, fmt.Errorf("insert reap event: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit reap tx: %w", err)
+	}
+
+	// Best-effort notification outside transaction.
+	_, _ = s.db.ExecContext(ctx, "SELECT pg_notify('a2a_task_event', $1)", taskID)
+
+	return true, nil
 }
 
 // PurgeTasksAndEvents deletes terminal SDK tasks and their correlated bridge
@@ -763,13 +875,14 @@ func (s *PostgresTaskStore) PurgeTasksAndEvents(ctx context.Context, olderThan t
 	defer tx.Rollback()
 
 	// Delete correlated events for terminal tasks being purged.
+	// Uses allTerminalStatesSQL to cover both canonical and legacy lowercase states.
 	evResult, err := tx.ExecContext(ctx,
-		`DELETE FROM a2a_task_events
+		fmt.Sprintf(`DELETE FROM a2a_task_events
 		 WHERE task_id IN (
 		     SELECT id FROM a2a_sdk_tasks
 		     WHERE updated_at < $1
-		       AND payload->'status'->>'state' IN ('TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED')
-		 )`,
+		       AND payload->'status'->>'state' IN (%s)
+		 )`, allTerminalStatesSQL()),
 		olderThan,
 	)
 	if err != nil {
@@ -779,9 +892,9 @@ func (s *PostgresTaskStore) PurgeTasksAndEvents(ctx context.Context, olderThan t
 
 	// Delete terminal SDK tasks.
 	taskResult, err := tx.ExecContext(ctx,
-		`DELETE FROM a2a_sdk_tasks
+		fmt.Sprintf(`DELETE FROM a2a_sdk_tasks
 		 WHERE updated_at < $1
-		   AND payload->'status'->>'state' IN ('TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED')`,
+		   AND payload->'status'->>'state' IN (%s)`, allTerminalStatesSQL()),
 		olderThan,
 	)
 	if err != nil {

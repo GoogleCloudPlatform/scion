@@ -138,17 +138,18 @@ TEST_DATABASE_URL="postgresql://scion:scion@localhost:5432/a2a_test?sslmode=disa
 
 ## Milestone: Two-Replica Production Proof (RED-to-GREEN)
 
-**Commits:** `4984163` (RED), `bde0bd2` (GREEN)
+**Commits:** `e1cfa96` (RED), `09a759e` (GREEN)
+**Branch:** `scion/dev-a2a-taskstore`, base `346b1f7` (origin/main), tip `12d063e`
 **Proof artifact:** `/scion-volumes/scratchpad/projects/ge-a2a/taskstore-production-proof.md`
 
 Added `TestTwoReplicaProductionPath_EndToEnd` — a two-process end-to-end test
 proving the durable no-metadata broker correlation path works across distinct
 OS processes sharing one PostgreSQL database.
 
-**RED (4984163):** Process B's `correlateToTask` fails (empty local cache,
+**RED (e1cfa96):** Process B's `correlateToTask` fails (empty local cache,
 task only in `a2a_sdk_tasks` not `a2a_tasks`) -> A times out -> TASK_STATE_FAILED.
 
-**GREEN (bde0bd2):** `FindActiveSDKTaskForAgent` queries `a2a_sdk_tasks` for
+**GREEN (09a759e):** `FindActiveSDKTaskForAgent` queries `a2a_sdk_tasks` for
 unambiguous project+agent match -> B correlates durably -> A receives event ->
 TASK_STATE_COMPLETED.
 
@@ -159,9 +160,9 @@ Changes:
 - `pgstore_crossprocess_test.go`: Added production helpers + E2E test
 
 Verification: race-clean, 3/3 repeated runs, all 7 cross-process tests pass,
-`go build/vet ./...` clean, clean rebase onto `370a026`.
+`go build/vet ./...` clean.
 
-### Expanded Production Proof (24a741b)
+### Expanded Production Proof (52c180d)
 
 Addressed 6 EM findings. See `/scion-volumes/scratchpad/projects/ge-a2a/taskstore-production-proof.md`.
 
@@ -188,7 +189,94 @@ Changes:
   negative streaming, metadata stripping, production context).
 
 Verification: all 13 tests pass (7 original + 6 new), race-clean, `go build/vet`
-clean.
+clean. Clean rebase onto `346b1f7` (origin/main), no semantic conflicts.
+
+### Rebase onto `346b1f7` (2026-09-18)
+
+Conflict-free rebase onto current `origin/main` (`346b1f74ceaf541b2a8838c7b14b6a68ec73baa3`).
+Changed-file intersection with main: empty. No semantic conflict resolution needed.
+
+Rebased commit hashes:
+- `e1cfa96` — RED test
+- `09a759e` — GREEN fix
+- `52c180d` — Expanded proof (6 findings)
+- `12d063e` — Project log docs (branch tip)
+
+All verification re-run post-rebase:
+- 13/13 tests pass (7 cross-process + 6 production proof)
+- Race detector: clean
+- Full bridge test suite: pass (except pre-existing `TestNotifyAcceleratesDelivery`)
+- `go build ./...` and `go vet ./...`: clean
+- `git diff --check HEAD~12..HEAD`: clean
+
+### Review Round 2 Findings (2026-09-18)
+
+Addressed 4 EM findings from audit round 2 on `12d063e`.
+
+#### 1. Canonical terminal-state handling (Critical — RESOLVED)
+
+**Problem:** `FindActiveSDKTaskForAgent`, partial index `idx_a2a_sdk_tasks_agent`,
+and migration terminalization used lowercase states (`'completed'`, etc.) but SDK
+persists uppercase `TASK_STATE_*` via JSON marshal. Terminal tasks were never
+excluded from active queries.
+
+**Fix:**
+- Introduced `sdkTerminalStates` / `legacyTerminalStates` / `allTerminalStatesSQL()`
+  for a single source of truth on terminal state strings.
+- `FindActiveSDKTaskForAgent`: uses `allTerminalStatesSQL()` (both cases).
+- Migration: terminalization writes `TASK_STATE_FAILED` (canonical uppercase).
+  Added normalization step: any legacy lowercase terminal → `TASK_STATE_FAILED`.
+- Partial index: DROP + CREATE with canonical `sdkTerminalStatesSQL()`.
+  Idempotent under advisory lock.
+- `PurgeTasksAndEvents`: uses `allTerminalStatesSQL()` (both cases purgeable).
+- `ClaimExecution`/`ReapStaleTasks` query predicates unchanged (already uppercase)
+  but CAS guard also uses `allTerminalStatesSQL()` for completeness.
+
+**Tests:** `TestTerminalStateExclusion`, `TestFinishTask1CreateTask2CorrelatesUniquely`,
+`TestMigrationIdempotentAndNormalizesIndex`, `TestLegacyLowercaseTerminalExcluded`.
+
+#### 2. Atomic terminal reap + durable event (Critical — RESOLVED)
+
+**Problem:** `ReapStaleTasks` updated `a2a_sdk_tasks` then caller separately
+appended events to `a2a_task_events`. Crash between them lost the event.
+`Final: true` not set. Startup path emitted no events.
+
+**Fix:**
+- `ReapStaleTasks` now does CAS state transition AND `Final=true` event insert
+  in a single Postgres transaction per task (`reapOneTask`).
+- Dedup key `reap:<taskID>` prevents duplicate events on retry.
+- Transaction rollback on any failure — no state-without-event possible.
+- `reapStaleSDKExecutions` (janitor caller) simplified — no longer emits events.
+- Startup path (main.go) already calls `ReapStaleTasks` directly — now
+  atomically includes events. Both paths use the same method.
+
+**Tests:** `TestAtomicReapTransactionRollback`, `TestReapIdempotencyOneEventOnly`,
+`TestStartupAndJanitorShareReapPath`, `TestReapedTaskVisibleCrossReplica`.
+
+#### 3. Notifier test isolation (Required — RESOLVED)
+
+**Problem:** `TestNotifyAcceleratesDelivery` used hardcoded task ID `"notify-accel-1"`.
+Cleanup only purged events, not the task row. Repeated runs → SQLSTATE 23505.
+
+**Fix:** Unique task ID per run (`time.Now().UnixNano()`). Cleanup deletes both
+events and the task row. 3x repeated run verified clean.
+
+#### 4. Nit dispositions (Required — RESOLVED)
+
+**README pool description:** Changed "separate connection pools" to "single shared
+`*sql.DB` connection pool" with accurate description.
+
+**ScopedTaskStore.ownership — NOT REQUIRED disposition:**
+In standalone mode with `PostgresTaskStore`, `ScopedTaskStore` is a redundant
+compatibility wrapper (design decision #17). Every ownership check performed by
+`ScopedTaskStore.ownership` map is also performed at the SQL level by
+`PostgresTaskStore` (owner_key WHERE clause on every Get/Update/List query).
+The map miss path (`!exists` in `Get`/`Update`) falls through to `inner.Get/Update`
+which hits SQL ownership enforcement. The map is a process-local fast-path
+optimization, not a correctness requirement. Growth is bounded by process lifetime
+(map cleared on restart). At typical standalone workloads (~10k tasks/day), memory
+overhead is ~1 MB/day. The map provides no value that the SQL store doesn't already
+enforce, and bounding it would add complexity without correctness benefit.
 
 ## Residual risks
 

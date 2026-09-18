@@ -53,7 +53,9 @@ func TestNotifyAcceleratesDelivery(t *testing.T) {
 	notifier := NewNotifier(dbURL, log)
 
 	ctx := context.Background()
-	taskID := "notify-accel-1"
+	// Use a unique task ID per run to avoid duplicate key errors
+	// when running against a shared/dirty database.
+	taskID := fmt.Sprintf("notify-accel-%d", time.Now().UnixNano())
 
 	// Create a task so AppendTaskEvent has a valid task_id to reference.
 	now := time.Now()
@@ -64,8 +66,10 @@ func TestNotifyAcceleratesDelivery(t *testing.T) {
 		t.Fatalf("CreateTask: %v", err)
 	}
 	defer func() {
-		// Clean up test data.
+		// Clean up both events and the task row itself, scoped to
+		// exactly the rows this test created.
 		store.PurgeTaskEvents(ctx, time.Now().Add(time.Hour))
+		store.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, taskID)
 	}()
 
 	// Register a waiter (this starts the LISTEN connection lazily).

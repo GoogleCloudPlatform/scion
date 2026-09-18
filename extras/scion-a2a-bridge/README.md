@@ -330,7 +330,7 @@ In standalone mode (`--standalone --database-url postgresql://...`), the bridge 
 | `a2a_task_events` | Durable event log for SSE streaming and blocking-mode polling | `state.PostgresStore` |
 | `a2a_sdk_tasks` | Full A2A SDK task payloads (complete `a2a.Task` JSON, ownership, versioning, execution lease) | `bridge.PostgresTaskStore` |
 
-**Important:** These tables share the same database but are managed by **separate connection pools** with **independent request-level transactions**. A bridge request that writes to both `a2a_tasks` and `a2a_sdk_tasks` does so in separate SQL transactions, not a single atomic operation. Retention cleanup (`PurgeTasksAndEvents`) is the exception — it deletes correlated SDK tasks and events within one transaction.
+**Important:** These tables share the same database and a **single shared `*sql.DB` connection pool** (the SDK task store is created via `NewPostgresTaskStoreWithDB(store.DB())`). Each store issues **independent request-level transactions** — a bridge request that writes to both `a2a_tasks` and `a2a_sdk_tasks` does so in separate SQL transactions, not a single atomic operation. Retention cleanup (`PurgeTasksAndEvents`) and execution lease reaping (`ReapStaleTasks`) are exceptions — each operates within a single transaction.
 
 ### Task ownership and isolation
 

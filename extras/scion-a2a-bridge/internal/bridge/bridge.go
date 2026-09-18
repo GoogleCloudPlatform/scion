@@ -198,6 +198,10 @@ func (b *Bridge) janitor() {
 
 // reapStaleSDKExecutions reaps SDK tasks with expired execution leases.
 // No-op when sdkTaskStore is nil (plugin mode).
+//
+// ReapStaleTasks atomically transitions each stale task to failed AND inserts
+// its terminal Final=true event within a single transaction — no separate
+// event emission is needed here.
 func (b *Bridge) reapStaleSDKExecutions(ctx context.Context, leaseTimeout time.Duration) {
 	if b.sdkTaskStore == nil {
 		return
@@ -208,26 +212,7 @@ func (b *Bridge) reapStaleSDKExecutions(ctx context.Context, leaseTimeout time.D
 		return
 	}
 	if len(reapedIDs) > 0 {
-		b.log.Warn("janitor: reaped stale SDK execution leases", "count", len(reapedIDs))
-		// REQ-6: Emit terminal failure events for reaped tasks so that
-		// cross-replica SSE subscribers and GetTask callers see the failure.
-		for _, taskID := range reapedIDs {
-			failPayload, _ := json.Marshal(TaskStatusUpdate{
-				TaskID: taskID,
-				Status: TaskStatus{State: TaskStateFailed, Message: &Message{
-					Role:  "agent",
-					Parts: []Part{{Text: "Execution lease expired; replica presumed crashed"}},
-				}},
-			})
-			if _, appendErr := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
-				TaskID:   taskID,
-				Kind:     "status",
-				Payload:  failPayload,
-				DedupKey: fmt.Sprintf("reap:%s", taskID),
-			}); appendErr != nil {
-				b.log.Error("janitor: failed to emit reap failure event", "task_id", taskID, "error", appendErr)
-			}
-		}
+		b.log.Warn("janitor: reaped stale SDK execution leases", "count", len(reapedIDs), "task_ids", reapedIDs)
 	}
 }
 

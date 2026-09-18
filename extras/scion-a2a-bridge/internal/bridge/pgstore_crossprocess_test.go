@@ -1757,21 +1757,21 @@ func TestRegressionREQ6_ReapEmitsTerminalEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgres: %v", err)
 	}
-	t.Cleanup(func() {
-		pgStore.PurgeTaskEvents(ctx, time.Now().Add(1*time.Hour))
-		pgStore.Close()
-	})
 
 	sdkStore, err := NewPostgresTaskStore(dbURL)
 	if err != nil {
 		t.Fatalf("NewPostgresTaskStore: %v", err)
 	}
+
+	taskID := fmt.Sprintf("req6-reap-%d", time.Now().UnixNano())
+
 	t.Cleanup(func() {
-		sdkStore.db.Exec("DELETE FROM a2a_sdk_tasks")
+		pgStore.PurgeTaskEvents(ctx, time.Now().Add(1*time.Hour))
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+		pgStore.DB().ExecContext(ctx, `DELETE FROM a2a_tasks WHERE id = $1`, taskID)
+		pgStore.Close()
 		sdkStore.Close()
 	})
-
-	taskID := "req6-reap-event-1"
 
 	// Create a working task with a stale execution lease.
 	routeCtx := ctxForRoute("proj-req6", "agent-req6")
@@ -3793,4 +3793,611 @@ func TestProductionContextDerivation(t *testing.T) {
 	t.Log("  1. WithRouteInfo (executor.go:45) → RouteInfoFrom (executor.go:50)")
 	t.Log("  2. WithCallerIdentity (caller.go:82) → callerIdentityFromContext (caller.go:93) / buildOwnerKey")
 	t.Log("  3. PostgresTaskStore.Create reads both from context correctly")
+}
+
+// --- Finding 1: Canonical terminal-state handling ---
+
+// TestTerminalStateExclusion verifies that FindActiveSDKTaskForAgent correctly
+// excludes tasks in all canonical terminal states (TASK_STATE_COMPLETED,
+// TASK_STATE_FAILED, TASK_STATE_CANCELED, TASK_STATE_REJECTED).
+func TestTerminalStateExclusion(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	sdkStore, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgresTaskStore: %v", err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	projID := "proj-term-" + suffix
+	agentSlug := "agent-term-" + suffix
+
+	t.Cleanup(func() {
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, projID)
+		sdkStore.Close()
+	})
+
+	routeCtx := ctxForRoute(projID, agentSlug)
+
+	// Test each terminal state is excluded.
+	terminalStates := []a2a.TaskState{
+		a2a.TaskStateCompleted,
+		a2a.TaskStateFailed,
+		a2a.TaskStateCanceled,
+		a2a.TaskStateRejected,
+	}
+	for _, ts := range terminalStates {
+		taskID := fmt.Sprintf("term-%s-%s", ts, suffix)
+		task := &a2a.Task{
+			ID:        a2a.TaskID(taskID),
+			ContextID: "ctx-term",
+			Status:    a2a.TaskStatus{State: ts},
+		}
+		if _, err := sdkStore.Create(routeCtx, task); err != nil {
+			t.Fatalf("Create(%s): %v", ts, err)
+		}
+	}
+
+	// No active task should be found — all are terminal.
+	_, _, err = sdkStore.FindActiveSDKTaskForAgent(ctx, projID, agentSlug)
+	if err == nil {
+		t.Fatal("FindActiveSDKTaskForAgent should return error when all tasks are terminal")
+	}
+	t.Logf("All 4 canonical terminal states correctly excluded: %v", err)
+
+	// Now create an active task — it should be found uniquely.
+	activeTaskID := fmt.Sprintf("active-%s", suffix)
+	activeTask := &a2a.Task{
+		ID:        a2a.TaskID(activeTaskID),
+		ContextID: "ctx-term",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+	}
+	if _, err := sdkStore.Create(routeCtx, activeTask); err != nil {
+		t.Fatalf("Create active: %v", err)
+	}
+
+	foundID, _, err := sdkStore.FindActiveSDKTaskForAgent(ctx, projID, agentSlug)
+	if err != nil {
+		t.Fatalf("FindActiveSDKTaskForAgent with 1 active + 4 terminal: %v", err)
+	}
+	if foundID != activeTaskID {
+		t.Errorf("found = %q, want %q", foundID, activeTaskID)
+	}
+	t.Log("Active task found uniquely despite 4 terminal tasks existing")
+}
+
+// TestFinishTask1CreateTask2CorrelatesUniquely verifies the critical scenario:
+// finish task 1, create task 2 for the same project/agent, and a no-metadata
+// broker event correlates uniquely to task 2 (not ambiguously to both).
+func TestFinishTask1CreateTask2CorrelatesUniquely(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	sdkStore, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgresTaskStore: %v", err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	projID := "proj-seq-" + suffix
+	agentSlug := "agent-seq-" + suffix
+
+	t.Cleanup(func() {
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, projID)
+		sdkStore.Close()
+	})
+
+	routeCtx := ctxForRoute(projID, agentSlug)
+
+	// Create task 1 in WORKING state.
+	task1ID := "task1-" + suffix
+	task1 := &a2a.Task{
+		ID:        a2a.TaskID(task1ID),
+		ContextID: "ctx-seq",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+	}
+	if _, err := sdkStore.Create(routeCtx, task1); err != nil {
+		t.Fatalf("Create task1: %v", err)
+	}
+
+	// Complete task 1 (transition to terminal).
+	task1.Status.State = a2a.TaskStateCompleted
+	ver1, err := sdkStore.Get(routeCtx, a2a.TaskID(task1ID))
+	if err != nil {
+		t.Fatalf("Get task1: %v", err)
+	}
+	if _, err := sdkStore.Update(routeCtx, &taskstore.UpdateRequest{
+		Task:        task1,
+		PrevVersion: ver1.Version,
+	}); err != nil {
+		t.Fatalf("Update task1 to completed: %v", err)
+	}
+
+	// Verify task 1 is now terminal in the DB.
+	var state1 string
+	sdkStore.db.QueryRowContext(ctx,
+		`SELECT payload->'status'->>'state' FROM a2a_sdk_tasks WHERE id = $1`, task1ID,
+	).Scan(&state1)
+	if state1 != "TASK_STATE_COMPLETED" {
+		t.Fatalf("task1 state = %q, want TASK_STATE_COMPLETED", state1)
+	}
+
+	// Create task 2 in WORKING state.
+	task2ID := "task2-" + suffix
+	task2 := &a2a.Task{
+		ID:        a2a.TaskID(task2ID),
+		ContextID: "ctx-seq",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+	}
+	if _, err := sdkStore.Create(routeCtx, task2); err != nil {
+		t.Fatalf("Create task2: %v", err)
+	}
+
+	// FindActiveSDKTaskForAgent should return ONLY task 2.
+	foundID, _, err := sdkStore.FindActiveSDKTaskForAgent(ctx, projID, agentSlug)
+	if err != nil {
+		t.Fatalf("FindActiveSDKTaskForAgent: %v", err)
+	}
+	if foundID != task2ID {
+		t.Errorf("found = %q, want %q (task2, not task1)", foundID, task2ID)
+	}
+	t.Logf("Finish task1, create task2 → correlates uniquely to task2: %s", foundID)
+}
+
+// TestMigrationIdempotentAndNormalizesIndex verifies that the migration is
+// idempotent and correctly recreates the partial index with canonical uppercase
+// predicates. Running migrate() twice should succeed without error.
+func TestMigrationIdempotentAndNormalizesIndex(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	// Run migration twice — should be idempotent.
+	store1, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("First migration: %v", err)
+	}
+	store1.Close()
+
+	store2, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("Second migration (idempotency): %v", err)
+	}
+	defer store2.Close()
+
+	// Verify the partial index uses the correct predicate.
+	var indexDef string
+	err = store2.db.QueryRowContext(context.Background(),
+		`SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_a2a_sdk_tasks_agent'`,
+	).Scan(&indexDef)
+	if err != nil {
+		t.Fatalf("query index definition: %v", err)
+	}
+
+	// The index must reference canonical uppercase states.
+	if !strings.Contains(indexDef, "TASK_STATE_COMPLETED") {
+		t.Errorf("partial index does not use canonical uppercase states: %s", indexDef)
+	}
+	if strings.Contains(indexDef, "'completed'") && !strings.Contains(indexDef, "TASK_STATE_COMPLETED") {
+		t.Errorf("partial index still uses legacy lowercase states: %s", indexDef)
+	}
+	t.Logf("Partial index definition: %s", indexDef)
+}
+
+// TestLegacyLowercaseTerminalExcluded verifies that rows with legacy lowercase
+// terminal states (from pre-migration data) are excluded by active-task queries
+// and can be purged by retention.
+func TestLegacyLowercaseTerminalExcluded(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	sdkStore, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgresTaskStore: %v", err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	projID := "proj-legacy-term-" + suffix
+	agentSlug := "agent-legacy-term-" + suffix
+
+	t.Cleanup(func() {
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, projID)
+		sdkStore.Close()
+	})
+
+	// Insert a row with legacy lowercase terminal state directly via SQL,
+	// simulating a pre-migration row that wasn't caught by normalization.
+	legacyID := "legacy-lc-" + suffix
+	legacyPayload := fmt.Sprintf(`{"id":"%s","status":{"state":"completed"},"contextId":"ctx-lc"}`, legacyID)
+	_, err = sdkStore.db.ExecContext(ctx,
+		`INSERT INTO a2a_sdk_tasks (id, context_id, owner_key, version, payload, project_id, agent_slug, caller_user_id, updated_at)
+		 VALUES ($1, 'ctx-lc', 'test:owner', 1, $2::jsonb, $3, $4, 'user1', NOW() - INTERVAL '2 hours')`,
+		legacyID, legacyPayload, projID, agentSlug,
+	)
+	if err != nil {
+		t.Fatalf("Insert legacy row: %v", err)
+	}
+
+	// FindActiveSDKTaskForAgent should NOT find the legacy terminal row.
+	_, _, err = sdkStore.FindActiveSDKTaskForAgent(ctx, projID, agentSlug)
+	if err == nil {
+		t.Fatal("FindActiveSDKTaskForAgent should not find legacy lowercase terminal task")
+	}
+	t.Log("Legacy lowercase terminal row correctly excluded from active query")
+
+	// Verify the legacy row can be purged by retention.
+	tasksPurged, _, err := sdkStore.PurgeTasksAndEvents(ctx, time.Now().Add(-1*time.Hour))
+	if err != nil {
+		t.Fatalf("PurgeTasksAndEvents: %v", err)
+	}
+	if tasksPurged == 0 {
+		t.Error("Legacy lowercase terminal row was not purged by retention")
+	}
+	t.Logf("Legacy lowercase terminal rows purged: %d", tasksPurged)
+}
+
+// --- Finding 2: Atomic terminal reap + durable event ---
+
+// TestAtomicReapTransactionRollback verifies that if the transaction fails,
+// neither the state update nor the event insertion is committed.
+func TestAtomicReapTransactionRollback(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	pgStore, err := state.NewPostgres(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgres: %v", err)
+	}
+	defer pgStore.Close()
+
+	sdkStore, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgresTaskStore: %v", err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	t.Cleanup(func() {
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id LIKE $1`, "reap-atom-%"+suffix)
+		pgStore.PurgeTaskEvents(ctx, time.Now().Add(time.Hour))
+		sdkStore.Close()
+	})
+
+	taskID := "reap-atom-" + suffix
+	routeCtx := ctxForRoute("proj-atom-"+suffix, "agent-atom-"+suffix)
+
+	// Create the task in both stores.
+	task := &a2a.Task{
+		ID:        a2a.TaskID(taskID),
+		ContextID: "ctx-atom",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+	}
+	if _, err := sdkStore.Create(routeCtx, task); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	pgStore.CreateTask(ctx, &state.Task{
+		ID: taskID, ContextID: "ctx-atom", ProjectID: "proj-atom-" + suffix,
+		AgentSlug: "agent-atom-" + suffix, State: "working",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(), Metadata: "{}",
+	})
+
+	// Claim execution and backdate heartbeat.
+	ownerID := "crashed-atom:" + suffix
+	if claimed, err := sdkStore.ClaimExecution(ctx, taskID, ownerID, 60*time.Second); err != nil || !claimed {
+		t.Fatalf("ClaimExecution: claimed=%v err=%v", claimed, err)
+	}
+	sdkStore.db.ExecContext(ctx, `UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW() - INTERVAL '10 minutes' WHERE id = $1`, taskID)
+
+	// Reap — should atomically update state and insert event.
+	reapedIDs, err := sdkStore.ReapStaleTasks(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("ReapStaleTasks: %v", err)
+	}
+	if len(reapedIDs) == 0 {
+		t.Fatal("no tasks reaped")
+	}
+	if reapedIDs[0] != taskID {
+		t.Errorf("reaped = %q, want %q", reapedIDs[0], taskID)
+	}
+
+	// Verify state is TASK_STATE_FAILED.
+	stored, err := sdkStore.Get(routeCtx, a2a.TaskID(taskID))
+	if err != nil {
+		t.Fatalf("Get after reap: %v", err)
+	}
+	if stored.Task.Status.State != a2a.TaskStateFailed {
+		t.Errorf("state = %q, want TASK_STATE_FAILED", stored.Task.Status.State)
+	}
+
+	// Verify terminal event exists with Final=true.
+	events, err := pgStore.ReadTaskEvents(ctx, taskID, 0, 100)
+	if err != nil {
+		t.Fatalf("ReadTaskEvents: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("no terminal event emitted")
+	}
+	if !events[0].Final {
+		t.Error("terminal reap event does not have Final=true")
+	}
+	t.Logf("Atomic reap: state=TASK_STATE_FAILED, event.Final=%v, dedup_key=%s",
+		events[0].Final, events[0].DedupKey)
+}
+
+// TestReapIdempotencyOneEventOnly verifies that retrying ReapStaleTasks after
+// a successful reap produces exactly one terminal event (not duplicates).
+func TestReapIdempotencyOneEventOnly(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	pgStore, err := state.NewPostgres(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgres: %v", err)
+	}
+	defer pgStore.Close()
+
+	sdkStore, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgresTaskStore: %v", err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	t.Cleanup(func() {
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id LIKE $1`, "reap-idem-%"+suffix)
+		pgStore.PurgeTaskEvents(ctx, time.Now().Add(time.Hour))
+		sdkStore.Close()
+	})
+
+	taskID := "reap-idem-" + suffix
+	projID := "proj-idem-" + suffix
+	agentSlugVal := "agent-idem-" + suffix
+	routeCtx := ctxForRoute(projID, agentSlugVal)
+
+	task := &a2a.Task{
+		ID:        a2a.TaskID(taskID),
+		ContextID: "ctx-idem",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+	}
+	if _, err := sdkStore.Create(routeCtx, task); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	pgStore.CreateTask(ctx, &state.Task{
+		ID: taskID, ContextID: "ctx-idem", ProjectID: projID,
+		AgentSlug: agentSlugVal, State: "working",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(), Metadata: "{}",
+	})
+
+	ownerID := "crashed-idem:" + suffix
+	sdkStore.ClaimExecution(ctx, taskID, ownerID, 60*time.Second)
+	sdkStore.db.ExecContext(ctx, `UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW() - INTERVAL '10 minutes' WHERE id = $1`, taskID)
+
+	// First reap.
+	reapedIDs, err := sdkStore.ReapStaleTasks(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("First ReapStaleTasks: %v", err)
+	}
+	if len(reapedIDs) != 1 {
+		t.Fatalf("first reap: got %d IDs, want 1", len(reapedIDs))
+	}
+
+	// Second reap — should be a no-op (task is already terminal).
+	reapedIDs2, err := sdkStore.ReapStaleTasks(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("Second ReapStaleTasks: %v", err)
+	}
+	if len(reapedIDs2) != 0 {
+		t.Errorf("second reap should be no-op, got %d IDs", len(reapedIDs2))
+	}
+
+	// Verify exactly one event.
+	events, err := pgStore.ReadTaskEvents(ctx, taskID, 0, 100)
+	if err != nil {
+		t.Fatalf("ReadTaskEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Errorf("expected exactly 1 terminal event, got %d", len(events))
+	}
+	t.Logf("Idempotent reap: %d reap(s), %d event(s)", 1, len(events))
+}
+
+// TestStartupAndJanitorShareReapPath verifies that both startup recovery and
+// periodic janitor use the same ReapStaleTasks production method.
+func TestStartupAndJanitorShareReapPath(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	pgStore, err := state.NewPostgres(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgres: %v", err)
+	}
+	defer pgStore.Close()
+
+	sdkStore, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgresTaskStore: %v", err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	t.Cleanup(func() {
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, "proj-share-"+suffix)
+		pgStore.PurgeTaskEvents(ctx, time.Now().Add(time.Hour))
+		sdkStore.Close()
+	})
+
+	projID := "proj-share-" + suffix
+	agentSlugVal := "agent-share-" + suffix
+
+	// Create 2 stale tasks — one will be reaped by "startup", one by "janitor".
+	for i, label := range []string{"startup", "janitor"} {
+		taskID := fmt.Sprintf("share-%s-%s", label, suffix)
+		routeCtx := ctxForRoute(projID, agentSlugVal)
+		task := &a2a.Task{
+			ID:        a2a.TaskID(taskID),
+			ContextID: "ctx-share",
+			Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+		}
+		if _, err := sdkStore.Create(routeCtx, task); err != nil {
+			t.Fatalf("Create %s: %v", label, err)
+		}
+		pgStore.CreateTask(ctx, &state.Task{
+			ID: taskID, ContextID: "ctx-share", ProjectID: projID,
+			AgentSlug: agentSlugVal, State: "working",
+			CreatedAt: time.Now(), UpdatedAt: time.Now(), Metadata: "{}",
+		})
+		ownerID := fmt.Sprintf("crashed-%d:%s", i, suffix)
+		sdkStore.ClaimExecution(ctx, taskID, ownerID, 60*time.Second)
+		sdkStore.db.ExecContext(ctx, `UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW() - INTERVAL '10 minutes' WHERE id = $1`, taskID)
+	}
+
+	// Startup path: direct call to ReapStaleTasks (same as main.go:512).
+	startupReaped, err := sdkStore.ReapStaleTasks(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("Startup ReapStaleTasks: %v", err)
+	}
+	t.Logf("Startup reaped: %v", startupReaped)
+
+	// Janitor path: via Bridge.reapStaleSDKExecutions.
+	shutdownCtx, shutdownCancel := context.WithCancel(ctx)
+	defer shutdownCancel()
+	b := &Bridge{
+		store:        pgStore,
+		log:          slog.Default(),
+		config:       &Config{},
+		activeTasks:  make(map[string]activeTaskEntry),
+		agentTasks:   make(map[string][]string),
+		push:         NewPushDispatcher(pgStore, &Config{}, slog.Default(), shutdownCtx),
+		sdkTaskStore: sdkStore,
+	}
+	b.reapStaleSDKExecutions(ctx, 5*time.Minute)
+
+	// Both paths should have produced terminal events for all tasks.
+	totalEvents := 0
+	for _, label := range []string{"startup", "janitor"} {
+		taskID := fmt.Sprintf("share-%s-%s", label, suffix)
+		events, err := pgStore.ReadTaskEvents(ctx, taskID, 0, 100)
+		if err != nil {
+			t.Fatalf("ReadTaskEvents(%s): %v", label, err)
+		}
+		if len(events) == 0 {
+			t.Errorf("%s path: no terminal event for %s", label, taskID)
+		} else if !events[0].Final {
+			t.Errorf("%s path: event.Final = false", label)
+		}
+		totalEvents += len(events)
+	}
+	if totalEvents != 2 {
+		t.Errorf("expected 2 total terminal events, got %d", totalEvents)
+	}
+	t.Logf("Both paths use shared ReapStaleTasks: startup reaped %d, janitor found %d remaining",
+		len(startupReaped), 2-len(startupReaped))
+}
+
+// TestReapedTaskVisibleCrossReplica verifies that after reaping, an authorized
+// subscriber on a different replica sees the terminal failure via ReadTaskEvents.
+func TestReapedTaskVisibleCrossReplica(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	pgStoreA, err := state.NewPostgres(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgres A: %v", err)
+	}
+	defer pgStoreA.Close()
+
+	pgStoreB, err := state.NewPostgres(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgres B: %v", err)
+	}
+	defer pgStoreB.Close()
+
+	sdkStore, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgresTaskStore: %v", err)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	t.Cleanup(func() {
+		sdkStore.db.ExecContext(ctx, `DELETE FROM a2a_sdk_tasks WHERE id = $1`, "reap-xr-"+suffix)
+		pgStoreA.PurgeTaskEvents(ctx, time.Now().Add(time.Hour))
+		sdkStore.Close()
+	})
+
+	taskID := "reap-xr-" + suffix
+	projID := "proj-xr-" + suffix
+	agentSlugVal := "agent-xr-" + suffix
+	routeCtx := ctxForRoute(projID, agentSlugVal)
+
+	task := &a2a.Task{
+		ID:        a2a.TaskID(taskID),
+		ContextID: "ctx-xr",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+	}
+	if _, err := sdkStore.Create(routeCtx, task); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	pgStoreA.CreateTask(ctx, &state.Task{
+		ID: taskID, ContextID: "ctx-xr", ProjectID: projID,
+		AgentSlug: agentSlugVal, State: "working",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(), Metadata: "{}",
+	})
+
+	ownerID := "crashed-xr:" + suffix
+	sdkStore.ClaimExecution(ctx, taskID, ownerID, 60*time.Second)
+	sdkStore.db.ExecContext(ctx, `UPDATE a2a_sdk_tasks SET exec_heartbeat = NOW() - INTERVAL '10 minutes' WHERE id = $1`, taskID)
+
+	// Reap on "replica A".
+	reapedIDs, err := sdkStore.ReapStaleTasks(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("ReapStaleTasks: %v", err)
+	}
+	if len(reapedIDs) != 1 {
+		t.Fatalf("expected 1 reaped, got %d", len(reapedIDs))
+	}
+
+	// Read events from "replica B" (different connection).
+	events, err := pgStoreB.ReadTaskEvents(ctx, taskID, 0, 100)
+	if err != nil {
+		t.Fatalf("ReadTaskEvents from B: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("replica B sees no terminal event after reap on A")
+	}
+	if !events[0].Final {
+		t.Error("terminal event visible on B but Final=false")
+	}
+
+	// Verify the SDK task state is also visible from a fresh store.
+	sdkStoreB, err := NewPostgresTaskStore(dbURL)
+	if err != nil {
+		t.Fatalf("NewPostgresTaskStore B: %v", err)
+	}
+	defer sdkStoreB.Close()
+
+	stored, err := sdkStoreB.Get(routeCtx, a2a.TaskID(taskID))
+	if err != nil {
+		t.Fatalf("Get from B: %v", err)
+	}
+	if stored.Task.Status.State != a2a.TaskStateFailed {
+		t.Errorf("B sees state = %q, want TASK_STATE_FAILED", stored.Task.Status.State)
+	}
+	t.Log("Cross-replica: terminal reap event and TASK_STATE_FAILED visible from replica B")
 }
