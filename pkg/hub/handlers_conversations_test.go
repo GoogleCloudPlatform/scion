@@ -353,6 +353,129 @@ func TestConvListMessages_NotParticipant(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, rr.Code)
 }
 
+func TestGetConversationMessage_HappyPath(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	msg := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      project.ID,
+		AgentID:        agent.ID,
+		Sender:         "agent:" + agent.Name,
+		SenderID:       agent.ID,
+		Recipient:      "user:test@example.com",
+		RecipientID:    api.NewUUID(),
+		Msg:            "A specific message",
+		Type:           "instruction",
+		ConversationID: conv.ID,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateMessage(context.Background(), msg))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+msg.ID, nil)
+	req = req.WithContext(agentContext(agent.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.handleConversationRoutes(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var result store.Message
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Equal(t, msg.ID, result.ID)
+	require.Equal(t, msg.ConversationID, result.ConversationID)
+	require.Equal(t, msg.Msg, result.Msg)
+}
+
+func TestGetConversationMessage_NotParticipant(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+
+	msg := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      project.ID,
+		AgentID:        agent.ID,
+		Sender:         "agent:" + agent.Name,
+		SenderID:       agent.ID,
+		Recipient:      "user:test@example.com",
+		RecipientID:    api.NewUUID(),
+		Msg:            "Private message",
+		Type:           "instruction",
+		ConversationID: conv.ID,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateMessage(context.Background(), msg))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+msg.ID, nil)
+	req = req.WithContext(agentContext(agent.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.handleGetConversationMessage(rr, req, conv.ID, msg.ID)
+
+	require.Equal(t, http.StatusForbidden, rr.Code)
+}
+
+func TestGetConversationMessage_WrongConversation(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	otherConv := &store.Conversation{
+		ID:             api.NewUUID(),
+		ProjectID:      &project.ID,
+		Kind:           "group",
+		Surface:        "native",
+		DisplayName:    "Other Conversation",
+		DriftState:     "active",
+		LastActivityAt: time.Now().UTC(),
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateConversation(context.Background(), otherConv))
+	msg := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      project.ID,
+		AgentID:        agent.ID,
+		Sender:         "agent:" + agent.Name,
+		SenderID:       agent.ID,
+		Recipient:      "user:test@example.com",
+		RecipientID:    api.NewUUID(),
+		Msg:            "Message from another conversation",
+		Type:           "instruction",
+		ConversationID: otherConv.ID,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateMessage(context.Background(), msg))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+msg.ID, nil)
+	req = req.WithContext(agentContext(agent.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.handleGetConversationMessage(rr, req, conv.ID, msg.ID)
+
+	require.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+func TestGetConversationMessage_NotFound(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	messageID := api.NewUUID()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+messageID, nil)
+	req = req.WithContext(agentContext(agent.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.handleGetConversationMessage(rr, req, conv.ID, messageID)
+
+	require.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+func TestGetConversationMessage_MethodNotAllowed(t *testing.T) {
+	srv, _ := testServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/conversation-id/messages/message-id", nil)
+	rr := httptest.NewRecorder()
+
+	srv.handleGetConversationMessage(rr, req, "conversation-id", "message-id")
+
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+}
+
 func TestConvListMessages_WithPagination(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)

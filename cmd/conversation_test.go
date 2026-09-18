@@ -48,6 +48,7 @@ func TestConversationSubcommands(t *testing.T) {
 	assert.True(t, subcommands["messages"], "should have 'messages' subcommand")
 	assert.True(t, subcommands["create"], "should have 'create' subcommand")
 	assert.True(t, subcommands["get"], "should have 'get' subcommand")
+	assert.True(t, subcommands["get-message"], "should have 'get-message' subcommand")
 	assert.True(t, subcommands["set-default"], "should have 'set-default' subcommand")
 	assert.True(t, subcommands["participants"], "should have 'participants' subcommand")
 	assert.True(t, subcommands["join"], "should have 'join' subcommand")
@@ -113,6 +114,14 @@ func TestConversationGetFlags(t *testing.T) {
 	require.NotNil(t, f, "--json flag should exist")
 }
 
+func TestConversationGetMessageFlags(t *testing.T) {
+	flags := conversationGetMessageCmd.Flags()
+
+	f := flags.Lookup("json")
+	require.NotNil(t, f, "--json flag should exist")
+	assert.Equal(t, "false", f.DefValue)
+}
+
 func TestConversationMessagesRequiresArgs(t *testing.T) {
 	err := conversationMessagesCmd.Args(conversationMessagesCmd, []string{})
 	assert.Error(t, err, "messages should require a conversation ref argument")
@@ -134,6 +143,17 @@ func TestConversationSetDefaultRequiresArgs(t *testing.T) {
 func TestConversationGetRequiresArgs(t *testing.T) {
 	err := conversationGetCmd.Args(conversationGetCmd, []string{})
 	assert.Error(t, err, "get should require a conversation ref argument")
+}
+
+func TestConversationGetMessageRequiresTwoArgs(t *testing.T) {
+	err := conversationGetMessageCmd.Args(conversationGetMessageCmd, []string{})
+	assert.Error(t, err, "get-message should require two arguments")
+
+	err = conversationGetMessageCmd.Args(conversationGetMessageCmd, []string{"conv:conversation-id"})
+	assert.Error(t, err, "get-message should require two arguments")
+
+	err = conversationGetMessageCmd.Args(conversationGetMessageCmd, []string{"conv:conversation-id", "message-id"})
+	assert.NoError(t, err, "get-message should accept exactly two arguments")
 }
 
 func TestConversationParticipantsRequiresArgs(t *testing.T) {
