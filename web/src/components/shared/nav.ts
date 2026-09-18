@@ -440,7 +440,13 @@ export class ScionNav extends LitElement {
                 ${section.items.map(
                   (item) => html`
                     <li class="nav-item">
-                      <sl-tooltip content="${item.label}" placement="right" ?disabled=${!this.collapsed} hoist>
+                      <sl-tooltip
+                        style="display: block;"
+                        content="${item.label}"
+                        placement="right"
+                        ?disabled=${!this.collapsed}
+                        hoist
+                      >
                         <a
                           href="${item.path}"
                           class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
@@ -475,7 +481,13 @@ export class ScionNav extends LitElement {
                   ).map(
                     (item) => html`
                       <li class="nav-item">
-                        <sl-tooltip content="${item.label}" placement="right" ?disabled=${!this.collapsed} hoist>
+                        <sl-tooltip
+                          style="display: block;"
+                          content="${item.label}"
+                          placement="right"
+                          ?disabled=${!this.collapsed}
+                          hoist
+                        >
                           <a
                             href="${item.path}"
                             class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
@@ -492,7 +504,13 @@ export class ScionNav extends LitElement {
                     ? ADMIN_SUPERADMIN_ITEMS.map(
                         (item) => html`
                           <li class="nav-item">
-                            <sl-tooltip content="${item.label}" placement="right" ?disabled=${!this.collapsed} hoist>
+                            <sl-tooltip
+                              style="display: block;"
+                              content="${item.label}"
+                              placement="right"
+                              ?disabled=${!this.collapsed}
+                              hoist
+                            >
                               <a
                                 href="${item.path}"
                                 class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
