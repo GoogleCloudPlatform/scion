@@ -32,6 +32,9 @@ for short-lived Hub user access tokens.
 | `e099d85` | fix(hub): concurrent first-linkage provisioning collision (H3-R1) (#1616) |
 | `53dc31c` | docs: update project log with round 4 H3-R1 concurrent provisioning fix (#1616) |
 | `4a65c45` | feat(hub): rate limit + body size limit for GE exchange endpoint (#1616) |
+| `37a3489` | docs: update project log with round 5 rate/body limit evidence (#1616) |
+| `bea2b4d` | test(hub): RED — exchange route blocked by outer auth middleware (#1616) — on `scion/dev-ge-auth-route-fix` |
+| `0dc8107` | fix(hub): add GE exchange to unauthenticated endpoint list (#1616) — on `scion/dev-ge-auth-route-fix` |
 
 ## Hub — `POST /api/v1/auth/integrations/google/exchange` (#1616)
 
@@ -235,6 +238,15 @@ Hub `go.mod`: No changes.
 | H2-O1 | `flexInt64` for `expires_in` | **Resolved**: custom JSON type handling number/string forms | `TestFlexInt64_*` (4 tests), `TestProductionValidator_AccessToken_ExpiresInAsString` |
 | H2-O2 | Dead remaining-lifetime branch | **Resolved**: strict `remaining <= 0` check | `TestProductionValidator_IDToken_ExpiredWithinSkew`, `_PositiveRemaining`, `_LongRemaining` |
 | H2-O3 | User deletion cascade | **Resolved**: `entsql.OnDelete(entsql.Cascade)` annotation | `TestExternalIdentityStore_UserDeleteCascade` |
+
+## Route correction (`scion/dev-ge-auth-route-fix` from `37a3489`)
+
+- **Bug:** Exchange path was `RoutePublic` in `routeMetadataTable` but MISSING from `isUnauthenticatedEndpoint()` in `auth.go`. `UnifiedAuthMiddleware` checks `isUnauthenticatedEndpoint()` before route metadata, so unauthenticated callers (bridge replicas) got 401 "missing authorization header" before reaching the handler.
+- **RED commit `bea2b4d`:** Regression test through full `Server.Handler()` middleware chain — fails with the expected BUG diagnostic
+- **GREEN commit `0dc8107`:** Added exchange path to `isUnauthenticatedEndpoint()` — 1-line fix, all handler-level defenses retained
+- **7 full-middleware route tests:** valid credential (200), invalid credential (handler 401), missing credential (400), protected endpoint (middleware 401), disabled exchange (not_configured 401), rate limit (429 + Retry-After + zero calls), body limit (413 + zero calls)
+- **116 total GE tests pass**, race-clean, build/vet clean
+- **File delta:** `auth.go` (+2 lines), `ge_exchange_route_test.go` (new, 335 lines)
 
 ## Test evidence (round 5 rate/body limits: `4a65c45`)
 
