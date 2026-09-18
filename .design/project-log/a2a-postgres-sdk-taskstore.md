@@ -503,3 +503,48 @@ The original `origin/scion/dev-a2a-taskstore` ref remained exactly
 `23911e531c4d3cb8f9d96d8b111a8329db3822e3`. The implementation-and-format tip
 before this log update is `97c9cd187e6a01dda4b685b3954523dc0cc3cd5e`;
 the pushed final ref is recorded in the durable sixth-cycle report.
+
+### Integration-discovered state migration serialization correction (2026-09-18)
+
+The temporary correction branch `scion/dev-a2a-state-migration-lock-fix` was
+created directly from accepted HA tip
+`77550f0e3e66397b787e93ffef72e6c9b0c2206b`. The original PR and component refs
+were not moved. This is a bounded baseline release-defect correction discovered
+by the final two-replica assembly run, not a reopening of the HA architecture.
+
+Committed RED `7952547f5b8822f9e959c7dbd05a134e344e966f` proved that concurrent
+`state.NewPostgres` constructors race PostgreSQL catalog creation on an empty
+schema. Twenty in-process constructors and two independently synchronized OS
+processes both reproduced SQLSTATE 23505 before the production change. A held
+schema-specific advisory lock also proved that the old migration ignored the
+intended serialization boundary.
+
+Correction `ce5eb34f070239e738ccf3f300f25ecea3781156` changes only
+`internal/state.PostgresStore.migrate`. It begins one transaction, resolves
+`current_database()` and the actual `current_schema()`, acquires
+`pg_advisory_xact_lock(hashtext(database), hashtext(schema))`, and executes
+every DDL statement and commit on that transaction. The transaction therefore
+pins lock ownership and DDL to one session; commit, rollback, process loss, or
+connection loss releases the lock. Equal database/schema pairs serialize,
+while distinct schemas remain independent.
+
+Fresh-schema real-PostgreSQL verification covered same-schema contention,
+distinct-schema noninterference, two production-constructor processes,
+migration failure rollback, killed-process cleanup, no retained advisory
+locks, and existing-data idempotence. Results:
+
+```text
+focused correction suite, count=5: PASS (6.282s)
+focused correction suite, -race count=3: PASS (8.603s)
+full internal/state: PASS (1.651s)
+full internal/state + internal/bridge: PASS (1.936s / 93.417s)
+full internal/state + internal/bridge, -race: PASS (4.225s / 92.810s)
+go vet ./...: PASS
+go build -buildvcs=false ./...: PASS
+Go format and git diff --check: PASS
+neighboring final-assembly database canary: must-survive
+```
+
+No lease, broker fencing, SSE/crash, authentication, transport, or deduplication
+code changed. The correction does not claim exactly-once delivery. Exact pushed
+tip and commands are recorded in the durable migration-lock correction report.
