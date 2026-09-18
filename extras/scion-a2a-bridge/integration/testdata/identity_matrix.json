@@ -1,0 +1,150 @@
+{
+  "schema": "scion.test.ge-a2a.identity-matrix/v1",
+  "comment": "Synthetic identity categories for deterministic local tests. Values under *.invalid are reserved examples, are not credentials, and must never be presented as live Google validation evidence.",
+  "sources": [
+    {
+      "title": "OpenID Connect Core 1.0 - ID Token",
+      "url": "https://openid.net/specs/openid-connect-core-1_0.html#IDToken"
+    },
+    {
+      "title": "Google OpenID Connect",
+      "url": "https://developers.google.com/identity/openid-connect/openid-connect"
+    },
+    {
+      "title": "Gemini Enterprise - Register and manage an A2A agent",
+      "url": "https://docs.cloud.google.com/gemini/enterprise/docs/register-and-manage-an-a2a-agent"
+    }
+  ],
+  "entries": [
+    {
+      "category": "user-a",
+      "principal_kind": "hub-user",
+      "principal_label": "user-a",
+      "subject": "synthetic-user-a",
+      "email": "user-a@example.invalid",
+      "claims": ["project-alpha"],
+      "expected": "authorized-project-alpha"
+    },
+    {
+      "category": "user-b",
+      "principal_kind": "hub-user",
+      "principal_label": "user-b",
+      "subject": "synthetic-user-b",
+      "email": "user-b@example.invalid",
+      "claims": ["project-beta"],
+      "expected": "denied-project-alpha"
+    },
+    {
+      "category": "suspended",
+      "principal_kind": "hub-user",
+      "principal_label": "user-suspended",
+      "subject": "synthetic-user-suspended",
+      "email": "suspended@example.invalid",
+      "claims": ["suspended", "project-alpha"],
+      "expected": "denied"
+    },
+    {
+      "category": "valid",
+      "principal_kind": "google-end-user",
+      "principal_label": "user-a",
+      "issuer": "https://issuer.example.invalid",
+      "subject": "synthetic-user-a",
+      "email": "user-a@example.invalid",
+      "audience": "synthetic-ge-client",
+      "claims": ["exp-present", "signature-valid", "email-authoritative"],
+      "expected": "exchange"
+    },
+    {
+      "category": "rotated",
+      "principal_kind": "google-end-user",
+      "principal_label": "user-a",
+      "issuer": "https://issuer.example.invalid",
+      "subject": "synthetic-user-a",
+      "email": "user-a@example.invalid",
+      "audience": "synthetic-ge-client",
+      "claims": ["new-runtime-bearer", "same-issuer-subject"],
+      "expected": "exchange-on-cold-cache"
+    },
+    {
+      "category": "foreign",
+      "principal_kind": "google-end-user",
+      "principal_label": "foreign-client",
+      "issuer": "https://issuer.example.invalid",
+      "subject": "synthetic-user-a",
+      "audience": "synthetic-foreign-client",
+      "expected": "denied"
+    },
+    {
+      "category": "expired",
+      "principal_kind": "google-end-user",
+      "principal_label": "expired-user-a",
+      "issuer": "https://issuer.example.invalid",
+      "subject": "synthetic-user-a",
+      "claims": ["exp-in-past"],
+      "expected": "denied"
+    },
+    {
+      "category": "missing-exp",
+      "principal_kind": "google-end-user",
+      "principal_label": "missing-exp-user-a",
+      "issuer": "https://issuer.example.invalid",
+      "subject": "synthetic-user-a",
+      "claims": ["exp-absent"],
+      "expected": "denied"
+    },
+    {
+      "category": "forged",
+      "principal_kind": "google-end-user",
+      "principal_label": "forged-user-a",
+      "issuer": "https://issuer.example.invalid",
+      "subject": "synthetic-user-a",
+      "claims": ["signature-invalid"],
+      "expected": "denied"
+    },
+    {
+      "category": "service-account",
+      "principal_kind": "google-service-account",
+      "principal_label": "synthetic-service-account",
+      "issuer": "https://issuer.example.invalid",
+      "subject": "synthetic-service-account",
+      "email": "service-account@example.invalid",
+      "expected": "policy-dependent-denial"
+    },
+    {
+      "category": "changed-email",
+      "principal_kind": "google-end-user",
+      "principal_label": "user-a",
+      "issuer": "https://issuer.example.invalid",
+      "subject": "synthetic-user-a",
+      "email": "new-user-a@example.invalid",
+      "claims": ["same-stable-subject", "email-changed"],
+      "expected": "same-hub-user"
+    },
+    {
+      "category": "non-authoritative",
+      "principal_kind": "google-end-user",
+      "principal_label": "third-party-email",
+      "issuer": "https://issuer.example.invalid",
+      "subject": "synthetic-third-party-user",
+      "email": "third-party@example.invalid",
+      "claims": ["email-not-authoritative"],
+      "expected": "denied-or-no-email-binding"
+    },
+    {
+      "category": "hub-principal",
+      "principal_kind": "service",
+      "principal_label": "hub-control-plane",
+      "subject": "synthetic-hub-service",
+      "audience": "synthetic-bridge-control-plane",
+      "expected": "grpc-accepted"
+    },
+    {
+      "category": "ge-principal",
+      "principal_kind": "service",
+      "principal_label": "ge-invoker",
+      "subject": "synthetic-ge-invoker-service",
+      "audience": "synthetic-bridge-ingress",
+      "expected": "http-ingress-only-grpc-denied"
+    }
+  ]
+}

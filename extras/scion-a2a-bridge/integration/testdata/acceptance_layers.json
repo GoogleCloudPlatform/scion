@@ -1,0 +1,63 @@
+{
+  "schema": "scion.test.ge-a2a.acceptance-layers/v1",
+  "comment": "Auth+transport phase status at the combined immutable tip. Parent layers remain false whenever an external-live or taskstore sublayer is still pending.",
+  "layers": [
+    {
+      "name": "TestGEEnvelopeCompatibility",
+      "status": "partial",
+      "passing": false,
+      "dependencies": ["reviewed-auth", "production-mux"],
+      "external_live_only": ["actual Gemini Enterprise envelope capture"],
+      "sublayers": [
+        {"name": "local-deterministic", "status": "passing", "passing": true},
+        {"name": "actual-ge-capture", "status": "external-live-only", "passing": false}
+      ]
+    },
+    {
+      "name": "TestTwoReplicaUserLifecycle",
+      "status": "passing",
+      "passing": true,
+      "dependencies": ["reviewed-auth", "reviewed-taskstore", "postgresql"]
+    },
+    {
+      "name": "TestColdReplicaAndRotation",
+      "status": "passing",
+      "passing": true,
+      "dependencies": ["reviewed-auth", "two-bridge-processes"]
+    },
+    {
+      "name": "TestCrossReplicaStreamCursor",
+      "status": "passing",
+      "passing": true,
+      "dependencies": ["reviewed-taskstore", "postgresql", "load-alternator"]
+    },
+    {
+      "name": "TestCrashLeaseBoundary",
+      "status": "passing",
+      "passing": true,
+      "dependencies": ["reviewed-taskstore", "postgresql", "process-topology"]
+    },
+    {
+      "name": "TestControlPlanePrincipalIsolation",
+      "status": "passing",
+      "passing": true,
+      "dependencies": ["accepted-grpc-transport", "process-topology"]
+    },
+    {
+      "name": "TestCombinedStartupMatrix",
+      "status": "passing",
+      "passing": true,
+      "dependencies": ["reviewed-auth", "reviewed-taskstore", "accepted-grpc-transport"],
+      "sublayers": [
+        {"name": "auth-transport-startup", "status": "passing", "passing": true},
+        {"name": "taskstore-ha-startup", "status": "passing", "passing": true}
+      ]
+    },
+    {
+      "name": "TestCredentialRedaction",
+      "status": "passing",
+      "passing": true,
+      "dependencies": ["credential-redactor", "structured-observations"]
+    }
+  ]
+}
