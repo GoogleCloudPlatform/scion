@@ -25,6 +25,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // testPostgresTaskStore creates a PostgresTaskStore for testing.
@@ -114,6 +115,38 @@ func TestPostgresTaskStoreDuplicateCreate(t *testing.T) {
 	_, err := store.Create(ctx, task)
 	if !errors.Is(err, taskstore.ErrTaskAlreadyExists) {
 		t.Errorf("error = %v, want ErrTaskAlreadyExists", err)
+	}
+}
+
+func TestIsUniqueViolationUsesSQLState(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "wrapped unique violation",
+			err:  fmt.Errorf("execute insert: %w", &pgconn.PgError{Code: "23505", Message: "unique_violation"}),
+			want: true,
+		},
+		{
+			name: "unrelated error with duplicate-key wording",
+			err:  errors.New("duplicate key value violates unique constraint"),
+			want: false,
+		},
+		{
+			name: "non-unique SQLSTATE with duplicate-key wording",
+			err:  &pgconn.PgError{Code: "23503", Message: "duplicate key value violates unique constraint"},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isUniqueViolation(tt.err); got != tt.want {
+				t.Errorf("isUniqueViolation(%v) = %t, want %t", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 
