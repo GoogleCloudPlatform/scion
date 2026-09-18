@@ -194,6 +194,12 @@ func (s *Server) authorizeScheduledMessageFire(
 		return nil, fmt.Errorf("scheduled_message_no_creator: message event has no creator; cannot authorize at fire time")
 	}
 
+	// Fail closed if the target agent was deleted between scheduling and fire.
+	if agent == nil {
+		return nil, fmt.Errorf("%s: target agent is nil; may have been deleted since scheduling",
+			MessageDenialScheduledTargetDeleted)
+	}
+
 	// Phase 5 D3: Cross-project scheduled messages are now allowed when the
 	// Hub feature is enabled. The event's project is the sender's project;
 	// the target agent may be in a different project.

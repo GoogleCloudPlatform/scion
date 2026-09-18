@@ -107,7 +107,7 @@ func (s *Server) ResolveFanOutTargets(
 		if ref.ProjectSlug != "" {
 			// Cross-project reference: resolve project by slug.
 			project, err := s.store.GetProjectBySlug(ctx, ref.ProjectSlug)
-			if err != nil {
+			if err != nil || project == nil {
 				slog.Warn("ResolveFanOutTargets: project lookup failed",
 					"project_slug", ref.ProjectSlug, "error", err)
 				targets = append(targets, FanOutTarget{
@@ -360,6 +360,14 @@ func (s *Server) AuthorizeAttachmentDownload(
 		return AttachmentTransferDecision{
 			Code:   MessageDenialAttachmentUnauthorized,
 			Reason: "conversation ID is required for attachment authorization",
+		}
+	}
+
+	// Fail closed if requester identity is missing from context.
+	if requesterIdentity == nil {
+		return AttachmentTransferDecision{
+			Code:   MessageDenialAttachmentUnauthorized,
+			Reason: "requester identity is missing; cannot authorize attachment download",
 		}
 	}
 

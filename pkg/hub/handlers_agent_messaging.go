@@ -2043,7 +2043,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				// the slug to a project ID so the boundary check compares the
 				// same type (ID vs ID) on both sides.
 				refProject, refErr := s.store.GetProjectBySlug(ctx, ref.ProjectSlug)
-				if refErr != nil {
+				if refErr != nil || refProject == nil {
 					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 						fmt.Sprintf("project %q not found", ref.ProjectSlug), nil)
 					return
