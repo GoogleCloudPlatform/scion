@@ -28,6 +28,9 @@ type PublicSettingsResponse struct {
 	// DefaultRuntimeBroker is the hub-level default broker ID/slug/name.
 	// The agent-create UI uses it as a fallback when no project default is set.
 	DefaultRuntimeBroker string `json:"defaultRuntimeBroker,omitempty"`
+	// DefaultHarnessConfig is the hub-level default harness config.
+	// The agent-create UI uses it as a fallback when no project default is set.
+	DefaultHarnessConfig string `json:"defaultHarnessConfig,omitempty"`
 }
 
 // nativeChatEnabled reports whether the built-in chat feature is active.
@@ -56,12 +59,15 @@ func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
 		autoExposePortsEnabled = *s.config.AutoExposePortsDefault
 	}
 
-	defaultRuntimeBroker := s.hubAgentDefaults().DefaultRuntimeBroker
+	defaults := s.hubAgentDefaults()
+	defaultRuntimeBroker := defaults.DefaultRuntimeBroker
+	defaultHarnessConfig := defaults.DefaultHarnessConfig
 
 	writeJSON(w, http.StatusOK, PublicSettingsResponse{
 		TelemetryEnabled:       telemetryEnabled,
 		AutoExposePortsEnabled: autoExposePortsEnabled,
 		NativeChatEnabled:      s.nativeChatEnabled(),
 		DefaultRuntimeBroker:   defaultRuntimeBroker,
+		DefaultHarnessConfig:   defaultHarnessConfig,
 	})
 }
