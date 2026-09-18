@@ -40,7 +40,8 @@ var (
 
 	convCreateJSON bool
 
-	convGetJSON bool
+	convGetJSON        bool
+	convGetMessageJSON bool
 
 	convParticipantsJSON bool
 
@@ -61,6 +62,7 @@ Commands:
   scion conversation list                       List your conversations
   scion conversation messages <conv-ref>        View messages in a conversation
   scion conversation get <conv-ref>             Get conversation details
+  scion conversation get-message <ref> <msg-id> Get a message from a conversation
   scion conversation create <name>              Create a new group conversation
   scion conversation set-default <ref> <agent>  Set default agent for a conversation
 
@@ -129,6 +131,19 @@ Examples:
   scion conversation get @my-agent --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runConversationGet,
+}
+
+// conversationGetMessageCmd gets a message from a conversation.
+var conversationGetMessageCmd = &cobra.Command{
+	Use:   "get-message <conversation-ref> <message-id>",
+	Short: "Get a specific message by ID from a conversation",
+	Long: `Get a specific message by its ID from a conversation.
+
+Examples:
+  scion conversation get-message conv:a1b2c3d4-... msg-uuid-here
+  scion conversation get-message conv:a1b2c3d4-... msg-uuid-here --json`,
+	Args: cobra.ExactArgs(2),
+	RunE: runConversationGetMessage,
 }
 
 // conversationSetDefaultCmd sets the default agent for a conversation.
@@ -203,6 +218,7 @@ func init() {
 	conversationCmd.AddCommand(conversationMessagesCmd)
 	conversationCmd.AddCommand(conversationCreateCmd)
 	conversationCmd.AddCommand(conversationGetCmd)
+	conversationCmd.AddCommand(conversationGetMessageCmd)
 	conversationCmd.AddCommand(conversationSetDefaultCmd)
 	conversationCmd.AddCommand(conversationParticipantsCmd)
 	conversationCmd.AddCommand(conversationJoinCmd)
@@ -230,6 +246,7 @@ func init() {
 
 	// Get flags
 	conversationGetCmd.Flags().BoolVar(&convGetJSON, "json", false, "Output in JSON format")
+	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageJSON, "json", false, "Output in JSON format")
 
 	// Participants flags
 	conversationParticipantsCmd.Flags().BoolVar(&convParticipantsJSON, "json", false, "Output in JSON format")
@@ -421,6 +438,76 @@ func runConversationGet(cmd *cobra.Command, args []string) error {
 		_ = tw.Flush()
 	}
 	return nil
+}
+
+func runConversationGetMessage(cmd *cobra.Command, args []string) error {
+	if convGetMessageJSON {
+		outputFormat = "json"
+	}
+
+	_, client, err := requireHubClient()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+
+	conversationID, err := resolveConversationRef(ctx, client, args[0])
+	if err != nil {
+		return err
+	}
+
+	msg, err := client.Conversations().GetMessage(ctx, conversationID, args[1])
+	if err != nil {
+		return fmt.Errorf("failed to get message: %w", err)
+	}
+
+	if isJSONOutput() {
+		return outputJSON(msg)
+	}
+
+	senderProjectID := ""
+	if msg.SenderProjectID != nil {
+		senderProjectID = *msg.SenderProjectID
+	}
+	recipientProjectID := ""
+	if msg.RecipientProjectID != nil {
+		recipientProjectID = *msg.RecipientProjectID
+	}
+	dispatchedAt := ""
+	if msg.DispatchedAt != nil {
+		dispatchedAt = msg.DispatchedAt.Format(time.RFC3339)
+	}
+	dispatchFailureReason := ""
+	if msg.DispatchFailureReason != nil {
+		dispatchFailureReason = *msg.DispatchFailureReason
+	}
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintf(tw, "ID\t%s\n", msg.ID)
+	_, _ = fmt.Fprintf(tw, "CONVERSATION ID\t%s\n", msg.ConversationID)
+	_, _ = fmt.Fprintf(tw, "PROJECT ID\t%s\n", msg.ProjectID)
+	_, _ = fmt.Fprintf(tw, "AGENT ID\t%s\n", msg.AgentID)
+	_, _ = fmt.Fprintf(tw, "SENDER\t%s\n", msg.Sender)
+	_, _ = fmt.Fprintf(tw, "SENDER ID\t%s\n", msg.SenderID)
+	_, _ = fmt.Fprintf(tw, "SENDER PROJECT ID\t%s\n", senderProjectID)
+	_, _ = fmt.Fprintf(tw, "RECIPIENT\t%s\n", msg.Recipient)
+	_, _ = fmt.Fprintf(tw, "RECIPIENT ID\t%s\n", msg.RecipientID)
+	_, _ = fmt.Fprintf(tw, "RECIPIENT PROJECT ID\t%s\n", recipientProjectID)
+	_, _ = fmt.Fprintf(tw, "MESSAGE\t%s\n", msg.Msg)
+	_, _ = fmt.Fprintf(tw, "TYPE\t%s\n", msg.Type)
+	_, _ = fmt.Fprintf(tw, "URGENT\t%t\n", msg.Urgent)
+	_, _ = fmt.Fprintf(tw, "BROADCASTED\t%t\n", msg.Broadcasted)
+	_, _ = fmt.Fprintf(tw, "READ\t%t\n", msg.Read)
+	_, _ = fmt.Fprintf(tw, "GROUP ID\t%s\n", msg.GroupID)
+	_, _ = fmt.Fprintf(tw, "CHANNEL\t%s\n", msg.Channel)
+	_, _ = fmt.Fprintf(tw, "THREAD ID\t%s\n", msg.ThreadID)
+	_, _ = fmt.Fprintf(tw, "CREATED\t%s\n", msg.CreatedAt.Format(time.RFC3339))
+	_, _ = fmt.Fprintf(tw, "DISPATCH STATE\t%s\n", msg.DispatchState)
+	_, _ = fmt.Fprintf(tw, "DISPATCHED AT\t%s\n", dispatchedAt)
+	_, _ = fmt.Fprintf(tw, "DISPATCH FAILURE REASON\t%s\n", dispatchFailureReason)
+	return tw.Flush()
 }
 
 func runConversationSetDefault(cmd *cobra.Command, args []string) error {
