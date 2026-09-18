@@ -91,6 +91,7 @@ allowed_paths=(
   "^pkg/hub/handlers_project_test.go$"
   "^pkg/hub/heartbeat_legacy_test.go$"
   "^pkg/hub/route_classification_test.go$"
+  "^pkg/hub/web_test.go$"
   "^pkg/hubclient/agents_test.go$"
   "^pkg/hubclient/client_test.go$"
   "^pkg/hubclient/runtime_brokers_test.go$"
