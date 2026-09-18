@@ -548,3 +548,41 @@ neighboring final-assembly database canary: must-survive
 No lease, broker fencing, SSE/crash, authentication, transport, or deduplication
 code changed. The correction does not claim exactly-once delivery. Exact pushed
 tip and commands are recorded in the durable migration-lock correction report.
+
+### PR #1742 current-main CI composition fix (2026-09-18)
+
+The temporary composition fix branch `scion/dev-ha-ci-composition-fix` was
+created directly from accepted HA tip `84f797b1cc1de8e9be3f57b35c25849920552737`.
+The original `origin/scion/dev-a2a-taskstore` ref remained untouched at `84f797b1`.
+Current main `b5b2590684d9a824e396632bad53d2d31201361d` was merged normally with
+a two-parent merge commit (`9893dc19f02482f4ae9ca82178fc8269c689dd1b`).
+
+Merging current main into the HA branch surfaced an A2A bridge test compilation
+failure in job `105663452052`: `mockHubClient.Messaging` was declared twice in
+`extras/scion-a2a-bridge/internal/bridge/followup_test.go` (at line 163 and line 174).
+Main's commit `b5b25906` introduced `Messaging()` at line 163, while the HA
+branch had introduced an identical stub at line 174. The duplicate declaration
+at line 174 was removed, preserving column alignment and mock behavior matching
+current main.
+
+No auth fixture allowlist modifications, conversation-upsert guard alterations,
+or module version bumps beyond accepted current main were made. Read-only
+inspection of accepted transport candidate `c82fdab076e044b3038b7014320127c152b6c27b`
+against current main `b5b25906` confirmed that an identical duplicate mock
+declaration occurs upon merging main, with zero A2A module or compat literal issues.
+
+Verification gates against task-local PostgreSQL 15.19 (Debian 15.19-0+deb12u1):
+- State migration concurrency suite (`TestConcurrentPostgresStateMigrations`,
+  `TestPostgresStateMigrationTwoProductionProcesses`,
+  `TestPostgresStateMigrationLockScopesByDatabaseAndSchema`,
+  `TestPostgresStateMigrationFailureAndProcessCancellationReleaseLock`,
+  `TestPostgresStateMigrationExistingDataIdempotent`):
+  - Normal count=1: PASS (1.272s)
+  - Repetition count=5: PASS (6.194s)
+  - Race count=3: PASS (8.633s)
+- Focused lifecycle and ownership regressions: PASS (12.130s)
+- Accepted HA cross-process, cursor, and ownership regressions: PASS (37.499s)
+- Complete bridge and state suites: PASS (state 1.742s, bridge 96.746s)
+- Static analysis: Go formatting (`make fmt-check`), git diff check, `make compat-literals`,
+  bridge and root `go vet` and `go build`, scoped lint: PASS
+- Test canary (`test_canary.sentinel`): survived byte-for-byte across all suites.
