@@ -1022,22 +1022,57 @@ func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug, topi
 		return "", fmt.Errorf("unknown task: %s", taskID)
 	}
 
-	// No a2aTaskId — fall back to local cache, then DB.
+	// No a2aTaskId — correlate by project/agent.
+	// Local cache may nominate a candidate, but it NEVER authorizes alone.
+	// The candidate must be revalidated against the authoritative SDK store.
 	aKey := agentKey(projectID, agentSlug)
 
-	// Fast path: check local cache.
-	b.tasksMu.RLock()
-	taskIDs := append([]string(nil), b.agentTasks[aKey]...)
-	b.tasksMu.RUnlock()
+	// Path A: Durable SDK store lookup (standalone mode).
+	// This is the authoritative path for SDK-only tasks.
+	if b.sdkTaskStore != nil {
+		// Local cache may nominate a candidate for revalidation.
+		var candidate string
+		b.tasksMu.RLock()
+		if ids := b.agentTasks[aKey]; len(ids) > 0 {
+			candidate = ids[len(ids)-1]
+		}
+		b.tasksMu.RUnlock()
 
-	if len(taskIDs) > 0 {
-		b.log.Debug("correlating broker message by agent slug from local cache",
-			"agent", agentSlug, "project", projectID, "active_tasks", len(taskIDs))
-		// Use the most recently registered task.
-		return taskIDs[len(taskIDs)-1], nil
+		if candidate != "" {
+			// Revalidate candidate against durable store.
+			sdkTask, callerUserID, sdkErr := b.sdkTaskStore.GetByIDAndAgent(ctx, candidate, projectID, agentSlug)
+			if sdkErr == nil && sdkTask != nil {
+				// Validate topic user.
+				if topicUserID := extractUserIDFromTopic(topic); topicUserID != "" {
+					if callerUserID != "" && topicUserID != callerUserID {
+						b.log.Warn("dropping message: topic user mismatch (no-metadata candidate)",
+							"topic_user", topicUserID, "stored_caller", callerUserID, "task_id", candidate)
+						return "", fmt.Errorf("topic user mismatch for task %s", candidate)
+					}
+				}
+				return candidate, nil
+			}
+			// Candidate not found in durable store — fall through to full lookup.
+		}
+
+		// No valid candidate — durable unambiguous lookup.
+		sdkTaskID, callerUserID, sdkErr := b.sdkTaskStore.FindActiveSDKTaskForAgent(ctx, projectID, agentSlug)
+		if sdkErr == nil && sdkTaskID != "" {
+			// Validate topic user.
+			if topicUserID := extractUserIDFromTopic(topic); topicUserID != "" {
+				if callerUserID != "" && topicUserID != callerUserID {
+					b.log.Warn("dropping message: topic user mismatch (no-metadata durable)",
+						"topic_user", topicUserID, "stored_caller", callerUserID, "task_id", sdkTaskID)
+					return "", fmt.Errorf("topic user mismatch for task %s", sdkTaskID)
+				}
+			}
+			return sdkTaskID, nil
+		}
+		// Fall through to legacy a2a_tasks path for plugin-mode compatibility.
 	}
 
-	// Slow path: query DB.
+	// Path B: Legacy bridge state store (plugin mode, a2a_tasks).
+	// Also serves as fallback when sdkTaskStore is nil.
 	task, err := b.store.FindActiveTaskForAgent(ctx, projectID, agentSlug)
 	if err != nil {
 		return "", fmt.Errorf("DB lookup failed: %w", err)
@@ -1046,7 +1081,7 @@ func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug, topi
 		return "", fmt.Errorf("no active tasks for agent %s in project %s", agentSlug, projectID)
 	}
 
-	b.log.Debug("correlating broker message by agent slug from DB fallback",
+	b.log.Debug("correlating broker message by agent slug from legacy DB",
 		"agent", agentSlug, "project", projectID, "task_id", task.ID)
 	return task.ID, nil
 }

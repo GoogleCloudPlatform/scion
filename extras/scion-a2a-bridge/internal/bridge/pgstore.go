@@ -168,6 +168,51 @@ func (s *PostgresTaskStore) GetOwnedTaskSnapshotAndCursor(
 	}, cursor, nil
 }
 
+// FindActiveSDKTaskForAgent finds the single most-recently-created non-terminal
+// SDK task for the given project+agent. Used by correlateToTask when there is
+// no a2aTaskId metadata — the no-metadata branch. Returns ErrTaskNotFound if
+// no match or multiple active tasks exist (fail closed on ambiguity).
+// Also returns the stored caller_user_id for topic validation.
+func (s *PostgresTaskStore) FindActiveSDKTaskForAgent(ctx context.Context, projectID, agentSlug string) (string, string, error) {
+	if projectID == "" || agentSlug == "" {
+		return "", "", fmt.Errorf("empty correlation key: %w", a2a.ErrTaskNotFound)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, caller_user_id FROM a2a_sdk_tasks
+		 WHERE project_id = $1 AND agent_slug = $2
+		   AND payload->'status'->>'state' NOT IN ('completed', 'canceled', 'failed', 'rejected')
+		 ORDER BY created_at DESC
+		 LIMIT 2`,
+		projectID, agentSlug,
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("find active SDK task: %w", err)
+	}
+	defer rows.Close()
+
+	var taskID, callerUserID string
+	count := 0
+	for rows.Next() {
+		count++
+		if count == 1 {
+			if err := rows.Scan(&taskID, &callerUserID); err != nil {
+				return "", "", fmt.Errorf("scan active SDK task: %w", err)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", "", fmt.Errorf("iterate active SDK tasks: %w", err)
+	}
+	if count == 0 {
+		return "", "", a2a.ErrTaskNotFound
+	}
+	if count > 1 {
+		// Ambiguous — multiple active tasks. Fail closed.
+		return "", "", fmt.Errorf("ambiguous: %d active SDK tasks for %s/%s", count, projectID, agentSlug)
+	}
+	return taskID, callerUserID, nil
+}
+
 // sdkTaskStoreMigrationLockID is a Postgres advisory lock ID used to
 // serialize schema migrations across replicas (REQ-4).
 const sdkTaskStoreMigrationLockID = 827419618 // arbitrary stable int
