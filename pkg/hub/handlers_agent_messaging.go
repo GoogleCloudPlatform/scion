@@ -1355,27 +1355,72 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 	messaging.RecordStep(ctx, "agent_loaded")
 
-	// AC-33: Cross-project mention check. Verify that all mentioned agents
-	// belong to the same project as the primary recipient before any dispatch.
+	// AC-33 + Phase 5 D1: Cross-project mention check with fan-out support.
+	// For same-project mentions, validate all agents belong to the same project.
+	// For project-qualified mentions (@project/agent), evaluate per-recipient
+	// cross-project policy independently.
 	if len(req.Mentions) > 0 {
-		mentionAddrs := make([]messaging.Addressee, 0, len(req.Mentions)+1)
-		// Include the primary recipient agent.
-		mentionAddrs = append(mentionAddrs, messaging.Addressee{
+		senderIdentity := GetIdentityFromContext(ctx)
+		var qualifiedRefs []QualifiedAgentRef
+		var sameProjectMentions []messaging.Addressee
+
+		// Include the primary recipient agent in same-project validation.
+		sameProjectMentions = append(sameProjectMentions, messaging.Addressee{
 			PrincipalKind: "agent",
 			PrincipalID:   agent.ID,
 		})
-		// Resolve mention slugs to agent IDs for the cross-project check.
+
 		for _, slug := range req.Mentions {
-			if mentionAgent, lookupErr := s.store.GetAgentBySlug(ctx, agent.ProjectID, slug); lookupErr == nil && mentionAgent != nil {
-				mentionAddrs = append(mentionAddrs, messaging.Addressee{
-					PrincipalKind: "agent",
-					PrincipalID:   mentionAgent.ID,
-				})
+			ref, refErr := ParseQualifiedAgentRef(slug)
+			if refErr != nil {
+				s.messageLog.Warn("malformed mention reference, skipping", "slug", slug, "error", refErr)
+				continue
+			}
+			if ref.ProjectSlug != "" {
+				// Project-qualified reference: evaluate cross-project policy per-target.
+				qualifiedRefs = append(qualifiedRefs, ref)
+			} else {
+				// Same-project mention: add to batch validation.
+				if mentionAgent, lookupErr := s.store.GetAgentBySlug(ctx, agent.ProjectID, slug); lookupErr == nil && mentionAgent != nil {
+					sameProjectMentions = append(sameProjectMentions, messaging.Addressee{
+						PrincipalKind: "agent",
+						PrincipalID:   mentionAgent.ID,
+					})
+				}
 			}
 		}
-		if crossErr := messaging.ValidateCrossProjectAddressees(ctx, s.store, mentionAddrs); crossErr != nil {
+
+		// Validate same-project mentions.
+		if crossErr := messaging.ValidateCrossProjectAddressees(ctx, s.store, sameProjectMentions); crossErr != nil {
 			ValidationError(w, crossErr.Error(), nil)
 			return
+		}
+
+		// Evaluate cross-project qualified mentions per-target.
+		if len(qualifiedRefs) > 0 {
+			targets, resolveErr := s.ResolveFanOutTargets(ctx, qualifiedRefs, agent.ProjectID)
+			if resolveErr != nil {
+				ValidationError(w, resolveErr.Error(), nil)
+				return
+			}
+			result := s.EvaluateFanOutTargets(ctx, senderIdentity, targets)
+			// Log denied fan-out targets for audit (D7).
+			for _, t := range result.Targets {
+				if !t.Decision.Allowed {
+					LogCrossProjectDecision(CrossProjectAuditEntry{
+						Timestamp:        time.Now(),
+						Action:           "deny",
+						SenderID:         agent.ID,
+						SenderProjectID:  agent.ProjectID,
+						RecipientID:      t.AgentSlug,
+						RecipientProject: t.ProjectID,
+						DecisionCode:     t.DenialCode,
+						Reason:           t.Decision.Reason,
+						CrossProject:     true,
+						Surface:          "mention_fanout",
+					})
+				}
+			}
 		}
 	}
 
@@ -2016,6 +2061,39 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 	}
 	projectID := anchorAgent.ProjectID
 
+	// Phase 5 D2: Reject cross-project group/broadcast/plugin forwarding
+	// BEFORE any effects. Group messages retain project boundaries — each
+	// agent recipient must be in the anchor agent's project.
+	for _, recip := range recipients {
+		if recip.Kind == messages.RecipientAgent {
+			ref, refErr := ParseQualifiedAgentRef(recip.Name)
+			if refErr != nil {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+					fmt.Sprintf("malformed agent reference %q: %v", recip.Name, refErr), nil)
+				return
+			}
+			if ref.ProjectSlug != "" {
+				// Explicit cross-project reference in a group context: resolve
+				// the slug to a project ID so the boundary check compares the
+				// same type (ID vs ID) on both sides.
+				refProject, refErr := s.store.GetProjectBySlug(ctx, ref.ProjectSlug)
+				if refErr != nil || refProject == nil {
+					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+						fmt.Sprintf("project %q not found", ref.ProjectSlug), nil)
+					return
+				}
+				boundary := ValidateCrossProjectGroupBoundary(projectID, refProject.ID, "group message")
+				if boundary != nil {
+					writeError(w, http.StatusForbidden, ErrCodeForbidden,
+						boundary.Reason, map[string]interface{}{
+							"code": string(boundary.Code),
+						})
+					return
+				}
+			}
+		}
+	}
+
 	recipientStrs := make([]string, len(recipients))
 	for i, r := range recipients {
 		recipientStrs[i] = r.String()
@@ -2355,12 +2433,18 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Phase 3 msg-authz: Agent callers must be in the same project.
-	// ScopeAgentLifecycle no longer required — messaging is a first-class axis (D1).
-	// Per-recipient authorization happens below via authorizeAgentMessage.
+	// Phase 3 msg-authz + Phase 5 D2: Agent callers must be in the same project.
+	// Broadcasts retain project boundaries — cross-project broadcasts are denied
+	// even in hub mode. ScopeAgentLifecycle no longer required — messaging is a
+	// first-class axis (D1). Per-recipient authorization happens below via
+	// authorizeAgentMessage.
 	if agentIdent != nil && userIdent == nil {
 		if agentIdent.ProjectID() != projectID {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only broadcast within their own project", nil)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"cross-project broadcast is not supported; group/broadcast/plugin channels retain project boundaries",
+				map[string]interface{}{
+					"code": string(MessageDenialCrossProjectGroupsUnsupported),
+				})
 			return
 		}
 	}

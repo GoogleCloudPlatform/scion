@@ -33,14 +33,27 @@ import (
 type MessageDenialCode string
 
 const (
-	MessageDenialNone                    MessageDenialCode = ""
-	MessageDenialCrossProjectDisabled    MessageDenialCode = "cross_project_disabled"
-	MessageDenialCrossProjectSenderMode  MessageDenialCode = "cross_project_sender_mode"
-	MessageDenialCrossProjectTargetMode  MessageDenialCode = "cross_project_target_mode"
-	MessageDenialCrossProjectInboundNone MessageDenialCode = "cross_project_inbound_none"
-	MessageDenialCrossProjectNotMember   MessageDenialCode = "cross_project_origin_not_member"
-	MessageDenialCrossProjectUntrusted   MessageDenialCode = "cross_project_untrusted_origin"
-	MessageDenialCrossProjectUnsupported MessageDenialCode = "cross_project_surface_unsupported"
+	MessageDenialNone                            MessageDenialCode = ""
+	MessageDenialCrossProjectDisabled            MessageDenialCode = "cross_project_disabled"
+	MessageDenialCrossProjectSenderMode          MessageDenialCode = "cross_project_sender_mode"
+	MessageDenialCrossProjectTargetMode          MessageDenialCode = "cross_project_target_mode"
+	MessageDenialCrossProjectInboundNone         MessageDenialCode = "cross_project_inbound_none"
+	MessageDenialCrossProjectNotMember           MessageDenialCode = "cross_project_origin_not_member"
+	MessageDenialCrossProjectUntrusted           MessageDenialCode = "cross_project_untrusted_origin"
+	MessageDenialCrossProjectUnsupported         MessageDenialCode = "cross_project_surface_unsupported"
+	MessageDenialCrossProjectGroupsUnsupported   MessageDenialCode = "cross_project_groups_unsupported"
+	MessageDenialCrossProjectAttachUnsupported   MessageDenialCode = "cross_project_attachment_unsupported"
+	MessageDenialCrossProjectScheduledDenied     MessageDenialCode = "cross_project_scheduled_denied"
+	MessageDenialCrossProjectScheduledDisabled   MessageDenialCode = "cross_project_scheduled_disabled"
+	MessageDenialCrossProjectScheduledTarget     MessageDenialCode = "cross_project_scheduled_target"      // reserved: scheduled message target validation
+	MessageDenialCrossProjectContentUnauthorized MessageDenialCode = "cross_project_content_unauthorized"
+	MessageDenialScheduledCreatorDeleted         MessageDenialCode = "scheduled_message_creator_deleted"  // reserved: creator lifecycle checks
+	MessageDenialScheduledCreatorInactive        MessageDenialCode = "scheduled_message_creator_inactive" // reserved: creator lifecycle checks
+	MessageDenialScheduledTargetDeleted          MessageDenialCode = "scheduled_message_target_deleted"
+	MessageDenialScheduledModeChanged            MessageDenialCode = "scheduled_message_mode_changed" // reserved: mode-change detection at fire time
+	MessageDenialAttachmentNotFound              MessageDenialCode = "attachment_not_found"
+	MessageDenialAttachmentUnauthorized          MessageDenialCode = "attachment_unauthorized"
+	MessageDenialDeliveryDuplicate               MessageDenialCode = "delivery_duplicate" // reserved: delivery deduplication guard
 )
 
 // MessageDecision captures the outcome of an agent message authorization
