@@ -3311,7 +3311,7 @@ export class ScionPageChat extends LitElement {
         const thread = this.shadowRoot?.querySelector('scion-chat-thread') as
           | import('../shared/chat/chat-thread.js').ScionChatThread
           | null;
-        thread?.scrollToMessageById(detail.messageId);
+        void thread?.scrollToMessageById(detail.messageId);
       });
     }
   }

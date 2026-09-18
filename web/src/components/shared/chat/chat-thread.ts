@@ -343,6 +343,7 @@ export class ScionChatThread extends LitElement {
 
   private eventSource: EventSource | null = null;
   private nextCursor: string | null = null;
+  private viewingAroundMessage = false;
   private lastKnownTimestamp: string | null = null;
   private hadError = false;
   private fetchId = 0;
@@ -363,7 +364,7 @@ export class ScionChatThread extends LitElement {
       this._sawSseConnect = true;
       return;
     }
-    if (!this.loaded) return;
+    if (!this.loaded || this.viewingAroundMessage) return;
     void this.fetchHistoryV2().catch((err) => {
       console.warn('[chat-thread] catch-up fetch after reconnect failed:', err);
     });
@@ -936,6 +937,7 @@ export class ScionChatThread extends LitElement {
     this.messageMap.clear();
     this.messages = [];
     this.nextCursor = null;
+    this.viewingAroundMessage = false;
     this.lastKnownTimestamp = null;
     this.hasOlderMessages = true;
     this.loaded = false;
@@ -1249,7 +1251,7 @@ export class ScionChatThread extends LitElement {
       // Determine scroll target: permalink hash > unread divider > bottom.
       const hashMsgId = this.parseMessageHash();
       if (hashMsgId) {
-        this.scrollToMessageById(hashMsgId, true);
+        void this.scrollToMessageById(hashMsgId, true);
       } else if (this.showUnreadDivider) {
         this.scrollToUnreadDivider();
       } else {
@@ -1420,6 +1422,7 @@ export class ScionChatThread extends LitElement {
     if (eventKey && eventKey !== this.conversationKey) {
       return; // Not for this conversation
     }
+    if (this.viewingAroundMessage) return;
 
     // The sender finished typing the moment their message landed — drop the
     // indicator now rather than waiting out TYPING_EXPIRY_MS.
@@ -1553,7 +1556,7 @@ export class ScionChatThread extends LitElement {
    * (a burst of SSE events) collapse into one trailing refetch.
    */
   private async backfillV2(): Promise<void> {
-    if (!this.conversationKey) return;
+    if (!this.conversationKey || this.viewingAroundMessage) return;
     if (this._backfillInFlight) {
       this._backfillPending = true;
       return;
@@ -2092,7 +2095,7 @@ export class ScionChatThread extends LitElement {
 
   /** Handle scroll-to-message from reply preview click. */
   private handleScrollToMessage(e: CustomEvent<{ messageId: string }>): void {
-    this.scrollToMessageById(e.detail.messageId);
+    void this.scrollToMessageById(e.detail.messageId);
   }
 
   /** SSE handler for message-edited events. */
@@ -2322,7 +2325,27 @@ export class ScionChatThread extends LitElement {
       .catch(() => {});
   }
 
-  private handleJumpToLatest(): void {
+  private async handleJumpToLatest(): Promise<void> {
+    if (this.viewingAroundMessage) {
+      this.messageMap.clear();
+      this.messages = [];
+      this.v2AttachmentMap.clear();
+      this.v2MessageExtMap.clear();
+      this.v2ReplyPreviewMap.clear();
+      this.nextCursor = null;
+      this.hasOlderMessages = true;
+      this.pinnedToBottom = true;
+
+      try {
+        await this.fetchHistoryV2();
+        this.viewingAroundMessage = false;
+      } catch (err) {
+        this.error = err instanceof Error ? err.message : 'Failed to load messages';
+        this.pinnedToBottom = false;
+        return;
+      }
+    }
+
     this.pinnedToBottom = true;
     this.scrollToBottomAfterRender();
   }
@@ -2341,18 +2364,78 @@ export class ScionChatThread extends LitElement {
    * Scroll to a specific message by ID, with optional highlight animation.
    * Can be called externally (e.g. from search navigation on same conversation).
    */
-  scrollToMessageById(messageId: string, highlight = true): void {
-    void this.updateComplete.then(() => {
-      const scrollEl = this.shadowRoot?.querySelector('.messages-scroll');
-      if (!scrollEl) return;
-      const msgEl = scrollEl.querySelector(`#msg-${messageId}`);
-      if (!msgEl) return;
-      msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      if (highlight) {
-        msgEl.classList.add('permalink-highlight');
-        setTimeout(() => msgEl.classList.remove('permalink-highlight'), 2000);
-      }
+  async scrollToMessageById(messageId: string, highlight = true): Promise<void> {
+    await this.updateComplete;
+    const scrollEl = this.shadowRoot?.querySelector('.messages-scroll');
+    if (!scrollEl) return;
+
+    let msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
+    if (!msgEl) {
+      await this.fetchAroundMessage(messageId);
+      await this.updateComplete;
+      msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
+    }
+    if (!msgEl) return;
+
+    msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (highlight) {
+      msgEl.classList.add('permalink-highlight');
+      setTimeout(() => msgEl?.classList.remove('permalink-highlight'), 2000);
+    }
+  }
+
+  private async fetchAroundMessage(messageId: string): Promise<void> {
+    if (!this.conversationKey) return;
+
+    const currentId = this.fetchId;
+    const params = new URLSearchParams({
+      around: messageId,
+      limit: String(HISTORY_PAGE_SIZE),
     });
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
+      );
+      if (currentId !== this.fetchId || !res.ok) return;
+
+      const data = (await res.json()) as {
+        items?: Message[];
+        messages?: Message[];
+        nextCursor?: string;
+        messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+        messageExtensions?: Record<
+          string,
+          { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
+        >;
+        replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
+      };
+      if (currentId !== this.fetchId) return;
+
+      const items = data.items ?? data.messages ?? [];
+      this.messageMap.clear();
+      this.v2AttachmentMap.clear();
+      this.v2MessageExtMap.clear();
+      this.v2ReplyPreviewMap.clear();
+
+      for (const [msgId, refs] of Object.entries(data.messageAttachments ?? {})) {
+        this.v2AttachmentMap.set(msgId, refs);
+      }
+      for (const [msgId, ext] of Object.entries(data.messageExtensions ?? {})) {
+        this.v2MessageExtMap.set(msgId, ext);
+      }
+      for (const [msgId, preview] of Object.entries(data.replyPreviews ?? {})) {
+        this.v2ReplyPreviewMap.set(msgId, preview);
+      }
+
+      this.nextCursor = data.nextCursor ?? null;
+      this.hasOlderMessages = this.nextCursor !== null;
+      this.viewingAroundMessage = true;
+      this.pinnedToBottom = false;
+      this.mergeMessages(items);
+    } catch (err) {
+      console.error('Failed to fetch around message:', err);
+    }
   }
 
   /** Scroll to the unread divider after render. */
