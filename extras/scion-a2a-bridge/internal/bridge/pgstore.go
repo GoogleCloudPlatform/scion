@@ -463,6 +463,10 @@ func (s *PostgresTaskStore) Update(ctx context.Context, req *taskstore.UpdateReq
 		}
 	}
 
+	if req.Task.Status.State == a2a.TaskStateCanceled {
+		return s.updateCanceledTask(ctx, req, owner, payload, now)
+	}
+
 	// Use CAS: only update if the version matches (when PrevVersion is tracked).
 	if req.PrevVersion != taskstore.TaskVersionMissing {
 		var newVersion int64
@@ -507,6 +511,100 @@ func (s *PostgresTaskStore) Update(ctx context.Context, req *taskstore.UpdateReq
 	if err != nil {
 		return taskstore.TaskVersionMissing, fmt.Errorf("update SDK task: %w", err)
 	}
+	return taskstore.TaskVersion(newVersion), nil
+}
+
+// updateCanceledTask atomically commits the authoritative canceled snapshot,
+// releases the execution lease, inserts one task-scoped final bridge event,
+// and advances the snapshot cursor to that event. This is the convergence
+// boundary consumed by a blocking executor on another replica.
+func (s *PostgresTaskStore) updateCanceledTask(
+	ctx context.Context,
+	req *taskstore.UpdateRequest,
+	owner string,
+	payload []byte,
+	now time.Time,
+) (taskstore.TaskVersion, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return taskstore.TaskVersionMissing, fmt.Errorf("begin canceled task update: %w", err)
+	}
+	defer tx.Rollback()
+
+	var newVersion int64
+	if req.PrevVersion != taskstore.TaskVersionMissing {
+		err = tx.QueryRowContext(ctx,
+			`UPDATE a2a_sdk_tasks
+			 SET payload=$1, version=version+1, updated_at=$2, context_id=$3,
+			     exec_owner=NULL, exec_heartbeat=NULL
+			 WHERE id=$4 AND owner_key=$5 AND version=$6
+			 RETURNING version`,
+			payload, now, req.Task.ContextID, string(req.Task.ID), owner, int64(req.PrevVersion),
+		).Scan(&newVersion)
+	} else {
+		err = tx.QueryRowContext(ctx,
+			`UPDATE a2a_sdk_tasks
+			 SET payload=$1, version=version+1, updated_at=$2, context_id=$3,
+			     exec_owner=NULL, exec_heartbeat=NULL
+			 WHERE id=$4 AND owner_key=$5
+			 RETURNING version`,
+			payload, now, req.Task.ContextID, string(req.Task.ID), owner,
+		).Scan(&newVersion)
+	}
+	if err == sql.ErrNoRows {
+		var exists bool
+		if existsErr := tx.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM a2a_sdk_tasks WHERE id=$1 AND owner_key=$2)`,
+			string(req.Task.ID), owner,
+		).Scan(&exists); existsErr != nil {
+			return taskstore.TaskVersionMissing, fmt.Errorf("check task existence: %w", existsErr)
+		}
+		if exists && req.PrevVersion != taskstore.TaskVersionMissing {
+			return taskstore.TaskVersionMissing, taskstore.ErrConcurrentModification
+		}
+		return taskstore.TaskVersionMissing, a2a.ErrTaskNotFound
+	}
+	if err != nil {
+		return taskstore.TaskVersionMissing, fmt.Errorf("update canceled SDK task: %w", err)
+	}
+
+	taskID := string(req.Task.ID)
+	dedupKey := "sdk-cancel:" + taskID
+	cancelPayload, err := json.Marshal(TaskStatusUpdate{
+		TaskID: taskID,
+		Status: TaskStatus{State: TaskStateCanceled},
+	})
+	if err != nil {
+		return taskstore.TaskVersionMissing, fmt.Errorf("marshal cancel boundary: %w", err)
+	}
+	var eventID int64
+	err = tx.QueryRowContext(ctx,
+		`INSERT INTO a2a_task_events (task_id, kind, payload, final, dedup_key, created_at)
+		 VALUES ($1, 'status', $2, true, $3, NOW())
+		 ON CONFLICT (task_id, dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING
+		 RETURNING id`,
+		taskID, json.RawMessage(cancelPayload), dedupKey,
+	).Scan(&eventID)
+	if err == sql.ErrNoRows {
+		err = tx.QueryRowContext(ctx,
+			`SELECT id FROM a2a_task_events WHERE task_id=$1 AND dedup_key=$2`,
+			taskID, dedupKey,
+		).Scan(&eventID)
+	}
+	if err != nil {
+		return taskstore.TaskVersionMissing, fmt.Errorf("insert cancel boundary: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx,
+		`UPDATE a2a_sdk_tasks SET last_event_cursor=GREATEST(last_event_cursor, $1)
+		 WHERE id=$2 AND owner_key=$3`, eventID, taskID, owner); err != nil {
+		return taskstore.TaskVersionMissing, fmt.Errorf("advance cancel cursor: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return taskstore.TaskVersionMissing, fmt.Errorf("commit canceled task update: %w", err)
+	}
+
+	// NOTIFY is only an accelerator; committed polling remains authoritative.
+	_, _ = s.db.ExecContext(ctx, "SELECT pg_notify('a2a_task_event', $1)", taskID)
 	return taskstore.TaskVersion(newVersion), nil
 }
 

@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 
@@ -400,12 +401,15 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 		heartbeatStore = sdkStore[0]
 	}
 	ownerID := OwnerID()
+	var ownerKey string
 	if heartbeatStore != nil {
 		// Continuations must start strictly after the last event reflected in
 		// this task's durable snapshot. Derive the same owner key used by the
 		// task store from authenticated route/caller context; never authorize
 		// from a local cache or a process/global cursor.
-		ownerKey, ok, err := buildOwnerKey(ctx)
+		var ok bool
+		var err error
+		ownerKey, ok, err = buildOwnerKey(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("derive task owner: %w", err)
 		}
@@ -433,7 +437,13 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 		// another replica), abort immediately. No post-loss event may be yielded.
 		if heartbeatStore != nil {
 			if hbErr := heartbeatStore.HeartbeatExecution(ctx, taskID, ownerID); hbErr != nil {
-				return nil, fmt.Errorf("lease lost before read for task %s: %w", taskID, hbErr)
+				// Cancellation atomically releases the lease and publishes a final
+				// event. The authenticated task owner may consume that one terminal
+				// boundary after lease release; every other lease loss still aborts.
+				stored, _, snapshotErr := heartbeatStore.GetOwnedTaskSnapshotAndCursor(ctx, taskID, ownerKey)
+				if snapshotErr != nil || stored.Task.Status.State != a2a.TaskStateCanceled {
+					return nil, fmt.Errorf("lease lost before read for task %s: %w", taskID, hbErr)
+				}
 			}
 		}
 
@@ -448,7 +458,10 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 				// STEP 3: Verify ownership IMMEDIATELY before returning.
 				if heartbeatStore != nil {
 					if hbErr := heartbeatStore.HeartbeatExecution(ctx, taskID, ownerID); hbErr != nil {
-						return nil, fmt.Errorf("lease lost before emit for task %s: %w", taskID, hbErr)
+						stored, _, snapshotErr := heartbeatStore.GetOwnedTaskSnapshotAndCursor(ctx, taskID, ownerKey)
+						if snapshotErr != nil || stored.Task.Status.State != a2a.TaskStateCanceled || !ev.Final {
+							return nil, fmt.Errorf("lease lost before emit for task %s: %w", taskID, hbErr)
+						}
 					}
 				}
 				return &ev, nil

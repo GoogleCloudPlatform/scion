@@ -273,28 +273,6 @@ func (h *DurableRequestHandler) CancelTask(ctx context.Context, req *a2a.CancelT
 	if err != nil {
 		return nil, err
 	}
-	// The SDK task store is authoritative for the canceled snapshot, while
-	// blocking executors consume the bridge event log. Publish one durable final
-	// boundary so a waiter on another replica converges without waiting for its
-	// request timeout. The task-scoped key makes a retry idempotent.
-	if task != nil && h.eventStore != nil {
-		payload, marshalErr := json.Marshal(TaskStatusUpdate{
-			TaskID: string(task.ID),
-			Status: TaskStatus{State: TaskStateCanceled},
-		})
-		if marshalErr != nil {
-			return nil, fmt.Errorf("marshal cancel boundary: %w", marshalErr)
-		}
-		if _, appendErr := h.eventStore.AppendTaskEvent(ctx, &state.TaskEvent{
-			TaskID:   string(task.ID),
-			Kind:     "status",
-			Payload:  payload,
-			Final:    true,
-			DedupKey: "sdk-cancel:" + string(task.ID),
-		}); appendErr != nil {
-			return nil, fmt.Errorf("persist cancel boundary: %w", appendErr)
-		}
-	}
 	stripBridgeEventID(task)
 	return task, nil
 }
