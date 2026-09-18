@@ -247,3 +247,27 @@ config, Hub, authz, runtime, and runtime-broker packages. The transport package
 remained green. `make lint` and `make build` passed; the unrelated failures
 were documented in the durable report and intentionally left out of this
 bounded fix.
+
+## Post-merge duplicate mock resolution (2026-09-18)
+
+Following the upstream merge of PR #1741 into `main` (`7c0e3a26856136975a479715724db37fabde1bfa`),
+the A2A bridge test suite failed to compile due to a duplicate method declaration:
+`mockHubClient.Messaging()` was declared at both lines 163 and 166 in
+`extras/scion-a2a-bridge/internal/bridge/followup_test.go`:
+`internal/bridge/followup_test.go:166:25: method mockHubClient.Messaging already declared at internal/bridge/followup_test.go:163:25`.
+
+A fresh fix branch `scion/dev-postmerge-mock-dedup` was created directly from upstream `main`
+(`7c0e3a26856136975a479715724db37fabde1bfa`), without importing historical composition branches
+(such as `9abf6c8`) or rebasing old PR branches. The redundant line 166 declaration was removed,
+preserving line 163 and all test behaviors.
+
+Validation confirmed clean compilation and test execution:
+- Full A2A bridge test suite passed cleanly (`go test ./...` in 34.9s).
+- Full A2A bridge race detector passed cleanly (`go test -race ./...` in 36.5s).
+- Focused follow-up tests passed cleanly (`go test -run TestSendFollowUp ./internal/bridge/...`).
+- Bridge vet and build passed cleanly (`go vet ./...` and `go build ./cmd/scion-a2a-bridge/`).
+- Root build and vet passed cleanly (`go build ./cmd/...` and `go vet ./pkg/plugin/... ./pkg/config/... ./pkg/hub/...`).
+- Root plugin tests passed cleanly (`go test ./pkg/plugin/...`).
+- Hub integration activation test passed (`go test ./pkg/hub/ -run TestActivateInstalledIntegration`).
+- Formatting (`gofmt`), git diff sanity (`git diff --check`), compatibility literals (`make compat-literals`), and scoped `golangci-lint` passed with zero issues.
+- Baseline `authzop` catalog mismatches against new API endpoints in `7c0e3a2` were classified as pre-existing and isolated from this fix.
