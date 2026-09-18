@@ -357,4 +357,3 @@ Hub `go.mod`: No changes.
   - Transport (`c82fdab`): duplicate mock in `followup_test.go` WILL arise upon
     merge with main (Transport added `Messaging()` at line 165; main at line 180).
     Compat allowlist will NOT arise (zero legacy grove literals introduced).
-
