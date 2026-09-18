@@ -64,12 +64,45 @@ func (s *PostgresStore) Close() error {
 	return s.db.Close()
 }
 
+// DB returns the underlying database connection pool. This allows other
+// stores (e.g. PostgresTaskStore) to share the same pool, avoiding the
+// overhead and connection count of separate pools per store.
+func (s *PostgresStore) DB() *sql.DB {
+	return s.db
+}
+
 // Ping checks database connectivity.
 func (s *PostgresStore) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
 func (s *PostgresStore) migrate() error {
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// PostgreSQL can race even CREATE TABLE IF NOT EXISTS when independent
+	// replicas create the same catalog rows concurrently. Serialize migrations
+	// per database and actual target schema. The transaction owns both the
+	// advisory lock and every DDL statement, so commit, rollback, cancellation,
+	// and connection loss release the lock without pool/session ambiguity.
+	var databaseName, schemaName string
+	if err := tx.QueryRowContext(ctx, `SELECT current_database(), current_schema()`).Scan(&databaseName, &schemaName); err != nil {
+		return fmt.Errorf("resolve migration namespace: %w", err)
+	}
+	if schemaName == "" {
+		return fmt.Errorf("resolve migration namespace: current schema is empty")
+	}
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`,
+		databaseName, schemaName,
+	); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+
 	migrations := []string{
 		`CREATE TABLE IF NOT EXISTS a2a_tasks (
 			id TEXT PRIMARY KEY,
@@ -121,9 +154,12 @@ func (s *PostgresStore) migrate() error {
 	}
 
 	for _, m := range migrations {
-		if _, err := s.db.Exec(m); err != nil {
+		if _, err := tx.ExecContext(ctx, m); err != nil {
 			return fmt.Errorf("exec migration: %w", err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration: %w", err)
 	}
 	return nil
 }

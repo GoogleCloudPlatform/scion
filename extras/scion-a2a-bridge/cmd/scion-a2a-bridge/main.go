@@ -489,12 +489,49 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	})
 
 	// 10. Create SDK executor and request handler.
+	// In standalone mode, use a durable Postgres-backed SDK task store instead of
+	// the in-memory store. This ensures SDK task state (full a2a.Task payloads with
+	// history, artifacts, etc.) survives replica restarts and is accessible across
+	// all replicas sharing the same database.
 	executor := bridge.NewScionExecutor(b, log.With("component", "executor"))
-	routeAuthenticator := bridge.RouteKeyAuthenticator()
-	innerTaskStore := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
-		Authenticator: routeAuthenticator,
-	})
-	scopedTaskStore := bridge.NewScopedTaskStore(innerTaskStore)
+	// Share the state store's connection pool with the SDK task store
+	// (REQ-4: avoid doubling max connections per replica).
+	pgTaskStore, err := bridge.NewPostgresTaskStoreWithDB(store.DB())
+	if err != nil {
+		log.Error("failed to initialize Postgres SDK task store", "error", err)
+		os.Exit(1)
+	}
+	defer pgTaskStore.Close() // no-op since pool is owned by state store
+	log.Info("Postgres SDK task store initialized (shared pool)")
+
+	// Wire the SDK task store into the bridge for execution leases,
+	// reaping stale execution claims, and retention cleanup.
+	b.SetSDKTaskStore(pgTaskStore)
+
+	// Constraint 2: Create barrier store for deterministic create-completion
+	// signaling between consumer (store.Create) and producer (ClaimExecution).
+	barrierStore := bridge.NewBarrierTaskStore(pgTaskStore)
+	b.SetBarrierStore(barrierStore)
+
+	// Startup recovery: reap any stale execution leases left by
+	// previous instances that crashed mid-execution.
+	// ReapStaleTasks may return partial successes alongside aggregated errors.
+	// Log both independently, matching the janitor path in bridge.go.
+	{
+		reapedIDs, err := pgTaskStore.ReapStaleTasks(context.Background(), 2*cfg.Timeouts.SendMessage)
+		if len(reapedIDs) > 0 {
+			log.Warn("startup: reaped stale SDK execution leases from previous crash", "count", len(reapedIDs), "task_ids", reapedIDs)
+		}
+		if err != nil {
+			log.Error("startup: errors reaping stale SDK execution leases", "error", err)
+		}
+	}
+
+	// SDK receives: SDK → BarrierTaskStore → PostgresTaskStore.
+	// PostgresTaskStore is the authoritative owner enforcer — it derives and
+	// checks owner_key on every Create/Get/Update/List at the SQL level.
+	// No ScopedTaskStore: its in-memory ownership map was redundant with SQL
+	// enforcement and grew monotonically without bound in long-lived processes.
 	sdkRequestHandler := a2asrv.NewHandler(
 		executor,
 		a2asrv.WithLogger(log.With("component", "a2a-sdk")),
@@ -503,12 +540,16 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 			PushNotifications: false,
 		}),
 		a2asrv.WithAgentInactivityTimeout(cfg.Timeouts.SendMessage),
-		a2asrv.WithTaskStore(scopedTaskStore),
+		a2asrv.WithTaskStore(barrierStore),
 	)
 	b.SetSDKRequestHandler(sdkRequestHandler)
 
+	// Constraint 3: DurableRequestHandler wraps the SDK handler for
+	// ownership-enforcing durable subscribe that bypasses localManager.Resubscribe.
+	durableHandler := bridge.NewDurableRequestHandler(sdkRequestHandler, pgTaskStore, store, notifier)
+
 	sdkJSONRPCHandler := a2asrv.NewJSONRPCHandler(
-		sdkRequestHandler,
+		durableHandler,
 		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
 	)
 

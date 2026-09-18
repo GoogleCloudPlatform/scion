@@ -77,9 +77,15 @@ func (c *CallerIdentity) CallerKey() string {
 
 type callerContextKey struct{}
 
-// withCallerIdentity injects a CallerIdentity into the context.
-func withCallerIdentity(ctx context.Context, id *CallerIdentity) context.Context {
+// WithCallerIdentity injects a CallerIdentity into the context.
+// Exported for use in test infrastructure (subprocess servers).
+func WithCallerIdentity(ctx context.Context, id *CallerIdentity) context.Context {
 	return context.WithValue(ctx, callerContextKey{}, id)
+}
+
+// withCallerIdentity is the internal alias kept for existing callers.
+func withCallerIdentity(ctx context.Context, id *CallerIdentity) context.Context {
+	return WithCallerIdentity(ctx, id)
 }
 
 // callerIdentityFromContext retrieves the CallerIdentity from the context.

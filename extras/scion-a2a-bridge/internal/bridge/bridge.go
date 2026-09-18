@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 
@@ -84,6 +85,16 @@ type Bridge struct {
 
 	// oidcCache caches proxied OIDC discovery and JWKS responses from the hub.
 	oidcCache *oidcProxyCache
+
+	// sdkTaskStore is the durable SDK task store (PostgresTaskStore) used in
+	// standalone mode for execution leases, reaping, and retention. nil in
+	// plugin mode.
+	sdkTaskStore *PostgresTaskStore
+
+	// barrierStore wraps sdkTaskStore with deterministic create-completion
+	// barriers. The executor uses it to wait for store.Create to commit
+	// before attempting ClaimExecution (Constraint 2). nil in plugin mode.
+	barrierStore *BarrierTaskStore
 
 	// oidcClientOnce ensures the shared OIDC HTTP client is created exactly once.
 	oidcClientOnce sync.Once
@@ -181,7 +192,28 @@ func (b *Bridge) janitor() {
 		case <-ticker.C:
 			b.reapStaleTasks(b.shutdownCtx, maxAge)
 			b.evictStaleAgentCache()
+			b.reapStaleSDKExecutions(b.shutdownCtx, maxAge)
 		}
+	}
+}
+
+// reapStaleSDKExecutions reaps SDK tasks with expired execution leases.
+// No-op when sdkTaskStore is nil (plugin mode).
+//
+// ReapStaleTasks atomically transitions each stale task to failed AND inserts
+// its terminal Final=true event within a single transaction — no separate
+// event emission is needed here.
+func (b *Bridge) reapStaleSDKExecutions(ctx context.Context, leaseTimeout time.Duration) {
+	if b.sdkTaskStore == nil {
+		return
+	}
+	reapedIDs, err := b.sdkTaskStore.ReapStaleTasks(ctx, leaseTimeout)
+	// ReapStaleTasks may return partial successes alongside aggregated errors.
+	if len(reapedIDs) > 0 {
+		b.log.Warn("janitor: reaped stale SDK execution leases", "count", len(reapedIDs), "task_ids", reapedIDs)
+	}
+	if err != nil {
+		b.log.Error("janitor: errors reaping stale SDK execution leases", "error", err)
 	}
 }
 
@@ -244,12 +276,28 @@ func (b *Bridge) RunSweep(ctx context.Context) {
 	}
 	b.reapStaleTasks(ctx, maxAge)
 
-	// Purge events older than 1 hour (D8).
-	purged, err := b.store.PurgeTaskEvents(ctx, time.Now().Add(-1*time.Hour))
-	if err != nil {
-		b.log.Error("failed to purge task events", "error", err)
-	} else if purged > 0 {
-		b.log.Info("purged old task events", "count", purged)
+	if b.sdkTaskStore != nil {
+		// Standalone mode: purge terminal SDK tasks and their correlated
+		// events in a single transaction. This handles BOTH a2a_sdk_tasks
+		// and a2a_task_events referentially; the unconditional
+		// PurgeTaskEvents is skipped to avoid deleting events for tasks
+		// that are still active (REQ-2).
+		cutoff := time.Now().Add(-1 * time.Hour)
+		tp, ep, err := b.sdkTaskStore.PurgeTasksAndEvents(ctx, cutoff)
+		if err != nil {
+			b.log.Error("failed to purge SDK tasks/events", "error", err)
+		} else if tp > 0 || ep > 0 {
+			b.log.Info("purged terminal SDK tasks and events", "tasks", tp, "events", ep)
+		}
+	} else {
+		// Plugin mode: no SDK task store, so the only retention path is
+		// time-based event purge (D8).
+		purged, err := b.store.PurgeTaskEvents(ctx, time.Now().Add(-1*time.Hour))
+		if err != nil {
+			b.log.Error("failed to purge task events", "error", err)
+		} else if purged > 0 {
+			b.log.Info("purged old task events", "count", purged)
+		}
 	}
 }
 
@@ -294,6 +342,20 @@ func (b *Bridge) SetNotifier(n *Notifier) {
 	b.notifier = n
 }
 
+// SetSDKTaskStore wires the durable SDK task store for execution leases,
+// reaping, and retention. When set, the janitor will also reap stale SDK
+// execution leases and purge terminal SDK tasks/events. In non-standalone
+// (plugin) mode this is nil and no SDK-level lifecycle management runs.
+func (b *Bridge) SetSDKTaskStore(store *PostgresTaskStore) {
+	b.sdkTaskStore = store
+}
+
+// SetBarrierStore wires the barrier task store for deterministic
+// create-completion signaling. Called during standalone mode initialization.
+func (b *Bridge) SetBarrierStore(store *BarrierTaskStore) {
+	b.barrierStore = store
+}
+
 // SetSnapshot wires the atomic config snapshot for hot-apply support.
 func (b *Bridge) SetSnapshot(snap *SnapshotHolder) {
 	b.snapshot = snap
@@ -322,13 +384,44 @@ func agentKey(projectID, agentSlug string) string {
 // waitForTaskEvent polls the event log for a response event on the given task,
 // with adaptive backoff. Returns the first response (content/message) event or
 // a final event, whichever comes first.
-func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout time.Duration) (*state.TaskEvent, error) {
+//
+// When sdkStore is provided and non-nil, the execution heartbeat is refreshed
+// on each poll cycle to keep the lease alive during long-running Hub execution.
+func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout time.Duration, sdkStore ...*PostgresTaskStore) (*state.TaskEvent, error) {
 	var cursor int64
 	interval := 100 * time.Millisecond
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	pollTimer := time.NewTimer(interval)
 	defer pollTimer.Stop()
+
+	// Resolve optional SDK store for heartbeat.
+	var heartbeatStore *PostgresTaskStore
+	if len(sdkStore) > 0 {
+		heartbeatStore = sdkStore[0]
+	}
+	ownerID := OwnerID()
+	var ownerKey string
+	if heartbeatStore != nil {
+		// Continuations must start strictly after the last event reflected in
+		// this task's durable snapshot. Derive the same owner key used by the
+		// task store from authenticated route/caller context; never authorize
+		// from a local cache or a process/global cursor.
+		var ok bool
+		var err error
+		ownerKey, ok, err = buildOwnerKey(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("derive task owner: %w", err)
+		}
+		if !ok {
+			return nil, fmt.Errorf("task owner unavailable")
+		}
+		_, durableCursor, err := heartbeatStore.GetOwnedTaskSnapshotAndCursor(ctx, taskID, ownerKey)
+		if err != nil {
+			return nil, fmt.Errorf("load owned task cursor: %w", err)
+		}
+		cursor = durableCursor
+	}
 
 	// Register for NOTIFY acceleration (no-op if notifier is nil).
 	var notifyCh <-chan struct{}
@@ -339,16 +432,43 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 	}
 
 	for {
+		canceledLeaseRelease := false
+		// STEP 1: Verify ownership BEFORE reading (Constraint 5).
+		// CRIT-4: If heartbeat fails (lease lost, reaped, or stolen by
+		// another replica), abort immediately. No post-loss event may be yielded.
+		if heartbeatStore != nil {
+			if hbErr := heartbeatStore.HeartbeatExecution(ctx, taskID, ownerID); hbErr != nil {
+				// Cancellation atomically releases the lease and publishes a final
+				// event. The authenticated task owner may consume that one terminal
+				// boundary after lease release; every other lease loss still aborts.
+				stored, _, snapshotErr := heartbeatStore.GetOwnedTaskSnapshotAndCursor(ctx, taskID, ownerKey)
+				if snapshotErr != nil || stored == nil || stored.Task == nil || stored.Task.Status.State != a2a.TaskStateCanceled {
+					return nil, fmt.Errorf("lease lost before read for task %s: %w", taskID, hbErr)
+				}
+				canceledLeaseRelease = true
+			}
+		}
+
+		// STEP 2: Read events (ownership verified in step 1).
 		events, err := b.store.ReadTaskEvents(ctx, taskID, cursor, 10)
 		if err != nil {
 			return nil, fmt.Errorf("reading task events: %w", err)
 		}
 		for _, ev := range events {
 			cursor = ev.ID
-			if isResponseEvent(ev) {
-				return &ev, nil
+			if canceledLeaseRelease && !isCanceledEvent(ev) {
+				continue
 			}
-			if ev.Final {
+			if isResponseEvent(ev) || ev.Final {
+				// STEP 3: Verify ownership IMMEDIATELY before returning.
+				if heartbeatStore != nil {
+					if hbErr := heartbeatStore.HeartbeatExecution(ctx, taskID, ownerID); hbErr != nil {
+						stored, _, snapshotErr := heartbeatStore.GetOwnedTaskSnapshotAndCursor(ctx, taskID, ownerKey)
+						if snapshotErr != nil || stored == nil || stored.Task == nil || stored.Task.Status.State != a2a.TaskStateCanceled || !isCanceledEvent(ev) {
+							return nil, fmt.Errorf("lease lost before emit for task %s: %w", taskID, hbErr)
+						}
+					}
+				}
 				return &ev, nil
 			}
 		}
@@ -366,6 +486,7 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 			continue
 		}
 
+		// STEP 4: Wait for notification or poll timer.
 		select {
 		case <-notifyCh:
 			// NOTIFY woke us — immediately re-read (reset backoff).
@@ -388,11 +509,26 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 	}
 }
 
-// isResponseEvent returns true if the event is a content/message event
-// (as opposed to a status-only event). These are the events that carry
-// the agent's response content back to the blocking caller.
+// isResponseEvent returns true for content events and for input-required
+// status. Input-required is a nonterminal response boundary: the caller must
+// regain control so it can continue the same task with additional input.
 func isResponseEvent(ev state.TaskEvent) bool {
-	return ev.Kind == "message" || ev.Kind == "artifact"
+	if ev.Kind == "message" || ev.Kind == "artifact" {
+		return true
+	}
+	if ev.Kind != "status" {
+		return false
+	}
+	var update TaskStatusUpdate
+	return json.Unmarshal(ev.Payload, &update) == nil && update.Status.State == TaskStateInputRequired
+}
+
+func isCanceledEvent(ev state.TaskEvent) bool {
+	if ev.Kind != "status" || !ev.Final {
+		return false
+	}
+	var update TaskStatusUpdate
+	return json.Unmarshal(ev.Payload, &update) == nil && update.Status.State == TaskStateCanceled
 }
 
 // taskEventToTaskResult converts a stored TaskEvent to a TaskResult for
@@ -866,8 +1002,8 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 		return nil
 	}
 
-	// Correlate to taskID.
-	taskID, err := b.correlateToTask(ctx, projectID, agentSlug, msg)
+	// Correlate to taskID (pass topic for user validation).
+	taskID, err := b.correlateToTask(ctx, projectID, agentSlug, topic, msg)
 	if err != nil {
 		b.log.Debug("could not correlate broker message to task", "error", err, "topic", topic, "sender", msg.Sender)
 		return nil
@@ -885,14 +1021,47 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 }
 
 // correlateToTask determines the taskID for a broker message, using metadata
-// or falling back to DB lookup.
-func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug string, msg *messages.StructuredMessage) (string, error) {
-	// If the message carries a task correlation ID, verify ownership.
+// or falling back to DB lookup. The topic parameter is used for user/caller
+// validation (Constraint 1).
+//
+// When sdkTaskStore is set (standalone mode), the SDK store is authoritative:
+// no legacy a2a_tasks fallback is attempted. Legacy fallback is only used
+// when sdkTaskStore is nil (plugin mode).
+func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug, topic string, msg *messages.StructuredMessage) (string, error) {
 	if taskID := msg.Metadata["a2aTaskId"]; taskID != "" {
-		task, err := b.store.GetTask(ctx, taskID)
-		if err != nil || task == nil {
-			return "", fmt.Errorf("unknown task: %s", taskID)
+		return b.correlateWithMetadata(ctx, projectID, agentSlug, topic, taskID)
+	}
+	return b.correlateWithoutMetadata(ctx, projectID, agentSlug, topic)
+}
+
+// correlateWithMetadata handles broker messages that carry a2aTaskId.
+// When SDK store is authoritative, it is checked first; a legacy row cannot
+// bypass SDK caller/route validation.
+func (b *Bridge) correlateWithMetadata(ctx context.Context, projectID, agentSlug, topic, taskID string) (string, error) {
+	if b.sdkTaskStore != nil {
+		// Standalone mode: SDK store is authoritative.
+		sdkTask, callerUserID, sdkErr := b.sdkTaskStore.GetByIDAndAgent(ctx, taskID, projectID, agentSlug)
+		if sdkErr == nil && sdkTask != nil {
+			// A canceled SDK snapshot fences late broker delivery: no assistant
+			// reply may be appended after a cross-replica cancel.
+			if sdkTask.Task.Status.State == a2a.TaskStateCanceled {
+				return "", fmt.Errorf("task is terminal")
+			}
+			if err := b.validateTopicUser(topic, callerUserID, taskID); err != nil {
+				return "", err
+			}
+			return taskID, nil
 		}
+		// SDK miss/error → fail closed. A stale or attacker-controlled
+		// legacy row must not bypass SDK validation.
+		b.log.Debug("SDK metadata correlation failed, fail closed",
+			"task_id", taskID, "project", projectID, "agent", agentSlug)
+		return "", fmt.Errorf("unknown task: %s", taskID)
+	}
+
+	// Plugin mode (sdkTaskStore == nil): legacy store only.
+	task, err := b.store.GetTask(ctx, taskID)
+	if err == nil && task != nil {
 		if task.AgentSlug != agentSlug {
 			b.log.Warn("dropping cross-agent a2aTaskId injection",
 				"task_agent", task.AgentSlug, "msg_agent", agentSlug, "task_id", taskID)
@@ -900,23 +1069,62 @@ func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug strin
 		}
 		return taskID, nil
 	}
+	return "", fmt.Errorf("unknown task: %s", taskID)
+}
 
-	// No a2aTaskId — fall back to local cache, then DB.
+// correlateWithoutMetadata handles broker messages without a2aTaskId.
+// Uses durable SDK store lookup with ambiguity-safe uniqueness check.
+// Local cache may accelerate the lookup but NEVER authorizes alone.
+func (b *Bridge) correlateWithoutMetadata(ctx context.Context, projectID, agentSlug, topic string) (string, error) {
+	if b.sdkTaskStore != nil {
+		// Standalone mode: authoritative durable uniqueness check.
+		// Always call FindActiveSDKTaskForAgent first to enforce uniqueness.
+		// This fails closed on ambiguity (multiple active tasks) and on
+		// empty project/agent keys.
+		sdkTaskID, callerUserID, sdkErr := b.sdkTaskStore.FindActiveSDKTaskForAgent(ctx, projectID, agentSlug)
+		if sdkErr != nil {
+			b.log.Debug("SDK no-metadata correlation failed, fail closed",
+				"error", sdkErr, "project", projectID, "agent", agentSlug)
+			return "", fmt.Errorf("no active SDK tasks for agent %s in project %s: %w", agentSlug, projectID, sdkErr)
+		}
+
+		// Local cache can accelerate: if the cached candidate matches the
+		// unique durable result, we skip the topic user revalidation since
+		// FindActiveSDKTaskForAgent already confirmed uniqueness.
+		aKey := agentKey(projectID, agentSlug)
+		b.tasksMu.RLock()
+		var cachedMatch bool
+		if ids := b.agentTasks[aKey]; len(ids) > 0 {
+			cachedMatch = ids[len(ids)-1] == sdkTaskID
+		}
+		b.tasksMu.RUnlock()
+
+		if cachedMatch {
+			b.log.Debug("no-metadata correlation: cache hit matches durable unique result",
+				"task_id", sdkTaskID, "project", projectID, "agent", agentSlug)
+		}
+
+		// Validate topic user against stored caller.
+		if err := b.validateTopicUser(topic, callerUserID, sdkTaskID); err != nil {
+			return "", err
+		}
+		return sdkTaskID, nil
+	}
+
+	// Plugin mode (sdkTaskStore == nil): legacy store only.
+	// Check local cache first (fast path).
 	aKey := agentKey(projectID, agentSlug)
-
-	// Fast path: check local cache.
 	b.tasksMu.RLock()
 	taskIDs := append([]string(nil), b.agentTasks[aKey]...)
 	b.tasksMu.RUnlock()
 
 	if len(taskIDs) > 0 {
-		b.log.Debug("correlating broker message by agent slug from local cache",
+		b.log.Debug("correlating broker message by agent slug from local cache (plugin mode)",
 			"agent", agentSlug, "project", projectID, "active_tasks", len(taskIDs))
-		// Use the most recently registered task.
 		return taskIDs[len(taskIDs)-1], nil
 	}
 
-	// Slow path: query DB.
+	// Slow path: query legacy DB.
 	task, err := b.store.FindActiveTaskForAgent(ctx, projectID, agentSlug)
 	if err != nil {
 		return "", fmt.Errorf("DB lookup failed: %w", err)
@@ -925,9 +1133,37 @@ func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug strin
 		return "", fmt.Errorf("no active tasks for agent %s in project %s", agentSlug, projectID)
 	}
 
-	b.log.Debug("correlating broker message by agent slug from DB fallback",
+	b.log.Debug("correlating broker message by agent slug from legacy DB",
 		"agent", agentSlug, "project", projectID, "task_id", task.ID)
 	return task.ID, nil
+}
+
+// validateTopicUser checks that the topic's user matches the stored caller.
+// Returns nil if validation passes or is not applicable.
+func (b *Bridge) validateTopicUser(topic, callerUserID, taskID string) error {
+	topicUserID := extractUserIDFromTopic(topic)
+	if topicUserID == "" {
+		return nil
+	}
+	if callerUserID != "" && topicUserID != callerUserID {
+		b.log.Warn("dropping message: topic user mismatch",
+			"topic_user", topicUserID, "stored_caller", callerUserID, "task_id", taskID)
+		return fmt.Errorf("topic user mismatch for task %s", taskID)
+	}
+	return nil
+}
+
+// extractUserIDFromTopic extracts the user ID from a broker topic.
+// Returns "" for non-user topics or parse failures.
+func extractUserIDFromTopic(topic string) string {
+	parsed, err := projectcompat.ParseTopic(topic)
+	if err != nil {
+		return ""
+	}
+	if parsed.Kind == projectcompat.TopicKindUser {
+		return parsed.Actor
+	}
+	return ""
 }
 
 // processAndAppendEvent translates a broker message to an event, appends it to

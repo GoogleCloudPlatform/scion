@@ -94,11 +94,20 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			return
 		}
 
+		// Constraint 2: Prepare barrier before yielding the initial task.
+		// The barrier provides deterministic signaling between the consumer
+		// (store.Create) and producer (ClaimExecution) goroutines.
+		var barrier *CreateBarrier
+		if bs := e.bridge.barrierStore; bs != nil {
+			barrier = bs.PrepareBarrier(string(taskID))
+			defer barrier.Cancel() // cleanup on every exit path
+		}
+
 		// Emit submitted task.
 		if execCtx.StoredTask == nil {
 			task := a2a.NewSubmittedTask(execCtx, execCtx.Message)
 			if !yield(task, nil) {
-				return
+				return // defer barrier.Cancel() runs
 			}
 		}
 
@@ -138,6 +147,57 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		e.bridge.registerActiveTask(string(taskID), aKey)
 		defer e.bridge.unregisterActiveTask(string(taskID), aKey)
 
+		// Claim execution lease before Hub send to prevent duplicate sends.
+		// The lease tracks which replica is executing this task; if we crash,
+		// the janitor reaps tasks with expired leases.
+		//
+		// CRIT-3: All claim errors fail closed. No Hub side effects without
+		// a confirmed lease. "Degraded mode" bypass is forbidden.
+		//
+		// Constraint 2: For new task submissions, the barrier replaces the
+		// retry loop. BarrierTaskStore.Await blocks until Create commits,
+		// then a single ClaimExecution attempt succeeds.
+		if e.bridge.sdkTaskStore != nil {
+			ownerID := OwnerID()
+			leaseTimeout := e.bridge.config.Timeouts.SendMessage
+			if leaseTimeout == 0 {
+				leaseTimeout = 120 * time.Second
+			}
+
+			// Wait for barrier if this is a new task (Create in flight).
+			if barrier != nil && execCtx.StoredTask == nil {
+				if barrierErr := barrier.Await(ctx); barrierErr != nil {
+					e.log.Error("barrier await failed", "error", barrierErr, "task_id", taskID)
+					failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Task creation failed: "+barrierErr.Error()))
+					yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+					return
+				}
+			}
+
+			// Single ClaimExecution attempt — row guaranteed to exist after barrier.
+			claimed, claimErr := e.bridge.sdkTaskStore.ClaimExecution(ctx, string(taskID), ownerID, leaseTimeout)
+
+			if claimErr != nil {
+				// CRIT-3: Fail closed on any DB error. Never proceed to Hub send.
+				e.log.Error("failed to claim execution lease", "error", claimErr, "task_id", taskID)
+				failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Failed to acquire execution lease"))
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+				return
+			}
+			if !claimed {
+				e.log.Warn("execution lease held by another replica", "task_id", taskID)
+				failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Task execution already in progress on another replica"))
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+				return
+			}
+			// Release the lease on completion (normal or error).
+			defer func() {
+				if releaseErr := e.bridge.sdkTaskStore.ReleaseExecution(context.Background(), string(taskID), ownerID); releaseErr != nil {
+					e.log.Error("failed to release execution lease", "error", releaseErr, "task_id", taskID)
+				}
+			}()
+		}
+
 		// Send to Hub using the per-user or admin client.
 		if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 			e.log.Error("failed to send message to agent", "error", err, "task_id", taskID, "agent_id", agentCtx.AgentID)
@@ -161,7 +221,7 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			timeout = 120 * time.Second
 		}
 
-		ev, err := e.bridge.waitForTaskEvent(ctx, string(taskID), timeout)
+		ev, err := e.bridge.waitForTaskEvent(ctx, string(taskID), timeout, e.bridge.sdkTaskStore)
 		if err != nil {
 			var failMsg *a2a.Message
 			if errors.Is(err, ErrTimeout) {
@@ -189,7 +249,11 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 }
 
 // taskEventToSDKEvent converts a stored TaskEvent to an SDK a2a.Event.
+// Constraint 4: Embeds the bridge event's autoincrement ID (_bridgeEventID)
+// into the SDK event metadata so that PostgresTaskStore.Update can advance
+// last_event_cursor to the exact event applied (not MAX(id)).
 func taskEventToSDKEvent(execCtx *a2asrv.ExecutorContext, ev *state.TaskEvent) (a2a.Event, error) {
+	var sdkEvent a2a.Event
 	switch ev.Kind {
 	case "message":
 		var su TaskStatusUpdate
@@ -212,14 +276,14 @@ func taskEventToSDKEvent(execCtx *a2asrv.ExecutorContext, ev *state.TaskEvent) (
 			sdkParts = append(sdkParts, a2a.NewTextPart("[empty response]"))
 		}
 		statusMsg := a2a.NewMessageForTask(a2a.MessageRoleAgent, execCtx, sdkParts...)
-		return a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, statusMsg), nil
+		sdkEvent = a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, statusMsg)
 	case "status":
 		var su TaskStatusUpdate
 		if err := json.Unmarshal(ev.Payload, &su); err != nil {
 			return nil, fmt.Errorf("unmarshal status event: %w", err)
 		}
 		sdkState := mapBridgeStateToSDK(su.Status.State)
-		return a2a.NewStatusUpdateEvent(execCtx, sdkState, nil), nil
+		sdkEvent = a2a.NewStatusUpdateEvent(execCtx, sdkState, nil)
 	case "artifact":
 		var au TaskArtifactUpdate
 		if err := json.Unmarshal(ev.Payload, &au); err != nil {
@@ -235,13 +299,20 @@ func taskEventToSDKEvent(execCtx *a2asrv.ExecutorContext, ev *state.TaskEvent) (
 			}
 		}
 		if len(artParts) == 0 {
-			return a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil
+			sdkEvent = a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil)
+		} else {
+			artMsg := a2a.NewMessageForTask(a2a.MessageRoleAgent, execCtx, artParts...)
+			sdkEvent = a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, artMsg)
 		}
-		artMsg := a2a.NewMessageForTask(a2a.MessageRoleAgent, execCtx, artParts...)
-		return a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, artMsg), nil
 	default:
 		return nil, fmt.Errorf("unknown event kind: %s", ev.Kind)
 	}
+
+	// Carry the exact bridge event ID through the SDK pipeline.
+	if mc, ok := sdkEvent.(interface{ SetMeta(string, any) }); ok {
+		mc.SetMeta(bridgeEventIDKey, ev.ID)
+	}
+	return sdkEvent, nil
 }
 
 // mapBridgeStateToSDK maps bridge task states to SDK task states.
