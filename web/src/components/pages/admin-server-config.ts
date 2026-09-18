@@ -556,6 +556,13 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Native Chat — default ON, matching the server's absent-means-enabled rule.
   @state() private nativeChatEnabled = true;
 
+  // Cross-project agent messaging (from admin/messaging API, not server-config)
+  @state() private crossProjectMessagingEnabled = false;
+  @state() private crossProjectMessagingRevision = 0;
+  @state() private crossProjectMessagingLoading = false;
+  @state() private crossProjectMessagingError: string | null = null;
+  @state() private crossProjectMessagingSuccess: string | null = null;
+
   // GitHub App
   @state() private githubAppConfigured = false;
   @state() private githubAppId = 0;
@@ -1340,6 +1347,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     void this.loadHarnessConfigs();
     void this.loadRuntimeBrokers();
     void this.loadGitHubAppInstallations();
+    void this.loadMessagingSettings();
   }
 
   private async loadConfig(): Promise<void> {
@@ -3573,6 +3581,47 @@ export class ScionPageAdminServerConfig extends LitElement {
       </div>
 
       ${this.renderNativeChatSection()} ${this.renderMessageBrokerSection()}
+      ${this.renderCrossProjectMessagingSection()}
+    `;
+  }
+
+  private renderCrossProjectMessagingSection() {
+    return html`
+      <div class="section">
+        <h3 class="section-title">Cross-Project Agent Messaging</h3>
+        <div class="form-grid">
+          <div class="form-field full-width">
+            <sl-switch
+              ?checked=${this.crossProjectMessagingEnabled}
+              ?disabled=${this.crossProjectMessagingLoading}
+              @sl-change=${(e: Event) => {
+                const enabled = (e.target as HTMLInputElement & { checked: boolean }).checked;
+                void this.saveCrossProjectMessaging(enabled);
+              }}
+              >Allow agent messaging across projects</sl-switch
+            >
+            <span class="hint">
+              When enabled, agents in Hub mode can send direct messages to agents in other projects on
+              this Hub. The sender needs Hub mode; each destination project independently chooses
+              whether to accept external messages. Disabling takes effect for new cross-project checks
+              and delayed deliveries. Already delivered messages are not recalled.
+            </span>
+            ${this.crossProjectMessagingError
+              ? html`<div class="status-message error" style="margin-top: 0.5rem">
+                  ${this.crossProjectMessagingError}
+                </div>`
+              : nothing}
+            ${this.crossProjectMessagingSuccess
+              ? html`<div class="status-message success" style="margin-top: 0.5rem">
+                  ${this.crossProjectMessagingSuccess}
+                </div>`
+              : nothing}
+            <span class="hint" style="margin-top: 0.25rem; font-size: 0.6875rem">
+              Revision: ${this.crossProjectMessagingRevision}
+            </span>
+          </div>
+        </div>
+      </div>
     `;
   }
 
@@ -5311,6 +5360,75 @@ export class ScionPageAdminServerConfig extends LitElement {
       // Non-critical
     } finally {
       this.githubAppInstallationsLoading = false;
+    }
+  }
+
+  // ── Cross-project messaging (admin/messaging API) ──
+
+  private async loadMessagingSettings(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/admin/messaging');
+      if (res.ok) {
+        const data = (await res.json()) as {
+          cross_project_messaging_enabled?: boolean;
+          revision?: number;
+        };
+        this.crossProjectMessagingEnabled = data.cross_project_messaging_enabled ?? false;
+        this.crossProjectMessagingRevision = data.revision ?? 0;
+      }
+    } catch {
+      // Non-critical — the toggle defaults to off
+    }
+  }
+
+  private async saveCrossProjectMessaging(enabled: boolean): Promise<void> {
+    const previous = this.crossProjectMessagingEnabled;
+    this.crossProjectMessagingEnabled = enabled; // optimistic
+    this.crossProjectMessagingLoading = true;
+    this.crossProjectMessagingError = null;
+    this.crossProjectMessagingSuccess = null;
+
+    try {
+      const res = await apiFetch('/api/v1/admin/messaging', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cross_project_messaging_enabled: enabled,
+          expected_revision: this.crossProjectMessagingRevision,
+        }),
+      });
+
+      if (res.status === 409) {
+        this.crossProjectMessagingError =
+          'Settings were changed by another administrator. Reloading current values.';
+        this.crossProjectMessagingEnabled = previous; // revert
+        await this.loadMessagingSettings();
+        return;
+      }
+
+      if (!res.ok) {
+        this.crossProjectMessagingError = await extractApiError(
+          res,
+          'Failed to update cross-project messaging setting'
+        );
+        this.crossProjectMessagingEnabled = previous; // revert
+        return;
+      }
+
+      const data = (await res.json()) as {
+        cross_project_messaging_enabled?: boolean;
+        revision?: number;
+      };
+      this.crossProjectMessagingEnabled = data.cross_project_messaging_enabled ?? enabled;
+      this.crossProjectMessagingRevision = data.revision ?? this.crossProjectMessagingRevision;
+      this.crossProjectMessagingSuccess = enabled
+        ? 'Cross-project messaging enabled.'
+        : 'Cross-project messaging disabled.';
+    } catch {
+      this.crossProjectMessagingError = 'Failed to update cross-project messaging setting';
+      this.crossProjectMessagingEnabled = previous; // revert
+    } finally {
+      this.crossProjectMessagingLoading = false;
     }
   }
 

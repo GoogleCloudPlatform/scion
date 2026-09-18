@@ -465,3 +465,48 @@ describe('scion-chat-message path links', () => {
     expect(links[1].dataset.filePath).toBe('/scion-volumes/data/b.ts');
   });
 });
+
+describe('scion-chat-message cross-project label', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('shows cross-project label when senderProjectSlug is set', async () => {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'Hello from another project';
+    el.sender = 'agent:remote-bot';
+    el.senderName = 'remote-bot';
+    el.fromAgent = true;
+    el.showHeader = true;
+    el.senderProjectSlug = 'other-project';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+
+    const label = el.shadowRoot?.querySelector('.cross-project-label');
+    expect(label).toBeTruthy();
+    expect(label?.textContent).toContain('other-project');
+  });
+
+  it('hides cross-project label when senderProjectSlug is empty', async () => {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'Hello from same project';
+    el.sender = 'agent:local-bot';
+    el.senderName = 'local-bot';
+    el.fromAgent = true;
+    el.showHeader = true;
+    el.senderProjectSlug = '';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+
+    const label = el.shadowRoot?.querySelector('.cross-project-label');
+    expect(label).toBeNull();
+  });
+});

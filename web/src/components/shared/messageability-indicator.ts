@@ -37,9 +37,20 @@ interface IndicatorState {
 }
 
 /**
+ * Returns true if the denial reason indicates a cross-project issue.
+ */
+function isCrossProjectReason(reason?: string): boolean {
+  return !!reason && reason.startsWith('cross_project_');
+}
+
+/**
  * Derive the visual state from messageability data.
  */
-function getIndicatorState(messageability: AgentMessageability): IndicatorState {
+function getIndicatorState(
+  messageability: AgentMessageability,
+  recipientName?: string,
+  senderName?: string
+): IndicatorState {
   const { canMessage, canReachViewer, reason } = messageability;
 
   if (canMessage && canReachViewer) {
@@ -51,10 +62,14 @@ function getIndicatorState(messageability: AgentMessageability): IndicatorState 
   }
 
   if (canMessage && !canReachViewer) {
+    const replyReason = messageability.replyReason;
+    const replyHint = replyReason
+      ? ` (${getDenialMessage(replyReason, recipientName, senderName)})`
+      : '';
     return {
       icon: 'arrow-right',
       color: 'var(--sl-color-neutral-500)',
-      tooltip: 'You can message this agent but it cannot reply to you',
+      tooltip: `You can message this agent but it cannot reply to you${replyHint}`,
     };
   }
 
@@ -67,10 +82,11 @@ function getIndicatorState(messageability: AgentMessageability): IndicatorState 
   }
 
   // !canMessage && !canReachViewer
+  const icon = isCrossProjectReason(reason) ? 'globe' : 'x-circle';
   return {
-    icon: 'x-circle',
+    icon,
     color: 'var(--sl-color-neutral-400)',
-    tooltip: getDenialMessage(reason),
+    tooltip: getDenialMessage(reason, recipientName, senderName),
   };
 }
 
@@ -82,6 +98,12 @@ export class ScionMessageabilityIndicator extends LitElement {
    */
   @property({ type: Object })
   messageability?: AgentMessageability;
+
+  /**
+   * Agent name for substitution in denial messages.
+   */
+  @property()
+  agentName?: string;
 
   /**
    * Size variant — matches the badge size semantics.
@@ -114,7 +136,7 @@ export class ScionMessageabilityIndicator extends LitElement {
       return nothing;
     }
 
-    const state = getIndicatorState(this.messageability);
+    const state = getIndicatorState(this.messageability, this.agentName);
 
     return html`
       <sl-tooltip content="${state.tooltip}">

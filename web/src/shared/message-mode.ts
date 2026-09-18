@@ -48,8 +48,7 @@ export const MESSAGE_MODE_DISPLAY: Record<MessageMode, MessageModeDisplay> = {
     icon: 'globe',
     color: 'success',
     label: 'Hub',
-    description:
-      'Project messaging plus permitted agents in other projects on this Hub',
+    description: 'Project messaging plus permitted agents in other projects on this Hub',
   },
   project: {
     icon: 'globe2',
@@ -115,7 +114,15 @@ export type MessageDenialReason =
   | 'mode_lineage_no_ancestry'
   | 'mode_branch_no_edge'
   | 'mode_lineage_agent_to_agent'
-  | 'missing_permission';
+  | 'missing_permission'
+  | 'cross_project_disabled'
+  | 'cross_project_sender_mode'
+  | 'cross_project_target_mode'
+  | 'cross_project_inbound_none'
+  | 'cross_project_origin_not_member'
+  | 'cross_project_untrusted_origin'
+  | 'cross_project_surface_unsupported'
+  | 'denied';
 
 /**
  * Maps denial reason codes to user-facing copy.
@@ -131,6 +138,21 @@ export const DENIAL_REASON_COPY: Record<MessageDenialReason, string> = {
   mode_lineage_agent_to_agent:
     '{sender} is in lineage mode: it can message lineage users but not other agents.',
   missing_permission: 'You do not have permission to message this agent.',
+  cross_project_disabled:
+    'Cross-project messaging is disabled by the Hub administrator.',
+  cross_project_sender_mode:
+    '{sender} must be in Hub mode to send messages across projects.',
+  cross_project_target_mode:
+    '{recipient} must be in Project or Hub mode to receive cross-project messages.',
+  cross_project_inbound_none:
+    "{recipient}'s project does not accept messages from external agents.",
+  cross_project_origin_not_member:
+    "Your originating user is not a member of {recipient}'s project.",
+  cross_project_untrusted_origin:
+    "The sender's identity origin could not be verified for cross-project messaging.",
+  cross_project_surface_unsupported:
+    'Cross-project messaging is not supported for this conversation type.',
+  denied: 'Message delivery denied.',
 };
 
 /**

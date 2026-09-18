@@ -34,6 +34,8 @@ import type {
   GCPServiceAccount,
   PreStartHook,
   PreStartHookSummary,
+  CrossProjectInboundPolicy,
+  ProjectMessagingPolicy,
 } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
@@ -284,6 +286,22 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private boundaryError = '';
+
+  // Cross-project messaging policy
+  @state()
+  private messagingPolicy: ProjectMessagingPolicy | null = null;
+
+  @state()
+  private messagingPolicyLoading = true;
+
+  @state()
+  private messagingPolicySaving = false;
+
+  @state()
+  private messagingPolicyError: string | null = null;
+
+  @state()
+  private messagingPolicySuccess: string | null = null;
 
   private brokerRelativeTimeInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -842,6 +860,7 @@ export class ScionPageProjectSettings extends LitElement {
     void this.loadHarnessConfigs();
     void this.loadBrokers();
     void this.loadGCPServiceAccounts();
+    void this.loadMessagingPolicy();
   }
 
   override disconnectedCallback(): void {
@@ -918,6 +937,184 @@ export class ScionPageProjectSettings extends LitElement {
     } finally {
       this.boundaryLoading = false;
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cross-project messaging policy
+  // ---------------------------------------------------------------------------
+
+  private async loadMessagingPolicy(): Promise<void> {
+    this.messagingPolicyLoading = true;
+    this.messagingPolicyError = null;
+    try {
+      const res = await apiFetch(
+        `/api/v1/projects/${this.projectId}/messaging-policy`
+      );
+      if (res.ok) {
+        this.messagingPolicy = (await res.json()) as ProjectMessagingPolicy;
+      }
+    } catch {
+      // Non-critical — section won't render
+    } finally {
+      this.messagingPolicyLoading = false;
+    }
+  }
+
+  private async saveMessagingPolicy(value: CrossProjectInboundPolicy): Promise<void> {
+    if (!this.messagingPolicy) return;
+    const previous = this.messagingPolicy.crossProjectInbound;
+    this.messagingPolicy = { ...this.messagingPolicy, crossProjectInbound: value }; // optimistic
+    this.messagingPolicySaving = true;
+    this.messagingPolicyError = null;
+    this.messagingPolicySuccess = null;
+    try {
+      const res = await apiFetch(
+        `/api/v1/projects/${this.projectId}/messaging-policy`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            crossProjectInbound: value,
+            expectedRevision: this.messagingPolicy.revision,
+          }),
+        }
+      );
+      if (res.status === 409) {
+        this.messagingPolicy = { ...this.messagingPolicy, crossProjectInbound: previous }; // revert
+        await this.loadMessagingPolicy();
+        this.messagingPolicyError = 'Settings were modified by another user. Refreshing...';
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(
+          await extractApiError(res, 'Failed to save')
+        );
+      }
+      this.messagingPolicy = (await res.json()) as ProjectMessagingPolicy;
+      this.messagingPolicySuccess = 'Messaging policy saved.';
+    } catch (err) {
+      this.messagingPolicyError =
+        err instanceof Error ? err.message : 'Failed to save policy';
+      this.messagingPolicy = { ...this.messagingPolicy, crossProjectInbound: previous }; // revert
+    } finally {
+      this.messagingPolicySaving = false;
+    }
+  }
+
+  private renderMessagingPolicySection() {
+    // Don't render until data is loaded (or if the endpoint is unavailable)
+    if (this.messagingPolicyLoading) {
+      return html`
+        <div class="section">
+          <h2>Cross-Project Messaging</h2>
+          <p>Controls which external agents can send messages to agents in this project.</p>
+          <div style="text-align: center; padding: 1rem;"><sl-spinner></sl-spinner></div>
+        </div>
+      `;
+    }
+
+    if (!this.messagingPolicy) return nothing;
+
+    const canEdit = can(this.project?._capabilities, 'manage');
+    const policy = this.messagingPolicy;
+    const hubDisabled = !policy.hubCrossProjectEnabled;
+    const currentValue = policy.crossProjectInbound;
+
+    const policyLabels: Record<CrossProjectInboundPolicy, string> = {
+      none: 'No external agents',
+      members: 'Agents created by this project’s members',
+      any: 'Agents from any project on this Hub',
+    };
+
+    const policyHelp: Record<CrossProjectInboundPolicy, string> = {
+      none: 'No agents from other projects can send messages to agents in this project.',
+      members:
+        'Accepts messages from agents in other projects whose originating user is a current member of this project, including members via groups.',
+      any: 'Accepts messages from eligible agents in any project on this Hub.',
+    };
+
+    return html`
+      <div class="section">
+        <h2>Cross-Project Messaging</h2>
+        <p>
+          Controls which external agents can send messages to agents in this project. This is an
+          inbound policy &mdash; replies from your agents to other projects require Hub mode and the
+          destination project&rsquo;s consent.
+        </p>
+
+        ${hubDisabled
+          ? html`
+              <sl-alert variant="warning" open>
+                <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                <strong>Disabled by Hub administrator.</strong> Cross-project messaging is turned off
+                at the Hub level. Your configured selection below is preserved and will take effect
+                when the Hub administrator enables cross-project messaging.
+              </sl-alert>
+            `
+          : ''}
+        ${this.messagingPolicyError
+          ? html`<div
+              class="config-status error"
+              style="margin-bottom: 0.75rem; font-size: 0.8125rem;"
+            >
+              ${this.messagingPolicyError}
+            </div>`
+          : ''}
+        ${this.messagingPolicySuccess
+          ? html`<div
+              class="config-status success"
+              style="margin-bottom: 0.75rem; font-size: 0.8125rem;"
+            >
+              ${this.messagingPolicySuccess}
+            </div>`
+          : ''}
+
+        <sl-radio-group
+          label="Inbound policy"
+          value=${currentValue}
+          @sl-change=${(e: Event) => {
+            if (!canEdit) return;
+            const value = (e.target as HTMLInputElement).value as CrossProjectInboundPolicy;
+            void this.saveMessagingPolicy(value);
+          }}
+        >
+          ${(['none', 'members', 'any'] as CrossProjectInboundPolicy[]).map(
+            (value) => html`
+              <sl-radio-button value=${value} ?disabled=${!canEdit || this.messagingPolicySaving}>
+                ${policyLabels[value]}
+              </sl-radio-button>
+            `
+          )}
+        </sl-radio-group>
+
+        <p
+          style="margin-top: 0.75rem; font-size: 0.8125rem; color: var(--scion-text-muted, #64748b);"
+        >
+          ${policyHelp[currentValue]}
+        </p>
+
+        ${!canEdit
+          ? html`
+              <p
+                style="margin-top: 0.5rem; font-size: 0.8125rem; color: var(--scion-text-muted, #64748b); font-style: italic;"
+              >
+                Only project owners can change the messaging policy.
+              </p>
+            `
+          : ''}
+        ${currentValue !== 'none' && !hubDisabled
+          ? html`
+              <p
+                style="margin-top: 0.5rem; font-size: 0.8125rem; color: var(--scion-text-muted, #64748b);"
+              >
+                Choosing &ldquo;${policyLabels[currentValue]}&rdquo; can admit external messages to
+                existing project-mode agents. It does not grant those agents external send authority.
+                Replying requires their own Hub mode and the peer project&rsquo;s consent.
+              </p>
+            `
+          : ''}
+      </div>
+    `;
   }
 
   /**
@@ -1361,7 +1558,8 @@ export class ScionPageProjectSettings extends LitElement {
         <h1>${this.project.name} Settings</h1>
       </div>
 
-      ${this.renderConfigSection()} ${this.renderGitHubAppSection()}
+      ${this.renderConfigSection()} ${this.renderMessagingPolicySection()}
+      ${this.renderGitHubAppSection()}
       <scion-project-members-editor
         projectId=${this.project.id}
         ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}

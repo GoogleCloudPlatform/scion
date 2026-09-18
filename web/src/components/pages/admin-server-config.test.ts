@@ -103,12 +103,18 @@ function createFetchHandler(
       status: number;
       body: Record<string, unknown>;
     };
+    messagingResponse?: Record<string, unknown>;
   }
 ) {
   return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
 
-    if (init?.method === 'PUT' && opts?.putHandler) {
+    if (
+      init?.method === 'PUT' &&
+      opts?.putHandler &&
+      path.includes('/api/v1/admin/server-config') &&
+      !path.includes('/schema')
+    ) {
       const reqBody = JSON.parse(init.body as string);
       const result = opts.putHandler(reqBody);
       return Promise.resolve(
@@ -137,6 +143,30 @@ function createFetchHandler(
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         })
+      );
+    }
+
+    if (path.includes('/api/v1/admin/messaging')) {
+      if (init?.method === 'PUT' && opts?.putHandler) {
+        const reqBody = JSON.parse(init.body as string);
+        const result = opts.putHandler(reqBody);
+        return Promise.resolve(
+          new Response(JSON.stringify(result.body), {
+            status: result.status,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return Promise.resolve(
+        new Response(
+          JSON.stringify(
+            opts?.messagingResponse ?? {
+              cross_project_messaging_enabled: false,
+              revision: 1,
+            }
+          ),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
       );
     }
 
@@ -728,6 +758,115 @@ describe('scion-page-admin-server-config', () => {
       expect(capturedPayload!.default_max_turns).toBe(0);
       expect(capturedPayload!.default_max_model_calls).toBe(0);
       expect(capturedPayload!.default_max_duration).toBe('');
+    });
+  });
+
+  // ── Cross-project messaging (D1) ──
+
+  describe('Cross-project messaging section', () => {
+    it('renders cross-project messaging section in hub server tab', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          messagingResponse: {
+            cross_project_messaging_enabled: false,
+            revision: 1,
+          },
+        })
+      );
+
+      const text = shadowText(element);
+      expect(text).toContain('Cross-Project Agent Messaging');
+    });
+
+    it('calls the messaging API on connect', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          messagingResponse: {
+            cross_project_messaging_enabled: true,
+            revision: 3,
+          },
+        })
+      );
+
+      expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+        expect.stringContaining('/api/v1/admin/messaging'),
+        expect.any(Object)
+      );
+    });
+
+    it('shows the revision number', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          messagingResponse: {
+            cross_project_messaging_enabled: false,
+            revision: 7,
+          },
+        })
+      );
+
+      const text = shadowText(element);
+      expect(text).toContain('Revision: 7');
+    });
+
+    it('sends CAS revision on save', async () => {
+      let capturedPayload: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          messagingResponse: {
+            cross_project_messaging_enabled: false,
+            revision: 5,
+          },
+          putHandler: (body) => {
+            capturedPayload = body;
+            return {
+              status: 200,
+              body: { cross_project_messaging_enabled: true, revision: 6 },
+            };
+          },
+        })
+      );
+
+      // Wait for messaging settings to load
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      // Trigger save by calling the method directly
+      await (element as any).saveCrossProjectMessaging(true);
+      await (element as any).updateComplete;
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.expected_revision).toBe(5);
+      expect(capturedPayload!.cross_project_messaging_enabled).toBe(true);
+    });
+
+    it('handles 409 conflict by reloading', async () => {
+      let putCallCount = 0;
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          messagingResponse: {
+            cross_project_messaging_enabled: false,
+            revision: 5,
+          },
+          putHandler: () => {
+            putCallCount++;
+            return {
+              status: 409,
+              body: { error: 'conflict' },
+            };
+          },
+        })
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      await (element as any).saveCrossProjectMessaging(true);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      expect(putCallCount).toBe(1);
+      // Error message should indicate conflict
+      expect((element as any).crossProjectMessagingError).toContain('another administrator');
     });
   });
 });

@@ -79,8 +79,14 @@ function getEdgeStyle(
   if (pm === 'branch' && cm === 'branch') {
     return { stroke: 'var(--sl-color-primary-600)', dashArray: '', markerClass: 'lit' };
   }
-  // Both project mode (messageable)
-  if (pm === 'project' && cm === 'project') {
+  // Hub/project compatibility: hub joins the project communication cell.
+  // hub↔hub, hub↔project, and project↔project are all messageable within the same project.
+  const projectOrHub = new Set<MessageMode>(['project', 'hub']);
+  if (projectOrHub.has(pm) && projectOrHub.has(cm)) {
+    // Use hub color when either endpoint is hub mode
+    if (pm === 'hub' || cm === 'hub') {
+      return { stroke: 'var(--sl-color-success-600)', dashArray: '', markerClass: 'lit' };
+    }
     return { stroke: 'var(--sl-color-neutral-400)', dashArray: '', markerClass: '' };
   }
   // Mode mismatch (non-messageable)
