@@ -386,6 +386,46 @@ func TestGetConversationMessage_HappyPath(t *testing.T) {
 	require.Equal(t, msg.Msg, result.Msg)
 }
 
+func TestGetConversationMessage_DMAuth(t *testing.T) {
+	srv, s := testServer(t)
+	project, agentA, _ := setupConvTestData(t, s)
+	agentB := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "get-message-dm-agent-b",
+		Slug:       "get-message-dm-agent-b",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), agentB))
+
+	conv := setupDMConversation(t, s, agentA.ID, agentB.ID)
+	require.NoError(t, s.RemoveParticipant(context.Background(), conv.ID, "agent", agentA.ID))
+
+	msg := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      project.ID,
+		AgentID:        agentB.ID,
+		Sender:         "agent:" + agentB.Name,
+		SenderID:       agentB.ID,
+		Recipient:      "agent:" + agentA.Name,
+		RecipientID:    agentA.ID,
+		Msg:            "DM message after leaving",
+		Type:           "instruction",
+		ConversationID: conv.ID,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateMessage(context.Background(), msg))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+msg.ID, nil)
+	req = req.WithContext(agentContext(agentA.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.handleGetConversationMessage(rr, req, conv.ID, msg.ID)
+
+	require.Equal(t, http.StatusOK, rr.Code,
+		"canonical DM participant should retain message access after leaving; body: %s", rr.Body.String())
+}
+
 func TestGetConversationMessage_NotParticipant(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)

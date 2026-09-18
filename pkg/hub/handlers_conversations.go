@@ -361,14 +361,29 @@ func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	isParticipant, err := isConversationParticipant(ctx, s.store, conversationID, identity.Type(), identity.ID())
+	// Authorization: for direct conversations, use canonical DM key (kind+ID).
+	// For group conversations, use participant rows.
+	conv, err := s.store.GetConversation(ctx, conversationID)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeErrorFromErr(w, err, "Conversation")
 		return
 	}
-	if !isParticipant {
-		Forbidden(w)
-		return
+
+	if conv.Kind == "direct" {
+		if !authorizeDMRead(conv, identity.Type(), identity.ID()) {
+			Forbidden(w)
+			return
+		}
+	} else {
+		isParticipant, partErr := isConversationParticipant(ctx, s.store, conversationID, identity.Type(), identity.ID())
+		if partErr != nil {
+			writeErrorFromErr(w, partErr, "")
+			return
+		}
+		if !isParticipant {
+			Forbidden(w)
+			return
+		}
 	}
 
 	msg, err := s.store.GetMessage(ctx, messageID)
