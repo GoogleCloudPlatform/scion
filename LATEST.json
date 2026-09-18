@@ -1,0 +1,19 @@
+{
+  "channels": {
+    "stable": {
+      "version": "",
+      "date": "",
+      "url": ""
+    },
+    "preview": {
+      "version": "v0.3.0-preview.2",
+      "date": "2026-09-15T00:00:00Z",
+      "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/v0.3.0-preview.2"
+    },
+    "nightly": {
+      "version": "",
+      "date": "",
+      "url": ""
+    }
+  }
+}

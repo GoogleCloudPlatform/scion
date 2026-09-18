@@ -20,6 +20,7 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+'          # Stable: v0.3.0, v1.2.3
       - 'v[0-9]+.[0-9]+.[0-9]+-preview.*' # Preview: v0.3.0-preview.1
       - 'v[0-9]+.[0-9]+.[0-9]+-rc.*'      # RC: v0.3.0-rc.1
+      - 'nightly-[0-9]*'                   # Nightly: nightly-20260916
 
 permissions:
   contents: write
@@ -210,6 +211,9 @@ jobs:
     name: Create GitHub Release
     needs: [build, build-plugins]
     runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.channel.outputs.channel }}
+      tag: ${{ steps.channel.outputs.tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
@@ -220,7 +224,10 @@ jobs:
           REF: ${{ github.ref }}
         run: |
           TAG="${REF#refs/tags/}"
-          if [[ "$TAG" == *"-preview."* ]]; then
+          if [[ "$TAG" == nightly-* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "channel=nightly" >> $GITHUB_OUTPUT
+          elif [[ "$TAG" == *"-preview."* ]]; then
             echo "prerelease=true" >> $GITHUB_OUTPUT
             echo "channel=preview" >> $GITHUB_OUTPUT
           elif [[ "$TAG" == *"-rc."* ]]; then
@@ -258,10 +265,10 @@ jobs:
           CHANNEL: ${{ steps.channel.outputs.channel }}
           TAG: ${{ steps.channel.outputs.tag }}
         run: |
-          # For preview and rc tags, update the "preview" branch
-          # For stable tags, update the "stable" branch
           if [[ "$CHANNEL" == "stable" ]]; then
             BRANCH="stable"
+          elif [[ "$CHANNEL" == "nightly" ]]; then
+            BRANCH="nightly"
           else
             BRANCH="preview"
           fi
@@ -276,7 +283,86 @@ jobs:
         run: |
           if [[ "$CHANNEL" == "stable" ]]; then
             BRANCH="stable"
+          elif [[ "$CHANNEL" == "nightly" ]]; then
+            BRANCH="nightly"
           else
             BRANCH="preview"
           fi
           echo "::warning::Failed to update channel branch '${BRANCH}' to ${TAG}. Manual update may be needed."
+
+  update-manifest:
+    name: Update LATEST.json
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update manifest
+        env:
+          CHANNEL: ${{ needs.release.outputs.channel }}
+          TAG: ${{ needs.release.outputs.tag }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          RELEASE_URL="${REPO_URL}/releases/tag/${TAG}"
+
+          # Map rc channel to preview in the manifest
+          MANIFEST_CHANNEL="${CHANNEL}"
+          if [ "${MANIFEST_CHANNEL}" = "rc" ]; then
+            MANIFEST_CHANNEL="preview"
+          fi
+
+          export DATE RELEASE_URL MANIFEST_CHANNEL
+
+          # Create or update LATEST.json using python if available, otherwise jq
+          if command -v python3 >/dev/null 2>&1; then
+            python3 <<'PYEOF'
+          import json, os
+
+          manifest_path = "LATEST.json"
+          if os.path.exists(manifest_path):
+              with open(manifest_path) as f:
+                  manifest = json.load(f)
+          else:
+              manifest = {"channels": {"stable": {"version": "", "date": "", "url": ""}, "preview": {"version": "", "date": "", "url": ""}, "nightly": {"version": "", "date": "", "url": ""}}}
+
+          channel = os.environ["MANIFEST_CHANNEL"]
+          manifest["channels"][channel] = {
+              "version": os.environ["TAG"],
+              "date": os.environ["DATE"],
+              "url": os.environ["RELEASE_URL"]
+          }
+
+          with open(manifest_path, "w") as f:
+              json.dump(manifest, f, indent=2)
+              f.write("\n")
+          PYEOF
+          elif command -v jq >/dev/null 2>&1; then
+            if [ -f LATEST.json ]; then
+              jq --arg ch "${MANIFEST_CHANNEL}" \
+                 --arg ver "${TAG}" \
+                 --arg date "${DATE}" \
+                 --arg url "${RELEASE_URL}" \
+                 '.channels[$ch] = {"version": $ver, "date": $date, "url": $url}' \
+                 LATEST.json > LATEST.json.tmp && mv LATEST.json.tmp LATEST.json
+            fi
+          fi
+
+      - name: Commit and push manifest
+        env:
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add LATEST.json
+          # Only commit if there are changes
+          if git diff --cached --quiet; then
+            echo "No changes to LATEST.json"
+          else
+            git commit -m "chore: update LATEST.json for ${TAG}"
+            git push origin main
+          fi
