@@ -18,27 +18,35 @@ recovery, retention cleanup, and cursor-based pagination.
 ## Changes
 
 ### New files
-- `internal/bridge/pgstore_crossprocess_test.go` (~1400 lines) — 16 integration
+- `internal/bridge/pgstore_crossprocess_test.go` (~2100 lines) — 22 integration
   tests covering cross-process HTTP-level behavior, execution lease, crash
-  recovery, retention, dedup, event delivery, caller isolation.
-- `internal/bridge/testdata/a2a-testserver/main.go` (~210 lines) — Subprocess
-  test server with `-caller-id` flag, `/test/append-event` and `/test/read-events`
-  endpoints, `READY <pid> <port>` protocol.
+  recovery, retention, dedup, event delivery, caller isolation, plus regression
+  tests for CRIT-2, CRIT-3, REQ-2, REQ-6, OPT-1.
+- `internal/bridge/testdata/a2a-testserver/main.go` (~170 lines) — Subprocess
+  test server with `-caller-id` flag, `READY <pid> <port>` protocol. Backdoor
+  test endpoints removed per REQ-1.
 
 ### Modified files
-- `internal/bridge/pgstore.go` (~617 lines) — execution lease columns
+- `internal/bridge/pgstore.go` (~650 lines) — execution lease columns
   (`exec_owner`, `exec_heartbeat`), `ClaimExecution`, `HeartbeatExecution`,
-  `ReleaseExecution`, `ReapStaleTasks`, `PurgeTasksAndEvents`.
+  `ReleaseExecution`, `ReapStaleTasks` (returns `[]string` for REQ-6),
+  `PurgeTasksAndEvents`. Advisory lock on migration (REQ-4). Partial index
+  `idx_a2a_sdk_tasks_exec` (REQ-5).
 - `internal/bridge/bridge.go` — Added `sdkTaskStore` field, `SetSDKTaskStore`
-  method, `reapStaleSDKExecutions` in janitor, `PurgeTasksAndEvents` in
-  `RunSweep`, heartbeat during `waitForTaskEvent`.
-- `internal/bridge/executor.go` — Wired `ClaimExecution` before Hub send,
-  heartbeat during poll via `waitForTaskEvent`, `ReleaseExecution` on
-  completion/error via defer.
+  method, `reapStaleSDKExecutions` in janitor (emits terminal failure events
+  per REQ-6), `PurgeTasksAndEvents` in `RunSweep` (standalone-only per REQ-2),
+  heartbeat during `waitForTaskEvent` (CRIT-4), SDK-only task correlation
+  fallback (CRIT-1).
+- `internal/bridge/executor.go` — Wired `ClaimExecution` with retry loop
+  (CRIT-2), fail-closed on all errors (CRIT-3), heartbeat during poll,
+  `ReleaseExecution` on completion/error via defer.
+- `internal/bridge/translate.go` — Deterministic artifact/message IDs via
+  content hash (OPT-1).
 - `internal/bridge/caller.go` — Exported `WithCallerIdentity` for test
   infrastructure.
+- `internal/state/postgres.go` — Added `DB()` method for shared pool (REQ-4).
 - `cmd/scion-a2a-bridge/main.go` — `SetSDKTaskStore(pgTaskStore)` wiring,
-  startup `ReapStaleTasks` recovery.
+  shared pool via `NewPostgresTaskStoreWithDB` (REQ-4), startup recovery.
 - `README.md` — Corrected false transactional consistency claims. Documents
   execution lease, crash recovery, retention, dedup, SSE cursor semantics.
 - `.gitignore` — Added `/a2a-testserver`.
@@ -80,10 +88,19 @@ CREATE TABLE a2a_sdk_tasks (
    exec_owner prevents double-reap.
 5. **Single-transaction retention** — `PurgeTasksAndEvents` deletes from both
    tables atomically.
-6. **Separate connection pools** — Bridge state and SDK task store use
-   independent `*sql.DB` pools. README corrected to state this.
+6. **Shared connection pool** — Bridge state and SDK task store share a
+   single `*sql.DB` pool via `NewPostgresTaskStoreWithDB` / `state.DB()` (REQ-4).
 7. **Dedup at broker boundary** — Event log uses `dedup_key` with
    `ON CONFLICT DO NOTHING`.
+8. **Deterministic artifact IDs** — `TranslateScionToA2A` uses content-hash-based
+   IDs instead of random UUIDs, enabling reliable dedup_key generation (OPT-1).
+9. **Fail-closed lease semantics** — All ClaimExecution errors prevent Hub sends
+   (CRIT-3). Lease loss mid-execution returns error (CRIT-4).
+10. **Terminal failure events on reap** — `ReapStaleTasks` returns reaped IDs;
+    caller emits cross-replica-visible failure events to `a2a_task_events` (REQ-6).
+11. **Active-task-safe retention** — Standalone mode skips unconditional
+    `PurgeTaskEvents`; only terminal task events are purged via
+    `PurgeTasksAndEvents` (REQ-2).
 
 ## Test provisioning
 
