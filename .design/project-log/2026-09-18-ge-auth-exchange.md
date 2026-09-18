@@ -30,6 +30,8 @@ for short-lived Hub user access tokens.
 | `0695f75` | fix(bridge): wire transport auth to snapshot validator + harden dispatch tests (#1616, #1617) |
 | `58df399` | docs: update project log with round 3 rebase onto origin/main 346b1f7 (#1616, #1617) |
 | `e099d85` | fix(hub): concurrent first-linkage provisioning collision (H3-R1) (#1616) |
+| `53dc31c` | docs: update project log with round 4 H3-R1 concurrent provisioning fix (#1616) |
+| `4a65c45` | feat(hub): rate limit + body size limit for GE exchange endpoint (#1616) |
 
 ## Hub — `POST /api/v1/auth/integrations/google/exchange` (#1616)
 
@@ -56,6 +58,12 @@ for short-lived Hub user access tokens.
 - `pkg/store/entadapter/externalidentity_store.go` — Ent-backed durable
   store implementing ExternalIdentityStore interface.
 - `pkg/store/entadapter/externalidentity_store_test.go` — 13 store tests.
+- `pkg/hub/ge_exchange_ratelimit.go` — Per-client-IP token bucket rate
+  limiter (10 req/min, burst 20, 10k entry bound). Safe trusted-proxy
+  client IP extraction with right-to-left XFF walk and IPv4/IPv6
+  normalization. Background cleanup goroutine.
+- `pkg/hub/ge_exchange_ratelimit_test.go` — 20 route-level tests for
+  rate limit + body limit + IP extraction.
 
 ### Files modified
 - `pkg/hub/server.go` — Config struct, service init, route registration.
@@ -227,6 +235,18 @@ Hub `go.mod`: No changes.
 | H2-O1 | `flexInt64` for `expires_in` | **Resolved**: custom JSON type handling number/string forms | `TestFlexInt64_*` (4 tests), `TestProductionValidator_AccessToken_ExpiresInAsString` |
 | H2-O2 | Dead remaining-lifetime branch | **Resolved**: strict `remaining <= 0` check | `TestProductionValidator_IDToken_ExpiredWithinSkew`, `_PositiveRemaining`, `_LongRemaining` |
 | H2-O3 | User deletion cascade | **Resolved**: `entsql.OnDelete(entsql.Cascade)` annotation | `TestExternalIdentityStore_UserDeleteCascade` |
+
+## Test evidence (round 5 rate/body limits: `4a65c45`)
+
+- **Rate limit:** Per-client-IP token bucket (10 req/min sustained, burst 20) enforced before credential validation. Returns HTTP 429 with `Retry-After`. Bounded at 10k entries with 30m deterministic expiry. Fail closed when at capacity.
+- **Body limit:** `http.MaxBytesReader` caps at 8 KB before JSON decode. Returns HTTP 413 without invoking validator/store.
+- **Client IP:** Safe trusted-proxy extraction — right-to-left XFF walk past trusted hops, IPv4-mapped IPv6 normalization, malformed entry fail-closed.
+- **New files:** `ge_exchange_ratelimit.go` (limiter + IP extraction), `ge_exchange_ratelimit_test.go` (20 route-level tests)
+- **Modified:** `ge_exchange.go` (handler: rate limit + body limit), `server.go` (field + init + cleanup)
+- **20 new tests:** burst→429, zero-call, refill, spoofed headers, trusted proxy chain (9 subcases), oversize body (3), max-entries fail-closed, cleanup+race, IPv4/IPv6 normalization (8 subcases), integration
+- **109 total GE tests pass** (rate/body + exchange + validator + flexBool/Int64 + ext identity store)
+- Bridge suite unmodified, passes
+- INFO-2 (cache metrics): not required — #1620 harness records per-replica counters; rationale documented in code
 
 ## Test evidence (round 4 H3-R1 fix: `e099d85`)
 
