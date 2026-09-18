@@ -19,7 +19,7 @@ Zero production Go code was modified, preserving the post-merge tree integrity. 
 4. **Exact cursor/reconnect verification:** Proved intermediate event absence from snapshot history, verified `a2a_task_events.id > a2a_sdk_tasks.last_event_cursor`, single stream delivery, absence of duplicate replay, and verified `_bridgeEventID` never leaks.
 5. **gRPC BrokerService 6 Unary Methods:** `controlRPCErrors` explicitly verifies the six unary methods of `proto/broker/v1` `BrokerService`: `Configure`, `Publish`, `Subscribe`, `Unsubscribe`, `HealthCheck`, and `GetInfo`.
 6. **Process & resource hygiene:** Kernel-allocated dynamic ports (`127.0.0.1:0`), process tree termination and wait reaping on test completion, per-test PostgreSQL schema isolation (`harness_run_*`), and verification of undisturbed canary data in `test_canary.sentinel`.
-7. **CI fail-closed execution:** Integration harness requires PostgreSQL 15 when running under `CI=true` or `TEST_REQUIRE_DATABASE=1`, failing closed (`t.Fatal`) rather than silently skipping. Invoked via `make test-a2a-integration` or `./scripts/run-integration-ci.sh`.
+7. **CI fail-closed execution & runner verification:** Integration harness requires PostgreSQL 15 and `psql` when running under `CI=true` or `TEST_REQUIRE_DATABASE=1`, failing closed (`t.Fatal` / exit code 1) rather than silently skipping. Runner redacts all DSN credentials (`Using TEST_DATABASE_URL=[REDACTED]`), requires `psql`, validates exact pre- and post-test canary sentinel identity and value (`canary-1` -> `must-survive`) without modifying unrelated rows, and parses `go test -json` machine-readable output across all test phases (normal, race, repetition count=3) to fail closed on any `Action=skip`. Deliberate negative runner tests verified: absent DB (exit 1), missing psql (exit 1), injected test skip via `TestInjectedSkipFixture` (exit 1), and canary row mutation (exit 1).
 8. **Deployment manifests and dry-run validation:** Cloud Run multi-instance (`deploy/cloudrun/service.yaml`) and Kubernetes multi-replica (`deploy/kubernetes/deployment.yaml`) manifests are deterministically validated via `TestCloudRunManifestValidation` and `TestKubernetesManifestValidation`. Documentation covers dual headers (`X-Serverless-Authorization` vs `Authorization`), principal separation (`hub-sa` vs `ge-invoker`), health/rollback/cleanup, and strict no-refresh-token OAuth exchange.
 9. **Matrix & documentation reflection:** `testdata/acceptance_layers.json` and docs reflect actual local deterministic proof. Live external Gemini Enterprise capture, Cloud Run live deployment, and Kubernetes live deployment remain marked `external-live-only` / `passing: false`.
 10. **Test-only dependency closure:** The `go.mod`/`go.sum` additions in `extras/scion-a2a-bridge/` are strictly limited to the exact transitive dependency closure required by the test-only modernc SQLite driver (`modernc.org/sqlite`, `modernc.org/libc`, `modernc.org/mathutil`, `modernc.org/memory`, `github.com/dustin/go-humanize`, `github.com/ncruces/go-strftime`, `github.com/remyoudompheng/bigfft`). These are needed solely by `serveHubProcess` to back the Hub ent adapter with a temporary SQLite database (`SCION_TEST_HUB_DATABASE`) without external dependencies. Zero production code references these drivers.
@@ -40,7 +40,7 @@ Zero production Go code was modified, preserving the post-merge tree integrity. 
 
 ## Test Verification Runs
 
-### Full Suite Run (18/18 PASS)
+### Full Suite Run (20/20 PASS)
 ```
 $ make test-a2a-integration
 === Phase 1: Standard Integration Suite ===
@@ -80,27 +80,39 @@ $ make test-a2a-integration
 --- PASS: TestPostgreSQLSchemaAllocator (0.01s)
 === RUN   TestAcceptanceLayersMatchProvenScope
 --- PASS: TestAcceptanceLayersMatchProvenScope (0.00s)
+=== RUN   TestSkippedAcceptanceDetectionNegative
+--- PASS: TestSkippedAcceptanceDetectionNegative (0.00s)
+=== RUN   TestInjectedSkipFixture
+--- PASS: TestInjectedSkipFixture (0.00s)
 PASS
-ok  	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/integration	15.729s
+ok  	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/integration	15.499s
 ```
 
 ### Race Detector Run
 ```
 === Phase 2: Race Detection Integration Suite ===
-ok  	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/integration	32.469s
+ok  	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/integration	31.115s
 ```
 
 ### Repetition / Stress Run
 ```
 === Phase 3: Repetition Stress Suite (count=3) ===
-ok  	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/integration	42.331s
+ok  	github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/integration	42.657s
 ```
 
 ### Canary Sentinel Verification
 ```
-=== Phase 4: Canary Table Verification ===
-Canary verified: count=1
+=== Phase 4: Canary Sentinel Post-Verification ===
+Pre-test canary sentinel 'canary-1' verified: 'must-survive'
+Post-test canary sentinel 'canary-1' matches pre-test baseline: 'must-survive'
 ```
+
+### Runner Negative and Fail-Closed Proofs
+- **Absent DB:** `TEST_DATABASE_URL="postgres://[user]:[password]@127.0.0.1:5433/a2a_test?sslmode=disable" ./extras/scion-a2a-bridge/scripts/run-integration-ci.sh` -> exit code `1` (`::error::PostgreSQL is unreachable via psql or TEST_DATABASE_URL is invalid. Fails closed.`).
+- **Missing psql:** `bash -c 'mkdir -p /tmp/no_psql_bin && for f in bash dirname pwd sed grep mktemp cat rm go; do ln -sf $(which $f) /tmp/no_psql_bin/$f; done && PATH=/tmp/no_psql_bin ./extras/scion-a2a-bridge/scripts/run-integration-ci.sh'` -> exit code `1` (`::error::psql is required for the CI entrypoint but was not found in PATH. Fails closed.`).
+- **Injected Skip Detection:** `TEST_TRIGGER_INJECTED_SKIP=1 ./extras/scion-a2a-bridge/scripts/run-integration-ci.sh` -> exit code `1` (`::error::Phase 1: Standard Integration Suite detected forbidden test skip(s): - SKIPPED: TestInjectedSkipFixture`).
+- **Canary Mutation Detection:** `TEST_TRIGGER_CANARY_MUTATION=1 ./extras/scion-a2a-bridge/scripts/run-integration-ci.sh` -> exit code `1` (`::error::Canary sentinel 'canary-1' was mutated or deleted after test phases (got 'mutated', want 'must-survive'). Fails closed.`).
+- **Positive Run:** `./extras/scion-a2a-bridge/scripts/run-integration-ci.sh` -> exit code `0`.
 
 ## Files Committed
 - `.github/workflows/extras-ci.yml` (added `a2a-bridge-postgres-integration` job with PostgreSQL 15 service)

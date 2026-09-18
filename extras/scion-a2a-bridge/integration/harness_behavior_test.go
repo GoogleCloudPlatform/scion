@@ -313,3 +313,9 @@ func TestSkippedAcceptanceDetectionNegative(t *testing.T) {
 		t.Fatal("expected status 'skipped' to be rejected by allowed statuses")
 	}
 }
+
+func TestInjectedSkipFixture(t *testing.T) {
+	if os.Getenv("TEST_TRIGGER_INJECTED_SKIP") == "1" {
+		t.Skip("deliberate injected skip for CI runner skip-detection verification")
+	}
+}
