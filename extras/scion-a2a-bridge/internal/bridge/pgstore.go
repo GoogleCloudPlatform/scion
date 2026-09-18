@@ -41,7 +41,8 @@ import (
 // both the in-memory taskstore.InMemory and the ScopedTaskStore wrapper: all
 // ownership enforcement and list filtering happen at the SQL level.
 type PostgresTaskStore struct {
-	db *sql.DB
+	db       *sql.DB
+	ownsPool bool // true if this store opened the pool and should close it
 }
 
 // Compile-time check.
@@ -64,7 +65,7 @@ func NewPostgresTaskStore(databaseURL string) (*PostgresTaskStore, error) {
 		return nil, fmt.Errorf("ping postgres for SDK task store: %w", err)
 	}
 
-	s := &PostgresTaskStore{db: db}
+	s := &PostgresTaskStore{db: db, ownsPool: true}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate SDK task store: %w", err)
@@ -73,12 +74,39 @@ func NewPostgresTaskStore(databaseURL string) (*PostgresTaskStore, error) {
 	return s, nil
 }
 
-// Close closes the underlying connection pool.
-func (s *PostgresTaskStore) Close() error {
-	return s.db.Close()
+// NewPostgresTaskStoreWithDB creates a PostgresTaskStore using an existing
+// database connection pool. This avoids opening a second pool when the
+// bridge state store already has one (REQ-4: shared pool). The caller
+// retains ownership of the pool and must close it after the store.
+func NewPostgresTaskStoreWithDB(db *sql.DB) (*PostgresTaskStore, error) {
+	s := &PostgresTaskStore{db: db, ownsPool: false}
+	if err := s.migrate(); err != nil {
+		return nil, fmt.Errorf("migrate SDK task store: %w", err)
+	}
+	return s, nil
 }
 
+// Close closes the underlying connection pool only if this store owns it.
+// When the pool is shared (created via NewPostgresTaskStoreWithDB), Close
+// is a no-op — the pool owner is responsible for closing it.
+func (s *PostgresTaskStore) Close() error {
+	if s.ownsPool {
+		return s.db.Close()
+	}
+	return nil
+}
+
+// sdkTaskStoreMigrationLockID is a Postgres advisory lock ID used to
+// serialize schema migrations across replicas (REQ-4).
+const sdkTaskStoreMigrationLockID = 827419618 // arbitrary stable int
+
 func (s *PostgresTaskStore) migrate() error {
+	// Acquire advisory lock to prevent DDL races across replicas.
+	if _, err := s.db.Exec(`SELECT pg_advisory_lock($1)`, sdkTaskStoreMigrationLockID); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer s.db.Exec(`SELECT pg_advisory_unlock($1)`, sdkTaskStoreMigrationLockID)
+
 	migrations := []string{
 		`CREATE TABLE IF NOT EXISTS a2a_sdk_tasks (
 			id TEXT PRIMARY KEY,
@@ -94,6 +122,8 @@ func (s *PostgresTaskStore) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_a2a_sdk_tasks_owner ON a2a_sdk_tasks(owner_key)`,
 		`CREATE INDEX IF NOT EXISTS idx_a2a_sdk_tasks_context_owner ON a2a_sdk_tasks(context_id, owner_key)`,
 		`CREATE INDEX IF NOT EXISTS idx_a2a_sdk_tasks_updated ON a2a_sdk_tasks(owner_key, updated_at DESC, id DESC)`,
+		// REQ-5: Partial index for janitor reap queries.
+		`CREATE INDEX IF NOT EXISTS idx_a2a_sdk_tasks_exec ON a2a_sdk_tasks(exec_heartbeat) WHERE exec_owner IS NOT NULL`,
 		// Migration for existing tables: add exec_owner and exec_heartbeat columns.
 		`DO $$ BEGIN
 			ALTER TABLE a2a_sdk_tasks ADD COLUMN IF NOT EXISTS exec_owner TEXT;
@@ -475,7 +505,9 @@ func (s *PostgresTaskStore) ReleaseExecution(ctx context.Context, taskID, ownerI
 //
 // Each transition is atomic via CAS on the version column, so concurrent
 // reapers on multiple replicas produce exactly one winner per task.
-func (s *PostgresTaskStore) ReapStaleTasks(ctx context.Context, leaseTimeout time.Duration) (int, error) {
+// Returns the count and IDs of reaped tasks so the caller can emit terminal
+// failure events to the event log (REQ-6).
+func (s *PostgresTaskStore) ReapStaleTasks(ctx context.Context, leaseTimeout time.Duration) ([]string, error) {
 	// Find tasks with expired execution leases.
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, owner_key, version, payload, exec_owner FROM a2a_sdk_tasks
@@ -486,7 +518,7 @@ func (s *PostgresTaskStore) ReapStaleTasks(ctx context.Context, leaseTimeout tim
 		fmt.Sprintf("%d seconds", int(leaseTimeout.Seconds())),
 	)
 	if err != nil {
-		return 0, fmt.Errorf("list stale SDK tasks: %w", err)
+		return nil, fmt.Errorf("list stale SDK tasks: %w", err)
 	}
 	defer rows.Close()
 
@@ -501,15 +533,15 @@ func (s *PostgresTaskStore) ReapStaleTasks(ctx context.Context, leaseTimeout tim
 	for rows.Next() {
 		var st staleTask
 		if err := rows.Scan(&st.id, &st.owner, &st.version, &st.payload, &st.execOwner); err != nil {
-			return 0, fmt.Errorf("scan stale task: %w", err)
+			return nil, fmt.Errorf("scan stale task: %w", err)
 		}
 		staleTasks = append(staleTasks, st)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate stale tasks: %w", err)
+		return nil, fmt.Errorf("iterate stale tasks: %w", err)
 	}
 
-	reaped := 0
+	var reapedIDs []string
 	for _, st := range staleTasks {
 		// Unmarshal, transition to failed, re-marshal.
 		var task a2a.Task
@@ -537,10 +569,10 @@ func (s *PostgresTaskStore) ReapStaleTasks(ctx context.Context, leaseTimeout tim
 			continue
 		}
 		if n, _ := result.RowsAffected(); n > 0 {
-			reaped++
+			reapedIDs = append(reapedIDs, st.id)
 		}
 	}
-	return reaped, nil
+	return reapedIDs, nil
 }
 
 // PurgeTasksAndEvents deletes terminal SDK tasks and their correlated bridge

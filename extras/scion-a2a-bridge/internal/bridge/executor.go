@@ -141,29 +141,62 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		// Claim execution lease before Hub send to prevent duplicate sends.
 		// The lease tracks which replica is executing this task; if we crash,
 		// the janitor reaps tasks with expired leases.
+		//
+		// CRIT-3: All claim errors fail closed. No Hub side effects without
+		// a confirmed lease. "Degraded mode" bypass is forbidden.
+		//
+		// CRIT-2: For new task submissions, the SDK's store.Create runs
+		// asynchronously via the event consumer goroutine. The row might not
+		// exist when we first try to claim. Retry briefly to let Create commit.
 		if e.bridge.sdkTaskStore != nil {
 			ownerID := OwnerID()
 			leaseTimeout := e.bridge.config.Timeouts.SendMessage
 			if leaseTimeout == 0 {
 				leaseTimeout = 120 * time.Second
 			}
-			claimed, claimErr := e.bridge.sdkTaskStore.ClaimExecution(ctx, string(taskID), ownerID, leaseTimeout)
+
+			var claimed bool
+			var claimErr error
+			maxAttempts := 1
+			if execCtx.StoredTask == nil {
+				// New task: Create is in flight asynchronously.
+				maxAttempts = 50 // up to ~1s
+			}
+			for attempt := 0; attempt < maxAttempts; attempt++ {
+				claimed, claimErr = e.bridge.sdkTaskStore.ClaimExecution(ctx, string(taskID), ownerID, leaseTimeout)
+				if claimErr != nil {
+					break // DB error — fail closed below
+				}
+				if claimed {
+					break // success
+				}
+				if execCtx.StoredTask == nil && attempt < maxAttempts-1 {
+					// Row might not exist yet; wait for async Create.
+					time.Sleep(20 * time.Millisecond)
+					continue
+				}
+				break // follow-up task or retries exhausted
+			}
+
 			if claimErr != nil {
+				// CRIT-3: Fail closed on any DB error. Never proceed to Hub send.
 				e.log.Error("failed to claim execution lease", "error", claimErr, "task_id", taskID)
-				// Non-fatal: proceed without lease protection in degraded mode.
-			} else if !claimed {
-				e.log.Warn("execution lease already held by another replica", "task_id", taskID)
+				failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Failed to acquire execution lease"))
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+				return
+			}
+			if !claimed {
+				e.log.Warn("execution lease held by another replica", "task_id", taskID)
 				failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Task execution already in progress on another replica"))
 				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
 				return
-			} else {
-				// Release the lease on completion (normal or error).
-				defer func() {
-					if releaseErr := e.bridge.sdkTaskStore.ReleaseExecution(context.Background(), string(taskID), ownerID); releaseErr != nil {
-						e.log.Error("failed to release execution lease", "error", releaseErr, "task_id", taskID)
-					}
-				}()
 			}
+			// Release the lease on completion (normal or error).
+			defer func() {
+				if releaseErr := e.bridge.sdkTaskStore.ReleaseExecution(context.Background(), string(taskID), ownerID); releaseErr != nil {
+					e.log.Error("failed to release execution lease", "error", releaseErr, "task_id", taskID)
+				}
+			}()
 		}
 
 		// Send to Hub using the per-user or admin client.

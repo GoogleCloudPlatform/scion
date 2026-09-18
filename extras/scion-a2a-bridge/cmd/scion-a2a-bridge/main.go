@@ -482,13 +482,15 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	// history, artifacts, etc.) survives replica restarts and is accessible across
 	// all replicas sharing the same database.
 	executor := bridge.NewScionExecutor(b, log.With("component", "executor"))
-	pgTaskStore, err := bridge.NewPostgresTaskStore(databaseURL)
+	// Share the state store's connection pool with the SDK task store
+	// (REQ-4: avoid doubling max connections per replica).
+	pgTaskStore, err := bridge.NewPostgresTaskStoreWithDB(store.DB())
 	if err != nil {
 		log.Error("failed to initialize Postgres SDK task store", "error", err)
 		os.Exit(1)
 	}
-	defer pgTaskStore.Close()
-	log.Info("Postgres SDK task store initialized")
+	defer pgTaskStore.Close() // no-op since pool is owned by state store
+	log.Info("Postgres SDK task store initialized (shared pool)")
 
 	// Wire the SDK task store into the bridge for execution leases,
 	// reaping stale execution claims, and retention cleanup.
@@ -496,10 +498,10 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 
 	// Startup recovery: reap any stale execution leases left by
 	// previous instances that crashed mid-execution.
-	if reaped, err := pgTaskStore.ReapStaleTasks(context.Background(), 2*cfg.Timeouts.SendMessage); err != nil {
+	if reapedIDs, err := pgTaskStore.ReapStaleTasks(context.Background(), 2*cfg.Timeouts.SendMessage); err != nil {
 		log.Error("startup: failed to reap stale SDK execution leases", "error", err)
-	} else if reaped > 0 {
-		log.Warn("startup: reaped stale SDK execution leases from previous crash", "count", reaped)
+	} else if len(reapedIDs) > 0 {
+		log.Warn("startup: reaped stale SDK execution leases from previous crash", "count", len(reapedIDs), "task_ids", reapedIDs)
 	}
 
 	sdkRequestHandler := a2asrv.NewHandler(

@@ -21,33 +21,24 @@
 //
 // The server prints "READY <pid> <port>" to stdout once listening, then serves
 // A2A JSON-RPC requests until stdin is closed or SIGTERM is received.
-//
-// Additional test endpoints:
-//
-//	POST /test/append-event   — appends an event to the bridge event log
-//	GET  /test/read-events    — reads events from the bridge event log
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"iter"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/bridge"
-	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 )
 
 var (
@@ -113,14 +104,6 @@ func main() {
 	}
 	defer store.Close()
 
-	// Create bridge state store for event log operations (test endpoints).
-	bridgeStore, err := state.NewPostgres(*databaseURL)
-	if err != nil {
-		log.Error("failed to create bridge state store", "error", err)
-		os.Exit(1)
-	}
-	defer bridgeStore.Close()
-
 	handler := a2asrv.NewHandler(
 		&testExecutor{},
 		a2asrv.WithTaskStore(store),
@@ -146,52 +129,6 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/", routeHandler)
-
-	// Test endpoint: append an event to the bridge event log.
-	mux.HandleFunc("/test/append-event", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		var ev state.TaskEvent
-		if err := json.Unmarshal(body, &ev); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		id, err := bridgeStore.AppendTaskEvent(r.Context(), &ev)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]int64{"id": id})
-	})
-
-	// Test endpoint: read events from the bridge event log.
-	mux.HandleFunc("/test/read-events", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "GET only", http.StatusMethodNotAllowed)
-			return
-		}
-		taskID := r.URL.Query().Get("taskID")
-		afterIDStr := r.URL.Query().Get("afterID")
-		afterID := int64(0)
-		if afterIDStr != "" {
-			afterID, _ = strconv.ParseInt(afterIDStr, 10, 64)
-		}
-		events, err := bridgeStore.ReadTaskEvents(r.Context(), taskID, afterID, 100)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(events)
-	})
 
 	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", *port))
 	if err != nil {

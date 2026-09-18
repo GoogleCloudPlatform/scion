@@ -64,6 +64,13 @@ func (s *PostgresStore) Close() error {
 	return s.db.Close()
 }
 
+// DB returns the underlying database connection pool. This allows other
+// stores (e.g. PostgresTaskStore) to share the same pool, avoiding the
+// overhead and connection count of separate pools per store.
+func (s *PostgresStore) DB() *sql.DB {
+	return s.db
+}
+
 // Ping checks database connectivity.
 func (s *PostgresStore) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)

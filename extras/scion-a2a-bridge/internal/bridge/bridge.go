@@ -197,13 +197,32 @@ func (b *Bridge) reapStaleSDKExecutions(ctx context.Context, leaseTimeout time.D
 	if b.sdkTaskStore == nil {
 		return
 	}
-	reaped, err := b.sdkTaskStore.ReapStaleTasks(ctx, leaseTimeout)
+	reapedIDs, err := b.sdkTaskStore.ReapStaleTasks(ctx, leaseTimeout)
 	if err != nil {
 		b.log.Error("janitor: reaping stale SDK execution leases", "error", err)
 		return
 	}
-	if reaped > 0 {
-		b.log.Warn("janitor: reaped stale SDK execution leases", "count", reaped)
+	if len(reapedIDs) > 0 {
+		b.log.Warn("janitor: reaped stale SDK execution leases", "count", len(reapedIDs))
+		// REQ-6: Emit terminal failure events for reaped tasks so that
+		// cross-replica SSE subscribers and GetTask callers see the failure.
+		for _, taskID := range reapedIDs {
+			failPayload, _ := json.Marshal(TaskStatusUpdate{
+				TaskID: taskID,
+				Status: TaskStatus{State: TaskStateFailed, Message: &Message{
+					Role:  "agent",
+					Parts: []Part{{Text: "Execution lease expired; replica presumed crashed"}},
+				}},
+			})
+			if _, appendErr := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
+				TaskID:   taskID,
+				Kind:     "status",
+				Payload:  failPayload,
+				DedupKey: fmt.Sprintf("reap:%s", taskID),
+			}); appendErr != nil {
+				b.log.Error("janitor: failed to emit reap failure event", "task_id", taskID, "error", appendErr)
+			}
+		}
 	}
 }
 
@@ -266,24 +285,27 @@ func (b *Bridge) RunSweep(ctx context.Context) {
 	}
 	b.reapStaleTasks(ctx, maxAge)
 
-	// Purge events older than 1 hour (D8).
-	purged, err := b.store.PurgeTaskEvents(ctx, time.Now().Add(-1*time.Hour))
-	if err != nil {
-		b.log.Error("failed to purge task events", "error", err)
-	} else if purged > 0 {
-		b.log.Info("purged old task events", "count", purged)
-	}
-
-	// Purge terminal SDK tasks and their correlated events in a single
-	// transaction (referential consistency between a2a_sdk_tasks and
-	// a2a_task_events). No-op when sdkTaskStore is nil (plugin mode).
 	if b.sdkTaskStore != nil {
+		// Standalone mode: purge terminal SDK tasks and their correlated
+		// events in a single transaction. This handles BOTH a2a_sdk_tasks
+		// and a2a_task_events referentially; the unconditional
+		// PurgeTaskEvents is skipped to avoid deleting events for tasks
+		// that are still active (REQ-2).
 		cutoff := time.Now().Add(-1 * time.Hour)
 		tp, ep, err := b.sdkTaskStore.PurgeTasksAndEvents(ctx, cutoff)
 		if err != nil {
 			b.log.Error("failed to purge SDK tasks/events", "error", err)
 		} else if tp > 0 || ep > 0 {
 			b.log.Info("purged terminal SDK tasks and events", "tasks", tp, "events", ep)
+		}
+	} else {
+		// Plugin mode: no SDK task store, so the only retention path is
+		// time-based event purge (D8).
+		purged, err := b.store.PurgeTaskEvents(ctx, time.Now().Add(-1*time.Hour))
+		if err != nil {
+			b.log.Error("failed to purge task events", "error", err)
+		} else if purged > 0 {
+			b.log.Info("purged old task events", "count", purged)
 		}
 	}
 }
@@ -407,9 +429,12 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 		}
 
 		// Heartbeat execution lease on each poll cycle to keep it alive.
+		// CRIT-4: If heartbeat fails (lease lost, reaped, or stolen by
+		// another replica), abort immediately. Continuing would produce
+		// split-brain duplicate execution or zombie task resurrection.
 		if heartbeatStore != nil {
 			if hbErr := heartbeatStore.HeartbeatExecution(ctx, taskID, ownerID); hbErr != nil {
-				b.log.Warn("execution heartbeat failed", "task_id", taskID, "error", hbErr)
+				return nil, fmt.Errorf("execution lease lost for task %s: %w", taskID, hbErr)
 			}
 		}
 
@@ -950,15 +975,24 @@ func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug strin
 	// If the message carries a task correlation ID, verify ownership.
 	if taskID := msg.Metadata["a2aTaskId"]; taskID != "" {
 		task, err := b.store.GetTask(ctx, taskID)
-		if err != nil || task == nil {
-			return "", fmt.Errorf("unknown task: %s", taskID)
+		if err == nil && task != nil {
+			if task.AgentSlug != agentSlug {
+				b.log.Warn("dropping cross-agent a2aTaskId injection",
+					"task_agent", task.AgentSlug, "msg_agent", agentSlug, "task_id", taskID)
+				return "", fmt.Errorf("cross-agent injection for task %s", taskID)
+			}
+			return taskID, nil
 		}
-		if task.AgentSlug != agentSlug {
-			b.log.Warn("dropping cross-agent a2aTaskId injection",
-				"task_agent", task.AgentSlug, "msg_agent", agentSlug, "task_id", taskID)
-			return "", fmt.Errorf("cross-agent injection for task %s", taskID)
+		// Task not found in bridge state (a2a_tasks). In standalone SDK
+		// mode, tasks exist only in a2a_sdk_tasks. Check the local active
+		// task cache — we trust a2aTaskId because the executor sets it.
+		b.tasksMu.RLock()
+		_, inCache := b.activeTasks[taskID]
+		b.tasksMu.RUnlock()
+		if inCache {
+			return taskID, nil
 		}
-		return taskID, nil
+		return "", fmt.Errorf("unknown task: %s", taskID)
 	}
 
 	// No a2aTaskId — fall back to local cache, then DB.
