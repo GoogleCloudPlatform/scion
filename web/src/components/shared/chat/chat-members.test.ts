@@ -144,6 +144,22 @@ describe('scion-chat-members thread default', () => {
   });
 });
 
+describe('scion-chat-members host clicks', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('does not reset the current conversation when empty space is clicked', async () => {
+    const el = await mount([]);
+    const onResetView = vi.fn();
+    el.addEventListener('reset-view', onResetView);
+
+    el.click();
+
+    expect(onResetView).not.toHaveBeenCalled();
+  });
+});
+
 describe('scion-chat-members wobble', () => {
   beforeEach(() => {
     vi.useFakeTimers();

@@ -445,15 +445,8 @@ export class ScionChatMembers extends LitElement {
     }
   `;
 
-  override connectedCallback(): void {
-    super.connectedCallback();
-    // Clicking empty area in the members sidebar resets to global view
-    this.addEventListener('click', this._handleHostClick);
-  }
-
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    this.removeEventListener('click', this._handleHostClick);
     // Clean up wobble timers
     for (const timer of this._wobbleTimers.values()) clearTimeout(timer);
     this._wobbleTimers.clear();
@@ -519,27 +512,6 @@ export class ScionChatMembers extends LitElement {
     next.delete(agentId);
     this.recentlyChangedAgents = next;
   }
-
-  /** Click on the host element itself (empty space) triggers a reset. */
-  private _handleHostClick = (e: MouseEvent): void => {
-    // Only fire when the click lands on the host itself or on the
-    // scrollable container (not on a member item, section label, or toolbar)
-    const path = e.composedPath();
-    const clickedMember = path.some(
-      (el) => el instanceof HTMLElement && el.classList?.contains('member-item')
-    );
-    if (clickedMember) return;
-    const clickedLabel = path.some(
-      (el) => el instanceof HTMLElement && el.classList?.contains('section-label')
-    );
-    if (clickedLabel) return;
-    const clickedToolbar = path.some(
-      (el) => el instanceof HTMLElement && el.classList?.contains('members-toolbar')
-    );
-    if (clickedToolbar) return;
-
-    this.dispatchEvent(new CustomEvent('reset-view', { bubbles: true, composed: true }));
-  };
 
   override render() {
     return html` ${this.renderToolbar()} ${this.renderHumans()} ${this.renderAgents()} `;

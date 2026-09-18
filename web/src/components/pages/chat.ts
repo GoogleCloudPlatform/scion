@@ -2815,7 +2815,6 @@ export class ScionPageChat extends LitElement {
             dm-peer-id="${this.v2Conversation?.isDM ? this.v2Conversation.peerId : ''}"
             default-agent-slug="${this.v2Conversation?.defaultAgent || ''}"
             @member-click=${this.handleMemberClick}
-            @reset-view=${this.handleResetView}
           ></scion-chat-members>
         </div>
       </div>
