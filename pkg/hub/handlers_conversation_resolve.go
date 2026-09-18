@@ -24,9 +24,9 @@ import (
 
 // conversationResolveResponse is the response for GET /api/v1/conversations/resolve.
 type conversationResolveResponse struct {
-	Exists       bool                `json:"exists"`
+	Exists       bool                  `json:"exists"`
 	Conversation *conversationResponse `json:"conversation,omitempty"`
-	PeerAgent    *targetAgentInfo    `json:"peerAgent,omitempty"`
+	PeerAgent    *targetAgentInfo      `json:"peerAgent,omitempty"`
 }
 
 // handleConversationResolve handles GET /api/v1/conversations/resolve.
