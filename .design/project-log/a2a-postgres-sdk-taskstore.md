@@ -426,8 +426,8 @@ lifecycle + atomic cancel suite, count=3: PASS (34.406s)
 lifecycle + atomic cancel suite, -race: PASS (12.539s)
 accepted cross-replica/cursor/ownership/reaper set: PASS (34.243s)
 same accepted regression set, -race: PASS (35.724s)
-full module go test ./...: PASS (bridge 86.756s)
-full module go test -race ./...: PASS (bridge 89.318s)
+full module go test ./... at final code tip: PASS (bridge 86.741s)
+full module go test -race ./... at final code tip: PASS (bridge 89.027s)
 go vet ./internal/bridge: PASS
 go build -buildvcs=false ./...: PASS
 pre-existing schema canary: preexisting|must-survive
