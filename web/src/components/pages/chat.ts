@@ -3085,6 +3085,8 @@ export class ScionPageChat extends LitElement {
   private renderPromoteDialog() {
     if (!this.promoteDialogOpen || !this.v2Conversation) return nothing;
     const conv = this.v2Conversation;
+    const displaySlug =
+      conv.projectSlug || this._projectIdToSlug.get(conv.projectId) || 'this project';
     return html`
       <sl-dialog
         label="Promote DM to Thread"
@@ -3096,7 +3098,7 @@ export class ScionPageChat extends LitElement {
         <p>
           This will move your conversation with
           <strong>${conv.peerName}</strong> into a shared thread visible to all members of
-          <strong>${conv.projectSlug}</strong>. This cannot be undone.
+          <strong>${displaySlug}</strong>. This cannot be undone.
         </p>
         <sl-input
           label="Thread name"
@@ -3153,20 +3155,22 @@ export class ScionPageChat extends LitElement {
         }
       );
       if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as {
-          error?: string;
-          code?: string;
+        const body = (await res.json().catch(() => ({ error: {} }))) as {
+          error?: { code?: string; message?: string };
         };
         if (res.status === 409) {
           const msg =
-            body.code === 'IN_FLIGHT_MESSAGES'
+            body.error?.code === 'IN_FLIGHT_MESSAGES'
               ? 'Agent is still responding. Try again in a few seconds.'
-              : body.code === 'NAME_CONFLICT'
+              : body.error?.code === 'NAME_CONFLICT'
                 ? 'A thread with that name already exists.'
-                : body.error || 'Conflict — please try again.';
+                : body.error?.message || 'Conflict — please try again.';
           this.showPromoteToast(msg, 'warning');
         } else {
-          this.showPromoteToast(body.error || `Promotion failed (${res.status})`, 'danger');
+          this.showPromoteToast(
+            body.error?.message || `Promotion failed (${res.status})`,
+            'danger'
+          );
         }
         return;
       }

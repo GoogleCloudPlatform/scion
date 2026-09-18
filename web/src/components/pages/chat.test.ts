@@ -492,3 +492,76 @@ describe('chat page — muted DMs raise no unread dot', () => {
     expect(el.v2UnreadFromIds).toEqual([]);
   });
 });
+
+describe('chat page — promote DM dialog', () => {
+  function pageOnAgentDM(): any {
+    const el = createPage();
+    el.v2Conversation = {
+      conversationKey: 'dm:agent:agent-1:user:user-me',
+      projectId: 'proj-1',
+      projectSlug: '',
+      threadName: '',
+      peerName: 'Coder One',
+      peerId: 'agent-1',
+      peerKind: 'agent',
+      isDM: true,
+    };
+    el.promoteDialogOpen = true;
+    el.promoteThreadName = 'coder-one';
+    return el;
+  }
+
+  it('looks up the project slug when the DM does not carry one', () => {
+    const el = pageOnAgentDM();
+    el._projectIdToSlug.set('proj-1', 'chat-test');
+
+    const dialog = renderToFragment(el.renderPromoteDialog());
+    const projectName = dialog.querySelectorAll('strong')[1];
+
+    expect(projectName?.textContent).toBe('chat-test');
+  });
+
+  it('uses a readable fallback when the project slug is unavailable', () => {
+    const el = pageOnAgentDM();
+
+    const dialog = renderToFragment(el.renderPromoteDialog());
+    const projectName = dialog.querySelectorAll('strong')[1];
+
+    expect(projectName?.textContent).toBe('this project');
+  });
+
+  it('shows the nested backend error message instead of coercing the error object', async () => {
+    const el = pageOnAgentDM();
+    const showPromoteToast = vi.spyOn(el, 'showPromoteToast').mockImplementation(() => undefined);
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { code: 'PROMOTION_FAILED', message: 'Promotion unavailable' } }),
+        { status: 422 }
+      )
+    );
+
+    await el.executePromote();
+
+    expect(showPromoteToast).toHaveBeenCalledWith('Promotion unavailable', 'danger');
+  });
+
+  it('uses the nested backend error code for conflict guidance', async () => {
+    const el = pageOnAgentDM();
+    const showPromoteToast = vi.spyOn(el, 'showPromoteToast').mockImplementation(() => undefined);
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: { code: 'IN_FLIGHT_MESSAGES', message: 'agent has pending replies' },
+        }),
+        { status: 409 }
+      )
+    );
+
+    await el.executePromote();
+
+    expect(showPromoteToast).toHaveBeenCalledWith(
+      'Agent is still responding. Try again in a few seconds.',
+      'warning'
+    );
+  });
+});
