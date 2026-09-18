@@ -44,9 +44,10 @@ type BrokerServer struct {
 	configured    bool
 
 	// Admin config management fields (Phase 3).
-	baseConfig *Config         // base YAML config loaded at boot (immutable after init)
-	snapshot   *SnapshotHolder // atomic snapshot of effective config
-	stateDir   string          // directory for admin-overlay.json persistence
+	baseConfig *Config             // base YAML config loaded at boot (immutable after init)
+	snapshot   *SnapshotHolder     // atomic snapshot of effective config
+	stateDir   string              // directory for admin-overlay.json persistence
+	geOpts     []GEValidatorOption // forwarded to BuildSnapshot for geGoogle auth (e.g. transport auth)
 }
 
 var _ plugin.MessageBrokerPluginInterface = (*BrokerServer)(nil)
@@ -69,14 +70,17 @@ func (b *BrokerServer) SetHandler(handler MessageHandler) {
 	b.handler = handler
 }
 
-// SetAdminConfig wires the base config, snapshot holder, and state directory
-// for admin overlay management. Must be called before the first Configure() push.
-func (b *BrokerServer) SetAdminConfig(baseCfg *Config, snap *SnapshotHolder, stateDir string) {
+// SetAdminConfig wires the base config, snapshot holder, state directory, and
+// GE validator options for admin overlay management. Must be called before the
+// first Configure() push. The geOpts are forwarded to BuildSnapshot for
+// geGoogle auth (e.g. WithGETransportAuth for Cloud Run / IAP).
+func (b *BrokerServer) SetAdminConfig(baseCfg *Config, snap *SnapshotHolder, stateDir string, geOpts ...GEValidatorOption) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.baseConfig = baseCfg
 	b.snapshot = snap
 	b.stateDir = stateDir
+	b.geOpts = geOpts
 }
 
 // Configure is called by the Hub plugin manager during initialization.
@@ -127,7 +131,7 @@ func (b *BrokerServer) Configure(config map[string]string) error {
 // Must be called with b.mu held.
 func (b *BrokerServer) applyOverlay(overlay *AdminOverlay) {
 	effective := ApplyOverlay(*b.baseConfig, overlay)
-	snap := BuildSnapshot(effective)
+	snap := BuildSnapshot(effective, b.geOpts...)
 
 	// Preserve the JWT validator from the current snapshot if the scheme
 	// is still hubJWT — the signing key is loaded at boot and doesn't change.

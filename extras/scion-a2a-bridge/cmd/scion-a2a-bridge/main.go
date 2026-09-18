@@ -35,6 +35,7 @@ import (
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/prometheus/client_golang/prometheus"
@@ -160,6 +161,19 @@ func main() {
 
 	transportSrc, transportMode := resolveTransportAuth(log)
 
+	// Build GE validator options from transport auth. These are forwarded to
+	// BuildSnapshot so the geGoogle snapshot validator receives Cloud Run / IAP
+	// headers on Hub exchange requests. Also used for broker overlay rebuilds.
+	var geOpts []bridge.GEValidatorOption
+	if transportSrc != nil {
+		geOpts = append(geOpts, bridge.WithGETransportAuth(transportSrc, transportMode))
+	}
+
+	// Rebuild snapshot with transport auth now that it's resolved.
+	// The initial BuildSnapshot at line ~130 was created before transport
+	// resolution and therefore lacked GE transport options.
+	snapshot.Store(bridge.BuildSnapshot(*cfg, geOpts...))
+
 	hubOpts := []hubclient.Option{hubclient.WithAuthenticator(adminAuth)}
 	if transportSrc != nil {
 		hubOpts = append(hubOpts, hubclient.WithTransportAuth(transportSrc, transportMode))
@@ -205,7 +219,7 @@ func main() {
 
 	// Wire admin config management: snapshot + base config + state dir.
 	b.SetSnapshot(snapshot)
-	broker.SetAdminConfig(&baseCfg, snapshot, stateDir)
+	broker.SetAdminConfig(&baseCfg, snapshot, stateDir, geOpts...)
 
 	// Create SDK executor and request handler.
 	// Use a route-key authenticator so the in-memory task store associates tasks
@@ -235,6 +249,12 @@ func main() {
 		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
 	)
 
+	// Create v0.3 REST compat handler for legacy (GE v0.3) clients.
+	v0RESTHandler := a2av0.NewRESTHandler(
+		sdkRequestHandler,
+		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+	)
+
 	// Start A2A HTTP server.
 	listenAddr := cfg.Bridge.ListenAddress
 	if listenAddr == "" {
@@ -242,9 +262,14 @@ func main() {
 	}
 
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"), sdkJSONRPCHandler)
+	srv.SetV0RESTHandler(v0RESTHandler)
 	srv.SetSnapshot(snapshot)
 	if signingKey != nil {
 		srv.SetJWTValidator(bridge.NewJWTValidator(signingKey))
+	}
+	// Wire transport auth into GE exchange validator for Cloud Run / IAP.
+	if transportSrc != nil {
+		srv.SetGETransportAuth(transportSrc, transportMode)
 	}
 	srv.WarnOnOpenAuth()
 
@@ -439,6 +464,12 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 
 	transportSrc, transportMode := resolveTransportAuth(log)
 
+	// Build GE validator options from transport auth for snapshot composition.
+	var geOpts []bridge.GEValidatorOption
+	if transportSrc != nil {
+		geOpts = append(geOpts, bridge.WithGETransportAuth(transportSrc, transportMode))
+	}
+
 	hubOpts := []hubclient.Option{hubclient.WithAuthenticator(adminAuth)}
 	if transportSrc != nil {
 		hubOpts = append(hubOpts, hubclient.WithTransportAuth(transportSrc, transportMode))
@@ -453,9 +484,9 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 
 	metrics := bridge.NewMetrics(prometheus.DefaultRegisterer)
 
-	// 7. Build config snapshot (base YAML + runtime overrides).
+	// 7. Build config snapshot with transport auth (base YAML + runtime overrides).
 	baseCfg := *cfg
-	snapshot := bridge.NewSnapshotHolder(bridge.BuildSnapshot(*cfg))
+	snapshot := bridge.NewSnapshotHolder(bridge.BuildSnapshot(*cfg, geOpts...))
 
 	// 8. Create core bridge (pass transport auth so per-caller clients inherit it).
 	var bridgeOpts []bridge.BridgeOption
@@ -474,7 +505,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	brokerServer.SetHandler(b.HandleBrokerMessage)
 	b.SetBroker(brokerServer)
 	b.SetSnapshot(snapshot)
-	brokerServer.SetAdminConfig(&baseCfg, snapshot, "")
+	brokerServer.SetAdminConfig(&baseCfg, snapshot, "", geOpts...)
 
 	// 9. Set up reconfigure callback for runtime config changes.
 	rt.SetReconfigure(func(newCfg map[string]string) error {
@@ -483,7 +514,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 		if apiKey := os.Getenv("A2A_API_KEY"); apiKey != "" {
 			cfg.Auth.APIKey = apiKey
 		}
-		snap := bridge.BuildSnapshot(*cfg)
+		snap := bridge.BuildSnapshot(*cfg, geOpts...)
 		snapshot.Store(snap)
 		return nil
 	})
@@ -553,6 +584,12 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
 	)
 
+	// Create v0.3 REST compat handler for legacy (GE v0.3) clients.
+	v0RESTHandler := a2av0.NewRESTHandler(
+		sdkRequestHandler,
+		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+	)
+
 	// 11. Start A2A HTTP server.
 	listenAddr := cfg.Bridge.ListenAddress
 	if listenAddr == "" {
@@ -560,9 +597,14 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	}
 
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"), sdkJSONRPCHandler)
+	srv.SetV0RESTHandler(v0RESTHandler)
 	srv.SetSnapshot(snapshot)
 	if signingKey != nil {
 		srv.SetJWTValidator(bridge.NewJWTValidator(signingKey))
+	}
+	// Wire transport auth into GE exchange validator for Cloud Run / IAP.
+	if transportSrc != nil {
+		srv.SetGETransportAuth(transportSrc, transportMode)
 	}
 	srv.WarnOnOpenAuth()
 

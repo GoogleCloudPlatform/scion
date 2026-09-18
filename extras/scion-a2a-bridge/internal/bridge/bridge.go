@@ -111,6 +111,10 @@ type Bridge struct {
 	transportSrc  transportauth.TokenSource
 	transportMode transportauth.HeaderMode
 
+	// v0RESTEnabled is true when the v0.3 REST compatibility handler is active.
+	// Used by GenerateAgentCard to conditionally advertise the REST interface.
+	v0RESTEnabled bool
+
 	// shutdownCtx is cancelled during graceful shutdown.
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
@@ -1416,6 +1420,17 @@ func (b *Bridge) callerHubClient(caller *CallerIdentity) (hubclient.Client, erro
 			opts = append(opts, hubclient.WithTransportAuth(b.transportSrc, b.transportMode))
 		}
 		return hubclient.New(b.config.Hub.Endpoint, opts...)
+	case "ge_exchange":
+		// GE exchange: the Hub has already validated the Google credential and
+		// returned a Hub access token (stored in RawToken). This token is used
+		// directly as a bearer token for downstream Hub operations, just like
+		// a UAT. Transport auth (IAP / Cloud Run invoker) is composed when
+		// configured.
+		opts := []hubclient.Option{hubclient.WithBearerToken(caller.RawToken)}
+		if b.transportSrc != nil {
+			opts = append(opts, hubclient.WithTransportAuth(b.transportSrc, b.transportMode))
+		}
+		return hubclient.New(b.config.Hub.Endpoint, opts...)
 	default:
 		return nil, fmt.Errorf("unknown token type: %s", caller.TokenType)
 	}
@@ -1500,14 +1515,29 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, projectSlug, agentSlug s
 		"defaultInputModes":  []string{"text/plain", "application/json"},
 		"defaultOutputModes": []string{"text/plain", "application/json"},
 		"skills":             skills,
-		"supportedInterfaces": []map[string]interface{}{
-			{
-				"url":             jsonrpcURL,
-				"protocolBinding": "JSONRPC",
-				"protocolVersion": "1.0",
-			},
+	}
+
+	// Build supported interfaces list.
+	interfaces := []map[string]interface{}{
+		{
+			"url":             jsonrpcURL,
+			"protocolBinding": "JSONRPC",
+			"protocolVersion": "1.0",
 		},
 	}
+	// Only advertise REST v0.3 when the handler is active.
+	if b.v0RESTEnabled {
+		interfaces = append(interfaces, map[string]interface{}{
+			"url":             agentURL,
+			"protocolBinding": "REST",
+			"protocolVersion": "0.3",
+		})
+		// v0.3 compatibility flat fields — legacy clients read these directly
+		// instead of supportedInterfaces.
+		card["protocolVersion"] = "0.3"
+		card["preferredTransport"] = "REST"
+	}
+	card["supportedInterfaces"] = interfaces
 
 	if cfg.Bridge.Provider.Organization != "" {
 		card["provider"] = map[string]string{

@@ -263,6 +263,11 @@ type ServerConfig struct {
 	// and injects it into the auth middleware.
 	Federation config.FederationConfig
 
+	// GEGoogleExchange holds the trust configuration for the GE Google
+	// credential exchange endpoint. When Enabled, the server creates a
+	// GEExchangeService and registers the exchange route.
+	GEGoogleExchange GEGoogleExchangeConfig
+
 	// Mode is the server mode (e.g. "workstation", "dev", "hosted").
 	// Used by the federation authenticator to enforce HTTPS on issuer URLs
 	// in non-dev/non-workstation modes.
@@ -956,6 +961,11 @@ type Server struct {
 	// served from ephemeral local storage, keeping that warning to one line per
 	// slug on a request path. See warnEphemeralProjectPath.
 	warnedEphemeralProjects sync.Map
+
+	// GE Google credential exchange service (nil = exchange disabled).
+	geExchangeService *GEExchangeService
+	// GE exchange endpoint rate limiter (per-client-IP token bucket).
+	geExchangeRateLimiter *geExchangeRateLimiter
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -1570,6 +1580,23 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize image checker for harness config image status verification
 	srv.imageChecker = imagecheck.NewChecker()
+
+	// Initialize GE Google credential exchange service.
+	if cfg.GEGoogleExchange.IsValid() {
+		geValidator := NewGoogleCredentialValidator(nil)
+		srv.geExchangeService = NewGEExchangeService(
+			cfg.GEGoogleExchange,
+			geValidator,
+			srv.userTokenService,
+			s, // store.Store embeds ExternalIdentityStore (ent-backed, durable)
+			s,
+			srv.isUserAuthorized, // same domain/invite/allow-registration policy as web login
+			slog.Default(),
+		)
+		srv.geExchangeRateLimiter = newGEExchangeRateLimiter()
+		slog.Info("GE Google exchange service initialized",
+			"allowed_client_ids", len(cfg.GEGoogleExchange.AllowedClientIDs))
+	}
 
 	srv.registerRoutes()
 
@@ -3664,6 +3691,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.oidcTokenRateLimiter != nil {
 		s.oidcTokenRateLimiter.StartCleanup(ctx)
 	}
+	if s.geExchangeRateLimiter != nil {
+		s.geExchangeRateLimiter.StartCleanup(ctx)
+	}
 
 	// Start OIDC key cleanup loop to remove expired rotated keys from JWKS.
 	if s.oidcKeyManager != nil {
@@ -4000,6 +4030,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/auth/tokens/", s.guarded("/api/v1/auth/tokens/", s.handleTokenByID))
 	s.mux.HandleFunc("/api/v1/auth/scopes", s.guarded("/api/v1/auth/scopes", s.handleAuthScopes))
 	s.mux.HandleFunc("/api/v1/auth/providers", s.guarded("/api/v1/auth/providers", s.handleCLIAuthProviders))
+
+	// GE Google credential exchange endpoint (unauthenticated — authentication endpoint itself)
+	s.mux.HandleFunc("/api/v1/auth/integrations/google/exchange", s.guarded("/api/v1/auth/integrations/google/exchange", s.handleGEGoogleExchange))
 
 	// CLI OAuth endpoints (unauthenticated - used for login)
 	s.mux.HandleFunc("/api/v1/auth/invite/redeem", s.guarded("/api/v1/auth/invite/redeem", s.handleInviteRedeem))

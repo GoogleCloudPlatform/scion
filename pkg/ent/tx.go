@@ -46,6 +46,8 @@ type Tx struct {
 	EntitlementBinding *EntitlementBindingClient
 	// EnvVar is the client for interacting with the EnvVar builders.
 	EnvVar *EnvVarClient
+	// ExternalIdentity is the client for interacting with the ExternalIdentity builders.
+	ExternalIdentity *ExternalIdentityClient
 	// GCPServiceAccount is the client for interacting with the GCPServiceAccount builders.
 	GCPServiceAccount *GCPServiceAccountClient
 	// GitHubResolutionCache is the client for interacting with the GitHubResolutionCache builders.
@@ -276,6 +278,7 @@ func (tx *Tx) init() {
 	tx.DelegationEdge = NewDelegationEdgeClient(tx.config)
 	tx.EntitlementBinding = NewEntitlementBindingClient(tx.config)
 	tx.EnvVar = NewEnvVarClient(tx.config)
+	tx.ExternalIdentity = NewExternalIdentityClient(tx.config)
 	tx.GCPServiceAccount = NewGCPServiceAccountClient(tx.config)
 	tx.GitHubResolutionCache = NewGitHubResolutionCacheClient(tx.config)
 	tx.GithubInstallation = NewGithubInstallationClient(tx.config)

@@ -46,6 +46,8 @@ const (
 	EdgeMemberships = "memberships"
 	// EdgePolicyBindings holds the string denoting the policy_bindings edge name in mutations.
 	EdgePolicyBindings = "policy_bindings"
+	// EdgeExternalIdentities holds the string denoting the external_identities edge name in mutations.
+	EdgeExternalIdentities = "external_identities"
 	// Table holds the table name of the user in the database.
 	Table = "users"
 	// OwnedGroupsTable is the table that holds the owned_groups relation/edge.
@@ -69,6 +71,13 @@ const (
 	PolicyBindingsInverseTable = "policy_bindings"
 	// PolicyBindingsColumn is the table column denoting the policy_bindings relation/edge.
 	PolicyBindingsColumn = "user_id"
+	// ExternalIdentitiesTable is the table that holds the external_identities relation/edge.
+	ExternalIdentitiesTable = "external_identities"
+	// ExternalIdentitiesInverseTable is the table name for the ExternalIdentity entity.
+	// It exists in this package in order to avoid circular dependency with the "externalidentity" package.
+	ExternalIdentitiesInverseTable = "external_identities"
+	// ExternalIdentitiesColumn is the table column denoting the external_identities relation/edge.
+	ExternalIdentitiesColumn = "user_id"
 )
 
 // Columns holds all SQL columns for user fields.
@@ -267,6 +276,20 @@ func ByPolicyBindings(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 		sqlgraph.OrderByNeighborTerms(s, newPolicyBindingsStep(), append([]sql.OrderTerm{term}, terms...)...)
 	}
 }
+
+// ByExternalIdentitiesCount orders the results by external_identities count.
+func ByExternalIdentitiesCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newExternalIdentitiesStep(), opts...)
+	}
+}
+
+// ByExternalIdentities orders the results by external_identities terms.
+func ByExternalIdentities(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newExternalIdentitiesStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
 func newOwnedGroupsStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
@@ -286,5 +309,12 @@ func newPolicyBindingsStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(PolicyBindingsInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, true, PolicyBindingsTable, PolicyBindingsColumn),
+	)
+}
+func newExternalIdentitiesStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(ExternalIdentitiesInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, ExternalIdentitiesTable, ExternalIdentitiesColumn),
 	)
 }

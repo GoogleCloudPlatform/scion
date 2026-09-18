@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"entgo.io/ent"
+	"entgo.io/ent/dialect/entsql"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
@@ -105,5 +106,7 @@ func (User) Edges() []ent.Edge {
 			Ref("user"),
 		edge.From("policy_bindings", PolicyBinding.Type).
 			Ref("user"),
+		edge.To("external_identities", ExternalIdentity.Type).
+			Annotations(entsql.OnDelete(entsql.Cascade)),
 	}
 }

@@ -216,6 +216,9 @@ type Store interface {
 
 	// Access Constraint operations (AC1 — Operator Access Constraint Backend)
 	AccessConstraintStore
+
+	// External Identity operations (GE Google Credential Exchange)
+	ExternalIdentityStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -2140,4 +2143,38 @@ type AccessConstraintStore interface {
 	// DisableAccessConstraint disables a constraint (for offline recovery).
 	// Returns ErrNotFound if the constraint doesn't exist.
 	DisableAccessConstraint(ctx context.Context, id string) error
+}
+
+// ExternalIdentityBinding represents a persistent mapping from an external
+// identity provider's (provider, issuer, subject) triple to a local Hub user.
+// Used by the GE Google credential exchange to persist stable cross-login
+// identity linkage.
+type ExternalIdentityBinding struct {
+	ID        string    `json:"id"`
+	Provider  string    `json:"provider"` // e.g. "google"
+	Issuer    string    `json:"issuer"`   // canonical issuer URL
+	Subject   string    `json:"subject"`  // stable provider subject
+	UserID    string    `json:"userId"`   // FK to User.ID
+	Email     string    `json:"email"`    // email at binding time (informational)
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// ExternalIdentityStore provides durable persistence for external identity
+// bindings with transactional uniqueness on (provider, issuer, subject).
+type ExternalIdentityStore interface {
+	// GetExternalIdentity looks up a binding by (provider, issuer, subject).
+	// Returns ErrNotFound if no binding exists.
+	GetExternalIdentity(ctx context.Context, provider, issuer, subject string) (*ExternalIdentityBinding, error)
+
+	// CreateExternalIdentity atomically creates a new binding.
+	// Returns an error if a binding for this (provider, issuer, subject)
+	// already exists (unique constraint violation).
+	CreateExternalIdentity(ctx context.Context, binding *ExternalIdentityBinding) error
+
+	// UpdateExternalIdentityEmail updates the email field of an existing binding.
+	UpdateExternalIdentityEmail(ctx context.Context, id, email string) error
+
+	// GetExternalIdentitiesByUserID returns all bindings for a given user.
+	GetExternalIdentitiesByUserID(ctx context.Context, userID string) ([]*ExternalIdentityBinding, error)
 }

@@ -17,6 +17,7 @@ package bridge
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -93,10 +94,11 @@ type ConfigSnapshot struct {
 
 // AuthValidators holds the active auth validation functions.
 type AuthValidators struct {
-	Scheme       string
-	UATValidator *UATValidator // non-nil when scheme is hubUAT
-	JWTValidator *JWTValidator // non-nil when scheme is hubJWT
-	APIKey       string        // non-empty when scheme is apiKey or bearer
+	Scheme              string
+	UATValidator        *UATValidator        // non-nil when scheme is hubUAT
+	JWTValidator        *JWTValidator        // non-nil when scheme is hubJWT
+	GEExchangeValidator *GEExchangeValidator // non-nil when scheme is geGoogle
+	APIKey              string               // non-empty when scheme is apiKey or bearer
 }
 
 // SnapshotHolder wraps an atomic pointer to ConfigSnapshot for lock-free reads.
@@ -318,7 +320,9 @@ func ApplyOverlay(base Config, overlay *AdminOverlay) Config {
 }
 
 // BuildAuthValidators constructs the appropriate validators for the given config.
-func BuildAuthValidators(cfg *Config) AuthValidators {
+// The optional geOpts are forwarded to NewGEExchangeValidator when scheme is
+// geGoogle (e.g. WithGETransportAuth for Cloud Run / IAP).
+func BuildAuthValidators(cfg *Config, geOpts ...GEValidatorOption) AuthValidators {
 	av := AuthValidators{
 		Scheme: cfg.Auth.Scheme,
 	}
@@ -329,6 +333,9 @@ func BuildAuthValidators(cfg *Config) AuthValidators {
 	case "hubJWT":
 		// JWTValidator requires a signing key which is loaded separately.
 		// It will be set via SetJWTValidator on the Server.
+	case "geGoogle":
+		av.GEExchangeValidator = NewGEExchangeValidator(cfg.Hub.Endpoint, cfg.Auth.GEExchange,
+			slog.Default(), geOpts...)
 	case "apiKey", "bearer", "":
 		av.APIKey = cfg.Auth.APIKey
 	}
@@ -336,10 +343,12 @@ func BuildAuthValidators(cfg *Config) AuthValidators {
 }
 
 // BuildSnapshot creates a complete ConfigSnapshot from the effective config.
-func BuildSnapshot(cfg Config) *ConfigSnapshot {
+// The optional geOpts are forwarded to BuildAuthValidators for the geGoogle
+// auth scheme (e.g. WithGETransportAuth for Cloud Run / IAP).
+func BuildSnapshot(cfg Config, geOpts ...GEValidatorOption) *ConfigSnapshot {
 	snap := &ConfigSnapshot{
 		Config: cfg,
-		Auth:   BuildAuthValidators(&cfg),
+		Auth:   BuildAuthValidators(&cfg, geOpts...),
 	}
 	if cfg.RateLimit.Enabled {
 		rate := cfg.RateLimit.RequestsPerSec

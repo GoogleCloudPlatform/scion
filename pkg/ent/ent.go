@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
@@ -147,6 +148,7 @@ func checkColumn(t, c string) error {
 			delegationedge.Table:           delegationedge.ValidColumn,
 			entitlementbinding.Table:       entitlementbinding.ValidColumn,
 			envvar.Table:                   envvar.ValidColumn,
+			externalidentity.Table:         externalidentity.ValidColumn,
 			gcpserviceaccount.Table:        gcpserviceaccount.ValidColumn,
 			githubresolutioncache.Table:    githubresolutioncache.ValidColumn,
 			githubinstallation.Table:       githubinstallation.ValidColumn,

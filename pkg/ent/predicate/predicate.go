@@ -57,6 +57,9 @@ type EntitlementBinding func(*sql.Selector)
 // EnvVar is the predicate function for envvar builders.
 type EnvVar func(*sql.Selector)
 
+// ExternalIdentity is the predicate function for externalidentity builders.
+type ExternalIdentity func(*sql.Selector)
+
 // GCPServiceAccount is the predicate function for gcpserviceaccount builders.
 type GCPServiceAccount func(*sql.Selector)
 
