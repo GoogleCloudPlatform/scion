@@ -477,12 +477,19 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	})
 
 	// 10. Create SDK executor and request handler.
+	// In standalone mode, use a durable Postgres-backed SDK task store instead of
+	// the in-memory store. This ensures SDK task state (full a2a.Task payloads with
+	// history, artifacts, etc.) survives replica restarts and is accessible across
+	// all replicas sharing the same database.
 	executor := bridge.NewScionExecutor(b, log.With("component", "executor"))
-	routeAuthenticator := bridge.RouteKeyAuthenticator()
-	innerTaskStore := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
-		Authenticator: routeAuthenticator,
-	})
-	scopedTaskStore := bridge.NewScopedTaskStore(innerTaskStore)
+	pgTaskStore, err := bridge.NewPostgresTaskStore(databaseURL)
+	if err != nil {
+		log.Error("failed to initialize Postgres SDK task store", "error", err)
+		os.Exit(1)
+	}
+	defer pgTaskStore.Close()
+	log.Info("Postgres SDK task store initialized")
+
 	sdkRequestHandler := a2asrv.NewHandler(
 		executor,
 		a2asrv.WithLogger(log.With("component", "a2a-sdk")),
@@ -491,7 +498,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 			PushNotifications: false,
 		}),
 		a2asrv.WithAgentInactivityTimeout(cfg.Timeouts.SendMessage),
-		a2asrv.WithTaskStore(scopedTaskStore),
+		a2asrv.WithTaskStore(pgTaskStore),
 	)
 	b.SetSDKRequestHandler(sdkRequestHandler)
 

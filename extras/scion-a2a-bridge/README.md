@@ -7,8 +7,9 @@ A protocol bridge that exposes Scion agents as [A2A (Agent-to-Agent)](https://go
 - Translates A2A JSON-RPC requests into Scion Hub API calls and vice versa.
 - Generates A2A Agent Cards for each exposed agent, enriched with metadata from the Hub.
 - Supports blocking request/response, SSE streaming, and push notification (webhook) delivery modes.
-- Manages task lifecycle state in a local SQLite database.
-- Connects to the Hub via a broker plugin (go-plugin RPC) to receive agent messages in real time.
+- Manages task lifecycle state in a local SQLite database (plugin mode) or shared PostgreSQL database (standalone mode).
+- In standalone mode, SDK task payloads are durably stored in PostgreSQL (`a2a_sdk_tasks` table) with transactional ownership enforcement and CAS/version semantics, enabling cross-replica access, restart recovery, and horizontal scaling.
+- Connects to the Hub via a broker plugin (go-plugin RPC) or standalone gRPC broker to receive agent messages in real time.
 
 ## Configuration
 
@@ -318,6 +319,39 @@ docker run -p 8443:8443 -p 9090:9090 \
 ```
 
 The container runs as non-root user `bridge` (UID 1000). The state database directory `/var/lib/scion-a2a-bridge/` is writable by this user inside the container (mode `0700`). To persist state across restarts, mount a volume at that path.
+
+## Standalone mode and horizontal scaling
+
+In standalone mode (`--standalone --database-url postgresql://...`), the bridge uses a shared PostgreSQL database for both internal bridge state and SDK task payloads:
+
+| Table | Purpose |
+|-------|---------|
+| `a2a_tasks` | Bridge internal state (task metadata, events, contexts, push notification configs) |
+| `a2a_sdk_tasks` | Full A2A SDK task payloads (complete `a2a.Task` JSON, ownership, versioning) |
+
+### Task ownership and isolation
+
+Each SDK task is bound to an **owner key** derived from the request's route (project + agent) and, when caller authentication is active, the caller's identity. Ownership is enforced transactionally at the SQL level on all operations (create, get, list, update):
+
+- **Route isolation**: Tasks created under `project-a/agent-x` are invisible to requests targeting `project-b/agent-y`.
+- **Caller isolation**: When caller authentication is configured, each user sees only their own tasks within a route.
+
+### Concurrency and CAS semantics
+
+Updates use a monotonically incrementing version counter with compare-and-swap (CAS) semantics. When `PrevVersion` is set, the update succeeds only if the stored version matches — otherwise `ErrConcurrentModification` is returned. This prevents lost updates when multiple replicas process concurrent requests for the same task.
+
+### Cross-replica access
+
+All replicas read from and write to the same PostgreSQL database. A task created on replica A is immediately visible to replica B via `Get` or `List`. Task cancellation, status updates, and artifact additions performed on any replica are durable and consistent.
+
+### Restart recovery
+
+Task state survives process restarts. A new `PostgresTaskStore` instance reconnects to the same database and finds all previously created tasks with their current versions and payloads.
+
+### Limitations
+
+- **In-flight execution takeover**: If a replica dies mid-execution, the task's last committed state is preserved, but in-flight work is lost. The task can be retried or cancelled from another replica. Active execution lease/handoff is not implemented — the bridge treats this as a terminal retry scenario.
+- **SSE resubscription**: Stream resubscription targets the same replica that originated the stream. Cross-replica stream migration requires external routing.
 
 ## Known Limitations
 
