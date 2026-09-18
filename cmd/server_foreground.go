@@ -63,6 +63,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	gcputil "github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -2697,6 +2698,7 @@ func isObserverBroker(pluginMgr *scionplugin.Manager, name string) bool {
 func initPluginManager(ctx context.Context, secretBackend secret.SecretBackend, dataStore store.Store) *scionplugin.Manager {
 	logger := logging.Subsystem("plugin")
 	mgr := scionplugin.NewManager(logger)
+	grpcbroker.SetADCSourceConstructor(adcsource.New)
 	mgr.NewGRPCBrokerAdapter = grpcbroker.NewAdapterFromEntry
 
 	vs, err := config.LoadVersionedSettings("")
@@ -2752,6 +2754,8 @@ func initPluginManager(ctx context.Context, secretBackend secret.SecretBackend, 
 			TLSKeyFile:    entry.TLSKeyFile,
 			TLSCAFile:     entry.TLSCAFile,
 			TLSSkipVerify: entry.TLSSkipVerify,
+			AuthType:      entry.AuthType,
+			AuthAudience:  entry.AuthAudience,
 		}
 	}
 
