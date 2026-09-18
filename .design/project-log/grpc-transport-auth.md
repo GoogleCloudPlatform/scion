@@ -271,4 +271,3 @@ Validation confirmed clean compilation and test execution:
 - Hub integration activation test passed (`go test ./pkg/hub/ -run TestActivateInstalledIntegration`).
 - Formatting (`gofmt`), git diff sanity (`git diff --check`), compatibility literals (`make compat-literals`), and scoped `golangci-lint` passed with zero issues.
 - Baseline `authzop` catalog mismatches against new API endpoints in `7c0e3a2` were classified as pre-existing and isolated from this fix.
-
