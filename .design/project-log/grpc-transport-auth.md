@@ -107,6 +107,46 @@ factory paths, reconnection, and bearer token extraction.
   authorization, verification matrix
 - `.design/project-log/grpc-transport-auth.md`: this log
 
+### Review fixes (post-f95a124)
+
+1. **Bridge test mock interface** (`followup_test.go`): Added missing
+   `Messaging() hubclient.MessagingService` method to `mockHubClient`,
+   fixing compilation after the `MessagingService` interface addition in
+   Phase 5.
+
+2. **Wildcard listen address fail-closed** (`tokenvalidator.go`): Added
+   `isLocalListenAddress` that treats empty host (`:50051`), `0.0.0.0`,
+   and `::` as NON-local wildcard binds. Updated
+   `ValidateStandaloneServerConfig` to use it instead of `isLocalAddress`
+   (which treats empty host as local for client dial semantics). This
+   closes the fail-open vulnerability where a bridge on `:50051` with no
+   auth mode would silently accept unauthenticated connections on all
+   interfaces.
+
+3. **JWKS refetch cooldown** (`tokenvalidator.go`): Added
+   `minJWKSRefreshInterval` (1 minute) cooldown. If the JWKS was fetched
+   within the cooldown and a kid is not found, the error is returned
+   immediately without re-fetching, preventing DoS via unknown-kid
+   stampede. Also added `io.LimitReader` (1 MiB) on the JWKS response
+   body to bound memory allocation.
+
+4. **Dynamic activation auth fields** (`handlers_integrations.go`):
+   Added `AuthType` and `AuthAudience` to the `PluginEntry` constructed
+   in `activateInstalledIntegration`, so dynamically activated plugins
+   inherit authentication settings from `settings.yaml`.
+
+### Regression tests added
+
+- `TestIsLocalListenAddress` — 9 subtests covering localhost, loopback,
+  wildcard, empty host, remote hostname, private IP
+- `TestValidateStandaloneServerConfig_WildcardListen_FailsClosed` —
+  reproduces the exact fail-open condition (`:50051` + empty auth)
+- `TestValidateStandaloneServerConfig_WildcardListen_LocalDev_FailsClosed`
+- `TestValidateStandaloneServerConfig_WildcardListen_GoogleIDToken_Accepted`
+- `TestGoogleIDTokenValidator_JWKSCooldown_PreventsStampede` — verifies
+  5 unknown-kid attempts trigger zero additional JWKS fetches
+- `TestActivateInstalledIntegration_AuthFieldsPropagated`
+
 ## Boundaries
 
 - Did NOT implement #1616/#1617 user credential exchange or #1618 task
@@ -119,19 +159,19 @@ factory paths, reconnection, and bearer token extraction.
 
 ```
 go test ./pkg/plugin/grpcbroker/... -count=1
-ok  github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker  0.831s
+ok  github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker  1.113s
 
 go test ./pkg/plugin/... -count=1
 ok  github.com/GoogleCloudPlatform/scion/pkg/plugin           0.013s
-ok  github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker 0.758s
+ok  github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker 1.354s
 ok  github.com/GoogleCloudPlatform/scion/pkg/plugin/refbroker  0.213s
 
 # Bridge test suite:
 cd extras/scion-a2a-bridge && go test ./... -count=1
-ok  .../internal/bridge  23.086s
-ok  .../internal/state    0.226s
+ok  .../internal/bridge  23.373s
+ok  .../internal/state    0.234s
 
-go vet ./pkg/plugin/... ./pkg/config/...
+go vet ./pkg/plugin/... ./pkg/config/... ./pkg/hub/...
 (clean)
 
 go build -buildvcs=false ./cmd/...

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -45,8 +46,18 @@ const (
 	// defaultJWKSRefreshInterval is how often the JWKS key set is refreshed.
 	defaultJWKSRefreshInterval = 1 * time.Hour
 
+	// minJWKSRefreshInterval is the minimum time between JWKS fetches to
+	// prevent DoS via unknown kid stampede — if the JWKS was fetched recently
+	// and the kid is still not found, return an error immediately without
+	// re-fetching.
+	minJWKSRefreshInterval = 1 * time.Minute
+
 	// defaultJWKSFetchTimeout is the HTTP timeout for JWKS endpoint fetches.
 	defaultJWKSFetchTimeout = 10 * time.Second
+
+	// maxJWKSResponseBytes limits the JWKS response body size to prevent
+	// memory exhaustion from a compromised or malicious endpoint.
+	maxJWKSResponseBytes = 1 << 20 // 1 MiB
 )
 
 // GoogleIDTokenValidatorConfig configures the concrete Google ID token
@@ -221,28 +232,45 @@ func (v *GoogleIDTokenValidator) ValidateToken(ctx context.Context, tokenString 
 }
 
 // getSigningKey fetches and caches Google's JWKS, returning keys matching kid.
+// It enforces a cooldown (minJWKSRefreshInterval) on re-fetches to prevent
+// DoS via unknown kid stampede: if the JWKS was fetched recently and the kid
+// is still not found, an error is returned immediately without re-fetching.
 func (v *GoogleIDTokenValidator) getSigningKey(ctx context.Context, kid string) ([]interface{}, error) {
 	v.mu.RLock()
-	if v.jwks != nil && time.Since(v.fetchedAt) < defaultJWKSRefreshInterval {
-		keys := v.jwks.Key(kid)
-		v.mu.RUnlock()
+	cachedJWKS := v.jwks
+	fetchAge := time.Since(v.fetchedAt)
+	v.mu.RUnlock()
+
+	if cachedJWKS != nil && fetchAge < defaultJWKSRefreshInterval {
+		keys := cachedJWKS.Key(kid)
 		if len(keys) > 0 {
 			return keysToPublicKeys(keys), nil
 		}
-		// Key not found — may need refresh, fall through.
-	} else {
-		v.mu.RUnlock()
+		// Key not found. If fetched within cooldown, refuse to re-fetch
+		// to prevent unknown-kid stampede attacks.
+		if fetchAge < minJWKSRefreshInterval {
+			return nil, fmt.Errorf("no key found for kid %q (JWKS cache is fresh; next refresh in %v)",
+				kid, minJWKSRefreshInterval-fetchAge)
+		}
+		// Fall through to re-fetch — cooldown has elapsed.
 	}
 
 	// Fetch fresh JWKS.
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	// Double-check after acquiring write lock.
-	if v.jwks != nil && time.Since(v.fetchedAt) < defaultJWKSRefreshInterval {
+	// Double-check after acquiring write lock — another goroutine may have
+	// fetched while we waited.
+	fetchAge = time.Since(v.fetchedAt)
+	if v.jwks != nil && fetchAge < defaultJWKSRefreshInterval {
 		keys := v.jwks.Key(kid)
 		if len(keys) > 0 {
 			return keysToPublicKeys(keys), nil
+		}
+		// Under cooldown, return error without re-fetching.
+		if fetchAge < minJWKSRefreshInterval {
+			return nil, fmt.Errorf("no key found for kid %q (JWKS cache is fresh; next refresh in %v)",
+				kid, minJWKSRefreshInterval-fetchAge)
 		}
 	}
 
@@ -279,7 +307,7 @@ func (v *GoogleIDTokenValidator) fetchJWKS(ctx context.Context) (*jose.JSONWebKe
 		return nil, fmt.Errorf("JWKS endpoint returned %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKSResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read JWKS response: %w", err)
 	}
@@ -450,13 +478,36 @@ type StandaloneServerConfig struct {
 	Logger *slog.Logger
 }
 
+// isLocalListenAddress determines whether a server listen address binds only
+// to the loopback interface. Unlike isLocalAddress (used for client dial
+// targets), this function treats an empty host, "0.0.0.0", and "::" as
+// NON-local because they are wildcard binds that accept connections from any
+// network interface. Only explicit loopback addresses (localhost, 127.0.0.1,
+// ::1) are considered local.
+func isLocalListenAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	// Empty host in a listen address (e.g. ":50051") means bind all
+	// interfaces — this is NOT local.
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // ValidateStandaloneServerConfig validates the standalone server config
 // for security correctness. Returns an error if the config would create
 // an insecure deployment.
 func ValidateStandaloneServerConfig(cfg StandaloneServerConfig) error {
 	var errs []string
 
-	isLocal := isLocalAddress(cfg.ListenAddress)
+	isLocal := isLocalListenAddress(cfg.ListenAddress)
 
 	switch cfg.AuthMode {
 	case AuthModeGoogleIDToken:
