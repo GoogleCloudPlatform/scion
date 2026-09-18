@@ -17,6 +17,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BRIDGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+RUNNER_TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scion-a2a-integration.XXXXXX")"
+
+cleanup() {
+  rm -rf -- "${RUNNER_TEMP_DIR}"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "=== A2A Bridge Deterministic PostgreSQL Integration Runner ==="
 
@@ -76,7 +85,7 @@ run_test_phase() {
   echo "=== Running ${phase_name}: go test $* ==="
 
   local json_log
-  json_log="$(mktemp /tmp/ci-test-json.XXXXXX)"
+  json_log="$(mktemp "${RUNNER_TEMP_DIR}/test-json.XXXXXX")"
 
   set +e
   go test -json "$@" > "${json_log}" 2>&1

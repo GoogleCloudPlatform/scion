@@ -241,8 +241,8 @@ func TestDatabaseRunNamingAndCleanup(t *testing.T) {
 func TestPostgreSQLSchemaAllocator(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
-		if os.Getenv("TEST_REQUIRE_DATABASE") == "1" || os.Getenv("CI") == "true" {
-			t.Fatal("TEST_DATABASE_URL is required in fail-closed / CI mode")
+		if os.Getenv("TEST_REQUIRE_DATABASE") == "1" {
+			t.Fatal("TEST_DATABASE_URL is required in fail-closed mode")
 		}
 		t.Skip("TEST_DATABASE_URL is not set")
 	}

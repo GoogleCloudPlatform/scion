@@ -53,8 +53,8 @@ func startHAFinalTopology(t *testing.T) *haFinalTopology {
 	t.Helper()
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
-		if os.Getenv("TEST_REQUIRE_DATABASE") == "1" || os.Getenv("CI") == "true" {
-			t.Fatal("TEST_DATABASE_URL is required in fail-closed / CI mode")
+		if os.Getenv("TEST_REQUIRE_DATABASE") == "1" {
+			t.Fatal("TEST_DATABASE_URL is required in fail-closed mode")
 		}
 		t.Skip("TEST_DATABASE_URL not set")
 	}
@@ -439,11 +439,18 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 
 	publishBrokerMessage(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-working", messages.TypeStateChange, "working")
 	first := subscribeTask(t, h.bridgeA.URL(), h.userToken, taskID)
+	firstClosed := false
+	defer func() {
+		if !firstClosed {
+			_ = first.response.Body.Close()
+		}
+	}()
 	firstSnapshot := nextSSE(t, first, 3*time.Second)
 	if !bytes.Contains(firstSnapshot, []byte(taskID)) || bytes.Contains(firstSnapshot, []byte("_bridgeEventID")) {
 		t.Fatalf("invalid first snapshot: %s", firstSnapshot)
 	}
 	_ = first.response.Body.Close() // explicit client disconnect
+	firstClosed = true
 
 	h.bridgeB = h.restartBridge(t, h.bridgeB, "ha-bridge-b-restarted")
 	reconnected := subscribeTask(t, h.bridgeB.URL(), h.userToken, taskID)
@@ -461,6 +468,12 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	storePreClosed := false
+	defer func() {
+		if !storePreClosed {
+			storePre.Close()
+		}
+	}()
 	var snapCursor, workingEventID int64
 	if err := storePre.DB().QueryRow(`SELECT last_event_cursor FROM a2a_sdk_tasks WHERE id=$1`, taskID).Scan(&snapCursor); err != nil {
 		t.Fatal(err)
@@ -469,6 +482,7 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	storePre.Close()
+	storePreClosed = true
 	if !(workingEventID > snapCursor) {
 		t.Fatalf("expected working event id (%d) > last_event_cursor (%d)", workingEventID, snapCursor)
 	}
@@ -582,8 +596,15 @@ func TestCrashLeaseBoundary(t *testing.T) {
 		t.Fatalf("crash-reaped task state=%q want failed result=%s", state, got.Result)
 	}
 	stream := subscribeTask(t, h.bridgeB.URL(), h.userToken, taskID)
+	streamClosed := false
+	defer func() {
+		if !streamClosed {
+			_ = stream.response.Body.Close()
+		}
+	}()
 	terminal := nextSSE(t, stream, 3*time.Second)
 	_ = stream.response.Body.Close()
+	streamClosed = true
 	if !bytes.Contains(terminal, []byte("TASK_STATE_FAILED")) {
 		t.Fatalf("other replica did not observe durable failed terminal event: %s", terminal)
 	}

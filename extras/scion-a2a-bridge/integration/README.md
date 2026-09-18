@@ -42,12 +42,12 @@ go test ./integration
 
 ### Fail-Closed Database Policy
 
-When running in CI (`CI=true`) or when `TEST_REQUIRE_DATABASE=1` is specified,
-the suite enforces a strict fail-closed policy: if `TEST_DATABASE_URL` is empty or
+When `TEST_REQUIRE_DATABASE=1` is specified, the suite enforces a strict
+fail-closed policy: if `TEST_DATABASE_URL` is empty or
 PostgreSQL 15 is unreachable, the tests fail immediately (`t.Fatal`) rather than
 silently skipping.
 
-In local developer mode (when neither `CI` nor `TEST_REQUIRE_DATABASE` is set),
+In generic test jobs and local developer mode (when `TEST_REQUIRE_DATABASE` is not set),
 PostgreSQL-dependent tests skip gracefully with `t.Skip` if `TEST_DATABASE_URL` is unset.
 
 ### Acceptance Layers & Deployment Boundaries
