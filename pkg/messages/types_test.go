@@ -539,6 +539,62 @@ func TestStructuredMessage_ValidateSystem(t *testing.T) {
 	}
 }
 
+func TestLogAttrs_SkipsAttachmentsMetadata(t *testing.T) {
+	m := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-09-19T00:00:00Z",
+		Sender:    "agent:dev",
+		Recipient: "user:alice",
+		Msg:       "here is a file",
+		Type:      TypeAssistantReply,
+		Metadata: map[string]string{
+			"attachments":     `[{"id":"a1","name":"shot.png"}]`,
+			"channel":         "web",
+			"system_category": "test",
+		},
+	}
+
+	attrs := m.LogAttrs()
+
+	// Collect all keys from the attrs slice (key-value pairs).
+	keys := map[string]bool{}
+	for i := 0; i < len(attrs)-1; i += 2 {
+		if k, ok := attrs[i].(string); ok {
+			keys[k] = true
+		}
+	}
+
+	// The "attachments" internal transport key must NOT appear in log output.
+	if keys["meta_attachments"] {
+		t.Error("LogAttrs should skip the internal attachments metadata key")
+	}
+
+	// Other metadata keys should be present.
+	if !keys["meta_channel"] {
+		t.Error("LogAttrs should include non-internal metadata keys like channel")
+	}
+	if !keys["meta_system_category"] {
+		t.Error("LogAttrs should include non-internal metadata keys like system_category")
+	}
+}
+
+func TestLogAttrs_NilMetadata(t *testing.T) {
+	m := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-09-19T00:00:00Z",
+		Sender:    "agent:dev",
+		Recipient: "user:alice",
+		Msg:       "no metadata",
+		Type:      TypeInstruction,
+	}
+
+	// Should not panic with nil Metadata.
+	attrs := m.LogAttrs()
+	if len(attrs) == 0 {
+		t.Error("expected non-empty LogAttrs")
+	}
+}
+
 func TestSenderPrefix(t *testing.T) {
 	tests := []struct {
 		input string

@@ -23,6 +23,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
 // Agents attach files by path: `scion message --attach` copies each file into
@@ -40,9 +42,9 @@ import (
 // metadata under attachmentsMetadataKey (the same key the user-upload path
 // uses), and whoever persists the message links them.
 
-// attachmentsMetadataKey is the StructuredMessage.Metadata key carrying the
-// JSON-encoded []AttachmentRef of a message's attachments.
-const attachmentsMetadataKey = "attachments"
+// attachmentsMetadataKey aliases the canonical constant from pkg/messages so
+// that existing hub call sites continue to compile without a bulk rename.
+const attachmentsMetadataKey = messages.AttachmentsMetadataKey
 
 // agentAttachmentMimes maps the extensions agents commonly attach to a MIME
 // type. Consulted before mime.TypeByExtension, whose answer depends on the
