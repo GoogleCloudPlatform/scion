@@ -1052,7 +1052,10 @@ this settings schema since they use provider-specific namespaces.
 2. **Non-blocking startup**: Telemetry failures log errors but don't block agent startup.
 3. **Privacy default**: `agent.user.prompt` excluded by default.
 4. **Raw proto forwarding**: Uses `ExportProtoSpans()` to forward OTLP data directly without SDK span conversion (avoids `ReadOnlySpan` private method constraint).
-5. **Graceful shutdown**: 5-second timeout for telemetry flush on shutdown.
+5. **Graceful shutdown**: The init telemetry Stop path allows 20 seconds after
+   child exit for an in-flight metric export and one safe 15-second write slot;
+   it reports residual state when that budget expires. External runtime stop
+   deadlines can be shorter and may force termination first.
 
 **Integration Point:** `cmd/sciontool/commands/init.go`
 - Pipeline starts after `setupHostUser()` and before lifecycle hooks.

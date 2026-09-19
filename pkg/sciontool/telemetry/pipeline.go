@@ -60,6 +60,8 @@ type Pipeline struct {
 	metricRejectedPoints atomic.Int64
 	metricFlushCtx       context.Context
 	metricFlushCnl       context.CancelFunc
+	metricExportCtx      context.Context
+	metricExportCnl      context.CancelFunc
 	metricLastFlush      time.Time
 	metricFlushWg        sync.WaitGroup
 }
@@ -190,6 +192,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	// Start metric flush goroutine for batching exports to Cloud Monitoring.
 	if p.exporter != nil {
 		p.metricFlushCtx, p.metricFlushCnl = context.WithCancel(ctx)
+		p.metricExportCtx, p.metricExportCnl = context.WithCancel(ctx)
 		p.metricFlushWg.Add(1)
 		go func() {
 			defer p.metricFlushWg.Done()
@@ -228,18 +231,35 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 		p.healthCancel = nil
 	}
 
-	// Stop metric flush goroutine, then stop admission before the final drain.
+	// Stop new periodic flushes without canceling an export already in flight.
 	if p.metricFlushCnl != nil {
 		p.metricFlushCnl()
 		p.metricFlushCnl = nil
 	}
-	p.metricFlushWg.Wait()
+	flushDone := make(chan struct{})
+	go func() {
+		p.metricFlushWg.Wait()
+		close(flushDone)
+	}()
+	select {
+	case <-flushDone:
+	case <-ctx.Done():
+		// The caller's deadline is the bound for a healthy in-flight export.
+		if p.metricExportCnl != nil {
+			p.metricExportCnl()
+		}
+		<-flushDone
+	}
+	if p.metricExportCnl != nil {
+		p.metricExportCnl()
+		p.metricExportCnl = nil
+	}
 	if p.receiver != nil {
 		if err := p.receiver.Stop(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("receiver stop error: %w", err))
 		}
 	}
-	p.flushMetricBuffer(ctx, false)
+	p.flushMetricsOnStop(ctx)
 	p.metricStateMu.Lock()
 	residualPending := len(p.metricPending)
 	residualDirty := 0
@@ -396,8 +416,32 @@ func (p *Pipeline) metricFlushLoop() {
 		case <-p.metricFlushCtx.Done():
 			return
 		case <-ticker.C:
-			p.flushMetricBuffer(p.metricFlushCtx, false)
+			p.flushMetricBuffer(p.metricExportCtx, false)
 		}
+	}
+}
+
+// flushMetricsOnStop waits for the next safe Cloud write slot when the caller
+// has enough time. A short deadline leaves state intact for the residual error.
+func (p *Pipeline) flushMetricsOnStop(ctx context.Context) {
+	p.metricStateMu.Lock()
+	hasWork := len(p.metricPending) != 0 || p.metricStreams != nil && p.metricStreams.hasDirty()
+	nextFlush := p.metricLastFlush.Add(metricFlushInterval)
+	p.metricStateMu.Unlock()
+	if !hasWork {
+		return
+	}
+	if delay := time.Until(nextFlush); delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return
+		}
+	}
+	if ctx.Err() == nil {
+		p.flushMetricBuffer(ctx, false)
 	}
 }
 

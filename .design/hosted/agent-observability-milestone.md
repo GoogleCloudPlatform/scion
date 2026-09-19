@@ -1,6 +1,6 @@
 # Agent observability: first integration milestone
 
-Status: Phase 1 accepted with live evidence; Phase 2 implemented locally, awaiting review and live Cloud evidence. Phases 3–5 remain pending.
+Status: Phase 1 accepted with live evidence; Phase 2 deployed but its first live gate failed, with shutdown remediation awaiting review. Phases 3–5 remain pending.
 Updated: 2026-09-19.
 
 ## Outcome and evidence labels
@@ -168,11 +168,20 @@ descriptor mismatch is discovered during export and returns a Cloud error;
 it is locally observable and is never counted as confirmed delivery.
 
 One immutable pending snapshot is retried without re-adding newer increments.
-The normal no-failure shutdown flushes accepted metrics. If a failed pending
-snapshot is followed by newer dirty state and the 15-second Cloud write cadence
-prevents another write at shutdown, Stop reports bounded residual counts.
-Ordered cadence-aware draining, durable delivery, and cross-process session
-reconciliation remain Phase 3 or later work.
+Normal shutdown lets an in-flight metric export finish within the caller's
+deadline, then waits for the next safe 15-second Cloud write slot before
+flushing newer accepted metrics. `sciontool init` allows 20 seconds for this
+post-child telemetry stop, up to 15 seconds longer than its former budget;
+backend latency can still exceed it. A short deadline or a failed pending
+snapshot with newer dirty state produces a non-nil bounded residual error
+instead of a delivery claim. The first Phase 2 live gate failed when a reset
+arrived before the prior epoch was exported and newer metric state remained at
+shutdown. The local repair awaits review and a new live gate. Ordered
+failed-backlog draining, durable delivery, and cross-process session
+reconciliation remain Phase 3 or later work. An external `docker stop` without
+an explicit timeout can force-kill a Linux container after its shorter
+[default 10-second grace period](https://docs.docker.com/reference/cli/docker/container/stop/),
+so the 20-second internal budget is not an outer termination guarantee.
 
 ## Later-phase intended contracts (not yet implemented)
 

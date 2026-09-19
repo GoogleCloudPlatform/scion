@@ -368,7 +368,7 @@ func TestPipelineMetricFailedSnapshotDoesNotReaddHooks(t *testing.T) {
 	}
 }
 
-func TestPipelineStopReportsNewerMetricResidualAfterPendingRetry(t *testing.T) {
+func TestPipelineStopReportsNewerMetricResidualAfterPendingRetryWithTightDeadline(t *testing.T) {
 	failed := true
 	var totals []int64
 	p := newTestPipelineWithExporter(nil, &mockMetricClient{exportFunc: func(_ context.Context, req *colmetricpb.ExportMetricsServiceRequest, _ ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
@@ -392,7 +392,9 @@ func TestPipelineStopReportsNewerMetricResidualAfterPendingRetry(t *testing.T) {
 	}
 	p.flushMetricBuffer(context.Background(), true)
 	p.running = true
-	if err := p.Stop(context.Background()); err == nil || !strings.Contains(err.Error(), "metric shutdown residual") {
+	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := p.Stop(stopCtx); err == nil || !strings.Contains(err.Error(), "metric shutdown residual") {
 		t.Fatalf("Stop residual = %v", err)
 	}
 	if fmt.Sprint(totals) != "[7 7]" {

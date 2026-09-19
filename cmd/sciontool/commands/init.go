@@ -48,6 +48,17 @@ var (
 	gracePeriod time.Duration
 )
 
+// telemetryStopBudget permits one safe 15-second metric write interval plus
+// five seconds for the final export after the child has exited. The bound does
+// not guarantee Cloud delivery when the backend is slower.
+const telemetryStopBudget = 20 * time.Second
+
+func stopTelemetryWithTimeout(stop func(context.Context) error, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return stop(ctx)
+}
+
 // initCmd represents the init command
 var initCmd = &cobra.Command{
 	Use:   "init [--] <command> [args...]",
@@ -209,11 +220,9 @@ func runInit(args []string) int {
 			telemetryPipeline = pipeline
 			log.Info("Telemetry pipeline started")
 			defer func() {
-				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				if err := telemetryPipeline.Stop(shutdownCtx); err != nil {
+				if err := stopTelemetryWithTimeout(telemetryPipeline.Stop, telemetryStopBudget); err != nil {
 					log.Error("Failed to stop telemetry: %v", err)
 				}
-				shutdownCancel()
 				telemetryCancel()
 			}()
 		}
