@@ -129,14 +129,18 @@ func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
 	return cachePath, nil
 }
 
-// ResolveWithHash fetches a resource, using the provided hash for a fast cache
-// lookup that skips the metadata round-trip on a hit.
+// ResolveWithHash fetches a resource, always verifying the current content hash
+// with the hub to prevent serving stale cached content.
+//
+// The caller's contentHash (from the dispatch) may be stale if the hub
+// re-bootstrapped the resource after the agent was created but before the
+// broker resolved it, or if the dispatch raced with a bootstrap. To guard
+// against this, ResolveWithHash always calls Resolve, which fetches the
+// current metadata from the hub and uses the authoritative content hash for
+// the cache lookup. On a cache hit with the current hash the cached directory
+// is returned immediately (no download); on a miss the resource is downloaded
+// and cached under the current hash.
 func (r *Resolver) ResolveWithHash(ctx context.Context, ref, contentHash string) (string, error) {
-	if contentHash != "" {
-		if cachedPath, ok := r.cache.Get(contentHash); ok {
-			return cachedPath, nil
-		}
-	}
 	return r.Resolve(ctx, ref)
 }
 

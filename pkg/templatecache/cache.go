@@ -279,6 +279,30 @@ func (c *Cache) saveIndex() error {
 	return os.WriteFile(indexPath, data, 0644)
 }
 
+// Invalidate removes a specific entry from the cache by content hash.
+// This is used when a resource is re-bootstrapped with new content: the old
+// hash's cached directory is stale and must be evicted so that subsequent
+// resolves for the old hash fall through to a fresh download.
+func (c *Cache) Invalidate(contentHash string) {
+	if contentHash == "" {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, ok := c.index.Entries[contentHash]
+	if !ok {
+		return
+	}
+
+	templatePath := filepath.Join(c.basePath, contentHash)
+	_ = os.RemoveAll(templatePath)
+	delete(c.index.Entries, contentHash)
+	c.index.TotalSize -= entry.Size
+	_ = c.saveIndex()
+}
+
 // Clear removes all cached templates.
 func (c *Cache) Clear() error {
 	c.mu.Lock()
