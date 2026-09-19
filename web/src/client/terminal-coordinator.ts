@@ -129,15 +129,19 @@ export class TerminalCoordinator {
    */
   async open(
     agentId: string,
-    requestId: string = crypto.randomUUID(),
+    suppliedRequestId?: string,
     timeoutMs = 1000
   ): Promise<TerminalOpenResult> {
     if (!uuid.test(agentId)) throw new Error('Terminal requires an agent UUID.');
-    if (!token(requestId))
+    if (suppliedRequestId !== undefined && !token(suppliedRequestId))
       throw new Error('Terminal request ID required (maximum 256 characters).');
     if (!Number.isFinite(timeoutMs) || timeoutMs < 0)
       throw new Error('Invalid acknowledgment timeout.');
     agentId = agentId.toLowerCase();
+    // No request is submitted in these terminal states, so an omitted ID needs
+    // only a result marker. Insecure HTTP does not expose crypto.randomUUID.
+    const requestId =
+      suppliedRequestId ?? (this.stopped || !this.available ? 'unsubmitted' : crypto.randomUUID());
     const outcome = (status: TerminalOpenResult['status']): TerminalOpenResult => ({
       status,
       agentId,
@@ -354,7 +358,10 @@ export class TerminalCoordinator {
 
   private readonly onPageHide = (): void => this.stop();
 
-  /** Document/account teardown ONLY. Never call on route or mode changes. */
+  /**
+   * Document/account teardown ONLY. Never call on route or mode changes.
+   * Attempts every session close; throws AggregateError on failure and retains the lock.
+   */
   stop(): void {
     if (this.stopped) return;
     const sessions = this.sessions;
@@ -373,9 +380,19 @@ export class TerminalCoordinator {
           focus: 'not-confirmed',
         });
     }
-    // Stop transports before surrendering authority. If disposal throws, keep the
-    // lock until document exit rather than permit a second owner alongside it.
-    for (const session of sessions) session.close();
+    // One renderer failure must not leave other transports live after teardown.
+    // Report all failures only after every session has had a chance to close.
+    const failures: unknown[] = [];
+    for (const session of sessions) {
+      try {
+        session.close();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    // Keep the lock until document exit on ANY failure. Repeated stop is a no-op;
+    // it must not retry failed disposal or accidentally release this authority.
+    if (failures.length) throw new AggregateError(failures, 'Terminal session teardown failed.');
     this.ownerGeneration = null;
     this.release?.();
     this.requests.clear();

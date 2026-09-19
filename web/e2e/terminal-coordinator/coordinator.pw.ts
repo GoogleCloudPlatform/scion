@@ -2,7 +2,13 @@ import { test, expect, type Page } from '@playwright/test';
 
 const agent = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const other = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-async function start(page: Page, accountId = 'fixture-account', base = '/', deny = true) {
+async function start(
+  page: Page,
+  accountId = 'fixture-account',
+  base = '/',
+  deny = true,
+  url = '/'
+) {
   await page.route('**/api/v1/agents/**', (route) =>
     route.fulfill({
       json: route.request().url().includes('/pty')
@@ -13,7 +19,7 @@ async function start(page: Page, accountId = 'fixture-account', base = '/', deny
   await page.routeWebSocket('**/api/v1/agents/**/pty?*', (socket) => {
     socket.onMessage(() => {});
   });
-  await page.goto('/');
+  await page.goto(url);
   await page.waitForFunction(() => !!window.fixture);
   await page.evaluate(
     ({ accountId, base, deny }) =>
@@ -342,4 +348,101 @@ test('invalid trusted scope and agent inputs fail before any session is created'
   });
   expect(rejected).toBe(6);
   expect((await snapshot(page)).sessions).toEqual([]);
+});
+
+test('R1 teardown attempts every session after a disposer throws and retains the lock', async ({
+  context,
+}) => {
+  const owner = await context.newPage();
+  const requester = await context.newPage();
+  await Promise.all([start(owner), start(requester)]);
+  await open(owner);
+  await open(owner, other, 'second');
+  await expect
+    .poll(async () => (await snapshot(owner)).sessions.map((s) => s.connection))
+    .toEqual(['connected', 'connected']);
+  const result = await owner.evaluate(() => {
+    window.fixture.captureSessions();
+    window.fixture.throwOnDispose(0);
+    let failure: { name: string; count: number } | null = null;
+    try {
+      window.fixture.stop();
+    } catch (error) {
+      failure = {
+        name: error instanceof Error ? error.name : 'unknown',
+        count: error instanceof AggregateError ? error.errors.length : 1,
+      };
+    }
+    window.fixture.stop();
+    return { failure, ...window.fixture.teardownState() };
+  });
+  expect(result.disposalAttempts).toEqual([0, 1]);
+  expect(result.sends).toEqual([false, false]);
+  expect(result.connections[1]).toBe('closed');
+  expect(result.failure).toEqual({ name: 'AggregateError', count: 1 });
+  expect(await open(requester, agent, 'still-held', 100)).toMatchObject({ status: 'pending' });
+  expect((await snapshot(requester)).owner).toBe(false);
+  expect((await snapshot(requester)).sessions).toEqual([]);
+  expect(await requester.evaluate(async () => (await navigator.locks.query()).held?.length)).toBe(
+    1
+  );
+});
+
+test('R2 actual insecure HTTP default-ID opens return unsupported and stopped without UUID API', async ({
+  page,
+  request,
+}) => {
+  const javascript = await (await request.get('http://127.0.0.1:4519/fixture.js')).text();
+  await page.route('http://insecure.example/**', (route) =>
+    route.fulfill(
+      route.request().url().endsWith('/fixture.js')
+        ? { contentType: 'text/javascript', body: javascript }
+        : {
+            contentType: 'text/html',
+            body: '<!doctype html><main></main><script type="module" src="/fixture.js"></script>',
+          }
+    )
+  );
+  await start(page, 'fixture-account', '/', true, 'http://insecure.example/');
+  expect(
+    await page.evaluate(() => ({ secure: isSecureContext, uuid: typeof crypto.randomUUID }))
+  ).toEqual({ secure: false, uuid: 'undefined' });
+  expect(await page.evaluate((agent) => window.fixture.open(agent), agent)).toMatchObject({
+    status: 'unsupported',
+    requestId: 'unsubmitted',
+  });
+  expect(await open(page, agent, 'supplied-unsupported')).toMatchObject({
+    status: 'unsupported',
+    requestId: 'supplied-unsupported',
+  });
+  await page.evaluate(() => window.fixture.stop());
+  expect(await page.evaluate((agent) => window.fixture.open(agent), agent)).toMatchObject({
+    status: 'stopped',
+    requestId: 'unsubmitted',
+  });
+  expect(await open(page, agent, 'supplied-stopped')).toMatchObject({
+    status: 'stopped',
+    requestId: 'supplied-stopped',
+  });
+  expect((await snapshot(page)).initialized).toBe(0);
+  expect((await snapshot(page)).sessions).toEqual([]);
+});
+
+test('R2 secure default-ID opens retain UUID generation and stopped opens need no UUID API', async ({
+  page,
+}) => {
+  await start(page);
+  const result = await page.evaluate((agent) => window.fixture.open(agent), agent);
+  expect(result.status).toBe('selected');
+  expect(result.requestId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+  );
+  await page.evaluate(() => {
+    window.fixture.stop();
+    Object.defineProperty(crypto, 'randomUUID', { value: undefined });
+  });
+  expect(await page.evaluate((agent) => window.fixture.open(agent), agent)).toMatchObject({
+    status: 'stopped',
+    requestId: 'unsubmitted',
+  });
 });

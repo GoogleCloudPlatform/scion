@@ -36,3 +36,29 @@ Git bundle and manifest are under the externally mounted
 `transfers/p1-1648-candidate.*`). Independent review and integration are separate
 manager gates. No remote Git operations, shared registry edits, sibling implementation,
 or child agents were used.
+
+## Independent review R1 fixes
+
+Addressed both findings against candidate `e4a9b232740bcae6bee03f1bc5ecdd7750d9229c`.
+Teardown now attempts every captured session close independently, collects failures,
+and throws an AggregateError only after all attempts. Any failure retains the lock;
+repeated stop remains a safe no-op. A real-browser regression starts two connected
+sessions, throws in the first renderer's disposer, and proves both disposal attempts,
+no subsequent transport sends, safe repeated teardown, and no ownership claim by a
+second tab. The registry remains unchanged; a failed renderer can leave its session
+state stale even though its socket was released.
+
+Default-ID opens now resolve their ID inside the method. Unsupported/stopped calls
+without a supplied ID use the unregistered result marker `unsubmitted`; supported
+calls still generate crypto.randomUUID and supplied IDs are preserved. Regressions use
+an actual intercepted insecure HTTP origin with no UUID API, plus a stopped secure
+instance whose UUID API is absent. All three new regressions failed on R1 before the
+fixes. Expanded Chromium suite passes 20 cases. Supplemental typecheck and scoped
+lint cover the revised source/tests; build and detailed chronology are recorded in
+the revised shared developer report. Existing full-suite/root-lint evidence was not
+repeated for these focused fixes; cumulative and later runtime gates remain unchanged.
+
+R1 report/bundle/manifest are preserved. Revised artifacts use
+`transfers/p1-1648-candidate-r2.bundle` and `.json`, with revised developer report and
+red/green logs on the same external shared volume. Fresh review is required before
+integration or leaf acceptance.

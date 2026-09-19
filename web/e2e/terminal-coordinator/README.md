@@ -35,6 +35,9 @@ only to the owner. Do not construct the coordinator from route or channel identi
 
 `open(agentUUID, requestId?, timeoutMs?)` represents an explicit user open intent.
 Reuse its request ID for retries after `pending`; use a fresh ID for a new intent.
+A caller-supplied ID is preserved. When no ID is supplied, supported calls generate
+crypto.randomUUID; unsupported/stopped calls return the marker `unsubmitted` without
+using that secure-context-only API. The marker is not registered or broadcast.
 The result carries status, request ID, normalized agent UUID, owner generation, and
 separate focus observation. `selected` means the selection adapter completed, not
 that the PTY handshake succeeded; session `state.connection` remains authoritative.
@@ -60,6 +63,10 @@ visibility plus `document.hasFocus()`. Failed, denied, or delayed activation ret
 Keep the coordinator alive while its owner displays Chat or Dashboard. Never call
 `stop()` on SPA route/mode changes. `stop()` is document/account teardown: abort
 selection, finish pending requests as stopped, close sessions, then release the lock.
-A disposal exception deliberately retains authority until document exit. `pagehide`
+Every captured session is closed independently. Failures are reported together as an
+`AggregateError` after all close attempts, with authority retained until document exit.
+Repeated stop is a safe no-op; it does not retry disposal or release a failed teardown's
+lock. A failed renderer's session state can remain stale, but all captured transports
+have received their close attempt before the aggregate error reaches the caller. `pagehide`
 also stops this instance. BFCache restoration, account-wide broadcasts, ownership
 recovery UX, and router/pane integration are later-phase work.
