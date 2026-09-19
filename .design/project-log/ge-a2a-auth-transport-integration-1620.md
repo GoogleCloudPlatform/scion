@@ -243,5 +243,58 @@ PR #1747 fix was imported or duplicated.
   `canary-1=must-survive` preservation.
 - Root Build & Test job `105790361187` failed on PersistentStore SQLite driver setup,
   exchange-route permission classification, and other Hub/authz census findings. Those
-  remain dependent on separate open PR #1747 at
-  `22e66f275c6f545aa1694dfd388d5a8f55bd2a9d` and are outside this test/runner-only scope.
+  findings were owned by separate PR #1747, which has since merged upstream. Validation
+  of its actual merge result against current upstream `main` remains manager-owned and is
+  outside this test/runner-only scope.
+
+## Post-Merge Integration Harness Test-Quality Follow-Up
+
+**Date:** 2026-09-19
+**Branch:** `scion/dev-postmerge-integration-harness-test-fixes`
+**Immutable candidate:** `135b73579601c55c0febb270e9f1fa3a6fecbe63`
+
+The two Required test-quality findings were resolved without changing the integration
+runner, production code, CI policy, or the separately owned root fixes:
+
+- `TestIntegrationRunnerCleansArtifactsOnSignal` no longer snapshots, diffs, or schedules
+  deletion of global `/tmp/ci-test-json.*` paths. The runner still receives a test-owned
+  `TMPDIR`; the regression creates one exact unrelated legacy-pattern file while the
+  runner is active and proves that file and an unrelated directory both survive.
+- Every runner command started by
+  `TestIntegrationRunnerConcurrentInvocationsAreIsolated` now has its own process group
+  and an immediately registered cleanup that terminates the group, waits for the runner,
+  and verifies the group is gone. All waits are bounded. Both fake runners stop on an
+  explicit release file only after the test observes both ready markers and both
+  invocation-owned directories. Forced-timeout and pre-barrier-failure subtests verify
+  that no task-owned runner group or directory survives and that unrelated directories
+  remain intact.
+
+### RED/GREEN Evidence
+
+- Deterministic RED commit
+  `a20cc7e896f63f7120952c64ea3ef8117562b885` preserved both failing assertions.
+  The signal test created an unrelated `/tmp/ci-test-json.*` file after the runner entered
+  its held phase; the former global-diff logic failed with
+  `signal-interrupted runner leaked legacy logs` and scheduled that foreign path for
+  deletion. The concurrency test failed before launching a child with
+  `runner-1 is not configured with an isolated process group`.
+- GREEN commit `1271a35c95f5968ff44ff3ea3b38baaad2862b41` replaced global
+  observation with exact-path assertions and introduced owned process-group lifecycle,
+  explicit release, bounded waits, timeout cleanup, and pre-barrier cleanup.
+- `go test ./integration -run '^TestIntegrationRunner' -count=1`: PASS (`0.491s`).
+- `go test -race ./integration -run '^TestIntegrationRunner' -count=1`: PASS (`1.799s`).
+- `go test ./integration -run '^TestIntegrationRunner(CleansArtifactsOnSignal|ConcurrentInvocationsAreIsolated)$' -count=20`:
+  PASS (`4.254s`).
+- `go test ./integration -count=1`: PASS (`12.322s`) under the existing optional-database
+  semantics; the package completed without requiring an unavailable database.
+- `make fmt-check`, `make compat-literals`, bridge `go vet ./integration`, bridge
+  `go build -buildvcs=false ./...`, root `go build -buildvcs=false ./...`, and final
+  whitespace/scope checks: PASS.
+- ShellCheck was not repeated because the shell runner is unchanged. A new real-PostgreSQL
+  run was unavailable in this container (no PostgreSQL client/server, container runtime,
+  or database URL); the exact successor delta is test/log-only, so the candidate's prior
+  real-PostgreSQL runner evidence remains unaffected.
+
+No readiness conclusion is made here. PR #1747 has merged separately, and the manager will
+inspect current-upstream overlap and validate the actual merge result before any readiness
+decision.
