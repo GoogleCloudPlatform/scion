@@ -24,6 +24,7 @@ import (
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/status"
 )
 
 // GCPExporter exports telemetry data to GCP using native APIs.
@@ -187,9 +188,33 @@ func (e *GCPExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics []
 		}
 	}
 	if succeeded > 0 && len(errs) > 0 {
-		return &partialSuccessError{message: fmt.Sprintf("GCP metric batch partly delivered: %d resource groups succeeded, %d failed", succeeded, len(errs))}
+		cause, code := classifyMonitoringFailures(errs)
+		return &partialSuccessError{
+			message:         fmt.Sprintf("GCP metric batch partly delivered: %d resource groups succeeded, %d failed; cause=%s status=%s", succeeded, len(errs), cause, code),
+			succeededGroups: succeeded, failedGroups: len(errs), causeClass: cause, statusCode: code,
+		}
 	}
 	return errors.Join(errs...)
+}
+
+// classifyMonitoringFailures exposes only bounded codes, never SDK text or labels.
+func classifyMonitoringFailures(errs []error) (string, string) {
+	cause, code := "", ""
+	for _, err := range errs {
+		currentCause := classifyError(err)
+		currentCode := status.Code(err).String()
+		if cause == "" {
+			cause = currentCause
+		} else if cause != currentCause {
+			cause = "mixed"
+		}
+		if code == "" {
+			code = currentCode
+		} else if code != currentCode {
+			code = "mixed"
+		}
+	}
+	return cause, code
 }
 
 // ExportProtoLogs converts OTLP proto log records to Cloud Logging entries.

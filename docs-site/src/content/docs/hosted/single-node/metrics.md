@@ -211,6 +211,18 @@ When harness events occur (via hooks), sciontool automatically records the follo
 Hook token counters use the `scion.hook.tokens.*` namespace. Genuine native harness
 `gen_ai.tokens.*` metrics remain separate; normalized hooks do not emit those
 native names. Token counters appear only when a hook provides token usage.
+For Cloud Monitoring, the six normalized hook counters in this table use a
+collector observation epoch and the time sciontool takes each cumulative
+snapshot. A counter's Cloud point time therefore describes when this collector
+observed the total, rather than the time of the last hook event. Retries keep
+the original snapshot time. Generic OTLP forwarding and native metric points
+keep their source timestamps through sciontool. The Monitoring SDK maps
+non-gauge intervals shorter than two milliseconds to a one-millisecond
+interval; admission checks use that mapped end. A native point known to be less than five seconds
+after a possibly written point in the same Cloud series is rejected before
+admission; a request containing that point is rejected as a whole. Scope and
+metric names select the hook counter behavior, so local producers using those
+reserved names also opt into it. This does not authenticate the producer.
 Session-end totals do not add a second copy of model-end usage. Short-lived
 hook processes normally cannot pair start and end events, so duration
 histograms are not guaranteed. This does not establish native Codex token

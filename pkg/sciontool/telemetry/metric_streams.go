@@ -37,18 +37,20 @@ type metricStreamKey struct {
 }
 
 type metricStream struct {
-	resource *metricpb.ResourceMetrics
-	scope    *metricpb.ScopeMetrics
-	metric   *metricpb.Metric
-	start    uint64
-	end      uint64
-	lastSeen time.Time
-	dirty    bool
-	pending  bool
-	hook     bool
-	seen     map[string]struct{}
-	order    []metricFingerprint
-	floorEnd uint64
+	resource       *metricpb.ResourceMetrics
+	scope          *metricpb.ScopeMetrics
+	metric         *metricpb.Metric
+	start          uint64
+	end            uint64
+	lastSeen       time.Time
+	dirty          bool
+	pending        bool
+	hook           bool
+	collectorEpoch uint64 // GCP hook observation epoch; source intervals stay in start/end.
+	cloudKey       cloudMetricIdentity
+	seen           map[string]struct{}
+	order          []metricFingerprint
+	floorEnd       uint64
 }
 
 type metricFingerprint struct {
@@ -260,7 +262,11 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 					return s.reject("nonmonotonic delta sum")
 				}
 				base := metricStreamKey{resource: rk, scope: sk, name: m.Name, unit: m.Unit, kind: kind, temporality: temporal, monotonic: monotonic}
-				hook := sm.GetScope().GetName() == hookMetricScope && kind == "sum" && monotonic && temporal == metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA && isHookCounter(m.Name)
+				reservedHook := sm.GetScope().GetName() == hookMetricScope && isHookCounter(m.Name)
+				hook := reservedHook && kind == "sum" && monotonic && temporal == metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA
+				if s.gcp && reservedHook && (!hook || m.Unit != hookCounterUnit(m.Name)) {
+					return s.reject("unsupported normalized hook counter shape")
+				}
 				switch kind {
 				case "sum", "gauge":
 					var points []*metricpb.NumberDataPoint
@@ -306,6 +312,9 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 							k.valueType = "double"
 						default:
 							return s.reject("unsupported number point type")
+						}
+						if s.gcp && reservedHook && k.valueType != "int64" {
+							return s.reject("unsupported normalized hook counter type")
 						}
 						if err := s.addNumber(k, rm, sm, m, point, hook); err != nil {
 							return err
@@ -415,6 +424,22 @@ func (s *metricStreams) validateCloudIdentity(rm *metricpb.ResourceMetrics, sm *
 	}
 	s.cloudIdentities[key] = full
 	return nil
+}
+
+func cloudIdentityFor(rm *metricpb.ResourceMetrics, sm *metricpb.ScopeMetrics, metric *metricpb.Metric, attrs []*commonpb.KeyValue, kind string) (cloudMetricIdentity, error) {
+	r, err := cloudResourceKey(rm)
+	if err != nil {
+		return cloudMetricIdentity{}, err
+	}
+	scope, err := cloudScopeKey(sm)
+	if err != nil {
+		return cloudMetricIdentity{}, err
+	}
+	point, err := canonicalAttrs(allowedMetricAttrs(attrs, cloudPointFieldsFor(sm.GetScope().GetName(), metric.Name)))
+	if err != nil {
+		return cloudMetricIdentity{}, err
+	}
+	return cloudMetricIdentity{resource: r, scope: scope, point: point, name: metric.Name, unit: metric.Unit, kind: kind}, nil
 }
 
 func (s *metricStreams) validateDescriptor(rm *metricpb.ResourceMetrics, sm *metricpb.ScopeMetrics, m *metricpb.Metric, kind string, attrs []*commonpb.KeyValue, number any) error {
@@ -546,6 +571,17 @@ func isHookCounter(name string) bool {
 	}
 }
 
+func hookCounterUnit(name string) string {
+	switch name {
+	case "agent.tool.calls", "gen_ai.api.calls":
+		return "{call}"
+	case "agent.session.count":
+		return "{session}"
+	default:
+		return "{token}"
+	}
+}
+
 func (s *metricStreams) entry(k metricStreamKey, rm *metricpb.ResourceMetrics, sm *metricpb.ScopeMetrics, m *metricpb.Metric, start, end uint64, hook bool) (*metricStream, error) {
 	now := s.now()
 	if entry := s.streams[k]; entry != nil {
@@ -555,6 +591,9 @@ func (s *metricStreams) entry(k metricStreamKey, rm *metricpb.ResourceMetrics, s
 		return nil, s.reject("active metric stream limit")
 	}
 	entry := &metricStream{resource: proto.Clone(rm).(*metricpb.ResourceMetrics), scope: proto.Clone(sm).(*metricpb.ScopeMetrics), metric: proto.Clone(m).(*metricpb.Metric), start: start, end: end, hook: hook, seen: make(map[string]struct{}), lastSeen: now, dirty: true}
+	if hook && s.gcp {
+		entry.collectorEpoch = uint64(now.UnixNano())
+	}
 	entry.resource.ScopeMetrics = nil
 	entry.scope.Metrics = nil
 	switch k.kind {
@@ -648,6 +687,12 @@ func (s *metricStreams) addNumber(k metricStreamKey, rm *metricpb.ResourceMetric
 	entry, err := s.entry(k, rm, sm, m, start, end, hook)
 	if err != nil {
 		return err
+	}
+	if s.gcp {
+		entry.cloudKey, err = cloudIdentityFor(rm, sm, m, point.Attributes, k.kind)
+		if err != nil {
+			return s.reject(err.Error())
+		}
 	}
 	copyPoint := proto.Clone(point).(*metricpb.NumberDataPoint)
 	var current *metricpb.NumberDataPoint
@@ -815,6 +860,12 @@ func (s *metricStreams) addHistogram(k metricStreamKey, rm *metricpb.ResourceMet
 	if err != nil {
 		return err
 	}
+	if s.gcp {
+		entry.cloudKey, err = cloudIdentityFor(rm, sm, m, point.Attributes, k.kind)
+		if err != nil {
+			return s.reject(err.Error())
+		}
+	}
 	copyPoint := proto.Clone(point).(*metricpb.HistogramDataPoint)
 	points := entry.metric.GetHistogram().DataPoints
 	if len(points) > 0 {
@@ -920,6 +971,65 @@ func (s *metricStreams) snapshot() []*metricpb.ResourceMetrics {
 		entry.pending = true
 	}
 	return output
+}
+
+// snapshotGCP freezes a whole eligible batch. Its hook timestamps describe an
+// actual observation of the accumulated value, leaving source intervals intact.
+func (s *metricStreams) snapshotGCP(observed time.Time, possible map[cloudMetricIdentity]uint64) ([]*metricpb.ResourceMetrics, map[cloudMetricIdentity]uint64, bool) {
+	end := observed.UnixNano()
+	ends := make(map[cloudMetricIdentity]uint64)
+	for _, entry := range s.streams {
+		if !entry.dirty {
+			continue
+		}
+		pointEnd := entry.end
+		if entry.hook {
+			// The pinned Monitoring SDK changes intervals shorter than 2ms to
+			// epoch+1ms. Wait for a real observation that needs no rewrite.
+			if end <= 0 || uint64(end) <= entry.collectorEpoch || uint64(end)-entry.collectorEpoch < uint64(2*time.Millisecond) {
+				return nil, nil, false
+			}
+			pointEnd = uint64(end)
+		} else {
+			pointEnd = mappedMonitoringEnd(entry)
+		}
+		if previous := possible[entry.cloudKey]; previous != 0 && (pointEnd < previous || pointEnd-previous < uint64(5*time.Second)) {
+			return nil, nil, false
+		}
+		ends[entry.cloudKey] = pointEnd
+	}
+	var output []*metricpb.ResourceMetrics
+	for _, entry := range s.streams {
+		if !entry.dirty {
+			continue
+		}
+		rm := proto.Clone(entry.resource).(*metricpb.ResourceMetrics)
+		sm := proto.Clone(entry.scope).(*metricpb.ScopeMetrics)
+		metric := proto.Clone(entry.metric).(*metricpb.Metric)
+		if entry.hook {
+			point := metric.GetSum().DataPoints[0]
+			point.StartTimeUnixNano = entry.collectorEpoch
+			point.TimeUnixNano = ends[entry.cloudKey]
+		}
+		sm.Metrics = []*metricpb.Metric{metric}
+		rm.ScopeMetrics = []*metricpb.ScopeMetrics{sm}
+		output = append(output, rm)
+		entry.dirty = false
+		entry.pending = true
+	}
+	return output, ends, true
+}
+
+// The pinned Monitoring exporter maps non-gauge intervals shorter than 2ms
+// to start+1ms. Admission and freeze must use the end actually sent by it.
+func mappedMonitoringEnd(entry *metricStream) uint64 {
+	if entry.cloudKey.kind == "gauge" {
+		return entry.end
+	}
+	if entry.end >= entry.start && entry.end-entry.start < uint64(2*time.Millisecond) {
+		return entry.start + uint64(time.Millisecond)
+	}
+	return entry.end
 }
 
 // clearPendingMarker only releases snapshot markers. Confirmed delivery is

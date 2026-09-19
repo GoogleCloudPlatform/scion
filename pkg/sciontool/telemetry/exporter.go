@@ -31,8 +31,12 @@ var errOTLPCACertsNotFound = errors.New("parsing OTLP CA file: no certificates f
 // partialSuccessError is terminal: replaying the whole batch duplicates the
 // units the destination already accepted.
 type partialSuccessError struct {
-	message  string
-	rejected int64 // explicit OTLP rejected record count, when supplied
+	message         string
+	rejected        int64 // explicit OTLP rejected record count, when supplied
+	succeededGroups int
+	failedGroups    int
+	causeClass      string
+	statusCode      string
 }
 
 func (e *partialSuccessError) Error() string { return e.message }

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	otellog "go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/metric"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
@@ -262,8 +263,8 @@ func TestHookProviderEmittedResourceAndPointsPassStrictCloudAdmission(t *testing
 		t.Fatal(err)
 	}
 	meter := providers.MeterProvider.Meter(hookMetricScope)
-	tool, _ := meter.Int64Counter("agent.tool.calls")
-	tokens, _ := meter.Int64Counter("scion.hook.tokens.input")
+	tool, _ := meter.Int64Counter("agent.tool.calls", metric.WithUnit("{call}"))
+	tokens, _ := meter.Int64Counter("scion.hook.tokens.input", metric.WithUnit("{token}"))
 	tool.Add(context.Background(), 1)
 	tokens.Add(context.Background(), 3)
 	if err := providers.Shutdown(context.Background()); err != nil {
@@ -292,7 +293,7 @@ func TestMetricHookChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	counter, err := providers.MeterProvider.Meter(hookMetricScope).Int64Counter("agent.tool.calls")
+	counter, err := providers.MeterProvider.Meter(hookMetricScope).Int64Counter("agent.tool.calls", metric.WithUnit("{call}"))
 	if err != nil {
 		t.Fatal(err)
 	}

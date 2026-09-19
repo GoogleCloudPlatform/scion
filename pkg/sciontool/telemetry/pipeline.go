@@ -81,6 +81,7 @@ type Pipeline struct {
 	metricStateMu                                                  sync.Mutex
 	metricExportMu                                                 sync.Mutex
 	metricStreams                                                  *metricStreams
+	metricPossibleEnds                                             map[cloudMetricIdentity]uint64
 	metricPending                                                  []*metricpb.ResourceMetrics
 	metricDirtyAdmissions, metricPendingAdmissions                 []metricAdmission
 	metricPendingAttempts                                          int
@@ -657,6 +658,7 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 		if p.metricStreams == nil {
 			p.metricStreams = newMetricStreams()
 			p.metricStreams.gcp = p.config.IsGCP()
+			p.metricStreams.now = p.now
 		}
 		candidate := p.metricStreams.clone()
 		if err := candidate.add(processed); err != nil {
@@ -673,7 +675,26 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 				changed = append(changed, key)
 			}
 		}
+		if p.config.IsGCP() {
+			for _, key := range changed {
+				entry := candidate.streams[key]
+				if entry.hook {
+					continue
+				}
+				mappedEnd := mappedMonitoringEnd(entry)
+				if previous := p.metricPossibleEnds[entry.cloudKey]; previous != 0 && (mappedEnd < previous || mappedEnd-previous < uint64(5*time.Second)) {
+					p.metricDiagnostics.rejected.Add(int64(records))
+					p.metricStateMu.Unlock()
+					return status.Error(codes.InvalidArgument, "unsupported Cloud Monitoring sampling interval")
+				}
+			}
+		}
 		p.metricStreams = candidate
+		for key := range p.metricPossibleEnds {
+			if _, active := candidate.cloudIdentities[key]; !active {
+				delete(p.metricPossibleEnds, key)
+			}
+		}
 		if len(changed) == 0 {
 			// A duplicate or older point made no stream state eligible for
 			// export. It owns no retained request entry or delivery credit.
@@ -805,16 +826,25 @@ func (p *Pipeline) flushMetricsOnStop(ctx context.Context) {
 		// A retryable failure retains the immutable pending snapshot. Recheck
 		// work and wait for the next post-completion cadence slot while the
 		// caller still has time; terminal and successful calls clear ownership.
-		p.flushMetricBuffer(ctx, false)
+		if !p.flushMetricBuffer(ctx, false) {
+			// A clock-ineligible whole batch must not make Stop spin after
+			// the ordinary cadence target has passed.
+			timer := time.NewTimer(100 * time.Millisecond)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			}
+		}
 	}
 }
 
 // flushMetricBuffer exports one immutable cumulative snapshot at a time.
 //
-// Cloud Monitoring requires a minimum 10-second interval between writes for the
-// same time series. This method enforces metricFlushInterval between exports to
-// prevent rapid consecutive flushes (e.g. periodic tick followed by shutdown drain)
-// from triggering sampling-rate rejections. Tests may force a flush; shutdown
+// Cloud Monitoring requires at least five seconds between point end times in
+// one series. The longer metricFlushInterval spaces exporter calls; snapshotGCP
+// separately checks end-time eligibility. Tests may force a flush; shutdown
 // observes the cadence and reports residual state if it cannot drain safely.
 func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 	p.metricExportMu.Lock()
@@ -831,7 +861,22 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		p.metricStreams = newMetricStreams()
 	}
 	if len(p.metricPending) == 0 {
-		p.metricPending = p.metricStreams.snapshot()
+		if p.config.IsGCP() {
+			batch, ends, eligible := p.metricStreams.snapshotGCP(p.now(), p.metricPossibleEnds)
+			if !eligible {
+				p.metricStateMu.Unlock()
+				return false
+			}
+			p.metricPending = batch
+			if p.metricPossibleEnds == nil {
+				p.metricPossibleEnds = make(map[cloudMetricIdentity]uint64)
+			}
+			for key, end := range ends {
+				p.metricPossibleEnds[key] = end
+			}
+		} else {
+			p.metricPending = p.metricStreams.snapshot()
+		}
 		if len(p.metricPending) != 0 {
 			p.metricBatchSequence++
 			p.metricPendingSequence = p.metricBatchSequence
