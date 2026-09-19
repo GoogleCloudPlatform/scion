@@ -41,7 +41,7 @@ model_aliases:
   extra-large: grok-4.6
 
 command:
-  base: ["grok", "--yolo", "--sandbox", "off", "--no-ask-user", "--trust"]
+  base: ["grok", "--yolo", "--sandbox", "off", "--no-ask-user", "--trust", "--disallowed-tools", "x_search"]
   resume_flag: "-c"
   task_position: after_base_args
   system_prompt_flag: "--system-prompt-override"
