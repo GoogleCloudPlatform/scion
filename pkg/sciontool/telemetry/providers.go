@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
@@ -123,6 +124,16 @@ func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Res
 	metricOpts := []otlpmetricgrpc.Option{
 		otlpmetricgrpc.WithEndpoint(endpoint),
 		otlpmetricgrpc.WithInsecure(),
+	}
+	// Hook commands are short lived independent writers. Export their counter
+	// additions as deltas so the receiver can accumulate them once.
+	if !batch {
+		metricOpts = append(metricOpts, otlpmetricgrpc.WithTemporalitySelector(func(kind metric.InstrumentKind) metricdata.Temporality {
+			if kind == metric.InstrumentKindCounter {
+				return metricdata.DeltaTemporality
+			}
+			return metricdata.CumulativeTemporality
+		}))
 	}
 	rawMetricExporter, err := otlpmetricgrpc.New(ctx, metricOpts...)
 	if err != nil {

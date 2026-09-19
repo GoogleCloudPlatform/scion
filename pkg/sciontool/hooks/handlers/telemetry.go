@@ -606,7 +606,8 @@ func (h *TelemetryHandler) recordTokenMetrics(ctx context.Context, event *hooks.
 	}
 }
 
-// recordSessionMetrics records session counters and any cumulative token usage on session end.
+// recordSessionMetrics records session completion. Session-end token totals
+// overlap model-end increments, so they are omitted from normalized counters.
 func (h *TelemetryHandler) recordSessionMetrics(event *hooks.Event) {
 	ctx := context.Background()
 	baseAttrs := h.metricAttrs()
@@ -620,8 +621,6 @@ func (h *TelemetryHandler) recordSessionMetrics(event *hooks.Event) {
 		h.sessionCount.Add(ctx, 1, metric.WithAttributes(sessionAttrs...))
 	}
 
-	// Record cumulative token usage if reported on session-end
-	h.recordTokenMetrics(ctx, event, baseAttrs)
 }
 
 // Flush ends any in-progress spans. Called during shutdown.

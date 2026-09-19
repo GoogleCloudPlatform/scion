@@ -6,7 +6,14 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
+	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	"google.golang.org/grpc"
 	"net"
+	"os"
+	"os/exec"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -118,6 +125,158 @@ func TestNewProviders_RoutesAllSignalsToLoopback(t *testing.T) {
 	}
 	if spans.Load() == 0 || logs.Load() == 0 || metrics.Load() == 0 {
 		t.Fatalf("loopback captures: spans=%d logs=%d metrics=%d", spans.Load(), logs.Load(), metrics.Load())
+	}
+}
+
+func TestHookProviderEmitsCounterDeltaAndOtherInstrumentTemporalities(t *testing.T) {
+	port := availableTCPPort(t)
+	cfg := &Config{Enabled: true, GRPCPort: port, HTTPPort: 0, Endpoint: "external.invalid:4317"}
+	var mu sync.Mutex
+	var captured []*metricpb.ResourceMetrics
+	receiver := NewReceiver(cfg, nil, WithMetricHandler(func(_ context.Context, rms []*metricpb.ResourceMetrics) error {
+		mu.Lock()
+		defer mu.Unlock()
+		captured = append(captured, rms...)
+		return nil
+	}))
+	if err := receiver.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = receiver.Stop(context.Background()) }()
+	for range 2 {
+		providers, err := NewProviders(context.Background(), cfg, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		meter := providers.MeterProvider.Meter(hookMetricScope)
+		counter, _ := meter.Int64Counter("agent.tool.calls")
+		updown, _ := meter.Int64UpDownCounter("active")
+		hist, _ := meter.Float64Histogram("duration")
+		gauge, _ := meter.Int64Gauge("status")
+		counter.Add(context.Background(), 1)
+		updown.Add(context.Background(), 1)
+		hist.Record(context.Background(), 2)
+		gauge.Record(context.Background(), 1)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := providers.Shutdown(ctx); err != nil {
+			t.Fatal(err)
+		}
+		cancel()
+	}
+	longLived, err := NewProviders(context.Background(), cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	longCounter, err := longLived.MeterProvider.Meter("longlived").Int64Counter("longlived.counter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	longCounter.Add(context.Background(), 1)
+	if err := longLived.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var counts = map[string]int{}
+	for _, rm := range captured {
+		for _, sm := range rm.ScopeMetrics {
+			for _, m := range sm.Metrics {
+				counts[m.Name]++
+				switch m.Name {
+				case "agent.tool.calls":
+					if m.GetSum().AggregationTemporality != metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA || m.GetSum().DataPoints[0].GetAsInt() != 1 {
+						t.Fatalf("hook counter = %v", m.GetSum())
+					}
+				case "active":
+					if m.GetSum().AggregationTemporality != metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE {
+						t.Fatalf("updown = %v", m.GetSum())
+					}
+				case "duration":
+					if m.GetHistogram().AggregationTemporality != metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE {
+						t.Fatalf("histogram = %v", m.GetHistogram())
+					}
+				case "status":
+					if m.GetGauge() == nil {
+						t.Fatalf("gauge = %v", m)
+					}
+				case "longlived.counter":
+					if m.GetSum().AggregationTemporality != metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE {
+						t.Fatalf("long-lived counter = %v", m.GetSum())
+					}
+				}
+			}
+		}
+	}
+	for _, name := range []string{"agent.tool.calls", "active", "duration", "status"} {
+		if counts[name] != 2 {
+			t.Fatalf("%s emitted %d points", name, counts[name])
+		}
+	}
+	if counts["longlived.counter"] != 1 {
+		t.Fatalf("long-lived counter emitted %d points", counts["longlived.counter"])
+	}
+}
+
+func TestMetricHookChild(t *testing.T) {
+	value := os.Getenv("SCION_TEST_HOOK_PORT")
+	if value == "" {
+		return
+	}
+	port, err := strconv.Atoi(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers, err := NewProviders(context.Background(), &Config{Enabled: true, GRPCPort: port}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter, err := providers.MeterProvider.Meter(hookMetricScope).Int64Counter("agent.tool.calls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter.Add(context.Background(), 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := providers.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTenIndependentHookProcessesAcrossFlushWindows(t *testing.T) {
+	port := availableTCPPort(t)
+	cfg := &Config{Enabled: true, GRPCPort: port, HTTPPort: 0}
+	var totals []int64
+	p := NewWithConfig(cfg)
+	p.exporter = &CloudExporter{metricClient: &mockMetricClient{exportFunc: func(_ context.Context, req *colmetricpb.ExportMetricsServiceRequest, _ ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
+		for _, rm := range req.ResourceMetrics {
+			for _, sm := range rm.ScopeMetrics {
+				for _, m := range sm.Metrics {
+					if m.Name == "agent.tool.calls" {
+						totals = append(totals, m.GetSum().DataPoints[0].GetAsInt())
+					}
+				}
+			}
+		}
+		return &colmetricpb.ExportMetricsServiceResponse{}, nil
+	}}}
+	receiver := NewReceiver(cfg, nil, WithMetricHandler(p.handleMetrics))
+	if err := receiver.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = receiver.Stop(context.Background()) }()
+	for i := range 10 {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestMetricHookChild$", "-test.count=1")
+		cmd.Env = append(os.Environ(), fmt.Sprintf("SCION_TEST_HOOK_PORT=%d", port))
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("hook process %d: %v: %s", i, err, output)
+		}
+		if i == 4 {
+			p.flushMetricBuffer(context.Background(), true)
+		}
+	}
+	p.flushMetricBuffer(context.Background(), true)
+	if fmt.Sprint(totals) != "[5 10]" {
+		t.Fatalf("hook totals = %v", totals)
 	}
 }
 

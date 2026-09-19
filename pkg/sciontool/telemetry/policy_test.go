@@ -156,17 +156,22 @@ func TestReceiverPolicy_AllSignalsReachDestinationsProcessed(t *testing.T) {
 			Metrics: []*metricpb.Metric{{
 				Name: "synthetic.native.counter",
 				Data: &metricpb.Metric_Sum{Sum: &metricpb.Sum{DataPoints: []*metricpb.NumberDataPoint{{
-					Attributes: append(secretAttr("point.secret", "POINT_MARKER"), secretKV("session_id", "metric-session-raw")),
-					Exemplars:  []*metricpb.Exemplar{{FilteredAttributes: secretAttr("exemplar.secret", "EXEMPLAR_MARKER")}},
-				}}}},
+					StartTimeUnixNano: 1,
+					TimeUnixNano:      2,
+					Value:             &metricpb.NumberDataPoint_AsInt{AsInt: 7},
+					Attributes:        append(secretAttr("point.secret", "POINT_MARKER"), secretKV("session_id", "metric-session-raw")),
+					Exemplars:         []*metricpb.Exemplar{{FilteredAttributes: secretAttr("exemplar.secret", "EXEMPLAR_MARKER")}},
+				}}, AggregationTemporality: metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE}},
 			}},
 		}},
 	}}
 	if err := p.handleMetrics(context.Background(), metrics); err != nil {
 		t.Fatalf("handleMetrics: %v", err)
 	}
-	// The in-memory buffer is a local sink and must contain only processed data.
-	assertRedacted(t, p.metricBuf[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].Attributes, "point.secret")
+	// The stream state is a local sink and must contain only processed data.
+	for _, stream := range p.metricStreams.streams {
+		assertRedacted(t, stream.metric.GetSum().DataPoints[0].Attributes, "point.secret")
+	}
 	p.flushMetricBuffer(context.Background(), true)
 	if len(capturedMetrics) != 1 {
 		t.Fatalf("captured metrics = %#v, want one batch despite event include policy", capturedMetrics)
@@ -527,8 +532,8 @@ func TestReceiverPolicy_RejectsWholeRequestAcrossTransportsAndSignals(t *testing
 	if response, err := (&metricsServiceServer{handler: p.handleMetrics}).Export(context.Background(), metricRequest); response != nil || status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("metrics RPC response=%#v err=%v", response, err)
 	}
-	if got := p.policyRejectedDataPoints.Load(); got != 2 || len(p.metricBuf) != 0 {
-		t.Fatalf("metric rejection accounting=%d buffer=%d", got, len(p.metricBuf))
+	if got := p.policyRejectedDataPoints.Load(); got != 2 || p.metricStreams != nil {
+		t.Fatalf("metric rejection accounting=%d state=%v", got, p.metricStreams)
 	}
 	if got := p.policyRejectedRequests.Load(); got != 4 {
 		t.Fatalf("rejected request count=%d, want 4 (trace RPC, log RPC, trace HTTP, metric RPC)", got)

@@ -135,7 +135,11 @@ func (e *GCPExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics []
 		return nil
 	}
 
-	sdkMetrics := protoResourceMetricsToSDK(resourceMetrics)
+	identified, err := gcpIdentityMetrics(resourceMetrics)
+	if err != nil {
+		return err
+	}
+	sdkMetrics := protoResourceMetricsToSDK(identified)
 	var errs []error
 
 	for i := range sdkMetrics {

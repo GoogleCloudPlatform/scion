@@ -659,12 +659,15 @@ func TestTelemetryHandler_TokenMetricsOnModelEnd(t *testing.T) {
 	}
 }
 
-func TestTelemetryHandler_TokenMetricsOnSessionEnd(t *testing.T) {
+func TestTelemetryHandler_SessionTotalsDoNotDuplicateModelTokens(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer func() { _ = mp.Shutdown(context.Background()) }()
 
 	h := NewTelemetryHandler(nil, nil, nil, mp)
+	if err := h.Handle(&hooks.Event{Name: hooks.EventModelEnd, Data: hooks.EventData{Success: true, InputTokens: 1500, OutputTokens: 500}}); err != nil {
+		t.Fatal(err)
+	}
 
 	// session-end with cumulative token usage
 	if err := h.Handle(&hooks.Event{
@@ -684,20 +687,23 @@ func TestTelemetryHandler_TokenMetricsOnSessionEnd(t *testing.T) {
 	}
 
 	found := map[string]bool{}
+	totals := map[string]int64{}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
 			found[m.Name] = true
+			if sum, ok := m.Data.(metricdata.Sum[int64]); ok {
+				for _, point := range sum.DataPoints {
+					totals[m.Name] += point.Value
+				}
+			}
 		}
 	}
 
 	if !found["agent.session.count"] {
 		t.Error("expected agent.session.count metric to be recorded")
 	}
-	if !found["gen_ai.tokens.input"] {
-		t.Error("expected gen_ai.tokens.input metric to be recorded on session-end")
-	}
-	if !found["gen_ai.tokens.output"] {
-		t.Error("expected gen_ai.tokens.output metric to be recorded on session-end")
+	if totals["gen_ai.tokens.input"] != 1500 || totals["gen_ai.tokens.output"] != 500 {
+		t.Errorf("session totals duplicated model increments: input=%d output=%d", totals["gen_ai.tokens.input"], totals["gen_ai.tokens.output"])
 	}
 }
 

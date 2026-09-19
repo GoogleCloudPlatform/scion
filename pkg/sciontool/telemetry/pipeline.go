@@ -10,8 +10,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,7 +19,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
-	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
@@ -34,18 +31,6 @@ import (
 // Monitoring. This prevents sampling-rate violations when multiple short-lived
 // processes (hooks) send metrics in rapid succession.
 const metricFlushInterval = 15 * time.Second
-
-// maxMetricBufCap is the maximum number of ResourceMetrics batches kept in
-// the re-buffer when metric export fails after retries are exhausted. This
-// prevents unbounded memory growth — it allows roughly 2x the normal inflow
-// between flush intervals to accumulate before older entries are discarded.
-const maxMetricBufCap = 100
-
-// maxConsecutiveFlushFailures is the maximum number of consecutive metric
-// flush failures before the pipeline stops re-buffering failed metrics.
-// This prevents an indefinite retry loop when the backend is persistently
-// unreachable (e.g. missing credentials or project ID).
-const maxConsecutiveFlushFailures = 5
 
 // Pipeline orchestrates the telemetry collection and forwarding.
 type Pipeline struct {
@@ -68,14 +53,15 @@ type Pipeline struct {
 	policyRejectedDataPoints atomic.Int64
 	policyRejectedRequests   atomic.Int64
 
-	metricBuf             []*metricpb.ResourceMetrics
-	metricBufMu           sync.Mutex
-	metricFlushCtx        context.Context
-	metricFlushCnl        context.CancelFunc
-	metricLastFlush       time.Time
-	metricFlushWg         sync.WaitGroup
-	metricConsecFailures  int  // consecutive flush failures
-	metricRebufferStopped bool // true when re-buffering is disabled due to too many failures
+	metricStateMu        sync.Mutex
+	metricExportMu       sync.Mutex
+	metricStreams        *metricStreams
+	metricPending        []*metricpb.ResourceMetrics
+	metricRejectedPoints atomic.Int64
+	metricFlushCtx       context.Context
+	metricFlushCnl       context.CancelFunc
+	metricLastFlush      time.Time
+	metricFlushWg        sync.WaitGroup
 }
 
 // New creates a new telemetry pipeline.
@@ -242,19 +228,32 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 		p.healthCancel = nil
 	}
 
-	// Stop metric flush goroutine and drain remaining buffered metrics.
+	// Stop metric flush goroutine, then stop admission before the final drain.
 	if p.metricFlushCnl != nil {
 		p.metricFlushCnl()
 		p.metricFlushCnl = nil
 	}
 	p.metricFlushWg.Wait()
-	p.flushMetricBuffer(ctx, true)
-
-	// Stop receiver first
 	if p.receiver != nil {
 		if err := p.receiver.Stop(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("receiver stop error: %w", err))
 		}
+	}
+	p.flushMetricBuffer(ctx, false)
+	p.metricStateMu.Lock()
+	residualPending := len(p.metricPending)
+	residualDirty := 0
+	if p.metricStreams != nil {
+		for _, stream := range p.metricStreams.streams {
+			if stream.dirty {
+				residualDirty++
+			}
+		}
+	}
+	p.metricStateMu.Unlock()
+	if residualPending != 0 || residualDirty != 0 {
+		log.Error("Telemetry metric shutdown residual: %d pending streams, %d newer dirty streams", residualPending, residualDirty)
+		errs = append(errs, fmt.Errorf("metric shutdown residual: pending=%d dirty=%d", residualPending, residualDirty))
 	}
 
 	// Shutdown exporter to flush any buffered spans
@@ -358,10 +357,21 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 	}
 
 	if p.exporter != nil {
-		p.metricBufMu.Lock()
-		p.metricBuf = append(p.metricBuf, processed...)
-		p.metricBufMu.Unlock()
-		log.Debug("Buffered %d policy-processed resource metric batches for export", len(processed))
+		p.metricStateMu.Lock()
+		if p.metricStreams == nil {
+			p.metricStreams = newMetricStreams()
+			p.metricStreams.gcp = p.config.IsGCP()
+		}
+		candidate := p.metricStreams.clone()
+		if err := candidate.add(processed); err != nil {
+			p.metricStreams.rejected[err.Error()]++
+			p.metricRejectedPoints.Add(int64(countMetricPoints(processed)))
+			p.metricStateMu.Unlock()
+			return status.Error(codes.InvalidArgument, err.Error())
+		}
+		p.metricStreams = candidate
+		p.metricStateMu.Unlock()
+		log.Debug("Accepted %d policy-processed resource metric batches", len(processed))
 	} else {
 		metricCount := 0
 		for _, rm := range processed {
@@ -377,7 +387,7 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 	return nil
 }
 
-// metricFlushLoop periodically flushes buffered metrics to Cloud Monitoring.
+// metricFlushLoop periodically flushes metric streams to Cloud Monitoring.
 func (p *Pipeline) metricFlushLoop() {
 	ticker := time.NewTicker(metricFlushInterval)
 	defer ticker.Stop()
@@ -391,36 +401,38 @@ func (p *Pipeline) metricFlushLoop() {
 	}
 }
 
-// flushMetricBuffer deduplicates and exports buffered metrics to Cloud Monitoring.
-// For cumulative metrics from short-lived hook processes, multiple data points may
-// exist for the same metric+attributes combination. Only the latest data point is
-// kept to avoid Cloud Monitoring sampling-rate violations.
+// flushMetricBuffer exports one immutable cumulative snapshot at a time.
 //
 // Cloud Monitoring requires a minimum 10-second interval between writes for the
 // same time series. This method enforces metricFlushInterval between exports to
 // prevent rapid consecutive flushes (e.g. periodic tick followed by shutdown drain)
-// from triggering sampling-rate rejections. Pass force=true during shutdown to
-// bypass the interval check and drain all remaining buffered metrics.
+// from triggering sampling-rate rejections. Tests may force a flush; shutdown
+// observes the cadence and reports residual state if it cannot drain safely.
 func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) {
-	p.metricBufMu.Lock()
-	buf := p.metricBuf
+	p.metricExportMu.Lock()
+	defer p.metricExportMu.Unlock()
+	p.metricStateMu.Lock()
 	sinceLastFlush := time.Since(p.metricLastFlush)
-	if len(buf) > 0 && !force && sinceLastFlush < metricFlushInterval {
-		p.metricBufMu.Unlock()
+	if !force && sinceLastFlush < metricFlushInterval {
+		p.metricStateMu.Unlock()
 		log.Debug("Skipping metric flush — last export was %v ago (minimum %v)", sinceLastFlush.Round(time.Millisecond), metricFlushInterval)
 		return
 	}
-	p.metricBuf = nil
-	p.metricBufMu.Unlock()
+	if p.metricStreams == nil {
+		p.metricStreams = newMetricStreams()
+	}
+	if len(p.metricPending) == 0 {
+		p.metricPending = p.metricStreams.snapshot()
+	}
+	batch := p.metricPending
+	p.metricStateMu.Unlock()
 
-	if len(buf) == 0 || p.exporter == nil {
+	if len(batch) == 0 || p.exporter == nil {
 		return
 	}
 
-	deduped := deduplicateMetrics(buf)
-
 	metricCount := 0
-	for _, rm := range deduped {
+	for _, rm := range batch {
 		for _, sm := range rm.ScopeMetrics {
 			metricCount += len(sm.Metrics)
 		}
@@ -429,193 +441,31 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) {
 	// Pipeline-level retry on top of gRPC/SDK transport retry — see
 	// handleSpans for the rationale on intentional double-retry layering.
 	err := retryExport(ctx, p.retryConfig, "metrics", func() error {
-		return p.exporter.ExportProtoMetrics(ctx, deduped)
+		return p.exporter.ExportProtoMetrics(ctx, batch)
 	})
 	if err != nil {
 		p.recordExportError(ctx, "metrics", err)
-		log.Error("Failed to export %d buffered metrics to cloud: %v", metricCount, err)
-
-		p.metricBufMu.Lock()
-		p.metricConsecFailures++
-		if p.metricConsecFailures >= maxConsecutiveFlushFailures {
-			if !p.metricRebufferStopped {
-				p.metricRebufferStopped = true
-				failures := p.metricConsecFailures
-				p.metricBufMu.Unlock()
-				slog.Warn("cloud telemetry metric export has failed repeatedly — stopping metric re-buffering until export succeeds",
-					"consecutive_failures", failures,
-					"hint", "check that SCION_GCP_PROJECT_ID is set and credentials are valid",
-				)
-			} else {
-				p.metricBufMu.Unlock()
-			}
-			return
-		}
-		// Re-buffer failed metrics so they can be retried on the next flush
-		// cycle. Cap the buffer to maxMetricBufCap to avoid unbounded growth.
-		// Prepend the failed metrics so they remain the oldest in the buffer,
-		// and newly accumulated metrics remain the newest.
-		p.metricBuf = append(deduped, p.metricBuf...)
-		if len(p.metricBuf) > maxMetricBufCap {
-			log.Error("Metric re-buffer exceeds cap (%d > %d), discarding oldest entries", len(p.metricBuf), maxMetricBufCap)
-			discardCount := len(p.metricBuf) - maxMetricBufCap
-			// Nil out discarded pointers to prevent memory leaks
-			for i := 0; i < discardCount; i++ {
-				p.metricBuf[i] = nil
-			}
-			p.metricBuf = p.metricBuf[discardCount:]
-		}
-		p.metricBufMu.Unlock()
+		log.Error("Failed to export %d metric streams to cloud: %v", metricCount, err)
 		return
 	}
-	p.metricBufMu.Lock()
-	p.metricConsecFailures = 0
-	p.metricRebufferStopped = false
+	p.metricStateMu.Lock()
+	p.metricPending = nil
+	p.metricStreams.delivered()
 	p.metricLastFlush = time.Now()
-	p.metricBufMu.Unlock()
-	log.Debug("Exported %d buffered metrics to cloud", metricCount)
+	p.metricStateMu.Unlock()
+	log.Debug("Exported %d metric streams to cloud", metricCount)
 }
 
-// deduplicateMetrics merges multiple ResourceMetrics into one, keeping only the
-// latest data point per (metric name, attribute set) for Sum metrics. This
-// prevents Cloud Monitoring sampling-rate violations when multiple hook processes
-// report the same cumulative counter within a short window.
-func deduplicateMetrics(rms []*metricpb.ResourceMetrics) []*metricpb.ResourceMetrics {
-	if len(rms) <= 1 {
-		return rms
-	}
-
-	// Flatten all metrics into a single ResourceMetrics, deduplicating data points.
-	// Key: "scope/metricname" → Metric with deduplicated data points.
-	type metricKey struct {
-		scope  string
-		metric string
-	}
-	latest := make(map[metricKey]*metricpb.Metric)
-
-	var resource *metricpb.ResourceMetrics
+func countMetricPoints(rms []*metricpb.ResourceMetrics) int {
+	count := 0
 	for _, rm := range rms {
-		if rm == nil {
-			continue
-		}
-		if resource == nil {
-			resource = rm
-		}
-		for _, sm := range rm.ScopeMetrics {
-			scopeName := ""
-			if sm.Scope != nil {
-				scopeName = sm.Scope.Name
-			}
-			for _, m := range sm.Metrics {
-				key := metricKey{scope: scopeName, metric: m.Name}
-				existing, ok := latest[key]
-				if !ok {
-					latest[key] = m
-					continue
-				}
-				// For Sum metrics, keep only the data point with the latest timestamp
-				// per attribute set. For other types, keep the latest metric entirely.
-				merged := mergeMetricDataPoints(existing, m)
-				latest[key] = merged
+		for _, sm := range rm.GetScopeMetrics() {
+			for _, m := range sm.GetMetrics() {
+				count += len(m.GetSum().GetDataPoints()) + len(m.GetGauge().GetDataPoints()) + len(m.GetHistogram().GetDataPoints())
 			}
 		}
 	}
-
-	if resource == nil || len(latest) == 0 {
-		return nil
-	}
-
-	// Rebuild scope→metrics structure.
-	scopeMetrics := make(map[string][]*metricpb.Metric)
-	for key, m := range latest {
-		scopeMetrics[key.scope] = append(scopeMetrics[key.scope], m)
-	}
-	sms := make([]*metricpb.ScopeMetrics, 0, len(scopeMetrics))
-	for _, metrics := range scopeMetrics {
-		sms = append(sms, &metricpb.ScopeMetrics{Metrics: metrics})
-	}
-	return []*metricpb.ResourceMetrics{{
-		Resource:     resource.Resource,
-		ScopeMetrics: sms,
-	}}
-}
-
-// mergeMetricDataPoints merges two proto metrics with the same name, keeping
-// the latest data point per attribute set for Sum types.
-func mergeMetricDataPoints(a, b *metricpb.Metric) *metricpb.Metric {
-	aSum, aOK := a.Data.(*metricpb.Metric_Sum)
-	bSum, bOK := b.Data.(*metricpb.Metric_Sum)
-	if !aOK || !bOK {
-		// For non-Sum metrics, keep the one with the latest timestamp
-		return b
-	}
-
-	// Dedup by attribute set: keep the data point with the latest TimeUnixNano.
-	type attrKey string
-	pointMap := make(map[attrKey]*metricpb.NumberDataPoint)
-	for _, dp := range aSum.Sum.DataPoints {
-		key := attrKey(attrSetKey(dp.Attributes))
-		pointMap[key] = dp
-	}
-	for _, dp := range bSum.Sum.DataPoints {
-		key := attrKey(attrSetKey(dp.Attributes))
-		existing, ok := pointMap[key]
-		if !ok || dp.TimeUnixNano > existing.TimeUnixNano {
-			pointMap[key] = dp
-		}
-	}
-
-	merged := make([]*metricpb.NumberDataPoint, 0, len(pointMap))
-	for _, dp := range pointMap {
-		merged = append(merged, dp)
-	}
-	return &metricpb.Metric{
-		Name:        a.Name,
-		Description: a.Description,
-		Unit:        a.Unit,
-		Data: &metricpb.Metric_Sum{
-			Sum: &metricpb.Sum{
-				DataPoints:             merged,
-				AggregationTemporality: aSum.Sum.AggregationTemporality,
-				IsMonotonic:            aSum.Sum.IsMonotonic,
-			},
-		},
-	}
-}
-
-// attrSetKey creates a stable string key from a list of proto attributes.
-// Attributes are copied and sorted by key to ensure a stable, order-independent key.
-func attrSetKey(attrs []*commonpb.KeyValue) string {
-	if len(attrs) == 0 {
-		return ""
-	}
-	sorted := make([]*commonpb.KeyValue, len(attrs))
-	copy(sorted, attrs)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Key < sorted[j].Key
-	})
-
-	var b strings.Builder
-	for i, kv := range sorted {
-		if i > 0 {
-			b.WriteByte(';')
-		}
-		b.WriteString(kv.Key)
-		b.WriteByte('=')
-		if kv.Value != nil {
-			switch v := kv.Value.GetValue().(type) {
-			case *commonpb.AnyValue_StringValue:
-				b.WriteString(v.StringValue)
-			case *commonpb.AnyValue_BoolValue:
-				b.WriteString(strconv.FormatBool(v.BoolValue))
-			case *commonpb.AnyValue_IntValue:
-				b.WriteString(strconv.FormatInt(v.IntValue, 10))
-			case *commonpb.AnyValue_DoubleValue:
-				b.WriteString(strconv.FormatFloat(v.DoubleValue, 'f', -1, 64))
-			}
-		}
-	}
-	return b.String()
+	return count
 }
 
 // handleLogs processes incoming logs from the receiver.

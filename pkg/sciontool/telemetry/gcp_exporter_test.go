@@ -75,6 +75,7 @@ func TestGCPExporter_PostAdapterCapturesProcessedMetricScopeAndSchema(t *testing
 	if decision.Reason != "" {
 		t.Fatal(decision.Reason)
 	}
+	assertRedacted(t, decision.Data[0].ScopeMetrics[0].Scope.Attributes, "scope.secret")
 	if err := exporter.ExportProtoMetrics(context.Background(), decision.Data); err != nil {
 		t.Fatal(err)
 	}
@@ -85,8 +86,8 @@ func TestGCPExporter_PostAdapterCapturesProcessedMetricScopeAndSchema(t *testing
 	if got.Resource.SchemaURL() != "https://example.test/resource" || got.ScopeMetrics[0].Scope.SchemaURL != "https://example.test/scope" {
 		t.Fatalf("post-adapter schema: resource=%q scope=%q", got.Resource.SchemaURL(), got.ScopeMetrics[0].Scope.SchemaURL)
 	}
-	if value, ok := got.ScopeMetrics[0].Scope.Attributes.Value("scope.secret"); !ok || value.AsString() != "[REDACTED]" {
-		t.Fatalf("post-adapter scope attributes: %v", got.ScopeMetrics[0].Scope.Attributes)
+	if _, ok := got.ScopeMetrics[0].Scope.Attributes.Value("scope.secret"); ok {
+		t.Fatalf("Cloud adapter retained disallowed scope dimension: %v", got.ScopeMetrics[0].Scope.Attributes)
 	}
 }
 
@@ -204,7 +205,7 @@ func TestGCPExporter_ExportProtoMetrics(t *testing.T) {
 	}
 }
 
-func TestGCPExporter_ExportProtoMetrics_FiltersUnsupportedSummary(t *testing.T) {
+func TestGCPExporter_ExportProtoMetrics_RejectsUnsupportedSummary(t *testing.T) {
 	exp := &captureMetricExporter{}
 	exporter := &GCPExporter{metricExporter: exp}
 
@@ -235,8 +236,8 @@ func TestGCPExporter_ExportProtoMetrics_FiltersUnsupportedSummary(t *testing.T) 
 			},
 		},
 	})
-	if err != nil {
-		t.Fatalf("ExportProtoMetrics() error = %v", err)
+	if err == nil {
+		t.Fatal("unsupported summary returned nil success")
 	}
 	if len(exp.exports) != 0 {
 		t.Fatalf("len(exports) = %d, want 0", len(exp.exports))

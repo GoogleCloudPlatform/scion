@@ -7,7 +7,6 @@ package telemetry
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 
@@ -19,9 +18,7 @@ import (
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
-	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
-	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
@@ -374,157 +371,6 @@ func TestHandleLogs_NoRetryOnAuthError(t *testing.T) {
 	}
 }
 
-// --- Metric re-buffer tests ---
-
-func TestFlushMetricBuffer_RebufferOnExhaustion(t *testing.T) {
-	metricClient := &mockMetricClient{
-		exportFunc: func(_ context.Context, _ *colmetricpb.ExportMetricsServiceRequest, _ ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
-			return nil, errors.New("temporary failure")
-		},
-	}
-
-	p := newTestPipelineWithExporter(nil, metricClient, nil)
-	p.retryConfig = fastRetryConfig()
-
-	// Add metrics to buffer
-	testMetrics := []*metricpb.ResourceMetrics{
-		{ScopeMetrics: []*metricpb.ScopeMetrics{{Metrics: []*metricpb.Metric{{Name: "test.metric"}}}}},
-	}
-	p.metricBuf = testMetrics
-
-	// Flush (should fail and re-buffer)
-	p.flushMetricBuffer(context.Background(), true)
-
-	p.metricBufMu.Lock()
-	bufLen := len(p.metricBuf)
-	p.metricBufMu.Unlock()
-
-	if bufLen == 0 {
-		t.Error("expected metrics to be re-buffered after export failure")
-	}
-}
-
-func TestFlushMetricBuffer_RebufferCapped(t *testing.T) {
-	// makeDistinct creates n ResourceMetrics with unique scope+metric names
-	// so deduplicateMetrics does not collapse them.
-	makeDistinct := func(n int, prefix string) []*metricpb.ResourceMetrics {
-		out := make([]*metricpb.ResourceMetrics, n)
-		for i := range out {
-			out[i] = &metricpb.ResourceMetrics{
-				ScopeMetrics: []*metricpb.ScopeMetrics{{
-					Scope:   &commonpb.InstrumentationScope{Name: fmt.Sprintf("%s.scope.%d", prefix, i)},
-					Metrics: []*metricpb.Metric{{Name: fmt.Sprintf("%s.metric.%d", prefix, i)}},
-				}},
-			}
-		}
-		return out
-	}
-
-	// The mock export function simulates concurrent handleMetrics calls
-	// flooding the buffer during the retry window. flushMetricBuffer sets
-	// metricBuf = nil before calling the exporter, so entries added here
-	// accumulate in the buffer while the export retries. After retries
-	// exhaust, the re-buffer appends deduped data on top of these entries.
-	var p *Pipeline
-	metricClient := &mockMetricClient{
-		exportFunc: func(_ context.Context, _ *colmetricpb.ExportMetricsServiceRequest, _ ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
-			// Simulate concurrent handleMetrics adding entries during retry.
-			p.metricBufMu.Lock()
-			p.metricBuf = append(p.metricBuf, makeDistinct(maxMetricBufCap/2, "concurrent")...)
-			p.metricBufMu.Unlock()
-			return nil, errors.New("temporary failure")
-		},
-	}
-
-	p = newTestPipelineWithExporter(nil, metricClient, nil)
-	p.retryConfig = fastRetryConfig()
-
-	// Seed the buffer with one batch.
-	p.metricBuf = makeDistinct(10, "initial")
-
-	// Flush — export fails on every attempt. Each attempt adds
-	// maxMetricBufCap/2 entries to the buffer (simulating concurrent
-	// handleMetrics calls). After 4 attempts (1 + 3 retries) the buffer
-	// holds 4*(maxMetricBufCap/2) = 2*maxMetricBufCap entries, plus the
-	// re-buffered deduped batch. The cap should trim it.
-	p.flushMetricBuffer(context.Background(), true)
-
-	p.metricBufMu.Lock()
-	bufLen := len(p.metricBuf)
-	p.metricBufMu.Unlock()
-
-	if bufLen > maxMetricBufCap {
-		t.Errorf("re-buffer exceeded cap: got %d, max %d", bufLen, maxMetricBufCap)
-	}
-	if bufLen == 0 {
-		t.Error("expected re-buffered metrics, got empty buffer")
-	}
-}
-
-func TestFlushMetricBuffer_SuccessfulExport(t *testing.T) {
-	exported := false
-	metricClient := &mockMetricClient{
-		exportFunc: func(_ context.Context, _ *colmetricpb.ExportMetricsServiceRequest, _ ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
-			exported = true
-			return &colmetricpb.ExportMetricsServiceResponse{}, nil
-		},
-	}
-
-	p := newTestPipelineWithExporter(nil, metricClient, nil)
-	p.retryConfig = fastRetryConfig()
-
-	p.metricBuf = []*metricpb.ResourceMetrics{
-		{ScopeMetrics: []*metricpb.ScopeMetrics{{Metrics: []*metricpb.Metric{{Name: "test"}}}}},
-	}
-
-	p.flushMetricBuffer(context.Background(), true)
-
-	if !exported {
-		t.Error("expected metrics to be exported")
-	}
-
-	p.metricBufMu.Lock()
-	bufLen := len(p.metricBuf)
-	p.metricBufMu.Unlock()
-
-	if bufLen != 0 {
-		t.Errorf("expected empty buffer after successful export, got %d", bufLen)
-	}
-}
-
-func TestFlushMetricBuffer_SuccessAfterRetry(t *testing.T) {
-	calls := 0
-	metricClient := &mockMetricClient{
-		exportFunc: func(_ context.Context, _ *colmetricpb.ExportMetricsServiceRequest, _ ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
-			calls++
-			if calls < 2 {
-				return nil, context.DeadlineExceeded
-			}
-			return &colmetricpb.ExportMetricsServiceResponse{}, nil
-		},
-	}
-
-	p := newTestPipelineWithExporter(nil, metricClient, nil)
-	p.retryConfig = fastRetryConfig()
-
-	p.metricBuf = []*metricpb.ResourceMetrics{
-		{ScopeMetrics: []*metricpb.ScopeMetrics{{Metrics: []*metricpb.Metric{{Name: "test"}}}}},
-	}
-
-	p.flushMetricBuffer(context.Background(), true)
-
-	p.metricBufMu.Lock()
-	bufLen := len(p.metricBuf)
-	p.metricBufMu.Unlock()
-
-	if bufLen != 0 {
-		t.Errorf("expected empty buffer after successful retry, got %d", bufLen)
-	}
-	if calls != 2 {
-		t.Errorf("expected 2 export calls, got %d", calls)
-	}
-}
-
 // --- gRPC error classification tests ---
 
 func TestClassifyError_GRPCUnauthenticated(t *testing.T) {
@@ -578,99 +424,5 @@ func TestIsRetryable_GRPCAuth(t *testing.T) {
 				t.Errorf("isRetryable(gRPC %s) = %v, want %v", tt.name, got, tt.retryable)
 			}
 		})
-	}
-}
-
-// --- Consecutive flush failure bounding tests ---
-
-func TestFlushMetricBuffer_StopsRebufferAfterConsecutiveFailures(t *testing.T) {
-	metricClient := &mockMetricClient{
-		exportFunc: func(_ context.Context, _ *colmetricpb.ExportMetricsServiceRequest, _ ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
-			return nil, errors.New("persistent backend failure")
-		},
-	}
-
-	p := newTestPipelineWithExporter(nil, metricClient, nil)
-	p.retryConfig = fastRetryConfig()
-
-	// Simulate maxConsecutiveFlushFailures flush cycles
-	for i := 0; i < maxConsecutiveFlushFailures+1; i++ {
-		p.metricBufMu.Lock()
-		p.metricBuf = []*metricpb.ResourceMetrics{
-			{ScopeMetrics: []*metricpb.ScopeMetrics{{Metrics: []*metricpb.Metric{{Name: fmt.Sprintf("test.%d", i)}}}}},
-		}
-		p.metricBufMu.Unlock()
-		p.flushMetricBuffer(context.Background(), true)
-	}
-
-	p.metricBufMu.Lock()
-	stopped := p.metricRebufferStopped
-	bufLen := len(p.metricBuf)
-	p.metricBufMu.Unlock()
-
-	if !stopped {
-		t.Error("expected metricRebufferStopped to be true after max consecutive failures")
-	}
-	// After stopping, the buffer should be empty because the last flush
-	// did not re-buffer the failed metrics
-	if bufLen != 0 {
-		t.Errorf("expected empty buffer after re-buffer stopped, got %d", bufLen)
-	}
-}
-
-func TestFlushMetricBuffer_ResetsFailureCountOnSuccess(t *testing.T) {
-	// Track flush-level calls (each flush may have up to 4 export attempts
-	// due to retryExport). Use a counter per flush to control behavior.
-	flushNum := 0
-	metricClient := &mockMetricClient{
-		exportFunc: func(_ context.Context, _ *colmetricpb.ExportMetricsServiceRequest, _ ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
-			// Flushes 1-3: always fail. Flush 4+: succeed.
-			if flushNum <= 3 {
-				return nil, errors.New("persistent failure")
-			}
-			return &colmetricpb.ExportMetricsServiceResponse{}, nil
-		},
-	}
-
-	p := newTestPipelineWithExporter(nil, metricClient, nil)
-	p.retryConfig = fastRetryConfig()
-
-	// Run 3 failing flushes
-	for i := 0; i < 3; i++ {
-		flushNum = i + 1
-		p.metricBufMu.Lock()
-		p.metricBuf = []*metricpb.ResourceMetrics{
-			{ScopeMetrics: []*metricpb.ScopeMetrics{{Metrics: []*metricpb.Metric{{Name: fmt.Sprintf("test.%d", i)}}}}},
-		}
-		p.metricBufMu.Unlock()
-		p.flushMetricBuffer(context.Background(), true)
-	}
-
-	p.metricBufMu.Lock()
-	failCount := p.metricConsecFailures
-	p.metricBufMu.Unlock()
-	if failCount != 3 {
-		t.Errorf("expected 3 consecutive failures, got %d", failCount)
-	}
-
-	// Now run a successful flush
-	flushNum = 4
-	p.metricBufMu.Lock()
-	p.metricBuf = []*metricpb.ResourceMetrics{
-		{ScopeMetrics: []*metricpb.ScopeMetrics{{Metrics: []*metricpb.Metric{{Name: "success"}}}}},
-	}
-	p.metricBufMu.Unlock()
-	p.flushMetricBuffer(context.Background(), true)
-
-	p.metricBufMu.Lock()
-	failCount = p.metricConsecFailures
-	stopped := p.metricRebufferStopped
-	p.metricBufMu.Unlock()
-
-	if failCount != 0 {
-		t.Errorf("expected failure count reset to 0 after success, got %d", failCount)
-	}
-	if stopped {
-		t.Error("expected metricRebufferStopped to be false after successful flush")
 	}
 }
