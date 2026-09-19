@@ -521,8 +521,24 @@ func cursorPayloadEvidence(payload []byte) string {
 }
 
 func cursorSSEEvidence(event sseWireEvent) string {
-	return fmt.Sprintf("received_at=%s event_type=%q sse_id=%s %s",
+	return fmt.Sprintf("received_at=%s event_type=%s sse_id=%s %s",
 		event.receivedAt.UTC().Format(time.RFC3339Nano), cursorEventType(event.eventType), cursorUUID(event.id), cursorPayloadEvidence(event.data))
+}
+
+func TestCursorDiagnosticQuoteFree(t *testing.T) {
+	for _, eventType := range []string{"", "message", "error", "status", "artifact", "secret\"canary"} {
+		evidence := cursorSSEEvidence(sseWireEvent{
+			eventType: eventType,
+			id:        "550e8400-e29b-41d4-a716-446655440000",
+			data:      []byte(`{"token":"secret-canary"}`),
+		})
+		if strings.ContainsAny(evidence, "\"\\\n\r") || strings.Contains(evidence, "secret") {
+			t.Fatal("diagnostic contains unsafe characters or raw content")
+		}
+		if !strings.Contains(evidence, "sse_id=550e8400-e29b-41d4-a716-446655440000") || !strings.Contains(evidence, "sha256=") {
+			t.Fatal("diagnostic lost correlation fields")
+		}
+	}
 }
 
 func TestCrossReplicaStreamCursor(t *testing.T) {
