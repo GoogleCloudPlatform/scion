@@ -161,14 +161,17 @@ export class ScionPageAgents extends LitElement {
          wrapping the meta lines into a narrow ribbon. Growing into the space
          the badges leave keeps names readable and truncation a last resort. */
       .agent-header > div {
-        /* The floor is what makes flex-wrap fire: with min-width:0 the column
-           would shrink indefinitely and the badges would never wrap, which is
-           how the name ended up as "anot…" on a card with space to spare.
-           Below this width the badges move to the next line and the name gets
-           the full card instead. Long names still truncate inside
-           .resource-name, which keeps its own min-width:0 and overflow. */
-        min-width: 11rem;
-        flex: 1 1 11rem;
+        /* Full-width basis, so the badges always wrap to their own row rather
+           than sometimes fitting beside the name and sometimes not. A per-card
+           decision left the grid looking ragged — one card with its status
+           badge on the title row, the next with it underneath.
+
+           This also removes the crushing problem at its root: the name column
+           is never asked to share the row, so it cannot be squeezed down to a
+           few characters. Long names still truncate inside .resource-name,
+           which keeps its own min-width:0 and overflow. */
+        flex: 1 1 100%;
+        min-width: 0;
       }
 
       /* The badges keep their intrinsic size so the name absorbs the
