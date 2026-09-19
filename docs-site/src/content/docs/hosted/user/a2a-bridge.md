@@ -50,6 +50,26 @@ The A2A Bridge supports High Availability (HA) natively through a **leaderless a
 
 HA mode requires **standalone mode** (`--standalone` flag or `A2A_STANDALONE=true`) with a shared **PostgreSQL** backend (`DATABASE_URL`). This replaces the default local SQLite store so that all replicas share webhook subscriptions, task state, and admin configuration. Without a shared database, per-replica local state (SQLite) would drift across replicas and be lost on restart — making SQLite unsuitable for multi-replica or ephemeral deployments like Cloud Run.
 
+#### Durable Task State
+In standalone/HA mode, the bridge stores A2A SDK tasks in PostgreSQL with authoritative ownership, cross-replica correlation, and execution leases. Key properties:
+- **Execution Leases**: Each task's Hub-bound send is serialized via an `exec_owner`/`exec_heartbeat` lease — only one replica processes a task at a time, preventing duplicate messages to agents.
+- **Atomic Crash Recovery**: On startup and periodically, stale leases (where the owning replica stopped heartbeating) are automatically reaped and the tasks transitioned to a failed state.
+- **Event Deduplication**: Task events and artifacts are deduplicated by a `dedup_key`, ensuring idempotent delivery across replicas.
+- **LISTEN/NOTIFY Acceleration**: PostgreSQL's `LISTEN`/`NOTIFY` mechanism accelerates event delivery to waiting subscribers, supplementing the polling-based correctness floor.
+
+#### Authenticated gRPC Transport
+In standalone mode, the Hub communicates with the bridge via gRPC instead of the in-process `go-plugin` RPC. This transport supports fail-closed authentication:
+
+| Environment Variable | Description |
+| :--- | :--- |
+| `GRPC_AUTH_MODE` | Auth mode for incoming Hub gRPC RPCs: `google_id_token` or `local_dev`. Required for non-local listen addresses. |
+| `GRPC_AUTH_AUDIENCE` | Expected audience claim in Google ID tokens (required when mode is `google_id_token`). |
+| `GRPC_AUTH_SUBJECTS` | Comma-separated allowlist of authorized service account emails (required when mode is `google_id_token`). |
+| `GRPC_TLS_CERT` / `GRPC_TLS_KEY` | Server TLS certificate and key (for Kubernetes deployments; ignored in Cloud Run mux mode). |
+| `GRPC_TLS_CLIENT_CA` | Client CA for mTLS verification (optional). |
+
+On the Hub side, the plugin configuration in `settings.yaml` specifies `mode: "grpc"` with `address`, `auth_type`, and optional TLS fields for the outbound connection to the bridge.
+
 #### Single-Port h2c Multiplexing (Cloud Run)
 Google Cloud Run enforces a strict single-port limitation for incoming traffic. To run both the A2A HTTP server and the Broker Plugin RPC gRPC server on a single container port, the bridge implements **h2c port multiplexing**:
 - **Auto-Detection**: The bridge automatically detects when it is running on Cloud Run by checking for the presence of the `K_SERVICE` environment variable.
@@ -169,7 +189,7 @@ plugin:
 
 # Client Authentication
 auth:
-  # Schemes: "apiKey", "bearer", "hubUAT", "hubJWT", or "none" (not recommended)
+  # Schemes: "apiKey", "bearer", "hubUAT", "hubJWT", "geGoogle", "oidcFederation", or "none" (not recommended)
   scheme: "apiKey"
   
   # Static key (required only for "apiKey" and "bearer" schemes).
@@ -178,6 +198,11 @@ auth:
 
   # UAT validation cache duration for "hubUAT" scheme (default: 60s, max: 300s).
   uat_cache_ttl: 60s
+
+  # Google credential exchange settings (required only for "geGoogle" scheme).
+  # ge_exchange:
+  #   credential_type: "id_token"  # "id_token" or "access_token"
+  #   cache_ttl: 60s               # max 300s; capped by token expiry
 
 # SQLite State Database
 state:
@@ -333,7 +358,22 @@ The A2A bridge supports three authentication schemes for granular access control
 * **How it works**: Callers present a Scion-signed User JWT.
 * **Local Validation**: The bridge validates the JWT signature locally using the HS256 `hub.signing_key` secret shared with the Hub. Since this happens entirely locally, it requires no active API calls to the Hub, making it extremely fast.
 
-#### 3. `oidcFederation` (For Federated Access)
+#### 3. `geGoogle` (For Google Cloud Environments)
+* **How it works**: Callers present a Google credential (ID token or access token) in the `Authorization: Bearer` header. The bridge exchanges it with the Hub for a short-lived Hub user token via the `/api/v1/auth/integrations/google/exchange` endpoint.
+* **Credential Types**: Supports both `id_token` and `access_token` via `auth.ge_exchange.credential_type`.
+* **LRU Cache**: Validated tokens are cached per-replica with a configurable TTL (`auth.ge_exchange.cache_ttl`, default `60s`, max `300s`). The effective TTL is capped at the minimum of the configured value, the Hub token expiry, and the upstream Google credential expiry. Expired tokens fail closed (never cached).
+* **No Refresh Tokens**: This scheme is designed for short-lived credentials only. Clients must rotate credentials upstream.
+
+Configure in `scion-a2a-bridge.yaml`:
+```yaml
+auth:
+  scheme: "geGoogle"
+  ge_exchange:
+    credential_type: "id_token"  # or "access_token"
+    cache_ttl: 60s               # max 300s
+```
+
+#### 4. `oidcFederation` (For Federated Access)
 * **How it works**: Callers present an OIDC ID token issued by a trusted federation provider.
 * **Token Verification & Bookkeeping**: The bridge decodes the OIDC token and performs local bookkeeping. It fully supports RFC 7519 `aud` (audience) claim validation, accepting the claim in either string or array-of-strings format.
 * **Transport Auth Wiring**: Integrated with Google Cloud Identity-Aware Proxy (IAP) transport auth wiring to automatically resolve and bypass platform-level guards when accessing protected backends.

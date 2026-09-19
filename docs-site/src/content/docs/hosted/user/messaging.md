@@ -29,7 +29,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
   - **DMs / General Chat**: If there is no active project context (such as when in Direct Messages or bare `/chat`), the toggle falls back to the top-level dashboard `/`.
 - **Direct Messaging (DMs)**: In addition to collaborative project spaces, the chat interface supports robust 1-on-1 Direct Messages (DMs). This includes both **human-to-human (H2H)** communication between team members and **human-to-agent (H2A)** chats. DMs are structured as a "global pair"—a single, consolidated thread per participant pair.
   - **DM Promotion to Shared Threads**: When a 1-on-1 Direct Message with an agent develops context useful for the broader team, you can promote the DM conversation into a Shared Space Thread. This atomic operation safely re-keys the messages and streams the transition live to all clients via SSE without a page reload. Use the promotion button located in the DM header.
-- **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message.
+- **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message. The thread's default agent is highlighted with a "thread default" label in the AGENTS section of the sidebar. Members can be filtered (All/Unread toggle) and sorted (Alphabetical or Recent Activity).
 - **The Thread Rail & Mobile Swipe Navigation**: A left-hand navigation sidebar lists all active chat spaces, threads, and DMs. On mobile viewports, the rail supports native **swipe gestures** for fluid, app-like drawer navigation.
 - **Chat/Log Toggle**: Located on the main `scion-chat-thread` panel, this toggle lets you switch between a clean, dialogue-focused **Chat** view and a live **Execution Log** stream for that agent.
 - **Zero-Reload Navigation**: Move between threads, project spaces, and configuration pages instantly with deep-linking support and no full-page reloads, ensuring no interruption to your active chat context or log streams.
@@ -59,6 +59,7 @@ Right-clicking a message (on desktop) or long-pressing (on mobile) opens a conte
 
 #### 3. High-Density Developer Utilities
 - **Cmd/Ctrl-K Conversation Switcher**: Trigger a keyboard-driven switcher to jump between spaces, threads, and DMs instantly without leaving your keyboard.
+- **Jump-to-Message from Search**: Clicking a search result automatically scrolls to the target message, even when it falls outside the currently loaded message buffer. The target message receives a highlight-flash animation, and a "Jump to latest" button appears to return to the live message stream.
 - **Unread Divider with Watermark**: An unread indicator bar automatically segments new messages since your last visit, including a watermark to ensure you never miss a transition.
 - **Rich Agent Output Rendering**: Dispatched agents can render complex interactive payloads directly inside the chat, including structural diffs, test suite results, and interactive JSON/YAML tree-structures.
 - **Collapsed Agent-to-Agent Messages**: To keep threads readable, background agent-to-agent messages (visible under the **Full** density filter) are collapsed into a compact, click-to-expand pill. When expanded, these messages are displayed with 2-line truncation. If a message is truncated, an expand icon ('arrows-angle-expand') appears next to it, allowing you to open a full-screen Markdown-rendered dialog overlay.
@@ -212,6 +213,9 @@ scion conversation set-default "#sprint-planning" agent-id
 # Catch up on recent messages (last 2 hours)
 scion conversation catch-up @tech-lead --since 2h
 
+# Retrieve a single message by ID
+scion conversation get-message conv:a1b2c3d4-... msg-uuid-here
+
 # List participants in a conversation
 scion conversation participants "#sprint-planning"
 
@@ -259,6 +263,7 @@ Every agent is protected by a **Message Mode** that controls which users and oth
 The available modes are:
 
 - **Project Mode (Default)**: Any user with the `agent:message` permission in the project can message the agent. Any peer agent in the project (that is not restricted by lineage mode) can also message it. The most permissive mode. Note that the default project-member role does **not** include `agent:message` — messaging requires an owner, admin, or ancestry relationship with the agent (i.e., the agent's creator or their ancestors). This aligns messaging authorization with the terminal attach permission gate.
+- **Hub Mode**: Behaves like Project mode within the agent's own project, and additionally allows the agent to send direct messages across project boundaries when [cross-project messaging](#cross-project-messaging) is enabled. A project-mode agent can *receive* a cross-project DM but cannot *reply* across the boundary until granted Hub mode.
 - **Branch Mode**: Only users in the agent's ancestry chain (its creator and their ancestors), plus the agent's direct parent and child agents, can message it.
 - **Lineage Mode**: Strictly restricts messaging to users in the agent's ancestry chain (its creator and their ancestors). No agent-to-agent messaging is permitted.
 - **None Mode**: Seals the agent from all messaging except system-plane notices. No users and no agents can message a none-mode agent through normal paths.
@@ -270,6 +275,70 @@ Highly privileged users can bypass an agent's message mode restrictions. This is
 Piercing applies only to user identities — it is never inherited by an owner's agents.
 
 The Web Dashboard displays reachability indicators (e.g., whether you can message a specific agent) based on the computed messageability, which takes into account the agent's mode, your ancestry relationship to it, and any piercing privileges.
+
+---
+
+## Cross-Project Messaging
+
+Agents can send direct messages across project boundaries when all three independent controls permit it. Cross-project messaging is **off by default**; all three must be enabled for a message to be delivered.
+
+### The Three-Control System
+
+| Control | Setting | Default | Who can change it |
+| :--- | :--- | :--- | :--- |
+| **Hub availability** | `cross_project_messaging_enabled` (Hub messaging settings) | `false` | Hub administrator |
+| **Agent outbound reach** | Agent message mode set to `hub` | `project` | Agent owner or project admin |
+| **Receiving project inbound policy** | `crossProjectInbound` on the destination project | `none` | Project owner or Hub administrator |
+
+### Project Inbound Policy
+
+Each project controls which cross-project messages it accepts via its `crossProjectInbound` setting:
+
+| Policy | Meaning |
+| :--- | :--- |
+| `none` | Accept no agent messages from other projects (default). |
+| `members` | Accept an external agent only when its originating human is an active member of the receiving project. |
+| `any` | Accept an eligible agent from any project on the Hub. |
+
+### Enabling Cross-Project Messaging
+
+1. **Hub administrator enables the feature globally:**
+   ```bash
+   scion hub messaging set --cross-project-enabled=true --revision <N>
+   ```
+
+2. **Project owner sets an inbound policy on the receiving project:**
+   ```bash
+   scion project messaging set --project <project> --policy members --revision <N>
+   ```
+
+3. **Grant `hub` mode to the sending agent:**
+   ```bash
+   scion set-message-mode <agent-name> hub
+   ```
+
+4. **Send a cross-project message:**
+   ```bash
+   scion message --project <target-project> @<agent-name> "message"
+   ```
+
+### Denial Codes
+
+When a cross-project message is rejected, the system returns a specific denial code explaining the reason:
+
+| Code | Meaning |
+| :--- | :--- |
+| `cross_project_disabled` | Cross-project messaging is disabled by the Hub administrator. |
+| `cross_project_sender_mode` | The sender must be in Hub mode to send cross-project messages. |
+| `cross_project_target_mode` | The recipient must be in Project or Hub mode to receive cross-project messages. |
+| `cross_project_inbound_none` | The recipient's project does not accept messages from external agents. |
+| `cross_project_origin_not_member` | The sender's originating user is not a member of the recipient's project. |
+| `cross_project_untrusted_origin` | The sender's identity origin could not be verified. |
+| `cross_project_surface_unsupported` | Cross-project messaging is not supported for this conversation type (e.g., group conversations). |
+
+:::note[Hub Mode Grant Guard]
+An **agent** can only grant `hub` mode to another agent when the calling agent is itself in `hub` mode, has the `full` authorization role, and holds the `project:agent:set_message_mode` scope. Human callers (project owners, super-admins) can seed `hub` mode directly without these restrictions.
+:::
 
 ---
 
@@ -305,6 +374,7 @@ Write a unit test for the auth package.
 | Type | Meaning | Action Required |
 |---|---|---|
 | **`instruction`** | Direct instruction sent to you. | Read and act on it. |
+| **`reply`** | A reply to a message you previously sent. Routes to the original sender agent, not the thread default. Includes `reply_context` metadata with the first 32 characters of the replied-to message. | Read and act on it like an `instruction`. |
 | **`state-change`** | A notification that another agent changed phase (e.g. stopped or stalled). | Treat as FYI — no reply or action needed. |
 | **`input-needed`** | A broadcast that an agent has called `sciontool status ask_user`. | See handling rules below. |
 | **`mention`** | You were CC'd or mentioned in a message. | Treat as FYI unless explicitly directed otherwise. |

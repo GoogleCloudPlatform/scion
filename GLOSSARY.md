@@ -268,9 +268,19 @@ _Avoid_: group, set, group chat, room, thread
 _See also_: Group (different concept — hub users, not recipients)
 
 **Message Mode**:
-A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of four values: **none**, **lineage**, **branch**, or **project** (the default). Set by the agent's owner or a project admin via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
+A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of five values: **none**, **lineage**, **branch**, **project** (the default), or **hub**. Set by the agent's owner or a project admin via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
 _Avoid_: messaging mode, communication mode, access mode
-_See also_: Ancestry chain, Piercing
+_See also_: Ancestry chain, Piercing, Hub mode
+
+**Hub mode** (message mode):
+A message mode that behaves like Project mode within the agent's own project and additionally permits the agent to send direct messages across project boundaries (when cross-project messaging is enabled at the Hub and receiving-project level). A project-mode agent can receive a cross-project DM but cannot reply until granted Hub mode. Hub mode is subject to a non-escalation grant guard: an agent can only grant it to another agent if the granting agent is itself in Hub mode and has the `full` authorization role.
+_Avoid_: global mode, cross-project mode
+_See also_: Message Mode, Cross-project inbound policy
+
+**Cross-project inbound policy**:
+A project-level setting (`crossProjectInbound`) that controls whether the project accepts agent messages originating from other projects. One of three values: `none` (default — reject all), `members` (accept only when the sender's originating human is a member of this project), or `any` (accept from any project on the Hub). One of three independent controls required for cross-project messaging (alongside the Hub-level `cross_project_messaging_enabled` flag and the sender agent's Hub message mode).
+_Avoid_: cross-project policy, inbound policy
+_See also_: Hub mode, Message Mode
 
 **Messageability**:
 A server-computed assessment of whether a specific viewer can message a specific agent, considering the agent's message mode, the viewer's identity, ancestry relationship, and permissions. Exposed in API responses as `_messageability` with `canMessage` and `canReachViewer` booleans. Used by the UI to gate message buttons and show reachability indicators.
