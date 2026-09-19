@@ -5,9 +5,15 @@ Copyright 2026 The Scion Authors.
 package telemetry
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
@@ -17,6 +23,9 @@ import (
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestReceiverPolicy_AllSignalsReachDestinationsProcessed(t *testing.T) {
@@ -78,7 +87,6 @@ func TestReceiverPolicy_AllSignalsReachDestinationsProcessed(t *testing.T) {
 					Status:     &tracepb.Status{Message: "STATUS_MARKER"},
 				},
 				{Name: "excluded.event"},
-				{Name: "unsafe user supplied name"},
 			},
 		}},
 	}}
@@ -215,15 +223,284 @@ func TestReceiverPolicy_DefaultContentFieldsProtectUnstructuredBodyAndStatus(t *
 		EventName: "allowed.event",
 		Body:      stringValue("UNSTRUCTURED_BODY_MARKER"),
 	}}}}}})
-	if got := logs[0].ScopeLogs[0].LogRecords[0].Body.GetStringValue(); got != "[REDACTED]" {
+	if got := logs.Data[0].ScopeLogs[0].LogRecords[0].Body.GetStringValue(); got != "[REDACTED]" {
 		t.Fatalf("unstructured body = %q, want redacted", got)
 	}
 	spans := policy.processSpans([]*tracepb.ResourceSpans{{ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{{
 		Name:   "allowed.event",
 		Status: &tracepb.Status{Message: "STATUS_MARKER"},
 	}}}}}})
-	if got := spans[0].ScopeSpans[0].Spans[0].Status.Message; got != "[REDACTED]" {
+	if got := spans.Data[0].ScopeSpans[0].Spans[0].Status.Message; got != "[REDACTED]" {
 		t.Fatalf("status message = %q, want redacted", got)
+	}
+}
+
+func TestReceiverPolicy_StructuredBodyAndPinnedAliasesSafeAtBothDestinations(t *testing.T) {
+	policy := newReceiverPolicy(&Config{Enabled: true, Redaction: RedactionConfig{
+		Redact: []string{"log.body", "tool_output"},
+		Hash:   []string{"session_id"},
+	}})
+	body := &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: []*commonpb.AnyValue{
+		stringValue("UNKEYED_MARKER"),
+		{Value: &commonpb.AnyValue_BytesValue{BytesValue: []byte("BYTE_MARKER")}},
+	}}}}
+	result := policy.processLogs([]*logspb.ResourceLogs{{
+		SchemaUrl: "resource-schema",
+		ScopeLogs: []*logspb.ScopeLogs{{
+			SchemaUrl: "scope-schema",
+			Scope: &commonpb.InstrumentationScope{Name: "scope", Attributes: []*commonpb.KeyValue{
+				secretKV("scope.safe", "safe"),
+			}},
+			LogRecords: []*logspb.LogRecord{{
+				EventName: "allowed.event",
+				Attributes: []*commonpb.KeyValue{
+					secretKV("conversation.id", "SESSION_MARKER"),
+					secretKV("output", "OUTPUT_MARKER"),
+				},
+				Body: body,
+			}},
+		}},
+	}})
+	if result.Rejected != 0 || len(result.Data) != 1 {
+		t.Fatalf("policy result = %#v", result)
+	}
+	record := result.Data[0].ScopeLogs[0].LogRecords[0]
+	genericText := record.String()
+	for _, marker := range []string{"UNKEYED_MARKER", "BYTE_MARKER", "SESSION_MARKER", "OUTPUT_MARKER"} {
+		if strings.Contains(genericText, marker) {
+			t.Fatalf("generic OTLP destination leaked %q: %s", marker, genericText)
+		}
+	}
+	entry := protoLogToCloudEntry(record, result.Data[0].Resource, result.Data[0].SchemaUrl, result.Data[0].ScopeLogs[0].Scope, result.Data[0].ScopeLogs[0].SchemaUrl)
+	gcpText := entry.Payload.(map[string]interface{})
+	for _, marker := range []string{"UNKEYED_MARKER", "BYTE_MARKER", "SESSION_MARKER", "OUTPUT_MARKER"} {
+		if strings.Contains(fmt.Sprint(gcpText), marker) {
+			t.Fatalf("GCP-shaped destination leaked %q: %#v", marker, gcpText)
+		}
+	}
+}
+
+func TestReceiverPolicy_NormalizesEveryEventNameRepresentation(t *testing.T) {
+	for _, storage := range []string{"record", "event.name", "event_name", "event.type"} {
+		for native, canonical := range map[string]string{
+			"codex.user_prompt":      "agent.user.prompt",
+			"codex.tool_result":      "agent.tool.result",
+			"gemini_cli.user_prompt": "agent.user.prompt",
+		} {
+			t.Run(storage+"/"+native, func(t *testing.T) {
+				policy := newReceiverPolicy(&Config{Enabled: true, Filter: FilterConfig{Include: []string{canonical}}})
+				record := &logspb.LogRecord{}
+				if storage == "record" {
+					record.EventName = native
+				} else {
+					record.Attributes = []*commonpb.KeyValue{secretKV(storage, native)}
+				}
+				result := policy.processLogs([]*logspb.ResourceLogs{{ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{record}}}}})
+				if result.Rejected != 0 || len(result.Data) != 1 {
+					t.Fatalf("normalized event rejected: %#v", result)
+				}
+				got := result.Data[0].ScopeLogs[0].LogRecords[0]
+				if got.EventName != canonical || countAttr(got.Attributes, normalizedEventNameAttribute) != 1 || attrValue(got.Attributes, normalizedEventNameAttribute) != canonical {
+					t.Fatalf("canonical record = %#v", got)
+				}
+				for _, legacy := range []string{"event_name", "event.type"} {
+					if countAttr(got.Attributes, legacy) != 0 {
+						t.Fatalf("legacy event alias %q retained", legacy)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestReceiverPolicy_RejectsConflictingAndTypedEventNames(t *testing.T) {
+	tests := map[string]*logspb.LogRecord{
+		"record conflicts with alias": {EventName: "allowed.event", Attributes: []*commonpb.KeyValue{secretKV("event.name", "agent.user.prompt")}},
+		"duplicate aliases conflict":  {Attributes: []*commonpb.KeyValue{secretKV("event_name", "allowed.event"), secretKV("event_name", "other.event")}},
+		"typed alias":                 {Attributes: []*commonpb.KeyValue{{Key: "event.type", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 1}}}}},
+	}
+	for name, record := range tests {
+		t.Run(name, func(t *testing.T) {
+			policy := newReceiverPolicy(&Config{Enabled: true})
+			result := policy.processLogs([]*logspb.ResourceLogs{{ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{record}}}}})
+			if result.Rejected != 1 || len(result.Data) != 0 || result.Reason != policyAdmissionReason {
+				t.Fatalf("conflict result = %#v", result)
+			}
+		})
+	}
+}
+
+func TestReceiverPolicy_StripsSpoofedIdentityBeforeAuthoritativeReplacement(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "trusted-agent")
+	t.Setenv("SCION_AGENT_SLUG", "")
+	t.Setenv("SCION_PROJECT_ID", "trusted-project")
+	t.Setenv("SCION_GROVE_ID", "legacy-project")
+	t.Setenv("SCION_HARNESS", "trusted-harness")
+	t.Setenv("SCION_MODEL", "")
+	t.Setenv("SCION_BROKER_ID", "")
+	t.Setenv("SCION_BROKER_NAME", "trusted-broker")
+	policy := newReceiverPolicy(&Config{Enabled: true, Redaction: RedactionConfig{Redact: []string{"scion.agent.id", "scion.project.id", "scion.broker.name"}}})
+	attrs := []*commonpb.KeyValue{
+		secretKV("scion.agent.id", "spoof-1"),
+		{Key: "scion.agent.id", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 7}}},
+		secretKV("scion.agent.slug", "spoof-slug"),
+		secretKV("scion.project.id", "spoof-project"),
+		secretKV(projectcompat.LegacyTelemetryIdentityKeys()[1], "spoof-project"),
+		secretKV("scion.broker", "spoof-broker"),
+		secretKV("scion.broker.id", "spoof-broker-id"),
+		secretKV("scion.broker.name", "spoof-broker-name"),
+		secretKV("scion.model", "spoof-model"),
+	}
+	result := policy.processSpans([]*tracepb.ResourceSpans{{Resource: &resourcepb.Resource{Attributes: attrs}, ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{{Name: "safe.span"}}}}}})
+	if result.Rejected != 0 || len(result.Data) != 1 {
+		t.Fatalf("identity result = %#v", result)
+	}
+	got := result.Data[0].Resource.Attributes
+	for key, want := range map[string]string{
+		"scion.agent.id":    "trusted-agent",
+		"scion.project.id":  "trusted-project",
+		"scion.harness":     "trusted-harness",
+		"scion.broker.name": "trusted-broker",
+	} {
+		if countAttr(got, key) != 1 || attrValue(got, key) != want {
+			t.Fatalf("identity %q = %#v, want one %q", key, got, want)
+		}
+	}
+	for _, absent := range []string{"scion.agent.slug", projectcompat.LegacyTelemetryIdentityKeys()[1], "scion.broker", "scion.broker.id", "scion.model"} {
+		if countAttr(got, absent) != 0 {
+			t.Fatalf("spoofed or legacy identity %q retained: %#v", absent, got)
+		}
+	}
+}
+
+func TestReceiverPolicy_InvalidInputIsProducerVisibleAndNeverForwarded(t *testing.T) {
+	p := NewWithConfig(&Config{Enabled: true})
+	forwarded := false
+	p.exporter = &CloudExporter{logClient: &mockLogClient{exportFunc: func(_ context.Context, _ *collogspb.ExportLogsServiceRequest, _ ...grpc.CallOption) (*collogspb.ExportLogsServiceResponse, error) {
+		forwarded = true
+		return &collogspb.ExportLogsServiceResponse{}, nil
+	}}}
+	request := &collogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{EventName: "unsafe event name"}}}}}}}
+	response, err := (&logsServiceServer{handler: p.handleLogs}).Export(context.Background(), request)
+	if response != nil || status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != policyAdmissionReason {
+		t.Fatalf("Export() = (%#v, %v), want bounded InvalidArgument", response, err)
+	}
+	if forwarded {
+		t.Fatal("invalid request was partially forwarded")
+	}
+	if got := p.policyRejectedLogs.Load(); got != 1 {
+		t.Fatalf("local rejected log count = %d, want 1", got)
+	}
+}
+
+func TestReceiverPolicy_RejectsWholeRequestAcrossTransportsAndSignals(t *testing.T) {
+	p := NewWithConfig(&Config{Enabled: true})
+	forwarded := 0
+	p.exporter = &CloudExporter{
+		grpcClient: &mockTraceClient{exportFunc: func(context.Context, *coltracepb.ExportTraceServiceRequest, ...grpc.CallOption) (*coltracepb.ExportTraceServiceResponse, error) {
+			forwarded++
+			return &coltracepb.ExportTraceServiceResponse{}, nil
+		}},
+		logClient: &mockLogClient{exportFunc: func(context.Context, *collogspb.ExportLogsServiceRequest, ...grpc.CallOption) (*collogspb.ExportLogsServiceResponse, error) {
+			forwarded++
+			return &collogspb.ExportLogsServiceResponse{}, nil
+		}},
+	}
+	traceRequest := &coltracepb.ExportTraceServiceRequest{ResourceSpans: []*tracepb.ResourceSpans{{ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{
+		{Name: "safe.span"}, {Name: "unsafe span"},
+	}}}}}}
+	if response, err := (&traceServiceServer{handler: p.handleSpans}).Export(context.Background(), traceRequest); response != nil || status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("trace RPC response=%#v err=%v", response, err)
+	}
+	if got := p.policyRejectedSpans.Load(); got != 2 {
+		t.Fatalf("trace rejection accounting = %d", got)
+	}
+	logsRequest := &collogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{
+		{EventName: "safe.event"}, {EventName: "unsafe event"},
+	}}}}}}
+	if response, err := (&logsServiceServer{handler: p.handleLogs}).Export(context.Background(), logsRequest); response != nil || status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("logs RPC response=%#v err=%v", response, err)
+	}
+	receiver := &Receiver{handler: p.handleSpans}
+	body, err := proto.Marshal(traceRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpResponse := httptest.NewRecorder()
+	receiver.handleHTTPTraces(httpResponse, httptest.NewRequest(http.MethodPost, "/v1/traces", bytes.NewReader(body)))
+	if httpResponse.Code != http.StatusBadRequest || strings.TrimSpace(httpResponse.Body.String()) != policyAdmissionReason {
+		t.Fatalf("HTTP response = (%d, %q)", httpResponse.Code, httpResponse.Body.String())
+	}
+	if forwarded != 0 {
+		t.Fatalf("invalid mixed requests forwarded %d batches", forwarded)
+	}
+	metricPoint := func(name string, value int64) *metricpb.Metric {
+		return &metricpb.Metric{
+			Name: name,
+			Data: &metricpb.Metric_Gauge{Gauge: &metricpb.Gauge{
+				DataPoints: []*metricpb.NumberDataPoint{{Value: &metricpb.NumberDataPoint_AsInt{AsInt: value}}},
+			}},
+		}
+	}
+	metricRequest := &colmetricpb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricpb.ResourceMetrics{{
+			ScopeMetrics: []*metricpb.ScopeMetrics{{
+				Metrics: []*metricpb.Metric{metricPoint("safe.metric", 1), metricPoint("unsafe metric", 2)},
+			}},
+		}},
+	}
+	if response, err := (&metricsServiceServer{handler: p.handleMetrics}).Export(context.Background(), metricRequest); response != nil || status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("metrics RPC response=%#v err=%v", response, err)
+	}
+	if got := p.policyRejectedDataPoints.Load(); got != 2 || len(p.metricBuf) != 0 {
+		t.Fatalf("metric rejection accounting=%d buffer=%d", got, len(p.metricBuf))
+	}
+	if got := p.policyRejectedRequests.Load(); got != 4 {
+		t.Fatalf("rejected request count=%d, want 4 (trace RPC, log RPC, trace HTTP, metric RPC)", got)
+	}
+}
+
+func TestReceiverPolicy_RejectsOverBudgetBeforeForwarding(t *testing.T) {
+	p := NewWithConfig(&Config{Enabled: true})
+	forwarded := false
+	p.exporter = &CloudExporter{logClient: &mockLogClient{exportFunc: func(_ context.Context, _ *collogspb.ExportLogsServiceRequest, _ ...grpc.CallOption) (*collogspb.ExportLogsServiceResponse, error) {
+		forwarded = true
+		return &collogspb.ExportLogsServiceResponse{}, nil
+	}}}
+	body := stringValue("leaf")
+	for range maxAnyValueDepth {
+		body = &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: []*commonpb.AnyValue{body}}}}
+	}
+	err := p.handleLogs(context.Background(), []*logspb.ResourceLogs{{ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{EventName: "safe.event", Body: body}}}}}})
+	if status.Code(err) != codes.InvalidArgument || forwarded {
+		t.Fatalf("handleLogs() = %v, forwarded=%v", err, forwarded)
+	}
+}
+
+func TestReceiverPolicy_RejectsUnsafeSpanEventsAndCrossAttributeBudgets(t *testing.T) {
+	policy := newReceiverPolicy(&Config{Enabled: true})
+	unsafeEvent := policy.processSpans([]*tracepb.ResourceSpans{{ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{{
+		Name: "safe.span", Events: []*tracepb.Span_Event{{Name: "unsafe event"}},
+	}}}}}})
+	if unsafeEvent.Rejected != 1 || len(unsafeEvent.Data) != 0 || unsafeEvent.Reason != policyAdmissionReason {
+		t.Fatalf("unsafe span event result = %#v", unsafeEvent)
+	}
+	wideAttrs := make([]*commonpb.KeyValue, maxAnyValueNodes+1)
+	for i := range wideAttrs {
+		wideAttrs[i] = secretKV("public", "safe")
+	}
+	overResource := policy.processMetrics([]*metricpb.ResourceMetrics{{
+		Resource: &resourcepb.Resource{Attributes: wideAttrs},
+		ScopeMetrics: []*metricpb.ScopeMetrics{{Metrics: []*metricpb.Metric{{
+			Name: "safe.metric", Data: &metricpb.Metric_Gauge{Gauge: &metricpb.Gauge{DataPoints: []*metricpb.NumberDataPoint{{Value: &metricpb.NumberDataPoint_AsInt{AsInt: 1}}}}},
+		}}}},
+	}})
+	if overResource.Rejected != 1 || len(overResource.Data) != 0 || overResource.Reason != policyAdmissionReason {
+		t.Fatalf("over-budget metric resource result = %#v", overResource)
+	}
+	filtered := newReceiverPolicy(&Config{Enabled: true, Filter: FilterConfig{Exclude: []string{"safe.span"}}}).processSpans([]*tracepb.ResourceSpans{{ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{{Name: "safe.span"}}}}}})
+	if filtered.Reason != "" || filtered.Rejected != 0 || filtered.Filtered != 1 || len(filtered.Data) != 0 {
+		t.Fatalf("configured filtering confused with rejection: %#v", filtered)
 	}
 }
 
@@ -256,6 +533,16 @@ func attrValue(attrs []*commonpb.KeyValue, key string) string {
 		}
 	}
 	return ""
+}
+
+func countAttr(attrs []*commonpb.KeyValue, key string) int {
+	count := 0
+	for _, attr := range attrs {
+		if attr != nil && attr.Key == key {
+			count++
+		}
+	}
+	return count
 }
 
 func assertAttr(t *testing.T, attrs []*commonpb.KeyValue, key, want string) {

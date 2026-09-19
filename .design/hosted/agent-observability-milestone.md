@@ -51,19 +51,38 @@ Phase 1 establishes the common ingress boundary in
   credentials or external destinations;
 - receiver ingress adds authoritative `scion.agent.id`, `scion.project.id`,
   `scion.harness`, and available agent-slug/broker identity without replacing
-  incoming `service.name` or `service.instance.id`;
+  incoming `service.name` or `service.instance.id`. Producer Scion identity
+  keys, including duplicate, typed, and legacy broker/project aliases, are
+  stripped after field processing, then one authoritative value is appended
+  for each identity available from the receiver environment. When an env value
+  is absent, no producer-provided substitute is trusted. Configured redaction
+  cannot suppress authoritative identity;
 - canonical `SCION_PROJECT_ID` wins over the legacy environment alias, whose
   name is obtained from `pkg/projectcompat`;
 - resource and instrumentation-scope identity, scope name/version/attributes,
-  and resource/scope schema URLs are preserved;
+  and resource/scope schema URLs reach generic OTLP destinations. The native
+  Cloud Trace/Monitoring adapters retain processed scope attributes and both
+  schema URLs in supported SDK metadata. Cloud Logging has no equivalent
+  scope/schema fields: its adapter writes processed scope name/version/attributes
+  and schema URLs under the reserved `scion_otel_metadata` payload key (attribute
+  values stringified); it does not claim backend-native scope fields;
 - event include/exclude policy applies to span names and normalized log
   `event.name`; exclusion wins, restrictive includes reject unnamed logs, and
-  event lists do not filter metrics;
+  event lists do not filter metrics. Pinned Codex `codex.user_prompt` and
+  `codex.tool_result`, and Gemini `gemini_cli.user_prompt`, normalize to the
+  corresponding `agent.user.prompt` and `agent.tool.result` policy names;
+  contradictory event-name fields/duplicates reject the entire request;
 - unsafe producer-controlled span, span-event, log-event, and metric names are
-  rejected rather than forwarded with possible user content;
+  rejected with bounded InvalidArgument (gRPC) or HTTP 400 responses rather
+  than silently dropped. The entire request is validated before cloning or
+  forwarding; a 32-level/4096-value AnyValue budget prevents unbounded
+  recursion, while local counters track rejected spans/log records/metric
+  points. Configured filtering is distinct from invalid-input rejection;
 - field policy recursively covers resource, scope, span, span-event, link, log
   record, structured log body, metric-point, and exemplar attributes;
-- unstructured log bodies use the virtual field `log.body`, and span status
+- unstructured log bodies and unkeyed scalars/bytes in structured body arrays
+  use the virtual field `log.body`, while keyed body values use their own field
+  names. Span status
   text uses `span.status.message`; both are redacted by default;
 - producer-side hook transformation was removed. Ingress clones and transforms
   a batch once, then retries the immutable processed batch. No producer flag or
@@ -79,8 +98,8 @@ The finite native content aliases covered by Phase 1 are:
 | --- | --- |
 | `prompt` | `gen_ai.prompt`, `gen_ai.input.messages`, `input.value` |
 | `tool_input` | `tool.input`, `tool.call.arguments`, `gen_ai.tool.call.arguments` |
-| `tool_output` | `gen_ai.completion`, `gen_ai.output.messages`, `output.value`, `tool.output`, `tool.call.result`, `gen_ai.tool.call.result` |
-| `session_id` | `session.id`, `gen_ai.conversation.id` |
+| `tool_output` | `gen_ai.completion`, `gen_ai.output.messages`, `output.value`, `output`, `tool.output`, `tool.call.result`, `gen_ai.tool.call.result` |
+| `session_id` | `session.id`, `gen_ai.conversation.id`, `conversation.id` |
 
 This is field-based protection, not arbitrary secret detection. Safe event
 names and trace/span correlation identifiers are retained. Phase 1 tests use

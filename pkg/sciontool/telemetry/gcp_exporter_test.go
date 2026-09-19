@@ -8,11 +8,122 @@ import (
 	"context"
 	"testing"
 
+	"cloud.google.com/go/logging"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
+
+type captureTraceExporter struct {
+	spans []sdktrace.ReadOnlySpan
+}
+
+func (c *captureTraceExporter) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
+	c.spans = append(c.spans, spans...)
+	return nil
+}
+
+func (*captureTraceExporter) Shutdown(context.Context) error { return nil }
+
+func TestGCPExporter_PostAdapterCapturesProcessedTraceScopeAndSchema(t *testing.T) {
+	traceCapture := &captureTraceExporter{}
+	exporter := &GCPExporter{traceExporter: traceCapture}
+	policy := newReceiverPolicy(&Config{Enabled: true, Redaction: RedactionConfig{Redact: []string{"scope.secret"}}})
+	decision := policy.processSpans([]*tracepb.ResourceSpans{{
+		SchemaUrl: "https://example.test/resource",
+		ScopeSpans: []*tracepb.ScopeSpans{{
+			SchemaUrl: "https://example.test/scope",
+			Scope:     &commonpb.InstrumentationScope{Name: "native.scope", Attributes: secretAttr("scope.secret", "SCOPE_SECRET")},
+			Spans:     []*tracepb.Span{{Name: "safe.span"}},
+		}},
+	}})
+	if decision.Reason != "" {
+		t.Fatal(decision.Reason)
+	}
+	if err := exporter.ExportProtoSpans(context.Background(), decision.Data); err != nil {
+		t.Fatal(err)
+	}
+	if len(traceCapture.spans) != 1 {
+		t.Fatalf("captured %d spans", len(traceCapture.spans))
+	}
+	got := traceCapture.spans[0]
+	scope := got.InstrumentationScope()
+	if got.Resource().SchemaURL() != "https://example.test/resource" || scope.SchemaURL != "https://example.test/scope" {
+		t.Fatalf("post-adapter schema: resource=%q scope=%q", got.Resource().SchemaURL(), scope.SchemaURL)
+	}
+	if value, ok := scope.Attributes.Value("scope.secret"); !ok || value.AsString() != "[REDACTED]" {
+		t.Fatalf("post-adapter scope attributes: %v", scope.Attributes)
+	}
+}
+
+func TestGCPExporter_PostAdapterCapturesProcessedMetricScopeAndSchema(t *testing.T) {
+	metricCapture := &captureMetricExporter{}
+	exporter := &GCPExporter{metricExporter: metricCapture}
+	policy := newReceiverPolicy(&Config{Enabled: true, Redaction: RedactionConfig{Redact: []string{"scope.secret"}}})
+	decision := policy.processMetrics([]*metricpb.ResourceMetrics{{
+		SchemaUrl: "https://example.test/resource",
+		ScopeMetrics: []*metricpb.ScopeMetrics{{
+			SchemaUrl: "https://example.test/scope",
+			Scope:     &commonpb.InstrumentationScope{Name: "native.scope", Attributes: secretAttr("scope.secret", "SCOPE_SECRET")},
+			Metrics:   []*metricpb.Metric{{Name: "safe.metric", Data: &metricpb.Metric_Gauge{Gauge: &metricpb.Gauge{DataPoints: []*metricpb.NumberDataPoint{{Value: &metricpb.NumberDataPoint_AsInt{AsInt: 1}}}}}}},
+		}},
+	}})
+	if decision.Reason != "" {
+		t.Fatal(decision.Reason)
+	}
+	if err := exporter.ExportProtoMetrics(context.Background(), decision.Data); err != nil {
+		t.Fatal(err)
+	}
+	if len(metricCapture.exports) != 1 {
+		t.Fatalf("captured %d exports", len(metricCapture.exports))
+	}
+	got := metricCapture.exports[0]
+	if got.Resource.SchemaURL() != "https://example.test/resource" || got.ScopeMetrics[0].Scope.SchemaURL != "https://example.test/scope" {
+		t.Fatalf("post-adapter schema: resource=%q scope=%q", got.Resource.SchemaURL(), got.ScopeMetrics[0].Scope.SchemaURL)
+	}
+	if value, ok := got.ScopeMetrics[0].Scope.Attributes.Value("scope.secret"); !ok || value.AsString() != "[REDACTED]" {
+		t.Fatalf("post-adapter scope attributes: %v", got.ScopeMetrics[0].Scope.Attributes)
+	}
+}
+
+func TestGCPExporter_PostAdapterCapturesProcessedLogMetadata(t *testing.T) {
+	var captured []logging.Entry
+	exporter := &GCPExporter{logSink: func(entry logging.Entry) { captured = append(captured, entry) }}
+	policy := newReceiverPolicy(&Config{Enabled: true, Redaction: RedactionConfig{Redact: []string{"scope.secret", "tool_output"}}})
+	decision := policy.processLogs([]*logspb.ResourceLogs{{
+		SchemaUrl: "https://example.test/resource",
+		ScopeLogs: []*logspb.ScopeLogs{{
+			SchemaUrl:  "https://example.test/scope",
+			Scope:      &commonpb.InstrumentationScope{Name: "native.scope", Attributes: secretAttr("scope.secret", "SCOPE_SECRET")},
+			LogRecords: []*logspb.LogRecord{{EventName: "safe.event", Attributes: secretAttr("output", "OUTPUT_SECRET")}},
+		}},
+	}})
+	if decision.Reason != "" {
+		t.Fatal(decision.Reason)
+	}
+	if err := exporter.ExportProtoLogs(context.Background(), decision.Data); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) != 1 {
+		t.Fatalf("captured %d entries", len(captured))
+	}
+	payload := captured[0].Payload.(map[string]interface{})
+	if payload["output"] != "[REDACTED]" {
+		t.Fatalf("post-adapter output = %#v", payload["output"])
+	}
+	metadata := payload[cloudLoggingOTelMetadataKey].(map[string]interface{})
+	if metadata["resource_schema_url"] != "https://example.test/resource" || metadata["scope_schema_url"] != "https://example.test/scope" || metadata["scope_name"] != "native.scope" {
+		t.Fatalf("post-adapter log metadata = %#v", metadata)
+	}
+	attrs := metadata["scope_attributes"].(map[string]interface{})
+	if attrs["scope.secret"] != "[REDACTED]" {
+		t.Fatalf("post-adapter scope = %#v", attrs)
+	}
+}
 
 type captureMetricExporter struct {
 	exports []*metricdata.ResourceMetrics

@@ -81,7 +81,7 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 	}
 	if broker := os.Getenv("SCION_BROKER_NAME"); broker != "" {
 		attrs = append(attrs, resource.WithAttributes(
-			attribute.String("scion.broker", broker),
+			attribute.String("scion.broker.name", broker),
 		))
 	}
 	if gcpProjectID := os.Getenv(EnvProjectID); gcpProjectID != "" {

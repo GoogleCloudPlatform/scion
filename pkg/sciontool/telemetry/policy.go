@@ -5,6 +5,7 @@ Copyright 2026 The Scion Authors.
 package telemetry
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 
@@ -19,7 +20,36 @@ import (
 
 const normalizedEventNameAttribute = "event.name"
 
+const policyAdmissionReason = "telemetry rejected by receiver admission policy"
+
 var safeSignalName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.:/-]{0,127}$`)
+
+var nativeEventNameAliases = map[string]string{
+	"codex.user_prompt":      "agent.user.prompt",
+	"codex.tool_result":      "agent.tool.result",
+	"gemini_cli.user_prompt": "agent.user.prompt",
+}
+
+var reservedIdentityAttributes = map[string]struct{}{
+	"scion.agent":       {},
+	"scion.agent.id":    {},
+	"scion.agent.slug":  {},
+	"scion.project":     {},
+	"scion.project.id":  {},
+	"scion.project_id":  {},
+	"scion.harness":     {},
+	"scion.model":       {},
+	"scion.broker":      {},
+	"scion.broker.id":   {},
+	"scion.broker.name": {},
+}
+
+type policyResult[T any] struct {
+	Data     T
+	Filtered int64
+	Rejected int64
+	Reason   string
+}
 
 type receiverPolicy struct {
 	filter   *Filter
@@ -49,15 +79,20 @@ func authoritativeIdentity() []*commonpb.KeyValue {
 	add("scion.agent.slug", os.Getenv("SCION_AGENT_SLUG"))
 	add("scion.project.id", projectcompat.ProjectIDFromEnv(os.Getenv))
 	add("scion.harness", os.Getenv("SCION_HARNESS"))
+	add("scion.model", os.Getenv("SCION_MODEL"))
 	add("scion.broker.id", os.Getenv("SCION_BROKER_ID"))
 	add("scion.broker.name", os.Getenv("SCION_BROKER_NAME"))
 	return attrs
 }
 
-func (p *receiverPolicy) processSpans(input []*tracepb.ResourceSpans) []*tracepb.ResourceSpans {
+func (p *receiverPolicy) processSpans(input []*tracepb.ResourceSpans) policyResult[[]*tracepb.ResourceSpans] {
 	if p == nil {
-		return input
+		return policyResult[[]*tracepb.ResourceSpans]{Data: input}
 	}
+	if err := validateSpans(input); err != nil {
+		return policyResult[[]*tracepb.ResourceSpans]{Rejected: countSpans(input), Reason: policyAdmissionReason}
+	}
+	var filtered int64
 	result := make([]*tracepb.ResourceSpans, 0, len(input))
 	for _, original := range input {
 		if original == nil {
@@ -76,19 +111,19 @@ func (p *receiverPolicy) processSpans(input []*tracepb.ResourceSpans) []*tracepb
 			p.processScope(scopeSpans.Scope)
 			keptSpans := scopeSpans.Spans[:0]
 			for _, span := range scopeSpans.Spans {
-				if span == nil || !safeSignalName.MatchString(span.Name) || !p.filter.ShouldProcessSpan(span.Name) {
+				if span == nil {
+					continue
+				}
+				if !p.filter.ShouldProcessSpan(span.Name) {
+					filtered++
 					continue
 				}
 				span.Attributes = p.redactor.RedactProtoAttributes(span.Attributes)
-				keptEvents := span.Events[:0]
 				for _, event := range span.Events {
-					if event == nil || !safeSignalName.MatchString(event.Name) {
-						continue
+					if event != nil {
+						event.Attributes = p.redactor.RedactProtoAttributes(event.Attributes)
 					}
-					event.Attributes = p.redactor.RedactProtoAttributes(event.Attributes)
-					keptEvents = append(keptEvents, event)
 				}
-				span.Events = keptEvents
 				for _, link := range span.Links {
 					if link != nil {
 						link.Attributes = p.redactor.RedactProtoAttributes(link.Attributes)
@@ -109,13 +144,17 @@ func (p *receiverPolicy) processSpans(input []*tracepb.ResourceSpans) []*tracepb
 			result = append(result, rs)
 		}
 	}
-	return result
+	return policyResult[[]*tracepb.ResourceSpans]{Data: result, Filtered: filtered}
 }
 
-func (p *receiverPolicy) processLogs(input []*logspb.ResourceLogs) []*logspb.ResourceLogs {
+func (p *receiverPolicy) processLogs(input []*logspb.ResourceLogs) policyResult[[]*logspb.ResourceLogs] {
 	if p == nil {
-		return input
+		return policyResult[[]*logspb.ResourceLogs]{Data: input}
 	}
+	if err := validateLogs(input); err != nil {
+		return policyResult[[]*logspb.ResourceLogs]{Rejected: countLogs(input), Reason: policyAdmissionReason}
+	}
+	var filtered int64
 	result := make([]*logspb.ResourceLogs, 0, len(input))
 	for _, original := range input {
 		if original == nil {
@@ -137,25 +176,25 @@ func (p *receiverPolicy) processLogs(input []*logspb.ResourceLogs) []*logspb.Res
 				if record == nil {
 					continue
 				}
-				eventName := normalizedLogEventName(record)
-				if eventName != "" && !safeSignalName.MatchString(eventName) {
-					continue
-				}
+				eventName, _ := normalizedLogEventName(record)
 				if eventName == "" {
 					if p.filter.HasIncludes() {
+						filtered++
 						continue
 					}
 				} else if !p.filter.ShouldProcess(eventName) {
+					filtered++
 					continue
 				}
+				record.Attributes = removeEventNameAttributes(record.Attributes)
+				record.Attributes = p.redactor.RedactProtoAttributes(record.Attributes)
 				if eventName != "" {
 					record.EventName = eventName
-					record.Attributes = upsertAttribute(record.Attributes, normalizedEventNameAttribute, eventName)
+					record.Attributes = append(record.Attributes, &commonpb.KeyValue{Key: normalizedEventNameAttribute, Value: stringProtoValue(eventName)})
 				}
-				record.Attributes = p.redactor.RedactProtoAttributes(record.Attributes)
 				if record.Body != nil {
 					if isStructuredValue(record.Body) {
-						record.Body = p.redactor.RedactProtoValue("", record.Body)
+						record.Body, _ = p.redactor.RedactStructuredProtoValue("log.body", record.Body)
 					} else {
 						record.Body = p.redactor.RedactProtoValue("log.body", record.Body)
 					}
@@ -172,12 +211,15 @@ func (p *receiverPolicy) processLogs(input []*logspb.ResourceLogs) []*logspb.Res
 			result = append(result, rl)
 		}
 	}
-	return result
+	return policyResult[[]*logspb.ResourceLogs]{Data: result, Filtered: filtered}
 }
 
-func (p *receiverPolicy) processMetrics(input []*metricpb.ResourceMetrics) []*metricpb.ResourceMetrics {
+func (p *receiverPolicy) processMetrics(input []*metricpb.ResourceMetrics) policyResult[[]*metricpb.ResourceMetrics] {
 	if p == nil {
-		return input
+		return policyResult[[]*metricpb.ResourceMetrics]{Data: input}
+	}
+	if err := validateMetrics(input); err != nil {
+		return policyResult[[]*metricpb.ResourceMetrics]{Rejected: countMetricDataPoints(input), Reason: policyAdmissionReason}
 	}
 	result := make([]*metricpb.ResourceMetrics, 0, len(input))
 	for _, original := range input {
@@ -197,7 +239,7 @@ func (p *receiverPolicy) processMetrics(input []*metricpb.ResourceMetrics) []*me
 			p.processScope(scopeMetrics.Scope)
 			keptMetrics := scopeMetrics.Metrics[:0]
 			for _, metric := range scopeMetrics.Metrics {
-				if metric == nil || !safeSignalName.MatchString(metric.Name) {
+				if metric == nil {
 					continue
 				}
 				p.processMetric(metric)
@@ -213,17 +255,16 @@ func (p *receiverPolicy) processMetrics(input []*metricpb.ResourceMetrics) []*me
 			result = append(result, rm)
 		}
 	}
-	return result
+	return policyResult[[]*metricpb.ResourceMetrics]{Data: result}
 }
 
 func (p *receiverPolicy) processResource(resource *resourcepb.Resource) {
 	if resource == nil {
 		return
 	}
-	for _, identity := range p.identity {
-		resource.Attributes = upsertAttribute(resource.Attributes, identity.Key, identity.Value.GetStringValue())
-	}
 	resource.Attributes = p.redactor.RedactProtoAttributes(resource.Attributes)
+	resource.Attributes = removeReservedIdentityAttributes(resource.Attributes)
+	resource.Attributes = append(resource.Attributes, cloneKeyValues(p.identity)...)
 }
 
 func (p *receiverPolicy) processScope(scope *commonpb.InstrumentationScope) {
@@ -298,18 +339,87 @@ func (p *receiverPolicy) processMetric(metric *metricpb.Metric) {
 	}
 }
 
-func normalizedLogEventName(record *logspb.LogRecord) string {
-	if record.EventName != "" {
-		return record.EventName
+func normalizedLogEventName(record *logspb.LogRecord) (string, error) {
+	if record == nil {
+		return "", nil
 	}
-	for _, key := range []string{normalizedEventNameAttribute, "event_name", "event.type"} {
-		for _, attr := range record.Attributes {
-			if attr != nil && attr.Key == key && attr.Value != nil {
-				return attr.Value.GetStringValue()
-			}
+	values := make([]string, 0, 4)
+	if record.EventName != "" {
+		values = append(values, normalizeNativeEventName(record.EventName))
+	}
+	for _, attr := range record.Attributes {
+		if attr == nil || !isEventNameAttribute(attr.Key) {
+			continue
+		}
+		if attr.Value == nil {
+			return "", fmt.Errorf("event name attribute must be a string")
+		}
+		text, ok := attr.Value.Value.(*commonpb.AnyValue_StringValue)
+		if !ok {
+			return "", fmt.Errorf("event name attribute must be a string")
+		}
+		if text.StringValue != "" {
+			values = append(values, normalizeNativeEventName(text.StringValue))
 		}
 	}
-	return ""
+	if len(values) == 0 {
+		return "", nil
+	}
+	canonical := values[0]
+	for _, value := range values[1:] {
+		if value != canonical {
+			return "", fmt.Errorf("conflicting event name representations")
+		}
+	}
+	return canonical, nil
+}
+
+func normalizeNativeEventName(name string) string {
+	if normalized, ok := nativeEventNameAliases[name]; ok {
+		return normalized
+	}
+	return name
+}
+
+func isEventNameAttribute(key string) bool {
+	return key == normalizedEventNameAttribute || key == "event_name" || key == "event.type"
+}
+
+func removeEventNameAttributes(attrs []*commonpb.KeyValue) []*commonpb.KeyValue {
+	result := make([]*commonpb.KeyValue, 0, len(attrs))
+	for _, attr := range attrs {
+		if attr == nil || !isEventNameAttribute(attr.Key) {
+			result = append(result, attr)
+		}
+	}
+	return result
+}
+
+func removeReservedIdentityAttributes(attrs []*commonpb.KeyValue) []*commonpb.KeyValue {
+	result := make([]*commonpb.KeyValue, 0, len(attrs))
+	for _, attr := range attrs {
+		if attr == nil {
+			result = append(result, attr)
+			continue
+		}
+		if _, reserved := reservedIdentityAttributes[attr.Key]; !reserved {
+			if projectcompat.IsLegacyTelemetryIdentityKey(attr.Key) {
+				continue
+			}
+			result = append(result, attr)
+		}
+	}
+	return result
+}
+
+func cloneKeyValues(attrs []*commonpb.KeyValue) []*commonpb.KeyValue {
+	result := make([]*commonpb.KeyValue, 0, len(attrs))
+	for _, attr := range attrs {
+		if attr != nil {
+			result = append(result, proto.Clone(attr).(*commonpb.KeyValue))
+		}
+	}
+	return result
 }
 
 func upsertAttribute(attrs []*commonpb.KeyValue, key, value string) []*commonpb.KeyValue {

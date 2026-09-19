@@ -33,6 +33,7 @@ type GCPExporter struct {
 	metricExporter sdkmetric.Exporter
 	logClient      *logging.Client
 	logger         *logging.Logger
+	logSink        func(logging.Entry) // optional local capture after conversion
 	projectID      string
 	metricsDebug   bool
 }
@@ -152,15 +153,19 @@ func (e *GCPExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics []
 
 // ExportProtoLogs converts OTLP proto log records to Cloud Logging entries.
 func (e *GCPExporter) ExportProtoLogs(ctx context.Context, resourceLogs []*logspb.ResourceLogs) error {
-	if e == nil || e.logger == nil {
+	if e == nil || (e.logger == nil && e.logSink == nil) {
 		return nil
 	}
 
 	for _, rl := range resourceLogs {
 		for _, sl := range rl.ScopeLogs {
 			for _, lr := range sl.LogRecords {
-				entry := protoLogToCloudEntry(lr, rl.Resource)
-				e.logger.Log(entry)
+				entry := protoLogToCloudEntry(lr, rl.Resource, rl.SchemaUrl, sl.Scope, sl.SchemaUrl)
+				if e.logSink != nil {
+					e.logSink(entry)
+				} else {
+					e.logger.Log(entry)
+				}
 			}
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -59,9 +60,13 @@ type Pipeline struct {
 	meter        otelmetric.Meter
 	retryConfig  RetryConfig
 
-	metricsDropWarned sync.Once
-	logsDropWarned    sync.Once
-	spansDropWarned   sync.Once
+	metricsDropWarned        sync.Once
+	logsDropWarned           sync.Once
+	spansDropWarned          sync.Once
+	policyRejectedSpans      atomic.Int64
+	policyRejectedLogs       atomic.Int64
+	policyRejectedDataPoints atomic.Int64
+	policyRejectedRequests   atomic.Int64
 
 	metricBuf             []*metricpb.ResourceMetrics
 	metricBufMu           sync.Mutex
@@ -290,7 +295,14 @@ func (p *Pipeline) Config() *Config {
 func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.ResourceSpans) error {
 	// Clone and transform at the receiver boundary before any destination sees
 	// the batch. The processed value remains immutable across export retries.
-	filtered := p.policy.processSpans(resourceSpans)
+	decision := p.policy.processSpans(resourceSpans)
+	if decision.Reason != "" {
+		p.policyRejectedRequests.Add(1)
+		p.policyRejectedSpans.Add(decision.Rejected)
+		log.Error("Rejected %d spans at telemetry receiver: %s", decision.Rejected, decision.Reason)
+		return status.Error(codes.InvalidArgument, decision.Reason)
+	}
+	filtered := decision.Data
 	if len(filtered) == 0 {
 		return nil
 	}
@@ -333,7 +345,14 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 // Metrics are accumulated and flushed at metricFlushInterval to avoid
 // sampling-rate violations from rapid writes (e.g. multiple hook processes).
 func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricpb.ResourceMetrics) error {
-	processed := p.policy.processMetrics(resourceMetrics)
+	decision := p.policy.processMetrics(resourceMetrics)
+	if decision.Reason != "" {
+		p.policyRejectedRequests.Add(1)
+		p.policyRejectedDataPoints.Add(decision.Rejected)
+		log.Error("Rejected %d metric data points at telemetry receiver: %s", decision.Rejected, decision.Reason)
+		return status.Error(codes.InvalidArgument, decision.Reason)
+	}
+	processed := decision.Data
 	if len(processed) == 0 {
 		return nil
 	}
@@ -601,7 +620,14 @@ func attrSetKey(attrs []*commonpb.KeyValue) string {
 
 // handleLogs processes incoming logs from the receiver.
 func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.ResourceLogs) error {
-	processed := p.policy.processLogs(resourceLogs)
+	decision := p.policy.processLogs(resourceLogs)
+	if decision.Reason != "" {
+		p.policyRejectedRequests.Add(1)
+		p.policyRejectedLogs.Add(decision.Rejected)
+		log.Error("Rejected %d log records at telemetry receiver: %s", decision.Rejected, decision.Reason)
+		return status.Error(codes.InvalidArgument, decision.Reason)
+	}
+	processed := decision.Data
 	if len(processed) == 0 {
 		return nil
 	}

@@ -19,6 +19,8 @@ import (
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -245,6 +247,10 @@ func handleHTTPExport(w http.ResponseWriter, req *http.Request, exportReq, expor
 		return
 	}
 	if err := process(req.Context()); err != nil {
+		if status.Code(err) == codes.InvalidArgument {
+			http.Error(w, policyAdmissionReason, http.StatusBadRequest)
+			return
+		}
 		http.Error(w, processError, http.StatusInternalServerError)
 		return
 	}
