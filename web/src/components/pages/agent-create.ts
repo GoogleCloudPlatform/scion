@@ -429,7 +429,7 @@ export class ScionPageAgentCreate extends LitElement {
           // project a member belongs to from this picker, so members could not
           // create an agent anywhere even though the API would have allowed it.
           // The unfiltered list is already scoped to what the caller may read.
-          fetch('/api/v1/projects?limit=100', { credentials: 'include' }),
+          apiFetch('/api/v1/projects?limit=100'),
           fetch('/api/v1/runtime-brokers?limit=100', { credentials: 'include' }),
           apiFetchAllPages<Template>(tmplUrl, 'templates'),
           fetch('/api/v1/settings/public', { credentials: 'include' }),
