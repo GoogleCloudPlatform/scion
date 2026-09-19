@@ -143,6 +143,23 @@ export class ScionPageAgents extends LitElement {
         align-items: flex-start;
         justify-content: space-between;
         margin-bottom: 0.75rem;
+        gap: 0.5rem;
+      }
+
+      /* The name column must be allowed to shrink for the truncation in
+         .resource-name to take effect — min-width:auto on this flex item
+         would otherwise hold the header open at the full name width. It is
+         the only div in the header; the siblings are badge elements. */
+      .agent-header > div {
+        min-width: 0;
+      }
+
+      /* The badges keep their intrinsic size so the name absorbs the
+         shrinking rather than squeezing the status indicators. */
+      .agent-header > scion-status-badge,
+      .agent-header > scion-message-mode-badge,
+      .agent-header > scion-messageability-indicator {
+        flex-shrink: 0;
       }
 
       .agent-meta {

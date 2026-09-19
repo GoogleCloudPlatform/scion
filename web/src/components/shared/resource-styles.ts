@@ -550,10 +550,28 @@ export const listPageStyles = css`
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    /* A flex item defaults to min-width:auto, so it refuses to shrink below
+       its content and a long unbroken name pushes the card header wider than
+       the card. min-width:0 lets it shrink; the overflow rules then truncate
+       rather than spill. */
+    min-width: 0;
+    overflow: hidden;
   }
 
+  /* The icon must keep its size while the text absorbs the shrinking. */
   .resource-name sl-icon {
     color: var(--scion-primary, #3b82f6);
+    flex-shrink: 0;
+  }
+
+  /* Truncation has to land on the element that holds the text — usually an
+     anchor inside the heading — because the flex parent only clips. */
+  .resource-name > a,
+  .resource-name > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* ── Stats (label + value pairs) ─────────────────────────────────── */
