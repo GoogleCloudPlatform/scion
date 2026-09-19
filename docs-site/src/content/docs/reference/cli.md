@@ -228,7 +228,6 @@ Conversations are referenced using one of three forms:
     - `list` (default): List conversations you participate in.
     - `get <conversation-ref>`: Show conversation details.
     - `get-message <conversation-ref> <message-id>`: Retrieve a single message by its ID from a conversation. Authorization is participant-based — only participants of the conversation can retrieve its messages.
-        - Flags: `--json` (output in JSON format).
     - `messages <conversation-ref>`: View messages in a conversation.
     - `create <name>`: Create a new group conversation.
     - `set-default <conversation-ref> <agent-id>`: Set the default agent for a conversation.
@@ -252,6 +251,8 @@ Conversations are referenced using one of three forms:
     - `--json`: Output in JSON format.
 - **Flags (on `catch-up`):**
     - `--since <duration>`: Show messages from this duration ago, e.g. `30m`, `2h` (default `1h`).
+    - `--json`: Output in JSON format.
+- **Flags (on `get-message`):**
     - `--json`: Output in JSON format.
 
 ### `scion logs`
@@ -332,6 +333,10 @@ Manages the Scion workspace (Project).
         - Flags: `--name`, `--script`, `--description`.
     - `activate <id-or-slug> [project]`: Mark an archived hook as active (archives any currently active hook).
     - `delete <id-or-slug> [project]` (alias `rm`, `remove`): Delete an archived hook. Active hooks cannot be deleted.
+- `scion project messaging`: Manage cross-project messaging policy for a project.
+    - `set [project]`: Set the inbound messaging policy.
+        - Flags: `--policy <string>` (one of `none`, `members`, `all`), `--revision <int>` (required, optimistic concurrency revision).
+    - `get [project]`: Show the current messaging policy and revision.
 
 ### `scion user`
 
@@ -526,6 +531,10 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags: `--name`, `--script`, `--description`.
     - `activate <id-or-slug>`: Mark an archived hook as active (archives any currently active hub-scoped hook).
     - `delete <id-or-slug>` (alias `rm`, `remove`): Delete an archived hook. Active hooks cannot be deleted.
+- `scion hub messaging`: Manage hub-wide cross-project messaging settings. Requires administrator privileges.
+    - `set`: Set hub-wide messaging settings.
+        - Flags: `--cross-project-enabled <bool>` (enable or disable cross-project messaging), `--revision <int>` (required, optimistic concurrency revision).
+    - `get`: Show the current hub-wide messaging settings and revision.
 
 ## Notification Management
 

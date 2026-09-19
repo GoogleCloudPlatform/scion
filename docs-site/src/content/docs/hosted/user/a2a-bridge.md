@@ -346,7 +346,7 @@ When the A2A bridge is configured with per-user authentication, callers present 
 
 ### Per-User & Federation Schemes
 
-The A2A bridge supports three authentication schemes for granular access control, specified via `auth.scheme` in the bridge configuration:
+The A2A bridge supports four authentication schemes for granular access control, specified via `auth.scheme` in the bridge configuration:
 
 #### 1. `hubUAT` (Recommended for Desktop App Federation)
 * **How it works**: Callers present a Scion User Access Token (`Authorization: Bearer scion_pat_...`) created via the CLI.
