@@ -292,13 +292,28 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     config = telemetry.get("telemetry") if isinstance(telemetry, dict) else None
     enabled = isinstance(config, dict) and config.get("enabled", True)
     source_env = telemetry.get("env", {}) if isinstance(telemetry, dict) else {}
+    cloud = config.get("cloud") if isinstance(config, dict) else None
+    configured_provider = cloud.get("provider", "") if isinstance(cloud, dict) else ""
+    staged_provider = source_env.get("SCION_TELEMETRY_CLOUD_PROVIDER", "")
+    if configured_provider and staged_provider and configured_provider != staged_provider:
+        raise scion_harness.ProvisionError("conflicting telemetry cloud provider")
+    provider = staged_provider or configured_provider
+    if enabled and not provider:
+        # The receiver can infer GCP from credentials even when provider is
+        # absent. A credential path is only a reason to stop, not a selector.
+        has_credentials = bool(source_env.get("SCION_OTEL_GCP_CREDENTIALS")) or os.path.isfile(
+            os.path.join(ctx.home, ".scion", "telemetry-gcp-credentials.json")
+        )
+        generic_endpoint = (cloud.get("endpoint") if isinstance(cloud, dict) else None) or source_env.get("SCION_OTEL_ENDPOINT")
+        if has_credentials or not generic_endpoint:
+            raise scion_harness.ProvisionError("explicit telemetry cloud provider required")
     port = str(source_env.get("SCION_OTEL_GRPC_PORT") or "4317")
     if not port.isdecimal() or not 1 <= int(port) <= 65535:
         raise scion_harness.ProvisionError("invalid local telemetry gRPC port")
     env.update({
         "SCION_NATIVE_TELEMETRY_POLICY": "enabled" if enabled else "disabled",
         "CLAUDE_CODE_ENABLE_TELEMETRY": "1" if enabled else "0",
-        "OTEL_METRICS_EXPORTER": "otlp" if enabled else "none",
+        "OTEL_METRICS_EXPORTER": "otlp" if enabled and provider != "gcp" else "none",
         "OTEL_LOGS_EXPORTER": "otlp" if enabled else "none",
         "OTEL_TRACES_EXPORTER": "none",
         "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{port}",

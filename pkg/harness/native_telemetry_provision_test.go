@@ -22,8 +22,12 @@ func TestNativeTelemetryProvisionedChildEnv(t *testing.T) {
 	if err != nil {
 		t.Skip("python3 unavailable")
 	}
-	for _, harnessName := range []string{"claude", "gemini-cli", "codex"} {
+	for _, harnessName := range []string{"claude", "claude-gcp", "gemini-cli", "codex"} {
 		for _, enabled := range []bool{true, false} {
+			bundleHarnessName := harnessName
+			if harnessName == "claude-gcp" {
+				bundleHarnessName = "claude"
+			}
 			name := harnessName + "/disabled"
 			if enabled {
 				name = harnessName + "/enabled"
@@ -35,7 +39,7 @@ func TestNativeTelemetryProvisionedChildEnv(t *testing.T) {
 					t.Fatal(err)
 				}
 				for _, file := range []string{"provision.py", "scion_harness.py"} {
-					data, err := fs.ReadFile(harnessFS.FS, harnessName+"/"+file)
+					data, err := fs.ReadFile(harnessFS.FS, bundleHarnessName+"/"+file)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -43,7 +47,15 @@ func TestNativeTelemetryProvisionedChildEnv(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				input, _ := json.Marshal(map[string]any{"telemetry": map[string]any{"enabled": enabled}, "env": map[string]string{"SCION_OTEL_GRPC_PORT": "14317"}})
+				telemetry := map[string]any{"enabled": enabled}
+				if bundleHarnessName == "claude" {
+					provider := "otlp"
+					if harnessName == "claude-gcp" {
+						provider = "gcp"
+					}
+					telemetry["cloud"] = map[string]any{"provider": provider}
+				}
+				input, _ := json.Marshal(map[string]any{"telemetry": telemetry, "env": map[string]string{"SCION_OTEL_GRPC_PORT": "14317"}})
 				if err := os.WriteFile(filepath.Join(bundle, "inputs", "telemetry.json"), input, 0644); err != nil {
 					t.Fatal(err)
 				}
@@ -94,6 +106,32 @@ func TestNativeTelemetryProvisionedChildEnv(t *testing.T) {
 				}
 				if harnessName == "gemini-cli" && !strings.Contains(string(child), "GEMINI_TELEMETRY_TRACES_ENABLED=false\n") {
 					t.Fatal("Gemini detailed traces are not disabled in child env")
+				}
+				if harnessName == "claude-gcp" {
+					if !strings.Contains(string(child), "OTEL_METRICS_EXPORTER=none\n") {
+						t.Fatal("GCP Claude metrics were not disabled in child env")
+					}
+					wantLogs := "OTEL_LOGS_EXPORTER=none\n"
+					if enabled {
+						wantLogs = "OTEL_LOGS_EXPORTER=otlp\n"
+					}
+					if !strings.Contains(string(child), wantLogs) {
+						t.Fatal("GCP Claude log exporter mismatch in child env")
+					}
+					blocked := filepath.Join(home, "blocked-child")
+					t.Setenv("OTEL_METRICS_EXPORTER", "otlp")
+					if code, err := supervisor.New(cfg).Run(context.Background(), []string{"sh", "-c", `touch "` + blocked + `"`}); err == nil || code == 0 {
+						t.Fatalf("inherited metric exporter started child: code=%d err=%v", code, err)
+					}
+					if _, err := os.Stat(blocked); !os.IsNotExist(err) {
+						t.Fatalf("child ran after inherited conflict: %v", err)
+					}
+					// The same generated overlay must reject fetched secrets that
+					// would undo the GCP logs-first decision.
+					cfg.SecretOverrides = map[string]string{"OTEL_METRICS_EXPORTER": "otlp"}
+					if code, err := supervisor.New(cfg).Run(context.Background(), []string{"sh", "-c", `touch "` + blocked + `"`}); err == nil || code == 0 {
+						t.Fatalf("secret metric exporter started child: code=%d err=%v", code, err)
+					}
 				}
 				for key, value := range overlay {
 					if key == "CODEX_HOME" || strings.HasPrefix(key, "OTEL_") || strings.HasPrefix(key, "GEMINI_TELEMETRY_") || key == "CLAUDE_CODE_ENABLE_TELEMETRY" {

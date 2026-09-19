@@ -13,11 +13,14 @@ ROOT = Path(__file__).parent
 
 
 class TelemetryProvisionTest(unittest.TestCase):
-    def _invoke(self, harness, enabled, port):
+    def _invoke(self, harness, enabled, port, provider=None, extra_env=None,
+                well_known_gcp_credentials=False, cloud_endpoint=None):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             bundle = home / '.scion' / 'harness'
             (bundle / 'inputs').mkdir(parents=True)
+            if well_known_gcp_credentials:
+                (home / '.scion' / 'telemetry-gcp-credentials.json').write_text('{}')
             spec = importlib.util.spec_from_file_location('provision', ROOT / harness / 'provision.py')
             module = importlib.util.module_from_spec(spec)
             with patch.dict(os.environ, {'HOME': tmp}, clear=False):
@@ -26,9 +29,17 @@ class TelemetryProvisionTest(unittest.TestCase):
                     'harness_bundle_dir': str(bundle),
                     'harness_config': {'no_auth': {'behavior': 'allow'}},
                 })
+                telemetry = {'enabled': enabled}
+                if provider is not None or cloud_endpoint is not None:
+                    telemetry['cloud'] = {}
+                    if provider is not None:
+                        telemetry['cloud']['provider'] = provider
+                    if cloud_endpoint is not None:
+                        telemetry['cloud']['endpoint'] = cloud_endpoint
+                source_env = {'SCION_OTEL_GRPC_PORT': str(port)}
+                source_env.update(extra_env or {})
                 (bundle / 'inputs' / 'telemetry.json').write_text(json.dumps({
-                    'telemetry': {'enabled': enabled},
-                    'env': {'SCION_OTEL_GRPC_PORT': str(port)},
+                    'telemetry': telemetry, 'env': source_env,
                 }))
                 ctx.select_auth = lambda _: module.scion_harness.ResolvedAuth('none')
                 module.provision(ctx)
@@ -44,11 +55,51 @@ class TelemetryProvisionTest(unittest.TestCase):
     def test_claude_default_custom_and_disabled(self):
         for enabled, port in ((True, 4317), (True, 14317), (False, 14317)):
             with self.subTest(enabled=enabled, port=port):
-                env, _ = self._invoke('claude', enabled, port)
+                env, _ = self._invoke('claude', enabled, port, provider='otlp')
                 self.assertEqual(env['CLAUDE_CODE_ENABLE_TELEMETRY'], '1' if enabled else '0')
                 self.assertEqual(env['OTEL_METRICS_EXPORTER'], 'otlp' if enabled else 'none')
                 self.assertEqual(env['OTEL_LOGS_EXPORTER'], 'otlp' if enabled else 'none')
                 self.assertEqual(env['OTEL_EXPORTER_OTLP_ENDPOINT'], f'http://127.0.0.1:{port}')
+
+    def test_claude_gcp_logs_only_and_generic_metrics(self):
+        for provider, enabled, port, metrics, logs in (
+            ('gcp', True, 4317, 'none', 'otlp'),
+            ('gcp', True, 14317, 'none', 'otlp'),
+            ('gcp', False, 14317, 'none', 'none'),
+            ('generic', True, 4317, 'otlp', 'otlp'),
+            (None, True, 14317, 'otlp', 'otlp'),
+        ):
+            with self.subTest(provider=provider, enabled=enabled, port=port):
+                env, _ = self._invoke('claude', enabled, port, provider=provider,
+                                      cloud_endpoint='https://generic.invalid/v1' if provider is None else None)
+                self.assertEqual(env['OTEL_METRICS_EXPORTER'], metrics)
+                self.assertEqual(env['OTEL_LOGS_EXPORTER'], logs)
+                self.assertEqual(env['OTEL_EXPORTER_OTLP_ENDPOINT'], f'http://127.0.0.1:{port}')
+                self.assertEqual(env['OTEL_TRACES_EXPORTER'], 'none')
+
+    def test_claude_staged_provider_and_implicit_gcp_credentials(self):
+        env, _ = self._invoke('claude', True, 14317, extra_env={
+            'SCION_TELEMETRY_CLOUD_PROVIDER': 'gcp',
+        })
+        self.assertEqual(env['OTEL_METRICS_EXPORTER'], 'none')
+        with self.assertRaisesRegex(Exception, 'explicit telemetry cloud provider required'):
+            self._invoke('claude', True, 14317, extra_env={
+                'SCION_OTEL_GCP_CREDENTIALS': '/private/key.json',
+            })
+        with self.assertRaisesRegex(Exception, 'explicit telemetry cloud provider required'):
+            self._invoke('claude', True, 14317, well_known_gcp_credentials=True)
+        with self.assertRaisesRegex(Exception, 'explicit telemetry cloud provider required'):
+            self._invoke('claude', True, 14317)
+        with self.assertRaisesRegex(Exception, 'explicit telemetry cloud provider required'):
+            self._invoke('claude', True, 14317, cloud_endpoint='https://generic.invalid/v1',
+                         well_known_gcp_credentials=True)
+        env, _ = self._invoke('claude', True, 14317, cloud_endpoint='https://generic.invalid/v1',
+                              extra_env={'SCION_TELEMETRY_CLOUD_PROVIDER': 'gcp'})
+        self.assertEqual(env['OTEL_METRICS_EXPORTER'], 'none')
+        with self.assertRaisesRegex(Exception, 'conflicting telemetry cloud provider'):
+            self._invoke('claude', True, 14317, provider='generic', extra_env={
+                'SCION_TELEMETRY_CLOUD_PROVIDER': 'gcp',
+            })
 
     def test_gemini_default_custom_and_disabled(self):
         for enabled, port in ((True, 4317), (True, 14317), (False, 14317)):
@@ -101,7 +152,7 @@ class TelemetryProvisionTest(unittest.TestCase):
             'SCION_CODEX_OTEL_ENDPOINT': 'https://external.invalid:443',
         }
         with patch.dict(os.environ, inherited):
-            claude_env, _ = self._invoke('claude', True, 14317)
+            claude_env, _ = self._invoke('claude', True, 14317, provider='otlp')
             gemini_env, gemini_config = self._invoke('gemini-cli', True, 14317)
             codex_env, codex_config = self._invoke('codex', True, 14317)
         self.assertEqual(claude_env['OTEL_EXPORTER_OTLP_ENDPOINT'], 'http://127.0.0.1:14317')

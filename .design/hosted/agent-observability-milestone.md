@@ -349,12 +349,17 @@ The Phase 4 provisioners generate receiver configuration from the staged
 cloud exporter endpoint and old Codex endpoint overrides are not native
 destinations. Disabled provisioners explicitly disable supported exporters.
 Codex uses OTLP gRPC for logs, traces, and metrics; hook token counters retain
-their separate `scion.hook.*` names. Claude configures OTLP logs and metrics;
-its trace exporter is disabled because its documented telemetry options do not
-establish a native trace emitter. Gemini configures its documented local OTLP
+their separate `scion.hook.*` names. Claude configures OTLP logs and metrics for
+generic cloud backends, but GCP-backed Claude configures logs only because its
+native metric dimensions are unsupported by the pinned Cloud identity policy.
+Its trace exporter is disabled because its documented telemetry options do not
+establish a native trace emitter. The staged nonsecret effective backend hint
+accounts for GCP credential projection after provisioning; ambiguous backend
+inputs fail before native child launch. Gemini configures its documented local OTLP
 target with prompt logging and detailed traces off; detailed Gemini traces can
 contain system instructions and other content. These are configured
-capabilities, not evidence of emitted signals. The Phase 4 live gate still
+capabilities, not evidence of emitted signals. Exact installed Claude 2.1.273
+selector behavior and emitted log privacy remain unverified. The Phase 4 live gate still
 requires inspection of exact installed Claude and Gemini versions: their image
 builds currently use `@latest`, and neither binary nor Docker was available in
 the developer environment. Codex 0.154.0 was installed locally; its generated
