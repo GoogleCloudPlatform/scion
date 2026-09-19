@@ -69,13 +69,17 @@ export class SSEClient extends EventTarget {
   private connectionOpen = false;
   private onVisibilityChange: (() => void) | null = null;
 
+  constructor(private readonly endpoint = '/events') {
+    super();
+  }
+
   /**
    * Build the SSE URL with subscription subjects as query parameters.
    * Maps to the WatchRequest pattern.
    */
   private buildUrl(subjects: string[]): string {
     const params = subjects.map((s) => `sub=${encodeURIComponent(s)}`).join('&');
-    return `/events?${params}`;
+    return `${this.endpoint}?${params}`;
   }
 
   /**
@@ -174,6 +178,10 @@ export class SSEClient extends EventTarget {
     // replacement connection never lands, that still counts as a drop.
     this.eventSource.addEventListener('reconnect', () => {
       if (es !== this.eventSource) return;
+      if (this.connectionOpen) {
+        this.connectionOpen = false;
+        this.dispatchEvent(new CustomEvent('disconnected'));
+      }
       this.reconnectAttempts = 0;
       es.close();
       this.eventSource = null;
@@ -205,6 +213,7 @@ export class SSEClient extends EventTarget {
     const generation = this.generation;
     try {
       const resp = await fetch('/auth/me', { credentials: 'include' });
+      if (generation !== this.generation) return;
       if (resp.status === 401 || resp.redirected) {
         console.warn('[SSE] Session expired, redirecting to login');
         const returnTo = encodeURIComponent(window.location.pathname);

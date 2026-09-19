@@ -448,3 +448,28 @@ describe('SSEClient connected event', () => {
     client.disconnect();
   });
 });
+
+it('uses an explicit trusted deployment endpoint without changing the default', () => {
+  const scoped = new SSEClient('https://hub.example/team/events');
+  scoped.connect(['agent.one.>']);
+  expect(latest().url).toBe('https://hub.example/team/events?sub=agent.one.%3E');
+  scoped.disconnect();
+  const normal = new SSEClient();
+  normal.connect(['project.one.>']);
+  expect(latest().url).toBe('/events?sub=project.one.%3E');
+  normal.disconnect();
+});
+
+it('reports a server reconnect gap before the replacement is ready', () => {
+  const client = connectAndOpen();
+  const disconnected = vi.fn();
+  const connected = vi.fn();
+  client.addEventListener('disconnected', disconnected);
+  client.addEventListener('connected', connected);
+  latest().dispatchEvent(new Event('reconnect'));
+  expect(disconnected).toHaveBeenCalledTimes(1);
+  expect(connected).not.toHaveBeenCalled();
+  latest().simulateOpen();
+  expect(connected).toHaveBeenCalledTimes(1);
+  client.disconnect();
+});
