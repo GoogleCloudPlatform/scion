@@ -255,7 +255,9 @@ The receiver admission gate closes before pipeline shutdown. A handler already
 inside the pipeline keeps its budget reservation and exporter alive until it
 returns. If the caller deadline expires first, Stop returns an incomplete
 shutdown error, keeps resources for a later cleanup call, and reports degraded
-state. A gRPC worker still receiving before the pipeline handler also keeps
+state. If the deadline expires before SDK client shutdown, the pipeline retains
+the exporter and a later Stop retries closing it; successful closes are not
+repeated. A gRPC worker still receiving before the pipeline handler also keeps
 its processing slot until it unwinds; a repeated Stop cannot claim a clean
 drain while that slot remains. Forced gRPC Stop runs asynchronously because
 grpc-go may serialize it behind GracefulStop; both shutdown goroutines may

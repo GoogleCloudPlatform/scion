@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	lp "cloud.google.com/go/logging/apiv2/loggingpb"
 	slog "github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	logs "go.opentelemetry.io/proto/otlp/logs/v1"
+	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/api/option"
 	mr "google.golang.org/genproto/googleapis/api/monitoredres"
 	"google.golang.org/grpc"
@@ -143,4 +146,129 @@ func testActualLoggingSDKFailureAndRecovery(t *testing.T, overlap bool) {
 		t.Fatalf("SDK cleanup: %v", e)
 	}
 	t.Logf("recovered actual SDK diagnostics=%+v; two local transport calls; no Google backend contacted", d)
+}
+
+func TestPipelineStopRetriesExpiredLoggingClientClose(t *testing.T) {
+	conn, err := grpc.NewClient("127.0.0.1:1", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	client, err := logging.NewClient(context.Background(), "phase3-local-only", option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &GCPExporter{logClient: client}
+	p := NewWithConfig(&Config{Enabled: true, CloudEnabled: true})
+	p.running = true
+	p.exporter = &CloudExporter{gcpExporter: g}
+	short, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-short.Done()
+	if err := p.Stop(short); err == nil {
+		t.Fatal("expired Stop claimed complete shutdown")
+	}
+	if !p.running || p.DeliveryState() != "degraded" || g.logClient == nil {
+		t.Fatalf("incomplete Stop lost client ownership: running=%v state=%s client=%v", p.running, p.DeliveryState(), g.logClient)
+	}
+	if err := p.Stop(context.Background()); err != nil {
+		t.Fatalf("later Stop failed to close retained Logging client: %v", err)
+	}
+	if p.running || g.logClient != nil {
+		t.Fatalf("later Stop left client owned: running=%v client=%v", p.running, g.logClient)
+	}
+	// Hold the same slot after Close so this export cannot check availability
+	// until it actually becomes its owner. A pre-slot check could silently
+	// enqueue against a client that another owner just closed.
+	if err := g.acquireLogSlot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	late := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		late <- g.ExportProtoLogs(context.Background(), nil)
+	}()
+	<-started
+	select {
+	case err := <-late:
+		t.Fatalf("late export bypassed owned slot: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	<-g.logSlot
+	select {
+	case err := <-late:
+		if err == nil || !strings.Contains(err.Error(), "unavailable") {
+			t.Fatalf("closed Logging exporter accepted delayed export: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("delayed export did not return after slot release")
+	}
+	if g.asyncLogErrors.Load() != 0 {
+		t.Fatal("delayed export entered the closed Logging SDK")
+	}
+	if err := p.Stop(context.Background()); err != nil {
+		t.Fatalf("completed Stop not idempotent: %v", err)
+	}
+}
+
+func TestPipelineStopMetricBudgetExpiresBeforeLoggingClose(t *testing.T) {
+	conn, err := grpc.NewClient("127.0.0.1:1", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	client, err := logging.NewClient(context.Background(), "phase3-local-only", option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &GCPExporter{logClient: client}
+	p := NewWithConfig(&Config{Enabled: true, CloudEnabled: true})
+	p.running = true
+	p.exporter = &CloudExporter{gcpExporter: g}
+	if err := p.handleMetrics(context.Background(), []*metricpb.ResourceMetrics{stopTestMetric(7, 2)}); err != nil {
+		t.Fatal(err)
+	}
+	// A recent write holds this same-series metric until its 15-second slot.
+	// The caller budget expires during the drain, before Logging SDK shutdown.
+	p.metricLastFlush = time.Now()
+	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := p.Stop(short); err == nil {
+		t.Fatal("metric drain deadline claimed clean shutdown")
+	}
+	if !p.running || g.logClient == nil || p.DeliveryState() != "degraded" {
+		t.Fatalf("expired metric drain lost SDK ownership: running=%v client=%v state=%s", p.running, g.logClient, p.DeliveryState())
+	}
+	if err := p.beginIntake(); err == nil {
+		p.endIntake()
+		t.Fatal("intake reopened after incomplete Stop")
+	}
+	if d := p.Diagnostics()["metrics"]; d.Accepted != 1 || d.Unconfirmed != 1 || p.QueueDepth() != (QueueDepth{}) {
+		t.Fatalf("metric residual disposition=%+v depth=%+v", d, p.QueueDepth())
+	}
+	// Concurrent retries share p.mu. Exactly one can close the retained client;
+	// the rest observe a completed Stop without repeating Close.
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- p.Stop(context.Background())
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil && !strings.Contains(err.Error(), "unconfirmed") {
+			t.Fatalf("later cleanup error: %v", err)
+		}
+	}
+	if p.running || g.logClient != nil || p.DeliveryState() != "degraded" {
+		t.Fatalf("later cleanup incomplete: running=%v client=%v state=%s", p.running, g.logClient, p.DeliveryState())
+	}
+	if d := p.Diagnostics()["metrics"]; d.Accepted != 1 || d.Unconfirmed != 1 || d.Delivered != 0 {
+		t.Fatalf("duplicate metric disposition after repeat Stop: %+v", d)
+	}
 }

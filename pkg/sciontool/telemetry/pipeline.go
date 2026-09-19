@@ -378,7 +378,12 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	// Shutdown exporter to flush any buffered spans
 	if p.exporter != nil {
 		if err := p.exporter.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("exporter shutdown error: %w", err))
+			// Keep the exporter owned by this pipeline. The intake gate and
+			// receiver are already closed, but a later Stop with a live budget
+			// must be able to finish closing SDK clients.
+			p.deliveryState.Store("degraded")
+			p.logDeliverySnapshot(true)
+			return fmt.Errorf("telemetry shutdown incomplete: exporter shutdown error: %w", err)
 		}
 	}
 

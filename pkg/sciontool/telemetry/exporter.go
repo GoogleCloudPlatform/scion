@@ -317,12 +317,16 @@ func (e *CloudExporter) Shutdown(ctx context.Context) error {
 	if e.traceExporter != nil {
 		if err := e.traceExporter.Shutdown(ctx); err != nil {
 			errs = append(errs, err)
+		} else {
+			e.traceExporter = nil
 		}
 	}
 
 	if e.grpcConn != nil {
 		if err := e.grpcConn.Close(); err != nil {
 			errs = append(errs, err)
+		} else {
+			e.grpcConn = nil
 		}
 	}
 

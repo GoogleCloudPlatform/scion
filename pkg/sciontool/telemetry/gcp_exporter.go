@@ -194,13 +194,16 @@ func (e *GCPExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics []
 
 // ExportProtoLogs converts OTLP proto log records to Cloud Logging entries.
 func (e *GCPExporter) ExportProtoLogs(ctx context.Context, resourceLogs []*logspb.ResourceLogs) error {
-	if e == nil || (e.logger == nil && e.logSink == nil) {
+	if e == nil {
 		return errors.New("GCP log exporter unavailable")
 	}
 	if err := e.acquireLogSlot(ctx); err != nil {
 		return err
 	}
 	defer func() { <-e.logSlot }()
+	if e.logger == nil && e.logSink == nil {
+		return errors.New("GCP log exporter unavailable")
+	}
 
 	for _, rl := range resourceLogs {
 		for _, sl := range rl.ScopeLogs {
@@ -233,12 +236,16 @@ func (e *GCPExporter) Shutdown(ctx context.Context) error {
 	if e.traceExporter != nil {
 		if err := e.traceExporter.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("trace exporter shutdown: %w", err))
+		} else {
+			e.traceExporter = nil
 		}
 	}
 
 	if e.metricExporter != nil {
 		if err := e.metricExporter.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("metric exporter shutdown: %w", err))
+		} else {
+			e.metricExporter = nil
 		}
 	}
 
@@ -246,9 +253,13 @@ func (e *GCPExporter) Shutdown(ctx context.Context) error {
 		if err := e.acquireLogSlot(ctx); err != nil {
 			return fmt.Errorf("log client close incomplete: %w", err)
 		}
+		// The pinned Logging SDK marks Client closed even when Close returns
+		// an asynchronous flush error. It must not be closed again.
 		if err := e.logClient.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("log client close: %w", err))
 		}
+		e.logClient = nil
+		e.logger = nil
 		<-e.logSlot
 	}
 
