@@ -161,10 +161,14 @@ export class TerminalMetadata {
     queueMicrotask(() => {
       this.scheduled = false;
       if (this.disposed) return;
-      const ids = [...this.entries.values()].filter((e) => !e.excluded).map((e) => e.id);
+      const retained = [...this.entries.values()].filter((entry) => !entry.excluded);
+      const subscribed = this.batches.flatMap((batch) => batch.entries);
+      // The same UUID can now belong to a replacement Entry. Existing batches
+      // capture the old objects, so subject equality alone cannot justify reuse.
       if (
         !this.forceUnion &&
-        ids.join() === this.batches.flatMap((b) => b.entries.map((e) => e.id)).join()
+        retained.length === subscribed.length &&
+        retained.every((entry, index) => entry === subscribed[index])
       )
         return;
       this.forceUnion = false;

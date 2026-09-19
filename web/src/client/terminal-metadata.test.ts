@@ -314,3 +314,84 @@ it('aborts bounded diagnostic requests on disposal without rebuilding after late
   expect(Source.instances).toHaveLength(1);
   expect(metadata.get(id(1))).toBeUndefined();
 });
+
+it.each(['before readiness', 'connected'])(
+  'reconciles a same-ID replacement with a retained peer %s',
+  async (stage) => {
+    metadata.retain(id(1));
+    metadata.retain(id(2));
+    await flush();
+    const oldSource = Source.instances[0];
+    if (stage === 'connected') {
+      oldSource.open();
+      await flush();
+    }
+    const previousRequests = fetcher.mock.calls.length;
+    metadata.release(id(2));
+    metadata.retain(id(2));
+    await flush();
+    expect(Source.instances).toHaveLength(2);
+    expect(oldSource.close).toHaveBeenCalledTimes(1);
+    oldSource.open();
+    oldSource.update(2, 'deleted', {});
+    await flush();
+    expect(fetcher).toHaveBeenCalledTimes(previousRequests);
+    expect(metadata.get(id(2))).toMatchObject({ availability: 'loading', agent: null });
+
+    const replacement = Source.instances[1];
+    replacement.open();
+    await flush();
+    expect(fetcher).toHaveBeenCalledTimes(previousRequests + 2);
+    expect(metadata.get(id(1))?.availability).toBe('ready');
+    expect(metadata.get(id(2))).toMatchObject({ availability: 'ready', agent: agent(2) });
+    replacement.update(2, 'status', { activity: 'executing' });
+    replacement.update(2, 'ports', { ports: [{ port: 4000 }] });
+    expect(metadata.get(id(2))?.agent).toMatchObject({
+      activity: 'executing',
+      exposedPorts: [{ port: 4000 }],
+    });
+    replacement.update(2, 'deleted', {});
+    expect(metadata.get(id(2))?.availability).toBe('deleted');
+    expect(metadata.get(id(1))?.availability).toBe('ready');
+  }
+);
+
+it.each(['fetch', 'body'])(
+  'rejects an old %s continuation after same-ID replacement with a retained peer',
+  async (stage) => {
+    const response = deferred<Response>();
+    const body = deferred<unknown>();
+    const parseBody = vi.fn(() => body.promise);
+    fetcher
+      .mockResolvedValueOnce(json(agent(1)))
+      .mockReturnValueOnce(
+        stage === 'fetch'
+          ? response.promise
+          : Promise.resolve({ ok: true, json: parseBody } as unknown as Response)
+      );
+    metadata.retain(id(1));
+    metadata.retain(id(2));
+    await flush();
+    Source.instances[0].open();
+    await flush();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    if (stage === 'body') expect(parseBody).toHaveBeenCalledTimes(1);
+    const oldSignal = fetcher.mock.calls[1][1]?.signal;
+    metadata.release(id(2));
+    metadata.retain(id(2));
+    await flush();
+    expect(oldSignal?.aborted).toBe(true);
+    expect(Source.instances).toHaveLength(2);
+    Source.instances[1].open();
+    await flush();
+    Source.instances[1].update(2, 'status', { activity: 'completed' });
+    response.resolve(json({ ...agent(2), name: 'obsolete' }));
+    body.resolve({ ...agent(2), name: 'obsolete' });
+    await flush();
+    expect(metadata.get(id(2))).toMatchObject({
+      availability: 'ready',
+      agent: { name: 'agent-2', activity: 'completed' },
+    });
+    expect(metadata.get(id(1))?.availability).toBe('ready');
+  }
+);

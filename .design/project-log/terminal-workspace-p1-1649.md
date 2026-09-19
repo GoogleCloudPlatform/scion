@@ -112,3 +112,24 @@ focus remains user-deferred to #1662 and lifecycle freeze to P3.3.
 Delivery is a verified Git bundle plus manifest/report on the externally mounted
 scratchpad, as explicitly required by the brief; no remote push, main rebase,
 backend change, child agent or sibling implementation is authorized here.
+
+## R2 review correction: retained-peer same-ID replacement
+
+Independent R1 finding R1-1 reproduced on `beb067f`: retaining A/B, then closing
+and reopening B in one turn preserves the subject strings but replaces B's Entry.
+The no-op check left the batch pointing at the old Entry, so replacement metadata
+stayed loading and ignored events. The union comparison now requires identical
+Entry objects in addition to equal length. A changed Entry rebuilds subscriptions
+and reconciles after readiness; temporary different-ID add/remove still avoids
+churn when the surviving Entry identities are unchanged.
+
+Four new maintained regressions fail before the fix and pass afterward: replacement
+before readiness and after connection, and rejection of late fetch/JSON-body
+continuations with a retained peer. They verify fresh snapshots, status/ports and
+deletion, old-source rejection and peer continuity. Final focused suite: 99 tests
+pass; the reviewer's seven adversarial probes also pass. Supplemental production/
+test typecheck, scoped typed lint (zero errors), formatting and production build
+pass. The unchanged root-lint baseline and backend/integration prerequisites above
+remain explicit. No backend, coordinator, pane or public-contract change was needed.
+R1 artifacts remain preserved; revised report, bundle and manifest use R2 paths
+on the external shared volume and require fresh independent review.
