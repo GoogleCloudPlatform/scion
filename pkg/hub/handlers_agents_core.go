@@ -402,6 +402,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
+	s.addAgentCreateIfAnyProjectAllows(ctx, identity, scopeCap)
 
 	writeJSON(w, http.StatusOK, ListAgentsResponse{
 		Agents:       agents,
@@ -410,6 +411,121 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		ServerTime:   time.Now().UTC(),
 		Capabilities: scopeCap,
 	})
+}
+
+// addAgentCreateIfAnyProjectAllows adds "create" to the agents list's
+// scope-level capabilities when the caller may create an agent in at least one
+// project they can reach.
+//
+// Agent creation is inherently project-scoped: `POST /api/v1/agents` decides
+// against the target project via authorizeAgentCreate, and `agent.create` lives
+// in project-scoped roles rather than in hub-member or hub-admin. A hub-scope
+// capability check therefore answers "no" for every principal except a
+// super-admin (who passes via the Decide step-1 bypass), which hid the
+// "New Agent" button from the page whose subject is agents.
+//
+// This reports what the enforcement point would decide, on behalf of a page
+// that has no project in hand. It grants nothing: creation is still authorized
+// per project at the API, so a caller who gets "create" here and then targets a
+// project they may not create in is still refused.
+//
+// Skipped entirely when the caller already has create, which is both the
+// super-admin case and any future role that carries it at hub scope.
+//
+// Uses a batch approach (3 queries total, independent of project count) that
+// also correctly handles group-derived permissions:
+//  1. Resolve the user's effective groups.
+//  2. Fetch all role bindings for the user and their groups in one query.
+//  3. Batch-load the corresponding role definitions and check for agent.create.
+func (s *Server) addAgentCreateIfAnyProjectAllows(
+	ctx context.Context,
+	identity Identity,
+	caps *Capabilities,
+) {
+	if caps == nil {
+		return
+	}
+	for _, a := range caps.Actions {
+		if a == string(ActionCreate) {
+			return
+		}
+	}
+
+	// Only human callers. Agents create agents through the delegation path,
+	// which has its own ceiling checks, and this page is not their surface.
+	user, isUser := identity.(UserIdentity)
+	if !isUser {
+		return
+	}
+
+	// Resolve the user's direct and group-derived principals.
+	principals := []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: user.ID()}}
+	groups, err := s.store.GetEffectiveGroups(ctx, user.ID())
+	if err != nil {
+		// GetEffectiveGroups may return ErrNotFound for users with no groups.
+		// Only warn on unexpected errors.
+		slog.WarnContext(ctx, "listAgents: could not resolve groups for agent-create capability",
+			"error", err)
+		// Fall through with just the direct user principal.
+	}
+	for _, g := range groups {
+		principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: g})
+	}
+
+	// Fetch all role bindings for these principals in a single query.
+	bindings, err := s.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	if err != nil {
+		// Advisory only — the button stays hidden and the per-project create
+		// path still works. Not worth failing the list response.
+		slog.WarnContext(ctx, "listAgents: could not resolve role bindings for agent-create capability",
+			"error", err)
+		return
+	}
+
+	// Filter to active project-scoped bindings and collect unique role definition IDs.
+	now := time.Now()
+	roleDefIDsMap := make(map[string]struct{})
+	hasActiveProjectBinding := false
+	for _, rb := range bindings {
+		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID == "" {
+			continue
+		}
+		if !isBindingActive(rb, now) {
+			continue
+		}
+		hasActiveProjectBinding = true
+		roleDefIDsMap[rb.RoleDefinitionID] = struct{}{}
+	}
+
+	if !hasActiveProjectBinding {
+		return
+	}
+
+	// Batch-load the role definitions.
+	roleDefIDs := make([]string, 0, len(roleDefIDsMap))
+	for id := range roleDefIDsMap {
+		roleDefIDs = append(roleDefIDs, id)
+	}
+	roleDefs, err := s.store.GetRoleDefinitionsByIDs(ctx, roleDefIDs)
+	if err != nil {
+		slog.WarnContext(ctx, "listAgents: could not resolve role definitions for agent-create capability",
+			"error", err)
+		return
+	}
+
+	// Check if any of the active roles grant the "agent.create" permission.
+	targetPermission := derivePermissionID("agent", ActionCreate)
+	for _, rd := range roleDefs {
+		if rd == nil {
+			continue
+		}
+		for _, perm := range rd.Permissions {
+			if perm == targetPermission {
+				caps.Actions = append(caps.Actions, string(ActionCreate))
+				return
+			}
+		}
+	}
 }
 
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
