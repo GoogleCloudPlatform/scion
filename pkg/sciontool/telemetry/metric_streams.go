@@ -922,9 +922,17 @@ func (s *metricStreams) snapshot() []*metricpb.ResourceMetrics {
 	return output
 }
 
-func (s *metricStreams) delivered() {
+// clearPendingMarker only releases snapshot markers. Confirmed delivery is
+// recorded separately by the pipeline after an exporter success.
+func (s *metricStreams) clearPendingMarker() {
 	for _, entry := range s.streams {
 		entry.pending = false
+	}
+}
+
+func (s *metricStreams) clearDirty() {
+	for _, entry := range s.streams {
+		entry.dirty = false
 	}
 }
 

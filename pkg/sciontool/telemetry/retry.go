@@ -81,6 +81,20 @@ func isRetryable(err error) bool {
 	return classifyError(err) != "auth"
 }
 
+func terminalExportReason(err error) (terminalReason, int64) {
+	var partial *partialSuccessError
+	if errors.As(err, &partial) {
+		return terminalPartial, partial.rejected
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || status.Code(err) == codes.Canceled || status.Code(err) == codes.DeadlineExceeded {
+		return terminalCanceled, 0
+	}
+	if !isRetryable(err) {
+		return terminalPermanent, 0
+	}
+	return terminalAttemptLimit, 0
+}
+
 // retryExport retries fn with exponential backoff until it succeeds, a
 // non-retryable error is encountered, retries are exhausted, or the context
 // is cancelled. It returns the last error when all retries are exhausted.

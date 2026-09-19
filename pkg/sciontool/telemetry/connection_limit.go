@@ -3,7 +3,11 @@ package telemetry
 import (
 	"net"
 	"sync"
+	"time"
 )
+
+const maxGRPCConnections = 64
+const grpcHandshakeTimeout = 5 * time.Second
 
 // connectionLimit rejects transport connections beyond the finite per-agent
 // cap. A rejected connection closes promptly with a transport error; no OTLP

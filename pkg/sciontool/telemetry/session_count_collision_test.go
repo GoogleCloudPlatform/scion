@@ -108,7 +108,7 @@ func TestLifecycleAndHookSessionCountsUseDistinctCloudSeries(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := state.snapshot()
-	state.delivered()
+	state.clearPendingMarker()
 	if err := state.add(iD.Data); err != nil {
 		t.Fatalf("second admitted? %v", err)
 	}

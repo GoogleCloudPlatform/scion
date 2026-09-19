@@ -25,7 +25,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/tap"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -47,18 +46,19 @@ type LogHandler func(ctx context.Context, logs []*logspb.ResourceLogs) error
 
 // Receiver accepts OTLP trace and metric data via gRPC and HTTP.
 type Receiver struct {
-	config                         *Config
-	grpcServer                     *grpc.Server
-	httpServer                     *http.Server
-	handler                        SpanHandler
-	metricHandler                  MetricHandler
-	logHandler                     LogHandler
-	mu                             sync.Mutex
-	running                        bool
-	decodeSlots                    chan struct{}
-	grpcListenAddr, httpListenAddr string
-	grpcConnections                *connectionLimit
-	httpConnections                *connectionLimit
+	config                          *Config
+	grpcServer                      *grpc.Server
+	httpServer                      *http.Server
+	handler                         SpanHandler
+	metricHandler                   MetricHandler
+	logHandler                      LogHandler
+	mu                              sync.Mutex
+	running                         bool
+	decodeSlots                     chan struct{}
+	grpcListenAddr, httpListenAddr  string
+	grpcConnections                 *connectionLimit
+	httpConnections                 *connectionLimit
+	grpcGracefulDone, grpcForceDone chan struct{}
 }
 
 // NewReceiver creates a new OTLP receiver.
@@ -99,6 +99,10 @@ func (r *Receiver) Start(ctx context.Context) error {
 	if r.running {
 		return fmt.Errorf("receiver already running")
 	}
+	if err := r.waitGRPCShutdown(ctx); err != nil {
+		return err
+	}
+	r.grpcGracefulDone, r.grpcForceDone = nil, nil
 
 	// Start gRPC server
 	grpcAddr := fmt.Sprintf("127.0.0.1:%d", r.config.GRPCPort)
@@ -109,23 +113,15 @@ func (r *Receiver) Start(ctx context.Context) error {
 	r.grpcListenAddr = grpcLis.Addr().String()
 	r.grpcConnections = newConnectionLimit(grpcLis, maxGRPCConnections)
 
-	r.grpcServer = grpc.NewServer(grpc.MaxRecvMsgSize(maxDecodedBytes), grpc.MaxConcurrentStreams(maxConcurrentIntake), grpc.MaxHeaderListSize(16<<10), grpc.ConnectionTimeout(grpcHandshakeTimeout), grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionIdle: 30 * time.Second}), grpc.StatsHandler(grpcAdmissionStats{}), grpc.InTapHandle(func(ctx context.Context, info *tap.Info) (context.Context, error) {
-		if info.FullMethodName != "/opentelemetry.proto.collector.trace.v1.TraceService/Export" && info.FullMethodName != "/opentelemetry.proto.collector.metrics.v1.MetricsService/Export" && info.FullMethodName != "/opentelemetry.proto.collector.logs.v1.LogsService/Export" {
-			return ctx, status.Error(codes.Unimplemented, "unsupported OTLP method")
-		}
-		select {
-		case r.decodeSlots <- struct{}{}:
-			return newGRPCPermitContext(ctx, r.decodeSlots), nil
-		default:
-			return ctx, transientOverload("telemetry intake concurrency exhausted")
-		}
-	}))
-	coltracepb.RegisterTraceServiceServer(r.grpcServer, &traceServiceServer{handler: r.handler})
-	colmetricpb.RegisterMetricsServiceServer(r.grpcServer, &metricsServiceServer{handler: r.metricHandler})
-	collogspb.RegisterLogsServiceServer(r.grpcServer, &logsServiceServer{handler: r.logHandler})
+	r.grpcServer = grpc.NewServer(grpc.MaxRecvMsgSize(maxDecodedBytes), grpc.MaxConcurrentStreams(maxConcurrentIntake), grpc.MaxHeaderListSize(16<<10), grpc.ConnectionTimeout(grpcHandshakeTimeout), grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionIdle: 30 * time.Second}), grpc.StatsHandler(grpcDeadlineStats{}), grpc.InTapHandle(grpcDeadlineTap))
+	registerBoundedOTLPServices(r.grpcServer, r.decodeSlots,
+		&traceServiceServer{handler: r.handler},
+		&metricsServiceServer{handler: r.metricHandler},
+		&logsServiceServer{handler: r.logHandler})
 
+	grpcServer, grpcConnections := r.grpcServer, r.grpcConnections
 	go func() {
-		if err := r.grpcServer.Serve(r.grpcConnections); err != nil && err != grpc.ErrServerStopped {
+		if err := grpcServer.Serve(grpcConnections); err != nil && err != grpc.ErrServerStopped {
 			_ = err // receiver may be stopping; ignore serve errors
 		}
 	}()
@@ -163,10 +159,11 @@ func (r *Receiver) Start(ctx context.Context) error {
 		MaxHeaderBytes:    16 << 10,
 	}
 
+	httpServer, httpConnections := r.httpServer, r.httpConnections
 	go func() {
 		// Log error but don't fail - error is intentionally ignored
 		// because this is a best-effort telemetry receiver.
-		_ = r.httpServer.Serve(r.httpConnections)
+		_ = httpServer.Serve(httpConnections)
 	}()
 
 	r.running = true
@@ -179,23 +176,34 @@ func (r *Receiver) Stop(ctx context.Context) error {
 	defer r.mu.Unlock()
 
 	if !r.running {
-		return nil
+		return r.waitGRPCShutdown(ctx)
 	}
 
 	var errs []error
 
 	// Stop gRPC server
 	if r.grpcServer != nil {
+		server := r.grpcServer
 		done := make(chan struct{})
+		r.grpcGracefulDone = done
 		go func() {
-			r.grpcServer.GracefulStop()
+			server.GracefulStop()
 			close(done)
 		}()
 		select {
 		case <-done:
 		case <-ctx.Done():
-			r.grpcServer.Stop()
-			<-done
+			// A concurrent GracefulStop may hold grpc-go's server mutex
+			// while waiting for a handler that ignores cancellation. Force
+			// Stop asynchronously so this caller still meets its deadline.
+			forceDone := make(chan struct{})
+			r.grpcForceDone = forceDone
+			go func() {
+				server.Stop()
+				close(forceDone)
+			}()
+			// GracefulStop still waits for handler stacks that ignore context.
+			// Both server goroutines may remain until such work exits.
 			errs = append(errs, fmt.Errorf("gRPC shutdown: %w", ctx.Err()))
 		}
 	}
@@ -212,6 +220,20 @@ func (r *Receiver) Stop(ctx context.Context) error {
 
 	if len(errs) > 0 {
 		return errs[0]
+	}
+	return nil
+}
+
+func (r *Receiver) waitGRPCShutdown(ctx context.Context) error {
+	for _, done := range []<-chan struct{}{r.grpcGracefulDone, r.grpcForceDone} {
+		if done == nil {
+			continue
+		}
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return fmt.Errorf("gRPC shutdown incomplete: %w", ctx.Err())
+		}
 	}
 	return nil
 }

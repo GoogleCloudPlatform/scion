@@ -218,13 +218,25 @@ review and pinned live evidence:
 | --- | --- |
 | OTLP HTTP intake | Loopback only; 4 MiB body on the wire, protobuf with `application/x-protobuf` and identity encoding only. Oversize returns 413, unsupported content type or encoding 415, malformed protobuf 400. Gzip and JSON intake are not supported. The 8 MiB decoded ceiling is redundant for identity encoding but protects any future decoder. |
 | OTLP gRPC intake | Loopback only; 8 MiB post-decompression message limit. Permanent oversize is `ResourceExhausted` without retry advice. |
-| Intake execution | 15-second deadline without extending a shorter caller deadline; 16 concurrent HTTP and gRPC receiver calls, acquired before body read or gRPC decompression. Transient saturation returns HTTP 429 with `Retry-After: 1` or gRPC `ResourceExhausted` with `RetryInfo`. A gRPC slot remains held through decoder and handler completion even if its context is canceled. |
+| Intake execution | 15-second deadline without extending a shorter caller deadline; 16 shared HTTP and gRPC processing slots, acquired before body read or gRPC `RecvMsg` decompression. Transient saturation returns HTTP 429 with `Retry-After: 1` or gRPC `ResourceExhausted` with `RetryInfo`. A gRPC slot remains held through receive, decoder, typed Export, and response send even if its context is canceled. The limit counts admitted processing stacks, not all transport workers or total heap. |
 | Transport resources | Each listener accepts at most 64 live connections. The 65th is closed promptly as a transport error; it has no gRPC retry status. gRPC handshake is limited to 5 seconds, headers to 16 KiB, and idle connection time to 30 seconds. Idle connections do not use the 16 active request slots. HTTP has 5-second header and 15-second read/write limits with 16 KiB headers. |
 | Retained payload | 16 MiB encoded, 4096 admitted records/metric points, and 512 request entries across all signals, in-flight exports, metric dirty state, and pending retry. An entry is one nonempty admitted request; a pending metric snapshot retains ownership of its contributing entries until success or terminal disposition. Whole new requests are rejected before policy cloning or state commit on exhaustion. Empty requests use no entry. Existing metric stream state remains capped at 2048 streams. |
-| Retry and cadence | Three retries after the first export attempt, exponential backoff from 100 ms capped at 5 seconds. Metric pending snapshots are immutable; a failed pending seven-point cumulative snapshot drains before newer ten-point state, with the 15-second same-series write cadence preserved. |
+| Retry and cadence | Spans and logs have at most four pipeline exporter calls (initial plus three retries), exponential backoff from 100 ms capped at 5 seconds and caller-context cancellation. Metrics make one pipeline exporter call per eligible flush, with at least 15 seconds after the preceding call completes before another call on the same series. An immutable metric snapshot terminates after 20 pipeline calls or five minutes from its oldest unresolved admission, whichever comes first. A failed pending seven-point cumulative snapshot is resolved before newer ten-point state. |
 
 The retained-byte ceiling measures protobuf encoding, not total resident memory:
-policy clones, stream state, Go allocator overhead, and SDK buffers add to it.
+compressed and decompressed intake buffers, protobuf allocations, policy clones,
+stream state, Go allocator overhead, and SDK buffers add to it. Up to 16
+admitted gRPC messages may each reach the 8 MiB decoded-message ceiling before
+these additional allocations; the 16 MiB retained-queue budget is separate.
+The gRPC server advertises at most 16 concurrent streams per connection. A
+17th generated-client call on the same connection may wait locally before
+sending HEADERS; its caller deadline bounds that wait, while the server's
+15-second intake timer starts only for a received stream. A 17th call sent on
+another connection reaches the handler and receives prompt retry advice when
+all 16 processing slots are occupied. External clients without a deadline can
+wait at the per-connection gate, so the 15-second server intake timer is not
+an end-to-end producer deadline. The queue and decode limits do not cap total
+transport workers, protobuf clones, SDK buffers, or process RSS.
 The entry ceiling can reject 513 small requests before 4096 records are reached.
 Synchronous trace and log exports retain their admission reservation until the
 export call ends; a failed call returns an error to the producer. Metric intake
@@ -238,6 +250,59 @@ remain visible locally. Disk persistence, cross-crash exactly-once delivery,
 and a bound on context-ignoring SDK calls are not provided. The internal init
 telemetry stop budget remains 20 seconds; a shorter external container stop
 limit can still terminate before the drain completes.
+
+The receiver admission gate closes before pipeline shutdown. A handler already
+inside the pipeline keeps its budget reservation and exporter alive until it
+returns. If the caller deadline expires first, Stop returns an incomplete
+shutdown error, keeps resources for a later cleanup call, and reports degraded
+state. A gRPC worker still receiving before the pipeline handler also keeps
+its processing slot until it unwinds; a repeated Stop cannot claim a clean
+drain while that slot remains. Forced gRPC Stop runs asynchronously because
+grpc-go may serialize it behind GracefulStop; both shutdown goroutines may
+remain until context-ignoring work exits. This does not bound a context-ignoring
+SDK call or guarantee zero residual goroutines at deadline.
+
+Diagnostic units are spans, log records, or admitted metric points. `Accepted`
+counts policy-processed units acknowledged by intake; `Queued` counts units
+actually retained for export, including synchronous export in flight;
+`Delivered` counts units in a wholly confirmed export batch. `Dropped` counts
+only proven local discard, such as an accepted request with no destination.
+`Unconfirmed` counts terminal admitted units whose remote outcome is not
+confirmed, including permanent, partial, age, attempt-limit, and shutdown
+dispositions. These fixed reason counters partition `Unconfirmed`;
+`BackendRejected` is a known rejected subset from OTLP PartialSuccess, not an
+additional disposition. At a quiescent instant, `Accepted = Delivered +
+Dropped + Unconfirmed + retained`, in the same signal-record units. Filtered
+and rejected-before-admission units are excluded. `Attempts` counts exporter
+calls and `Failed` counts failed export batches; `Queued` is cumulative actual
+retained record units. Concurrent snapshots of separate atomics are
+informational rather than a transactional ledger.
+
+Metric admissions keep their own timestamps and encoded-payload reservations
+through dirty, pending, retry, and in-flight states. A terminal snapshot is
+reported as unconfirmed, released from the retry queue, and never attributed
+later success. The cumulative stream baseline and epoch remain; genuinely
+newer accepted data can therefore produce cumulative 10 after terminal 7 plus
+new 3. That later success confirms only the newer admission's local delivery
+accounting and does not prove whether the earlier 7 reached the backend.
+Without new eligible data, terminal resolution creates no new work. Newer
+data retains its original age even while it waits behind a pending snapshot.
+The five-minute limit is checked on the periodic one-second expiry tick;
+context-ignoring export work keeps ownership until its call returns.
+
+The three gRPC Export methods are registered with fresh public service
+descriptors so admission happens in their stream handlers before `RecvMsg`.
+Generated unary OTLP clients still send one request and receive one response
+using the original method names and protobuf types. gRPC server statistics and
+`GetServiceInfo` intentionally classify these adapters as server-streaming;
+the protobuf service definitions remain unary. The receiver has no unary or
+stream interceptors to preserve; its tap installs the deadline and its stats
+handler cleans up that timer. A second request message is rejected before the
+typed Export handler runs, though grpc-go may decode that second message while
+the first request's processing slot is held. A caller that omits END_STREAM
+keeps a slot until the intake deadline or earlier caller cancellation. CPU-bound
+decode or an exporter ignoring context may outlive that deadline; capacity is
+released only when the handler stack actually returns.
 
 For generic OTLP gRPC, `tls.enabled=false` requests plaintext transport, while
 `tls.insecure_skip_verify=true` keeps TLS encryption and skips certificate

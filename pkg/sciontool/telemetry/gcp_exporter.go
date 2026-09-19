@@ -170,7 +170,7 @@ func (e *GCPExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics []
 		}
 	}
 	if succeeded > 0 && len(errs) > 0 {
-		return &partialSuccessError{fmt.Sprintf("GCP metric batch partly delivered: %d resource groups succeeded, %d failed", succeeded, len(errs))}
+		return &partialSuccessError{message: fmt.Sprintf("GCP metric batch partly delivered: %d resource groups succeeded, %d failed", succeeded, len(errs))}
 	}
 	return errors.Join(errs...)
 }
@@ -196,10 +196,10 @@ func (e *GCPExporter) ExportProtoLogs(ctx context.Context, resourceLogs []*logsp
 	if e.logger != nil && e.logSink == nil {
 		before := e.asyncLogErrors.Load()
 		if err := e.logger.Flush(); err != nil {
-			return &partialSuccessError{fmt.Sprintf("Cloud Logging flush failed with unknown per-record outcome: %v", err)}
+			return &partialSuccessError{message: fmt.Sprintf("Cloud Logging flush failed with unknown per-record outcome: %v", err)}
 		}
 		if after := e.asyncLogErrors.Load(); after != before {
-			return &partialSuccessError{fmt.Sprintf("Cloud Logging asynchronous failures with unknown per-record outcome: %d", after-before)}
+			return &partialSuccessError{message: fmt.Sprintf("Cloud Logging asynchronous failures with unknown per-record outcome: %d", after-before)}
 		}
 	}
 	return nil

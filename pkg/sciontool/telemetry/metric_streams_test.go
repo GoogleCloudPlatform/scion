@@ -47,7 +47,7 @@ func TestMetricStreamsTenHooksAcrossWindows(t *testing.T) {
 			if got := first[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].GetAsInt(); got != 5 {
 				t.Fatalf("first window = %d", got)
 			}
-			s.delivered()
+			s.clearPendingMarker()
 		}
 	}
 	second := s.snapshot()
@@ -237,7 +237,7 @@ func TestMonotonicCumulativeRejectsSameEpochDecrease(t *testing.T) {
 				}
 				if delivered {
 					_ = s.snapshot()
-					s.delivered()
+					s.clearPendingMarker()
 				}
 				if err := s.add([]*metricpb.ResourceMetrics{input(3, 3)}); err == nil || err.Error() != "decreasing cumulative sum" {
 					t.Fatalf("same-epoch decrease = %v", err)
@@ -269,7 +269,7 @@ func TestMetricCumulativeResetAndBounds(t *testing.T) {
 	if err := s.add([]*metricpb.ResourceMetrics{input(3, 4, 1)}); err == nil {
 		t.Fatal("pending reset was accepted")
 	}
-	s.delivered()
+	s.clearPendingMarker()
 	if err := s.add([]*metricpb.ResourceMetrics{input(3, 4, 1)}); err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +290,7 @@ func TestMetricCumulativeResetAndBounds(t *testing.T) {
 		t.Fatal("active stream limit not enforced")
 	}
 	_ = s.snapshot()
-	s.delivered()
+	s.clearPendingMarker()
 	clock = clock.Add(metricStreamIdleTTL)
 	if err := s.add([]*metricpb.ResourceMetrics{input(1, 2, 1)}); err != nil {
 		t.Fatalf("idle expiry: %v", err)
@@ -324,7 +324,7 @@ func TestMetricIdleExpiryStartsNewHookEpochAndDuplicateWindowIsBounded(t *testin
 	if first.GetAsInt() != maxDuplicateIntervals+1 {
 		t.Fatalf("first epoch = %d", first.GetAsInt())
 	}
-	s.delivered()
+	s.clearPendingMarker()
 	clock = clock.Add(metricStreamIdleTTL)
 	if err := s.add([]*metricpb.ResourceMetrics{input(1000)}); err != nil {
 		t.Fatal(err)
@@ -382,7 +382,7 @@ func TestMetricRetrySnapshotImmutable(t *testing.T) {
 	if first[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].GetAsInt() != 2 {
 		t.Fatal("retry snapshot mutated")
 	}
-	s.delivered()
+	s.clearPendingMarker()
 	if got := s.snapshot()[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].GetAsInt(); got != 3 {
 		t.Fatalf("next window = %d", got)
 	}
@@ -453,7 +453,7 @@ func TestPipelineStopReportsNewerMetricResidualAfterPendingRetryWithTightDeadlin
 	if err := p.Stop(stopCtx); err == nil || !strings.Contains(err.Error(), "metric shutdown residual") {
 		t.Fatalf("Stop residual = %v", err)
 	}
-	if fmt.Sprint(totals) != "[7 7 7 7 7]" {
+	if fmt.Sprint(totals) != "[7 7]" {
 		t.Fatalf("shutdown wrote early same series: %v", totals)
 	}
 }
@@ -644,7 +644,7 @@ func TestCloudRegistriesTurnOverOnlyDeliveredIdleStreams(t *testing.T) {
 		t.Fatal("did not reach all active and Cloud registry caps")
 	}
 	_ = s.snapshot()
-	s.delivered()
+	s.clearPendingMarker()
 	clock = clock.Add(metricStreamIdleTTL / 2)
 	if err := s.add([]*metricpb.ResourceMetrics{input("after.expiry", "{call}")}); err != nil {
 		t.Fatalf("delivered idle turnover: %v", err)

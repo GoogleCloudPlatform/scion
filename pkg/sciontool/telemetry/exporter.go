@@ -30,7 +30,10 @@ var errOTLPCACertsNotFound = errors.New("parsing OTLP CA file: no certificates f
 
 // partialSuccessError is terminal: replaying the whole batch duplicates the
 // units the destination already accepted.
-type partialSuccessError struct{ message string }
+type partialSuccessError struct {
+	message  string
+	rejected int64 // explicit OTLP rejected record count, when supplied
+}
 
 func (e *partialSuccessError) Error() string { return e.message }
 
@@ -229,7 +232,7 @@ func (e *CloudExporter) ExportProtoSpans(ctx context.Context, resourceSpans []*t
 			return err
 		}
 		if partial := resp.GetPartialSuccess(); partial != nil && partial.GetRejectedSpans() != 0 {
-			return &partialSuccessError{fmt.Sprintf("OTLP trace partial success: %d rejected spans: %s", partial.GetRejectedSpans(), partial.GetErrorMessage())}
+			return &partialSuccessError{message: fmt.Sprintf("OTLP trace partial success: %d rejected spans", partial.GetRejectedSpans()), rejected: partial.GetRejectedSpans()}
 		}
 		return nil
 	}
@@ -258,7 +261,7 @@ func (e *CloudExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics 
 			return err
 		}
 		if partial := resp.GetPartialSuccess(); partial != nil && partial.GetRejectedDataPoints() != 0 {
-			return &partialSuccessError{fmt.Sprintf("OTLP metric partial success: %d rejected points: %s", partial.GetRejectedDataPoints(), partial.GetErrorMessage())}
+			return &partialSuccessError{message: fmt.Sprintf("OTLP metric partial success: %d rejected points", partial.GetRejectedDataPoints()), rejected: partial.GetRejectedDataPoints()}
 		}
 		return nil
 	}
@@ -287,7 +290,7 @@ func (e *CloudExporter) ExportProtoLogs(ctx context.Context, resourceLogs []*log
 			return err
 		}
 		if partial := resp.GetPartialSuccess(); partial != nil && partial.GetRejectedLogRecords() != 0 {
-			return &partialSuccessError{fmt.Sprintf("OTLP log partial success: %d rejected records: %s", partial.GetRejectedLogRecords(), partial.GetErrorMessage())}
+			return &partialSuccessError{message: fmt.Sprintf("OTLP log partial success: %d rejected records", partial.GetRejectedLogRecords()), rejected: partial.GetRejectedLogRecords()}
 		}
 		return nil
 	}

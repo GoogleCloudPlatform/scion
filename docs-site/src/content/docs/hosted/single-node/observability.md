@@ -160,7 +160,13 @@ The telemetry pipeline in sciontool collects and forwards OpenTelemetry (OTLP) d
 
 ### Telemetry Export Resilience
 
-To safeguard against transient network issues or temporary destination outages, `sciontool`'s telemetry pipeline includes automated **retry with exponential backoff** for all cloud OTLP exports. When an export attempt fails (e.g. due to rate limits or transient 5xx errors from the cloud backend), the pipeline retries with a progressively increasing delay, ensuring high telemetry delivery reliability and preventing data loss.
+Trace and log batches make at most four pipeline export attempts, including the first, with exponential backoff while the caller deadline permits. Metrics make one pipeline export call per eligible flush. Calls for the same metric series are spaced at least 15 seconds after the preceding call completes. An unresolved metric snapshot stops after 20 pipeline calls or five minutes from its oldest admission, whichever comes first. An underlying SDK may make additional network calls within one pipeline call; the caller context bounds cooperative work.
+
+An OTLP intake success means the agent's local collector accepted the records. It does not confirm remote delivery. The collector retains at most 16 MiB of encoded payload, 4096 records or metric points, and 512 nonempty request entries across all signals, including pending, in-flight, and retry work. On capacity exhaustion it rejects the new request with HTTP 429 or gRPC `ResourceExhausted` and retry advice; it does not evict healthy admitted work. A permanent oversize request receives HTTP 413 or gRPC `ResourceExhausted` without retry advice. The collector has no disk-backed queue, so a process crash can lose admitted data.
+
+Local delivery diagnostics use span, log-record, or admitted metric-point units. `Delivered` means a whole exporter batch returned success. `Unconfirmed` means admitted data reached a terminal permanent, partial, attempt-limit, age-limit, or shutdown outcome without full delivery confirmation; it is not proof that the backend lost those records. `Dropped` covers proven local discard. `BackendRejected` records the known rejected subset in an OTLP partial-success response. At a quiet point, `Accepted = Delivered + Dropped + Unconfirmed + retained`. `Attempts` counts exporter calls, and `Failed` counts failed batch outcomes. A later cumulative metric value may include an earlier unconfirmed baseline, but it cannot retroactively confirm that earlier admission.
+
+The server admits at most 16 active HTTP and gRPC processing requests together. A gRPC client can queue a 17th call locally on the same connection before the server receives it; use a caller deadline to bound that wait. The server's 15-second intake deadline starts only after it receives a stream. These are local collector limits, not end-to-end delivery or process-memory guarantees.
 
 ### What's Collected
 

@@ -33,7 +33,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/encoding"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
 )
 
@@ -106,6 +105,27 @@ func TestCloudBoundIntakeRejectsMissingExporter(t *testing.T) {
 				t.Fatalf("admission status = %v, want Unavailable", code)
 			}
 		})
+	}
+}
+
+func TestNoDestinationDiagnosticsCountAcceptedImmediateDrops(t *testing.T) {
+	p := NewWithConfig(&Config{Enabled: true})
+	if err := p.handleSpans(context.Background(), []*tracepb.ResourceSpans{{ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{{Name: "safe"}}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.handleLogs(context.Background(), []*logspb.ResourceLogs{{ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{EventName: "safe"}}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.handleMetrics(context.Background(), []*metricpb.ResourceMetrics{testMetricResource("native", "scope", "", "", testNumber("safe", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 1))}); err != nil {
+		t.Fatal(err)
+	}
+	for signal, snapshot := range p.Diagnostics() {
+		if snapshot.Accepted != 1 || snapshot.Queued != 0 || snapshot.Delivered != 0 || snapshot.Dropped != 1 {
+			t.Fatalf("%s diagnostics = %+v", signal, snapshot)
+		}
+	}
+	if depth := p.QueueDepth(); depth != (QueueDepth{}) {
+		t.Fatalf("immediate drops retained budget: %+v", depth)
 	}
 }
 
@@ -596,94 +616,6 @@ func TestHTTPAndGRPCShareIntakeCapacity(t *testing.T) {
 	}
 }
 
-func TestGRPCPermitCancelBeforeHandlerReleasesSlot(t *testing.T) {
-	slots := make(chan struct{}, 1)
-	slots <- struct{}{}
-	ctx, cancel := context.WithCancel(context.Background())
-	bounded := newGRPCPermitContext(ctx, slots)
-	permit := bounded.Value(grpcPermitKey{}).(*grpcPermit)
-	cancel()
-	deadline := time.After(time.Second)
-	for len(slots) != 0 {
-		select {
-		case <-deadline:
-			t.Fatal("cancel leaked predecode slot")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-	permit.mu.Lock()
-	released := permit.released
-	permit.mu.Unlock()
-	if !released {
-		t.Fatal("canceled stream retained slot")
-	}
-}
-
-func TestGRPCPermitCancellationDuringWorkKeepsSlotUntilEnd(t *testing.T) {
-	slots := make(chan struct{}, 1)
-	slots <- struct{}{}
-	ctx, cancel := context.WithCancel(context.Background())
-	bounded := newGRPCPermitContext(ctx, slots)
-	permit := bounded.Value(grpcPermitKey{}).(*grpcPermit)
-	grpcAdmissionStats{}.HandleRPC(bounded, &stats.InHeader{})
-	cancel()
-	time.Sleep(10 * time.Millisecond)
-	if len(slots) != 1 {
-		t.Fatal("cancellation released live decode slot")
-	}
-	grpcAdmissionStats{}.HandleRPC(bounded, &stats.End{})
-	if len(slots) != 0 {
-		t.Fatal("terminal RPC leaked decode slot")
-	}
-	permit.mu.Lock()
-	released := permit.released
-	permit.mu.Unlock()
-	if !released {
-		t.Fatal("permit not terminal")
-	}
-}
-
-func TestGRPCPermitPredispatchCancelReacquiresBeforeWork(t *testing.T) {
-	slots := make(chan struct{}, 1)
-	slots <- struct{}{}
-	parent, cancel := context.WithCancel(context.Background())
-	bounded := newGRPCPermitContext(parent, slots)
-	cancel()
-	deadline := time.After(time.Second)
-	for len(slots) != 0 {
-		select {
-		case <-deadline:
-			t.Fatal("predispatch cancellation retained slot")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-	// Another request takes the released slot. A late server worker must not
-	// begin decoding until this work releases it.
-	slots <- struct{}{}
-	started := make(chan struct{})
-	go func() {
-		grpcAdmissionStats{}.HandleRPC(bounded, &stats.InHeader{})
-		close(started)
-	}()
-	select {
-	case <-started:
-		t.Fatal("late worker began while capacity was full")
-	case <-time.After(20 * time.Millisecond):
-	}
-	<-slots
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("late worker never reacquired capacity")
-	}
-	grpcAdmissionStats{}.HandleRPC(bounded, &stats.End{})
-	if len(slots) != 0 {
-		t.Fatal("late worker leaked reacquired capacity")
-	}
-}
-
 func TestAdmissionBudgetRejectsAndRecovers(t *testing.T) {
 	var budget admissionBudget
 	if err := budget.reserve(maxRetainedBytes, maxRetainedRecords); err != nil {
@@ -792,7 +724,7 @@ func TestPermanentMetricFailureDropsPendingAndReclaimsBudget(t *testing.T) {
 	if depth := p.QueueDepth(); depth != (QueueDepth{}) {
 		t.Fatalf("budget after permanent disposition: %+v", depth)
 	}
-	if diagnostics := p.Diagnostics()["metrics"]; diagnostics.Accepted != 1 || diagnostics.Dropped != 1 || diagnostics.Delivered != 0 || diagnostics.Failed != 1 {
+	if diagnostics := p.Diagnostics()["metrics"]; diagnostics.Accepted != 1 || diagnostics.Unconfirmed != 1 || diagnostics.Permanent != 1 || diagnostics.Dropped != 0 || diagnostics.Delivered != 0 || diagnostics.Failed != 1 {
 		t.Fatalf("diagnostics: %+v", diagnostics)
 	}
 }

@@ -36,6 +36,16 @@ import (
 // processes (hooks) send metrics in rapid succession.
 const metricFlushInterval = 15 * time.Second
 
+const (
+	metricMaxAttempts = 20
+	metricMaxAge      = 5 * time.Minute
+)
+
+type metricAdmission struct {
+	bytes, records int
+	at             time.Time
+}
+
 // Pipeline orchestrates the telemetry collection and forwarding.
 type Pipeline struct {
 	config        *Config
@@ -49,6 +59,10 @@ type Pipeline struct {
 	exportErrors  otelmetric.Int64Counter
 	meter         otelmetric.Meter
 	retryConfig   RetryConfig
+	intakeMu      sync.Mutex
+	intakeClosed  bool
+	intakeActive  int
+	intakeDone    chan struct{}
 
 	metricsDropWarned        sync.Once
 	logsDropWarned           sync.Once
@@ -62,6 +76,9 @@ type Pipeline struct {
 	metricExportMu                                                 sync.Mutex
 	metricStreams                                                  *metricStreams
 	metricPending                                                  []*metricpb.ResourceMetrics
+	metricDirtyAdmissions, metricPendingAdmissions                 []metricAdmission
+	metricPendingAttempts                                          int
+	metricNow                                                      func() time.Time
 	metricRejectedPoints                                           atomic.Int64
 	metricFlushCtx                                                 context.Context
 	metricFlushCnl                                                 context.CancelFunc
@@ -74,6 +91,13 @@ type Pipeline struct {
 	metricDirtyBytes, metricDirtyRecords, metricDirtyEntries       int
 	metricPendingBytes, metricPendingRecords, metricPendingEntries int
 	metricBatchSequence, metricPendingSequence                     uint64
+}
+
+func (p *Pipeline) now() time.Time {
+	if p.metricNow != nil {
+		return p.metricNow()
+	}
+	return time.Now()
 }
 
 // New creates a new telemetry pipeline.
@@ -185,7 +209,11 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	}
 
 	// Create receiver with span and metric handlers
-	p.receiver = NewReceiver(p.config, p.handleSpans, WithMetricHandler(p.handleMetrics), WithLogHandler(p.handleLogs))
+	p.intakeMu.Lock()
+	p.intakeClosed = false
+	p.intakeDone = nil
+	p.intakeMu.Unlock()
+	p.receiver = NewReceiver(p.config, p.acceptSpans, WithMetricHandler(p.acceptMetrics), WithLogHandler(p.acceptLogs))
 
 	// Start receiver
 	if err := p.receiver.Start(ctx); err != nil {
@@ -234,6 +262,7 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	}
 
 	var errs []error
+	intakeDone := p.closeIntake()
 
 	// Stop health gauge ticker
 	if p.healthCancel != nil {
@@ -269,6 +298,32 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("receiver stop error: %w", err))
 		}
 	}
+	select {
+	case <-intakeDone:
+	default:
+		select {
+		case <-intakeDone:
+		case <-ctx.Done():
+			p.deliveryState = "degraded"
+			return fmt.Errorf("telemetry shutdown incomplete: %w; %d receiver handlers still active", ctx.Err(), p.activeIntake())
+		}
+	}
+	if p.receiver != nil {
+		// A forced gRPC Stop may have returned while a pre-handler RecvMsg
+		// still owns a processing slot. That worker cannot touch pipeline
+		// resources after the gate closes, but it must finish before a later
+		// Stop call can claim a clean drain.
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for len(p.receiver.decodeSlots) != 0 {
+			select {
+			case <-ctx.Done():
+				p.deliveryState = "degraded"
+				return fmt.Errorf("telemetry shutdown incomplete: %w; %d receiver processing slots still active", ctx.Err(), len(p.receiver.decodeSlots))
+			case <-ticker.C:
+			}
+		}
+	}
 	p.flushMetricsOnStop(ctx)
 	p.metricStateMu.Lock()
 	residualPending := len(p.metricPending)
@@ -282,19 +337,21 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	}
 	if residualPending != 0 || residualDirty != 0 || p.metricPendingEntries+p.metricDirtyEntries != 0 {
 		forcedRecords := p.metricPendingRecords + p.metricDirtyRecords
-		p.metricDiagnostics.dropped.Add(int64(forcedRecords))
-		log.Error("Telemetry metric shutdown residual: %d pending streams, %d newer dirty streams, %d forced dropped admitted points", residualPending, residualDirty, forcedRecords)
+		p.metricDiagnostics.terminal(forcedRecords, terminalCanceled, 0)
+		log.Error("Telemetry metric shutdown residual: %d pending streams, %d newer dirty streams, %d terminal unconfirmed admitted points", residualPending, residualDirty, forcedRecords)
 		errs = append(errs, fmt.Errorf("metric shutdown residual: pending=%d dirty=%d", residualPending, residualDirty))
 	}
 	p.budget.release(p.metricPendingBytes+p.metricDirtyBytes, p.metricPendingRecords+p.metricDirtyRecords, p.metricPendingEntries+p.metricDirtyEntries)
 	p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries = 0, 0, 0
 	p.metricDirtyBytes, p.metricDirtyRecords, p.metricDirtyEntries = 0, 0, 0
+	p.metricPendingAdmissions, p.metricDirtyAdmissions = nil, nil
+	p.metricPendingAttempts = 0
 	p.metricPending = nil
 	p.metricPendingSequence = 0
 	p.metricStreams = nil
 	p.metricStateMu.Unlock()
-	if dropped := p.metricDiagnostics.dropped.Load(); dropped > 0 {
-		errs = append(errs, fmt.Errorf("telemetry metric delivery dropped %d admitted points", dropped))
+	if unconfirmed := p.metricDiagnostics.unconfirmed.Load(); unconfirmed > 0 {
+		errs = append(errs, fmt.Errorf("telemetry metric delivery unconfirmed for %d admitted points", unconfirmed))
 	}
 
 	// Shutdown exporter to flush any buffered spans
@@ -316,6 +373,73 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 		return errs[0]
 	}
 	return nil
+}
+
+// Receiver handlers acquire this gate before touching pipeline state or the
+// exporter. Shutdown closes the gate first and keeps resources alive until all
+// previously admitted handlers return. A forced Stop may return incomplete;
+// another Stop call can finish cleanup after the handlers unwind.
+func (p *Pipeline) beginIntake() error {
+	p.intakeMu.Lock()
+	defer p.intakeMu.Unlock()
+	if p.intakeClosed {
+		return status.Error(codes.Unavailable, "telemetry receiver is stopping")
+	}
+	p.intakeActive++
+	return nil
+}
+
+func (p *Pipeline) endIntake() {
+	p.intakeMu.Lock()
+	defer p.intakeMu.Unlock()
+	p.intakeActive--
+	if p.intakeClosed && p.intakeActive == 0 && p.intakeDone != nil {
+		close(p.intakeDone)
+		p.intakeDone = nil
+	}
+}
+
+func (p *Pipeline) closeIntake() <-chan struct{} {
+	p.intakeMu.Lock()
+	defer p.intakeMu.Unlock()
+	if p.intakeDone == nil {
+		p.intakeDone = make(chan struct{})
+		if p.intakeActive == 0 {
+			close(p.intakeDone)
+		}
+	}
+	p.intakeClosed = true
+	return p.intakeDone
+}
+
+func (p *Pipeline) activeIntake() int {
+	p.intakeMu.Lock()
+	defer p.intakeMu.Unlock()
+	return p.intakeActive
+}
+
+func (p *Pipeline) acceptSpans(ctx context.Context, spans []*tracepb.ResourceSpans) error {
+	if err := p.beginIntake(); err != nil {
+		return err
+	}
+	defer p.endIntake()
+	return p.handleSpans(ctx, spans)
+}
+
+func (p *Pipeline) acceptMetrics(ctx context.Context, metrics []*metricpb.ResourceMetrics) error {
+	if err := p.beginIntake(); err != nil {
+		return err
+	}
+	defer p.endIntake()
+	return p.handleMetrics(ctx, metrics)
+}
+
+func (p *Pipeline) acceptLogs(ctx context.Context, logs []*logspb.ResourceLogs) error {
+	if err := p.beginIntake(); err != nil {
+		return err
+	}
+	defer p.endIntake()
+	return p.handleLogs(ctx, logs)
 }
 
 // DeliveryState reports the local destination lifecycle without implying that
@@ -394,23 +518,24 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 	}
 	bytes, spanCount = processedBytes, processedCount
 	p.spanDiagnostics.accepted.Add(int64(spanCount))
-	p.spanDiagnostics.queued.Add(int64(spanCount))
 
 	// Forward to cloud exporter if available.
-	// This retry sits above the gRPC/SDK transport-level retry. Both layers
-	// are intentional: transport retries handle transient network blips,
-	// while this pipeline-level retry catches higher-level failures (quota,
-	// timeout) that the transport considers terminal. In the worst case a
-	// batch sees ~16 network attempts (4 pipeline × ~4 transport), which is
-	// acceptable for background telemetry where data loss is costlier.
+	// This retry is bounded to four pipeline exporter calls. Underlying SDK
+	// and transport calls may have their own retry policy within the caller's
+	// context; this count is not a network-attempt guarantee.
 	if p.exporter != nil {
+		p.spanDiagnostics.queued.Add(int64(spanCount))
 		err := retryExport(ctx, p.retryConfig, "spans", func() error {
 			p.spanDiagnostics.attempts.Add(1)
 			return p.exporter.ExportProtoSpans(ctx, filtered)
 		})
 		if err != nil {
 			p.spanDiagnostics.failed.Add(1)
-			p.spanDiagnostics.dropped.Add(int64(spanCount))
+			reason, rejected := terminalExportReason(err)
+			if rejected < 0 {
+				rejected = 0
+			}
+			p.spanDiagnostics.terminal(spanCount, reason, rejected)
 			p.recordExportError(ctx, "spans", err)
 			log.Error("Failed to export spans to cloud: %v", err)
 			return err
@@ -457,6 +582,7 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 		return status.Error(codes.InvalidArgument, decision.Reason)
 	}
 	processed := decision.Data
+	p.metricDiagnostics.filtered.Add(decision.Filtered)
 	if len(processed) == 0 {
 		return nil
 	}
@@ -491,9 +617,11 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 		p.metricDirtyBytes += bytes
 		p.metricDirtyRecords += records
 		p.metricDirtyEntries++
+		p.metricDirtyAdmissions = append(p.metricDirtyAdmissions, metricAdmission{bytes: bytes, records: records, at: p.now()})
 		p.metricStateMu.Unlock()
 		log.Debug("Accepted %d policy-processed resource metric batches", len(processed))
 	} else {
+		p.metricDiagnostics.accepted.Add(int64(records))
 		p.metricDiagnostics.dropped.Add(int64(records))
 		metricCount := 0
 		for _, rm := range processed {
@@ -511,7 +639,7 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 
 // metricFlushLoop periodically flushes metric streams to Cloud Monitoring.
 func (p *Pipeline) metricFlushLoop() {
-	ticker := time.NewTicker(metricFlushInterval)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -520,6 +648,51 @@ func (p *Pipeline) metricFlushLoop() {
 		case <-ticker.C:
 			p.flushMetricBuffer(p.metricExportCtx, false)
 		}
+	}
+}
+
+// expireMetricAdmissions runs with metricExportMu held. A terminal pending
+// snapshot leaves the cumulative baseline intact; only its admitted ownership
+// and immutable retry state are removed.
+func (p *Pipeline) expireMetricAdmissions(now time.Time) {
+	p.metricStateMu.Lock()
+	defer p.metricStateMu.Unlock()
+	if len(p.metricPendingAdmissions) != 0 && !now.Before(p.metricPendingAdmissions[0].at.Add(metricMaxAge)) {
+		p.disposeMetricPending(terminalAgeLimit)
+	}
+	if len(p.metricDirtyAdmissions) == 0 {
+		return
+	}
+	kept := p.metricDirtyAdmissions[:0]
+	for _, admission := range p.metricDirtyAdmissions {
+		if now.Before(admission.at.Add(metricMaxAge)) {
+			kept = append(kept, admission)
+			continue
+		}
+		p.metricDiagnostics.terminal(admission.records, terminalAgeLimit, 0)
+		p.budget.release(admission.bytes, admission.records, 1)
+		p.metricDirtyBytes -= admission.bytes
+		p.metricDirtyRecords -= admission.records
+		p.metricDirtyEntries--
+	}
+	p.metricDirtyAdmissions = kept
+	if len(kept) == 0 && p.metricStreams != nil {
+		p.metricStreams.clearDirty()
+	}
+}
+
+// disposeMetricPending requires metricStateMu and metricExportMu. The later
+// dirty state, if any, retains its original admission timestamps.
+func (p *Pipeline) disposeMetricPending(reason terminalReason) {
+	p.metricDiagnostics.terminal(p.metricPendingRecords, reason, 0)
+	p.budget.release(p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries)
+	p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries = 0, 0, 0
+	p.metricPendingAdmissions = nil
+	p.metricPendingAttempts = 0
+	p.metricPending = nil
+	p.metricPendingSequence = 0
+	if p.metricStreams != nil {
+		p.metricStreams.clearPendingMarker()
 	}
 }
 
@@ -559,8 +732,9 @@ func (p *Pipeline) flushMetricsOnStop(ctx context.Context) {
 func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 	p.metricExportMu.Lock()
 	defer p.metricExportMu.Unlock()
+	p.expireMetricAdmissions(p.now())
 	p.metricStateMu.Lock()
-	sinceLastFlush := time.Since(p.metricLastFlush)
+	sinceLastFlush := p.now().Sub(p.metricLastFlush)
 	if !force && sinceLastFlush < metricFlushInterval {
 		p.metricStateMu.Unlock()
 		log.Debug("Skipping metric flush — last export was %v ago (minimum %v)", sinceLastFlush.Round(time.Millisecond), metricFlushInterval)
@@ -576,6 +750,8 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 			p.metricPendingSequence = p.metricBatchSequence
 		}
 		p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries = p.metricDirtyBytes, p.metricDirtyRecords, p.metricDirtyEntries
+		p.metricPendingAdmissions, p.metricDirtyAdmissions = p.metricDirtyAdmissions, nil
+		p.metricPendingAttempts = 0
 		p.metricDirtyBytes, p.metricDirtyRecords, p.metricDirtyEntries = 0, 0, 0
 	}
 	batch := p.metricPending
@@ -586,6 +762,8 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		p.metricStateMu.Lock()
 		p.budget.release(p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries)
 		p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries = 0, 0, 0
+		p.metricPendingAdmissions = nil
+		p.metricPendingAttempts = 0
 		p.metricPendingSequence = 0
 		p.metricStateMu.Unlock()
 		return false
@@ -601,12 +779,34 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		}
 	}
 
-	// Pipeline-level retry on top of gRPC/SDK transport retry — see
-	// handleSpans for the rationale on intentional double-retry layering.
-	err := retryExport(ctx, p.retryConfig, "metrics", func() error {
-		p.metricDiagnostics.attempts.Add(1)
-		return p.exporter.ExportProtoMetrics(ctx, batch)
-	})
+	// Each cadence slot makes exactly one pipeline exporter invocation. The
+	// immutable snapshot remains pending for a later slot on transient failure.
+	p.metricStateMu.Lock()
+	if p.metricPendingAttempts >= metricMaxAttempts {
+		p.disposeMetricPending(terminalAttemptLimit)
+		p.metricStateMu.Unlock()
+		return false
+	}
+	remaining := metricMaxAge
+	if len(p.metricPendingAdmissions) != 0 {
+		remaining = p.metricPendingAdmissions[0].at.Add(metricMaxAge).Sub(p.now())
+	}
+	p.metricPendingAttempts++
+	p.metricStateMu.Unlock()
+	if remaining <= 0 {
+		p.metricStateMu.Lock()
+		p.metricPendingAttempts--
+		p.disposeMetricPending(terminalAgeLimit)
+		p.metricStateMu.Unlock()
+		return false
+	}
+	attemptCtx, cancel := context.WithTimeout(ctx, remaining)
+	p.metricDiagnostics.attempts.Add(1)
+	err := p.exporter.ExportProtoMetrics(attemptCtx, batch)
+	cancel()
+	p.metricStateMu.Lock()
+	p.metricLastFlush = p.now()
+	p.metricStateMu.Unlock()
 	if err != nil {
 		p.metricDiagnostics.failed.Add(1)
 		// Do not create another error-counter point when that diagnostic stream
@@ -617,17 +817,19 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		log.Error("Failed to export %d metric streams to cloud: %v", metricCount, err)
 		if !isRetryable(err) {
 			p.metricStateMu.Lock()
-			p.metricDiagnostics.dropped.Add(int64(p.metricPendingRecords))
-			p.budget.release(p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries)
-			p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries = 0, 0, 0
-			p.metricPending = nil
-			p.metricPendingSequence = 0
-			p.metricStreams.delivered()
-			// A partial success may have written the same series. Keep cadence
-			// before any newer cumulative snapshot.
-			var partial *partialSuccessError
-			if errors.As(err, &partial) {
-				p.metricLastFlush = time.Now()
+			reason, rejected := terminalExportReason(err)
+			if rejected > int64(p.metricPendingRecords) {
+				rejected = int64(p.metricPendingRecords)
+			}
+			p.disposeMetricPending(reason)
+			p.metricDiagnostics.backendRejected.Add(rejected)
+			p.metricStateMu.Unlock()
+		} else {
+			p.metricStateMu.Lock()
+			if p.metricPendingAttempts >= metricMaxAttempts {
+				p.disposeMetricPending(terminalAttemptLimit)
+			} else if len(p.metricPendingAdmissions) != 0 && !p.now().Before(p.metricPendingAdmissions[0].at.Add(metricMaxAge)) {
+				p.disposeMetricPending(terminalAgeLimit)
 			}
 			p.metricStateMu.Unlock()
 		}
@@ -637,10 +839,11 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 	p.metricDiagnostics.success(p.metricPendingRecords)
 	p.metricPending = nil
 	p.metricPendingSequence = 0
+	p.metricPendingAdmissions = nil
+	p.metricPendingAttempts = 0
 	p.budget.release(p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries)
 	p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries = 0, 0, 0
-	p.metricStreams.delivered()
-	p.metricLastFlush = time.Now()
+	p.metricStreams.clearPendingMarker()
 	p.metricStateMu.Unlock()
 	log.Info("Telemetry metric batch confirmed sequence=%d digest=%s resource_metrics=%d points=%d", sequence, metricBatchDigest(batch), len(batch), countMetricPoints(batch))
 	log.Debug("Exported %d metric streams to cloud", metricCount)
@@ -731,19 +934,20 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 	}
 	bytes, logCount = processedBytes, processedCount
 	p.logDiagnostics.accepted.Add(int64(logCount))
-	p.logDiagnostics.queued.Add(int64(logCount))
 
 	// Forward to cloud exporter if available.
 	// Pipeline-level retry on top of gRPC/SDK transport retry — see
 	// handleSpans for the rationale on intentional double-retry layering.
 	if p.exporter != nil {
+		p.logDiagnostics.queued.Add(int64(logCount))
 		err := retryExport(ctx, p.retryConfig, "logs", func() error {
 			p.logDiagnostics.attempts.Add(1)
 			return p.exporter.ExportProtoLogs(ctx, processed)
 		})
 		if err != nil {
 			p.logDiagnostics.failed.Add(1)
-			p.logDiagnostics.dropped.Add(int64(logCount))
+			reason, rejected := terminalExportReason(err)
+			p.logDiagnostics.terminal(logCount, reason, rejected)
 			p.recordExportError(ctx, "logs", err)
 			log.Error("Failed to export logs to cloud: %v", err)
 			return err
