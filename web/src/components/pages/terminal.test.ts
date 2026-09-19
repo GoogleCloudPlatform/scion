@@ -15,7 +15,7 @@
  */
 
 /**
- * Tests for drag-and-drop file upload in the terminal page component.
+ * Tests for drag-and-drop file upload in the shared terminal pane.
  *
  * Covers four areas introduced by the drag-drop feature:
  *
@@ -34,7 +34,7 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-let ScionPageTerminal: any;
+let ScionTerminalPane: any;
 
 /** One recorded fetch call. */
 interface Call {
@@ -118,8 +118,8 @@ function makeFetchMock(calls: Call[], opts: MockOptions = {}) {
 /** Create an element instance without appending to DOM (avoids connectedCallback side effects). */
 function createElement(): any {
   // Use document.createElement but don't append — this gives us an instance
-  // we can call private methods on without triggering loadAgentInfo().
-  const el = document.createElement('scion-page-terminal') as any;
+  // we can call private helpers without opening a session.
+  const el = document.createElement('scion-terminal-pane') as any;
   return el;
 }
 
@@ -141,9 +141,9 @@ function cleanup() {
 
 describe('terminal — _quoteForShell', () => {
   beforeAll(async () => {
-    const mod = await import('./terminal.js');
-    ScionPageTerminal = mod.ScionPageTerminal;
-    expect(ScionPageTerminal).toBeDefined();
+    const mod = await import('../terminal/terminal-pane.js');
+    ScionTerminalPane = mod.ScionTerminalPane;
+    expect(ScionTerminalPane).toBeDefined();
   });
 
   afterEach(cleanup);
@@ -189,7 +189,7 @@ describe('terminal — _quoteForShell', () => {
 
 describe('terminal — _handleFileDrop size validation', () => {
   beforeAll(async () => {
-    await import('./terminal.js');
+    await import('../terminal/terminal-pane.js');
   });
 
   afterEach(cleanup);
@@ -252,7 +252,7 @@ describe('terminal — _handleFileDrop size validation', () => {
 
 describe('terminal — resolveUploadTarget', () => {
   beforeAll(async () => {
-    await import('./terminal.js');
+    await import('../terminal/terminal-pane.js');
   });
 
   afterEach(cleanup);
@@ -330,7 +330,7 @@ describe('terminal — resolveUploadTarget', () => {
 
 describe('terminal — _handleFileDrop upload paths', () => {
   beforeAll(async () => {
-    await import('./terminal.js');
+    await import('../terminal/terminal-pane.js');
   });
 
   afterEach(cleanup);
@@ -448,7 +448,7 @@ describe('terminal — _handleFileDrop upload paths', () => {
 
 describe('terminal — drag enter/leave counter', () => {
   beforeAll(async () => {
-    await import('./terminal.js');
+    await import('../terminal/terminal-pane.js');
   });
 
   afterEach(cleanup);

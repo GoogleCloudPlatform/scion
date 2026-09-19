@@ -13,6 +13,8 @@ vi.mock('@xterm/xterm', () => ({
     reset = vi.fn();
     write = vi.fn();
     focus = vi.fn();
+    blur = vi.fn();
+    refresh = vi.fn();
     parser = { registerOscHandler: vi.fn() };
     loadAddon = vi.fn();
     open = vi.fn();
@@ -64,6 +66,8 @@ beforeEach(() => {
   terminal.instances.length = 0;
   FakeSocket.instances = [];
   frames = [];
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
   vi.stubGlobal('WebSocket', FakeSocket);
   vi.stubGlobal('EventSource', FakeEventSource);
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
@@ -90,6 +94,10 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+function pane() {
+  return page.shadowRoot?.querySelector('scion-terminal-pane');
+}
+
 async function mountToFrame() {
   document.body.append(page);
   await vi.waitFor(() => expect(frames).toHaveLength(1));
@@ -103,11 +111,20 @@ async function mountConnected() {
 }
 
 describe('legacy terminal transport adapter', () => {
+  it('takes agent identity from supplied route data, not the current URL', async () => {
+    page.agentId = '';
+    history.replaceState(null, '', '/dashboard');
+    await mountConnected();
+    expect(pane()?.agentId).toBe(agentId);
+  });
+
   it('requires authenticated bootstrap identity before fetching or attaching', async () => {
     page.pageData = null;
     document.body.append(page);
     await page.updateComplete;
-    expect(page.shadowRoot?.textContent).toContain('Authentication required');
+    await vi.waitFor(() =>
+      expect(page.shadowRoot?.textContent).toContain('Authentication required')
+    );
     expect(fetcher).not.toHaveBeenCalled();
     expect(FakeSocket.instances).toHaveLength(0);
   });
@@ -140,11 +157,11 @@ describe('legacy terminal transport adapter', () => {
     fetcher
       .mockResolvedValueOnce(json({ id: agentId, name: 'test', phase: 'running' }))
       .mockResolvedValueOnce(json({}, 403));
-    page.shadowRoot?.querySelector<HTMLButtonElement>('.reconnect-btn')?.click();
-    await vi.waitFor(() => expect(page.shadowRoot?.textContent).toContain('permission'));
+    pane()?.shadowRoot?.querySelector<HTMLButtonElement>('.reconnect-btn')?.click();
+    await vi.waitFor(() => expect(pane()?.shadowRoot?.textContent).toContain('permission'));
     expect(terminal.instances[0].dispose).not.toHaveBeenCalled();
     expect(terminal.instances[0].reset).not.toHaveBeenCalled();
-    page.shadowRoot?.querySelector<HTMLButtonElement>('.reconnect-btn')?.click();
+    pane()?.shadowRoot?.querySelector<HTMLButtonElement>('.reconnect-btn')?.click();
     await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(2));
     expect(terminal.instances[0].reset).not.toHaveBeenCalled();
     FakeSocket.instances[1].open();
@@ -155,12 +172,12 @@ describe('legacy terminal transport adapter', () => {
 
 it('connection notifications do not overwrite metadata refreshed by page controls', async () => {
   await mountConnected();
-  const controls = page as unknown as { refreshAgentData(): Promise<void>; sendResize(): void };
+  const controls = pane() as unknown as { refreshAgentData(): Promise<void>; sendResize(): void };
   fetcher.mockResolvedValueOnce(json({ id: agentId, name: 'test', phase: 'stopped' }));
   await controls.refreshAgentData();
   controls.sendResize();
   await page.updateComplete;
-  expect(page.shadowRoot?.querySelector('scion-status-badge')?.getAttribute('status')).toBe(
+  expect(pane()?.shadowRoot?.querySelector('scion-status-badge')?.getAttribute('status')).toBe(
     'stopped'
   );
 });
