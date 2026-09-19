@@ -473,3 +473,20 @@ it('reports a server reconnect gap before the replacement is ready', () => {
   expect(connected).toHaveBeenCalledTimes(1);
   client.disconnect();
 });
+
+it('reports failed handshakes separately and scopes the auth probe to its Hub base', async () => {
+  const client = new SSEClient('https://hub.example/team/events');
+  const failed = vi.fn();
+  const connected = vi.fn();
+  client.addEventListener('handshake-failed', failed);
+  client.addEventListener('connected', connected);
+  client.connect(['agent.one.>']);
+  latest().simulateHandshakeFailure();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(failed).toHaveBeenCalledTimes(1);
+  expect(connected).not.toHaveBeenCalled();
+  expect(fetch).toHaveBeenCalledWith('https://hub.example/team/auth/me', {
+    credentials: 'include',
+  });
+  client.disconnect();
+});
