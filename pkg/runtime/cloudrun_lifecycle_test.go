@@ -223,6 +223,63 @@ func TestCloudRunRun_CreatesInstanceWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestCloudRunRun_RestartPolicyAlways(t *testing.T) {
+	fake := &fakeInstancesClient{getErr: notFoundErr()}
+	rt := newFakeCloudRunRuntime(t, fake)
+
+	_, err := rt.Run(context.Background(), runConfigForTest())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(fake.createReqs) != 1 {
+		t.Fatalf("CreateInstance called %d times, want 1", len(fake.createReqs))
+	}
+	inst := fake.createReqs[0].Instance
+	if inst.Annotations == nil {
+		t.Fatal("Instance.Annotations is nil, expected restart policy annotation")
+	}
+	const wantKey = "run.googleapis.com/restart-policy"
+	const wantVal = "Always"
+	if got := inst.Annotations[wantKey]; got != wantVal {
+		t.Errorf("Instance.Annotations[%q] = %q, want %q", wantKey, got, wantVal)
+	}
+}
+
+func TestCloudRunRun_HubEndpointEnvPassthrough(t *testing.T) {
+	fake := &fakeInstancesClient{getErr: notFoundErr()}
+	rt := newFakeCloudRunRuntime(t, fake)
+
+	cfg := runConfigForTest()
+	cfg.Env = []string{
+		"SCION_HUB_ENDPOINT=https://hub.example.com",
+		"SCION_HUB_URL=https://hub.example.com",
+	}
+
+	_, err := rt.Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(fake.createReqs) != 1 {
+		t.Fatalf("CreateInstance called %d times, want 1", len(fake.createReqs))
+	}
+	container := fake.createReqs[0].Instance.Containers[0]
+	foundEndpoint := false
+	for _, ev := range container.Env {
+		if ev.Name == "SCION_HUB_ENDPOINT" {
+			val := ev.GetValues().(*runpb.EnvVar_Value).Value
+			if val != "https://hub.example.com" {
+				t.Errorf("SCION_HUB_ENDPOINT = %q, want %q", val, "https://hub.example.com")
+			}
+			foundEndpoint = true
+		}
+	}
+	if !foundEndpoint {
+		t.Error("SCION_HUB_ENDPOINT env var not found in container")
+	}
+}
+
 func TestCloudRunRun_StartsExistingInstance(t *testing.T) {
 	wantID := cloudRunInstanceID("agent-1")
 	wantName := "projects/test-project/locations/us-central1/instances/" + wantID

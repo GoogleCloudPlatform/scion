@@ -383,6 +383,21 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 		hubEndpoint = sandboxEndpoint
 	}
+	// On the cloudrun (CRI) runtime, standalone instances run on separate VMs
+	// (potentially in different regions) and cannot reach the broker's localhost
+	// endpoint. Unlike cloudrun-sandbox (co-located with the hub, reachable via
+	// link-local), CRI instances need the hub's public Cloud Run service URL.
+	// Resolve it from the K_SERVICE env var and GCE metadata.
+	if runtimeName == "cloudrun" && isLocalhostEndpoint(hubEndpoint) {
+		criEndpoint, err := cloudrunInstancesHubEndpoint()
+		if err != nil {
+			return nil, &startContextError{
+				Status:  http.StatusInternalServerError,
+				Message: fmt.Sprintf("cannot resolve hub endpoint for Cloud Run instance: %v", err),
+			}
+		}
+		hubEndpoint = criEndpoint
+	}
 	if hubEndpoint != "" {
 		env["SCION_HUB_ENDPOINT"] = hubEndpoint
 		classifyBrokerEnv("SCION_HUB_ENDPOINT", api.EnvKindPlain)
