@@ -790,6 +790,134 @@ describe('scion-chat-thread initial scroll position', () => {
   });
 });
 
+describe('scion-chat-thread search result navigation', () => {
+  const TARGET = {
+    id: 'target-message',
+    sender: 'them@example.com',
+    msg: 'search target',
+    createdAt: '2026-01-01T00:01:00Z',
+  };
+  let scrollIntoView: ReturnType<typeof vi.fn>;
+  const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          messages: [
+            {
+              ...TARGET,
+              id: 'currently-loaded-message',
+              msg: 'currently loaded',
+            },
+          ],
+        }),
+    } as unknown as Response);
+    scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+  });
+
+  afterEach(() => {
+    if (originalScrollIntoView) {
+      Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+        configurable: true,
+        value: originalScrollIntoView,
+      });
+    } else {
+      delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView;
+    }
+    document.body.innerHTML = '';
+  });
+
+  it('fetches and replaces the message window when the target is not loaded', async () => {
+    const el = await mount();
+    apiFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          messages: [
+            { ...TARGET, id: 'before-message', msg: 'before' },
+            TARGET,
+            { ...TARGET, id: 'after-message', msg: 'after' },
+          ],
+          nextCursor: 'older-cursor',
+        }),
+    } as unknown as Response);
+
+    await el.scrollToMessageById(TARGET.id);
+    await el.updateComplete;
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `/api/v1/chat/conversations/${CONVERSATION_KEY}/messages?around=${TARGET.id}`
+      )
+    );
+    const target = el.shadowRoot?.querySelector(`#msg-${TARGET.id}`);
+    expect(target).not.toBeNull();
+    expect(el.shadowRoot?.querySelector('#msg-currently-loaded-message')).toBeNull();
+    expect(target?.classList.contains('permalink-highlight')).toBe(true);
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' });
+    expect(el.shadowRoot?.querySelector('.jump-btn')).not.toBeNull();
+  });
+
+  it('refetches the newest window after jumping to an older search result', async () => {
+    const el = await mount();
+    apiFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ messages: [TARGET], nextCursor: 'older-cursor' }),
+    } as unknown as Response);
+    await el.scrollToMessageById(TARGET.id);
+    await el.updateComplete;
+
+    const latest = { ...TARGET, id: 'latest-message', msg: 'latest' };
+    apiFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ messages: [latest] }),
+    } as unknown as Response);
+
+    const jump = el.shadowRoot?.querySelector('.jump-btn') as HTMLElement | null;
+    jump?.click();
+    await vi.waitFor(() =>
+      expect(el.shadowRoot?.querySelector('#msg-latest-message')).not.toBeNull()
+    );
+
+    expect(el.shadowRoot?.querySelector(`#msg-${TARGET.id}`)).toBeNull();
+    expect(apiFetch.mock.calls.at(-1)?.[0]).not.toContain('around=');
+  });
+
+  it('keeps live tail messages out of a detached around window', async () => {
+    const el = await mount();
+    apiFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ messages: [TARGET], nextCursor: 'older-cursor' }),
+    } as unknown as Response);
+    await el.scrollToMessageById(TARGET.id);
+
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'live-tail-message',
+      msg: 'newest tail',
+      sender: 'them@example.com',
+      createdAt: '2026-01-01T01:00:00Z',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('#msg-live-tail-message')).toBeNull();
+    expect(el.shadowRoot?.querySelector('.jump-btn')).not.toBeNull();
+  });
+});
+
 /**
  * SSE-delivered messages with attachments must render the attachment previews
  * immediately — not only after the next user-triggered re-render. The bug was
