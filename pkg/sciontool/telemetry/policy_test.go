@@ -647,3 +647,61 @@ func assertCommonIdentity(t *testing.T, attrs []*commonpb.KeyValue, serviceName 
 	assertAttr(t, attrs, "scion.agent.slug", "agent-slug")
 	assertAttr(t, attrs, "scion.broker.name", "broker-one")
 }
+
+// This synthetic OTLP request follows the HTTP receiver, policy and cloud
+// exporter path. It does not assert what any installed vendor actually emits.
+func TestReceiverSystemInstructionsCannotReachEgress(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		redaction RedactionConfig
+	}{
+		{name: "default prompt policy", redaction: RedactionConfig{Redact: DefaultRedactFields}},
+		{name: "explicit policy omits prompt", redaction: RedactionConfig{Redact: []string{"tool_output"}, Hash: []string{"gen_ai.system_instructions"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewWithConfig(&Config{Enabled: true, Redaction: tc.redaction})
+			p.retryConfig = fastRetryConfig()
+			var captured []*tracepb.ResourceSpans
+			p.exporter = &CloudExporter{grpcClient: &mockTraceClient{exportFunc: func(_ context.Context, req *coltracepb.ExportTraceServiceRequest, _ ...grpc.CallOption) (*coltracepb.ExportTraceServiceResponse, error) {
+				captured = req.ResourceSpans
+				return &coltracepb.ExportTraceServiceResponse{}, nil
+			}}}
+			secret := func(value string) []*commonpb.KeyValue { return secretAttr("gen_ai.system_instructions", value) }
+			req := &coltracepb.ExportTraceServiceRequest{ResourceSpans: []*tracepb.ResourceSpans{{
+				Resource: &resourcepb.Resource{Attributes: append(secret("RESOURCE_SECRET"), secretKV("service.name", "safe-service"))},
+				ScopeSpans: []*tracepb.ScopeSpans{{
+					Scope: &commonpb.InstrumentationScope{Name: "safe.scope", Attributes: secret("SCOPE_SECRET")},
+					Spans: []*tracepb.Span{{Name: "safe.span", Attributes: append(secret("SPAN_SECRET"), secretKV("gen_ai.input.messages", "PROMPT_SECRET"), secretKV("safe.key", "safe-value")),
+						Events: []*tracepb.Span_Event{{Name: "safe.event", Attributes: append(secret("EVENT_SECRET"), &commonpb.KeyValue{Key: "nested", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{Values: secret("NESTED_SECRET")}}}})}},
+						Links:  []*tracepb.Span_Link{{Attributes: secret("LINK_SECRET")}},
+					}},
+				}},
+			}}}
+			body, err := proto.Marshal(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			receiver := &Receiver{handler: p.handleSpans}
+			response := httptest.NewRecorder()
+			receiver.handleHTTPTraces(response, otlpHTTPRequest("/v1/traces", bytes.NewReader(body)))
+			if response.Code != http.StatusOK {
+				t.Fatalf("receiver status %d: %s", response.Code, response.Body.String())
+			}
+			if len(captured) != 1 || len(captured[0].ScopeSpans) != 1 || len(captured[0].ScopeSpans[0].Spans) != 1 {
+				t.Fatalf("unexpected egress batch: %#v", captured)
+			}
+			rs := captured[0]
+			span := rs.ScopeSpans[0].Spans[0]
+			for _, attrs := range [][]*commonpb.KeyValue{rs.Resource.Attributes, rs.ScopeSpans[0].Scope.Attributes, span.Attributes, span.Events[0].Attributes, span.Events[0].Attributes[1].Value.GetKvlistValue().Values, span.Links[0].Attributes} {
+				assertRedacted(t, attrs, "gen_ai.system_instructions")
+			}
+			assertAttr(t, rs.Resource.Attributes, "service.name", "safe-service")
+			assertAttr(t, span.Attributes, "safe.key", "safe-value")
+			if tc.name == "default prompt policy" {
+				assertRedacted(t, span.Attributes, "gen_ai.input.messages")
+			} else {
+				assertAttr(t, span.Attributes, "gen_ai.input.messages", "PROMPT_SECRET")
+			}
+		})
+	}
+}

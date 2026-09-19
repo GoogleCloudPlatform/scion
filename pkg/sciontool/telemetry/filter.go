@@ -20,6 +20,7 @@ import (
 var nativeFieldAliases = map[string]string{
 	"conversation.id":            "session_id",
 	"gen_ai.prompt":              "prompt",
+	"gen_ai.system_instructions": "prompt",
 	"gen_ai.input.messages":      "prompt",
 	"input.value":                "prompt",
 	"gen_ai.completion":          "tool_output",
@@ -162,6 +163,11 @@ func NewRedactor(config RedactionConfig) *Redactor {
 func (r *Redactor) ShouldRedact(key string) bool {
 	if r == nil {
 		return false
+	}
+	// This known native content field must not be disabled by an explicit
+	// redaction list or downgraded to a hash by custom configuration.
+	if key == "gen_ai.system_instructions" {
+		return true
 	}
 	return r.redactFields[key] || r.redactFields[nativeFieldAliases[key]]
 }
