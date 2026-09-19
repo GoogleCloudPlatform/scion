@@ -179,30 +179,69 @@ Current merged `main` and the exact branch merge-base are `0c07fdee3eefac5a21f93
 - `make fmt-check`, `make compat-literals`, `git diff --check 0c07fdee...HEAD`, and `git diff --check` all exited 0.
 - `git diff --name-only e9b34d2a...` confirms the correction changes only manifests, their focused validation test, deployment documentation, and this project log; runtime topology tests and production Go remain untouched.
 
-## PR #1748 Review-Fix Checkpoint (UNREVIEWED WIP)
+## PR #1748 Review-Fix Final Delivery
 
-**Date:** 2026-09-18  
-**Temporary branch:** `scion/dev-postmerge-integration-harness-review-fixes`  
-**Exact accepted base:** `29e8a45ccd11b4db77ea1fee04945917a129af94`
+**Date:** 2026-09-19
+**Temporary branch:** `scion/dev-postmerge-integration-harness-review-fixes-resume`
+**Preserved WIP ancestor:** `c7dec1a4f139d283e1a209bebf3f73fda1e13d51`
+**Exact accepted PR head/base:** `29e8a45ccd11b4db77ea1fee04945917a129af94`
 
-This is an urgent-cleanup checkpoint, not an approval or readiness claim. The scoped WIP:
+The bounded review correction is complete. No production code and no separately owned
+PR #1747 fix was imported or duplicated.
 
-- guarantees fallback closure of `storePre` and the two explicitly disconnected SSE bodies while retaining their intentional early-close timing;
-- gives `run-integration-ci.sh` an invocation-owned `mktemp -d` directory with exact-path cleanup on exit and HUP/INT/TERM;
-- adds deterministic fake-boundary regressions for success, empty DB URL, missing `psql`, early test failure, forbidden skip, canary mutation, signal interruption, concurrent isolation, unrelated-file preservation, and credential redaction; and
-- scopes fail-closed database behavior to `TEST_REQUIRE_DATABASE=1`, so generic `CI=true` bridge jobs may skip PostgreSQL-only tests while the dedicated PostgreSQL runner still rejects every skip.
+### Upstream Review Findings
 
-Completed evidence:
+- `storePre` has a deferred fallback close before either query can fail, while its
+  successful-path close remains at the original pre-stream point.
+- Both intentionally disconnected SSE response bodies have deferred fallback closure
+  before assertions can fail, while their successful paths still close immediately at
+  the intended disconnect boundaries.
+- `run-integration-ci.sh` creates one invocation-owned directory with
+  `mktemp -d "${TMPDIR:-/tmp}/scion-a2a-integration.XXXXXX"`; every JSON log is created
+  beneath that directory, and cleanup removes only that exact directory. There is no
+  broad `/tmp` glob.
+- The `EXIT` cleanup runs on normal completion and early failure. HUP, INT, and TERM
+  traps convert each signal to the corresponding exit status, which then reaches the
+  same exact-path `EXIT` cleanup. Focused regressions prove normal/failure cleanup,
+  signal interruption, concurrent invocation isolation, unrelated-file preservation,
+  skip rejection, canary mutation detection, and credential redaction.
+- Generic `CI=true` no longer implies that PostgreSQL was provisioned: the four
+  PostgreSQL-dependent integration tests may skip when `TEST_DATABASE_URL` is absent.
+  `TEST_REQUIRE_DATABASE=1` remains fail-closed, and the actual dedicated runner sets it,
+  rejects every `Action=skip`, and runs the complete integration package.
 
-- RED: accepted tip failed the four PostgreSQL-only tests under `CI=true` without `TEST_DATABASE_URL`.
-- RED: the new cleanup regressions caught the legacy signal leak `/tmp/ci-test-json.*` and absence of isolated concurrent runner directories.
-- GREEN: focused runner regressions passed normally and with `-race`; generic `CI=true` four-test composition passed; `TEST_REQUIRE_DATABASE=1` without a DB still failed closed; `go vet ./integration` and `go test ./integration -count=1` passed.
-- Upstream PR #1748 generic extras job `105790395454` failed only the four over-broad `CI=true` database requirements addressed here.
-- Upstream dedicated PostgreSQL job `105790361080` passed standard, race, and count=3 phases with zero skips/failures and exact `canary-1=must-survive` preservation; its log redacted the DSN.
-- Upstream Build & Test job `105790361187` showed root PersistentStore `unknown driver "sqlite"`, exchange-route permission classification, and other Hub/authz census failures. Per maintenance ownership, these remain the separate unmerged PR #1747 dependency at `22e66f275c6f545aa1694dfd388d5a8f55bd2a9d`; none were duplicated here.
+### Final Verification
 
-Incomplete at the urgent cleanup boundary:
+- `go test ./integration -run 'TestIntegrationRunner' -count=1`: PASS (`0.404s`).
+- `go test -race ./integration -run 'TestIntegrationRunner' -count=1`: PASS (`1.721s`).
+- Generic no-PostgreSQL workflow equivalent with `CI=true`: PASS with exactly four
+  skips, one for each selected PostgreSQL-dependent test.
+- Fresh PostgreSQL 15.19 execution through the actual `scripts/run-integration-ci.sh`
+  with `TEST_REQUIRE_DATABASE=1`: standard PASS (`14.315s`), race PASS (`30.127s`),
+  count=3 PASS (`42.049s`), zero skips and zero failures in every phase. The run included
+  `TestColdReplicaAndRotation`, exercising the SQLite-backed durable Hub identity path.
+  Output showed `Using TEST_DATABASE_URL=[REDACTED]` only, and both the runner and an
+  independent final query confirmed exactly `canary-1=must-survive`.
+- ShellCheck 0.11.0 on `scripts/run-integration-ci.sh`: PASS.
+- `make fmt-check`, `make compat-literals`, root `go vet ./...`, root
+  `go build -buildvcs=false ./...`, bridge `go vet ./integration`, and bridge
+  `go build -buildvcs=false ./...`: PASS.
+- Final staged/unstaged whitespace and scope checks are recorded in the durable delivery
+  report alongside the immutable delivery commit and verified remote ref.
+- Per the resume brief, the long root candidate/main `make test-fast` was not repeated;
+  its earlier interrupted runs still carry no verdict.
 
-- Equivalent scrubbed-environment `make test-fast` runs on candidate and exact upstream main `0c07fdee3eefac5a21f93878211bf507b2e5c6a7` were intentionally interrupted with exit 130 after approximately 11 minutes and produced no final verdict.
-- `shellcheck` was unavailable locally. The accepted-tip upstream shellcheck job was green, but this delta has not received a local shellcheck run.
-- Final `make fmt-check`, `make compat-literals`, build, post-checkpoint `git diff --check`, independent review, and a new real-PostgreSQL run of this descendant are pending.
+### Actual PR #1748 CI Classification
+
+- PR #1748 remains open at exact head `29e8a45ccd11b4db77ea1fee04945917a129af94`.
+- Generic extras bridge job `105790395454` is branch-owned and addressed: its four
+  decisive failures were `TestTwoReplicaUserLifecycle`, `TestCrossReplicaStreamCursor`,
+  `TestCrashLeaseBoundary`, and `TestPostgreSQLSchemaAllocator`, each caused by the former
+  over-broad `CI=true` database requirement.
+- Dedicated PostgreSQL job `105790361080` is SUCCESS. Its actual log shows a redacted DSN,
+  all standard/race/count=3 phases completing with zero skips and failures, and exact
+  `canary-1=must-survive` preservation.
+- Root Build & Test job `105790361187` failed on PersistentStore SQLite driver setup,
+  exchange-route permission classification, and other Hub/authz census findings. Those
+  remain dependent on separate open PR #1747 at
+  `22e66f275c6f545aa1694dfd388d5a8f55bd2a9d` and are outside this test/runner-only scope.
