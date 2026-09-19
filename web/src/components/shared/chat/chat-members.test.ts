@@ -123,6 +123,27 @@ describe('scion-chat-members agent tooltip', () => {
   });
 });
 
+describe('scion-chat-members thread default', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('labels only the agent whose slug matches the thread default', async () => {
+    const el = await mount([
+      agent(),
+      agent({ id: 'agent-2', displayName: 'Reviewer', slug: 'reviewer' }),
+    ]);
+    el.defaultAgentSlug = 'reviewer';
+    await el.updateComplete;
+
+    const rows = [...(el.shadowRoot?.querySelectorAll('.member-item') ?? [])];
+    expect(rows[0]?.querySelector('.default-agent-label')).toBeNull();
+    expect(rows[1]?.querySelector('.default-agent-label')?.textContent?.trim()).toBe(
+      'thread default'
+    );
+  });
+});
+
 describe('scion-chat-members wobble', () => {
   beforeEach(() => {
     vi.useFakeTimers();
