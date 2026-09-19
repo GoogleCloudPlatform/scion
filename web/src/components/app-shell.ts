@@ -28,8 +28,6 @@ import { customElement, property, state } from 'lit/decorators.js';
 import './shared/nav.js';
 import './shared/header.js';
 import './shared/breadcrumb.js';
-import './shared/debug-panel.js';
-
 import type { User } from '../shared/types.js';
 import type { AccessDeniedDetail } from '../client/api.js';
 import { showAccessDeniedToast } from '../utils/access-denied.js';
@@ -294,8 +292,6 @@ export class ScionApp extends LitElement {
         </div>
       </main>
 
-      <!-- Debug Panel (only shows in debug mode) -->
-      <scion-debug-panel></scion-debug-panel>
     `;
   }
 

@@ -33,8 +33,6 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 import '../shared/header.js';
-import '../shared/debug-panel.js';
-
 import type { User } from '../../shared/types.js';
 import type { AccessDeniedDetail } from '../../client/api.js';
 import { showAccessDeniedToast } from '../../utils/access-denied.js';
@@ -234,7 +232,6 @@ export class ScionChatShell extends LitElement {
         </div>
       </main>
 
-      <scion-debug-panel></scion-debug-panel>
     `;
   }
 
