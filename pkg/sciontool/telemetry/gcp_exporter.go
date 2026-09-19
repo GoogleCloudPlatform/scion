@@ -236,37 +236,40 @@ func (e *GCPExporter) Shutdown(ctx context.Context) error {
 	if e.traceExporter != nil {
 		if err := e.traceExporter.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("trace exporter shutdown: %w", err))
-		} else {
-			e.traceExporter = nil
 		}
+		e.traceExporter = nil
 	}
 
 	if e.metricExporter != nil {
+		// The pinned Monitoring SDK runs Shutdown once and closes its client
+		// even when it returns a caller-context or Close error. The debug
+		// wrapper delegates to that same one-shot method.
 		if err := e.metricExporter.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("metric exporter shutdown: %w", err))
-		} else {
-			e.metricExporter = nil
 		}
+		e.metricExporter = nil
 	}
 
 	if e.logClient != nil {
 		if err := e.acquireLogSlot(ctx); err != nil {
-			return fmt.Errorf("log client close incomplete: %w", err)
+			errs = append(errs, fmt.Errorf("log client close incomplete: %w", err))
+		} else {
+			// The pinned Logging SDK marks Client closed even when Close returns
+			// an asynchronous flush error. It must not be closed again.
+			if err := e.logClient.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("log client close: %w", err))
+			}
+			e.logClient = nil
+			e.logger = nil
+			<-e.logSlot
 		}
-		// The pinned Logging SDK marks Client closed even when Close returns
-		// an asynchronous flush error. It must not be closed again.
-		if err := e.logClient.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("log client close: %w", err))
-		}
-		e.logClient = nil
-		e.logger = nil
-		<-e.logSlot
 	}
 
-	if len(errs) > 0 {
-		return errs[0]
-	}
-	return nil
+	return errors.Join(errs...)
+}
+
+func (e *GCPExporter) shutdownComplete() bool {
+	return e == nil || e.traceExporter == nil && e.metricExporter == nil && e.logClient == nil
 }
 
 func filterGCPMetricdata(rm *metricdata.ResourceMetrics, metricsDebug bool) *metricdata.ResourceMetrics {

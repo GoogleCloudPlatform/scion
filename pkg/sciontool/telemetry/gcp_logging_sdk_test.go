@@ -14,7 +14,9 @@ import (
 
 	"cloud.google.com/go/logging"
 	lp "cloud.google.com/go/logging/apiv2/loggingpb"
+	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
 	slog "github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	logs "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/api/option"
@@ -174,7 +176,7 @@ func TestPipelineStopRetriesExpiredLoggingClientClose(t *testing.T) {
 	if err := p.Stop(context.Background()); err != nil {
 		t.Fatalf("later Stop failed to close retained Logging client: %v", err)
 	}
-	if p.running || g.logClient != nil {
+	if p.running || g.logClient != nil || !errors.Is(p.shutdownErr, context.DeadlineExceeded) || p.DeliveryState() != "degraded" {
 		t.Fatalf("later Stop left client owned: running=%v client=%v", p.running, g.logClient)
 	}
 	// Hold the same slot after Close so this export cannot check availability
@@ -270,5 +272,117 @@ func TestPipelineStopMetricBudgetExpiresBeforeLoggingClose(t *testing.T) {
 	}
 	if d := p.Diagnostics()["metrics"]; d.Accepted != 1 || d.Unconfirmed != 1 || d.Delivered != 0 {
 		t.Fatalf("duplicate metric disposition after repeat Stop: %+v", d)
+	}
+}
+
+func TestPipelineStopCompositeGCPOneShotMonitoringAndLogging(t *testing.T) {
+	for _, debug := range []bool{false, true} {
+		for _, withMetric := range []bool{false, true} {
+			name := "normal"
+			if debug {
+				name = "debug_wrapper"
+			}
+			if withMetric {
+				name += "_metric_budget"
+			} else {
+				name += "_expired"
+			}
+			t.Run(name, func(t *testing.T) {
+				logConn, err := grpc.NewClient("127.0.0.1:1", grpc.WithTransportCredentials(insecure.NewCredentials()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer logConn.Close()
+				metricConn, err := grpc.NewClient("127.0.0.1:1", grpc.WithTransportCredentials(insecure.NewCredentials()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer metricConn.Close()
+				client, err := logging.NewClient(context.Background(), "phase3-local-only", option.WithGRPCConn(logConn))
+				if err != nil {
+					t.Fatal(err)
+				}
+				metric, err := mexporter.New(mexporter.WithProjectID("phase3-local-only"), mexporter.WithMonitoringClientOptions(option.WithGRPCConn(metricConn)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if debug {
+					metric = newDebugMetricExporter(metric)
+				}
+				g := &GCPExporter{metricExporter: metric, logClient: client}
+				p := NewWithConfig(&Config{Enabled: true, CloudEnabled: true})
+				p.running = true
+				p.exporter = &CloudExporter{gcpExporter: g}
+				var stopCtx context.Context
+				var cancel context.CancelFunc
+				wantContextErr := context.Canceled
+				if withMetric {
+					if err := p.handleMetrics(context.Background(), []*metricpb.ResourceMetrics{stopTestMetric(7, 2)}); err != nil {
+						t.Fatal(err)
+					}
+					p.metricLastFlush = time.Now()
+					stopCtx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
+					wantContextErr = context.DeadlineExceeded
+				} else {
+					stopCtx, cancel = context.WithCancel(context.Background())
+					cancel()
+				}
+				defer cancel()
+				first := p.Stop(stopCtx)
+				if !errors.Is(first, wantContextErr) || !strings.Contains(first.Error(), "metric exporter shutdown") || !p.running || g.metricExporter != nil || g.logClient == nil {
+					t.Fatalf("first composite Stop error=%v running=%v metric=%v log=%v", first, p.running, g.metricExporter, g.logClient)
+				}
+				if err := metric.Export(context.Background(), &metricdata.ResourceMetrics{}); err == nil || !strings.Contains(err.Error(), "exporter is shutdown") {
+					t.Fatalf("pinned Monitoring SDK remained usable after one-shot Shutdown: %v", err)
+				}
+				if withMetric {
+					if d := p.Diagnostics()["metrics"]; d.Accepted != 1 || d.Unconfirmed != 1 || d.Delivered != 0 || p.QueueDepth() != (QueueDepth{}) {
+						t.Fatalf("first metric disposition=%+v depth=%+v", d, p.QueueDepth())
+					}
+				}
+				if err := p.beginIntake(); err == nil {
+					p.endIntake()
+					t.Fatal("incomplete Stop reopened intake")
+				}
+				firstShutdownErr := p.shutdownErr
+				for i := 0; i < 3; i++ {
+					if err := p.Stop(stopCtx); !errors.Is(err, wantContextErr) || g.logClient == nil || p.shutdownErr != firstShutdownErr {
+						t.Fatalf("repeated expired Stop changed ownership/error: err=%v client=%v", err, g.logClient)
+					}
+				}
+				var wg sync.WaitGroup
+				results := make(chan error, 8)
+				for i := 0; i < 8; i++ {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						results <- p.Stop(context.Background())
+					}()
+				}
+				wg.Wait()
+				close(results)
+				preserved := 0
+				for err := range results {
+					if err != nil {
+						if strings.Contains(err.Error(), "exporter is shutdown") {
+							t.Fatalf("later Stop lost first error or repeated Monitoring shutdown: %v", err)
+						}
+						preserved++
+					}
+				}
+				wantPreserved := 0
+				if withMetric {
+					wantPreserved = 1 // the admitted metric was terminal Unconfirmed
+				}
+				if preserved != wantPreserved || !errors.Is(p.shutdownErr, wantContextErr) || p.running || g.metricExporter != nil || g.logClient != nil || p.DeliveryState() != "degraded" || p.QueueDepth() != (QueueDepth{}) {
+					t.Fatalf("composite cleanup preserved=%d running=%v metric=%v log=%v state=%s depth=%+v", preserved, p.running, g.metricExporter, g.logClient, p.DeliveryState(), p.QueueDepth())
+				}
+				if withMetric {
+					if d := p.Diagnostics()["metrics"]; d.Accepted != 1 || d.Unconfirmed != 1 || d.Delivered != 0 {
+						t.Fatalf("duplicate metric disposition after cleanup: %+v", d)
+					}
+				}
+			})
+		}
 	}
 }

@@ -55,6 +55,7 @@ type Pipeline struct {
 	policy           *receiverPolicy
 	mu               sync.Mutex
 	running          bool
+	shutdownErr      error        // preserves a completed one-shot SDK shutdown failure
 	deliveryState    atomic.Value // string; readable without taking the lifecycle mutex
 	diagnosticMu     sync.Mutex
 	diagnosticLast   time.Time
@@ -378,17 +379,26 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	// Shutdown exporter to flush any buffered spans
 	if p.exporter != nil {
 		if err := p.exporter.Shutdown(ctx); err != nil {
-			// Keep the exporter owned by this pipeline. The intake gate and
-			// receiver are already closed, but a later Stop with a live budget
-			// must be able to finish closing SDK clients.
+			if p.shutdownErr == nil {
+				p.shutdownErr = fmt.Errorf("exporter shutdown error: %w", err)
+				log.Error("Telemetry exporter shutdown error: %v", err)
+			} else if p.exporter.shutdownComplete() {
+				// A later completed Close can report a distinct terminal error.
+				errs = append(errs, fmt.Errorf("exporter shutdown error: %w", err))
+				log.Error("Telemetry exporter shutdown error: %v", err)
+			}
+		}
+		if !p.exporter.shutdownComplete() {
+			// Intake and receiver are closed, but a client whose Close has not
+			// started remains owned until a later Stop can finish cleanup.
 			p.deliveryState.Store("degraded")
 			p.logDeliverySnapshot(true)
-			return fmt.Errorf("telemetry shutdown incomplete: exporter shutdown error: %w", err)
+			return fmt.Errorf("telemetry shutdown incomplete: %w", p.shutdownErr)
 		}
 	}
 
 	p.running = false
-	if len(errs) > 0 {
+	if len(errs) > 0 || p.shutdownErr != nil {
 		p.deliveryState.Store("degraded")
 	} else {
 		if p.config != nil && !p.config.CloudEnabled {

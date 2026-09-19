@@ -315,25 +315,29 @@ func (e *CloudExporter) Shutdown(ctx context.Context) error {
 
 	// Generic OTLP path
 	if e.traceExporter != nil {
+		// The pinned OTLP trace exporter stops once, including on a context
+		// error. A later call cannot make that same close more complete.
 		if err := e.traceExporter.Shutdown(ctx); err != nil {
 			errs = append(errs, err)
-		} else {
-			e.traceExporter = nil
 		}
+		e.traceExporter = nil
 	}
 
 	if e.grpcConn != nil {
 		if err := e.grpcConn.Close(); err != nil {
 			errs = append(errs, err)
-		} else {
-			e.grpcConn = nil
 		}
+		e.grpcConn = nil
 	}
 
 	if len(errs) > 0 {
 		return errs[0]
 	}
 	return nil
+}
+
+func (e *CloudExporter) shutdownComplete() bool {
+	return e == nil || (e.gcpExporter == nil || e.gcpExporter.shutdownComplete()) && e.traceExporter == nil && e.grpcConn == nil
 }
 
 // SpanExporter returns the underlying trace.SpanExporter.
