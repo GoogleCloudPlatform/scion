@@ -132,6 +132,9 @@ func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
 // ResolveWithHash fetches a resource, always verifying the current content hash
 // with the hub to prevent serving stale cached content.
 //
+// Deprecated: ResolveWithHash now always verifies with the hub. Use Resolve
+// directly. The contentHash parameter is ignored.
+//
 // The caller's contentHash (from the dispatch) may be stale if the hub
 // re-bootstrapped the resource after the agent was created but before the
 // broker resolved it, or if the dispatch raced with a bootstrap. To guard

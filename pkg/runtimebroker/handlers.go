@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -1026,8 +1027,10 @@ func (s *Server) hydrateHarnessConfig(ctx context.Context, cfg *CreateAgentConfi
 		// authoritative; if they differ the resource was re-bootstrapped
 		// and we must use the current state.
 		localPathOK := true
+		var currentHC *hubclient.HarnessConfig
 		if conn.HubClient != nil && cfg.HarnessConfigHash != "" && ref != "" {
-			currentHC, metaErr := conn.HubClient.HarnessConfigs().Get(ctx, ref)
+			var metaErr error
+			currentHC, metaErr = conn.HubClient.HarnessConfigs().Get(ctx, ref)
 			if metaErr == nil && currentHC != nil && currentHC.ContentHash != cfg.HarnessConfigHash {
 				s.agentLifecycleLog.Info("harness-config content hash changed since dispatch; using current version",
 					"ref", ref,
@@ -1038,12 +1041,31 @@ func (s *Server) hydrateHarnessConfig(ctx context.Context, cfg *CreateAgentConfi
 		}
 
 		if localPathOK {
-			path, err := s.resolveLocalResource(ctx, storage.ResourceKindHarnessConfig, ref, conn)
-			if err != nil {
-				return "", err
-			}
-			if path != "" {
-				return path, nil
+			if currentHC != nil {
+				// We already fetched metadata above; resolve the local
+				// path directly to avoid a duplicate hub round-trip.
+				if resolver, ok := conn.LocalStorage.(localObjectResolver); ok {
+					objectPath := currentHC.StoragePath
+					if objectPath == "" {
+						objectPath = storage.ResourceStoragePath("", storage.ResourceKindHarnessConfig, currentHC.Scope, currentHC.ScopeID, currentHC.Slug)
+					}
+					dir := resolver.ObjectFSPath(objectPath)
+					info, statErr := os.Stat(dir)
+					if statErr == nil && info.IsDir() {
+						return dir, nil
+					}
+				}
+			} else {
+				// Hash check was skipped (no hub client or no dispatch
+				// hash); resolve via the standard path which fetches
+				// metadata itself.
+				path, err := s.resolveLocalResource(ctx, storage.ResourceKindHarnessConfig, ref, conn)
+				if err != nil {
+					return "", err
+				}
+				if path != "" {
+					return path, nil
+				}
 			}
 		}
 		// Not present in the backend yet or hash mismatch — fall through to hydration.

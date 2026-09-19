@@ -117,6 +117,9 @@ func (h *Hydrator) Hydrate(ctx context.Context, templateRef string) (string, err
 // HydrateWithHash fetches a template, always verifying the current content hash
 // with the hub to prevent serving stale cached content.
 //
+// Deprecated: HydrateWithHash now always verifies with the hub. Use Hydrate
+// directly. The contentHash parameter is ignored.
+//
 // The caller's contentHash (from the dispatch) may be stale if the hub
 // re-bootstrapped the template after the agent was created but before the
 // broker resolved it, or if the dispatch raced with a bootstrap. To guard

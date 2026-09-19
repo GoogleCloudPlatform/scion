@@ -299,7 +299,9 @@ func (c *Cache) Invalidate(contentHash string) {
 	templatePath := filepath.Join(c.basePath, contentHash)
 	_ = os.RemoveAll(templatePath)
 	delete(c.index.Entries, contentHash)
-	c.index.TotalSize -= entry.Size
+	if entry != nil {
+		c.index.TotalSize -= entry.Size
+	}
 	_ = c.saveIndex()
 }
 
