@@ -77,9 +77,9 @@ func TestGCPMixedMetricResultIsTerminal(t *testing.T) {
 
 func TestCloudLoggingAsyncErrorReachesLocalDiagnostics(t *testing.T) {
 	p := NewWithConfig(&Config{Enabled: true, CloudEnabled: true})
-	e := &GCPExporter{onAsyncLogError: func(error) { p.logDiagnostics.failed.Add(1) }}
+	e := &GCPExporter{onAsyncLogError: func(error) { p.logDiagnostics.sdkErrors.Add(1) }}
 	e.reportAsyncLogError(errors.New("async write failed"))
-	if e.asyncLogErrors.Load() != 1 || p.Diagnostics()["logs"].Failed != 1 {
+	if e.asyncLogErrors.Load() != 1 || p.Diagnostics()["logs"].SDKErrors != 1 || p.Diagnostics()["logs"].Failed != 0 {
 		t.Fatalf("async errors = %d, diagnostics = %+v", e.asyncLogErrors.Load(), p.Diagnostics()["logs"])
 	}
 }

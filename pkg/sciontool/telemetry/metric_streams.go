@@ -930,12 +930,6 @@ func (s *metricStreams) clearPendingMarker() {
 	}
 }
 
-func (s *metricStreams) clearDirty() {
-	for _, entry := range s.streams {
-		entry.dirty = false
-	}
-}
-
 func (s *metricStreams) hasDirty() bool {
 	for _, entry := range s.streams {
 		if entry.dirty {

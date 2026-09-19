@@ -9,6 +9,7 @@ import (
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestTerminalCumulativeRecoveryAcrossMetricKinds(t *testing.T) {
@@ -66,6 +67,73 @@ func TestTerminalCumulativeRecoveryAcrossMetricKinds(t *testing.T) {
 				t.Fatalf("idle baseline exported again: %v", values)
 			}
 		})
+	}
+}
+
+func TestExpiredDirtyStreamCannotRideUnrelatedAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name, oldName, newName, oldService, newService, oldScope, newScope string
+	}{
+		{"distinct_names", "old.calls", "new.calls", "native", "native", "scope", "scope"},
+		{"same_name_distinct_identity", "same.calls", "same.calls", "old-service", "new-service", "old-scope", "new-scope"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			p := NewWithConfig(&Config{Enabled: true, CloudEnabled: true})
+			p.metricNow = func() time.Time { return now }
+			var exported []*colmetricpb.ExportMetricsServiceRequest
+			p.exporter = &CloudExporter{metricClient: &mockMetricClient{exportFunc: func(_ context.Context, req *colmetricpb.ExportMetricsServiceRequest, _ ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
+				exported = append(exported, proto.Clone(req).(*colmetricpb.ExportMetricsServiceRequest))
+				return &colmetricpb.ExportMetricsServiceResponse{}, nil
+			}}}
+			admit := func(service, scope, name string, value int64, end uint64) {
+				t.Helper()
+				metric := testNumber(name, metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, end, value)
+				if err := p.handleMetrics(context.Background(), []*metricpb.ResourceMetrics{testMetricResource(service, scope, "", "", metric)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			admit(tc.oldService, tc.oldScope, tc.oldName, 7, 2)
+			now = now.Add(4 * time.Minute)
+			admit(tc.newService, tc.newScope, tc.newName, 3, 3)
+			now = now.Add(time.Minute)
+			if !p.flushMetricBuffer(context.Background(), false) {
+				t.Fatal("eligible new stream not exported")
+			}
+			if len(exported) != 1 || len(exported[0].ResourceMetrics) != 1 {
+				t.Fatalf("snapshot includes expired stream: %+v", exported)
+			}
+			got := exported[0].ResourceMetrics[0]
+			if got.GetResource().GetAttributes()[0].GetValue().GetStringValue() != tc.newService || got.ScopeMetrics[0].GetScope().GetName() != tc.newScope || got.ScopeMetrics[0].Metrics[0].GetName() != tc.newName {
+				t.Fatalf("wrong eligible stream: %+v", got)
+			}
+			if d := p.Diagnostics()["metrics"]; d.Accepted != 2 || d.AgeLimit != 1 || d.Unconfirmed != 1 || d.Delivered != 1 || p.QueueDepth() != (QueueDepth{}) {
+				t.Fatalf("ownership diagnostics=%+v depth=%+v", d, p.QueueDepth())
+			}
+		})
+	}
+}
+
+func TestDuplicateMetricAdmissionDoesNotCreateUnownedQueueWork(t *testing.T) {
+	p := NewWithConfig(&Config{Enabled: true, CloudEnabled: true})
+	p.exporter = &CloudExporter{metricClient: &mockMetricClient{exportFunc: func(context.Context, *colmetricpb.ExportMetricsServiceRequest, ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
+		return &colmetricpb.ExportMetricsServiceResponse{}, nil
+	}}}
+	input := []*metricpb.ResourceMetrics{stopTestMetric(7, 2)}
+	if err := p.handleMetrics(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.handleMetrics(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	if d := p.QueueDepth(); d.Records != 1 || d.Entries != 1 {
+		t.Fatalf("duplicate owned reservation: %+v", d)
+	}
+	if !p.flushMetricBuffer(context.Background(), false) {
+		t.Fatal("first point not exported")
+	}
+	if d := p.Diagnostics()["metrics"]; d.Accepted != 1 || d.Filtered != 1 || d.Delivered != 1 || d.Unconfirmed != 0 || p.QueueDepth() != (QueueDepth{}) {
+		t.Fatalf("duplicate conservation diagnostics=%+v depth=%+v", d, p.QueueDepth())
 	}
 }
 

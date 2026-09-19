@@ -44,25 +44,30 @@ const (
 type metricAdmission struct {
 	bytes, records int
 	at             time.Time
+	streams        []metricStreamKey
 }
 
 // Pipeline orchestrates the telemetry collection and forwarding.
 type Pipeline struct {
-	config        *Config
-	receiver      *Receiver
-	exporter      *CloudExporter
-	policy        *receiverPolicy
-	mu            sync.Mutex
-	running       bool
-	deliveryState string
-	healthCancel  context.CancelFunc
-	exportErrors  otelmetric.Int64Counter
-	meter         otelmetric.Meter
-	retryConfig   RetryConfig
-	intakeMu      sync.Mutex
-	intakeClosed  bool
-	intakeActive  int
-	intakeDone    chan struct{}
+	config           *Config
+	receiver         *Receiver
+	exporter         *CloudExporter
+	policy           *receiverPolicy
+	mu               sync.Mutex
+	running          bool
+	deliveryState    atomic.Value // string; readable without taking the lifecycle mutex
+	diagnosticMu     sync.Mutex
+	diagnosticLast   time.Time
+	diagnosticCancel context.CancelFunc
+	diagnosticDone   chan struct{}
+	healthCancel     context.CancelFunc
+	exportErrors     otelmetric.Int64Counter
+	meter            otelmetric.Meter
+	retryConfig      RetryConfig
+	intakeMu         sync.Mutex
+	intakeClosed     bool
+	intakeActive     int
+	intakeDone       chan struct{}
 
 	metricsDropWarned        sync.Once
 	logsDropWarned           sync.Once
@@ -181,12 +186,16 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 		exporter, err := NewCloudExporter(ctx, p.config)
 		if err != nil {
-			p.deliveryState = "failed"
+			p.deliveryState.Store("failed")
+			p.logDeliverySnapshot(true)
 			return fmt.Errorf("failed to create cloud exporter: %w", err)
 		} else {
 			p.exporter = exporter
 			if exporter.gcpExporter != nil {
-				exporter.gcpExporter.onAsyncLogError = func(error) { p.logDiagnostics.failed.Add(1) }
+				exporter.gcpExporter.onAsyncLogError = func(error) {
+					p.logDiagnostics.sdkErrors.Add(1)
+					p.markDeliveryDegraded()
+				}
 			}
 			mode := "OTLP"
 			if p.config.IsGCP() {
@@ -199,7 +208,8 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		}
 	} else {
 		if p.config.CloudEnabled {
-			p.deliveryState = "failed"
+			p.deliveryState.Store("failed")
+			p.logDeliverySnapshot(true)
 			if p.config.IsGCP() && p.config.ProjectID == "" {
 				slog.Warn("telemetry cloud export disabled — GCP mode requires a project ID", "env_checked", EnvProjectID)
 			}
@@ -217,7 +227,8 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 	// Start receiver
 	if err := p.receiver.Start(ctx); err != nil {
-		p.deliveryState = "failed"
+		p.deliveryState.Store("failed")
+		p.logDeliverySnapshot(true)
 		if p.exporter != nil {
 			_ = p.exporter.Shutdown(ctx)
 		}
@@ -225,7 +236,9 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	}
 
 	p.running = true
-	p.deliveryState = "running"
+	p.deliveryState.Store("running")
+	p.startDiagnosticSnapshots(ctx)
+	p.logDeliverySnapshot(true)
 
 	// Start metric flush goroutine for batching exports to Cloud Monitoring.
 	if p.exporter != nil {
@@ -263,6 +276,12 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 
 	var errs []error
 	intakeDone := p.closeIntake()
+	if p.diagnosticCancel != nil {
+		p.diagnosticCancel()
+		<-p.diagnosticDone
+		p.diagnosticCancel = nil
+		p.diagnosticDone = nil
+	}
 
 	// Stop health gauge ticker
 	if p.healthCancel != nil {
@@ -304,7 +323,8 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 		select {
 		case <-intakeDone:
 		case <-ctx.Done():
-			p.deliveryState = "degraded"
+			p.deliveryState.Store("degraded")
+			p.logDeliverySnapshot(true)
 			return fmt.Errorf("telemetry shutdown incomplete: %w; %d receiver handlers still active", ctx.Err(), p.activeIntake())
 		}
 	}
@@ -318,7 +338,8 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 		for len(p.receiver.decodeSlots) != 0 {
 			select {
 			case <-ctx.Done():
-				p.deliveryState = "degraded"
+				p.deliveryState.Store("degraded")
+				p.logDeliverySnapshot(true)
 				return fmt.Errorf("telemetry shutdown incomplete: %w; %d receiver processing slots still active", ctx.Err(), len(p.receiver.decodeSlots))
 			case <-ticker.C:
 			}
@@ -350,8 +371,8 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	p.metricPendingSequence = 0
 	p.metricStreams = nil
 	p.metricStateMu.Unlock()
-	if unconfirmed := p.metricDiagnostics.unconfirmed.Load(); unconfirmed > 0 {
-		errs = append(errs, fmt.Errorf("telemetry metric delivery unconfirmed for %d admitted points", unconfirmed))
+	if unconfirmed := p.spanDiagnostics.unconfirmed.Load() + p.metricDiagnostics.unconfirmed.Load() + p.logDiagnostics.unconfirmed.Load(); unconfirmed > 0 {
+		errs = append(errs, fmt.Errorf("telemetry delivery unconfirmed for %d admitted records", unconfirmed))
 	}
 
 	// Shutdown exporter to flush any buffered spans
@@ -363,10 +384,15 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 
 	p.running = false
 	if len(errs) > 0 {
-		p.deliveryState = "degraded"
+		p.deliveryState.Store("degraded")
 	} else {
-		p.deliveryState = "configured"
+		if p.config != nil && !p.config.CloudEnabled {
+			p.deliveryState.Store("disabled")
+		} else {
+			p.deliveryState.Store("configured")
+		}
 	}
+	p.logDeliverySnapshot(true)
 	log.Info("Telemetry pipeline stopped")
 
 	if len(errs) > 0 {
@@ -448,10 +474,8 @@ func (p *Pipeline) DeliveryState() string {
 	if p == nil {
 		return "disabled"
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.deliveryState != "" {
-		return p.deliveryState
+	if state := p.deliveryState.Load(); state != nil {
+		return state.(string)
 	}
 	if p.config == nil || !p.config.CloudEnabled {
 		return "disabled"
@@ -560,6 +584,23 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 	if bytes > maxDecodedBytes {
 		return status.Error(codes.ResourceExhausted, "metric request exceeds message limit")
 	}
+	// Even a request with no supported points must pass kind validation. An
+	// unsupported Summary or ExponentialHistogram must never look like an empty
+	// successful request merely because the stream accumulator cannot count it.
+	for _, rm := range resourceMetrics {
+		for _, sm := range rm.GetScopeMetrics() {
+			for _, metric := range sm.GetMetrics() {
+				if metric == nil {
+					p.metricDiagnostics.rejected.Add(int64(records))
+					return status.Error(codes.InvalidArgument, "nil metric")
+				}
+				if _, _, _, err := metricKind(metric); err != nil {
+					p.metricDiagnostics.rejected.Add(int64(records))
+					return status.Error(codes.InvalidArgument, err.Error())
+				}
+			}
+		}
+	}
 	if records == 0 {
 		return nil
 	}
@@ -610,14 +651,28 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 			p.metricStateMu.Unlock()
 			return status.Error(codes.InvalidArgument, err.Error())
 		}
+		changed := make([]metricStreamKey, 0, len(candidate.streams))
+		for key, current := range candidate.streams {
+			prior := p.metricStreams.streams[key]
+			if prior == nil || current.dirty != prior.dirty || !proto.Equal(current.metric, prior.metric) {
+				changed = append(changed, key)
+			}
+		}
 		p.metricStreams = candidate
+		if len(changed) == 0 {
+			// A duplicate or older point made no stream state eligible for
+			// export. It owns no retained request entry or delivery credit.
+			p.metricDiagnostics.filtered.Add(int64(records))
+			p.metricStateMu.Unlock()
+			return nil
+		}
 		committed = true
 		p.metricDiagnostics.accepted.Add(int64(records))
 		p.metricDiagnostics.queued.Add(int64(records))
 		p.metricDirtyBytes += bytes
 		p.metricDirtyRecords += records
 		p.metricDirtyEntries++
-		p.metricDirtyAdmissions = append(p.metricDirtyAdmissions, metricAdmission{bytes: bytes, records: records, at: p.now()})
+		p.metricDirtyAdmissions = append(p.metricDirtyAdmissions, metricAdmission{bytes: bytes, records: records, at: p.now(), streams: changed})
 		p.metricStateMu.Unlock()
 		log.Debug("Accepted %d policy-processed resource metric batches", len(processed))
 	} else {
@@ -664,6 +719,7 @@ func (p *Pipeline) expireMetricAdmissions(now time.Time) {
 		return
 	}
 	kept := p.metricDirtyAdmissions[:0]
+	expiredStreams := make(map[metricStreamKey]struct{})
 	for _, admission := range p.metricDirtyAdmissions {
 		if now.Before(admission.at.Add(metricMaxAge)) {
 			kept = append(kept, admission)
@@ -674,10 +730,22 @@ func (p *Pipeline) expireMetricAdmissions(now time.Time) {
 		p.metricDirtyBytes -= admission.bytes
 		p.metricDirtyRecords -= admission.records
 		p.metricDirtyEntries--
+		for _, key := range admission.streams {
+			expiredStreams[key] = struct{}{}
+		}
 	}
 	p.metricDirtyAdmissions = kept
-	if len(kept) == 0 && p.metricStreams != nil {
-		p.metricStreams.clearDirty()
+	for _, admission := range kept {
+		for _, key := range admission.streams {
+			delete(expiredStreams, key)
+		}
+	}
+	if p.metricStreams != nil {
+		for key := range expiredStreams {
+			if entry := p.metricStreams.streams[key]; entry != nil {
+				entry.dirty = false
+			}
+		}
 	}
 }
 
@@ -707,6 +775,9 @@ func (p *Pipeline) flushMetricsOnStop(ctx context.Context) {
 		if !hasWork {
 			return
 		}
+		if p.exporter == nil {
+			return
+		}
 		if delay := time.Until(nextFlush); delay > 0 {
 			timer := time.NewTimer(delay)
 			select {
@@ -716,9 +787,10 @@ func (p *Pipeline) flushMetricsOnStop(ctx context.Context) {
 				return
 			}
 		}
-		if !p.flushMetricBuffer(ctx, false) {
-			return
-		}
+		// A retryable failure retains the immutable pending snapshot. Recheck
+		// work and wait for the next post-completion cadence slot while the
+		// caller still has time; terminal and successful calls clear ownership.
+		p.flushMetricBuffer(ctx, false)
 	}
 }
 
@@ -809,6 +881,7 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 	p.metricStateMu.Unlock()
 	if err != nil {
 		p.metricDiagnostics.failed.Add(1)
+		p.markDeliveryDegraded()
 		// Do not create another error-counter point when that diagnostic stream
 		// itself failed. The local log remains the failure signal.
 		if !metricBatchContains(batch, pipelineMetricScope, "scion.telemetry.export.errors") {
@@ -880,7 +953,7 @@ func countMetricPoints(rms []*metricpb.ResourceMetrics) int {
 	for _, rm := range rms {
 		for _, sm := range rm.GetScopeMetrics() {
 			for _, m := range sm.GetMetrics() {
-				count += len(m.GetSum().GetDataPoints()) + len(m.GetGauge().GetDataPoints()) + len(m.GetHistogram().GetDataPoints())
+				count += len(m.GetSum().GetDataPoints()) + len(m.GetGauge().GetDataPoints()) + len(m.GetHistogram().GetDataPoints()) + len(m.GetSummary().GetDataPoints()) + len(m.GetExponentialHistogram().GetDataPoints())
 			}
 		}
 	}
@@ -1040,6 +1113,7 @@ func (p *Pipeline) startHealthGauge(ctx context.Context, providers *Providers) {
 
 // recordExportError increments the export error counter if registered.
 func (p *Pipeline) recordExportError(ctx context.Context, signal string, err error) {
+	p.markDeliveryDegraded()
 	if p.exportErrors == nil {
 		return
 	}

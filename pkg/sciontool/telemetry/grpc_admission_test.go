@@ -582,8 +582,16 @@ func TestPipelineStopLeavesActiveReceiverResourcesUntilHandlerReturns(t *testing
 	case <-time.After(time.Second):
 		t.Fatal("in-flight handler did not return")
 	}
-	if p.activeIntake() != 0 || p.QueueDepth().Entries != 0 {
-		t.Fatalf("residual after handler: active=%d depth=%+v", p.activeIntake(), p.QueueDepth())
+	// Client cancellation can finish before the server handler unwinds. Wait
+	// for the actual owner to release its intake and queue reservations.
+	ownerDone := time.After(time.Second)
+	for p.activeIntake() != 0 || p.QueueDepth().Entries != 0 {
+		select {
+		case <-ownerDone:
+			t.Fatalf("residual after handler: active=%d depth=%+v", p.activeIntake(), p.QueueDepth())
+		default:
+			time.Sleep(time.Millisecond)
+		}
 	}
 	// Model a pre-handler RecvMsg that still owns a processing slot after a
 	// forced transport stop. A repeated Stop cannot claim clean drain yet.

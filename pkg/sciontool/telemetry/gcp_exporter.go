@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 
 	"cloud.google.com/go/logging"
@@ -39,6 +40,8 @@ type GCPExporter struct {
 	metricsDebug    bool
 	asyncLogErrors  atomic.Int64
 	onAsyncLogError func(error)
+	logSlotOnce     sync.Once
+	logSlot         chan struct{} // one Logger/Client Flush outcome per pipeline batch
 }
 
 // NewGCPExporter creates a new GCP-native exporter for traces, metrics, and logs.
@@ -125,6 +128,20 @@ func (e *GCPExporter) reportAsyncLogError(err error) {
 	log.Error("Cloud Logging asynchronous delivery failed: %v", err)
 }
 
+func (e *GCPExporter) acquireLogSlot(ctx context.Context) error {
+	e.logSlotOnce.Do(func() { e.logSlot = make(chan struct{}, 1) })
+	select {
+	case e.logSlot <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-e.logSlot
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // ExportProtoSpans converts OTLP proto spans to SDK ReadOnlySpan and exports
 // via the GCP Cloud Trace exporter.
 func (e *GCPExporter) ExportProtoSpans(ctx context.Context, resourceSpans []*tracepb.ResourceSpans) error {
@@ -180,6 +197,10 @@ func (e *GCPExporter) ExportProtoLogs(ctx context.Context, resourceLogs []*logsp
 	if e == nil || (e.logger == nil && e.logSink == nil) {
 		return errors.New("GCP log exporter unavailable")
 	}
+	if err := e.acquireLogSlot(ctx); err != nil {
+		return err
+	}
+	defer func() { <-e.logSlot }()
 
 	for _, rl := range resourceLogs {
 		for _, sl := range rl.ScopeLogs {
@@ -194,12 +215,8 @@ func (e *GCPExporter) ExportProtoLogs(ctx context.Context, resourceLogs []*logsp
 		}
 	}
 	if e.logger != nil && e.logSink == nil {
-		before := e.asyncLogErrors.Load()
 		if err := e.logger.Flush(); err != nil {
 			return &partialSuccessError{message: fmt.Sprintf("Cloud Logging flush failed with unknown per-record outcome: %v", err)}
-		}
-		if after := e.asyncLogErrors.Load(); after != before {
-			return &partialSuccessError{message: fmt.Sprintf("Cloud Logging asynchronous failures with unknown per-record outcome: %d", after-before)}
 		}
 	}
 	return nil
@@ -226,9 +243,13 @@ func (e *GCPExporter) Shutdown(ctx context.Context) error {
 	}
 
 	if e.logClient != nil {
+		if err := e.acquireLogSlot(ctx); err != nil {
+			return fmt.Errorf("log client close incomplete: %w", err)
+		}
 		if err := e.logClient.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("log client close: %w", err))
 		}
+		<-e.logSlot
 	}
 
 	if len(errs) > 0 {

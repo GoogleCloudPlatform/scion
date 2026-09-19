@@ -277,6 +277,17 @@ and rejected-before-admission units are excluded. `Attempts` counts exporter
 calls and `Failed` counts failed export batches; `Queued` is cumulative actual
 retained record units. Concurrent snapshots of separate atomics are
 informational rather than a transactional ledger.
+`SDKErrors` separately counts asynchronous Cloud Logging SDK callbacks. One
+failed Logger.Flush contributes one pipeline `Failed` batch outcome even if
+the SDK also invokes its error callback. Log export and Flush calls are
+serialized for the single client/logger so the SDK's client-wide error reset
+cannot let concurrent batches consume one another's result; callback delivery
+can lag Flush and is not used as a second per-batch failure signal.
+The collector emits a fixed-cardinality local delivery snapshot at startup,
+first error/degraded transition, no more than once per 60 seconds thereafter,
+and final or incomplete shutdown. It includes state, queue bytes/records/entries
+and all per-signal count/reason/last-success fields in agent stderr/agent.log;
+it does not export itself through OTLP or include request/backend error text.
 
 Metric admissions keep their own timestamps and encoded-payload reservations
 through dirty, pending, retry, and in-flight states. A terminal snapshot is
@@ -287,6 +298,11 @@ new 3. That later success confirms only the newer admission's local delivery
 accounting and does not prove whether the earlier 7 reached the backend.
 Without new eligible data, terminal resolution creates no new work. Newer
 data retains its original age even while it waits behind a pending snapshot.
+Expiry clears a dirty stream's export marker when its last eligible admission
+ages out; an unrelated fresh stream cannot carry that expired point into a
+snapshot. A genuinely newer admission on the same stream keeps the marker and
+may export its cumulative baseline. Exact duplicate or older points that do
+not change stream state are treated as filtered, without a queue reservation.
 The five-minute limit is checked on the periodic one-second expiry tick;
 context-ignoring export work keeps ownership until its call returns.
 
