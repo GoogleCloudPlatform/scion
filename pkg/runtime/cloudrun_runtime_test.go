@@ -516,6 +516,98 @@ func TestCloudRunProvisionNFSFailsWhenHubLacksNFSMount(t *testing.T) {
 	}
 }
 
+func TestBuildCloudRunInstance_HarnessCommand(t *testing.T) {
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID: "test-project", Location: "us-central1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("harness command is wrapped in tmux", func(t *testing.T) {
+		cfg := RunConfig{
+			Image: "test-image:latest",
+			Labels: map[string]string{
+				"agent_id": "agent-1",
+			},
+			Harness: &mockHarness{
+				command: []string{"claude", "--no-chrome", "--dangerously-skip-permissions"},
+			},
+			Task: "do something",
+		}
+		inst := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+
+		if len(inst.Containers) != 1 {
+			t.Fatalf("expected 1 container, got %d", len(inst.Containers))
+		}
+		c := inst.Containers[0]
+
+		// Command (ENTRYPOINT override) must be nil — we rely on the image's
+		// ENTRYPOINT ("sciontool init --") from scion-base.
+		if len(c.Command) != 0 {
+			t.Errorf("Container.Command should be nil/empty (use image ENTRYPOINT), got %v", c.Command)
+		}
+
+		// Args (CMD override) must contain the tmux-wrapped harness command.
+		if len(c.Args) != 3 {
+			t.Fatalf("Container.Args length = %d, want 3 [/bin/sh -c <tmux_cmd>]", len(c.Args))
+		}
+		if c.Args[0] != "/bin/sh" || c.Args[1] != "-c" {
+			t.Errorf("Container.Args[0:2] = %v, want [/bin/sh -c]", c.Args[:2])
+		}
+		tmuxCmd := c.Args[2]
+		if !strings.Contains(tmuxCmd, "tmux new-session") {
+			t.Errorf("tmux wrapper missing from Args: %s", tmuxCmd)
+		}
+		if !strings.Contains(tmuxCmd, "claude") {
+			t.Errorf("harness command 'claude' missing from Args: %s", tmuxCmd)
+		}
+		if !strings.Contains(tmuxCmd, "--no-chrome") {
+			t.Errorf("harness flag '--no-chrome' missing from Args: %s", tmuxCmd)
+		}
+		// Must use poll loop (while tmux has-session), NOT attach-session.
+		if strings.Contains(tmuxCmd, "attach-session") {
+			t.Errorf("must use poll loop instead of attach-session (no TTY in CRI): %s", tmuxCmd)
+		}
+		if !strings.Contains(tmuxCmd, "while tmux has-session") {
+			t.Errorf("poll loop missing from tmux command: %s", tmuxCmd)
+		}
+	})
+
+	t.Run("no harness falls back to CommandArgs as Args", func(t *testing.T) {
+		cfg := RunConfig{
+			Image:       "test-image:latest",
+			Labels:      map[string]string{"agent_id": "agent-2"},
+			CommandArgs: []string{"custom-binary", "--flag"},
+		}
+		inst := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+
+		c := inst.Containers[0]
+		if len(c.Command) != 0 {
+			t.Errorf("Container.Command should be nil/empty, got %v", c.Command)
+		}
+		if len(c.Args) != 2 || c.Args[0] != "custom-binary" || c.Args[1] != "--flag" {
+			t.Errorf("Container.Args = %v, want [custom-binary --flag]", c.Args)
+		}
+	})
+
+	t.Run("no harness and no args uses image defaults", func(t *testing.T) {
+		cfg := RunConfig{
+			Image:  "test-image:latest",
+			Labels: map[string]string{"agent_id": "agent-3"},
+		}
+		inst := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+
+		c := inst.Containers[0]
+		if len(c.Command) != 0 {
+			t.Errorf("Container.Command should be nil/empty, got %v", c.Command)
+		}
+		if len(c.Args) != 0 {
+			t.Errorf("Container.Args should be nil/empty, got %v", c.Args)
+		}
+	})
+}
+
 func TestCloudRunShortInstanceID(t *testing.T) {
 	tests := []struct {
 		name string

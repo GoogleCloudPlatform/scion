@@ -37,6 +37,7 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/run/apiv2/runpb"
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
@@ -338,19 +339,67 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		labels[sanitizeGCPLabelKey(k)] = sanitizeGCPLabelValue(v)
 	}
 
+	// Build the container command. Cloud Run Instances have no TTY, so the
+	// harness is wrapped in tmux (which allocates a PTY) following the same
+	// pattern as cloudrun-sandbox (buildEntrypoint in
+	// cloudrun_sandbox_runtime.go).
+	//
+	// The image ENTRYPOINT is "sciontool init --" (from scion-base), so we
+	// set Args (CMD override) to the tmux-wrapped command. sciontool init
+	// receives it as the child process to supervise.
+	//
+	// Previously, cfg.CommandArgs was passed as Container.Command (which
+	// overrides ENTRYPOINT), bypassing both GetCommand() and tmux. The CLI
+	// then ran without a PTY and crashed: "bubbletea: could not open TTY".
+	container := &runpb.Container{
+		Name:         "scion-agent",
+		Image:        cfg.Image,
+		Env:          envVars,
+		VolumeMounts: volumeMounts,
+	}
+
+	if cfg.NoAuth {
+		cmdLine := buildNoAuthCmdLine(cfg.NoAuthMessage, cfg.NoAuthCommand)
+		agentWindowCmd := "/bin/sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
+		tmuxCmd := fmt.Sprintf(
+			"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent; while tmux has-session -t scion 2>/dev/null; do sleep 2; done",
+			agentWindowCmd,
+		)
+		container.Args = []string{"/bin/sh", "-c", tmuxCmd}
+	} else if cfg.Harness != nil {
+		harnessArgs := cfg.Harness.GetCommand(cfg.Task, cfg.Resume, cfg.CommandArgs)
+		var quotedArgs []string
+		for _, a := range harnessArgs {
+			quotedArgs = append(quotedArgs, shellQuote(a))
+		}
+		cmdLine := strings.Join(quotedArgs, " ")
+		agentWindowCmd := "/bin/sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
+		// Use poll loop instead of attach-session: CRI has no TTY for PID 1,
+		// so tmux attach-session would fail with "not a terminal". The poll
+		// loop tracks the tmux session's lifetime without needing a terminal,
+		// matching the cloudrun-sandbox pattern.
+		tmuxCmd := fmt.Sprintf(
+			"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent; while tmux has-session -t scion 2>/dev/null; do sleep 2; done",
+			agentWindowCmd,
+		)
+		container.Args = []string{"/bin/sh", "-c", tmuxCmd}
+	} else if len(cfg.CommandArgs) > 0 {
+		// Fallback: no harness, pass raw command args as CMD override.
+		container.Args = cfg.CommandArgs
+	}
+	// If none of the above, image defaults (ENTRYPOINT + CMD) are used.
+
 	inst := &runpb.Instance{
 		LaunchStage: googleapi.LaunchStage_ALPHA,
-		Containers: []*runpb.Container{
-			{
-				Name:         "scion-agent",
-				Image:        cfg.Image,
-				Command:      cfg.CommandArgs,
-				Env:          envVars,
-				VolumeMounts: volumeMounts,
-			},
+		Annotations: map[string]string{
+			// Cloud Run Instances default to OnFailure, which kills the instance
+			// permanently on clean exit (code 0). Agents that complete a task and
+			// exit 0 must be restarted so they stay available for new messages.
+			"run.googleapis.com/restart-policy": "Always",
 		},
-		Volumes: volumes,
-		Labels:  labels,
+		Containers: []*runpb.Container{container},
+		Volumes:    volumes,
+		Labels:     labels,
 	}
 
 	if r.config != nil {
