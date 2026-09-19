@@ -41,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/web"
+	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
 	"golang.org/x/net/http2"
 	//nolint:staticcheck // h2c is kept for local cleartext HTTP/2 support.
@@ -1335,7 +1336,9 @@ func validateSSESubjects(subjects []string) string {
 // authorizeSSESubjects checks that the caller has access to every requested
 // subject. Returns the list of denied subjects; an empty slice means all are
 // authorized. For project-scoped subjects (project.<id>.*) the caller must
-// have ActionRead on the project. For user-scoped subjects (user.<id>.*)
+// have ActionRead on the project. Agent subjects require a concrete canonical
+// UUID and ActionRead on the resolved agent, matching the metadata endpoint.
+// For user-scoped subjects (user.<id>.*)
 // the caller's identity must match the user ID. Other subjects (notification,
 // broker, etc.) pass through without additional checks.
 func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []string {
@@ -1373,9 +1376,10 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 		"web",
 	)
 
-	// Collect unique project IDs and user IDs from subjects.
+	// Collect unique resource IDs from subjects.
 	projectIDs := map[string]bool{}
 	userIDs := map[string]bool{}
+	agentIDs := map[string]bool{}
 	for _, sub := range subjects {
 		tokens := strings.Split(sub, ".")
 		if len(tokens) >= 2 {
@@ -1384,6 +1388,10 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 				projectIDs[tokens[1]] = true
 			case "user":
 				userIDs[tokens[1]] = true
+			case "agent":
+				if len(tokens) >= 3 {
+					agentIDs[tokens[1]] = true
+				}
 			}
 		}
 	}
@@ -1405,6 +1413,22 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 		}
 	}
 
+	// Resolve each concrete agent once. Wildcard/alias selectors must never
+	// bypass resource checks, even for administrators. Event suffix wildcards
+	// remain valid once access to the single agent has been established.
+	allowedAgents := map[string]bool{}
+	for id := range agentIDs {
+		parsed, err := uuid.Parse(id)
+		if err != nil || parsed.String() != id || ws.store == nil {
+			continue
+		}
+		agent, err := ws.store.GetAgent(r.Context(), id)
+		if err != nil || agent == nil || agent.ID != id {
+			continue
+		}
+		allowedAgents[id] = ws.authzService.CheckAccess(r.Context(), identity, agentResource(agent), ActionRead).Allowed
+	}
+
 	// Check user subjects: caller can only subscribe to their own user subjects.
 	deniedUsers := map[string]bool{}
 	for uid := range userIDs {
@@ -1414,12 +1438,15 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 	}
 
 	// Build denied list.
-	if len(deniedProjects) == 0 && len(deniedUsers) == 0 {
-		return nil
-	}
 	var denied []string
 	for _, sub := range subjects {
 		tokens := strings.Split(sub, ".")
+		if tokens[0] == "agent" {
+			if len(tokens) < 3 || !allowedAgents[tokens[1]] {
+				denied = append(denied, sub)
+			}
+			continue
+		}
 		if len(tokens) >= 2 {
 			switch tokens[0] {
 			case "project":
