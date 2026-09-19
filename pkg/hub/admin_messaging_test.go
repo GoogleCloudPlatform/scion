@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 )
 
 // newAdminMessagingServer creates a minimal Server with an OperationalSettings
@@ -432,11 +434,21 @@ func TestHandleAdminMessaging_AC97d_NullResetReturnsDefault(t *testing.T) {
 		t.Errorf("expected conversation_envelope_switch=true (null reset → compiled default ON), got %v", resp.ConversationEnvelopeSwitch)
 	}
 
-	// Verify the section was deleted from the store (absent → default path).
+	// Verify the section was reset to default (PR#1705: per-field reset writes
+	// the merged document back, so the section persists with compiled defaults).
 	store.mu.Lock()
-	_, exists := store.settings["messaging"]
+	storedSetting, exists := store.settings["messaging"]
 	store.mu.Unlock()
-	if exists {
-		t.Error("expected messaging section to be deleted after null reset, but it still exists")
+	if !exists {
+		t.Fatal("expected messaging section to exist with default values after null reset")
+	}
+	var stored opsettings.MessagingSettings
+	if err := json.Unmarshal(storedSetting.Value, &stored); err != nil {
+		t.Fatalf("failed to unmarshal stored messaging section: %v", err)
+	}
+	if stored.ConversationEnvelopeSwitch == nil {
+		t.Errorf("expected stored conversation_envelope_switch=true (compiled default), got nil")
+	} else if !*stored.ConversationEnvelopeSwitch {
+		t.Errorf("expected stored conversation_envelope_switch=true (compiled default), got false")
 	}
 }

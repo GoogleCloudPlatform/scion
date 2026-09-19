@@ -17,6 +17,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,10 @@ import (
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -293,13 +298,23 @@ func newTestExchangeServiceWithExtStore(validator GoogleCredentialValidator, use
 // real ent/SQLite store at the given path. Each call opens an independent
 // ent.Client to the same database file — callers can use two instances to
 // simulate cross-instance convergence. Cleanup is registered on t.
-func newPersistentTestExchangeService(t *testing.T, dbPath string) (*GEExchangeService, store.Store, ExternalIdentityStore) {
+func newPersistentTestExchangeService(t *testing.T, dbPath, driverName string) (*GEExchangeService, store.Store, ExternalIdentityStore) {
 	t.Helper()
 	dsn := "file:" + dbPath + "?_journal_mode=WAL&_busy_timeout=5000"
-	client, err := entc.OpenSQLite(dsn, entc.PoolConfig{MaxOpenConns: 1})
+	db, err := sql.Open(driverName, dsn)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		_ = db.Close()
+		t.Fatalf("enable sqlite foreign keys: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
+		_ = db.Close()
+		t.Fatalf("enable sqlite WAL mode: %v", err)
+	}
+	client := ent.NewClient(ent.Driver(entsql.OpenDB(dialect.SQLite, db)))
 	t.Cleanup(func() { _ = client.Close() })
 	if err := entc.AutoMigrate(context.Background(), client); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -1252,15 +1267,20 @@ func TestGEExchange_ProvisionNewUser_CreateError_FailsClosed(t *testing.T) {
 // adapter), proving that the unique-email collision and binding convergence
 // work across instances/reconnect — not merely through a shared fake object.
 func TestGEExchange_ConcurrentFirstLinkage_PersistentStore(t *testing.T) {
+	driverName := sqliteDriverName()
+	if driverName == "" {
+		t.Skip("skipping: requires SQLite driver (excluded by no_sqlite build tag)")
+	}
+
 	// This test requires the ent adapter with a real SQLite database.
 	// We create two independent service instances sharing the same DB file.
 	tmpDir := t.TempDir()
 	dbPath := tmpDir + "/concurrent_test.db"
 
 	// Create the first service+store pair.
-	svc1, store1, extStore1 := newPersistentTestExchangeService(t, dbPath)
+	svc1, store1, extStore1 := newPersistentTestExchangeService(t, dbPath, driverName)
 	// Create the second service+store pair using the same DB file.
-	svc2, store2, extStore2 := newPersistentTestExchangeService(t, dbPath)
+	svc2, store2, extStore2 := newPersistentTestExchangeService(t, dbPath, driverName)
 	_, _, _ = store1, store2, extStore2 // used only for cleanup via t.Cleanup
 
 	identity := validGmailIdentity()
@@ -1306,6 +1326,15 @@ func TestGEExchange_ConcurrentFirstLinkage_PersistentStore(t *testing.T) {
 		t.Fatalf("svc2 resolved to user %q, expected %q (convergence failed across instances)",
 			resp2.User.ID, user1ID)
 	}
+}
+
+func sqliteDriverName() string {
+	for _, driver := range sql.Drivers() {
+		if driver == "sqlite" || driver == "sqlite3" {
+			return driver
+		}
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
