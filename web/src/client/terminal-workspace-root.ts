@@ -55,6 +55,8 @@ export class TerminalWorkspaceRoot {
   }
 
   show(visible: boolean): void {
+    // Keep the inline display rule aligned with hidden so author styles cannot
+    // accidentally reveal an inactive retained root.
     this.element.hidden = !visible;
     this.element.style.display = visible ? 'block' : 'none';
     for (const [key, pane] of this.panes) pane.setVisible(visible && key === this.selected);

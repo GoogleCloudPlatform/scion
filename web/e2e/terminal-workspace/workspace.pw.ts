@@ -2,7 +2,11 @@ import { test, expect, type Page } from '@playwright/test';
 
 const agent = '11111111-1111-4111-8111-111111111111';
 
-async function setup(page: Page, enabled = true, locks = true) {
+async function setup(
+  page: Page,
+  enabled = true,
+  locks = true
+): Promise<{ readonly attaches: number; readonly closes: number; sent: string[] }> {
   let attaches = 0;
   let closes = 0;
   const sent: string[] = [];
@@ -27,7 +31,7 @@ async function setup(page: Page, enabled = true, locks = true) {
           super();
           queueMicrotask(() => this.onopen?.());
         }
-        close() {}
+        close(): void {}
       } as unknown as typeof EventSource;
     },
     { enabled, locks }
@@ -53,17 +57,19 @@ async function setup(page: Page, enabled = true, locks = true) {
     socket.onClose(() => closes++);
   });
   return {
-    get attaches() {
+    get attaches(): number {
       return attaches;
     },
-    get closes() {
+    get closes(): number {
       return closes;
     },
     sent,
   };
 }
 
-async function identity(page: Page) {
+async function identity(
+  page: Page
+): Promise<{ host: boolean; pane: boolean; terminal: boolean; count: number }> {
   return page.evaluate(() => {
     const host = document.querySelector('#terminal-workspace')!;
     const pane = host.querySelector('scion-terminal-pane')!;

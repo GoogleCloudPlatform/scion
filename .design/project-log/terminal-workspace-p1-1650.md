@@ -40,3 +40,14 @@ The feature deliberately leaves header/rail layout and broad entry-point
 wiring to P1.6/P1.7, and detailed hidden input/drop policy to P1.8. The
 minimal retained root exposes a status message when a second tab routes its
 request to an owner.
+
+## R2 lint integration
+
+The browser fixture has its own `tsconfig.json`, following sibling e2e
+directories, and all four fixture TypeScript files typecheck. The repository's
+ESLint config pins `parserOptions.project` to the root `tsconfig.json`, which
+excludes e2e files. The directory config alone therefore did not remove four
+new parser errors. A narrow ESLint override selects that directory config only
+for `e2e/terminal-workspace/*.ts`. Scoped typed lint now reports zero findings;
+full `eslint .` returns the same 857 errors and 2,100 warnings measured on the
+accepted base. The existing full-repository findings are outside this leaf.

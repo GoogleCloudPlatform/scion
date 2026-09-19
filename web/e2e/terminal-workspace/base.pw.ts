@@ -12,7 +12,7 @@ test('direct legacy load and history retain the deployment base', async ({ page 
         super();
         queueMicrotask(() => this.onopen?.());
       }
-      close() {}
+      close(): void {}
     } as unknown as typeof EventSource;
   });
   await page.route('**/auth/me', (route) =>

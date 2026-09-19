@@ -169,8 +169,10 @@ function ensureRoots(): HTMLElement | null {
 function ensureTerminalCoordinator(): TerminalCoordinator | null {
   if (!terminalWorkspaceEnabled || !currentUser?.id) return null;
   if (terminalCoordinator) return terminalCoordinator;
+  const app = document.getElementById('app');
+  if (!app) return null;
   terminalWorkspace = new TerminalWorkspaceRoot();
-  document.getElementById('app')!.appendChild(terminalWorkspace.element);
+  app.appendChild(terminalWorkspace.element);
   terminalCoordinator = new TerminalCoordinator(
     {
       hubUrl: new URL(import.meta.env.BASE_URL, window.location.origin).href,
