@@ -297,6 +297,8 @@ command = "gcloud auth print-access-token"
 model = "{scion_harness.toml_escape(model_id)}"
 base_url = "{scion_harness.toml_escape(base_url)}"
 auth_provider = "{_VERTEX_AUTH_PROVIDER_NAME}"
+api_backend = "chat_completions"
+supports_backend_search = false
 
 [models]
 default = "{_VERTEX_MODEL_CONFIG_NAME}"'''
@@ -344,7 +346,9 @@ def _write_vertex_model_alias(
 [model."{escaped_alias}"]
 model = "{scion_harness.toml_escape(model_id)}"
 base_url = "{scion_harness.toml_escape(base_url)}"
-auth_provider = "{_VERTEX_AUTH_PROVIDER_NAME}"'''
+auth_provider = "{_VERTEX_AUTH_PROVIDER_NAME}"
+api_backend = "chat_completions"
+supports_backend_search = false'''
 
     content = content.rstrip("\n") + "\n" + alias_toml + "\n"
     scion_harness.atomic_write_text(config_path, content)

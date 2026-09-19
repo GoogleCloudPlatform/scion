@@ -23,6 +23,7 @@ import importlib.util
 import json
 import os
 import tempfile
+import tomllib
 import unittest
 from contextlib import contextmanager
 from typing import Any
@@ -1001,6 +1002,9 @@ class VertexAIAuthTest(unittest.TestCase):
             self.assertIn("[models]", content)
             self.assertIn('default = "vertex-grok"', content)
             self.assertIn("my-gcp-project", content)
+            model = tomllib.loads(content)["model"]["vertex-grok"]
+            self.assertEqual(model["api_backend"], "chat_completions")
+            self.assertIs(model["supports_backend_search"], False)
 
     def test_vertex_global_endpoint_when_no_region(self) -> None:
         """When GOOGLE_CLOUD_REGION is not set, the base_url uses the global
@@ -1552,6 +1556,10 @@ class VertexAIAuthTest(unittest.TestCase):
                 content.count(f'auth_provider = "{provision._VERTEX_AUTH_PROVIDER_NAME}"'),
                 2,
             )
+            models = tomllib.loads(content)["model"]
+            for name in ("vertex-grok", "grok-4.6"):
+                self.assertEqual(models[name]["api_backend"], "chat_completions")
+                self.assertIs(models[name]["supports_backend_search"], False)
 
     def test_vertex_model_alias_not_created_when_matches_config_name(self) -> None:
         """When SCION_MODEL equals the vertex config name ('vertex-grok'),
