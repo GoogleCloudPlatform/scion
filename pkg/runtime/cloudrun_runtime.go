@@ -48,7 +48,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const cloudRunInstanceIDMaxLength = 63
+const cloudRunInstanceIDMaxLength = 49
 
 var defaultCallOpts = []gax.CallOption{
 	gax.WithRetry(func() gax.Retryer {
@@ -335,7 +335,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 
 	labels := make(map[string]string)
 	for k, v := range cfg.Labels {
-		labels[k] = v
+		labels[sanitizeGCPLabelKey(k)] = sanitizeGCPLabelValue(v)
 	}
 
 	inst := &runpb.Instance{
@@ -674,7 +674,7 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 
 		match := true
 		for k, v := range labelFilter {
-			if inst.Labels[k] != v {
+			if inst.Labels[sanitizeGCPLabelKey(k)] != v {
 				match = false
 				break
 			}
@@ -803,4 +803,50 @@ func (r *CloudRunRuntime) StreamLogs(ctx context.Context, instanceName string, o
 		}
 	}()
 	return outCh, nil
+}
+
+// sanitizeGCPLabelKey converts a label key to comply with GCP naming constraints.
+// GCP label keys must: start with a lowercase letter, contain only lowercase letters,
+// digits, underscores, and dashes, and be at most 63 characters long.
+// Dots are replaced with underscores.
+func sanitizeGCPLabelKey(key string) string {
+	key = strings.Map(func(r rune) rune {
+		if r == '.' || r == '/' {
+			return '_'
+		}
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			return r
+		}
+		if r >= 'A' && r <= 'Z' {
+			return r + 32 // lowercase
+		}
+		return '_'
+	}, key)
+	if len(key) > 63 {
+		key = key[:63]
+	}
+	return key
+}
+
+// sanitizeGCPLabelValue ensures a label value complies with GCP constraints.
+// Values must be at most 63 characters, contain only lowercase letters, digits,
+// underscores, and dashes, and must start and end with alphanumeric characters.
+// Empty values are allowed.
+func sanitizeGCPLabelValue(value string) string {
+	if value == "" {
+		return value
+	}
+	value = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			return r
+		}
+		if r >= 'A' && r <= 'Z' {
+			return r + 32 // lowercase
+		}
+		return '_'
+	}, value)
+	if len(value) > 63 {
+		value = value[:63]
+	}
+	return value
 }

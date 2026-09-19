@@ -407,21 +407,22 @@ func TestCloudRunTeardown_ErrorPaths(t *testing.T) {
 func TestCloudRunList_FiltersByLabelsAndMapsAgentInfo(t *testing.T) {
 	const wanted = "projects/test-project/locations/us-central1/instances/agent-wanted-0000000000"
 
-	// The "scion.name" key here is the label the runtime emits today
-	// (pkg/agent/run.go). It is a fixture, not a contract: if label-key
-	// sanitization is introduced for GCP resource labels, these fixtures and
-	// the filter key below need updating to the sanitized form.
+	// Label keys stored in Cloud Run are sanitized by buildCloudRunInstance
+	// (dots/slashes → underscores via sanitizeGCPLabelKey). The fixtures
+	// below use the sanitized form ("scion_name") to match what the runtime
+	// actually stores. The filter key passed to List uses the original form
+	// ("scion.name") because List sanitizes it before lookup.
 	newFake := func() *fakeInstancesClient {
 		return &fakeInstancesClient{
 			listResult: []*runpb.Instance{
 				{
 					Name:              wanted,
-					Labels:            map[string]string{"scion.name": "wanted", "agent_id": "agent-1"},
+					Labels:            map[string]string{"scion_name": "wanted", "agent_id": "agent-1"},
 					TerminalCondition: &runpb.Condition{State: runpb.Condition_CONDITION_SUCCEEDED},
 				},
 				{
 					Name:   "projects/test-project/locations/us-central1/instances/agent-other-1111111111",
-					Labels: map[string]string{"scion.name": "other", "agent_id": "agent-2"},
+					Labels: map[string]string{"scion_name": "other", "agent_id": "agent-2"},
 				},
 			},
 		}
@@ -459,7 +460,7 @@ func TestCloudRunList_FiltersByLabelsAndMapsAgentInfo(t *testing.T) {
 		if a.ContainerStatus != runpb.Condition_CONDITION_SUCCEEDED.String() {
 			t.Errorf("AgentInfo.ContainerStatus = %q, want %q", a.ContainerStatus, runpb.Condition_CONDITION_SUCCEEDED.String())
 		}
-		if a.Labels["scion.name"] != "wanted" {
+		if a.Labels["scion_name"] != "wanted" {
 			t.Errorf("AgentInfo.Labels = %v, want the instance labels", a.Labels)
 		}
 		if fake.closeCount != 1 {
