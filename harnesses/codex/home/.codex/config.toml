@@ -19,7 +19,6 @@ approval_policy = "never"
 notify = ["sh", "/home/scion/.codex/scion_notify.sh"]
 
 model = "gpt-5.5"
-model_reasoning_effort = "medium"
 
 [features]
 hooks = true

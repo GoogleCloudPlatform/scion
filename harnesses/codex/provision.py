@@ -233,11 +233,13 @@ def _build_otel_section(telemetry: dict[str, Any], env: dict[str, str] | None) -
 
 
 def _resolve_reasoning_effort(level: int) -> str:
-    """Map a thinking level (0-100) to OpenAI reasoning_effort (low/medium/high)."""
+    """Map a thinking level (0-100) to OpenAI model_reasoning_effort."""
     level = max(0, min(100, level))
-    if level >= 67:
+    if level >= 76:
+        return "xhigh"
+    if level >= 51:
         return "high"
-    if level >= 34:
+    if level >= 26:
         return "medium"
     return "low"
 
@@ -279,10 +281,11 @@ def _reconcile_codex_toml(
         with open(config_path, "r", encoding="utf-8") as f:
             content = f.read()
     content = _strip_toml_top_level_key(content, "reasoning_effort")
+    content = _strip_toml_top_level_key(content, "model_reasoning_effort")
     content = scion_harness.strip_toml_sections(content, lambda h: h == "[otel]")
 
     if reasoning_effort:
-        re_line = f'reasoning_effort = "{scion_harness.toml_escape(reasoning_effort)}"'
+        re_line = f'model_reasoning_effort = "{scion_harness.toml_escape(reasoning_effort)}"'
         content = content.rstrip("\n\t ") + "\n" + re_line + "\n"
 
     if _telemetry_enabled(telemetry):

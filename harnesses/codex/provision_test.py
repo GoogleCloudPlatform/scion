@@ -230,25 +230,26 @@ class CodexProvisionTest(unittest.TestCase):
 
     def test_resolve_reasoning_effort_maps_thinking_levels(self) -> None:
         self.assertEqual(provision._resolve_reasoning_effort(0), "low")
-        self.assertEqual(provision._resolve_reasoning_effort(33), "low")
-        self.assertEqual(provision._resolve_reasoning_effort(34), "medium")
+        self.assertEqual(provision._resolve_reasoning_effort(25), "low")
+        self.assertEqual(provision._resolve_reasoning_effort(26), "medium")
         self.assertEqual(provision._resolve_reasoning_effort(50), "medium")
-        self.assertEqual(provision._resolve_reasoning_effort(66), "medium")
-        self.assertEqual(provision._resolve_reasoning_effort(67), "high")
-        self.assertEqual(provision._resolve_reasoning_effort(100), "high")
+        self.assertEqual(provision._resolve_reasoning_effort(51), "high")
+        self.assertEqual(provision._resolve_reasoning_effort(75), "high")
+        self.assertEqual(provision._resolve_reasoning_effort(76), "xhigh")
+        self.assertEqual(provision._resolve_reasoning_effort(100), "xhigh")
 
     def test_resolve_reasoning_effort_clamps_out_of_range(self) -> None:
         self.assertEqual(provision._resolve_reasoning_effort(-10), "low")
-        self.assertEqual(provision._resolve_reasoning_effort(150), "high")
+        self.assertEqual(provision._resolve_reasoning_effort(150), "xhigh")
 
-    def test_reconcile_codex_toml_writes_reasoning_effort(self) -> None:
+    def test_reconcile_codex_toml_writes_model_reasoning_effort(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with temporary_home(tmp):
                 provision._reconcile_codex_toml(None, None, reasoning_effort="medium")
                 config_path = os.path.join(tmp, ".codex", "config.toml")
                 with open(config_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                self.assertIn('reasoning_effort = "medium"', content)
+                self.assertIn('model_reasoning_effort = "medium"', content)
 
     def test_reconcile_codex_toml_omits_reasoning_effort_when_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,6 +259,7 @@ class CodexProvisionTest(unittest.TestCase):
                 with open(config_path, "r", encoding="utf-8") as f:
                     content = f.read()
                 self.assertNotIn("reasoning_effort", content)
+                self.assertNotIn("model_reasoning_effort", content)
 
     def test_reconcile_codex_toml_replaces_existing_reasoning_effort(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -270,8 +272,47 @@ class CodexProvisionTest(unittest.TestCase):
                 provision._reconcile_codex_toml(None, None, reasoning_effort="high")
                 with open(config_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                self.assertIn('reasoning_effort = "high"', content)
+                self.assertIn('model_reasoning_effort = "high"', content)
                 self.assertNotIn('"low"', content)
+                self.assertIn('other_key = "value"', content)
+
+    def test_reconcile_codex_toml_replaces_baked_in_model_reasoning_effort(self) -> None:
+        """Verify that a pre-existing model_reasoning_effort (from the image config) gets replaced."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write('model_reasoning_effort = "medium"\nother_key = "value"\n')
+                provision._reconcile_codex_toml(None, None, reasoning_effort="xhigh")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn('model_reasoning_effort = "xhigh"', content)
+                self.assertEqual(content.count("model_reasoning_effort"), 1)
+                self.assertNotIn('"medium"', content)
+                self.assertIn('other_key = "value"', content)
+
+    def test_reconcile_codex_toml_strips_both_old_and_new_keys(self) -> None:
+        """Verify both reasoning_effort and model_reasoning_effort are stripped before writing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write(
+                        'model_reasoning_effort = "medium"\n'
+                        'reasoning_effort = "low"\n'
+                        'other_key = "value"\n'
+                    )
+                provision._reconcile_codex_toml(None, None, reasoning_effort="high")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn('model_reasoning_effort = "high"', content)
+                self.assertEqual(content.count("model_reasoning_effort"), 1)
+                self.assertNotIn('reasoning_effort = "low"', content)
+                self.assertNotIn('reasoning_effort = "medium"', content)
                 self.assertIn('other_key = "value"', content)
 
     def test_strip_toml_top_level_key_section_safety(self) -> None:
