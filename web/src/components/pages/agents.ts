@@ -401,7 +401,7 @@ export class ScionPageAgents extends LitElement {
     // Also require scope capabilities — without them the "New Agent" button
     // won't render, so we must fetch from the API to get them.
     const hydratedAgents = stateManager.getAgents();
-    const hydratedCaps = stateManager.getScopeCapabilities();
+    const hydratedCaps = stateManager.getScopeCapabilities('agent');
     if (hydratedAgents.length > 0 && hydratedCaps && this.agentScope === 'all') {
       this.agents = hydratedAgents;
       this.scopeCapabilities = hydratedCaps;
@@ -503,7 +503,7 @@ export class ScionPageAgents extends LitElement {
     }
     stateManager.seedAgents(this.agents);
     if (this.scopeCapabilities) {
-      stateManager.seedScopeCapabilities(this.scopeCapabilities);
+      stateManager.seedScopeCapabilities('agent', this.scopeCapabilities);
     }
   }
 
