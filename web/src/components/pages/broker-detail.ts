@@ -327,10 +327,22 @@ export class ScionPageBrokerDetail extends LitElement {
         display: flex;
         align-items: center;
         gap: 0.5rem;
+        min-width: 0;
+        overflow: hidden;
       }
 
       .agent-name sl-icon {
         color: var(--scion-primary, #3b82f6);
+        flex-shrink: 0;
+      }
+
+      /* The name was a bare text node, which text-overflow cannot reach
+         through a flex container — hence the span wrapper in the template. */
+      .agent-name > span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .agent-meta {
@@ -823,7 +835,7 @@ export class ScionPageBrokerDetail extends LitElement {
           <div>
             <h3 class="agent-name">
               <sl-icon name="cpu"></sl-icon>
-              ${agent.name}
+              <span>${agent.name}</span>
             </h3>
             <div class="agent-meta"><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
           </div>

@@ -374,6 +374,17 @@ export class ScionPageProjectDetail extends LitElement {
       align-items: flex-start;
       justify-content: space-between;
       margin-bottom: 0.75rem;
+      gap: 0.5rem;
+    }
+
+    /* Let the name column shrink so .agent-name can truncate; without this a
+       flex item's min-width:auto holds the header open at the full name. */
+    .agent-header > div {
+      min-width: 0;
+    }
+
+    .agent-header > scion-status-badge {
+      flex-shrink: 0;
     }
 
     .agent-name {
@@ -384,10 +395,23 @@ export class ScionPageProjectDetail extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.5rem;
+      min-width: 0;
+      overflow: hidden;
     }
 
     .agent-name sl-icon {
       color: var(--scion-primary, #3b82f6);
+      flex-shrink: 0;
+    }
+
+    /* Truncation lands on the anchor that holds the text — the flex parent
+       only clips. Without this a hyphenated name breaks across several lines
+       instead of ellipsising. */
+    .agent-name > a {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .agent-meta {
