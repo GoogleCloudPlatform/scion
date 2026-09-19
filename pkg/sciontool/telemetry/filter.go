@@ -278,10 +278,29 @@ func stringProtoValue(value string) *commonpb.AnyValue {
 	return &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: value}}
 }
 
-// RedactSpan applies redaction and hashing to a span's attributes.
+// RedactSpan applies redaction and hashing to a span's attributes. It returns
+// nil when the span exceeds the value complexity budget, before cloning it.
 func (r *Redactor) RedactSpan(span *tracepb.Span) *tracepb.Span {
 	if r == nil || span == nil {
 		return span
+	}
+	validator := newAnyValueValidator()
+	if err := validator.ValidateAttributes(span.Attributes); err != nil {
+		return nil
+	}
+	for _, event := range span.Events {
+		if event != nil {
+			if err := validator.ValidateAttributes(event.Attributes); err != nil {
+				return nil
+			}
+		}
+	}
+	for _, link := range span.Links {
+		if link != nil {
+			if err := validator.ValidateAttributes(link.Attributes); err != nil {
+				return nil
+			}
+		}
 	}
 
 	redactedSpan := proto.Clone(span).(*tracepb.Span)

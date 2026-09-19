@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
 func TestFilter_ShouldProcess(t *testing.T) {
@@ -343,6 +344,37 @@ func TestAnyValueValidator_Bounds(t *testing.T) {
 				t.Fatalf("valid typed value rejected: %v", err)
 			}
 		})
+	}
+}
+
+func TestRedactor_RedactSpanRejectsOverLimitBeforeClone(t *testing.T) {
+	redactor := NewRedactor(RedactionConfig{Redact: []string{"prompt"}})
+	deep := stringValue("DEEP_MARKER")
+	for range maxAnyValueDepth {
+		deep = &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: []*commonpb.AnyValue{deep}}}}
+	}
+	wide := &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: make([]*commonpb.AnyValue, maxAnyValueNodes)}}}
+	attribute := func(value *commonpb.AnyValue) *commonpb.KeyValue {
+		return &commonpb.KeyValue{Key: "public", Value: value}
+	}
+	tests := map[string]*tracepb.Span{
+		"deep span attribute":  {Attributes: []*commonpb.KeyValue{attribute(deep)}},
+		"wide event attribute": {Events: []*tracepb.Span_Event{{Attributes: []*commonpb.KeyValue{attribute(wide)}}}},
+		"wide link attribute":  {Links: []*tracepb.Span_Link{{Attributes: []*commonpb.KeyValue{attribute(wide)}}}},
+		"cross component budget": {
+			Attributes: []*commonpb.KeyValue{attribute(&commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: make([]*commonpb.AnyValue, maxAnyValueNodes/2)}}})},
+			Events:     []*tracepb.Span_Event{{Attributes: []*commonpb.KeyValue{attribute(&commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: make([]*commonpb.AnyValue, maxAnyValueNodes/2)}}})}}},
+		},
+	}
+	for name, span := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := redactor.RedactSpan(span); got != nil {
+				t.Fatalf("RedactSpan accepted over-limit input: %#v", got)
+			}
+		})
+	}
+	if got := deep.GetArrayValue().Values[0]; got == nil {
+		t.Fatal("standalone rejection changed the original value")
 	}
 }
 

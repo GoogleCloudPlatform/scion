@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"cloud.google.com/go/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -276,6 +277,80 @@ func TestReceiverPolicy_StructuredBodyAndPinnedAliasesSafeAtBothDestinations(t *
 	for _, marker := range []string{"UNKEYED_MARKER", "BYTE_MARKER", "SESSION_MARKER", "OUTPUT_MARKER"} {
 		if strings.Contains(fmt.Sprint(gcpText), marker) {
 			t.Fatalf("GCP-shaped destination leaked %q: %#v", marker, gcpText)
+		}
+	}
+}
+
+func TestPipeline_F1MarkersSafeAtGenericAndGCPLogDestinations(t *testing.T) {
+	config := &Config{Enabled: true, Filter: FilterConfig{Include: []string{"allowed.event"}}, Redaction: RedactionConfig{
+		Redact: []string{"log.body", "tool_output"},
+		Hash:   []string{"session_id"},
+	}}
+	input := []*logspb.ResourceLogs{{ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{
+		EventName: "allowed.event",
+		Attributes: []*commonpb.KeyValue{
+			secretKV("control", "SAFE_CONTROL"),
+			secretKV("conversation.id", "SESSION_MARKER"),
+			secretKV("output", "OUTPUT_MARKER"),
+		},
+		Body: &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: []*commonpb.AnyValue{
+			stringValue("UNKEYED_MARKER"),
+			{Value: &commonpb.AnyValue_BytesValue{BytesValue: []byte("BYTE_MARKER")}},
+		}}}},
+	}}}}}}
+	markers := []string{"UNKEYED_MARKER", "BYTE_MARKER", "SESSION_MARKER", "OUTPUT_MARKER"}
+
+	var genericRequests []*collogspb.ExportLogsServiceRequest
+	generic := NewWithConfig(config)
+	generic.exporter = &CloudExporter{logClient: &mockLogClient{exportFunc: func(_ context.Context, req *collogspb.ExportLogsServiceRequest, _ ...grpc.CallOption) (*collogspb.ExportLogsServiceResponse, error) {
+		genericRequests = append(genericRequests, req)
+		return &collogspb.ExportLogsServiceResponse{}, nil
+	}}}
+	if err := generic.handleLogs(context.Background(), input); err != nil {
+		t.Fatalf("generic handleLogs: %v", err)
+	}
+	if len(genericRequests) != 1 || len(genericRequests[0].ResourceLogs) != 1 || len(genericRequests[0].ResourceLogs[0].ScopeLogs[0].LogRecords) != 1 {
+		t.Fatalf("generic destination did not receive one positive-control record: %#v", genericRequests)
+	}
+	genericRecord := genericRequests[0].ResourceLogs[0].ScopeLogs[0].LogRecords[0]
+	if attrValue(genericRecord.Attributes, "control") != "SAFE_CONTROL" || genericRecord.EventName != "allowed.event" {
+		t.Fatalf("generic positive control missing: %#v", genericRecord)
+	}
+	if attrValue(genericRecord.Attributes, "conversation.id") != HashValue("SESSION_MARKER") || attrValue(genericRecord.Attributes, "output") != "[REDACTED]" {
+		t.Fatalf("generic native aliases not processed: %#v", genericRecord.Attributes)
+	}
+	for _, value := range genericRecord.Body.GetArrayValue().Values {
+		if value.GetStringValue() != "[REDACTED]" {
+			t.Fatalf("generic body value not redacted: %#v", value)
+		}
+	}
+	for _, marker := range markers {
+		if strings.Contains(genericRequests[0].String(), marker) {
+			t.Fatalf("generic destination leaked %q", marker)
+		}
+	}
+
+	var gcpEntries []logging.Entry
+	gcp := NewWithConfig(config)
+	gcp.exporter = &CloudExporter{gcpExporter: &GCPExporter{logSink: func(entry logging.Entry) {
+		gcpEntries = append(gcpEntries, entry)
+	}}}
+	if err := gcp.handleLogs(context.Background(), input); err != nil {
+		t.Fatalf("GCP handleLogs: %v", err)
+	}
+	if len(gcpEntries) != 1 {
+		t.Fatalf("GCP destination received %d records, want one positive control", len(gcpEntries))
+	}
+	payload, ok := gcpEntries[0].Payload.(map[string]interface{})
+	if !ok || payload["control"] != "SAFE_CONTROL" || payload["event.name"] != "allowed.event" {
+		t.Fatalf("GCP positive control missing: %#v", gcpEntries[0].Payload)
+	}
+	if payload["conversation.id"] != HashValue("SESSION_MARKER") || payload["output"] != "[REDACTED]" {
+		t.Fatalf("GCP native aliases not processed: %#v", payload)
+	}
+	for _, marker := range markers {
+		if strings.Contains(fmt.Sprint(payload), marker) {
+			t.Fatalf("GCP destination leaked %q: %#v", marker, payload)
 		}
 	}
 }
