@@ -288,6 +288,23 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
                 ctx.warn(f"failed to write API key approval: {exc}")
 
     env = _build_env_overlay(ctx, auth)
+    telemetry = ctx.telemetry
+    config = telemetry.get("telemetry") if isinstance(telemetry, dict) else None
+    enabled = isinstance(config, dict) and config.get("enabled", True)
+    source_env = telemetry.get("env", {}) if isinstance(telemetry, dict) else {}
+    port = str(source_env.get("SCION_OTEL_GRPC_PORT") or "4317")
+    if not port.isdecimal() or not 1 <= int(port) <= 65535:
+        raise scion_harness.ProvisionError("invalid local telemetry gRPC port")
+    env.update({
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1" if enabled else "0",
+        "OTEL_METRICS_EXPORTER": "otlp" if enabled else "none",
+        "OTEL_LOGS_EXPORTER": "otlp" if enabled else "none",
+        "OTEL_TRACES_EXPORTER": "none",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{port}",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": f"http://127.0.0.1:{port}",
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": f"http://127.0.0.1:{port}",
+        "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+    })
     model = _apply_model(ctx, env)
     extra: dict[str, Any] | None = None
     if auth.method == "vertex-ai":

@@ -344,6 +344,25 @@ loopback receiver for the signals they actually emit. External destinations
 must not bypass the boundary. Unsupported, broken, and untested capabilities
 must be reported separately.
 
+The Phase 4 provisioners generate receiver configuration from the staged
+`SCION_OTEL_GRPC_PORT` (default 4317), always targeting `127.0.0.1`. The
+cloud exporter endpoint and old Codex endpoint overrides are not native
+destinations. Disabled provisioners explicitly disable supported exporters.
+Codex uses OTLP gRPC for logs, traces, and metrics; hook token counters retain
+their separate `scion.hook.*` names. Claude configures OTLP logs and metrics;
+its trace exporter is disabled because its documented telemetry options do not
+establish a native trace emitter. Gemini configures its documented local OTLP
+target with prompt logging off and detailed traces on. These are configured
+capabilities, not evidence of emitted signals. The Phase 4 live gate still
+requires inspection of exact installed Claude and Gemini versions: their image
+builds currently use `@latest`, and neither binary nor Docker was available in
+the developer environment. Codex 0.154.0 was installed locally; its generated
+configuration was exercised, but actual emission was not observed there.
+Configuration keys were checked against the vendor references for
+[Claude Code environment variables](https://code.claude.com/docs/en/env-vars),
+[Gemini CLI telemetry](https://geminicli.com/docs/cli/telemetry/), and
+[Codex config](https://developers.openai.com/codex/config-file/config-reference).
+
 ### Phase 5: integration and evidence
 
 Exercise subprocess hooks and real installed native emitters through the actual
