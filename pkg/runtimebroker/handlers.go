@@ -1369,6 +1369,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		GrovePath          string                 `json:"grovePath"`
 		GroveSlug          string                 `json:"groveSlug"`
 		HarnessConfig      string                 `json:"harnessConfig"`
+		HarnessConfigID    string                 `json:"harnessConfigId"`
+		HarnessConfigHash  string                 `json:"harnessConfigHash"`
 		ResolvedEnv        map[string]string      `json:"resolvedEnv"`
 		EnvClassifications map[string]api.EnvKind `json:"envClassifications,omitempty"`
 		ResolvedSecrets    []api.ResolvedSecret   `json:"resolvedSecrets,omitempty"`
@@ -1399,12 +1401,14 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 	// Build config for buildStartContext (startAgent uses a subset of CreateAgentConfig)
 	var cfg *CreateAgentConfig
-	if startReq.Task != "" || startReq.HarnessConfig != "" || len(startReq.SharedDirs) > 0 || startReq.SharedWorkspace {
+	if startReq.Task != "" || startReq.HarnessConfig != "" || startReq.HarnessConfigID != "" || startReq.HarnessConfigHash != "" || len(startReq.SharedDirs) > 0 || startReq.SharedWorkspace {
 		cfg = &CreateAgentConfig{
-			Task:            startReq.Task,
-			HarnessConfig:   startReq.HarnessConfig,
-			SharedDirs:      startReq.SharedDirs,
-			SharedWorkspace: startReq.SharedWorkspace,
+			Task:              startReq.Task,
+			HarnessConfig:     startReq.HarnessConfig,
+			HarnessConfigID:   startReq.HarnessConfigID,
+			HarnessConfigHash: startReq.HarnessConfigHash,
+			SharedDirs:        startReq.SharedDirs,
+			SharedWorkspace:   startReq.SharedWorkspace,
 		}
 	}
 

@@ -257,7 +257,7 @@ type deferredTestClient struct {
 	startCalled atomic.Int32
 }
 
-func (c *deferredTestClient) StartAgent(_ context.Context, brokerID, _, _, _, _, _, _, _ string, _ map[string]string, _ []ResolvedSecret, _ *api.ScionConfig, _ []api.SharedDir, _, _ bool) (*RemoteAgentResponse, error) {
+func (c *deferredTestClient) StartAgent(_ context.Context, brokerID, _, _, _, _, _, _, _, _, _ string, _ map[string]string, _ []ResolvedSecret, _ *api.ScionConfig, _ []api.SharedDir, _, _ bool) (*RemoteAgentResponse, error) {
 	c.startCalled.Add(1)
 	if brokerID != c.localBroker {
 		return nil, ErrLifecycleDeferred

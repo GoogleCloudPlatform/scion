@@ -48,7 +48,7 @@ func (f *fakeHTTPClient) MessageAgent(context.Context, string, string, string, s
 func (f *fakeHTTPClient) CreateAgent(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
 	return nil, nil
 }
-func (f *fakeHTTPClient) StartAgent(context.Context, string, string, string, string, string, string, string, string, map[string]string, []ResolvedSecret, *api.ScionConfig, []api.SharedDir, bool, bool) (*RemoteAgentResponse, error) {
+func (f *fakeHTTPClient) StartAgent(context.Context, string, string, string, string, string, string, string, string, string, string, map[string]string, []ResolvedSecret, *api.ScionConfig, []api.SharedDir, bool, bool) (*RemoteAgentResponse, error) {
 	f.startAgentCalled = true
 	return nil, nil
 }
@@ -156,7 +156,7 @@ func TestHybridBrokerClient_StatelessBrokerLifecycleUsesHTTP(t *testing.T) {
 	c.SetStatelessLocalBrokers([]string{brokerID})
 	c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "other-replica", true })
 
-	_, err := c.StartAgent(ctx, brokerID, "http://localhost:9800", "agent-1", "project-1", "", "", "", "", nil, nil, nil, nil, false, false)
+	_, err := c.StartAgent(ctx, brokerID, "http://localhost:9800", "agent-1", "project-1", "", "", "", "", "", "", nil, nil, nil, nil, false, false)
 	assert.NoError(t, err)
 	assert.True(t, httpClient.startAgentCalled)
 
