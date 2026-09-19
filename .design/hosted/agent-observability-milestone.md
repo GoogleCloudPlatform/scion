@@ -1,6 +1,6 @@
 # Agent observability: first integration milestone
 
-Status: Phase 1 accepted with live evidence; Phase 2 deployed but its first live gate failed, with shutdown remediation awaiting review. Phases 3–5 remain pending.
+Status: Phase 1 accepted with live evidence; Phase 2 deployed but its live gate remains open after a session-count Cloud series collision. Phases 3–5 remain pending.
 Updated: 2026-09-19.
 
 ## Outcome and evidence labels
@@ -150,10 +150,12 @@ rejected for Cloud metrics, even if policy redacted or hashed them, including
 when nested inside an allowed array or map. Unknown resource, scope, and point
 identity fields reject on first Cloud admission; generic OTLP retains them
 after policy processing. A second full OTLP identity that would collapse to an
-admitted Cloud identity is also rejected. Cloud descriptor shape is fixed per
-metric name among active streams: varying label sets, kind, value type, or
-unit reject before state commit. Identity and descriptor registries each cap
-at 2048 entries and retire an entry only after all related streams have been
+admitted Cloud identity is also rejected. Different input temporalities or
+writer semantics targeting the same active Cloud series reject before
+admission, including sums and explicit histograms. Cloud descriptor shape is
+fixed per metric name among active streams: varying label sets, kind, value
+type, or unit reject before state commit. Identity and descriptor registries
+each cap at 2048 entries and retire an entry only after all related streams have been
 delivered and idle for 30 minutes. An old remote descriptor mismatch after
 local expiry remains a Cloud export error, not confirmed delivery.
 
@@ -176,10 +178,26 @@ backend latency can still exceed it. A short deadline or a failed pending
 snapshot with newer dirty state produces a non-nil bounded residual error
 instead of a delivery claim. The first Phase 2 live gate failed when a reset
 arrived before the prior epoch was exported and newer metric state remained at
-shutdown. The local repair awaits review and a new live gate. Ordered
-failed-backlog draining, durable delivery, and cross-process session
-reconciliation remain Phase 3 or later work. An external `docker stop` without
-an explicit timeout can force-kill a Linux container after its shorter
+shutdown. The R4 shutdown repair passed the next live causal barriers, but the
+final `agent.session.count` write was rejected by Cloud because init's
+cumulative counter and a hook subprocess's delta counter mapped to one Cloud
+series with different start epochs. Init lifecycle metrics now use a fixed
+`/lifecycle` instrumentation scope; hook metrics keep their prior scope. The
+existing scope digest yields separate Cloud series without changing the metric
+name, unit, descriptor, or point labels. These series count lifecycle and
+harness hook events respectively. They must not be summed as a canonical
+logical session count; dashboard reconciliation remains deferred. The live
+correction still requires independent review and a new pinned rollout.
+
+The init handler constructs the same token, tool, session, and API instruments
+under its lifecycle scope, but its registered pre-start, post-start, pre-stop,
+and session-end events currently record only `agent.session.count`. Its trace
+scope and log scope are unchanged, as are hook subprocess metrics.
+
+Ordered failed-backlog draining and bounded in-memory retry remain Phase 3;
+disk durability and cross-process logical-session reconciliation are later
+work. An external `docker stop` without an explicit timeout can force-kill a
+Linux container after its shorter
 [default 10-second grace period](https://docs.docker.com/reference/cli/docker/container/stop/),
 so the 20-second internal budget is not an outer termination guarantee.
 
@@ -211,8 +229,10 @@ Update the deployment walkthrough only after this evidence exists.
 
 Phase 1 was deployed and accepted with 134 live Cloud assertions and 57 local
 generic checks at `bf41c234`; see the task-local Phase 1 acceptance report.
-Phase 2 has local tests only and has not been deployed. The original defective
-baseline observations above predate Phase 1.
+Phase 2 was deployed for bounded live checks at `82fc67cb` and `b385857b`.
+The R4 session-count Cloud collision remains an open live gate; the R5 source
+scope correction has local tests only and awaits review and a pinned rollout.
+The original defective baseline observations above predate Phase 1.
 Before declaring the milestone delivered, a reviewed integration revision must
 prove in a scoped workload:
 

@@ -12,6 +12,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -602,6 +603,34 @@ func TestTelemetryHandler_SessionMetrics(t *testing.T) {
 
 	if !foundSessionCount {
 		t.Error("expected agent.session.count metric to be recorded")
+	}
+}
+
+func TestSessionMetricScopesSeparateHookAndLifecycleSources(t *testing.T) {
+	for _, tc := range []struct {
+		name, scope string
+		newHandler  func(metric.MeterProvider) *TelemetryHandler
+	}{
+		{"hook", hookMetricScope, func(mp metric.MeterProvider) *TelemetryHandler { return NewTelemetryHandler(nil, nil, nil, mp) }},
+		{"lifecycle", telemetry.LifecycleMetricScope, func(mp metric.MeterProvider) *TelemetryHandler {
+			return NewLifecycleTelemetryHandler(nil, nil, nil, mp)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := sdkmetric.NewManualReader()
+			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+			defer func() { _ = mp.Shutdown(context.Background()) }()
+			if err := tc.newHandler(mp).Handle(&hooks.Event{Name: hooks.EventSessionEnd}); err != nil {
+				t.Fatal(err)
+			}
+			var rm metricdata.ResourceMetrics
+			if err := reader.Collect(context.Background(), &rm); err != nil {
+				t.Fatal(err)
+			}
+			if len(rm.ScopeMetrics) != 1 || rm.ScopeMetrics[0].Scope.Name != tc.scope || len(rm.ScopeMetrics[0].Metrics) != 1 || rm.ScopeMetrics[0].Metrics[0].Name != "agent.session.count" {
+				t.Fatalf("session metric scope or name changed: %+v", rm.ScopeMetrics)
+			}
+		})
 	}
 }
 

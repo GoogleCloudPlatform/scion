@@ -93,6 +93,62 @@ func TestHookTokenNamespaceIsSeparateFromNativeUsage(t *testing.T) {
 	}
 }
 
+func TestCloudRejectsDifferentTemporalityWritersBeforeStateCommit(t *testing.T) {
+	for _, kind := range []string{"sum", "histogram"} {
+		for _, first := range []metricpb.AggregationTemporality{
+			metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA,
+			metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE,
+		} {
+			t.Run(fmt.Sprintf("%s/%s", kind, first), func(t *testing.T) {
+				other := metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA
+				if first == other {
+					other = metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE
+				}
+				input := func(temporal metricpb.AggregationTemporality, start, end uint64) *metricpb.ResourceMetrics {
+					var m *metricpb.Metric
+					if kind == "sum" {
+						m = testNumber("same.name", temporal, start, end, 1)
+					} else {
+						m = testHist(temporal, start, end, 1, 1, []float64{2}, []uint64{1, 0})
+					}
+					return testMetricResource("native", "same.scope", "", "", m)
+				}
+				p := newTestPipelineWithExporter(nil, &mockMetricClient{}, nil)
+				p.config.CloudProvider = "gcp"
+				if err := p.handleMetrics(context.Background(), []*metricpb.ResourceMetrics{input(first, 1, 2)}); err != nil {
+					t.Fatal(err)
+				}
+				if err := p.handleMetrics(context.Background(), []*metricpb.ResourceMetrics{input(other, 3, 4)}); status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "incompatible Cloud Monitoring series writers") {
+					t.Fatalf("second writer admission = %v", err)
+				}
+				if len(p.metricStreams.streams) != 1 || len(p.metricStreams.cloudIdentities) != 1 || p.metricRejectedPoints.Load() != 1 {
+					t.Fatalf("rejection mutated admitted state: streams=%d identities=%d rejected=%d", len(p.metricStreams.streams), len(p.metricStreams.cloudIdentities), p.metricRejectedPoints.Load())
+				}
+				healthyStart := uint64(2)
+				if first == metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE {
+					healthyStart = 1
+				}
+				if err := p.handleMetrics(context.Background(), []*metricpb.ResourceMetrics{input(first, healthyStart, 3)}); err != nil {
+					t.Fatalf("healthy writer poisoned: %v", err)
+				}
+				if len(p.metricStreams.streams) != 1 {
+					t.Fatal("failed writer committed a second stream")
+				}
+				fresh := newTestPipelineWithExporter(nil, &mockMetricClient{}, nil)
+				fresh.config.CloudProvider = "gcp"
+				if err := fresh.handleMetrics(context.Background(), []*metricpb.ResourceMetrics{input(first, 1, 2), input(other, 3, 4)}); status.Code(err) != codes.InvalidArgument || len(fresh.metricStreams.streams) != 0 || len(fresh.metricStreams.cloudIdentities) != 0 {
+					t.Fatalf("whole conflicting request was committed: streams=%d identities=%d err=%v", len(fresh.metricStreams.streams), len(fresh.metricStreams.cloudIdentities), err)
+				}
+				// Generic OTLP retains the distinct processed temporalities.
+				generic := newMetricStreams()
+				if err := generic.add([]*metricpb.ResourceMetrics{input(first, 1, 2), input(other, 3, 4)}); err != nil || len(generic.streams) != 2 {
+					t.Fatalf("generic writer admission: streams=%d err=%v", len(generic.streams), err)
+				}
+			})
+		}
+	}
+}
+
 func TestMetricStreamIdentityAndCanonicalAttributes(t *testing.T) {
 	attrs := [][]*commonpb.KeyValue{
 		{metricStringLabel("a;b", "c=d")}, {metricStringLabel("a", "b;c=d")},

@@ -204,7 +204,7 @@ When harness events occur (via hooks), sciontool automatically records the follo
 | `scion.hook.tokens.cached` | Counter | tokens | Cached tokens reported by model-end hooks |
 | `agent.tool.calls` | Counter | calls | Total number of tool executions |
 | `agent.tool.duration` | Histogram | ms | Tool duration when paired start and end events are available in one process |
-| `agent.session.count` | Counter | sessions | Total number of agent sessions |
+| `agent.session.count` | Counter | sessions | Session-end events emitted by each source |
 | `gen_ai.api.calls` | Counter | calls | Total number of LLM API requests |
 | `gen_ai.api.duration` | Histogram | ms | Model duration when paired start and end events are available in one process |
 
@@ -215,6 +215,16 @@ Session-end totals do not add a second copy of model-end usage. Short-lived
 hook processes normally cannot pair start and end events, so duration
 histograms are not guaranteed. This does not establish native Codex token
 emission.
+
+`agent.session.count` has two distinct sources: harness `session-end` hooks and
+the `sciontool init` lifecycle `session-end` event. They keep the same metric
+name and unit, but use distinct instrumentation scopes. In Cloud Monitoring,
+filter the `scion_metric_scope_id` label for the source you intend to inspect:
+the hook scope is `github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers`,
+and the init lifecycle scope adds `/lifecycle`. The Cloud label contains a
+digest of the scope identity, so inspect a sample series to obtain its value.
+These are source event counts; summing both does not produce a canonical count
+of logical sessions. The Hub dashboard does not reconcile them.
 
 The current Hub dashboard still queries historical `gen_ai.tokens.*` names.
 Its charts exclude the new hook token namespace and, because older normalized

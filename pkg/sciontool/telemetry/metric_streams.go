@@ -25,6 +25,10 @@ const (
 
 const hookMetricScope = "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 
+// LifecycleMetricScope separates init lifecycle counters from hook subprocess
+// counters that may share a name and point labels but use a different writer.
+const LifecycleMetricScope = hookMetricScope + "/lifecycle"
+
 type metricStreamKey struct {
 	resource, scope, attrs      string
 	name, unit, kind, valueType string
@@ -63,7 +67,11 @@ type metricStreams struct {
 
 type metricDescriptorShape struct{ kind, unit, valueType, labels string }
 type cloudMetricIdentity struct{ resource, scope, point, name, unit, kind string }
-type metricIdentityFull struct{ resource, scope, point string }
+type metricIdentityFull struct {
+	resource, scope, point string
+	temporality            metricpb.AggregationTemporality
+	monotonic              bool
+}
 
 func (s *metricStreams) clone() *metricStreams {
 	copyState := &metricStreams{streams: make(map[metricStreamKey]*metricStream, len(s.streams)), rejected: make(map[string]uint64, len(s.rejected)), descriptors: make(map[string]metricDescriptorShape, len(s.descriptors)), cloudIdentities: make(map[cloudMetricIdentity]metricIdentityFull, len(s.cloudIdentities)), now: s.now, gcp: s.gcp}
@@ -281,7 +289,7 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 							if err := s.validateDescriptor(rm, sm, m, kind, point.Attributes, point.Value); err != nil {
 								return err
 							}
-							if err := s.validateCloudIdentity(rm, sm, m, kind, point.Attributes); err != nil {
+							if err := s.validateCloudIdentity(rm, sm, m, kind, temporal, monotonic, point.Attributes); err != nil {
 								return err
 							}
 						}
@@ -321,7 +329,7 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 							if err := s.validateDescriptor(rm, sm, m, kind, point.Attributes, nil); err != nil {
 								return err
 							}
-							if err := s.validateCloudIdentity(rm, sm, m, kind, point.Attributes); err != nil {
+							if err := s.validateCloudIdentity(rm, sm, m, kind, temporal, monotonic, point.Attributes); err != nil {
 								return err
 							}
 						}
@@ -343,7 +351,7 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 	return nil
 }
 
-func (s *metricStreams) validateCloudIdentity(rm *metricpb.ResourceMetrics, sm *metricpb.ScopeMetrics, metric *metricpb.Metric, kind string, attrs []*commonpb.KeyValue) error {
+func (s *metricStreams) validateCloudIdentity(rm *metricpb.ResourceMetrics, sm *metricpb.ScopeMetrics, metric *metricpb.Metric, kind string, temporality metricpb.AggregationTemporality, monotonic bool, attrs []*commonpb.KeyValue) error {
 	for _, source := range []struct {
 		attrs   []*commonpb.KeyValue
 		allowed map[string]bool
@@ -392,10 +400,13 @@ func (s *metricStreams) validateCloudIdentity(rm *metricpb.ResourceMetrics, sm *
 		return s.reject(err.Error())
 	}
 	key := cloudMetricIdentity{resource: r, scope: scope, point: point, name: metric.Name, unit: metric.Unit, kind: kind}
-	full := metricIdentityFull{fullR, fullS, fullP}
+	full := metricIdentityFull{resource: fullR, scope: fullS, point: fullP, temporality: temporality, monotonic: monotonic}
 	if previous, exists := s.cloudIdentities[key]; exists {
-		if previous != full {
+		if previous.resource != full.resource || previous.scope != full.scope || previous.point != full.point {
 			return s.reject("unsupported Cloud Monitoring identity dimension")
+		}
+		if previous.temporality != full.temporality || previous.monotonic != full.monotonic {
+			return s.reject("incompatible Cloud Monitoring series writers")
 		}
 		return nil
 	}
@@ -581,7 +592,7 @@ func (s *metricStreams) expireDeliveredIdle() {
 	active := make(map[activeIdentity]struct{}, len(s.streams))
 	for key := range s.streams {
 		activeNames[key.name] = struct{}{}
-		active[activeIdentity{full: metricIdentityFull{key.resource, key.scope, key.attrs}, name: key.name, unit: key.unit, kind: key.kind}] = struct{}{}
+		active[activeIdentity{full: metricIdentityFull{resource: key.resource, scope: key.scope, point: key.attrs, temporality: key.temporality, monotonic: key.monotonic}, name: key.name, unit: key.unit, kind: key.kind}] = struct{}{}
 	}
 	for name := range s.descriptors {
 		if _, exists := activeNames[name]; !exists {

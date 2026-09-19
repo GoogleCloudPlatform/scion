@@ -82,9 +82,21 @@ type TelemetryHandler struct {
 // If lp is non-nil, correlated log records will be emitted alongside spans.
 // If mp is non-nil, OTel metric instruments will be created for recording counters and histograms.
 func NewTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, _ *telemetry.Redactor, mp ...metric.MeterProvider) *TelemetryHandler {
+	return newTelemetryHandler(tp, lp, hookMetricScope, mp...)
+}
+
+// NewLifecycleTelemetryHandler gives init lifecycle metrics their own source
+// identity. Hook subprocesses keep the original instrumentation scope.
+func NewLifecycleTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, _ *telemetry.Redactor, mp ...metric.MeterProvider) *TelemetryHandler {
+	return newTelemetryHandler(tp, lp, telemetry.LifecycleMetricScope, mp...)
+}
+
+const hookMetricScope = "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
+
+func newTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, metricScope string, mp ...metric.MeterProvider) *TelemetryHandler {
 	var tracer trace.Tracer
 	if tp != nil {
-		tracer = tp.Tracer("github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers")
+		tracer = tp.Tracer(hookMetricScope)
 	} else {
 		tracer = noop.NewTracerProvider().Tracer("noop")
 	}
@@ -103,15 +115,15 @@ func NewTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, _ *
 
 	// Initialize metric instruments if a MeterProvider is given
 	if len(mp) > 0 && mp[0] != nil {
-		h.initMetrics(mp[0])
+		h.initMetrics(mp[0], metricScope)
 	}
 
 	return h
 }
 
 // initMetrics creates OTel metric instruments on the handler.
-func (h *TelemetryHandler) initMetrics(mp metric.MeterProvider) {
-	meter := mp.Meter("github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers")
+func (h *TelemetryHandler) initMetrics(mp metric.MeterProvider, scope string) {
+	meter := mp.Meter(scope)
 
 	var err error
 

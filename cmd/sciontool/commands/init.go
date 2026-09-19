@@ -263,23 +263,8 @@ func runInit(args []string) int {
 			log.Error("Failed to create lifecycle telemetry providers: %v", provErr)
 		}
 
-		var tp trace.TracerProvider
-		var lp otellog.LoggerProvider
-		var mp metric.MeterProvider
-		if lifecycleProviders != nil {
-			tp = lifecycleProviders.TracerProvider
-			lp = lifecycleProviders.LoggerProvider
-			if lifecycleProviders.MeterProvider != nil {
-				mp = lifecycleProviders.MeterProvider
-			}
-		}
-		telemetryHandler = handlers.NewTelemetryHandler(tp, lp, redactor, mp)
+		telemetryHandler = registerLifecycleTelemetryHandler(lifecycleManager, lifecycleProviders, redactor)
 		log.Info("Telemetry handler initialized for hook-to-span conversion")
-
-		// Register telemetry handler for lifecycle events
-		for _, eventName := range []string{hooks.EventPreStart, hooks.EventPostStart, hooks.EventPreStop, hooks.EventSessionEnd} {
-			lifecycleManager.RegisterHandler(eventName, telemetryHandler.Handle)
-		}
 	}
 	if lifecycleProviders != nil {
 		defer func() {
@@ -1069,6 +1054,22 @@ waitLoop:
 
 	log.Info("Child exited with code %d", result.code)
 	return result.code
+}
+
+func registerLifecycleTelemetryHandler(manager *hooks.LifecycleManager, providers *telemetry.Providers, redactor *telemetry.Redactor) *handlers.TelemetryHandler {
+	var tp trace.TracerProvider
+	var lp otellog.LoggerProvider
+	var mp metric.MeterProvider
+	if providers != nil {
+		tp = providers.TracerProvider
+		lp = providers.LoggerProvider
+		mp = providers.MeterProvider
+	}
+	handler := handlers.NewLifecycleTelemetryHandler(tp, lp, redactor, mp)
+	for _, eventName := range []string{hooks.EventPreStart, hooks.EventPostStart, hooks.EventPreStop, hooks.EventSessionEnd} {
+		manager.RegisterHandler(eventName, handler.Handle)
+	}
+	return handler
 }
 
 // readHarnessExitCode reads and parses the harness exit-code file written by the
