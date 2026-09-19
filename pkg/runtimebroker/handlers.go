@@ -1031,7 +1031,10 @@ func (s *Server) hydrateHarnessConfig(ctx context.Context, cfg *CreateAgentConfi
 		if conn.HubClient != nil && cfg.HarnessConfigHash != "" && ref != "" {
 			var metaErr error
 			currentHC, metaErr = conn.HubClient.HarnessConfigs().Get(ctx, ref)
-			if metaErr == nil && currentHC != nil && currentHC.ContentHash != cfg.HarnessConfigHash {
+			if metaErr != nil {
+				return "", wrapResourceMetaErr(metaErr, "harness-config")
+			}
+			if currentHC != nil && currentHC.ContentHash != cfg.HarnessConfigHash {
 				s.agentLifecycleLog.Info("harness-config content hash changed since dispatch; using current version",
 					"ref", ref,
 					"dispatch_hash", cfg.HarnessConfigHash,
