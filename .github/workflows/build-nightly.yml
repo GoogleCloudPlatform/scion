@@ -1,0 +1,109 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Nightly Release
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # Daily at 2:00 AM UTC
+  workflow_dispatch:        # Allow manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-tag:
+    name: Check for Changes and Tag
+    runs-on: ubuntu-latest
+    outputs:
+      tagged: ${{ steps.tag.outputs.tagged }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Check for new commits and tag
+        id: tag
+        run: |
+          # Find the latest nightly tag
+          LATEST_NIGHTLY=$(git tag -l --sort=-v:refname "nightly-*" | head -1)
+
+          if [ -n "$LATEST_NIGHTLY" ]; then
+            # Check if main has new commits since the last nightly tag
+            NEW_COMMITS=$(git rev-list "${LATEST_NIGHTLY}..HEAD" --count)
+            if [ "$NEW_COMMITS" -eq 0 ]; then
+              echo "No new commits since ${LATEST_NIGHTLY}. Skipping nightly build."
+              echo "tagged=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "Found ${NEW_COMMITS} new commits since ${LATEST_NIGHTLY}"
+          else
+            echo "No previous nightly tag found. Creating first nightly build."
+          fi
+
+          # Create nightly tag
+          TAG="nightly-$(date -u +%Y%m%d)"
+
+          # Check if today's nightly already exists
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists. Skipping."
+            echo "tagged=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          git tag "$TAG"
+          git push origin "$TAG"
+
+          echo "tagged=true" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Created and pushed tag: ${TAG}"
+
+  cleanup:
+    name: Cleanup Old Nightly Releases
+    needs: check-and-tag
+    if: needs.check-and-tag.outputs.tagged == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old nightly releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Keep last 14 days of nightly releases
+          CUTOFF_DATE=$(date -u -d "14 days ago" +%Y%m%d 2>/dev/null || date -u -v-14d +%Y%m%d 2>/dev/null || echo "")
+
+          if [ -z "$CUTOFF_DATE" ]; then
+            echo "Could not calculate cutoff date. Skipping cleanup."
+            exit 0
+          fi
+
+          # List all nightly releases
+          gh release list --limit 100 --json tagName,createdAt | \
+            python3 -c "
+          import json, sys
+          releases = json.load(sys.stdin)
+          cutoff = '${CUTOFF_DATE}'
+          for r in releases:
+              tag = r['tagName']
+              if tag.startswith('nightly-'):
+                  date_part = tag.replace('nightly-', '')
+                  if date_part < cutoff:
+                      print(tag)
+          " | while read -r old_tag; do
+            echo "Deleting old nightly release: ${old_tag}"
+            gh release delete "$old_tag" --yes --cleanup-tag 2>/dev/null || true
+          done
