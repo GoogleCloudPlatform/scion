@@ -25,7 +25,7 @@ const (
 var cloudResourceFields = map[string]bool{
 	"service.name": true, "service.namespace": true, "service.instance.id": true,
 	"scion.agent.id": true, "scion.project.id": true, "scion.agent.slug": true,
-	"scion.harness": true, "scion.model": true, "scion.broker.name": true,
+	"scion.harness": true, "scion.model": true, "scion.broker.id": true, "scion.broker.name": true,
 	"gcp.project_id": true,
 }
 var cloudScopeFields = map[string]bool{"component": true, "scope.kind": true, "scope.variant": true}
@@ -91,9 +91,9 @@ func checkCloudMetricFields(attrs []*commonpb.KeyValue, allowed map[string]bool,
 		if !allowed[kv.Key] {
 			return fmt.Errorf("unsupported Cloud Monitoring %s dimension", layer)
 		}
-		if layer == "resource" && kv.Key == "gcp.project_id" {
+		if layer == "resource" && (kv.Key == "gcp.project_id" || kv.Key == "scion.broker.id") {
 			if _, ok := kv.GetValue().GetValue().(*commonpb.AnyValue_StringValue); !ok || len(kv.GetValue().GetStringValue()) > 256 {
-				return fmt.Errorf("invalid Cloud Monitoring project identity")
+				return fmt.Errorf("invalid Cloud Monitoring resource identity")
 			}
 		}
 	}

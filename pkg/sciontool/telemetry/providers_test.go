@@ -220,7 +220,7 @@ func TestHookProviderEmitsCounterDeltaAndOtherInstrumentTemporalities(t *testing
 func TestHookProviderEmittedResourceAndPointsPassStrictCloudAdmission(t *testing.T) {
 	for key, value := range map[string]string{
 		"SCION_AGENT_ID": "agent", "SCION_AGENT_SLUG": "slug", "SCION_PROJECT_ID": "project",
-		"SCION_HARNESS": "claude", "SCION_MODEL": "model", "SCION_BROKER_NAME": "broker",
+		"SCION_HARNESS": "claude", "SCION_MODEL": "model", "SCION_BROKER_ID": "broker-id", "SCION_BROKER_NAME": "broker",
 		EnvProjectID: "cloud-project",
 	} {
 		t.Setenv(key, value)
@@ -233,6 +233,15 @@ func TestHookProviderEmittedResourceAndPointsPassStrictCloudAdmission(t *testing
 		if decision.Reason != "" {
 			results <- fmt.Errorf("policy: %s", decision.Reason)
 			return nil
+		}
+		for key, want := range map[string]string{
+			"scion.agent.id": "agent", "scion.agent.slug": "slug", "scion.project.id": "project",
+			"scion.harness": "claude", "scion.model": "model", "scion.broker.id": "broker-id", "scion.broker.name": "broker",
+		} {
+			if got := attrValue(decision.Data[0].Resource.Attributes, key); got != want {
+				results <- fmt.Errorf("authoritative resource %s = %q, want %q", key, got, want)
+				return nil
+			}
 		}
 		state := newMetricStreams()
 		state.gcp = true

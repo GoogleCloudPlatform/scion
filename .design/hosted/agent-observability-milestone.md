@@ -129,7 +129,8 @@ Generic OTLP exports all policy-processed dimensions. Cloud Monitoring uses
 only these resource fields in its canonical resource digest: `service.name`,
 `service.namespace`, `service.instance.id`, `scion.agent.id`,
 `scion.project.id`, `scion.agent.slug`, `scion.harness`, `scion.model`,
-`scion.broker.name`, and bounded scalar-string `gcp.project_id` (digest only,
+`scion.broker.id`, `scion.broker.name`, and bounded scalar-string
+`gcp.project_id` (digest only,
 distinct from `scion.project.id`). The scope digest includes scope name, version, schema URL,
 and only `component`, `scope.kind`, and `scope.variant` attributes. The point
 digest includes only `agent_id`, `project_id`, `harness`, `model`, `tool_name`,

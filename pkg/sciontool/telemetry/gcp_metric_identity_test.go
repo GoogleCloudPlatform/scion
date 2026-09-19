@@ -179,6 +179,76 @@ func TestCloudGCPProjectResourceIdentity(t *testing.T) {
 	}
 }
 
+func TestCloudBrokerIDUsesOnlyPostPolicyAuthoritativeResource(t *testing.T) {
+	for key, value := range map[string]string{
+		"SCION_AGENT_ID": "agent", "SCION_AGENT_SLUG": "slug", "SCION_PROJECT_ID": "project",
+		"SCION_HARNESS": "claude", "SCION_MODEL": "model", "SCION_BROKER_NAME": "broker-name",
+	} {
+		t.Setenv(key, value)
+	}
+	makeInput := func(spoof bool) *metricpb.ResourceMetrics {
+		input := testMetricResource("native", "scope", "", "", testNumber("agent.tool.calls", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 1))
+		if spoof {
+			input.Resource.Attributes = append(input.Resource.Attributes, metricStringLabel("scion.broker.id", "producer-spoof"))
+		}
+		return input
+	}
+	ids := map[string]bool{}
+	for _, brokerID := range []string{"", "broker-one", "broker-two"} {
+		t.Setenv("SCION_BROKER_ID", brokerID)
+		var digest string
+		for _, spoof := range []bool{false, true} {
+			decision := newReceiverPolicy(&Config{Enabled: true}).processMetrics([]*metricpb.ResourceMetrics{makeInput(spoof)})
+			if decision.Reason != "" {
+				t.Fatalf("policy broker %q: %s", brokerID, decision.Reason)
+			}
+			if got := attrValue(decision.Data[0].Resource.Attributes, "scion.broker.id"); got != brokerID {
+				t.Fatalf("broker %q spoof=%t produced %q", brokerID, spoof, got)
+			}
+			adapted, err := gcpIdentityMetrics(decision.Data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attrs := adapted[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].Attributes
+			if attrValue(attrs, "scion.broker.id") != "" || attrValue(attrs, "scion_broker_id") != "" {
+				t.Fatal("broker ID became a readable point label")
+			}
+			got := attrValue(attrs, gcpResourceIDLabel)
+			if digest != "" && got != digest {
+				t.Fatalf("producer spoof changed authoritative digest for broker %q", brokerID)
+			}
+			digest = got
+		}
+		ids[digest] = true
+	}
+	if len(ids) != 3 {
+		t.Fatalf("absent/distinct broker IDs collapsed: %d", len(ids))
+	}
+	malformed := makeInput(false)
+	malformed.Resource.Attributes = append(malformed.Resource.Attributes, &commonpb.KeyValue{Key: "scion.broker.id", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{}}}})
+	if _, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{malformed}); err == nil {
+		t.Fatal("nested broker ID accepted by direct adapter")
+	}
+}
+
+func TestPolicyAuthoritativeResourceFieldsHaveCloudMappings(t *testing.T) {
+	for key := range map[string]bool{
+		"SCION_AGENT_ID": true, "SCION_AGENT_SLUG": true, "SCION_PROJECT_ID": true,
+		"SCION_HARNESS": true, "SCION_MODEL": true, "SCION_BROKER_ID": true, "SCION_BROKER_NAME": true,
+	} {
+		t.Setenv(key, "present")
+	}
+	attrs := authoritativeIdentity()
+	if len(attrs) != 7 {
+		t.Fatalf("authoritative field count = %d", len(attrs))
+	}
+	for _, kv := range attrs {
+		if !cloudResourceFields[kv.Key] {
+			t.Fatalf("policy-produced %s lacks Cloud identity mapping", kv.Key)
+		}
+	}
+}
+
 func TestCloudSelfMetricPointFieldsAreNameScopedAndBounded(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
