@@ -28,6 +28,15 @@ import (
 
 const runnerTempPrefix = "scion-a2a-integration."
 
+const runnerTestTimeout = 5 * time.Second
+
+type runningRunner struct {
+	cmd     *exec.Cmd
+	output  bytes.Buffer
+	done    chan struct{}
+	waitErr error
+}
+
 func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
@@ -45,9 +54,13 @@ if [[ -n "${FAKE_GO_READY:-}" ]]; then
   trap 'exit 143' TERM INT
   while :; do sleep 1; done
 fi
+if [[ -n "${FAKE_GO_PRE_BARRIER_STATUS:-}" ]]; then
+  printf '%s\n' '{"Action":"output","Output":"injected pre-barrier failure\\n"}'
+  exit "${FAKE_GO_PRE_BARRIER_STATUS}"
+fi
 if [[ -n "${FAKE_GO_BARRIER_DIR:-}" ]]; then
-  touch "${FAKE_GO_BARRIER_DIR}/${TEST_INVOCATION_ID}"
-  while [[ $(find "${FAKE_GO_BARRIER_DIR}" -type f | wc -l) -lt 2 ]]; do sleep 0.01; done
+  touch "${FAKE_GO_BARRIER_DIR}/${TEST_INVOCATION_ID}.ready"
+  while [[ ! -f "${FAKE_GO_BARRIER_RELEASE}" ]]; do sleep 0.01; done
 fi
 if [[ "${FAKE_GO_STATUS:-0}" != "0" ]]; then
   printf '%s\n' '{"Action":"output","Output":"injected early failure\\n"}'
@@ -94,6 +107,83 @@ func runnerCommand(t *testing.T, tempParent, binDir string, extraEnv ...string) 
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	return cmd
+}
+
+func startRunner(t *testing.T, cmd *exec.Cmd) *runningRunner {
+	t.Helper()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	runner := &runningRunner{cmd: cmd, done: make(chan struct{})}
+	cmd.Stdout = &runner.output
+	cmd.Stderr = &runner.output
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		runner.waitErr = cmd.Wait()
+		close(runner.done)
+	}()
+	t.Cleanup(func() {
+		if err := runner.terminateAndReap(syscall.SIGKILL, runnerTestTimeout); err != nil {
+			t.Errorf("clean up runner process group: %v", err)
+		}
+	})
+	return runner
+}
+
+func (r *runningRunner) wait(timeout time.Duration) (error, bool) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-r.done:
+		return r.waitErr, true
+	case <-timer.C:
+		return nil, false
+	}
+}
+
+func (r *runningRunner) processGroupAlive() bool {
+	err := syscall.Kill(-r.cmd.Process.Pid, 0)
+	return err == nil || err == syscall.EPERM
+}
+
+func (r *runningRunner) terminateAndReap(signal syscall.Signal, timeout time.Duration) error {
+	if r.processGroupAlive() {
+		if err := syscall.Kill(-r.cmd.Process.Pid, signal); err != nil && err != syscall.ESRCH {
+			return fmt.Errorf("signal process group: %w", err)
+		}
+	}
+	if _, finished := r.wait(timeout); !finished {
+		if err := syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+			return fmt.Errorf("kill timed-out process group: %w", err)
+		}
+		if _, finished := r.wait(timeout); !finished {
+			return fmt.Errorf("runner process was not reaped within %s", timeout)
+		}
+	}
+	deadline := time.Now().Add(timeout)
+	for r.processGroupAlive() {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("runner process group survived for %s after reap", timeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return nil
+}
+
+func waitForCondition(t *testing.T, description string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(runnerTestTimeout)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", description)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func runnerArtifacts(t *testing.T, tempParent string) []string {
@@ -163,34 +253,13 @@ func TestIntegrationRunnerCleansOwnedArtifacts(t *testing.T) {
 func TestIntegrationRunnerCleansArtifactsOnSignal(t *testing.T) {
 	tempParent := t.TempDir()
 	ready := filepath.Join(tempParent, "go-ready")
-	legacyBefore, err := filepath.Glob("/tmp/ci-test-json.*")
-	if err != nil {
+	unrelated := filepath.Join(tempParent, "unrelated-runner-data")
+	if err := os.Mkdir(unrelated, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	legacyKnown := make(map[string]bool, len(legacyBefore))
-	for _, path := range legacyBefore {
-		legacyKnown[path] = true
-	}
-	cmd := runnerCommand(t, tempParent, fakeRunnerBin(t, true), "FAKE_GO_READY="+ready)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	runner := startRunner(t, runnerCommand(t, tempParent, fakeRunnerBin(t, true), "FAKE_GO_READY="+ready))
+	waitForCondition(t, "runner to enter the test phase", func() bool { return pathExists(ready) })
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(ready); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("runner did not enter test phase:\n%s", output.String())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 	unrelatedLegacyLog, err := os.CreateTemp("/tmp", "ci-test-json.")
 	if err != nil {
 		t.Fatal(err)
@@ -200,80 +269,150 @@ func TestIntegrationRunnerCleansArtifactsOnSignal(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Remove(unrelatedLegacyLogPath) })
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
-		t.Fatal(err)
+
+	if err := runner.terminateAndReap(syscall.SIGTERM, runnerTestTimeout); err != nil {
+		t.Fatalf("terminate signal-interrupted runner: %v", err)
 	}
-	if err := cmd.Wait(); err == nil {
+	if runner.waitErr == nil {
 		t.Fatal("signal-interrupted runner succeeded")
 	}
 	requireNoRunnerArtifacts(t, tempParent)
-	legacyAfter, err := filepath.Glob("/tmp/ci-test-json.*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var leaked []string
-	for _, path := range legacyAfter {
-		if !legacyKnown[path] {
-			leaked = append(leaked, path)
-			path := path
-			t.Cleanup(func() { _ = os.Remove(path) })
-		}
-	}
-	if len(leaked) != 0 {
-		t.Fatalf("signal-interrupted runner leaked legacy logs: %v", leaked)
-	}
 	if _, err := os.Stat(unrelatedLegacyLogPath); err != nil {
-		t.Fatalf("signal test removed unrelated legacy-pattern file: %v", err)
+		t.Fatalf("signal-interrupted runner removed unrelated legacy-pattern file: %v", err)
+	}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Fatalf("signal-interrupted runner removed unrelated directory: %v", err)
 	}
 }
 
 func TestIntegrationRunnerConcurrentInvocationsAreIsolated(t *testing.T) {
-	tempParent := t.TempDir()
-	unrelated := filepath.Join(tempParent, "unrelated-runner-data")
-	barrier := filepath.Join(tempParent, "barrier")
-	for _, dir := range []string{unrelated, barrier} {
-		if err := os.Mkdir(dir, 0o755); err != nil {
+	t.Run("explicit release after both owned directories are observed", func(t *testing.T) {
+		tempParent := t.TempDir()
+		unrelated := filepath.Join(tempParent, "unrelated-runner-data")
+		barrier := filepath.Join(tempParent, "barrier")
+		for _, dir := range []string{unrelated, barrier} {
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		release := filepath.Join(barrier, "release")
+		binDir := fakeRunnerBin(t, true)
+		runners := make([]*runningRunner, 0, 2)
+		for i := 1; i <= 2; i++ {
+			id := fmt.Sprintf("runner-%d", i)
+			runners = append(runners, startRunner(t, runnerCommand(t, tempParent, binDir,
+				"FAKE_GO_BARRIER_DIR="+barrier,
+				"FAKE_GO_BARRIER_RELEASE="+release,
+				"TEST_INVOCATION_ID="+id,
+				"FAKE_CANARY_STATE="+filepath.Join(tempParent, id+"-canary-state"),
+			)))
+		}
+
+		waitForCondition(t, "both runners to reach the barrier with isolated directories", func() bool {
+			return len(runnerArtifacts(t, tempParent)) == 2 &&
+				pathExists(filepath.Join(barrier, "runner-1.ready")) &&
+				pathExists(filepath.Join(barrier, "runner-2.ready"))
+		})
+		for i, runner := range runners {
+			if _, finished := runner.wait(10 * time.Millisecond); finished {
+				t.Fatalf("runner-%d passed the barrier before explicit release", i+1)
+			}
+		}
+		if err := os.WriteFile(release, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
-	}
-	binDir := fakeRunnerBin(t, true)
-	type result struct {
-		id     string
-		output []byte
-		err    error
-	}
-	results := make(chan result, 2)
-	for i := 1; i <= 2; i++ {
-		id := fmt.Sprintf("runner-%d", i)
-		cmd := runnerCommand(t, tempParent, binDir,
-			"FAKE_GO_BARRIER_DIR="+barrier,
-			"TEST_INVOCATION_ID="+id,
-			"FAKE_CANARY_STATE="+filepath.Join(tempParent, id+"-canary-state"),
-		)
-		if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
-			t.Fatalf("%s is not configured with an isolated process group", id)
-		}
-		go func() {
-			output, err := cmd.CombinedOutput()
-			results <- result{id: id, output: output, err: err}
-		}()
-	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for len(runnerArtifacts(t, tempParent)) != 2 {
-		if time.Now().After(deadline) {
-			t.Fatalf("did not observe two isolated runner directories: %v", runnerArtifacts(t, tempParent))
+		for i, runner := range runners {
+			if err, finished := runner.wait(runnerTestTimeout); !finished {
+				t.Fatalf("runner-%d did not exit within %s", i+1, runnerTestTimeout)
+			} else if err != nil {
+				t.Fatalf("runner-%d failed: %v\n%s", i+1, err, runner.output.String())
+			}
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	for i := 0; i < 2; i++ {
-		got := <-results
-		if got.err != nil {
-			t.Fatalf("%s failed: %v\n%s", got.id, got.err, got.output)
+		requireNoRunnerArtifacts(t, tempParent)
+		if _, err := os.Stat(unrelated); err != nil {
+			t.Fatalf("concurrent runners removed unrelated directory: %v", err)
 		}
-	}
-	requireNoRunnerArtifacts(t, tempParent)
-	if _, err := os.Stat(unrelated); err != nil {
-		t.Fatalf("concurrent runners removed unrelated directory: %v", err)
-	}
+	})
+
+	t.Run("forced timeout terminates and reaps the process group", func(t *testing.T) {
+		tempParent := t.TempDir()
+		unrelated := filepath.Join(tempParent, "unrelated-runner-data")
+		if err := os.Mkdir(unrelated, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ready := filepath.Join(tempParent, "go-ready")
+		runner := startRunner(t, runnerCommand(t, tempParent, fakeRunnerBin(t, true), "FAKE_GO_READY="+ready))
+		waitForCondition(t, "runner to enter the held test phase", func() bool {
+			return pathExists(ready) && len(runnerArtifacts(t, tempParent)) == 1
+		})
+		if _, finished := runner.wait(50 * time.Millisecond); finished {
+			t.Fatalf("held runner exited before the forced timeout:\n%s", runner.output.String())
+		}
+		if err := runner.terminateAndReap(syscall.SIGTERM, runnerTestTimeout); err != nil {
+			t.Fatalf("terminate timed-out runner: %v", err)
+		}
+		if runner.waitErr == nil {
+			t.Fatal("timed-out runner succeeded after termination")
+		}
+		if runner.processGroupAlive() {
+			t.Fatal("timed-out runner process group survived termination")
+		}
+		requireNoRunnerArtifacts(t, tempParent)
+		if _, err := os.Stat(unrelated); err != nil {
+			t.Fatalf("timeout cleanup removed unrelated directory: %v", err)
+		}
+	})
+
+	t.Run("pre-barrier failure cleans every runner", func(t *testing.T) {
+		tempParent := t.TempDir()
+		unrelated := filepath.Join(tempParent, "unrelated-runner-data")
+		barrier := filepath.Join(tempParent, "barrier")
+		for _, dir := range []string{unrelated, barrier} {
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		release := filepath.Join(barrier, "release")
+		binDir := fakeRunnerBin(t, true)
+		held := startRunner(t, runnerCommand(t, tempParent, binDir,
+			"FAKE_GO_BARRIER_DIR="+barrier,
+			"FAKE_GO_BARRIER_RELEASE="+release,
+			"TEST_INVOCATION_ID=held",
+			"FAKE_CANARY_STATE="+filepath.Join(tempParent, "held-canary-state"),
+		))
+		failed := startRunner(t, runnerCommand(t, tempParent, binDir,
+			"FAKE_GO_BARRIER_DIR="+barrier,
+			"FAKE_GO_BARRIER_RELEASE="+release,
+			"FAKE_GO_PRE_BARRIER_STATUS=23",
+			"TEST_INVOCATION_ID=failed",
+			"FAKE_CANARY_STATE="+filepath.Join(tempParent, "failed-canary-state"),
+		))
+		waitForCondition(t, "first runner to reach the barrier", func() bool {
+			return pathExists(filepath.Join(barrier, "held.ready"))
+		})
+		if err, finished := failed.wait(runnerTestTimeout); !finished {
+			t.Fatal("pre-barrier failure did not exit within the bounded wait")
+		} else if err == nil {
+			t.Fatal("pre-barrier failure unexpectedly succeeded")
+		}
+		if !strings.Contains(failed.output.String(), "failed with exit code 23") {
+			t.Fatalf("pre-barrier failure output missing exit status:\n%s", failed.output.String())
+		}
+		if pathExists(filepath.Join(barrier, "failed.ready")) {
+			t.Fatal("failing runner reached the barrier")
+		}
+		if err := held.terminateAndReap(syscall.SIGTERM, runnerTestTimeout); err != nil {
+			t.Fatalf("terminate runner held by failed peer: %v", err)
+		}
+		for _, runner := range []*runningRunner{held, failed} {
+			if runner.processGroupAlive() {
+				t.Fatal("runner process group survived pre-barrier failure cleanup")
+			}
+		}
+		requireNoRunnerArtifacts(t, tempParent)
+		if _, err := os.Stat(unrelated); err != nil {
+			t.Fatalf("pre-barrier cleanup removed unrelated directory: %v", err)
+		}
+	})
 }
