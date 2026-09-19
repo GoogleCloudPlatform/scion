@@ -580,6 +580,7 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// row created here — the ID they need exists nowhere else. Done before the
 	// SSE event so a client refetching on it already sees them.
 	linkAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, parseAttachmentRefs(msg.Metadata), p.log)
+	delete(msg.Metadata, attachmentsMetadataKey) // strip internal transport key
 
 	// Stamp the DM watermark with the store-assigned message ID. The web
 	// channel spoke already registered the participant rows and bumped

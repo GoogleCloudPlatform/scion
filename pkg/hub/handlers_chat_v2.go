@@ -1248,6 +1248,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			}
 		}
 	}
+	delete(msg.Metadata, attachmentsMetadataKey) // strip internal transport key
 
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 

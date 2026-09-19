@@ -274,6 +274,14 @@ func NewSystemMessage(sender, recipient, msg, category string) *StructuredMessag
 	}
 }
 
+// logMetadataSkipKeys lists metadata keys that are internal transport
+// mechanisms and should never appear in log output. Defense-in-depth:
+// even if a new call site forgets to strip the key after consuming it,
+// LogAttrs will not emit it.
+var logMetadataSkipKeys = map[string]bool{
+	"attachments": true, // internal attachment-ref transport; see pkg/hub/attachments_agent.go
+}
+
 // LogAttrs returns slog attributes for structured logging of this message.
 func (m *StructuredMessage) LogAttrs() []any {
 	attrs := []any{
@@ -300,6 +308,12 @@ func (m *StructuredMessage) LogAttrs() []any {
 	}
 	if m.ThreadID != "" {
 		attrs = append(attrs, "thread_id", m.ThreadID)
+	}
+	for k, v := range m.Metadata {
+		if logMetadataSkipKeys[k] {
+			continue
+		}
+		attrs = append(attrs, "meta_"+k, v)
 	}
 	return attrs
 }

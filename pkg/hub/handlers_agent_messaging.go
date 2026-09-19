@@ -1038,6 +1038,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		cr := s.channelRegistry
 		s.mu.RUnlock()
 		linkAttachmentRefs(ctx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
+		delete(structuredMsg.Metadata, attachmentsMetadataKey) // strip internal transport key
 		s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 		if cr != nil && cr.Len() > 0 {
 			cr.Dispatch(ctx, structuredMsg)
