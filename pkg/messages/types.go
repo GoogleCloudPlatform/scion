@@ -42,6 +42,11 @@ const MaxMetadataKeySize = 256
 // Maximum size of a single metadata value in bytes.
 const MaxMetadataValueSize = 4 * 1024 // 4KB
 
+// AttachmentsMetadataKey is the StructuredMessage.Metadata key carrying the
+// JSON-encoded attachment refs of a message's attachments. It is used by
+// pkg/hub for internal transport and must be stripped before logging.
+const AttachmentsMetadataKey = "attachments"
+
 // Maximum length of the Channel field.
 const MaxChannelLength = 64
 
@@ -279,7 +284,7 @@ func NewSystemMessage(sender, recipient, msg, category string) *StructuredMessag
 // even if a new call site forgets to strip the key after consuming it,
 // LogAttrs will not emit it.
 var logMetadataSkipKeys = map[string]bool{
-	"attachments": true, // internal attachment-ref transport; see pkg/hub/attachments_agent.go
+	AttachmentsMetadataKey: true, // internal attachment-ref transport; see pkg/hub/attachments_agent.go
 }
 
 // LogAttrs returns slog attributes for structured logging of this message.
