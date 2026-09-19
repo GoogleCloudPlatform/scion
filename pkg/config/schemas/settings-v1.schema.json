@@ -923,6 +923,14 @@
           "description": "Controls user access: 'open' (anyone can sign in), 'invite' (admin must invite), 'closed' (no new users).",
           "x-env-var": "SCION_SERVER_AUTH_USER_ACCESS_MODE",
           "x-since": "1"
+        },
+        "default_user_role": {
+          "type": "string",
+          "description": "Role assigned to new users not in admin_emails. Values: 'member' (default), 'viewer'. 'admin' is blocked.",
+          "enum": ["member", "viewer"],
+          "default": "member",
+          "x-env-var": "SCION_SERVER_AUTH_DEFAULT_USER_ROLE",
+          "x-since": "1"
         }
       }
     },

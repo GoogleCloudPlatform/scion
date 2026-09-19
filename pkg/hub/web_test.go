@@ -186,6 +186,7 @@ type staticAccessSettings struct {
 func (s *staticAccessSettings) AdminEmails() []string       { return s.adminEmails }
 func (s *staticAccessSettings) AuthorizedDomains() []string { return s.authorizedDomains }
 func (s *staticAccessSettings) UserAccessMode() string      { return s.userAccessMode }
+func (s *staticAccessSettings) DefaultUserRole() string     { return "member" }
 
 func newTestWebServer(t *testing.T, cfg WebServerConfig) *WebServer {
 	t.Helper()
