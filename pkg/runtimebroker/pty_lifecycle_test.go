@@ -109,8 +109,10 @@ exec "$TW_LIFECYCLE_TMUX" -S "$TW_LIFECYCLE_SOCKET" "$@"
 				_ = bridge.Run() // EOF/EIO/cancellation are normal detach outcomes.
 				_ = client.CloseStream(streamID, "session ended", 0)
 			}()
-			// Cancel through the stream to avoid racing initialization of the PTY.
+			// Cancel readiness too on assertion failure; do not access PTY fields
+			// until Run exits, since initialization may still be in progress.
 			t.Cleanup(func() {
+				bridge.cancel()
 				payload, _ := json.Marshal(wsprotocol.NewStreamCloseMessage(streamID, "test cleanup", 0))
 				_ = client.handleStreamClose(payload)
 				select {
