@@ -111,6 +111,8 @@ func TestControlChannelBrokerClient_StartAgentSignsTunneledRequest(t *testing.T)
 		"/tmp/project",
 		"project-slug",
 		"",
+		"",
+		"",
 		nil,
 		nil,
 		nil,
