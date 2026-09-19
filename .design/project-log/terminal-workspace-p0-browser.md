@@ -75,3 +75,22 @@ message validation, logout teardown, bounded request-cache policy, BFCache resto
 and real transport closure before lock release. These are not implemented in this
 P0 fixture. The actual desktop focus and lifecycle-freeze observations are still
 needed; a timeout must never be used as proof that ownership is vacant.
+
+## Review fixes (R2)
+
+Addressed findings O1 and O2 on top of R1 head
+`9d80bc29e25af155cca219b2b210ac35a1abfc44`:
+
+- O1: A raw `GET http://[ HTTP/1.1` reproduced an uncaught `ERR_INVALID_URL`
+  that terminated the fixture server. The new regression failed before the fix.
+  Guarded request-target parsing now returns HTTP 400, and the regression requires
+  a following healthy request to return HTTP 200 and the fixture HTML.
+- O2: Added separate acknowledgment regressions for mismatched request ID, agent
+  ID, and owner generation. Each verifies the caller remains pending/non-owner,
+  then accepts the real owner's matching acknowledgment after processing resumes.
+
+R2 validation: the same isolated-environment fixture command passed all **15 tests**;
+fixture TypeScript checking, server syntax/ESLint checks, Prettier and Git whitespace
+checks passed. Full repository checks were not repeated for these fixture-local
+changes; R1 results and unchanged baseline lint failures remain recorded above.
+Real desktop focus and automatic lifecycle-freeze limitations remain unchanged.

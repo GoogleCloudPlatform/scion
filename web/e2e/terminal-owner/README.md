@@ -14,8 +14,8 @@ npm run typecheck -- --project e2e/terminal-owner/tsconfig.json
 ```
 
 Omit `TERMINAL_OWNER_CHROMIUM` to use Playwright's installed Chromium. The local
-config starts a loopback-only fixture server on port 4517. `owner.pw.ts` deliberately
-does not match the root `*.spec.ts` suite, which starts a real Hub. CI must invoke
+config starts a loopback-only fixture server on port 4517. The fixture `*.pw.ts` files
+deliberately do not match the root `*.spec.ts` suite, which starts a real Hub. CI must invoke
 this config explicitly. No common harness changes or new packages are needed.
 In Scion, remove inherited `SCION_*` variables from the test child environment.
 
@@ -62,6 +62,11 @@ Sources checked 2026-09-19: [Web Locks](https://www.w3.org/TR/web-locks/),
 [window focus](https://html.spec.whatwg.org/multipage/interaction.html#dom-window-focus).
 The lock callback controls ownership lifetime; focus is a request the browser can
 decline. Browser messaging and ownership do not establish desktop activation.
+
+Regression coverage also rejects acknowledgments with mismatched request ID,
+agent ID, or generation while allowing the subsequent legitimate acknowledgment.
+The loopback server returns HTTP 400 for malformed request targets; a raw HTTP
+regression checks that a following healthy request still succeeds.
 
 ## Observed versus unverified
 

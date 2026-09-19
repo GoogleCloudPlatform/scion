@@ -7,7 +7,14 @@ const assets = new Map([
   ['/coordinator.js', ['coordinator.js', 'text/javascript']],
 ]);
 const server = createServer(async (request, response) => {
-  const asset = assets.get(new URL(request.url, 'http://localhost').pathname);
+  let pathname;
+  try {
+    pathname = new URL(request.url, 'http://localhost').pathname;
+  } catch {
+    response.writeHead(400).end('Invalid request target');
+    return;
+  }
+  const asset = assets.get(pathname);
   if (!asset) {
     response.writeHead(404).end();
     return;

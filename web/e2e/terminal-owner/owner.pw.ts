@@ -203,3 +203,47 @@ test('stale generation messages cannot execute a selection', async ({ context })
   await open(caller, 'agent-b', 'valid');
   expect(await snapshot(owner)).toMatchObject({ executions: 2, sessions: ['agent-a', 'agent-b'] });
 });
+
+for (const mismatch of ['requestId', 'agentId', 'generation'] as const) {
+  test(`acknowledgment with mismatched ${mismatch} cannot resolve a pending open`, async ({
+    context,
+  }) => {
+    const owner = await context.newPage();
+    const caller = await context.newPage();
+    await Promise.all([load(owner), load(caller)]);
+    await open(owner);
+    const state = await snapshot(owner);
+    await owner.evaluate(() => window.fixture.pause(true));
+    expect((await open(caller, 'agent-b', 'pending-request')).status).toBe('pending');
+
+    await owner.evaluate(
+      ({ state, mismatch }) => {
+        const channel = new BroadcastChannel(state.lockName);
+        channel.postMessage({
+          key: state.key,
+          type: 'ack',
+          requestId: 'pending-request',
+          agentId: 'agent-b',
+          generation: state.generation,
+          status: 'injected-ack',
+          [mismatch]: 'wrong-value',
+        });
+        channel.close();
+      },
+      { state, mismatch }
+    );
+
+    expect((await open(caller, 'agent-b', 'pending-request')).status).toBe('pending');
+    expect((await snapshot(caller)).owner).toBe(false);
+    await owner.evaluate(() => window.fixture.pause(false));
+    expect(await open(caller, 'agent-b', 'pending-request')).toMatchObject({
+      status: 'selected',
+      generation: state.generation,
+      text: 'Selected in your terminal workspace',
+    });
+    expect(await snapshot(owner)).toMatchObject({
+      executions: 2,
+      sessions: ['agent-a', 'agent-b'],
+    });
+  });
+}
