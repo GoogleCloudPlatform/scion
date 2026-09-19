@@ -120,6 +120,23 @@ jobs:
           esac
           exit "$rc"
 
+      - name: Check Route Authorization Manifest
+        run: |
+          # Invoked directly rather than via `make check-route-authz-manifest`:
+          # GNU make reports its own failure code (always 2), which would collapse
+          # the script's exit 1 (violations) and exit 4 (nothing was analysed)
+          # into one indistinguishable result. Those mean opposite things.
+          set +e
+          ./hack/check-route-authz-manifest.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Route authorization manifest::Routes found without declared authorization posture (see ptone/scion#598). The route list is in the step log above." ;;
+            *) echo "::error title=Route authorization manifest NOT checked::check-route-authz-manifest could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure and is NOT a statement about the codebase. Do not read it as a manifest failure." ;;
+          esac
+          exit "$rc"
+
       - name: Run Tests
         run: make test-fast
 
