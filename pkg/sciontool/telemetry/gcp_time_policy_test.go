@@ -283,10 +283,17 @@ func TestGCPHookSnapshotWaitsForActualTwoMillisecondObservation(t *testing.T) {
 	if err := p.handleMetrics(context.Background(), []*metricpb.ResourceMetrics{testMetricResource("sciontool", hookMetricScope, "", "", m)}); err != nil {
 		t.Fatal(err)
 	}
+	owned := p.QueueDepth()
+	if owned.Records != 1 || owned.Entries != 1 {
+		t.Fatalf("unexpected admitted ownership: %+v", owned)
+	}
 	for _, gap := range []time.Duration{500 * time.Microsecond, time.Millisecond, 2*time.Millisecond - time.Nanosecond} {
 		now = time.Unix(100, 0).Add(gap)
 		if p.flushMetricBuffer(context.Background(), true) || len(p.metricPending) != 0 || len(sink.exports) != 0 {
 			t.Fatalf("premature point at %s", gap)
+		}
+		if depth, diag := p.QueueDepth(), p.Diagnostics()["metrics"]; depth != owned || len(p.metricDirtyAdmissions) != 1 || len(p.metricPendingAdmissions) != 0 || !p.metricStreams.hasDirty() || len(p.metricPossibleEnds) != 0 || p.metricBatchSequence != 0 || diag.Accepted != 1 || diag.Queued != 1 || diag.Attempts != 0 || diag.Delivered != 0 || diag.Unconfirmed != 0 {
+			t.Fatalf("short snapshot transferred ownership at %s: depth=%+v diag=%+v dirty=%d pending=%d sequence=%d watermarks=%d", gap, depth, diag, len(p.metricDirtyAdmissions), len(p.metricPendingAdmissions), p.metricBatchSequence, len(p.metricPossibleEnds))
 		}
 	}
 	now = time.Unix(100, 0).Add(2 * time.Millisecond)
@@ -296,6 +303,9 @@ func TestGCPHookSnapshotWaitsForActualTwoMillisecondObservation(t *testing.T) {
 	pt := sink.exports[0].ScopeMetrics[0].Metrics[0].Data.(metricdata.Sum[int64]).DataPoints[0]
 	if !pt.Time.Equal(now) {
 		t.Fatalf("fabricated observation end %+v", pt)
+	}
+	if depth, diag := p.QueueDepth(), p.Diagnostics()["metrics"]; depth != (QueueDepth{}) || diag.Accepted != 1 || diag.Delivered != 1 || diag.Queued != 1 || diag.Attempts != 1 || len(p.metricDirtyAdmissions) != 0 || len(p.metricPendingAdmissions) != 0 || p.metricBatchSequence != 1 || len(p.metricPossibleEnds) != 1 {
+		t.Fatalf("eligible snapshot did not settle ownership: depth=%+v diag=%+v dirty=%d pending=%d sequence=%d watermarks=%d", depth, diag, len(p.metricDirtyAdmissions), len(p.metricPendingAdmissions), p.metricBatchSequence, len(p.metricPossibleEnds))
 	}
 }
 
