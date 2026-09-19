@@ -191,6 +191,15 @@ func TestIntegrationRunnerCleansArtifactsOnSignal(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	unrelatedLegacyLog, err := os.CreateTemp("/tmp", "ci-test-json.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelatedLegacyLogPath := unrelatedLegacyLog.Name()
+	if err := unrelatedLegacyLog.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(unrelatedLegacyLogPath) })
 	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
@@ -212,6 +221,9 @@ func TestIntegrationRunnerCleansArtifactsOnSignal(t *testing.T) {
 	}
 	if len(leaked) != 0 {
 		t.Fatalf("signal-interrupted runner leaked legacy logs: %v", leaked)
+	}
+	if _, err := os.Stat(unrelatedLegacyLogPath); err != nil {
+		t.Fatalf("signal test removed unrelated legacy-pattern file: %v", err)
 	}
 }
 
@@ -238,6 +250,9 @@ func TestIntegrationRunnerConcurrentInvocationsAreIsolated(t *testing.T) {
 			"TEST_INVOCATION_ID="+id,
 			"FAKE_CANARY_STATE="+filepath.Join(tempParent, id+"-canary-state"),
 		)
+		if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+			t.Fatalf("%s is not configured with an isolated process group", id)
+		}
 		go func() {
 			output, err := cmd.CombinedOutput()
 			results <- result{id: id, output: output, err: err}
