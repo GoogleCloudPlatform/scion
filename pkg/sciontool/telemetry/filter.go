@@ -37,6 +37,16 @@ var nativeFieldAliases = map[string]string{
 	"gen_ai.conversation.id":     "session_id",
 }
 
+// These documented native identity/content keys must not leave the receiver
+// raw or as content-derived hashes, regardless of an explicit field policy.
+var mandatoryRedactFields = map[string]struct{}{
+	"gen_ai.system_instructions": {},
+	"organization.id":            {},
+	"user.account_uuid":          {},
+	"user.account_id":            {},
+	"user.id":                    {},
+}
+
 const (
 	maxAnyValueDepth = 32
 	maxAnyValueNodes = 4096
@@ -164,9 +174,7 @@ func (r *Redactor) ShouldRedact(key string) bool {
 	if r == nil {
 		return false
 	}
-	// This known native content field must not be disabled by an explicit
-	// redaction list or downgraded to a hash by custom configuration.
-	if key == "gen_ai.system_instructions" {
+	if _, mandatory := mandatoryRedactFields[key]; mandatory {
 		return true
 	}
 	return r.redactFields[key] || r.redactFields[nativeFieldAliases[key]]
