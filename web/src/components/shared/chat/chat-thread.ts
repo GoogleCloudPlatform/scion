@@ -38,6 +38,7 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { guard } from 'lit/directives/guard.js';
 import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Agent, Message } from '../../../shared/types.js';
 import type { ChatSendDetail } from './chat-composer.js';
@@ -65,6 +66,14 @@ const MAX_BUFFER = 500;
 
 /** Number of messages to fetch per history request. */
 const HISTORY_PAGE_SIZE = 50;
+
+const MESSAGE_DATE_FORMAT = new Intl.DateTimeFormat('en', {
+  year: 'numeric',
+  month: 'short',
+  day: 'numeric',
+});
+const EMPTY_ATTACHMENTS: NonNullable<Message['attachments']> = [];
+const EMPTY_ATTACHMENT_REFS: import('./chat-message.js').AttachmentRefInfo[] = [];
 
 /** Threshold in pixels from top to trigger upward scroll loading. */
 const SCROLL_TOP_THRESHOLD = 100;
@@ -273,6 +282,23 @@ export class ScionChatThread extends LitElement {
   @state() private loadingOlder = false;
   @state() private hasOlderMessages = true;
   @state() private loaded = false;
+
+  private messageRowsVersion = 0;
+
+  override willUpdate(changedProperties: Map<string, unknown>): void {
+    // These updates affect controls around the transcript, not its rows.
+    // Invalidate for every other property (including future ones), and for
+    // explicit requestUpdate() calls such as read-receipt expiry. Metadata
+    // maps are mutated in place alongside messages, so do not cache by map identity.
+    if (
+      changedProperties.size === 0 ||
+      [...changedProperties.keys()].some(
+        (key) => key !== 'typingUsers' && key !== 'agents' && key !== 'pinnedToBottom'
+      )
+    ) {
+      this.messageRowsVersion++;
+    }
+  }
   /** Mention results keyed by message ID (for "also notified" footer per message). */
   @state() private mentionResultsByMessageId = new Map<string, MentionResult[]>();
 
@@ -1018,7 +1044,7 @@ export class ScionChatThread extends LitElement {
   private getMessageAttachmentRefs(
     messageId: string
   ): import('./chat-message.js').AttachmentRefInfo[] {
-    return this.v2AttachmentMap.get(messageId) ?? [];
+    return this.v2AttachmentMap.get(messageId) ?? EMPTY_ATTACHMENT_REFS;
   }
 
   /** Check if a message sender is an agent (v2 multi-sender). */
@@ -3202,7 +3228,7 @@ export class ScionChatThread extends LitElement {
           ${this.loadingOlder
             ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
             : nothing}
-          ${this.renderMessages()}
+          ${guard([this.messageRowsVersion, this.seenExpired], () => this.renderMessages())}
         </div>
         ${!this.pinnedToBottom
           ? html`
@@ -3216,6 +3242,10 @@ export class ScionChatThread extends LitElement {
           : nothing}
       </div>
     `;
+  }
+
+  private get seenExpired(): boolean {
+    return this.peerReadAt > 0 && Date.now() - this.peerReadAt > SEEN_VISIBLE_MS;
   }
 
   private renderMessages() {
@@ -3234,7 +3264,7 @@ export class ScionChatThread extends LitElement {
     // Delivery state is a property of the conversation's tail, not of every
     // bubble: only the newest message this user sent carries it.
     const lastOwnMessageId = this.lastOwnMessageId();
-    const seenExpired = this.peerReadAt > 0 && Date.now() - this.peerReadAt > SEEN_VISIBLE_MS;
+    const seenExpired = this.seenExpired;
 
     // Unread divider: find the position of the last-read message so we can
     // insert the divider after it.
@@ -3247,11 +3277,7 @@ export class ScionChatThread extends LitElement {
     for (let mi = 0; mi < this.messages.length; mi++) {
       const msg = this.messages[mi];
       const d = new Date(msg.createdAt);
-      const dateStr = d.toLocaleDateString('en', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      });
+      const dateStr = Number.isNaN(d.getTime()) ? 'Invalid Date' : MESSAGE_DATE_FORMAT.format(d);
 
       // Collect all inter-agent messages that fall before this DM message
       // and insert ONE pill for the entire group.
@@ -3374,7 +3400,7 @@ export class ScionChatThread extends LitElement {
           dispatchState=${this.deliveryStateFor(msg, lastOwnMessageId, seenExpired)}
           ?seen=${msg.id === lastOwnMessageId && this.isMessageSeen(msg)}
           dispatchFailureReason=${msg.dispatchFailureReason || ''}
-          .attachments=${msg.attachments || []}
+          .attachments=${msg.attachments || EMPTY_ATTACHMENTS}
           .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
           routedTo=${msgRoutedTo}
           .replyPreview=${replyPreview}

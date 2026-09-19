@@ -231,6 +231,10 @@ export class ScionPageChat extends LitElement {
   // ---- V2 state ----
   @state() private v2Conversation: V2ConversationState | null = null;
   @state() private v2Members: SpaceMember[] = [];
+
+  private mentionAgentsSource: SpaceMember[] | null = null;
+  private mentionAgentsProjectId = '';
+  private mentionAgents: import('../../shared/types.js').Agent[] = [];
   @state() private v2MembersExpanded = true;
 
   /** Width of the members panel in px. Persisted per browser. */
@@ -3317,17 +3321,24 @@ export class ScionPageChat extends LitElement {
 
   /** Extract agent members as Agent-like objects for the mention autocomplete. */
   private getAgentsFromMembers(): import('../../shared/types.js').Agent[] {
-    return this.v2Members
+    const projectId = this.v2Conversation?.projectId || '';
+    if (this.mentionAgentsSource === this.v2Members && this.mentionAgentsProjectId === projectId) {
+      return this.mentionAgents;
+    }
+    this.mentionAgentsSource = this.v2Members;
+    this.mentionAgentsProjectId = projectId;
+    this.mentionAgents = this.v2Members
       .filter((m) => m.kind === 'agent')
       .map((m) => ({
         id: m.id,
         name: m.name,
         slug: m.name,
-        projectId: this.v2Conversation?.projectId || '',
+        projectId,
         template: '',
         phase: 'running' as const,
         status: 'active' as const,
       }));
+    return this.mentionAgents;
   }
 
   // ---- Shared utilities ----

@@ -248,7 +248,7 @@ export class ScionSlashAutocomplete extends LitElement {
       this.dismissedPrefix = this.currentPrefix;
     }
     this.active = false;
-    this.commands = [];
+    if (this.commands.length > 0) this.commands = [];
     this.selectedIndex = 0;
   }
 

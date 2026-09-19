@@ -50,6 +50,21 @@ vi.mock('../../client/api.js', async (importOriginal) => {
 
 let ScionPageChat: any;
 
+describe('chat mention roster stability', () => {
+  it('reuses agent props until the member roster or project changes', () => {
+    const page = createPage();
+    page.v2Conversation = { projectId: 'p1' };
+    page.v2Members = [{ id: 'a', kind: 'agent', name: 'Coder', email: '' }];
+    const agents = page.getAgentsFromMembers();
+    page.v2TypingUserIds = ['someone'];
+    expect(page.getAgentsFromMembers()).toBe(agents);
+    page.v2Conversation = { projectId: 'p2' };
+    expect(page.getAgentsFromMembers()[0].projectId).toBe('p2');
+    page.v2Members = [{ id: 'a', kind: 'agent', name: 'Renamed', email: '' }];
+    expect(page.getAgentsFromMembers()[0].name).toBe('Renamed');
+  });
+});
+
 /** A page instance with a signed-in user and a small member roster. */
 function createPage(): any {
   const el = document.createElement('scion-page-chat') as any;
