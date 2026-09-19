@@ -397,9 +397,10 @@ export class ScionMentionAutocomplete extends LitElement {
     const slugs = new Set<string>();
 
     for (const agent of this.agents || []) {
-      slugs.add(agent.slug || agent.name || '');
+      const rawSlug = agent.slug || agent.name || '';
+      slugs.add(rawSlug.toLowerCase().replace(/\s+/g, '-'));
       allCandidates.push({
-        slug: agent.slug || agent.name || '',
+        slug: rawSlug,
         name: agent.name || '',
         kind: 'agent',
         avatarUrl: undefined,
