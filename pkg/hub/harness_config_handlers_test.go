@@ -332,6 +332,130 @@ func TestHarnessConfigPatch(t *testing.T) {
 	}
 }
 
+func TestHarnessConfigPatchStatus(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	hc := &store.HarnessConfig{
+		ID:         tid("hc_pstat1"),
+		Slug:       "patch-status-test",
+		Name:       "Patch Status Test",
+		Harness:    "claude",
+		Scope:      "global",
+		Visibility: store.VisibilityPublic,
+		Status:     store.HarnessConfigStatusActive,
+		Created:    time.Now(),
+		Updated:    time.Now(),
+	}
+	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
+		t.Fatalf("failed to create harness config: %v", err)
+	}
+
+	// Archive the config.
+	body := map[string]interface{}{"status": "archived"}
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/harness-configs/%s", tid("hc_pstat1")), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var result store.HarnessConfig
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if result.Status != store.HarnessConfigStatusArchived {
+		t.Errorf("expected status %q, got %q", store.HarnessConfigStatusArchived, result.Status)
+	}
+
+	// Restore the config back to active.
+	body = map[string]interface{}{"status": "active"}
+	rec = doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/harness-configs/%s", tid("hc_pstat1")), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if result.Status != store.HarnessConfigStatusActive {
+		t.Errorf("expected status %q, got %q", store.HarnessConfigStatusActive, result.Status)
+	}
+
+	// Invalid status should be rejected.
+	body = map[string]interface{}{"status": "deleted"}
+	rec = doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/harness-configs/%s", tid("hc_pstat1")), body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for invalid status, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHarnessConfigListStatusFilter(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	activeHC := &store.HarnessConfig{
+		ID:         tid("hc_lsf_active"),
+		Slug:       "list-filter-active",
+		Name:       "Active HC",
+		Harness:    "claude",
+		Scope:      "global",
+		Visibility: store.VisibilityPublic,
+		Status:     store.HarnessConfigStatusActive,
+		Created:    time.Now(),
+		Updated:    time.Now(),
+	}
+	archivedHC := &store.HarnessConfig{
+		ID:         tid("hc_lsf_arch"),
+		Slug:       "list-filter-archived",
+		Name:       "Archived HC",
+		Harness:    "claude",
+		Scope:      "global",
+		Visibility: store.VisibilityPublic,
+		Status:     store.HarnessConfigStatusArchived,
+		Created:    time.Now(),
+		Updated:    time.Now(),
+	}
+	for _, hc := range []*store.HarnessConfig{activeHC, archivedHC} {
+		if err := s.CreateHarnessConfig(ctx, hc); err != nil {
+			t.Fatalf("failed to create harness config %s: %v", hc.ID, err)
+		}
+	}
+
+	// Default listing returns only active configs.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp ListHarnessConfigsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.HarnessConfigs) != 1 {
+		t.Errorf("expected 1 active config in default listing, got %d", len(resp.HarnessConfigs))
+	}
+
+	// ?status=archived returns only archived configs.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs?status=archived", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.HarnessConfigs) != 1 {
+		t.Errorf("expected 1 archived config, got %d", len(resp.HarnessConfigs))
+	}
+
+	// ?status=all returns both active and archived configs.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs?status=all", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.HarnessConfigs) != 2 {
+		t.Errorf("expected 2 configs with status=all, got %d", len(resp.HarnessConfigs))
+	}
+}
+
 func TestHarnessConfigExposesCapabilities(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
