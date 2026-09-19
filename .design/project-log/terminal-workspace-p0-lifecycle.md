@@ -1,8 +1,9 @@
 # Terminal workspace P0.2: retained xterm and detach lifecycle
 
 Date: 2026-09-19. Base: `1bb405704a96c2a03f2a1b2b95719edc5d0cda94`.
-Scope: executable proof fixtures only; no production behavior or runtime policy
-changed. Design: [persistent terminal workspace](../hosted/terminal-workspace.md).
+Fixture scope: executable proof only. The combined candidate also imports the
+separately authored, manager-authorized PTY cleanup fix described below; runtime
+policy is unchanged. Design: [persistent terminal workspace](../hosted/terminal-workspace.md).
 
 ## Findings and contract
 
@@ -33,11 +34,16 @@ changed. Design: [persistent terminal workspace](../hosted/terminal-workspace.md
    These checks do not establish behavior of a remote container init process.
 5. **Resize and FD teardown need synchronization.** The focused race run exposed
    `handleResize()` calling `pty.Setsize`/`os.File.Fd` while the PTY reader releases
-   and destroys the descriptor during detach-plus-close. `Run()` cancels but does
+   and destroys the descriptor during detach-plus-close. The original `Run()` canceled but did
    not join the resize goroutine before its deferred FD close. This is a concrete
    production defect, not a failed assertion in the fixture; the initial race
    trace is preserved in the shared report logs. The manager assigned a separate
-   developer to the production fix; this worker retains fixture ownership.
+   developer to the production fix; this worker retains fixture ownership. That
+   exact atomic fix now joins the resize worker after cancellation and before FD
+   teardown. Original commit `2c2ac3e7cc97dc03b4b418c86dac4e1d537e1741` maps to
+   `cb252a740a4ba88006214a658d218eefcdd6f490` atop fixture head
+   `b8da19661001a9215f160afaf936ef27de3abb49`; exact diff-byte equivalence was
+   verified. Production changes were not reauthored by this worker.
 6. **Do not infer runtime policy from the frontend comment.** The comment in
    `sendTmuxDetach()` says killing an attach would tear down the container. The
    local kernel-PTY/tmux proof shows that killing this attach leaves its pane
@@ -112,13 +118,23 @@ Commands from repository root:
 
 - `go test ./pkg/hub ./pkg/runtimebroker -run TestPTYLifecycle -count=1 -v`:
   **pass**, Hub case and broker's four attachment rounds.
-- `go test -race ./pkg/hub ./pkg/runtimebroker -run TestPTYLifecycle -count=1 -v`:
-  **failed**, production PTY resize/close race in the broker's detach-plus-close
-  round; Hub case passed. A separate developer owns the production fix; the
-  fixture candidate remains provisional until that dependency is verified.
-- `make ci`: **pass** (format, vet, custom checks, all no-SQLite tests, build).
+- Initial `go test -race ./pkg/hub ./pkg/runtimebroker -run TestPTYLifecycle
+-count=1 -v`: **failed before the fix**, production PTY resize/close race in the
+  broker's detach-plus-close round; Hub case passed. The trace remains preserved.
+- Combined `go test -race ./pkg/hub ./pkg/runtimebroker -run TestPTYLifecycle
+-count=30 -v`: **pass**, 30 Hub cases and 120 broker lifecycle rounds, no skips.
+- Combined `go test -race ./pkg/runtimebroker -count=1`: **pass**, complete broker
+  package under the race detector.
+- Combined three browser fixtures and their typecheck, ESLint and Prettier gates:
+  **pass** again after the exact fix import. Production web sources are unchanged;
+  the earlier full web unit/typecheck/build results above remain applicable.
+- Combined `make ci`: **pass** (format, vet, custom checks, all no-SQLite tests, build).
   `make ci-full` was not run; the separate web gates above were run, while the
   additional full-repository golangci-lint gate was not part of this fixture run.
+
+Combined checks ran at `cb252a740a4ba88006214a658d218eefcdd6f490`; the subsequent
+fixture-owned commit updates only this findings document. Both the fixture unit
+and the mapped fix still require independent review before integration.
 
 Local commits are delivered through a verified shared Git bundle as required by
 the brief, with exact head, prerequisites, checksums and logs in the shared P0.2
