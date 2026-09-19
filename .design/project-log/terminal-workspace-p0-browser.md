@@ -73,8 +73,12 @@ desktop acceptance gates and makes no guarantee of foreground activation.
 Keep future production concerns explicit: authenticated account/deployment keys,
 message validation, logout teardown, bounded request-cache policy, BFCache restore,
 and real transport closure before lock release. These are not implemented in this
-P0 fixture. The actual desktop focus and lifecycle-freeze observations are still
-needed; a timeout must never be used as proof that ownership is vacant.
+P0 fixture. Per the coordinator's acceptance clarification, debugger-confirmed
+suspension with a held lock and no takeover establishes the **P0 unresponsive-owner
+contract**. Actual browser lifecycle freezing remains unverified runtime behavior
+carried to **P3.3**, not an additional P0 gate. This does not equate debugger pause
+with lifecycle freeze. Desktop foreground evidence remains pending a real desktop
+run or explicit user deferral; a timeout never proves ownership is vacant.
 
 ## Review fixes (R2)
 

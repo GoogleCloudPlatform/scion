@@ -88,6 +88,12 @@ or window manager was available. Automated focus emulation is not desktop proof.
 
 ## Real desktop manual procedure
 
+Acceptance clarification: debugger-confirmed suspension establishes the P0
+unresponsive-owner contract. Actual lifecycle freezing remains unverified and is
+carried to P3.3, not an additional P0 gate. Step 7 below is that later runtime
+investigation. Desktop foreground evidence remains pending a real desktop run or
+explicit user deferral. Debugger pause is not lifecycle freeze.
+
 Record Chrome version from `chrome://version`, OS/window manager, fixture commit,
 and whether the browser is normal/incognito. Use no automation, focus-enabling
 flags, extension, or DevTools focus emulation. Record the physically visible
