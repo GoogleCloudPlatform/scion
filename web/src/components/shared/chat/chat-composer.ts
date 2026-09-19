@@ -31,6 +31,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { guard } from 'lit/directives/guard.js';
 import type { Agent } from '../../../shared/types.js';
 import type { MentionAcceptDetail } from './mention-autocomplete.js';
 import type { SlashCommandDetail } from './slash-autocomplete.js';
@@ -40,6 +41,11 @@ import { showToast } from '../../../utils/toast.js';
 
 /** Maximum message length in rune count. */
 const MAX_MESSAGE_LENGTH = 2000;
+
+const GRAPHEME_SEGMENTER =
+  typeof Intl !== 'undefined' && 'Segmenter' in Intl
+    ? new Intl.Segmenter('en', { granularity: 'grapheme' })
+    : null;
 
 /** Pastes exceeding this rune count are auto-converted to text attachments. */
 export const PASTE_TO_ATTACHMENT_THRESHOLD = 1000;
@@ -112,11 +118,10 @@ export interface MemberInfo {
  * Uses Intl.Segmenter where available, falls back to spread length.
  */
 function countRunes(text: string): number {
-  if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
-    const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
+  if (GRAPHEME_SEGMENTER) {
     let count = 0;
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    for (const _ of segmenter.segment(text)) count++;
+    for (const _ of GRAPHEME_SEGMENTER.segment(text)) count++;
     return count;
   }
   // Fallback: spread into an array (handles surrogate pairs but not all grapheme clusters)
@@ -125,6 +130,11 @@ function countRunes(text: string): number {
 
 @customElement('scion-chat-composer')
 export class ScionChatComposer extends LitElement {
+  // Let capable browsers size the input during their normal layout pass.
+  // Older engines retain Shoelace's JS autosizing behavior.
+  private readonly nativeTextareaSizing =
+    typeof CSS !== 'undefined' && CSS.supports('field-sizing', 'content');
+
   /** Whether the send button should be disabled (e.g. while sending). */
   @property({ type: Boolean })
   disabled = false;
@@ -250,6 +260,13 @@ export class ScionChatComposer extends LitElement {
     sl-textarea::part(textarea) {
       resize: none;
       color: var(--scion-text, #1e293b);
+    }
+
+    @supports (field-sizing: content) {
+      sl-textarea::part(textarea) {
+        field-sizing: content;
+        min-width: 0;
+      }
     }
 
     sl-textarea::part(form-control) {
@@ -664,7 +681,9 @@ export class ScionChatComposer extends LitElement {
     const sendVariant = inEditMode ? 'warning' : 'primary';
 
     return html`
-      ${this.conversationMode ? this.renderDestinationChip() : nothing}
+      ${guard([this.conversationMode, this.peerName, this.defaultAgent, this.members], () =>
+        this.conversationMode ? this.renderDestinationChip() : nothing
+      )}
       <div
         class="composer-wrapper"
         @dragover=${this.handleDragOver}
@@ -704,7 +723,7 @@ export class ScionChatComposer extends LitElement {
                 placeholder=${inEditMode ? 'Edit your message...' : 'Send a message...'}
                 size="small"
                 rows="1"
-                resize="auto"
+                resize=${this.nativeTextareaSizing ? 'none' : 'auto'}
                 .value=${this.text}
                 @sl-input=${this.handleInput}
                 @keydown=${this.handleKeydown}

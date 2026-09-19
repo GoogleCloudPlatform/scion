@@ -330,7 +330,7 @@ export class ScionMentionAutocomplete extends LitElement {
       this.dismissedQuery = this.currentQuery;
     }
     this.active = false;
-    this.candidates = [];
+    if (this.candidates.length > 0) this.candidates = [];
     this.highlightIndex = 0;
     this.triggerStart = -1;
   }
@@ -394,8 +394,10 @@ export class ScionMentionAutocomplete extends LitElement {
   private matchCandidates(query: string): MentionCandidate[] {
     // Build a unified list of candidates from agents + members
     const allCandidates: MentionCandidate[] = [];
+    const slugs = new Set<string>();
 
     for (const agent of this.agents || []) {
+      slugs.add(agent.slug || agent.name || '');
       allCandidates.push({
         slug: agent.slug || agent.name || '',
         name: agent.name || '',
@@ -407,7 +409,8 @@ export class ScionMentionAutocomplete extends LitElement {
     for (const member of this.members || []) {
       // Avoid duplicate entries if a member is also an agent
       const slug = member.name.toLowerCase().replace(/\s+/g, '-');
-      if (!allCandidates.some((c) => c.slug === slug)) {
+      if (!slugs.has(slug)) {
+        slugs.add(slug);
         allCandidates.push({
           slug,
           name: member.name,

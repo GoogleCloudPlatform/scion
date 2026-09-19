@@ -48,6 +48,12 @@ export interface AttachmentRefInfo {
 /** Image MIME types rendered inline. */
 const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
+const MESSAGE_TIME_FORMAT = new Intl.DateTimeFormat('en', {
+  hour12: false,
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
 /** Non-`text/*` MIME types whose bytes are still text. */
 const TEXT_MIMES = new Set([
   'application/json',
@@ -2236,11 +2242,7 @@ export class ScionChatMessage extends LitElement {
     if (!this.timestamp) return '';
     try {
       const d = new Date(this.timestamp);
-      return d.toLocaleTimeString('en', {
-        hour12: false,
-        hour: '2-digit',
-        minute: '2-digit',
-      });
+      return Number.isNaN(d.getTime()) ? 'Invalid Date' : MESSAGE_TIME_FORMAT.format(d);
     } catch {
       return '';
     }
