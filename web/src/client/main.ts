@@ -31,6 +31,9 @@ import { setDocumentTitle } from './page-title.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread } from './chat-unread.js';
+import { TerminalCoordinator } from './terminal-coordinator.js';
+import { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
+import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
 import { isFeatureEnabled, setFeatureFlag } from '../utils/feature-flags.js';
 import {
   type AdminStatus,
@@ -137,6 +140,59 @@ let ssrPageData: PageData | null = null;
  * Includes the permissions array for per-route permission checks.
  */
 let cachedAdminStatus: AdminStatus | null = null;
+let terminalWorkspaceEnabled = false;
+let terminalCoordinator: TerminalCoordinator | null = null;
+let terminalWorkspace: TerminalWorkspaceRoot | null = null;
+let routeOutlet: HTMLElement | null = null;
+const terminalNavigations = new Map<string, number>();
+const uuidPath = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const terminalAgentRoute = new RegExp(`^/terminals/(${uuidPath})$`, 'i');
+const legacyTerminalRoute = new RegExp(`^/agents/(${uuidPath})/terminal$`, 'i');
+
+function browserPath(path: string): string {
+  const base = import.meta.env.BASE_URL;
+  return base && base !== '/' ? base.replace(/\/$/, '') + path : path;
+}
+
+function ensureRoots(): HTMLElement | null {
+  const app = document.getElementById('app');
+  if (!app) return null;
+  if (!routeOutlet || routeOutlet.parentElement !== app) {
+    routeOutlet = document.createElement('div');
+    routeOutlet.id = 'route-outlet';
+    routeOutlet.style.cssText = 'height:100%;min-height:0';
+    app.replaceChildren(routeOutlet);
+  }
+  return routeOutlet;
+}
+
+function ensureTerminalCoordinator(): TerminalCoordinator | null {
+  if (!terminalWorkspaceEnabled || !currentUser?.id) return null;
+  if (terminalCoordinator) return terminalCoordinator;
+  terminalWorkspace = new TerminalWorkspaceRoot();
+  document.getElementById('app')!.appendChild(terminalWorkspace.element);
+  terminalCoordinator = new TerminalCoordinator(
+    {
+      hubUrl: new URL(import.meta.env.BASE_URL, window.location.origin).href,
+      accountId: currentUser.id,
+    },
+    {
+      initialize: (): Promise<TerminalResources> =>
+        Promise.reject(new Error('Retained pane initializer required.')),
+      create: (registry, agentId): TerminalSession => terminalWorkspace!.create(registry, agentId),
+      select: (session, signal, requestId): void => {
+        if (signal.aborted) throw new Error('Terminal workspace stopped.');
+        const expected = requestId && terminalNavigations.get(requestId);
+        if (requestId) terminalNavigations.delete(requestId);
+        if (expected !== undefined && expected !== navigationId)
+          throw new Error('Navigation superseded.');
+        terminalWorkspace!.select(session);
+        if (expected === undefined) navigateTo(`/terminals/${session.state.agentId}`);
+      },
+    }
+  );
+  return terminalCoordinator;
+}
 
 /**
  * Fetch the current user's admin status from the backend.
@@ -735,6 +791,8 @@ async function init(): Promise<void> {
   // matching). Feature flags must be settled first — renderRoute gates /chat on
   // them, and rendering early would flash a page the server has disabled.
   await featureFlagsReady;
+  terminalWorkspaceEnabled = isFeatureEnabled('web.terminal_workspace');
+  ensureRoots();
 
   // The tab-title unread badge is unread state, not notification state: it
   // runs for every signed-in user regardless of the push preference, and on
@@ -745,14 +803,14 @@ async function init(): Promise<void> {
     chatUnread.start();
   }
 
-  await renderRoute(stripBasePath(window.location.pathname));
-
   // Setup client-side router for navigation
   setupRouter();
+  await renderRoute(stripBasePath(window.location.pathname));
 
   // Disconnect SSE on page unload
   window.addEventListener('beforeunload', () => {
     stateManager.disconnect();
+    terminalCoordinator?.stop();
   });
 
   console.info('[Scion] Client initialization complete');
@@ -820,11 +878,49 @@ let navigationId = 0;
  * to avoid full-page redraws on navigation.
  */
 async function renderRoute(path: string): Promise<void> {
-  const appContainer = document.getElementById('app');
+  const appContainer = ensureRoots();
   if (!appContainer) return;
+  const thisNav = ++navigationId;
 
   // Strip query string and hash for route matching
-  const pathname = path.split('?')[0].split('#')[0];
+  let pathname = path.split('?')[0].split('#')[0];
+  if (terminalWorkspaceEnabled) {
+    const legacyAgent = pathname.match(legacyTerminalRoute)?.[1];
+    if (legacyAgent) {
+      pathname = `/terminals/${legacyAgent}`;
+      path = pathname;
+      window.history.replaceState({}, '', browserPath(path));
+    }
+    if (pathname === '/terminals' || terminalAgentRoute.test(pathname)) {
+      if (!currentUser?.id) {
+        navigateTo('/login');
+        return;
+      }
+      appContainer.hidden = true;
+      const coordinator = ensureTerminalCoordinator();
+      terminalWorkspace?.show(true);
+      setDocumentTitle('Terminals');
+      const agentId = pathname.match(terminalAgentRoute)?.[1];
+      if (agentId && coordinator) {
+        const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
+        if (requestId) terminalNavigations.set(requestId, thisNav);
+        const result = await coordinator.open(agentId, requestId);
+        if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
+        if (thisNav === navigationId && !coordinator.isOwner) {
+          terminalWorkspace?.setStatus(
+            result.status === 'selected'
+              ? 'Terminal selected in its owning tab.'
+              : result.status === 'pending'
+                ? 'Waiting for the owning tab to select this terminal.'
+                : 'Terminal workspace is unavailable in this tab.'
+          );
+        }
+      }
+      return;
+    }
+  }
+  appContainer.hidden = false;
+  terminalWorkspace?.show(false);
   const route = resolveRoute(pathname);
   const tag = route.tag;
 
@@ -883,7 +979,6 @@ async function renderRoute(path: string): Promise<void> {
 
   // Lazy-load the page component module (and profile/chat shell if needed).
   // The import registers the custom element as a side effect.
-  const thisNav = ++navigationId;
   const loads: Promise<unknown>[] = [route.load()];
   if (shellType === 'profile' && !customElements.get('scion-profile-shell')) {
     loads.push(
@@ -980,6 +1075,17 @@ function setupRouter(): void {
     }
 
     if (!anchor) return;
+    if (
+      e.defaultPrevented ||
+      e.button !== 0 ||
+      e.metaKey ||
+      e.ctrlKey ||
+      e.shiftKey ||
+      e.altKey ||
+      (anchor.target && anchor.target !== '_self') ||
+      anchor.hasAttribute('download')
+    )
+      return;
 
     const href = anchor.getAttribute('href');
     if (!href) return;
@@ -1021,12 +1127,14 @@ function setupRouter(): void {
  */
 function navigateTo(path: string): void {
   const currentAppPath = stripBasePath(window.location.pathname);
-  if (path === currentAppPath) return;
+  if (path === currentAppPath) {
+    if (terminalWorkspaceEnabled && (path === '/terminals' || terminalAgentRoute.test(path)))
+      void renderRoute(path);
+    return;
+  }
 
   // Prefix app-relative paths with the base path for the browser URL bar
-  const base = import.meta.env.BASE_URL;
-  const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + path : path;
-  window.history.pushState({}, '', browserPath);
+  window.history.pushState({}, '', browserPath(path));
   void renderRoute(path);
 }
 

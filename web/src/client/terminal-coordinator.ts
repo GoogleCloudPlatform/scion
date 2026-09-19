@@ -25,12 +25,14 @@ import {
 export type TerminalFocusResult = 'document-focused' | 'not-confirmed';
 export interface TerminalCoordinatorAdapter {
   initialize: TerminalResourceInitializer;
+  /** Owner-only creation bridge; must return this registry's requested entry. */
+  create?(registry: TerminalSessionRegistry, agentId: string): TerminalSession;
   /**
    * Activate the retained single-pane presentation. Guard async work with signal.
    * Combine it with host navigation guards and REJECT a canceled selection so the
    * coordinator does not request focus. This signal covers document/account teardown.
    */
-  select(session: TerminalSession, signal: AbortSignal): void | Promise<void>;
+  select(session: TerminalSession, signal: AbortSignal, requestId?: string): void | Promise<void>;
   /** Optional host activation adapter. Must report observation, not selection success. */
   focus?(): Promise<TerminalFocusResult>;
 }
@@ -310,8 +312,14 @@ export class TerminalCoordinator {
         };
         if (!this.isOwner) return reply;
         try {
-          const session = this.registry.open(message.agentId, this.adapter.initialize);
-          await this.adapter.select(session, this.lifetime.signal);
+          const session =
+            this.registry.list().find((entry) => entry.state.agentId === message.agentId) ??
+            (this.adapter.create
+              ? this.adapter.create(this.registry, message.agentId)
+              : this.registry.open(message.agentId, this.adapter.initialize));
+          if (session.state.agentId !== message.agentId || !this.registry.list().includes(session))
+            throw new Error('Terminal adapter returned a foreign session.');
+          await this.adapter.select(session, this.lifetime.signal, message.requestId);
           if (!this.isOwner) return reply;
           const focus = await this.focus();
           return { ...reply, status: 'selected', focus };
