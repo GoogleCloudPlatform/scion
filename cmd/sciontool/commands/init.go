@@ -380,6 +380,7 @@ func runInit(args []string) int {
 	// container-script harness — the child would otherwise launch without
 	// its credentials.
 	var harnessEnvOverlay map[string]string
+	var nativeTelemetryPolicy string
 	if harnessReq.EnvOverlayPath != "" {
 		overlayPath := hooks.ResolveContainerPath(harnessReq.EnvOverlayPath, agentHome)
 		allowedRoots := []string{harnessReq.BundleDir, agentHome}
@@ -392,6 +393,22 @@ func runInit(args []string) int {
 				return 1
 			}
 		} else if len(overlay) > 0 {
+			if policy, ok := overlay[hooks.NativeTelemetryPolicyKey]; ok {
+				if policy != "enabled" && policy != "disabled" {
+					log.Error("Invalid native telemetry policy marker")
+					return 1
+				}
+				nativeTelemetryPolicy = policy
+				delete(overlay, hooks.NativeTelemetryPolicyKey)
+			}
+			if nativeTelemetryPolicy == "" {
+				for key := range overlay {
+					if hooks.IsNativeTelemetryKey(key) {
+						log.Error("Native telemetry overlay has no policy marker")
+						return 1
+					}
+				}
+			}
 			harnessEnvOverlay = overlay
 			log.Info("Loaded %d env overlay entries from %s", len(overlay), overlayPath)
 		}
@@ -546,13 +563,14 @@ func runInit(args []string) int {
 
 	// Create supervisor with configuration
 	config := supervisor.Config{
-		GracePeriod:     gracePeriod,
-		UID:             targetUID,
-		GID:             targetGID,
-		Username:        "scion",
-		Rootless:        rootless,
-		EnvOverlay:      harnessEnvOverlay,
-		SecretOverrides: secretOverrides,
+		GracePeriod:           gracePeriod,
+		UID:                   targetUID,
+		GID:                   targetGID,
+		Username:              "scion",
+		Rootless:              rootless,
+		EnvOverlay:            harnessEnvOverlay,
+		NativeTelemetryPolicy: nativeTelemetryPolicy,
+		SecretOverrides:       secretOverrides,
 	}
 	sup := supervisor.New(config)
 

@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
@@ -44,6 +45,9 @@ type Config struct {
 	// Existing entries in the runtime environment win on conflict; overlay
 	// values only fill keys that are not already set.
 	EnvOverlay map[string]string
+	// NativeTelemetryPolicy enables fail-closed validation of the generated
+	// native telemetry environment before the child is launched.
+	NativeTelemetryPolicy string
 	// SecretOverrides are secret values fetched from the hub's
 	// POST /api/v1/agent/secrets endpoint (#127, P2d). Unlike EnvOverlay,
 	// these REPLACE existing entries — the runtime-provided value is a
@@ -162,13 +166,24 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 		s.cmd.Env = removeEnvVar(s.cmd.Env, "SCION_EXTRA_PATH")
 		log.Debug("Applied SCION_EXTRA_PATH: PATH=%s", newPath)
 	}
-
 	// Merge harness-generated env overlay. Runtime env wins on conflict so a
 	// container-script harness cannot mask a value set by the broker/CLI.
 	if len(s.config.EnvOverlay) > 0 {
 		before := len(s.cmd.Env)
-		s.cmd.Env = mergeEnvOverlay(s.cmd.Env, s.config.EnvOverlay)
+		if s.config.NativeTelemetryPolicy != "" {
+			merged, err := hooks.MergeEnvOverlayWithNativeTelemetryPolicy(s.config.NativeTelemetryPolicy, s.cmd.Env, s.config.EnvOverlay, s.config.SecretOverrides)
+			if err != nil {
+				return 1, err
+			}
+			s.cmd.Env = merged
+		} else {
+			s.cmd.Env = mergeEnvOverlay(s.cmd.Env, s.config.EnvOverlay)
+		}
 		log.Debug("Applied harness env overlay: %d entries (added %d)", len(s.config.EnvOverlay), len(s.cmd.Env)-before)
+	} else if s.config.NativeTelemetryPolicy != "" {
+		if err := hooks.ValidateNativeTelemetryEnv(s.config.NativeTelemetryPolicy, s.cmd.Env, nil, s.config.SecretOverrides); err != nil {
+			return 1, err
+		}
 	}
 
 	// Apply fetched secret overrides. These REPLACE existing entries —
@@ -181,6 +196,9 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 			s.cmd.Env = setEnvVar(s.cmd.Env, k, v)
 		}
 		log.Debug("Applied %d fetched secret override(s)", len(s.config.SecretOverrides))
+	}
+	if s.config.NativeTelemetryPolicy != "" {
+		s.cmd.Env = removeEnvVar(s.cmd.Env, hooks.NativeTelemetryPolicyKey)
 	}
 
 	if err := s.cmd.Start(); err != nil {
