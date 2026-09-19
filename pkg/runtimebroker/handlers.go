@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -1005,19 +1006,69 @@ func (s *Server) hydrateHarnessConfig(ctx context.Context, cfg *CreateAgentConfi
 	}
 
 	// Local-backend direct read (co-located workstation mode).
+	//
+	// Before returning the local path, verify that the dispatch's content
+	// hash still matches the hub's authoritative hash. After a hub
+	// re-bootstrap the DB hash changes, but the dispatch that created this
+	// agent may carry the pre-bootstrap hash. In that window the on-disk
+	// files are already updated (bootstrap writes storage before the DB),
+	// so the local path is correct — but if the hashes diverge we must
+	// re-fetch metadata to confirm, preventing a stale read if the storage
+	// write is still in flight.
 	if conn.LocalStorage != nil {
 		ref := cfg.HarnessConfigID
 		if ref == "" {
 			ref = cfg.HarnessConfig
 		}
-		path, err := s.resolveLocalResource(ctx, storage.ResourceKindHarnessConfig, ref, conn)
-		if err != nil {
-			return "", err
+
+		// Verify the dispatch hash is current by fetching live metadata
+		// from the hub. For a co-located hub this is a cheap loopback DB
+		// read. If the hashes match, the local storage path is
+		// authoritative; if they differ the resource was re-bootstrapped
+		// and we must use the current state.
+		localPathOK := true
+		var currentHC *hubclient.HarnessConfig
+		if conn.HubClient != nil && cfg.HarnessConfigHash != "" && ref != "" {
+			var metaErr error
+			currentHC, metaErr = conn.HubClient.HarnessConfigs().Get(ctx, ref)
+			if metaErr == nil && currentHC != nil && currentHC.ContentHash != cfg.HarnessConfigHash {
+				s.agentLifecycleLog.Info("harness-config content hash changed since dispatch; using current version",
+					"ref", ref,
+					"dispatch_hash", cfg.HarnessConfigHash,
+					"current_hash", currentHC.ContentHash)
+				localPathOK = false
+			}
 		}
-		if path != "" {
-			return path, nil
+
+		if localPathOK {
+			if currentHC != nil {
+				// We already fetched metadata above; resolve the local
+				// path directly to avoid a duplicate hub round-trip.
+				if resolver, ok := conn.LocalStorage.(localObjectResolver); ok {
+					objectPath := currentHC.StoragePath
+					if objectPath == "" {
+						objectPath = storage.ResourceStoragePath("", storage.ResourceKindHarnessConfig, currentHC.Scope, currentHC.ScopeID, currentHC.Slug)
+					}
+					dir := resolver.ObjectFSPath(objectPath)
+					info, statErr := os.Stat(dir)
+					if statErr == nil && info.IsDir() {
+						return dir, nil
+					}
+				}
+			} else {
+				// Hash check was skipped (no hub client or no dispatch
+				// hash); resolve via the standard path which fetches
+				// metadata itself.
+				path, err := s.resolveLocalResource(ctx, storage.ResourceKindHarnessConfig, ref, conn)
+				if err != nil {
+					return "", err
+				}
+				if path != "" {
+					return path, nil
+				}
+			}
 		}
-		// Not present in the backend yet — fall through to hydration.
+		// Not present in the backend yet or hash mismatch — fall through to hydration.
 	}
 
 	resolver := conn.HCResolver
@@ -1025,9 +1076,8 @@ func (s *Server) hydrateHarnessConfig(ctx context.Context, cfg *CreateAgentConfi
 		return "", nil
 	}
 
-	if cfg.HarnessConfigHash != "" && cfg.HarnessConfigID != "" {
-		return resolver.ResolveWithHash(ctx, cfg.HarnessConfigID, cfg.HarnessConfigHash)
-	}
+	// Always resolve via the hub's current metadata rather than trusting
+	// the dispatch hash, which may be stale after a re-bootstrap.
 	if cfg.HarnessConfigID != "" {
 		return resolver.Resolve(ctx, cfg.HarnessConfigID)
 	}

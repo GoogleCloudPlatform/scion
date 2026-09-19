@@ -114,9 +114,20 @@ func (h *Hydrator) Hydrate(ctx context.Context, templateRef string) (string, err
 	return h.r.Resolve(ctx, templateRef)
 }
 
-// HydrateWithHash fetches a template, using the provided hash for a fast cache
-// lookup. This is useful when the Hub dispatcher includes the content hash in
-// the request, letting the broker skip the metadata round-trip on a cache hit.
+// HydrateWithHash fetches a template, always verifying the current content hash
+// with the hub to prevent serving stale cached content.
+//
+// Deprecated: HydrateWithHash now always verifies with the hub. Use Hydrate
+// directly. The contentHash parameter is ignored.
+//
+// The caller's contentHash (from the dispatch) may be stale if the hub
+// re-bootstrapped the template after the agent was created but before the
+// broker resolved it, or if the dispatch raced with a bootstrap. To guard
+// against this, HydrateWithHash always fetches the current metadata from the
+// hub and uses the authoritative content hash for the cache lookup. On a cache
+// hit with the current hash the cached directory is returned immediately (no
+// download); on a miss the template is downloaded and cached under the current
+// hash.
 func (h *Hydrator) HydrateWithHash(ctx context.Context, templateRef string, contentHash string) (string, error) {
 	return h.r.ResolveWithHash(ctx, templateRef, contentHash)
 }

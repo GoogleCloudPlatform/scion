@@ -210,24 +210,32 @@ func TestHydrateWithHash(t *testing.T) {
 		t.Fatalf("Put() error = %v", err)
 	}
 
-	// Create hydrator with mock that should not be called
+	// Create hydrator with mock that returns the current hash —
+	// HydrateWithHash always verifies with the hub to prevent stale cache hits.
+	getCalled := false
 	templateSvc := &mockTemplateService{
 		getFunc: func(ctx context.Context, templateID string) (*hubclient.Template, error) {
-			t.Error("Get() should not be called when hash matches cache")
-			return nil, nil
+			getCalled = true
+			return &hubclient.Template{
+				ID:          "tmpl-999",
+				ContentHash: contentHash, // Hub confirms hash is current.
+			}, nil
 		},
 	}
 
 	client := &mockHubClient{templates: templateSvc}
 	hydrator := NewHydrator(cache, client)
 
-	// Hydrate with known hash should use cache
+	// Hydrate with known hash should verify with hub, then return cached path.
 	path, err := hydrator.HydrateWithHash(context.Background(), "tmpl-999", contentHash)
 	if err != nil {
 		t.Fatalf("HydrateWithHash() error = %v", err)
 	}
 	if path != cachedPath {
 		t.Errorf("HydrateWithHash() should return cached path")
+	}
+	if !getCalled {
+		t.Error("HydrateWithHash() should call Get() to verify hash freshness")
 	}
 }
 
