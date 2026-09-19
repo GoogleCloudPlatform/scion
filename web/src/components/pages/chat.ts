@@ -290,6 +290,8 @@ export class ScionPageChat extends LitElement {
   private _presenceProjectIds: string[] = [];
   /** Slow fallback poll for what SSE does not cover (see FALLBACK_POLL_INTERVAL_MS). */
   private _fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
+  /** Debounced re-fetch of members after a new agent appears via SSE. */
+  private _canAttachRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Which of the three panels is on screen. Only meaningful under the mobile
    * breakpoint — on desktop all three are visible and this is inert.
@@ -865,6 +867,11 @@ export class ScionPageChat extends LitElement {
       if (this._fallbackPollInterval) {
         clearInterval(this._fallbackPollInterval);
         this._fallbackPollInterval = null;
+      }
+      // Clean up the canAttach refresh timer
+      if (this._canAttachRefreshTimer != null) {
+        clearTimeout(this._canAttachRefreshTimer);
+        this._canAttachRefreshTimer = null;
       }
       // Clean up typing timers
       for (const timer of this._typingTimers.values()) {
@@ -1531,10 +1538,12 @@ export class ScionPageChat extends LitElement {
       scopeProjectId ? projectId === scopeProjectId : true;
 
     const byId = new Map(this.v2AgentMembers.map((a) => [a.id, a]));
+    let hasNewAgent = false;
 
     for (const agent of stateManager.getAgents()) {
       const existing = byId.get(agent.id);
       if (!existing && !inScope(agent.projectId || '')) continue;
+      if (!existing) hasNewAgent = true;
       byId.set(agent.id, {
         id: agent.id,
         kind: 'agent' as const,
@@ -1567,6 +1576,23 @@ export class ScionPageChat extends LitElement {
     }
 
     this.v2AgentMembers = Array.from(byId.values());
+
+    // When a brand-new agent appears via SSE, its `canAttach` is unknown
+    // (SSE events carry status, not per-viewer authorization). Schedule a
+    // debounced re-fetch of the members endpoint so the terminal icon
+    // appears without waiting for the 60-second fallback poll.
+    if (hasNewAgent && this.v2Conversation && !this.v2Conversation.isDM) {
+      const projectId = this.v2Conversation.projectId;
+      if (this._canAttachRefreshTimer != null) {
+        clearTimeout(this._canAttachRefreshTimer);
+      }
+      this._canAttachRefreshTimer = setTimeout(() => {
+        this._canAttachRefreshTimer = null;
+        if (projectId && this.v2Conversation?.projectId === projectId) {
+          void this.loadV2Members(projectId);
+        }
+      }, 1000);
+    }
 
     // A deleted agent cannot remain the thread default. The server clears the
     // binding and emits topic-updated; this covers the open view even if that
