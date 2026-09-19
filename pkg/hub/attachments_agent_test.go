@@ -332,8 +332,8 @@ func TestStripAttachmentMetadata(t *testing.T) {
 
 	metadata := map[string]string{
 		attachmentsMetadataKey: encoded,
-		"channel":             "web",
-		"thread_id":           "topic-123",
+		"channel":              "web",
+		"thread_id":            "topic-123",
 	}
 
 	// Simulate the strip that happens at each consume site.

@@ -548,8 +548,8 @@ func TestLogAttrs_SkipsAttachmentsMetadata(t *testing.T) {
 		Msg:       "here is a file",
 		Type:      TypeAssistantReply,
 		Metadata: map[string]string{
-			"attachments":    `[{"id":"a1","name":"shot.png"}]`,
-			"channel":        "web",
+			"attachments":     `[{"id":"a1","name":"shot.png"}]`,
+			"channel":         "web",
 			"system_category": "test",
 		},
 	}
