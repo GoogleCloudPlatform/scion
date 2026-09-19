@@ -843,10 +843,17 @@ func (h *StreamPTYHandler) Run() error {
 	}()
 
 	// Handle resize events
-	go h.handleResize()
+	resizeDone := make(chan struct{})
+	go func() {
+		defer close(resizeDone)
+		h.handleResize()
+	}()
 
 	err := <-errCh
 	h.cancel()
+	// Setsize accesses the raw descriptor, so join the resize worker before
+	// deferred cleanup closes the PTY and lets pending I/O destroy the fd.
+	<-resizeDone
 	return err
 }
 
