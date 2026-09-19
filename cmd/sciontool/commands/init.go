@@ -401,14 +401,6 @@ func runInit(args []string) int {
 				nativeTelemetryPolicy = policy
 				delete(overlay, hooks.NativeTelemetryPolicyKey)
 			}
-			if nativeTelemetryPolicy == "" {
-				for key := range overlay {
-					if hooks.IsNativeTelemetryKey(key) {
-						log.Error("Native telemetry overlay has no policy marker")
-						return 1
-					}
-				}
-			}
 			harnessEnvOverlay = overlay
 			log.Info("Loaded %d env overlay entries from %s", len(overlay), overlayPath)
 		}

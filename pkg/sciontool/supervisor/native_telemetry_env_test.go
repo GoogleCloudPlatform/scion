@@ -90,3 +90,21 @@ func TestNativeTelemetryPolicyEffectiveChildEnv(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeTelemetryNoPolicyKeepsLegacyPrecedence(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://cli.invalid")
+	out := filepath.Join(t.TempDir(), "endpoint")
+	cfg := DefaultConfig()
+	cfg.EnvOverlay = map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4317"}
+	code, err := New(cfg).Run(context.Background(), []string{"sh", "-c", `printf '%s' "$OTEL_EXPORTER_OTLP_ENDPOINT" > ` + out})
+	if code != 0 || err != nil {
+		t.Fatalf("code=%d err=%v", code, err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "https://cli.invalid" {
+		t.Fatalf("legacy env=%q", got)
+	}
+}

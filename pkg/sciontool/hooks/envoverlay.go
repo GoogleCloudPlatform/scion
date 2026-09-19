@@ -92,12 +92,6 @@ func reservedNativeTelemetryKey(key string) bool {
 	return false
 }
 
-// IsNativeTelemetryKey reports whether an overlay key requires an explicit
-// policy marker. CODEX_HOME remains valid in legacy overlays.
-func IsNativeTelemetryKey(key string) bool {
-	return reservedNativeTelemetryKey(key)
-}
-
 // LoadEnvOverlay reads the env overlay JSON written by a container-script
 // harness's pre-start provisioner and returns the resolved key/value pairs.
 //
