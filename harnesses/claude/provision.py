@@ -295,7 +295,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     cloud = config.get("cloud") if isinstance(config, dict) else None
     configured_provider = cloud.get("provider", "") if isinstance(cloud, dict) else ""
     staged_provider = source_env.get("SCION_TELEMETRY_CLOUD_PROVIDER", "")
-    if configured_provider and staged_provider and configured_provider != staged_provider:
+    if enabled and configured_provider and staged_provider and configured_provider != staged_provider:
         raise scion_harness.ProvisionError("conflicting telemetry cloud provider")
     provider = staged_provider or configured_provider
     if enabled and not provider:

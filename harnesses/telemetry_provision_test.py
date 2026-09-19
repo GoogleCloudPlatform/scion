@@ -100,6 +100,11 @@ class TelemetryProvisionTest(unittest.TestCase):
             self._invoke('claude', True, 14317, provider='generic', extra_env={
                 'SCION_TELEMETRY_CLOUD_PROVIDER': 'gcp',
             })
+        disabled, _ = self._invoke('claude', False, 14317, provider='generic', extra_env={
+            'SCION_TELEMETRY_CLOUD_PROVIDER': 'gcp',
+        })
+        self.assertEqual(disabled['OTEL_METRICS_EXPORTER'], 'none')
+        self.assertEqual(disabled['OTEL_LOGS_EXPORTER'], 'none')
 
     def test_gemini_default_custom_and_disabled(self):
         for enabled, port in ((True, 4317), (True, 14317), (False, 14317)):

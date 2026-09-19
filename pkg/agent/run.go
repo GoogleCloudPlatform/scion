@@ -868,7 +868,7 @@ authDone:
 		effectiveTelemetry = finalScionCfg.Telemetry
 	}
 	if telemetryApplier, ok := h.(api.TelemetrySettingsApplier); ok {
-		provisionEnv, err := nativeTelemetryProvisionEnv(agentHome, effectiveTelemetry, opts.Env, opts.ResolvedSecrets)
+		provisionEnv, err := nativeTelemetryProvisionEnvForHarness(h.Name(), agentHome, effectiveTelemetry, opts.Env, opts.ResolvedSecrets)
 		if err != nil {
 			return nil, fmt.Errorf("failed to determine native telemetry backend: %w", err)
 		}

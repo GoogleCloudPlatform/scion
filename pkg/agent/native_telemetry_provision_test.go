@@ -61,6 +61,36 @@ func TestNativeTelemetryProvisionBackend(t *testing.T) {
 	}
 }
 
+func TestNativeTelemetryProvisionGuardScopedToEnabledClaude(t *testing.T) {
+	home := t.TempDir()
+	late := []api.ResolvedSecret{{Name: "OTHER", Type: "environment", Target: "SCION_TELEMETRY_CLOUD_PROVIDER"}}
+	enabled, disabled := true, false
+	for _, tc := range []struct {
+		name      string
+		harness   string
+		telemetry *api.TelemetryConfig
+		wantErr   bool
+	}{
+		{"enabled Claude", "claude", &api.TelemetryConfig{Enabled: &enabled}, true},
+		{"default-enabled Claude", "claude", &api.TelemetryConfig{}, true},
+		{"disabled Claude", "claude", &api.TelemetryConfig{Enabled: &disabled}, false},
+		{"absent Claude telemetry", "claude", nil, false},
+		{"enabled Gemini", "gemini-cli", &api.TelemetryConfig{Enabled: &enabled}, false},
+		{"enabled Codex", "codex", &api.TelemetryConfig{Enabled: &enabled}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := map[string]string{"SCION_OTEL_GRPC_PORT": "14317"}
+			got, err := nativeTelemetryProvisionEnvForHarness(tc.harness, home, tc.telemetry, input, late)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v, wantErr=%t", err, tc.wantErr)
+			}
+			if !tc.wantErr && got["SCION_OTEL_GRPC_PORT"] != "14317" {
+				t.Fatal("original port not preserved")
+			}
+		})
+	}
+}
+
 func TestNativeTelemetryStagedProviderMatchesReceiverMode(t *testing.T) {
 	for _, tc := range []struct {
 		name            string

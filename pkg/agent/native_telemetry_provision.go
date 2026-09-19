@@ -11,6 +11,15 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
+// Only enabled Claude selects a native metrics exporter by receiver backend.
+// Other provisioners and disabled Claude keep the original staged environment.
+func nativeTelemetryProvisionEnvForHarness(name, home string, telemetry *api.TelemetryConfig, env map[string]string, secrets []api.ResolvedSecret) (map[string]string, error) {
+	if name != "claude" || telemetry == nil || (telemetry.Enabled != nil && !*telemetry.Enabled) {
+		return env, nil
+	}
+	return nativeTelemetryProvisionEnv(home, telemetry, env, secrets)
+}
+
 // nativeTelemetryProvisionEnv stages the effective backend for native harness
 // provisioning. Runtime GCP credential projection happens after provisioners
 // run, so a nonsecret hint is needed to prevent a logs-first harness from
