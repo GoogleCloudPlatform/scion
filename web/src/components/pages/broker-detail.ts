@@ -317,6 +317,21 @@ export class ScionPageBrokerDetail extends LitElement {
         align-items: flex-start;
         justify-content: space-between;
         margin-bottom: 0.75rem;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
+
+      /* Full-width basis so the status badge always wraps to its own row. A
+         wide label like "Waiting_for_input" would otherwise crush the name to
+         a few characters — it is the badge's width that matters, not how many
+         there are. */
+      .agent-header > div {
+        flex: 1 1 100%;
+        min-width: 0;
+      }
+
+      .agent-header > scion-status-badge {
+        flex-shrink: 0;
       }
 
       .agent-name {

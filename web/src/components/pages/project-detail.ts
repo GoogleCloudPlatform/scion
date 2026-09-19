@@ -375,11 +375,17 @@ export class ScionPageProjectDetail extends LitElement {
       justify-content: space-between;
       margin-bottom: 0.75rem;
       gap: 0.5rem;
+      flex-wrap: wrap;
     }
 
     /* Let the name column shrink so .agent-name can truncate; without this a
        flex item's min-width:auto holds the header open at the full name. */
     .agent-header > div {
+      /* Full-width basis so the badge always wraps to its own row. A wide
+         status label like "Waiting_for_input" would otherwise crush the name
+         to a few characters, the same failure the agents grid had — it is the
+         badge's width that matters, not how many there are. */
+      flex: 1 1 100%;
       min-width: 0;
     }
 
