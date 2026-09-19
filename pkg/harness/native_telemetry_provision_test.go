@@ -92,6 +92,9 @@ func TestNativeTelemetryProvisionedChildEnv(t *testing.T) {
 				if strings.Contains(string(child), hooks.NativeTelemetryPolicyKey+"=") {
 					t.Fatal("policy marker leaked to child")
 				}
+				if harnessName == "gemini-cli" && !strings.Contains(string(child), "GEMINI_TELEMETRY_TRACES_ENABLED=false\n") {
+					t.Fatal("Gemini detailed traces are not disabled in child env")
+				}
 				for key, value := range overlay {
 					if key == "CODEX_HOME" || strings.HasPrefix(key, "OTEL_") || strings.HasPrefix(key, "GEMINI_TELEMETRY_") || key == "CLAUDE_CODE_ENABLE_TELEMETRY" {
 						if !strings.Contains(string(child), key+"="+value+"\n") {

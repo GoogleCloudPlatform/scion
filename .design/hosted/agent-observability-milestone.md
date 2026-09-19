@@ -352,7 +352,8 @@ Codex uses OTLP gRPC for logs, traces, and metrics; hook token counters retain
 their separate `scion.hook.*` names. Claude configures OTLP logs and metrics;
 its trace exporter is disabled because its documented telemetry options do not
 establish a native trace emitter. Gemini configures its documented local OTLP
-target with prompt logging off and detailed traces on. These are configured
+target with prompt logging and detailed traces off; detailed Gemini traces can
+contain system instructions and other content. These are configured
 capabilities, not evidence of emitted signals. The Phase 4 live gate still
 requires inspection of exact installed Claude and Gemini versions: their image
 builds currently use `@latest`, and neither binary nor Docker was available in

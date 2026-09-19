@@ -232,7 +232,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         "GEMINI_TELEMETRY_OTLP_ENDPOINT": f"http://127.0.0.1:{port}",
         "GEMINI_TELEMETRY_OTLP_PROTOCOL": "grpc",
         "GEMINI_TELEMETRY_LOG_PROMPTS": "false",
-        "GEMINI_TELEMETRY_TRACES_ENABLED": "true" if enabled else "false",
+        "GEMINI_TELEMETRY_TRACES_ENABLED": "false",
         "GEMINI_TELEMETRY_USE_COLLECTOR": "false",
         "GEMINI_TELEMETRY_OUTFILE": "",
     })
@@ -246,7 +246,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     settings["telemetry"] = {
         "enabled": bool(enabled), "target": "local",
         "otlpEndpoint": f"http://127.0.0.1:{port}", "otlpProtocol": "grpc",
-        "logPrompts": False, "traces": bool(enabled), "useCollector": False,
+        "logPrompts": False, "traces": False, "useCollector": False,
     }
     scion_harness.atomic_write_json(settings_path, settings)
     extra: dict[str, Any] | None = None
