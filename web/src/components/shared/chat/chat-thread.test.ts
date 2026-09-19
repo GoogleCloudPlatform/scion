@@ -406,6 +406,35 @@ describe('scion-chat-thread read watermark', () => {
     vi.useRealTimers();
   });
 
+  it.each([
+    ['2026-09-19T00:00:00Z', '2026-09-19T00:00:00Z', 'b', 'a'],
+    ['2026-09-19T00:00:00.100000001Z', '2026-09-19T00:00:00.1Z', 'a', 'b'],
+    ['2026-09-19T00:00:00.000002Z', '2026-09-19T00:00:00.000001Z', 'a', 'b'],
+    ['2026-09-19T01:00:00+01:00', '2026-09-19T00:00:00Z', 'b', 'a'],
+  ])('acknowledges the server tail for tied millisecond timestamps (%s / %s)', async (newer, older, tailID, oldID) => {
+    vi.useFakeTimers();
+    try {
+      apiFetch.mockImplementation((url: string) => Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(String(url).includes('/messages?') ? { items: [
+          { id: tailID, sender: 'user:them', msg: 'newest', type: 'chat', createdAt: newer },
+          { id: oldID, sender: 'user:them', msg: 'older', type: 'chat', createdAt: older },
+        ] } : {}),
+      } as Response));
+      const el = await mount();
+      await vi.advanceTimersByTimeAsync(600);
+      const readCall = apiFetch.mock.calls.find(
+        (c) => String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
+      );
+      expect(readCall).toBeDefined();
+      expect(JSON.parse(String((readCall![1] as RequestInit).body))).toEqual({ messageId: tailID });
+      const bubbles = el.shadowRoot!.querySelectorAll('scion-chat-message');
+      expect(bubbles[bubbles.length - 1].id).toBe(`msg-${tailID}`);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('drops a watermark response that lands after a conversation switch', async () => {
     const el = await mount();
 
@@ -433,6 +462,68 @@ describe('scion-chat-thread read watermark', () => {
     await pending;
 
     expect(updated).not.toHaveBeenCalled();
+  });
+});
+
+describe('scion-chat-thread receipt expiry', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.useRealTimers();
+  });
+
+  it('hides Seen at the exact timer deadline without another UI event', async () => {
+    const el = await mount();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-19T00:00:00Z'));
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as {
+      mergeMessages(messages: Message[]): void;
+      applyPeerReadState(id: string, readAt: string): void;
+      seenExpired: boolean;
+    };
+    internals.mergeMessages([{
+      id: 'receipt-1', projectId: '', sender: 'user:me@example.com', senderId: 'user-me',
+      recipient: '', msg: 'hello', type: 'chat', agentId: '', dispatchState: 'dispatched',
+      createdAt: new Date().toISOString(),
+    }]);
+    internals.applyPeerReadState('receipt-1', new Date().toISOString());
+    await el.updateComplete;
+    const bubble = () => el.shadowRoot!.querySelector('scion-chat-message')!;
+    expect(bubble().getAttribute('dispatchState')).toBe('dispatched');
+    expect(bubble().hasAttribute('seen')).toBe(true);
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000 - 1);
+    expect(internals.seenExpired).toBe(false);
+    expect(bubble().getAttribute('dispatchState')).toBe('dispatched');
+    await vi.advanceTimersByTimeAsync(1);
+    await el.updateComplete;
+    expect(internals.seenExpired).toBe(true);
+    expect(bubble().getAttribute('dispatchState')).toBe('');
+  });
+
+  it('rearms expiry when a newer receipt arrives and cancels it on teardown', async () => {
+    const el = await mount();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-19T00:00:00Z'));
+    const internals = el as unknown as {
+      applyPeerReadState(id: string, readAt: string): void;
+      seenExpired: boolean;
+      _seenExpiryTimer: ReturnType<typeof setTimeout> | null;
+    };
+    internals.applyPeerReadState('first', new Date().toISOString());
+    await vi.advanceTimersByTimeAsync(1000);
+    internals.applyPeerReadState('second', new Date().toISOString());
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000 - 1000);
+    expect(internals.seenExpired).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(internals.seenExpired).toBe(true);
+    internals.applyPeerReadState('third', new Date().toISOString());
+    el.remove();
+    expect(internals._seenExpiryTimer).toBeNull();
   });
 });
 

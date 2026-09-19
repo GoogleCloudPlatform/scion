@@ -2868,6 +2868,35 @@ func (s *Server) handleSpaceEmoji(w http.ResponseWriter, r *http.Request, projec
 // DM Endpoints
 // ---------------------------------------------------------------------------
 
+// nativeDMLastMessage uses the same scope as the history endpoint, not the
+// cross-channel activity watermark. That watermark can point to an external
+// message, a deleted message, or one moved into a promoted thread, none of
+// which can be acknowledged by viewing this DM. Mention fan-out copies are
+// also excluded because chat-thread does not display them.
+func (s *Server) nativeDMLastMessage(ctx context.Context, key string) (*store.Message, error) {
+	filter := store.MessageFilter{Channel: "web", ThreadID: key, ExcludeType: messages.TypeMention}
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
+		parts := strings.Split(key, ":")
+		if len(parts) != 5 {
+			return nil, fmt.Errorf("invalid DM key: %q", key)
+		}
+		conv, err := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
+		if err != nil || conv == nil {
+			return nil, err
+		}
+		filter.ThreadID = ""
+		filter.ConversationID = conv.ConversationID
+	}
+	result, err := s.store.ListMessages(ctx, filter, store.ListOptions{Limit: 1, SkipTotalCount: true})
+	if err != nil {
+		return nil, err
+	}
+	if len(result.Items) == 0 {
+		return nil, nil
+	}
+	return &result.Items[0], nil
+}
+
 // handleChatDMs handles GET /api/v1/chat/dms.
 func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -2904,8 +2933,17 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 			ConversationKey: dm.ConversationKey,
 			PeerID:          dm.PeerID,
 			PeerKind:        dm.PeerKind,
-			LastMessageID:   dm.LastMessageID,
 			LastActivityAt:  dm.LastActivityAt,
+		}
+		lastMessage, err := s.nativeDMLastMessage(ctx, dm.ConversationKey)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch DM messages", nil)
+			return
+		}
+		if lastMessage != nil {
+			entry.LastMessageID = lastMessage.ID
+			entry.LastMessagePreview = truncatePreview(lastMessage.Msg, 120)
+			entry.LastMessageSender = lastMessage.Sender
 		}
 
 		// Enrich with peer info.
@@ -2924,25 +2962,16 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Get read state for unread indicator.
-		rs, _ := wcs.GetReadState(ctx, user.ID(), dm.ConversationKey)
+		rs, err := wcs.GetReadState(ctx, user.ID(), dm.ConversationKey)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch DM read state", nil)
+			return
+		}
 		if rs != nil {
 			entry.LastReadMessageID = rs.LastReadMessageID
 			entry.Muted = rs.Muted
-			entry.HasUnread = dm.LastMessageID != "" && dm.LastMessageID != rs.LastReadMessageID
-		} else {
-			entry.HasUnread = dm.LastMessageID != ""
 		}
-
-		// Get last message preview.
-		if dm.LastMessageID != "" {
-			msgMap, err := s.store.GetMessagesByIDs(ctx, []string{dm.LastMessageID})
-			if err == nil {
-				if msg, ok := msgMap[dm.LastMessageID]; ok {
-					entry.LastMessagePreview = truncatePreview(msg.Msg, 120)
-					entry.LastMessageSender = msg.Sender
-				}
-			}
-		}
+		entry.HasUnread = entry.LastMessageID != "" && entry.LastMessageID != entry.LastReadMessageID
 
 		entries = append(entries, entry)
 	}

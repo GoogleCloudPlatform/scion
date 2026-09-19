@@ -145,6 +145,31 @@ func TestListMessagesFilters(t *testing.T) {
 	assert.Equal(t, 1, res.TotalCount)
 }
 
+func TestListMessagesExcludeTypeAndSkipCount(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	for i, kind := range []string{"chat", "instruction", "mention"} {
+		msg := newTestMessage(projectID, "agent-1")
+		msg.Type = kind
+		msg.CreatedAt = time.Now().Add(time.Duration(i) * time.Second)
+		require.NoError(t, s.CreateMessage(ctx, msg))
+	}
+	filter := store.MessageFilter{ExcludeType: "mention"}
+	page, err := s.ListMessages(ctx, filter, store.ListOptions{Limit: 1, SkipTotalCount: true})
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, "instruction", page.Items[0].Type)
+	assert.Zero(t, page.TotalCount)
+	require.NotEmpty(t, page.NextCursor)
+	next, err := s.ListMessages(ctx, filter, store.ListOptions{Limit: 1, Cursor: page.NextCursor})
+	require.NoError(t, err)
+	require.Len(t, next.Items, 1)
+	assert.Equal(t, "chat", next.Items[0].Type)
+	assert.Equal(t, 2, next.TotalCount)
+	assert.Empty(t, next.NextCursor)
+}
+
 func TestPurgeOldMessages(t *testing.T) {
 	s := newTestMessageStore(t)
 	ctx := context.Background()

@@ -312,6 +312,9 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	if filter.Type != "" {
 		query.Where(message.TypeEQ(filter.Type))
 	}
+	if filter.ExcludeType != "" {
+		query.Where(message.TypeNEQ(filter.ExcludeType))
+	}
 	if filter.Channel != "" {
 		query.Where(message.ChannelEQ(filter.Channel))
 	}
@@ -335,9 +338,13 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	// totalCount represents the total number of messages matching the base
 	// filter (before cursor pagination is applied). Clone and count before
 	// adding the cursor predicate so the count stays stable across pages.
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	var totalCount int
+	if !opts.SkipTotalCount {
+		var err error
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	ascending := strings.EqualFold(opts.SortDir, "asc")
