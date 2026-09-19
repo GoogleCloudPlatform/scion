@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
@@ -15,6 +16,21 @@ import (
 // run, so a nonsecret hint is needed to prevent a logs-first harness from
 // accidentally enabling metrics against a GCP receiver.
 func nativeTelemetryProvisionEnv(home string, telemetry *api.TelemetryConfig, env map[string]string, secrets []api.ResolvedSecret) (map[string]string, error) {
+	for _, secret := range secrets {
+		if secret.Type == "file" && strings.HasSuffix(filepath.Clean(secret.Target), filepath.Join(".scion", "telemetry-gcp-credentials.json")) && secret.Name != "scion-telemetry-gcp-credentials" {
+			// A differently named file secret can materialize the receiver's
+			// well-known credential path after provisioner execution.
+			return nil, fmt.Errorf("late telemetry credential file target")
+		}
+		if secret.Type != "environment" && secret.Type != "" {
+			continue
+		}
+		if secret.Target == "SCION_TELEMETRY_CLOUD_PROVIDER" || secret.Target == "SCION_OTEL_GCP_CREDENTIALS" {
+			// Runtime projects these values only after provisioning. Their
+			// values cannot be used to choose a native exporter safely.
+			return nil, fmt.Errorf("late telemetry backend secret target: %s", secret.Target)
+		}
+	}
 	staged := make(map[string]string, len(env)+1)
 	for key, value := range env {
 		staged[key] = value

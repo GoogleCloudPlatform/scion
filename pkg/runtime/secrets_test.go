@@ -24,8 +24,66 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 )
+
+func TestLateTelemetrySecretTargetsChangeReceiverMode(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		secret api.ResolvedSecret
+		file   bool
+	}{
+		{"provider env", api.ResolvedSecret{Name: "OTHER", Type: "environment", Target: "SCION_TELEMETRY_CLOUD_PROVIDER", Value: "gcp"}, false},
+		{"credential env", api.ResolvedSecret{Name: "OTHER", Type: "environment", Target: "SCION_OTEL_GCP_CREDENTIALS"}, false},
+		{"well-known file", api.ResolvedSecret{Name: "OTHER", Type: "file", Target: "~/.scion/telemetry-gcp-credentials.json"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("SCION_TELEMETRY_CLOUD_PROVIDER", "")
+			t.Setenv("SCION_OTEL_GCP_CREDENTIALS", "")
+			t.Setenv("SCION_GCP_PROJECT_ID", "test-project")
+			restore := telemetry.SetTelemetryTestSandboxed()
+			defer restore()
+			credentialPath := filepath.Join(home, ".scion", "telemetry-gcp-credentials.json")
+			if tc.secret.Target == "SCION_OTEL_GCP_CREDENTIALS" {
+				tc.secret.Value = credentialPath
+			}
+			cfg := RunConfig{UnixUsername: "scion", Harness: &harness.Generic{}, Env: []string{"SCION_OTEL_ENDPOINT=https://generic.invalid/v1"}, ResolvedSecrets: []api.ResolvedSecret{tc.secret}}
+			if err := prepareContainerSecretEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			args, err := buildCommonRunArgs(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] != "-e" {
+					continue
+				}
+				key, value, found := strings.Cut(args[i+1], "=")
+				if !found {
+					continue
+				}
+				if key == "SCION_TELEMETRY_CLOUD_PROVIDER" || key == "SCION_OTEL_GCP_CREDENTIALS" {
+					t.Setenv(key, value)
+				}
+			}
+			if tc.file {
+				if err := os.MkdirAll(filepath.Dir(credentialPath), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(credentialPath, []byte("{}"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !telemetry.LoadConfig().IsGCP() {
+				t.Fatal("late secret did not switch receiver to GCP")
+			}
+		})
+	}
+}
 
 func TestPrepareContainerSecretEnv(t *testing.T) {
 	config := RunConfig{
