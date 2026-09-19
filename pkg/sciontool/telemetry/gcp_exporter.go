@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync/atomic"
 
 	"cloud.google.com/go/logging"
 	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
@@ -29,13 +30,15 @@ import (
 // Metrics are converted at the forwarding boundary and sent through the SDK
 // metric exporter after receiver policy processing.
 type GCPExporter struct {
-	traceExporter  trace.SpanExporter
-	metricExporter sdkmetric.Exporter
-	logClient      *logging.Client
-	logger         *logging.Logger
-	logSink        func(logging.Entry) // optional local capture after conversion
-	projectID      string
-	metricsDebug   bool
+	traceExporter   trace.SpanExporter
+	metricExporter  sdkmetric.Exporter
+	logClient       *logging.Client
+	logger          *logging.Logger
+	logSink         func(logging.Entry) // optional local capture after conversion
+	projectID       string
+	metricsDebug    bool
+	asyncLogErrors  atomic.Int64
+	onAsyncLogError func(error)
 }
 
 // NewGCPExporter creates a new GCP-native exporter for traces, metrics, and logs.
@@ -100,21 +103,33 @@ func NewGCPExporter(config *Config) (*GCPExporter, error) {
 		loggerOpts = append(loggerOpts, logging.CommonLabels(commonLabels))
 	}
 
-	return &GCPExporter{
+	exporter := &GCPExporter{
 		traceExporter:  traceExp,
 		metricExporter: metricExporter,
 		logClient:      logClient,
 		logger:         logClient.Logger(scionlog.AgentLogID, loggerOpts...),
 		projectID:      config.ProjectID,
 		metricsDebug:   config.MetricsDebug,
-	}, nil
+	}
+	logClient.OnError = func(err error) {
+		exporter.reportAsyncLogError(err)
+	}
+	return exporter, nil
+}
+
+func (e *GCPExporter) reportAsyncLogError(err error) {
+	e.asyncLogErrors.Add(1)
+	if e.onAsyncLogError != nil {
+		e.onAsyncLogError(err)
+	}
+	log.Error("Cloud Logging asynchronous delivery failed: %v", err)
 }
 
 // ExportProtoSpans converts OTLP proto spans to SDK ReadOnlySpan and exports
 // via the GCP Cloud Trace exporter.
 func (e *GCPExporter) ExportProtoSpans(ctx context.Context, resourceSpans []*tracepb.ResourceSpans) error {
 	if e == nil || e.traceExporter == nil {
-		return nil
+		return errors.New("GCP trace exporter unavailable")
 	}
 
 	sdkSpans := protoResourceSpansToSDK(resourceSpans)
@@ -132,7 +147,7 @@ func (e *GCPExporter) ExportProtoSpans(ctx context.Context, resourceSpans []*tra
 // sciontool receiver.
 func (e *GCPExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics []*metricpb.ResourceMetrics) error {
 	if e == nil || e.metricExporter == nil {
-		return nil
+		return errors.New("GCP metric exporter unavailable")
 	}
 
 	identified, err := gcpIdentityMetrics(resourceMetrics)
@@ -141,6 +156,7 @@ func (e *GCPExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics []
 	}
 	sdkMetrics := protoResourceMetricsToSDK(identified)
 	var errs []error
+	succeeded := 0
 
 	for i := range sdkMetrics {
 		filtered := filterGCPMetricdata(&sdkMetrics[i], e.metricsDebug)
@@ -149,16 +165,20 @@ func (e *GCPExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics []
 		}
 		if err := e.metricExporter.Export(ctx, filtered); err != nil {
 			errs = append(errs, err)
+		} else {
+			succeeded++
 		}
 	}
-
+	if succeeded > 0 && len(errs) > 0 {
+		return &partialSuccessError{fmt.Sprintf("GCP metric batch partly delivered: %d resource groups succeeded, %d failed", succeeded, len(errs))}
+	}
 	return errors.Join(errs...)
 }
 
 // ExportProtoLogs converts OTLP proto log records to Cloud Logging entries.
 func (e *GCPExporter) ExportProtoLogs(ctx context.Context, resourceLogs []*logspb.ResourceLogs) error {
 	if e == nil || (e.logger == nil && e.logSink == nil) {
-		return nil
+		return errors.New("GCP log exporter unavailable")
 	}
 
 	for _, rl := range resourceLogs {
@@ -173,7 +193,15 @@ func (e *GCPExporter) ExportProtoLogs(ctx context.Context, resourceLogs []*logsp
 			}
 		}
 	}
-
+	if e.logger != nil && e.logSink == nil {
+		before := e.asyncLogErrors.Load()
+		if err := e.logger.Flush(); err != nil {
+			return &partialSuccessError{fmt.Sprintf("Cloud Logging flush failed with unknown per-record outcome: %v", err)}
+		}
+		if after := e.asyncLogErrors.Load(); after != before {
+			return &partialSuccessError{fmt.Sprintf("Cloud Logging asynchronous failures with unknown per-record outcome: %d", after-before)}
+		}
+	}
 	return nil
 }
 

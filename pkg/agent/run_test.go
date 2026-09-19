@@ -1104,7 +1104,7 @@ func TestBuildAgentEnv_TelemetryInjection(t *testing.T) {
 		"SCION_TELEMETRY_CLOUD_ENABLED": "true",
 		"SCION_OTEL_ENDPOINT":           "otel.example.com:4317",
 		"SCION_OTEL_PROTOCOL":           "grpc",
-		"SCION_OTEL_INSECURE":           "false",
+		"SCION_OTEL_SKIP_TLS_VERIFY":    "false",
 	}
 
 	for k, want := range expected {

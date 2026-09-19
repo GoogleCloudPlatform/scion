@@ -11,9 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/trace"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -27,6 +27,12 @@ import (
 )
 
 var errOTLPCACertsNotFound = errors.New("parsing OTLP CA file: no certificates found")
+
+// partialSuccessError is terminal: replaying the whole batch duplicates the
+// units the destination already accepted.
+type partialSuccessError struct{ message string }
+
+func (e *partialSuccessError) Error() string { return e.message }
 
 func loadOTLPTLSConfig(caFile string) (*tls.Config, error) {
 	tlsConfig := &tls.Config{}
@@ -93,6 +99,12 @@ type CloudExporter struct {
 // When provider=gcp, uses GCP-native APIs (Cloud Trace, Cloud Logging).
 // Otherwise, uses standard OTLP gRPC/HTTP forwarding.
 func NewCloudExporter(ctx context.Context, config *Config) (*CloudExporter, error) {
+	if config != nil && config.Insecure && (config.SkipTLSVerify || config.CAFile != "") {
+		return nil, fmt.Errorf("plaintext OTLP transport conflicts with TLS verification options")
+	}
+	if config != nil && config.IsGCP() && (config.Insecure || config.SkipTLSVerify || config.CAFile != "") {
+		return nil, fmt.Errorf("GCP-native exporter does not support generic OTLP TLS overrides")
+	}
 	if !config.IsCloudConfigured() {
 		return nil, nil
 	}
@@ -112,13 +124,19 @@ func NewCloudExporter(ctx context.Context, config *Config) (*CloudExporter, erro
 		return exporter, nil
 	}
 
-	// Generic OTLP mode
+	// Generic OTLP HTTP has no raw proto forwarding path for all three
+	// signals. Reject it before accepting any receiver data.
+	if strings.HasPrefix(config.Endpoint, "http://") || strings.HasPrefix(config.Endpoint, "https://") {
+		return nil, fmt.Errorf("generic OTLP gRPC endpoint must be a gRPC target without an HTTP URL scheme")
+	}
 	var err error
 	switch config.Protocol {
-	case "http":
-		err = exporter.initHTTP(ctx, config)
-	default:
+	case "grpc":
 		err = exporter.initGRPC(ctx, config)
+	case "http":
+		return nil, fmt.Errorf("generic OTLP HTTP export is unsupported")
+	default:
+		return nil, fmt.Errorf("unsupported OTLP export protocol %q", config.Protocol)
 	}
 
 	if err != nil {
@@ -164,8 +182,8 @@ func (e *CloudExporter) initGRPC(ctx context.Context, config *Config) error {
 
 	conn, err := grpc.NewClient(config.Endpoint, connOpts...)
 	if err != nil {
-		// Continue without raw client - we can still use SDK exporter
-		return nil
+		_ = traceExp.Shutdown(ctx)
+		return fmt.Errorf("creating OTLP gRPC client: %w", err)
 	}
 
 	e.grpcConn = conn
@@ -176,29 +194,10 @@ func (e *CloudExporter) initGRPC(ctx context.Context, config *Config) error {
 	return nil
 }
 
-// initHTTP initializes the generic OTLP HTTP exporter.
-func (e *CloudExporter) initHTTP(ctx context.Context, config *Config) error {
-	opts := []otlptracehttp.Option{
-		otlptracehttp.WithEndpoint(config.Endpoint),
-	}
-	opts, err := appendOTLPTraceHTTPSecurityOption(opts, config)
-	if err != nil {
-		return err
-	}
-
-	traceExp, err := otlptracehttp.New(ctx, opts...)
-	if err != nil {
-		return fmt.Errorf("failed to create HTTP trace exporter: %w", err)
-	}
-
-	e.traceExporter = traceExp
-	return nil
-}
-
 // ExportSpans exports a batch of SDK spans to the cloud endpoint.
 func (e *CloudExporter) ExportSpans(ctx context.Context, spans []trace.ReadOnlySpan) error {
 	if e == nil {
-		return nil
+		return errors.New("cloud exporter unavailable")
 	}
 	if e.gcpExporter != nil {
 		return e.gcpExporter.traceExporter.ExportSpans(ctx, spans)
@@ -212,7 +211,7 @@ func (e *CloudExporter) ExportSpans(ctx context.Context, spans []trace.ReadOnlyS
 // ExportProtoSpans exports raw proto spans to the cloud endpoint.
 func (e *CloudExporter) ExportProtoSpans(ctx context.Context, resourceSpans []*tracepb.ResourceSpans) error {
 	if e == nil {
-		return nil
+		return errors.New("cloud exporter unavailable")
 	}
 
 	// GCP-native path: convert proto → SDK → Cloud Trace
@@ -225,17 +224,23 @@ func (e *CloudExporter) ExportProtoSpans(ctx context.Context, resourceSpans []*t
 		req := &coltracepb.ExportTraceServiceRequest{
 			ResourceSpans: resourceSpans,
 		}
-		_, err := e.grpcClient.Export(ctx, req)
-		return err
+		resp, err := e.grpcClient.Export(ctx, req)
+		if err != nil {
+			return err
+		}
+		if partial := resp.GetPartialSuccess(); partial != nil && partial.GetRejectedSpans() != 0 {
+			return &partialSuccessError{fmt.Sprintf("OTLP trace partial success: %d rejected spans: %s", partial.GetRejectedSpans(), partial.GetErrorMessage())}
+		}
+		return nil
 	}
 
-	return nil
+	return errors.New("OTLP trace client unavailable")
 }
 
 // ExportProtoMetrics exports raw proto metrics to the cloud endpoint.
 func (e *CloudExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics []*metricpb.ResourceMetrics) error {
 	if e == nil {
-		return nil
+		return errors.New("cloud exporter unavailable")
 	}
 
 	// GCP-native path
@@ -248,17 +253,23 @@ func (e *CloudExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics 
 		req := &colmetricpb.ExportMetricsServiceRequest{
 			ResourceMetrics: resourceMetrics,
 		}
-		_, err := e.metricClient.Export(ctx, req)
-		return err
+		resp, err := e.metricClient.Export(ctx, req)
+		if err != nil {
+			return err
+		}
+		if partial := resp.GetPartialSuccess(); partial != nil && partial.GetRejectedDataPoints() != 0 {
+			return &partialSuccessError{fmt.Sprintf("OTLP metric partial success: %d rejected points: %s", partial.GetRejectedDataPoints(), partial.GetErrorMessage())}
+		}
+		return nil
 	}
 
-	return nil
+	return errors.New("OTLP metric client unavailable")
 }
 
 // ExportProtoLogs exports raw proto logs to the cloud endpoint.
 func (e *CloudExporter) ExportProtoLogs(ctx context.Context, resourceLogs []*logspb.ResourceLogs) error {
 	if e == nil {
-		return nil
+		return errors.New("cloud exporter unavailable")
 	}
 
 	// GCP-native path
@@ -271,11 +282,17 @@ func (e *CloudExporter) ExportProtoLogs(ctx context.Context, resourceLogs []*log
 		req := &collogspb.ExportLogsServiceRequest{
 			ResourceLogs: resourceLogs,
 		}
-		_, err := e.logClient.Export(ctx, req)
-		return err
+		resp, err := e.logClient.Export(ctx, req)
+		if err != nil {
+			return err
+		}
+		if partial := resp.GetPartialSuccess(); partial != nil && partial.GetRejectedLogRecords() != 0 {
+			return &partialSuccessError{fmt.Sprintf("OTLP log partial success: %d rejected records: %s", partial.GetRejectedLogRecords(), partial.GetErrorMessage())}
+		}
+		return nil
 	}
 
-	return nil
+	return errors.New("OTLP log client unavailable")
 }
 
 // Shutdown gracefully shuts down the exporter.

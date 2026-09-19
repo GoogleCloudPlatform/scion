@@ -36,6 +36,7 @@ func loadSecureOTLPTLSConfig(config *Config) (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to load OTLP TLS config: %w", err)
 	}
+	tlsConfig.InsecureSkipVerify = config.SkipTLSVerify //nolint:gosec // explicit operator configuration
 	return tlsConfig, nil
 }
 

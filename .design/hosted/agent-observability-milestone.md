@@ -211,6 +211,45 @@ egress protocols, Cloud Logging asynchronous error handling, and deadline-bound
 shutdown ordering. Admission, enqueue, export attempt, and confirmed delivery
 must remain distinct states.
 
+The Phase 3 developer candidate uses these per-agent limits, pending independent
+review and pinned live evidence:
+
+| Boundary | Limit and response |
+| --- | --- |
+| OTLP HTTP intake | Loopback only; 4 MiB body on the wire, protobuf with `application/x-protobuf` and identity encoding only. Oversize returns 413, unsupported content type or encoding 415, malformed protobuf 400. Gzip and JSON intake are not supported. The 8 MiB decoded ceiling is redundant for identity encoding but protects any future decoder. |
+| OTLP gRPC intake | Loopback only; 8 MiB post-decompression message limit. Permanent oversize is `ResourceExhausted` without retry advice. |
+| Intake execution | 15-second deadline without extending a shorter caller deadline; 16 concurrent HTTP and gRPC receiver calls, acquired before body read or gRPC decompression. Transient saturation returns HTTP 429 with `Retry-After: 1` or gRPC `ResourceExhausted` with `RetryInfo`. A gRPC slot remains held through decoder and handler completion even if its context is canceled. |
+| Transport resources | Each listener accepts at most 64 live connections. The 65th is closed promptly as a transport error; it has no gRPC retry status. gRPC handshake is limited to 5 seconds, headers to 16 KiB, and idle connection time to 30 seconds. Idle connections do not use the 16 active request slots. HTTP has 5-second header and 15-second read/write limits with 16 KiB headers. |
+| Retained payload | 16 MiB encoded, 4096 admitted records/metric points, and 512 request entries across all signals, in-flight exports, metric dirty state, and pending retry. An entry is one nonempty admitted request; a pending metric snapshot retains ownership of its contributing entries until success or terminal disposition. Whole new requests are rejected before policy cloning or state commit on exhaustion. Empty requests use no entry. Existing metric stream state remains capped at 2048 streams. |
+| Retry and cadence | Three retries after the first export attempt, exponential backoff from 100 ms capped at 5 seconds. Metric pending snapshots are immutable; a failed pending seven-point cumulative snapshot drains before newer ten-point state, with the 15-second same-series write cadence preserved. |
+
+The retained-byte ceiling measures protobuf encoding, not total resident memory:
+policy clones, stream state, Go allocator overhead, and SDK buffers add to it.
+The entry ceiling can reject 513 small requests before 4096 records are reached.
+Synchronous trace and log exports retain their admission reservation until the
+export call ends; a failed call returns an error to the producer. Metric intake
+ACK means accepted local state only. Fixed-cardinality local diagnostics count
+admitted, filtered, rejected, queued, attempts, failures, confirmed delivery,
+drops, current depth, and last successful export separately. Generic OTLP HTTP
+destination configuration fails at startup; generic OTLP gRPC and GCP native
+are the supported forwarding paths. A successful Cloud Logging `Flush` is
+required before its exporter reports delivery, and asynchronous client errors
+remain visible locally. Disk persistence, cross-crash exactly-once delivery,
+and a bound on context-ignoring SDK calls are not provided. The internal init
+telemetry stop budget remains 20 seconds; a shorter external container stop
+limit can still terminate before the drain completes.
+
+For generic OTLP gRPC, `tls.enabled=false` requests plaintext transport, while
+`tls.insecure_skip_verify=true` keeps TLS encryption and skips certificate
+verification. A custom CA retains verified TLS. Plaintext cannot be combined
+with a custom CA or skip-verify. Explicit nondefault generic TLS settings in
+GCP-native mode fail telemetry startup because the GCP SDK transport would
+otherwise ignore them. The effective direct environment setting wins over a
+settings-file value; contradictory effective transport settings fail startup.
+Confirmed metric exports emit a local sequence and deterministic batch digest
+to correlate a whole cumulative batch with downstream evidence; an intake ACK
+and a successful earlier batch do not confirm a later batch.
+
 ### Phase 4: harness wiring
 
 Configure supported installed Claude, Gemini, and Codex versions to use the

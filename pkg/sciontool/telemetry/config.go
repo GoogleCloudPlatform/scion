@@ -26,8 +26,10 @@ const (
 	EnvEndpoint = "SCION_OTEL_ENDPOINT"
 	// EnvProtocol is the OTLP protocol to use (grpc or http).
 	EnvProtocol = "SCION_OTEL_PROTOCOL"
-	// EnvInsecure controls whether TLS verification is skipped.
+	// EnvInsecure selects plaintext OTLP transport.
 	EnvInsecure = "SCION_OTEL_INSECURE"
+	// EnvSkipTLSVerify retains TLS transport while disabling certificate verification.
+	EnvSkipTLSVerify = "SCION_OTEL_SKIP_TLS_VERIFY"
 	// EnvCAFile is the path to a PEM-encoded CA bundle for OTLP TLS.
 	EnvCAFile = "SCION_OTEL_CA_FILE"
 	// EnvGRPCPort is the local gRPC receiver port.
@@ -79,8 +81,10 @@ type Config struct {
 	Endpoint string
 	// Protocol is the OTLP protocol ("grpc" or "http").
 	Protocol string
-	// Insecure skips TLS verification if true.
+	// Insecure selects plaintext OTLP transport if true.
 	Insecure bool
+	// SkipTLSVerify disables certificate verification without using plaintext.
+	SkipTLSVerify bool
 	// CAFile is the path to a PEM-encoded CA bundle for OTLP TLS.
 	CAFile string
 	// GRPCPort is the local gRPC receiver port.
@@ -136,15 +140,16 @@ func SetTelemetryTestSandboxed() func() {
 // pipeline) remains available for tests that need it.
 func LoadConfig() *Config {
 	cfg := &Config{
-		Enabled:      parseBoolEnv(EnvEnabled, true),
-		CloudEnabled: parseBoolEnv(EnvCloudEnabled, true),
-		Endpoint:     os.Getenv(EnvEndpoint),
-		Protocol:     getEnvOrDefault(EnvProtocol, DefaultProtocol),
-		Insecure:     parseBoolEnv(EnvInsecure, false),
-		CAFile:       os.Getenv(EnvCAFile),
-		GRPCPort:     parseIntEnv(EnvGRPCPort, DefaultGRPCPort),
-		HTTPPort:     parseIntEnv(EnvHTTPPort, DefaultHTTPPort),
-		ProjectID:    os.Getenv(EnvProjectID),
+		Enabled:       parseBoolEnv(EnvEnabled, true),
+		CloudEnabled:  parseBoolEnv(EnvCloudEnabled, true),
+		Endpoint:      os.Getenv(EnvEndpoint),
+		Protocol:      getEnvOrDefault(EnvProtocol, DefaultProtocol),
+		Insecure:      parseBoolEnv(EnvInsecure, false),
+		SkipTLSVerify: parseBoolEnv(EnvSkipTLSVerify, false),
+		CAFile:        os.Getenv(EnvCAFile),
+		GRPCPort:      parseIntEnv(EnvGRPCPort, DefaultGRPCPort),
+		HTTPPort:      parseIntEnv(EnvHTTPPort, DefaultHTTPPort),
+		ProjectID:     os.Getenv(EnvProjectID),
 		Filter: FilterConfig{
 			Include: parseCSVEnv(EnvFilterInclude),
 			Exclude: parseCSVEnv(EnvFilterExclude),

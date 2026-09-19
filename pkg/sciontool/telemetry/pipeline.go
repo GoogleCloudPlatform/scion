@@ -6,6 +6,8 @@ package telemetry
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,12 +21,14 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
+	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // metricFlushInterval is the minimum interval between metric exports to Cloud
@@ -34,16 +38,17 @@ const metricFlushInterval = 15 * time.Second
 
 // Pipeline orchestrates the telemetry collection and forwarding.
 type Pipeline struct {
-	config       *Config
-	receiver     *Receiver
-	exporter     *CloudExporter
-	policy       *receiverPolicy
-	mu           sync.Mutex
-	running      bool
-	healthCancel context.CancelFunc
-	exportErrors otelmetric.Int64Counter
-	meter        otelmetric.Meter
-	retryConfig  RetryConfig
+	config        *Config
+	receiver      *Receiver
+	exporter      *CloudExporter
+	policy        *receiverPolicy
+	mu            sync.Mutex
+	running       bool
+	deliveryState string
+	healthCancel  context.CancelFunc
+	exportErrors  otelmetric.Int64Counter
+	meter         otelmetric.Meter
+	retryConfig   RetryConfig
 
 	metricsDropWarned        sync.Once
 	logsDropWarned           sync.Once
@@ -53,17 +58,22 @@ type Pipeline struct {
 	policyRejectedDataPoints atomic.Int64
 	policyRejectedRequests   atomic.Int64
 
-	metricStateMu        sync.Mutex
-	metricExportMu       sync.Mutex
-	metricStreams        *metricStreams
-	metricPending        []*metricpb.ResourceMetrics
-	metricRejectedPoints atomic.Int64
-	metricFlushCtx       context.Context
-	metricFlushCnl       context.CancelFunc
-	metricExportCtx      context.Context
-	metricExportCnl      context.CancelFunc
-	metricLastFlush      time.Time
-	metricFlushWg        sync.WaitGroup
+	metricStateMu                                                  sync.Mutex
+	metricExportMu                                                 sync.Mutex
+	metricStreams                                                  *metricStreams
+	metricPending                                                  []*metricpb.ResourceMetrics
+	metricRejectedPoints                                           atomic.Int64
+	metricFlushCtx                                                 context.Context
+	metricFlushCnl                                                 context.CancelFunc
+	metricExportCtx                                                context.Context
+	metricExportCnl                                                context.CancelFunc
+	metricLastFlush                                                time.Time
+	metricFlushWg                                                  sync.WaitGroup
+	budget                                                         admissionBudget
+	spanDiagnostics, metricDiagnostics, logDiagnostics             signalDiagnostics
+	metricDirtyBytes, metricDirtyRecords, metricDirtyEntries       int
+	metricPendingBytes, metricPendingRecords, metricPendingEntries int
+	metricBatchSequence, metricPendingSequence                     uint64
 }
 
 // New creates a new telemetry pipeline.
@@ -147,10 +157,13 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 		exporter, err := NewCloudExporter(ctx, p.config)
 		if err != nil {
-			log.Error("Failed to create cloud exporter: %v", err)
-			// Continue without cloud export - receiver can still work for local debugging
+			p.deliveryState = "failed"
+			return fmt.Errorf("failed to create cloud exporter: %w", err)
 		} else {
 			p.exporter = exporter
+			if exporter.gcpExporter != nil {
+				exporter.gcpExporter.onAsyncLogError = func(error) { p.logDiagnostics.failed.Add(1) }
+			}
 			mode := "OTLP"
 			if p.config.IsGCP() {
 				mode = "GCP-native"
@@ -161,19 +174,14 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			log.Info("Cloud exporter initialized (%s, project: %s)", mode, p.config.ProjectID)
 		}
 	} else {
-		if p.config.CloudEnabled && p.config.CloudProvider == "gcp" && p.config.ProjectID == "" {
-			slog.Warn("telemetry cloud export disabled — GCP mode requires a project ID",
-				"hint", "set SCION_GCP_PROJECT_ID or ensure credentials file contains project_id",
-				"env_checked", EnvProjectID,
-				"credentials_file", p.config.GCPCredentialsFile,
-			)
-		} else {
-			slog.Warn("telemetry cloud export not configured",
-				"reason", "no credentials or endpoint",
-				"env_checked", EnvGCPCredentials,
-				"well_known_path", WellKnownGCPCredentialsPath,
-			)
+		if p.config.CloudEnabled {
+			p.deliveryState = "failed"
+			if p.config.IsGCP() && p.config.ProjectID == "" {
+				slog.Warn("telemetry cloud export disabled — GCP mode requires a project ID", "env_checked", EnvProjectID)
+			}
+			return fmt.Errorf("cloud telemetry enabled but destination is not configured")
 		}
+		slog.Info("telemetry cloud export disabled")
 	}
 
 	// Create receiver with span and metric handlers
@@ -181,6 +189,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 	// Start receiver
 	if err := p.receiver.Start(ctx); err != nil {
+		p.deliveryState = "failed"
 		if p.exporter != nil {
 			_ = p.exporter.Shutdown(ctx)
 		}
@@ -188,6 +197,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	}
 
 	p.running = true
+	p.deliveryState = "running"
 
 	// Start metric flush goroutine for batching exports to Cloud Monitoring.
 	if p.exporter != nil {
@@ -270,10 +280,21 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 			}
 		}
 	}
-	p.metricStateMu.Unlock()
-	if residualPending != 0 || residualDirty != 0 {
-		log.Error("Telemetry metric shutdown residual: %d pending streams, %d newer dirty streams", residualPending, residualDirty)
+	if residualPending != 0 || residualDirty != 0 || p.metricPendingEntries+p.metricDirtyEntries != 0 {
+		forcedRecords := p.metricPendingRecords + p.metricDirtyRecords
+		p.metricDiagnostics.dropped.Add(int64(forcedRecords))
+		log.Error("Telemetry metric shutdown residual: %d pending streams, %d newer dirty streams, %d forced dropped admitted points", residualPending, residualDirty, forcedRecords)
 		errs = append(errs, fmt.Errorf("metric shutdown residual: pending=%d dirty=%d", residualPending, residualDirty))
+	}
+	p.budget.release(p.metricPendingBytes+p.metricDirtyBytes, p.metricPendingRecords+p.metricDirtyRecords, p.metricPendingEntries+p.metricDirtyEntries)
+	p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries = 0, 0, 0
+	p.metricDirtyBytes, p.metricDirtyRecords, p.metricDirtyEntries = 0, 0, 0
+	p.metricPending = nil
+	p.metricPendingSequence = 0
+	p.metricStreams = nil
+	p.metricStateMu.Unlock()
+	if dropped := p.metricDiagnostics.dropped.Load(); dropped > 0 {
+		errs = append(errs, fmt.Errorf("telemetry metric delivery dropped %d admitted points", dropped))
 	}
 
 	// Shutdown exporter to flush any buffered spans
@@ -284,12 +305,34 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	}
 
 	p.running = false
+	if len(errs) > 0 {
+		p.deliveryState = "degraded"
+	} else {
+		p.deliveryState = "configured"
+	}
 	log.Info("Telemetry pipeline stopped")
 
 	if len(errs) > 0 {
 		return errs[0]
 	}
 	return nil
+}
+
+// DeliveryState reports the local destination lifecycle without implying that
+// an intake acknowledgment proves remote delivery.
+func (p *Pipeline) DeliveryState() string {
+	if p == nil {
+		return "disabled"
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.deliveryState != "" {
+		return p.deliveryState
+	}
+	if p.config == nil || !p.config.CloudEnabled {
+		return "disabled"
+	}
+	return "configured"
 }
 
 // IsRunning returns true if the pipeline is running.
@@ -312,27 +355,46 @@ func (p *Pipeline) Config() *Config {
 
 // handleSpans processes incoming spans from the receiver.
 func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.ResourceSpans) error {
+	bytes, spanCount := encodedSize(resourceSpans), int(countSpans(resourceSpans))
+	if bytes > maxDecodedBytes {
+		return status.Error(codes.ResourceExhausted, "trace request exceeds message limit")
+	}
+	if spanCount == 0 {
+		return nil
+	}
+	if err := p.budget.reserve(bytes, spanCount); err != nil {
+		p.spanDiagnostics.rejected.Add(int64(spanCount))
+		return err
+	}
+	defer func() { p.budget.release(bytes, spanCount, 1) }()
 	// Clone and transform at the receiver boundary before any destination sees
 	// the batch. The processed value remains immutable across export retries.
 	decision := p.policy.processSpans(resourceSpans)
 	if decision.Reason != "" {
+		p.spanDiagnostics.rejected.Add(decision.Rejected)
 		p.policyRejectedRequests.Add(1)
 		p.policyRejectedSpans.Add(decision.Rejected)
 		log.Error("Rejected %d spans at telemetry receiver: %s", decision.Rejected, decision.Reason)
 		return status.Error(codes.InvalidArgument, decision.Reason)
 	}
 	filtered := decision.Data
+	p.spanDiagnostics.filtered.Add(decision.Filtered)
 	if len(filtered) == 0 {
 		return nil
 	}
+	if p.config.CloudEnabled && p.exporter == nil {
+		return status.Error(codes.Unavailable, "cloud exporter unavailable")
+	}
 
 	// Count total spans for logging
-	spanCount := 0
-	for _, rs := range filtered {
-		for _, ss := range rs.ScopeSpans {
-			spanCount += len(ss.Spans)
-		}
+	processedBytes, processedCount := encodedSize(filtered), int(countSpans(filtered))
+	if err := p.budget.resize(bytes, spanCount, processedBytes, processedCount); err != nil {
+		p.spanDiagnostics.rejected.Add(int64(spanCount))
+		return err
 	}
+	bytes, spanCount = processedBytes, processedCount
+	p.spanDiagnostics.accepted.Add(int64(spanCount))
+	p.spanDiagnostics.queued.Add(int64(spanCount))
 
 	// Forward to cloud exporter if available.
 	// This retry sits above the gRPC/SDK transport-level retry. Both layers
@@ -343,15 +405,20 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 	// acceptable for background telemetry where data loss is costlier.
 	if p.exporter != nil {
 		err := retryExport(ctx, p.retryConfig, "spans", func() error {
+			p.spanDiagnostics.attempts.Add(1)
 			return p.exporter.ExportProtoSpans(ctx, filtered)
 		})
 		if err != nil {
+			p.spanDiagnostics.failed.Add(1)
+			p.spanDiagnostics.dropped.Add(int64(spanCount))
 			p.recordExportError(ctx, "spans", err)
 			log.Error("Failed to export spans to cloud: %v", err)
 			return err
 		}
+		p.spanDiagnostics.success(spanCount)
 		log.Debug("Exported %d spans to cloud", spanCount)
 	} else {
+		p.spanDiagnostics.dropped.Add(int64(spanCount))
 		p.spansDropWarned.Do(func() {
 			log.Error("Received %d spans but cloud exporter is not configured — spans will be dropped. Set SCION_GCP_PROJECT_ID or configure telemetry.cloud", spanCount)
 		})
@@ -364,8 +431,26 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 // Metrics are accumulated and flushed at metricFlushInterval to avoid
 // sampling-rate violations from rapid writes (e.g. multiple hook processes).
 func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricpb.ResourceMetrics) error {
+	bytes, records := encodedSize(resourceMetrics), countMetricPoints(resourceMetrics)
+	if bytes > maxDecodedBytes {
+		return status.Error(codes.ResourceExhausted, "metric request exceeds message limit")
+	}
+	if records == 0 {
+		return nil
+	}
+	if err := p.budget.reserve(bytes, records); err != nil {
+		p.metricDiagnostics.rejected.Add(int64(records))
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			p.budget.release(bytes, records, 1)
+		}
+	}()
 	decision := p.policy.processMetrics(resourceMetrics)
 	if decision.Reason != "" {
+		p.metricDiagnostics.rejected.Add(decision.Rejected)
 		p.policyRejectedRequests.Add(1)
 		p.policyRejectedDataPoints.Add(decision.Rejected)
 		log.Error("Rejected %d metric data points at telemetry receiver: %s", decision.Rejected, decision.Reason)
@@ -375,8 +460,17 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 	if len(processed) == 0 {
 		return nil
 	}
+	if p.config.CloudEnabled && p.exporter == nil {
+		return status.Error(codes.Unavailable, "cloud exporter unavailable")
+	}
 
 	if p.exporter != nil {
+		processedBytes, processedRecords := encodedSize(processed), countMetricPoints(processed)
+		if err := p.budget.resize(bytes, records, processedBytes, processedRecords); err != nil {
+			p.metricDiagnostics.rejected.Add(int64(records))
+			return err
+		}
+		bytes, records = processedBytes, processedRecords
 		p.metricStateMu.Lock()
 		if p.metricStreams == nil {
 			p.metricStreams = newMetricStreams()
@@ -384,15 +478,23 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 		}
 		candidate := p.metricStreams.clone()
 		if err := candidate.add(processed); err != nil {
+			p.metricDiagnostics.rejected.Add(int64(records))
 			p.metricStreams.rejected[err.Error()]++
 			p.metricRejectedPoints.Add(int64(countMetricPoints(processed)))
 			p.metricStateMu.Unlock()
 			return status.Error(codes.InvalidArgument, err.Error())
 		}
 		p.metricStreams = candidate
+		committed = true
+		p.metricDiagnostics.accepted.Add(int64(records))
+		p.metricDiagnostics.queued.Add(int64(records))
+		p.metricDirtyBytes += bytes
+		p.metricDirtyRecords += records
+		p.metricDirtyEntries++
 		p.metricStateMu.Unlock()
 		log.Debug("Accepted %d policy-processed resource metric batches", len(processed))
 	} else {
+		p.metricDiagnostics.dropped.Add(int64(records))
 		metricCount := 0
 		for _, rm := range processed {
 			for _, sm := range rm.ScopeMetrics {
@@ -424,24 +526,26 @@ func (p *Pipeline) metricFlushLoop() {
 // flushMetricsOnStop waits for the next safe Cloud write slot when the caller
 // has enough time. A short deadline leaves state intact for the residual error.
 func (p *Pipeline) flushMetricsOnStop(ctx context.Context) {
-	p.metricStateMu.Lock()
-	hasWork := len(p.metricPending) != 0 || p.metricStreams != nil && p.metricStreams.hasDirty()
-	nextFlush := p.metricLastFlush.Add(metricFlushInterval)
-	p.metricStateMu.Unlock()
-	if !hasWork {
-		return
-	}
-	if delay := time.Until(nextFlush); delay > 0 {
-		timer := time.NewTimer(delay)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
+	for ctx.Err() == nil {
+		p.metricStateMu.Lock()
+		hasWork := len(p.metricPending) != 0 || p.metricStreams != nil && p.metricStreams.hasDirty()
+		nextFlush := p.metricLastFlush.Add(metricFlushInterval)
+		p.metricStateMu.Unlock()
+		if !hasWork {
 			return
 		}
-	}
-	if ctx.Err() == nil {
-		p.flushMetricBuffer(ctx, false)
+		if delay := time.Until(nextFlush); delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			}
+		}
+		if !p.flushMetricBuffer(ctx, false) {
+			return
+		}
 	}
 }
 
@@ -452,7 +556,7 @@ func (p *Pipeline) flushMetricsOnStop(ctx context.Context) {
 // prevent rapid consecutive flushes (e.g. periodic tick followed by shutdown drain)
 // from triggering sampling-rate rejections. Tests may force a flush; shutdown
 // observes the cadence and reports residual state if it cannot drain safely.
-func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) {
+func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 	p.metricExportMu.Lock()
 	defer p.metricExportMu.Unlock()
 	p.metricStateMu.Lock()
@@ -460,19 +564,34 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) {
 	if !force && sinceLastFlush < metricFlushInterval {
 		p.metricStateMu.Unlock()
 		log.Debug("Skipping metric flush — last export was %v ago (minimum %v)", sinceLastFlush.Round(time.Millisecond), metricFlushInterval)
-		return
+		return false
 	}
 	if p.metricStreams == nil {
 		p.metricStreams = newMetricStreams()
 	}
 	if len(p.metricPending) == 0 {
 		p.metricPending = p.metricStreams.snapshot()
+		if len(p.metricPending) != 0 {
+			p.metricBatchSequence++
+			p.metricPendingSequence = p.metricBatchSequence
+		}
+		p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries = p.metricDirtyBytes, p.metricDirtyRecords, p.metricDirtyEntries
+		p.metricDirtyBytes, p.metricDirtyRecords, p.metricDirtyEntries = 0, 0, 0
 	}
 	batch := p.metricPending
+	sequence := p.metricPendingSequence
 	p.metricStateMu.Unlock()
 
-	if len(batch) == 0 || p.exporter == nil {
-		return
+	if len(batch) == 0 {
+		p.metricStateMu.Lock()
+		p.budget.release(p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries)
+		p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries = 0, 0, 0
+		p.metricPendingSequence = 0
+		p.metricStateMu.Unlock()
+		return false
+	}
+	if p.exporter == nil {
+		return false
 	}
 
 	metricCount := 0
@@ -485,23 +604,47 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) {
 	// Pipeline-level retry on top of gRPC/SDK transport retry — see
 	// handleSpans for the rationale on intentional double-retry layering.
 	err := retryExport(ctx, p.retryConfig, "metrics", func() error {
+		p.metricDiagnostics.attempts.Add(1)
 		return p.exporter.ExportProtoMetrics(ctx, batch)
 	})
 	if err != nil {
+		p.metricDiagnostics.failed.Add(1)
 		// Do not create another error-counter point when that diagnostic stream
 		// itself failed. The local log remains the failure signal.
 		if !metricBatchContains(batch, pipelineMetricScope, "scion.telemetry.export.errors") {
 			p.recordExportError(ctx, "metrics", err)
 		}
 		log.Error("Failed to export %d metric streams to cloud: %v", metricCount, err)
-		return
+		if !isRetryable(err) {
+			p.metricStateMu.Lock()
+			p.metricDiagnostics.dropped.Add(int64(p.metricPendingRecords))
+			p.budget.release(p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries)
+			p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries = 0, 0, 0
+			p.metricPending = nil
+			p.metricPendingSequence = 0
+			p.metricStreams.delivered()
+			// A partial success may have written the same series. Keep cadence
+			// before any newer cumulative snapshot.
+			var partial *partialSuccessError
+			if errors.As(err, &partial) {
+				p.metricLastFlush = time.Now()
+			}
+			p.metricStateMu.Unlock()
+		}
+		return false
 	}
 	p.metricStateMu.Lock()
+	p.metricDiagnostics.success(p.metricPendingRecords)
 	p.metricPending = nil
+	p.metricPendingSequence = 0
+	p.budget.release(p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries)
+	p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries = 0, 0, 0
 	p.metricStreams.delivered()
 	p.metricLastFlush = time.Now()
 	p.metricStateMu.Unlock()
+	log.Info("Telemetry metric batch confirmed sequence=%d digest=%s resource_metrics=%d points=%d", sequence, metricBatchDigest(batch), len(batch), countMetricPoints(batch))
 	log.Debug("Exported %d metric streams to cloud", metricCount)
+	return true
 }
 
 func metricBatchContains(rms []*metricpb.ResourceMetrics, scopeName, name string) bool {
@@ -520,6 +663,15 @@ func metricBatchContains(rms []*metricpb.ResourceMetrics, scopeName, name string
 	return false
 }
 
+func metricBatchDigest(batch []*metricpb.ResourceMetrics) string {
+	encoded, err := (proto.MarshalOptions{Deterministic: true}).Marshal(&colmetricpb.ExportMetricsServiceRequest{ResourceMetrics: batch})
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
+}
+
 func countMetricPoints(rms []*metricpb.ResourceMetrics) int {
 	count := 0
 	for _, rm := range rms {
@@ -532,42 +684,74 @@ func countMetricPoints(rms []*metricpb.ResourceMetrics) int {
 	return count
 }
 
+func encodedSize[T proto.Message](messages []T) int {
+	size := 0
+	for _, message := range messages {
+		size += proto.Size(message)
+	}
+	return size
+}
+
 // handleLogs processes incoming logs from the receiver.
 func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.ResourceLogs) error {
+	bytes, logCount := encodedSize(resourceLogs), int(countLogs(resourceLogs))
+	if bytes > maxDecodedBytes {
+		return status.Error(codes.ResourceExhausted, "log request exceeds message limit")
+	}
+	if logCount == 0 {
+		return nil
+	}
+	if err := p.budget.reserve(bytes, logCount); err != nil {
+		p.logDiagnostics.rejected.Add(int64(logCount))
+		return err
+	}
+	defer func() { p.budget.release(bytes, logCount, 1) }()
 	decision := p.policy.processLogs(resourceLogs)
 	if decision.Reason != "" {
+		p.logDiagnostics.rejected.Add(decision.Rejected)
 		p.policyRejectedRequests.Add(1)
 		p.policyRejectedLogs.Add(decision.Rejected)
 		log.Error("Rejected %d log records at telemetry receiver: %s", decision.Rejected, decision.Reason)
 		return status.Error(codes.InvalidArgument, decision.Reason)
 	}
 	processed := decision.Data
+	p.logDiagnostics.filtered.Add(decision.Filtered)
 	if len(processed) == 0 {
 		return nil
 	}
+	if p.config.CloudEnabled && p.exporter == nil {
+		return status.Error(codes.Unavailable, "cloud exporter unavailable")
+	}
 
 	// Count total log records for logging
-	logCount := 0
-	for _, rl := range processed {
-		for _, sl := range rl.ScopeLogs {
-			logCount += len(sl.LogRecords)
-		}
+	processedBytes, processedCount := encodedSize(processed), int(countLogs(processed))
+	if err := p.budget.resize(bytes, logCount, processedBytes, processedCount); err != nil {
+		p.logDiagnostics.rejected.Add(int64(logCount))
+		return err
 	}
+	bytes, logCount = processedBytes, processedCount
+	p.logDiagnostics.accepted.Add(int64(logCount))
+	p.logDiagnostics.queued.Add(int64(logCount))
 
 	// Forward to cloud exporter if available.
 	// Pipeline-level retry on top of gRPC/SDK transport retry — see
 	// handleSpans for the rationale on intentional double-retry layering.
 	if p.exporter != nil {
 		err := retryExport(ctx, p.retryConfig, "logs", func() error {
+			p.logDiagnostics.attempts.Add(1)
 			return p.exporter.ExportProtoLogs(ctx, processed)
 		})
 		if err != nil {
+			p.logDiagnostics.failed.Add(1)
+			p.logDiagnostics.dropped.Add(int64(logCount))
 			p.recordExportError(ctx, "logs", err)
 			log.Error("Failed to export logs to cloud: %v", err)
 			return err
 		}
+		p.logDiagnostics.success(logCount)
 		log.Debug("Exported %d log records to cloud", logCount)
 	} else {
+		p.logDiagnostics.dropped.Add(int64(logCount))
 		p.logsDropWarned.Do(func() {
 			log.Error("Received %d log records but cloud exporter is not configured — logs will be dropped. Set SCION_GCP_PROJECT_ID or configure telemetry.cloud", logCount)
 		})

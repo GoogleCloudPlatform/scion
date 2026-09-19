@@ -1081,8 +1081,8 @@
         "insecure_skip_verify": {
           "type": "boolean",
           "default": false,
-          "description": "Skip TLS certificate verification.",
-          "x-env-var": "SCION_OTEL_INSECURE",
+          "description": "Keep TLS encryption but skip certificate verification. Cannot be enabled when tls.enabled is false.",
+          "x-env-var": "SCION_OTEL_SKIP_TLS_VERIFY",
           "x-since": "1"
         },
         "ca_file": {

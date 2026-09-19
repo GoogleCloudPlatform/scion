@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,56 @@ import (
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/grpc"
 )
+
+func TestFailedPendingMetricThenNewerDirtyDrainsInOrder(t *testing.T) {
+	var values []int64
+	fail := true
+	client := &mockMetricClient{exportFunc: func(_ context.Context, req *colmetricpb.ExportMetricsServiceRequest, _ ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
+		if fail {
+			return nil, errors.New("transient failure")
+		}
+		values = append(values, req.ResourceMetrics[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].GetAsInt())
+		return &colmetricpb.ExportMetricsServiceResponse{}, nil
+	}}
+	p := &Pipeline{exporter: &CloudExporter{metricClient: client}, metricStreams: newMetricStreams(), retryConfig: RetryConfig{MaxRetries: 0}}
+	if err := p.metricStreams.add([]*metricpb.ResourceMetrics{stopTestMetric(7, 2)}); err != nil {
+		t.Fatal(err)
+	}
+	if p.flushMetricBuffer(context.Background(), true) {
+		t.Fatal("failed flush reported success")
+	}
+	firstSequence := p.metricPendingSequence
+	firstDigest := metricBatchDigest(p.metricPending)
+	if firstSequence == 0 || firstDigest == "" {
+		t.Fatal("failed snapshot lacks correlation")
+	}
+	if err := p.metricStreams.add([]*metricpb.ResourceMetrics{stopTestMetric(10, 3)}); err != nil {
+		t.Fatal(err)
+	}
+	fail = false
+	if !p.flushMetricBuffer(context.Background(), true) {
+		t.Fatal("pending retry failed")
+	}
+	if p.metricBatchSequence != firstSequence {
+		t.Fatal("retry created a new snapshot")
+	}
+	if len(values) != 1 || values[0] != 7 {
+		t.Fatalf("first confirmed values = %v, want [7]", values)
+	}
+	p.metricLastFlush = time.Now().Add(-metricFlushInterval)
+	if !p.flushMetricBuffer(context.Background(), false) {
+		t.Fatal("newer dirty flush failed")
+	}
+	if p.metricBatchSequence != firstSequence+1 {
+		t.Fatal("newer dirty state did not form a distinct snapshot")
+	}
+	if len(values) != 2 || values[1] != 10 {
+		t.Fatalf("confirmed values = %v, want [7 10]", values)
+	}
+	if p.flushMetricBuffer(context.Background(), true) {
+		t.Fatalf("duplicate immediate write: %v", values)
+	}
+}
 
 func stopTestMetric(value int64, end uint64) *metricpb.ResourceMetrics {
 	return testMetricResource("native", "scope", "", "", testNumber("stop.calls", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, end, value))

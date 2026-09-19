@@ -6,11 +6,15 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"math"
 	"math/rand/v2"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"google.golang.org/api/googleapi"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Default retry configuration constants.
@@ -56,6 +60,20 @@ func DefaultRetryConfig() RetryConfig {
 // self-heal without credential rotation.
 func isRetryable(err error) bool {
 	if err == nil {
+		return false
+	}
+	var partial *partialSuccessError
+	if errors.As(err, &partial) {
+		return false
+	}
+	if st, ok := status.FromError(err); ok {
+		switch st.Code() {
+		case codes.InvalidArgument, codes.NotFound, codes.AlreadyExists, codes.FailedPrecondition, codes.Unimplemented, codes.PermissionDenied, codes.Unauthenticated:
+			return false
+		}
+	}
+	var gapiErr *googleapi.Error
+	if errors.As(err, &gapiErr) && gapiErr.Code >= 400 && gapiErr.Code < 500 && gapiErr.Code != 408 && gapiErr.Code != 429 {
 		return false
 	}
 	// Known retryable classes: timeout, quota, other (unknown).

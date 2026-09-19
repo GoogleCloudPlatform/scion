@@ -507,7 +507,7 @@ func TestReceiverPolicy_RejectsWholeRequestAcrossTransportsAndSignals(t *testing
 		t.Fatal(err)
 	}
 	httpResponse := httptest.NewRecorder()
-	receiver.handleHTTPTraces(httpResponse, httptest.NewRequest(http.MethodPost, "/v1/traces", bytes.NewReader(body)))
+	receiver.handleHTTPTraces(httpResponse, otlpHTTPRequest("/v1/traces", bytes.NewReader(body)))
 	if httpResponse.Code != http.StatusBadRequest || strings.TrimSpace(httpResponse.Body.String()) != policyAdmissionReason {
 		t.Fatalf("HTTP response = (%d, %q)", httpResponse.Code, httpResponse.Body.String())
 	}

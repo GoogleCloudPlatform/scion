@@ -10,7 +10,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
+	"time"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -18,10 +20,20 @@ import (
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/tap"
 	"google.golang.org/protobuf/proto"
+)
+
+const (
+	maxHTTPWireBytes    = 4 << 20
+	maxDecodedBytes     = 8 << 20
+	intakeDeadline      = 15 * time.Second
+	maxConcurrentIntake = 16
 )
 
 // SpanHandler is called when spans are received.
@@ -35,21 +47,26 @@ type LogHandler func(ctx context.Context, logs []*logspb.ResourceLogs) error
 
 // Receiver accepts OTLP trace and metric data via gRPC and HTTP.
 type Receiver struct {
-	config        *Config
-	grpcServer    *grpc.Server
-	httpServer    *http.Server
-	handler       SpanHandler
-	metricHandler MetricHandler
-	logHandler    LogHandler
-	mu            sync.Mutex
-	running       bool
+	config                         *Config
+	grpcServer                     *grpc.Server
+	httpServer                     *http.Server
+	handler                        SpanHandler
+	metricHandler                  MetricHandler
+	logHandler                     LogHandler
+	mu                             sync.Mutex
+	running                        bool
+	decodeSlots                    chan struct{}
+	grpcListenAddr, httpListenAddr string
+	grpcConnections                *connectionLimit
+	httpConnections                *connectionLimit
 }
 
 // NewReceiver creates a new OTLP receiver.
 func NewReceiver(config *Config, handler SpanHandler, opts ...ReceiverOption) *Receiver {
 	r := &Receiver{
-		config:  config,
-		handler: handler,
+		config:      config,
+		handler:     handler,
+		decodeSlots: make(chan struct{}, maxConcurrentIntake),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -84,30 +101,44 @@ func (r *Receiver) Start(ctx context.Context) error {
 	}
 
 	// Start gRPC server
-	grpcAddr := fmt.Sprintf(":%d", r.config.GRPCPort)
+	grpcAddr := fmt.Sprintf("127.0.0.1:%d", r.config.GRPCPort)
 	grpcLis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on gRPC port %d: %w", r.config.GRPCPort, err)
 	}
+	r.grpcListenAddr = grpcLis.Addr().String()
+	r.grpcConnections = newConnectionLimit(grpcLis, maxGRPCConnections)
 
-	r.grpcServer = grpc.NewServer()
+	r.grpcServer = grpc.NewServer(grpc.MaxRecvMsgSize(maxDecodedBytes), grpc.MaxConcurrentStreams(maxConcurrentIntake), grpc.MaxHeaderListSize(16<<10), grpc.ConnectionTimeout(grpcHandshakeTimeout), grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionIdle: 30 * time.Second}), grpc.StatsHandler(grpcAdmissionStats{}), grpc.InTapHandle(func(ctx context.Context, info *tap.Info) (context.Context, error) {
+		if info.FullMethodName != "/opentelemetry.proto.collector.trace.v1.TraceService/Export" && info.FullMethodName != "/opentelemetry.proto.collector.metrics.v1.MetricsService/Export" && info.FullMethodName != "/opentelemetry.proto.collector.logs.v1.LogsService/Export" {
+			return ctx, status.Error(codes.Unimplemented, "unsupported OTLP method")
+		}
+		select {
+		case r.decodeSlots <- struct{}{}:
+			return newGRPCPermitContext(ctx, r.decodeSlots), nil
+		default:
+			return ctx, transientOverload("telemetry intake concurrency exhausted")
+		}
+	}))
 	coltracepb.RegisterTraceServiceServer(r.grpcServer, &traceServiceServer{handler: r.handler})
 	colmetricpb.RegisterMetricsServiceServer(r.grpcServer, &metricsServiceServer{handler: r.metricHandler})
 	collogspb.RegisterLogsServiceServer(r.grpcServer, &logsServiceServer{handler: r.logHandler})
 
 	go func() {
-		if err := r.grpcServer.Serve(grpcLis); err != nil && err != grpc.ErrServerStopped {
+		if err := r.grpcServer.Serve(r.grpcConnections); err != nil && err != grpc.ErrServerStopped {
 			_ = err // receiver may be stopping; ignore serve errors
 		}
 	}()
 
 	// Start HTTP server
-	httpAddr := fmt.Sprintf(":%d", r.config.HTTPPort)
+	httpAddr := fmt.Sprintf("127.0.0.1:%d", r.config.HTTPPort)
 	httpLis, err := net.Listen("tcp", httpAddr)
 	if err != nil {
 		r.grpcServer.Stop()
 		return fmt.Errorf("failed to listen on HTTP port %d: %w", r.config.HTTPPort, err)
 	}
+	r.httpListenAddr = httpLis.Addr().String()
+	r.httpConnections = newConnectionLimit(httpLis, maxGRPCConnections)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/traces", r.handleHTTPTraces)
@@ -115,13 +146,27 @@ func (r *Receiver) Start(ctx context.Context) error {
 	mux.HandleFunc("/v1/logs", r.handleHTTPLogs)
 
 	r.httpServer = &http.Server{
-		Handler: mux,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			select {
+			case r.decodeSlots <- struct{}{}:
+				defer func() { <-r.decodeSlots }()
+			default:
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, "Telemetry intake concurrency exhausted", http.StatusTooManyRequests)
+				return
+			}
+			mux.ServeHTTP(w, req)
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       intakeDeadline,
+		WriteTimeout:      intakeDeadline,
+		MaxHeaderBytes:    16 << 10,
 	}
 
 	go func() {
 		// Log error but don't fail - error is intentionally ignored
 		// because this is a best-effort telemetry receiver.
-		_ = r.httpServer.Serve(httpLis)
+		_ = r.httpServer.Serve(r.httpConnections)
 	}()
 
 	r.running = true
@@ -141,12 +186,24 @@ func (r *Receiver) Stop(ctx context.Context) error {
 
 	// Stop gRPC server
 	if r.grpcServer != nil {
-		r.grpcServer.GracefulStop()
+		done := make(chan struct{})
+		go func() {
+			r.grpcServer.GracefulStop()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			r.grpcServer.Stop()
+			<-done
+			errs = append(errs, fmt.Errorf("gRPC shutdown: %w", ctx.Err()))
+		}
 	}
 
 	// Stop HTTP server
 	if r.httpServer != nil {
 		if err := r.httpServer.Shutdown(ctx); err != nil {
+			_ = r.httpServer.Close()
 			errs = append(errs, fmt.Errorf("HTTP shutdown error: %w", err))
 		}
 	}
@@ -237,18 +294,54 @@ func handleHTTPExport(w http.ResponseWriter, req *http.Request, exportReq, expor
 		return
 	}
 
-	body, err := io.ReadAll(req.Body)
+	if ct := strings.TrimSpace(strings.Split(req.Header.Get("Content-Type"), ";")[0]); ct != "application/x-protobuf" {
+		http.Error(w, "Unsupported OTLP content type", http.StatusUnsupportedMediaType)
+		return
+	}
+	if encoding := strings.TrimSpace(req.Header.Get("Content-Encoding")); encoding != "" && encoding != "identity" {
+		http.Error(w, "Unsupported OTLP content encoding", http.StatusUnsupportedMediaType)
+		return
+	}
+	if req.ContentLength > maxHTTPWireBytes {
+		http.Error(w, "OTLP request too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), intakeDeadline)
+	defer cancel()
+	body, err := io.ReadAll(io.LimitReader(req.Body, maxHTTPWireBytes+1))
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+	if len(body) > maxHTTPWireBytes {
+		http.Error(w, "OTLP request too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	if err := proto.Unmarshal(body, exportReq); err != nil {
 		http.Error(w, "Failed to parse OTLP request", http.StatusBadRequest)
 		return
 	}
-	if err := process(req.Context()); err != nil {
+	if err := process(ctx); err != nil {
 		if status.Code(err) == codes.InvalidArgument {
 			http.Error(w, policyAdmissionReason, http.StatusBadRequest)
+			return
+		}
+		if status.Code(err) == codes.ResourceExhausted {
+			code := http.StatusRequestEntityTooLarge
+			if st, ok := status.FromError(err); ok {
+				for _, detail := range st.Details() {
+					if _, ok := detail.(*errdetails.RetryInfo); ok {
+						w.Header().Set("Retry-After", "1")
+						code = http.StatusTooManyRequests
+						break
+					}
+				}
+			}
+			http.Error(w, "Telemetry intake limit exceeded", code)
+			return
+		}
+		if status.Code(err) == codes.Unavailable {
+			http.Error(w, "Telemetry destination unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		http.Error(w, processError, http.StatusInternalServerError)

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1111,6 +1112,15 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	// 4. Load environment variables (SCION_ prefix)
 	_ = k.Load(env.Provider("SCION_", ".", versionedEnvKeyMapper), nil)
+	// SCION_OTEL_INSECURE is a plaintext switch. Its value is the inverse of
+	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
+	if raw, present := os.LookupEnv("SCION_OTEL_INSECURE"); present {
+		plaintext, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("SCION_OTEL_INSECURE: %w", err)
+		}
+		_ = k.Load(confmap.Provider(map[string]interface{}{"telemetry.cloud.tls.enabled": !plaintext}, "."), nil)
+	}
 
 	// For git projects, the project_id is stored in a project-id file inside the
 	// .scion directory rather than in the settings file. Read it here so that
@@ -1144,6 +1154,12 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	if err := k.Unmarshal("", settings); err != nil {
 		return nil, err
+	}
+	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
+		tls := settings.Telemetry.Cloud.TLS
+		if tls.Enabled != nil && !*tls.Enabled && ((tls.InsecureSkipVerify != nil && *tls.InsecureSkipVerify) || tls.CAFile != "") {
+			return nil, fmt.Errorf("telemetry.cloud.tls: plaintext conflicts with certificate verification settings")
+		}
 	}
 
 	return settings, nil
@@ -1366,7 +1382,8 @@ func mapTelemetryEnvKey(key string) string {
 //	"endpoint" -> "telemetry.cloud.endpoint"
 //	"protocol" -> "telemetry.cloud.protocol"
 //	"headers" -> "telemetry.cloud.headers"
-//	"insecure" -> "telemetry.cloud.tls.insecure_skip_verify"
+//	"insecure" -> "telemetry.cloud.tls.enabled" (value inverted after env load)
+//	"skip_tls_verify" -> "telemetry.cloud.tls.insecure_skip_verify"
 //	"ca_file" -> "telemetry.cloud.tls.ca_file"
 func mapOtelEnvKey(key string) string {
 	switch key {
@@ -1377,6 +1394,8 @@ func mapOtelEnvKey(key string) string {
 	case "headers":
 		return "telemetry.cloud.headers"
 	case "insecure":
+		return "telemetry.cloud.tls.enabled"
+	case "skip_tls_verify":
 		return "telemetry.cloud.tls.insecure_skip_verify"
 	case "ca_file":
 		return "telemetry.cloud.tls.ca_file"

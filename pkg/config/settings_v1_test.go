@@ -3572,7 +3572,8 @@ func TestVersionedEnvKeyMapper_Telemetry(t *testing.T) {
 		{"SCION_OTEL_ENDPOINT", "telemetry.cloud.endpoint"},
 		{"SCION_OTEL_PROTOCOL", "telemetry.cloud.protocol"},
 		{"SCION_OTEL_HEADERS", "telemetry.cloud.headers"},
-		{"SCION_OTEL_INSECURE", "telemetry.cloud.tls.insecure_skip_verify"},
+		{"SCION_OTEL_INSECURE", "telemetry.cloud.tls.enabled"},
+		{"SCION_OTEL_SKIP_TLS_VERIFY", "telemetry.cloud.tls.insecure_skip_verify"},
 		{"SCION_OTEL_CA_FILE", "telemetry.cloud.tls.ca_file"},
 	}
 

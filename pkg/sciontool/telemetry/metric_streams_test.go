@@ -399,7 +399,7 @@ func TestPipelineMetricFailedSnapshotDoesNotReaddHooks(t *testing.T) {
 		values = append(values, value)
 		if failed {
 			failed = false
-			return nil, status.Error(codes.PermissionDenied, "test auth")
+			return nil, status.Error(codes.Unavailable, "test transient")
 		}
 		return &colmetricpb.ExportMetricsServiceResponse{}, nil
 	}}, nil)
@@ -425,13 +425,13 @@ func TestPipelineMetricFailedSnapshotDoesNotReaddHooks(t *testing.T) {
 }
 
 func TestPipelineStopReportsNewerMetricResidualAfterPendingRetryWithTightDeadline(t *testing.T) {
-	failed := true
+	failures := 4
 	var totals []int64
 	p := newTestPipelineWithExporter(nil, &mockMetricClient{exportFunc: func(_ context.Context, req *colmetricpb.ExportMetricsServiceRequest, _ ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
 		totals = append(totals, req.ResourceMetrics[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].GetAsInt())
-		if failed {
-			failed = false
-			return nil, status.Error(codes.PermissionDenied, "test auth")
+		if failures > 0 {
+			failures--
+			return nil, status.Error(codes.Unavailable, "test transient")
 		}
 		return &colmetricpb.ExportMetricsServiceResponse{}, nil
 	}}, nil)
@@ -453,7 +453,7 @@ func TestPipelineStopReportsNewerMetricResidualAfterPendingRetryWithTightDeadlin
 	if err := p.Stop(stopCtx); err == nil || !strings.Contains(err.Error(), "metric shutdown residual") {
 		t.Fatalf("Stop residual = %v", err)
 	}
-	if fmt.Sprint(totals) != "[7 7]" {
+	if fmt.Sprint(totals) != "[7 7 7 7 7]" {
 		t.Fatalf("shutdown wrote early same series: %v", totals)
 	}
 }
