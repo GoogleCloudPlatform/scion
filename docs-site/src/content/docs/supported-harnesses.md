@@ -114,6 +114,18 @@ Codex supports two authentication methods (auto-detected in this order):
 - **Notify Bridge**: Scion configures `notify = "sh ~/.codex/scion_notify.sh"` so Codex notify payloads can drive Scion state updates.
 - **OpenTelemetry**: When telemetry is enabled, Scion performs telemetry reconciliation at start to ensure consistent OTLP export (default `localhost:4317`).
 
+### Reasoning Effort (Thinking Level)
+When `SCION_THINKING_LEVEL` is set (a value from 0–100, provided via `--thinking-level` on `scion start` or via Hub agent defaults), the Codex provisioner maps it to the `model_reasoning_effort` key in `~/.codex/config.toml` using four quartile buckets:
+
+| Thinking Level | Reasoning Effort |
+| :--- | :--- |
+| 0–25 | `low` |
+| 26–50 | `medium` |
+| 51–75 | `high` |
+| 76–100 | `xhigh` |
+
+Values outside the 0–100 range are clamped to the nearest boundary.
+
 ### Known Limitations
 - **Auth File Copy**: The `auth.json` file is only copied when the agent is **created**.
 - **Model selection**: Specific model selection must currently be handled via the `config.toml` or environment variables within the agent.

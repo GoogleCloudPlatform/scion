@@ -51,7 +51,7 @@ starting a **stopped** or **error** agent runs a fresh session. See
     - `--harness-config <string>`: Named harness configuration to use.
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
     - `--broker <string>`: Preferred runtime broker ID or name for execution.
-    - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, or `none`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
+    - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
 
 ### `scion stop`
@@ -194,9 +194,9 @@ Sets the message mode for an agent, controlling which users and agents can send 
 
 - **Arguments:**
     - `<agent-name>`: The target agent.
-    - `<mode>`: One of `project` (default), `branch`, `lineage`, or `none`.
+    - `<mode>`: One of `project` (default), `branch`, `lineage`, `none`, or `hub`.
 
-See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes) for details on each mode.
+See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes) for details on each mode. The `hub` mode enables [cross-project messaging](/scion/hosted/user/messaging/#cross-project-messaging).
 
 ### `scion messages` (aliases: `msgs`, `inbox`)
 
@@ -227,6 +227,7 @@ Conversations are referenced using one of three forms:
 - **Commands:**
     - `list` (default): List conversations you participate in.
     - `get <conversation-ref>`: Show conversation details.
+    - `get-message <conversation-ref> <message-id>`: Retrieve a single message by its ID from a conversation. Authorization is participant-based — only participants of the conversation can retrieve its messages.
     - `messages <conversation-ref>`: View messages in a conversation.
     - `create <name>`: Create a new group conversation.
     - `set-default <conversation-ref> <agent-id>`: Set the default agent for a conversation.
@@ -250,6 +251,8 @@ Conversations are referenced using one of three forms:
     - `--json`: Output in JSON format.
 - **Flags (on `catch-up`):**
     - `--since <duration>`: Show messages from this duration ago, e.g. `30m`, `2h` (default `1h`).
+    - `--json`: Output in JSON format.
+- **Flags (on `get-message`):**
     - `--json`: Output in JSON format.
 
 ### `scion logs`
@@ -330,6 +333,10 @@ Manages the Scion workspace (Project).
         - Flags: `--name`, `--script`, `--description`.
     - `activate <id-or-slug> [project]`: Mark an archived hook as active (archives any currently active hook).
     - `delete <id-or-slug> [project]` (alias `rm`, `remove`): Delete an archived hook. Active hooks cannot be deleted.
+- `scion project messaging`: Manage cross-project messaging policy for a project.
+    - `set [project]`: Set the inbound messaging policy.
+        - Flags: `--policy <string>` (one of `none`, `members`, `all`), `--revision <int>` (required, optimistic concurrency revision).
+    - `get [project]`: Show the current messaging policy and revision.
 
 ### `scion user`
 
@@ -524,6 +531,10 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags: `--name`, `--script`, `--description`.
     - `activate <id-or-slug>`: Mark an archived hook as active (archives any currently active hub-scoped hook).
     - `delete <id-or-slug>` (alias `rm`, `remove`): Delete an archived hook. Active hooks cannot be deleted.
+- `scion hub messaging`: Manage hub-wide cross-project messaging settings. Requires administrator privileges.
+    - `set`: Set hub-wide messaging settings.
+        - Flags: `--cross-project-enabled <bool>` (enable or disable cross-project messaging), `--revision <int>` (required, optimistic concurrency revision).
+    - `get`: Show the current hub-wide messaging settings and revision.
 
 ## Notification Management
 
@@ -682,8 +693,11 @@ The command populates a structured JSON schema divided into two latency tiers:
 
 ### `scion version`
 
-Prints the Scion version information.
+Prints the Scion version information and optionally checks for available updates.
 
-**Usage:** `scion version`
+**Usage:** `scion version [flags]`
+
+- **Flags:**
+    - `--check`: Query the release manifest (`LATEST.json`) for available updates across release channels (stable, preview, nightly). Outputs update availability in plain text by default, or structured JSON when combined with `--format json`.
 
 
