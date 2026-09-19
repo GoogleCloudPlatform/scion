@@ -31,7 +31,12 @@ import type {
   AgentActivity,
   ExposedPort,
 } from '../../shared/types.js';
-import { isTerminalAvailable } from '../../shared/types.js';
+import {
+  TerminalSessionRegistry,
+  type TerminalSession,
+  type TerminalSessionState,
+  type TerminalResources,
+} from '../../client/terminal-sessions.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { SSEClient } from '../../client/sse-client.js';
@@ -45,20 +50,6 @@ import { showToast } from '../../utils/toast.js';
 type Terminal = import('@xterm/xterm').Terminal;
 type FitAddon = import('@xterm/addon-fit').FitAddon;
 type ClipboardAddon = import('@xterm/addon-clipboard').ClipboardAddon;
-
-/** PTY WebSocket message types */
-interface PTYDataMessage {
-  type: 'data';
-  data: string; // base64
-}
-
-interface PTYResizeMessage {
-  type: 'resize';
-  cols: number;
-  rows: number;
-}
-
-type PTYMessage = PTYDataMessage | PTYResizeMessage;
 
 /** Which tmux window is active */
 type TmuxWindow = 'agent' | 'shell';
@@ -127,9 +118,12 @@ export class ScionPageTerminal extends LitElement {
   @state() private uploadStatus = ''; // progress/error message in overlay
 
   private terminal: Terminal | null = null;
+  private terminalStyle: HTMLStyleElement | null = null;
   private fitAddon: FitAddon | null = null;
   private clipboardAddon: ClipboardAddon | null = null;
-  private socket: WebSocket | null = null;
+  private session: TerminalSession | null = null;
+  private sessionAgent: Agent | null = null;
+  private sessionUnsubscribe: (() => void) | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   private sseClient: SSEClient | null = null;
@@ -568,22 +562,35 @@ export class ScionPageTerminal extends LitElement {
     this.cleanup();
   }
 
-  private async loadAgentInfo(): Promise<void> {
+  private loadAgentInfo(): void {
     this.loading = true;
     this.error = null;
-
     try {
-      const response = await fetch(`/api/v1/agents/${this.agentId}`, {
-        credentials: 'include',
+      // Identity comes from authenticated bootstrap, never from the route.
+      const accountId = this.pageData?.user?.id;
+      if (!accountId) throw new Error('Authentication required to access this terminal.');
+      // The legacy page is disposable. The retained workspace will own its registry.
+      const registry = new TerminalSessionRegistry({
+        hubUrl: new URL(import.meta.env.BASE_URL, window.location.origin).href,
+        accountId,
       });
+      this.session = registry.open(this.agentId, async (_agent, signal) => {
+        this.loading = false;
+        await this.updateComplete;
+        signal.throwIfAborted();
+        return this.initTerminal(signal);
+      });
+      this.sessionUnsubscribe = this.session.subscribe((state) => this.applySessionState(state));
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load agent';
+      this.loading = false;
+    }
+  }
 
-      if (!response.ok) {
-        throw new Error(
-          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
-        );
-      }
-
-      const agent = (await response.json()) as Agent;
+  private applySessionState(state: TerminalSessionState): void {
+    const agent = state.agent;
+    if (agent && this.sessionAgent !== agent) {
+      this.sessionAgent = agent;
       this.agent = agent;
       this.agentName = agent.name;
       this.projectId = agent.projectId ?? '';
@@ -592,31 +599,17 @@ export class ScionPageTerminal extends LitElement {
       this.exposedPorts = agent.exposedPorts ?? [];
       dispatchPageTitle(this, 'Terminal', agent.name || this.agentId);
       this.connectSSE();
-
-      // Resolve upload target shared dir (best-effort, non-blocking for terminal init)
-      if (this.projectId) {
-        void this.resolveUploadTarget();
-      }
-
-      if (!isTerminalAvailable(agent)) {
-        this.error =
-          agent.activity === 'offline'
-            ? 'Agent is offline. Terminal is not available while the agent is unreachable.'
-            : `Agent phase is ${agent.phase}. Terminal is not available until the agent has started.`;
-        this.loading = false;
-        return;
-      }
-
-      this.loading = false;
-
-      // Wait for render, then initialize terminal
-      await this.updateComplete;
-      await this.initTerminal();
-      void this.connectWebSocket();
-    } catch (err) {
-      console.error('Failed to load agent:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to load agent';
-      this.loading = false;
+      if (this.projectId) void this.resolveUploadTarget();
+    }
+    const newlyConnected = !this.connected && state.connection === 'connected';
+    this.connected = state.connection === 'connected';
+    this.error = state.error;
+    if (state.connection !== 'loading') this.loading = false;
+    if (newlyConnected) {
+      this.wasConnected = true;
+      this.fitAddon?.fit();
+      this.sendResize();
+      this.terminal?.focus();
     }
   }
 
@@ -662,7 +655,7 @@ export class ScionPageTerminal extends LitElement {
     }
   }
 
-  private async initTerminal(): Promise<void> {
+  private async initTerminal(signal: AbortSignal): Promise<TerminalResources> {
     // Dynamic import — xterm.js requires DOM APIs not available during SSR
     const [{ Terminal }, { FitAddon }, { WebLinksAddon }, { ClipboardAddon }] = await Promise.all([
       import('@xterm/xterm'),
@@ -671,8 +664,17 @@ export class ScionPageTerminal extends LitElement {
       import('@xterm/addon-clipboard'),
     ]);
 
+    signal.throwIfAborted();
+    const xtermStyle = document.createElement('style');
+    try {
+      const cssModule = await import('@xterm/xterm/css/xterm.css?inline');
+      xtermStyle.textContent = cssModule.default;
+    } catch {
+      console.warn('[Terminal] Could not load xterm CSS inline, terminal may not render correctly');
+    }
+    signal.throwIfAborted();
     const container = this.shadowRoot?.querySelector('.terminal-container') as HTMLElement;
-    if (!container) return;
+    if (!container) throw new Error('Terminal container is not available.');
 
     this.terminal = new Terminal({
       theme: {
@@ -716,19 +718,11 @@ export class ScionPageTerminal extends LitElement {
     this.clipboardAddon = new ClipboardAddon();
     this.terminal.loadAddon(this.clipboardAddon);
 
-    // Inject xterm.css into shadow root
-    const xtermStyle = document.createElement('style');
-    // We need to fetch and inject xterm CSS since it can't penetrate shadow DOM
-    try {
-      const cssModule = await import('@xterm/xterm/css/xterm.css?inline');
-      xtermStyle.textContent = cssModule.default;
-    } catch {
-      // Fallback: try to find xterm CSS in bundled assets
-      console.warn('[Terminal] Could not load xterm CSS inline, terminal may not render correctly');
-    }
+    this.terminalStyle = xtermStyle;
     this.shadowRoot?.appendChild(xtermStyle);
 
     this.terminal.open(container);
+    const terminal = this.terminal;
     this.enableShiftSelectionOnMac();
 
     // Detect active tmux window from OSC 7337 sequence sent by the broker
@@ -747,6 +741,7 @@ export class ScionPageTerminal extends LitElement {
     // Defer initial fit until browser has completed layout so the container
     // has its final dimensions (below the toolbar).
     await new Promise((resolve) => requestAnimationFrame(resolve));
+    signal.throwIfAborted();
     this.fitAddon.fit();
 
     // Clipboard key bindings & CSI u extended keys — xterm.js inside Shadow DOM
@@ -833,6 +828,15 @@ export class ScionPageTerminal extends LitElement {
       }
     });
     this.resizeObserver.observe(container);
+    return {
+      write: (bytes) => terminal.write(bytes),
+      reset: () => terminal.reset(),
+      size: () => ({ cols: terminal.cols, rows: terminal.rows }),
+      dispose: () => {
+        xtermStyle.remove();
+        this.disposeTerminal();
+      },
+    };
   }
 
   /**
@@ -859,130 +863,12 @@ export class ScionPageTerminal extends LitElement {
     };
   }
 
-  private async connectWebSocket(): Promise<void> {
-    if (!this.terminal) return;
-
-    // Preflight auth check — the browser WebSocket API hides HTTP error
-    // codes on failed upgrades (always returns close code 1006), so we
-    // cannot distinguish "permission denied" from "network error" after
-    // the fact. A preflight fetch surfaces the real HTTP status.
-    const preflightUrl = `/api/v1/agents/${this.agentId}/pty`;
-    try {
-      const resp = await fetch(preflightUrl, { credentials: 'include' });
-      if (!resp.ok) {
-        // Surface specific messages for common auth errors; fall back to
-        // the server's error body for everything else (422 no broker,
-        // 503 broker unavailable, etc.).
-        if (resp.status === 403) {
-          this.error = 'You do not have permission to attach to this agent.';
-        } else if (resp.status === 401) {
-          this.error = 'Authentication required to access this terminal.';
-        } else if (resp.status === 404) {
-          this.error = 'Agent not found.';
-        } else {
-          const message = await extractApiError(
-            resp,
-            `Terminal connection failed: ${resp.statusText}`
-          );
-          this.error = message;
-        }
-        return;
-      }
-    } catch (err) {
-      // Network error during preflight.
-      this.error =
-        err instanceof Error
-          ? `Could not connect to terminal: ${err.message}`
-          : 'A network error occurred while connecting to the terminal.';
-      return;
-    }
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${window.location.host}/api/v1/agents/${this.agentId}/pty?cols=${this.terminal.cols}&rows=${this.terminal.rows}`;
-
-    console.debug('[Terminal] Connecting to', url);
-    this.socket = new WebSocket(url);
-
-    this.socket.onopen = () => {
-      console.debug('[Terminal] WebSocket connected');
-      this.connected = true;
-      this.wasConnected = true;
-      this.error = null;
-      // Re-fit now that the connection is live so tmux gets accurate dimensions
-      if (this.fitAddon) {
-        this.fitAddon.fit();
-        this.sendResize();
-      }
-      this.terminal?.focus();
-    };
-
-    this.socket.onmessage = (event: MessageEvent) => {
-      try {
-        const raw = event.data;
-        if (typeof raw !== 'string') {
-          console.warn(
-            '[Terminal] Received non-string message frame (binary/Blob), type:',
-            typeof raw,
-            raw
-          );
-          return;
-        }
-        const msg = JSON.parse(raw) as PTYMessage;
-        if (msg.type === 'data') {
-          const bytes = Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0));
-          this.terminal?.write(bytes);
-        }
-      } catch (err) {
-        console.warn('[Terminal] Failed to parse WebSocket message:', err, event.data);
-      }
-    };
-
-    this.socket.onclose = (event: CloseEvent) => {
-      console.debug('[Terminal] WebSocket closed, code:', event.code, 'reason:', event.reason);
-      this.connected = false;
-      if (event.code !== 1000) {
-        this.error = `Connection closed (code: ${event.code})`;
-      }
-    };
-
-    this.socket.onerror = (event) => {
-      console.error('[Terminal] WebSocket error:', event);
-      this.connected = false;
-      this.error = 'WebSocket connection error';
-    };
-  }
-
   private sendData(data: string): void {
-    if (this.socket?.readyState !== WebSocket.OPEN) return;
-
-    // Encode to base64 — handle Unicode properly
-    const bytes = new TextEncoder().encode(data);
-    const base64 = btoa(String.fromCharCode(...bytes));
-
-    const msg: PTYDataMessage = { type: 'data', data: base64 };
-    this.socket.send(JSON.stringify(msg));
+    this.session?.sendData(data);
   }
 
   private sendResize(): void {
-    if (this.socket?.readyState !== WebSocket.OPEN || !this.terminal) return;
-
-    const msg: PTYResizeMessage = {
-      type: 'resize',
-      cols: this.terminal.cols,
-      rows: this.terminal.rows,
-    };
-    this.socket.send(JSON.stringify(msg));
-  }
-
-  /**
-   * Sends a tmux detach sequence (Ctrl-B d) so the tmux client exits cleanly
-   * instead of being killed, which would tear down the container.
-   */
-  private sendTmuxDetach(): void {
-    if (this.socket?.readyState === WebSocket.OPEN) {
-      // tmux default prefix is Ctrl-B (0x02), detach key is 'd'
-      this.sendData('\x02d');
-    }
+    if (this.terminal) this.session?.resize(this.terminal.cols, this.terminal.rows);
   }
 
   // --- Drag-and-drop file upload ---
@@ -1132,7 +1018,13 @@ export class ScionPageTerminal extends LitElement {
   }
 
   private cleanup(): void {
-    this.sendTmuxDetach();
+    this.sessionUnsubscribe?.();
+    this.sessionUnsubscribe = null;
+    // Only the disposable page tears down on navigation. A retained host must
+    // keep its session alive when hidden or when other routes are selected.
+    this.session?.close('navigation');
+    this.session = null;
+    this.connected = false;
     this.disconnectSSE();
     if (this._windowDragOver) {
       window.removeEventListener('dragover', this._windowDragOver);
@@ -1142,10 +1034,17 @@ export class ScionPageTerminal extends LitElement {
       window.removeEventListener('drop', this._windowDrop);
       this._windowDrop = null;
     }
-    if (this.socket) {
-      this.socket.close(1000, 'detach');
-      this.socket = null;
+    this.disposeTerminal();
+    if (this._errorTimer) {
+      clearTimeout(this._errorTimer);
+      this._errorTimer = null;
     }
+    this.wasConnected = false;
+  }
+
+  private disposeTerminal(): void {
+    this.terminalStyle?.remove();
+    this.terminalStyle = null;
     if (this.terminal) {
       this.terminal.dispose();
       this.terminal = null;
@@ -1171,7 +1070,7 @@ export class ScionPageTerminal extends LitElement {
    * Switch to the "agent" tmux window via prefix key binding (Ctrl-B A).
    */
   private switchToAgent(): void {
-    if (this.socket?.readyState !== WebSocket.OPEN) return;
+    if (!this.connected) return;
     this.sendData('\x02A');
     this.activeWindow = 'agent';
     this.terminal?.focus();
@@ -1182,7 +1081,7 @@ export class ScionPageTerminal extends LitElement {
    * The binding in .tmux.conf handles creating the window if it was closed.
    */
   private switchToShell(): void {
-    if (this.socket?.readyState !== WebSocket.OPEN) return;
+    if (!this.connected) return;
     this.sendData('\x02S');
     this.activeWindow = 'shell';
     this.terminal?.focus();
@@ -1365,8 +1264,8 @@ export class ScionPageTerminal extends LitElement {
   }
 
   private handleReconnect(): void {
-    this.cleanup();
-    void this.loadAgentInfo();
+    if (this.session) void this.session.connect();
+    else this.loadAgentInfo();
   }
 
   // --- SVG icon helpers ---
