@@ -97,6 +97,22 @@ const TYPING_EXPIRY_MS = 6000;
  */
 const SEEN_VISIBLE_MS = 5 * 60 * 1000;
 
+/** Match the store's ascending (created, UUID) order, not arrival order. */
+function compareMessageOrder(a: Message, b: Message): number {
+  const milliseconds = Date.parse(a.createdAt) - Date.parse(b.createdAt);
+  if (Number.isFinite(milliseconds) && milliseconds !== 0) return milliseconds;
+  // Go emits RFC3339 timestamps with up to nine fractional digits; Date
+  // truncates to milliseconds. Preserve the remainder before breaking ties
+  // by ID, and pad varying precision (.1 and .100000001) to the same width.
+  const remainder = (timestamp: string): number => {
+    const fraction = /\.(\d+)/.exec(timestamp)?.[1] || '';
+    return Number(fraction.padEnd(9, '0').slice(3, 9));
+  };
+  const subMilliseconds = remainder(a.createdAt) - remainder(b.createdAt);
+  if (subMilliseconds !== 0) return subMilliseconds;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
 /** Typing send throttle in ms. */
 const TYPING_SEND_THROTTLE_MS = 4000;
 
@@ -1178,10 +1194,9 @@ export class ScionChatThread extends LitElement {
       this.messageMap.set(msg.id, msg);
     }
 
-    // Sort ascending by createdAt (oldest first for chat display)
-    const sorted = Array.from(this.messageMap.values()).sort(
-      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-    );
+    // Match the server's (created, id) order so the displayed tail is also
+    // the unread watermark, including tied/sub-millisecond timestamps.
+    const sorted = Array.from(this.messageMap.values()).sort(compareMessageOrder);
 
     // Enforce buffer cap — remove oldest
     if (sorted.length > MAX_BUFFER) {
@@ -1740,6 +1755,7 @@ export class ScionChatThread extends LitElement {
     this.peerReadAt = Number.isNaN(parsed) ? Date.now() : parsed;
 
     if (this._seenExpiryTimer) clearTimeout(this._seenExpiryTimer);
+    this._seenExpiryTimer = null;
     const remaining = this.peerReadAt + SEEN_VISIBLE_MS - Date.now();
     if (remaining > 0) {
       this._seenExpiryTimer = setTimeout(() => {
@@ -1800,7 +1816,7 @@ export class ScionChatThread extends LitElement {
     if (!this.peerReadMessageId) return false;
     const watermark = this.messageMap.get(this.peerReadMessageId);
     if (!watermark) return false;
-    return new Date(msg.createdAt).getTime() <= new Date(watermark.createdAt).getTime();
+    return compareMessageOrder(msg, watermark) <= 0;
   }
 
   /** Fetch inter-agent messages for inline markers. Stores the raw flat list. */
@@ -1820,9 +1836,7 @@ export class ScionChatThread extends LitElement {
       if (currentId !== this.fetchId) return;
       const msgs = data?.messages ?? [];
       // Store sorted flat list — grouping by DM gaps happens in renderMessages().
-      this.interagentMessages = [...msgs].sort(
-        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-      );
+      this.interagentMessages = [...msgs].sort(compareMessageOrder);
     } catch {
       // Non-critical
     }
@@ -1881,7 +1895,7 @@ export class ScionChatThread extends LitElement {
     this._pendingIdempotencyKeys.add(idempotencyKey);
     this.messages = Array.from(this.messageMap.values())
       .filter((m) => m.type !== 'mention')
-      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      .sort(compareMessageOrder);
     this.scrollToBottomAfterRender();
 
     try {
@@ -1933,7 +1947,7 @@ export class ScionChatThread extends LitElement {
         this._pendingIdempotencyKeys.delete(idempotencyKey);
         this.messages = Array.from(this.messageMap.values())
           .filter((m) => m.type !== 'mention')
-          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+          .sort(compareMessageOrder);
         // Restore reply-to state so the reply bar comes back for retry.
         this.composerReplyTo = savedReplyTo;
         this.sendError = await extractApiError(res, 'Failed to send message');
@@ -1981,7 +1995,7 @@ export class ScionChatThread extends LitElement {
         }
         this.messages = Array.from(this.messageMap.values())
           .filter((m) => m.type !== 'mention')
-          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+          .sort(compareMessageOrder);
 
         onSuccess();
         // Backfill to get the full server-enriched message. The optimistic
@@ -1995,7 +2009,7 @@ export class ScionChatThread extends LitElement {
       this._pendingIdempotencyKeys.delete(idempotencyKey);
       this.messages = Array.from(this.messageMap.values())
         .filter((m) => m.type !== 'mention')
-        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+        .sort(compareMessageOrder);
       // Restore reply-to state so the reply bar comes back for retry.
       this.composerReplyTo = savedReplyTo;
       this.sendError = err instanceof Error ? err.message : 'Failed to send message';
@@ -3245,7 +3259,7 @@ export class ScionChatThread extends LitElement {
   }
 
   private get seenExpired(): boolean {
-    return this.peerReadAt > 0 && Date.now() - this.peerReadAt > SEEN_VISIBLE_MS;
+    return this.peerReadAt > 0 && Date.now() - this.peerReadAt >= SEEN_VISIBLE_MS;
   }
 
   private renderMessages() {
@@ -3255,9 +3269,7 @@ export class ScionChatThread extends LitElement {
     let prevTimestamp = 0;
 
     // Pre-sort inter-agent messages by time for gap-based grouping.
-    const iaMessages = [...this.interagentMessages].sort(
-      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-    );
+    const iaMessages = [...this.interagentMessages].sort(compareMessageOrder);
     let iaIdx = 0;
     const hasIA = this.hasInteragentMessages;
 

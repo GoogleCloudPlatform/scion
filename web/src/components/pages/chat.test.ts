@@ -470,6 +470,40 @@ describe('chat page — DM mute toggle', () => {
 });
 
 describe('chat page — muted DMs raise no unread dot', () => {
+  it('ignores an older unread response after a newer refresh clears the dot', async () => {
+    const el = createPage();
+    el.v2UnreadFromIds = ['agent-1', 'agent-2'];
+    let resolveOld!: (response: Response) => void;
+    vi.mocked(apiFetch)
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        dms: [{ peerId: 'agent-1', hasUnread: false }, { peerId: 'agent-2', hasUnread: true }],
+      })));
+    const oldRequest = el.loadUnreadDMPeers();
+    await el.loadUnreadDMPeers();
+    expect(el.v2UnreadFromIds).toEqual(['agent-2']);
+    resolveOld(new Response(JSON.stringify({
+      dms: [{ peerId: 'agent-1', hasUnread: true }, { peerId: 'agent-2', hasUnread: true }],
+    })));
+    await oldRequest;
+    expect(el.v2UnreadFromIds).toEqual(['agent-2']);
+  });
+
+  it.each([
+    'dm:agent:agent-1:user:user-me',
+    'dm:user:user-me:agent:agent-1',
+  ])('clears the acknowledged peer, not the selected conversation (%s)', (key) => {
+    const el = createPage();
+    el.v2UnreadFromIds = ['agent-1', 'agent-2'];
+    el.v2Conversation = { peerId: 'agent-2' };
+    const refresh = vi.spyOn(el, 'loadUnreadDMPeers').mockResolvedValue(undefined);
+    el._handleReadStateUpdated(new CustomEvent('read-state-updated', {
+      detail: { conversationKey: key },
+    }));
+    expect(el.v2UnreadFromIds).toEqual(['agent-2']);
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
   /** Answer GET /api/v1/chat/dms with the given entries. */
   function serveDMs(dms: Array<Record<string, unknown>>): void {
     vi.mocked(apiFetch).mockImplementation((url: string) => {

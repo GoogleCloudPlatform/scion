@@ -1825,6 +1825,7 @@ type MessageFilter struct {
 	Sender         string
 	OnlyUnread     bool      // Only unread messages
 	Type           string    // Filter by message type
+	ExcludeType    string    // Exclude a message type (e.g. mention fan-out copies)
 	Channel        string    // Filter by channel (e.g. "web", "discord")
 	ThreadID       string    // Filter by thread_id (wave-2 conversation key)
 	ConversationID string    // Filter by conversation_id (S4 conversation model)

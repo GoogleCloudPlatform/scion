@@ -1163,6 +1163,16 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{MessagesColumns[18]},
 			},
+			{
+				Name:    "message_conversation_id_channel_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[18], MessagesColumns[16], MessagesColumns[19], MessagesColumns[0]},
+			},
+			{
+				Name:    "message_thread_id_channel_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[17], MessagesColumns[16], MessagesColumns[19], MessagesColumns[0]},
+			},
 		},
 	}
 	// MessageAddresseesColumns holds the columns for the "message_addressees" table.

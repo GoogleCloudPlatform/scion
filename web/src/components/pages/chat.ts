@@ -252,6 +252,7 @@ export class ScionPageChat extends LitElement {
   private _onAgentsUpdated = this._handleAgentsUpdated.bind(this);
   private _onScopeChanged = this._handleScopeChanged.bind(this);
   private _onReadStateUpdated = this._handleReadStateUpdated.bind(this);
+  private _unreadDMRequestId = 0;
   private _onDMPromoted = this.handleDMPromoted.bind(this);
   /** Bound keydown handler for Cmd/Ctrl+K quick switcher. */
   private _onKeydown = this._handleGlobalKeydown.bind(this);
@@ -847,6 +848,7 @@ export class ScionPageChat extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    ++this._unreadDMRequestId;
     document.removeEventListener('keydown', this._onKeydown);
     if (this.isV2) {
       stateManager.removeEventListener('chat-message-received', this._onChatMessage);
@@ -1578,7 +1580,7 @@ export class ScionPageChat extends LitElement {
   /**
    * A conversation's read watermark moved (dispatched by chat-thread after a
    * successful POST). Clear the matching unread markers without a round trip,
-   * then re-sync from the server so a rejected write cannot leave the UI lying.
+   * then re-sync from the server to account for messages arriving meanwhile.
    */
   private _handleReadStateUpdated(e: Event): void {
     const detail = (e as CustomEvent).detail as { conversationKey?: string } | undefined;
@@ -1586,7 +1588,15 @@ export class ScionPageChat extends LitElement {
     if (!key) return;
 
     if (key.startsWith('dm:')) {
-      const peerId = this.v2Conversation?.peerId || '';
+      // The acknowledgement belongs to its key, even if navigation changed
+      // the selected conversation before this event was delivered.
+      const parts = key.split(':');
+      const userId = this.pageData?.user?.id;
+      let peerId = '';
+      if (parts.length === 5) {
+        if (parts[1] === 'user' && parts[2] === userId) peerId = parts[4];
+        else if (parts[3] === 'user' && parts[4] === userId) peerId = parts[2];
+      }
       if (peerId && this.v2UnreadFromIds.includes(peerId)) {
         this.v2UnreadFromIds = this.v2UnreadFromIds.filter((id) => id !== peerId);
       }
@@ -2106,6 +2116,7 @@ export class ScionPageChat extends LitElement {
    * for the blue unread dot on member avatars.
    */
   private async loadUnreadDMPeers(): Promise<void> {
+    const requestId = ++this._unreadDMRequestId;
     try {
       const res = await apiFetch('/api/v1/chat/dms');
       if (!res.ok) return;
@@ -2118,6 +2129,7 @@ export class ScionPageChat extends LitElement {
       };
       // A muted DM raises no dot: muting is the user saying "stop telling me
       // about this", and the avatar dot is the telling (#1029).
+      if (requestId !== this._unreadDMRequestId) return;
       const unreadIds = (data?.dms || [])
         .filter((dm) => dm.hasUnread && !dm.muted)
         .map((dm) => dm.peerId);

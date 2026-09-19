@@ -103,6 +103,10 @@ func (Message) Indexes() []ent.Index {
 		index.Fields("recipient", "recipient_id"),
 		index.Fields("created"),
 		index.Fields("conversation_id"),
+		// Native chat tail and history reads must not sort the entire DM on
+		// every unread refresh. Both read-switch paths order by created, id.
+		index.Fields("conversation_id", "channel", "created", "id"),
+		index.Fields("thread_id", "channel", "created", "id"),
 	}
 }
 
