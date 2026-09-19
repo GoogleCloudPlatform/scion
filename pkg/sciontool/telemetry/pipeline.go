@@ -51,7 +51,7 @@ type Pipeline struct {
 	config       *Config
 	receiver     *Receiver
 	exporter     *CloudExporter
-	filter       *Filter
+	policy       *receiverPolicy
 	mu           sync.Mutex
 	running      bool
 	healthCancel context.CancelFunc
@@ -82,7 +82,7 @@ func New() *Pipeline {
 	}
 	return &Pipeline{
 		config:      config,
-		filter:      NewFilter(config.Filter),
+		policy:      newReceiverPolicy(config),
 		retryConfig: DefaultRetryConfig(),
 	}
 }
@@ -94,7 +94,7 @@ func NewWithConfig(config *Config) *Pipeline {
 	}
 	return &Pipeline{
 		config:      config,
-		filter:      NewFilter(config.Filter),
+		policy:      newReceiverPolicy(config),
 		retryConfig: DefaultRetryConfig(),
 	}
 }
@@ -288,8 +288,9 @@ func (p *Pipeline) Config() *Config {
 
 // handleSpans processes incoming spans from the receiver.
 func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.ResourceSpans) error {
-	// Filter spans based on name/event type
-	filtered := p.filterSpans(resourceSpans)
+	// Clone and transform at the receiver boundary before any destination sees
+	// the batch. The processed value remains immutable across export retries.
+	filtered := p.policy.processSpans(resourceSpans)
 	if len(filtered) == 0 {
 		return nil
 	}
@@ -328,62 +329,23 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 	return nil
 }
 
-// filterSpans applies the filter to resource spans.
-func (p *Pipeline) filterSpans(resourceSpans []*tracepb.ResourceSpans) []*tracepb.ResourceSpans {
-	if p.filter == nil {
-		return resourceSpans
-	}
-
-	result := make([]*tracepb.ResourceSpans, 0, len(resourceSpans))
-	for _, rs := range resourceSpans {
-		filteredRS := &tracepb.ResourceSpans{
-			Resource:   rs.Resource,
-			ScopeSpans: make([]*tracepb.ScopeSpans, 0, len(rs.ScopeSpans)),
-			SchemaUrl:  rs.SchemaUrl,
-		}
-
-		for _, ss := range rs.ScopeSpans {
-			filteredSS := &tracepb.ScopeSpans{
-				Scope:     ss.Scope,
-				Spans:     make([]*tracepb.Span, 0, len(ss.Spans)),
-				SchemaUrl: ss.SchemaUrl,
-			}
-
-			for _, span := range ss.Spans {
-				if p.filter.ShouldProcessSpan(span.Name) {
-					filteredSS.Spans = append(filteredSS.Spans, span)
-				}
-			}
-
-			if len(filteredSS.Spans) > 0 {
-				filteredRS.ScopeSpans = append(filteredRS.ScopeSpans, filteredSS)
-			}
-		}
-
-		if len(filteredRS.ScopeSpans) > 0 {
-			result = append(result, filteredRS)
-		}
-	}
-
-	return result
-}
-
 // handleMetrics buffers incoming metrics for periodic export to Cloud Monitoring.
 // Metrics are accumulated and flushed at metricFlushInterval to avoid
 // sampling-rate violations from rapid writes (e.g. multiple hook processes).
 func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricpb.ResourceMetrics) error {
-	if len(resourceMetrics) == 0 {
+	processed := p.policy.processMetrics(resourceMetrics)
+	if len(processed) == 0 {
 		return nil
 	}
 
 	if p.exporter != nil {
 		p.metricBufMu.Lock()
-		p.metricBuf = append(p.metricBuf, resourceMetrics...)
+		p.metricBuf = append(p.metricBuf, processed...)
 		p.metricBufMu.Unlock()
-		log.Debug("Buffered %d resource metric batches for export", len(resourceMetrics))
+		log.Debug("Buffered %d policy-processed resource metric batches for export", len(processed))
 	} else {
 		metricCount := 0
-		for _, rm := range resourceMetrics {
+		for _, rm := range processed {
 			for _, sm := range rm.ScopeMetrics {
 				metricCount += len(sm.Metrics)
 			}
@@ -639,13 +601,14 @@ func attrSetKey(attrs []*commonpb.KeyValue) string {
 
 // handleLogs processes incoming logs from the receiver.
 func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.ResourceLogs) error {
-	if len(resourceLogs) == 0 {
+	processed := p.policy.processLogs(resourceLogs)
+	if len(processed) == 0 {
 		return nil
 	}
 
 	// Count total log records for logging
 	logCount := 0
-	for _, rl := range resourceLogs {
+	for _, rl := range processed {
 		for _, sl := range rl.ScopeLogs {
 			logCount += len(sl.LogRecords)
 		}
@@ -656,7 +619,7 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 	// handleSpans for the rationale on intentional double-retry layering.
 	if p.exporter != nil {
 		err := retryExport(ctx, p.retryConfig, "logs", func() error {
-			return p.exporter.ExportProtoLogs(ctx, resourceLogs)
+			return p.exporter.ExportProtoLogs(ctx, processed)
 		})
 		if err != nil {
 			p.recordExportError(ctx, "logs", err)

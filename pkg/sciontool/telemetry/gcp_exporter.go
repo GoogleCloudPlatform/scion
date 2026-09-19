@@ -26,7 +26,8 @@ import (
 
 // GCPExporter exports telemetry data to GCP using native APIs.
 // It uses Cloud Trace for spans and Cloud Logging for logs.
-// Metrics are forwarded via the SDK metric exporter (see providers.go).
+// Metrics are converted at the forwarding boundary and sent through the SDK
+// metric exporter after receiver policy processing.
 type GCPExporter struct {
 	traceExporter  trace.SpanExporter
 	metricExporter sdkmetric.Exporter
@@ -126,9 +127,8 @@ func (e *GCPExporter) ExportProtoSpans(ctx context.Context, resourceSpans []*tra
 // ExportProtoMetrics converts OTLP proto metrics to SDK metricdata and exports
 // them via the Cloud Monitoring exporter.
 //
-// This is primarily used for harnesses that emit native OTLP metrics to the
-// local sciontool receiver. Sciontool's own normalized SDK metrics may still be
-// exported directly by a MeterProvider configured in providers.go.
+// Both native and normalized SDK metrics reach this path through the local
+// sciontool receiver.
 func (e *GCPExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics []*metricpb.ResourceMetrics) error {
 	if e == nil || e.metricExporter == nil {
 		return nil

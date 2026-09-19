@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
@@ -54,7 +55,6 @@ type inProgressSpan struct {
 type TelemetryHandler struct {
 	tracer       trace.Tracer
 	logger       *slog.Logger
-	redactor     *telemetry.Redactor
 	metricsDebug bool
 	spanStore    sync.Map // map[string]*inProgressSpan - keyed by spanKey
 
@@ -81,7 +81,7 @@ type TelemetryHandler struct {
 // If tp is nil, a noop tracer will be used.
 // If lp is non-nil, correlated log records will be emitted alongside spans.
 // If mp is non-nil, OTel metric instruments will be created for recording counters and histograms.
-func NewTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, redactor *telemetry.Redactor, mp ...metric.MeterProvider) *TelemetryHandler {
+func NewTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, _ *telemetry.Redactor, mp ...metric.MeterProvider) *TelemetryHandler {
 	var tracer trace.Tracer
 	if tp != nil {
 		tracer = tp.Tracer("github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers")
@@ -91,7 +91,6 @@ func NewTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, red
 
 	h := &TelemetryHandler{
 		tracer:       tracer,
-		redactor:     redactor,
 		metricsDebug: telemetry.MetricsDebugEnabled(),
 		aggregator:   telemetry.NewAggregator(),
 	}
@@ -193,8 +192,8 @@ func (h *TelemetryHandler) Handle(event *hooks.Event) error {
 
 	if h.metricsDebug && isMetricRelevantEvent(event.Name) {
 		log.TaggedInfo("metrics",
-			"normalized hook event=%s raw=%s dialect=%s input_tokens=%d output_tokens=%d cached_tokens=%d success=%t error=%q",
-			event.Name, event.RawName, event.Dialect, event.Data.InputTokens, event.Data.OutputTokens, event.Data.CachedTokens, event.Data.Success, event.Data.Error)
+			"normalized hook event=%s dialect=%s input_tokens=%d output_tokens=%d cached_tokens=%d success=%t has_error=%t",
+			event.Name, event.Dialect, event.Data.InputTokens, event.Data.OutputTokens, event.Data.CachedTokens, event.Data.Success, event.Data.Error != "")
 	}
 
 	spanName, ok := SpanMapping[event.Name]
@@ -320,7 +319,7 @@ func (h *TelemetryHandler) emitLogRecord(ctx context.Context, event *hooks.Event
 	}
 
 	attrs := []slog.Attr{
-		slog.String("event.name", event.Name),
+		slog.String("event.name", spanName),
 	}
 
 	if event.RawName != "" {
@@ -330,38 +329,22 @@ func (h *TelemetryHandler) emitLogRecord(ctx context.Context, event *hooks.Event
 		attrs = append(attrs, slog.String("event.dialect", event.Dialect))
 	}
 	if event.Data.SessionID != "" {
-		val := event.Data.SessionID
-		if h.redactor != nil && h.redactor.ShouldHash("session_id") {
-			val = telemetry.HashValue(val)
-		}
-		attrs = append(attrs, slog.String("session_id", val))
+		attrs = append(attrs, slog.String("session_id", event.Data.SessionID))
 	}
 	if event.Data.ToolName != "" {
 		attrs = append(attrs, slog.String("tool_name", event.Data.ToolName))
 	}
 	if event.Data.ToolInput != "" {
-		val := event.Data.ToolInput
-		if h.redactor != nil && h.redactor.ShouldRedact("tool_input") {
-			val = "[REDACTED]"
-		}
-		attrs = append(attrs, slog.String("tool_input", val))
+		attrs = append(attrs, slog.String("tool_input", event.Data.ToolInput))
 	}
 	if event.Data.ToolOutput != "" {
-		val := event.Data.ToolOutput
-		if h.redactor != nil && h.redactor.ShouldRedact("tool_output") {
-			val = "[REDACTED]"
-		}
-		attrs = append(attrs, slog.String("tool_output", val))
+		attrs = append(attrs, slog.String("tool_output", event.Data.ToolOutput))
 	}
 	if event.Data.FilePath != "" {
 		attrs = append(attrs, slog.String("file_path", event.Data.FilePath))
 	}
 	if event.Data.Prompt != "" {
-		val := event.Data.Prompt
-		if h.redactor != nil && h.redactor.ShouldRedact("prompt") {
-			val = "[REDACTED]"
-		}
-		attrs = append(attrs, slog.String("prompt", val))
+		attrs = append(attrs, slog.String("prompt", event.Data.Prompt))
 	}
 	if event.Data.Source != "" {
 		attrs = append(attrs, slog.String("source", event.Data.Source))
@@ -393,8 +376,12 @@ func (h *TelemetryHandler) emitLogRecord(ctx context.Context, event *hooks.Event
 
 // eventToAttributes converts event data to span attributes.
 func (h *TelemetryHandler) eventToAttributes(event *hooks.Event) []attribute.KeyValue {
+	eventName := SpanMapping[event.Name]
+	if eventName == "" {
+		eventName = event.Name
+	}
 	attrs := []attribute.KeyValue{
-		attribute.String("event.name", event.Name),
+		attribute.String("event.name", eventName),
 	}
 
 	if event.RawName != "" {
@@ -406,11 +393,7 @@ func (h *TelemetryHandler) eventToAttributes(event *hooks.Event) []attribute.Key
 
 	// Add data fields with redaction
 	if event.Data.SessionID != "" {
-		val := event.Data.SessionID
-		if h.redactor != nil && h.redactor.ShouldHash("session_id") {
-			val = telemetry.HashValue(val)
-		}
-		attrs = append(attrs, attribute.String("session_id", val))
+		attrs = append(attrs, attribute.String("session_id", event.Data.SessionID))
 	}
 
 	if event.Data.ToolName != "" {
@@ -418,19 +401,11 @@ func (h *TelemetryHandler) eventToAttributes(event *hooks.Event) []attribute.Key
 	}
 
 	if event.Data.ToolInput != "" {
-		val := event.Data.ToolInput
-		if h.redactor != nil && h.redactor.ShouldRedact("tool_input") {
-			val = "[REDACTED]"
-		}
-		attrs = append(attrs, attribute.String("tool_input", val))
+		attrs = append(attrs, attribute.String("tool_input", event.Data.ToolInput))
 	}
 
 	if event.Data.ToolOutput != "" {
-		val := event.Data.ToolOutput
-		if h.redactor != nil && h.redactor.ShouldRedact("tool_output") {
-			val = "[REDACTED]"
-		}
-		attrs = append(attrs, attribute.String("tool_output", val))
+		attrs = append(attrs, attribute.String("tool_output", event.Data.ToolOutput))
 	}
 
 	if event.Data.FilePath != "" {
@@ -438,11 +413,7 @@ func (h *TelemetryHandler) eventToAttributes(event *hooks.Event) []attribute.Key
 	}
 
 	if event.Data.Prompt != "" {
-		val := event.Data.Prompt
-		if h.redactor != nil && h.redactor.ShouldRedact("prompt") {
-			val = "[REDACTED]"
-		}
-		attrs = append(attrs, attribute.String("prompt", val))
+		attrs = append(attrs, attribute.String("prompt", event.Data.Prompt))
 	}
 
 	if event.Data.Source != "" {
@@ -476,11 +447,7 @@ func (h *TelemetryHandler) eventToEndAttributes(event *hooks.Event, startTime ti
 
 	// Add tool output for end events
 	if event.Data.ToolOutput != "" {
-		val := event.Data.ToolOutput
-		if h.redactor != nil && h.redactor.ShouldRedact("tool_output") {
-			val = "[REDACTED]"
-		}
-		attrs = append(attrs, attribute.String("tool_output", val))
+		attrs = append(attrs, attribute.String("tool_output", event.Data.ToolOutput))
 	}
 
 	// Add token usage attributes
@@ -506,12 +473,9 @@ func (h *TelemetryHandler) metricAttrs() []attribute.KeyValue {
 	if v := os.Getenv("SCION_HARNESS"); v != "" {
 		attrs = append(attrs, attribute.String("harness", v))
 	}
-	if v := os.Getenv("SCION_GROVE_ID"); v != "" {
-		attrs = append(attrs, attribute.String("grove_id", v))
-		attrs = append(attrs, attribute.String("project_id", v))
-	} else if v := os.Getenv("SCION_PROJECT_ID"); v != "" {
-		attrs = append(attrs, attribute.String("grove_id", v))
-		attrs = append(attrs, attribute.String("project_id", v))
+	projectID := projectcompat.ProjectIDFromEnv(os.Getenv)
+	if projectID != "" {
+		attrs = append(attrs, attribute.String("project_id", projectID))
 	}
 	return attrs
 }

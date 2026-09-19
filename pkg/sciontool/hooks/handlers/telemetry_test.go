@@ -28,7 +28,7 @@ func TestNewTelemetryHandler(t *testing.T) {
 	}
 }
 
-func TestNewTelemetryHandler_WithRedactor(t *testing.T) {
+func TestNewTelemetryHandler_AcceptsLegacyRedactorArgument(t *testing.T) {
 	redactor := telemetry.NewRedactor(telemetry.RedactionConfig{
 		Redact: []string{"prompt"},
 		Hash:   []string{"session_id"},
@@ -37,9 +37,6 @@ func TestNewTelemetryHandler_WithRedactor(t *testing.T) {
 	h := NewTelemetryHandler(nil, nil, redactor)
 	if h == nil {
 		t.Fatal("NewTelemetryHandler should not return nil")
-	}
-	if h.redactor == nil {
-		t.Error("handler should have a redactor")
 	}
 }
 
@@ -50,6 +47,24 @@ func TestTelemetryHandler_HandleNilEvent(t *testing.T) {
 	err := h.Handle(nil)
 	if err != nil {
 		t.Errorf("Handle(nil) should not return error, got: %v", err)
+	}
+}
+
+func TestTelemetryHandler_MetricAttrsPreferCanonicalProject(t *testing.T) {
+	t.Setenv("SCION_PROJECT_ID", "canonical-project")
+	h := NewTelemetryHandler(nil, nil, nil)
+	attrs := h.metricAttrs()
+	foundProject := false
+	for _, attr := range attrs {
+		if string(attr.Key) == "project_id" {
+			foundProject = true
+			if attr.Value.AsString() != "canonical-project" {
+				t.Fatalf("project_id = %q, want canonical-project", attr.Value.AsString())
+			}
+		}
+	}
+	if !foundProject {
+		t.Fatal("project_id metric dimension missing")
 	}
 }
 
@@ -182,26 +197,6 @@ func TestSpanMapping(t *testing.T) {
 	}
 }
 
-func TestTelemetryHandler_RedactionApplied(t *testing.T) {
-	redactor := telemetry.NewRedactor(telemetry.RedactionConfig{
-		Redact: []string{"prompt", "tool_input", "tool_output"},
-		Hash:   []string{"session_id"},
-	})
-
-	h := NewTelemetryHandler(nil, nil, redactor)
-
-	// Test that redactor is properly referenced
-	if h.redactor == nil {
-		t.Fatal("redactor should be set")
-	}
-	if !h.redactor.ShouldRedact("prompt") {
-		t.Error("redactor should redact 'prompt'")
-	}
-	if !h.redactor.ShouldHash("session_id") {
-		t.Error("redactor should hash 'session_id'")
-	}
-}
-
 // recordingProcessor captures log records for test assertions.
 type recordingProcessor struct {
 	mu      sync.Mutex
@@ -287,8 +282,8 @@ func TestTelemetryHandler_WithLoggerProvider(t *testing.T) {
 		return true
 	})
 
-	if found["event.name"] != hooks.EventSessionStart {
-		t.Errorf("event.name = %q, want %q", found["event.name"], hooks.EventSessionStart)
+	if found["event.name"] != "agent.session.start" {
+		t.Errorf("event.name = %q, want %q", found["event.name"], "agent.session.start")
 	}
 	if found["session_id"] != "sess-abc" {
 		t.Errorf("session_id = %q, want %q", found["session_id"], "sess-abc")
@@ -298,7 +293,7 @@ func TestTelemetryHandler_WithLoggerProvider(t *testing.T) {
 	}
 }
 
-func TestTelemetryHandler_LogRedaction(t *testing.T) {
+func TestTelemetryHandler_LeavesPolicyTransformationToReceiver(t *testing.T) {
 	proc := &recordingProcessor{}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
 	defer func() { _ = lp.Shutdown(context.Background()) }()
@@ -333,17 +328,13 @@ func TestTelemetryHandler_LogRedaction(t *testing.T) {
 		return true
 	})
 
-	// Prompt should be redacted
-	if found["prompt"] != "[REDACTED]" {
-		t.Errorf("prompt = %q, want [REDACTED]", found["prompt"])
+	// Producers retain raw values so the receiver is the single authoritative
+	// policy boundary and hashes each accepted field exactly once.
+	if found["prompt"] != "my secret prompt" {
+		t.Errorf("prompt = %q, want unprocessed producer value", found["prompt"])
 	}
-
-	// Session ID should be hashed (not the original value)
-	if found["session_id"] == "sess-secret" {
-		t.Error("session_id should be hashed, not plaintext")
-	}
-	if found["session_id"] == "" {
-		t.Error("session_id should be present as hashed value")
+	if found["session_id"] != "sess-secret" {
+		t.Errorf("session_id = %q, want unprocessed producer value", found["session_id"])
 	}
 }
 

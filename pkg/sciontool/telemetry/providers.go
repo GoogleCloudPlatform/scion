@@ -9,8 +9,7 @@ import (
 	"fmt"
 	"os"
 
-	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
-	texporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -20,7 +19,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
-	"google.golang.org/api/option"
 )
 
 // Providers holds SDK TracerProvider, LoggerProvider, and MeterProvider for OTel export.
@@ -31,15 +29,15 @@ type Providers struct {
 	MeterProvider  *metric.MeterProvider
 }
 
-// NewProviders creates real SDK providers that export to the configured backend.
-// When provider=gcp, uses GCP-native trace exporter and OTLP for logs/metrics.
-// Otherwise, uses standard OTLP gRPC exporters for all signals.
+// NewProviders creates SDK providers that export every producer signal to the
+// container's loopback receiver. Cloud credentials and external endpoints are
+// deliberately used only by the long-lived forwarding pipeline.
 //
 // The batch parameter controls processor mode:
 //   - batch=false uses synchronous processors (for short-lived hook commands)
 //   - batch=true uses batching processors (for long-lived init commands)
 func NewProviders(ctx context.Context, config *Config, batch bool) (*Providers, error) {
-	if config == nil || !config.Enabled || !config.IsCloudConfigured() {
+	if config == nil || !config.Enabled {
 		return nil, nil
 	}
 
@@ -48,11 +46,7 @@ func NewProviders(ctx context.Context, config *Config, batch bool) (*Providers, 
 		return nil, err
 	}
 
-	if config.IsGCP() {
-		return newGCPProviders(ctx, config, res, batch)
-	}
-
-	return newOTLPProviders(ctx, config, res, batch)
+	return newLoopbackProviders(ctx, config, res, batch)
 }
 
 // buildResource creates the OTel resource with service name and agent identifiers.
@@ -62,16 +56,14 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 	}
 	if agentID := os.Getenv("SCION_AGENT_ID"); agentID != "" {
 		attrs = append(attrs, resource.WithAttributes(semconv.ServiceInstanceID(agentID)))
+		attrs = append(attrs, resource.WithAttributes(attribute.String("scion.agent.id", agentID)))
 	}
 	if agentSlug := os.Getenv("SCION_AGENT_SLUG"); agentSlug != "" {
 		attrs = append(attrs, resource.WithAttributes(
 			attribute.String("scion.agent.slug", agentSlug),
 		))
 	}
-	projectID := os.Getenv("SCION_PROJECT_ID")
-	if projectID == "" {
-		projectID = os.Getenv("SCION_GROVE_ID") // fallback for older dispatchers
-	}
+	projectID := projectcompat.ProjectIDFromEnv(os.Getenv)
 	if projectID != "" {
 		attrs = append(attrs, resource.WithAttributes(
 			attribute.String("scion.project.id", projectID),
@@ -104,96 +96,12 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 	return res, nil
 }
 
-// newGCPProviders creates providers using GCP-native exporters.
-// Traces use the Cloud Trace exporter directly.
-// Logs use OTLP to the local receiver (pipeline handles Cloud Logging forwarding).
-// Metrics use the Cloud Monitoring exporter directly.
-func newGCPProviders(ctx context.Context, config *Config, res *resource.Resource, batch bool) (*Providers, error) {
-	clientOpts := []option.ClientOption{}
-	if config.GCPCredentialsFile != "" {
-		clientOpts = append(clientOpts, option.WithAuthCredentialsFile(option.ServiceAccount, config.GCPCredentialsFile))
-	}
-
-	// GCP Cloud Trace exporter
-	traceOpts := []texporter.Option{
-		texporter.WithProjectID(config.ProjectID),
-	}
-	if len(clientOpts) > 0 {
-		traceOpts = append(traceOpts, texporter.WithTraceClientOptions(clientOpts))
-	}
-	traceExporter, err := texporter.New(traceOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("creating GCP trace exporter: %w", err)
-	}
-
-	// Logs export to the local OTLP receiver (pipeline forwards to Cloud Logging)
-	logExporter, err := otlploggrpc.New(ctx,
-		otlploggrpc.WithEndpoint(fmt.Sprintf("localhost:%d", config.GRPCPort)),
-		otlploggrpc.WithInsecure(),
-	)
-	if err != nil {
-		_ = traceExporter.Shutdown(ctx)
-		return nil, fmt.Errorf("creating log exporter: %w", err)
-	}
-
-	// Metrics: short-lived processes (hooks, batch=false) route through the
-	// local pipeline receiver via OTLP, just like logs. The long-running
-	// pipeline aggregates and exports to Cloud Monitoring at safe intervals,
-	// avoiding sampling-rate violations that occur when each hook process
-	// creates an independent Cloud Monitoring exporter.
-	// Long-lived processes (init, batch=true) export directly to Cloud
-	// Monitoring since they maintain stable cumulative counters.
-	var metricExporter metric.Exporter
-	if batch {
-		metricOpts := []mexporter.Option{
-			mexporter.WithProjectID(config.ProjectID),
-		}
-		if len(clientOpts) > 0 {
-			metricOpts = append(metricOpts, mexporter.WithMonitoringClientOptions(clientOpts...))
-		}
-		rawMetricExporter, err := mexporter.New(metricOpts...)
-		if err != nil {
-			_ = traceExporter.Shutdown(ctx)
-			_ = logExporter.Shutdown(ctx)
-			return nil, fmt.Errorf("creating GCP metric exporter: %w", err)
-		}
-		metricExporter = rawMetricExporter
-	} else {
-		otlpMetricExp, err := otlpmetricgrpc.New(ctx,
-			otlpmetricgrpc.WithEndpoint(fmt.Sprintf("localhost:%d", config.GRPCPort)),
-			otlpmetricgrpc.WithInsecure(),
-		)
-		if err != nil {
-			_ = traceExporter.Shutdown(ctx)
-			_ = logExporter.Shutdown(ctx)
-			return nil, fmt.Errorf("creating OTLP metric exporter for pipeline: %w", err)
-		}
-		metricExporter = otlpMetricExp
-	}
-	if config.MetricsDebug {
-		metricExporter = newDebugMetricExporter(metricExporter)
-	}
-
-	return buildProviders(res, traceExporter, logExporter, metricExporter, batch), nil
-}
-
-// newOTLPProviders creates providers using standard OTLP gRPC exporters.
-func newOTLPProviders(ctx context.Context, config *Config, res *resource.Resource, batch bool) (*Providers, error) {
-	gcpDialOpts, err := loadSecureGCPDialOptions(ctx, config)
-	if err != nil {
-		return nil, fmt.Errorf("loading GCP credentials: %w", err)
-	}
-
-	// Create trace exporter (gRPC)
+// newLoopbackProviders creates standard OTLP gRPC exporters fixed to loopback.
+func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Resource, batch bool) (*Providers, error) {
+	endpoint := loopbackEndpoint(config)
 	traceOpts := []otlptracegrpc.Option{
-		otlptracegrpc.WithEndpoint(config.Endpoint),
-	}
-	traceOpts, err = appendOTLPTraceGRPCSecurityOption(traceOpts, config)
-	if err != nil {
-		return nil, fmt.Errorf("loading OTLP TLS config: %w", err)
-	}
-	for _, do := range gcpDialOpts {
-		traceOpts = append(traceOpts, otlptracegrpc.WithDialOption(do))
+		otlptracegrpc.WithEndpoint(endpoint),
+		otlptracegrpc.WithInsecure(),
 	}
 	traceExporter, err := otlptracegrpc.New(ctx, traceOpts...)
 	if err != nil {
@@ -202,15 +110,8 @@ func newOTLPProviders(ctx context.Context, config *Config, res *resource.Resourc
 
 	// Create log exporter (gRPC)
 	logOpts := []otlploggrpc.Option{
-		otlploggrpc.WithEndpoint(config.Endpoint),
-	}
-	logOpts, err = appendOTLPLogGRPCSecurityOption(logOpts, config)
-	if err != nil {
-		_ = traceExporter.Shutdown(ctx)
-		return nil, fmt.Errorf("loading OTLP TLS config: %w", err)
-	}
-	for _, do := range gcpDialOpts {
-		logOpts = append(logOpts, otlploggrpc.WithDialOption(do))
+		otlploggrpc.WithEndpoint(endpoint),
+		otlploggrpc.WithInsecure(),
 	}
 	logExporter, err := otlploggrpc.New(ctx, logOpts...)
 	if err != nil {
@@ -220,16 +121,8 @@ func newOTLPProviders(ctx context.Context, config *Config, res *resource.Resourc
 
 	// Create metric exporter (gRPC)
 	metricOpts := []otlpmetricgrpc.Option{
-		otlpmetricgrpc.WithEndpoint(config.Endpoint),
-	}
-	metricOpts, err = appendOTLPMetricGRPCSecurityOption(metricOpts, config)
-	if err != nil {
-		_ = traceExporter.Shutdown(ctx)
-		_ = logExporter.Shutdown(ctx)
-		return nil, fmt.Errorf("loading OTLP TLS config: %w", err)
-	}
-	for _, do := range gcpDialOpts {
-		metricOpts = append(metricOpts, otlpmetricgrpc.WithDialOption(do))
+		otlpmetricgrpc.WithEndpoint(endpoint),
+		otlpmetricgrpc.WithInsecure(),
 	}
 	rawMetricExporter, err := otlpmetricgrpc.New(ctx, metricOpts...)
 	if err != nil {
@@ -237,12 +130,11 @@ func newOTLPProviders(ctx context.Context, config *Config, res *resource.Resourc
 		_ = logExporter.Shutdown(ctx)
 		return nil, fmt.Errorf("creating metric exporter: %w", err)
 	}
-	var metricExporter metric.Exporter = rawMetricExporter
-	if config.MetricsDebug {
-		metricExporter = newDebugMetricExporter(metricExporter)
-	}
+	return buildProviders(res, traceExporter, logExporter, rawMetricExporter, batch), nil
+}
 
-	return buildProviders(res, traceExporter, logExporter, metricExporter, batch), nil
+func loopbackEndpoint(config *Config) string {
+	return fmt.Sprintf("127.0.0.1:%d", config.GRPCPort)
 }
 
 // buildProviders constructs TracerProvider, LoggerProvider, and MeterProvider

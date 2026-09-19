@@ -64,7 +64,7 @@ const (
 var DefaultFilterExclude = []string{"agent.user.prompt"}
 
 // Default fields to redact for privacy.
-var DefaultRedactFields = []string{"prompt", "user.email", "tool_output", "tool_input"}
+var DefaultRedactFields = []string{"prompt", "user.email", "tool_output", "tool_input", "log.body", "span.status.message"}
 
 // Default fields to hash for privacy while maintaining correlation.
 var DefaultHashFields = []string{"session_id"}

@@ -14,7 +14,10 @@
 
 package projectcompat
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestCanonicalConfigKey(t *testing.T) {
 	tests := []struct {
@@ -36,6 +39,18 @@ func TestCanonicalConfigKey(t *testing.T) {
 		if canonical != tt.canonical || legacy != tt.legacy {
 			t.Fatalf("CanonicalConfigKey(%q) = (%q, %v), want (%q, %v)", tt.key, canonical, legacy, tt.canonical, tt.legacy)
 		}
+	}
+}
+
+func TestProjectIDFromEnv(t *testing.T) {
+	t.Setenv(EnvProjectID, "canonical")
+	t.Setenv(EnvGroveID, "legacy")
+	if got := ProjectIDFromEnv(os.Getenv); got != "canonical" {
+		t.Fatalf("ProjectIDFromEnv() = %q, want canonical", got)
+	}
+	t.Setenv(EnvProjectID, "")
+	if got := ProjectIDFromEnv(os.Getenv); got != "legacy" {
+		t.Fatalf("ProjectIDFromEnv() fallback = %q, want legacy", got)
 	}
 }
 

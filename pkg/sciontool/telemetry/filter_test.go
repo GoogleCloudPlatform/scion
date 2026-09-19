@@ -239,6 +239,37 @@ func TestRedactor_RedactProtoAttributes(t *testing.T) {
 	}
 }
 
+func TestRedactor_RecursivelyAppliesNativeContentAliases(t *testing.T) {
+	r := NewRedactor(RedactionConfig{
+		Redact: []string{"prompt", "tool_output"},
+		Hash:   []string{"session_id"},
+	})
+
+	attrs := []*commonpb.KeyValue{
+		{Key: "gen_ai.input.messages", Value: stringValue("secret prompt")},
+		{Key: "nested", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{Values: []*commonpb.KeyValue{
+			{Key: "output.value", Value: stringValue("secret output")},
+			{Key: "gen_ai.conversation.id", Value: stringValue("session-123")},
+		}}}}},
+	}
+
+	result := r.RedactProtoAttributes(attrs)
+	if got := getStringValue(result[0]); got != "[REDACTED]" {
+		t.Fatalf("gen_ai.input.messages = %q, want redacted", got)
+	}
+	nested := result[1].Value.GetKvlistValue().Values
+	if got := getStringValue(nested[0]); got != "[REDACTED]" {
+		t.Fatalf("output.value = %q, want redacted", got)
+	}
+	if got := getStringValue(nested[1]); got != HashValue("session-123") {
+		t.Fatalf("gen_ai.conversation.id = %q, want one SHA-256 hash", got)
+	}
+}
+
+func stringValue(value string) *commonpb.AnyValue {
+	return &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: value}}
+}
+
 func getStringValue(kv *commonpb.KeyValue) string {
 	if sv, ok := kv.Value.Value.(*commonpb.AnyValue_StringValue); ok {
 		return sv.StringValue
@@ -265,6 +296,18 @@ func TestRedactor_DefaultFields(t *testing.T) {
 	}
 	if !foundPrompt {
 		t.Error("DefaultRedactFields should contain 'prompt'")
+	}
+	for _, field := range []string{"log.body", "span.status.message"} {
+		found := false
+		for _, configured := range DefaultRedactFields {
+			if configured == field {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("DefaultRedactFields should contain %q", field)
+		}
 	}
 
 	foundSessionID := false

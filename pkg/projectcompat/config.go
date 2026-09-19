@@ -79,3 +79,15 @@ func EnvProjectIDConfigKey(envName string, hubProjectAsTopLevel bool) (string, b
 		return "", false
 	}
 }
+
+// ProjectIDFromEnv returns the canonical project identity from an environment
+// lookup. The canonical name wins when both canonical and legacy aliases exist.
+func ProjectIDFromEnv(getenv func(string) string) string {
+	if getenv == nil {
+		return ""
+	}
+	if projectID := getenv(EnvProjectID); projectID != "" {
+		return projectID
+	}
+	return getenv(EnvGroveID)
+}
