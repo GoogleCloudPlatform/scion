@@ -364,7 +364,10 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     extra: dict[str, Any] | None = None
     if resolved.method == "auth-file":
         extra = {"auth_file_written": True}
-    ctx.write_outputs(resolved, env={"CODEX_HOME": os.path.join(ctx.home, ".codex")}, extra=extra)
+    ctx.write_outputs(resolved, env={
+        "CODEX_HOME": os.path.join(ctx.home, ".codex"),
+        "SCION_NATIVE_TELEMETRY_POLICY": "enabled" if _telemetry_enabled(telemetry) else "disabled",
+    }, extra=extra)
 
     scion_harness.apply_mcp_translated(ctx, _build_mcp_section, _write_mcp_to_config)
 

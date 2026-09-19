@@ -358,6 +358,8 @@ requires inspection of exact installed Claude and Gemini versions: their image
 builds currently use `@latest`, and neither binary nor Docker was available in
 the developer environment. Codex 0.154.0 was installed locally; its generated
 configuration was exercised, but actual emission was not observed there.
+Each provisioner output declares `SCION_NATIVE_TELEMETRY_POLICY` as `enabled`
+or `disabled` for the runtime's fail-closed inherited-env check.
 Configuration keys were checked against the vendor references for
 [Claude Code environment variables](https://code.claude.com/docs/en/env-vars),
 [Gemini CLI telemetry](https://geminicli.com/docs/cli/telemetry/), and

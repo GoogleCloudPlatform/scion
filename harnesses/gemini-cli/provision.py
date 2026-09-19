@@ -226,6 +226,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     if not port.isdecimal() or not 1 <= int(port) <= 65535:
         raise scion_harness.ProvisionError("invalid local telemetry gRPC port")
     env.update({
+        "SCION_NATIVE_TELEMETRY_POLICY": "enabled" if enabled else "disabled",
         "GEMINI_TELEMETRY_ENABLED": "true" if enabled else "false",
         "GEMINI_TELEMETRY_TARGET": "local",
         "GEMINI_TELEMETRY_OTLP_ENDPOINT": f"http://127.0.0.1:{port}",

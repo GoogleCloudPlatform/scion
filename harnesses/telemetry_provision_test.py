@@ -33,6 +33,7 @@ class TelemetryProvisionTest(unittest.TestCase):
                 ctx.select_auth = lambda _: module.scion_harness.ResolvedAuth('none')
                 module.provision(ctx)
                 env = json.loads((bundle / 'outputs' / 'env.json').read_text())
+                self.assertEqual(env['SCION_NATIVE_TELEMETRY_POLICY'], 'enabled' if enabled else 'disabled')
                 config = None
                 if harness == 'gemini-cli':
                     config = json.loads((home / '.gemini' / 'settings.json').read_text())['telemetry']
