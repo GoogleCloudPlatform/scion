@@ -51,6 +51,12 @@ class FakeSocket {
   }
 }
 class FakeEventSource extends EventTarget {
+  static instances: FakeEventSource[] = [];
+  onopen: (() => void) | null = null;
+  constructor() {
+    super();
+    FakeEventSource.instances.push(this);
+  }
   close = vi.fn();
 }
 const agentId = '11111111-1111-4111-8111-111111111111';
@@ -65,6 +71,7 @@ beforeAll(async () => {
 beforeEach(() => {
   terminal.instances.length = 0;
   FakeSocket.instances = [];
+  FakeEventSource.instances = [];
   frames = [];
   vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
   vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
@@ -172,6 +179,8 @@ describe('legacy terminal transport adapter', () => {
 
 it('connection notifications do not overwrite metadata refreshed by page controls', async () => {
   await mountConnected();
+  FakeEventSource.instances[0].onopen?.();
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
   const controls = pane() as unknown as { refreshAgentData(): Promise<void>; sendResize(): void };
   fetcher.mockResolvedValueOnce(json({ id: agentId, name: 'test', phase: 'stopped' }));
   await controls.refreshAgentData();

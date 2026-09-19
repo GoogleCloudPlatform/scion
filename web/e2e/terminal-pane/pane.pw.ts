@@ -14,6 +14,11 @@ async function setup(page: Page) {
   await page.addInitScript(() => {
     // Real pane/SSE adapter, fake isolated event source and system clipboard.
     window.EventSource = class extends EventTarget {
+      onopen: (() => void) | null = null;
+      constructor() {
+        super();
+        queueMicrotask(() => this.onopen?.());
+      }
       close(): void {}
     } as unknown as typeof EventSource;
     window.clipboardText = '';

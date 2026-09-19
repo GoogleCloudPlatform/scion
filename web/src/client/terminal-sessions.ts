@@ -17,6 +17,7 @@
 import type { Agent } from '../shared/types.js';
 import { isTerminalAvailable } from '../shared/types.js';
 import { extractApiError } from './api.js';
+import { TerminalMetadata } from './terminal-metadata.js';
 
 /** Supplied by authenticated bootstrap, never by a terminal route or peer message. */
 export interface TerminalScope {
@@ -87,6 +88,8 @@ export class TerminalSessionRegistry {
   private readonly sessions = new Map<string, Session>();
   private readonly hubUrl: string;
   private readonly accountId: string;
+  readonly metadata: TerminalMetadata;
+  private disposed = false;
 
   constructor(scope: TerminalScope) {
     const url = new URL(scope.hubUrl);
@@ -102,21 +105,50 @@ export class TerminalSessionRegistry {
     if (!scope.accountId.trim()) throw new Error('Authenticated terminal account required.');
     this.hubUrl = url.href.replace(/\/+$/, '') + '/';
     this.accountId = scope.accountId;
+    this.metadata = new TerminalMetadata(this.hubUrl);
   }
 
   /** Registers synchronously before any asynchronous work. Existing entries never rebind/reconnect. */
   open(agentId: string, initialize: TerminalResourceInitializer): TerminalSession {
+    if (this.disposed) throw new Error('Terminal registry is disposed.');
     if (!uuid.test(agentId)) throw new Error('Terminal requires an agent UUID.');
     const id = agentId.toLowerCase();
     const existing = this.sessions.get(id);
     if (existing) return existing;
     const key = JSON.stringify([this.hubUrl, this.accountId, id]);
-    const session = new Session(key, id, this.hubUrl, initialize, () => {
-      if (this.sessions.get(id) === session) this.sessions.delete(id);
-    });
+    const session = new Session(
+      key,
+      id,
+      this.hubUrl,
+      initialize,
+      () => {
+        if (this.sessions.get(id) === session) {
+          this.sessions.delete(id);
+          this.metadata.release(id);
+        }
+      },
+      (agent) => this.metadata.seed(id, agent)
+    );
     this.sessions.set(id, session);
+    this.metadata.retain(id);
     void session.connect();
     return session;
+  }
+
+  /** Final account/document teardown; never used for mode or route changes. */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    const errors: unknown[] = [];
+    for (const session of this.sessions.values()) {
+      try {
+        session.close();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    this.metadata.dispose();
+    if (errors.length) throw new AggregateError(errors, 'Terminal disposal failed.');
   }
 
   list(): readonly TerminalSession[] {
@@ -137,7 +169,8 @@ class Session implements TerminalSession {
     agentId: string,
     private readonly hubUrl: string,
     private readonly initialize: TerminalResourceInitializer,
-    private readonly remove: () => void
+    private readonly remove: () => void,
+    private readonly seedMetadata: (agent: Agent) => void
   ) {
     this.snapshot = {
       key,
@@ -207,6 +240,7 @@ class Session implements TerminalSession {
       if (!current()) return;
       if (agent.id?.toLowerCase() !== this.state.agentId)
         throw new Error('Agent metadata does not match the requested UUID.');
+      this.seedMetadata(agent);
       this.update({ agent });
       if (!current()) return;
       if (!isTerminalAvailable(agent)) {
@@ -320,14 +354,27 @@ class Session implements TerminalSession {
 
   close(reason: 'explicit' | 'navigation' = 'explicit'): void {
     if (this.state.connection === 'closed') return;
-    // Preserve Ctrl-B d followed by socket close for explicit disposal only.
-    if (reason === 'explicit') this.sendData('\x02d');
+    // Cleanup is exhaustive even if a renderer or subscriber throws. Removal
+    // must still release the aggregate subscription for the last session.
+    const errors: unknown[] = [];
+    const attempt = (cleanup: () => void): void => {
+      try {
+        cleanup();
+      } catch (error) {
+        errors.push(error);
+      }
+    };
+    if (reason === 'explicit')
+      attempt(() => {
+        this.sendData('\x02d');
+      });
     this.controller?.abort();
-    this.releaseSocket();
-    this.releaseResources();
-    this.remove();
-    this.update({ generation: this.state.generation + 1, connection: 'closed' });
+    attempt(() => this.releaseSocket());
+    attempt(() => this.releaseResources());
+    attempt(() => this.remove());
+    attempt(() => this.update({ generation: this.state.generation + 1, connection: 'closed' }));
     this.listeners.clear();
+    if (errors.length) throw new AggregateError(errors, 'Terminal session disposal failed.');
   }
 
   private releaseSocket(): void {

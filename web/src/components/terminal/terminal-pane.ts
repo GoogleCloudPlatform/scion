@@ -33,8 +33,7 @@ import {
 } from '../../client/terminal-sessions.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
-import { SSEClient } from '../../client/sse-client.js';
-import type { SSEUpdateEvent } from '../../client/sse-client.js';
+import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
 import type { StatusType } from '../shared/status-badge.js';
 import '../shared/status-badge.js';
 import { showToast } from '../../utils/toast.js';
@@ -123,12 +122,11 @@ export class ScionTerminalPane extends LitElement {
   private fitAddon: FitAddon | null = null;
   private clipboardAddon: ClipboardAddon | null = null;
   private ownedSession: TerminalSession | null = null;
-  private sessionAgent: Agent | null = null;
   private sessionUnsubscribe: (() => void) | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
-  private sseClient: SSEClient | null = null;
-  private sseUpdateHandler: ((e: CustomEvent<SSEUpdateEvent>) => void) | null = null;
+  private metadataUnsubscribe: (() => void) | null = null;
+  private metadataError: string | null = null;
   private portDropdownClose: (() => void) | null = null;
   private portDropdownTimer: ReturnType<typeof setTimeout> | null = null;
   private _dragCounter = 0;
@@ -590,6 +588,9 @@ export class ScionTerminalPane extends LitElement {
         throw error;
       }
     });
+    this.metadataUnsubscribe = registry.metadata.subscribe(this.agentId, (value) =>
+      this.applyMetadata(value)
+    );
     this.sessionUnsubscribe = this.session!.subscribe((state) => this.applySessionState(state));
     return this.session!;
   }
@@ -608,8 +609,11 @@ export class ScionTerminalPane extends LitElement {
   /** Explicit lifetime boundary. Navigation is reserved for the legacy adapter. */
   dispose(reason: 'explicit' | 'navigation' = 'explicit'): void {
     if (this.disposed) return;
-    this.session?.close(reason);
-    this.cleanup();
+    try {
+      this.session?.close(reason);
+    } finally {
+      this.cleanup();
+    }
   }
 
   private measurable(): boolean {
@@ -646,24 +650,9 @@ export class ScionTerminalPane extends LitElement {
       return;
     }
     if (this.disposed) return;
-    const agent = state.agent;
-    if (agent && this.sessionAgent !== agent) {
-      this.sessionAgent = agent;
-      this.agent = agent;
-      this.agentName = agent.name;
-      this.projectId = agent.projectId ?? '';
-      this.agentPhase = agent.phase;
-      this.agentActivity = agent.activity ?? '';
-      this.exposedPorts = agent.exposedPorts ?? [];
-      dispatchPageTitle(this, 'Terminal', agent.name || this.agentId);
-      // Temporary legacy metadata adapter; workspace subscriptions replace these
-      // connectSSE/disconnectSSE calls in P1.4. Never reads route-cleared state.
-      this.connectSSE();
-      if (this.projectId) void this.resolveUploadTarget();
-    }
     const newlyConnected = !this.connected && state.connection === 'connected';
     this.connected = state.connection === 'connected';
-    this.error = state.error;
+    this.error = this.metadataError ?? state.error;
     if (state.connection !== 'loading') this.loading = false;
     if (newlyConnected) {
       this.wasConnected = true;
@@ -682,39 +671,27 @@ export class ScionTerminalPane extends LitElement {
     return this.agentPhase;
   }
 
-  private connectSSE(): void {
-    this.disconnectSSE();
-    const client = new SSEClient();
-    this.sseClient = client;
-    this.sseUpdateHandler = (e: CustomEvent<SSEUpdateEvent>) => {
-      const { subject, data } = e.detail;
-      // Only handle events for this agent
-      if (!subject.startsWith(`agent.${this.agentId}.`)) return;
-      if (subject.endsWith('.ports')) {
-        const portsData = data as { ports: ExposedPort[] };
-        this.exposedPorts = portsData.ports ?? [];
-        return;
-      }
-      const delta = data as Partial<Agent>;
-      if (delta.phase) this.agentPhase = delta.phase;
-      if (delta.activity !== undefined) this.agentActivity = delta.activity ?? '';
-    };
-    client.addEventListener('update', this.sseUpdateHandler);
-    client.connect([`agent.${this.agentId}.>`]);
-  }
-
-  private disconnectSSE(): void {
-    if (this.sseClient) {
-      if (this.sseUpdateHandler) {
-        this.sseClient.removeEventListener(
-          'update',
-          this.sseUpdateHandler as EventListenerOrEventListenerObject
-        );
-        this.sseUpdateHandler = null;
-      }
-      this.sseClient.disconnect();
-      this.sseClient = null;
-    }
+  /** Metadata is consumed independently of transport/resize snapshots. */
+  private applyMetadata(value: TerminalAgentMetadata): void {
+    if (this.disposed) return;
+    this.metadataError = value.error;
+    this.error = value.error ?? this.session?.state.error ?? null;
+    const agent = value.agent;
+    if (!agent) return;
+    const previousProject = this.projectId;
+    const previousName = this.agentName;
+    this.agent = agent;
+    this.agentName = agent.name;
+    this.projectId = agent.projectId ?? '';
+    this.agentPhase = agent.phase;
+    this.agentActivity = agent.activity ?? '';
+    this.exposedPorts =
+      value.availability === 'deleted' || value.availability === 'unavailable'
+        ? []
+        : (agent.exposedPorts ?? []);
+    if (previousName !== agent.name)
+      dispatchPageTitle(this, 'Terminal', agent.name || this.agentId);
+    if (this.projectId && previousProject !== this.projectId) void this.resolveUploadTarget();
   }
 
   private async initTerminal(signal: AbortSignal): Promise<TerminalResources> {
@@ -1103,7 +1080,8 @@ export class ScionTerminalPane extends LitElement {
     this.sessionUnsubscribe?.();
     this.sessionUnsubscribe = null;
     this.connected = false;
-    this.disconnectSSE();
+    this.metadataUnsubscribe?.();
+    this.metadataUnsubscribe = null;
     this.closePortDropdown();
     this.removeWindowListeners();
     this.disposeTerminal();
@@ -1342,20 +1320,11 @@ export class ScionTerminalPane extends LitElement {
   }
 
   private async refreshAgentData(): Promise<void> {
-    try {
-      const response = await apiFetch(`/api/v1/agents/${this.agentId}`);
-      if (!response.ok) return;
-
-      const agent = (await response.json()) as Agent;
-      this.agent = agent;
-      this.agentPhase = agent.phase;
-      this.agentActivity = agent.activity ?? '';
-    } catch (err) {
-      console.warn('Failed to refresh agent data:', err);
-    }
+    await this.registry?.metadata.refresh(this.agentId);
   }
 
   private handleReconnect(): void {
+    if (this.metadataError) void this.refreshAgentData();
     if (this.session) void this.session.connect();
   }
 
@@ -1416,7 +1385,8 @@ export class ScionTerminalPane extends LitElement {
       `;
     }
 
-    if (this.error && !this.terminal) {
+    // Metadata availability must not remove the host during independent PTY setup.
+    if (this.session?.state.error && !this.terminal) {
       return html`
         <div class="toolbar">
           ${this.projectId
@@ -1504,6 +1474,11 @@ export class ScionTerminalPane extends LitElement {
               style="padding: 0.375rem 1rem; background: #7f1d1d; color: #fecaca; font-size: 0.75rem;"
             >
               ${this.error}
+              ${this.metadataError
+                ? html`<button class="metadata-retry" @click=${() => void this.refreshAgentData()}>
+                    Retry metadata
+                  </button>`
+                : nothing}
             </div>
           `
         : ''}

@@ -45,6 +45,12 @@ class FakeSocket {
 function fixture() {
   FakeSocket.instances = [];
   vi.stubGlobal('WebSocket', FakeSocket);
+  vi.stubGlobal(
+    'EventSource',
+    class extends EventTarget {
+      close() {}
+    }
+  );
   const fetcher = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) =>
     Promise.resolve(json(agent))
   );
@@ -360,4 +366,27 @@ it('keeps prior screen/resources until a reconnect socket actually opens', async
   expect(f.initialize).toHaveBeenCalledTimes(1);
   session.close();
   expect(f.resources.dispose).toHaveBeenCalledTimes(1);
+});
+
+it('releases every retained entry and metadata when a renderer disposer throws', async () => {
+  const f = fixture();
+  const first = f.registry.open(agentId, f.initialize);
+  await first.connect();
+  const otherId = '22222222-2222-4222-8222-222222222222';
+  f.fetcher.mockResolvedValue(json({ ...agent, id: otherId }));
+  const otherResources = { ...f.resources, dispose: vi.fn() };
+  const second = f.registry.open(otherId, () => Promise.resolve(otherResources));
+  await second.connect();
+  f.resources.dispose.mockImplementation(() => {
+    throw new Error('renderer failed');
+  });
+  expect(() => f.registry.dispose()).toThrow('Terminal disposal failed');
+  expect(otherResources.dispose).toHaveBeenCalledTimes(1);
+  expect(f.registry.list()).toEqual([]);
+  expect(first.state.connection).toBe('closed');
+  expect(second.state.connection).toBe('closed');
+  expect(f.registry.metadata.get(agentId)).toBeUndefined();
+  expect(f.registry.metadata.get(otherId)).toBeUndefined();
+  expect(() => f.registry.open(agentId, f.initialize)).toThrow('disposed');
+  expect(() => f.registry.dispose()).not.toThrow();
 });

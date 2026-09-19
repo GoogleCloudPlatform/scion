@@ -39,6 +39,7 @@ type SSEClientEventMap = {
   update: CustomEvent<SSEUpdateEvent>;
   connected: CustomEvent<{ connectionId: string; subjects: string[] }>;
   disconnected: CustomEvent<void>;
+  'handshake-failed': CustomEvent<void>;
   reconnecting: CustomEvent<{ attempt: number }>;
 };
 
@@ -69,13 +70,17 @@ export class SSEClient extends EventTarget {
   private connectionOpen = false;
   private onVisibilityChange: (() => void) | null = null;
 
+  constructor(private readonly endpoint = '/events') {
+    super();
+  }
+
   /**
    * Build the SSE URL with subscription subjects as query parameters.
    * Maps to the WatchRequest pattern.
    */
   private buildUrl(subjects: string[]): string {
     const params = subjects.map((s) => `sub=${encodeURIComponent(s)}`).join('&');
-    return `/events?${params}`;
+    return `${this.endpoint}?${params}`;
   }
 
   /**
@@ -152,6 +157,7 @@ export class SSEClient extends EventTarget {
       // spec a rejected handshake lands CLOSED and a mid-stream drop lands
       // CONNECTING, which is the opposite way round.
       if (!wasOpen) {
+        this.dispatchEvent(new CustomEvent('handshake-failed'));
         void this.checkAuthAndReconnect();
       } else {
         this.scheduleReconnect();
@@ -170,10 +176,13 @@ export class SSEClient extends EventTarget {
     });
 
     // Handle server-initiated reconnect (e.g. before a clean shutdown).
-    // connectionOpen is left alone: the feed was live a moment ago, so if the
-    // replacement connection never lands, that still counts as a drop.
+    // Report the gap immediately so snapshot consumers invalidate in-flight work.
     this.eventSource.addEventListener('reconnect', () => {
       if (es !== this.eventSource) return;
+      if (this.connectionOpen) {
+        this.connectionOpen = false;
+        this.dispatchEvent(new CustomEvent('disconnected'));
+      }
       this.reconnectAttempts = 0;
       es.close();
       this.eventSource = null;
@@ -204,7 +213,11 @@ export class SSEClient extends EventTarget {
   private async checkAuthAndReconnect(): Promise<void> {
     const generation = this.generation;
     try {
-      const resp = await fetch('/auth/me', { credentials: 'include' });
+      const authUrl = this.endpoint.startsWith('/')
+        ? '/auth/me'
+        : new URL('auth/me', this.endpoint).href;
+      const resp = await fetch(authUrl, { credentials: 'include' });
+      if (generation !== this.generation) return;
       if (resp.status === 401 || resp.redirected) {
         console.warn('[SSE] Session expired, redirecting to login');
         const returnTo = encodeURIComponent(window.location.pathname);
