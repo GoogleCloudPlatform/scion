@@ -555,7 +555,6 @@ export const listPageStyles = css`
        the card. min-width:0 lets it shrink; the overflow rules then truncate
        rather than spill. */
     min-width: 0;
-    overflow: hidden;
   }
 
   /* The icon must keep its size while the text absorbs the shrinking. */
@@ -564,14 +563,15 @@ export const listPageStyles = css`
     flex-shrink: 0;
   }
 
-  /* Truncation has to land on the element that holds the text — usually an
-     anchor inside the heading — because the flex parent only clips. */
+  /* Show the whole name, wrapping onto more lines when it does not fit. The
+     defect was the name pushing past the card edge, not the name being long,
+     and an ellipsis hides the one piece of information that identifies the
+     card. overflow-wrap:anywhere handles the hard case — a long name with no
+     spaces or hyphens, which would otherwise overflow with nowhere to break. */
   .resource-name > a,
   .resource-name > span {
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
 
   /* ── Stats (label + value pairs) ─────────────────────────────────── */

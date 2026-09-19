@@ -402,7 +402,6 @@ export class ScionPageProjectDetail extends LitElement {
       align-items: center;
       gap: 0.5rem;
       min-width: 0;
-      overflow: hidden;
     }
 
     .agent-name sl-icon {
@@ -415,9 +414,7 @@ export class ScionPageProjectDetail extends LitElement {
        instead of ellipsising. */
     .agent-name > a {
       min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      overflow-wrap: anywhere;
     }
 
     .agent-meta {

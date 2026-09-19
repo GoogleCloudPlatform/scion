@@ -343,7 +343,6 @@ export class ScionPageBrokerDetail extends LitElement {
         align-items: center;
         gap: 0.5rem;
         min-width: 0;
-        overflow: hidden;
       }
 
       .agent-name sl-icon {
@@ -355,9 +354,7 @@ export class ScionPageBrokerDetail extends LitElement {
          through a flex container — hence the span wrapper in the template. */
       .agent-name > span {
         min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        overflow-wrap: anywhere;
       }
 
       .agent-meta {
