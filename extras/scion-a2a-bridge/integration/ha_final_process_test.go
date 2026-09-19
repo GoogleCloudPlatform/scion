@@ -357,7 +357,14 @@ func TestTwoReplicaUserLifecycle(t *testing.T) {
 
 type sseStream struct {
 	response *http.Response
-	events   <-chan []byte
+	events   <-chan sseWireEvent
+}
+
+type sseWireEvent struct {
+	data       []byte
+	eventType  string
+	id         string
+	receivedAt time.Time
 }
 
 func subscribeTask(t *testing.T, endpoint, token, taskID string) *sseStream {
@@ -376,21 +383,36 @@ func subscribeTask(t *testing.T, endpoint, token, taskID string) *sseStream {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := make(chan []byte, 8)
+	events := make(chan sseWireEvent, 8)
 	go func() {
 		defer close(events)
 		scanner := bufio.NewScanner(response.Body)
+		var eventType, eventID string
 		for scanner.Scan() {
 			line := scanner.Bytes()
+			if bytes.HasPrefix(line, []byte("event: ")) {
+				eventType = string(bytes.TrimPrefix(line, []byte("event: ")))
+				continue
+			}
+			if bytes.HasPrefix(line, []byte("id: ")) {
+				eventID = string(bytes.TrimPrefix(line, []byte("id: ")))
+				continue
+			}
 			if bytes.HasPrefix(line, []byte("data: ")) {
-				events <- append([]byte(nil), bytes.TrimPrefix(line, []byte("data: "))...)
+				events <- sseWireEvent{
+					data:       append([]byte(nil), bytes.TrimPrefix(line, []byte("data: "))...),
+					eventType:  eventType,
+					id:         eventID,
+					receivedAt: time.Now().UTC(),
+				}
+				eventType, eventID = "", ""
 			}
 		}
 	}()
 	return &sseStream{response: response, events: events}
 }
 
-func nextSSE(t *testing.T, stream *sseStream, timeout time.Duration) []byte {
+func nextSSE(t *testing.T, stream *sseStream, timeout time.Duration) sseWireEvent {
 	t.Helper()
 	select {
 	case event, ok := <-stream.events:
@@ -400,7 +422,7 @@ func nextSSE(t *testing.T, stream *sseStream, timeout time.Duration) []byte {
 		return event
 	case <-time.After(timeout):
 		t.Fatal("timed out waiting for SSE event")
-		return nil
+		return sseWireEvent{}
 	}
 }
 
@@ -409,7 +431,8 @@ func assertNoSSE(t *testing.T, stream *sseStream, wait time.Duration) {
 	select {
 	case event, ok := <-stream.events:
 		if ok {
-			t.Fatalf("unexpected replayed SSE event: %s", event)
+			t.Fatalf("unexpected replayed SSE event: received_at=%s event=%q id=%q data=%s",
+				event.receivedAt.Format(time.RFC3339Nano), event.eventType, event.id, event.data)
 		}
 	case <-time.After(wait):
 	}
@@ -417,8 +440,12 @@ func assertNoSSE(t *testing.T, stream *sseStream, wait time.Duration) {
 
 func TestCrossReplicaStreamCursor(t *testing.T) {
 	h := startHAFinalTopology(t)
+	var taskID string
 	t.Cleanup(func() {
 		if t.Failed() {
+			if taskID != "" {
+				logCursorFailureEvidence(t, taskID)
+			}
 			t.Logf("Topology logs:\n%s", h.topology.logs.String())
 		}
 	})
@@ -435,7 +462,7 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 	if err := json.Unmarshal(list.Result, &listed); err != nil || len(listed.Tasks) != 1 {
 		t.Fatalf("active task lookup: err=%v result=%s", err, list.Result)
 	}
-	taskID := listed.Tasks[0].ID
+	taskID = listed.Tasks[0].ID
 
 	publishBrokerMessage(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-working", messages.TypeStateChange, "working")
 	first := subscribeTask(t, h.bridgeA.URL(), h.userToken, taskID)
@@ -446,8 +473,8 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 		}
 	}()
 	firstSnapshot := nextSSE(t, first, 3*time.Second)
-	if !bytes.Contains(firstSnapshot, []byte(taskID)) || bytes.Contains(firstSnapshot, []byte("_bridgeEventID")) {
-		t.Fatalf("invalid first snapshot: %s", firstSnapshot)
+	if !bytes.Contains(firstSnapshot.data, []byte(taskID)) || bytes.Contains(firstSnapshot.data, []byte("_bridgeEventID")) {
+		t.Fatalf("invalid first snapshot: %s", firstSnapshot.data)
 	}
 	_ = first.response.Body.Close() // explicit client disconnect
 	firstClosed = true
@@ -456,11 +483,11 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 	reconnected := subscribeTask(t, h.bridgeB.URL(), h.userToken, taskID)
 	defer reconnected.response.Body.Close()
 	restartSnapshot := nextSSE(t, reconnected, 3*time.Second)
-	if !bytes.Contains(restartSnapshot, []byte(taskID)) || bytes.Contains(restartSnapshot, []byte("_bridgeEventID")) {
-		t.Fatalf("invalid restart snapshot: %s", restartSnapshot)
+	if !bytes.Contains(restartSnapshot.data, []byte(taskID)) || bytes.Contains(restartSnapshot.data, []byte("_bridgeEventID")) {
+		t.Fatalf("invalid restart snapshot: %s", restartSnapshot.data)
 	}
-	if bytes.Contains(restartSnapshot, []byte("cursor-working")) {
-		t.Fatalf("intermediate working event must be absent from snapshot payload/history: %s", restartSnapshot)
+	if bytes.Contains(restartSnapshot.data, []byte("cursor-working")) {
+		t.Fatalf("intermediate working event must be absent from snapshot payload/history: %s", restartSnapshot.data)
 	}
 
 	// Verify durable intermediate event has event_id > last_event_cursor before streaming.
@@ -489,19 +516,22 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 
 	// Per no-old-replay contract, the unreflected working event after last_event_cursor must stream.
 	workingEvent := nextSSE(t, reconnected, 3*time.Second)
-	if !bytes.Contains(workingEvent, []byte("TASK_STATE_WORKING")) || bytes.Contains(workingEvent, []byte("_bridgeEventID")) {
-		t.Fatalf("invalid unreflected working event: %s", workingEvent)
+	if !bytes.Contains(workingEvent.data, []byte("TASK_STATE_WORKING")) || bytes.Contains(workingEvent.data, []byte("_bridgeEventID")) {
+		t.Fatalf("invalid unreflected working event: %s", workingEvent.data)
 	}
+	t.Logf("cursor evidence task_id=%s snapshot_cursor=%d working_event_id=%d first_snapshot=%s restart_snapshot=%s working_sse_received_at=%s working_sse_event=%q working_sse_id=%q working_sse_data=%s",
+		taskID, snapCursor, workingEventID, firstSnapshot.data, restartSnapshot.data,
+		workingEvent.receivedAt.Format(time.RFC3339Nano), workingEvent.eventType, workingEvent.id, workingEvent.data)
 	assertNoSSE(t, reconnected, 250*time.Millisecond)
 
 	publishBrokerMessage(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeAssistantReply, "final once")
 	publishBrokerMessage(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeAssistantReply, "final once")
 	for {
 		ev := nextSSE(t, reconnected, 3*time.Second)
-		if bytes.Contains(ev, []byte("_bridgeEventID")) {
-			t.Fatalf("bridge event ID leaked on wire: %s", ev)
+		if bytes.Contains(ev.data, []byte("_bridgeEventID")) {
+			t.Fatalf("bridge event ID leaked on wire: %s", ev.data)
 		}
-		if bytes.Contains(ev, []byte("TASK_STATE_COMPLETED")) {
+		if bytes.Contains(ev.data, []byte("TASK_STATE_COMPLETED")) {
 			break
 		}
 	}
@@ -526,6 +556,51 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 	}
 	if cursor <= 0 || distinct != total {
 		t.Fatalf("cursor=%d distinct_dedup=%d total_events=%d", cursor, distinct, total)
+	}
+}
+
+func logCursorFailureEvidence(t *testing.T, taskID string) {
+	t.Helper()
+	store, err := bridgestate.NewPostgres(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Logf("cursor failure evidence unavailable: %v", err)
+		return
+	}
+	defer store.Close()
+	var payload []byte
+	var cursor int64
+	var ownerHash, execOwner string
+	var execHeartbeat *time.Time
+	err = store.DB().QueryRow(`SELECT payload, last_event_cursor, md5(owner_key), COALESCE(exec_owner, ''), exec_heartbeat
+		FROM a2a_sdk_tasks WHERE id=$1`, taskID).Scan(&payload, &cursor, &ownerHash, &execOwner, &execHeartbeat)
+	if err != nil {
+		t.Logf("cursor failure snapshot query task_id=%s: %v", taskID, err)
+		return
+	}
+	t.Logf("cursor failure snapshot task_id=%s cursor=%d owner_hash=%s exec_owner=%q exec_heartbeat=%v payload=%s",
+		taskID, cursor, ownerHash, execOwner, execHeartbeat, payload)
+	rows, err := store.DB().Query(`SELECT id, kind, final, COALESCE(dedup_key, ''), created_at, payload
+		FROM a2a_task_events WHERE task_id=$1 ORDER BY id`, taskID)
+	if err != nil {
+		t.Logf("cursor failure events query task_id=%s: %v", taskID, err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var eventID int64
+		var kind, dedupKey string
+		var final bool
+		var createdAt time.Time
+		var eventPayload []byte
+		if err := rows.Scan(&eventID, &kind, &final, &dedupKey, &createdAt, &eventPayload); err != nil {
+			t.Logf("cursor failure event scan task_id=%s: %v", taskID, err)
+			return
+		}
+		t.Logf("cursor failure event task_id=%s event_id=%d kind=%s final=%t dedup_key=%q created_at=%s payload=%s",
+			taskID, eventID, kind, final, dedupKey, createdAt.UTC().Format(time.RFC3339Nano), eventPayload)
+	}
+	if err := rows.Err(); err != nil {
+		t.Logf("cursor failure event iteration task_id=%s: %v", taskID, err)
 	}
 }
 
@@ -605,8 +680,8 @@ func TestCrashLeaseBoundary(t *testing.T) {
 	terminal := nextSSE(t, stream, 3*time.Second)
 	_ = stream.response.Body.Close()
 	streamClosed = true
-	if !bytes.Contains(terminal, []byte("TASK_STATE_FAILED")) {
-		t.Fatalf("other replica did not observe durable failed terminal event: %s", terminal)
+	if !bytes.Contains(terminal.data, []byte("TASK_STATE_FAILED")) {
+		t.Fatalf("other replica did not observe durable failed terminal event: %s", terminal.data)
 	}
 	// Deterministically synchronize via post-terminal janitor/poll cycle across both replicas.
 	// This proves a full maintenance/janitor pass has completed post-terminal before asserting

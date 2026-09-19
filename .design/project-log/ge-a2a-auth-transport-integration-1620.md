@@ -298,3 +298,51 @@ runner, production code, CI policy, or the separately owned root fixes:
 No readiness conclusion is made here. PR #1747 has merged separately, and the manager will
 inspect current-upstream overlap and validate the actual merge result before any readiness
 decision.
+
+## PR #1748 PostgreSQL Cursor-Replay CI Investigation
+
+**Date:** 2026-09-19
+**Frozen PR head:** `fecf85b6bdf5ebe69648556b67b3e5837ec2921d`
+**CI job:** `105811994668`
+
+The dedicated PostgreSQL job passed its normal phase (`13.920s`) and race phase
+(`26.929s`) with zero skips, then failed the exact command
+`go test -count=3 ./integration`. The sole failure was
+`TestCrossReplicaStreamCursor` at the second `assertNoSSE`, after the test had already
+observed `TASK_STATE_COMPLETED`. The runner's JSON-output extraction truncated the
+historical payload at its first escaped quote, leaving only `{\`; therefore the original
+event body, SSE ID, and type cannot be recovered from that immutable job log.
+
+An equivalent task-owned PostgreSQL 15.19 cluster produced no local failure:
+
+- unmodified frozen head, cursor-only `-count=3`: 3/3 PASS;
+- unmodified frozen head, cursor-only `-count=20`: 20/20 PASS;
+- diagnostic head, adjacent HA lifecycle plus cursor test, `GOMAXPROCS=2 -count=30`:
+  30/30 cursor cases PASS;
+- diagnostic head, exact failing phase command: 3/3 cursor cases PASS and package PASS
+  (`41.894s`);
+- diagnostic head, cursor-only `GOMAXPROCS=4 -count=60`: 60/60 PASS (`87.292s`).
+
+The diagnostic-only test change preserves every no-replay and privacy assertion while
+capturing complete SSE data, SSE `event`/`id`, receipt time, task ID, snapshot payload and
+cursor, durable event rows, hashed owner key, execution owner, and heartbeat on any future
+failure. A representative run showed an empty SSE event type, generated SSE ID, snapshot
+cursor `0`, durable `cursor-working` event after that cursor, and one corresponding
+`TASK_STATE_WORKING` SSE with no `_bridgeEventID` exposure.
+
+Durable inspection showed no duplicate `(task_id, dedup_key)` groups and the expected
+three-row final sequence per cursor task: `cursor-working` status, `cursor-final` artifact,
+then `cursor-final:message`. The completed SDK snapshot advances through the artifact row;
+the message row remains a legitimate later event and is the event that the durable
+subscription maps to `TASK_STATE_COMPLETED`. Many completed snapshots therefore
+legitimately have an event after `last_event_cursor`; a post-terminal negative time window
+is not, by itself, a cursor-equality boundary.
+
+Classification: **harness synchronization/negative-window assumption, probabilistic and
+not locally reproduced**. There is no evidence of stale/foreign fixture contamination,
+dedup failure, cross-task delivery, owner/privacy leakage, or a production cursor defect.
+The immutable CI payload truncation prevents a definitive identification of that one extra
+frame, so no test correction or production change is proposed from this evidence. The
+minimal next step is to retain the diagnostic-only commit and use its complete failure
+capture if the job recurs; any semantic test correction remains manager-authorized work.
+No readiness conclusion is made here.
