@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
 	brokerv1 "github.com/GoogleCloudPlatform/scion/proto/broker/v1"
+	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -431,11 +433,96 @@ func assertNoSSE(t *testing.T, stream *sseStream, wait time.Duration) {
 	select {
 	case event, ok := <-stream.events:
 		if ok {
-			t.Fatalf("unexpected replayed SSE event: received_at=%s event=%q id=%q data=%s",
-				event.receivedAt.Format(time.RFC3339Nano), event.eventType, event.id, event.data)
+			t.Fatalf("unexpected replayed SSE event: %s", cursorSSEEvidence(event))
 		}
 	case <-time.After(wait):
 	}
+}
+
+// Diagnostic output is intentionally allowlisted: no wire payload, history, owner,
+// URL, error body, or arbitrary identifier can enter a CI log via these helpers.
+func cursorUUID(value string) string {
+	id, err := uuid.Parse(value)
+	if err != nil {
+		return "[not-uuid]"
+	}
+	return id.String()
+}
+
+func cursorEventType(value string) string {
+	switch value {
+	case "", "message", "error", "status", "artifact":
+		return value
+	default:
+		return "[other]"
+	}
+}
+
+func cursorState(value string) string {
+	switch value {
+	case "", "working", "completed", "TASK_STATE_WORKING", "TASK_STATE_COMPLETED", "TASK_STATE_CANCELED", "TASK_STATE_FAILED":
+		return value
+	default:
+		return "[other]"
+	}
+}
+
+func cursorPayloadEvidence(payload []byte) string {
+	var shape struct {
+		ID     string `json:"id"`
+		TaskID string `json:"taskId"`
+		Result struct {
+			Task *struct {
+				ID      string            `json:"id"`
+				History []json.RawMessage `json:"history"`
+				Status  struct {
+					State string `json:"state"`
+				} `json:"status"`
+			} `json:"task"`
+			StatusUpdate *struct {
+				TaskID string `json:"taskId"`
+				Status struct {
+					State string `json:"state"`
+				} `json:"status"`
+			} `json:"statusUpdate"`
+			ArtifactUpdate *struct {
+				TaskID string `json:"taskId"`
+			} `json:"artifactUpdate"`
+		} `json:"result"`
+		Status struct {
+			State string `json:"state"`
+		} `json:"status"`
+		History  []json.RawMessage          `json:"history"`
+		Artifact json.RawMessage            `json:"artifact"`
+		Metadata map[string]json.RawMessage `json:"metadata"`
+	}
+	hash := sha256.Sum256(payload)
+	if json.Unmarshal(payload, &shape) != nil {
+		return fmt.Sprintf("bytes=%d sha256=%x json=invalid", len(payload), hash)
+	}
+	kind, taskID, state, historyLen := "other", shape.TaskID, shape.Status.State, 0
+	switch {
+	case shape.Result.Task != nil:
+		kind, taskID, state, historyLen = "snapshot", shape.Result.Task.ID, shape.Result.Task.Status.State, len(shape.Result.Task.History)
+	case shape.Result.StatusUpdate != nil:
+		kind, taskID, state = "status-update", shape.Result.StatusUpdate.TaskID, shape.Result.StatusUpdate.Status.State
+	case shape.Result.ArtifactUpdate != nil:
+		kind, taskID = "artifact-update", shape.Result.ArtifactUpdate.TaskID
+	case shape.ID != "" && shape.TaskID == "":
+		kind, taskID, historyLen = "stored-snapshot", shape.ID, len(shape.History)
+	case len(shape.Artifact) > 0:
+		kind = "durable-artifact"
+	case shape.TaskID != "":
+		kind = "durable-status"
+	}
+	_, internalCursor := shape.Metadata["_bridgeEventID"]
+	return fmt.Sprintf("bytes=%d sha256=%x kind=%s task_id=%s state=%s history_count=%d internal_cursor_present=%t artifact_present=%t",
+		len(payload), hash, kind, cursorUUID(taskID), cursorState(state), historyLen, internalCursor, len(shape.Artifact) > 0)
+}
+
+func cursorSSEEvidence(event sseWireEvent) string {
+	return fmt.Sprintf("received_at=%s event_type=%q sse_id=%s %s",
+		event.receivedAt.UTC().Format(time.RFC3339Nano), cursorEventType(event.eventType), cursorUUID(event.id), cursorPayloadEvidence(event.data))
 }
 
 func TestCrossReplicaStreamCursor(t *testing.T) {
@@ -446,7 +533,8 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 			if taskID != "" {
 				logCursorFailureEvidence(t, taskID)
 			}
-			t.Logf("Topology logs:\n%s", h.topology.logs.String())
+			logs := []byte(h.topology.logs.String())
+			t.Logf("topology logs withheld bytes=%d sha256=%x", len(logs), sha256.Sum256(logs))
 		}
 	})
 	send := callRPCAsync(h.bridgeA.URL(), h.userToken, "SendMessage", newMessageParams("cursor-1", "stream me", "", ""))
@@ -460,7 +548,7 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 		} `json:"tasks"`
 	}
 	if err := json.Unmarshal(list.Result, &listed); err != nil || len(listed.Tasks) != 1 {
-		t.Fatalf("active task lookup: err=%v result=%s", err, list.Result)
+		t.Fatalf("active task lookup: decode_error=%t tasks=%d %s", err != nil, len(listed.Tasks), cursorPayloadEvidence(list.Result))
 	}
 	taskID = listed.Tasks[0].ID
 
@@ -474,7 +562,7 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 	}()
 	firstSnapshot := nextSSE(t, first, 3*time.Second)
 	if !bytes.Contains(firstSnapshot.data, []byte(taskID)) || bytes.Contains(firstSnapshot.data, []byte("_bridgeEventID")) {
-		t.Fatalf("invalid first snapshot: %s", firstSnapshot.data)
+		t.Fatalf("invalid first snapshot: %s", cursorSSEEvidence(firstSnapshot))
 	}
 	_ = first.response.Body.Close() // explicit client disconnect
 	firstClosed = true
@@ -484,10 +572,10 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 	defer reconnected.response.Body.Close()
 	restartSnapshot := nextSSE(t, reconnected, 3*time.Second)
 	if !bytes.Contains(restartSnapshot.data, []byte(taskID)) || bytes.Contains(restartSnapshot.data, []byte("_bridgeEventID")) {
-		t.Fatalf("invalid restart snapshot: %s", restartSnapshot.data)
+		t.Fatalf("invalid restart snapshot: %s", cursorSSEEvidence(restartSnapshot))
 	}
 	if bytes.Contains(restartSnapshot.data, []byte("cursor-working")) {
-		t.Fatalf("intermediate working event must be absent from snapshot payload/history: %s", restartSnapshot.data)
+		t.Fatalf("intermediate working event must be absent from snapshot payload/history: %s", cursorSSEEvidence(restartSnapshot))
 	}
 
 	// Verify durable intermediate event has event_id > last_event_cursor before streaming.
@@ -517,11 +605,10 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 	// Per no-old-replay contract, the unreflected working event after last_event_cursor must stream.
 	workingEvent := nextSSE(t, reconnected, 3*time.Second)
 	if !bytes.Contains(workingEvent.data, []byte("TASK_STATE_WORKING")) || bytes.Contains(workingEvent.data, []byte("_bridgeEventID")) {
-		t.Fatalf("invalid unreflected working event: %s", workingEvent.data)
+		t.Fatalf("invalid unreflected working event: %s", cursorSSEEvidence(workingEvent))
 	}
-	t.Logf("cursor evidence task_id=%s snapshot_cursor=%d working_event_id=%d first_snapshot=%s restart_snapshot=%s working_sse_received_at=%s working_sse_event=%q working_sse_id=%q working_sse_data=%s",
-		taskID, snapCursor, workingEventID, firstSnapshot.data, restartSnapshot.data,
-		workingEvent.receivedAt.Format(time.RFC3339Nano), workingEvent.eventType, workingEvent.id, workingEvent.data)
+	t.Logf("cursor evidence task_id=%s snapshot_cursor=%d working_event_id=%d first_snapshot={%s} restart_snapshot={%s} working_sse={%s}",
+		cursorUUID(taskID), snapCursor, workingEventID, cursorSSEEvidence(firstSnapshot), cursorSSEEvidence(restartSnapshot), cursorSSEEvidence(workingEvent))
 	assertNoSSE(t, reconnected, 250*time.Millisecond)
 
 	publishBrokerMessage(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeAssistantReply, "final once")
@@ -529,7 +616,7 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 	for {
 		ev := nextSSE(t, reconnected, 3*time.Second)
 		if bytes.Contains(ev.data, []byte("_bridgeEventID")) {
-			t.Fatalf("bridge event ID leaked on wire: %s", ev.data)
+			t.Fatalf("bridge event ID leaked on wire: %s", cursorSSEEvidence(ev))
 		}
 		if bytes.Contains(ev.data, []byte("TASK_STATE_COMPLETED")) {
 			break
@@ -539,7 +626,7 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 	result := awaitRPC(t, send)
 	_, _, finalState := taskIdentity(t, result.reply.Result)
 	if finalState != "TASK_STATE_COMPLETED" {
-		t.Fatalf("send state=%q raw=%s", finalState, result.raw)
+		t.Fatalf("send state=%s %s", cursorState(finalState), cursorPayloadEvidence(result.reply.Result))
 	}
 
 	store, err := bridgestate.NewPostgres(os.Getenv("TEST_DATABASE_URL"))
@@ -563,26 +650,26 @@ func logCursorFailureEvidence(t *testing.T, taskID string) {
 	t.Helper()
 	store, err := bridgestate.NewPostgres(os.Getenv("TEST_DATABASE_URL"))
 	if err != nil {
-		t.Logf("cursor failure evidence unavailable: %v", err)
+		t.Log("cursor failure evidence unavailable: store open failed; error withheld")
 		return
 	}
 	defer store.Close()
 	var payload []byte
 	var cursor int64
-	var ownerHash, execOwner string
+	var ownerPresent, execOwnerPresent bool
 	var execHeartbeat *time.Time
-	err = store.DB().QueryRow(`SELECT payload, last_event_cursor, md5(owner_key), COALESCE(exec_owner, ''), exec_heartbeat
-		FROM a2a_sdk_tasks WHERE id=$1`, taskID).Scan(&payload, &cursor, &ownerHash, &execOwner, &execHeartbeat)
+	err = store.DB().QueryRow(`SELECT payload, last_event_cursor, owner_key <> '', COALESCE(exec_owner, '') <> '', exec_heartbeat
+		FROM a2a_sdk_tasks WHERE id=$1`, taskID).Scan(&payload, &cursor, &ownerPresent, &execOwnerPresent, &execHeartbeat)
 	if err != nil {
-		t.Logf("cursor failure snapshot query task_id=%s: %v", taskID, err)
+		t.Logf("cursor failure snapshot query task_id=%s: failed; error withheld", cursorUUID(taskID))
 		return
 	}
-	t.Logf("cursor failure snapshot task_id=%s cursor=%d owner_hash=%s exec_owner=%q exec_heartbeat=%v payload=%s",
-		taskID, cursor, ownerHash, execOwner, execHeartbeat, payload)
+	t.Logf("cursor failure snapshot task_id=%s cursor=%d owner_present=%t exec_owner_present=%t exec_heartbeat=%v %s",
+		cursorUUID(taskID), cursor, ownerPresent, execOwnerPresent, execHeartbeat, cursorPayloadEvidence(payload))
 	rows, err := store.DB().Query(`SELECT id, kind, final, COALESCE(dedup_key, ''), created_at, payload
 		FROM a2a_task_events WHERE task_id=$1 ORDER BY id`, taskID)
 	if err != nil {
-		t.Logf("cursor failure events query task_id=%s: %v", taskID, err)
+		t.Logf("cursor failure events query task_id=%s: failed; error withheld", cursorUUID(taskID))
 		return
 	}
 	defer rows.Close()
@@ -593,14 +680,23 @@ func logCursorFailureEvidence(t *testing.T, taskID string) {
 		var createdAt time.Time
 		var eventPayload []byte
 		if err := rows.Scan(&eventID, &kind, &final, &dedupKey, &createdAt, &eventPayload); err != nil {
-			t.Logf("cursor failure event scan task_id=%s: %v", taskID, err)
+			t.Logf("cursor failure event scan task_id=%s: failed; error withheld", cursorUUID(taskID))
 			return
 		}
-		t.Logf("cursor failure event task_id=%s event_id=%d kind=%s final=%t dedup_key=%q created_at=%s payload=%s",
-			taskID, eventID, kind, final, dedupKey, createdAt.UTC().Format(time.RFC3339Nano), eventPayload)
+		dedupClass := "other"
+		switch {
+		case dedupKey == "cursor-working":
+			dedupClass = "cursor-working"
+		case dedupKey == "cursor-final:message":
+			dedupClass = "cursor-final:message"
+		case strings.HasPrefix(dedupKey, "cursor-final:artifact:"):
+			dedupClass = "cursor-final:artifact"
+		}
+		t.Logf("cursor failure event task_id=%s event_id=%d kind=%s final=%t dedup_class=%s created_at=%s %s",
+			cursorUUID(taskID), eventID, cursorEventType(kind), final, dedupClass, createdAt.UTC().Format(time.RFC3339Nano), cursorPayloadEvidence(eventPayload))
 	}
 	if err := rows.Err(); err != nil {
-		t.Logf("cursor failure event iteration task_id=%s: %v", taskID, err)
+		t.Logf("cursor failure event iteration task_id=%s: failed; error withheld", cursorUUID(taskID))
 	}
 }
 

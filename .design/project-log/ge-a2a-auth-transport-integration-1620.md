@@ -324,10 +324,11 @@ An equivalent task-owned PostgreSQL 15.19 cluster produced no local failure:
 - diagnostic head, cursor-only `GOMAXPROCS=4 -count=60`: 60/60 PASS (`87.292s`).
 
 The diagnostic-only test change preserves every no-replay and privacy assertion while
-capturing complete SSE data, SSE `event`/`id`, receipt time, task ID, snapshot payload and
-cursor, durable event rows, hashed owner key, execution owner, and heartbeat on any future
-failure. A representative run showed an empty SSE event type, generated SSE ID, snapshot
-cursor `0`, durable `cursor-working` event after that cursor, and one corresponding
+capturing allowlisted SSE event type and UUID ID, receipt time, task UUID, payload shape
+and SHA-256 (never raw content), snapshot cursor, durable event IDs/kinds, ownership-presence
+booleans, and heartbeat on any future failure. A representative run showed an empty SSE
+event type, generated SSE ID, snapshot cursor `0`, durable `cursor-working` event after
+that cursor, and one corresponding
 `TASK_STATE_WORKING` SSE with no `_bridgeEventID` exposure.
 
 Durable inspection showed no duplicate `(task_id, dedup_key)` groups and the expected
@@ -338,11 +339,12 @@ subscription maps to `TASK_STATE_COMPLETED`. Many completed snapshots therefore
 legitimately have an event after `last_event_cursor`; a post-terminal negative time window
 is not, by itself, a cursor-equality boundary.
 
-Classification: **harness synchronization/negative-window assumption, probabilistic and
-not locally reproduced**. There is no evidence of stale/foreign fixture contamination,
-dedup failure, cross-task delivery, owner/privacy leakage, or a production cursor defect.
-The immutable CI payload truncation prevents a definitive identification of that one extra
-frame, so no test correction or production change is proposed from this evidence. The
-minimal next step is to retain the diagnostic-only commit and use its complete failure
-capture if the job recurs; any semantic test correction remains manager-authorized work.
+Classification: **INCONCLUSIVE**. Local runs did not exhibit stale/foreign fixture
+contamination, dedup failure, cross-task delivery, or owner/privacy leakage, but cannot
+exclude those causes or a production cursor defect in CI. A distinct post-snapshot event,
+a harness timing/negative-window assumption, and a real replay/duplicate are hypotheses,
+not findings: the immutable CI truncation prevents identifying the extra frame. The
+minimal next step is to retain safe diagnostic instrumentation and compare the allowlisted
+frame ID/task/shape/hash against durable event IDs and snapshot cursor at a manager-authorized
+future recurrence. No semantic test correction or production change is proposed.
 No readiness conclusion is made here.
