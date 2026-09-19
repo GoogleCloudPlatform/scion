@@ -233,11 +233,13 @@ def _build_otel_section(telemetry: dict[str, Any], env: dict[str, str] | None) -
 
 
 def _resolve_reasoning_effort(level: int) -> str:
-    """Map a thinking level (0-100) to OpenAI model_reasoning_effort."""
+    """Map a thinking level (0-100) to OpenAI reasoning_effort (low/medium/high/xhigh)."""
     level = max(0, min(100, level))
-    if level >= 67:
+    if level >= 76:
+        return "xhigh"
+    if level >= 51:
         return "high"
-    if level >= 34:
+    if level >= 26:
         return "medium"
     return "low"
 
