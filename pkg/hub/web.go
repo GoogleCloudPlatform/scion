@@ -1236,14 +1236,16 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		ws.logger().Debug("Failed to clear write deadline for SSE", "error", err)
 	}
 
+	// Install the subscription before flushing headers: EventSource can start
+	// its metadata snapshot as soon as the client observes the open stream.
+	ch, unsubscribe := ws.events.Subscribe(subjects...)
+	defer unsubscribe()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher.Flush()
-
-	ch, unsubscribe := ws.events.Subscribe(subjects...)
-	defer unsubscribe()
 
 	eventID := 0
 	heartbeat := time.NewTicker(30 * time.Second)
