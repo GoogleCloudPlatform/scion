@@ -47,13 +47,8 @@ func TestGCPMetricIdentityPrivacyAndCanonicalLabels(t *testing.T) {
 	}
 	unmapped := makeInput(stringValue)
 	unmapped.ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].Attributes = append(unmapped.ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].Attributes, metricStringLabel("unmapped", "PRIVATE-MARKER"))
-	unmappedOut, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{unmapped})
-	if err != nil {
-		t.Fatal(err)
-	}
-	unmappedAttrs := unmappedOut[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].Attributes
-	if attrValue(unmappedAttrs, gcpPointIDLabel) != attrValue(stringAttrs, gcpPointIDLabel) || attrValue(unmappedAttrs, "unmapped") != "" {
-		t.Fatal("unmapped value entered Cloud identity")
+	if _, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{unmapped}); err == nil || strings.Contains(err.Error(), "PRIVATE-MARKER") {
+		t.Fatalf("unmapped point handling = %v", err)
 	}
 	nested := func(reverse bool) *commonpb.AnyValue {
 		values := []*commonpb.KeyValue{metricStringLabel("a", "1"), metricStringLabel("b", "2")}
@@ -91,6 +86,138 @@ func TestGCPMetricIdentityPrivacyAndCanonicalLabels(t *testing.T) {
 	attrs := without[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].Attributes
 	if attrValue(attrs, gcpAgentLabel) != "" || attrValue(attrs, gcpProjectLabel) != "" {
 		t.Fatal("invented authority when resource identity absent")
+	}
+}
+
+func TestCloudRejectsUnknownAndNestedForbiddenDimensionsOnFirstArrival(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*metricpb.ResourceMetrics)
+	}{
+		{"unknown resource", func(rm *metricpb.ResourceMetrics) {
+			rm.Resource.Attributes = append(rm.Resource.Attributes, metricStringLabel("tenant.region", "west"))
+		}},
+		{"unknown scope", func(rm *metricpb.ResourceMetrics) {
+			rm.ScopeMetrics[0].Scope.Attributes = []*commonpb.KeyValue{metricStringLabel("tenant.region", "west")}
+		}},
+		{"unknown point", func(rm *metricpb.ResourceMetrics) {
+			rm.ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].Attributes = []*commonpb.KeyValue{metricStringLabel("tenant.region", "west")}
+		}},
+		{"nested resource", func(rm *metricpb.ResourceMetrics) {
+			rm.Resource.Attributes = append(rm.Resource.Attributes, &commonpb.KeyValue{Key: "service.namespace", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{Values: []*commonpb.KeyValue{metricStringLabel("prompt", "redacted")}}}}})
+		}},
+		{"nested point", func(rm *metricpb.ResourceMetrics) {
+			rm.ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].Attributes = []*commonpb.KeyValue{{Key: "operation", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{Values: []*commonpb.KeyValue{metricStringLabel("conversation.id", "already-policy-hashed-session")}}}}}}
+		}},
+		{"array nested scope", func(rm *metricpb.ResourceMetrics) {
+			rm.ScopeMetrics[0].Scope.Attributes = []*commonpb.KeyValue{{Key: "component", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: []*commonpb.AnyValue{{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{Values: []*commonpb.KeyValue{metricStringLabel("payload", "redacted")}}}}}}}}}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := testMetricResource("native", "scope", "", "", testNumber("agent.tool.calls", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 1))
+			tc.change(input)
+			s := newMetricStreams()
+			s.gcp = true
+			if err := s.add([]*metricpb.ResourceMetrics{input}); err == nil {
+				t.Fatal("first Cloud admission accepted unsupported dimension")
+			}
+			if len(s.streams) != 0 {
+				t.Fatal("unsupported dimension reached stream state")
+			}
+			if _, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{input}); err == nil {
+				t.Fatal("Cloud adapter discarded unsupported dimension")
+			}
+			generic := newMetricStreams()
+			if err := generic.add([]*metricpb.ResourceMetrics{input}); err != nil {
+				t.Fatalf("generic OTLP lost processed dimension: %v", err)
+			}
+		})
+	}
+}
+
+func TestCloudGCPProjectResourceIdentity(t *testing.T) {
+	makeInput := func() *metricpb.ResourceMetrics {
+		return testMetricResource("native", "scope", "", "", testNumber("agent.tool.calls", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 1))
+	}
+	base := makeInput()
+	first := makeInput()
+	first.Resource.Attributes = append(first.Resource.Attributes, metricStringLabel("gcp.project_id", "cloud-one"))
+	second := makeInput()
+	second.Resource.Attributes = append(second.Resource.Attributes, metricStringLabel("gcp.project_id", "cloud-two"))
+	ids := map[string]bool{}
+	streams := newMetricStreams()
+	streams.gcp = true
+	for _, input := range []*metricpb.ResourceMetrics{base, first, second} {
+		if err := streams.add([]*metricpb.ResourceMetrics{input}); err != nil {
+			t.Fatalf("Cloud project stream admission: %v", err)
+		}
+		out, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{input})
+		if err != nil {
+			t.Fatal(err)
+		}
+		attrs := out[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].Attributes
+		ids[attrValue(attrs, gcpResourceIDLabel)] = true
+		if attrValue(attrs, "gcp.project_id") != "" {
+			t.Fatal("Cloud destination project became a readable label")
+		}
+	}
+	if len(ids) != 3 || len(streams.streams) != 3 {
+		t.Fatalf("absent and distinct Cloud project identities collapsed: digests=%d streams=%d", len(ids), len(streams.streams))
+	}
+	malformed := makeInput()
+	malformed.Resource.Attributes = append(malformed.Resource.Attributes, &commonpb.KeyValue{Key: "gcp.project_id", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{}}}})
+	if _, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{malformed}); err == nil {
+		t.Fatal("nested Cloud project accepted")
+	}
+	malformed.Resource.Attributes[len(malformed.Resource.Attributes)-1].Value = &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 1}}
+	if _, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{malformed}); err == nil {
+		t.Fatal("typed Cloud project accepted")
+	}
+	malformed.Resource.Attributes[len(malformed.Resource.Attributes)-1].Value = &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: strings.Repeat("x", 257)}}
+	if _, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{malformed}); err == nil {
+		t.Fatal("overlong Cloud project accepted")
+	}
+}
+
+func TestCloudSelfMetricPointFieldsAreNameScopedAndBounded(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		metric *metricpb.Metric
+	}{
+		{"status", &metricpb.Metric{Name: "scion.telemetry.pipeline.status", Data: &metricpb.Metric_Gauge{Gauge: &metricpb.Gauge{DataPoints: []*metricpb.NumberDataPoint{{TimeUnixNano: 2, Value: &metricpb.NumberDataPoint_AsInt{AsInt: 1}, Attributes: []*commonpb.KeyValue{metricStringLabel("scion.telemetry.provider", "gcp"), metricStringLabel("scion.telemetry.project_id", "cloud-project")}}}}}}},
+		{"export error", testNumber("scion.telemetry.export.errors", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 1, metricStringLabel("signal", "metrics"), metricStringLabel("error_type", "auth"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := testMetricResource("sciontool", pipelineMetricScope, "", "", tc.metric)
+			s := newMetricStreams()
+			s.gcp = true
+			if err := s.add([]*metricpb.ResourceMetrics{input}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{input}); err != nil {
+				t.Fatal(err)
+			}
+			wrongScope := proto.Clone(input).(*metricpb.ResourceMetrics)
+			wrongScope.ScopeMetrics[0].Scope.Name = "native.scope"
+			if err := s.add([]*metricpb.ResourceMetrics{wrongScope}); err == nil {
+				t.Fatal("self metric labels accepted outside internal scope")
+			}
+			malformed := proto.Clone(input).(*metricpb.ResourceMetrics)
+			var attrs []*commonpb.KeyValue
+			if tc.metric.GetGauge() != nil {
+				attrs = malformed.ScopeMetrics[0].Metrics[0].GetGauge().DataPoints[0].Attributes
+			} else {
+				attrs = malformed.ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].Attributes
+			}
+			attrs[0].Value = &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 1}}
+			if err := s.add([]*metricpb.ResourceMetrics{malformed}); err == nil {
+				t.Fatal("typed self metric dimension admitted")
+			}
+		})
+	}
+	badSignal := testMetricResource("sciontool", pipelineMetricScope, "", "", testNumber("scion.telemetry.export.errors", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 1, metricStringLabel("signal", "raw-error"), metricStringLabel("error_type", "other")))
+	if _, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{badSignal}); err == nil {
+		t.Fatal("unbounded diagnostic signal admitted")
 	}
 }
 

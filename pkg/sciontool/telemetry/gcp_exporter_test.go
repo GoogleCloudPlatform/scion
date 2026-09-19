@@ -63,19 +63,19 @@ func TestGCPExporter_PostAdapterCapturesProcessedTraceScopeAndSchema(t *testing.
 func TestGCPExporter_PostAdapterCapturesProcessedMetricScopeAndSchema(t *testing.T) {
 	metricCapture := &captureMetricExporter{}
 	exporter := &GCPExporter{metricExporter: metricCapture}
-	policy := newReceiverPolicy(&Config{Enabled: true, Redaction: RedactionConfig{Redact: []string{"scope.secret"}}})
+	policy := newReceiverPolicy(&Config{Enabled: true, Redaction: RedactionConfig{Redact: []string{"component"}}})
 	decision := policy.processMetrics([]*metricpb.ResourceMetrics{{
 		SchemaUrl: "https://example.test/resource",
 		ScopeMetrics: []*metricpb.ScopeMetrics{{
 			SchemaUrl: "https://example.test/scope",
-			Scope:     &commonpb.InstrumentationScope{Name: "native.scope", Attributes: secretAttr("scope.secret", "SCOPE_SECRET")},
+			Scope:     &commonpb.InstrumentationScope{Name: "native.scope", Attributes: secretAttr("component", "SCOPE_SECRET")},
 			Metrics:   []*metricpb.Metric{{Name: "safe.metric", Data: &metricpb.Metric_Gauge{Gauge: &metricpb.Gauge{DataPoints: []*metricpb.NumberDataPoint{{Value: &metricpb.NumberDataPoint_AsInt{AsInt: 1}}}}}}},
 		}},
 	}})
 	if decision.Reason != "" {
 		t.Fatal(decision.Reason)
 	}
-	assertRedacted(t, decision.Data[0].ScopeMetrics[0].Scope.Attributes, "scope.secret")
+	assertRedacted(t, decision.Data[0].ScopeMetrics[0].Scope.Attributes, "component")
 	if err := exporter.ExportProtoMetrics(context.Background(), decision.Data); err != nil {
 		t.Fatal(err)
 	}
@@ -86,8 +86,8 @@ func TestGCPExporter_PostAdapterCapturesProcessedMetricScopeAndSchema(t *testing
 	if got.Resource.SchemaURL() != "https://example.test/resource" || got.ScopeMetrics[0].Scope.SchemaURL != "https://example.test/scope" {
 		t.Fatalf("post-adapter schema: resource=%q scope=%q", got.Resource.SchemaURL(), got.ScopeMetrics[0].Scope.SchemaURL)
 	}
-	if _, ok := got.ScopeMetrics[0].Scope.Attributes.Value("scope.secret"); ok {
-		t.Fatalf("Cloud adapter retained disallowed scope dimension: %v", got.ScopeMetrics[0].Scope.Attributes)
+	if value, ok := got.ScopeMetrics[0].Scope.Attributes.Value("component"); !ok || value.AsString() != "[REDACTED]" {
+		t.Fatalf("Cloud adapter lost processed allowed scope dimension: %v", got.ScopeMetrics[0].Scope.Attributes)
 	}
 }
 

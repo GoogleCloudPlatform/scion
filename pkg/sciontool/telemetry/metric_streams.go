@@ -217,6 +217,7 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 	if s.streams == nil {
 		*s = *newMetricStreams()
 	}
+	s.expireDeliveredIdle()
 	for _, rm := range rms {
 		if rm == nil {
 			return s.reject("nil resource metrics")
@@ -240,6 +241,9 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 				kind, temporal, monotonic, err := metricKind(m)
 				if err != nil {
 					return s.reject(err.Error())
+				}
+				if sm.GetScope().GetName() == hookMetricScope && strings.HasPrefix(m.Name, "gen_ai.tokens.") {
+					return s.reject("unsupported normalized hook token name")
 				}
 				if kind != "gauge" && temporal != metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE && temporal != metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA {
 					return s.reject("unsupported metric temporality")
@@ -274,7 +278,7 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 							return s.reject("negative monotonic sum")
 						}
 						if s.gcp {
-							if err := s.validateDescriptor(rm, m, kind, point.Attributes, point.Value); err != nil {
+							if err := s.validateDescriptor(rm, sm, m, kind, point.Attributes, point.Value); err != nil {
 								return err
 							}
 							if err := s.validateCloudIdentity(rm, sm, m, kind, point.Attributes); err != nil {
@@ -314,7 +318,7 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 							return s.reject("nonfinite histogram sum")
 						}
 						if s.gcp {
-							if err := s.validateDescriptor(rm, m, kind, point.Attributes, nil); err != nil {
+							if err := s.validateDescriptor(rm, sm, m, kind, point.Attributes, nil); err != nil {
 								return err
 							}
 							if err := s.validateCloudIdentity(rm, sm, m, kind, point.Attributes); err != nil {
@@ -340,12 +344,23 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 }
 
 func (s *metricStreams) validateCloudIdentity(rm *metricpb.ResourceMetrics, sm *metricpb.ScopeMetrics, metric *metricpb.Metric, kind string, attrs []*commonpb.KeyValue) error {
-	for _, values := range [][]*commonpb.KeyValue{rm.GetResource().GetAttributes(), sm.GetScope().GetAttributes(), attrs} {
-		if err := checkCloudMetricFields(values); err != nil {
+	for _, source := range []struct {
+		attrs   []*commonpb.KeyValue
+		allowed map[string]bool
+		layer   string
+	}{
+		{rm.GetResource().GetAttributes(), cloudResourceFields, "resource"},
+		{sm.GetScope().GetAttributes(), cloudScopeFields, "scope"},
+		{attrs, cloudPointFieldsFor(sm.GetScope().GetName(), metric.Name), "point"},
+	} {
+		if err := checkCloudMetricFields(source.attrs, source.allowed, source.layer); err != nil {
 			return s.reject(err.Error())
 		}
 	}
-	for _, values := range [][]*commonpb.KeyValue{allowedMetricAttrs(rm.GetResource().GetAttributes(), cloudResourceFields), allowedMetricAttrs(sm.GetScope().GetAttributes(), cloudScopeFields), allowedMetricAttrs(attrs, cloudPointFields)} {
+	if err := checkCloudSelfMetricFields(sm.GetScope().GetName(), metric.Name, attrs); err != nil {
+		return s.reject(err.Error())
+	}
+	for _, values := range [][]*commonpb.KeyValue{allowedMetricAttrs(rm.GetResource().GetAttributes(), cloudResourceFields), allowedMetricAttrs(sm.GetScope().GetAttributes(), cloudScopeFields), allowedMetricAttrs(attrs, cloudPointFieldsFor(sm.GetScope().GetName(), metric.Name))} {
 		for _, kv := range values {
 			if proto.Size(kv.Value) > 256 {
 				return s.reject("Cloud Monitoring identity value too long")
@@ -360,7 +375,7 @@ func (s *metricStreams) validateCloudIdentity(rm *metricpb.ResourceMetrics, sm *
 	if err != nil {
 		return s.reject(err.Error())
 	}
-	point, err := canonicalAttrs(allowedMetricAttrs(attrs, cloudPointFields))
+	point, err := canonicalAttrs(allowedMetricAttrs(attrs, cloudPointFieldsFor(sm.GetScope().GetName(), metric.Name)))
 	if err != nil {
 		return s.reject(err.Error())
 	}
@@ -391,7 +406,7 @@ func (s *metricStreams) validateCloudIdentity(rm *metricpb.ResourceMetrics, sm *
 	return nil
 }
 
-func (s *metricStreams) validateDescriptor(rm *metricpb.ResourceMetrics, m *metricpb.Metric, kind string, attrs []*commonpb.KeyValue, number any) error {
+func (s *metricStreams) validateDescriptor(rm *metricpb.ResourceMetrics, sm *metricpb.ScopeMetrics, m *metricpb.Metric, kind string, attrs []*commonpb.KeyValue, number any) error {
 	labels := map[string]struct{}{}
 	add := func(key string) error {
 		name := cloudLabelKey(key)
@@ -443,7 +458,7 @@ func (s *metricStreams) validateDescriptor(rm *metricpb.ResourceMetrics, m *metr
 		case gcpResourceIDLabel, gcpScopeIDLabel, gcpPointIDLabel, gcpAgentLabel, gcpProjectLabel:
 			return s.reject("reserved Cloud Monitoring metric label")
 		}
-		if cloudPointFields[kv.Key] {
+		if cloudPointFieldsFor(sm.GetScope().GetName(), m.Name)[kv.Key] {
 			if proto.Size(kv.Value) > 256 {
 				return s.reject("Cloud Monitoring point label too long")
 			}
@@ -513,7 +528,7 @@ func cloudLabelKey(key string) string {
 
 func isHookCounter(name string) bool {
 	switch name {
-	case "agent.tool.calls", "agent.session.count", "gen_ai.api.calls", "gen_ai.tokens.input", "gen_ai.tokens.output", "gen_ai.tokens.cached":
+	case "agent.tool.calls", "agent.session.count", "gen_ai.api.calls", "scion.hook.tokens.input", "scion.hook.tokens.output", "scion.hook.tokens.cached":
 		return true
 	default:
 		return false
@@ -522,11 +537,6 @@ func isHookCounter(name string) bool {
 
 func (s *metricStreams) entry(k metricStreamKey, rm *metricpb.ResourceMetrics, sm *metricpb.ScopeMetrics, m *metricpb.Metric, start, end uint64, hook bool) (*metricStream, error) {
 	now := s.now()
-	for key, entry := range s.streams {
-		if !entry.dirty && !entry.pending && now.Sub(entry.lastSeen) >= metricStreamIdleTTL {
-			delete(s.streams, key)
-		}
-	}
 	if entry := s.streams[k]; entry != nil {
 		return entry, nil
 	}
@@ -546,6 +556,44 @@ func (s *metricStreams) entry(k metricStreamKey, rm *metricpb.ResourceMetrics, s
 	}
 	s.streams[k] = entry
 	return entry, nil
+}
+
+// Registry entries live while at least one related stream can still accept a
+// point. Retiring them only after delivered idle streams expire bounds churn
+// without forgetting an active Cloud collision or descriptor shape.
+func (s *metricStreams) expireDeliveredIdle() {
+	now := s.now()
+	removed := false
+	for key, entry := range s.streams {
+		if !entry.dirty && !entry.pending && now.Sub(entry.lastSeen) >= metricStreamIdleTTL {
+			delete(s.streams, key)
+			removed = true
+		}
+	}
+	if !removed || !s.gcp {
+		return
+	}
+	activeNames := make(map[string]struct{}, len(s.streams))
+	type activeIdentity struct {
+		full             metricIdentityFull
+		name, unit, kind string
+	}
+	active := make(map[activeIdentity]struct{}, len(s.streams))
+	for key := range s.streams {
+		activeNames[key.name] = struct{}{}
+		active[activeIdentity{full: metricIdentityFull{key.resource, key.scope, key.attrs}, name: key.name, unit: key.unit, kind: key.kind}] = struct{}{}
+	}
+	for name := range s.descriptors {
+		if _, exists := activeNames[name]; !exists {
+			delete(s.descriptors, name)
+		}
+	}
+	for key, full := range s.cloudIdentities {
+		identity := activeIdentity{full: full, name: key.name, unit: key.unit, kind: key.kind}
+		if _, exists := active[identity]; !exists {
+			delete(s.cloudIdentities, key)
+		}
+	}
 }
 
 func intervalKey(start, end uint64, value proto.Message) string {
@@ -653,6 +701,9 @@ func (s *metricStreams) addNumber(k metricStreamKey, rm *metricpb.ResourceMetric
 				if end == entry.end {
 					return nil
 				}
+				if k.monotonic && numberDecreased(current, copyPoint) {
+					return s.reject("decreasing cumulative sum")
+				}
 			}
 		} else {
 			fingerprint := intervalKey(start, end, copyPoint)
@@ -685,6 +736,17 @@ func (s *metricStreams) addNumber(k metricStreamKey, rm *metricpb.ResourceMetric
 	}
 	entry.start, entry.end, entry.lastSeen, entry.dirty = start, end, s.now(), true
 	return nil
+}
+
+func numberDecreased(current, next *metricpb.NumberDataPoint) bool {
+	switch value := current.Value.(type) {
+	case *metricpb.NumberDataPoint_AsInt:
+		return next.GetAsInt() < value.AsInt
+	case *metricpb.NumberDataPoint_AsDouble:
+		return next.GetAsDouble() < value.AsDouble
+	default:
+		return false
+	}
 }
 
 func addNumberValue(dst, src *metricpb.NumberDataPoint) error {

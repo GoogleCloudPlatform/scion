@@ -118,16 +118,26 @@ sum. Overlap, conflicting writers, unsupported kinds/details, and ambiguous
 resets return admission errors with bounded local rejection reasons. The
 receiver caps active streams at 2048 and duplicate intervals at 64 per stream;
 delivered idle streams expire after 30 minutes and start a new output epoch.
-Session-end token totals no longer repeat model-end token increments.
+Session-end token totals no longer repeat model-end token increments. Hook
+tokens use `scion.hook.tokens.input`, `.output`, and `.cached`; genuine native
+`gen_ai.tokens.*` keeps a separate namespace. Old normalized hook token names
+are rejected. The current Hub dashboard queries historical `gen_ai.tokens.*`,
+so it excludes the new hook counters and cannot be read as complete or
+native-only usage while old hook samples remain.
 
 Generic OTLP exports all policy-processed dimensions. Cloud Monitoring uses
 only these resource fields in its canonical resource digest: `service.name`,
 `service.namespace`, `service.instance.id`, `scion.agent.id`,
-`scion.project.id`, `scion.agent.slug`, `scion.harness`, `scion.model`, and
-`scion.broker.name`. The scope digest includes scope name, version, schema URL,
+`scion.project.id`, `scion.agent.slug`, `scion.harness`, `scion.model`,
+`scion.broker.name`, and bounded scalar-string `gcp.project_id` (digest only,
+distinct from `scion.project.id`). The scope digest includes scope name, version, schema URL,
 and only `component`, `scope.kind`, and `scope.variant` attributes. The point
 digest includes only `agent_id`, `project_id`, `harness`, `model`, `tool_name`,
-`status`, `operation`, `sensor`, `phase`, and `run`. All three digests use
+`status`, `operation`, `sensor`, `phase`, and `run`. Only the internal pipeline
+status metric may additionally use bounded scalar-string
+`scion.telemetry.provider` and `scion.telemetry.project_id`; only the internal
+export-error metric may use bounded `signal` and classified `error_type`.
+All three digests use
 type-aware canonical encoding after policy processing and appear as fixed
 `scion_metric_resource_id`, `scion_metric_scope_id`, and
 `scion_metric_point_id` labels. Readable `scion_agent_id` and
@@ -135,11 +145,16 @@ type-aware canonical encoding after policy processing and appear as fixed
 identity; producer point `agent_id` and `project_id` keep their existing
 meaning. Service resource fields retain the Monitoring SDK's existing service
 labels. Forbidden prompt, conversation/session, and payload fields are
-rejected for Cloud metrics, even if policy redacted or hashed them. A second
-full OTLP identity that would collapse to an admitted Cloud identity is also
-rejected. Cloud descriptor shape is fixed per metric name in process: varying
-label sets, kind, value type, or unit reject before state commit. Identity and
-descriptor registries are each capped at 2048 entries per process.
+rejected for Cloud metrics, even if policy redacted or hashed them, including
+when nested inside an allowed array or map. Unknown resource, scope, and point
+identity fields reject on first Cloud admission; generic OTLP retains them
+after policy processing. A second full OTLP identity that would collapse to an
+admitted Cloud identity is also rejected. Cloud descriptor shape is fixed per
+metric name among active streams: varying label sets, kind, value type, or
+unit reject before state commit. Identity and descriptor registries each cap
+at 2048 entries and retire an entry only after all related streams have been
+delivered and idle for 30 minutes. An old remote descriptor mismatch after
+local expiry remains a Cloud export error, not confirmed delivery.
 
 The existing `agent.tool.calls` Cloud descriptor is CUMULATIVE/INT64/{call}
 with eight historical string labels, including `grove_id`. The adapter keeps

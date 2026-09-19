@@ -444,7 +444,11 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) {
 		return p.exporter.ExportProtoMetrics(ctx, batch)
 	})
 	if err != nil {
-		p.recordExportError(ctx, "metrics", err)
+		// Do not create another error-counter point when that diagnostic stream
+		// itself failed. The local log remains the failure signal.
+		if !metricBatchContains(batch, pipelineMetricScope, "scion.telemetry.export.errors") {
+			p.recordExportError(ctx, "metrics", err)
+		}
 		log.Error("Failed to export %d metric streams to cloud: %v", metricCount, err)
 		return
 	}
@@ -454,6 +458,22 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) {
 	p.metricLastFlush = time.Now()
 	p.metricStateMu.Unlock()
 	log.Debug("Exported %d metric streams to cloud", metricCount)
+}
+
+func metricBatchContains(rms []*metricpb.ResourceMetrics, scopeName, name string) bool {
+	for _, rm := range rms {
+		for _, sm := range rm.GetScopeMetrics() {
+			if sm.GetScope().GetName() != scopeName {
+				continue
+			}
+			for _, metric := range sm.GetMetrics() {
+				if metric.GetName() == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func countMetricPoints(rms []*metricpb.ResourceMetrics) int {

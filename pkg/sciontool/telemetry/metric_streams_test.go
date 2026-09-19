@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
@@ -64,6 +66,30 @@ func TestMetricStreamsTenHooksAcrossWindows(t *testing.T) {
 	}
 	if len(s.streams) != 2 {
 		t.Fatalf("hook/native stream count = %d", len(s.streams))
+	}
+}
+
+func TestHookTokenNamespaceIsSeparateFromNativeUsage(t *testing.T) {
+	s := newMetricStreams()
+	hook := testMetricResource("sciontool", hookMetricScope, "", "", testNumber("scion.hook.tokens.input", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA, 1, 2, 5))
+	native := testMetricResource("native", "native.scope", "", "", testNumber("gen_ai.tokens.input", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 7))
+	for _, input := range []*metricpb.ResourceMetrics{hook, native} {
+		if err := s.add([]*metricpb.ResourceMetrics{input}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(s.streams) != 2 {
+		t.Fatalf("hook and native usage collapsed: %d", len(s.streams))
+	}
+	oldHook := testMetricResource("sciontool", hookMetricScope, "", "", testNumber("gen_ai.tokens.input", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA, 3, 4, 1))
+	if err := s.add([]*metricpb.ResourceMetrics{oldHook}); err == nil || err.Error() != "unsupported normalized hook token name" {
+		t.Fatalf("old hook token name admission = %v", err)
+	}
+	if _, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{oldHook}); err == nil || err.Error() != "unsupported normalized hook token name" {
+		t.Fatalf("old hook token name Cloud adapter = %v", err)
+	}
+	if _, err := gcpIdentityMetrics([]*metricpb.ResourceMetrics{native}); err != nil {
+		t.Fatalf("genuine native token Cloud adapter = %v", err)
 	}
 }
 
@@ -135,6 +161,40 @@ func TestMetricSumIntervalsAndReplay(t *testing.T) {
 				t.Fatalf("value = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestMonotonicCumulativeRejectsSameEpochDecrease(t *testing.T) {
+	for _, valueType := range []string{"int64", "double"} {
+		for _, delivered := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/delivered=%t", valueType, delivered), func(t *testing.T) {
+				s := newMetricStreams()
+				input := func(end uint64, value int64) *metricpb.ResourceMetrics {
+					m := testNumber("agent.tool.calls", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, end, value)
+					if valueType == "double" {
+						m.GetSum().DataPoints[0].Value = &metricpb.NumberDataPoint_AsDouble{AsDouble: float64(value)}
+					}
+					return testMetricResource("native", "scope", "", "", m)
+				}
+				if err := s.add([]*metricpb.ResourceMetrics{input(2, 7)}); err != nil {
+					t.Fatal(err)
+				}
+				if delivered {
+					_ = s.snapshot()
+					s.delivered()
+				}
+				if err := s.add([]*metricpb.ResourceMetrics{input(3, 3)}); err == nil || err.Error() != "decreasing cumulative sum" {
+					t.Fatalf("same-epoch decrease = %v", err)
+				}
+				if err := s.add([]*metricpb.ResourceMetrics{input(3, 8)}); err != nil {
+					t.Fatalf("healthy increment after rejection: %v", err)
+				}
+				point := s.snapshot()[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0]
+				if valueType == "double" && point.GetAsDouble() != 8 || valueType == "int64" && point.GetAsInt() != 8 {
+					t.Fatalf("cumulative value after rejection = %v", point)
+				}
+			})
+		}
 	}
 }
 
@@ -361,6 +421,28 @@ func TestPipelineStopFlushesAcceptedMetricsWithoutPriorFailure(t *testing.T) {
 	}
 }
 
+func TestMetricDiagnosticExportFailureDoesNotRecordAnotherDiagnostic(t *testing.T) {
+	p := newTestPipelineWithExporter(nil, &mockMetricClient{exportFunc: func(context.Context, *colmetricpb.ExportMetricsServiceRequest, ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
+		return nil, status.Error(codes.PermissionDenied, "diagnostic export failed")
+	}}, nil)
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() { _ = meterProvider.Shutdown(context.Background()) }()
+	p.exportErrors, _ = meterProvider.Meter("test").Int64Counter("test.export.errors")
+	input := testMetricResource("sciontool", pipelineMetricScope, "", "", testNumber("scion.telemetry.export.errors", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 1, metricStringLabel("signal", "metrics"), metricStringLabel("error_type", "auth")))
+	if err := p.handleMetrics(context.Background(), []*metricpb.ResourceMetrics{input}); err != nil {
+		t.Fatal(err)
+	}
+	p.flushMetricBuffer(context.Background(), true)
+	var captured metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &captured); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured.ScopeMetrics) != 0 {
+		t.Fatalf("diagnostic failure recursively recorded %d metric scopes", len(captured.ScopeMetrics))
+	}
+}
+
 func TestCloudMetricPolicyRejectsForbiddenDimensionBeforeCommit(t *testing.T) {
 	t.Setenv("SCION_AGENT_ID", "agent-authority")
 	t.Setenv("SCION_PROJECT_ID", "project-authority")
@@ -378,6 +460,21 @@ func TestCloudMetricPolicyRejectsForbiddenDimensionBeforeCommit(t *testing.T) {
 	}
 	if p.metricRejectedPoints.Load() != 1 || len(p.metricStreams.streams) != 0 || len(p.metricStreams.descriptors) != 0 {
 		t.Fatal("rejected metric was counted incorrectly or committed state")
+	}
+	nested := testMetricResource("native", "scope", "1", "a", testNumber("agent.tool.calls", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 1, &commonpb.KeyValue{Key: "operation", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{Values: []*commonpb.KeyValue{metricStringLabel("conversation.id", "PRIVATE-MARKER")}}}}}))
+	decision := p.policy.processMetrics([]*metricpb.ResourceMetrics{nested})
+	if decision.Reason != "" {
+		t.Fatalf("Phase 1 policy rejected supported generic structure: %s", decision.Reason)
+	}
+	processedNested := decision.Data[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints[0].Attributes[0].GetValue().GetKvlistValue().Values[0].GetValue().GetStringValue()
+	if processedNested != HashValue("PRIVATE-MARKER") {
+		t.Fatalf("generic nested value was not policy processed: %q", processedNested)
+	}
+	if err := p.handleMetrics(context.Background(), []*metricpb.ResourceMetrics{nested}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("nested forbidden producer-visible rejection = %v", err)
+	}
+	if p.metricRejectedPoints.Load() != 2 || len(p.metricStreams.streams) != 0 {
+		t.Fatal("nested rejected metric changed Cloud state")
 	}
 }
 
@@ -463,6 +560,42 @@ func TestCloudMetricDescriptorRegistryLimit(t *testing.T) {
 	}
 	if len(s.streams) != 0 || len(s.descriptors) != maxActiveMetricStreams {
 		t.Fatal("over-limit admission changed state")
+	}
+}
+
+func TestCloudRegistriesTurnOverOnlyDeliveredIdleStreams(t *testing.T) {
+	s := newMetricStreams()
+	s.gcp = true
+	clock := time.Unix(100, 0)
+	s.now = func() time.Time { return clock }
+	input := func(name, unit string) *metricpb.ResourceMetrics {
+		metric := testNumber(name, metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 1)
+		metric.Unit = unit
+		return testMetricResource("native", "scope", "", "", metric)
+	}
+	for i := range maxActiveMetricStreams - 1 {
+		if err := s.add([]*metricpb.ResourceMetrics{input(fmt.Sprintf("old.%d", i), "{call}")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clock = clock.Add(metricStreamIdleTTL / 2)
+	if err := s.add([]*metricpb.ResourceMetrics{input("still.active", "{call}")}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.streams) != maxActiveMetricStreams || len(s.descriptors) != maxActiveMetricStreams || len(s.cloudIdentities) != maxActiveMetricStreams {
+		t.Fatal("did not reach all active and Cloud registry caps")
+	}
+	_ = s.snapshot()
+	s.delivered()
+	clock = clock.Add(metricStreamIdleTTL / 2)
+	if err := s.add([]*metricpb.ResourceMetrics{input("after.expiry", "{call}")}); err != nil {
+		t.Fatalf("delivered idle turnover: %v", err)
+	}
+	if len(s.streams) != 2 || len(s.descriptors) != 2 || len(s.cloudIdentities) != 2 {
+		t.Fatalf("retained state streams=%d descriptors=%d identities=%d", len(s.streams), len(s.descriptors), len(s.cloudIdentities))
+	}
+	if err := s.add([]*metricpb.ResourceMetrics{input("still.active", "ms")}); err == nil || err.Error() != "incompatible Cloud Monitoring descriptor" {
+		t.Fatalf("active descriptor conflict = %v", err)
 	}
 }
 

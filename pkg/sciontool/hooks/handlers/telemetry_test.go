@@ -645,17 +645,22 @@ func TestTelemetryHandler_TokenMetricsOnModelEnd(t *testing.T) {
 		}
 	}
 
-	if !found["gen_ai.tokens.input"] {
-		t.Error("expected gen_ai.tokens.input metric to be recorded")
+	if !found["scion.hook.tokens.input"] {
+		t.Error("expected scion.hook.tokens.input metric to be recorded")
 	}
-	if !found["gen_ai.tokens.output"] {
-		t.Error("expected gen_ai.tokens.output metric to be recorded")
+	if !found["scion.hook.tokens.output"] {
+		t.Error("expected scion.hook.tokens.output metric to be recorded")
 	}
-	if !found["gen_ai.tokens.cached"] {
-		t.Error("expected gen_ai.tokens.cached metric to be recorded")
+	if !found["scion.hook.tokens.cached"] {
+		t.Error("expected scion.hook.tokens.cached metric to be recorded")
 	}
 	if !found["gen_ai.api.calls"] {
 		t.Error("expected gen_ai.api.calls metric to be recorded")
+	}
+	for _, oldName := range []string{"gen_ai.tokens.input", "gen_ai.tokens.output", "gen_ai.tokens.cached"} {
+		if found[oldName] {
+			t.Errorf("normalized hook emitted old native token name %s", oldName)
+		}
 	}
 }
 
@@ -702,8 +707,8 @@ func TestTelemetryHandler_SessionTotalsDoNotDuplicateModelTokens(t *testing.T) {
 	if !found["agent.session.count"] {
 		t.Error("expected agent.session.count metric to be recorded")
 	}
-	if totals["gen_ai.tokens.input"] != 1500 || totals["gen_ai.tokens.output"] != 500 {
-		t.Errorf("session totals duplicated model increments: input=%d output=%d", totals["gen_ai.tokens.input"], totals["gen_ai.tokens.output"])
+	if totals["scion.hook.tokens.input"] != 1500 || totals["scion.hook.tokens.output"] != 500 {
+		t.Errorf("session totals duplicated model increments: input=%d output=%d", totals["scion.hook.tokens.input"], totals["scion.hook.tokens.output"])
 	}
 }
 
@@ -775,11 +780,11 @@ func TestTelemetryHandler_UnpairedModelEnd(t *testing.T) {
 	if !found["gen_ai.api.calls"] {
 		t.Error("expected gen_ai.api.calls metric from unpaired model-end")
 	}
-	if !found["gen_ai.tokens.input"] {
-		t.Error("expected gen_ai.tokens.input metric from unpaired model-end")
+	if !found["scion.hook.tokens.input"] {
+		t.Error("expected scion.hook.tokens.input metric from unpaired model-end")
 	}
-	if !found["gen_ai.tokens.output"] {
-		t.Error("expected gen_ai.tokens.output metric from unpaired model-end")
+	if !found["scion.hook.tokens.output"] {
+		t.Error("expected scion.hook.tokens.output metric from unpaired model-end")
 	}
 }
 
@@ -805,7 +810,7 @@ func TestTelemetryHandler_NoTokenMetricsWhenZero(t *testing.T) {
 
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name == "gen_ai.tokens.input" || m.Name == "gen_ai.tokens.output" || m.Name == "gen_ai.tokens.cached" {
+			if m.Name == "scion.hook.tokens.input" || m.Name == "scion.hook.tokens.output" || m.Name == "scion.hook.tokens.cached" {
 				t.Errorf("did not expect %s metric when token counts are zero", m.Name)
 			}
 		}

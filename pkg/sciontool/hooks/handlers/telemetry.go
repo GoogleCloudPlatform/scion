@@ -115,28 +115,28 @@ func (h *TelemetryHandler) initMetrics(mp metric.MeterProvider) {
 
 	var err error
 
-	h.tokensInput, err = meter.Int64Counter("gen_ai.tokens.input",
+	h.tokensInput, err = meter.Int64Counter("scion.hook.tokens.input",
 		metric.WithUnit("{token}"),
 		metric.WithDescription("Number of input tokens consumed"),
 	)
 	if err != nil {
-		log.Error("Failed to create gen_ai.tokens.input counter: %v", err)
+		log.Error("Failed to create scion.hook.tokens.input counter: %v", err)
 	}
 
-	h.tokensOutput, err = meter.Int64Counter("gen_ai.tokens.output",
+	h.tokensOutput, err = meter.Int64Counter("scion.hook.tokens.output",
 		metric.WithUnit("{token}"),
 		metric.WithDescription("Number of output tokens generated"),
 	)
 	if err != nil {
-		log.Error("Failed to create gen_ai.tokens.output counter: %v", err)
+		log.Error("Failed to create scion.hook.tokens.output counter: %v", err)
 	}
 
-	h.tokensCached, err = meter.Int64Counter("gen_ai.tokens.cached",
+	h.tokensCached, err = meter.Int64Counter("scion.hook.tokens.cached",
 		metric.WithUnit("{token}"),
 		metric.WithDescription("Number of tokens served from cache"),
 	)
 	if err != nil {
-		log.Error("Failed to create gen_ai.tokens.cached counter: %v", err)
+		log.Error("Failed to create scion.hook.tokens.cached counter: %v", err)
 	}
 
 	h.toolCalls, err = meter.Int64Counter("agent.tool.calls",

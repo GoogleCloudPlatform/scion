@@ -217,6 +217,59 @@ func TestHookProviderEmitsCounterDeltaAndOtherInstrumentTemporalities(t *testing
 	}
 }
 
+func TestHookProviderEmittedResourceAndPointsPassStrictCloudAdmission(t *testing.T) {
+	for key, value := range map[string]string{
+		"SCION_AGENT_ID": "agent", "SCION_AGENT_SLUG": "slug", "SCION_PROJECT_ID": "project",
+		"SCION_HARNESS": "claude", "SCION_MODEL": "model", "SCION_BROKER_NAME": "broker",
+		EnvProjectID: "cloud-project",
+	} {
+		t.Setenv(key, value)
+	}
+	port := availableTCPPort(t)
+	cfg := &Config{Enabled: true, CloudProvider: "gcp", GRPCPort: port}
+	results := make(chan error, 1)
+	receiver := NewReceiver(cfg, nil, WithMetricHandler(func(_ context.Context, rms []*metricpb.ResourceMetrics) error {
+		decision := newReceiverPolicy(cfg).processMetrics(rms)
+		if decision.Reason != "" {
+			results <- fmt.Errorf("policy: %s", decision.Reason)
+			return nil
+		}
+		state := newMetricStreams()
+		state.gcp = true
+		if err := state.add(decision.Data); err != nil {
+			results <- err
+			return nil
+		}
+		_, err := gcpIdentityMetrics(state.snapshot())
+		results <- err
+		return nil
+	}))
+	if err := receiver.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = receiver.Stop(context.Background()) }()
+	providers, err := NewProviders(context.Background(), cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meter := providers.MeterProvider.Meter(hookMetricScope)
+	tool, _ := meter.Int64Counter("agent.tool.calls")
+	tokens, _ := meter.Int64Counter("scion.hook.tokens.input")
+	tool.Add(context.Background(), 1)
+	tokens.Add(context.Background(), 3)
+	if err := providers.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-results:
+		if err != nil {
+			t.Fatalf("emitted provider Cloud admission: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider metric export did not reach receiver")
+	}
+}
+
 func TestMetricHookChild(t *testing.T) {
 	value := os.Getenv("SCION_TEST_HOOK_PORT")
 	if value == "" {
