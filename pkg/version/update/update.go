@@ -158,14 +158,16 @@ func CheckForUpdate(ctx context.Context, currentVersion string, opts ...Option) 
 
 // DetectChannel returns the release channel associated with version.
 func DetectChannel(version string) string {
+	v := withVersionPrefix(version)
 	switch {
 	case version == "", version == "dev":
 		return ""
 	case strings.HasPrefix(version, "nightly-"):
 		return "nightly"
-	case strings.Contains(version, "-preview."), strings.Contains(version, "-rc."):
-		return "preview"
-	case semver.IsValid(withVersionPrefix(version)):
+	case semver.IsValid(v):
+		if semver.Prerelease(v) != "" {
+			return "preview"
+		}
 		return "stable"
 	default:
 		return ""

@@ -182,5 +182,5 @@ func TestVersionCheckDevBuildSkipsUpdateOutput(t *testing.T) {
 		require.NoError(t, runVersionCommand())
 	})
 
-	assert.Equal(t, "scion dev (commit abc12345)\n", output)
+	assert.Equal(t, "scion dev (commit abc12345)\n\nUpdate checking is not supported for development or unknown builds.\n", output)
 }

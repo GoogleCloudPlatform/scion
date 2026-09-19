@@ -32,6 +32,14 @@ var versionCmd = &cobra.Command{
 	Short: "Print the version number of scion",
 	Long:  `All software has versions. This is scion's`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		var (
+			info      *update.UpdateInfo
+			updateErr error
+		)
+		if checkUpdate {
+			info, updateErr = update.CheckForUpdate(cmd.Context(), version.Version)
+		}
+
 		if isJSONOutput() {
 			result := map[string]interface{}{
 				"version":   version.Version,
@@ -41,9 +49,8 @@ var versionCmd = &cobra.Command{
 			}
 
 			if checkUpdate {
-				info, err := update.CheckForUpdate(cmd.Context(), version.Version)
-				if err != nil {
-					result["updateError"] = err.Error()
+				if updateErr != nil {
+					result["updateError"] = updateErr.Error()
 				} else {
 					result["channel"] = info.Channel
 					result["updateAvailable"] = info.UpdateAvailable
@@ -60,9 +67,8 @@ var versionCmd = &cobra.Command{
 		fmt.Println(version.Get())
 
 		if checkUpdate {
-			info, err := update.CheckForUpdate(cmd.Context(), version.Version)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "\nCould not check for updates: %v\n", err)
+			if updateErr != nil {
+				fmt.Fprintf(os.Stderr, "\nCould not check for updates: %v\n", updateErr)
 			} else if info.UpdateAvailable {
 				fmt.Printf("\nUpdate available: %s\n", info.LatestVersion)
 				if info.ReleaseURL != "" {
@@ -70,6 +76,8 @@ var versionCmd = &cobra.Command{
 				}
 			} else if info.Channel != "" {
 				fmt.Printf("\nYou are running the latest %s version.\n", info.Channel)
+			} else {
+				fmt.Println("\nUpdate checking is not supported for development or unknown builds.")
 			}
 		}
 
