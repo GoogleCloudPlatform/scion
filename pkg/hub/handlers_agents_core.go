@@ -413,13 +413,6 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// maxProjectsProbedForAgentCreate bounds the work done by
-// addAgentCreateIfAnyProjectAllows. A user in more projects than this who can
-// create in none of the first N loses only the affordance on this page — the
-// per-project create path is unaffected — so the cap trades an unlikely false
-// negative for a bounded response time.
-const maxProjectsProbedForAgentCreate = 50
-
 // addAgentCreateIfAnyProjectAllows adds "create" to the agents list's
 // scope-level capabilities when the caller may create an agent in at least one
 // project they can reach.
@@ -438,6 +431,12 @@ const maxProjectsProbedForAgentCreate = 50
 //
 // Skipped entirely when the caller already has create, which is both the
 // super-admin case and any future role that carries it at hub scope.
+//
+// Uses a batch approach (3 queries total, independent of project count) that
+// also correctly handles group-derived permissions:
+//  1. Resolve the user's effective groups.
+//  2. Fetch all role bindings for the user and their groups in one query.
+//  3. Batch-load the corresponding role definitions and check for agent.create.
 func (s *Server) addAgentCreateIfAnyProjectAllows(
 	ctx context.Context,
 	identity Identity,
@@ -459,45 +458,72 @@ func (s *Server) addAgentCreateIfAnyProjectAllows(
 		return
 	}
 
-	// Candidates are the projects the caller holds a binding on. This is
-	// deliberately not taken from the list filter: on the default "All" view
-	// resolveProjectListClassification returns an empty classification (it only
-	// populates for the "mine" and "shared" tabs), so sourcing candidates from
-	// the filter would probe nothing in exactly the common case.
-	bindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID())
+	// Resolve the user's direct and group-derived principals.
+	principals := []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: user.ID()}}
+	groups, err := s.store.GetEffectiveGroups(ctx, user.ID())
+	if err != nil {
+		// GetEffectiveGroups may return ErrNotFound for users with no groups.
+		// Only warn on unexpected errors.
+		slog.WarnContext(ctx, "listAgents: could not resolve groups for agent-create capability",
+			"error", err)
+		// Fall through with just the direct user principal.
+	}
+	for _, g := range groups {
+		principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: g})
+	}
+
+	// Fetch all role bindings for these principals in a single query.
+	bindings, err := s.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
 	if err != nil {
 		// Advisory only — the button stays hidden and the per-project create
 		// path still works. Not worth failing the list response.
-		slog.WarnContext(ctx, "listAgents: could not resolve projects for agent-create capability",
+		slog.WarnContext(ctx, "listAgents: could not resolve role bindings for agent-create capability",
 			"error", err)
 		return
 	}
 
-	seen := make(map[string]struct{})
-	probed := 0
+	// Filter to active project-scoped bindings and collect unique role definition IDs.
+	now := time.Now()
+	roleDefIDsMap := make(map[string]struct{})
+	hasActiveProjectBinding := false
 	for _, rb := range bindings {
 		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID == "" {
 			continue
 		}
-		if _, dup := seen[rb.ScopeID]; dup {
+		if !isBindingActive(rb, now) {
 			continue
 		}
-		seen[rb.ScopeID] = struct{}{}
-		if probed >= maxProjectsProbedForAgentCreate {
-			return
-		}
-		probed++
+		hasActiveProjectBinding = true
+		roleDefIDsMap[rb.RoleDefinitionID] = struct{}{}
+	}
 
-		// Expired or not-yet-valid bindings are not filtered here; CheckAccess
-		// is the authority on that and simply denies, costing one probe.
-		decision := s.authzService.CheckAccess(ctx, identity, Resource{
-			Type:       "agent",
-			ParentType: "project",
-			ParentID:   rb.ScopeID,
-		}, ActionCreate)
-		if decision.Allowed {
-			caps.Actions = append(caps.Actions, string(ActionCreate))
-			return
+	if !hasActiveProjectBinding {
+		return
+	}
+
+	// Batch-load the role definitions.
+	roleDefIDs := make([]string, 0, len(roleDefIDsMap))
+	for id := range roleDefIDsMap {
+		roleDefIDs = append(roleDefIDs, id)
+	}
+	roleDefs, err := s.store.GetRoleDefinitionsByIDs(ctx, roleDefIDs)
+	if err != nil {
+		slog.WarnContext(ctx, "listAgents: could not resolve role definitions for agent-create capability",
+			"error", err)
+		return
+	}
+
+	// Check if any of the active roles grant the "agent.create" permission.
+	targetPermission := derivePermissionID("agent", ActionCreate)
+	for _, rd := range roleDefs {
+		if rd == nil {
+			continue
+		}
+		for _, perm := range rd.Permissions {
+			if perm == targetPermission {
+				caps.Actions = append(caps.Actions, string(ActionCreate))
+				return
+			}
 		}
 	}
 }
