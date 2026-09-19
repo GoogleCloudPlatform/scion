@@ -117,7 +117,6 @@ import '../components/shared/nav.js';
 import '../components/shared/header.js';
 import '../components/shared/breadcrumb.js';
 import '../components/shared/status-badge.js';
-import '../components/shared/debug-panel.js';
 
 // Profile shell (lazy-loaded with profile routes)
 // import '../components/profile/profile-shell.js';
@@ -711,7 +710,6 @@ async function init(): Promise<void> {
     customElements.whenDefined('scion-header'),
     customElements.whenDefined('scion-breadcrumb'),
     customElements.whenDefined('scion-status-badge'),
-    customElements.whenDefined('scion-debug-panel'),
   ]);
 
   console.info('[Scion] Components defined, setting up router...');

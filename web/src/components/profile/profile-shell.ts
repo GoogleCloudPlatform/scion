@@ -26,8 +26,6 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import './profile-nav.js';
 import '../shared/header.js';
-import '../shared/debug-panel.js';
-
 import type { User } from '../../shared/types.js';
 import { performLogout } from '../../utils/auth.js';
 import { setDocumentTitle } from '../../client/page-title.js';
@@ -192,7 +190,6 @@ export class ScionProfileShell extends LitElement {
         </div>
       </main>
 
-      <scion-debug-panel></scion-debug-panel>
     `;
   }
 
