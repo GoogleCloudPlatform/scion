@@ -144,6 +144,10 @@ export class ScionPageAgents extends LitElement {
         justify-content: space-between;
         margin-bottom: 0.75rem;
         gap: 0.5rem;
+        /* Cards are minmax(320px, 1fr), so the header has ~270px to work with
+           and the badges claim most of it. Wrapping lets them drop to their own
+           line instead of squeezing the name into a few characters. */
+        flex-wrap: wrap;
       }
 
       /* The name column must be allowed to shrink for the truncation in
@@ -157,8 +161,14 @@ export class ScionPageAgents extends LitElement {
          wrapping the meta lines into a narrow ribbon. Growing into the space
          the badges leave keeps names readable and truncation a last resort. */
       .agent-header > div {
-        min-width: 0;
-        flex: 1;
+        /* The floor is what makes flex-wrap fire: with min-width:0 the column
+           would shrink indefinitely and the badges would never wrap, which is
+           how the name ended up as "anot…" on a card with space to spare.
+           Below this width the badges move to the next line and the name gets
+           the full card instead. Long names still truncate inside
+           .resource-name, which keeps its own min-width:0 and overflow. */
+        min-width: 11rem;
+        flex: 1 1 11rem;
       }
 
       /* The badges keep their intrinsic size so the name absorbs the
