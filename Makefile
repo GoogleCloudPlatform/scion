@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast vet lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast vet lint compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-setenv-guard check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -93,6 +93,10 @@ compat-literals:
 check-authz-guards:
 	@./hack/check-authz-guards.sh
 
+## check-setenv-guard: Flag silenced os.Setenv of security-sensitive env vars
+check-setenv-guard:
+	@./hack/check-setenv-guard.sh
+
 ## check-conversation-upsert-guard: Verify UpsertConversationByExternalRef is only called from pkg/messaging and pkg/store
 check-conversation-upsert-guard:
 	@./hack/check-conversation-upsert-guard.sh
@@ -106,7 +110,7 @@ check-authorization-catalog:
 	@./hack/check-authorization-catalog.sh
 
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: compat-literals check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog
+check-custom: compat-literals check-authz-guards check-setenv-guard check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog
 	@echo "All custom checks passed."
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
