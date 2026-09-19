@@ -41,7 +41,11 @@ func TestNativeChatTailIndexes(t *testing.T) {
 			rows, err := db.QueryContext(ctx, "EXPLAIN QUERY PLAN SELECT * FROM messages WHERE "+column+
 				" = ? AND channel = ? AND type <> ? ORDER BY created DESC, id DESC LIMIT 2", "dm", "web", "mention")
 			require.NoError(t, err)
-			defer rows.Close()
+			defer func() {
+				if err := rows.Close(); err != nil {
+					t.Logf("rows.Close: %v", err)
+				}
+			}()
 			var plan string
 			for rows.Next() {
 				var id, parent, unused int

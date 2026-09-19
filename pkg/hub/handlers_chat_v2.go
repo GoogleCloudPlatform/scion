@@ -2937,10 +2937,9 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 		}
 		lastMessage, err := s.nativeDMLastMessage(ctx, dm.ConversationKey)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch DM messages", nil)
-			return
-		}
-		if lastMessage != nil {
+			slog.Warn("failed to fetch DM last message", "key", dm.ConversationKey, "error", err)
+			// Continue without last message enrichment for this DM
+		} else if lastMessage != nil {
 			entry.LastMessageID = lastMessage.ID
 			entry.LastMessagePreview = truncatePreview(lastMessage.Msg, 120)
 			entry.LastMessageSender = lastMessage.Sender
