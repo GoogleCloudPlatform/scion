@@ -321,18 +321,39 @@ Examples:
 		// value is the TARGET project, not the sender's working context.
 		// Set up hub context using the agent's own project and capture the
 		// target project slug for cross-project resolution.
+		//
+		// When --project matches the agent's own project (by slug or ID),
+		// skip cross-project detection to preserve normal same-project
+		// sending — which works even when CPM is disabled. Without this
+		// guard, the cross-project resolver would reject at Hub-off before
+		// lookup, breaking ordinary same-project sends with explicit --project.
 		var crossProjectTarget string
 		senderProjectPath := projectPath
-		// Cross-project detection: in agent mode, when --project explicitly
-		// selects a different project, treat it as the TARGET project.
-		// This applies to both bare agent names and @agent references.
 		hasAgentTarget := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent)
 		if hasAgentTarget && os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
-			// The --project flag was explicitly set in agent mode.
-			// Use the agent's own project (from environment/config, not --project)
-			// and treat --project as the target.
-			crossProjectTarget = projectPath
-			senderProjectPath = "" // let hub context resolve from agent's own config
+			ownProjectSlug := os.Getenv("SCION_PROJECT")
+			ownProjectID := os.Getenv("SCION_PROJECT_ID")
+			isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
+				(ownProjectID != "" && projectPath == ownProjectID)
+			if !isSameProject {
+				// The --project flag selects a DIFFERENT project.
+				crossProjectTarget = projectPath
+				senderProjectPath = "" // let hub context resolve from agent's own config
+			}
+		}
+
+		// conv:<id> with explicit --project mismatch in agent mode: reject.
+		// The conversation ID already identifies its project context;
+		// reinterpreting the sender context via --project would be silently wrong.
+		if convRef != nil && convRef.Kind == messaging.RefConversation &&
+			os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
+			ownProjectSlug := os.Getenv("SCION_PROJECT")
+			ownProjectID := os.Getenv("SCION_PROJECT_ID")
+			isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
+				(ownProjectID != "" && projectPath == ownProjectID)
+			if !isSameProject {
+				return fmt.Errorf("--project cannot be used with conv: references; the conversation already identifies its project context")
+			}
 		}
 
 		// Check if Hub should be used

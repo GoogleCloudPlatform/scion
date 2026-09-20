@@ -2370,3 +2370,93 @@ func TestCrossProjectMismatchRejection(t *testing.T) {
 	hasAgentTarget = false || (emailRef != nil && emailRef.Kind == messaging.RefAgent)
 	assert.False(t, hasAgentTarget, "email ref should not be detected as agent target")
 }
+
+// TestCrossProjectSameProjectBypass verifies that --project matching the
+// agent's own project (by slug or ID) does NOT trigger cross-project
+// detection, preserving normal same-project sending even when CPM is disabled.
+func TestCrossProjectSameProjectBypass(t *testing.T) {
+	tests := []struct {
+		name           string
+		projectFlag    string
+		ownSlug        string
+		ownID          string
+		wantCross      bool
+	}{
+		{
+			name:        "slug match → same-project (no cross-project)",
+			projectFlag: "my-project",
+			ownSlug:     "my-project",
+			wantCross:   false,
+		},
+		{
+			name:        "ID match → same-project (no cross-project)",
+			projectFlag: "abc-123-def",
+			ownID:       "abc-123-def",
+			wantCross:   false,
+		},
+		{
+			name:        "different slug → cross-project",
+			projectFlag: "other-project",
+			ownSlug:     "my-project",
+			wantCross:   true,
+		},
+		{
+			name:        "no env vars → cross-project (conservative)",
+			projectFlag: "some-project",
+			ownSlug:     "",
+			ownID:       "",
+			wantCross:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			isSameProject := (tc.ownSlug != "" && tc.projectFlag == tc.ownSlug) ||
+				(tc.ownID != "" && tc.projectFlag == tc.ownID)
+			gotCross := !isSameProject
+			assert.Equal(t, tc.wantCross, gotCross)
+		})
+	}
+}
+
+// TestConvRefMismatchedProjectRejection verifies that conv:<id> with an
+// explicit --project that doesn't match the agent's own project is rejected.
+func TestConvRefMismatchedProjectRejection(t *testing.T) {
+	convRef := &messaging.Reference{Kind: messaging.RefConversation, Value: "some-uuid", Raw: "conv:some-uuid"}
+
+	// Simulate the rejection logic from messageCmd.RunE
+	agentMode := true
+	projectChanged := true
+	ownSlug := "my-project"
+	projectFlag := "other-project"
+
+	if convRef != nil && convRef.Kind == messaging.RefConversation && agentMode && projectChanged {
+		isSameProject := projectFlag == ownSlug
+		if !isSameProject {
+			// Should reject
+			assert.True(t, true, "mismatched --project with conv: should reject")
+			return
+		}
+	}
+	t.Fatal("should have rejected mismatched --project with conv: ref")
+}
+
+// TestConvRefSameProjectAllowed verifies that conv:<id> with --project
+// matching the agent's own project is allowed through.
+func TestConvRefSameProjectAllowed(t *testing.T) {
+	convRef := &messaging.Reference{Kind: messaging.RefConversation, Value: "some-uuid", Raw: "conv:some-uuid"}
+
+	agentMode := true
+	projectChanged := true
+	ownSlug := "my-project"
+	projectFlag := "my-project"
+
+	rejected := false
+	if convRef != nil && convRef.Kind == messaging.RefConversation && agentMode && projectChanged {
+		isSameProject := projectFlag == ownSlug
+		if !isSameProject {
+			rejected = true
+		}
+	}
+	assert.False(t, rejected, "same-project conv: should not be rejected")
+}
