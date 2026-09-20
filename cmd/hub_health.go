@@ -121,32 +121,32 @@ func runHubHealth(cmd *cobra.Command, args []string) error {
 }
 
 func printHubHealthSummary(w io.Writer, s *hubclient.HealthSummaryResponse, endpoint string) {
-	fmt.Fprintln(w, "==================================================================")
-	fmt.Fprintln(w, "                     SCION HUB HEALTH & METRICS                   ")
-	fmt.Fprintln(w, "==================================================================")
+	_, _ = fmt.Fprintln(w, "==================================================================")
+	_, _ = fmt.Fprintln(w, "                     SCION HUB HEALTH & METRICS                   ")
+	_, _ = fmt.Fprintln(w, "==================================================================")
 	if endpoint != "" {
-		fmt.Fprintf(w, "Endpoint: %s\n", endpoint)
+		_, _ = fmt.Fprintf(w, "Endpoint: %s\n", endpoint)
 	}
 
-	fmt.Fprintf(w, "Overall Status:      %s\n", s.Status)
-	fmt.Fprintf(w, "Hub Server Version:  %s (Uptime: %s)\n", s.Hub.Version, s.Hub.Uptime)
-	fmt.Fprintf(w, "Registered Projects: %d  |  Active Agents: %d  |  Brokers: %d\n\n",
+	_, _ = fmt.Fprintf(w, "Overall Status:      %s\n", s.Status)
+	_, _ = fmt.Fprintf(w, "Hub Server Version:  %s (Uptime: %s)\n", s.Hub.Version, s.Hub.Uptime)
+	_, _ = fmt.Fprintf(w, "Registered Projects: %d  |  Active Agents: %d  |  Brokers: %d\n\n",
 		s.Hub.Projects, s.Hub.ActiveAgents, s.Hub.ConnectedBrokers)
 
 	// Database Subsystem
-	fmt.Fprintln(w, "--- Database Subsystem -------------------------------------------")
-	fmt.Fprintf(w, "Status:     %s\n", s.Database.Status)
-	fmt.Fprintf(w, "Pool Stats: Active=%d / Max=%d  |  Idle=%d  |  Wait Count Total=%d\n\n",
+	_, _ = fmt.Fprintln(w, "--- Database Subsystem -------------------------------------------")
+	_, _ = fmt.Fprintf(w, "Status:     %s\n", s.Database.Status)
+	_, _ = fmt.Fprintf(w, "Pool Stats: Active=%d / Max=%d  |  Idle=%d  |  Wait Count Total=%d\n\n",
 		s.Database.PoolActive, s.Database.PoolMax, s.Database.PoolIdle, s.Database.PoolWaitCountTotal)
 
 	// Runtime Brokers
-	fmt.Fprintln(w, "--- Runtime Brokers ----------------------------------------------")
+	_, _ = fmt.Fprintln(w, "--- Runtime Brokers ----------------------------------------------")
 	if len(s.Brokers) == 0 {
-		fmt.Fprintln(w, "No runtime brokers registered.")
+		_, _ = fmt.Fprintln(w, "No runtime brokers registered.")
 	} else {
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "BROKER\tSTATUS\tRUNTIME\tAVAILABLE\tAGENTS(OK/TOT)\tLAST HEARTBEAT")
-		fmt.Fprintln(tw, "------\t------\t-------\t---------\t--------------\t--------------")
+		_, _ = fmt.Fprintln(tw, "BROKER\tSTATUS\tRUNTIME\tAVAILABLE\tAGENTS(OK/TOT)\tLAST HEARTBEAT")
+		_, _ = fmt.Fprintln(tw, "------\t------\t-------\t---------\t--------------\t--------------")
 		for _, b := range s.Brokers {
 			avail := "no"
 			if b.RuntimeAvailable {
@@ -156,7 +156,7 @@ func printHubHealthSummary(w io.Writer, s *hubclient.HealthSummaryResponse, endp
 			if !b.LastHeartbeat.IsZero() {
 				hb = b.LastHeartbeat.Format("2006-01-02 15:04:05")
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d/%d\t%s\n",
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d/%d\t%s\n",
 				truncate(b.Name, 24),
 				b.Status,
 				b.Runtime,
@@ -168,30 +168,30 @@ func printHubHealthSummary(w io.Writer, s *hubclient.HealthSummaryResponse, endp
 		}
 		_ = tw.Flush()
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 
 	// Fleet Agent Health
-	fmt.Fprintln(w, "--- Fleet Agent Health -------------------------------------------")
+	_, _ = fmt.Fprintln(w, "--- Fleet Agent Health -------------------------------------------")
 	running := s.Agents.ByPhase["running"]
 	errors := s.Agents.ByPhase["error"]
-	fmt.Fprintf(w, "Total Agents: %d  (Running: %d, Errors: %d)\n", s.Agents.Total, running, errors)
+	_, _ = fmt.Fprintf(w, "Total Agents: %d  (Running: %d, Errors: %d)\n", s.Agents.Total, running, errors)
 
 	if len(s.Agents.Stalled) > 0 {
-		fmt.Fprintf(w, "! Stalled Agents (%d): %s\n", len(s.Agents.Stalled), strings.Join(s.Agents.Stalled, ", "))
-		fmt.Fprintln(w, "  Hint: Run 'scion look <agent>' or 'scion attach <agent>' to inspect terminal state.")
+		_, _ = fmt.Fprintf(w, "! Stalled Agents (%d): %s\n", len(s.Agents.Stalled), strings.Join(s.Agents.Stalled, ", "))
+		_, _ = fmt.Fprintln(w, "  Hint: Run 'scion look <agent>' or 'scion attach <agent>' to inspect terminal state.")
 	}
 	if len(s.Agents.Crashed) > 0 {
-		fmt.Fprintf(w, "x Crashed Agents (%d): %s\n", len(s.Agents.Crashed), strings.Join(s.Agents.Crashed, ", "))
-		fmt.Fprintln(w, "  Hint: Run 'scion logs <agent>' to view termination logs.")
+		_, _ = fmt.Fprintf(w, "x Crashed Agents (%d): %s\n", len(s.Agents.Crashed), strings.Join(s.Agents.Crashed, ", "))
+		_, _ = fmt.Fprintln(w, "  Hint: Run 'scion logs <agent>' to view termination logs.")
 	}
 	if len(s.Agents.Errored) > 0 {
-		fmt.Fprintf(w, "x Errored Agents (%d): %s\n", len(s.Agents.Errored), strings.Join(s.Agents.Errored, ", "))
-		fmt.Fprintln(w, "  Hint: Run 'scion logs <agent>' or 'scion reset-auth <agent>' to troubleshoot.")
+		_, _ = fmt.Fprintf(w, "x Errored Agents (%d): %s\n", len(s.Agents.Errored), strings.Join(s.Agents.Errored, ", "))
+		_, _ = fmt.Fprintln(w, "  Hint: Run 'scion logs <agent>' or 'scion reset-auth <agent>' to troubleshoot.")
 	}
 
 	if s.Dispatch != nil && (s.Dispatch.StuckMessages > 0 || s.Dispatch.Failed1h > 0) {
-		fmt.Fprintf(w, "! Dispatch Queue Issues: Stuck Messages=%d, Failed (1h)=%d\n",
+		_, _ = fmt.Fprintf(w, "! Dispatch Queue Issues: Stuck Messages=%d, Failed (1h)=%d\n",
 			s.Dispatch.StuckMessages, s.Dispatch.Failed1h)
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 }
