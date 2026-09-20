@@ -551,7 +551,7 @@ func (s *LocalPTYSession) Run() error {
 		select {
 		case <-s.ctx.Done():
 			if s.ptyMaster != nil {
-				s.ptyMaster.Close()
+				_ = s.ptyMaster.Close()
 			}
 		case <-runDone:
 			// Run() exited normally or on error; watcher no longer needed.
@@ -951,7 +951,7 @@ func (h *StreamPTYHandler) Run() error {
 		select {
 		case <-h.ctx.Done():
 			if h.ptyMaster != nil {
-				h.ptyMaster.Close()
+				_ = h.ptyMaster.Close()
 			}
 		case <-runDone:
 			// Run() exited normally or on error; watcher no longer needed.
