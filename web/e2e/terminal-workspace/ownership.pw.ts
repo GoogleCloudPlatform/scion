@@ -270,24 +270,23 @@ test('multiple tabs competing for ownership — only one succeeds, no split', as
 // Headed-only observation notes (cannot be tested headlessly)
 // ---------------------------------------------------------------------------
 /**
- * HEADED CHROME OBSERVATIONS (manual verification):
+ * NOT RUN — Manual verification checklist
+ *
+ * These observations have not been exercised in this environment.
  *
  * 1. Tab freeze/suspend: When the owner tab is backgrounded or frozen via
- *    Page Lifecycle API, its Web Lock is retained by the browser. The non-owner
- *    tab cannot acquire the lock. The frozen tab's BroadcastChannel messages
- *    queue and are delivered when the tab resumes. Verified with:
+ *    Page Lifecycle API, the Web Lock should be retained by the browser. The
+ *    non-owner tab should not acquire the lock. The frozen tab's
+ *    BroadcastChannel messages should queue and be delivered when the tab
+ *    resumes. Steps to verify:
  *    - chrome://discards → Freeze tab
  *    - Background tab for >5 minutes (Chrome may freeze it)
  *
  * 2. Tab crash: When the owner tab crashes (chrome://crash), the Web Lock
- *    is released immediately by the browser. The queued lock request in the
- *    non-owner tab fires, and the next explicit open succeeds.
+ *    should be released immediately by the browser. The queued lock request
+ *    in the non-owner tab should fire, and the next explicit open should
+ *    succeed.
  *
  * 3. Navigation away: When the owner tab navigates to a different origin,
- *    pagehide fires → stop() → lock released → non-owner acquires.
- *
- * These observations cannot be automated in headless CI because:
- * - Page Lifecycle events (freeze/resume) are not exposed via CDP
- * - chrome://crash is blocked in headless mode
- * - Tab backgrounding has no effect in headless mode
+ *    pagehide should fire → stop() → lock released → non-owner acquires.
  */
