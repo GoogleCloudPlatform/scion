@@ -154,6 +154,46 @@ Tests expanded to 22 browser e2e + 10 vitest. New tests:
 - OSC 52 selection: non-'c' types ignored, 'c' echoed in response
 - OSC 52 malformed: invalid base64 and missing semicolon handled gracefully
 
+### Revision 4 — R2 review findings
+
+**R2 O1: setVisible(true) focus bypass** — Manager elevated to Required. Changed
+`_focused` initial value from `true` to `false`. `setVisible(true)` now derives
+`_focused` from actual DOM state (`this.contains(document.activeElement) ||
+this.shadowRoot?.contains(document.activeElement as Node) || false`) instead of
+unconditionally setting `true`. Auto-focus path
+(`shouldAutoFocusTerminal()` → `terminal.focus()` → `focusin` → `_focused = true`)
+establishes correct state when nothing else has focus.
+
+**R2 O2: Window blur test** — Added maintained test for `focusout` with `null`
+`relatedTarget` (window blur / Alt-Tab scenario).
+
+**R2 FYI: Non-'c' OSC 52 read response** — Non-'c' reads now send empty protocol
+response `\x1b]52;${sel};\x07` matching original `BrowserClipboardProvider` which
+returned `Promise.resolve('')`. Non-'c' writes remain no-op. No OS clipboard
+access for unsupported selections.
+
+**R2 FYI: Drop focus back door** — `_onDrop` now calls `this.terminal?.focus()`
+for real DOM focus path instead of directly setting `_focused = true`. The
+`focusin` event naturally establishes `_focused`. If focus leaves during async
+upload, `focusout` clears `_focused` and completion guard correctly blocks.
+
+**Malformed base64 disposition** — Invalid base64 write: original addon decoded
+to `''` and called `writeText('')` (clearing clipboard). Custom handler: `atob()`
+throws, caught silently, no clipboard mutation. Deliberate safer behavior
+documented in code, not a claim of exact parity.
+
+**Protocol DSR/DA coverage** — Added test verifying DSR (CSI 6n) and DA (CSI c)
+responses continue through focused, unfocused, and hidden states.
+
+Tests expanded to 28 browser e2e (+ non-'c' dedicated = 29 test functions in file).
+New tests:
+- Initial visible without DOM focus blocks OSC 52
+- Hide/reveal while sibling focused blocks until terminal focused
+- Window blur (null relatedTarget) clears _focused and blocks
+- Protocol DSR/DA unchanged through focus state transitions
+- File drop establishes real DOM focus (not back door)
+- Non-'c' OSC 52 read returns empty response matching original addon
+
 ## Baseline failures (pre-existing, not introduced)
 
 - `src/components/shared/role-binding-assignment-form.test.ts` — beforeAll
