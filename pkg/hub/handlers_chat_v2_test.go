@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strconv"
@@ -4705,5 +4706,22 @@ func TestInteragentAuthorizationAndCrossProject(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodGet, otherEndpoint, nil)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("non-participant: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// --- Test 4: reader-only user is denied (agent.read but not agent.attach) ---
+	// A project-member has agent.read (metadata) but not agent.attach
+	// (management). Design §7 requires management authorization for
+	// inter-agent observation, so agent.read alone must not suffice.
+	readerID := tid("interagent-reader")
+	createTestUserWithProjectRole(t, s, readerID, "reader@test.com", projA.ID, store.ProjectRoleMember)
+	readerDMKey := fmt.Sprintf("dm:agent:%s:user:%s", agentA.ID, readerID)
+	readerIdentity := NewAuthenticatedUser(readerID, "reader@test.com", "Reader", "member", "cli")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/chat/conversations/placeholder/interagent", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), readerIdentity))
+	rr := httptest.NewRecorder()
+	srv.handleConversationInteragent(rr, req, readerDMKey)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("reader-only: expected 403, got %d: %s", rr.Code, rr.Body.String())
 	}
 }

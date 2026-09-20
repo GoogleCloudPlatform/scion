@@ -2208,13 +2208,14 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Enforce agent-read authorization. The DM-participant check above
-	// verifies the caller occupies a user slot in the DM key; this
-	// additionally verifies the caller has read access to the agent
-	// resource, which is required for viewing inter-agent exchanges
-	// (design §7: DM participation alone is insufficient for
-	// cross-project observation).
-	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+	// Enforce agent management authorization. The DM-participant check
+	// above verifies the caller occupies a user slot in the DM key;
+	// this additionally verifies the caller has attach (management)
+	// capability on the agent resource, which is required for viewing
+	// inter-agent exchanges (design §7: DM participation alone is
+	// insufficient for cross-project observation). ActionAttach matches
+	// the management gate used by authorizeAgentLifecycle.
+	if !s.authorize(w, r, agentResource(agent), ActionAttach) {
 		return
 	}
 
