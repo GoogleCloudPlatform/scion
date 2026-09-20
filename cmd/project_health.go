@@ -17,8 +17,10 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -134,7 +136,7 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 	} else if len(args) > 0 {
 		query := args[0]
 		for _, p := range projectsResp.Projects {
-			if p.Name == query || p.Slug == query || p.ID == query {
+			if strings.EqualFold(p.Name, query) || strings.EqualFold(p.Slug, query) || p.ID == query {
 				targetProjects = append(targetProjects, p)
 				break
 			}
@@ -143,7 +145,7 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("project '%s' not found on Hub", query)
 		}
 	} else {
-		// Detect current project
+		// Detect current project in prioritized order: exact ID -> gitRemote -> global
 		targetID := settings.GetHubProjectID()
 		if targetID == "" {
 			targetID = settings.ProjectID
@@ -153,19 +155,37 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 			gitRemote = util.GetGitRemoteDir(filepath.Dir(resolvedPath))
 		}
 
-		for _, p := range projectsResp.Projects {
-			if targetID != "" && p.ID == targetID {
-				targetProjects = append(targetProjects, p)
-				break
+		var matchedProject *hubclient.Project
+		if targetID != "" {
+			for i := range projectsResp.Projects {
+				p := &projectsResp.Projects[i]
+				if p.ID == targetID {
+					matchedProject = p
+					break
+				}
 			}
-			if gitRemote != "" && util.NormalizeGitRemote(p.GitRemote) == util.NormalizeGitRemote(gitRemote) {
-				targetProjects = append(targetProjects, p)
-				break
+		}
+		if matchedProject == nil && gitRemote != "" {
+			normalizedRemote := util.NormalizeGitRemote(gitRemote)
+			for i := range projectsResp.Projects {
+				p := &projectsResp.Projects[i]
+				if util.NormalizeGitRemote(p.GitRemote) == normalizedRemote {
+					matchedProject = p
+					break
+				}
 			}
-			if isGlobal && p.Name == "global" {
-				targetProjects = append(targetProjects, p)
-				break
+		}
+		if matchedProject == nil && isGlobal {
+			for i := range projectsResp.Projects {
+				p := &projectsResp.Projects[i]
+				if strings.EqualFold(p.Name, "global") {
+					matchedProject = p
+					break
+				}
 			}
+		}
+		if matchedProject != nil {
+			targetProjects = append(targetProjects, *matchedProject)
 		}
 
 		if len(targetProjects) == 0 {
@@ -175,11 +195,25 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 
 	var reports []ProjectHealthReport
 	for _, p := range targetProjects {
-		agentsResp, err := client.Projects().ListAgents(ctx, p.ID, &hubclient.ListAgentsOptions{
-			Page: apiclient.PageOptions{Limit: 200},
-		})
-		if err != nil {
-			statusf("Warning: failed to list agents for project %s: %v\n", p.Name, err)
+		var allAgents []hubclient.Agent
+		cursor := ""
+		fetchErr := false
+		for {
+			agentsResp, err := client.Projects().ListAgents(ctx, p.ID, &hubclient.ListAgentsOptions{
+				Page: apiclient.PageOptions{Limit: 200, Cursor: cursor},
+			})
+			if err != nil {
+				statusf("Warning: failed to list agents for project %s: %v\n", p.Name, err)
+				fetchErr = true
+				break
+			}
+			allAgents = append(allAgents, agentsResp.Agents...)
+			if agentsResp.Page.NextCursor == "" {
+				break
+			}
+			cursor = agentsResp.Page.NextCursor
+		}
+		if fetchErr && len(allAgents) == 0 {
 			continue
 		}
 
@@ -188,11 +222,11 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 			Name:      p.Name,
 			Slug:      p.Slug,
 			GitRemote: p.GitRemote,
-			Agents:    agentsResp.Agents,
+			Agents:    allAgents,
 		}
 
-		report.Summary.Total = len(agentsResp.Agents)
-		for _, a := range agentsResp.Agents {
+		report.Summary.Total = len(allAgents)
+		for _, a := range allAgents {
 			switch a.Phase {
 			case "running":
 				report.Summary.Running++
@@ -226,21 +260,21 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	printProjectHealthReports(reports)
+	printProjectHealthReports(os.Stdout, reports)
 	return nil
 }
 
-func printProjectHealthReports(reports []ProjectHealthReport) {
-	fmt.Println("==================================================================")
-	fmt.Println("                     PROJECT HEALTH & AGENT METRICS               ")
-	fmt.Println("==================================================================")
+func printProjectHealthReports(w io.Writer, reports []ProjectHealthReport) {
+	fmt.Fprintln(w, "==================================================================")
+	fmt.Fprintln(w, "                     PROJECT HEALTH & AGENT METRICS               ")
+	fmt.Fprintln(w, "==================================================================")
 
 	for i, r := range reports {
 		if i > 0 {
-			fmt.Println()
+			fmt.Fprintln(w)
 		}
-		fmt.Printf("Project: %s (slug: %s, id: %s)\n", r.Name, r.Slug, r.ID)
-		fmt.Printf("  Summary: Total=%d | Running=%d | Error=%d | Working/Thinking=%d | Blocked=%d | Completed=%d\n\n",
+		fmt.Fprintf(w, "Project: %s (slug: %s, id: %s)\n", r.Name, r.Slug, r.ID)
+		fmt.Fprintf(w, "  Summary: Total=%d | Running=%d | Error=%d | Working/Thinking=%d | Blocked=%d | Completed=%d\n\n",
 			r.Summary.Total,
 			r.Summary.Running,
 			r.Summary.Error,
@@ -250,13 +284,13 @@ func printProjectHealthReports(reports []ProjectHealthReport) {
 		)
 
 		if len(r.Agents) == 0 {
-			fmt.Println("  No agents registered in this project.")
+			fmt.Fprintln(w, "  No agents registered in this project.")
 			continue
 		}
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "  AGENT\tTEMPLATE\tHARNESS\tPHASE\tACTIVITY")
-		fmt.Fprintln(w, "  -----\t--------\t-------\t-----\t--------")
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "  AGENT\tTEMPLATE\tHARNESS\tPHASE\tACTIVITY")
+		fmt.Fprintln(tw, "  -----\t--------\t-------\t-----\t--------")
 		for _, a := range r.Agents {
 			name := a.Name
 			if name == "" {
@@ -274,7 +308,7 @@ func printProjectHealthReports(reports []ProjectHealthReport) {
 			if activity == "" {
 				activity = "-"
 			}
-			fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\n",
+			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n",
 				truncate(name, 26),
 				truncate(tmpl, 14),
 				truncate(harness, 10),
@@ -282,21 +316,21 @@ func printProjectHealthReports(reports []ProjectHealthReport) {
 				activity,
 			)
 		}
-		_ = w.Flush()
+		_ = tw.Flush()
 
 		// Troubleshooting hints for degraded states
 		if r.Summary.Blocked > 0 || r.Summary.Error > 0 || r.Summary.Stalled > 0 {
-			fmt.Println()
+			fmt.Fprintln(w)
 			if r.Summary.Blocked > 0 {
-				fmt.Printf("  ! %d agent(s) are blocked waiting on permissions or inputs.\n", r.Summary.Blocked)
+				fmt.Fprintf(w, "  ! %d agent(s) are blocked waiting on permissions or inputs.\n", r.Summary.Blocked)
 			}
 			if r.Summary.Error > 0 {
-				fmt.Printf("  x %d agent(s) are in error phase. Run 'scion logs <agent>' or 'scion reset-auth <agent>'.\n", r.Summary.Error)
+				fmt.Fprintf(w, "  x %d agent(s) are in error phase. Run 'scion logs <agent>' or 'scion reset-auth <agent>'.\n", r.Summary.Error)
 			}
 			if r.Summary.Stalled > 0 {
-				fmt.Printf("  ! %d agent(s) are stalled. Run 'scion look <agent>' to check terminal state.\n", r.Summary.Stalled)
+				fmt.Fprintf(w, "  ! %d agent(s) are stalled. Run 'scion look <agent>' to check terminal state.\n", r.Summary.Stalled)
 			}
 		}
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 }

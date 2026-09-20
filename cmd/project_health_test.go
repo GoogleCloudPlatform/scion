@@ -16,8 +16,6 @@ package cmd
 
 import (
 	"bytes"
-	"io"
-	"os"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -79,17 +77,8 @@ func TestPrintProjectHealthReports(t *testing.T) {
 		},
 	}
 
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	printProjectHealthReports(reports)
-
-	w.Close()
-	os.Stdout = oldStdout
-
 	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
+	printProjectHealthReports(&buf, reports)
 	output := buf.String()
 
 	assert.Contains(t, output, "PROJECT HEALTH & AGENT METRICS")
