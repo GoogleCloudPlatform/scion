@@ -89,11 +89,14 @@ const (
 // and using SIGTERM, we give Docker the chance to propagate the hangup signal
 // to the in-container process.
 //
-// Returns true if SIGKILL was required (container-side cleanup may be needed),
-// false if the process exited from PTY hangup or SIGTERM (runtime handled
-// cleanup). The caller must not call cmd.Wait() separately; this function
-// reaps the process.
-func gracefulShutdownExec(cmd *exec.Cmd, ptyMaster *os.File, slug string) (forceKilled bool) {
+// The caller must not call cmd.Wait() separately; this function reaps the
+// process.
+//
+// Close() also closes ptyMaster before this defer runs. Both calls target the
+// same *os.File object, and Go's os.File.Close() uses an internal poll.FD that
+// tracks closed state — the second Close() returns os.ErrClosed without issuing
+// a second syscall.Close on the raw fd, so there is no fd-reuse race.
+func gracefulShutdownExec(cmd *exec.Cmd, ptyMaster *os.File, slug string) {
 	// Step 1: Close PTY master — triggers SIGHUP on the slave side. For
 	// Docker exec, this breaks the stdio pipes, which Docker handles by
 	// sending SIGHUP to the container-side process.
@@ -102,12 +105,12 @@ func gracefulShutdownExec(cmd *exec.Cmd, ptyMaster *os.File, slug string) (force
 	}
 
 	if cmd == nil || cmd.Process == nil {
-		return false
+		return
 	}
 
 	// Already reaped (e.g., process exited before cleanup started).
 	if cmd.ProcessState != nil {
-		return false
+		return
 	}
 
 	// Step 2: Wait for process exit from PTY hangup.
@@ -120,7 +123,7 @@ func gracefulShutdownExec(cmd *exec.Cmd, ptyMaster *os.File, slug string) (force
 	select {
 	case <-exited:
 		slog.Debug("PTY exec exited after hangup", "slug", slug)
-		return false
+		return
 	case <-time.After(processExitGracePeriod):
 	}
 
@@ -132,7 +135,7 @@ func gracefulShutdownExec(cmd *exec.Cmd, ptyMaster *os.File, slug string) (force
 	select {
 	case <-exited:
 		slog.Debug("PTY exec exited after SIGTERM", "slug", slug)
-		return false
+		return
 	case <-time.After(processTermTimeout):
 	}
 
@@ -140,7 +143,6 @@ func gracefulShutdownExec(cmd *exec.Cmd, ptyMaster *os.File, slug string) (force
 	slog.Warn("PTY exec did not exit after SIGTERM, sending SIGKILL", "slug", slug)
 	_ = cmd.Process.Kill()
 	<-exited
-	return true
 }
 
 // listTmuxClientTTYs returns the set of currently attached tmux client TTY
@@ -180,13 +182,31 @@ func listTmuxClientTTYs(runtimeCmd, containerID, execUser string) map[string]str
 	return clients
 }
 
-// identifyAttachedPTY polls the container's tmux client list to find the PTY
-// device that was created for THIS attach session. It compares the current
+// inferAttachedPTY polls the container's tmux client list to infer which PTY
+// device was likely created for THIS attach session. It compares the current
 // client list against the baseline snapshot taken before the exec started.
-// Returns the PTY device path (e.g. "/dev/pts/3") only if exactly one new
-// client appeared — otherwise returns "" to avoid misidentifying a concurrent
-// client.
-func identifyAttachedPTY(ctx context.Context, runtimeCmd, containerID, execUser string, baseline map[string]struct{}) string {
+// Returns the inferred PTY device path (e.g. "/dev/pts/3") only if exactly one
+// new client appeared — otherwise returns "" when inference is ambiguous.
+//
+// IMPORTANT — inference limitations (not causal proof of ownership):
+//
+// This function uses snapshot-difference heuristics, NOT causal binding between
+// the exec request and the resulting container-side PTY. Known false-certainty
+// windows:
+//   - If an unrelated client (CLI user, another browser session) attaches between
+//     the baseline snapshot and this poll, the function may return that client's
+//     TTY instead of ours. There is no way to distinguish them via snapshot diff.
+//   - The returned TTY device path can be reused by the kernel after the original
+//     process exits (devpts recycling). A stored path may refer to a different
+//     process at detach time.
+//
+// Because of these limitations, the result is suitable for observability logging
+// only — callers MUST NOT use it for destructive operations (e.g. tmux
+// detach-client) without independent causal proof of ownership. Causal proof
+// would require mapping the exec's host-side PID or PTY fd to a specific
+// container-side /dev/pts/N, which is not available through standard Docker/
+// runtime exec APIs.
+func inferAttachedPTY(ctx context.Context, runtimeCmd, containerID, execUser string, baseline map[string]struct{}) string {
 	if runtimeCmd == "kubernetes" || runtimeCmd == "k8s" || containerID == "" {
 		return ""
 	}
@@ -217,20 +237,29 @@ func identifyAttachedPTY(ctx context.Context, runtimeCmd, containerID, execUser 
 			if len(newTTYs) == 1 {
 				return newTTYs[0]
 			}
-			// If multiple new clients appeared, we can't safely identify
-			// ours — skip cleanup to protect concurrent sessions.
+			// Zero or multiple new clients: inference is ambiguous. Continue
+			// polling — a transient client may appear or disappear on the
+			// next tick. If ambiguity persists until the timeout, return "".
 		}
 	}
 }
 
 // detachContainerClient detaches a specific tmux client by its TTY device path
-// inside the container. This is the safety net for TW-UAT-002: if the host-side
-// exec termination did not clean up the container-side tmux attach process,
-// this function explicitly detaches it.
+// inside the container.
 //
-// It targets only the specific PTY device identified by identifyAttachedPTY,
-// so concurrent CLI clients and other browser sessions are never affected.
-// If targetTTY is empty (identification failed), this is a no-op.
+// WARNING: This function is only safe to call when targetTTY is known to belong
+// to this session through causal proof (e.g., PID or fd mapping). It MUST NOT be
+// called with a TTY obtained from snapshot-difference inference (inferAttachedPTY)
+// because inference has known false-certainty windows where the wrong client
+// would be detached. See inferAttachedPTY documentation for details.
+//
+// Additionally, the stored TTY device can be reused by the kernel (devpts
+// recycling) after the original process exits. Callers should validate that
+// targetTTY still belongs to the expected session before detaching.
+//
+// Currently not called from the main cleanup path because no causal binding
+// mechanism is available. Retained for future use if causal proof becomes
+// feasible. If targetTTY is empty, this is a no-op.
 func detachContainerClient(runtimeCmd, containerID, execUser, targetTTY string) {
 	if targetTTY == "" || containerID == "" {
 		return
@@ -647,19 +676,41 @@ func (s *LocalPTYSession) Run() error {
 		}
 	}
 
-	// Identify our specific container-side PTY for targeted cleanup.
-	var attachedPTY string
+	// Infer our container-side PTY concurrently with the data pump (R-2).
+	// The result is for observability logging only — not used for destructive
+	// cleanup because inference has known false-certainty windows (F-1).
+	inferredCh := make(chan string, 1)
 	if !isK8s {
-		attachedPTY = identifyAttachedPTY(s.ctx, s.runtimeCmd, s.containerID, s.execUser, baseline)
+		go func() {
+			inferredCh <- inferAttachedPTY(s.ctx, s.runtimeCmd, s.containerID, s.execUser, baseline)
+		}()
+	} else {
+		inferredCh <- ""
 	}
 
 	defer func() {
+		// Wait for the inference goroutine to complete before cleanup. The
+		// goroutine returns promptly because s.ctx was cancelled by s.cancel()
+		// before this defer runs.
+		inferredTTY := <-inferredCh
+		if inferredTTY != "" {
+			slog.Info("Inferred container-side PTY for session (observability only)",
+				"agent_id", s.agentID, "inferred_tty", inferredTTY)
+		}
 		// Graceful shutdown: close PTY (terminal hangup) → wait → SIGTERM →
 		// SIGKILL, ensuring the container runtime can propagate the hangup
 		// to the container-side tmux attach process (TW-UAT-002 fix).
+		//
+		// Container-side targeted detach is NOT performed here because the
+		// PTY inference is based on snapshot-difference heuristics with known
+		// false-certainty windows — an unrelated client that attached between
+		// baseline and poll would be misidentified and wrongly detached. The
+		// graceful shutdown sequence is the primary cleanup mechanism. In rare
+		// cases where SIGKILL is needed and the runtime does not propagate the
+		// kill to the container-side process, a residual tmux client may
+		// remain until the container restarts. This is a known limitation
+		// documented in the TW-UAT-002 design notes.
 		gracefulShutdownExec(s.cmd, s.ptyMaster, s.agentID)
-		// Safety net: unconditionally detach our specific client.
-		detachContainerClient(s.runtimeCmd, s.containerID, s.execUser, attachedPTY)
 	}()
 
 	errCh := make(chan error, 2)
@@ -975,12 +1026,11 @@ type StreamPTYHandler struct {
 	k8sConfig    *rest.Config
 	k8sClientset kubernetes.Interface
 
-	// attachedPTY is the specific container-side PTY device (e.g. "/dev/pts/3")
-	// allocated for THIS browser attach session. Identified after exec starts
-	// by diffing tmux clients against a pre-attach baseline. Used by cleanup
-	// to target exactly this session's orphaned client without affecting
-	// concurrent CLI clients or other browser sessions.
-	attachedPTY string
+	// inferredPTY is the container-side PTY device (e.g. "/dev/pts/3") inferred
+	// for this browser attach session by snapshot-difference heuristics. Used
+	// for observability logging ONLY — not for destructive cleanup, because
+	// inference has known false-certainty windows. See inferAttachedPTY docs.
+	inferredPTY string
 }
 
 // NewStreamPTYHandler creates a handler for a PTY stream from the control channel.
@@ -1044,25 +1094,43 @@ func (h *StreamPTYHandler) Run() error {
 		}
 	}
 
-	// Identify the specific container-side PTY device for THIS session by
-	// diffing current tmux clients against the pre-attach baseline. This
-	// gives us exact per-attach identity: only our PTY will be targeted
-	// during cleanup, so concurrent CLI clients and other browser sessions
-	// are never affected.
+	// Infer the container-side PTY device for this session concurrently with
+	// the data pump (R-2). The result is for observability logging only — not
+	// used for destructive cleanup because inference has known false-certainty
+	// windows (F-1). See inferAttachedPTY documentation.
+	inferredCh := make(chan string, 1)
 	if !isK8s {
-		h.attachedPTY = identifyAttachedPTY(h.ctx, runtimeCmd, h.containerID, h.execUser, baseline)
+		go func() {
+			inferredCh <- inferAttachedPTY(h.ctx, runtimeCmd, h.containerID, h.execUser, baseline)
+		}()
+	} else {
+		inferredCh <- ""
 	}
 
 	defer func() {
+		// Wait for the inference goroutine to complete before cleanup. The
+		// goroutine returns promptly because h.ctx was cancelled by h.cancel()
+		// before this defer runs.
+		inferredTTY := <-inferredCh
+		h.inferredPTY = inferredTTY
+		if inferredTTY != "" {
+			slog.Info("Inferred container-side PTY for session (observability only)",
+				"slug", h.slug, "inferred_tty", inferredTTY)
+		}
 		// Graceful shutdown: close PTY (terminal hangup) → wait → SIGTERM →
 		// SIGKILL, ensuring the container runtime can propagate the hangup
 		// to the container-side tmux attach process (TW-UAT-002 fix).
+		//
+		// Container-side targeted detach is NOT performed here because the
+		// PTY inference is based on snapshot-difference heuristics with known
+		// false-certainty windows — an unrelated client that attached between
+		// baseline and poll would be misidentified and wrongly detached. The
+		// graceful shutdown sequence is the primary cleanup mechanism. In rare
+		// cases where SIGKILL is needed and the runtime does not propagate the
+		// kill to the container-side process, a residual tmux client may
+		// remain until the container restarts. This is a known limitation
+		// documented in the TW-UAT-002 design notes.
 		gracefulShutdownExec(h.cmd, h.ptyMaster, h.slug)
-		// Safety net: detach the specific container-side client for THIS
-		// session if it survived the host-side exec termination. This runs
-		// unconditionally — both graceful exit and force-kill can leave
-		// orphaned container-side processes in some timing scenarios.
-		detachContainerClient(h.runtimeCmd, h.containerID, h.execUser, h.attachedPTY)
 	}()
 
 	errCh := make(chan error, 2)
@@ -1365,11 +1433,17 @@ func (h *StreamPTYHandler) readFromStream() error {
 
 // Close stops the PTY handler. It initiates shutdown by canceling the context
 // and closing the PTY (terminal hangup). The full graceful shutdown sequence
-// (wait → SIGTERM → SIGKILL → container cleanup) is handled by Run()'s defer.
+// (wait → SIGTERM → SIGKILL) is handled by Run()'s defer via gracefulShutdownExec.
+//
+// Close() and Run()'s defer both close h.ptyMaster. This is safe because both
+// target the same *os.File object: Go's os.File.Close() uses an internal poll.FD
+// that tracks closed state, so the second call returns os.ErrClosed without
+// issuing a duplicate syscall.Close on the raw fd. No fd-reuse race exists.
 func (h *StreamPTYHandler) Close() {
 	h.cancel()
-	// Close PTY to trigger terminal hangup. Run()'s defer handles the full
-	// graceful shutdown including process wait and container cleanup.
+	// Close PTY to trigger terminal hangup. Run()'s defer also closes this fd
+	// via gracefulShutdownExec — the second close is a safe no-op on the same
+	// *os.File (see comment above).
 	if h.ptyMaster != nil {
 		_ = h.ptyMaster.Close()
 	}

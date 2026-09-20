@@ -685,14 +685,15 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 	}
 
 	// KEY ASSERTION: concurrent client must survive the browser cleanup.
-	// Allow a brief settling period then verify.
-	time.Sleep(500 * time.Millisecond)
-
-	out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
-	require.NoError(t, err)
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	require.Equal(t, 1, len(lines),
-		"concurrent client must survive browser cleanup — got %d clients: %v", len(lines), lines)
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
+		if err != nil {
+			return false
+		}
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		return len(lines) == 1
+	}, 10*time.Second, 50*time.Millisecond,
+		"concurrent client must survive browser cleanup — expected exactly 1 client")
 
 	// Verify the surviving client is the concurrent one, not the browser one
 	require.True(t, concurrentCmd.ProcessState == nil,
