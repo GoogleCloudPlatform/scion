@@ -13,7 +13,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 )
 
-func TestAgentStartNativeTelemetryConflictHasNoRuntimeChild(t *testing.T) {
+// This sentinel covers a new agent with an empty runtime inventory and a
+// cached image. Existing-agent deletion and missing-image pulls can precede
+// the backend guard; see ptone/scion#1699.
+func TestAgentStartNativeTelemetryConflictWithEmptyInventoryAndCachedImage(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		cloud      *api.TelemetryCloudConfig
@@ -78,16 +81,20 @@ func TestAgentStartNativeTelemetryConflictHasNoRuntimeChild(t *testing.T) {
 			if effective.Harness != "claude" || effective.Telemetry == nil || effective.Telemetry.Enabled == nil || !*effective.Telemetry.Enabled || effective.Telemetry.Cloud == nil || effective.Telemetry.Cloud.Provider != tc.cloud.Provider || effective.Telemetry.Cloud.Endpoint != tc.cloud.Endpoint {
 				t.Fatal("test fixture did not resolve enabled Claude telemetry")
 			}
-			var runs, deletes, pulls int
+			var runs, lists, imageChecks int
 			rt := &runtime.MockRuntime{
-				ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil },
+				ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+					lists++
+					return nil, nil
+				},
 				RunFunc: func(context.Context, runtime.RunConfig) (string, error) {
 					runs++
 					return "unexpected-child", nil
 				},
-				DeleteFunc:      func(context.Context, string) error { deletes++; return nil },
-				PullImageFunc:   func(context.Context, string) error { pulls++; return nil },
-				ImageExistsFunc: func(context.Context, string) (bool, error) { return true, nil },
+				ImageExistsFunc: func(context.Context, string) (bool, error) {
+					imageChecks++
+					return true, nil
+				},
 			}
 			mgr := NewManager(rt)
 			defer mgr.Close()
@@ -99,8 +106,8 @@ func TestAgentStartNativeTelemetryConflictHasNoRuntimeChild(t *testing.T) {
 			if err == nil || err.Error() != want || info != nil {
 				t.Fatalf("Start result: infoPresent=%t, err=%v, want error=%q", info != nil, err, want)
 			}
-			if runs != 0 || deletes != 0 || pulls != 0 {
-				t.Fatalf("runtime child side effects: runs=%d deletes=%d pulls=%d", runs, deletes, pulls)
+			if lists != 1 || imageChecks != 1 || runs != 0 {
+				t.Fatalf("fixture or child launch mismatch: lists=%d imageChecks=%d runs=%d", lists, imageChecks, runs)
 			}
 		})
 	}

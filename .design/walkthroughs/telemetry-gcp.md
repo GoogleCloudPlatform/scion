@@ -2,6 +2,8 @@
 
 **Status:** Phase 4 R5 accepted only for Claude Code 2.1.273 logs first; Phase 5 R4 source checks and pinned `b529e04eac3930230664c86e004f5a9589db16ae` deployment health passed. Phase 5 live evidence and overall acceptance remain pending. This procedure requires an approved, isolated fixture. It does not authorize changing active agents, shared settings, or infrastructure.
 
+Known lifecycle limit: `agent.Start` may delete a matching stopped agent or an agent restarted with a new task, and may pull an absent image, before rejecting conflicting native telemetry settings. The local full-Start conflict sentinel covers only an empty runtime inventory and a cached image; it proves no runtime child launch in that fixture. The broader ordering fix is deferred to [ptone/scion#1699](https://github.com/ptone/scion/issues/1699). Use a unique task-owned fixture name and confirm its inventory before starting it.
+
 ## Pin and record the fixture
 
 Before starting, record UTC start and end, integration commit, built `scion` and `sciontool` SHA256, container image digest, installed harness name/version, receiver configuration, Cloud project/log name, exact Scion agent ID, project ID, harness label, and a unique nonsecret marker. Keep the marker and any sensitive controls out of credentials. Preserve an inventory of running and total container IDs and hashes of the shared binaries/configuration. Use a task-owned fixture and short-lived credential; never copy real user content into an evidence fixture.
