@@ -110,6 +110,50 @@ checking. A scoped ESLint override in `.eslintrc.cjs` is needed to lint it
 with its own tsconfig; this requires manager coordination since #1652
 currently owns narrow fixture overrides in that shared file.
 
+## Revision history
+
+### Rev 2 (cfa1cba, da726b6) — Focused-state guards, drag scoping
+
+Per manager review: added `_focused` field requiring `_visible && _focused`
+for all human input guards. Window drag prevention scoped via `composedPath()`.
+ESLint override added for `e2e/terminal-hidden/*.ts`. Expanded to 15 e2e tests.
+
+### Rev 3 (18f424f) — R1 review fixes
+
+Per independent R1 review findings:
+
+**R1: OSC 52 read generation gap** — Captured session generation before
+`readText()`, added generation recheck at async completion. Prevents clipboard
+content leaking to a reconnected session (browser-confirmed by reviewer probe).
+
+**R2: OSC 52 selection type parity** — Extracts selection prefix from OSC 52
+data. Only `c` (system clipboard) supported; non-`c` selections (`p`, `q`, `s`)
+silently ignored, matching original `BrowserClipboardProvider`. Response echoes
+the requested selection type in the reply.
+
+**R3: writeText async documentation** — Corrected comments: `writeText()` is
+async per Clipboard API spec. Pre-call guard prevents unauthorized initiation
+but cannot revoke an already-dispatched OS write. Inherent API limitation.
+
+**DOM focus ownership** — Promoted from Phase 2 optional to required. Wired
+`focusin`/`focusout` event listeners in `connectedCallback` to automatically
+track `_focused`. Focus moving to sibling elements (rail, header) clears
+`_focused` via `focusout` handler. Focus moving within the pane (toolbar,
+file picker) preserves `_focused` via `relatedTarget`/`contains()` check.
+File drops restore `_focused` as an explicit user interaction.
+
+**Stale mock cleanup** — Removed `vi.mock('@xterm/addon-clipboard')` from
+vitest (addon no longer imported).
+
+**Lint nits** — Added return type annotations to getter properties, fixing
+2 lint warnings.
+
+Tests expanded to 22 browser e2e + 10 vitest. New tests:
+- DOM focus: sibling click clears _focused, toolbar preserves it, refocus restores it
+- OSC 52 generation: read response blocked after session reconnect
+- OSC 52 selection: non-'c' types ignored, 'c' echoed in response
+- OSC 52 malformed: invalid base64 and missing semicolon handled gracefully
+
 ## Baseline failures (pre-existing, not introduced)
 
 - `src/components/shared/role-binding-assignment-form.test.ts` — beforeAll
