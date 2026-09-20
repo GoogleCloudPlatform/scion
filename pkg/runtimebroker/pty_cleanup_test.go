@@ -102,26 +102,33 @@ func TestGracefulShutdownExec_ProcessExitsOnPTYClose(t *testing.T) {
 		"process should exit from stdin close without needing SIGTERM")
 }
 
-// TestCleanupContainerAttach_SkipsK8s verifies that cleanupContainerAttach
+// TestDetachContainerClient_SkipsK8s verifies that detachContainerClient
 // is a no-op for Kubernetes runtimes.
-func TestCleanupContainerAttach_SkipsK8s(t *testing.T) {
+func TestDetachContainerClient_SkipsK8s(t *testing.T) {
 	// These should not panic or attempt any exec
-	cleanupContainerAttach("kubernetes", "some-pod", "scion", nil)
-	cleanupContainerAttach("k8s", "some-pod", "scion", nil)
+	detachContainerClient("kubernetes", "some-pod", "scion", "/dev/pts/0")
+	detachContainerClient("k8s", "some-pod", "scion", "/dev/pts/0")
 }
 
-// TestCleanupContainerAttach_SkipsEmptyContainer verifies that
-// cleanupContainerAttach is a no-op when containerID is empty.
-func TestCleanupContainerAttach_SkipsEmptyContainer(t *testing.T) {
-	cleanupContainerAttach("docker", "", "scion", nil)
+// TestDetachContainerClient_SkipsEmptyContainer verifies that
+// detachContainerClient is a no-op when containerID is empty.
+func TestDetachContainerClient_SkipsEmptyContainer(t *testing.T) {
+	detachContainerClient("docker", "", "scion", "/dev/pts/0")
 }
 
-// TestCleanupContainerAttach_ToleratesCommandFailure verifies that
-// cleanupContainerAttach does not panic or error when the runtime command
+// TestDetachContainerClient_SkipsEmptyTTY verifies that
+// detachContainerClient is a no-op when targetTTY is empty
+// (identification failed or ambiguous).
+func TestDetachContainerClient_SkipsEmptyTTY(t *testing.T) {
+	detachContainerClient("docker", "some-container", "scion", "")
+}
+
+// TestDetachContainerClient_ToleratesCommandFailure verifies that
+// detachContainerClient does not panic or error when the runtime command
 // fails (e.g., container already stopped).
-func TestCleanupContainerAttach_ToleratesCommandFailure(t *testing.T) {
+func TestDetachContainerClient_ToleratesCommandFailure(t *testing.T) {
 	// "false" always exits 1, simulating a failed docker exec
-	cleanupContainerAttach("false", "nonexistent-container", "scion", nil)
+	detachContainerClient("false", "nonexistent-container", "scion", "/dev/pts/0")
 }
 
 // TestPTYCleanup_ExplicitCloseReleasesAttach tests acceptance criterion 2:
@@ -558,6 +565,138 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 	out, err := tmuxCommand("display-message", "-p", "-t", "scion", "#{session_name}")
 	require.NoError(t, err)
 	require.Equal(t, "scion", out, "CLI must remain functional")
+}
+
+// TestPTYCleanup_ConcurrentClientSurvivesCleanup is a regression test for the
+// concurrent client race condition identified by the technical advisor: a client
+// opened AFTER the baseline snapshot but BEFORE cleanup must NOT be detached.
+//
+// This tests that the per-attach PTY identity approach correctly targets only
+// the specific PTY device for the browser session, leaving a concurrently
+// opened client untouched.
+//
+// Test fixture: real local tmux via shell adapter (not Docker containers).
+func TestPTYCleanup_ConcurrentClientSurvivesCleanup(t *testing.T) {
+	tmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("requires tmux in PATH")
+	}
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TMUX", "")
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "tmux.sock")
+	tmuxCommand := func(args ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, tmux, append([]string{"-S", socket}, args...)...).CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+
+	_, err = tmuxCommand("-f", "/dev/null", "new-session", "-d", "-s", "scion", "-x", "80", "-y", "24", "exec cat")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = tmuxCommand("kill-server") })
+
+	// Runtime adapter
+	adapter := filepath.Join(dir, "runtime-exec")
+	require.NoError(t, os.WriteFile(adapter, []byte(`#!/bin/sh
+set -eu
+[ "$1" = exec ]; shift
+if [ "$1" = -it ]; then shift; fi
+[ "$1" = --user ]; shift 2
+[ "$1" = concurrent-fixture ]; shift
+[ "$1" = tmux ]; shift
+exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
+`), 0700))
+	t.Setenv("TW_CLEANUP_TMUX", tmux)
+	t.Setenv("TW_CLEANUP_SOCKET", socket)
+
+	// Start browser PTY session through the bridge
+	brokerConn, hubConn, cleanupWS := newWSPair(t)
+	defer cleanupWS()
+	client := &ControlChannelClient{conn: brokerConn, connected: true, streams: make(map[string]*StreamHandler)}
+
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			var msg json.RawMessage
+			if err := hubConn.ReadJSON(&msg); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() { _ = hubConn.Close(); <-readerDone }()
+
+	streamID := "concurrent-1"
+	handler := &StreamHandler{
+		streamID: streamID, slug: "fixture",
+		dataCh: make(chan []byte, 4), resizeCh: make(chan [2]int, 4),
+		closeCh: make(chan struct{}),
+	}
+	client.streamMu.Lock()
+	client.streams[streamID] = handler
+	client.streamMu.Unlock()
+
+	bridge := NewStreamPTYHandler(client, handler, "concurrent-fixture", adapter, "scion", "", 80, 24, nil, nil)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = bridge.Run()
+	}()
+
+	// Wait for browser client to attach
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
+		return err == nil && strings.TrimSpace(out) != ""
+	}, 5*time.Second, 20*time.Millisecond, "browser client should attach")
+
+	// NOW open a concurrent client AFTER the baseline was captured.
+	// This simulates the race condition: a new CLI session opens while the
+	// browser session is active. Under the old baseline subtraction approach,
+	// this client would be incorrectly detached because it wasn't in the baseline.
+	concurrentCmd := exec.Command(tmux, "-S", socket, "attach-session", "-t", "scion")
+	concurrentPtmx, err := pty.Start(concurrentCmd)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = concurrentPtmx.Close()
+		_ = concurrentCmd.Process.Kill()
+		_ = concurrentCmd.Wait()
+	})
+
+	// Wait for concurrent client to attach (should be 2 total)
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
+		if err != nil {
+			return false
+		}
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		return len(lines) == 2
+	}, 5*time.Second, 20*time.Millisecond, "should have 2 clients (browser + concurrent)")
+
+	// Close browser session — this triggers cleanup
+	payload, err := json.Marshal(wsprotocol.NewStreamCloseMessage(streamID, "browser closed", 0))
+	require.NoError(t, err)
+	require.NoError(t, client.handleStreamClose(payload))
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("bridge did not exit")
+	}
+
+	// KEY ASSERTION: concurrent client must survive the browser cleanup.
+	// Allow a brief settling period then verify.
+	time.Sleep(500 * time.Millisecond)
+
+	out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.Equal(t, 1, len(lines),
+		"concurrent client must survive browser cleanup — got %d clients: %v", len(lines), lines)
+
+	// Verify the surviving client is the concurrent one, not the browser one
+	require.True(t, concurrentCmd.ProcessState == nil,
+		"concurrent client process must still be running")
 }
 
 // TestPTYCleanup_SingleAttachOnReopen tests acceptance criterion 1:

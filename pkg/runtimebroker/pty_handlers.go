@@ -83,11 +83,11 @@ const (
 // escalating through SIGTERM to SIGKILL only if necessary.
 //
 // Background (TW-UAT-002): exec.CommandContext sends SIGKILL on context cancel,
-// which kills the host-side docker exec instantly. Docker/containerd never gets
-// to clean up the container-side exec session, so the tmux attach-session
-// process inside the container survives, reparented to PID 1. By closing the
-// PTY first and using SIGTERM, we give Docker the chance to propagate the
-// hangup signal to the in-container process.
+// which kills the host-side docker exec instantly. Docker/containerd may not
+// clean up the container-side exec session, leaving the tmux attach-session
+// process inside the container as a residual process. By closing the PTY first
+// and using SIGTERM, we give Docker the chance to propagate the hangup signal
+// to the in-container process.
 //
 // Returns true if SIGKILL was required (container-side cleanup may be needed),
 // false if the process exited from PTY hangup or SIGTERM (runtime handled
@@ -143,12 +143,10 @@ func gracefulShutdownExec(cmd *exec.Cmd, ptyMaster *os.File, slug string) (force
 	return true
 }
 
-// snapshotTmuxClients captures the current set of tmux client TTY devices for
-// a container. This snapshot is used by cleanupContainerAttach to identify
-// which clients were pre-existing (CLI, sciontool init) vs. added by the
-// browser PTY session, ensuring only the browser's orphaned client is cleaned
-// up and CLI clients are preserved.
-func snapshotTmuxClients(runtimeCmd, containerID, execUser string) map[string]struct{} {
+// listTmuxClientTTYs returns the set of currently attached tmux client TTY
+// devices for the scion session in the given container. Returns nil on any
+// failure (container stopped, tmux not available, etc.).
+func listTmuxClientTTYs(runtimeCmd, containerID, execUser string) map[string]struct{} {
 	if runtimeCmd == "kubernetes" || runtimeCmd == "k8s" || containerID == "" {
 		return nil
 	}
@@ -182,19 +180,62 @@ func snapshotTmuxClients(runtimeCmd, containerID, execUser string) map[string]st
 	return clients
 }
 
-// cleanupContainerAttach verifies and cleans up any container-side tmux attach
-// processes that survived host-side exec termination. This is a safety net for
-// the TW-UAT-002 defect where the container-side process (tmux attach-session)
-// outlives the docker exec host process.
-//
-// It compares current tmux clients against the baseline snapshot taken before
-// the attach session started. Only clients that are NEW (not in the baseline)
-// are detached, preserving CLI clients and other legitimate sessions.
-func cleanupContainerAttach(runtimeCmd, containerID, execUser string, baseline map[string]struct{}) {
-	if runtimeCmd == "kubernetes" || runtimeCmd == "k8s" {
-		return // K8s exec cleanup is handled by the SPDY executor
+// identifyAttachedPTY polls the container's tmux client list to find the PTY
+// device that was created for THIS attach session. It compares the current
+// client list against the baseline snapshot taken before the exec started.
+// Returns the PTY device path (e.g. "/dev/pts/3") only if exactly one new
+// client appeared — otherwise returns "" to avoid misidentifying a concurrent
+// client.
+func identifyAttachedPTY(ctx context.Context, runtimeCmd, containerID, execUser string, baseline map[string]struct{}) string {
+	if runtimeCmd == "kubernetes" || runtimeCmd == "k8s" || containerID == "" {
+		return ""
 	}
-	if containerID == "" {
+
+	pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-pollCtx.Done():
+			return ""
+		case <-ticker.C:
+			current := listTmuxClientTTYs(runtimeCmd, containerID, execUser)
+			if current == nil {
+				continue
+			}
+			var newTTYs []string
+			for tty := range current {
+				if baseline == nil {
+					newTTYs = append(newTTYs, tty)
+				} else if _, existed := baseline[tty]; !existed {
+					newTTYs = append(newTTYs, tty)
+				}
+			}
+			if len(newTTYs) == 1 {
+				return newTTYs[0]
+			}
+			// If multiple new clients appeared, we can't safely identify
+			// ours — skip cleanup to protect concurrent sessions.
+		}
+	}
+}
+
+// detachContainerClient detaches a specific tmux client by its TTY device path
+// inside the container. This is the safety net for TW-UAT-002: if the host-side
+// exec termination did not clean up the container-side tmux attach process,
+// this function explicitly detaches it.
+//
+// It targets only the specific PTY device identified by identifyAttachedPTY,
+// so concurrent CLI clients and other browser sessions are never affected.
+// If targetTTY is empty (identification failed), this is a no-op.
+func detachContainerClient(runtimeCmd, containerID, execUser, targetTTY string) {
+	if targetTTY == "" || containerID == "" {
+		return
+	}
+	if runtimeCmd == "kubernetes" || runtimeCmd == "k8s" {
 		return
 	}
 
@@ -203,47 +244,21 @@ func cleanupContainerAttach(runtimeCmd, containerID, execUser string, baseline m
 
 	execUser = sanitizeExecUser(execUser)
 
-	var listCmd *exec.Cmd
+	var cmd *exec.Cmd
 	if runtimeCmd == "cloudrun-sandbox" {
-		listCmd = exec.CommandContext(ctx, cloudRunSandboxBin, "exec", containerID, "--",
-			"/usr/bin/tmux", "list-clients", "-t", "scion", "-F", "#{client_tty}")
+		cmd = exec.CommandContext(ctx, cloudRunSandboxBin, "exec", containerID, "--",
+			"/usr/bin/tmux", "detach-client", "-t", targetTTY)
 	} else {
-		listCmd = exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID,
-			"tmux", "list-clients", "-t", "scion", "-F", "#{client_tty}")
+		cmd = exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID,
+			"tmux", "detach-client", "-t", targetTTY)
 	}
-
-	out, err := listCmd.Output()
-	if err != nil {
-		// Container may have stopped, or tmux server may be gone. Not an error.
-		return
-	}
-
-	for _, tty := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		tty = strings.TrimSpace(tty)
-		if tty == "" {
-			continue
-		}
-		// Preserve clients that existed before this attach session
-		if baseline != nil {
-			if _, existed := baseline[tty]; existed {
-				continue
-			}
-		}
-
-		slog.Info("Detaching residual container tmux client",
-			"containerID", containerID, "tty", tty)
-		var detachCmd *exec.Cmd
-		if runtimeCmd == "cloudrun-sandbox" {
-			detachCmd = exec.CommandContext(ctx, cloudRunSandboxBin, "exec", containerID, "--",
-				"/usr/bin/tmux", "detach-client", "-t", tty)
-		} else {
-			detachCmd = exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID,
-				"tmux", "detach-client", "-t", tty)
-		}
-		if err := detachCmd.Run(); err != nil {
-			slog.Debug("Failed to detach residual tmux client",
-				"containerID", containerID, "tty", tty, "error", err)
-		}
+	if err := cmd.Run(); err != nil {
+		// Expected when client was already cleaned up by graceful shutdown.
+		slog.Debug("Container tmux client detach", "containerID", containerID,
+			"tty", targetTTY, "result", "already gone or error", "error", err)
+	} else {
+		slog.Info("Detached residual container tmux client",
+			"containerID", containerID, "tty", targetTTY)
 	}
 }
 
@@ -601,9 +616,9 @@ func (s *LocalPTYSession) Run() error {
 	isCloudRunSandbox := s.runtimeCmd == "cloudrun-sandbox"
 
 	// Capture baseline tmux clients before attaching (TW-UAT-002).
-	var baselineClients map[string]struct{}
+	var baseline map[string]struct{}
 	if !isK8s {
-		baselineClients = snapshotTmuxClients(s.runtimeCmd, s.containerID, s.execUser)
+		baseline = listTmuxClientTTYs(s.runtimeCmd, s.containerID, s.execUser)
 	}
 
 	if isCloudRunSandbox {
@@ -632,14 +647,19 @@ func (s *LocalPTYSession) Run() error {
 		}
 	}
 
+	// Identify our specific container-side PTY for targeted cleanup.
+	var attachedPTY string
+	if !isK8s {
+		attachedPTY = identifyAttachedPTY(s.ctx, s.runtimeCmd, s.containerID, s.execUser, baseline)
+	}
+
 	defer func() {
 		// Graceful shutdown: close PTY (terminal hangup) → wait → SIGTERM →
 		// SIGKILL, ensuring the container runtime can propagate the hangup
 		// to the container-side tmux attach process (TW-UAT-002 fix).
-		forceKilled := gracefulShutdownExec(s.cmd, s.ptyMaster, s.agentID)
-		if forceKilled {
-			cleanupContainerAttach(s.runtimeCmd, s.containerID, s.execUser, baselineClients)
-		}
+		gracefulShutdownExec(s.cmd, s.ptyMaster, s.agentID)
+		// Safety net: unconditionally detach our specific client.
+		detachContainerClient(s.runtimeCmd, s.containerID, s.execUser, attachedPTY)
 	}()
 
 	errCh := make(chan error, 2)
@@ -955,10 +975,12 @@ type StreamPTYHandler struct {
 	k8sConfig    *rest.Config
 	k8sClientset kubernetes.Interface
 
-	// baselineClients records the tmux client TTYs that existed before this
-	// session's attach, so cleanup can distinguish pre-existing CLI clients
-	// from the browser session's orphaned attach process.
-	baselineClients map[string]struct{}
+	// attachedPTY is the specific container-side PTY device (e.g. "/dev/pts/3")
+	// allocated for THIS browser attach session. Identified after exec starts
+	// by diffing tmux clients against a pre-attach baseline. Used by cleanup
+	// to target exactly this session's orphaned client without affecting
+	// concurrent CLI clients or other browser sessions.
+	attachedPTY string
 }
 
 // NewStreamPTYHandler creates a handler for a PTY stream from the control channel.
@@ -991,11 +1013,11 @@ func (h *StreamPTYHandler) Run() error {
 	isK8s := (runtimeCmd == "kubernetes" || runtimeCmd == "k8s") && h.k8sConfig != nil && h.k8sClientset != nil
 	isCloudRunSandbox := runtimeCmd == "cloudrun-sandbox"
 
-	// Capture baseline tmux clients BEFORE attaching, so the cleanup safety
-	// net can distinguish pre-existing CLI clients from the browser's
-	// orphaned attach process (TW-UAT-002).
+	// Capture baseline tmux clients BEFORE attaching, so we can identify
+	// which PTY device belongs to THIS session after exec starts.
+	var baseline map[string]struct{}
 	if !isK8s {
-		h.baselineClients = snapshotTmuxClients(runtimeCmd, h.containerID, h.execUser)
+		baseline = listTmuxClientTTYs(runtimeCmd, h.containerID, h.execUser)
 	}
 
 	if isCloudRunSandbox {
@@ -1022,17 +1044,25 @@ func (h *StreamPTYHandler) Run() error {
 		}
 	}
 
+	// Identify the specific container-side PTY device for THIS session by
+	// diffing current tmux clients against the pre-attach baseline. This
+	// gives us exact per-attach identity: only our PTY will be targeted
+	// during cleanup, so concurrent CLI clients and other browser sessions
+	// are never affected.
+	if !isK8s {
+		h.attachedPTY = identifyAttachedPTY(h.ctx, runtimeCmd, h.containerID, h.execUser, baseline)
+	}
+
 	defer func() {
 		// Graceful shutdown: close PTY (terminal hangup) → wait → SIGTERM →
 		// SIGKILL, ensuring the container runtime can propagate the hangup
 		// to the container-side tmux attach process (TW-UAT-002 fix).
-		forceKilled := gracefulShutdownExec(h.cmd, h.ptyMaster, h.slug)
-		// Safety net: if SIGKILL was needed, the container runtime likely
-		// did not clean up the in-container process. Detach any orphaned
-		// tmux clients that weren't in the baseline.
-		if forceKilled {
-			cleanupContainerAttach(h.runtimeCmd, h.containerID, h.execUser, h.baselineClients)
-		}
+		gracefulShutdownExec(h.cmd, h.ptyMaster, h.slug)
+		// Safety net: detach the specific container-side client for THIS
+		// session if it survived the host-side exec termination. This runs
+		// unconditionally — both graceful exit and force-kill can leave
+		// orphaned container-side processes in some timing scenarios.
+		detachContainerClient(h.runtimeCmd, h.containerID, h.execUser, h.attachedPTY)
 	}()
 
 	errCh := make(chan error, 2)
