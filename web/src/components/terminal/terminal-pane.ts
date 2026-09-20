@@ -61,7 +61,7 @@ export class ScionTerminalPane extends LitElement {
   }
 
   /** User ID for building chat DM keys. Set by workspace root. */
-  userId: string = '';
+  @state() userId: string = '';
 
   private registry: TerminalSessionRegistry | null = null;
   private disposed = false;

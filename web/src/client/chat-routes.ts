@@ -42,13 +42,6 @@ export interface ChatConversationTarget {
 }
 
 /**
- * Builds the deep link for a conversation, or null when the event did not
- * carry enough to address one (a thread with no project has no route).
- *
- * DM keys contain colons, which `encodeURIComponent` escapes — the encoded
- * segment therefore never contains a slash and stays a single path segment.
- */
-/**
  * Builds the DM conversation key for a direct conversation between
  * a user and an agent. Returns null if either ID is missing.
  */
@@ -57,6 +50,13 @@ export function buildAgentDMKey(agentId: string, userId: string): string | null 
   return `dm:agent:${agentId}:user:${userId}`;
 }
 
+/**
+ * Builds the deep link for a conversation, or null when the event did not
+ * carry enough to address one (a thread with no project has no route).
+ *
+ * DM keys contain colons, which `encodeURIComponent` escapes — the encoded
+ * segment therefore never contains a slash and stays a single path segment.
+ */
 export function chatConversationPath(target: ChatConversationTarget): string | null {
   if (!target) return null;
   const key = target.conversationKey?.trim();

@@ -1716,23 +1716,13 @@ test('chat button hidden when userId is unavailable', async ({ page }) => {
   const chatBtn = page.locator('scion-terminal-pane').locator('button[title="Open in chat"]');
   await expect(chatBtn).toBeVisible();
 
-  // Clear the userId on the pane and trigger a re-render via metadata refresh
-  await page.evaluate(async () => {
+  // Clear the userId on the pane — @state() decorator triggers re-render automatically
+  await page.evaluate(() => {
     type WorkspaceEl = HTMLElement & {
       workspaceRoot?: { setUser: (u: null) => void };
     };
     const host = document.querySelector('#terminal-workspace') as WorkspaceEl;
     host.workspaceRoot!.setUser(null);
-
-    // Force a re-render by refreshing agent metadata (triggers reactive state change)
-    const pane = document.querySelector<
-      HTMLElement & {
-        registry: { metadata: { refresh: (agentId: string) => Promise<void> } };
-        agentId: string;
-        requestUpdate: () => Promise<void>;
-      }
-    >('#terminal-workspace scion-terminal-pane');
-    if (pane) await pane.requestUpdate();
   });
 
   // Chat button should disappear when userId is cleared
