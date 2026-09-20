@@ -1972,6 +1972,7 @@ test('performLogout dispatches teardown and closes sessions before redirect', as
 
   // Call performLogout via the auth module
   await page.evaluate(async () => {
+    // @ts-expect-error TS2307 - dynamic import runs in Playwright browser context via Vite dev-server
     const auth = (await import('/src/utils/auth.js')) as {
       performLogout: () => void;
     };
@@ -1997,6 +1998,7 @@ test('API 401 response triggers teardown before login redirect', async ({ page }
   await page.route('**/api/v1/test-401', (route) => route.fulfill({ status: 401 }));
 
   await page.evaluate(async () => {
+    // @ts-expect-error TS2307 - dynamic import runs in Playwright browser context via Vite dev-server
     const api = (await import('/src/client/api.js')) as {
       apiFetch: (url: string) => Promise<Response>;
     };
@@ -2054,6 +2056,7 @@ test('SSE auth-expiry check triggers teardown before login redirect', async ({ p
     // This goes through the real SSEClient code: openConnection creates the
     // failing EventSource, onerror fires checkAuthAndReconnect, which fetches
     // /auth/me, sees 401, and calls dispatchTeardown('auth-expired').
+    // @ts-expect-error TS2307 - dynamic import runs in Playwright browser context via Vite dev-server
     const { SSEClient } = (await import('/src/client/sse-client.js')) as {
       SSEClient: new () => { connect: (topics: string[]) => void };
     };
@@ -2065,6 +2068,97 @@ test('SSE auth-expiry check triggers teardown before login redirect', async ({ p
   // dispatchTeardown('auth-expired') → main.ts handler disposes workspace
   await expect.poll(() => socket.closes).toBeGreaterThanOrEqual(1);
   await expect(page.locator('#terminal-workspace')).toBeHidden();
+});
+
+test('teardown hides workspace even when session close throws AggregateError (C1 throwing-disposer)', async ({
+  page,
+}) => {
+  // C1 fix verification: when a cross-tab teardown arrives via BroadcastChannel
+  // and stop() throws AggregateError (session close failure), the coordinator's
+  // receive() handler catches the error and still calls dispatchTeardown(), which
+  // fires the main.ts ACCOUNT_TEARDOWN_EVENT listener whose finally block hides
+  // the workspace and nulls refs.
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await expect(page.locator('#terminal-workspace')).toBeVisible();
+
+  // Inject a throwing disposer on the session's close method. The workspace root
+  // is exposed on the DOM element; its registry (TypeScript `private`, erased at
+  // runtime) holds the live sessions. Monkey-patching close() to throw after the
+  // real cleanup simulates a renderer failure during teardown.
+  const injected = await page.evaluate(() => {
+    const el = document.querySelector('#terminal-workspace') as
+      | (HTMLElement & {
+          workspaceRoot?: {
+            registry: { list: () => Array<{ close: (...args: unknown[]) => void }> };
+          };
+        })
+      | null;
+    const sessions = el?.workspaceRoot?.registry?.list();
+    if (!sessions?.length) return false;
+    for (const session of sessions) {
+      const original = session.close.bind(session);
+      session.close = (...args: unknown[]) => {
+        original(...args);
+        throw new Error('Injected renderer dispose failure for C1 verification');
+      };
+    }
+    return true;
+  });
+  expect(injected).toBe(true);
+
+  // Capture console.error calls to verify the AggregateError was caught and logged
+  // by the coordinator's receive() handler catch block.
+  const consoleErrors: string[] = [];
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') consoleErrors.push(msg.text());
+  });
+
+  // Send teardown via BroadcastChannel — simulates another tab broadcasting
+  // account-teardown. The coordinator's receive() handler processes the message:
+  // stop() → session.close() throws → AggregateError caught by try/catch →
+  // dispatchTeardown('logout') → main.ts listener → finally block hides workspace.
+  // Construct the coordinationKey the same way the coordinator does.
+  await page.evaluate(() => {
+    const hubUrl =
+      new URL('/', window.location.origin).href.replace(/\/+$/, '') + '/';
+    const key = `terminal-owner:v1:${JSON.stringify([hubUrl, 'fixture-user'])}`;
+    const bc = new BroadcastChannel(key);
+    bc.postMessage({
+      key,
+      type: 'account-teardown',
+      requestId: 'teardown',
+      agentId: '',
+      generation: null,
+    });
+    bc.close();
+  });
+
+  // Despite the thrown AggregateError, the workspace must be hidden — the
+  // coordinator's receive() caught the error from stop() and still called
+  // dispatchTeardown(), which triggered main.ts's finally block.
+  await expect(page.locator('#terminal-workspace')).toBeHidden();
+
+  // The WebSocket was closed by the original close() before the injected throw.
+  await expect.poll(() => socket.closes).toBeGreaterThanOrEqual(1);
+
+  // Verify the error was logged by the coordinator's receive() catch block.
+  await expect
+    .poll(() => consoleErrors.some((msg) => msg.includes('[Teardown]')))
+    .toBe(true);
+
+  // No recreation possible after teardown — the accountTornDown guard prevents
+  // ensureTerminalCoordinator() from creating a new coordinator.
+  await page.evaluate(async (id) => {
+    document.dispatchEvent(
+      new CustomEvent('nav-click', { detail: { path: `/terminals/${id}` }, bubbles: true })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }, agent);
+  await expect(page.locator('#terminal-workspace')).toBeHidden();
+  // No new WebSocket connections were made
+  expect(socket.attaches).toBe(1);
 });
 
 test('teardown cancels pending agent metadata preflight before WebSocket creation', async ({
