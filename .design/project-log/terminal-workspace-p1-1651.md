@@ -45,3 +45,23 @@ Known limits: desktop foreground focus, live authorization/runtime behavior,
 broad entry-point migration, and detailed hidden input/drop/clipboard policy are
 not claimed by this phase. Full ESLint remains baseline-red; exact counts are
 reported in the developer handoff.
+
+## R2 accessibility acceptance
+
+R1 follow-up replaced the rail's `listbox`/`option` structure with an explicit
+`list`/`listitem` rail containing separately named Show/Reconnect/Close buttons,
+avoiding nested interactive controls inside ARIA options while preserving the
+same accessible names and arrow-key focus behavior. Selection is exposed on the
+Show button with `aria-current="page"` and styled with `data-selected`.
+
+Rail refreshes are now microtask-batched for synchronous session/metadata
+notifications, count publication happens through `refresh()`, and the header and
+workspace share the terminal-count event from one module. Header last-path memory
+is intentionally document-level and is grouped/commented for the two header
+instances. Pending Reconnect controls are disabled while a session is loading or
+connecting.
+
+Browser coverage now includes real Chromium ArrowDown/ArrowUp/Home/End rail
+navigation, proof that no `role="option"` remains, metadata-only refresh focus
+preservation across an accessible-name change, and the existing deployment
+base-path route/history case.

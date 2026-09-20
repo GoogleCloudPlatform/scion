@@ -124,6 +124,15 @@ async function identity(
   });
 }
 
+async function focusedRailControlLabel(page: Page): Promise<string | null> {
+  return page.evaluate(() =>
+    document.activeElement instanceof HTMLElement &&
+    document.querySelector('#terminal-workspace')?.contains(document.activeElement)
+      ? document.activeElement.getAttribute('aria-label')
+      : null
+  );
+}
+
 test('production router retains one pane and socket across shell routes, alias and history', async ({
   page,
 }) => {
@@ -239,6 +248,87 @@ test('rail selection reuses sessions and disambiguates repeated agent names by p
   await expect(page).toHaveURL(`/terminals/${agent}`);
   expect(socket.attaches).toBe(2);
   await expect(page.locator('#terminal-workspace scion-terminal-pane')).toHaveCount(2);
+});
+
+test('rail list preserves valid semantics and real browser arrow key navigation', async ({
+  page,
+}) => {
+  const socket = await setup(page, true, true, {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'project-a' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'project-b' },
+  });
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await page.evaluate(
+    (path) => document.dispatchEvent(new CustomEvent('nav-click', { detail: { path } })),
+    `/terminals/${agentB}`
+  );
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  await expect(page.getByRole('list', { name: 'Retained terminal sessions' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /alpha in project-a/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /beta in project-b/ })).toBeVisible();
+  await expect(page.getByRole('listitem')).toHaveCount(2);
+  await expect(page.locator('[role="option"]')).toHaveCount(0);
+
+  await page.getByRole('button', { name: /alpha in project-a/ }).focus();
+  await expect
+    .poll(() => focusedRailControlLabel(page))
+    .toBe('Show terminal for alpha in project-a');
+
+  await page.keyboard.press('ArrowDown');
+  await expect
+    .poll(() => focusedRailControlLabel(page))
+    .toBe('Show terminal for beta in project-b');
+  await page.keyboard.press('ArrowUp');
+  await expect
+    .poll(() => focusedRailControlLabel(page))
+    .toBe('Show terminal for alpha in project-a');
+  await page.keyboard.press('End');
+  await expect
+    .poll(() => focusedRailControlLabel(page))
+    .toBe('Show terminal for beta in project-b');
+  await page.keyboard.press('Home');
+  await expect
+    .poll(() => focusedRailControlLabel(page))
+    .toBe('Show terminal for alpha in project-a');
+});
+
+test('metadata-only rail updates preserve focused control', async ({ page }) => {
+  const agents: Record<string, AgentFixture> = {
+    [agent]: {
+      id: agent,
+      name: 'isolated-agent',
+      phase: 'running',
+      projectId: 'fixture-project',
+    },
+  };
+  await setup(page, true, true, agents);
+  await page.goto(`/terminals/${agent}`);
+  await expect(page.getByRole('button', { name: 'Close isolated-agent' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Close isolated-agent' }).focus();
+  await expect.poll(() => focusedRailControlLabel(page)).toBe('Close isolated-agent');
+
+  agents[agent] = {
+    ...agents[agent],
+    name: 'renamed-agent',
+    activity: 'snapshot refreshed',
+  };
+  await page.evaluate(async (id) => {
+    const pane = document.querySelector<
+      HTMLElement & {
+        registry: { metadata: { refresh: (agentId: string) => Promise<void> } };
+      }
+    >('#terminal-workspace scion-terminal-pane');
+    await pane?.registry.metadata.refresh(id);
+  }, agent);
+
+  await expect(page.getByRole('button', { name: 'Close renamed-agent' })).toBeFocused();
+  await expect(
+    page.getByRole('button', { name: /renamed-agent in fixture-project/ })
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Close isolated-agent' })).toHaveCount(0);
 });
 
 test('close removes only that retained client and leaves peers connected', async ({ page }) => {

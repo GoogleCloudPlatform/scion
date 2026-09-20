@@ -26,6 +26,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { User } from '../../shared/types.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { apiFetch } from '../../client/api.js';
+import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
 import './notification-tray.js';
 import './inbox-tray.js';
 
@@ -67,10 +68,13 @@ const DOCS_URL = 'https://googlecloudplatform.github.io/scion/overview/';
 /** Feature flag gating the chat mode (and therefore the mode switch). */
 const NATIVE_CHAT_FLAG = 'web.native_chat';
 const TERMINAL_WORKSPACE_FLAG = 'web.terminal_workspace';
-const TERMINAL_SESSION_COUNT_EVENT = 'scion:terminal-session-count';
 
-let lastDashboardPath = '/';
-let lastChatPath = '/chat';
+// Header instances in the app shell and retained terminal workspace share one
+// document-level mode memory so switching views restores the same last paths.
+const rememberedModePaths = {
+  dashboard: '/',
+  chat: '/chat',
+};
 
 @customElement('scion-header')
 export class ScionHeader extends LitElement {
@@ -485,16 +489,16 @@ export class ScionHeader extends LitElement {
     if (targetMode === 'terminals') {
       target = '/terminals';
     } else if (targetMode === 'chat') {
-      if (lastChatPath && lastChatPath.startsWith('/chat')) {
-        target = lastChatPath;
+      if (rememberedModePaths.chat && rememberedModePaths.chat.startsWith('/chat')) {
+        target = rememberedModePaths.chat;
       } else {
         // Dashboard -> Chat: carry the project ID into a space URL.
         const projectId = projectIdFromDashboardPath(currentPath);
         target = projectId ? `/chat/space/${encodeURIComponent(projectId)}` : '/chat';
       }
     } else {
-      if (lastDashboardPath && !lastDashboardPath.startsWith('/chat')) {
-        target = lastDashboardPath;
+      if (rememberedModePaths.dashboard && !rememberedModePaths.dashboard.startsWith('/chat')) {
+        target = rememberedModePaths.dashboard;
       } else {
         // Chat -> Dashboard: resolve project ID from the chat URL.
         const projectId = projectIdFromChatSpacePath(currentPath);
@@ -615,9 +619,9 @@ export class ScionHeader extends LitElement {
   private rememberModePath(): void {
     const path = this.currentPath || window.location.pathname;
     if (path.startsWith('/chat')) {
-      lastChatPath = path;
+      rememberedModePaths.chat = path;
     } else if (path !== '/terminals' && !path.startsWith('/terminals/')) {
-      lastDashboardPath = path || '/';
+      rememberedModePaths.dashboard = path || '/';
     }
   }
 

@@ -8,6 +8,10 @@ import {
 import type { TerminalAgentMetadata } from './terminal-metadata.js';
 import type { ScionHeader } from '../components/shared/header.js';
 import type { ScionTerminalPane } from '../components/terminal/terminal-pane.js';
+import {
+  TERMINAL_SESSION_COUNT_EVENT,
+  type TerminalSessionCountDetail,
+} from './terminal-workspace-events.js';
 import '../components/shared/header.js';
 import '../components/terminal/terminal-pane.js';
 
@@ -18,12 +22,6 @@ interface RailEntry {
   unsubscribeState: () => void;
   unsubscribeMetadata: () => void;
 }
-
-export interface TerminalSessionCountDetail {
-  readonly count: number;
-}
-
-export const TERMINAL_SESSION_COUNT_EVENT = 'scion:terminal-session-count';
 
 /** Document-lived presentation. Pane nodes never move through disposable shells. */
 export class TerminalWorkspaceRoot {
@@ -42,6 +40,7 @@ export class TerminalWorkspaceRoot {
   private registry: TerminalSessionRegistry | null = null;
   private currentPath = '/terminals';
   private selected: string | null = null;
+  private refreshQueued = false;
 
   constructor(user: User | null = null) {
     this.element.id = 'terminal-workspace';
@@ -65,7 +64,7 @@ export class TerminalWorkspaceRoot {
     this.count.className = 'terminal-count';
     railHeader.append(title, this.count);
     this.railList.className = 'terminal-rail-list';
-    this.railList.setAttribute('role', 'listbox');
+    this.railList.setAttribute('role', 'list');
     this.railList.setAttribute('aria-label', 'Retained terminal sessions');
     this.railList.addEventListener('keydown', (event) => this.handleRailKeydown(event));
     this.empty.className = 'terminal-empty';
@@ -164,41 +163,68 @@ export class TerminalWorkspaceRoot {
       };
       entry.unsubscribeState = session.subscribe((next) => {
         entry.state = next;
-        this.refresh();
+        this.queueRefresh();
       });
       entry.unsubscribeMetadata = this.registry!.metadata.subscribe(state.agentId, (next) => {
         entry.metadata = next;
-        this.refresh();
+        this.queueRefresh();
       });
       this.entries.set(session.state.key, entry);
     }
     if (!this.selected && sessions.length > 0)
       this.selected = sessions[sessions.length - 1].state.key;
-    this.publishCount();
     this.refresh();
+  }
+
+  private queueRefresh(): void {
+    if (this.refreshQueued) return;
+    this.refreshQueued = true;
+    queueMicrotask(() => {
+      this.refreshQueued = false;
+      this.refresh();
+    });
   }
 
   private refresh(): void {
     const entries = [...this.entries.values()];
     const total = entries.length;
-    const focusedLabel =
+    const focusedId =
       document.activeElement instanceof HTMLElement &&
       this.railList.contains(document.activeElement)
-        ? document.activeElement.getAttribute('aria-label')
+        ? document.activeElement.dataset.railFocusId
         : null;
     this.count.textContent = String(total);
     this.empty.hidden = total > 0;
     this.status.hidden = total > 0 && !!this.selected;
     this.railList.replaceChildren(...entries.map((entry) => this.renderRailEntry(entry)));
-    if (focusedLabel) {
-      this.railList
-        .querySelector<HTMLElement>(`[aria-label="${CSS.escape(focusedLabel)}"]`)
-        ?.focus();
+    if (focusedId) {
+      this.restoreRailFocus(focusedId);
+      requestAnimationFrame(() => this.restoreRailFocus(focusedId));
     }
     for (const [key, pane] of this.panes) {
       pane.setVisible(!this.element.hidden && key === this.selected);
     }
     this.publishCount();
+  }
+
+  private restoreRailFocus(focusedId: string): void {
+    const active = document.activeElement;
+    if (
+      active instanceof HTMLElement &&
+      active !== document.body &&
+      !this.railList.contains(active)
+    )
+      return;
+    if (
+      active instanceof HTMLElement &&
+      this.railList.contains(active) &&
+      active.dataset.railFocusId &&
+      active.dataset.railFocusId !== focusedId
+    )
+      return;
+    [...this.railList.querySelectorAll<HTMLElement>('[data-rail-focus-id]')]
+      .find((element) => element.dataset.railFocusId === focusedId)
+      ?.focus();
   }
 
   private renderRailEntry(entry: RailEntry): HTMLElement {
@@ -208,8 +234,8 @@ export class TerminalWorkspaceRoot {
     const projectId = agent?.projectId || 'Unknown project';
     const item = document.createElement('div');
     item.className = 'terminal-rail-item';
-    item.setAttribute('role', 'option');
-    item.setAttribute('aria-selected', String(entry.state.key === this.selected));
+    item.setAttribute('role', 'listitem');
+    item.dataset.selected = String(entry.state.key === this.selected);
     item.dataset.connection = entry.state.connection;
     item.dataset.availability = metadata.availability;
 
@@ -217,6 +243,8 @@ export class TerminalWorkspaceRoot {
     select.type = 'button';
     select.className = 'terminal-rail-select';
     select.setAttribute('aria-label', `Show terminal for ${agentName} in ${projectId}`);
+    if (entry.state.key === this.selected) select.setAttribute('aria-current', 'page');
+    select.dataset.railFocusId = `${entry.state.key}:select`;
     select.addEventListener('click', () => this.openSessionRoute(entry));
 
     const connection = document.createElement('span');
@@ -245,10 +273,14 @@ export class TerminalWorkspaceRoot {
     reconnect.type = 'button';
     reconnect.className = 'terminal-icon-action';
     reconnect.setAttribute('aria-label', `Reconnect ${agentName}`);
+    reconnect.dataset.railFocusId = `${entry.state.key}:reconnect`;
     reconnect.title = 'Reconnect';
     reconnect.innerHTML = '<sl-icon name="arrow-clockwise"></sl-icon>';
     reconnect.disabled =
-      entry.state.connection === 'connected' || entry.state.connection === 'closed';
+      entry.state.connection === 'loading' ||
+      entry.state.connection === 'connecting' ||
+      entry.state.connection === 'connected' ||
+      entry.state.connection === 'closed';
     reconnect.addEventListener('click', (event) => {
       event.stopPropagation();
       void this.registry?.metadata.refresh(entry.state.agentId);
@@ -258,6 +290,7 @@ export class TerminalWorkspaceRoot {
     close.type = 'button';
     close.className = 'terminal-icon-action';
     close.setAttribute('aria-label', `Close ${agentName}`);
+    close.dataset.railFocusId = `${entry.state.key}:close`;
     close.title = 'Close';
     close.innerHTML = '<sl-icon name="x-circle"></sl-icon>';
     close.addEventListener('click', (event) => {
@@ -356,7 +389,7 @@ export class TerminalWorkspaceRoot {
         gap: 0.25rem;
         border-radius: 6px;
       }
-      .terminal-rail-item[aria-selected='true'] {
+      .terminal-rail-item[data-selected='true'] {
         background: color-mix(in srgb, var(--scion-primary, #3b82f6) 10%, transparent);
       }
       .terminal-rail-select {
