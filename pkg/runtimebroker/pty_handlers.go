@@ -71,7 +71,6 @@ const (
 	// processTermTimeout is how long to wait after SIGTERM before escalating
 	// to SIGKILL.
 	processTermTimeout = 2 * time.Second
-
 )
 
 // gracefulShutdownExec shuts down a runtime exec process (docker exec, sandbox
@@ -846,7 +845,6 @@ type StreamPTYHandler struct {
 	// K8s Go client for direct API exec (avoids needing kubectl binary)
 	k8sConfig    *rest.Config
 	k8sClientset kubernetes.Interface
-
 }
 
 // NewStreamPTYHandler creates a handler for a PTY stream from the control channel.
