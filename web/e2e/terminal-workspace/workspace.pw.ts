@@ -2816,8 +2816,11 @@ test.describe('production icon and title verification', () => {
   });
 
   test('header page title shows "🌱 Scion Terminal Viewer"', async ({ page }) => {
-    await setup(page);
+    const socket = await setup(page);
     await page.goto(`/terminals/${agent}`);
+    await expect.poll(() => socket.attaches).toBe(1);
+    // Wait for the header shadow DOM to finish rendering
+    await expect(page.getByRole('button', { name: 'Terminals (1)' })).toBeVisible();
     // The page title inside the header shadow DOM should read "🌱 Scion Terminal Viewer"
     const titleText = await page.evaluate(() => {
       const header = document.querySelector('scion-header');
@@ -2828,8 +2831,11 @@ test.describe('production icon and title verification', () => {
   });
 
   test('header has proper horizontal padding in terminal workspace', async ({ page }) => {
-    await setup(page);
+    const socket = await setup(page);
     await page.goto(`/terminals/${agent}`);
+    await expect.poll(() => socket.attaches).toBe(1);
+    // Wait for header to be visible
+    await expect(page.getByRole('button', { name: 'Terminals (1)' })).toBeVisible();
     // The scion-header in the terminal workspace lives in light DOM where the
     // global '* { padding: 0 }' reset can override :host padding. Verify the
     // CSS rule in terminal-workspace-root restores the expected padding.
