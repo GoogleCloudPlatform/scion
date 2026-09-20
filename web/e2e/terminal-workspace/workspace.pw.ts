@@ -2352,13 +2352,36 @@ test.describe('combined regression journey', () => {
     });
     expect(paneMarkersBefore).toBe(4);
 
+    // Capture xterm Terminal object references keyed by session key before
+    // overflow. A unique __refId is stamped on each terminal instance so we
+    // can verify reference equality (same object) after restore and after
+    // cross-mode navigation — not just content equality.
+    const xtermRefsBefore = await page.evaluate(() => {
+      const panes = document.querySelectorAll('#terminal-workspace scion-terminal-pane');
+      const refs: Record<string, number> = {};
+      for (const pane of panes) {
+        const session = (pane as unknown as { session?: { state: { key: string } } }).session;
+        const terminal = (pane as unknown as { terminal?: { __refId?: number } }).terminal;
+        if (session && terminal) {
+          if (terminal.__refId == null) {
+            terminal.__refId = Math.random();
+          }
+          refs[session.state.key] = terminal.__refId;
+        }
+      }
+      return refs;
+    });
+    // All 4 sessions should have captured refs
+    expect(Object.keys(xtermRefsBefore).length).toBe(4);
+
     // Write marker content through mock WebSocket server→client push.
     // The terminal session expects JSON frames: { type: 'data', data: '<base64>' }.
     // These writes flow through xterm's real parser and land in the terminal
-    // buffer. After overflow/restore and cross-mode navigation, we verify
-    // the buffer content survives — proving xterm instance and buffer identity,
-    // not just DOM element persistence (which the __journeyMarker checks
-    // verify separately above).
+    // buffer. MARKER_ALPHA goes to socket 0 (agent A's session) and
+    // MARKER_BETA goes to socket 1 (agent B's session). After overflow/restore
+    // and cross-mode navigation, we verify each marker is in its SPECIFIC
+    // session's buffer — proving xterm instance and buffer identity keyed by
+    // session, not just DOM element persistence.
     socket.sendToSocket(
       0,
       JSON.stringify({ type: 'data', data: Buffer.from('MARKER_ALPHA').toString('base64') })
@@ -2368,13 +2391,15 @@ test.describe('combined regression journey', () => {
       JSON.stringify({ type: 'data', data: Buffer.from('MARKER_BETA').toString('base64') })
     );
 
-    // Wait for xterm to process the marker data into its buffer
+    // Wait for xterm to process the marker data into its buffer, keyed by
+    // session key. Verify each marker is in its specific session's buffer.
     await expect
       .poll(async () => {
-        const texts = await page.evaluate(() => {
+        const keyedBuffers = await page.evaluate(() => {
           const panes = document.querySelectorAll('#terminal-workspace scion-terminal-pane');
-          const results: string[] = [];
+          const result: Record<string, string> = {};
           for (const pane of panes) {
+            const session = (pane as unknown as { session?: { state: { key: string } } }).session;
             const term = (
               pane as unknown as {
                 terminal?: {
@@ -2389,19 +2414,23 @@ test.describe('combined regression journey', () => {
                 };
               }
             ).terminal;
-            if (term) {
+            if (session && term) {
               const buffer = term.buffer.active;
               let text = '';
               for (let i = 0; i < buffer.length; i++) {
                 const line = buffer.getLine(i);
                 if (line) text += line.translateToString(true);
               }
-              results.push(text);
+              result[session.state.key] = text;
             }
           }
-          return results;
+          return result;
         });
-        return texts.some((t) => t.includes('MARKER_ALPHA'));
+        // MARKER_ALPHA must be in agent A's buffer (keys[0]) specifically
+        return (
+          keyedBuffers[keys[0]]?.includes('MARKER_ALPHA') === true &&
+          keyedBuffers[keys[1]]?.includes('MARKER_BETA') === true
+        );
       })
       .toBe(true);
 
@@ -2462,14 +2491,33 @@ test.describe('combined regression journey', () => {
     });
     expect(panesPreserved).toBe(5);
 
-    // Verify xterm buffer content survived the overflow/restore cycle.
-    // The markers were written via server→client WebSocket push before
-    // overflow. If the xterm instance or buffer were recreated, these
-    // markers would be lost.
-    const bufferAfterRestore = await page.evaluate(() => {
+    // Verify xterm Terminal object references are the SAME objects after
+    // overflow/restore — reference equality, not content equality.
+    const xtermRefsAfterRestore = await page.evaluate(() => {
       const panes = document.querySelectorAll('#terminal-workspace scion-terminal-pane');
-      const results: string[] = [];
+      const refs: Record<string, number> = {};
       for (const pane of panes) {
+        const session = (pane as unknown as { session?: { state: { key: string } } }).session;
+        const terminal = (pane as unknown as { terminal?: { __refId?: number } }).terminal;
+        if (session && terminal) {
+          refs[session.state.key] = terminal.__refId ?? -1;
+        }
+      }
+      return refs;
+    });
+    // Each key's refId must match — same xterm object, not a replacement
+    for (const key of Object.keys(xtermRefsBefore)) {
+      expect(xtermRefsAfterRestore[key]).toBe(xtermRefsBefore[key]);
+    }
+
+    // Verify xterm buffer content survived the overflow/restore cycle,
+    // keyed by session. Each marker must be in its SPECIFIC session's
+    // buffer — MARKER_ALPHA in keys[0], MARKER_BETA in keys[1].
+    const keyedBufferAfterRestore = await page.evaluate(() => {
+      const panes = document.querySelectorAll('#terminal-workspace scion-terminal-pane');
+      const result: Record<string, string> = {};
+      for (const pane of panes) {
+        const session = (pane as unknown as { session?: { state: { key: string } } }).session;
         const term = (
           pane as unknown as {
             terminal?: {
@@ -2482,29 +2530,42 @@ test.describe('combined regression journey', () => {
             };
           }
         ).terminal;
-        if (term) {
+        if (session && term) {
           const buffer = term.buffer.active;
           let text = '';
           for (let i = 0; i < buffer.length; i++) {
             const line = buffer.getLine(i);
             if (line) text += line.translateToString(true);
           }
-          results.push(text);
+          result[session.state.key] = text;
         }
       }
-      return results;
+      return result;
     });
-    expect(bufferAfterRestore.some((t) => t.includes('MARKER_ALPHA'))).toBe(true);
-    expect(bufferAfterRestore.some((t) => t.includes('MARKER_BETA'))).toBe(true);
+    expect(keyedBufferAfterRestore[keys[0]]).toContain('MARKER_ALPHA');
+    expect(keyedBufferAfterRestore[keys[1]]).toContain('MARKER_BETA');
 
     // ---------------------------------------------------------------
-    // Step 5: Navigate to graph, then chat, then return to Terminals
+    // Step 5: Navigate to graph view, then chat, then return to Terminals
+    //
+    // Asserts the actual /agents graph route with graph view visible,
+    // not just that we left /terminals.
     // ---------------------------------------------------------------
 
-    // Navigate to Dashboard mode (last dashboard URL may be /agents due
-    // to the graph view navigation in Step 1, or / — either is valid).
-    await page.getByRole('button', { name: 'Dashboard' }).click();
-    await expect(page).not.toHaveURL(/\/terminals/);
+    // Navigate to agents page via graph view and assert the URL
+    await page.evaluate(({ storageKey, mode }) => localStorage.setItem(storageKey, mode), {
+      storageKey: 'scion-view-agents',
+      mode: 'graph',
+    });
+    await page.evaluate(
+      (path) => document.dispatchEvent(new CustomEvent('nav-click', { detail: { path } })),
+      '/agents'
+    );
+    await expect(page).toHaveURL('/agents');
+    // Verify graph view rendered (sl-icon-button should be visible)
+    await expect(page.locator('sl-icon-button[label="Terminal"]').first()).toBeVisible({
+      timeout: 15000,
+    });
 
     // Navigate to chat
     await page.getByRole('button', { name: 'Chat' }).click();
@@ -2544,12 +2605,31 @@ test.describe('combined regression journey', () => {
     expect(socket.attaches).toBe(5);
     expect(socket.closes).toBe(0);
 
-    // Verify xterm buffer content survived cross-mode navigation.
-    // Same markers written before overflow must still be in the buffers.
-    const bufferAfterNav = await page.evaluate(() => {
+    // Verify xterm Terminal object references are the SAME objects after
+    // cross-mode navigation — reference equality via __refId.
+    const xtermRefsAfterNav = await page.evaluate(() => {
       const panes = document.querySelectorAll('#terminal-workspace scion-terminal-pane');
-      const results: string[] = [];
+      const refs: Record<string, number> = {};
       for (const pane of panes) {
+        const session = (pane as unknown as { session?: { state: { key: string } } }).session;
+        const terminal = (pane as unknown as { terminal?: { __refId?: number } }).terminal;
+        if (session && terminal) {
+          refs[session.state.key] = terminal.__refId ?? -1;
+        }
+      }
+      return refs;
+    });
+    for (const key of Object.keys(xtermRefsBefore)) {
+      expect(xtermRefsAfterNav[key]).toBe(xtermRefsBefore[key]);
+    }
+
+    // Verify xterm buffer content survived cross-mode navigation, keyed
+    // by session. Each marker must be in its SPECIFIC session's buffer.
+    const keyedBufferAfterNav = await page.evaluate(() => {
+      const panes = document.querySelectorAll('#terminal-workspace scion-terminal-pane');
+      const result: Record<string, string> = {};
+      for (const pane of panes) {
+        const session = (pane as unknown as { session?: { state: { key: string } } }).session;
         const term = (
           pane as unknown as {
             terminal?: {
@@ -2562,20 +2642,20 @@ test.describe('combined regression journey', () => {
             };
           }
         ).terminal;
-        if (term) {
+        if (session && term) {
           const buffer = term.buffer.active;
           let text = '';
           for (let i = 0; i < buffer.length; i++) {
             const line = buffer.getLine(i);
             if (line) text += line.translateToString(true);
           }
-          results.push(text);
+          result[session.state.key] = text;
         }
       }
-      return results;
+      return result;
     });
-    expect(bufferAfterNav.some((t) => t.includes('MARKER_ALPHA'))).toBe(true);
-    expect(bufferAfterNav.some((t) => t.includes('MARKER_BETA'))).toBe(true);
+    expect(keyedBufferAfterNav[keys[0]]).toContain('MARKER_ALPHA');
+    expect(keyedBufferAfterNav[keys[1]]).toContain('MARKER_BETA');
 
     // ---------------------------------------------------------------
     // Step 7: Close one session and verify cleanup
@@ -2817,7 +2897,7 @@ test.describe('production icon and title verification', () => {
     }).toPass({ timeout: 5000 });
   });
 
-  test('grid.svg exists in production build output', async () => {
+  test('grid.svg exists in production build output and matches Shoelace source', async () => {
     // The original #1677 defect was a production build issue — the grid.svg
     // asset wasn't copied to the built output by copy-shoelace-icons.mjs.
     // The dev server test above verifies rendering, but this test directly
@@ -2829,12 +2909,45 @@ test.describe('production icon and title verification', () => {
     const distPath = path.resolve(thisDir, '../../dist/client');
     // copy-shoelace-icons.mjs copies to public/shoelace/assets/icons/
     // which Vite copies to dist/client/shoelace/assets/icons/ during build
-    const gridSvgPath = path.join(distPath, 'shoelace/assets/icons/grid.svg');
-    expect(fs.existsSync(gridSvgPath)).toBe(true);
+    const builtGridSvg = path.join(distPath, 'shoelace/assets/icons/grid.svg');
+    expect(fs.existsSync(builtGridSvg)).toBe(true);
     // Verify it's a real SVG with content
-    const content = fs.readFileSync(gridSvgPath, 'utf-8');
-    expect(content).toContain('<svg');
-    expect(content.length).toBeGreaterThan(100);
+    const builtContent = fs.readFileSync(builtGridSvg, 'utf-8');
+    expect(builtContent).toContain('<svg');
+    expect(builtContent.length).toBeGreaterThan(100);
+
+    // Compare built asset against packaged Shoelace source — byte-equal copy
+    const sourceGridSvg = path.join(
+      thisDir,
+      '../../node_modules/@shoelace-style/shoelace/dist/assets/icons/grid.svg'
+    );
+    const sourceContent = fs.readFileSync(sourceGridSvg, 'utf-8');
+    expect(builtContent).toBe(sourceContent);
+  });
+
+  test('grid.svg is served at the correct URL by dev server', async ({ page }) => {
+    // Verify the built asset is actually served at its expected URL.
+    // The dev server serves static assets from public/ which mirrors the
+    // production build output for Shoelace icons. This confirms the asset
+    // is reachable at the URL that sl-icon requests at runtime.
+    //
+    // Note: this proves dev-server serving; production serving is covered
+    // equivalently because Vite copies public/ assets to dist/ verbatim,
+    // and the source/built content match above proves the file is identical.
+    // The toPass SVG render test further confirms the asset loads in the
+    // actual sl-icon component.
+    await setup(page);
+    await page.goto('/');
+    const response = await page.evaluate(async () => {
+      const res = await fetch('/shoelace/assets/icons/grid.svg');
+      return {
+        status: res.status,
+        contentType: res.headers.get('content-type'),
+        text: await res.text(),
+      };
+    });
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('<svg');
   });
 });
 
