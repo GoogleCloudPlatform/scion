@@ -16,8 +16,6 @@ package cmd
 
 import (
 	"bytes"
-	"io"
-	"os"
 	"testing"
 	"time"
 
@@ -77,18 +75,8 @@ func TestPrintHubHealthSummary(t *testing.T) {
 		},
 	}
 
-	// Capture stdout
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	printHubHealthSummary(summary, "https://hub.example.com/")
-
-	w.Close()
-	os.Stdout = oldStdout
-
 	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
+	printHubHealthSummary(&buf, summary, "https://hub.example.com/")
 	output := buf.String()
 
 	assert.Contains(t, output, "SCION HUB HEALTH & METRICS")

@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -115,47 +116,47 @@ func runHubHealth(cmd *cobra.Command, args []string) error {
 		return outputJSON(summary)
 	}
 
-	printHubHealthSummary(summary, settings.GetHubEndpoint())
+	printHubHealthSummary(os.Stdout, summary, settings.GetHubEndpoint())
 	return nil
 }
 
-func printHubHealthSummary(s *hubclient.HealthSummaryResponse, endpoint string) {
-	fmt.Println("==================================================================")
-	fmt.Println("                     SCION HUB HEALTH & METRICS                   ")
-	fmt.Println("==================================================================")
+func printHubHealthSummary(w io.Writer, s *hubclient.HealthSummaryResponse, endpoint string) {
+	fmt.Fprintln(w, "==================================================================")
+	fmt.Fprintln(w, "                     SCION HUB HEALTH & METRICS                   ")
+	fmt.Fprintln(w, "==================================================================")
 	if endpoint != "" {
-		fmt.Printf("Endpoint: %s\n", endpoint)
+		fmt.Fprintf(w, "Endpoint: %s\n", endpoint)
 	}
 
-	fmt.Printf("Overall Status:      %s\n", s.Status)
-	fmt.Printf("Hub Server Version:  %s (Uptime: %s)\n", s.Hub.Version, s.Hub.Uptime)
-	fmt.Printf("Registered Projects: %d  |  Active Agents: %d  |  Brokers: %d\n\n",
+	fmt.Fprintf(w, "Overall Status:      %s\n", s.Status)
+	fmt.Fprintf(w, "Hub Server Version:  %s (Uptime: %s)\n", s.Hub.Version, s.Hub.Uptime)
+	fmt.Fprintf(w, "Registered Projects: %d  |  Active Agents: %d  |  Brokers: %d\n\n",
 		s.Hub.Projects, s.Hub.ActiveAgents, s.Hub.ConnectedBrokers)
 
 	// Database Subsystem
-	fmt.Println("--- Database Subsystem -------------------------------------------")
-	fmt.Printf("Status:     %s\n", s.Database.Status)
-	fmt.Printf("Pool Stats: Active=%d / Max=%d  |  Idle=%d  |  Wait Count Total=%d\n\n",
+	fmt.Fprintln(w, "--- Database Subsystem -------------------------------------------")
+	fmt.Fprintf(w, "Status:     %s\n", s.Database.Status)
+	fmt.Fprintf(w, "Pool Stats: Active=%d / Max=%d  |  Idle=%d  |  Wait Count Total=%d\n\n",
 		s.Database.PoolActive, s.Database.PoolMax, s.Database.PoolIdle, s.Database.PoolWaitCountTotal)
 
 	// Runtime Brokers
-	fmt.Println("--- Runtime Brokers ----------------------------------------------")
+	fmt.Fprintln(w, "--- Runtime Brokers ----------------------------------------------")
 	if len(s.Brokers) == 0 {
-		fmt.Println("No runtime brokers registered.")
+		fmt.Fprintln(w, "No runtime brokers registered.")
 	} else {
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "BROKER\tSTATUS\tRUNTIME\tAVAILABLE\tAGENTS(OK/TOT)\tLAST HEARTBEAT")
-		fmt.Fprintln(w, "------\t------\t-------\t---------\t--------------\t--------------")
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "BROKER\tSTATUS\tRUNTIME\tAVAILABLE\tAGENTS(OK/TOT)\tLAST HEARTBEAT")
+		fmt.Fprintln(tw, "------\t------\t-------\t---------\t--------------\t--------------")
 		for _, b := range s.Brokers {
 			avail := "no"
 			if b.RuntimeAvailable {
 				avail = "yes"
 			}
 			hb := "never"
-			if !b.LastHeartbeat.IsZero() && b.LastHeartbeat.Year() > 1 {
+			if !b.LastHeartbeat.IsZero() {
 				hb = b.LastHeartbeat.Format("2006-01-02 15:04:05")
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d/%d\t%s\n",
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d/%d\t%s\n",
 				truncate(b.Name, 24),
 				b.Status,
 				b.Runtime,
@@ -165,34 +166,32 @@ func printHubHealthSummary(s *hubclient.HealthSummaryResponse, endpoint string) 
 				hb,
 			)
 		}
-		_ = w.Flush()
+		_ = tw.Flush()
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 
 	// Fleet Agent Health
-	fmt.Println("--- Fleet Agent Health -------------------------------------------")
+	fmt.Fprintln(w, "--- Fleet Agent Health -------------------------------------------")
 	running := s.Agents.ByPhase["running"]
 	errors := s.Agents.ByPhase["error"]
-	fmt.Printf("Total Agents: %d  (Running: %d, Errors: %d)\n", s.Agents.Total, running, errors)
+	fmt.Fprintf(w, "Total Agents: %d  (Running: %d, Errors: %d)\n", s.Agents.Total, running, errors)
 
 	if len(s.Agents.Stalled) > 0 {
-		fmt.Printf("! Stalled Agents (%d): %s\n", len(s.Agents.Stalled), strings.Join(s.Agents.Stalled, ", "))
-		fmt.Println("  Hint: Run 'scion look <agent>' or 'scion attach <agent>' to inspect terminal state.")
+		fmt.Fprintf(w, "! Stalled Agents (%d): %s\n", len(s.Agents.Stalled), strings.Join(s.Agents.Stalled, ", "))
+		fmt.Fprintln(w, "  Hint: Run 'scion look <agent>' or 'scion attach <agent>' to inspect terminal state.")
 	}
 	if len(s.Agents.Crashed) > 0 {
-		fmt.Printf("x Crashed Agents (%d): %s\n", len(s.Agents.Crashed), strings.Join(s.Agents.Crashed, ", "))
-		fmt.Println("  Hint: Run 'scion logs <agent>' to view termination logs.")
+		fmt.Fprintf(w, "x Crashed Agents (%d): %s\n", len(s.Agents.Crashed), strings.Join(s.Agents.Crashed, ", "))
+		fmt.Fprintln(w, "  Hint: Run 'scion logs <agent>' to view termination logs.")
 	}
 	if len(s.Agents.Errored) > 0 {
-		fmt.Printf("x Errored Agents (%d): %s\n", len(s.Agents.Errored), strings.Join(s.Agents.Errored, ", "))
-		fmt.Println("  Hint: Run 'scion logs <agent>' or 'scion reset-auth <agent>' to troubleshoot.")
+		fmt.Fprintf(w, "x Errored Agents (%d): %s\n", len(s.Agents.Errored), strings.Join(s.Agents.Errored, ", "))
+		fmt.Fprintln(w, "  Hint: Run 'scion logs <agent>' or 'scion reset-auth <agent>' to troubleshoot.")
 	}
 
 	if s.Dispatch != nil && (s.Dispatch.StuckMessages > 0 || s.Dispatch.Failed1h > 0) {
-		fmt.Printf("! Dispatch Queue Issues: Stuck Messages=%d, Failed (1h)=%d\n",
+		fmt.Fprintf(w, "! Dispatch Queue Issues: Stuck Messages=%d, Failed (1h)=%d\n",
 			s.Dispatch.StuckMessages, s.Dispatch.Failed1h)
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 }
-
-
