@@ -2376,11 +2376,11 @@ func TestCrossProjectMismatchRejection(t *testing.T) {
 // detection, preserving normal same-project sending even when CPM is disabled.
 func TestCrossProjectSameProjectBypass(t *testing.T) {
 	tests := []struct {
-		name           string
-		projectFlag    string
-		ownSlug        string
-		ownID          string
-		wantCross      bool
+		name        string
+		projectFlag string
+		ownSlug     string
+		ownID       string
+		wantCross   bool
 	}{
 		{
 			name:        "slug match → same-project (no cross-project)",

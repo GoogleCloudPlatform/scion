@@ -177,7 +177,9 @@ func TestCrossProjectConversationReadGate(t *testing.T) {
 		val, _ := json.Marshal(map[string]interface{}{
 			"cross_project_messaging_enabled": enabled,
 		})
-		fakeStore.UpsertHubSetting(ctx, "messaging", val, "test", 0, "test")
+		if _, err := fakeStore.UpsertHubSetting(ctx, "messaging", val, "test", 0, "test"); err != nil {
+			t.Fatalf("UpsertHubSetting: %v", err)
+		}
 		ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
 		if _, err := ops.Refresh(ctx); err != nil {
 			t.Fatalf("Refresh: %v", err)
@@ -649,9 +651,13 @@ func TestCrossProjectListGuard(t *testing.T) {
 		t.Helper()
 		fakeStore := newFakeHubSettingStore()
 		val, _ := json.Marshal(map[string]interface{}{"cross_project_messaging_enabled": enabled})
-		fakeStore.UpsertHubSetting(ctx, "messaging", val, "test", 0, "test")
+		if _, err := fakeStore.UpsertHubSetting(ctx, "messaging", val, "test", 0, "test"); err != nil {
+			t.Fatalf("UpsertHubSetting: %v", err)
+		}
 		ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-		ops.Refresh(ctx)
+		if _, err := ops.Refresh(ctx); err != nil {
+			t.Fatalf("Refresh: %v", err)
+		}
 		srv.SetOperationalSettings(ops)
 	}
 	clearHubSettings := func() {
@@ -736,9 +742,13 @@ func TestCrossProjectResolveGuard(t *testing.T) {
 		t.Helper()
 		fakeStore := newFakeHubSettingStore()
 		val, _ := json.Marshal(map[string]interface{}{"cross_project_messaging_enabled": enabled})
-		fakeStore.UpsertHubSetting(ctx, "messaging", val, "test", 0, "test")
+		if _, err := fakeStore.UpsertHubSetting(ctx, "messaging", val, "test", 0, "test"); err != nil {
+			t.Fatalf("UpsertHubSetting: %v", err)
+		}
 		ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-		ops.Refresh(ctx)
+		if _, err := ops.Refresh(ctx); err != nil {
+			t.Fatalf("Refresh: %v", err)
+		}
 		srv.SetOperationalSettings(ops)
 	}
 	clearHubSettings := func() {
