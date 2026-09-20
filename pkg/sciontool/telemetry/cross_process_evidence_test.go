@@ -153,15 +153,37 @@ func phase5IsPromptMarker(value string) bool {
 	return strings.Contains(value, "user_prompt")
 }
 
-func phase5RequireNoPromptMarker(t *testing.T, record *logspb.LogRecord) {
-	t.Helper()
-	if phase5IsPromptMarker(record.EventName) {
-		t.Fatal("filtered prompt marker reached native sink")
-	}
-	for _, attr := range record.Attributes {
-		if phase5IsPromptMarker(attr.Key) || phase5IsPromptMarker(attr.Value.GetStringValue()) {
-			t.Fatal("filtered prompt marker reached native sink")
+func phase5NativeInventoryError(records []*logspb.LogRecord, expected string) error {
+	for _, record := range records {
+		if phase5IsPromptMarker(record.EventName) {
+			return fmt.Errorf("filtered prompt marker reached native sink")
 		}
+		for _, attr := range record.Attributes {
+			if phase5IsPromptMarker(attr.Key) || phase5IsPromptMarker(attr.Value.GetStringValue()) {
+				return fmt.Errorf("filtered prompt marker reached native sink")
+			}
+		}
+		if record.EventName != expected {
+			return fmt.Errorf("unexpected native event reached sink")
+		}
+	}
+	if len(records) != 1 {
+		return fmt.Errorf("native sink record count mismatch: %d", len(records))
+	}
+	return nil
+}
+
+func TestPhase5NativeSinkRejectsExtraPrompt(t *testing.T) {
+	allowed := phase5NativeLog("assistant_response").ResourceLogs[0].ScopeLogs[0].LogRecords[0]
+	allowed.EventName = "assistant_response"
+	prompt := phase5NativeLog("user_prompt").ResourceLogs[0].ScopeLogs[0].LogRecords[0]
+	if err := phase5NativeInventoryError([]*logspb.LogRecord{allowed, prompt}, "assistant_response"); err == nil || !strings.Contains(err.Error(), "prompt marker") {
+		t.Fatal("extra prompt-shaped native sink record was not rejected as a prompt")
+	}
+	unknown := phase5NativeLog("unknown_event").ResourceLogs[0].ScopeLogs[0].LogRecords[0]
+	unknown.EventName = "assistant_response"
+	if err := phase5NativeInventoryError([]*logspb.LogRecord{allowed, unknown}, "assistant_response"); err == nil || !strings.Contains(err.Error(), "count mismatch") {
+		t.Fatal("extra unknown native sink record was not rejected by exact count")
 	}
 }
 
@@ -274,7 +296,8 @@ func TestPhase5CrossProcessReceiverEvidence(t *testing.T) {
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
 	var hookCount int64
-	var hookPoints, nativeCount, hookLogs, hookSpans int
+	var hookPoints, hookLogs, hookSpans int
+	var nativeRecords []*logspb.LogRecord
 	spanIDs := map[string]bool{}
 	for _, request := range sink.metrics {
 		for _, rm := range request.ResourceMetrics {
@@ -309,12 +332,10 @@ func TestPhase5CrossProcessReceiverEvidence(t *testing.T) {
 			for _, sl := range rl.ScopeLogs {
 				for _, record := range sl.LogRecords {
 					if sl.Scope.GetName() == "com.anthropic.claude_code.events" {
-						nativeCount++
+						nativeRecords = append(nativeRecords, record)
 						if resourceAttrs["service.name"] != "claude-code" {
 							t.Fatal("native service identity was not preserved")
 						}
-						phase5RequireNoPromptMarker(t, record)
-						phase5RequireNativeRecord(t, record, "assistant_response")
 					} else if sl.Scope.GetName() == "sciontool.hooks" {
 						hookLogs++
 					}
@@ -325,6 +346,10 @@ func TestPhase5CrossProcessReceiverEvidence(t *testing.T) {
 			}
 		}
 	}
+	if err := phase5NativeInventoryError(nativeRecords, "assistant_response"); err != nil {
+		t.Fatal(err)
+	}
+	phase5RequireNativeRecord(t, nativeRecords[0], "assistant_response")
 	for _, request := range sink.traces {
 		for _, rs := range request.ResourceSpans {
 			resourceAttrs := map[string]string{}
@@ -352,8 +377,8 @@ func TestPhase5CrossProcessReceiverEvidence(t *testing.T) {
 			}
 		}
 	}
-	if hookCount != 2 || hookPoints != 1 || nativeCount != 1 || hookLogs != 2 || hookSpans != 2 {
-		t.Fatalf("hook count=%d, points=%d, native=%d, hook logs=%d, spans=%d", hookCount, hookPoints, nativeCount, hookLogs, hookSpans)
+	if hookCount != 2 || hookPoints != 1 || hookLogs != 2 || hookSpans != 2 {
+		t.Fatalf("hook count=%d, points=%d, native=%d, hook logs=%d, spans=%d", hookCount, hookPoints, len(nativeRecords), hookLogs, hookSpans)
 	}
 }
 
