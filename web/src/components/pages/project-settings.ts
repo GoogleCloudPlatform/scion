@@ -1558,8 +1558,7 @@ export class ScionPageProjectSettings extends LitElement {
         <h1>${this.project.name} Settings</h1>
       </div>
 
-      ${this.renderConfigSection()} ${this.renderMessagingPolicySection()}
-      ${this.renderGitHubAppSection()}
+      ${this.renderConfigSection()}
       <scion-project-members-editor
         projectId=${this.project.id}
         ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}
@@ -1567,6 +1566,9 @@ export class ScionPageProjectSettings extends LitElement {
         sectionTitle="Members"
         sectionDescription="Users and groups with access to this project. Adding a member creates a project-scoped role binding."
       ></scion-project-members-editor>
+      ${this.renderResourcesSection()}
+      ${this.renderMessagingPolicySection()}
+      ${this.renderGitHubAppSection()}
       <scion-boundary-summary-notice
         label="Access constraints affecting this project"
         .groups=${this.boundaryGroups}
@@ -1576,8 +1578,6 @@ export class ScionPageProjectSettings extends LitElement {
           this.projectId
         )}"
       ></scion-boundary-summary-notice>
-
-      ${this.renderResourcesSection()}
       ${this.pageData?.user
         ? html`
             <scion-subscription-manager
