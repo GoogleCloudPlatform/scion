@@ -3,14 +3,14 @@
 **Date:** 2026-09-20
 **Developer:** tw-p1-1652-claude-dev (recovery)
 **Base:** d6b7fff8fe33601f8f0dedbcb0e9f83b148768fa
-**Head:** 9a5036f4c21b2eb8db973f3db932ff20608c0c11 (scion/terminal-workspace)
 **Status:** Candidate delivered, pending independent review
 
 ## Scope
 
 Centralize all terminal entry points in the Scion web frontend to route
 through the singleton terminal workspace coordinator when the
-`web.terminal_workspace` feature flag is enabled.
+`web.terminal_workspace` feature flag is enabled. Preserve chat page
+user state across terminal workspace round-trips.
 
 ## Changes
 
@@ -22,9 +22,13 @@ through the singleton terminal workspace coordinator when the
   Playwright browser tests covering every entry point.
 - `web/e2e/terminal-entrypoints/playwright.config.ts` — Test runner config.
 - `web/e2e/terminal-entrypoints/tsconfig.json` — TypeScript config for tests.
+- `.design/project-log/terminal-workspace-p1-1652.md` — This file.
 
 ### Modified files
 - `web/src/client/main.ts` — Re-exports `openTerminal` and `terminalHref`.
+  Added `returningFromTerminal` detection in `renderRoute()` to preserve
+  the existing page element when returning from terminal workspace to
+  the same route, instead of destroying and re-creating it.
 - `web/src/components/pages/agents.ts` — Terminal button href uses
   `terminalHref(agent.id)`.
 - `web/src/components/pages/agent-detail.ts` — Terminal link href uses
@@ -36,7 +40,7 @@ through the singleton terminal workspace coordinator when the
 - `web/src/components/shared/chat/chat-members.ts` — Terminal link uses
   `terminalHref(a.id)`, click handler routes through `openTerminalFromChat()`
   which delegates to workspace coordinator (flag-on) or legacy popup
-  (flag-off). Chat source state preserved.
+  (flag-off).
 - `web/.eslintrc.cjs` — Added override for `e2e/terminal-entrypoints/*.ts`
   selecting its own tsconfig (authorized by manager).
 
@@ -45,26 +49,31 @@ through the singleton terminal workspace coordinator when the
 - `terminal-workspace-root.ts`
 - Existing `e2e/terminal-workspace/` fixtures
 
-## Commits (3 ahead of base)
-
-1. `1785f658` feat: centralize terminal entry points through workspace coordinator
-2. `08aed9c6` fix: correct browser test fixtures and locators for entry point coverage
-3. `9a5036f4` test: expand browser coverage to 30 tests with all entry points and shell marker fix
-
 ## Verification
 
+All gates run via mandatory prefix-filter Python runner with SCION_*
+stripped (44 variables) and exact HEAD asserted.
+
 - **TypeScript:** `tsc --noEmit` — exit 0 (clean)
-- **Lint (touched files):** 0 new errors; 88 pre-existing baseline errors
-  across main.ts and other files (unsafe-any, no-unused-vars, etc.)
+- **Lint (touched source files):** Pre-existing baseline errors; 0 new
+  errors on any line introduced by this change. Cause of baseline
+  errors UNKNOWN.
 - **Lint (new test files):** 0 errors, exit 0
-- **Unit tests:** 1203 passed, 4 failed (all pre-existing in terminal-transport,
-  terminal-pane, agent-create-projects), 1 skipped
-- **Production build:** succeeds (8.78s), exit 0
+- **Unit tests:** `npm run test -- --maxWorkers=2` — 1207 passed, 0 failed,
+  exit 0. Earlier runs without `--maxWorkers=2` showed 4 failures in
+  files not touched by this change; cause UNKNOWN.
+- **Production build:** exit 0
 - **Browser tests:** 30 passed, 0 failed, exit 0
 
 ## Test Coverage
 
-30 table-driven Playwright browser tests:
+30 table-driven Playwright browser tests. Chat state tests (#22, #23)
+verify page element identity (unique id stamp — a destroyed and
+re-created page loses it) and appended draft content survival (a child
+element simulating in-progress user content — a destroyed page loses
+children). Both tests fail at the prior implementation without the
+page-preservation routing fix and pass with it (regression proof in
+`reports/p1-1652-logs/regression-r2.log`).
 
 | # | Test | Result |
 |---|---|---|
@@ -80,22 +89,22 @@ through the singleton terminal workspace coordinator when the
 | 10 | project detail (grid view) has legacy href when flag is OFF | PASS |
 | 11 | project detail (list/table view) has legacy href when flag is OFF | PASS |
 | 12 | tree/graph view has legacy href when flag is OFF | PASS |
-| 13 | clicking agent list (grid view) navigates to workspace and attaches | PASS |
-| 14 | clicking agent list (table view) navigates to workspace and attaches | PASS |
-| 15 | clicking agent detail page navigates to workspace and attaches | PASS |
-| 16 | clicking project detail (grid view) navigates to workspace and attaches | PASS |
-| 17 | clicking project detail (list/table view) navigates to workspace and attaches | PASS |
+| 13 | clicking agent list (grid) navigates to workspace and attaches | PASS |
+| 14 | clicking agent list (table) navigates to workspace and attaches | PASS |
+| 15 | clicking agent detail navigates to workspace and attaches | PASS |
+| 16 | clicking project detail (grid) navigates to workspace and attaches | PASS |
+| 17 | clicking project detail (list) navigates to workspace and attaches | PASS |
 | 18 | clicking tree/graph view navigates to workspace and attaches | PASS |
-| 19 | Ctrl-click on terminal link opens new tab via real href | PASS |
-| 20 | chat membership terminal control routes through workspace when flag is ON | PASS |
-| 21 | chat membership terminal control uses legacy popup when flag is OFF | PASS |
-| 22 | chat source state is retained when opening terminal from chat | PASS |
-| 23 | cross-tab: chat state retained when another tab owns terminals | PASS |
-| 24 | legacy /agents/{id}/terminal redirects to /terminals/{id} when ON | PASS |
-| 25 | legacy /agents/{id}/terminal loads standalone terminal when OFF | PASS |
-| 26 | repeated navigation to same agent reuses one pane and socket | PASS |
+| 19 | Ctrl-click opens new tab via real href | PASS |
+| 20 | chat membership control routes through workspace (flag ON) | PASS |
+| 21 | chat membership control uses legacy popup (flag OFF) | PASS |
+| 22 | chat source state retained (page identity + draft content) | PASS |
+| 23 | cross-tab: chat state retained after denied foreground focus | PASS |
+| 24 | legacy redirect /agents/{id}/terminal -> /terminals/{id} | PASS |
+| 25 | legacy standalone terminal (flag OFF) | PASS |
+| 26 | repeated navigation reuses one pane and socket | PASS |
 | 27 | pending open during agent fetch does not create duplicate | PASS |
-| 28 | second tab defers terminal to owning tab without attaching locally | PASS |
+| 28 | second tab defers to owning tab | PASS |
 | 29 | terminal hrefs use full trusted UUID format | PASS |
 | 30 | browser back/forward preserves retained terminal session | PASS |
 
@@ -108,13 +117,17 @@ through the singleton terminal workspace coordinator when the
 2. **openTerminalFromChat:** Checks feature flag at call time. When
    workspace is enabled, routes through `openTerminal()` (nav-click).
    When disabled, uses legacy `openTerminalPopout()` (window.open).
+   Kept in chat-members.ts (not centralized) because the legacy popup
+   fallback is a chat-specific import with only one caller.
 
-3. **Chat state preservation:** The route outlet is hidden (not destroyed)
-   when the terminal workspace is shown. The chat shell (`scion-chat-shell`)
-   is reused by `renderRoute()` — only the inner page element is swapped.
-   Tests mark the shell element to prove it survives navigation.
-
-4. **Shell marker vs page marker:** The router's `renderRoute()` replaces
-   the page element (`scion-page-chat`) inside the shell when re-navigating
-   to `/chat`, but the shell (`scion-chat-shell`) is reused. Tests verify
-   shell survival, which is the actual state preservation guarantee.
+3. **Chat page preservation:** When navigating from `/chat` to
+   `/terminals/{id}`, the terminal route handler hides the route outlet
+   (`appContainer.hidden = true`) without clearing it. The page element
+   inside remains live. When returning to `/chat`, `renderRoute()`
+   detects that the outlet was hidden (returning from terminal) and that
+   the existing page tag and path match, and skips the normal
+   `oldPage.remove()` + re-creation. This preserves the actual
+   `scion-page-chat` element — all in-memory reactive properties,
+   child nodes, event listeners, and DOM state survive the round-trip.
+   Explicit navigation to a different chat destination (e.g.,
+   `/chat/space/xyz`) still renders normally.
