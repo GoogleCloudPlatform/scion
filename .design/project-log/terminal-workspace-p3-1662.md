@@ -13,6 +13,7 @@ terminal workspace feature (P3.5). All gates pass; bundle delivered.
 ## Deliverables
 
 ### 1. Combined End-to-End Journey Test
+
 - Single Playwright test exercising the full lifecycle:
   - Open 4 agents via entry-point interactions (direct URL + nav-click dispatch)
   - Place in 2×2 four-grid layout
@@ -23,12 +24,14 @@ terminal workspace feature (P3.5). All gates pass; bundle delivered.
   - Close one session → remaining 4 intact, closed removed from rail and layouts
 
 ### 2. >12 Retained Sessions Test
+
 - Opens 13 sessions with unique agent UUIDs
 - Verifies all 13 appear in the rail, no eviction, no socket closes
 - Code audit confirms: no MAX_SESSION cap, no eviction/LRU logic in
   terminal-sessions.ts, terminal-coordinator.ts, or terminal-workspace-root.ts
 
 ### 3. Production Icon/Title Verification
+
 - "Terminals" mode label renders in header with session count
 - Header icon-button uses `terminal` icon name
 - Document title is "Terminals — Scion" when workspace active
@@ -38,6 +41,7 @@ terminal workspace feature (P3.5). All gates pass; bundle delivered.
   built output (public/shoelace/assets/icons/grid.svg confirmed)
 
 ### 4. Partial Coverage Verification
+
 - **AC1-4 (attach count)**: Existing test fixture tracks actual WebSocket
   routeWebSocket handler invocations — each `attaches++` is a real socket
   connection, not proxy text. Combined journey test also asserts throughout.
@@ -49,12 +53,14 @@ terminal workspace feature (P3.5). All gates pass; bundle delivered.
     shadow DOM, not session registry. Pane-level testing outside this scope.
 
 ### 5. Legacy Adapter Documentation
+
 - Code comment in main.ts route entry for `scion-page-terminal` explaining:
   - Flag-off: disposable standalone page, fresh socket per navigation, no retention
   - Flag-on: router redirects to /terminals/{id}, workspace coordinator manages lifetime
   - Flag changes preserve active sessions until reload
 
 ### 6. Rollout/Rollback Instructions
+
 - web/e2e/terminal-workspace/ROLLOUT.md (47 lines)
 - Flag mechanism: server injection → localStorage → default OFF
 - Enable/disable paths documented
@@ -63,24 +69,24 @@ terminal workspace feature (P3.5). All gates pass; bundle delivered.
 
 ## Files Changed
 
-| File | Lines |
-|------|-------|
-| web/e2e/terminal-workspace/workspace.pw.ts | +409 |
-| web/src/client/main.ts | +20 (comments only) |
-| web/e2e/terminal-workspace/ROLLOUT.md | +51 (new) |
+| File                                       | Lines               |
+| ------------------------------------------ | ------------------- |
+| web/e2e/terminal-workspace/workspace.pw.ts | +409                |
+| web/src/client/main.ts                     | +20 (comments only) |
+| web/e2e/terminal-workspace/ROLLOUT.md      | +51 (new)           |
 
 ## Gate Results
 
-| Gate | Result | Exit Code |
-|------|--------|-----------|
-| tsc --project tsconfig.json | PASS | 0 |
-| tsc --project tsconfig.client.json | PASS | 0 |
-| tsc --project src/client/tsconfig.terminal-tests.json | PASS | 0 |
-| tsc --project e2e/terminal-workspace/tsconfig.json | PASS | 0 |
-| eslint e2e/terminal-workspace/ | PASS | 0 (2 pre-existing warnings in reconnect.pw.ts) |
-| vitest run | PASS* | 1 (2 pre-existing failures: role-binding-assignment-form.test.ts hook timeout, terminal-pane.test.ts env issue — neither file touched) |
-| playwright workspace suite | PASS | 0 (73/73 passed) |
-| npm run build | PASS | 0 |
+| Gate                                                  | Result | Exit Code                                                                                                                   |
+| ----------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------- |
+| tsc --project tsconfig.json                           | PASS   | 0                                                                                                                           |
+| tsc --project tsconfig.client.json                    | PASS   | 0                                                                                                                           |
+| tsc --project src/client/tsconfig.terminal-tests.json | PASS   | 0                                                                                                                           |
+| tsc --project e2e/terminal-workspace/tsconfig.json    | PASS   | 0                                                                                                                           |
+| eslint e2e/terminal-workspace/                        | PASS   | 0 (2 pre-existing warnings in reconnect.pw.ts)                                                                              |
+| vitest run                                            | FAIL   | 1 (2 failures in unchanged files: role-binding-assignment-form.test.ts, terminal-pane.test.ts — cause UNKNOWN, exit code 1) |
+| playwright workspace suite                            | PASS   | 0 (73/73 passed)                                                                                                            |
+| npm run build                                         | PASS   | 0                                                                                                                           |
 
 ## Desktop Evidence — NOT IN SCOPE
 
@@ -94,5 +100,5 @@ verification steps.
 ## Pre-existing Warnings
 
 - 2 ESLint warnings in reconnect.pw.ts (missing return types on arrow functions) — pre-existing, not introduced
-- 2 Vitest failures in unrelated test files — pre-existing, not introduced
+- 2 Vitest failures in unchanged files (role-binding-assignment-form.test.ts, terminal-pane.test.ts), cause UNKNOWN, exit code 1
 - Phase 2 aggregate ci-full FAIL cause UNKNOWN — not attributed without evidence

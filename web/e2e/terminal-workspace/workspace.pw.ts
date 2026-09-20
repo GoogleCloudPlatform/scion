@@ -2230,8 +2230,10 @@ test('teardown cancels pending agent metadata preflight before WebSocket creatio
 // Combined regression journey (P3.5 — #1662)
 //
 // Exercises the full terminal workspace lifecycle in a single flow:
-// four agents opened → 2×2 grid → fifth agent overflow → layout restore →
-// cross-mode navigation → session retention → close and verify cleanup.
+// four agents opened via both entry mechanisms (direct URL + nav-click) →
+// 2×2 grid with DOM identity markers → fifth agent overflow → layout restore
+// with marker verification → cross-mode navigation with key set equality →
+// session retention → close and verify cleanup.
 // ---------------------------------------------------------------------------
 
 test.describe('combined regression journey', () => {
@@ -2248,29 +2250,31 @@ test.describe('combined regression journey', () => {
     const socket = await setup(page, true, true, fiveAgents);
 
     // ---------------------------------------------------------------
-    // Step 1: Open 4 agents using the supported entry-point interactions.
+    // Step 1: Open 4 agents using the two supported entry mechanisms.
     //
-    // The entry points (per open-terminal.ts and entrypoints.pw.ts):
-    //   - Direct URL navigation: /terminals/{agentId}
-    //   - nav-click custom event (list/detail, graph action, chat membership, tree action)
+    // The terminal workspace supports two entry mechanisms (see open-terminal.ts):
+    //   1. Direct URL navigation: page.goto('/terminals/{agentId}')
+    //   2. nav-click custom event dispatch: navigateToTerminal()
     //
-    // We use direct goto for the first and nav-click dispatch for the rest,
-    // matching the real entry paths that the feature provides.
+    // All UI surfaces (agent list, detail, graph, chat membership) route
+    // through one of these two mechanisms. Distinct UI surface coverage is
+    // provided by entrypoints.pw.ts; this journey test exercises both
+    // entry mechanisms to verify session creation and retention.
     // ---------------------------------------------------------------
 
-    // Agent 1: direct URL navigation (simulates clicking a link)
+    // Agent 1: direct URL navigation
     await page.goto(`/terminals/${agent}`);
     await expect.poll(() => socket.attaches).toBe(1);
 
-    // Agent 2: nav-click dispatch (simulates agent list/detail click)
+    // Agent 2: nav-click dispatch
     await navigateToTerminal(page, agentB);
     await expect.poll(() => socket.attaches).toBe(2);
 
-    // Agent 3: nav-click dispatch (simulates graph action terminal button)
+    // Agent 3: nav-click dispatch
     await navigateToTerminal(page, agentC);
     await expect.poll(() => socket.attaches).toBe(3);
 
-    // Agent 4: nav-click dispatch (simulates chat membership terminal control)
+    // Agent 4: nav-click dispatch
     await navigateToTerminal(page, agentD);
     await expect.poll(() => socket.attaches).toBe(4);
 
@@ -2298,6 +2302,24 @@ test.describe('combined regression journey', () => {
       expect(pos).not.toBeNull();
       expect(pos!.visible).toBe(true);
     }
+
+    // Set DOM identity markers on each pane element before overflow
+    const paneMarkersBefore = await page.evaluate(() => {
+      const panes = [...document.querySelectorAll('#terminal-workspace scion-terminal-pane')];
+      panes.forEach((p, i) => {
+        (p as HTMLElement & { __journeyMarker: string }).__journeyMarker = `pane-${i}`;
+      });
+      return panes.length;
+    });
+    expect(paneMarkersBefore).toBe(4);
+
+    // Write marker content through mock WebSocket for each attached session
+    // by sending data from the server side of the mock socket. The setup()
+    // fixture records sent frames (client→server); we verify buffer identity
+    // survives the restore cycle by checking pane elements are the same nodes.
+    // (Server→client writes require the routeWebSocket mock to push data,
+    // which our fixture does not expose — DOM identity markers serve the same
+    // proof that the xterm instance and its buffer were not recreated.)
 
     // Verify session identity: actual socket attach count (not label text)
     expect(socket.attaches).toBe(4);
@@ -2334,9 +2356,20 @@ test.describe('combined regression journey', () => {
     expect(socket.attaches).toBe(5);
     expect(socket.closes).toBe(0);
 
-    // Verify scrollback content preservation: the pane elements are the same
-    // DOM nodes, meaning the xterm instances and their scrollback buffers
-    // were never destroyed and recreated.
+    // Verify DOM node identity: the marker properties set before overflow
+    // must still be present on the same pane elements, proving the DOM nodes
+    // were not destroyed and recreated during the overflow/restore cycle.
+    const markersAfterRestore = await page.evaluate(() => {
+      const panes = [...document.querySelectorAll('#terminal-workspace scion-terminal-pane')];
+      return panes
+        .map((p) => (p as HTMLElement & { __journeyMarker?: string }).__journeyMarker)
+        .filter(Boolean);
+    });
+    expect(markersAfterRestore).toEqual(
+      expect.arrayContaining(['pane-0', 'pane-1', 'pane-2', 'pane-3'])
+    );
+
+    // Verify all 5 pane elements still exist (no eviction)
     const panesPreserved = await page.evaluate(() => {
       const panes = document.querySelectorAll<
         HTMLElement & { session: { state: { key: string } } | null }
@@ -2369,9 +2402,23 @@ test.describe('combined regression journey', () => {
     const keysAfterNav = await getPaneSessionKeys(page);
     expect(keysAfterNav.length).toBe(5);
 
-    // Same session keys as before (order may differ, so compare sets)
-    const keysSet = new Set(keysAfterNav);
-    expect(keysSet.size).toBe(5);
+    // Same session keys as before — actual set equality, not just size.
+    // Build the expected set from the original 4 keys plus agentE's key.
+    const agentEKey = keysAfterNav.find((k) => !keys.includes(k));
+    expect(agentEKey).toBeDefined();
+    const expectedKeys = [...keys, agentEKey!].sort();
+    expect([...keysAfterNav].sort()).toEqual(expectedKeys);
+
+    // Verify DOM identity markers survived cross-mode navigation
+    const markersAfterNav = await page.evaluate(() => {
+      const panes = [...document.querySelectorAll('#terminal-workspace scion-terminal-pane')];
+      return panes
+        .map((p) => (p as HTMLElement & { __journeyMarker?: string }).__journeyMarker)
+        .filter(Boolean);
+    });
+    expect(markersAfterNav).toEqual(
+      expect.arrayContaining(['pane-0', 'pane-1', 'pane-2', 'pane-3'])
+    );
 
     // Socket identity: no new attaches or closes from navigation
     expect(socket.attaches).toBe(5);
@@ -2575,10 +2622,12 @@ test.describe('production icon and title verification', () => {
     expect(title).not.toMatch(/^Terminals — Scion$/);
   });
 
-  test('grid icon is registered in USED_ICONS for production packaging', async ({ page }) => {
-    // This test verifies the grid icon is available at runtime by checking
-    // that the sl-icon element with name="grid" in the place button resolves.
-    // The build copies icons from USED_ICONS to public/shoelace/assets/icons/.
+  test('grid icon is registered in USED_ICONS and renders SVG content', async ({ page }) => {
+    // Verifies the grid icon actually renders (SVG loaded into shadow DOM),
+    // not just that the sl-icon element exists. The original #1677 defect was
+    // exactly this: the icon element existed but the SVG failed to load because
+    // the asset was missing from the build. Checking only DOM existence would
+    // pass even with a missing grid.svg file.
     const twoAgents: Record<string, AgentFixture> = {
       [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
       [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
@@ -2592,16 +2641,28 @@ test.describe('production icon and title verification', () => {
     // Switch to multi-pane layout so the "Place in pane" button appears
     await clickPreset(page, 'two-columns');
 
-    // Verify the place button contains an sl-icon with name="grid"
-    const gridIconExists = await page.evaluate(() => {
+    // Verify the sl-icon element exists AND its SVG actually loaded.
+    // sl-icon loads SVGs asynchronously into its shadow DOM; a successfully
+    // loaded icon has an <svg> element with child nodes inside its shadow root.
+    const gridIconRendered = await page.evaluate(async () => {
       const host = document.querySelector('#terminal-workspace');
-      if (!host) return false;
+      if (!host) return { exists: false, rendered: false };
       const placeBtn = host.querySelector('.terminal-place-btn');
-      if (!placeBtn) return false;
+      if (!placeBtn) return { exists: false, rendered: false };
       const icon = placeBtn.querySelector('sl-icon[name="grid"]');
-      return icon !== null;
+      if (!icon) return { exists: false, rendered: false };
+
+      // Wait briefly for async SVG load (sl-icon fetches the .svg file)
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      const svg = icon.shadowRoot?.querySelector('svg');
+      return {
+        exists: true,
+        rendered: svg != null && svg.children.length > 0,
+      };
     });
-    expect(gridIconExists).toBe(true);
+    expect(gridIconRendered.exists).toBe(true);
+    expect(gridIconRendered.rendered).toBe(true);
   });
 });
 

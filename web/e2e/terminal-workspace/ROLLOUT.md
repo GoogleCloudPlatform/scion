@@ -22,13 +22,19 @@
 
 ## Rollback (Disable)
 
-- **Server**: set `'web.terminal_workspace': false` in the injected features, or remove
-  the key entirely (defaults to OFF).
+- **Server (global)**: set `'web.terminal_workspace': false` in the injected features.
+  This overrides any retained `localStorage` value of `true`. Simply removing the
+  key is insufficient for global rollback if users have set localStorage overrides
+  — a retained `localStorage` value of `"true"` would still enable the flag via the
+  fallback precedence chain.
 - **Per-user**: `localStorage.setItem('scion:feature:web.terminal_workspace', 'false')`.
+  For full per-user rollback, also clear any cached value:
+  `localStorage.removeItem('scion:feature:web.terminal_workspace')`.
 - **Behavior**: active retained sessions are preserved in memory until the next
   page reload. On reload, the flag is re-evaluated and the app reverts to the
-  legacy disposable-pane mode (`/agents/{id}/terminal`). No data loss — sessions
-  were never persisted server-side.
+  legacy disposable-pane mode (`/agents/{id}/terminal`). In-memory terminal state
+  (scrollback, xterm instances, layout assignments) is discarded on page reload.
+  The agent process continues running server-side; users can re-attach after reload.
 
 ## Prerequisites
 
