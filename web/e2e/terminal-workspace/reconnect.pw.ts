@@ -324,3 +324,39 @@ test('toolbar reconnect button disabled during active reconnect attempt', async 
   await expect(toolbarBtn).toBeVisible();
   await expect(toolbarBtn).toBeDisabled();
 });
+
+test('disconnected session transitions to unavailable when agent stops', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Step 1: Disconnect via network — session enters "disconnected" state
+  socket.disconnectAll();
+  const overlay = page.locator('scion-terminal-pane .disconnected-overlay');
+  await expect(overlay).toBeVisible();
+  await expect(overlay.locator('.overlay-title')).toContainText('DISCONNECTED');
+
+  // Reconnect button should be enabled (disconnected, not unavailable)
+  const reconnectBtn = page.locator('scion-terminal-pane .overlay-reconnect');
+  await expect(reconnectBtn).toBeEnabled();
+
+  // Step 2: Deliver SSE agent-stopped event while session is disconnected
+  await page.evaluate((agentId) => {
+    const instances = (window as unknown as { __sseInstances__: EventTarget[] }).__sseInstances__;
+    for (const es of instances) {
+      es.dispatchEvent(
+        new MessageEvent('update', {
+          data: JSON.stringify({
+            subject: `agent.${agentId}.status`,
+            data: { phase: 'stopped', activity: 'offline' },
+          }),
+        })
+      );
+    }
+  }, agent);
+
+  // Step 3: Session should transition from disconnected → unavailable
+  await expect(overlay.locator('.overlay-title')).toContainText('AGENT UNAVAILABLE');
+  // Overlay should have the 'unavailable' class applied (drives CSS styling)
+  await expect(overlay).toHaveClass(/unavailable/);
+});

@@ -327,8 +327,7 @@ export class TerminalWorkspaceRoot {
           } else if (
             next.agent?.phase === 'stopped' &&
             entry.session.state.connection !== 'closed' &&
-            entry.session.state.connection !== 'unavailable' &&
-            entry.session.state.connection !== 'disconnected'
+            entry.session.state.connection !== 'unavailable'
           ) {
             entry.session.markUnavailable('agent-stopped', 'Agent has stopped.');
           }
