@@ -1185,3 +1185,122 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 	_ = browserConn.Close()
 	_ = serverConn.Close()
 }
+
+// TestPTYCleanup_LocalSessionCancelDuringResize verifies that cancelling the
+// context while resize events are flowing does not cause a data race between
+// the watcher's PTY close and resizeSandboxTerminal→pty.Setsize in
+// readFromWebSocket.
+//
+// Without the ptyMu mutex, the watcher's Close() can overlap with Setsize's
+// os.File.Fd() call, causing a race on the internal poll.FD state. The mutex
+// ensures these operations are serialized.
+//
+// This test exercises the racy Local path specifically — StreamPTYHandler uses
+// resizeDone join ordering instead of a mutex.
+//
+// Test fixture: real local tmux via shell adapter (not Docker containers).
+func TestPTYCleanup_LocalSessionCancelDuringResize(t *testing.T) {
+	tmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("requires tmux in PATH")
+	}
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TMUX", "")
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "tmux.sock")
+	tmuxCommand := func(args ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, tmux, append([]string{"-S", socket}, args...)...).CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+
+	// Create a private tmux session (agent surrogate)
+	_, err = tmuxCommand("-f", "/dev/null", "new-session", "-d", "-s", "scion", "-x", "80", "-y", "24", "exec cat")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = tmuxCommand("kill-server") })
+
+	// Runtime adapter
+	adapter := filepath.Join(dir, "runtime-exec")
+	require.NoError(t, os.WriteFile(adapter, []byte(`#!/bin/sh
+set -eu
+shift  # Remove "exec"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -it|-i|-t) shift ;;
+        -e) shift 2 ;;
+        --user) shift 2 ;;
+        *) break ;;
+    esac
+done
+shift  # Remove containerID
+shift  # Remove "tmux"
+exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
+`), 0700))
+	t.Setenv("TW_CLEANUP_TMUX", tmux)
+	t.Setenv("TW_CLEANUP_SOCKET", socket)
+
+	// Create raw WebSocket pair
+	accepted := make(chan *websocket.Conn, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err == nil {
+			accepted <- conn
+		}
+	}))
+	t.Cleanup(server.Close)
+	browserConn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	require.NoError(t, err)
+	serverConn := <-accepted
+
+	parentCtx, parentCancel := context.WithCancel(context.Background())
+	defer parentCancel()
+	session := newLocalPTYSession(parentCtx, "resize-race-test", "cleanup-fixture", adapter, "scion", "", serverConn, 80, 24, nil, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- session.Run()
+	}()
+
+	// Wait for the tmux client to appear (attach complete)
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_width}x#{client_height}")
+		return err == nil && out == "80x24"
+	}, 5*time.Second, 20*time.Millisecond, "tmux client should attach")
+
+	// Send rapid resize events to create a window where Setsize and Close
+	// can overlap. The -race flag detects the race if ptyMu is missing.
+	resizeSent := make(chan struct{})
+	go func() {
+		defer close(resizeSent)
+		for i := 0; i < 50; i++ {
+			msg := wsprotocol.PTYResizeMessage{
+				Type: wsprotocol.TypeResize,
+				Cols: 80 + (i % 10),
+				Rows: 24 + (i % 5),
+			}
+			if err := browserConn.WriteJSON(msg); err != nil {
+				return // WebSocket closed by watcher — expected
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	// Brief delay to let some resize events flow, then cancel.
+	time.Sleep(20 * time.Millisecond)
+	parentCancel()
+
+	// Assert: Run() returns within bounded time (no hang, no crash)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("LocalPTYSession.Run() did not return after cancel during resize")
+	}
+
+	// Wait for resize sender to finish (it should error on closed conn)
+	<-resizeSent
+
+	_ = browserConn.Close()
+	_ = serverConn.Close()
+}

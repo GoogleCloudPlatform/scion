@@ -455,6 +455,7 @@ type LocalPTYSession struct {
 	ptyMaster   *os.File
 	ptySlave    *os.File
 	writeMu     sync.Mutex
+	ptyMu       sync.Mutex // guards ptyMaster Close vs Setsize race
 
 	// K8s Go client for direct API exec
 	k8sConfig    *rest.Config
@@ -534,15 +535,20 @@ func (s *LocalPTYSession) Run() error {
 	}()
 
 	// Context cancellation watcher: when the parent context is cancelled,
-	// close the WebSocket first (unblocking readFromWebSocket and preventing
-	// further resize calls from that goroutine), then close the PTY master
-	// (unblocking readFromPTY). This ordering prevents a race between PTY
-	// close and any in-flight resize in readFromWebSocket.
+	// close the WebSocket (unblocking readFromWebSocket) and close the PTY
+	// master (unblocking readFromPTY). The PTY close is guarded by ptyMu to
+	// prevent a race with resizeSandboxTerminal→pty.Setsize (which calls
+	// os.File.Fd()) that may be in progress in readFromWebSocket. The mutex
+	// does NOT protect Read/Write — Go's poll.FD handles close-during-read
+	// atomically (read returns error, no concurrent destroy+Fd() race).
 	//
 	// Without exec.CommandContext, context cancellation alone does not kill
 	// the process or close the PTY, so blocking reads would hang indefinitely.
 	// The deferred gracefulShutdownExec handles the PTY double-close safely
-	// (same *os.File, Go's poll.FD tracks closed state).
+	// (same *os.File, Go's poll.FD tracks closed state). gracefulShutdownExec
+	// runs without the mutex, but by that point the watcher has already
+	// closed+destroyed the FD (under mutex). Subsequent Close returns
+	// ErrClosed without re-running destroy.
 	//
 	// Both I/O goroutines send to errCh (capacity 2), so neither blocks.
 	runDone := make(chan struct{})
@@ -550,14 +556,16 @@ func (s *LocalPTYSession) Run() error {
 	go func() {
 		select {
 		case <-s.ctx.Done():
-			// Close WebSocket first to unblock readFromWebSocket and stop
-			// any resize calls, then close PTY to unblock readFromPTY.
+			// Close WebSocket to unblock readFromWebSocket.
 			if s.conn != nil {
 				_ = s.conn.Close()
 			}
+			// Close PTY under ptyMu to prevent race with in-flight Setsize.
+			s.ptyMu.Lock()
 			if s.ptyMaster != nil {
 				_ = s.ptyMaster.Close()
 			}
+			s.ptyMu.Unlock()
 		case <-runDone:
 			// Run() exited normally or on error; watcher no longer needed.
 		}
@@ -843,7 +851,9 @@ func (s *LocalPTYSession) readFromWebSocket() error {
 			if err := json.Unmarshal(data, &msg); err != nil {
 				continue
 			}
+			s.ptyMu.Lock()
 			resizeSandboxTerminal(s.ctx, s.runtimeCmd, s.containerID, s.agentID, msg.Cols, msg.Rows, s.ptyMaster)
+			s.ptyMu.Unlock()
 		}
 	}
 }
