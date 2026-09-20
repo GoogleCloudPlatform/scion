@@ -5,15 +5,18 @@
  * and clipboard boundaries. No desktop clipboard access, no live Hub.
  *
  * Coverage:
- *   - hide → inert/blur/nonzero dims
+ *   - hide → inert/blur/nonzero dims preserved
  *   - reveal → changed size → resize sent
- *   - pending resize timer firing after hide
+ *   - resize timer cancelled on hide → no late resize
  *   - late connect focus
  *   - delayed paste/clipboard completing after hide
  *   - hidden OSC 52 isolation + visible OSC 52 continuity
+ *   - visible-but-unfocused OSC 52 write/read rejection
+ *   - focus lost during pending paste/upload
  *   - protocol response continuity while hidden
- *   - Chat/Dashboard file drops unaffected by hidden terminals
+ *   - Chat/Dashboard file drops unaffected (hidden AND visible panes)
  *   - upload completing after hide does not inject paths
+ *   - UTF-8 multi-byte OSC 52 round-trip parity
  */
 import { expect, test, type Page, type WebSocketRoute } from '@playwright/test';
 import type {} from './fixture.js';
@@ -334,4 +337,239 @@ test('upload completing after hide does not inject paths', async ({ page }) => {
   const newPaths = afterInput.filter((d) => d.includes('delayed.txt'));
   expect(newPaths).toHaveLength(0);
   expect(afterInput.length).toBe(beforeInput.length);
+});
+
+// --- Visible-but-unfocused tests (setFocused) ---
+
+test('visible but unfocused pane rejects OSC 52 clipboard write', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'original';
+  });
+
+  // Pane is visible but unfocused (multi-pane scenario)
+  await page.evaluate(() => window.hiddenFixture.pane.setFocused(false));
+
+  // Send OSC 52 clipboard write while visible+unfocused
+  ctx.write('\x1b]52;c;' + Buffer.from('unfocused-write').toString('base64') + '\x07');
+  await page.waitForTimeout(300);
+
+  // Clipboard should be unchanged — unfocused panes cannot write
+  const afterWrite = await page.evaluate(() => window.hiddenFixture.clipboardText);
+  expect(afterWrite).toBe('original');
+
+  // Re-focus and verify write works
+  await page.evaluate(() => window.hiddenFixture.pane.setFocused(true));
+  ctx.write('\x1b]52;c;' + Buffer.from('focused-write').toString('base64') + '\x07');
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.clipboardText))
+    .toBe('focused-write');
+});
+
+test('visible but unfocused pane rejects OSC 52 clipboard read', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'read-me';
+  });
+
+  // Unfocus the pane (visible but not focused)
+  await page.evaluate(() => window.hiddenFixture.pane.setFocused(false));
+
+  const beforeCount = ctx.frames.filter((f) => f.type === 'data').length;
+
+  // Send OSC 52 clipboard read request while visible+unfocused
+  ctx.write('\x1b]52;c;?\x07');
+  await page.waitForTimeout(300);
+
+  // No clipboard response should have been sent — read silently dropped
+  const afterCount = ctx.frames.filter((f) => f.type === 'data').length;
+  expect(afterCount).toBe(beforeCount);
+});
+
+test('focus lost during pending clipboard read does not send paste', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  // Enable gated clipboard mode
+  await page.evaluate(() => window.hiddenFixture.gateClipboard());
+
+  // Focus the terminal textarea and trigger Ctrl+V
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await textarea.press('Control+v');
+
+  // Lose focus (but remain visible) before clipboard resolves
+  await page.evaluate(() => window.hiddenFixture.pane.setFocused(false));
+  await page.waitForTimeout(50);
+
+  // Release the clipboard with paste text
+  const beforeInput = ctx.input().slice();
+  await page.evaluate(() => window.hiddenFixture.releaseClipboard('unfocused-paste'));
+  await page.waitForTimeout(300);
+
+  // The paste should NOT have been sent — pane lost focus during async
+  const afterInput = ctx.input();
+  expect(afterInput.filter((d) => d === 'unfocused-paste')).toHaveLength(0);
+  expect(afterInput.length).toBe(beforeInput.length);
+});
+
+test('focus lost during pending upload does not inject paths', async ({ page }) => {
+  const ctx = await setup(page);
+
+  let resolveUpload!: () => void;
+  await page.route('**/shared-dirs/scratchpad/files', async (route) => {
+    await new Promise<void>((r) => {
+      resolveUpload = r;
+    });
+    await route.fulfill({ json: {} });
+  });
+
+  await ready(page);
+
+  // Drop a file to start an upload
+  const wrapper = page.locator('.terminal-wrapper');
+  await wrapper.evaluate((el) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File(['upload-content'], 'unfocused-upload.txt', { type: 'text/plain' })
+    );
+    el.dispatchEvent(
+      new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer })
+    );
+  });
+  await page.waitForTimeout(100);
+
+  // Lose focus (but remain visible) while upload is pending
+  await page.evaluate(() => window.hiddenFixture.pane.setFocused(false));
+  await page.waitForTimeout(50);
+
+  // Complete the upload
+  const beforeInput = ctx.input().slice();
+  resolveUpload();
+  await page.waitForTimeout(300);
+
+  // Paths should NOT have been injected
+  const afterInput = ctx.input();
+  expect(afterInput.filter((d) => d.includes('unfocused-upload.txt'))).toHaveLength(0);
+  expect(afterInput.length).toBe(beforeInput.length);
+});
+
+test('visible pane does not preventDefault on sibling drop targets', async ({ page }) => {
+  await setup(page);
+  await ready(page);
+
+  // Pane is VISIBLE and FOCUSED — but sibling drops must still work
+  const dropTarget = page.locator('#drop-target');
+  await dropTarget.evaluate((el) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(['sibling-file'], 'sibling.txt', { type: 'text/plain' }));
+    const dragOver = new DragEvent('dragover', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: transfer,
+    });
+    el.dispatchEvent(dragOver);
+    const drop = new DragEvent('drop', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: transfer,
+    });
+    el.dispatchEvent(drop);
+  });
+
+  // The sibling drop target should have received the file
+  await expect.poll(() => dropTarget.getAttribute('data-dropped')).toBe('true');
+  await expect(dropTarget).toContainText('Received: sibling.txt');
+});
+
+test('visible focused OSC 52 round-trips UTF-8 multi-byte content', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  // Set clipboard to multi-byte UTF-8 content
+  const utf8Content = '\u{1F600} éèê 你好 \u{1F680}';
+  await page.evaluate((text) => {
+    window.hiddenFixture.clipboardText = text;
+  }, utf8Content);
+
+  // OSC 52 write: send multi-byte content encoded as base64
+  const writePayload = Buffer.from(utf8Content).toString('base64');
+  ctx.write('\x1b]52;c;' + writePayload + '\x07');
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.clipboardText))
+    .toBe(utf8Content);
+
+  // OSC 52 read: request clipboard back and verify response
+  const beforeDataCount = ctx.frames.filter((f) => f.type === 'data').length;
+  ctx.write('\x1b]52;c;?\x07');
+  await expect
+    .poll(() => ctx.frames.filter((f) => f.type === 'data').length)
+    .toBeGreaterThan(beforeDataCount);
+
+  // Decode the response: ESC ] 52 ; c ; <base64> BEL
+  const response = ctx.input().at(-1)!;
+  // eslint-disable-next-line no-control-regex
+  const match = response.match(/^\x1b\]52;c;([A-Za-z0-9+/=]+)\x07$/);
+  expect(match).not.toBeNull();
+  const decoded = Buffer.from(match![1], 'base64').toString('utf-8');
+  expect(decoded).toBe(utf8Content);
+});
+
+test('hidden pane preserves nonzero terminal dimensions', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  // Capture dimensions while visible
+  const visibleDims = await page.evaluate(() => {
+    const t = window.hiddenFixture.terminal();
+    return { cols: t.cols, rows: t.rows };
+  });
+  expect(visibleDims.cols).toBeGreaterThan(0);
+  expect(visibleDims.rows).toBeGreaterThan(0);
+
+  // Hide the pane
+  await page.evaluate(() => window.hiddenFixture.pane.setVisible(false));
+
+  // Terminal dimensions should still be nonzero (last known size preserved)
+  const hiddenDims = await page.evaluate(() => {
+    const t = window.hiddenFixture.terminal();
+    return { cols: t.cols, rows: t.rows };
+  });
+  expect(hiddenDims.cols).toBe(visibleDims.cols);
+  expect(hiddenDims.rows).toBe(visibleDims.rows);
+
+  // No resize frame should have been sent when hiding
+  const resizeFrames = ctx.frames.filter((f) => f.type === 'resize');
+  const lastResize = resizeFrames.at(-1);
+  // If a resize was sent at connection, it should match visible dims, not zero
+  if (lastResize) {
+    expect(lastResize.cols).toBeGreaterThan(0);
+    expect(lastResize.rows).toBeGreaterThan(0);
+  }
+});
+
+test('resize timer cancelled on hide does not send late resize', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  // Record resize count
+  const resizesBefore = ctx.frames.filter((f) => f.type === 'resize').length;
+
+  // Rapidly change size to trigger resize debounce timer, then immediately hide
+  await page.evaluate(() => {
+    window.hiddenFixture.pane.style.width = '500px';
+  });
+  // Don't wait for debounce — hide immediately to test timer cancelation
+  await page.evaluate(() => window.hiddenFixture.pane.setVisible(false));
+
+  // Wait longer than the debounce interval (150ms default)
+  await page.waitForTimeout(400);
+
+  // No new resize should have been sent after hide
+  const resizesAfter = ctx.frames.filter((f) => f.type === 'resize').length;
+  expect(resizesAfter).toBe(resizesBefore);
 });
