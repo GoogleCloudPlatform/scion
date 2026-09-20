@@ -35,6 +35,10 @@ module.exports = {
             files: ['e2e/terminal-entrypoints/*.ts'],
             parserOptions: { project: './e2e/terminal-entrypoints/tsconfig.json' },
         },
+        {
+            files: ['e2e/terminal-hidden/*.ts'],
+            parserOptions: { project: './e2e/terminal-hidden/tsconfig.json' },
+        },
     ],
     plugins: ['@typescript-eslint', 'prettier'],
     extends: [

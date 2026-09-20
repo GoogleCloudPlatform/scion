@@ -57,7 +57,7 @@ Kubernetes, Apple container, or Cloud Run sandbox integration.
 - Before the fix: unchanged lifecycle regression with `-race -count=10` failed
   with the descriptor race (both direct close and pending-read destruction).
 - After the fix: `go test -race ./pkg/hub ./pkg/runtimebroker -run TestPTYLifecycle
-  -count=30 -v` passed, including 120 broker attach/resize/close rounds.
+-count=30 -v` passed, including 120 broker attach/resize/close rounds.
 - `go test -race ./pkg/runtimebroker -count=1` passed for the complete package.
 - Isolated `make ci` passed: formatting, vet, custom checks, the complete
   `no_sqlite` test suite, and build. Its HOME and XDG directories were disposable;

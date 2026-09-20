@@ -33,7 +33,6 @@ vi.mock('@xterm/addon-fit', () => ({
   },
 }));
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: class {} }));
-vi.mock('@xterm/addon-clipboard', () => ({ ClipboardAddon: class {} }));
 
 class FakeSocket {
   static OPEN = 1;
@@ -253,6 +252,56 @@ it('two panes share registry SSE and preserve metadata across transport notifica
     other.dispose();
     other.remove();
   }
+});
+
+describe('hidden pane interaction isolation (P1.8)', () => {
+  it('setVisible(false) blurs terminal, cancels pending resize and removes window drag prevention', async () => {
+    await mountConnected();
+    const xt = terminal.instances[0];
+    expect(xt.blur).not.toHaveBeenCalled();
+    // Verify window drag handlers are installed when visible
+    const addSpy = vi.spyOn(window, 'addEventListener');
+    const removeSpy = vi.spyOn(window, 'removeEventListener');
+    page.setVisible(false);
+    expect(xt.blur).toHaveBeenCalled();
+    // Window drag prevention removed when hidden
+    expect(removeSpy).toHaveBeenCalledWith('dragover', expect.any(Function));
+    expect(removeSpy).toHaveBeenCalledWith('drop', expect.any(Function));
+    // setVisible(true) reinstalls them
+    page.setVisible(true);
+    expect(addSpy).toHaveBeenCalledWith('dragover', expect.any(Function));
+    expect(addSpy).toHaveBeenCalledWith('drop', expect.any(Function));
+  });
+
+  it('hidden pane does not auto-focus on late socket connect', async () => {
+    await mountToFrame();
+    frames.shift()?.(0);
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+    // Hide before socket opens
+    page.setVisible(false);
+    const xt = terminal.instances[0];
+    xt.focus.mockClear();
+    FakeSocket.instances[0].open();
+    await page.updateComplete;
+    // Terminal should NOT have been focused since pane is hidden
+    expect(xt.focus).not.toHaveBeenCalled();
+  });
+
+  it('window drag prevention is not installed when pane starts hidden', () => {
+    const pane2 = document.createElement('scion-terminal-pane');
+    const reg2 = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test-hidden',
+    });
+    pane2.setVisible(false);
+    const addSpy = vi.spyOn(window, 'addEventListener');
+    document.body.append(pane2);
+    const dragOverCalls = addSpy.mock.calls.filter(([event]) => event === 'dragover');
+    expect(dragOverCalls).toHaveLength(0);
+    pane2.open(reg2, '33333333-3333-4333-8333-333333333333');
+    pane2.dispose();
+    pane2.remove();
+  });
 });
 
 it('a failed metadata snapshot does not remove the independently authorized terminal host', async () => {
