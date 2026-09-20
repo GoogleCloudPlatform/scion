@@ -357,6 +357,13 @@ describe('terminal — _handleFileDrop upload paths', () => {
     el.uploadTargetDir = 'scratchpad';
     el.uploadBasePath = '/scion-volumes/scratchpad';
     el.projectId = 'test-project';
+    // Upload completion guard (P1.8) requires:
+    // 1. _focused = true (derived from DOM focusin events)
+    // 2. session.state.generation stable across async boundary
+    // Simulate a focused, connected terminal with a stable session.
+    document.body.appendChild(el);
+    el._onFocusIn();
+    el.ownedSession = { state: { generation: 0 } };
     return el;
   }
 
