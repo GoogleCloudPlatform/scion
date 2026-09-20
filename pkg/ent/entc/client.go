@@ -28,6 +28,7 @@ import (
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	entschema "entgo.io/ent/dialect/sql/schema"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -147,7 +148,18 @@ func OpenPostgres(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client,
 		connConfig.ConnectTimeout = connectTimeout
 	}
 
-	db := stdlib.OpenDB(*connConfig)
+	// Register google/uuid.UUID with pgx's type system so that UUID values are
+	// encoded with OID 2950 (uuid) instead of the fragile DriverValuer fallback
+	// that sends OID 25 (text). Without this, raw queries comparing uuid columns
+	// against Go uuid.UUID parameters fail with SQLSTATE 42883 ("operator does
+	// not exist: uuid = text"). See https://github.com/ptone/scion/issues/1634.
+	db := stdlib.OpenDB(*connConfig, stdlib.OptionAfterConnect(
+		func(ctx context.Context, conn *pgx.Conn) error {
+			conn.TypeMap().RegisterDefaultPgType(uuid.UUID{}, "uuid")
+			conn.TypeMap().RegisterDefaultPgType([]uuid.UUID{}, "_uuid")
+			return nil
+		},
+	))
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.Postgres, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
