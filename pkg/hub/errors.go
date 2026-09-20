@@ -93,6 +93,11 @@ const (
 	// filter. Status 409 — see G3 brief §3.
 	ErrCodeConversationNotResolved = "conversation_not_resolved"
 
+	// ErrCodeUnsupportedCapability is returned when a request exercises a
+	// capability that the server does not yet support (e.g. cross-project
+	// attachment transfer). Status 422.
+	ErrCodeUnsupportedCapability = "unsupported_capability"
+
 	// ErrCodeInvalidDMKey is returned when a DM key does not have exactly 5
 	// colon-separated parts. Distinguishable from ErrCodeConversationNotResolved
 	// because this is a parse failure, not a lookup miss.

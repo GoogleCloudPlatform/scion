@@ -474,15 +474,16 @@ func RejectCrossProjectFileTransport(transport string) AttachmentTransferDecisio
 type ContentSurfaceType string
 
 const (
-	ContentSurfaceStreamEvents ContentSurfaceType = "stream_events"
-	ContentSurfaceSearch       ContentSurfaceType = "search"
-	ContentSurfacePreview      ContentSurfaceType = "preview"
-	ContentSurfaceNotification ContentSurfaceType = "notification"
-	ContentSurfaceUnread       ContentSurfaceType = "unread"
-	ContentSurfaceEditDelete   ContentSurfaceType = "edit_delete"
-	ContentSurfaceReceipt      ContentSurfaceType = "receipt"
-	ContentSurfaceTyping       ContentSurfaceType = "typing"
-	ContentSurfaceAttachment   ContentSurfaceType = "attachment"
+	ContentSurfaceStreamEvents   ContentSurfaceType = "stream_events"
+	ContentSurfaceSearch         ContentSurfaceType = "search"
+	ContentSurfacePreview        ContentSurfaceType = "preview"
+	ContentSurfaceNotification   ContentSurfaceType = "notification"
+	ContentSurfaceUnread         ContentSurfaceType = "unread"
+	ContentSurfaceEditDelete     ContentSurfaceType = "edit_delete"
+	ContentSurfaceReceipt        ContentSurfaceType = "receipt"
+	ContentSurfaceTyping         ContentSurfaceType = "typing"
+	ContentSurfaceAttachment     ContentSurfaceType = "attachment"
+	ContentSurfaceInteragentView ContentSurfaceType = "interagent_view"
 )
 
 // ContentAccessDecision captures the outcome of a content surface
