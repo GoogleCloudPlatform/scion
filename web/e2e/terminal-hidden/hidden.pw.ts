@@ -20,10 +20,15 @@
  *   - DOM focus ownership: focusout to sibling blocks OSC 52
  *   - DOM focus ownership: toolbar click within pane preserves focus
  *   - DOM focus ownership: refocusing terminal restores _focused
+ *   - DOM focus ownership: initial visible pane without DOM focus blocks OSC 52
+ *   - DOM focus ownership: hide/reveal while sibling focused blocks until focused
+ *   - DOM focus ownership: window blur (null relatedTarget) blocks OSC 52
+ *   - DOM focus ownership: file drop focuses terminal via DOM
+ *   - Protocol: DSR/DA unchanged through focus state transitions
  *   - OSC 52 read generation check: reconnect blocks stale response
- *   - OSC 52 selection types: non-'c' silently ignored
+ *   - OSC 52 selection types: non-'c' reads get empty response, writes no-op
  *   - OSC 52 selection type echoed in read response
- *   - OSC 52 malformed payloads handled gracefully
+ *   - OSC 52 malformed payloads handled gracefully (invalid base64 no-mutation)
  */
 import { expect, test, type Page, type WebSocketRoute } from '@playwright/test';
 import type {} from './fixture.js';
@@ -207,7 +212,12 @@ test('hidden OSC 52 does not write to system clipboard, visible OSC 52 does', as
   await page.evaluate(() => window.hiddenFixture.pane.setVisible(true));
   await page.waitForTimeout(100);
 
-  // Send OSC 52 clipboard write while visible
+  // Focus the terminal (setVisible derives _focused from DOM, not unconditionally)
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.waitForTimeout(50);
+
+  // Send OSC 52 clipboard write while visible and focused
   ctx.write('\x1b]52;c;' + Buffer.from('visible-write').toString('base64') + '\x07');
   await expect
     .poll(() => page.evaluate(() => window.hiddenFixture.clipboardText))
@@ -763,12 +773,17 @@ test('OSC 52 non-c selection types are silently ignored', async ({ page }) => {
   let clip = await page.evaluate(() => window.hiddenFixture.clipboardText);
   expect(clip).toBe('original');
 
-  // Send OSC 52 read with selection type 'p' — should be silently dropped
+  // Send OSC 52 read with selection type 'p' — should get empty response
+  // matching original BrowserClipboardProvider semantics (returns '' for non-'c')
   const dataFramesBefore = ctx.frames.filter((f) => f.type === 'data').length;
   ctx.write('\x1b]52;p;?\x07');
-  await page.waitForTimeout(200);
-  const dataFramesAfter = ctx.frames.filter((f) => f.type === 'data').length;
-  expect(dataFramesAfter).toBe(dataFramesBefore);
+  await expect
+    .poll(() => ctx.frames.filter((f) => f.type === 'data').length)
+    .toBeGreaterThan(dataFramesBefore);
+  // Response should be empty: ESC ] 52 ; p ; BEL (no base64 content)
+  const pResponse = ctx.input().at(-1)!;
+  // eslint-disable-next-line no-control-regex
+  expect(pResponse).toBe('\x1b]52;p;\x07');
 
   // Send OSC 52 write with selection type 's' — also unsupported
   ctx.write('\x1b]52;s;' + Buffer.from('secondary-write').toString('base64') + '\x07');
@@ -822,11 +837,13 @@ test('OSC 52 malformed payloads are handled gracefully', async ({ page }) => {
   let clip = await page.evaluate(() => window.hiddenFixture.clipboardText);
   expect(clip).toBe('unchanged');
 
-  // Invalid base64 — should be caught by atob and ignored
+  // Invalid base64 — atob() throws, no clipboard mutation. Deliberate
+  // divergence from original addon which wrote '' to clipboard on invalid
+  // base64. No-mutation is safer for malformed server output.
   ctx.write('\x1b]52;c;!!!invalid-base64!!!\x07');
   await page.waitForTimeout(100);
 
-  // Clipboard should still be unchanged — atob throws on invalid base64
+  // Clipboard untouched — atob throw prevents writeText call
   clip = await page.evaluate(() => window.hiddenFixture.clipboardText);
   expect(clip).toBe('unchanged');
 
@@ -836,4 +853,295 @@ test('OSC 52 malformed payloads are handled gracefully', async ({ page }) => {
   await page.waitForTimeout(100);
   clip = await page.evaluate(() => window.hiddenFixture.clipboardText);
   expect(clip).toBe('');
+});
+
+// --- Rev4: Initialization and reveal focus derivation tests ---
+
+test('initial visible pane without DOM focus blocks OSC 52 clipboard write', async ({ page }) => {
+  const ctx = await setup(page);
+
+  // Focus sibling BEFORE navigating, so shouldAutoFocusTerminal returns false
+  await page.goto('/e2e/terminal-hidden/fixture.html');
+
+  // Wait for connection
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.session.state.connection))
+    .toBe('connected');
+
+  // Move focus to sibling — even if auto-focus ran, this simulates rail/tab focus
+  await page.evaluate(() => {
+    const target = document.getElementById('drop-target')!;
+    target.setAttribute('tabindex', '0');
+    target.focus();
+  });
+  await page.waitForTimeout(50);
+
+  // Verify focus is on sibling
+  const activeId = await page.evaluate(() => document.activeElement?.id);
+  expect(activeId).toBe('drop-target');
+
+  // Set clipboard
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'before-init-test';
+  });
+
+  // OSC 52 write should be blocked — pane is visible but has no DOM focus
+  ctx.write('\x1b]52;c;' + Buffer.from('init-write').toString('base64') + '\x07');
+  await page.waitForTimeout(300);
+  const clip = await page.evaluate(() => window.hiddenFixture.clipboardText);
+  expect(clip).toBe('before-init-test');
+
+  // Now focus terminal — should allow OSC 52
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.waitForTimeout(50);
+
+  ctx.write('\x1b]52;c;' + Buffer.from('after-focus').toString('base64') + '\x07');
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.clipboardText))
+    .toBe('after-focus');
+});
+
+test('hide/reveal while sibling focused blocks OSC 52 until terminal focused', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  // Focus the terminal first
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.waitForTimeout(50);
+
+  // Focus sibling (simulates clicking rail/tab button)
+  await page.evaluate(() => {
+    const target = document.getElementById('drop-target')!;
+    target.setAttribute('tabindex', '0');
+    target.focus();
+  });
+  const activeBeforeHide = await page.evaluate(() => document.activeElement?.id);
+  expect(activeBeforeHide).toBe('drop-target');
+
+  // Hide the pane
+  await page.evaluate(() => window.hiddenFixture.pane.setVisible(false));
+  await page.waitForTimeout(50);
+
+  // Reveal — focus is on sibling, not terminal. setVisible derives _focused from DOM.
+  await page.evaluate(() => window.hiddenFixture.pane.setVisible(true));
+  await page.waitForTimeout(100);
+
+  // Verify focus still on sibling
+  const activeAfterReveal = await page.evaluate(() => document.activeElement?.id);
+  expect(activeAfterReveal).toBe('drop-target');
+
+  // Set clipboard
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'before-reveal-test';
+  });
+
+  // OSC 52 write should be BLOCKED — pane visible but _focused derived as false
+  ctx.write('\x1b]52;c;' + Buffer.from('reveal-write').toString('base64') + '\x07');
+  await page.waitForTimeout(300);
+  const clip = await page.evaluate(() => window.hiddenFixture.clipboardText);
+  expect(clip).toBe('before-reveal-test');
+
+  // Focus the terminal — now OSC 52 should work
+  await textarea.focus();
+  await page.waitForTimeout(50);
+
+  ctx.write('\x1b]52;c;' + Buffer.from('reveal-focused').toString('base64') + '\x07');
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.clipboardText))
+    .toBe('reveal-focused');
+});
+
+test('window blur (null relatedTarget) clears _focused and blocks OSC 52', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  // Focus the terminal
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.waitForTimeout(50);
+
+  // Set clipboard and verify OSC 52 works while focused
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'before-blur';
+  });
+  ctx.write('\x1b]52;c;' + Buffer.from('focused-ok').toString('base64') + '\x07');
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.clipboardText))
+    .toBe('focused-ok');
+
+  // Simulate window blur by dispatching focusout with null relatedTarget
+  await page.evaluate(() => {
+    const pane = window.hiddenFixture.pane;
+    const focused = pane.shadowRoot?.querySelector('.xterm-helper-textarea');
+    if (focused) {
+      focused.dispatchEvent(
+        new FocusEvent('focusout', { bubbles: true, composed: true, relatedTarget: null })
+      );
+    }
+  });
+  await page.waitForTimeout(50);
+
+  // Reset clipboard to detect unauthorized write
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'after-blur';
+  });
+
+  // OSC 52 write should be blocked — null relatedTarget cleared _focused
+  ctx.write('\x1b]52;c;' + Buffer.from('blur-write').toString('base64') + '\x07');
+  await page.waitForTimeout(300);
+  const clipAfter = await page.evaluate(() => window.hiddenFixture.clipboardText);
+  expect(clipAfter).toBe('after-blur');
+});
+
+test('protocol DSR/DA responses continue through focus state transitions', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  // Focus terminal
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.waitForTimeout(50);
+
+  // DSR while focused — should work
+  let beforeCount = ctx.frames.filter((f) => f.type === 'data').length;
+  ctx.write('\x1b[6n');
+  await expect
+    .poll(() => ctx.frames.filter((f) => f.type === 'data').length)
+    .toBeGreaterThan(beforeCount);
+  let response = ctx.input().at(-1)!;
+  // eslint-disable-next-line no-control-regex
+  expect(response).toMatch(/^\x1b\[\d+;\d+R$/);
+
+  // Move focus to sibling (unfocused)
+  await page.evaluate(() => {
+    const target = document.getElementById('drop-target')!;
+    target.setAttribute('tabindex', '0');
+    target.focus();
+  });
+  await page.waitForTimeout(50);
+
+  // DSR while unfocused — should STILL work (protocol responses unrestricted)
+  beforeCount = ctx.frames.filter((f) => f.type === 'data').length;
+  ctx.write('\x1b[6n');
+  await expect
+    .poll(() => ctx.frames.filter((f) => f.type === 'data').length)
+    .toBeGreaterThan(beforeCount);
+  response = ctx.input().at(-1)!;
+  // eslint-disable-next-line no-control-regex
+  expect(response).toMatch(/^\x1b\[\d+;\d+R$/);
+
+  // DA (Device Attributes) request while unfocused — also unrestricted
+  beforeCount = ctx.frames.filter((f) => f.type === 'data').length;
+  ctx.write('\x1b[c');
+  await expect
+    .poll(() => ctx.frames.filter((f) => f.type === 'data').length)
+    .toBeGreaterThan(beforeCount);
+  response = ctx.input().at(-1)!;
+  // DA response: ESC [ ? ... c
+  // eslint-disable-next-line no-control-regex
+  expect(response).toMatch(/^\x1b\[\?[\d;]+c$/);
+
+  // Hide pane — protocol still works
+  await page.evaluate(() => window.hiddenFixture.pane.setVisible(false));
+  await page.waitForTimeout(50);
+
+  beforeCount = ctx.frames.filter((f) => f.type === 'data').length;
+  ctx.write('\x1b[6n');
+  await expect
+    .poll(() => ctx.frames.filter((f) => f.type === 'data').length)
+    .toBeGreaterThan(beforeCount);
+  response = ctx.input().at(-1)!;
+  // eslint-disable-next-line no-control-regex
+  expect(response).toMatch(/^\x1b\[\d+;\d+R$/);
+});
+
+test('file drop establishes real DOM focus on terminal', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  // Focus sibling first (terminal loses focus)
+  await page.evaluate(() => {
+    const target = document.getElementById('drop-target')!;
+    target.setAttribute('tabindex', '0');
+    target.focus();
+  });
+  await page.waitForTimeout(50);
+
+  // Verify _focused is false (sibling has focus)
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'before-drop';
+  });
+  ctx.write('\x1b]52;c;' + Buffer.from('pre-drop-write').toString('base64') + '\x07');
+  await page.waitForTimeout(200);
+  const clip = await page.evaluate(() => window.hiddenFixture.clipboardText);
+  expect(clip).toBe('before-drop');
+
+  // Drop a file on the terminal — should focus terminal via DOM
+  const wrapper = page.locator('.terminal-wrapper');
+  await wrapper.evaluate((el) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(['drop-content'], 'focus-test.txt', { type: 'text/plain' }));
+    el.dispatchEvent(
+      new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer })
+    );
+  });
+  await page.waitForTimeout(100);
+
+  // After drop, terminal should have focus via real DOM focus (not back door)
+  // OSC 52 should now work because focusin fired
+  ctx.write('\x1b]52;c;' + Buffer.from('post-drop-write').toString('base64') + '\x07');
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.clipboardText))
+    .toBe('post-drop-write');
+});
+
+test('non-c OSC 52 read returns empty response matching original addon', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  // Focus terminal
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.waitForTimeout(50);
+
+  // Set clipboard to known value (should NOT be returned for non-'c')
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'system-clipboard-content';
+  });
+
+  // Read with selection 'p' — should get empty response, no clipboard access
+  let beforeCount = ctx.frames.filter((f) => f.type === 'data').length;
+  ctx.write('\x1b]52;p;?\x07');
+  await expect
+    .poll(() => ctx.frames.filter((f) => f.type === 'data').length)
+    .toBeGreaterThan(beforeCount);
+  let response = ctx.input().at(-1)!;
+  // eslint-disable-next-line no-control-regex
+  expect(response).toBe('\x1b]52;p;\x07');
+
+  // Read with selection 'q' — same empty response
+  beforeCount = ctx.frames.filter((f) => f.type === 'data').length;
+  ctx.write('\x1b]52;q;?\x07');
+  await expect
+    .poll(() => ctx.frames.filter((f) => f.type === 'data').length)
+    .toBeGreaterThan(beforeCount);
+  response = ctx.input().at(-1)!;
+  // eslint-disable-next-line no-control-regex
+  expect(response).toBe('\x1b]52;q;\x07');
+
+  // Read with selection 's' — same empty response
+  beforeCount = ctx.frames.filter((f) => f.type === 'data').length;
+  ctx.write('\x1b]52;s;?\x07');
+  await expect
+    .poll(() => ctx.frames.filter((f) => f.type === 'data').length)
+    .toBeGreaterThan(beforeCount);
+  response = ctx.input().at(-1)!;
+  // eslint-disable-next-line no-control-regex
+  expect(response).toBe('\x1b]52;s;\x07');
+
+  // Clipboard should NOT have been read — no OS access for non-'c'
+  const clipUnchanged = await page.evaluate(() => window.hiddenFixture.clipboardText);
+  expect(clipUnchanged).toBe('system-clipboard-content');
 });
