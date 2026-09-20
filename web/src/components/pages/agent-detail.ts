@@ -75,6 +75,7 @@ import '../shared/effective-role-provenance.js';
 import '../shared/effective-access-boundary-notice.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { terminalHref } from '../../client/open-terminal.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -1270,7 +1271,7 @@ export class ScionPageAgentDetail extends LitElement {
                 : nothing}
           ${can(agent._capabilities, 'attach')
             ? html`
-                <a href="/agents/${this.agentId}/terminal" style="text-decoration: none;">
+                <a href=${terminalHref(this.agentId)} style="text-decoration: none;">
                   <sl-button
                     variant="primary"
                     size="small"

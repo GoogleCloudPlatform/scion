@@ -1151,5 +1151,9 @@ if (document.readyState === 'loading') {
   void init();
 }
 
+// Re-export the central terminal helpers so tests and non-component callers
+// can reach them through the entry module without importing a second path.
+export { openTerminal, terminalHref } from './open-terminal.js';
+
 // Export for use in components and tests
 export { getInitialData, navigateTo, stateManager };

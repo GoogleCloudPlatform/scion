@@ -53,6 +53,7 @@ import {
 import type { MessageMode } from '../../shared/types.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { terminalHref } from '../../client/open-terminal.js';
 
 @customElement('scion-page-agents')
 export class ScionPageAgents extends LitElement {
@@ -1138,7 +1139,7 @@ export class ScionPageAgents extends LitElement {
                   class="action-btn-primary"
                   variant="primary"
                   size="small"
-                  href="/agents/${agent.id}/terminal"
+                  href=${terminalHref(agent.id)}
                   ?disabled=${!isTerminalAvailable(agent)}
                   aria-label="Terminal"
                 >

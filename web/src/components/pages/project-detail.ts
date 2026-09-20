@@ -64,6 +64,7 @@ import {
 import type { FileEditorDataSource } from '../shared/file-editor.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { terminalHref } from '../../client/open-terminal.js';
 
 type AgentSortField = 'name' | 'status' | 'created' | 'updated';
 type SortDir = 'asc' | 'desc';
@@ -2249,7 +2250,7 @@ export class ScionPageProjectDetail extends LitElement {
                       <sl-button
                         variant="primary"
                         size="small"
-                        href="/agents/${agent.id}/terminal"
+                        href=${terminalHref(agent.id)}
                         ?disabled=${!isTerminalAvailable(agent)}
                         aria-label="Terminal"
                       >
@@ -2394,7 +2395,7 @@ export class ScionPageProjectDetail extends LitElement {
                     <sl-button
                       variant="primary"
                       size="small"
-                      href="/agents/${agent.id}/terminal"
+                      href=${terminalHref(agent.id)}
                       ?disabled=${!isTerminalAvailable(agent)}
                       aria-label="Terminal"
                     >
