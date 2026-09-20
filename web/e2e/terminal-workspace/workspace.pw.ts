@@ -2088,18 +2088,18 @@ test('teardown hides workspace even when session close throws AggregateError (C1
   // runtime) holds the live sessions. Monkey-patching close() to throw after the
   // real cleanup simulates a renderer failure during teardown.
   const injected = await page.evaluate(() => {
-    const el = document.querySelector('#terminal-workspace') as
+    const el:
       | (HTMLElement & {
           workspaceRoot?: {
             registry: { list: () => Array<{ close: (...args: unknown[]) => void }> };
           };
         })
-      | null;
+      | null = document.querySelector('#terminal-workspace');
     const sessions = el?.workspaceRoot?.registry?.list();
     if (!sessions?.length) return false;
     for (const session of sessions) {
       const original = session.close.bind(session);
-      session.close = (...args: unknown[]) => {
+      session.close = (...args: unknown[]): void => {
         original(...args);
         throw new Error('Injected renderer dispose failure for C1 verification');
       };
@@ -2121,8 +2121,7 @@ test('teardown hides workspace even when session close throws AggregateError (C1
   // dispatchTeardown('logout') → main.ts listener → finally block hides workspace.
   // Construct the coordinationKey the same way the coordinator does.
   await page.evaluate(() => {
-    const hubUrl =
-      new URL('/', window.location.origin).href.replace(/\/+$/, '') + '/';
+    const hubUrl = new URL('/', window.location.origin).href.replace(/\/+$/, '') + '/';
     const key = `terminal-owner:v1:${JSON.stringify([hubUrl, 'fixture-user'])}`;
     const bc = new BroadcastChannel(key);
     bc.postMessage({
@@ -2144,9 +2143,15 @@ test('teardown hides workspace even when session close throws AggregateError (C1
   await expect.poll(() => socket.closes).toBeGreaterThanOrEqual(1);
 
   // Verify the error was logged by the coordinator's receive() catch block.
-  await expect
-    .poll(() => consoleErrors.some((msg) => msg.includes('[Teardown]')))
-    .toBe(true);
+  await expect.poll(() => consoleErrors.some((msg) => msg.includes('[Teardown]'))).toBe(true);
+
+  // Verify Web Lock is still held after the throw — intentionally retained
+  // on failure to prevent split ownership (no other tab can become owner).
+  const lockHeld = await page.evaluate(async (): Promise<boolean> => {
+    const { held } = await navigator.locks.query();
+    return held?.some((lock) => lock.name?.startsWith('terminal-owner:')) ?? false;
+  });
+  expect(lockHeld).toBe(true);
 
   // No recreation possible after teardown — the accountTornDown guard prevents
   // ensureTerminalCoordinator() from creating a new coordinator.
