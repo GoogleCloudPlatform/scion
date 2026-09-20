@@ -65,3 +65,17 @@ Browser coverage now includes real Chromium ArrowDown/ArrowUp/Home/End rail
 navigation, proof that no `role="option"` remains, metadata-only refresh focus
 preservation across an accessible-name change, and the existing deployment
 base-path route/history case.
+
+## R3 focus acceptance
+
+R2 review found the metadata-focus test was flaky without retries. A preserved
+pre-fix repeat and focused diagnostic run showed the renamed Close button was
+rendered, but focus had moved into the visible `scion-terminal-pane` shadow
+textarea. The race was the terminal pane's delayed newly-connected autofocus,
+not the metadata refresh or the test assertion.
+
+R3 guards terminal connect autofocus so it only focuses the terminal when the
+document focus is neutral or already inside that terminal pane. If the user has
+moved focus to a rail/header/control before the socket reaches `connected`, the
+terminal no longer steals focus. The metadata-only focus test remains a strict
+`toBeFocused()` assertion and passes repeated retries-disabled runs.

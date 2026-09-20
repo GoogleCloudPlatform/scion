@@ -659,9 +659,14 @@ export class ScionTerminalPane extends LitElement {
       if (this.measurable()) {
         this.fitAddon?.fit();
         this.sendResize();
-        this.terminal?.focus();
+        if (this.shouldAutoFocusTerminal()) this.terminal?.focus();
       }
     }
+  }
+
+  private shouldAutoFocusTerminal(): boolean {
+    const active = document.activeElement;
+    return !active || active === document.body || active === this || this.contains(active);
   }
 
   private get agentDisplayStatus(): string {
