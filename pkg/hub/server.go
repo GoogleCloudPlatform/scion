@@ -1544,6 +1544,10 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	if cfg.ProxyAuth != nil {
 		srv.authConfig.ProxyUserProvisioner = MakeProxyUserProvisioner(srv)
 	}
+	// External bearer tokens from trusted issuers (e.g. Google credentials
+	// forwarded by the Gemini Enterprise A2A bridge) are provisioned through
+	// the same sign-in policy as interactive OAuth logins.
+	srv.authConfig.ExternalUserProvisioner = MakeProxyUserProvisioner(srv)
 
 	// Initialize Cloud Logging query service (optional, gated on GCP project ID)
 	if projectID := logging.ResolveProjectID(); projectID != "" {

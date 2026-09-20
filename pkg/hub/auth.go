@@ -73,6 +73,15 @@ type AuthConfig struct {
 	// The middleware loads from this pointer on each request to see
 	// hot-reloaded authenticators.
 	FederationAuth *atomic.Pointer[FederationAuthenticator]
+	// ExternalUserProvisioner turns a verified external user identity (a bearer
+	// token from a trusted issuer, e.g. a Google token forwarded by Gemini
+	// Enterprise) into a stored Hub user, applying the Hub's sign-in policy
+	// (admin_emails, authorized_domains, user_access_mode). When nil, external
+	// bearer tokens are only accepted for users that already exist and are active.
+	ExternalUserProvisioner func(ctx context.Context, info *ProxyUserInfo) (UserIdentity, error)
+	// GoogleTokenInfoURL overrides the Google tokeninfo endpoint used to verify
+	// opaque Google OAuth2 access tokens. Empty means the production endpoint.
+	GoogleTokenInfoURL string
 	// CredentialStore handles agent credential validation (Phase 1H).
 	// When non-nil, agent tokens are validated against persistent credential state.
 	CredentialStore store.AgentCredentialStore
@@ -401,6 +410,11 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				claims, err := cfg.UserTokenSvc.ValidateUserToken(token)
 				if err != nil {
+					// Not a Hub-issued user JWT. It may be an OIDC ID token from
+					// a trusted external issuer (server.federation.trusted_issuers).
+					if serveExternalBearer(w, r, next, ctx, token, cfg, log) {
+						return
+					}
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token: "+err.Error(), nil)
 					return
@@ -448,6 +462,12 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 
 			default:
+				// Opaque bearer tokens (e.g. Google OAuth2 access tokens forwarded
+				// by Gemini Enterprise) are verified against the trusted issuer
+				// configuration; anything else is rejected.
+				if serveExternalBearer(w, r, next, ctx, token, cfg, log) {
+					return
+				}
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 					"unrecognized token format", nil)
 				return

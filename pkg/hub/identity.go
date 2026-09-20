@@ -294,6 +294,10 @@ const (
 	AuthTypeBroker     = "broker"
 	AuthTypeProxy      = "proxy"
 	AuthTypeFederation = "federation"
+	// AuthTypeExternalBearer marks a Hub user authenticated with a bearer token
+	// issued by a trusted external issuer (e.g. a Google token forwarded by
+	// Gemini Enterprise) rather than a Hub-issued credential.
+	AuthTypeExternalBearer = "external-bearer"
 )
 
 // contextWithAuthType returns a new context with the auth type set.

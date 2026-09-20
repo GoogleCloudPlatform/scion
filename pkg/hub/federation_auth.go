@@ -167,6 +167,16 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 	}, nil
 }
 
+// IssuerConfig returns the trusted issuer configuration for issuerURL
+// (trailing slashes ignored) and whether such an issuer is configured.
+func (a *FederationAuthenticator) IssuerConfig(issuerURL string) (config.TrustedIssuerConfig, bool) {
+	entry, ok := a.issuers[strings.TrimRight(issuerURL, "/")]
+	if !ok {
+		return config.TrustedIssuerConfig{}, false
+	}
+	return entry.config, true
+}
+
 // Authenticate validates a federation OIDC identity token and returns the
 // authenticated FederatedIdentity on success.
 func (a *FederationAuthenticator) Authenticate(tokenString string) (FederatedIdentity, error) {

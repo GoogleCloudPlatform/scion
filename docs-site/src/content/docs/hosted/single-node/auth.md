@@ -265,6 +265,35 @@ server:
   - `service_account`: Authenticates automated workloads via GCP Service Accounts.
   - `user`: Maps OIDC tokens to standard user identities, with configurable `default_role` (defaults to `viewer`) and domain restrictions using wildcards (e.g. `allowed_emails: ["*@example.com"]`).
 
+### External Bearer Tokens (forwarded end-user credentials)
+
+Integrations that sit in front of the Hub — for example the Gemini Enterprise A2A bridge — do not mint Hub credentials on a user's behalf. They forward the end user's **own** Google credential as a plain `Authorization: Bearer` header, and the Hub's auth middleware verifies it against a `user`-type trusted issuer for `https://accounts.google.com`:
+
+- **OIDC ID tokens (JWTs)** are verified exactly like any other federated token: JWKS signature, `iss`, `aud` (`expected_audience`), expiry, and `allowed_emails`.
+- **Opaque Google OAuth2 access tokens (`ya29.…`)** are introspected with Google's `tokeninfo` endpoint. The token's audience must equal the issuer's `expected_audience` (the OAuth client ID registered with the calling application), the email must be Google-verified, and `allowed_emails` is enforced. Results are cached for at most five minutes (or the token's remaining lifetime, whichever is shorter).
+
+A verified email is then resolved to a Hub user through the **same sign-in policy as interactive login** (`admin_emails`, `authorized_domains`, `user_access_mode`), so a forwarded credential never bypasses Hub gating and never yields more than the role that policy assigns (`member` unless the email is in `admin_emails`). Project-level access is still granted separately through project membership or role bindings.
+
+```yaml
+server:
+  federation:
+    enabled: true
+    trusted_issuers:
+      - issuer_url: "https://accounts.google.com"
+        jwks_url: "https://www.googleapis.com/oauth2/v3/certs"
+        issuer_type: "user"
+        default_role: "member"
+        # REQUIRED for opaque access tokens: the OAuth client ID whose tokens are accepted.
+        expected_audience: "1234567890-abc.apps.googleusercontent.com"
+        # Who may sign in this way. Omit to accept any verified Google account
+        # that passes the Hub sign-in policy.
+        allowed_emails: ["*@example.com", "named.tester@gmail.com"]
+```
+
+:::caution[Audience binding is mandatory for access tokens]
+Without `expected_audience`, an access token minted for *any* application (for example one from `gcloud`) would authenticate its owner. The Hub therefore refuses opaque access tokens for issuers that have no `expected_audience`.
+:::
+
 ---
 
 ## Development Authentication (Dev Auth)
