@@ -20,7 +20,7 @@
  * Provides the top header bar with breadcrumb, user menu, and actions
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
@@ -66,6 +66,11 @@ const DOCS_URL = 'https://googlecloudplatform.github.io/scion/overview/';
 
 /** Feature flag gating the chat mode (and therefore the mode switch). */
 const NATIVE_CHAT_FLAG = 'web.native_chat';
+const TERMINAL_WORKSPACE_FLAG = 'web.terminal_workspace';
+const TERMINAL_SESSION_COUNT_EVENT = 'scion:terminal-session-count';
+
+let lastDashboardPath = '/';
+let lastChatPath = '/chat';
 
 @customElement('scion-header')
 export class ScionHeader extends LitElement {
@@ -95,6 +100,9 @@ export class ScionHeader extends LitElement {
 
   @state()
   private isDark = false;
+
+  @state()
+  private terminalSessionCount = 0;
 
   static override styles = css`
     :host {
@@ -174,7 +182,7 @@ export class ScionHeader extends LitElement {
       gap: 0.5rem;
     }
 
-    /* Chat ↔ dashboard mode switch */
+    /* Shared mode switch */
     .mode-switch {
       display: flex;
       align-items: center;
@@ -330,7 +338,7 @@ export class ScionHeader extends LitElement {
     }
   `;
 
-  override render() {
+  override render(): TemplateResult {
     return html`
       <div class="header-left">
         ${this.showMobileMenu
@@ -398,15 +406,22 @@ export class ScionHeader extends LitElement {
     return path.startsWith('/chat');
   }
 
+  private isTerminalView(): boolean {
+    const path = this.currentPath || window.location.pathname;
+    return path === '/terminals' || path.startsWith('/terminals/');
+  }
+
   /**
-   * Toggle between the dashboard and chat views. Chat is a peer view of the
-   * dashboard, so the switch lives in the header rather than in either
-   * sidebar — it is the one control present in both shells.
+   * Toggle between the peer views. Chat can be disabled independently; the
+   * terminal workspace remains available whenever its feature is enabled.
    */
-  private renderModeSwitch() {
-    if (!isFeatureEnabled(NATIVE_CHAT_FLAG)) return '';
+  private renderModeSwitch(): TemplateResult | '' {
+    const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
+    const terminalsEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
+    if (!chatEnabled && !terminalsEnabled) return '';
 
     const isChat = this.isChatView();
+    const isTerminal = this.isTerminalView();
 
     return html`
       <div class="mode-switch" role="group" aria-label="Switch view">
@@ -414,22 +429,40 @@ export class ScionHeader extends LitElement {
           <sl-icon-button
             name="house"
             label="Dashboard"
-            class=${isChat ? '' : 'active'}
-            @click=${() => {
-              this.handleModeSwitch('/');
+            class=${!isChat && !isTerminal ? 'active' : ''}
+            @click=${(): void => {
+              void this.handleModeSwitch('dashboard');
             }}
           ></sl-icon-button>
         </sl-tooltip>
-        <sl-tooltip content="Chat">
-          <sl-icon-button
-            name="chat-dots"
-            label="Chat"
-            class=${isChat ? 'active' : ''}
-            @click=${() => {
-              this.handleModeSwitch('/chat');
-            }}
-          ></sl-icon-button>
-        </sl-tooltip>
+        ${chatEnabled
+          ? html`
+              <sl-tooltip content="Chat">
+                <sl-icon-button
+                  name="chat-dots"
+                  label="Chat"
+                  class=${isChat ? 'active' : ''}
+                  @click=${(): void => {
+                    void this.handleModeSwitch('chat');
+                  }}
+                ></sl-icon-button>
+              </sl-tooltip>
+            `
+          : ''}
+        ${terminalsEnabled
+          ? html`
+              <sl-tooltip content=${`Terminals (${this.terminalSessionCount})`}>
+                <sl-icon-button
+                  name="terminal"
+                  label=${`Terminals (${this.terminalSessionCount})`}
+                  class=${isTerminal ? 'active' : ''}
+                  @click=${(): void => {
+                    void this.handleModeSwitch('terminals');
+                  }}
+                ></sl-icon-button>
+              </sl-tooltip>
+            `
+          : ''}
       </div>
     `;
   }
@@ -445,26 +478,36 @@ export class ScionHeader extends LitElement {
    * Uses the same nav-click event as the sidebar so the router handles it
    * identically in both the app and chat shells.
    */
-  private async handleModeSwitch(targetBase: string): Promise<void> {
+  private async handleModeSwitch(targetMode: 'dashboard' | 'chat' | 'terminals'): Promise<void> {
     const currentPath = this.currentPath || window.location.pathname;
     let target: string;
 
-    if (targetBase === '/chat') {
-      // Dashboard → Chat: carry the project ID into a space URL.
-      const projectId = projectIdFromDashboardPath(currentPath);
-      target = projectId ? `/chat/space/${encodeURIComponent(projectId)}` : '/chat';
-    } else {
-      // Chat → Dashboard: resolve project ID from the chat URL.
-      const projectId = projectIdFromChatSpacePath(currentPath);
-      if (projectId) {
-        target = `/projects/${encodeURIComponent(projectId)}`;
+    if (targetMode === 'terminals') {
+      target = '/terminals';
+    } else if (targetMode === 'chat') {
+      if (lastChatPath && lastChatPath.startsWith('/chat')) {
+        target = lastChatPath;
       } else {
-        const slug = slugFromChatPath(currentPath);
-        if (slug) {
-          const resolvedId = await this.resolveProjectIdBySlug(slug);
-          target = resolvedId ? `/projects/${encodeURIComponent(resolvedId)}` : '/';
+        // Dashboard -> Chat: carry the project ID into a space URL.
+        const projectId = projectIdFromDashboardPath(currentPath);
+        target = projectId ? `/chat/space/${encodeURIComponent(projectId)}` : '/chat';
+      }
+    } else {
+      if (lastDashboardPath && !lastDashboardPath.startsWith('/chat')) {
+        target = lastDashboardPath;
+      } else {
+        // Chat -> Dashboard: resolve project ID from the chat URL.
+        const projectId = projectIdFromChatSpacePath(currentPath);
+        if (projectId) {
+          target = `/projects/${encodeURIComponent(projectId)}`;
         } else {
-          target = '/';
+          const slug = slugFromChatPath(currentPath);
+          if (slug) {
+            const resolvedId = await this.resolveProjectIdBySlug(slug);
+            target = resolvedId ? `/projects/${encodeURIComponent(resolvedId)}` : '/';
+          } else {
+            target = '/';
+          }
         }
       }
     }
@@ -502,7 +545,7 @@ export class ScionHeader extends LitElement {
     return '';
   }
 
-  private renderUserSection() {
+  private renderUserSection(): TemplateResult {
     if (!this.user) {
       return html`
         <a href="/auth/login" class="sign-in-link">
@@ -545,6 +588,36 @@ export class ScionHeader extends LitElement {
     } else {
       root.setAttribute('data-theme', 'light');
       root.classList.remove('sl-theme-dark');
+    }
+    window.addEventListener(
+      TERMINAL_SESSION_COUNT_EVENT,
+      this.handleTerminalSessionCount as EventListener
+    );
+    this.rememberModePath();
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener(
+      TERMINAL_SESSION_COUNT_EVENT,
+      this.handleTerminalSessionCount as EventListener
+    );
+  }
+
+  override updated(changedProperties: Map<string, unknown>): void {
+    if (changedProperties.has('currentPath')) this.rememberModePath();
+  }
+
+  private readonly handleTerminalSessionCount = (event: CustomEvent<{ count?: number }>): void => {
+    this.terminalSessionCount = Math.max(0, event.detail?.count ?? 0);
+  };
+
+  private rememberModePath(): void {
+    const path = this.currentPath || window.location.pathname;
+    if (path.startsWith('/chat')) {
+      lastChatPath = path;
+    } else if (path !== '/terminals' && !path.startsWith('/terminals/')) {
+      lastDashboardPath = path || '/';
     }
   }
 

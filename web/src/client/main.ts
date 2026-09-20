@@ -171,7 +171,7 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
   if (terminalCoordinator) return terminalCoordinator;
   const app = document.getElementById('app');
   if (!app) return null;
-  terminalWorkspace = new TerminalWorkspaceRoot();
+  terminalWorkspace = new TerminalWorkspaceRoot(currentUser);
   app.appendChild(terminalWorkspace.element);
   terminalCoordinator = new TerminalCoordinator(
     {
@@ -900,6 +900,8 @@ async function renderRoute(path: string): Promise<void> {
       }
       appContainer.hidden = true;
       const coordinator = ensureTerminalCoordinator();
+      terminalWorkspace?.setUser(currentUser);
+      terminalWorkspace?.setCurrentPath(path);
       terminalWorkspace?.show(true);
       setDocumentTitle('Terminals');
       const agentId = pathname.match(terminalAgentRoute)?.[1];

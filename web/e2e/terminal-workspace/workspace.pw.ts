@@ -1,15 +1,39 @@
 import { test, expect, type Page } from '@playwright/test';
 
 const agent = '11111111-1111-4111-8111-111111111111';
+const agentB = '22222222-2222-4222-8222-222222222222';
+
+interface AgentFixture {
+  id: string;
+  name: string;
+  phase: string;
+  projectId: string;
+  activity?: string;
+}
 
 async function setup(
   page: Page,
   enabled = true,
-  locks = true
-): Promise<{ readonly attaches: number; readonly closes: number; sent: string[] }> {
+  locks = true,
+  agents: Record<string, AgentFixture> = {
+    [agent]: {
+      id: agent,
+      name: 'isolated-agent',
+      phase: 'running',
+      projectId: 'fixture-project',
+    },
+  },
+  nativeChatEnabled = true
+): Promise<{
+  readonly attaches: number;
+  readonly closes: number;
+  disconnectAll(): void;
+  sent: string[];
+}> {
   let attaches = 0;
   let closes = 0;
   const sent: string[] = [];
+  const sockets: Array<{ close: (options?: { code?: number; reason?: string }) => void }> = [];
   await page.addInitScript(
     ({ enabled, locks }) => {
       window.__SCION_FEATURES__ = { 'web.terminal_workspace': enabled };
@@ -36,23 +60,33 @@ async function setup(
     },
     { enabled, locks }
   );
-  await page.route('**/api/v1/agents/**', (route) =>
-    route.fulfill({
-      json: route.request().url().endsWith('/pty')
-        ? {}
-        : {
-            id: agent,
-            name: 'isolated-agent',
-            phase: 'running',
-            projectId: 'fixture-project',
-          },
-    })
+  await page.route('**/auth/me', (route) =>
+    route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
   );
+  await page.route('**/api/v1/settings/public', (route) =>
+    route.fulfill({ json: { nativeChatEnabled } })
+  );
+  await page.route('**/api/v1/agents/**', (route) => {
+    if (route.request().url().endsWith('/pty')) {
+      void route.fulfill({ json: {} });
+      return;
+    }
+    const id =
+      route
+        .request()
+        .url()
+        .match(/\/api\/v1\/agents\/([^/?]+)/)?.[1] ?? agent;
+    void route.fulfill({
+      status: agents[id] ? 200 : 404,
+      json: agents[id] ?? { error: 'not found' },
+    });
+  });
   await page.route('**/api/v1/system/status', (route) =>
     route.fulfill({ json: { complete: true } })
   );
   await page.routeWebSocket('**/pty?*', (socket) => {
     attaches++;
+    sockets.push(socket);
     socket.onMessage((message) => sent.push(String(message)));
     socket.onClose(() => closes++);
   });
@@ -62,6 +96,9 @@ async function setup(
     },
     get closes(): number {
       return closes;
+    },
+    disconnectAll(): void {
+      for (const socket of sockets) socket.close({ code: 1006, reason: 'fixture disconnect' });
     },
     sent,
   };
@@ -178,6 +215,94 @@ test('repeated pending and connected opens reuse one pane; a duplicate pane is r
       () => (window as typeof window & { terminalInitializers?: number }).terminalInitializers
     )
   ).toBe(1);
+});
+
+test('rail selection reuses sessions and disambiguates repeated agent names by project', async ({
+  page,
+}) => {
+  const socket = await setup(page, true, true, {
+    [agent]: { id: agent, name: 'worker', phase: 'running', projectId: 'alpha-project' },
+    [agentB]: { id: agentB, name: 'worker', phase: 'running', projectId: 'beta-project' },
+  });
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await page.evaluate(
+    (path) => document.dispatchEvent(new CustomEvent('nav-click', { detail: { path } })),
+    `/terminals/${agentB}`
+  );
+  await expect.poll(() => socket.attaches).toBe(2);
+  await expect(page.getByRole('button', { name: 'Terminals (2)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /worker in alpha-project/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /worker in beta-project/ })).toBeVisible();
+
+  await page.getByRole('button', { name: /worker in alpha-project/ }).click();
+  await expect(page).toHaveURL(`/terminals/${agent}`);
+  expect(socket.attaches).toBe(2);
+  await expect(page.locator('#terminal-workspace scion-terminal-pane')).toHaveCount(2);
+});
+
+test('close removes only that retained client and leaves peers connected', async ({ page }) => {
+  const socket = await setup(page, true, true, {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'same-project' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'same-project' },
+  });
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await page.evaluate(
+    (path) => document.dispatchEvent(new CustomEvent('nav-click', { detail: { path } })),
+    `/terminals/${agentB}`
+  );
+  await expect.poll(() => socket.attaches).toBe(2);
+  await page.getByRole('button', { name: 'Close alpha' }).click();
+  await expect(page.getByRole('button', { name: 'Terminals (1)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /beta in same-project/ })).toBeVisible();
+  expect(socket.sent.some((frame) => frame.includes('AmQ='))).toBe(true);
+  await expect(page.locator('#terminal-workspace scion-terminal-pane')).toHaveCount(1);
+});
+
+test('disconnected entries persist until explicit reconnect or close', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  socket.disconnectAll();
+  await expect(page.locator('#terminal-workspace')).toContainText('Disconnected');
+  await expect(page.getByRole('button', { name: 'Terminals (1)' })).toBeVisible();
+  await page.getByRole('button', { name: 'Reconnect isolated-agent' }).click();
+  await expect.poll(() => socket.attaches).toBe(2);
+  await page.getByRole('button', { name: 'Close isolated-agent' }).click();
+  await expect(page.getByRole('button', { name: 'Terminals (0)' })).toBeVisible();
+  await expect(page.locator('#terminal-workspace')).toContainText('No terminals are open.');
+});
+
+test('empty workspace and chat-disabled header keep Terminals available', async ({ page }) => {
+  await setup(page, true, true, undefined, false);
+  await page.goto('/terminals');
+  await expect(page.locator('#terminal-workspace')).toContainText('No terminals are open.');
+  await expect(page.getByRole('button', { name: 'Dashboard' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Terminals (0)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Chat' })).toHaveCount(0);
+});
+
+test('mode switch restores last dashboard and chat routes while retaining terminal selection', async ({
+  page,
+}) => {
+  const socket = await setup(page);
+  await page.goto('/projects/project-123/settings');
+  await page.getByRole('button', { name: 'Chat' }).click();
+  await expect(page).toHaveURL('/chat');
+  await page.evaluate(
+    (path) => document.dispatchEvent(new CustomEvent('nav-click', { detail: { path } })),
+    `/terminals/${agent}`
+  );
+  await expect.poll(() => socket.attaches).toBe(1);
+  await page.getByRole('button', { name: 'Dashboard' }).click();
+  await expect(page).toHaveURL('/projects/project-123/settings');
+  await page.getByRole('button', { name: 'Terminals (1)' }).click();
+  await expect(page).toHaveURL('/terminals');
+  await expect(page.locator('#terminal-workspace scion-terminal-pane:not([hidden])')).toHaveCount(
+    1
+  );
+  expect(socket.attaches).toBe(1);
 });
 
 test('explicit close during agent initialization cannot attach later', async ({ page }) => {

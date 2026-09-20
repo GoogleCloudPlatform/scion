@@ -81,11 +81,14 @@ export interface TerminalSession {
   close(reason?: 'explicit' | 'navigation'): void;
 }
 
+export type TerminalRegistryListener = (sessions: readonly TerminalSession[]) => void;
+
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Document-local registry. Browser ownership and UI selection belong to the coordinator. */
 export class TerminalSessionRegistry {
   private readonly sessions = new Map<string, Session>();
+  private readonly listeners = new Set<TerminalRegistryListener>();
   private readonly hubUrl: string;
   private readonly accountId: string;
   readonly metadata: TerminalMetadata;
@@ -125,12 +128,14 @@ export class TerminalSessionRegistry {
         if (this.sessions.get(id) === session) {
           this.sessions.delete(id);
           this.metadata.release(id);
+          this.notify();
         }
       },
       (agent) => this.metadata.seed(id, agent)
     );
     this.sessions.set(id, session);
     this.metadata.retain(id);
+    this.notify();
     void session.connect();
     return session;
   }
@@ -153,6 +158,20 @@ export class TerminalSessionRegistry {
 
   list(): readonly TerminalSession[] {
     return [...this.sessions.values()];
+  }
+
+  /** Collection changes only; individual connection state remains session-owned. */
+  subscribe(listener: TerminalRegistryListener): () => void {
+    this.listeners.add(listener);
+    listener(this.list());
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private notify(): void {
+    const sessions = this.list();
+    for (const listener of this.listeners) listener(sessions);
   }
 }
 
