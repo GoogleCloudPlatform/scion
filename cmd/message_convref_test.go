@@ -60,6 +60,30 @@ func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, 
 		case path == "/healthz" && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
+		case r.Method == http.MethodPost && strings.HasPrefix(path, "/api/v1/conversations/") && strings.HasSuffix(path, "/messages"):
+			// Conversation send endpoint: POST /api/v1/conversations/{id}/messages
+			// Used by Messaging().SendMessage() for conv:<uuid> replies.
+			convID := strings.TrimPrefix(path, "/api/v1/conversations/")
+			convID = strings.TrimSuffix(convID, "/messages")
+			var body struct {
+				Msg  string `json:"msg"`
+				Type string `json:"type"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			outbound = append(outbound, outboundMessage{
+				AgentName:       "conv:" + convID,
+				Message:         body.Msg,
+				Type:            body.Type,
+				ConversationRef: "conv:" + convID,
+			})
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"messageId": "msg-test-conv",
+				"status":    "delivered",
+			})
+
 		case r.Method == http.MethodPost && strings.HasPrefix(path, projectPrefix) && strings.HasSuffix(path, "/outbound-message"):
 			// Outbound message endpoint: /api/v1/projects/<pid>/agents/<agent>/outbound-message
 			rest := path[len(projectPrefix):]

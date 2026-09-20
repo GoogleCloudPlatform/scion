@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -103,6 +104,9 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 	// Apply client-side filtering.
 	// For direct conversations, verify canonical DM key authorization to ensure
 	// stale or forged participant rows cannot grant list visibility.
+	// For agent callers, also apply Hub-off cross-project guard (silently
+	// exclude rather than 403 mid-list, per design §7).
+	agentIdent := GetAgentIdentityFromContext(ctx)
 	var filtered []store.Conversation
 	for _, conv := range conversations {
 		if kindFilter != "" && conv.Kind != kindFilter {
@@ -120,6 +124,11 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 		// DM key. A stale participant row that does not match the key must not
 		// grant listing visibility.
 		if conv.Kind == "direct" && !isCanonicalDMParticipant(conv.ExternalRef, principalKind, principalID) {
+			continue
+		}
+		// Hub-off guard: agent callers must not see cross-project DMs when
+		// the feature is disabled. Silently filter rather than 403 mid-list.
+		if agentIdent != nil && !s.isCrossProjectReadAllowed(ctx, &conv, agentIdent) {
 			continue
 		}
 		filtered = append(filtered, conv)
@@ -221,6 +230,11 @@ func (s *Server) handleGetConversation(w http.ResponseWriter, r *http.Request, i
 			Forbidden(w)
 			return
 		}
+		// Hub-off guard: deny agent callers from reading cross-project DMs
+		// when the feature is disabled (design §7).
+		if !s.enforceCrossProjectReadGate(w, r, conv) {
+			return
+		}
 	}
 
 	// Fetch participants — used for authorization (groups) and response.
@@ -289,6 +303,11 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 	if conv.Kind == "direct" {
 		if !authorizeDMRead(conv, identity.Type(), identity.ID()) {
 			Forbidden(w)
+			return
+		}
+		// Hub-off guard: deny agent callers from reading cross-project DMs
+		// when the feature is disabled (design §7).
+		if !s.enforceCrossProjectReadGate(w, r, conv) {
 			return
 		}
 	} else {
@@ -372,6 +391,11 @@ func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Req
 	if conv.Kind == "direct" {
 		if !authorizeDMRead(conv, identity.Type(), identity.ID()) {
 			Forbidden(w)
+			return
+		}
+		// Hub-off guard: deny agent callers from reading cross-project DMs
+		// when the feature is disabled (design §7).
+		if !s.enforceCrossProjectReadGate(w, r, conv) {
 			return
 		}
 	} else {
@@ -772,6 +796,133 @@ func authorizeDMRead(conv *store.Conversation, principalKind, principalID string
 	}
 	// For non-direct conversations, caller must check participant rows separately.
 	// Return true here to fall through to the existing participant check.
+	return true
+}
+
+// isCrossProjectReadAllowed is the non-response-writing predicate form
+// of enforceCrossProjectReadGate. It returns true if the conversation
+// should be visible to the given agent identity, false if it should be
+// silently filtered out (e.g. from list results). Human callers are
+// never passed to this function — the caller must check.
+func (s *Server) isCrossProjectReadAllowed(ctx context.Context, conv *store.Conversation, agentIdent AgentIdentity) bool {
+	if conv.Kind != "direct" {
+		return true
+	}
+
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(conv.ExternalRef)
+	if err != nil {
+		// Unparseable key — fail closed: exclude from list.
+		return false
+	}
+
+	// Find the peer.
+	var peerKind, peerID string
+	callerID := agentIdent.ID()
+	switch {
+	case kindA == "agent" && idA == callerID:
+		peerKind, peerID = kindB, idB
+	case kindB == "agent" && idB == callerID:
+		peerKind, peerID = kindA, idA
+	default:
+		// Caller not in key — prior isCanonicalDMParticipant check handles this.
+		return true
+	}
+
+	if peerKind != "agent" {
+		return true // human-agent DM — always visible.
+	}
+
+	peerAgent, err := s.store.GetAgent(ctx, peerID)
+	if err != nil {
+		slog.Error("isCrossProjectReadAllowed: database error looking up peer agent", "peer_id", peerID, "error", err)
+		return false
+	}
+	if peerAgent == nil {
+		return false
+	}
+
+	if agentIdent.ProjectID() == peerAgent.ProjectID {
+		return true // Same project — always visible.
+	}
+
+	// Cross-project: check Hub gate.
+	return s.crossProjectMessagingEnabled()
+}
+
+// enforceCrossProjectReadGate denies agent callers from reading
+// conversations that cross project boundaries when the Hub-level
+// cross-project messaging switch is disabled. Returns true if access
+// is allowed; writes a 403 and returns false if denied.
+//
+// Human callers are always allowed (authorized audit survives Hub
+// disable per design §7). Same-project conversations and human-agent
+// DMs are always allowed. The peer is derived from the canonical DM
+// key (ExternalRef), not from mutable participant rows.
+func (s *Server) enforceCrossProjectReadGate(w http.ResponseWriter, r *http.Request, conv *store.Conversation) bool {
+	agentIdent := GetAgentIdentityFromContext(r.Context())
+	if agentIdent == nil {
+		// Human callers always pass — authorized audit survives Hub disable.
+		return true
+	}
+
+	if conv.Kind != "direct" {
+		return true
+	}
+
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(conv.ExternalRef)
+	if err != nil {
+		// Unparseable key — fail closed.
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"cross-project read denied: unparseable conversation key", nil)
+		return false
+	}
+
+	// Find the peer: the slot whose (kind, id) does not match the caller.
+	var peerKind, peerID string
+	callerID := agentIdent.ID()
+	switch {
+	case kindA == "agent" && idA == callerID:
+		peerKind, peerID = kindB, idB
+	case kindB == "agent" && idB == callerID:
+		peerKind, peerID = kindA, idA
+	default:
+		// Caller is not named in the key — authorizeDMRead should have
+		// caught this already. Allow through; the prior check is
+		// authoritative.
+		return true
+	}
+
+	// If the peer is not an agent, it's a human-agent DM — always allowed.
+	if peerKind != "agent" {
+		return true
+	}
+
+	// Look up the peer agent to compare project IDs.
+	peerAgent, err := s.store.GetAgent(r.Context(), peerID)
+	if err != nil {
+		slog.Error("enforceCrossProjectReadGate: database error looking up peer agent", "peer_id", peerID, "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Internal server error verifying peer agent", nil)
+		return false
+	}
+	if peerAgent == nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"cross-project read denied: peer agent not found", nil)
+		return false
+	}
+
+	// Same-project DMs are always allowed regardless of Hub setting.
+	if agentIdent.ProjectID() == peerAgent.ProjectID {
+		return true
+	}
+
+	// Cross-project: check the Hub gate.
+	if !s.crossProjectMessagingEnabled() {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"cross-project messaging is disabled", nil)
+		return false
+	}
+
 	return true
 }
 

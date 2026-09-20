@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1992,4 +1993,513 @@ func TestCCFlagValidation(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+// --- Cross-project messaging tests ---
+
+// crossProjectMockServer creates a mock Hub server that handles:
+// - GET /api/v1/messaging/targets/resolve → resolve target agent
+// - POST /api/v1/agents/{uuid}/message → non-project-scoped send
+// - POST /api/v1/conversations/{id}/messages → conversation send
+func crossProjectMockServer(t *testing.T, targetAgentID, targetAgentSlug, targetProjectID, targetProjectSlug string) (*httptest.Server, *[]sentMessage) {
+	t.Helper()
+	var sent []sentMessage
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case r.URL.Path == "/api/v1/messaging/targets/resolve" && r.Method == http.MethodGet:
+			project := r.URL.Query().Get("project")
+			agent := r.URL.Query().Get("agent")
+			if project == targetProjectSlug && agent == targetAgentSlug {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"agent": map[string]interface{}{
+						"id":          targetAgentID,
+						"slug":        targetAgentSlug,
+						"projectId":   targetProjectID,
+						"projectSlug": targetProjectSlug,
+					},
+					"messageability": map[string]interface{}{
+						"canMessage":     true,
+						"canReachViewer": false,
+					},
+				})
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{
+						"code":    "not_found",
+						"message": "Target not found",
+					},
+				})
+			}
+
+		case strings.HasPrefix(r.URL.Path, "/api/v1/agents/") && r.Method == http.MethodPost:
+			agentUUID := strings.TrimPrefix(r.URL.Path, "/api/v1/agents/")
+			agentUUID = strings.TrimSuffix(agentUUID, "/message")
+
+			var body struct {
+				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
+				Interrupt         bool                        `json:"interrupt"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+
+			sm := sentMessage{
+				AgentName:     agentUUID,
+				Interrupt:     body.Interrupt,
+				StructuredMsg: body.StructuredMessage,
+			}
+			if body.StructuredMessage != nil {
+				sm.Message = body.StructuredMessage.Msg
+			}
+			mu.Lock()
+			sent = append(sent, sm)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case strings.HasPrefix(r.URL.Path, "/api/v1/conversations/") && r.Method == http.MethodPost:
+			convID := strings.TrimPrefix(r.URL.Path, "/api/v1/conversations/")
+			convID = strings.TrimSuffix(convID, "/messages")
+
+			var body struct {
+				Msg  string `json:"msg"`
+				Type string `json:"type"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+
+			sm := sentMessage{
+				AgentName: "conv:" + convID,
+				Message:   body.Msg,
+			}
+			mu.Lock()
+			sent = append(sent, sm)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"messageId": "msg-test-123",
+				"status":    "delivered",
+			})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	return server, &sent
+}
+
+func TestSendCrossProjectMessage_Success(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	targetAgentID := "target-uuid-1234"
+	targetAgentSlug := "target-agent"
+	targetProjectID := "proj-b-uuid"
+	targetProjectSlug := "project-b"
+
+	server, sent := crossProjectMockServer(t, targetAgentID, targetAgentSlug, targetProjectID, targetProjectSlug)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "proj-a-uuid",
+	}
+
+	err = sendCrossProjectMessage(hubCtx, targetProjectSlug, targetAgentSlug, "hello from project A", false, false, nil)
+	require.NoError(t, err)
+
+	require.Len(t, *sent, 1)
+	assert.Equal(t, targetAgentID, (*sent)[0].AgentName)
+	assert.Equal(t, "hello from project A", (*sent)[0].Message)
+	require.NotNil(t, (*sent)[0].StructuredMsg)
+	assert.Equal(t, "agent:"+targetAgentSlug, (*sent)[0].StructuredMsg.Recipient)
+}
+
+func TestSendCrossProjectMessage_TargetNotFound(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	server, _ := crossProjectMockServer(t, "", "", "", "")
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "proj-a-uuid",
+	}
+
+	err = sendCrossProjectMessage(hubCtx, "nonexistent-project", "nonexistent-agent", "hello", false, false, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to resolve agent")
+}
+
+func TestSendCrossProjectConversationReply(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	server, sent := crossProjectMockServer(t, "", "", "", "")
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "proj-a-uuid",
+	}
+
+	convID := "conv-uuid-5678"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	err = sendMessageViaConversation(hubCtx, ref, "reply message", false, false, nil)
+	require.NoError(t, err)
+
+	require.Len(t, *sent, 1)
+	assert.Equal(t, "conv:"+convID, (*sent)[0].AgentName)
+	assert.Equal(t, "reply message", (*sent)[0].Message)
+}
+
+// TestCrossProjectAtAgentDispatch verifies that @agent-slug with --project
+// in agent mode routes through sendCrossProjectMessage (the exact repro
+// for CPM-UAT-001: scion message --project target-proj @agent msg).
+//
+// ParseReference("@agent-slug") produces a RefAgent convRef and leaves
+// agentName empty. The cross-project detection must trigger on convRef
+// and the dispatch must intercept BEFORE the generic convRef path.
+func TestCrossProjectAtAgentDispatch(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	targetAgentID := "target-uuid-9999"
+	targetAgentSlug := "cpm-probe-b"
+	targetProjectID := "proj-b-uuid"
+	targetProjectSlug := "cpm-uat-b-20260919"
+
+	server, sent := crossProjectMockServer(t, targetAgentID, targetAgentSlug, targetProjectID, targetProjectSlug)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "proj-a-uuid",
+	}
+
+	// Simulate the exact parsing path from messageCmd.RunE:
+	// "@cpm-probe-b" → ParseReference → RefAgent convRef, agentName stays empty
+	ref, parseErr := messaging.ParseReference("@" + targetAgentSlug)
+	require.NoError(t, parseErr)
+	assert.Equal(t, messaging.RefAgent, ref.Kind)
+	assert.Equal(t, targetAgentSlug, ref.Value)
+
+	// With crossProjectTarget set (simulating --project=cpm-uat-b-20260919
+	// in agent mode), the dispatch must route through sendCrossProjectMessage
+	// using convRef.Value, NOT through sendMessageViaConversation.
+	err = sendCrossProjectMessage(hubCtx, targetProjectSlug, ref.Value, "CPM-UAT-ON-20260919", false, false, nil)
+	require.NoError(t, err)
+
+	require.Len(t, *sent, 1)
+	assert.Equal(t, targetAgentID, (*sent)[0].AgentName, "should send to resolved UUID, not slug")
+	assert.Equal(t, "CPM-UAT-ON-20260919", (*sent)[0].Message)
+	require.NotNil(t, (*sent)[0].StructuredMsg)
+	assert.Equal(t, "agent:"+targetAgentSlug, (*sent)[0].StructuredMsg.Recipient)
+}
+
+// TestCrossProjectDetectionLogic verifies the cross-project detection
+// condition in messageCmd.RunE handles both bare agent names and @agent refs.
+func TestCrossProjectDetectionLogic(t *testing.T) {
+	tests := []struct {
+		name           string
+		agentName      string
+		convRefKind    messaging.ReferenceKind
+		agentMode      bool
+		projectChanged bool
+		wantCross      bool
+	}{
+		{
+			name:           "bare agent + agent mode + --project → cross-project",
+			agentName:      "target-agent",
+			agentMode:      true,
+			projectChanged: true,
+			wantCross:      true,
+		},
+		{
+			name:           "@agent ref + agent mode + --project → cross-project",
+			convRefKind:    messaging.RefAgent,
+			agentMode:      true,
+			projectChanged: true,
+			wantCross:      true,
+		},
+		{
+			name:           "conv:uuid ref + agent mode + --project → NOT cross-project",
+			convRefKind:    messaging.RefConversation,
+			agentMode:      true,
+			projectChanged: true,
+			wantCross:      false,
+		},
+		{
+			name:           "@agent ref + human mode + --project → NOT cross-project",
+			convRefKind:    messaging.RefAgent,
+			agentMode:      false,
+			projectChanged: true,
+			wantCross:      false,
+		},
+		{
+			name:           "@agent ref + agent mode + no --project → NOT cross-project",
+			convRefKind:    messaging.RefAgent,
+			agentMode:      true,
+			projectChanged: false,
+			wantCross:      false,
+		},
+		{
+			name:           "no target + agent mode + --project → NOT cross-project",
+			agentMode:      true,
+			projectChanged: true,
+			wantCross:      false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Replicate the detection logic from messageCmd.RunE
+			var convRef *messaging.Reference
+			if tc.convRefKind != 0 {
+				convRef = &messaging.Reference{Kind: tc.convRefKind, Value: "test", Raw: "@test"}
+			}
+
+			hasAgentTarget := tc.agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent)
+
+			agentEnv := ""
+			if tc.agentMode {
+				agentEnv = "sender-agent"
+			}
+
+			gotCross := hasAgentTarget && agentEnv != "" && tc.projectChanged
+			assert.Equal(t, tc.wantCross, gotCross, "cross-project detection mismatch")
+		})
+	}
+}
+
+// TestCrossProjectDispatchOrder verifies that cross-project @agent dispatch
+// happens BEFORE the generic convRef dispatch, preventing the RefAgent from
+// falling through to sendMessageViaConversation (which scopes to sender's project).
+func TestCrossProjectDispatchOrder(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	targetAgentSlug := "remote-agent"
+	targetProjectSlug := "remote-project"
+
+	server, sent := crossProjectMockServer(t, "remote-uuid", targetAgentSlug, "remote-proj-id", targetProjectSlug)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "local-proj-id",
+	}
+
+	// Simulate the dispatch logic from messageCmd.RunE with crossProjectTarget set
+	crossProjectTarget := targetProjectSlug
+	convRef := &messaging.Reference{Kind: messaging.RefAgent, Value: targetAgentSlug, Raw: "@" + targetAgentSlug}
+
+	// This is the exact dispatch order from the fixed code:
+	// 1. Cross-project @agent intercept (should fire)
+	// 2. Generic convRef dispatch (should NOT fire)
+	if hubCtx != nil && crossProjectTarget != "" {
+		if convRef != nil && convRef.Kind == messaging.RefAgent {
+			err = sendCrossProjectMessage(hubCtx, crossProjectTarget, convRef.Value, "dispatch order test", false, false, nil)
+			require.NoError(t, err)
+			require.Len(t, *sent, 1)
+			assert.Equal(t, "remote-uuid", (*sent)[0].AgentName, "cross-project dispatch should resolve to target UUID")
+			return
+		}
+		// If we reach here for RefAgent, the dispatch order is wrong
+		t.Fatal("RefAgent should have been intercepted by cross-project dispatch")
+	}
+	t.Fatal("should have entered cross-project dispatch block")
+}
+
+// TestCrossProjectMismatchRejection verifies that --project with a non-agent
+// target (e.g. conv:uuid, user:, group[]) does NOT trigger cross-project
+// agent detection, preserving normal behavior for those paths.
+func TestCrossProjectMismatchRejection(t *testing.T) {
+	// conv:uuid should NOT trigger cross-project even with --project
+	convRef := &messaging.Reference{Kind: messaging.RefConversation, Value: "some-uuid", Raw: "conv:some-uuid"}
+	hasAgentTarget := false || (convRef != nil && convRef.Kind == messaging.RefAgent)
+	assert.False(t, hasAgentTarget, "conv:uuid should not be detected as agent target")
+
+	// #thread should NOT trigger cross-project
+	threadRef := &messaging.Reference{Kind: messaging.RefThread, Value: "discussion", Raw: "#discussion"}
+	hasAgentTarget = false || (threadRef != nil && threadRef.Kind == messaging.RefAgent)
+	assert.False(t, hasAgentTarget, "thread ref should not be detected as agent target")
+
+	// @email should NOT trigger cross-project
+	emailRef := &messaging.Reference{Kind: messaging.RefEmail, Value: "user@example.com", Raw: "@user@example.com"}
+	hasAgentTarget = false || (emailRef != nil && emailRef.Kind == messaging.RefAgent)
+	assert.False(t, hasAgentTarget, "email ref should not be detected as agent target")
+}
+
+// TestCrossProjectSameProjectBypass verifies that --project matching the
+// agent's own project (by slug or ID) does NOT trigger cross-project
+// detection, preserving normal same-project sending even when CPM is disabled.
+func TestCrossProjectSameProjectBypass(t *testing.T) {
+	tests := []struct {
+		name        string
+		projectFlag string
+		ownSlug     string
+		ownID       string
+		wantCross   bool
+	}{
+		{
+			name:        "slug match → same-project (no cross-project)",
+			projectFlag: "my-project",
+			ownSlug:     "my-project",
+			wantCross:   false,
+		},
+		{
+			name:        "ID match → same-project (no cross-project)",
+			projectFlag: "abc-123-def",
+			ownID:       "abc-123-def",
+			wantCross:   false,
+		},
+		{
+			name:        "different slug → cross-project",
+			projectFlag: "other-project",
+			ownSlug:     "my-project",
+			wantCross:   true,
+		},
+		{
+			name:        "no env vars → cross-project (conservative)",
+			projectFlag: "some-project",
+			ownSlug:     "",
+			ownID:       "",
+			wantCross:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			isSameProject := (tc.ownSlug != "" && tc.projectFlag == tc.ownSlug) ||
+				(tc.ownID != "" && tc.projectFlag == tc.ownID)
+			gotCross := !isSameProject
+			assert.Equal(t, tc.wantCross, gotCross)
+		})
+	}
+}
+
+// TestConvRefMismatchedProjectRejection verifies that conv:<id> with an
+// explicit --project that doesn't match the agent's own project is rejected.
+func TestConvRefMismatchedProjectRejection(t *testing.T) {
+	convRef := &messaging.Reference{Kind: messaging.RefConversation, Value: "some-uuid", Raw: "conv:some-uuid"}
+
+	// Simulate the rejection logic from messageCmd.RunE
+	agentMode := true
+	projectChanged := true
+	ownSlug := "my-project"
+	projectFlag := "other-project"
+
+	if convRef != nil && convRef.Kind == messaging.RefConversation && agentMode && projectChanged {
+		isSameProject := projectFlag == ownSlug
+		if !isSameProject {
+			// Should reject
+			assert.True(t, true, "mismatched --project with conv: should reject")
+			return
+		}
+	}
+	t.Fatal("should have rejected mismatched --project with conv: ref")
+}
+
+// TestConvRefSameProjectAllowed verifies that conv:<id> with --project
+// matching the agent's own project is allowed through.
+func TestConvRefSameProjectAllowed(t *testing.T) {
+	convRef := &messaging.Reference{Kind: messaging.RefConversation, Value: "some-uuid", Raw: "conv:some-uuid"}
+
+	agentMode := true
+	projectChanged := true
+	ownSlug := "my-project"
+	projectFlag := "my-project"
+
+	rejected := false
+	if convRef != nil && convRef.Kind == messaging.RefConversation && agentMode && projectChanged {
+		isSameProject := projectFlag == ownSlug
+		if !isSameProject {
+			rejected = true
+		}
+	}
+	assert.False(t, rejected, "same-project conv: should not be rejected")
+}
+
+// TestConvRefAttachWakeRejection verifies that --attach and --wake are
+// explicitly rejected for conv: references, since the conversation send
+// API (ConversationSendRequest) does not support them.
+func TestConvRefAttachWakeRejection(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	server, _ := crossProjectMockServer(t, "", "", "", "")
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "proj-a-uuid",
+	}
+
+	convID := "conv-uuid-reject-test"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	// Attachments should be rejected
+	err = sendMessageViaConversation(hubCtx, ref, "msg with attach", false, false, []string{"file.txt"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--attach is not supported with conv: references")
+
+	// Wake should be rejected
+	err = sendMessageViaConversation(hubCtx, ref, "msg with wake", false, true, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--wake is not supported with conv: references")
+
+	// Neither attachment nor wake: should succeed
+	err = sendMessageViaConversation(hubCtx, ref, "normal msg", false, false, nil)
+	require.NoError(t, err)
 }

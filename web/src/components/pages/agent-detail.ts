@@ -165,6 +165,10 @@ export class ScionPageAgentDetail extends LitElement {
   @state()
   private chatViewActive = true;
 
+  /** Current user ID for constructing the DM conversation key. */
+  @state()
+  private currentUserId = '';
+
   /** Whether the native chat feature flag is enabled. */
   private get nativeChatEnabled(): boolean {
     return isFeatureEnabled('web.native_chat');
@@ -709,6 +713,25 @@ export class ScionPageAgentDetail extends LitElement {
         );
       }
 
+      // Resolve current user ID for the DM conversation key.
+      // Use pageData first, fall back to auth/me endpoint.
+      if (this.pageData?.user?.id) {
+        this.currentUserId = this.pageData.user.id;
+      } else if (!this.currentUserId) {
+        parallel.push(
+          apiFetch('/api/v1/auth/me')
+            .then(async (res) => {
+              if (res.ok) {
+                const data = (await res.json()) as { id?: string };
+                if (data.id) this.currentUserId = data.id;
+              }
+            })
+            .catch(() => {
+              // User ID resolution is optional; chat will degrade gracefully
+            })
+        );
+      }
+
       if (this.pageData?.user) {
         parallel.push(
           apiFetch(`/api/v1/notifications?agentId=${this.agentId}`)
@@ -1151,6 +1174,10 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-chat-thread
         agentId=${this.agentId}
         agentName=${agent.name || ''}
+        .conversationKey=${this.currentUserId ? `dm:agent:${this.agentId}:user:${this.currentUserId}` : ''}
+        .projectId=${agent.projectId || ''}
+        .currentUserId=${this.currentUserId}
+        ?isDM=${true}
         ?canSend=${can(agent._capabilities, 'attach') &&
         agent._messageability?.canMessage !== false}
         ?showVisibilityToggle=${true}
@@ -1159,6 +1186,7 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-agent-message-viewer
         agentId=${this.agentId}
         agentName=${agent.name || ''}
+        .projectId=${agent.projectId || ''}
         ?canSend=${can(agent._capabilities, 'attach') &&
         agent._messageability?.canMessage !== false}
         ?cloudLogging=${agent.cloudLogging || false}
