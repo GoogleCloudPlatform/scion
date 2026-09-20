@@ -41,10 +41,18 @@ var nativeFieldAliases = map[string]string{
 // raw or as content-derived hashes, regardless of an explicit field policy.
 var mandatoryRedactFields = map[string]struct{}{
 	"gen_ai.system_instructions": {},
-	"organization.id":            {},
-	"user.account_uuid":          {},
-	"user.account_id":            {},
-	"user.id":                    {},
+	// Claude Code 2.1.273 emits prompt/response content and these opaque
+	// per-message identifiers as native log attributes. They must not rely on
+	// a caller's optional redaction configuration before Cloud export.
+	"prompt":            {},
+	"response":          {},
+	"prompt.id":         {},
+	"message.uuid":      {},
+	"request_id":        {},
+	"organization.id":   {},
+	"user.account_uuid": {},
+	"user.account_id":   {},
+	"user.id":           {},
 }
 
 const (

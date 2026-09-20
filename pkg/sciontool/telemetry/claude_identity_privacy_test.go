@@ -148,3 +148,76 @@ func TestReceiverClaudeIdentityCannotReachEgress(t *testing.T) {
 		})
 	}
 }
+
+// The installed Claude 2.1.273 logs-only path emits these keys in native
+// user_prompt and api_response records. Keep content and opaque IDs out of
+// Cloud egress even when a custom redaction list omits the default fields.
+func TestReceiverClaudeInstalledLogShapePrivacy(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		redaction RedactionConfig
+	}{
+		{name: "default", redaction: RedactionConfig{Redact: DefaultRedactFields, Hash: DefaultHashFields}},
+		{name: "custom", redaction: RedactionConfig{Redact: []string{"user.email"}, Hash: []string{"session_id"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewWithConfig(&Config{Enabled: true, Redaction: tc.redaction})
+			p.retryConfig = fastRetryConfig()
+			var captured []*logspb.ResourceLogs
+			p.exporter = &CloudExporter{logClient: &mockLogClient{exportFunc: func(_ context.Context, req *collogspb.ExportLogsServiceRequest, _ ...grpc.CallOption) (*collogspb.ExportLogsServiceResponse, error) {
+				captured = req.ResourceLogs
+				return &collogspb.ExportLogsServiceResponse{}, nil
+			}}}
+			request := &collogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{
+				Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{secretKV("service.name", "claude-code")}},
+				ScopeLogs: []*logspb.ScopeLogs{{
+					Scope: &commonpb.InstrumentationScope{Name: "com.anthropic.claude_code.events"},
+					LogRecords: []*logspb.LogRecord{
+						{Body: stringProtoValue("PRIVATE_NATIVE_BODY"), Attributes: []*commonpb.KeyValue{
+							secretKV("event.name", "user_prompt"),
+							secretKV("prompt", "PRIVATE_PROMPT"),
+							secretKV("prompt.id", "PRIVATE_PROMPT_ID"),
+							secretKV("message.uuid", "PRIVATE_MESSAGE_ID"),
+							secretKV("session.id", "session-123"),
+							secretKV("user.id", "PRIVATE_USER_ID"),
+						}},
+						{Body: stringProtoValue("PRIVATE_NATIVE_BODY"), Attributes: []*commonpb.KeyValue{
+							secretKV("event.name", "assistant_response"),
+							secretKV("response", "PRIVATE_RESPONSE"),
+							secretKV("request_id", "PRIVATE_REQUEST_ID"),
+							secretKV("model", "claude-opus-4-6"),
+						}},
+					},
+				}},
+			}}}
+			body, err := proto.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			receiver := &Receiver{logHandler: p.handleLogs}
+			response := httptest.NewRecorder()
+			receiver.handleHTTPLogs(response, otlpHTTPRequest("/v1/logs", bytes.NewReader(body)))
+			if response.Code != http.StatusOK {
+				t.Fatalf("receiver status %d: %s", response.Code, response.Body.String())
+			}
+			if len(captured) != 1 || len(captured[0].ScopeLogs) != 1 || len(captured[0].ScopeLogs[0].LogRecords) != 2 {
+				t.Fatalf("unexpected log egress shape: %d resource groups", len(captured))
+			}
+			for _, record := range captured[0].ScopeLogs[0].LogRecords {
+				if body := record.GetBody().GetStringValue(); body != "[REDACTED]" {
+					t.Fatalf("native log body was retained")
+				}
+			}
+			promptAttrs := captured[0].ScopeLogs[0].LogRecords[0].Attributes
+			for _, key := range []string{"prompt", "prompt.id", "message.uuid", "user.id"} {
+				assertRedacted(t, promptAttrs, key)
+			}
+			assertAttr(t, promptAttrs, "session.id", HashValue("session-123"))
+			responseAttrs := captured[0].ScopeLogs[0].LogRecords[1].Attributes
+			for _, key := range []string{"response", "request_id"} {
+				assertRedacted(t, responseAttrs, key)
+			}
+			assertAttr(t, responseAttrs, "model", "claude-opus-4-6")
+		})
+	}
+}

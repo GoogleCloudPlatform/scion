@@ -20,6 +20,8 @@ import (
 
 const normalizedEventNameAttribute = "event.name"
 
+const claudeNativeLogScope = "com.anthropic.claude_code.events"
+
 const policyAdmissionReason = "telemetry rejected by receiver admission policy"
 
 var safeSignalName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.:/-]{0,127}$`)
@@ -193,7 +195,11 @@ func (p *receiverPolicy) processLogs(input []*logspb.ResourceLogs) policyResult[
 					record.Attributes = append(record.Attributes, &commonpb.KeyValue{Key: normalizedEventNameAttribute, Value: stringProtoValue(eventName)})
 				}
 				if record.Body != nil {
-					if isStructuredValue(record.Body) {
+					if scopeLogs.GetScope().GetName() == claudeNativeLogScope {
+						// The installed Claude native body is free-form text. Keep it
+						// private even if a custom policy omits log.body.
+						record.Body = stringProtoValue("[REDACTED]")
+					} else if isStructuredValue(record.Body) {
 						record.Body, _ = p.redactor.RedactStructuredProtoValue("log.body", record.Body)
 					} else {
 						record.Body = p.redactor.RedactProtoValue("log.body", record.Body)
