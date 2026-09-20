@@ -97,8 +97,9 @@ function fixture(): {
     },
   });
 
-  const fetcher = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) =>
-    Promise.resolve(json(agent))
+  const fetcher = vi.fn(
+    (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> =>
+      Promise.resolve(json(agent))
   );
   vi.stubGlobal('fetch', fetcher);
 
@@ -227,7 +228,7 @@ describe('TerminalSessionRegistry.dispose (teardown path)', () => {
     );
     vi.stubGlobal(
       'fetch',
-      vi.fn(() => Promise.resolve(json(agent)))
+      vi.fn((): Promise<Response> => Promise.resolve(json(agent)))
     );
     const resources = {
       write: vi.fn(),
@@ -267,7 +268,7 @@ describe('TerminalSessionRegistry.dispose (teardown path)', () => {
     );
     vi.stubGlobal(
       'fetch',
-      vi.fn(() => Promise.resolve(json(agent)))
+      vi.fn((): Promise<Response> => Promise.resolve(json(agent)))
     );
     const registry = new TerminalSessionRegistry(scope);
     registry.dispose();

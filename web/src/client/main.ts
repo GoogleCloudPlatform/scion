@@ -818,12 +818,17 @@ async function init(): Promise<void> {
   window.addEventListener(ACCOUNT_TEARDOWN_EVENT, () => {
     if (accountTornDown) return;
     accountTornDown = true;
-    terminalCoordinator?.teardownAccount();
-    terminalCoordinator = null;
-    // Hide the workspace UI immediately so the login page does not show
-    // hidden active terminals underneath.
-    terminalWorkspace?.show(false);
-    terminalWorkspace = null;
+    try {
+      terminalCoordinator?.teardownAccount();
+    } catch (e) {
+      console.error('[Teardown] session cleanup error:', e);
+    } finally {
+      terminalCoordinator = null;
+      // Hide the workspace UI immediately so the login page does not show
+      // hidden active terminals underneath.
+      terminalWorkspace?.show(false);
+      terminalWorkspace = null;
+    }
   });
 
   // Disconnect SSE on page unload

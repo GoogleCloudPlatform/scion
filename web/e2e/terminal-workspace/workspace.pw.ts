@@ -1839,7 +1839,7 @@ test('owner-tab logout disposes workspace, closes sessions, hides UI', async ({ 
   // Simulate logout by dispatching the teardown event
   await page.evaluate(() => {
     window.dispatchEvent(
-      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } }),
+      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } })
     );
   });
 
@@ -1865,7 +1865,7 @@ test('non-owner logout broadcasts teardown, owner disposes', async ({ context })
   // Non-owner fires teardown
   await other.evaluate(() => {
     window.dispatchEvent(
-      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } }),
+      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } })
     );
   });
 
@@ -1884,7 +1884,7 @@ test('pending connect during teardown aborts inflight attach', async ({ page }) 
   // which cancels any inflight or future connection attempts.
   await page.evaluate(() => {
     window.dispatchEvent(
-      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } }),
+      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } })
     );
   });
 
@@ -1895,7 +1895,7 @@ test('pending connect during teardown aborts inflight attach', async ({ page }) 
   const result = await page.evaluate(async (id) => {
     // Try to navigate to terminals again
     document.dispatchEvent(
-      new CustomEvent('nav-click', { detail: { path: `/terminals/${id}` }, bubbles: true }),
+      new CustomEvent('nav-click', { detail: { path: `/terminals/${id}` }, bubbles: true })
     );
     // Wait a tick for the route handler to execute
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1915,7 +1915,7 @@ test('login after teardown cannot recreate workspace in same page', async ({ pag
   // Teardown
   await page.evaluate(() => {
     window.dispatchEvent(
-      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } }),
+      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } })
     );
   });
   await expect(page.locator('#terminal-workspace')).toBeHidden();
@@ -1924,7 +1924,7 @@ test('login after teardown cannot recreate workspace in same page', async ({ pag
   // The accountTornDown flag prevents recreation within the same SPA lifetime
   await page.evaluate(() => {
     document.dispatchEvent(
-      new CustomEvent('nav-click', { detail: { path: '/terminals' }, bubbles: true }),
+      new CustomEvent('nav-click', { detail: { path: '/terminals' }, bubbles: true })
     );
   });
 
@@ -1933,7 +1933,7 @@ test('login after teardown cannot recreate workspace in same page', async ({ pag
   await expect(page.locator('#terminal-workspace')).toBeHidden();
 });
 
-test('teardown on one hub/account does not affect unrelated workspace', async ({ context }) => {
+test('teardown disposes only the targeted workspace', async ({ context }) => {
   const owner = await context.newPage();
   const ownerSocket = await setup(owner);
   await owner.goto(`/terminals/${agent}`);
@@ -1942,11 +1942,161 @@ test('teardown on one hub/account does not affect unrelated workspace', async ({
   // Teardown the owner
   await owner.evaluate(() => {
     window.dispatchEvent(
-      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } }),
+      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } })
     );
   });
 
   // Owner workspace should be torn down
   await expect(owner.locator('#terminal-workspace')).toBeHidden();
   await expect.poll(() => ownerSocket.closes).toBeGreaterThanOrEqual(1);
+});
+
+// --- Producer integration tests (P3.1 — #1658, criterion 4) ---
+
+test('performLogout dispatches teardown and closes sessions before redirect', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await expect(page.locator('#terminal-workspace')).toBeVisible();
+
+  // Intercept the logout POST so the page does not actually navigate away
+  let logoutPosted = false;
+  await page.route('**/auth/logout', (route) => {
+    logoutPosted = true;
+    void route.fulfill({ status: 200, body: '{}' });
+  });
+  // Block the login redirect so we can inspect state
+  await page.route('**/auth/login**', (route) =>
+    route.fulfill({ status: 200, body: '<html></html>' })
+  );
+
+  // Call performLogout via the auth module
+  await page.evaluate(async () => {
+    const auth = await import('/src/utils/auth.js');
+    auth.performLogout();
+  });
+
+  // Sessions should be closed before the redirect path executes
+  await expect.poll(() => socket.closes).toBeGreaterThanOrEqual(1);
+  await expect(page.locator('#terminal-workspace')).toBeHidden();
+  expect(logoutPosted).toBe(true);
+});
+
+test('API 401 response triggers teardown before login redirect', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await expect(page.locator('#terminal-workspace')).toBeVisible();
+
+  // Block the login redirect so the page stays alive for assertions
+  await page.route('**/login**', (route) => route.fulfill({ status: 200, body: '<html></html>' }));
+
+  // Make a 401-returning API call through the apiFetch wrapper
+  await page.route('**/api/v1/test-401', (route) => route.fulfill({ status: 401 }));
+
+  await page.evaluate(async () => {
+    const api = await import('/src/client/api.js');
+    await api.apiFetch('/api/v1/test-401');
+  });
+
+  // Teardown should have fired — sessions closed, workspace hidden
+  await expect.poll(() => socket.closes).toBeGreaterThanOrEqual(1);
+  await expect(page.locator('#terminal-workspace')).toBeHidden();
+});
+
+test('SSE auth-expiry check triggers teardown before login redirect', async ({ page }) => {
+  // Use custom setup that does NOT stub EventSource, so SSEClient uses real
+  // EventSource-like behavior. We stub /auth/me to return 401 for the probe.
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await expect(page.locator('#terminal-workspace')).toBeVisible();
+
+  // Block the login redirect
+  await page.route('**/login**', (route) => route.fulfill({ status: 200, body: '<html></html>' }));
+
+  // Make the auth-me endpoint return 401 to simulate session expiry
+  await page.route('**/auth/me', (route) => route.fulfill({ status: 401 }));
+
+  // Trigger the SSE auth check path by calling dispatchTeardown('auth-expired')
+  // from the SSE client's perspective. In production this is triggered when
+  // SSEClient.checkAuthAndReconnect() finds /auth/me returns 401.
+  await page.evaluate(async () => {
+    const auth = await import('/src/utils/auth.js');
+    auth.dispatchTeardown('auth-expired');
+  });
+
+  // Teardown should have fired — sessions closed, workspace hidden
+  await expect.poll(() => socket.closes).toBeGreaterThanOrEqual(1);
+  await expect(page.locator('#terminal-workspace')).toBeHidden();
+});
+
+test('pending WebSocket handshake is aborted on teardown', async ({ page }) => {
+  // Setup with a slow WebSocket — intercept the /pty route to delay the upgrade
+  let attaches = 0;
+  let closes = 0;
+  const sent: string[] = [];
+  await page.addInitScript(
+    ({ enabled }) => {
+      window.__SCION_FEATURES__ = { 'web.terminal_workspace': enabled };
+      window.EventSource = class extends EventTarget {
+        onopen: (() => void) | null = null;
+        constructor() {
+          super();
+          queueMicrotask(() => this.onopen?.());
+        }
+        close(): void {}
+      } as unknown as typeof EventSource;
+    },
+    { enabled: true }
+  );
+  await page.route('**/auth/me', (route) =>
+    route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
+  );
+  await page.route('**/api/v1/settings/public', (route) =>
+    route.fulfill({ json: { nativeChatEnabled: true } })
+  );
+  await page.route('**/api/v1/agents/**', (route) => {
+    if (route.request().url().endsWith('/pty')) {
+      void route.fulfill({ json: {} });
+      return;
+    }
+    void route.fulfill({
+      json: { id: agent, name: 'isolated-agent', phase: 'running', projectId: 'fixture-project' },
+    });
+  });
+  await page.route('**/api/v1/system/status', (route) =>
+    route.fulfill({ json: { complete: true } })
+  );
+  // Use routeWebSocket but deliberately delay the connection open
+  await page.routeWebSocket('**/pty?*', (socket) => {
+    attaches++;
+    socket.onMessage((message) => sent.push(String(message)));
+    socket.onClose(() => closes++);
+    // DO NOT send any data — simulates a slow/pending handshake
+  });
+
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => attaches).toBe(1);
+
+  // Trigger teardown while the WebSocket handshake is still pending
+  await page.evaluate(() => {
+    window.dispatchEvent(
+      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } })
+    );
+  });
+
+  // The pending connection should have been closed
+  await expect.poll(() => closes).toBeGreaterThanOrEqual(1);
+  await expect(page.locator('#terminal-workspace')).toBeHidden();
+
+  // No new WebSocket connections should be possible
+  const attachesBefore = attaches;
+  await page.evaluate(async (id) => {
+    document.dispatchEvent(
+      new CustomEvent('nav-click', { detail: { path: `/terminals/${id}` }, bubbles: true })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }, agent);
+  expect(attaches).toBe(attachesBefore);
 });

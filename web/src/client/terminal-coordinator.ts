@@ -242,7 +242,17 @@ export class TerminalCoordinator {
     // Account-teardown is a coordination-level signal that does not target a
     // specific agent. Validate only the key and type, not the agent UUID.
     if (message.type === 'account-teardown') {
-      this.stop();
+      try {
+        this.stop();
+      } catch (e) {
+        console.error('[Teardown] cleanup error:', e);
+      }
+      // Notify the workspace layer so it hides UI and sets the torn-down guard.
+      // The main.ts listener is idempotent (accountTornDown guard), so
+      // double-dispatch from both local and received paths is safe.
+      window.dispatchEvent(
+        new CustomEvent('scion:account-teardown', { detail: { reason: 'peer-logout' } })
+      );
       return;
     }
     if (

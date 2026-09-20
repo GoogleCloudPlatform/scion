@@ -1,6 +1,6 @@
 {
   "extends": "../../tsconfig.json",
-  "compilerOptions": { "noEmit": true },
+  "compilerOptions": { "noEmit": true, "types": ["vite/client"] },
   "include": [
     "terminal-layout.test.ts",
     "terminal-sessions.test.ts",
