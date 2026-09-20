@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1992,4 +1993,190 @@ func TestCCFlagValidation(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+// --- Cross-project messaging tests ---
+
+// crossProjectMockServer creates a mock Hub server that handles:
+// - GET /api/v1/messaging/targets/resolve → resolve target agent
+// - POST /api/v1/agents/{uuid}/message → non-project-scoped send
+// - POST /api/v1/conversations/{id}/messages → conversation send
+func crossProjectMockServer(t *testing.T, targetAgentID, targetAgentSlug, targetProjectID, targetProjectSlug string) (*httptest.Server, *[]sentMessage) {
+	t.Helper()
+	var sent []sentMessage
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case r.URL.Path == "/api/v1/messaging/targets/resolve" && r.Method == http.MethodGet:
+			project := r.URL.Query().Get("project")
+			agent := r.URL.Query().Get("agent")
+			if project == targetProjectSlug && agent == targetAgentSlug {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"agent": map[string]interface{}{
+						"id":          targetAgentID,
+						"slug":        targetAgentSlug,
+						"projectId":   targetProjectID,
+						"projectSlug": targetProjectSlug,
+					},
+					"messageability": map[string]interface{}{
+						"canMessage":     true,
+						"canReachViewer": false,
+					},
+				})
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{
+						"code":    "not_found",
+						"message": "Target not found",
+					},
+				})
+			}
+
+		case strings.HasPrefix(r.URL.Path, "/api/v1/agents/") && r.Method == http.MethodPost:
+			agentUUID := strings.TrimPrefix(r.URL.Path, "/api/v1/agents/")
+			agentUUID = strings.TrimSuffix(agentUUID, "/message")
+
+			var body struct {
+				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
+				Interrupt         bool                        `json:"interrupt"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+
+			sm := sentMessage{
+				AgentName:     agentUUID,
+				Interrupt:     body.Interrupt,
+				StructuredMsg: body.StructuredMessage,
+			}
+			if body.StructuredMessage != nil {
+				sm.Message = body.StructuredMessage.Msg
+			}
+			mu.Lock()
+			sent = append(sent, sm)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case strings.HasPrefix(r.URL.Path, "/api/v1/conversations/") && r.Method == http.MethodPost:
+			convID := strings.TrimPrefix(r.URL.Path, "/api/v1/conversations/")
+			convID = strings.TrimSuffix(convID, "/messages")
+
+			var body struct {
+				Msg  string `json:"msg"`
+				Type string `json:"type"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+
+			sm := sentMessage{
+				AgentName: "conv:" + convID,
+				Message:   body.Msg,
+			}
+			mu.Lock()
+			sent = append(sent, sm)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"messageId": "msg-test-123",
+				"status":    "delivered",
+			})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	return server, &sent
+}
+
+func TestSendCrossProjectMessage_Success(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	targetAgentID := "target-uuid-1234"
+	targetAgentSlug := "target-agent"
+	targetProjectID := "proj-b-uuid"
+	targetProjectSlug := "project-b"
+
+	server, sent := crossProjectMockServer(t, targetAgentID, targetAgentSlug, targetProjectID, targetProjectSlug)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "proj-a-uuid",
+	}
+
+	err = sendCrossProjectMessage(hubCtx, targetProjectSlug, targetAgentSlug, "hello from project A", false, false, nil)
+	require.NoError(t, err)
+
+	require.Len(t, *sent, 1)
+	assert.Equal(t, targetAgentID, (*sent)[0].AgentName)
+	assert.Equal(t, "hello from project A", (*sent)[0].Message)
+	require.NotNil(t, (*sent)[0].StructuredMsg)
+	assert.Equal(t, "agent:"+targetAgentSlug, (*sent)[0].StructuredMsg.Recipient)
+}
+
+func TestSendCrossProjectMessage_TargetNotFound(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	server, _ := crossProjectMockServer(t, "", "", "", "")
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "proj-a-uuid",
+	}
+
+	err = sendCrossProjectMessage(hubCtx, "nonexistent-project", "nonexistent-agent", "hello", false, false, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to resolve agent")
+}
+
+func TestSendCrossProjectConversationReply(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	server, sent := crossProjectMockServer(t, "", "", "", "")
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "proj-a-uuid",
+	}
+
+	convID := "conv-uuid-5678"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	err = sendMessageViaConversation(hubCtx, ref, "reply message", false, false, nil)
+	require.NoError(t, err)
+
+	require.Len(t, *sent, 1)
+	assert.Equal(t, "conv:"+convID, (*sent)[0].AgentName)
+	assert.Equal(t, "reply message", (*sent)[0].Message)
 }

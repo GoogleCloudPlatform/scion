@@ -316,20 +316,38 @@ Examples:
 			}
 		}
 
+		// Cross-project detection: when running as an agent and --project
+		// specifies a different project than the sender's own, the --project
+		// value is the TARGET project, not the sender's working context.
+		// Set up hub context using the agent's own project and capture the
+		// target project slug for cross-project resolution.
+		var crossProjectTarget string
+		senderProjectPath := projectPath
+		if agentName != "" && os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
+			// The --project flag was explicitly set in agent mode.
+			// Use the agent's own project (from environment/config, not --project)
+			// and treat --project as the target.
+			crossProjectTarget = projectPath
+			senderProjectPath = "" // let hub context resolve from agent's own config
+		}
+
 		// Check if Hub should be used
 		var hubCtx *HubContext
 		if convRef != nil {
 			// Conversation references require Hub mode for resolution
-			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
+			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
 		} else if len(groupRecipients) > 0 {
 			// Group recipients: skip sync (multiple recipients, no single agent)
-			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
+			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
 		} else if userRecipient != "" {
 			// User recipient: skip sync (no agent involved)
-			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
+			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
+		} else if crossProjectTarget != "" {
+			// Cross-project: set up hub from agent's own project
+			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
 		} else {
 			// Single agent: exclude target from sync requirements
-			hubCtx, err = CheckHubAvailabilityForAgent(projectPath, agentName, true)
+			hubCtx, err = CheckHubAvailabilityForAgent(senderProjectPath, agentName, true)
 		}
 		if err != nil {
 			return err
@@ -390,6 +408,12 @@ Examples:
 		// User-targeted messages: route to outbound-message endpoint
 		if userRecipient != "" {
 			return sendOutboundMessageViaHub(hubCtx, userRecipient, message, msgInterrupt)
+		}
+
+		// Cross-project agent-to-agent message: resolve target in the
+		// foreign project and send via the non-project-scoped endpoint.
+		if hubCtx != nil && crossProjectTarget != "" && agentName != "" {
+			return sendCrossProjectMessage(hubCtx, crossProjectTarget, agentName, message, msgInterrupt, msgWake, msgAttach)
 		}
 
 		if hubCtx != nil {
@@ -530,6 +554,53 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	return nil
 }
 
+// sendCrossProjectMessage resolves a target agent in a foreign project and
+// sends a message via the non-project-scoped agent message endpoint. The
+// sender's authenticated identity is preserved; only target resolution
+// crosses the project boundary.
+func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, message string, interrupt, wake bool, attachments []string) error {
+	if !isJSONOutput() {
+		PrintUsingHub(hubCtx.Endpoint)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Step 1: Resolve the target agent in the foreign project.
+	result, err := hubCtx.Client.Messaging().ResolveTarget(ctx, targetProject, agentSlug)
+	if err != nil {
+		return wrapHubError(fmt.Errorf("failed to resolve agent %q in project %q: %w", agentSlug, targetProject, err))
+	}
+	if result.Agent == nil {
+		return fmt.Errorf("agent %q not found in project %q", agentSlug, targetProject)
+	}
+
+	if !isJSONOutput() {
+		fmt.Printf("Sending cross-project message to agent '%s' in project '%s'...\n", agentSlug, targetProject)
+	}
+
+	// Step 2: Build the structured message with the sender's identity.
+	sender := resolveSenderIdentity(hubCtx)
+	msg := buildStructuredMessage(sender, "agent:"+agentSlug, message, attachments)
+	if err := messaging.ValidateLegacyMessage(msg); err != nil {
+		return fmt.Errorf("message validation failed: %w", err)
+	}
+
+	// Step 3: Send via the non-project-scoped endpoint using the target's UUID.
+	// ProjectAgents("") produces /api/v1/agents/{uuid}/message which bypasses
+	// the project-scoped slug lookup and its project isolation check.
+	agentSvc := hubCtx.Client.ProjectAgents("")
+	if _, err := agentSvc.SendStructuredMessage(ctx, result.Agent.ID, msg, interrupt, false, wake); err != nil {
+		return wrapHubError(fmt.Errorf("failed to send cross-project message to agent '%s': %w", agentSlug, err))
+	}
+
+	if !isJSONOutput() {
+		fmt.Printf("Message delivered to agent '%s' in project '%s'.\n", agentSlug, targetProject)
+	}
+
+	return nil
+}
+
 // sendMessageViaConversation sends a message to a conversation reference.
 //
 // DEF-142 P5: the CLI passes conversation_ref in the outbound message request
@@ -563,6 +634,26 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	// ref inline (P3) and routes through the existing DEF-138 auth block.
 	senderAgent := os.Getenv("SCION_AGENT_NAME")
 	if senderAgent != "" {
+		// Cross-project conv:<uuid> reply: use the Messaging().SendMessage API
+		// which hits POST /api/v1/conversations/{id}/messages. This bypasses
+		// the project-scoped agent lookup that rejects cross-project targets.
+		if ref.Kind == messaging.RefConversation {
+			sendReq := &hubclient.ConversationSendRequest{
+				Msg:       message,
+				Type:      "instruction",
+				Urgent:    interrupt,
+				Interrupt: interrupt,
+			}
+			result, sendErr := hubCtx.Client.Messaging().SendMessage(ctx, ref.Value, sendReq)
+			if sendErr != nil {
+				return wrapHubError(fmt.Errorf("failed to send message to conversation '%s': %w", ref.Value, sendErr))
+			}
+			if !isJSONOutput() {
+				fmt.Printf("Message sent to conversation '%s' (message %s).\n", ref.Value, result.MessageID)
+			}
+			return nil
+		}
+
 		// DEF-164: agent-to-agent messages use the structured message
 		// endpoint, not the outbound (user-only) endpoint. The outbound
 		// handler's resolveAgentDM creates conversation/participant rows
