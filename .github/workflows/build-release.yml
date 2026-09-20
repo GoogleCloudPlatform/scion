@@ -28,13 +28,12 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
-
 jobs:
   build:
     name: Build Multi-Arch Binaries
     runs-on: ubuntu-latest
+    permissions:
+      contents: read     # Only needs to read code for building
     strategy:
       matrix:
         include:
@@ -124,6 +123,8 @@ jobs:
   build-plugins:
     name: Build Plugin Binaries
     runs-on: ubuntu-latest
+    permissions:
+      contents: read     # Only needs to read code for building
     strategy:
       matrix:
         include:
@@ -219,6 +220,8 @@ jobs:
     name: Create GitHub Release
     needs: [build, build-plugins]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write    # Needs to create releases and push branches
     outputs:
       channel: ${{ steps.channel.outputs.channel }}
       tag: ${{ steps.channel.outputs.tag }}
@@ -306,6 +309,8 @@ jobs:
     name: Update LATEST.json
     needs: release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write    # Needs to commit and push to main
     steps:
       - name: Checkout main branch
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6

@@ -19,13 +19,12 @@ on:
     - cron: '0 2 * * *'   # Daily at 2:00 AM UTC
   workflow_dispatch:        # Allow manual trigger
 
-permissions:
-  contents: write
-
 jobs:
   check-and-tag:
     name: Check for Changes and Tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: write    # Needed to push tags
     outputs:
       tagged: ${{ steps.tag.outputs.tagged }}
       tag: ${{ steps.tag.outputs.tag }}
@@ -76,6 +75,8 @@ jobs:
     name: Build Nightly Release
     needs: check-and-tag
     if: needs.check-and-tag.outputs.tagged == 'true'
+    permissions:
+      contents: write    # Inherited by workflow_call
     uses: ./.github/workflows/build-release.yml
     with:
       ref: ${{ needs.check-and-tag.outputs.tag }}
@@ -85,6 +86,8 @@ jobs:
     needs: check-and-tag
     if: needs.check-and-tag.outputs.tagged == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write    # Needed to delete releases via gh CLI
     steps:
       - name: Delete old nightly releases
         env:
