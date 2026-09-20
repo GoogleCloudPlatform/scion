@@ -84,12 +84,14 @@ export class TerminalCoordinator {
   private stopped = false;
   private claiming: Promise<boolean> | null = null;
   private release: (() => void) | null = null;
+  private waitingAbort: AbortController | null = null;
   private readonly lifetime = new AbortController();
   private readonly requests = new Map<string, Request>();
   private readonly executed = new Map<
     string,
     { agentId: string; result: Promise<TerminalOpenResult> }
   >();
+  private readonly _unsupportedReason: string | null;
 
   constructor(
     scope: TerminalScope,
@@ -99,20 +101,35 @@ export class TerminalCoordinator {
     this.registry = new TerminalSessionRegistry(scope);
     const hubUrl = new URL(scope.hubUrl).href.replace(/\/+$/, '') + '/';
     this.coordinationKey = `terminal-owner:v1:${JSON.stringify([hubUrl, scope.accountId])}`;
-    if (globalThis.isSecureContext && navigator.locks && typeof BroadcastChannel === 'function') {
+    if (!globalThis.isSecureContext) {
+      this._unsupportedReason = 'Terminal coordination requires a secure context (HTTPS).';
+    } else if (!navigator.locks) {
+      this._unsupportedReason = 'Terminal coordination requires the Web Lock API.';
+    } else if (typeof BroadcastChannel !== 'function') {
+      this._unsupportedReason = 'Terminal coordination requires BroadcastChannel support.';
+    } else {
       try {
         this.channel = new BroadcastChannel(this.coordinationKey);
         this.channel.onmessage = (event: MessageEvent<unknown>): void => this.receive(event.data);
         this.available = true;
+        this._unsupportedReason = null;
       } catch {
-        /* Explicit unsupported result; never attach without coordination. */
+        this._unsupportedReason = 'Terminal coordination channel could not be created.';
       }
     }
+    if (!this._unsupportedReason) this._unsupportedReason = null;
     window.addEventListener('pagehide', this.onPageHide);
   }
 
   get supported(): boolean {
     return this.available;
+  }
+  /**
+   * Why coordination is unavailable. `null` when coordination is supported.
+   * Display to the user instead of silently falling back to non-singleton behavior.
+   */
+  get unsupportedReason(): string | null {
+    return this._unsupportedReason;
   }
   get isOwner(): boolean {
     return !this.stopped && this.ownerGeneration !== null;
@@ -215,6 +232,10 @@ export class TerminalCoordinator {
       void navigator.locks
         .request(this.coordinationKey, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
           if (!lock || this.stopped) {
+            // Lock held by another tab; queue a waiting request so this tab
+            // acquires ownership when the current owner exits or crashes.
+            // Frozen owners keep the lock; this never steals from them.
+            if (!lock && !this.stopped) this.waitForOwnership();
             resolve(false);
             return;
           }
@@ -224,12 +245,49 @@ export class TerminalCoordinator {
           });
           resolve(true);
           await held;
+          // Lock released (by stop() or browser tab destruction).
+          // Ensure stale owner state is cleared even if stop() was not
+          // the caller (e.g. the browser reclaimed the lock).
+          this.ownerGeneration = null;
+          this.release = null;
         })
         .catch(reject);
     }).finally(() => {
       this.claiming = null;
     });
     return this.claiming;
+  }
+
+  /**
+   * Queue a non-ifAvailable lock request. When the current owner releases
+   * the lock (tab close, crash, navigation away), this fires and makes the
+   * current tab the new owner. The request is cancelled on stop().
+   *
+   * This never races with a frozen owner — a frozen tab keeps its Web Lock.
+   */
+  private waitForOwnership(): void {
+    if (this.waitingAbort) return; // Already waiting
+    this.waitingAbort = new AbortController();
+    void navigator.locks
+      .request(
+        this.coordinationKey,
+        { mode: 'exclusive', signal: this.waitingAbort.signal },
+        async (lock) => {
+          this.waitingAbort = null;
+          if (!lock || this.stopped) return;
+          this.ownerGeneration = crypto.randomUUID();
+          const held = new Promise<void>((done) => {
+            this.release = done;
+          });
+          await held;
+          this.ownerGeneration = null;
+          this.release = null;
+        }
+      )
+      .catch(() => {
+        // AbortError from stop() cancellation is expected.
+        this.waitingAbort = null;
+      });
   }
 
   private send(message: Message): void {
@@ -419,6 +477,15 @@ export class TerminalCoordinator {
     const sessions = this.sessions;
     this.stopped = true;
     this.lifetime.abort();
+    // Cancel any queued ownership wait before touching other state.
+    // The AbortController fires synchronously, preventing the queued
+    // lock callback from racing with teardown.
+    try {
+      this.waitingAbort?.abort();
+    } catch {
+      /* AbortController.abort() is specified not to throw, but guard. */
+    }
+    this.waitingAbort = null;
     window.removeEventListener('pagehide', this.onPageHide);
     this.channel?.close();
     this.channel = null;
@@ -445,6 +512,8 @@ export class TerminalCoordinator {
     // Keep the lock until document exit on ANY failure. Repeated stop is a no-op;
     // it must not retry failed disposal or accidentally release this authority.
     if (failures.length) throw new AggregateError(failures, 'Terminal session teardown failed.');
+    // Cleanup precedes voluntary lock release: ownerGeneration is cleared
+    // before release() so no stale callback can see this tab as owner.
     this.ownerGeneration = null;
     this.release?.();
     this.requests.clear();
