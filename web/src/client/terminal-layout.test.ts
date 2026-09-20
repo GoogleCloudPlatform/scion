@@ -271,7 +271,7 @@ describe('TerminalLayoutManager', () => {
     it('clears all references across all presets', () => {
       const m = manager();
       m.open('agent-x');
-      m.place('agent-x', 'twoColumns' === 'twoColumns' ? 'two-columns' : 'two-columns', 1);
+      m.place('agent-x', 'two-columns', 1);
       m.place('agent-x', 'four', 3);
 
       m.close('agent-x');
