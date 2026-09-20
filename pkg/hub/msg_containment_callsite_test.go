@@ -169,6 +169,11 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	// authorized notification dispatch.
 	{file: "notification_sweep.go", function: "RetryDispatch", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "retry of previously authorized notification dispatch"},
+
+	// handlers_conversation_send.go: sendViaDirectConversation — guarded by
+	// isCanonicalDMParticipant + authorizeAgentMessage before dispatch.
+	{file: "handlers_conversation_send.go", function: "sendViaDirectConversation", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "isCanonicalDMParticipant and authorizeAgentMessage at handlers_conversation_send.go before dispatch; canonical DM participant verified via ExternalRef"},
 }
 
 // targetSymbols is the set of function/method names that constitute

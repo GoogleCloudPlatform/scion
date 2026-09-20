@@ -106,30 +106,8 @@ func (s *Server) sendViaDirectConversation(
 	// Derive peer from canonical DM key (immutable ExternalRef).
 	// Participant rows are mutable and must not redirect delivery;
 	// a forged third-participant row could otherwise divert a reply.
-	var peerKind, peerID string
-	if conv.ExternalRef != "" {
-		peerKind, peerID = derivePeerFromExternalRef(conv.ExternalRef, identity.Type(), identity.ID())
-	}
-
-	// Fallback to participant rows only if canonical key doesn't resolve.
-	// This handles conversations without an ExternalRef set.
-	if peerID == "" {
-		participants, err := s.store.ListParticipants(ctx, conv.ID)
-		if err != nil {
-			slog.Error("handleCPMConversationSend: failed to list participants",
-				"conversation_id", conv.ID, "error", err)
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"Failed to resolve conversation participants", nil)
-			return
-		}
-		for _, p := range participants {
-			if p.PrincipalKind != identity.Type() || p.PrincipalID != identity.ID() {
-				peerKind = p.PrincipalKind
-				peerID = p.PrincipalID
-				break
-			}
-		}
-	}
+	// No participant-row fallback: canonical DM handler is fail-closed.
+	peerKind, peerID := derivePeerFromExternalRef(conv.ExternalRef, identity.Type(), identity.ID())
 
 	if peerID == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
@@ -183,7 +161,7 @@ func (s *Server) sendViaDirectConversation(
 		AgentID:        targetAgent.ID,
 		ConversationID: conv.ID,
 		Urgent:         req.Urgent || req.Interrupt,
-		DispatchState:  store.MessageDispatchDispatched,
+		DispatchState:  store.MessageDispatchPending,
 	}
 
 	if err := s.store.CreateMessage(ctx, msg); err != nil {
@@ -214,12 +192,16 @@ func (s *Server) sendViaDirectConversation(
 		return
 	}
 
-	// Build a structured message for the dispatcher.
+	// Build a structured message for the dispatcher. Include canonical
+	// conversation context so the harness can correlate replies.
 	structuredMsg := &messages.StructuredMessage{
-		Type:      req.Type,
-		Sender:    senderLabel,
-		Recipient: msg.Recipient,
-		Msg:       req.Msg,
+		Type:           req.Type,
+		Sender:         senderLabel,
+		SenderID:       identity.ID(),
+		Recipient:      msg.Recipient,
+		RecipientID:    targetAgent.ID,
+		Msg:            req.Msg,
+		ConversationID: conv.ID,
 	}
 
 	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
@@ -233,6 +215,12 @@ func (s *Server) sendViaDirectConversation(
 		writeError(w, http.StatusBadGateway, "DISPATCH_FAILED",
 			"Message stored but delivery to agent failed: "+err.Error(), nil)
 		return
+	}
+
+	// CAS-flip pending→dispatched now that the broker accepted the message.
+	if _, markErr := s.store.MarkMessageDispatched(ctx, msgID); markErr != nil {
+		slog.Error("handleCPMConversationSend: failed to mark message dispatched",
+			"message_id", msgID, "error", markErr)
 	}
 
 	writeJSON(w, http.StatusOK, conversationSendResponse{
