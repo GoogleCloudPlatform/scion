@@ -1137,3 +1137,491 @@ test('narrow screen shows single pane; wide restores full populated layout', asy
   expect(socket.attaches).toBe(2);
   expect(socket.closes).toBe(0);
 });
+
+// --- Drag/Drop and Accessible Placement tests (P2.3) ---
+
+/** Custom MIME type constant matching the workspace root implementation. */
+const TERMINAL_DRAG_MIME = 'application/x-scion-terminal';
+
+/** Helper: simulate a drag-and-drop from a rail entry's drag handle to a slot element. */
+async function simulateDragDrop(
+  page: Page,
+  sourceSessionKey: string,
+  targetSlotIndex: number,
+  mimeType: string = TERMINAL_DRAG_MIME
+): Promise<void> {
+  await page.evaluate(
+    ({ key, slot, mime }) => {
+      const host = document.querySelector('#terminal-workspace')!;
+
+      // Find the drag handle for this session key by scanning all rail items
+      // and matching the focus-id attribute on the select button.
+      // Session keys can contain special characters, so we iterate instead of querySelector.
+      let dragHandle: HTMLElement | null = null;
+      const focusTargets = host.querySelectorAll<HTMLElement>('[data-rail-focus-id]');
+      for (const el of focusTargets) {
+        if (el.dataset.railFocusId === `${key}:select`) {
+          const item = el.closest('.terminal-rail-item');
+          if (item) {
+            dragHandle = item.querySelector('.terminal-drag-handle') as HTMLElement;
+            break;
+          }
+        }
+      }
+      if (!dragHandle) throw new Error(`No drag handle found for session key ${key}`);
+
+      // Find target slot element by iterating data-slot-index attributes
+      let target: HTMLElement | null = null;
+      const slotStr = String(slot);
+      const candidates = host.querySelectorAll<HTMLElement>('[data-slot-index]');
+      for (const el of candidates) {
+        if (el.dataset.slotIndex === slotStr) {
+          target = el;
+          break;
+        }
+      }
+      if (!target) throw new Error(`No slot element found for index ${slot}`);
+
+      // Create DataTransfer and dispatch drag events
+      const dt = new DataTransfer();
+      dt.setData(mime, key);
+
+      const dragStartEvent = new DragEvent('dragstart', {
+        bubbles: true,
+        dataTransfer: dt,
+      });
+      Object.defineProperty(dragStartEvent, 'dataTransfer', { value: dt });
+      dragHandle.dispatchEvent(dragStartEvent);
+
+      // Debug: verify DataTransfer is readable
+      // eslint-disable-next-line no-console
+      console.log(
+        'DT types:',
+        JSON.stringify(Array.from(dt.types)),
+        'includes:',
+        dt.types.includes(mime),
+        'getData:',
+        dt.getData(mime)
+      );
+
+      const dragOverEvent = new DragEvent('dragover', {
+        bubbles: true,
+        cancelable: true,
+      });
+      Object.defineProperty(dragOverEvent, 'dataTransfer', { value: dt });
+      const dragOverResult = target.dispatchEvent(dragOverEvent);
+      // eslint-disable-next-line no-console
+      console.log(
+        'dragover dispatched, defaultPrevented:',
+        !dragOverResult,
+        'dragOver attr:',
+        target.dataset.dragOver
+      );
+
+      const dropEvent = new DragEvent('drop', {
+        bubbles: true,
+        cancelable: true,
+      });
+      Object.defineProperty(dropEvent, 'dataTransfer', { value: dt });
+      target.dispatchEvent(dropEvent);
+
+      const dragEndEvent = new DragEvent('dragend', { bubbles: true });
+      dragHandle.dispatchEvent(dragEndEvent);
+    },
+    { key: sourceSessionKey, slot: targetSlotIndex, mime: mimeType }
+  );
+}
+
+/** Helper: simulate a file drop on a slot element. Returns true if our drag handler highlighted it. */
+async function simulateFileDrop(page: Page, targetSlotIndex: number): Promise<boolean> {
+  return page.evaluate((slot) => {
+    const host = document.querySelector('#terminal-workspace')!;
+
+    // Find target by iterating data-slot-index
+    let target: HTMLElement | null = null;
+    const slotStr = String(slot);
+    const candidates = host.querySelectorAll<HTMLElement>('[data-slot-index]');
+    for (const el of candidates) {
+      if (el.dataset.slotIndex === slotStr) {
+        target = el;
+        break;
+      }
+    }
+    if (!target) throw new Error(`No slot element found for index ${slot}`);
+
+    const dt = new DataTransfer();
+    // Add a file-like item (text/plain) — no custom terminal MIME type
+    dt.setData('text/plain', 'file-content');
+
+    const dragOverEvent = new DragEvent('dragover', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: dt,
+    });
+    Object.defineProperty(dragOverEvent, 'dataTransfer', { value: dt });
+    target.dispatchEvent(dragOverEvent);
+
+    // Check if our handler added drag-over feedback (it shouldn't for file drops)
+    const highlighted = target.dataset.dragOver === 'true';
+
+    const dropEvent = new DragEvent('drop', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: dt,
+    });
+    Object.defineProperty(dropEvent, 'dataTransfer', { value: dt });
+    target.dispatchEvent(dropEvent);
+
+    return highlighted;
+  }, targetSlotIndex);
+}
+
+test('drag rail entry to empty slot places session in correct grid position', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open both agents
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(2);
+
+  // Switch to two-columns (both slots empty)
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+  await expect.poll(() => placeholderCount(page)).toBe(2);
+
+  // Drag alpha to slot 0
+  await simulateDragDrop(page, keys[0], 0);
+
+  // Alpha should be visible in slot 0, slot 1 still placeholder
+  await expect.poll(() => visiblePaneCount(page)).toBe(1);
+  await expect.poll(() => placeholderCount(page)).toBe(1);
+
+  const pos = await getPaneGridPosition(page, keys[0]);
+  expect(pos).not.toBeNull();
+  expect(pos!.visible).toBe(true);
+  expect(pos!.col).toBe('1');
+
+  // No new socket connections from drag-drop
+  expect(socket.attaches).toBe(2);
+  expect(socket.closes).toBe(0);
+});
+
+test('drag rail entry to occupied slot performs swap', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open both
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(2);
+
+  // Place both manually first
+  await placeInPreset(page, keys[0], 'two-columns', 0);
+  await placeInPreset(page, keys[1], 'two-columns', 1);
+
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+
+  // Verify initial positions
+  let pos0 = await getPaneGridPosition(page, keys[0]);
+  let pos1 = await getPaneGridPosition(page, keys[1]);
+  expect(pos0!.col).toBe('1');
+  expect(pos1!.col).toBe('2');
+
+  // Drag alpha (slot 0) to slot 1 (occupied by beta) — should swap
+  await simulateDragDrop(page, keys[0], 1);
+
+  // After swap: alpha in slot 1 (col 2), beta in slot 0 (col 1)
+  await expect
+    .poll(async () => {
+      const p = await getPaneGridPosition(page, keys[0]);
+      return p?.col;
+    })
+    .toBe('2');
+
+  pos0 = await getPaneGridPosition(page, keys[0]);
+  pos1 = await getPaneGridPosition(page, keys[1]);
+  expect(pos0!.col).toBe('2'); // alpha moved to slot 1
+  expect(pos1!.col).toBe('1'); // beta swapped to slot 0
+
+  // Both still visible, no new sockets
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+  expect(socket.attaches).toBe(2);
+  expect(socket.closes).toBe(0);
+});
+
+test('drag to same slot is a no-op', async ({ page }) => {
+  const socket = await setup(page);
+
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(1);
+
+  // Place in two-columns slot 0
+  await placeInPreset(page, keys[0], 'two-columns', 0);
+  await clickPreset(page, 'two-columns');
+
+  // Get initial position
+  const posBefore = await getPaneGridPosition(page, keys[0]);
+  expect(posBefore!.col).toBe('1');
+
+  // Drag to same slot — no-op
+  await simulateDragDrop(page, keys[0], 0);
+
+  // Position unchanged
+  const posAfter = await getPaneGridPosition(page, keys[0]);
+  expect(posAfter!.col).toBe('1');
+
+  // No state change, no new sockets
+  expect(socket.attaches).toBe(1);
+  expect(socket.closes).toBe(0);
+});
+
+test('invalid/unknown payload is rejected — no placement, no state change', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => placeholderCount(page)).toBe(2);
+
+  // Drop with wrong MIME type — should not trigger placement
+  const beforePH = await placeholderCount(page);
+  await page.evaluate(() => {
+    const host = document.querySelector('#terminal-workspace')!;
+    const placeholder = host.querySelector('.terminal-slot-placeholder')!;
+
+    const dt = new DataTransfer();
+    dt.setData('text/plain', 'not-a-terminal-key');
+
+    const dragOverEvent = new DragEvent('dragover', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: dt,
+    });
+    Object.defineProperty(dragOverEvent, 'dataTransfer', { value: dt });
+    placeholder.dispatchEvent(dragOverEvent);
+
+    const dropEvent = new DragEvent('drop', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: dt,
+    });
+    Object.defineProperty(dropEvent, 'dataTransfer', { value: dt });
+    placeholder.dispatchEvent(dropEvent);
+  });
+
+  // Placeholder count unchanged — no placement occurred
+  expect(await placeholderCount(page)).toBe(beforePH);
+
+  // No socket changes
+  expect(socket.attaches).toBe(1);
+  expect(socket.closes).toBe(0);
+});
+
+test('file drop does not trigger placement', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  const keys = await getPaneSessionKeys(page);
+
+  // Place session in two-columns slot 0
+  await placeInPreset(page, keys[0], 'two-columns', 0);
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => visiblePaneCount(page)).toBe(1);
+
+  // Simulate file drop on slot 0 (occupied by our terminal)
+  const wasHighlighted = await simulateFileDrop(page, 0);
+
+  // File drops should NOT trigger our drag highlight feedback
+  expect(wasHighlighted).toBe(false);
+
+  // Layout unchanged
+  const pos = await getPaneGridPosition(page, keys[0]);
+  expect(pos!.col).toBe('1');
+
+  // No socket changes
+  expect(socket.attaches).toBe(1);
+  expect(socket.closes).toBe(0);
+});
+
+test('keyboard "Place in pane" action places session without drag gesture', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open both
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  const keys = await getPaneSessionKeys(page);
+
+  // Switch to two-columns (both slots empty)
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => placeholderCount(page)).toBe(2);
+
+  // Click the "Place in pane" button for alpha
+  const placeBtn = page.getByRole('button', { name: /Place alpha in pane/ });
+  await expect(placeBtn).toBeVisible();
+  await placeBtn.click();
+
+  // Place menu should appear with slot options
+  const menu = page.locator('.terminal-place-menu');
+  await expect(menu).toBeVisible();
+
+  // Menu should have 2 items (two-columns has 2 slots)
+  const menuItems = menu.locator('.terminal-place-menu-item');
+  await expect(menuItems).toHaveCount(2);
+
+  // First item should indicate empty slot
+  await expect(menuItems.first()).toContainText('Slot 1 (empty)');
+
+  // Click the first slot
+  await menuItems.first().click();
+
+  // Menu should be hidden
+  await expect(menu).toBeHidden();
+
+  // Alpha should now be placed in slot 0
+  await expect.poll(() => visiblePaneCount(page)).toBe(1);
+  await expect.poll(() => placeholderCount(page)).toBe(1);
+
+  const pos = await getPaneGridPosition(page, keys[0]);
+  expect(pos!.visible).toBe(true);
+  expect(pos!.col).toBe('1');
+
+  // Aria-live should announce the placement
+  const announcement = await page.evaluate(() => {
+    return document.querySelector('.terminal-aria-live')?.textContent ?? '';
+  });
+  expect(announcement).toContain('Placed');
+  expect(announcement).toContain('alpha');
+  expect(announcement).toContain('slot 1');
+
+  // No new sockets
+  expect(socket.attaches).toBe(2);
+  expect(socket.closes).toBe(0);
+});
+
+test('ordinary rail click still opens in single, not place', async ({ page }) => {
+  const socket = await setup(page);
+
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Switch to two-columns
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+  await expect.poll(() => placeholderCount(page)).toBe(2);
+
+  // Click the rail entry name/button (the select button) to go back
+  await page.getByRole('button', { name: /isolated-agent in fixture-project/ }).click();
+
+  // Should navigate via open() which sets active='single'
+  await expect.poll(() => activePreset(page)).toBe('single');
+  await expect.poll(() => visiblePaneCount(page)).toBe(1);
+
+  // Two-columns should still have empty slots (not affected by rail click)
+  const twoColSlots = await page.evaluate(() => {
+    type WorkspaceEl = HTMLElement & {
+      workspaceRoot?: {
+        layoutManager: { getState: () => { twoColumns: (string | null)[] } };
+      };
+    };
+    const host = document.querySelector('#terminal-workspace') as WorkspaceEl;
+    return host.workspaceRoot!.layoutManager.getState().twoColumns;
+  });
+  expect(twoColSlots).toEqual([null, null]);
+
+  expect(socket.attaches).toBe(1);
+});
+
+test('cross-preset independence: placing in two-columns does not change four-grid', async ({
+  page,
+}) => {
+  const fourAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'a1', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'a2', phase: 'running', projectId: 'proj' },
+    [agentC]: { id: agentC, name: 'a3', phase: 'running', projectId: 'proj' },
+    [agentD]: { id: agentD, name: 'a4', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, fourAgents);
+
+  // Open all four agents
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+  await navigateToTerminal(page, agentC);
+  await expect.poll(() => socket.attaches).toBe(3);
+  await navigateToTerminal(page, agentD);
+  await expect.poll(() => socket.attaches).toBe(4);
+
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(4);
+
+  // Place a1 and a2 in four-grid slots 0 and 1
+  await placeInPreset(page, keys[0], 'four', 0);
+  await placeInPreset(page, keys[1], 'four', 1);
+
+  // Switch to two-columns and place a1 and a3
+  await clickPreset(page, 'two-columns');
+  await placeInPreset(page, keys[0], 'two-columns', 0);
+  await placeInPreset(page, keys[2], 'two-columns', 1);
+
+  // Now drag a3 to swap with a1 within two-columns
+  await simulateDragDrop(page, keys[2], 0);
+
+  // Verify two-columns swapped: a3 at slot 0, a1 at slot 1
+  await expect
+    .poll(async () => {
+      const p = await getPaneGridPosition(page, keys[2]);
+      return p?.col;
+    })
+    .toBe('1');
+
+  // Switch to four-grid — its slots should be unchanged
+  await clickPreset(page, 'four');
+  await expect.poll(() => activePreset(page)).toBe('four');
+
+  const fourState = await page.evaluate(() => {
+    type WorkspaceEl = HTMLElement & {
+      workspaceRoot?: {
+        layoutManager: { getState: () => { four: (string | null)[] } };
+      };
+    };
+    const host = document.querySelector('#terminal-workspace') as WorkspaceEl;
+    return host.workspaceRoot!.layoutManager.getState().four;
+  });
+
+  // Four-grid should still have keys[0] at slot 0 and keys[1] at slot 1
+  expect(fourState[0]).toBe(keys[0]);
+  expect(fourState[1]).toBe(keys[1]);
+  expect(fourState[2]).toBeNull();
+  expect(fourState[3]).toBeNull();
+
+  expect(socket.attaches).toBe(4);
+  expect(socket.closes).toBe(0);
+});

@@ -28,6 +28,9 @@ interface RailEntry {
   unsubscribeMetadata: () => void;
 }
 
+/** Custom MIME type for terminal drag payloads. */
+const TERMINAL_DRAG_MIME = 'application/x-scion-terminal';
+
 /** Preset button definitions for the layout toolbar. */
 const PRESET_BUTTONS: ReadonlyArray<{ preset: TerminalLayout; label: string; title: string }> = [
   { preset: 'single', label: '1', title: 'Single pane' },
@@ -84,6 +87,8 @@ export class TerminalWorkspaceRoot {
   private readonly panes = new Map<string, ScionTerminalPane>();
   private readonly entries = new Map<string, RailEntry>();
   private readonly placeholders = new Map<number, HTMLElement>();
+  private readonly ariaLive = document.createElement('div');
+  private readonly placeMenu = document.createElement('div');
   readonly layoutManager = new TerminalLayoutManager();
   private registryUnsubscribe: (() => void) | null = null;
   private registry: TerminalSessionRegistry | null = null;
@@ -133,8 +138,26 @@ export class TerminalWorkspaceRoot {
     this.status.className = 'terminal-status';
     this.status.textContent = 'No terminal selected.';
     this.paneHost.append(this.empty, this.status);
+    // Aria-live region for placement announcements
+    this.ariaLive.className = 'terminal-aria-live';
+    this.ariaLive.setAttribute('aria-live', 'polite');
+    this.ariaLive.setAttribute('role', 'status');
+
+    // Place-in-pane menu (hidden by default)
+    this.placeMenu.className = 'terminal-place-menu';
+    this.placeMenu.setAttribute('role', 'menu');
+    this.placeMenu.setAttribute('aria-label', 'Choose a slot');
+    this.placeMenu.hidden = true;
+    this.placeMenu.addEventListener('keydown', (e) => this.handlePlaceMenuKeydown(e));
+    // Close menu on outside click
+    document.addEventListener('click', (e) => {
+      if (!this.placeMenu.hidden && !this.placeMenu.contains(e.target as Node)) {
+        this.closePlaceMenu();
+      }
+    });
+
     this.shell.append(this.rail, this.createPaneArea());
-    this.element.append(this.header, this.shell);
+    this.element.append(this.header, this.shell, this.ariaLive, this.placeMenu);
 
     // Subscribe to layout state (lives as long as the workspace root)
     this.layoutManager.subscribe(() => this.queueRefresh());
@@ -404,7 +427,11 @@ export class TerminalWorkspaceRoot {
         pane.style.gridColumn = col;
         pane.style.gridRow = row;
         pane.style.display = '';
+        pane.dataset.slotIndex = String(i);
         visibleKeys.add(key);
+
+        // Install drop handlers on the pane element
+        this.installDropHandlers(pane, i, effectivePreset);
 
         // Remove placeholder for this slot if exists
         const ph = this.placeholders.get(i);
@@ -425,7 +452,11 @@ export class TerminalWorkspaceRoot {
         ph.textContent = 'Drop terminal here';
         ph.style.gridColumn = col;
         ph.style.gridRow = row;
+        ph.dataset.slotIndex = String(i);
         ph.hidden = false;
+
+        // Install drop handlers on the placeholder
+        this.installDropHandlers(ph, i, effectivePreset);
       }
     }
 
@@ -437,10 +468,17 @@ export class TerminalWorkspaceRoot {
       }
     }
 
-    // Hide panes not visible in the current render
+    // Hide panes not visible in the current render and clear stale slot attributes
     for (const [key, pane] of this.panes) {
       if (!visibleKeys.has(key)) {
         pane.style.display = 'none';
+        delete pane.dataset.slotIndex;
+        // Clean up drop handlers on hidden panes
+        const cleanup = (pane as HTMLElement & { __dropCleanup?: () => void }).__dropCleanup;
+        if (cleanup) {
+          cleanup();
+          delete (pane as HTMLElement & { __dropCleanup?: () => void }).__dropCleanup;
+        }
       }
     }
   }
@@ -585,8 +623,38 @@ export class TerminalWorkspaceRoot {
       event.stopPropagation();
       entry.session.close();
     });
-    actions.append(reconnect, close);
-    item.append(select, actions);
+    // Drag handle
+    const dragHandle = document.createElement('span');
+    dragHandle.className = 'terminal-drag-handle';
+    dragHandle.setAttribute('draggable', 'true');
+    dragHandle.setAttribute('aria-label', `Drag to place ${agentName} in layout`);
+    dragHandle.setAttribute('role', 'img');
+    dragHandle.textContent = '⠿';
+    dragHandle.title = 'Drag to place in layout';
+    dragHandle.addEventListener('dragstart', (e) => {
+      e.dataTransfer!.setData(TERMINAL_DRAG_MIME, entry.state.key);
+      e.dataTransfer!.effectAllowed = 'move';
+      item.dataset.dragging = 'true';
+    });
+    dragHandle.addEventListener('dragend', () => {
+      delete item.dataset.dragging;
+    });
+
+    // Place in pane button (keyboard/touch accessible alternative)
+    const placeBtn = document.createElement('button');
+    placeBtn.type = 'button';
+    placeBtn.className = 'terminal-icon-action terminal-place-btn';
+    placeBtn.setAttribute('aria-label', `Place ${agentName} in pane`);
+    placeBtn.dataset.railFocusId = `${entry.state.key}:place`;
+    placeBtn.title = 'Place in pane…';
+    placeBtn.innerHTML = '<sl-icon name="grid"></sl-icon>';
+    placeBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      this.openPlaceMenu(entry.state.key, agentName, placeBtn);
+    });
+
+    actions.append(placeBtn, reconnect, close);
+    item.append(dragHandle, select, actions);
     return item;
   }
 
@@ -616,6 +684,142 @@ export class TerminalWorkspaceRoot {
     else if (event.key === 'ArrowDown') next = Math.min(buttons.length - 1, current + 1);
     else if (event.key === 'ArrowUp') next = current <= 0 ? 0 : current - 1;
     buttons[next]?.focus();
+  }
+
+  /**
+   * Install drag-over / drag-leave / drop handlers on a slot element.
+   * Replaces existing handlers on each refresh to capture current preset/index.
+   */
+  private installDropHandlers(el: HTMLElement, slotIndex: number, preset: TerminalLayout): void {
+    // Use a stored handler key to avoid duplicate listeners
+    const existing = (el as HTMLElement & { __dropCleanup?: () => void }).__dropCleanup;
+    existing?.();
+
+    const onDragOver = (e: DragEvent): void => {
+      if (!e.dataTransfer?.types.includes(TERMINAL_DRAG_MIME)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      el.dataset.dragOver = 'true';
+    };
+    const onDragLeave = (): void => {
+      delete el.dataset.dragOver;
+    };
+    const onDrop = (e: DragEvent): void => {
+      delete el.dataset.dragOver;
+      if (!e.dataTransfer?.types.includes(TERMINAL_DRAG_MIME)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const sessionKey = e.dataTransfer.getData(TERMINAL_DRAG_MIME);
+      if (!sessionKey || !this.panes.has(sessionKey)) return;
+      this.layoutManager.place(sessionKey, preset, slotIndex);
+      this.announceResult(sessionKey, slotIndex);
+    };
+
+    el.addEventListener('dragover', onDragOver);
+    el.addEventListener('dragleave', onDragLeave);
+    el.addEventListener('drop', onDrop);
+
+    (el as HTMLElement & { __dropCleanup?: () => void }).__dropCleanup = (): void => {
+      el.removeEventListener('dragover', onDragOver);
+      el.removeEventListener('dragleave', onDragLeave);
+      el.removeEventListener('drop', onDrop);
+    };
+  }
+
+  /** Announce placement result via aria-live region. */
+  private announceResult(sessionKey: string, slotIndex: number): void {
+    const entry = this.entries.get(sessionKey);
+    const name = entry ? entry.metadata.agent?.name || entry.state.agentId : sessionKey;
+    this.ariaLive.textContent = `Placed ${name} in slot ${slotIndex + 1}`;
+    // Clear after a delay so repeated placements are announced
+    setTimeout(() => {
+      if (this.ariaLive.textContent?.includes(name)) {
+        this.ariaLive.textContent = '';
+      }
+    }, 3000);
+  }
+
+  /** Open the "Place in pane…" menu, positioned near the trigger button. */
+  private openPlaceMenu(sessionKey: string, _agentName: string, trigger: HTMLElement): void {
+    const layoutState = this.layoutManager.getState();
+    const preset = layoutState.active;
+    const slots = SLOT_PLACEMENTS[preset];
+
+    // Build menu items for each slot
+    this.placeMenu.replaceChildren();
+    const presetSlots = this.getActivePresetSlots(preset);
+
+    for (let i = 0; i < slots.length; i++) {
+      const occupant = presetSlots[i];
+      const occupantEntry = occupant ? this.entries.get(occupant) : null;
+      const occupantName = occupantEntry
+        ? occupantEntry.metadata.agent?.name || occupantEntry.state.agentId
+        : null;
+      const label = occupant
+        ? `Slot ${i + 1} (${occupantName ?? occupant})`
+        : `Slot ${i + 1} (empty)`;
+
+      const menuItem = document.createElement('button');
+      menuItem.type = 'button';
+      menuItem.className = 'terminal-place-menu-item';
+      menuItem.setAttribute('role', 'menuitem');
+      menuItem.textContent = label;
+      menuItem.dataset.slotIndex = String(i);
+      menuItem.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.layoutManager.place(sessionKey, preset, i);
+        this.announceResult(sessionKey, i);
+        this.closePlaceMenu();
+      });
+      this.placeMenu.appendChild(menuItem);
+    }
+
+    // Position the menu near the trigger
+    const rect = trigger.getBoundingClientRect();
+    this.placeMenu.style.top = `${rect.bottom + 4}px`;
+    this.placeMenu.style.left = `${rect.left}px`;
+    this.placeMenu.hidden = false;
+
+    // Focus the first menu item
+    requestAnimationFrame(() => {
+      const firstItem = this.placeMenu.querySelector<HTMLButtonElement>(
+        '.terminal-place-menu-item'
+      );
+      firstItem?.focus();
+    });
+  }
+
+  /** Close the "Place in pane…" menu. */
+  private closePlaceMenu(): void {
+    this.placeMenu.hidden = true;
+    this.placeMenu.replaceChildren();
+  }
+
+  /** Keyboard navigation within the place menu. */
+  private handlePlaceMenuKeydown(event: KeyboardEvent): void {
+    const items = [
+      ...this.placeMenu.querySelectorAll<HTMLButtonElement>('.terminal-place-menu-item'),
+    ];
+    if (!items.length) return;
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      this.closePlaceMenu();
+      return;
+    }
+
+    const active = document.activeElement as HTMLElement;
+    const current = items.indexOf(active as HTMLButtonElement);
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      const next = current < items.length - 1 ? current + 1 : 0;
+      items[next]?.focus();
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      const next = current > 0 ? current - 1 : items.length - 1;
+      items[next]?.focus();
+    }
   }
 
   private publishCount(): void {
@@ -672,10 +876,25 @@ export class TerminalWorkspaceRoot {
       }
       .terminal-rail-item {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-columns: auto minmax(0, 1fr) auto;
         align-items: center;
         gap: 0.25rem;
         border-radius: 6px;
+      }
+      .terminal-rail-item[data-dragging='true'] {
+        opacity: 0.5;
+      }
+      .terminal-drag-handle {
+        cursor: grab;
+        padding: 0.375rem 0.125rem 0.375rem 0.375rem;
+        color: var(--scion-text-muted, #64748b);
+        font-size: 1rem;
+        line-height: 1;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      .terminal-drag-handle:active {
+        cursor: grabbing;
       }
       .terminal-rail-item[data-selected='true'] {
         background: color-mix(in srgb, var(--scion-primary, #3b82f6) 10%, transparent);
@@ -853,6 +1072,50 @@ export class TerminalWorkspaceRoot {
         background: color-mix(in srgb, var(--scion-bg, #f8fafc) 50%, transparent);
         min-height: 0;
         min-width: 0;
+        transition: border-color 0.15s, background 0.15s;
+      }
+      .terminal-slot-placeholder[data-drag-over='true'] {
+        border-color: var(--scion-primary, #3b82f6);
+        background: color-mix(in srgb, var(--scion-primary, #3b82f6) 15%, transparent);
+      }
+      scion-terminal-pane[data-drag-over='true'] {
+        outline: 2px solid var(--scion-primary, #3b82f6);
+        outline-offset: -2px;
+      }
+      .terminal-aria-live {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+      }
+      .terminal-place-menu {
+        position: fixed;
+        z-index: 1000;
+        min-width: 12rem;
+        background: var(--scion-surface, #fff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: 6px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        padding: 0.25rem;
+      }
+      .terminal-place-menu-item {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 0.5rem 0.75rem;
+        border: 0;
+        background: transparent;
+        color: var(--scion-text, #1e293b);
+        font-size: 0.8125rem;
+        cursor: pointer;
+        border-radius: 4px;
+      }
+      .terminal-place-menu-item:hover,
+      .terminal-place-menu-item:focus-visible {
+        background: var(--scion-bg-subtle, #f1f5f9);
+        outline: none;
       }
       .terminal-empty,
       .terminal-status {
