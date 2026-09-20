@@ -706,4 +706,3 @@ type HealthSummaryStall struct {
 	ThresholdSeconds int  `json:"threshold_seconds"`
 	AutoSuspend      bool `json:"auto_suspend"`
 }
-
