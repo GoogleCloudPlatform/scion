@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -294,7 +295,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 
 	// ── Step 10b: Copy GCP service account associations ─────────────────
 
-	if err := s.cloneProjectGCPServiceAccounts(ctx, src.ID, clone.ID, callerID, &rollback); err != nil {
+	if err := s.cloneProjectGCPServiceAccounts(ctx, src.ID, clone, callerID, &rollback); err != nil {
 		slog.Error("project clone: GCP service account copy failed",
 			"source_id", src.ID, "clone_id", clone.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -613,10 +614,10 @@ func (s *Server) cloneProjectEnvVars(ctx context.Context, srcProjectID, clonePro
 }
 
 // cloneProjectGCPServiceAccounts copies project-scoped GCP service account
-// associations from the source project to the clone. Cloned SAs are set to
-// Verified=false to force re-verification under the new project context,
-// since IAM bindings may not transfer automatically.
-func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectID, cloneProjectID, callerID string, rollback *[]func()) error {
+// associations from the source project to the clone, preserving each SA's
+// verified state. If the clone project's default-SA annotation references a
+// source SA, it is remapped to the corresponding cloned SA and persisted.
+func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectID string, clone *store.Project, callerID string, rollback *[]func()) error {
 	accounts, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
 		Scope:   store.ScopeProject,
 		ScopeID: srcProjectID,
@@ -638,7 +639,7 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 		for _, id := range clonedIDs {
 			if err := s.store.DeleteGCPServiceAccount(rbCtx, id); err != nil {
 				slog.Warn("project clone rollback: failed to delete GCP service account",
-					"clone_id", cloneProjectID, "sa_id", id, "error", err)
+					"clone_id", clone.ID, "sa_id", id, "error", err)
 			}
 		}
 	})
@@ -647,12 +648,12 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 		newSA := &store.GCPServiceAccount{
 			ID:            api.NewUUID(),
 			Scope:         store.ScopeProject,
-			ScopeID:       cloneProjectID,
+			ScopeID:       clone.ID,
 			Email:         sa.Email,
 			ProjectID:     sa.ProjectID,
 			DisplayName:   sa.DisplayName,
 			DefaultScopes: append([]string(nil), sa.DefaultScopes...),
-			Verified:      false,
+			Verified:      sa.Verified,
 			CreatedBy:     callerID,
 			Managed:       sa.Managed,
 			ManagedBy:     sa.ManagedBy,
@@ -662,6 +663,21 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 			return err
 		}
 		clonedIDs = append(clonedIDs, newSA.ID)
+	}
+
+	// Remap default SA annotation if it references a source SA.
+	defaultSAID, ok := clone.Annotations[projectSettingDefaultGCPIdentitySAID]
+	if ok && defaultSAID != "" {
+		for i, srcSA := range accounts {
+			if srcSA.ID == defaultSAID {
+				clone.Annotations[projectSettingDefaultGCPIdentitySAID] = clonedIDs[i]
+				// Update the persisted project row.
+				if err := s.store.UpdateProject(ctx, clone); err != nil {
+					return fmt.Errorf("remap default SA annotation: %w", err)
+				}
+				break
+			}
+		}
 	}
 
 	return nil
