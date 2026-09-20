@@ -321,7 +321,10 @@ export class TerminalWorkspaceRoot {
           if (
             next.availability === 'deleted' &&
             entry.session.state.connection !== 'closed' &&
-            entry.session.state.connection !== 'unavailable'
+            !(
+              entry.session.state.connection === 'unavailable' &&
+              entry.session.state.disconnectReason === 'agent-deleted'
+            )
           ) {
             entry.session.markUnavailable('agent-deleted', next.error ?? 'Agent was deleted.');
           } else if (

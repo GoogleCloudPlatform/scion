@@ -292,6 +292,27 @@ test('toolbar reconnect button disabled during active reconnect attempt', async 
   await page.goto(`/terminals/${agent}`);
   await expect.poll(() => socket.attaches).toBe(1);
 
+  // Install a slow mock fetch to keep the reconnect attempt pending while we
+  // assert the toolbar button state. Without this gate the reconnect can
+  // complete before the assertions run, causing a transient failure.
+  const slowFetch = { resolve: null as (() => void) | null };
+  await page.route('**/api/v1/agents/**', (route) => {
+    if (route.request().url().endsWith('/pty')) {
+      void route.fulfill({ json: {} });
+      return;
+    }
+    slowFetch.resolve = () => {
+      void route.fulfill({
+        json: {
+          id: agent,
+          name: 'reconnect-agent',
+          phase: 'running',
+          projectId: 'fixture-project',
+        },
+      });
+    };
+  });
+
   socket.disconnectAll();
   const toolbarBtn = page.locator('scion-terminal-pane .reconnect-btn');
   await expect(toolbarBtn).toBeVisible();
@@ -299,11 +320,13 @@ test('toolbar reconnect button disabled during active reconnect attempt', async 
   // Click toolbar reconnect
   await toolbarBtn.click();
 
-  // The toolbar button should show "Reconnecting..." and be disabled
+  // The toolbar button should show "Reconnecting..." and be disabled while
+  // the agent metadata fetch is still pending.
   await expect(toolbarBtn).toContainText('Reconnecting...');
   await expect(toolbarBtn).toBeDisabled();
 
-  // Wait for reconnect to complete
+  // Resolve the slow fetch to complete the reconnect
+  slowFetch.resolve?.();
   await expect.poll(() => socket.attaches).toBe(2);
 
   // Also verify: for terminal-permanent disconnect reasons (agent-deleted),
@@ -359,4 +382,50 @@ test('disconnected session transitions to unavailable when agent stops', async (
   await expect(overlay.locator('.overlay-title')).toContainText('AGENT UNAVAILABLE');
   // Overlay should have the 'unavailable' class applied (drives CSS styling)
   await expect(overlay).toHaveClass(/unavailable/);
+});
+
+test('stopped session transitions to deleted when agent is deleted', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Step 1: Deliver SSE agent-stopped event — session becomes unavailable
+  // with reason agent-stopped (reconnect still enabled)
+  await page.evaluate((agentId) => {
+    const instances = (window as unknown as { __sseInstances__: EventTarget[] }).__sseInstances__;
+    for (const es of instances) {
+      es.dispatchEvent(
+        new MessageEvent('update', {
+          data: JSON.stringify({
+            subject: `agent.${agentId}.status`,
+            data: { phase: 'stopped', activity: 'offline' },
+          }),
+        })
+      );
+    }
+  }, agent);
+
+  const overlay = page.locator('scion-terminal-pane .disconnected-overlay');
+  await expect(overlay.locator('.overlay-title')).toContainText('AGENT UNAVAILABLE');
+
+  // Reconnect button should be enabled (agent-stopped allows reconnect)
+  const reconnectBtn = page.locator('scion-terminal-pane .overlay-reconnect');
+  await expect(reconnectBtn).toBeEnabled();
+
+  // Step 2: Deliver SSE agent-deleted event — session should transition
+  // from unavailable/agent-stopped to unavailable/agent-deleted
+  await page.evaluate((agentId) => {
+    const instances = (window as unknown as { __sseInstances__: EventTarget[] }).__sseInstances__;
+    for (const es of instances) {
+      es.dispatchEvent(
+        new MessageEvent('update', {
+          data: JSON.stringify({ subject: `agent.${agentId}.deleted`, data: {} }),
+        })
+      );
+    }
+  }, agent);
+
+  // Overlay should now show DELETED title and reconnect should be disabled
+  await expect(overlay.locator('.overlay-title')).toContainText('DELETED');
+  await expect(reconnectBtn).toBeDisabled();
 });
