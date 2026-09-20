@@ -267,7 +267,7 @@ test('multiple tabs competing for ownership — only one succeeds, no split', as
 });
 
 // ---------------------------------------------------------------------------
-// Headed-only observation notes (cannot be tested headlessly)
+// Manual verification checklist — not run in this environment
 // ---------------------------------------------------------------------------
 /**
  * NOT RUN — Manual verification checklist
