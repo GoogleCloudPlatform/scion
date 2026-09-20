@@ -2925,29 +2925,48 @@ test.describe('production icon and title verification', () => {
     expect(builtContent).toBe(sourceContent);
   });
 
-  test('grid.svg is served at the correct URL by dev server', async ({ page }) => {
-    // Verify the built asset is actually served at its expected URL.
-    // The dev server serves static assets from public/ which mirrors the
-    // production build output for Shoelace icons. This confirms the asset
-    // is reachable at the URL that sl-icon requests at runtime.
-    //
-    // Note: this proves dev-server serving; production serving is covered
-    // equivalently because Vite copies public/ assets to dist/ verbatim,
-    // and the source/built content match above proves the file is identical.
-    // The toPass SVG render test further confirms the asset loads in the
-    // actual sl-icon component.
-    await setup(page);
-    await page.goto('/');
-    const response = await page.evaluate(async () => {
-      const res = await fetch('/shoelace/assets/icons/grid.svg');
-      return {
-        status: res.status,
-        contentType: res.headers.get('content-type'),
-        text: await res.text(),
-      };
+  test('grid.svg is served from built output at correct URL', async () => {
+    // Serve the built output directory (dist/client/) with a simple static
+    // server and verify grid.svg is reachable at the expected path with
+    // content matching the Shoelace source.
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const http = await import('node:http');
+    const { fileURLToPath } = await import('node:url');
+    const thisDir = path.dirname(fileURLToPath(import.meta.url));
+    const distPath = path.resolve(thisDir, '../../dist/client');
+
+    const server = http.createServer((req, res) => {
+      const filePath = path.join(distPath, req.url || '/');
+      try {
+        const content = fs.readFileSync(filePath);
+        res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
+        res.end(content);
+      } catch {
+        res.writeHead(404);
+        res.end('Not found');
+      }
     });
-    expect(response.status).toBe(200);
-    expect(response.text).toContain('<svg');
+
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const port = (server.address() as { port: number }).port;
+
+    try {
+      const response = await fetch(`http://localhost:${port}/shoelace/assets/icons/grid.svg`);
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).toContain('<svg');
+
+      // Verify served content matches Shoelace source (byte-equal)
+      const sourceGridSvg = path.join(
+        thisDir,
+        '../../node_modules/@shoelace-style/shoelace/dist/assets/icons/grid.svg'
+      );
+      const sourceContent = fs.readFileSync(sourceGridSvg, 'utf-8');
+      expect(text).toBe(sourceContent);
+    } finally {
+      server.close();
+    }
   });
 });
 
