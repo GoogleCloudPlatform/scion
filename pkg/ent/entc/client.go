@@ -156,6 +156,7 @@ func OpenPostgres(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client,
 	db := stdlib.OpenDB(*connConfig, stdlib.OptionAfterConnect(
 		func(ctx context.Context, conn *pgx.Conn) error {
 			conn.TypeMap().RegisterDefaultPgType(uuid.UUID{}, "uuid")
+			conn.TypeMap().RegisterDefaultPgType([]uuid.UUID{}, "_uuid")
 			return nil
 		},
 	))
