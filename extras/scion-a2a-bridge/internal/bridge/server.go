@@ -15,10 +15,12 @@
 package bridge
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -372,12 +374,181 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	card := s.bridge.GenerateAgentCard(r.Context(), projectSlug, agentSlug)
+	if card != nil {
+		card["protocolVersion"] = "0.3.0"
+		card["capabilities"] = map[string]bool{
+			"pushNotifications": false,
+			"streaming":         false,
+		}
+		if ifaces, ok := card["supportedInterfaces"].([]map[string]string); ok && len(ifaces) > 0 {
+			card["url"] = ifaces[0]["url"]
+		}
+		if skills, ok := card["skills"].([]map[string]interface{}); ok {
+			for _, sm := range skills {
+				if _, hasTags := sm["tags"]; !hasTags {
+					sm["tags"] = []string{"scion", "agent", agentSlug}
+				}
+			}
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	if err := json.NewEncoder(w).Encode(card); err != nil {
 		s.log.Error("failed to encode agent card response", "error", err)
 	}
+}
+
+type bufferedResponseWriter struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func (b *bufferedResponseWriter) Header() http.Header {
+	if b.header == nil {
+		b.header = make(http.Header)
+	}
+	return b.header
+}
+
+func (b *bufferedResponseWriter) WriteHeader(statusCode int) {
+	if b.status == 0 {
+		b.status = statusCode
+	}
+}
+
+func (b *bufferedResponseWriter) Write(p []byte) (int, error) {
+	if b.status == 0 {
+		b.status = http.StatusOK
+	}
+	return b.body.Write(p)
+}
+
+func convertV1StateToV03(state string) string {
+	switch state {
+	case "TASK_STATE_COMPLETED":
+		return "completed"
+	case "TASK_STATE_WORKING":
+		return "working"
+	case "TASK_STATE_SUBMITTED":
+		return "submitted"
+	case "TASK_STATE_FAILED":
+		return "failed"
+	case "TASK_STATE_CANCELED":
+		return "canceled"
+	case "TASK_STATE_INPUT_REQUIRED":
+		return "input-required"
+	case "TASK_STATE_AUTH_REQUIRED":
+		return "auth-required"
+	case "TASK_STATE_REJECTED":
+		return "rejected"
+	default:
+		return strings.ToLower(strings.TrimPrefix(state, "TASK_STATE_"))
+	}
+}
+
+func convertV1RoleToV03(role string) string {
+	switch role {
+	case "ROLE_USER":
+		return "user"
+	case "ROLE_AGENT":
+		return "agent"
+	default:
+		return strings.ToLower(strings.TrimPrefix(role, "ROLE_"))
+	}
+}
+
+func convertMessageToV03(msg map[string]interface{}) map[string]interface{} {
+	if msg == nil {
+		return nil
+	}
+	msg["kind"] = "message"
+	if r, ok := msg["role"].(string); ok {
+		msg["role"] = convertV1RoleToV03(r)
+	}
+	if parts, ok := msg["parts"].([]interface{}); ok {
+		for _, p := range parts {
+			if pm, ok := p.(map[string]interface{}); ok {
+				if _, hasText := pm["text"]; hasText {
+					pm["kind"] = "text"
+				}
+			}
+		}
+	}
+	return msg
+}
+
+func convertResponseToA2AV03(rawResp []byte, clientTaskID string) []byte {
+	var envelope map[string]interface{}
+	if err := json.Unmarshal(rawResp, &envelope); err != nil {
+		return rawResp
+	}
+	resMap, ok := envelope["result"].(map[string]interface{})
+	if !ok || resMap == nil {
+		return rawResp
+	}
+	// If result is wrapped in {"task": {...}} by a2a-go/v2 StreamResponse, unwrap it
+	taskMap, isWrapped := resMap["task"].(map[string]interface{})
+	if !isWrapped {
+		taskMap = resMap
+	}
+	taskMap["kind"] = "task"
+	if clientTaskID != "" {
+		taskMap["id"] = clientTaskID
+	}
+	taskID, _ := taskMap["id"].(string)
+	contextID, _ := taskMap["contextId"].(string)
+
+	var agentReplyMsg map[string]interface{}
+	if statusMap, ok := taskMap["status"].(map[string]interface{}); ok {
+		if st, ok := statusMap["state"].(string); ok {
+			statusMap["state"] = convertV1StateToV03(st)
+		}
+		if sm, ok := statusMap["message"].(map[string]interface{}); ok {
+			if clientTaskID != "" {
+				sm["taskId"] = clientTaskID
+			}
+			agentReplyMsg = convertMessageToV03(sm)
+		}
+	}
+
+	if history, ok := taskMap["history"].([]interface{}); ok {
+		for _, h := range history {
+			if hm, ok := h.(map[string]interface{}); ok {
+				if clientTaskID != "" {
+					hm["taskId"] = clientTaskID
+				}
+				convertMessageToV03(hm)
+			}
+		}
+		if agentReplyMsg != nil {
+			taskMap["history"] = append(history, agentReplyMsg)
+		}
+	}
+
+	// Ensure artifacts array is populated with the agent's reply for A2A v0.3 clients
+	if _, hasArtifacts := taskMap["artifacts"]; !hasArtifacts && agentReplyMsg != nil {
+		if parts, ok := agentReplyMsg["parts"].([]interface{}); ok && len(parts) > 0 {
+			artID, _ := agentReplyMsg["messageId"].(string)
+			if artID == "" {
+				artID = taskID
+			}
+			taskMap["artifacts"] = []interface{}{
+				map[string]interface{}{
+					"artifactId": artID,
+					"name":       "response",
+					"parts":      parts,
+				},
+			}
+		}
+	}
+	_ = contextID
+	envelope["result"] = taskMap
+	if out, err := json.Marshal(envelope); err == nil {
+		return out
+	}
+	return rawResp
 }
 
 // handleJSONRPC validates the project/agent routing and delegates to the SDK handler.
@@ -401,12 +572,90 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	// Enforce request body size limit to prevent memory exhaustion.
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 
+	isV03 := strings.Contains(r.UserAgent(), "Google")
+	var clientTaskID string
+
+	if bodyBytes, err := io.ReadAll(r.Body); err == nil && len(bodyBytes) > 0 {
+		s.log.Info("incoming A2A JSON-RPC request",
+			"user_agent", r.UserAgent(),
+			"has_auth_header", r.Header.Get("Authorization") != "",
+			"raw_body", string(bodyBytes),
+		)
+		if bytes.Contains(bodyBytes, []byte(`"message/send"`)) ||
+			bytes.Contains(bodyBytes, []byte(`"message/stream"`)) ||
+			bytes.Contains(bodyBytes, []byte(`"tasks/send"`)) ||
+			bytes.Contains(bodyBytes, []byte(`"tasks/get"`)) ||
+			bytes.Contains(bodyBytes, []byte(`"tasks/cancel"`)) ||
+			bytes.Contains(bodyBytes, []byte(`"kind"`)) {
+			isV03 = true
+		}
+
+		var rpcReq map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &rpcReq); err == nil {
+			if m, ok := rpcReq["method"].(string); ok {
+				switch m {
+				case "message/send", "message/stream", "tasks/send", "tasks/sendSubscribe":
+					rpcReq["method"] = "SendMessage"
+				case "tasks/get":
+					rpcReq["method"] = "GetTask"
+				case "tasks/cancel":
+					rpcReq["method"] = "CancelTask"
+				}
+			}
+			if params, ok := rpcReq["params"].(map[string]interface{}); ok {
+				if idVal, ok := params["id"].(string); ok && idVal != "" {
+					clientTaskID = idVal
+				}
+				if msg, ok := params["message"].(map[string]interface{}); ok {
+					if tid, ok := msg["taskId"].(string); ok && tid != "" {
+						clientTaskID = tid
+						// Strip taskId before passing to a2a-go/v2 so it creates a fresh task
+						// instead of failing with ErrTaskNotFound or terminal task state error.
+						delete(msg, "taskId")
+					}
+					if mid, _ := msg["messageId"].(string); mid == "" {
+						msg["messageId"] = fmt.Sprintf("msg-%d", time.Now().UnixNano())
+					}
+					if role, _ := msg["role"].(string); role == "" || strings.EqualFold(role, "user") {
+						msg["role"] = "ROLE_USER"
+					} else if strings.EqualFold(role, "agent") {
+						msg["role"] = "ROLE_AGENT"
+					}
+				}
+			}
+			if rewritten, err := json.Marshal(rpcReq); err == nil {
+				bodyBytes = rewritten
+			}
+		}
+
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		r.ContentLength = int64(len(bodyBytes))
+	}
+
 	// Inject routing info into context for the executor.
 	ctx := WithRouteInfo(r.Context(), RouteInfo{
 		ProjectSlug: projectSlug,
 		AgentSlug:   agentSlug,
 	})
 	r = r.WithContext(ctx)
+
+	if isV03 {
+		rec := &bufferedResponseWriter{}
+		s.sdkHandler.ServeHTTP(rec, r)
+		outBytes := convertResponseToA2AV03(rec.body.Bytes(), clientTaskID)
+		s.log.Info("outgoing A2A v0.3 JSON-RPC response", "body", string(outBytes))
+		for k, vals := range rec.Header() {
+			for _, v := range vals {
+				w.Header().Add(k, v)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if rec.status != 0 {
+			w.WriteHeader(rec.status)
+		}
+		_, _ = w.Write(outBytes)
+		return
+	}
 
 	// Delegate to SDK JSON-RPC handler.
 	s.sdkHandler.ServeHTTP(w, r)
@@ -525,9 +774,16 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 
 		case "hubUAT":
+			// The Hub is the single authority for every bearer credential:
+			// scion_pat_* user access tokens, Hub-issued JWTs, and external
+			// tokens from trusted issuers (e.g. the Google credential Gemini
+			// Enterprise attaches on behalf of the end user). The bridge only
+			// introspects the token via GET /api/v1/auth/me and forwards it
+			// unchanged; the Hub applies trusted-issuer, audience, allow-list
+			// and sign-in policy checks and provisions the user.
 			token := extractBearerOrAPIKey(r)
-			if !strings.HasPrefix(token, "scion_pat_") {
-				http.Error(w, "unauthorized: expected scion_pat_* token", http.StatusUnauthorized)
+			if token == "" {
+				http.Error(w, "unauthorized: missing bearer token", http.StatusUnauthorized)
 				return
 			}
 			if uatV == nil {
@@ -537,8 +793,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 			caller, err := uatV.Validate(r.Context(), token)
 			if err != nil {
-				s.log.Debug("UAT validation failed", "error", err)
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				s.log.Info("bearer token rejected by Scion Hub", "error", err)
+				http.Error(w, "unauthorized: token rejected by Scion Hub", http.StatusUnauthorized)
 				return
 			}
 			ctx := withCallerIdentity(r.Context(), caller)

@@ -629,6 +629,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	scionMsg := TranslateA2AToScion(parts)
 	scionMsg.Sender = senderLabel
 	scionMsg.Recipient = fmt.Sprintf("agent:%s", agentCtx.AgentSlug)
+	scionMsg.Channel = "a2a-bridge"
 	scionMsg.Metadata = map[string]string{"a2aTaskId": taskID}
 
 	if b.broker != nil {
@@ -1359,7 +1360,8 @@ func truncate(s string, n int) string {
 }
 
 // callerHubClient creates a per-request Hub client authenticated as the caller.
-// For UAT callers, the original token is passed through to the Hub.
+// For UAT and external bearer callers (tokens the Hub already introspected via
+// /api/v1/auth/me), the original token is passed through to the Hub unchanged.
 // For JWT callers, a fresh 5-minute JWT is minted for the caller's identity.
 // For federation callers, the bridge's admin auth is used with the federation
 // token passed via X-Scion-Federation-Token header.
@@ -1369,7 +1371,7 @@ func truncate(s string, n int) string {
 // identity-aware proxies.
 func (b *Bridge) callerHubClient(caller *CallerIdentity) (hubclient.Client, error) {
 	switch caller.TokenType {
-	case "uat":
+	case "uat", "bearer":
 		opts := []hubclient.Option{hubclient.WithBearerToken(caller.RawToken)}
 		if b.transportSrc != nil {
 			opts = append(opts, hubclient.WithTransportAuth(b.transportSrc, b.transportMode))
@@ -1543,6 +1545,34 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, projectSlug, agentSlug s
 		card["provider"] = map[string]string{
 			"organization": cfg.Bridge.Provider.Organization,
 			"url":          cfg.Bridge.Provider.URL,
+		}
+	}
+
+	if cfg.Auth.Scheme != "none" {
+		card["securitySchemes"] = map[string]interface{}{
+			"oauth2": map[string]interface{}{
+				"type": "oauth2",
+				"flows": map[string]interface{}{
+					"authorizationCode": map[string]interface{}{
+						"authorizationUrl": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent",
+						"tokenUrl":         "https://oauth2.googleapis.com/token",
+						"scopes": map[string]string{
+							"openid":  "OpenID Connect identity",
+							"email":   "User email address",
+							"profile": "User profile",
+						},
+					},
+				},
+			},
+			"bearerAuth": map[string]interface{}{
+				"type":         "http",
+				"scheme":       "bearer",
+				"bearerFormat": "JWT",
+			},
+		}
+		card["security"] = []map[string][]string{
+			{"oauth2": {"openid", "email", "profile"}},
+			{"bearerAuth": {}},
 		}
 	}
 
