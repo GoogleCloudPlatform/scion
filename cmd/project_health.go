@@ -189,7 +189,7 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 		}
 
 		if len(targetProjects) == 0 {
-			return fmt.Errorf("current project is not linked to the Hub. Specify a project name or run 'scion hub link'.")
+			return fmt.Errorf("current project is not linked to the Hub; specify a project name or run 'scion hub link'")
 		}
 	}
 
@@ -265,16 +265,16 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 }
 
 func printProjectHealthReports(w io.Writer, reports []ProjectHealthReport) {
-	fmt.Fprintln(w, "==================================================================")
-	fmt.Fprintln(w, "                     PROJECT HEALTH & AGENT METRICS               ")
-	fmt.Fprintln(w, "==================================================================")
+	_, _ = fmt.Fprintln(w, "==================================================================")
+	_, _ = fmt.Fprintln(w, "                     PROJECT HEALTH & AGENT METRICS               ")
+	_, _ = fmt.Fprintln(w, "==================================================================")
 
 	for i, r := range reports {
 		if i > 0 {
-			fmt.Fprintln(w)
+			_, _ = fmt.Fprintln(w)
 		}
-		fmt.Fprintf(w, "Project: %s (slug: %s, id: %s)\n", r.Name, r.Slug, r.ID)
-		fmt.Fprintf(w, "  Summary: Total=%d | Running=%d | Error=%d | Working/Thinking=%d | Blocked=%d | Completed=%d\n\n",
+		_, _ = fmt.Fprintf(w, "Project: %s (slug: %s, id: %s)\n", r.Name, r.Slug, r.ID)
+		_, _ = fmt.Fprintf(w, "  Summary: Total=%d | Running=%d | Error=%d | Working/Thinking=%d | Blocked=%d | Completed=%d\n\n",
 			r.Summary.Total,
 			r.Summary.Running,
 			r.Summary.Error,
@@ -284,13 +284,13 @@ func printProjectHealthReports(w io.Writer, reports []ProjectHealthReport) {
 		)
 
 		if len(r.Agents) == 0 {
-			fmt.Fprintln(w, "  No agents registered in this project.")
+			_, _ = fmt.Fprintln(w, "  No agents registered in this project.")
 			continue
 		}
 
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "  AGENT\tTEMPLATE\tHARNESS\tPHASE\tACTIVITY")
-		fmt.Fprintln(tw, "  -----\t--------\t-------\t-----\t--------")
+		_, _ = fmt.Fprintln(tw, "  AGENT\tTEMPLATE\tHARNESS\tPHASE\tACTIVITY")
+		_, _ = fmt.Fprintln(tw, "  -----\t--------\t-------\t-----\t--------")
 		for _, a := range r.Agents {
 			name := a.Name
 			if name == "" {
@@ -308,7 +308,7 @@ func printProjectHealthReports(w io.Writer, reports []ProjectHealthReport) {
 			if activity == "" {
 				activity = "-"
 			}
-			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n",
+			_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n",
 				truncate(name, 26),
 				truncate(tmpl, 14),
 				truncate(harness, 10),
@@ -320,17 +320,17 @@ func printProjectHealthReports(w io.Writer, reports []ProjectHealthReport) {
 
 		// Troubleshooting hints for degraded states
 		if r.Summary.Blocked > 0 || r.Summary.Error > 0 || r.Summary.Stalled > 0 {
-			fmt.Fprintln(w)
+			_, _ = fmt.Fprintln(w)
 			if r.Summary.Blocked > 0 {
-				fmt.Fprintf(w, "  ! %d agent(s) are blocked waiting on permissions or inputs.\n", r.Summary.Blocked)
+				_, _ = fmt.Fprintf(w, "  ! %d agent(s) are blocked waiting on permissions or inputs.\n", r.Summary.Blocked)
 			}
 			if r.Summary.Error > 0 {
-				fmt.Fprintf(w, "  x %d agent(s) are in error phase. Run 'scion logs <agent>' or 'scion reset-auth <agent>'.\n", r.Summary.Error)
+				_, _ = fmt.Fprintf(w, "  x %d agent(s) are in error phase. Run 'scion logs <agent>' or 'scion reset-auth <agent>'.\n", r.Summary.Error)
 			}
 			if r.Summary.Stalled > 0 {
-				fmt.Fprintf(w, "  ! %d agent(s) are stalled. Run 'scion look <agent>' to check terminal state.\n", r.Summary.Stalled)
+				_, _ = fmt.Fprintf(w, "  ! %d agent(s) are stalled. Run 'scion look <agent>' to check terminal state.\n", r.Summary.Stalled)
 			}
 		}
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 }
