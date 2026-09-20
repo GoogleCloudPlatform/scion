@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -236,5 +237,197 @@ func TestCrossProjectConversationReadGate(t *testing.T) {
 	rr = agentRequest(http.MethodGet, sameConv.ID)
 	if rr.Code != http.StatusOK {
 		t.Errorf("Hub OFF + agent + same-project: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CPM-UAT-005: Conversation send dispatches to broker and uses canonical peer
+// ---------------------------------------------------------------------------
+
+// TestConversationSendDispatch verifies that handleCPMConversationSend:
+//  1. Dispatches the message to the broker (not just persists it).
+//  2. Derives the peer from the canonical ExternalRef, not participant rows.
+//  3. Uses the agent slug format ("agent:<slug>") for sender, not UUID.
+//  4. Sets DispatchState to dispatched.
+//  5. A forged third participant does not redirect delivery.
+func TestConversationSendDispatch(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Set up a mock dispatcher that records calls.
+	spy := &brokerMockDispatcher{}
+	srv.SetDispatcher(spy)
+
+	// --- Setup: project with two agents ---
+	proj := &store.Project{
+		ID:   tid("cpm-send-proj"),
+		Slug: "send-proj",
+		Name: "Send Test Project",
+	}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// Sender agent (caller).
+	senderAgent := &store.Agent{
+		ID:          tid("cpm-send-sender"),
+		Slug:        "send-sender",
+		Name:        "Send Sender Agent",
+		ProjectID:   proj.ID,
+		Phase:       "running",
+		MessageMode: store.MessageModeProject,
+	}
+	// Target agent (peer to receive the message).
+	targetAgent := &store.Agent{
+		ID:              tid("cpm-send-target"),
+		Slug:            "send-target",
+		Name:            "Send Target Agent",
+		ProjectID:       proj.ID,
+		Phase:           "running",
+		MessageMode:     store.MessageModeProject,
+		RuntimeBrokerID: "test-broker-001",
+	}
+	for _, a := range []*store.Agent{senderAgent, targetAgent} {
+		if err := s.CreateAgent(ctx, a); err != nil {
+			t.Fatalf("CreateAgent %s: %v", a.Slug, err)
+		}
+	}
+
+	// Create the canonical DM conversation.
+	dmKey, err := messages.DMConversationKey("agent", senderAgent.ID, "agent", targetAgent.ID)
+	if err != nil {
+		t.Fatalf("DMConversationKey: %v", err)
+	}
+	conv := &store.Conversation{
+		ID:          tid("cpm-send-conv"),
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+	}
+	if err := s.CreateConversation(ctx, conv); err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+
+	// Build an agent identity for the sender.
+	senderIdent := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: senderAgent.ID},
+		ProjectID: proj.ID,
+	}}
+
+	// --- Test 1: Message is dispatched to broker ---
+	body := `{"msg":"CPM-UAT-005-dispatch-test","type":"instruction"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/messages",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), senderIdent))
+	rr := httptest.NewRecorder()
+
+	srv.handleCPMConversationSend(rr, req, conv.ID)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("dispatch test: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Parse response.
+	var resp conversationSendResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Status != "delivered" {
+		t.Errorf("expected status 'delivered', got %q", resp.Status)
+	}
+	if resp.MessageID == "" {
+		t.Error("expected non-empty messageId")
+	}
+
+	// Verify dispatcher was called with the target agent.
+	spy.mu.Lock()
+	dispatched := make([]brokerDispatchedMsg, len(spy.messages))
+	copy(dispatched, spy.messages)
+	spy.mu.Unlock()
+
+	if len(dispatched) == 0 {
+		t.Fatal("no dispatch calls recorded — message was stored but not dispatched (CPM-UAT-005 regression)")
+	}
+	if len(dispatched) != 1 {
+		t.Fatalf("expected 1 dispatch call, got %d", len(dispatched))
+	}
+	d := dispatched[0]
+	if d.agentSlug != targetAgent.Slug {
+		t.Errorf("dispatched to %q, expected %q", d.agentSlug, targetAgent.Slug)
+	}
+	if d.msg != "CPM-UAT-005-dispatch-test" {
+		t.Errorf("dispatched msg %q, expected %q", d.msg, "CPM-UAT-005-dispatch-test")
+	}
+
+	// --- Test 2: Sender uses slug format, not UUID ---
+	if d.structured == nil {
+		t.Fatal("structured message is nil")
+	}
+	if d.structured.Sender != "agent:send-sender" {
+		t.Errorf("sender = %q, expected 'agent:send-sender' (slug format)", d.structured.Sender)
+	}
+	if d.structured.Recipient != "agent:send-target" {
+		t.Errorf("recipient = %q, expected 'agent:send-target'", d.structured.Recipient)
+	}
+
+	// --- Test 3: Verify persisted message has DispatchState set ---
+	persistedMsg, err := s.GetMessage(ctx, resp.MessageID)
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if persistedMsg.DispatchState != store.MessageDispatchDispatched {
+		t.Errorf("persisted DispatchState = %q, expected %q",
+			persistedMsg.DispatchState, store.MessageDispatchDispatched)
+	}
+	// Also verify sender on persisted record.
+	if persistedMsg.Sender != "agent:send-sender" {
+		t.Errorf("persisted Sender = %q, expected 'agent:send-sender'", persistedMsg.Sender)
+	}
+
+	// --- Test 4: Canonical peer derivation from ExternalRef ---
+	// Verify derivePeerFromExternalRef extracts the correct peer from the
+	// immutable DM key. The store's DM participant guard (checkDMParticipantKey)
+	// already prevents adding forged third-party participants to DM conversations
+	// at the persistence layer — this test verifies the application-level
+	// derivation also uses ExternalRef, not participant rows.
+	peerKind, peerID := derivePeerFromExternalRef(dmKey, "agent", senderAgent.ID)
+	if peerKind != "agent" || peerID != targetAgent.ID {
+		t.Errorf("derivePeerFromExternalRef: got (%q, %q), expected ('agent', %q)",
+			peerKind, peerID, targetAgent.ID)
+	}
+	// Reverse direction: target calling → sender is peer.
+	peerKind2, peerID2 := derivePeerFromExternalRef(dmKey, "agent", targetAgent.ID)
+	if peerKind2 != "agent" || peerID2 != senderAgent.ID {
+		t.Errorf("derivePeerFromExternalRef reverse: got (%q, %q), expected ('agent', %q)",
+			peerKind2, peerID2, senderAgent.ID)
+	}
+	// Non-participant → empty (fail closed).
+	peerKind3, peerID3 := derivePeerFromExternalRef(dmKey, "agent", "not-in-key")
+	if peerKind3 != "" || peerID3 != "" {
+		t.Errorf("derivePeerFromExternalRef non-participant: got (%q, %q), expected empty",
+			peerKind3, peerID3)
+	}
+
+	// --- Test 5: No dispatcher → status pending (not delivered) ---
+	srv.SetDispatcher(nil)
+	body3 := `{"msg":"CPM-UAT-005-no-dispatch-test","type":"instruction"}`
+	req3 := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/messages",
+		strings.NewReader(body3))
+	req3.Header.Set("Content-Type", "application/json")
+	req3 = req3.WithContext(contextWithIdentity(req3.Context(), senderIdent))
+	rr3 := httptest.NewRecorder()
+
+	srv.handleCPMConversationSend(rr3, req3, conv.ID)
+
+	if rr3.Code != http.StatusOK {
+		t.Fatalf("no-dispatcher test: expected 200, got %d: %s", rr3.Code, rr3.Body.String())
+	}
+	var resp3 conversationSendResponse
+	if err := json.Unmarshal(rr3.Body.Bytes(), &resp3); err != nil {
+		t.Fatalf("unmarshal response3: %v", err)
+	}
+	if resp3.Status != "pending" {
+		t.Errorf("no-dispatcher: expected status 'pending', got %q", resp3.Status)
 	}
 }

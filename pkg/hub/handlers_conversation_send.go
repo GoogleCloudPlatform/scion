@@ -15,9 +15,11 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -101,29 +103,32 @@ func (s *Server) sendViaDirectConversation(
 ) {
 	ctx := r.Context()
 
-	// Get participants to find the peer.
-	participants, err := s.store.ListParticipants(ctx, conv.ID)
-	if err != nil {
-		slog.Error("handleCPMConversationSend: failed to list participants",
-			"conversation_id", conv.ID, "error", err)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"Failed to resolve conversation participants", nil)
-		return
-	}
-
-	// Find the peer (the participant that is not the caller).
+	// Derive peer from canonical DM key (immutable ExternalRef).
+	// Participant rows are mutable and must not redirect delivery;
+	// a forged third-participant row could otherwise divert a reply.
 	var peerKind, peerID string
-	for _, p := range participants {
-		if p.PrincipalKind != identity.Type() || p.PrincipalID != identity.ID() {
-			peerKind = p.PrincipalKind
-			peerID = p.PrincipalID
-			break
-		}
+	if conv.ExternalRef != "" {
+		peerKind, peerID = derivePeerFromExternalRef(conv.ExternalRef, identity.Type(), identity.ID())
 	}
 
-	// If no peer found from participants, try parsing the external ref.
-	if peerID == "" && conv.ExternalRef != "" {
-		peerKind, peerID = derivePeerFromExternalRef(conv.ExternalRef, identity.Type(), identity.ID())
+	// Fallback to participant rows only if canonical key doesn't resolve.
+	// This handles conversations without an ExternalRef set.
+	if peerID == "" {
+		participants, err := s.store.ListParticipants(ctx, conv.ID)
+		if err != nil {
+			slog.Error("handleCPMConversationSend: failed to list participants",
+				"conversation_id", conv.ID, "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to resolve conversation participants", nil)
+			return
+		}
+		for _, p := range participants {
+			if p.PrincipalKind != identity.Type() || p.PrincipalID != identity.ID() {
+				peerKind = p.PrincipalKind
+				peerID = p.PrincipalID
+				break
+			}
+		}
 	}
 
 	if peerID == "" {
@@ -154,12 +159,22 @@ func (s *Server) sendViaDirectConversation(
 		return
 	}
 
+	// Build sender identity. For agents, use the slug (not UUID) to match
+	// the "agent:<slug>" format used by the normal message pipeline.
+	senderLabel := identity.Type() + ":" + identity.ID()
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		callerAgent, lookupErr := s.store.GetAgent(ctx, agentIdent.ID())
+		if lookupErr == nil && callerAgent != nil {
+			senderLabel = "agent:" + callerAgent.Slug
+		}
+	}
+
 	// Create and persist the message.
 	msgID := generateID()
 	msg := &store.Message{
 		ID:             msgID,
 		ProjectID:      targetAgent.ProjectID,
-		Sender:         identity.Type() + ":" + identity.ID(),
+		Sender:         senderLabel,
 		SenderID:       identity.ID(),
 		Recipient:      "agent:" + targetAgent.Slug,
 		RecipientID:    targetAgent.ID,
@@ -168,6 +183,7 @@ func (s *Server) sendViaDirectConversation(
 		AgentID:        targetAgent.ID,
 		ConversationID: conv.ID,
 		Urgent:         req.Urgent || req.Interrupt,
+		DispatchState:  store.MessageDispatchDispatched,
 	}
 
 	if err := s.store.CreateMessage(ctx, msg); err != nil {
@@ -175,6 +191,47 @@ func (s *Server) sendViaDirectConversation(
 			"conversation_id", conv.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to create message", nil)
+		return
+	}
+
+	// Dispatch to the target agent's broker for actual delivery.
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		// Message persisted but dispatcher unavailable — report honestly.
+		writeJSON(w, http.StatusOK, conversationSendResponse{
+			MessageID: msgID,
+			Status:    "pending",
+		})
+		return
+	}
+
+	if targetAgent.RuntimeBrokerID == "" {
+		// Agent has no broker yet — message is stored, delivery deferred.
+		writeJSON(w, http.StatusOK, conversationSendResponse{
+			MessageID: msgID,
+			Status:    "pending",
+		})
+		return
+	}
+
+	// Build a structured message for the dispatcher.
+	structuredMsg := &messages.StructuredMessage{
+		Type:      req.Type,
+		Sender:    senderLabel,
+		Recipient: msg.Recipient,
+		Msg:       req.Msg,
+	}
+
+	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer retryCancel()
+
+	if err := dispatchWithBrokerRetry(retryCtx, dispatcher, targetAgent, req.Msg, req.Urgent || req.Interrupt, structuredMsg); err != nil {
+		if markErr := s.store.MarkMessageFailed(ctx, msgID, err.Error()); markErr != nil {
+			slog.Error("handleCPMConversationSend: failed to mark message as failed",
+				"message_id", msgID, "error", markErr)
+		}
+		writeError(w, http.StatusBadGateway, "DISPATCH_FAILED",
+			"Message stored but delivery to agent failed: "+err.Error(), nil)
 		return
 	}
 
