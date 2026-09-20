@@ -61,7 +61,6 @@ export function openTerminal(agentId: string): void {
     new CustomEvent('nav-click', {
       detail: { path: terminalHref(agentId) },
       bubbles: true,
-      composed: true,
     })
   );
 }

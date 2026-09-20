@@ -923,6 +923,10 @@ async function renderRoute(path: string): Promise<void> {
       return;
     }
   }
+  // Detect whether we are returning from a terminal workspace view.
+  // The terminal route handler hides the outlet without clearing it, so
+  // the previous page and shell are still live in the DOM.
+  const returningFromTerminal = appContainer.hidden;
   appContainer.hidden = false;
   terminalWorkspace?.show(false);
   const route = resolveRoute(pathname);
@@ -1023,11 +1027,30 @@ async function renderRoute(path: string): Promise<void> {
       currentPath: string;
       user: User | null;
     };
+
+    // When returning from a terminal workspace view to the same page that
+    // was hidden (not destroyed), preserve the existing page element so
+    // user state — drafts, selected conversation, scroll position — survives
+    // the round trip.  The outlet was hidden (`appContainer.hidden = true`)
+    // by the terminal route handler; the page inside is still live.
+    // Only skip the swap when the tag matches AND the path matches what
+    // was already rendered; explicit navigation to a different chat
+    // destination (e.g. /chat/space/xyz) must still render normally.
+    const oldPage = shell.querySelector('[data-scion-page]');
+    if (
+      returningFromTerminal &&
+      oldPage &&
+      oldPage.tagName.toLowerCase() === tag &&
+      shell.currentPath === path
+    ) {
+      shell.user = currentUser;
+      return;
+    }
+
     shell.currentPath = path;
     shell.user = currentUser;
 
-    // Replace only the page content inside the shell
-    const oldPage = shell.querySelector('[data-scion-page]');
+    // Replace the page content
     if (oldPage) oldPage.remove();
 
     const page = document.createElement(tag) as HTMLElement & { pageData: PageData };

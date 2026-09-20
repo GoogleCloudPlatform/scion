@@ -446,12 +446,28 @@ test('chat source state is retained when opening terminal from chat', async ({ p
   await page.goto('/chat');
   await expect(page.locator('scion-page-chat')).toBeAttached({ timeout: 10000 });
 
-  // Mark the chat SHELL (not the page) — the shell is the reused container
-  // that holds persistent chat state (SSE connections, space selections).
-  // The page inside may be swapped by renderRoute, but the shell survives.
+  // Wait for async chat initialization to settle (initV2 lazy-loads
+  // components and parses the route), so our state probes aren't
+  // overwritten by deferred setup.
+  await page.waitForTimeout(500);
+
+  // Stamp the page element with a unique id.  If the page is destroyed
+  // and re-created, this id is lost — proving element identity.
+  const pageId = await page.evaluate(() => {
+    const chatPage = document.querySelector('scion-page-chat')!;
+    const id = `chat-page-${Date.now()}`;
+    chatPage.id = id;
+    return id;
+  });
+
+  // Append a child element simulating in-progress user content (e.g. an
+  // unsaved draft overlay).  A destroyed page would lose this child.
   await page.evaluate(() => {
-    const shell = document.querySelector('scion-chat-shell');
-    if (shell) (shell as unknown as { _testMarker: boolean })._testMarker = true;
+    const chatPage = document.querySelector('scion-page-chat')!;
+    const draft = document.createElement('div');
+    draft.setAttribute('data-unsaved-draft', 'hello world');
+    draft.textContent = 'unsaved draft text';
+    chatPage.appendChild(draft);
   });
 
   // Navigate to terminal from chat
@@ -465,18 +481,10 @@ test('chat source state is retained when opening terminal from chat', async ({ p
   await expect(page).toHaveURL(`/terminals/${agentA}`);
   await expect.poll(() => socket.attaches).toBe(1);
 
-  // The route outlet should be hidden but not destroyed — this is the key
-  // mechanism that preserves chat state.
+  // The route outlet should be hidden but not destroyed
   const routeOutlet = page.locator('#route-outlet');
   await expect(routeOutlet).toBeAttached();
   expect(await routeOutlet.evaluate((el) => (el as HTMLElement).hidden)).toBe(true);
-
-  // Chat shell still exists in the hidden outlet with our marker intact
-  const shellSurvived = await page.evaluate(() => {
-    const shell = document.querySelector('scion-chat-shell');
-    return shell ? (shell as unknown as { _testMarker?: boolean })._testMarker === true : false;
-  });
-  expect(shellSurvived).toBe(true);
 
   // Navigate back to chat
   await page.evaluate(() =>
@@ -485,12 +493,18 @@ test('chat source state is retained when opening terminal from chat', async ({ p
   await expect(page).toHaveURL('/chat');
   await expect(routeOutlet).not.toBeHidden();
 
-  // The SAME chat shell instance (marker still present — not re-created)
-  const shellStillPresent = await page.evaluate(() => {
-    const shell = document.querySelector('scion-chat-shell');
-    return shell ? (shell as unknown as { _testMarker?: boolean })._testMarker === true : false;
-  });
-  expect(shellStillPresent).toBe(true);
+  // 1. Same DOM element — proves page was not destroyed and re-created
+  const sameElement = await page.evaluate(
+    (expectedId) => document.querySelector('scion-page-chat')?.id === expectedId,
+    pageId
+  );
+  expect(sameElement).toBe(true);
+
+  // 2. User content survived — appended draft child is still present
+  const draftSurvived = await page.evaluate(
+    () => document.querySelector('scion-page-chat [data-unsaved-draft]')?.textContent
+  );
+  expect(draftSurvived).toBe('unsaved draft text');
 
   // Socket still alive — terminal session retained
   expect(socket.attaches).toBe(1);
@@ -514,14 +528,22 @@ test('cross-tab: chat state retained when another tab owns terminals', async ({ 
   // Chat tab starts at /chat
   await chatTab.goto('/chat');
   await expect(chatTab.locator('scion-page-chat')).toBeAttached({ timeout: 10000 });
+  await chatTab.waitForTimeout(500); // Let async chat init settle
 
-  // Mark the chat SHELL (persistent container, not the swappable page element)
-  await chatTab.evaluate(() => {
-    const shell = document.querySelector('scion-chat-shell');
-    if (shell) (shell as unknown as { _testMarker: boolean })._testMarker = true;
+  // Stamp identity and append user content on the chat page
+  const pageId = await chatTab.evaluate(() => {
+    const chatPage = document.querySelector('scion-page-chat')!;
+    const id = `chat-page-crosstab-${Date.now()}`;
+    chatPage.id = id;
+    // Append child simulating user-generated content
+    const draft = document.createElement('div');
+    draft.setAttribute('data-unsaved-draft', 'cross-tab draft');
+    draft.textContent = 'cross-tab draft text';
+    chatPage.appendChild(draft);
+    return id;
   });
 
-  // Chat tab navigates to terminal — ownership deferred to owner
+  // Chat tab navigates to terminal — ownership deferred to owner (denied foreground focus)
   await chatTab.evaluate(
     (id) =>
       document.dispatchEvent(
@@ -537,25 +559,25 @@ test('cross-tab: chat state retained when another tab owns terminals', async ({ 
   await expect(routeOutlet).toBeAttached();
   expect(await routeOutlet.evaluate((el) => (el as HTMLElement).hidden)).toBe(true);
 
-  // Chat shell survives in the hidden outlet
-  const shellSurvivedDuringTerminal = await chatTab.evaluate(() => {
-    const shell = document.querySelector('scion-chat-shell');
-    return shell ? (shell as unknown as { _testMarker?: boolean })._testMarker === true : false;
-  });
-  expect(shellSurvivedDuringTerminal).toBe(true);
-
-  // Navigate back to chat — shell restores with marker
+  // Navigate back to chat after denied foreground focus
   await chatTab.evaluate(() =>
     document.dispatchEvent(new CustomEvent('nav-click', { detail: { path: '/chat' } }))
   );
   await expect(chatTab).toHaveURL('/chat');
   await expect(routeOutlet).not.toBeHidden();
 
-  const shellStillPresent = await chatTab.evaluate(() => {
-    const shell = document.querySelector('scion-chat-shell');
-    return shell ? (shell as unknown as { _testMarker?: boolean })._testMarker === true : false;
-  });
-  expect(shellStillPresent).toBe(true);
+  // Same page element survived — not re-created after denied foreground focus
+  const sameElement = await chatTab.evaluate(
+    (expectedId) => document.querySelector('scion-page-chat')?.id === expectedId,
+    pageId
+  );
+  expect(sameElement).toBe(true);
+
+  // User content survived the denied-foreground-focus round-trip
+  const draftSurvived = await chatTab.evaluate(
+    () => document.querySelector('scion-page-chat [data-unsaved-draft]')?.textContent
+  );
+  expect(draftSurvived).toBe('cross-tab draft text');
 });
 
 // ---------------------------------------------------------------------------
