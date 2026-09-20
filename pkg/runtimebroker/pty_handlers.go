@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -60,6 +61,191 @@ const (
 	// and is never part of the container image.
 	cloudRunSandboxBin = "/usr/local/gcp/bin/sandbox"
 )
+
+const (
+	// processExitGracePeriod is how long to wait for the runtime exec process
+	// to exit after the PTY master is closed. The PTY close triggers a terminal
+	// hangup (SIGHUP) that should cause the exec process to exit naturally.
+	processExitGracePeriod = 3 * time.Second
+
+	// processTermTimeout is how long to wait after SIGTERM before escalating
+	// to SIGKILL.
+	processTermTimeout = 2 * time.Second
+
+	// containerCleanupTimeout is the timeout for the container-side attach
+	// process verification and cleanup command.
+	containerCleanupTimeout = 5 * time.Second
+)
+
+// gracefulShutdownExec shuts down a runtime exec process (docker exec, sandbox
+// exec) by closing the PTY master first — triggering a terminal hangup that the
+// container runtime can propagate to the container-side process — then
+// escalating through SIGTERM to SIGKILL only if necessary.
+//
+// Background (TW-UAT-002): exec.CommandContext sends SIGKILL on context cancel,
+// which kills the host-side docker exec instantly. Docker/containerd never gets
+// to clean up the container-side exec session, so the tmux attach-session
+// process inside the container survives, reparented to PID 1. By closing the
+// PTY first and using SIGTERM, we give Docker the chance to propagate the
+// hangup signal to the in-container process.
+//
+// Returns true if SIGKILL was required (container-side cleanup may be needed),
+// false if the process exited from PTY hangup or SIGTERM (runtime handled
+// cleanup). The caller must not call cmd.Wait() separately; this function
+// reaps the process.
+func gracefulShutdownExec(cmd *exec.Cmd, ptyMaster *os.File, slug string) (forceKilled bool) {
+	// Step 1: Close PTY master — triggers SIGHUP on the slave side. For
+	// Docker exec, this breaks the stdio pipes, which Docker handles by
+	// sending SIGHUP to the container-side process.
+	if ptyMaster != nil {
+		_ = ptyMaster.Close()
+	}
+
+	if cmd == nil || cmd.Process == nil {
+		return false
+	}
+
+	// Already reaped (e.g., process exited before cleanup started).
+	if cmd.ProcessState != nil {
+		return false
+	}
+
+	// Step 2: Wait for process exit from PTY hangup.
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+
+	select {
+	case <-exited:
+		slog.Debug("PTY exec exited after hangup", "slug", slug)
+		return false
+	case <-time.After(processExitGracePeriod):
+	}
+
+	// Step 3: SIGTERM — more likely than SIGKILL to propagate to the
+	// container-side process through the runtime's exec infrastructure.
+	slog.Debug("PTY exec did not exit after hangup, sending SIGTERM", "slug", slug)
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+
+	select {
+	case <-exited:
+		slog.Debug("PTY exec exited after SIGTERM", "slug", slug)
+		return false
+	case <-time.After(processTermTimeout):
+	}
+
+	// Step 4: SIGKILL — last resort. Container-side process likely survives.
+	slog.Warn("PTY exec did not exit after SIGTERM, sending SIGKILL", "slug", slug)
+	_ = cmd.Process.Kill()
+	<-exited
+	return true
+}
+
+// snapshotTmuxClients captures the current set of tmux client TTY devices for
+// a container. This snapshot is used by cleanupContainerAttach to identify
+// which clients were pre-existing (CLI, sciontool init) vs. added by the
+// browser PTY session, ensuring only the browser's orphaned client is cleaned
+// up and CLI clients are preserved.
+func snapshotTmuxClients(runtimeCmd, containerID, execUser string) map[string]struct{} {
+	if runtimeCmd == "kubernetes" || runtimeCmd == "k8s" || containerID == "" {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	execUser = sanitizeExecUser(execUser)
+
+	var cmd *exec.Cmd
+	if runtimeCmd == "cloudrun-sandbox" {
+		cmd = exec.CommandContext(ctx, cloudRunSandboxBin, "exec", containerID, "--",
+			"/usr/bin/tmux", "list-clients", "-t", "scion", "-F", "#{client_tty}")
+	} else {
+		cmd = exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID,
+			"tmux", "list-clients", "-t", "scion", "-F", "#{client_tty}")
+	}
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	clients := make(map[string]struct{})
+	for _, tty := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		tty = strings.TrimSpace(tty)
+		if tty != "" {
+			clients[tty] = struct{}{}
+		}
+	}
+	return clients
+}
+
+// cleanupContainerAttach verifies and cleans up any container-side tmux attach
+// processes that survived host-side exec termination. This is a safety net for
+// the TW-UAT-002 defect where the container-side process (tmux attach-session)
+// outlives the docker exec host process.
+//
+// It compares current tmux clients against the baseline snapshot taken before
+// the attach session started. Only clients that are NEW (not in the baseline)
+// are detached, preserving CLI clients and other legitimate sessions.
+func cleanupContainerAttach(runtimeCmd, containerID, execUser string, baseline map[string]struct{}) {
+	if runtimeCmd == "kubernetes" || runtimeCmd == "k8s" {
+		return // K8s exec cleanup is handled by the SPDY executor
+	}
+	if containerID == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), containerCleanupTimeout)
+	defer cancel()
+
+	execUser = sanitizeExecUser(execUser)
+
+	var listCmd *exec.Cmd
+	if runtimeCmd == "cloudrun-sandbox" {
+		listCmd = exec.CommandContext(ctx, cloudRunSandboxBin, "exec", containerID, "--",
+			"/usr/bin/tmux", "list-clients", "-t", "scion", "-F", "#{client_tty}")
+	} else {
+		listCmd = exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID,
+			"tmux", "list-clients", "-t", "scion", "-F", "#{client_tty}")
+	}
+
+	out, err := listCmd.Output()
+	if err != nil {
+		// Container may have stopped, or tmux server may be gone. Not an error.
+		return
+	}
+
+	for _, tty := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		tty = strings.TrimSpace(tty)
+		if tty == "" {
+			continue
+		}
+		// Preserve clients that existed before this attach session
+		if baseline != nil {
+			if _, existed := baseline[tty]; existed {
+				continue
+			}
+		}
+
+		slog.Info("Detaching residual container tmux client",
+			"containerID", containerID, "tty", tty)
+		var detachCmd *exec.Cmd
+		if runtimeCmd == "cloudrun-sandbox" {
+			detachCmd = exec.CommandContext(ctx, cloudRunSandboxBin, "exec", containerID, "--",
+				"/usr/bin/tmux", "detach-client", "-t", tty)
+		} else {
+			detachCmd = exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID,
+				"tmux", "detach-client", "-t", tty)
+		}
+		if err := detachCmd.Run(); err != nil {
+			slog.Debug("Failed to detach residual tmux client",
+				"containerID", containerID, "tty", tty, "error", err)
+		}
+	}
+}
 
 // resizeSandboxTerminal relays a terminal resize event. For cloudrun-sandbox
 // runtimes, it sends the resize through the sandbox boundary via tmux
@@ -414,6 +600,12 @@ func (s *LocalPTYSession) Run() error {
 	isK8s := (s.runtimeCmd == "kubernetes" || s.runtimeCmd == "k8s") && s.k8sConfig != nil && s.k8sClientset != nil
 	isCloudRunSandbox := s.runtimeCmd == "cloudrun-sandbox"
 
+	// Capture baseline tmux clients before attaching (TW-UAT-002).
+	var baselineClients map[string]struct{}
+	if !isK8s {
+		baselineClients = snapshotTmuxClients(s.runtimeCmd, s.containerID, s.execUser)
+	}
+
 	if isCloudRunSandbox {
 		if err := s.startCloudRunSandboxExec(); err != nil {
 			return fmt.Errorf("failed to start sandbox exec: %w", err)
@@ -441,12 +633,12 @@ func (s *LocalPTYSession) Run() error {
 	}
 
 	defer func() {
-		if s.ptyMaster != nil {
-			_ = s.ptyMaster.Close()
-		}
-		if s.cmd != nil && s.cmd.Process != nil {
-			_ = s.cmd.Process.Kill()
-			_ = s.cmd.Wait()
+		// Graceful shutdown: close PTY (terminal hangup) → wait → SIGTERM →
+		// SIGKILL, ensuring the container runtime can propagate the hangup
+		// to the container-side tmux attach process (TW-UAT-002 fix).
+		forceKilled := gracefulShutdownExec(s.cmd, s.ptyMaster, s.agentID)
+		if forceKilled {
+			cleanupContainerAttach(s.runtimeCmd, s.containerID, s.execUser, baselineClients)
 		}
 	}()
 
@@ -623,7 +815,9 @@ func (s *LocalPTYSession) startCloudRunSandboxExec() error {
 		"--", "/usr/bin/tmux", "attach-session", "-t", "scion",
 	}
 
-	s.cmd = exec.CommandContext(s.ctx, cloudRunSandboxBin, args...)
+	// Use exec.Command (NOT exec.CommandContext) so that context cancellation
+	// does not immediately SIGKILL the process. See gracefulShutdownExec.
+	s.cmd = exec.Command(cloudRunSandboxBin, args...)
 
 	ptmx, err := pty.StartWithSize(s.cmd, &pty.Winsize{
 		Cols: uint16(s.cols),
@@ -652,7 +846,9 @@ func (s *LocalPTYSession) startDockerExec() error {
 		"tmux", "attach-session", "-t", "scion",
 	}
 
-	s.cmd = exec.CommandContext(s.ctx, s.runtimeCmd, args...)
+	// Use exec.Command (NOT exec.CommandContext) so that context cancellation
+	// does not immediately SIGKILL the process. See gracefulShutdownExec.
+	s.cmd = exec.Command(s.runtimeCmd, args...)
 
 	ptmx, err := pty.StartWithSize(s.cmd, &pty.Winsize{
 		Cols: uint16(s.cols),
@@ -758,6 +954,11 @@ type StreamPTYHandler struct {
 	// K8s Go client for direct API exec (avoids needing kubectl binary)
 	k8sConfig    *rest.Config
 	k8sClientset kubernetes.Interface
+
+	// baselineClients records the tmux client TTYs that existed before this
+	// session's attach, so cleanup can distinguish pre-existing CLI clients
+	// from the browser session's orphaned attach process.
+	baselineClients map[string]struct{}
 }
 
 // NewStreamPTYHandler creates a handler for a PTY stream from the control channel.
@@ -790,6 +991,13 @@ func (h *StreamPTYHandler) Run() error {
 	isK8s := (runtimeCmd == "kubernetes" || runtimeCmd == "k8s") && h.k8sConfig != nil && h.k8sClientset != nil
 	isCloudRunSandbox := runtimeCmd == "cloudrun-sandbox"
 
+	// Capture baseline tmux clients BEFORE attaching, so the cleanup safety
+	// net can distinguish pre-existing CLI clients from the browser's
+	// orphaned attach process (TW-UAT-002).
+	if !isK8s {
+		h.baselineClients = snapshotTmuxClients(runtimeCmd, h.containerID, h.execUser)
+	}
+
 	if isCloudRunSandbox {
 		if err := h.startCloudRunSandboxExec(); err != nil {
 			return err
@@ -815,18 +1023,15 @@ func (h *StreamPTYHandler) Run() error {
 	}
 
 	defer func() {
-		// With real PTY, ptyMaster and ptySlave are the same fd, so only close once
-		if h.ptyMaster != nil {
-			_ = h.ptyMaster.Close()
-		}
-		if h.cmd != nil && h.cmd.Process != nil {
-			// Kill only if still running
-			if h.cmd.ProcessState == nil {
-				_ = h.cmd.Process.Kill()
-			}
-			if err := h.cmd.Wait(); err != nil {
-				slog.Debug("PTY command exited with error", "slug", h.slug, "error", err)
-			}
+		// Graceful shutdown: close PTY (terminal hangup) → wait → SIGTERM →
+		// SIGKILL, ensuring the container runtime can propagate the hangup
+		// to the container-side tmux attach process (TW-UAT-002 fix).
+		forceKilled := gracefulShutdownExec(h.cmd, h.ptyMaster, h.slug)
+		// Safety net: if SIGKILL was needed, the container runtime likely
+		// did not clean up the in-container process. Detach any orphaned
+		// tmux clients that weren't in the baseline.
+		if forceKilled {
+			cleanupContainerAttach(h.runtimeCmd, h.containerID, h.execUser, h.baselineClients)
 		}
 	}()
 
@@ -1030,7 +1235,9 @@ func (h *StreamPTYHandler) startCloudRunSandboxExec() error {
 		"--", "/usr/bin/tmux", "attach-session", "-t", "scion",
 	}
 
-	h.cmd = exec.CommandContext(h.ctx, cloudRunSandboxBin, args...)
+	// Use exec.Command (NOT exec.CommandContext) so that context cancellation
+	// does not immediately SIGKILL the process. See gracefulShutdownExec.
+	h.cmd = exec.Command(cloudRunSandboxBin, args...)
 
 	ptmx, err := pty.StartWithSize(h.cmd, &pty.Winsize{
 		Cols: uint16(h.cols),
@@ -1066,7 +1273,9 @@ func (h *StreamPTYHandler) startDockerExec() error {
 		"tmux", "attach-session", "-t", "scion",
 	}
 
-	h.cmd = exec.CommandContext(h.ctx, runtimeCmd, args...)
+	// Use exec.Command (NOT exec.CommandContext) so that context cancellation
+	// does not immediately SIGKILL the process. See gracefulShutdownExec.
+	h.cmd = exec.Command(runtimeCmd, args...)
 
 	// Start with a real PTY - this provides proper terminal handling
 	ptmx, err := pty.StartWithSize(h.cmd, &pty.Winsize{
@@ -1124,15 +1333,20 @@ func (h *StreamPTYHandler) readFromStream() error {
 	}
 }
 
-// Close stops the PTY handler.
+// Close stops the PTY handler. It initiates shutdown by canceling the context
+// and closing the PTY (terminal hangup). The full graceful shutdown sequence
+// (wait → SIGTERM → SIGKILL → container cleanup) is handled by Run()'s defer.
 func (h *StreamPTYHandler) Close() {
 	h.cancel()
-	// With real PTY, ptyMaster and ptySlave are the same fd, so only close once
+	// Close PTY to trigger terminal hangup. Run()'s defer handles the full
+	// graceful shutdown including process wait and container cleanup.
 	if h.ptyMaster != nil {
 		_ = h.ptyMaster.Close()
 	}
 	if h.cmd != nil && h.cmd.Process != nil {
-		_ = h.cmd.Process.Kill()
+		// SIGTERM instead of SIGKILL — gives the container runtime a chance
+		// to propagate the signal to the container-side process (TW-UAT-002).
+		_ = h.cmd.Process.Signal(syscall.SIGTERM)
 	}
 }
 
