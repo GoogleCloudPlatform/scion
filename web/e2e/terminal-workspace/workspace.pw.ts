@@ -1972,7 +1972,9 @@ test('performLogout dispatches teardown and closes sessions before redirect', as
 
   // Call performLogout via the auth module
   await page.evaluate(async () => {
-    const auth = await import('/src/utils/auth.js');
+    const auth = (await import('/src/utils/auth.js')) as {
+      performLogout: () => void;
+    };
     auth.performLogout();
   });
 
@@ -1995,7 +1997,9 @@ test('API 401 response triggers teardown before login redirect', async ({ page }
   await page.route('**/api/v1/test-401', (route) => route.fulfill({ status: 401 }));
 
   await page.evaluate(async () => {
-    const api = await import('/src/client/api.js');
+    const api = (await import('/src/client/api.js')) as {
+      apiFetch: (url: string) => Promise<Response>;
+    };
     await api.apiFetch('/api/v1/test-401');
   });
 
@@ -2050,7 +2054,9 @@ test('SSE auth-expiry check triggers teardown before login redirect', async ({ p
     // This goes through the real SSEClient code: openConnection creates the
     // failing EventSource, onerror fires checkAuthAndReconnect, which fetches
     // /auth/me, sees 401, and calls dispatchTeardown('auth-expired').
-    const { SSEClient } = await import('/src/client/sse-client.js');
+    const { SSEClient } = (await import('/src/client/sse-client.js')) as {
+      SSEClient: new () => { connect: (topics: string[]) => void };
+    };
     const client = new SSEClient();
     client.connect(['auth-expiry-probe']);
   });
@@ -2061,7 +2067,9 @@ test('SSE auth-expiry check triggers teardown before login redirect', async ({ p
   await expect(page.locator('#terminal-workspace')).toBeHidden();
 });
 
-test('pending WebSocket handshake is aborted on teardown', async ({ page }) => {
+test('teardown cancels pending agent metadata preflight before WebSocket creation', async ({
+  page,
+}) => {
   // Use the shared setup for infrastructure (EventSource, route stubs), but
   // intercept the PTY preflight so it never responds. This keeps the session
   // in the loading/connecting phase — the WebSocket is never created because
