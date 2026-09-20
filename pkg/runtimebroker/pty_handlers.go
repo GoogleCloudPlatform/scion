@@ -533,6 +533,31 @@ func (s *LocalPTYSession) Run() error {
 		gracefulShutdownExec(s.cmd, s.ptyMaster, s.agentID)
 	}()
 
+	// Context cancellation watcher: when the parent context is cancelled,
+	// close the PTY master to unblock the readFromPTY goroutine. Without
+	// exec.CommandContext, context cancellation alone does not kill the
+	// process or close the PTY, so blocking reads would hang indefinitely.
+	// The deferred gracefulShutdownExec handles the double-close safely
+	// (same *os.File, Go's poll.FD tracks closed state).
+	//
+	// readFromWebSocket is unblocked by the caller's deferred conn.Close()
+	// after Run() returns. Both I/O goroutines send to errCh (capacity 2),
+	// so neither blocks. This is a pre-existing bounded lifecycle: the
+	// WebSocket reader goroutine survives until the caller closes the conn,
+	// which happens in the same defer chain that called Run().
+	runDone := make(chan struct{})
+	defer close(runDone)
+	go func() {
+		select {
+		case <-s.ctx.Done():
+			if s.ptyMaster != nil {
+				s.ptyMaster.Close()
+			}
+		case <-runDone:
+			// Run() exited normally or on error; watcher no longer needed.
+		}
+	}()
+
 	errCh := make(chan error, 2)
 
 	// Read from PTY, write to WebSocket
@@ -910,6 +935,27 @@ func (h *StreamPTYHandler) Run() error {
 		// may remain until the container restarts — this is a known gap
 		// pending UAT verification.
 		gracefulShutdownExec(h.cmd, h.ptyMaster, h.slug)
+	}()
+
+	// Context cancellation watcher: when the context is cancelled, close
+	// the PTY master to unblock the readFromPTY goroutine. Without
+	// exec.CommandContext, context cancellation alone does not kill the
+	// process or close the PTY, so blocking ptySlave.Read would hang
+	// indefinitely. readFromStream unblocks via its select on ctx.Done().
+	// The deferred gracefulShutdownExec handles the double-close safely
+	// (same *os.File, Go's poll.FD tracks closed state). Close() performs
+	// the same operation — both paths are safe due to poll.FD tracking.
+	runDone := make(chan struct{})
+	defer close(runDone)
+	go func() {
+		select {
+		case <-h.ctx.Done():
+			if h.ptyMaster != nil {
+				h.ptyMaster.Close()
+			}
+		case <-runDone:
+			// Run() exited normally or on error; watcher no longer needed.
+		}
 	}()
 
 	errCh := make(chan error, 2)

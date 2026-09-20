@@ -90,7 +90,7 @@ func TestGracefulShutdownExec_ProcessExitsOnPTYClose(t *testing.T) {
 	require.NoError(t, err)
 	cmd.Stdin = stdinR
 	require.NoError(t, cmd.Start())
-	stdinR.Close() // Close read end in parent
+	_ = stdinR.Close() // Close read end in parent
 
 	start := time.Now()
 	gracefulShutdownExec(cmd, stdinW, "pty-close-test")
@@ -925,4 +925,120 @@ exec "%s" -S "%s" "$@"
 		return err == nil && out == ""
 	}, 10*time.Second, 50*time.Millisecond,
 		"client must be cleaned up after resize session")
+}
+
+// TestPTYCleanup_IdleSessionContextCancel verifies that cancelling the parent
+// context unblocks Run() even when no I/O is in flight. Without the context
+// cancellation watcher, readFromPTY blocks on ptySlave.Read and Run() hangs
+// indefinitely because nothing closes the PTY or kills the process.
+//
+// Test fixture: real local tmux via shell adapter (not Docker containers).
+func TestPTYCleanup_IdleSessionContextCancel(t *testing.T) {
+	tmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("requires tmux in PATH")
+	}
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TMUX", "")
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "tmux.sock")
+	tmuxCommand := func(args ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, tmux, append([]string{"-S", socket}, args...)...).CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+
+	// Create a private tmux session (agent surrogate)
+	_, err = tmuxCommand("-f", "/dev/null", "new-session", "-d", "-s", "scion", "-x", "80", "-y", "24", "exec cat")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = tmuxCommand("kill-server") })
+
+	// Capture baseline pane PID to verify agent survival
+	panePID, err := tmuxCommand("display-message", "-p", "-t", "scion", "#{pane_pid}")
+	require.NoError(t, err)
+	require.NotEmpty(t, panePID)
+
+	// Runtime adapter that wraps tmux commands through the fixture socket
+	adapter := filepath.Join(dir, "runtime-exec")
+	require.NoError(t, os.WriteFile(adapter, []byte(`#!/bin/sh
+set -eu
+[ "$1" = exec ]; shift
+if [ "$1" = -it ]; then shift; fi
+[ "$1" = --user ]; shift 2
+[ "$1" = cleanup-fixture ]; shift
+[ "$1" = tmux ]; shift
+exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
+`), 0700))
+	t.Setenv("TW_CLEANUP_TMUX", tmux)
+	t.Setenv("TW_CLEANUP_SOCKET", socket)
+
+	brokerConn, hubConn, cleanup := newWSPair(t)
+	defer cleanup()
+	client := &ControlChannelClient{conn: brokerConn, connected: true, streams: make(map[string]*StreamHandler)}
+
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			var message struct {
+				Type     string `json:"type"`
+				StreamID string `json:"streamId"`
+			}
+			if err := hubConn.ReadJSON(&message); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() { _ = hubConn.Close(); <-readerDone }()
+
+	streamID := "idle-cancel-1"
+	handler := &StreamHandler{
+		streamID: streamID, slug: "fixture",
+		dataCh: make(chan []byte, 4), resizeCh: make(chan [2]int, 4),
+		closeCh: make(chan struct{}),
+	}
+	client.streamMu.Lock()
+	client.streams[streamID] = handler
+	client.streamMu.Unlock()
+
+	bridge := NewStreamPTYHandler(client, handler, "cleanup-fixture", adapter, "scion", "", 80, 24, nil, nil)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = bridge.Run()
+	}()
+
+	// Wait for the tmux client to appear (attach complete)
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_width}x#{client_height}")
+		return err == nil && out == "80x24"
+	}, 5*time.Second, 20*time.Millisecond, "tmux client should attach")
+
+	// Do NOT send any I/O — session is idle.
+
+	// Cancel the context directly (simulating parent context cancellation).
+	// This is the code path that previously caused Run() to hang because
+	// readFromPTY blocked on ptySlave.Read without anything closing the PTY.
+	bridge.cancel()
+
+	// Assert: Run() must return within a bounded time
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run() did not return after context cancellation — idle session hang")
+	}
+
+	// Assert: attach process is reaped (tmux client gone)
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
+		return err == nil && out == ""
+	}, 10*time.Second, 50*time.Millisecond,
+		"tmux client must be cleaned up after context cancellation")
+
+	// Assert: agent surrogate still alive
+	out, err := tmuxCommand("display-message", "-p", "-t", "scion", "#{pane_pid}:#{pane_dead}")
+	require.NoError(t, err)
+	require.Equal(t, panePID+":0", out,
+		"agent pane must survive context cancellation")
 }
