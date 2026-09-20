@@ -8,15 +8,27 @@ Before starting, record UTC start and end, integration commit, built `scion` and
 
 For the accepted Phase 4 R5 example, the commit was `ed8cb776e2659aae36b877f4d4d0888e43cceee4`, installed harness was Claude Code 2.1.273, and the Cloud Logging destination was `projects/deploy-demo-test/logs/scion-agents`. The restricted evidence and exact query results are in the task scratch area documented by `phase4-r5-native-live-acceptance.md`. These values identify that historical fixture, not a reusable test identity.
 
+## Effective configuration checks on isolated fixtures
+
+Use only an approved task-owned project, home, agent name and exact fixture container ID. Set `TASK_EVIDENCE_DIR` to a mode `0700` task-owned scratch directory before collecting any environment or raw telemetry. Keep the global settings file in that task home and project settings in that task project; record their hashes, the selected template, and the explicit environment passed to the fixture. Do not edit the operator's home, a shared project, or an active agent. The owner starts and removes each dedicated fixture by its exact ID after checking that it has stopped.
+
+For an enabled fixture, set `schema_version: "1"` and `telemetry.enabled: true`, `telemetry.cloud.enabled: true`, `telemetry.cloud.provider: gcp` in the task settings. Read the exact container's environment with `docker inspect "$FIXTURE_CONTAINER_ID" --format '{{range .Config.Env}}{{println .}}{{end}}' > "$TASK_EVIDENCE_DIR/fixture-env.txt"` into the restricted evidence directory; this file may contain credentials and must not be printed or shared. Confirm `SCION_TELEMETRY_ENABLED=true`, `SCION_TELEMETRY_CLOUD_ENABLED=true`, `SCION_TELEMETRY_CLOUD_PROVIDER=gcp`, the expected filter controls, and the harness's effective loopback OTLP endpoint/port. For Claude, confirm `CLAUDE_CODE_ENABLE_TELEMETRY=1` and loopback `OTEL_EXPORTER_OTLP_ENDPOINT`; Claude native GCP metrics must be disabled while hook metrics remain available. Confirm the receiver actually listens only on loopback at that port before interpreting missing source records.
+
+For a separate disabled fixture, put `telemetry.enabled: false` in its task project settings. Confirm `SCION_TELEMETRY_ENABLED=false`, no native harness telemetry enablement, and no receiver/listener or export diagnostics for that fixture. For precedence, use distinct nonsecret endpoint sentinels at global and project levels, then an explicit fixture environment override. The expected order is global < project < template < explicit environment; inspect the exact fixture's final environment and receiver configuration at each step. A setting present in a file is not evidence that it became effective. Restore or remove only the task-owned files and stopped fixture IDs after recording results.
+
 ## Source to receiver to Cloud counts
 
 1. Capture the fixture's native OTLP source requests at the loopback receiver with exact timestamps, signal type, instrumentation scope and event names. Keep raw payloads restricted. Record SHA256 and a value-free parsed summary. Record normalized hook subprocess inputs separately; synthetic native-shaped requests are local test fixtures and must never be described as installed-vendor emission.
 2. Capture receiver final diagnostics for spans, metrics and logs: Accepted, Filtered, Rejected, Delivered, Failed, SDK errors, Dropped, Unconfirmed, and queue bytes/records/entries. On clean Stop, require every accepted permitted record to be delivered with zero residual and zero terminal uncertainty. If the backend fails, report accepted versus delivered and terminal uncertainty separately; successful ingress is not Cloud proof.
 3. Query Cloud Logging within a fixed, recorded visibility window using the exact fixture agent ID, project ID, harness label, log name and UTC time interval. Save the exact filter, query time, response SHA256, unique insert IDs, event names, scope and resource fields. Query twice if the first readback is incomplete, within the predeclared deadline. Match unique Cloud rows to permitted source and receiver counts. Cloud Trace and Monitoring require their own backend readback before making a Cloud delivery claim for those signals.
 
-Example read-only Logging query after setting task fixture values (save the literal expanded filter and UTC query time with the JSON):
+Example read-only Logging query after setting task fixture values. The task evidence directory must be on access-controlled durable scratch storage. Disable terminal and CI transcript capture for this command; never print raw rows or attach them to shared reports:
 
 ```sh
+TASK_EVIDENCE_DIR=/path/to/restricted/task-evidence
+umask 077
+mkdir -p "$TASK_EVIDENCE_DIR"
+chmod 700 "$TASK_EVIDENCE_DIR"
 GCP_PROJECT=your-project-id
 AGENT_ID=your-fixture-agent-id
 PROJECT_ID=your-fixture-project-id
@@ -24,12 +36,21 @@ HARNESS=claude
 WINDOW_START=2026-09-20T00:00:00Z
 WINDOW_END=2026-09-20T00:05:00Z
 FILTER="logName=\"projects/${GCP_PROJECT}/logs/scion-agents\" AND timestamp>=\"${WINDOW_START}\" AND timestamp<\"${WINDOW_END}\" AND labels.\"scion.agent.id\"=\"${AGENT_ID}\" AND labels.\"scion.project.id\"=\"${PROJECT_ID}\" AND labels.\"scion.harness\"=\"${HARNESS}\""
-gcloud logging read "$FILTER" --project "$GCP_PROJECT" --format=json
+gcloud logging read "$FILTER" --project "$GCP_PROJECT" --format=json > "$TASK_EVIDENCE_DIR/cloud-rows.json"
+sha256sum "$TASK_EVIDENCE_DIR/cloud-rows.json" > "$TASK_EVIDENCE_DIR/cloud-rows.sha256"
+python3 - "$TASK_EVIDENCE_DIR/cloud-rows.json" <<'PY'
+import collections, json, sys
+rows = json.load(open(sys.argv[1]))
+allowed = {"assistant_response", "api_request", "agent.session.start", "agent.session.end", "agent.turn.start", "user_prompt", "agent.user.prompt"}
+counts = collections.Counter(row.get("jsonPayload", {}).get("event.name", "") for row in rows)
+print({name: counts[name] for name in sorted(allowed) if counts[name]})
+print("unique_insert_ids", len({row.get("insertId") for row in rows}))
+PY
 ```
 
-Confirm the actual backend field paths from a value-free sample before relying on the filter; record any corrected literal query. Never infer absence from a broad time-window query alone.
+Confirm the actual backend field paths from a value-free sample before relying on the filter; record any corrected literal query and its hash. Publish only value-free counts and hashes. Never infer absence from a broad time-window query alone. The restricted Phase 4 R5 evidence directory contains `preflight.sh`, `launch-fixture.sh`, `fixture.stderr`, `native-event-summary.txt`, `cloud-exact-id.json`, and `cleanup-fixture.sh` as pinned examples; inspect them in restricted storage before adapting a new task-owned capture. Do not run the historical launch or cleanup script against current agents.
 
-The accepted R5 fixture had five installed native Claude logs: one `user_prompt`, two `api_request`, two `assistant_response`. The receiver filtered the prompt and delivered seven logs total: four retained native records and three lifecycle hook records. Cloud Logging returned seven unique exact-ID rows in the fixed window. Receiver diagnostics also showed spans 3/3 and metrics 1/1 Accepted/Delivered with zero failure/residual, but no independent Trace or Monitoring backend readback was performed. A host-network model metadata-shim request count was not captured.
+The accepted R5 fixture had five installed native Claude logs with an empty OTLP `LogRecord.EventName` and string `event.name` attributes: one `user_prompt`, two `api_request`, two `assistant_response`. The receiver filtered the prompt and delivered seven logs total: four retained native records and three lifecycle hook records. Cloud Logging returned seven unique exact-ID rows in the fixed window. Receiver diagnostics also showed spans 3/3 and metrics 1/1 Accepted/Delivered with zero failure/residual, but no independent Trace or Monitoring backend readback was performed. A host-network model metadata-shim request count was not captured.
 
 ## Privacy controls
 
