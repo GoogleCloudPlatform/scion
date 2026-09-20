@@ -124,13 +124,15 @@ export class ScionTerminalPane extends LitElement {
   /** Explicit visibility state — see setVisible(). */
   private _visible = true;
   /**
-   * Whether this pane is the user's focused terminal for human input.
+   * Whether this pane owns user focus for human input.
    * System clipboard (OSC 52, paste) and input injection (upload paths)
    * require BOTH _visible AND _focused. Protocol responses (DSR, DA)
-   * are unrestricted. Default true for legacy/standalone pane usage;
-   * setVisible(false) clears it, setVisible(true) restores it.
-   * Phase 2 multi-pane layouts can override with setFocused(false)
-   * for visible-but-unfocused panes.
+   * are unrestricted. Automatically tracks actual DOM focus: set to true
+   * when this element or a descendant receives focus, cleared when focus
+   * leaves entirely (but not when it moves to toolbar/file-picker children
+   * inside this pane's Shadow DOM). setVisible(false) clears it;
+   * setVisible(true) restores it. setFocused() allows explicit override
+   * by the workspace root for multi-pane layouts.
    */
   private _focused = true;
   private sessionUnsubscribe: (() => void) | null = null;
@@ -553,16 +555,49 @@ export class ScionTerminalPane extends LitElement {
     // Install global drop prevention only when visible so hidden workspaces
     // do not interfere with Chat/Dashboard file drops. (P1.8)
     if (this._visible) this.installWindowDragPrevention();
+    // Track actual DOM focus ownership. focusin/focusout bubble and cover all
+    // descendants (toolbar buttons, file picker, xterm textarea). We use the
+    // relatedTarget to distinguish focus moving within this pane (toolbar click)
+    // from focus leaving entirely (rail/header/sibling click). (P1.8)
+    this.addEventListener('focusin', this._onFocusIn);
+    this.addEventListener('focusout', this._onFocusOut);
     void this.reveal();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     // DOM placement is not session lifetime. The retained owner explicitly closes.
+    this.removeEventListener('focusin', this._onFocusIn);
+    this.removeEventListener('focusout', this._onFocusOut);
     this.removeWindowListeners();
     this.terminal?.blur();
     this.cancelResize();
   }
+
+  /**
+   * DOM focus entered this pane or a descendant (terminal textarea, toolbar
+   * button, file picker). Set _focused so clipboard/input guards allow
+   * human interaction.
+   */
+  private _onFocusIn = (): void => {
+    if (this._visible && !this.disposed) this._focused = true;
+  };
+
+  /**
+   * DOM focus left this pane. Only clear _focused if focus actually moved
+   * outside — relatedTarget is null (window blur) or outside this element.
+   * Focus moving between toolbar/terminal children within this pane keeps
+   * _focused true.
+   */
+  private _onFocusOut = (e: FocusEvent): void => {
+    if (this.disposed) return;
+    const related = e.relatedTarget as Node | null;
+    // Focus moving within this pane (e.g. terminal → toolbar button): keep focused.
+    if (related && this.contains(related)) return;
+    // Focus moving within Shadow DOM children (relatedTarget may be in shadowRoot):
+    if (related && this.shadowRoot?.contains(related)) return;
+    this._focused = false;
+  };
 
   /**
    * Bind once, before or after mounting. Repeated opens on this pane are idempotent.
@@ -802,31 +837,57 @@ export class ScionTerminalPane extends LitElement {
     // Hidden or unfocused panes continue parsing output but cannot read or
     // write the system clipboard. Terminal protocol responses (DSR, DA etc.)
     // are unaffected — they flow through xterm's onData → sendData, not this
-    // handler. Limitation: OSC 52 read requests from unfocused/hidden panes
-    // are silently dropped (no error response sent to the server) rather than
-    // queued, because the correct clipboard content to return depends on the
-    // user's focused context at response time. UTF-8 is preserved via
-    // TextEncoder/TextDecoder for multi-byte content.
+    // handler. Only the 'c' (system clipboard) selection type is supported,
+    // matching the original ClipboardAddon's BrowserClipboardProvider which
+    // returns '' for reads and no-ops writes on non-'c' selections (p, q, s).
+    // Unsupported selection types return true (handled, no fallback) without
+    // touching the clipboard.
+    //
+    // Limitations:
+    // - OSC 52 read requests from unfocused/hidden panes are silently dropped
+    //   (no error response sent to the server) rather than queued, because the
+    //   correct clipboard content depends on user context at response time.
+    // - writeText() is asynchronous per the Clipboard API spec. The pre-call
+    //   visibility/focus guard prevents unauthorized initiation, but once
+    //   writeText() is dispatched to the browser, the OS clipboard write
+    //   cannot be revoked by a subsequent focus/visibility change. This is an
+    //   inherent API limitation shared with the original ClipboardAddon.
+    // - UTF-8 is preserved via TextEncoder/TextDecoder for multi-byte content.
     this.terminal.parser.registerOscHandler(52, (data: string) => {
       const semi = data.indexOf(';');
       if (semi < 0) return true;
+      const sel = data.substring(0, semi);
       const payload = data.substring(semi + 1);
+      // Only 'c' (system clipboard) is supported. Non-'c' selections (p, q, s
+      // etc.) are silently ignored, matching the original BrowserClipboardProvider.
+      if (sel !== 'c') return true;
       if (payload === '?') {
-        // Clipboard read — requires focused + visible.
+        // Clipboard read — requires focused + visible + generation match.
         if (!this._visible || !this._focused || this.disposed) return true;
+        const gen = this.session?.state.generation ?? 0;
         void navigator.clipboard
           .readText()
           .then((text) => {
-            // Recheck at completion: focus/visibility may have changed.
-            if (!this._visible || !this._focused || this.disposed) return;
+            // Recheck at completion: focus/visibility/generation may have changed.
+            // Generation check prevents leaking clipboard to a reconnected session.
+            if (
+              !this._visible ||
+              !this._focused ||
+              this.disposed ||
+              this.session?.state.generation !== gen
+            )
+              return;
             const bytes = new TextEncoder().encode(text);
             let binary = '';
             for (const byte of bytes) binary += String.fromCharCode(byte);
-            this.sendData(`\x1b]52;c;${btoa(binary)}\x07`);
+            this.sendData(`\x1b]52;${sel};${btoa(binary)}\x07`);
           })
           .catch(() => {});
       } else {
-        // Clipboard write — requires focused + visible.
+        // Clipboard write — guard prevents unauthorized initiation.
+        // Note: once writeText() is dispatched, the OS write cannot be revoked
+        // by a subsequent visibility/focus change. This is an inherent Clipboard
+        // API limitation, not a guard failure.
         if (!this._visible || !this._focused || this.disposed) return true;
         try {
           const binary = atob(payload);
@@ -834,7 +895,7 @@ export class ScionTerminalPane extends LitElement {
           const text = new TextDecoder().decode(bytes);
           void navigator.clipboard.writeText(text).catch(() => {});
         } catch {
-          // invalid base64
+          // invalid base64 — silently ignored
         }
       }
       return true;
@@ -1067,6 +1128,11 @@ export class ScionTerminalPane extends LitElement {
     this._dragCounter = 0;
     this.isDragOver = false;
     if (!this.uploadEnabled || !e.dataTransfer?.files.length) return;
+    // A file drop onto this pane is an explicit user interaction targeting it,
+    // equivalent to clicking. Restore _focused so the upload completion guard
+    // allows path injection. This handles the case where focus was temporarily
+    // lost to a dialog or file picker before the drop. (P1.8)
+    if (this._visible && !this.disposed) this._focused = true;
     await this._handleFileDrop(e.dataTransfer.files);
   }
 

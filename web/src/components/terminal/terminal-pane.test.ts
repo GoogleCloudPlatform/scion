@@ -33,7 +33,6 @@ vi.mock('@xterm/addon-fit', () => ({
   },
 }));
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: class {} }));
-vi.mock('@xterm/addon-clipboard', () => ({ ClipboardAddon: class {} }));
 
 class FakeSocket {
   static OPEN = 1;

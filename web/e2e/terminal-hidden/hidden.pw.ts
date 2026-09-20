@@ -17,6 +17,13 @@
  *   - Chat/Dashboard file drops unaffected (hidden AND visible panes)
  *   - upload completing after hide does not inject paths
  *   - UTF-8 multi-byte OSC 52 round-trip parity
+ *   - DOM focus ownership: focusout to sibling blocks OSC 52
+ *   - DOM focus ownership: toolbar click within pane preserves focus
+ *   - DOM focus ownership: refocusing terminal restores _focused
+ *   - OSC 52 read generation check: reconnect blocks stale response
+ *   - OSC 52 selection types: non-'c' silently ignored
+ *   - OSC 52 selection type echoed in read response
+ *   - OSC 52 malformed payloads handled gracefully
  */
 import { expect, test, type Page, type WebSocketRoute } from '@playwright/test';
 import type {} from './fixture.js';
@@ -73,10 +80,10 @@ async function setup(page: Page): Promise<{
   });
   return {
     frames,
-    get attaches() {
+    get attaches(): number {
       return attaches;
     },
-    get closes() {
+    get closes(): number {
       return closes;
     },
     write(text: string): void {
@@ -572,4 +579,261 @@ test('resize timer cancelled on hide does not send late resize', async ({ page }
   // No new resize should have been sent after hide
   const resizesAfter = ctx.frames.filter((f) => f.type === 'resize').length;
   expect(resizesAfter).toBe(resizesBefore);
+});
+
+// --- DOM focus ownership tests ---
+
+test('clicking sibling element clears _focused via DOM focusout, blocks OSC 52', async ({
+  page,
+}) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'before-focus-loss';
+  });
+
+  // Focus the terminal first (ensures focusin fires, _focused = true)
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.waitForTimeout(50);
+
+  // Now focus a sibling element — this triggers focusout on the pane
+  await page.evaluate(() => {
+    const target = document.getElementById('drop-target')!;
+    target.setAttribute('tabindex', '0');
+    target.focus();
+  });
+  await page.waitForTimeout(50);
+
+  // Verify DOM focus has moved
+  const activeId = await page.evaluate(() => document.activeElement?.id);
+  expect(activeId).toBe('drop-target');
+
+  // Send OSC 52 clipboard write — should be blocked because _focused is now false
+  ctx.write('\x1b]52;c;' + Buffer.from('after-focus-loss').toString('base64') + '\x07');
+  await page.waitForTimeout(300);
+
+  // Clipboard should NOT have been modified
+  const clipboardAfter = await page.evaluate(() => window.hiddenFixture.clipboardText);
+  expect(clipboardAfter).toBe('before-focus-loss');
+});
+
+test('toolbar click within pane preserves _focused (focus stays inside pane)', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'toolbar-test';
+  });
+
+  // Focus the terminal first
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.waitForTimeout(50);
+
+  // Click a toolbar button (focus moves within the pane's shadow DOM children).
+  // Use the agent/shell switch button if available, or simulate a toolbar-like click.
+  await page.evaluate(() => {
+    // Create a focusable element inside the pane to simulate toolbar interaction
+    const pane = window.hiddenFixture.pane;
+    const btn = document.createElement('button');
+    btn.id = 'test-toolbar-btn';
+    btn.textContent = 'Test';
+    pane.appendChild(btn);
+    btn.focus();
+  });
+  await page.waitForTimeout(50);
+
+  // _focused should still be true because focus stayed within the pane
+  ctx.write('\x1b]52;c;' + Buffer.from('toolbar-write').toString('base64') + '\x07');
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.clipboardText))
+    .toBe('toolbar-write');
+
+  // Clean up
+  await page.evaluate(() => {
+    document.getElementById('test-toolbar-btn')?.remove();
+  });
+});
+
+test('refocusing terminal after sibling focus restores _focused', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'original';
+  });
+
+  // Focus terminal, then move focus to sibling
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.evaluate(() => {
+    const target = document.getElementById('drop-target')!;
+    target.setAttribute('tabindex', '0');
+    target.focus();
+  });
+  await page.waitForTimeout(50);
+
+  // OSC 52 write should be blocked (focus lost)
+  ctx.write('\x1b]52;c;' + Buffer.from('blocked-write').toString('base64') + '\x07');
+  await page.waitForTimeout(200);
+  const clip = await page.evaluate(() => window.hiddenFixture.clipboardText);
+  expect(clip).toBe('original');
+
+  // Refocus the terminal — _focused should be restored via focusin
+  await textarea.focus();
+  await page.waitForTimeout(50);
+
+  // OSC 52 write should now succeed
+  ctx.write('\x1b]52;c;' + Buffer.from('restored-write').toString('base64') + '\x07');
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.clipboardText))
+    .toBe('restored-write');
+});
+
+// --- OSC 52 generation check on read ---
+
+test('OSC 52 read response blocked after session reconnect (generation mismatch)', async ({
+  page,
+}) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'sensitive-content';
+  });
+
+  // Gate the clipboard so readText() won't resolve until we release it
+  await page.evaluate(() => window.hiddenFixture.gateClipboard());
+
+  // Record generation before
+  const genBefore = await page.evaluate(() => window.hiddenFixture.session.state.generation);
+
+  // Send OSC 52 read request — starts gated readText()
+  ctx.write('\x1b]52;c;?\x07');
+  await page.waitForTimeout(100);
+
+  // Close the WebSocket from server side to simulate disconnect
+  void ctx.peer().close();
+
+  // Wait for disconnected state
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.session.state.connection))
+    .toBe('disconnected');
+
+  // Reconnect — increments generation
+  await page.evaluate(() => void window.hiddenFixture.session.connect());
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.session.state.connection))
+    .toBe('connected');
+
+  const genAfter = await page.evaluate(() => window.hiddenFixture.session.state.generation);
+  expect(genAfter).toBeGreaterThan(genBefore);
+
+  // Count data frames before releasing clipboard
+  const dataFramesBefore = ctx.frames.filter((f) => f.type === 'data').length;
+
+  // Release the gated clipboard — the pending readText() resolves
+  await page.evaluate(() => window.hiddenFixture.releaseClipboard('sensitive-content'));
+  await page.waitForTimeout(300);
+
+  // No new data should have been sent — generation mismatch blocks the response
+  const dataFramesAfter = ctx.frames.filter((f) => f.type === 'data').length;
+  expect(dataFramesAfter, 'OSC 52 read response must not leak to reconnected session').toBe(
+    dataFramesBefore
+  );
+});
+
+// --- OSC 52 selection type tests ---
+
+test('OSC 52 non-c selection types are silently ignored', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'original';
+  });
+
+  // Send OSC 52 write with selection type 'p' (X11 primary — unsupported)
+  ctx.write('\x1b]52;p;' + Buffer.from('primary-write').toString('base64') + '\x07');
+  await page.waitForTimeout(200);
+
+  // Clipboard should be unchanged — 'p' selection ignored
+  let clip = await page.evaluate(() => window.hiddenFixture.clipboardText);
+  expect(clip).toBe('original');
+
+  // Send OSC 52 read with selection type 'p' — should be silently dropped
+  const dataFramesBefore = ctx.frames.filter((f) => f.type === 'data').length;
+  ctx.write('\x1b]52;p;?\x07');
+  await page.waitForTimeout(200);
+  const dataFramesAfter = ctx.frames.filter((f) => f.type === 'data').length;
+  expect(dataFramesAfter).toBe(dataFramesBefore);
+
+  // Send OSC 52 write with selection type 's' — also unsupported
+  ctx.write('\x1b]52;s;' + Buffer.from('secondary-write').toString('base64') + '\x07');
+  await page.waitForTimeout(200);
+  clip = await page.evaluate(() => window.hiddenFixture.clipboardText);
+  expect(clip).toBe('original');
+
+  // Verify 'c' selection still works
+  ctx.write('\x1b]52;c;' + Buffer.from('correct-write').toString('base64') + '\x07');
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.clipboardText))
+    .toBe('correct-write');
+});
+
+test('OSC 52 read response echoes selection type in reply', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'echo-test';
+  });
+
+  const beforeCount = ctx.frames.filter((f) => f.type === 'data').length;
+  ctx.write('\x1b]52;c;?\x07');
+  await expect
+    .poll(() => ctx.frames.filter((f) => f.type === 'data').length)
+    .toBeGreaterThan(beforeCount);
+
+  // Response should include 'c' selection type: ESC ] 52 ; c ; <base64> BEL
+  const response = ctx.input().at(-1)!;
+  // eslint-disable-next-line no-control-regex
+  const match = response.match(/^\x1b\]52;c;([A-Za-z0-9+/=]+)\x07$/);
+  expect(match).not.toBeNull();
+  const decoded = Buffer.from(match![1], 'base64').toString('utf-8');
+  expect(decoded).toBe('echo-test');
+});
+
+test('OSC 52 malformed payloads are handled gracefully', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'unchanged';
+  });
+
+  // No semicolon — should be silently ignored
+  ctx.write('\x1b]52nosemicolon\x07');
+  await page.waitForTimeout(100);
+
+  // Clipboard should be unchanged — no semicolon means handler returns early
+  let clip = await page.evaluate(() => window.hiddenFixture.clipboardText);
+  expect(clip).toBe('unchanged');
+
+  // Invalid base64 — should be caught by atob and ignored
+  ctx.write('\x1b]52;c;!!!invalid-base64!!!\x07');
+  await page.waitForTimeout(100);
+
+  // Clipboard should still be unchanged — atob throws on invalid base64
+  clip = await page.evaluate(() => window.hiddenFixture.clipboardText);
+  expect(clip).toBe('unchanged');
+
+  // Empty payload — empty string is valid base64 (decodes to empty bytes),
+  // so this writes empty string to clipboard. This is correct behavior.
+  ctx.write('\x1b]52;c;\x07');
+  await page.waitForTimeout(100);
+  clip = await page.evaluate(() => window.hiddenFixture.clipboardText);
+  expect(clip).toBe('');
 });
