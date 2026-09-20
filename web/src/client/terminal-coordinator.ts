@@ -20,6 +20,7 @@ import {
   type TerminalSession,
   type TerminalResourceInitializer,
 } from './terminal-sessions.js';
+import { dispatchTeardown } from '../utils/auth.js';
 
 /** Document focus observation is not a guarantee of desktop foreground activation. */
 export type TerminalFocusResult = 'document-focused' | 'not-confirmed';
@@ -250,9 +251,7 @@ export class TerminalCoordinator {
       // Notify the workspace layer so it hides UI and sets the torn-down guard.
       // The main.ts listener is idempotent (accountTornDown guard), so
       // double-dispatch from both local and received paths is safe.
-      window.dispatchEvent(
-        new CustomEvent('scion:account-teardown', { detail: { reason: 'peer-logout' } })
-      );
+      dispatchTeardown('logout');
       return;
     }
     if (

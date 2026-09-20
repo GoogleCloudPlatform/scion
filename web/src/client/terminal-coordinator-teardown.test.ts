@@ -185,19 +185,31 @@ describe('TerminalCoordinator.teardownAccount', () => {
     expect(result.status).toBe('stopped');
   });
 
-  it('handles account-teardown message from a peer', () => {
+  it('handles account-teardown message from a peer', async () => {
     const f = fixture();
+    const { ACCOUNT_TEARDOWN_EVENT } = await import('../utils/auth.js');
+    const handler = vi.fn();
+    window.addEventListener(ACCOUNT_TEARDOWN_EVENT, handler);
 
-    // Simulate receiving an account-teardown message from another tab
-    deliverToPeer(f.coordinator, {
-      key: f.coordinator.coordinationKey,
-      type: 'account-teardown',
-      requestId: 'teardown',
-      agentId: '',
-      generation: null,
-    });
+    try {
+      // Simulate receiving an account-teardown message from another tab
+      deliverToPeer(f.coordinator, {
+        key: f.coordinator.coordinationKey,
+        type: 'account-teardown',
+        requestId: 'teardown',
+        agentId: '',
+        generation: null,
+      });
 
-    expect(f.coordinator.tornDown).toBe(true);
+      expect(f.coordinator.tornDown).toBe(true);
+      // The receive handler should also dispatch the DOM event so that
+      // main.ts can hide the workspace UI and set the torn-down guard.
+      expect(handler).toHaveBeenCalledTimes(1);
+      const event = handler.mock.calls[0][0] as CustomEvent<{ reason: string }>;
+      expect(event.detail.reason).toBe('logout');
+    } finally {
+      window.removeEventListener(ACCOUNT_TEARDOWN_EVENT, handler);
+    }
   });
 
   it('ignores teardown messages for a different coordination key', () => {

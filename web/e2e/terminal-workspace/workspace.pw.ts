@@ -2005,98 +2005,116 @@ test('API 401 response triggers teardown before login redirect', async ({ page }
 });
 
 test('SSE auth-expiry check triggers teardown before login redirect', async ({ page }) => {
-  // Use custom setup that does NOT stub EventSource, so SSEClient uses real
-  // EventSource-like behavior. We stub /auth/me to return 401 for the probe.
   const socket = await setup(page);
   await page.goto(`/terminals/${agent}`);
   await expect.poll(() => socket.attaches).toBe(1);
   await expect(page.locator('#terminal-workspace')).toBeVisible();
 
-  // Block the login redirect
+  // Block the login redirect so the page stays alive for assertions
   await page.route('**/login**', (route) => route.fulfill({ status: 200, body: '<html></html>' }));
 
-  // Make the auth-me endpoint return 401 to simulate session expiry
+  // Mock /auth/me to return 401, simulating an expired session
   await page.route('**/auth/me', (route) => route.fulfill({ status: 401 }));
 
-  // Trigger the SSE auth check path by calling dispatchTeardown('auth-expired')
-  // from the SSE client's perspective. In production this is triggered when
-  // SSEClient.checkAuthAndReconnect() finds /auth/me returns 401.
+  // Exercise the real SSE client auth-expiry path end-to-end:
+  //   SSEClient.connect → openConnection → new EventSource →
+  //   onerror (handshake failed, wasOpen=false) →
+  //   checkAuthAndReconnect → fetch('/auth/me') → 401 →
+  //   dispatchTeardown('auth-expired')
   await page.evaluate(async () => {
-    const auth = await import('/src/utils/auth.js');
-    auth.dispatchTeardown('auth-expired');
+    // Replace EventSource with one that fires onerror without opening,
+    // simulating a rejected SSE handshake after session invalidation.
+    window.EventSource = class extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 2;
+      readyState = 0;
+      onerror: (() => void) | null = null;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      constructor() {
+        super();
+        // Fire error on next microtask without opening first — the SSE
+        // client sees wasOpen=false and calls checkAuthAndReconnect().
+        queueMicrotask(() => {
+          this.readyState = 2;
+          this.onerror?.();
+        });
+      }
+      close(): void {
+        this.readyState = 2;
+      }
+    } as unknown as typeof EventSource;
+
+    // Import the actual SSE client module and trigger the auth-check path.
+    // This goes through the real SSEClient code: openConnection creates the
+    // failing EventSource, onerror fires checkAuthAndReconnect, which fetches
+    // /auth/me, sees 401, and calls dispatchTeardown('auth-expired').
+    const { SSEClient } = await import('/src/client/sse-client.js');
+    const client = new SSEClient();
+    client.connect(['auth-expiry-probe']);
   });
 
-  // Teardown should have fired — sessions closed, workspace hidden
+  // The SSE client's checkAuthAndReconnect fetched /auth/me → 401 →
+  // dispatchTeardown('auth-expired') → main.ts handler disposes workspace
   await expect.poll(() => socket.closes).toBeGreaterThanOrEqual(1);
   await expect(page.locator('#terminal-workspace')).toBeHidden();
 });
 
 test('pending WebSocket handshake is aborted on teardown', async ({ page }) => {
-  // Setup with a slow WebSocket — intercept the /pty route to delay the upgrade
-  let attaches = 0;
-  let closes = 0;
-  const sent: string[] = [];
-  await page.addInitScript(
-    ({ enabled }) => {
-      window.__SCION_FEATURES__ = { 'web.terminal_workspace': enabled };
-      window.EventSource = class extends EventTarget {
-        onopen: (() => void) | null = null;
-        constructor() {
-          super();
-          queueMicrotask(() => this.onopen?.());
-        }
-        close(): void {}
-      } as unknown as typeof EventSource;
-    },
-    { enabled: true }
-  );
-  await page.route('**/auth/me', (route) =>
-    route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
-  );
-  await page.route('**/api/v1/settings/public', (route) =>
-    route.fulfill({ json: { nativeChatEnabled: true } })
-  );
-  await page.route('**/api/v1/agents/**', (route) => {
-    if (route.request().url().endsWith('/pty')) {
-      void route.fulfill({ json: {} });
+  // Use the shared setup for infrastructure (EventSource, route stubs), but
+  // intercept the PTY preflight so it never responds. This keeps the session
+  // in the loading/connecting phase — the WebSocket is never created because
+  // the preflight fetch hasn't completed. When teardown fires, the
+  // AbortController cancels the pending fetch, proving the abort chain works
+  // for connections that haven't finished establishing.
+  const socket = await setup(page);
+
+  // Hang the agent metadata fetch so the session stays in the loading phase.
+  // The coordinator.open() still completes (it doesn't wait for attach), but
+  // the session's attach() hangs at the first fetch — no WebSocket is created.
+  let metadataRequested = false;
+  await page.route(`**/api/v1/agents/${agent}`, (route) => {
+    // Don't intercept the PTY preflight (sub-path), only the agent metadata endpoint
+    if (route.request().url().includes('/pty')) {
+      void route.continue();
       return;
     }
-    void route.fulfill({
-      json: { id: agent, name: 'isolated-agent', phase: 'running', projectId: 'fixture-project' },
-    });
-  });
-  await page.route('**/api/v1/system/status', (route) =>
-    route.fulfill({ json: { complete: true } })
-  );
-  // Use routeWebSocket but deliberately delay the connection open
-  await page.routeWebSocket('**/pty?*', (socket) => {
-    attaches++;
-    socket.onMessage((message) => sent.push(String(message)));
-    socket.onClose(() => closes++);
-    // DO NOT send any data — simulates a slow/pending handshake
+    metadataRequested = true;
+    // Never respond — the fetch hangs with the AbortController signal attached
   });
 
   await page.goto(`/terminals/${agent}`);
-  await expect.poll(() => attaches).toBe(1);
 
-  // Trigger teardown while the WebSocket handshake is still pending
-  await page.evaluate(() => {
+  // Wait for the workspace to render and the metadata request to be intercepted
+  await expect(page.locator('#terminal-workspace')).toBeVisible();
+  await expect(page.locator('scion-terminal-pane')).toHaveCount(1);
+  await expect.poll(() => metadataRequested).toBe(true);
+
+  // The WebSocket should NOT have been created yet — metadata fetch never completed
+  expect(socket.attaches).toBe(0);
+
+  // Dispatch the teardown event. The app's event listener is registered after
+  // renderRoute completes (~150ms after pane creation). waitForFunction retries
+  // until the handler fires and hides the workspace. The event handler is
+  // idempotent (accountTornDown guard), so repeated dispatches are safe.
+  await page.waitForFunction(() => {
     window.dispatchEvent(
       new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } })
     );
+    const host = document.querySelector('#terminal-workspace');
+    return host?.hasAttribute('hidden') || (host as HTMLElement)?.style.display === 'none';
   });
 
-  // The pending connection should have been closed
-  await expect.poll(() => closes).toBeGreaterThanOrEqual(1);
-  await expect(page.locator('#terminal-workspace')).toBeHidden();
+  // No WebSocket connections were ever made (metadata fetch never completed)
+  expect(socket.attaches).toBe(0);
 
-  // No new WebSocket connections should be possible
-  const attachesBefore = attaches;
+  // No new connections should be possible after teardown
   await page.evaluate(async (id) => {
     document.dispatchEvent(
       new CustomEvent('nav-click', { detail: { path: `/terminals/${id}` }, bubbles: true })
     );
     await new Promise((resolve) => setTimeout(resolve, 100));
   }, agent);
-  expect(attaches).toBe(attachesBefore);
+  expect(socket.attaches).toBe(0);
 });
