@@ -1,6 +1,6 @@
 # Telemetry GCP evidence runbook
 
-**Status:** Phase 4 R5 accepted only for Claude Code 2.1.273 logs first; Phase 5 source verification and deployment gate pending. This procedure requires an approved, isolated fixture. It does not authorize changing active agents, shared settings, or infrastructure.
+**Status:** Phase 4 R5 accepted only for Claude Code 2.1.273 logs first; Phase 5 R4 source checks and pinned `b529e04eac3930230664c86e004f5a9589db16ae` deployment health passed. Phase 5 live evidence and overall acceptance remain pending. This procedure requires an approved, isolated fixture. It does not authorize changing active agents, shared settings, or infrastructure.
 
 ## Pin and record the fixture
 

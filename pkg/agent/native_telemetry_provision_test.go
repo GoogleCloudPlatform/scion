@@ -1,14 +1,110 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 )
+
+func TestAgentStartNativeTelemetryConflictHasNoRuntimeChild(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cloud      *api.TelemetryCloudConfig
+		env        map[string]string
+		secrets    []api.ResolvedSecret
+		wantReason string
+	}{
+		{
+			name:       "explicit provider conflict",
+			cloud:      &api.TelemetryCloudConfig{Provider: "otlp"},
+			env:        map[string]string{"SCION_TELEMETRY_CLOUD_PROVIDER": "gcp"},
+			wantReason: "conflicting telemetry cloud provider",
+		},
+		{
+			name:       "late provider secret conflict",
+			cloud:      &api.TelemetryCloudConfig{Endpoint: "https://generic.invalid/v1"},
+			secrets:    []api.ResolvedSecret{{Name: "synthetic-provider", Type: "environment", Target: "SCION_TELEMETRY_CLOUD_PROVIDER", Value: "synthetic"}},
+			wantReason: "late telemetry backend secret target: SCION_TELEMETRY_CLOUD_PROVIDER",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, entry := range os.Environ() {
+				key, _, _ := strings.Cut(entry, "=")
+				if strings.HasPrefix(key, "SCION_") || strings.HasPrefix(key, "OTEL_") || strings.HasPrefix(key, "GOOGLE_") || key == "CLOUDSDK_CORE_PROJECT" {
+					t.Setenv(key, "")
+					if err := os.Unsetenv(key); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			globalScion := filepath.Join(home, ".scion")
+			harnessDir := filepath.Join(globalScion, "harness-configs", "claude-cfg")
+			if err := os.MkdirAll(harnessDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(harnessDir, "config.yaml"), []byte("harness: claude\nuser: scion\nimage: test-image:latest\nprovisioner:\n  type: container-script\n  interface_version: 1\n  command: [\"python3\", \"/home/scion/.scion/harness/provision.py\"]\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			templateDir := filepath.Join(globalScion, "templates", "default")
+			if err := os.MkdirAll(templateDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(templateDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude-cfg"}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(globalScion, "settings.yaml"), []byte("schema_version: \"1\"\nactive_profile: local\nprofiles:\n  local:\n    runtime: docker\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			projectScion := filepath.Join(home, "project", ".scion")
+			if err := os.MkdirAll(projectScion, 0700); err != nil {
+				t.Fatal(err)
+			}
+			enabled := true
+			inline := &api.ScionConfig{Telemetry: &api.TelemetryConfig{Enabled: &enabled, Cloud: tc.cloud}}
+			const agentName = "phase5-prechild-sentinel"
+			_, _, _, effective, err := GetAgent(context.Background(), agentName, "default", "", "", projectScion, "", "", "", "", inline)
+			if err != nil {
+				t.Fatalf("resolve test fixture: %v", err)
+			}
+			if effective.Harness != "claude" || effective.Telemetry == nil || effective.Telemetry.Enabled == nil || !*effective.Telemetry.Enabled || effective.Telemetry.Cloud == nil || effective.Telemetry.Cloud.Provider != tc.cloud.Provider || effective.Telemetry.Cloud.Endpoint != tc.cloud.Endpoint {
+				t.Fatal("test fixture did not resolve enabled Claude telemetry")
+			}
+			var runs, deletes, pulls int
+			rt := &runtime.MockRuntime{
+				ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil },
+				RunFunc: func(context.Context, runtime.RunConfig) (string, error) {
+					runs++
+					return "unexpected-child", nil
+				},
+				DeleteFunc:      func(context.Context, string) error { deletes++; return nil },
+				PullImageFunc:   func(context.Context, string) error { pulls++; return nil },
+				ImageExistsFunc: func(context.Context, string) (bool, error) { return true, nil },
+			}
+			mgr := NewManager(rt)
+			defer mgr.Close()
+			info, err := mgr.Start(context.Background(), api.StartOptions{
+				Name: agentName, Template: "default", ProjectPath: projectScion,
+				NoAuth: true, Env: tc.env, ResolvedSecrets: tc.secrets, InlineConfig: inline,
+			})
+			want := "failed to determine native telemetry backend: " + tc.wantReason
+			if err == nil || err.Error() != want || info != nil {
+				t.Fatalf("Start result: infoPresent=%t, err=%v, want error=%q", info != nil, err, want)
+			}
+			if runs != 0 || deletes != 0 || pulls != 0 {
+				t.Fatalf("runtime child side effects: runs=%d deletes=%d pulls=%d", runs, deletes, pulls)
+			}
+		})
+	}
+}
 
 func TestNativeTelemetryProvisionBackend(t *testing.T) {
 	home := t.TempDir()
