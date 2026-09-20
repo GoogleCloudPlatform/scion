@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/creack/pty"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 )
 
@@ -927,10 +930,14 @@ exec "%s" -S "%s" "$@"
 		"client must be cleaned up after resize session")
 }
 
-// TestPTYCleanup_IdleSessionContextCancel verifies that cancelling the parent
-// context unblocks Run() even when no I/O is in flight. Without the context
-// cancellation watcher, readFromPTY blocks on ptySlave.Read and Run() hangs
-// indefinitely because nothing closes the PTY or kills the process.
+// TestPTYCleanup_IdleSessionContextCancel verifies that cancelling the context
+// unblocks StreamPTYHandler.Run() even when no I/O is in flight.
+//
+// Note: StreamPTYHandler.readFromStream is select-driven with ctx.Done(), so
+// it unblocks immediately on context cancellation. The watcher's PTY close is
+// still needed to unblock readFromPTY (blocking ptySlave.Read). See
+// TestPTYCleanup_IdleLocalSessionContextCancel for the more critical
+// LocalPTYSession path where readFromWebSocket also blocks.
 //
 // Test fixture: real local tmux via shell adapter (not Docker containers).
 func TestPTYCleanup_IdleSessionContextCancel(t *testing.T) {
@@ -1041,4 +1048,140 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 	require.NoError(t, err)
 	require.Equal(t, panePID+":0", out,
 		"agent pane must survive context cancellation")
+}
+
+// TestPTYCleanup_IdleLocalSessionContextCancel is a regression test for the
+// idle-session context cancellation hang in LocalPTYSession.
+//
+// LocalPTYSession.readFromWebSocket (line ~810) blocks on conn.ReadMessage() —
+// a raw blocking read with NO select-driven ctx.Done() check. Unlike
+// StreamPTYHandler.readFromStream which uses select{case <-h.ctx.Done()},
+// this path has NO context awareness during the blocking read.
+//
+// Without the context cancellation watcher (line ~548), cancelling the parent
+// context would leave both readFromPTY (ptySlave.Read) and readFromWebSocket
+// (conn.ReadMessage) permanently blocked. Run() waits on errCh which would
+// never receive, causing an indefinite hang.
+//
+// The watcher closes the PTY master on ctx.Done(), which:
+//   - Unblocks readFromPTY via read error (EIO) → sends to errCh → Run() returns
+//   - readFromWebSocket remains blocked until the caller closes the WebSocket
+//     (bounded lifecycle — caller's defer runs after Run() returns)
+//
+// This test exercises LocalPTYSession specifically (not StreamPTYHandler) and
+// does NOT close the WebSocket — only the parent context is cancelled.
+//
+// Test fixture: real local tmux via shell adapter (not Docker containers).
+func TestPTYCleanup_IdleLocalSessionContextCancel(t *testing.T) {
+	tmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("requires tmux in PATH")
+	}
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TMUX", "")
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "tmux.sock")
+	tmuxCommand := func(args ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, tmux, append([]string{"-S", socket}, args...)...).CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+
+	// Create a private tmux session (agent surrogate)
+	_, err = tmuxCommand("-f", "/dev/null", "new-session", "-d", "-s", "scion", "-x", "80", "-y", "24", "exec cat")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = tmuxCommand("kill-server") })
+
+	// Capture baseline pane PID to verify agent survival
+	panePID, err := tmuxCommand("display-message", "-p", "-t", "scion", "#{pane_pid}")
+	require.NoError(t, err)
+	require.NotEmpty(t, panePID)
+
+	// Runtime adapter that wraps tmux commands through the fixture socket.
+	// Handles both docker-exec arg formats:
+	//   exec --user <user> <container> tmux has-session -t scion  (waitForTmuxSession)
+	//   exec -it -e TERM=... --user <user> <container> tmux attach-session -t scion  (startDockerExec)
+	adapter := filepath.Join(dir, "runtime-exec")
+	require.NoError(t, os.WriteFile(adapter, []byte(`#!/bin/sh
+set -eu
+shift  # Remove "exec"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -it|-i|-t) shift ;;
+        -e) shift 2 ;;
+        --user) shift 2 ;;
+        *) break ;;
+    esac
+done
+shift  # Remove containerID
+shift  # Remove "tmux"
+exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
+`), 0700))
+	t.Setenv("TW_CLEANUP_TMUX", tmux)
+	t.Setenv("TW_CLEANUP_SOCKET", socket)
+
+	// Create a raw WebSocket pair for LocalPTYSession (needs *websocket.Conn).
+	accepted := make(chan *websocket.Conn, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err == nil {
+			accepted <- conn
+		}
+	}))
+	t.Cleanup(server.Close)
+	browserConn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	require.NoError(t, err)
+	// Do NOT defer browserConn.Close() here — the test must NOT close the
+	// WebSocket to prove the watcher is the unblock mechanism.
+	serverConn := <-accepted
+
+	// Create LocalPTYSession with a cancellable parent context.
+	parentCtx, parentCancel := context.WithCancel(context.Background())
+	defer parentCancel()
+	session := newLocalPTYSession(parentCtx, "idle-local-test", "cleanup-fixture", adapter, "scion", "", serverConn, 80, 24, nil, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- session.Run()
+	}()
+
+	// Wait for the tmux client to appear (attach complete)
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_width}x#{client_height}")
+		return err == nil && out == "80x24"
+	}, 5*time.Second, 20*time.Millisecond, "tmux client should attach")
+
+	// Do NOT send any I/O — session is idle.
+	// Do NOT close the WebSocket — only cancel the parent context.
+	// This is the critical regression path: without the watcher,
+	// readFromWebSocket stays blocked on conn.ReadMessage() forever.
+	parentCancel()
+
+	// Assert: Run() must return within a bounded time.
+	// Without the watcher, this would hang indefinitely.
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("LocalPTYSession.Run() did not return after context cancellation — " +
+			"readFromWebSocket likely blocked on conn.ReadMessage() (idle session hang)")
+	}
+
+	// Assert: attach process is reaped (tmux client gone)
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
+		return err == nil && out == ""
+	}, 10*time.Second, 50*time.Millisecond,
+		"tmux client must be cleaned up after context cancellation")
+
+	// Assert: agent surrogate still alive
+	out, err := tmuxCommand("display-message", "-p", "-t", "scion", "#{pane_pid}:#{pane_dead}")
+	require.NoError(t, err)
+	require.Equal(t, panePID+":0", out,
+		"agent pane must survive context cancellation")
+
+	// Clean up WebSocket — deferred to test end, after Run() has returned.
+	_ = browserConn.Close()
+	_ = serverConn.Close()
 }
