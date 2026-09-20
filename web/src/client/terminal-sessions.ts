@@ -33,6 +33,23 @@ export type TerminalConnectionState =
   | 'unavailable'
   | 'closed';
 
+/**
+ * Classifies the cause of a disconnection or unavailability so the UI
+ * can present appropriate feedback and enable/disable the reconnect action.
+ */
+export type TerminalDisconnectReason =
+  | 'network' // WebSocket closed unexpectedly (close code != 1000)
+  | 'auth-401' // 401 Unauthorized from preflight or agent fetch
+  | 'auth-403' // 403 Forbidden from preflight
+  | 'not-found' // 404 — agent may be deleted
+  | 'agent-offline' // Agent activity is offline
+  | 'agent-phase' // Agent phase prevents terminal (not running/stopping)
+  | 'agent-stopped' // SSE reported agent stopped (phase change)
+  | 'agent-deleted' // SSE reported agent deleted
+  | 'server-error' // 5xx or unclassified HTTP error
+  | 'connect-error' // WebSocket onerror before open
+  | null; // No disconnect (connected, loading, or clean close)
+
 export interface TerminalSize {
   readonly cols: number;
   readonly rows: number;
@@ -46,6 +63,7 @@ export interface TerminalSessionState {
   readonly connection: TerminalConnectionState;
   readonly agent: Agent | null;
   readonly error: string | null;
+  readonly disconnectReason: TerminalDisconnectReason;
   readonly lastSize: TerminalSize | null;
 }
 
@@ -70,10 +88,17 @@ export type TerminalResourceInitializer = (
 
 export interface TerminalSession {
   readonly state: TerminalSessionState;
+  /** True when a reconnect attempt is in progress; UI can use this to disable repeated clicks. */
+  readonly reconnecting: boolean;
   /** Immediately reports current state; returns an unsubscribe function. */
   subscribe(listener: (state: TerminalSessionState) => void): () => void;
   /** Explicit attach/reconnect. Shared promise resolves after socket setup, not handshake. */
   connect(): Promise<void>;
+  /**
+   * Mark this session as unavailable due to an external signal (SSE agent-stopped/deleted).
+   * Sets the connection state and disconnect reason without disrupting transport.
+   */
+  markUnavailable(reason: 'agent-stopped' | 'agent-deleted', message: string): void;
   /** Immediate transport write, including xterm protocol responses. Never queues input. */
   sendData(data: string): boolean;
   resize(cols: number, rows: number): void;
@@ -198,12 +223,17 @@ class Session implements TerminalSession {
       connection: 'loading',
       agent: null,
       error: null,
+      disconnectReason: null,
       lastSize: null,
     };
   }
 
   get state(): TerminalSessionState {
     return this.snapshot;
+  }
+
+  get reconnecting(): boolean {
+    return this.pending !== null;
   }
 
   subscribe(listener: (state: TerminalSessionState) => void): () => void {
@@ -231,11 +261,23 @@ class Session implements TerminalSession {
     // Install the promise before notifying subscribers or invoking consumer code.
     const attempt = Promise.resolve().then(() => this.attach(generation, controller.signal));
     this.pending = attempt;
-    this.update({ generation, connection: 'loading', error: null });
+    this.update({ generation, connection: 'loading', error: null, disconnectReason: null });
     void attempt.finally(() => {
       if (this.pending === attempt) this.pending = null;
     });
     return attempt;
+  }
+
+  markUnavailable(reason: 'agent-stopped' | 'agent-deleted', message: string): void {
+    if (this.state.connection === 'closed') return;
+    // Close existing socket if any — the agent is no longer reachable.
+    this.releaseSocket();
+    this.controller?.abort();
+    this.update({
+      connection: 'unavailable',
+      error: message,
+      disconnectReason: reason,
+    });
   }
 
   private current(generation: number, signal: AbortSignal): boolean {
@@ -251,10 +293,16 @@ class Session implements TerminalSession {
       const endpoint = new URL(`api/v1/agents/${this.state.agentId}`, this.hubUrl).href;
       const response = await fetch(endpoint, { credentials: 'include', signal });
       if (!current()) return;
-      if (!response.ok)
-        throw new Error(
-          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
-        );
+      if (!response.ok) {
+        const reason = classifyHttpStatus(response.status);
+        const msg = `HTTP ${response.status}: ${response.statusText}`;
+        this.update({
+          connection: 'disconnected',
+          disconnectReason: reason,
+          error: await extractApiError(response, msg),
+        });
+        return;
+      }
       const agent = (await response.json()) as Agent;
       if (!current()) return;
       if (agent.id?.toLowerCase() !== this.state.agentId)
@@ -265,6 +313,7 @@ class Session implements TerminalSession {
       if (!isTerminalAvailable(agent)) {
         this.update({
           connection: 'unavailable',
+          disconnectReason: agent.activity === 'offline' ? 'agent-offline' : 'agent-phase',
           error:
             agent.activity === 'offline'
               ? 'Agent is offline. Terminal is not available while the agent is unreachable.'
@@ -276,6 +325,7 @@ class Session implements TerminalSession {
       const preflight = await fetch(`${endpoint}/pty`, { credentials: 'include', signal });
       if (!current()) return;
       if (!preflight.ok) {
+        const reason = classifyHttpStatus(preflight.status);
         const message =
           preflight.status === 403
             ? 'You do not have permission to attach to this agent.'
@@ -287,7 +337,8 @@ class Session implements TerminalSession {
                     preflight,
                     `Terminal connection failed: ${preflight.statusText}`
                   );
-        throw new Error(message);
+        this.update({ connection: 'disconnected', disconnectReason: reason, error: message });
+        return;
       }
       if (!current()) return;
       const reconnect = this.resources !== null;
@@ -313,7 +364,7 @@ class Session implements TerminalSession {
       socket.onopen = (): void => {
         if (!live()) return;
         if (reconnect) resources.reset();
-        this.update({ connection: 'connected', error: null });
+        this.update({ connection: 'connected', error: null, disconnectReason: null });
       };
       socket.onmessage = (event: MessageEvent): void => {
         if (!live() || typeof event.data !== 'string') return;
@@ -331,19 +382,25 @@ class Session implements TerminalSession {
         this.socket = null;
         this.update({
           connection: 'disconnected',
+          disconnectReason: event.code === 1000 ? null : 'network',
           error: event.code === 1000 ? null : `Connection closed (code: ${event.code})`,
         });
       };
       socket.onerror = (): void => {
         if (!live()) return;
         this.releaseSocket();
-        this.update({ connection: 'disconnected', error: 'WebSocket connection error' });
+        this.update({
+          connection: 'disconnected',
+          disconnectReason: 'connect-error',
+          error: 'WebSocket connection error',
+        });
       };
       this.update({ connection: 'connecting', lastSize: size });
     } catch (error) {
       if (current())
         this.update({
           connection: 'disconnected',
+          disconnectReason: 'network',
           error: error instanceof Error ? error.message : 'Failed to connect to terminal',
         });
     }
@@ -391,7 +448,13 @@ class Session implements TerminalSession {
     attempt(() => this.releaseSocket());
     attempt(() => this.releaseResources());
     attempt(() => this.remove());
-    attempt(() => this.update({ generation: this.state.generation + 1, connection: 'closed' }));
+    attempt(() =>
+      this.update({
+        generation: this.state.generation + 1,
+        connection: 'closed',
+        disconnectReason: null,
+      })
+    );
     this.listeners.clear();
     if (errors.length) throw new AggregateError(errors, 'Terminal session disposal failed.');
   }
@@ -407,6 +470,14 @@ class Session implements TerminalSession {
     this.resources = null;
     resources?.dispose();
   }
+}
+
+function classifyHttpStatus(status: number): TerminalDisconnectReason {
+  if (status === 401) return 'auth-401';
+  if (status === 403) return 'auth-403';
+  if (status === 404) return 'not-found';
+  if (status >= 500) return 'server-error';
+  return 'network';
 }
 
 function validSize(cols: number, rows: number): boolean {
