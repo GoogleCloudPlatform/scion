@@ -4,6 +4,7 @@ import {
   type TerminalConnectionState,
   type TerminalSession,
   type TerminalSessionState,
+  type TerminalDisconnectReason,
 } from './terminal-sessions.js';
 import {
   TerminalLayoutManager,
@@ -314,6 +315,29 @@ export class TerminalWorkspaceRoot {
       });
       entry.unsubscribeMetadata = this.registry!.metadata.subscribe(state.agentId, (next) => {
         entry.metadata = next;
+
+        // SSE → session bridge: reconcile metadata availability with session connection
+        try {
+          if (
+            next.availability === 'deleted' &&
+            entry.session.state.connection !== 'closed' &&
+            !(
+              entry.session.state.connection === 'unavailable' &&
+              entry.session.state.disconnectReason === 'agent-deleted'
+            )
+          ) {
+            entry.session.markUnavailable('agent-deleted', next.error ?? 'Agent was deleted.');
+          } else if (
+            next.agent?.phase === 'stopped' &&
+            entry.session.state.connection !== 'closed' &&
+            entry.session.state.connection !== 'unavailable'
+          ) {
+            entry.session.markUnavailable('agent-stopped', 'Agent has stopped.');
+          }
+        } catch {
+          // markUnavailable should not throw, but guard the subscription callback
+        }
+
         this.queueRefresh();
       });
       this.entries.set(session.state.key, entry);
@@ -572,6 +596,7 @@ export class TerminalWorkspaceRoot {
     item.dataset.selected = String(visibleSlots.includes(entry.state.key));
     item.dataset.connection = entry.state.connection;
     item.dataset.availability = metadata.availability;
+    if (entry.state.disconnectReason) item.dataset.disconnectReason = entry.state.disconnectReason;
 
     const select = document.createElement('button');
     select.type = 'button';
@@ -595,7 +620,7 @@ export class TerminalWorkspaceRoot {
     project.textContent = projectId;
     const details = document.createElement('span');
     details.className = 'terminal-state-label';
-    details.textContent = `${connectionLabel(entry.state.connection)} · ${availabilityLabel(
+    details.textContent = `${disconnectLabel(entry.state.connection, entry.state.disconnectReason)} · ${availabilityLabel(
       metadata.availability
     )}`;
     text.append(name, project, details);
@@ -614,7 +639,8 @@ export class TerminalWorkspaceRoot {
       entry.state.connection === 'loading' ||
       entry.state.connection === 'connecting' ||
       entry.state.connection === 'connected' ||
-      entry.state.connection === 'closed';
+      entry.state.connection === 'closed' ||
+      entry.state.disconnectReason === 'agent-deleted';
     reconnect.addEventListener('click', (event) => {
       event.stopPropagation();
       void this.registry?.metadata.refresh(entry.state.agentId);
@@ -1171,6 +1197,31 @@ function connectionLabel(state: TerminalConnectionState): string {
       return 'Unavailable';
     case 'closed':
       return 'Closed';
+  }
+}
+
+function disconnectLabel(state: TerminalConnectionState, reason: TerminalDisconnectReason): string {
+  if (state === 'connected' || state === 'loading' || state === 'connecting' || state === 'closed')
+    return connectionLabel(state);
+  switch (reason) {
+    case 'auth-401':
+      return 'Auth required';
+    case 'auth-403':
+      return 'Access denied';
+    case 'not-found':
+      return 'Not found';
+    case 'agent-offline':
+    case 'agent-phase':
+    case 'agent-stopped':
+      return 'Unavailable';
+    case 'agent-deleted':
+      return 'Deleted';
+    case 'network':
+    case 'connect-error':
+    case 'server-error':
+      return 'Disconnected';
+    default:
+      return connectionLabel(state);
   }
 }
 

@@ -30,6 +30,7 @@ import {
   type TerminalSession,
   type TerminalSessionState,
   type TerminalResources,
+  type TerminalDisconnectReason,
 } from '../../client/terminal-sessions.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
@@ -84,6 +85,12 @@ export class ScionTerminalPane extends LitElement {
 
   @state()
   private loading = true;
+
+  @state()
+  private disconnectReason: TerminalDisconnectReason = null;
+
+  @state()
+  private reconnectInProgress = false;
 
   @state()
   private activeWindow: TmuxWindow = 'agent';
@@ -245,9 +252,14 @@ export class ScionTerminalPane extends LitElement {
       font-size: 0.75rem;
     }
 
-    .reconnect-btn:hover {
+    .reconnect-btn:hover:not(:disabled) {
       border-color: #60a5fa;
       color: #60a5fa;
+    }
+
+    .reconnect-btn:disabled {
+      opacity: 0.5;
+      cursor: default;
     }
 
     .pane-action-btn {
@@ -370,21 +382,54 @@ export class ScionTerminalPane extends LitElement {
       left: 0;
       right: 0;
       bottom: 0;
-      background: rgba(0, 0, 0, 0.5);
+      background: rgba(0, 0, 0, 0.6);
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
+      gap: 1rem;
       z-index: 10;
-      pointer-events: none;
+      pointer-events: auto;
     }
 
-    .disconnected-overlay .overlay-text {
+    .disconnected-overlay .overlay-title {
       color: #ef4444;
-      font-size: 2rem;
+      font-size: 1.5rem;
       font-weight: 700;
-      letter-spacing: 0.15em;
+      letter-spacing: 0.1em;
       text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+    }
+
+    .disconnected-overlay.unavailable .overlay-title {
+      color: #f59e0b;
+    }
+
+    .disconnected-overlay .overlay-detail {
+      color: #94a3b8;
+      font-size: 0.875rem;
+      max-width: 400px;
+      text-align: center;
+      line-height: 1.5;
+    }
+
+    .disconnected-overlay .overlay-reconnect {
+      margin-top: 0.5rem;
+      background: #3b82f6;
+      color: #fff;
+      border: none;
+      padding: 0.5rem 1.5rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.875rem;
+    }
+
+    .disconnected-overlay .overlay-reconnect:hover:not(:disabled) {
+      background: #2563eb;
+    }
+
+    .disconnected-overlay .overlay-reconnect:disabled {
+      opacity: 0.5;
+      cursor: default;
     }
 
     .drop-overlay {
@@ -737,6 +782,8 @@ export class ScionTerminalPane extends LitElement {
     const newlyConnected = !this.connected && state.connection === 'connected';
     this.connected = state.connection === 'connected';
     this.error = this.metadataError ?? state.error;
+    this.disconnectReason = state.disconnectReason;
+    this.reconnectInProgress = this.ownedSession?.reconnecting ?? false;
     if (state.connection !== 'loading') this.loading = false;
     if (newlyConnected) {
       this.wasConnected = true;
@@ -1540,7 +1587,52 @@ export class ScionTerminalPane extends LitElement {
 
   private handleReconnect(): void {
     if (this.metadataError) void this.refreshAgentData();
-    if (this.session) void this.session.connect();
+    if (this.session) {
+      this.reconnectInProgress = true;
+      void this.session.connect().finally(() => {
+        this.reconnectInProgress = this.ownedSession?.reconnecting ?? false;
+      });
+    }
+  }
+
+  /**
+   * Whether the Reconnect button should be disabled in the current state.
+   * Disabled when already reconnecting, or for deleted agents.
+   */
+  private get reconnectDisabled(): boolean {
+    if (this.reconnectInProgress) return true;
+    if (this.disconnectReason === 'agent-deleted') return true;
+    return false;
+  }
+
+  /** Human-readable overlay title for disconnected/unavailable states. */
+  private get overlayTitle(): string {
+    switch (this.disconnectReason) {
+      case 'auth-401':
+        return 'AUTHENTICATION REQUIRED';
+      case 'auth-403':
+        return 'ACCESS DENIED';
+      case 'not-found':
+        return 'AGENT NOT FOUND';
+      case 'agent-offline':
+      case 'agent-phase':
+      case 'agent-stopped':
+        return 'AGENT UNAVAILABLE';
+      case 'agent-deleted':
+        return 'AGENT DELETED';
+      default:
+        return 'DISCONNECTED';
+    }
+  }
+
+  /** Whether the current disconnect state should be rendered as "unavailable" rather than "disconnected". */
+  private get isUnavailableState(): boolean {
+    return (
+      this.disconnectReason === 'agent-offline' ||
+      this.disconnectReason === 'agent-phase' ||
+      this.disconnectReason === 'agent-stopped' ||
+      this.disconnectReason === 'agent-deleted'
+    );
   }
 
   /** Dispatch SPA navigation via the document-level nav-click listener. */
@@ -1643,9 +1735,11 @@ export class ScionTerminalPane extends LitElement {
             : ''}
         </div>
         <div class="error-state">
-          <p>Terminal Unavailable</p>
+          <p>${this.isUnavailableState ? 'Agent Unavailable' : 'Terminal Unavailable'}</p>
           <div class="error-detail">${this.error}</div>
-          <button @click=${() => this.handleReconnect()}>Retry</button>
+          <button ?disabled=${this.reconnectDisabled} @click=${() => this.handleReconnect()}>
+            ${this.reconnectInProgress ? 'Reconnecting...' : 'Retry'}
+          </button>
         </div>
       `;
     }
@@ -1722,8 +1816,12 @@ export class ScionTerminalPane extends LitElement {
         </div>
         ${!this.connected
           ? html`
-              <button class="reconnect-btn" @click=${() => this.handleReconnect()}>
-                Reconnect
+              <button
+                class="reconnect-btn"
+                ?disabled=${this.reconnectDisabled}
+                @click=${() => this.handleReconnect()}
+              >
+                ${this.reconnectInProgress ? 'Reconnecting...' : 'Reconnect'}
               </button>
             `
           : ''}
@@ -1751,8 +1849,16 @@ export class ScionTerminalPane extends LitElement {
       >
         <div class="terminal-container"></div>
         ${!this.connected && this.wasConnected
-          ? html`<div class="disconnected-overlay">
-              <span class="overlay-text">DISCONNECTED</span>
+          ? html`<div class="disconnected-overlay ${this.isUnavailableState ? 'unavailable' : ''}">
+              <span class="overlay-title">${this.overlayTitle}</span>
+              ${this.error ? html`<span class="overlay-detail">${this.error}</span>` : nothing}
+              <button
+                class="overlay-reconnect"
+                ?disabled=${this.reconnectDisabled}
+                @click=${() => this.handleReconnect()}
+              >
+                ${this.reconnectInProgress ? 'Reconnecting...' : 'Reconnect'}
+              </button>
             </div>`
           : ''}
         <div
