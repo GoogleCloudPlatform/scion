@@ -409,7 +409,7 @@ func TestPhase5BoundedFailureDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(output), "state=degraded") || !strings.Contains(string(output), "Permanent:1") || !strings.Contains(string(output), "non-retryable error (auth)") || strings.Contains(string(output), "synthetic-private") || strings.Contains(stopErr.Error(), "synthetic-private") {
+	if !strings.Contains(string(output), "state=degraded") || !strings.Contains(string(output), "Permanent:1") || !strings.Contains(string(output), "Failed:1") || strings.Contains(string(output), "synthetic-private") || strings.Contains(stopErr.Error(), "synthetic-private") {
 		t.Fatal("fixed failure diagnostics absent or raw payload leaked")
 	}
 }
