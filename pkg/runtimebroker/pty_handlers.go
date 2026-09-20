@@ -524,13 +524,21 @@ func (s *LocalPTYSession) Run() error {
 	}
 
 	defer func() {
-		// Graceful shutdown: close PTY (terminal hangup) → wait → SIGTERM →
-		// SIGKILL. This gives the container runtime a chance to propagate
-		// the hangup to the container-side tmux attach process (TW-UAT-002
-		// mitigation). If SIGKILL is required and the runtime does not
-		// propagate the kill signal, a residual container-side tmux client
-		// may remain until the container restarts — this is a known gap
-		// pending UAT verification.
+		// Close PTY under ptyMu to prevent race with in-flight resize
+		// in readFromWebSocket, regardless of which exit path we took.
+		// This covers the normal-exit path where the watcher may exit
+		// via runDone (without closing the PTY) while readFromWebSocket
+		// is mid-resize.
+		s.ptyMu.Lock()
+		if s.ptyMaster != nil {
+			_ = s.ptyMaster.Close()
+		}
+		s.ptyMu.Unlock()
+		// Graceful shutdown: signal escalation (SIGTERM → SIGKILL) and
+		// cmd.Wait. The PTY is already closed above, so gracefulShutdownExec's
+		// Close is a safe no-op (poll.FD tracks closed state). This gives
+		// the container runtime a chance to propagate the hangup to the
+		// container-side tmux attach process (TW-UAT-002 mitigation).
 		gracefulShutdownExec(s.cmd, s.ptyMaster, s.agentID)
 	}()
 
