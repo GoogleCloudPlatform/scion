@@ -5,6 +5,11 @@ import {
   type TerminalSession,
   type TerminalSessionState,
 } from './terminal-sessions.js';
+import {
+  TerminalLayoutManager,
+  type TerminalLayout,
+  type TerminalSlot,
+} from './terminal-layout.js';
 import type { TerminalAgentMetadata } from './terminal-metadata.js';
 import type { ScionHeader } from '../components/shared/header.js';
 import type { ScionTerminalPane } from '../components/terminal/terminal-pane.js';
@@ -23,6 +28,47 @@ interface RailEntry {
   unsubscribeMetadata: () => void;
 }
 
+/** Preset button definitions for the layout toolbar. */
+const PRESET_BUTTONS: ReadonlyArray<{ preset: TerminalLayout; label: string; title: string }> = [
+  { preset: 'single', label: '1', title: 'Single pane' },
+  { preset: 'two-columns', label: '2 side by side', title: 'Two columns' },
+  { preset: 'two-rows', label: '2 stacked', title: 'Two rows' },
+  { preset: 'four', label: '4', title: '2×2 grid' },
+];
+
+/**
+ * Grid CSS templates for each preset.
+ * Keys: [grid-template-columns, grid-template-rows]
+ */
+const GRID_TEMPLATES: Record<TerminalLayout, [string, string]> = {
+  single: ['1fr', '1fr'],
+  'two-columns': ['1fr 1fr', '1fr'],
+  'two-rows': ['1fr', '1fr 1fr'],
+  four: ['1fr 1fr', '1fr 1fr'],
+};
+
+/**
+ * CSS grid placement for each slot index within a preset.
+ * Each entry: [grid-column, grid-row]
+ */
+const SLOT_PLACEMENTS: Record<TerminalLayout, ReadonlyArray<[string, string]>> = {
+  single: [['1', '1']],
+  'two-columns': [
+    ['1', '1'],
+    ['2', '1'],
+  ],
+  'two-rows': [
+    ['1', '1'],
+    ['1', '2'],
+  ],
+  four: [
+    ['1', '1'],
+    ['2', '1'],
+    ['1', '2'],
+    ['2', '2'],
+  ],
+};
+
 /** Document-lived presentation. Pane nodes never move through disposable shells. */
 export class TerminalWorkspaceRoot {
   readonly element = document.createElement('div');
@@ -32,21 +78,26 @@ export class TerminalWorkspaceRoot {
   private readonly railList = document.createElement('div');
   private readonly count = document.createElement('span');
   private readonly empty = document.createElement('div');
+  private readonly layoutBar = document.createElement('div');
   private readonly paneHost = document.createElement('section');
   private readonly status = document.createElement('p');
   private readonly panes = new Map<string, ScionTerminalPane>();
   private readonly entries = new Map<string, RailEntry>();
+  private readonly placeholders = new Map<number, HTMLElement>();
+  readonly layoutManager = new TerminalLayoutManager();
   private registryUnsubscribe: (() => void) | null = null;
   private registry: TerminalSessionRegistry | null = null;
   private currentPath = '/terminals';
-  private selected: string | null = null;
   private refreshQueued = false;
+  private narrowQuery: MediaQueryList | null = null;
 
   constructor(user: User | null = null) {
     this.element.id = 'terminal-workspace';
     this.element.hidden = true;
     this.element.style.cssText = 'height:100vh;min-height:0;display:none;flex-direction:column';
     this.element.className = 'terminal-workspace-root';
+    // Expose workspace root on the element for coordinator and test access.
+    (this.element as HTMLElement & { workspaceRoot?: TerminalWorkspaceRoot }).workspaceRoot = this;
 
     this.installStyles();
     this.header.user = user;
@@ -71,13 +122,71 @@ export class TerminalWorkspaceRoot {
     this.empty.textContent = 'No terminals are open.';
     this.rail.append(railHeader, this.railList);
 
+    // Layout toolbar
+    this.layoutBar.className = 'terminal-layout-bar';
+    this.layoutBar.setAttribute('role', 'toolbar');
+    this.layoutBar.setAttribute('aria-label', 'Layout presets');
+    this.buildLayoutButtons();
+
+    // Pane host: CSS Grid container
     this.paneHost.className = 'terminal-pane-host';
     this.status.className = 'terminal-status';
     this.status.textContent = 'No terminal selected.';
     this.paneHost.append(this.empty, this.status);
-    this.shell.append(this.rail, this.paneHost);
+    this.shell.append(this.rail, this.createPaneArea());
     this.element.append(this.header, this.shell);
+
+    // Subscribe to layout state (lives as long as the workspace root)
+    this.layoutManager.subscribe(() => this.queueRefresh());
+
+    // Narrow-screen media query
+    this.narrowQuery = window.matchMedia('(max-width: 760px)');
+    this.narrowQuery.addEventListener('change', () => this.queueRefresh());
+
     this.refresh();
+  }
+
+  /** Creates the right-side area with the layout bar above the pane host. */
+  private createPaneArea(): HTMLElement {
+    const area = document.createElement('div');
+    area.className = 'terminal-pane-area';
+    area.append(this.layoutBar, this.paneHost);
+    return area;
+  }
+
+  /** Builds the 4 preset buttons in the layout toolbar. */
+  private buildLayoutButtons(): void {
+    const label = document.createElement('span');
+    label.className = 'terminal-layout-label';
+    label.textContent = 'Layout:';
+    this.layoutBar.append(label);
+
+    for (const { preset, label: text, title } of PRESET_BUTTONS) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'terminal-layout-btn';
+      btn.dataset.preset = preset;
+      btn.textContent = text;
+      btn.title = title;
+      btn.setAttribute('aria-label', title);
+      btn.addEventListener('click', () => {
+        this.layoutManager.setLayout(preset);
+      });
+      this.layoutBar.append(btn);
+    }
+
+    // Restore button for zoom
+    const restoreBtn = document.createElement('button');
+    restoreBtn.type = 'button';
+    restoreBtn.className = 'terminal-layout-restore';
+    restoreBtn.textContent = 'Restore';
+    restoreBtn.title = 'Exit zoom and restore layout';
+    restoreBtn.setAttribute('aria-label', 'Exit zoom and restore layout');
+    restoreBtn.hidden = true;
+    restoreBtn.addEventListener('click', () => {
+      this.layoutManager.unzoom();
+    });
+    this.layoutBar.append(restoreBtn);
   }
 
   setUser(user: User | null): void {
@@ -109,22 +218,28 @@ export class TerminalWorkspaceRoot {
   select(session: TerminalSession): void {
     const pane = this.panes.get(session.state.key);
     if (!pane) throw new Error('Terminal session has no retained pane.');
-    this.selected = session.state.key;
+    // Use layoutManager.open() which sets single[0] and active='single'
+    this.layoutManager.open(session.state.key);
     this.status.textContent = '';
     this.show(true);
     this.refresh();
   }
 
   setStatus(message: string): void {
-    if (this.selected) return;
+    const state = this.layoutManager.getState();
+    const slots = this.layoutManager.getVisibleSlots();
+    const hasSelected = slots.some((s) => s !== null);
+    if (hasSelected) return;
     this.status.textContent = message;
-    this.refresh();
+    if (state.active === 'single' && state.single[0] === null) {
+      this.refresh();
+    }
   }
 
   show(visible: boolean): void {
     this.element.hidden = !visible;
     this.element.style.display = visible ? 'flex' : 'none';
-    for (const [key, pane] of this.panes) pane.setVisible(visible && key === this.selected);
+    this.refreshPaneVisibility();
   }
 
   private bindRegistry(registry: TerminalSessionRegistry): void {
@@ -144,7 +259,8 @@ export class TerminalWorkspaceRoot {
       const pane = this.panes.get(key);
       pane?.remove();
       this.panes.delete(key);
-      if (this.selected === key) this.selected = null;
+      // Close in layout manager to clear all preset references
+      this.layoutManager.close(key);
     }
     for (const session of sessions) {
       if (this.entries.has(session.state.key)) continue;
@@ -171,8 +287,11 @@ export class TerminalWorkspaceRoot {
       });
       this.entries.set(session.state.key, entry);
     }
-    if (!this.selected && sessions.length > 0)
-      this.selected = sessions[sessions.length - 1].state.key;
+    // If no active session, auto-select via layout manager
+    const currentSlots = this.layoutManager.getVisibleSlots();
+    if (!currentSlots.some((s) => s !== null) && sessions.length > 0) {
+      this.layoutManager.open(sessions[sessions.length - 1].state.key);
+    }
     this.refresh();
   }
 
@@ -195,16 +314,183 @@ export class TerminalWorkspaceRoot {
         : null;
     this.count.textContent = String(total);
     this.empty.hidden = total > 0;
-    this.status.hidden = total > 0 && !!this.selected;
+
+    const layoutState = this.layoutManager.getState();
+    const visibleSlots = this.layoutManager.getVisibleSlots();
+    const hasSelected = visibleSlots.some((s) => s !== null);
+    this.status.hidden = total > 0 && hasSelected;
+
+    // Rail rendering
     this.railList.replaceChildren(...entries.map((entry) => this.renderRailEntry(entry)));
     if (focusedId) {
       this.restoreRailFocus(focusedId);
       requestAnimationFrame(() => this.restoreRailFocus(focusedId));
     }
-    for (const [key, pane] of this.panes) {
-      pane.setVisible(!this.element.hidden && key === this.selected);
-    }
+
+    // Update layout bar active state
+    this.updateLayoutBar(layoutState);
+
+    // Update grid template based on active preset (or single when zoomed)
+    this.updateGridTemplate(layoutState);
+
+    // Position panes and manage placeholders
+    this.positionPanes(layoutState);
+
+    // Visibility
+    this.refreshPaneVisibility();
     this.publishCount();
+  }
+
+  /** Update layout toolbar button highlighting. */
+  private updateLayoutBar(state: { active: TerminalLayout }): void {
+    const isZoomed = this.layoutManager.getZoomed() !== null;
+
+    for (const btn of this.layoutBar.querySelectorAll<HTMLButtonElement>('.terminal-layout-btn')) {
+      const isActive = btn.dataset.preset === state.active && !isZoomed;
+      btn.dataset.active = String(isActive);
+      btn.setAttribute('aria-pressed', String(isActive));
+    }
+
+    const restoreBtn = this.layoutBar.querySelector<HTMLButtonElement>('.terminal-layout-restore');
+    if (restoreBtn) restoreBtn.hidden = !isZoomed;
+  }
+
+  /** Set grid-template-columns/rows on the pane host based on preset. */
+  private updateGridTemplate(state: { active: TerminalLayout }): void {
+    const isNarrow = this.narrowQuery?.matches ?? false;
+    const isZoomed = this.layoutManager.getZoomed() !== null;
+
+    // In narrow or zoomed mode, show single-pane grid
+    const effectivePreset: TerminalLayout = isNarrow || isZoomed ? 'single' : state.active;
+    const [cols, rows] = GRID_TEMPLATES[effectivePreset];
+    this.paneHost.style.gridTemplateColumns = cols;
+    this.paneHost.style.gridTemplateRows = rows;
+  }
+
+  /** Position each pane in the grid and manage empty slot placeholders. */
+  private positionPanes(state: { active: TerminalLayout }): void {
+    const isNarrow = this.narrowQuery?.matches ?? false;
+    const isZoomed = this.layoutManager.getZoomed() !== null;
+    const zoomedKey = this.layoutManager.getZoomed();
+    const visibleSlots = this.layoutManager.getVisibleSlots();
+
+    const effectivePreset: TerminalLayout = isNarrow || isZoomed ? 'single' : state.active;
+    const placements = SLOT_PLACEMENTS[effectivePreset];
+
+    // Determine the effective visible slots for rendering
+    let renderSlots: readonly TerminalSlot[];
+    if (isZoomed && zoomedKey) {
+      renderSlots = [zoomedKey];
+    } else if (isNarrow) {
+      // In narrow mode, show first occupied pane from active preset
+      const activeSlots = this.getActivePresetSlots(state.active);
+      const firstOccupied = activeSlots.find((s) => s !== null);
+      renderSlots = [firstOccupied ?? null];
+    } else {
+      renderSlots = visibleSlots;
+    }
+
+    // Track which slots need placeholders vs panes
+    const visibleKeys = new Set<string>();
+    const usedPlaceholderIndices = new Set<number>();
+
+    for (let i = 0; i < renderSlots.length && i < placements.length; i++) {
+      const key = renderSlots[i];
+      const [col, row] = placements[i];
+
+      if (key && this.panes.has(key)) {
+        // Position the pane in the grid
+        const pane = this.panes.get(key)!;
+        pane.style.gridColumn = col;
+        pane.style.gridRow = row;
+        pane.style.display = '';
+        visibleKeys.add(key);
+
+        // Remove placeholder for this slot if exists
+        const ph = this.placeholders.get(i);
+        if (ph) {
+          ph.remove();
+          this.placeholders.delete(i);
+        }
+      } else {
+        // Show placeholder for empty slot
+        usedPlaceholderIndices.add(i);
+        let ph = this.placeholders.get(i);
+        if (!ph) {
+          ph = document.createElement('div');
+          ph.className = 'terminal-slot-placeholder';
+          this.paneHost.appendChild(ph);
+          this.placeholders.set(i, ph);
+        }
+        ph.textContent = 'Drop terminal here';
+        ph.style.gridColumn = col;
+        ph.style.gridRow = row;
+        ph.hidden = false;
+      }
+    }
+
+    // Hide placeholders not used by current layout
+    for (const [idx, ph] of this.placeholders) {
+      if (!usedPlaceholderIndices.has(idx)) {
+        ph.remove();
+        this.placeholders.delete(idx);
+      }
+    }
+
+    // Hide panes not visible in the current render
+    for (const [key, pane] of this.panes) {
+      if (!visibleKeys.has(key)) {
+        pane.style.display = 'none';
+      }
+    }
+  }
+
+  /** Get the slot array for the active preset from layout state. */
+  private getActivePresetSlots(preset: TerminalLayout): readonly TerminalSlot[] {
+    const state = this.layoutManager.getState();
+    switch (preset) {
+      case 'single':
+        return state.single;
+      case 'two-columns':
+        return state.twoColumns;
+      case 'two-rows':
+        return state.twoRows;
+      case 'four':
+        return state.four;
+    }
+  }
+
+  /** Apply visibility to all panes based on layout state and workspace visibility. */
+  private refreshPaneVisibility(): void {
+    const workspaceVisible = !this.element.hidden;
+    const isNarrow = this.narrowQuery?.matches ?? false;
+    const isZoomed = this.layoutManager.getZoomed() !== null;
+    const zoomedKey = this.layoutManager.getZoomed();
+    const layoutState = this.layoutManager.getState();
+
+    // Determine the set of keys that should be visible
+    const visibleKeys = new Set<string>();
+
+    if (workspaceVisible) {
+      if (isZoomed && zoomedKey) {
+        visibleKeys.add(zoomedKey);
+      } else if (isNarrow) {
+        // Show first occupied pane from active preset
+        const activeSlots = this.getActivePresetSlots(layoutState.active);
+        const firstOccupied = activeSlots.find((s) => s !== null);
+        if (firstOccupied) visibleKeys.add(firstOccupied);
+      } else {
+        // All non-null slots in the active preset
+        const slots = this.layoutManager.getVisibleSlots();
+        for (const s of slots) {
+          if (s !== null) visibleKeys.add(s);
+        }
+      }
+    }
+
+    for (const [key, pane] of this.panes) {
+      pane.setVisible(visibleKeys.has(key));
+    }
   }
 
   private restoreRailFocus(focusedId: string): void {
@@ -235,7 +521,9 @@ export class TerminalWorkspaceRoot {
     const item = document.createElement('div');
     item.className = 'terminal-rail-item';
     item.setAttribute('role', 'listitem');
-    item.dataset.selected = String(entry.state.key === this.selected);
+    // Mark as selected if this key is in the visible slots
+    const visibleSlots = this.layoutManager.getVisibleSlots();
+    item.dataset.selected = String(visibleSlots.includes(entry.state.key));
     item.dataset.connection = entry.state.connection;
     item.dataset.availability = metadata.availability;
 
@@ -243,7 +531,7 @@ export class TerminalWorkspaceRoot {
     select.type = 'button';
     select.className = 'terminal-rail-select';
     select.setAttribute('aria-label', `Show terminal for ${agentName} in ${projectId}`);
-    if (entry.state.key === this.selected) select.setAttribute('aria-current', 'page');
+    if (visibleSlots.includes(entry.state.key)) select.setAttribute('aria-current', 'page');
     select.dataset.railFocusId = `${entry.state.key}:select`;
     select.addEventListener('click', () => this.openSessionRoute(entry));
 
@@ -480,17 +768,91 @@ export class TerminalWorkspaceRoot {
         cursor: default;
         opacity: 0.35;
       }
+      .terminal-pane-area {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        min-height: 0;
+      }
+      .terminal-layout-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.375rem 0.75rem;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        background: var(--scion-surface, #fff);
+        flex: 0 0 auto;
+      }
+      .terminal-layout-label {
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: var(--scion-text-muted, #64748b);
+        margin-right: 0.25rem;
+      }
+      .terminal-layout-btn {
+        font-size: 0.75rem;
+        padding: 0.25rem 0.5rem;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: 4px;
+        background: transparent;
+        color: var(--scion-text-muted, #64748b);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .terminal-layout-btn:hover,
+      .terminal-layout-btn:focus-visible {
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text, #1e293b);
+        outline: none;
+      }
+      .terminal-layout-btn[data-active='true'] {
+        background: color-mix(in srgb, var(--scion-primary, #3b82f6) 15%, transparent);
+        border-color: var(--scion-primary, #3b82f6);
+        color: var(--scion-primary, #3b82f6);
+        font-weight: 600;
+      }
+      .terminal-layout-restore {
+        font-size: 0.75rem;
+        padding: 0.25rem 0.5rem;
+        margin-left: auto;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: 4px;
+        background: transparent;
+        color: var(--scion-text-muted, #64748b);
+        cursor: pointer;
+      }
+      .terminal-layout-restore:hover,
+      .terminal-layout-restore:focus-visible {
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text, #1e293b);
+        outline: none;
+      }
       .terminal-pane-host {
         position: relative;
         min-width: 0;
         min-height: 0;
-        display: flex;
-        flex-direction: column;
+        flex: 1;
+        display: grid;
+        grid-template-columns: 1fr;
+        grid-template-rows: 1fr;
         background: #111827;
       }
       .terminal-pane {
-        flex: 1;
         min-height: 0;
+        min-width: 0;
+      }
+      .terminal-slot-placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 2px dashed var(--scion-border, #e2e8f0);
+        border-radius: 8px;
+        margin: 4px;
+        color: var(--scion-text-muted, #64748b);
+        font-size: 0.875rem;
+        background: color-mix(in srgb, var(--scion-bg, #f8fafc) 50%, transparent);
+        min-height: 0;
+        min-width: 0;
       }
       .terminal-empty,
       .terminal-status {
@@ -504,6 +866,7 @@ export class TerminalWorkspaceRoot {
         color: var(--scion-text-muted, #64748b);
         background: var(--scion-bg, #f8fafc);
         text-align: center;
+        z-index: 1;
       }
       #terminal-workspace [hidden] {
         display: none !important;

@@ -2,6 +2,9 @@ import { test, expect, type Page } from '@playwright/test';
 
 const agent = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
+const agentC = '33333333-3333-4333-8333-333333333333';
+const agentD = '44444444-4444-4444-8444-444444444444';
+const agentE = '55555555-5555-4555-8555-555555555555';
 
 interface AgentFixture {
   id: string;
@@ -500,4 +503,344 @@ test('unsupported coordination does not create a local pane or attach', async ({
   await expect(page.locator('#terminal-workspace')).toContainText('unavailable');
   expect(await page.locator('#terminal-workspace scion-terminal-pane').count()).toBe(0);
   expect(socket.attaches).toBe(0);
+});
+
+// --- Layout preset tests (P2.2) ---
+
+/** Navigate to a terminal agent by dispatching a nav-click event. */
+async function navigateToTerminal(page: Page, agentId: string): Promise<void> {
+  await page.evaluate(
+    (path) => document.dispatchEvent(new CustomEvent('nav-click', { detail: { path } })),
+    `/terminals/${agentId}`
+  );
+}
+
+/** Click a layout preset button by its data-preset attribute. */
+async function clickPreset(page: Page, preset: string): Promise<void> {
+  await page.click(`.terminal-layout-btn[data-preset="${preset}"]`);
+}
+
+/** Get the data-preset value of the currently active layout button. */
+async function activePreset(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const btn = document.querySelector('.terminal-layout-btn[data-active="true"]');
+    return btn instanceof HTMLElement ? (btn.dataset.preset ?? null) : null;
+  });
+}
+
+/** Count visible (not hidden, display not none) pane slots in the grid. */
+async function visiblePaneCount(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const panes = document.querySelectorAll<HTMLElement>('#terminal-workspace scion-terminal-pane');
+    let count = 0;
+    for (const p of panes) {
+      if (!p.hidden && p.style.display !== 'none') count++;
+    }
+    return count;
+  });
+}
+
+/** Count placeholder slots in the grid. */
+async function placeholderCount(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const phs = document.querySelectorAll<HTMLElement>(
+      '#terminal-workspace .terminal-slot-placeholder'
+    );
+    let count = 0;
+    for (const p of phs) {
+      if (!p.hidden) count++;
+    }
+    return count;
+  });
+}
+
+test('preset rendering shows correct number of pane slots for each preset', async ({ page }) => {
+  const fourAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'a1', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'a2', phase: 'running', projectId: 'proj' },
+    [agentC]: { id: agentC, name: 'a3', phase: 'running', projectId: 'proj' },
+    [agentD]: { id: agentD, name: 'a4', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, fourAgents);
+
+  // Open first agent
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Single preset: 1 visible pane, no placeholders
+  await expect.poll(() => activePreset(page)).toBe('single');
+  await expect.poll(() => visiblePaneCount(page)).toBe(1);
+  await expect.poll(() => placeholderCount(page)).toBe(0);
+
+  // Open remaining agents, waiting for each socket attachment
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+  await navigateToTerminal(page, agentC);
+  await expect.poll(() => socket.attaches).toBe(3);
+  await navigateToTerminal(page, agentD);
+  await expect.poll(() => socket.attaches).toBe(4);
+
+  // Now switch to two-columns: should show 1 pane (single[0] was last agent opened) + 1 placeholder
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+  // Two-columns has 2 slots; initially both are empty in multi-pane presets
+  // Only the slot with a placed pane shows, the rest are placeholders
+  const twoColVisible = await visiblePaneCount(page);
+  const twoColPH = await placeholderCount(page);
+  expect(twoColVisible + twoColPH).toBe(2);
+
+  // Switch to two-rows
+  await clickPreset(page, 'two-rows');
+  await expect.poll(() => activePreset(page)).toBe('two-rows');
+  const twoRowVisible = await visiblePaneCount(page);
+  const twoRowPH = await placeholderCount(page);
+  expect(twoRowVisible + twoRowPH).toBe(2);
+
+  // Switch to four
+  await clickPreset(page, 'four');
+  await expect.poll(() => activePreset(page)).toBe('four');
+  const fourVisible = await visiblePaneCount(page);
+  const fourPH = await placeholderCount(page);
+  expect(fourVisible + fourPH).toBe(4);
+
+  // Back to single
+  await clickPreset(page, 'single');
+  await expect.poll(() => activePreset(page)).toBe('single');
+  const singleVisible = await visiblePaneCount(page);
+  const singlePH = await placeholderCount(page);
+  expect(singleVisible + singlePH).toBe(1);
+});
+
+test('fifth-agent open switches to single; choosing four restores earlier grid', async ({
+  page,
+}) => {
+  const fiveAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'a1', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'a2', phase: 'running', projectId: 'proj' },
+    [agentC]: { id: agentC, name: 'a3', phase: 'running', projectId: 'proj' },
+    [agentD]: { id: agentD, name: 'a4', phase: 'running', projectId: 'proj' },
+    [agentE]: { id: agentE, name: 'a5', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, fiveAgents);
+
+  // Open 4 agents and place them in the grid
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+  await navigateToTerminal(page, agentC);
+  await expect.poll(() => socket.attaches).toBe(3);
+  await navigateToTerminal(page, agentD);
+  await expect.poll(() => socket.attaches).toBe(4);
+
+  // Multi-pane presets start with null slots — populated only via place() (P2.3 drag-drop).
+  // open()/select() only sets single[0]. So the four-grid has 4 empty slots.
+
+  // Verify: switch to four, get 4 placeholder slots
+  await clickPreset(page, 'four');
+  await expect.poll(() => activePreset(page)).toBe('four');
+  const fourPH = await placeholderCount(page);
+  expect(fourPH).toBe(4);
+
+  // Open 5th agent — this calls open() which switches to single
+  await navigateToTerminal(page, agentE);
+  await expect.poll(() => socket.attaches).toBe(5);
+  await expect.poll(() => activePreset(page)).toBe('single');
+  await expect.poll(() => visiblePaneCount(page)).toBe(1);
+
+  // Switch back to four — grid should still have 4 placeholder slots (unchanged)
+  await clickPreset(page, 'four');
+  await expect.poll(() => activePreset(page)).toBe('four');
+  await expect.poll(() => placeholderCount(page)).toBe(4);
+});
+
+test('socket identity preserved across preset switches — no new connections', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Record initial WebSocket attach count
+  const initialAttaches = socket.attaches;
+
+  // Switch through all presets
+  for (const preset of ['two-columns', 'two-rows', 'four', 'single'] as const) {
+    await clickPreset(page, preset);
+    await expect.poll(() => activePreset(page)).toBe(preset);
+    // No new socket connections
+    expect(socket.attaches).toBe(initialAttaches);
+    expect(socket.closes).toBe(0);
+  }
+});
+
+test('xterm identity preserved across preset switches', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Record identity
+  const initial = await identity(page);
+  expect(initial.pane).toBe(true);
+  expect(initial.terminal).toBe(true);
+
+  // Switch through presets
+  for (const preset of ['two-columns', 'two-rows', 'four', 'single'] as const) {
+    await clickPreset(page, preset);
+    const id = await identity(page);
+    expect(id.host).toBe(true);
+    expect(id.pane).toBe(true);
+    expect(id.terminal).toBe(true);
+  }
+
+  // Terminal was initialized only once
+  expect(
+    await page.evaluate(
+      () => (window as typeof window & { terminalInitializers?: number }).terminalInitializers
+    )
+  ).toBe(1);
+});
+
+test('zoom preserves all preset assignments and shows restore button', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Switch to two-columns so we can see a multi-pane preset
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+
+  // Restore button should be hidden when not zoomed
+  await expect(page.locator('.terminal-layout-restore')).toBeHidden();
+
+  // Zoom the pane via the workspace root's public layoutManager
+  await page.evaluate(() => {
+    type WorkspaceEl = HTMLElement & {
+      workspaceRoot?: { layoutManager: { zoom: (k: string) => void; getState: () => unknown } };
+    };
+    const host = document.querySelector('#terminal-workspace') as WorkspaceEl;
+    const panes = host.querySelectorAll<
+      HTMLElement & { session: { state: { key: string } } | null }
+    >('scion-terminal-pane');
+    const key = [...panes].find((p) => p.session)?.session?.state.key;
+    if (!key) throw new Error('No session key for zoom');
+    host.workspaceRoot!.layoutManager.zoom(key);
+  });
+
+  // Restore button should now be visible
+  await expect(page.locator('.terminal-layout-restore')).toBeVisible();
+
+  // Only zoomed pane should be visible
+  await expect.poll(() => visiblePaneCount(page)).toBe(1);
+
+  // Unzoom via the restore button
+  await page.click('.terminal-layout-restore');
+
+  // Restore button hidden again
+  await expect(page.locator('.terminal-layout-restore')).toBeHidden();
+
+  // Preset state was preserved — still two-columns
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+
+  // No new sockets from zoom/unzoom
+  expect(socket.attaches).toBe(1);
+  expect(socket.closes).toBe(0);
+});
+
+test('close clears session from layout slots', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open both agents
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  // Close alpha
+  await page.getByRole('button', { name: 'Close alpha' }).click();
+  await expect(page.getByRole('button', { name: 'Terminals (1)' })).toBeVisible();
+  await expect(page.locator('#terminal-workspace scion-terminal-pane')).toHaveCount(1);
+
+  // Verify remaining beta is still working across presets
+  for (const preset of ['two-columns', 'two-rows', 'four', 'single'] as const) {
+    await clickPreset(page, preset);
+    // Beta's pane should still exist
+    await expect(page.locator('#terminal-workspace scion-terminal-pane')).toHaveCount(1);
+    // No new sockets
+    expect(socket.attaches).toBe(2);
+  }
+});
+
+test('focus isolation: only focused pane xterm receives typed input', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open both agents
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  // The active session should be in single view (beta, last opened)
+  await expect.poll(() => activePreset(page)).toBe('single');
+
+  // Only one pane visible at a time in single mode
+  await expect.poll(() => visiblePaneCount(page)).toBe(1);
+
+  // The visible pane should be beta (last opened)
+  const visibleAgent = await page.evaluate(() => {
+    const panes = document.querySelectorAll<
+      HTMLElement & { session: { state: { agentId: string } } | null }
+    >('#terminal-workspace scion-terminal-pane');
+    for (const p of panes) {
+      if (!p.hidden && p.style.display !== 'none' && p.session) {
+        return p.session.state.agentId;
+      }
+    }
+    return null;
+  });
+  expect(visibleAgent).toBe(agentB);
+});
+
+test('preset control buttons activate correct layout', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Verify layout bar is visible
+  await expect(page.locator('.terminal-layout-bar')).toBeVisible();
+
+  // Click each preset button and verify it becomes active
+  for (const preset of ['two-columns', 'two-rows', 'four', 'single'] as const) {
+    await clickPreset(page, preset);
+    await expect.poll(() => activePreset(page)).toBe(preset);
+
+    // Verify the button has aria-pressed="true"
+    const pressed = await page.evaluate(
+      (p) =>
+        document
+          .querySelector(`.terminal-layout-btn[data-preset="${p}"]`)
+          ?.getAttribute('aria-pressed'),
+      preset
+    );
+    expect(pressed).toBe('true');
+
+    // Verify other buttons are not active
+    const otherActive = await page.evaluate(
+      (p) =>
+        [
+          ...document.querySelectorAll<HTMLElement>(
+            `.terminal-layout-btn:not([data-preset="${p}"])`
+          ),
+        ].some((b) => b.dataset.active === 'true'),
+      preset
+    );
+    expect(otherActive).toBe(false);
+  }
 });
