@@ -534,22 +534,27 @@ func (s *LocalPTYSession) Run() error {
 	}()
 
 	// Context cancellation watcher: when the parent context is cancelled,
-	// close the PTY master to unblock the readFromPTY goroutine. Without
-	// exec.CommandContext, context cancellation alone does not kill the
-	// process or close the PTY, so blocking reads would hang indefinitely.
-	// The deferred gracefulShutdownExec handles the double-close safely
+	// close the WebSocket first (unblocking readFromWebSocket and preventing
+	// further resize calls from that goroutine), then close the PTY master
+	// (unblocking readFromPTY). This ordering prevents a race between PTY
+	// close and any in-flight resize in readFromWebSocket.
+	//
+	// Without exec.CommandContext, context cancellation alone does not kill
+	// the process or close the PTY, so blocking reads would hang indefinitely.
+	// The deferred gracefulShutdownExec handles the PTY double-close safely
 	// (same *os.File, Go's poll.FD tracks closed state).
 	//
-	// readFromWebSocket is unblocked by the caller's deferred conn.Close()
-	// after Run() returns. Both I/O goroutines send to errCh (capacity 2),
-	// so neither blocks. This is a pre-existing bounded lifecycle: the
-	// WebSocket reader goroutine survives until the caller closes the conn,
-	// which happens in the same defer chain that called Run().
+	// Both I/O goroutines send to errCh (capacity 2), so neither blocks.
 	runDone := make(chan struct{})
 	defer close(runDone)
 	go func() {
 		select {
 		case <-s.ctx.Done():
+			// Close WebSocket first to unblock readFromWebSocket and stop
+			// any resize calls, then close PTY to unblock readFromPTY.
+			if s.conn != nil {
+				_ = s.conn.Close()
+			}
 			if s.ptyMaster != nil {
 				_ = s.ptyMaster.Close()
 			}
@@ -937,27 +942,6 @@ func (h *StreamPTYHandler) Run() error {
 		gracefulShutdownExec(h.cmd, h.ptyMaster, h.slug)
 	}()
 
-	// Context cancellation watcher: when the context is cancelled, close
-	// the PTY master to unblock the readFromPTY goroutine. Without
-	// exec.CommandContext, context cancellation alone does not kill the
-	// process or close the PTY, so blocking ptySlave.Read would hang
-	// indefinitely. readFromStream unblocks via its select on ctx.Done().
-	// The deferred gracefulShutdownExec handles the double-close safely
-	// (same *os.File, Go's poll.FD tracks closed state). Close() performs
-	// the same operation — both paths are safe due to poll.FD tracking.
-	runDone := make(chan struct{})
-	defer close(runDone)
-	go func() {
-		select {
-		case <-h.ctx.Done():
-			if h.ptyMaster != nil {
-				_ = h.ptyMaster.Close()
-			}
-		case <-runDone:
-			// Run() exited normally or on error; watcher no longer needed.
-		}
-	}()
-
 	errCh := make(chan error, 2)
 
 	// Read from PTY, send to control channel
@@ -977,11 +961,28 @@ func (h *StreamPTYHandler) Run() error {
 		h.handleResize()
 	}()
 
-	err := <-errCh
+	// Wait for an I/O goroutine to fail OR for context cancellation.
+	// readFromStream is select-driven with ctx.Done() and unblocks
+	// immediately on cancel. readFromPTY blocks on ptySlave.Read —
+	// we close the PTY below (after resize join) to unblock it.
+	var err error
+	select {
+	case err = <-errCh:
+	case <-h.ctx.Done():
+		err = h.ctx.Err()
+	}
 	h.cancel()
 	// Setsize accesses the raw descriptor, so join the resize worker before
-	// deferred cleanup closes the PTY and lets pending I/O destroy the fd.
+	// closing the PTY. handleResize returns promptly on cancel because its
+	// select includes h.ctx.Done() and h.handler.closeCh.
 	<-resizeDone
+	// Close PTY to unblock readFromPTY (ptySlave.Read). This is safe to do
+	// here because the resize worker has exited — no concurrent Setsize/Fd
+	// calls. The deferred gracefulShutdownExec double-closes safely (same
+	// *os.File, Go's poll.FD tracks closed state).
+	if h.ptyMaster != nil {
+		_ = h.ptyMaster.Close()
+	}
 	return err
 }
 
@@ -1257,21 +1258,18 @@ func (h *StreamPTYHandler) readFromStream() error {
 }
 
 // Close stops the PTY handler. It initiates shutdown by canceling the context
-// and closing the PTY (terminal hangup). The full graceful shutdown sequence
-// (wait → SIGTERM → SIGKILL) is handled by Run()'s defer via gracefulShutdownExec.
+// and sending SIGTERM to the process. Run() handles all PTY closes after
+// joining the resize worker to avoid a data race between os.File.Close() and
+// handleResize's pty.Setsize (which calls os.File.Fd()). The full graceful
+// shutdown sequence (PTY close → wait → SIGTERM → SIGKILL) runs in Run()'s
+// deferred gracefulShutdownExec after the resize worker exits.
 //
-// Close() and Run()'s defer both close h.ptyMaster. This is safe because both
-// target the same *os.File object: Go's os.File.Close() uses an internal poll.FD
-// that tracks closed state, so the second call returns os.ErrClosed without
-// issuing a duplicate syscall.Close on the raw fd. No fd-reuse race exists.
+// Close() does NOT close h.ptyMaster directly — that would race with
+// handleResize if the resize worker hasn't exited yet. Context cancellation
+// causes Run()'s select to unblock on ctx.Done(), which then joins
+// resizeDone before closing the PTY.
 func (h *StreamPTYHandler) Close() {
 	h.cancel()
-	// Close PTY to trigger terminal hangup. Run()'s defer also closes this fd
-	// via gracefulShutdownExec — the second close is a safe no-op on the same
-	// *os.File (see comment above).
-	if h.ptyMaster != nil {
-		_ = h.ptyMaster.Close()
-	}
 	if h.cmd != nil && h.cmd.Process != nil {
 		// SIGTERM instead of SIGKILL — gives the container runtime a chance
 		// to propagate the signal to the container-side process (TW-UAT-002).
