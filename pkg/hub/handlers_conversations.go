@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -832,8 +833,12 @@ func (s *Server) isCrossProjectReadAllowed(ctx context.Context, conv *store.Conv
 	}
 
 	peerAgent, err := s.store.GetAgent(ctx, peerID)
-	if err != nil || peerAgent == nil {
-		return false // Can't verify project — fail closed.
+	if err != nil {
+		slog.Error("isCrossProjectReadAllowed: database error looking up peer agent", "peer_id", peerID, "error", err)
+		return false
+	}
+	if peerAgent == nil {
+		return false
 	}
 
 	if agentIdent.ProjectID() == peerAgent.ProjectID {
@@ -894,8 +899,13 @@ func (s *Server) enforceCrossProjectReadGate(w http.ResponseWriter, r *http.Requ
 
 	// Look up the peer agent to compare project IDs.
 	peerAgent, err := s.store.GetAgent(r.Context(), peerID)
-	if err != nil || peerAgent == nil {
-		// Cannot verify peer project — fail closed.
+	if err != nil {
+		slog.Error("enforceCrossProjectReadGate: database error looking up peer agent", "peer_id", peerID, "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Internal server error verifying peer agent", nil)
+		return false
+	}
+	if peerAgent == nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"cross-project read denied: peer agent not found", nil)
 		return false

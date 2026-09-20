@@ -717,7 +717,7 @@ export class ScionPageAgentDetail extends LitElement {
       // Use pageData first, fall back to auth/me endpoint.
       if (this.pageData?.user?.id) {
         this.currentUserId = this.pageData.user.id;
-      } else {
+      } else if (!this.currentUserId) {
         parallel.push(
           apiFetch('/api/v1/auth/me')
             .then(async (res) => {
