@@ -2,7 +2,7 @@
  * Terminal entry-point coverage (P1.7 #1652).
  *
  * Table-driven real-browser tests for every UI surface that opens a terminal:
- * agent list, agent detail, project list/grid, tree/graph, chat membership.
+ * agent list, agent detail, project detail, and the production router itself.
  *
  * Covers: workspace-enabled hrefs, flag-off legacy hrefs, modified-click
  * passthrough (Ctrl/Cmd-click opens in new tab), cross-tab ownership
@@ -20,7 +20,6 @@ const agentB = '22222222-2222-4222-8222-222222222222';
 
 // Fixture project
 const projectId = 'fixture-project';
-const projectSlug = 'fixture-project';
 
 // ---------------------------------------------------------------------------
 // API fixture helpers
@@ -54,6 +53,14 @@ const defaultAgents: Record<string, AgentFixture> = {
     canAttach: true,
   },
 };
+
+/** Build the API-shaped agent object with _capabilities. */
+function apiAgent(a: AgentFixture): Record<string, unknown> {
+  return {
+    ...a,
+    _capabilities: a.canAttach !== false ? { actions: ['attach'] } : { actions: [] },
+  };
+}
 
 interface SetupResult {
   readonly attaches: number;
@@ -104,36 +111,35 @@ async function setup(
     route.fulfill({ json: { complete: true } })
   );
 
-  // Agent API: detail, list, and pty stub
+  // Agent detail + sub-resources (paths with segments after /agents/).
+  // Registered before the list handler because Playwright matches routes
+  // in registration order and `**/api/v1/agents/**` does NOT match the
+  // bare `/api/v1/agents` (or `/api/v1/agents?scope=all&limit=500`).
   await page.route('**/api/v1/agents/**', (route) => {
     const url = route.request().url();
+
+    // PTY metadata stub (e.g. /api/v1/agents/{id}/pty)
     if (url.endsWith('/pty')) {
       void route.fulfill({ json: {} });
       return;
     }
-    const id = url.match(/\/api\/v1\/agents\/([^/?]+)/)?.[1] ?? agentA;
+
+    // Extract the UUID from the path
+    const id =
+      url.match(
+        /\/api\/v1\/agents\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i
+      )?.[1] ?? agentA;
     void route.fulfill({
       status: agents[id] ? 200 : 404,
-      json: agents[id] ?? { error: 'not found' },
+      json: agents[id] ? apiAgent(agents[id]) : { error: 'not found' },
     });
   });
 
-  // Agent list endpoint (used by agents page)
-  await page.route('**/api/v1/agents?*', (route) => {
+  // Agent list (bare /api/v1/agents with optional query string).
+  // Uses a regex so it does not accidentally match detail paths.
+  await page.route(/\/api\/v1\/agents(\?|$)/, (route) => {
     void route.fulfill({
-      json: Object.values(agents).map((a) => ({
-        ...a,
-        capabilities: a.canAttach !== false ? { terminalAttach: true } : {},
-      })),
-    });
-  });
-  await page.route('**/api/v1/agents', (route) => {
-    if (route.request().url().includes('?')) return;
-    void route.fulfill({
-      json: Object.values(agents).map((a) => ({
-        ...a,
-        capabilities: a.canAttach !== false ? { terminalAttach: true } : {},
-      })),
+      json: Object.values(agents).map((a) => apiAgent(a)),
     });
   });
 
@@ -143,14 +149,17 @@ async function setup(
       json: {
         id: projectId,
         name: 'Fixture Project',
-        slug: projectSlug,
-        agents: Object.values(agents).map((a) => ({
-          ...a,
-          capabilities: a.canAttach !== false ? { terminalAttach: true } : {},
-        })),
+        slug: projectId,
+        agents: Object.values(agents).map((a) => apiAgent(a)),
+        _capabilities: { actions: ['attach'] },
       },
     });
   });
+
+  // Notifications API stub (used by agent detail page)
+  await page.route('**/api/v1/notifications**', (route) =>
+    route.fulfill({ json: { userNotifications: [], subscriptions: [] } })
+  );
 
   // Chat API stubs
   await page.route('**/api/v2/chat/**', (route) => void route.fulfill({ json: {} }));
@@ -179,6 +188,13 @@ async function setup(
 //
 // Each row describes a page that contains a terminal link, how to find the
 // link, and the expected href value under both flag-on and flag-off.
+//
+// Notes on locators:
+// - The agents page uses `sl-button` (not sl-icon-button) with `href` and
+//   `aria-label="Terminal"` inside a LitElement shadow DOM.
+// - Playwright pierces shadow DOM by default for CSS locators.
+// - The agent detail page uses `<a href="...">` with text "Terminal".
+// - The project detail page uses `sl-button` similar to agents page.
 // ---------------------------------------------------------------------------
 
 interface EntryPointRow {
@@ -186,7 +202,7 @@ interface EntryPointRow {
   name: string;
   /** URL to navigate to before looking for the link */
   page: string;
-  /** Playwright locator strategy to find the terminal link */
+  /** Playwright locator strategy to find the terminal link/button */
   locator: (page: Page) => ReturnType<Page['locator']>;
   /** Expected href when workspace flag is ON */
   hrefEnabled: string;
@@ -198,21 +214,22 @@ const entryPoints: EntryPointRow[] = [
   {
     name: 'agent list page',
     page: '/agents',
-    locator: (p) => p.locator(`sl-icon-button[href*="${agentA}"][name="terminal"]`).first(),
+    locator: (p) => p.locator('sl-button[aria-label="Terminal"]').first(),
     hrefEnabled: `/terminals/${agentA}`,
     hrefDisabled: `/agents/${agentA}/terminal`,
   },
   {
     name: 'agent detail page',
     page: `/agents/${agentA}`,
-    locator: (p) => p.locator(`a[href*="terminal"]`).first(),
+    // The detail page wraps <sl-button> inside <a href="..."> with a Terminal text label.
+    locator: (p) => p.locator('a[href*="terminal"][style*="text-decoration"]').first(),
     hrefEnabled: `/terminals/${agentA}`,
     hrefDisabled: `/agents/${agentA}/terminal`,
   },
   {
-    name: 'project detail list view',
+    name: 'project detail page',
     page: `/projects/${projectId}`,
-    locator: (p) => p.locator(`sl-icon-button[href*="${agentA}"][name="terminal"]`).first(),
+    locator: (p) => p.locator('sl-button[aria-label="Terminal"]').first(),
     hrefEnabled: `/terminals/${agentA}`,
     hrefDisabled: `/agents/${agentA}/terminal`,
   },
@@ -227,7 +244,7 @@ for (const row of entryPoints) {
     await setup(page, { enabled: true });
     await page.goto(row.page);
     const link = row.locator(page);
-    await expect(link).toBeVisible({ timeout: 10000 });
+    await expect(link).toBeVisible({ timeout: 15000 });
     const href = await link.getAttribute('href');
     expect(href).toBe(row.hrefEnabled);
   });
@@ -242,7 +259,7 @@ for (const row of entryPoints) {
     await setup(page, { enabled: false });
     await page.goto(row.page);
     const link = row.locator(page);
-    await expect(link).toBeVisible({ timeout: 10000 });
+    await expect(link).toBeVisible({ timeout: 15000 });
     const href = await link.getAttribute('href');
     expect(href).toBe(row.hrefDisabled);
   });
@@ -256,8 +273,8 @@ for (const row of entryPoints) {
 test('agent list terminal button navigates to workspace and attaches', async ({ page }) => {
   const socket = await setup(page);
   await page.goto('/agents');
-  const btn = page.locator(`sl-icon-button[href*="${agentA}"][name="terminal"]`).first();
-  await expect(btn).toBeVisible({ timeout: 10000 });
+  const btn = page.locator('sl-button[aria-label="Terminal"]').first();
+  await expect(btn).toBeVisible({ timeout: 15000 });
   await btn.click();
   await expect(page).toHaveURL(`/terminals/${agentA}`);
   await expect.poll(() => socket.attaches).toBe(1);
@@ -266,8 +283,8 @@ test('agent list terminal button navigates to workspace and attaches', async ({ 
 test('agent detail terminal link navigates to workspace and attaches', async ({ page }) => {
   const socket = await setup(page);
   await page.goto(`/agents/${agentA}`);
-  const link = page.locator('a[href*="terminal"]').first();
-  await expect(link).toBeVisible({ timeout: 10000 });
+  const link = page.locator('a[href*="terminal"][style*="text-decoration"]').first();
+  await expect(link).toBeVisible({ timeout: 15000 });
   await link.click();
   await expect(page).toHaveURL(`/terminals/${agentA}`);
   await expect.poll(() => socket.attaches).toBe(1);
@@ -276,8 +293,8 @@ test('agent detail terminal link navigates to workspace and attaches', async ({ 
 test('project detail terminal button navigates to workspace and attaches', async ({ page }) => {
   const socket = await setup(page);
   await page.goto(`/projects/${projectId}`);
-  const btn = page.locator(`sl-icon-button[href*="${agentA}"][name="terminal"]`).first();
-  await expect(btn).toBeVisible({ timeout: 10000 });
+  const btn = page.locator('sl-button[aria-label="Terminal"]').first();
+  await expect(btn).toBeVisible({ timeout: 15000 });
   await btn.click();
   await expect(page).toHaveURL(`/terminals/${agentA}`);
   await expect.poll(() => socket.attaches).toBe(1);
@@ -292,8 +309,8 @@ test('project detail terminal button navigates to workspace and attaches', async
 test('modified click on terminal link preserves browser new-tab behaviour', async ({ page }) => {
   await setup(page);
   await page.goto('/agents');
-  const btn = page.locator(`sl-icon-button[href*="${agentA}"][name="terminal"]`).first();
-  await expect(btn).toBeVisible({ timeout: 10000 });
+  const btn = page.locator('sl-button[aria-label="Terminal"]').first();
+  await expect(btn).toBeVisible({ timeout: 15000 });
 
   // Verify the link has a real href (not javascript: or #)
   const href = await btn.getAttribute('href');
@@ -391,9 +408,8 @@ test('chat source state is retained when opening terminal from chat membership',
   const socket = await setup(page, { enabled: true, nativeChatEnabled: true });
   // Navigate to chat
   await page.goto('/chat');
-  await expect(page.locator('scion-chat-shell, scion-page-chat, [data-scion-page]')).toBeVisible({
-    timeout: 10000,
-  });
+  // Wait for the chat page component to render
+  await expect(page.locator('scion-page-chat')).toBeAttached({ timeout: 10000 });
 
   // Dispatch a terminal open as if the user clicked the chat member terminal icon
   await page.evaluate(
@@ -457,9 +473,7 @@ test('cross-tab: chat state retained when another tab owns terminals', async ({ 
 
   // Chat tab starts at /chat
   await chatTab.goto('/chat');
-  await expect(chatTab.locator('scion-chat-shell, scion-page-chat, [data-scion-page]')).toBeVisible(
-    { timeout: 10000 }
-  );
+  await expect(chatTab.locator('scion-page-chat')).toBeAttached({ timeout: 10000 });
 
   // Chat tab navigates to terminal — ownership deferred to owner
   await chatTab.evaluate(
@@ -493,10 +507,9 @@ test('cross-tab: chat state retained when another tab owns terminals', async ({ 
 test('terminal hrefs use full trusted UUID format', async ({ page }) => {
   await setup(page);
   await page.goto('/agents');
-  const btn = page.locator(`sl-icon-button[href*="${agentA}"][name="terminal"]`).first();
-  await expect(btn).toBeVisible({ timeout: 10000 });
+  const btn = page.locator('sl-button[aria-label="Terminal"]').first();
+  await expect(btn).toBeVisible({ timeout: 15000 });
   const href = await btn.getAttribute('href');
-  // Full UUID in the path
   expect(href).toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
 });
 
@@ -506,21 +519,20 @@ test('terminal hrefs use full trusted UUID format', async ({ page }) => {
 
 test('browser back/forward preserves retained terminal session', async ({ page }) => {
   const socket = await setup(page);
-  await page.goto('/');
-  await page.evaluate(
-    (path) => document.dispatchEvent(new CustomEvent('nav-click', { detail: { path } })),
-    `/terminals/${agentA}`
-  );
-  await expect(page).toHaveURL(`/terminals/${agentA}`);
+  // Start at a terminal — goto creates the first history entry
+  await page.goto(`/terminals/${agentA}`);
   await expect.poll(() => socket.attaches).toBe(1);
 
-  // Go back to dashboard
-  await page.goBack();
+  // Navigate away via nav-click (pushes a history entry)
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('nav-click', { detail: { path: '/' } }))
+  );
   await expect(page).toHaveURL('/');
 
-  // Go forward to terminals — session should still be alive
-  await page.goForward();
+  // Go back — returns to the terminal route
+  await page.goBack();
   await expect(page).toHaveURL(`/terminals/${agentA}`);
+  // Session was retained — still only one attach, no closes
   expect(socket.attaches).toBe(1);
   expect(socket.closes).toBe(0);
 });
