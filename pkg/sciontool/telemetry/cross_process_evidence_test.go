@@ -148,6 +148,23 @@ func phase5PostLog(t *testing.T, addr string, request *colLogs.ExportLogsService
 	}
 }
 
+func phase5IsPromptMarker(value string) bool {
+	value = strings.ToLower(strings.NewReplacer(".", "_", "-", "_", " ", "_").Replace(value))
+	return strings.Contains(value, "user_prompt")
+}
+
+func phase5RequireNoPromptMarker(t *testing.T, record *logspb.LogRecord) {
+	t.Helper()
+	if phase5IsPromptMarker(record.EventName) {
+		t.Fatal("filtered prompt marker reached native sink")
+	}
+	for _, attr := range record.Attributes {
+		if phase5IsPromptMarker(attr.Key) || phase5IsPromptMarker(attr.Value.GetStringValue()) {
+			t.Fatal("filtered prompt marker reached native sink")
+		}
+	}
+}
+
 func phase5RequireNativeRecord(t *testing.T, record *logspb.LogRecord, event string) {
 	t.Helper()
 	if record.EventName != event || record.Body.GetStringValue() != "[REDACTED]" {
@@ -292,16 +309,12 @@ func TestPhase5CrossProcessReceiverEvidence(t *testing.T) {
 			for _, sl := range rl.ScopeLogs {
 				for _, record := range sl.LogRecords {
 					if sl.Scope.GetName() == "com.anthropic.claude_code.events" {
+						nativeCount++
 						if resourceAttrs["service.name"] != "claude-code" {
 							t.Fatal("native service identity was not preserved")
 						}
-						if record.EventName == "agent.user.prompt" {
-							t.Fatal("default-filtered prompt reached sink")
-						}
-						if record.EventName == "assistant_response" {
-							nativeCount++
-							phase5RequireNativeRecord(t, record, "assistant_response")
-						}
+						phase5RequireNoPromptMarker(t, record)
+						phase5RequireNativeRecord(t, record, "assistant_response")
 					} else if sl.Scope.GetName() == "sciontool.hooks" {
 						hookLogs++
 					}
