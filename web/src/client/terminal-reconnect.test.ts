@@ -244,6 +244,21 @@ describe('error classification (#1659 AC3)', () => {
     expect(session.state.disconnectReason).toBe(expectedReason);
   });
 
+  it.each([400, 408, 418, 429])(
+    'preflight %s (unclassified 4xx) → server-error, not network',
+    async (status) => {
+      const f = fixture();
+      f.fetcher
+        .mockResolvedValueOnce(json(agent))
+        .mockResolvedValueOnce(json({ error: { message: 'http error' } }, status));
+      const session = f.registry.open(agentId, f.initialize);
+      await session.connect();
+
+      expect(session.state.connection).toBe('disconnected');
+      expect(session.state.disconnectReason).toBe('server-error');
+    }
+  );
+
   it('offline agent → unavailable with agent-offline reason', async () => {
     const f = fixture();
     f.fetcher.mockResolvedValueOnce(json({ ...agent, activity: 'offline' }));

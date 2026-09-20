@@ -477,7 +477,7 @@ function classifyHttpStatus(status: number): TerminalDisconnectReason {
   if (status === 403) return 'auth-403';
   if (status === 404) return 'not-found';
   if (status >= 500) return 'server-error';
-  return 'network';
+  return 'server-error'; // unclassified HTTP errors are server-side, not network
 }
 
 function validSize(cols: number, rows: number): boolean {

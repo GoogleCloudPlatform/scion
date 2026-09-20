@@ -423,7 +423,7 @@ export class ScionTerminalPane extends LitElement {
       font-size: 0.875rem;
     }
 
-    .disconnected-overlay .overlay-reconnect:hover {
+    .disconnected-overlay .overlay-reconnect:hover:not(:disabled) {
       background: #2563eb;
     }
 
