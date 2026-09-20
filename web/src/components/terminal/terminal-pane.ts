@@ -37,6 +37,8 @@ import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
 import type { StatusType } from '../shared/status-badge.js';
 import '../shared/status-badge.js';
 import { showToast } from '../../utils/toast.js';
+import { buildAgentDMKey, chatConversationPath } from '../../client/chat-routes.js';
+import { isFeatureEnabled } from '../../utils/feature-flags.js';
 
 // xterm.js imports are client-side only — guarded by typeof check in lifecycle
 // These will be imported dynamically in firstUpdated() since they require DOM APIs
@@ -57,6 +59,9 @@ export class ScionTerminalPane extends LitElement {
   get session(): TerminalSession | null {
     return this.ownedSession;
   }
+
+  /** User ID for building chat DM keys. Set by workspace root. */
+  userId: string = '';
 
   private registry: TerminalSessionRegistry | null = null;
   private disposed = false;
@@ -243,6 +248,27 @@ export class ScionTerminalPane extends LitElement {
     .reconnect-btn:hover {
       border-color: #60a5fa;
       color: #60a5fa;
+    }
+
+    .pane-action-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: 1px solid #2a2a2a;
+      color: #94a3b8;
+      width: 32px;
+      height: 32px;
+      border-radius: 4px;
+      cursor: pointer;
+      padding: 0;
+      line-height: 1;
+    }
+
+    .pane-action-btn:hover {
+      border-color: #60a5fa;
+      color: #60a5fa;
+      background: rgba(96, 165, 250, 0.1);
     }
 
     .capture-auth-btn {
@@ -1517,6 +1543,31 @@ export class ScionTerminalPane extends LitElement {
     if (this.session) void this.session.connect();
   }
 
+  /** Dispatch SPA navigation via the document-level nav-click listener. */
+  private navigateToPath(path: string): void {
+    this.dispatchEvent(
+      new CustomEvent('nav-click', {
+        detail: { path },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  /** Navigate to the agent graph view for this pane's agent. */
+  private openInGraph(): void {
+    const path = `/agents/graph?project=${encodeURIComponent(this.projectId)}&focus=${encodeURIComponent(this.agentId)}`;
+    this.navigateToPath(path);
+  }
+
+  /** Navigate to the DM chat conversation with this pane's agent. */
+  private openInChat(): void {
+    const dmKey = buildAgentDMKey(this.agentId, this.userId);
+    if (!dmKey) return;
+    const path = chatConversationPath({ conversationKey: dmKey });
+    if (path) this.navigateToPath(path);
+  }
+
   // --- SVG icon helpers ---
 
   /** Robot icon (agent) */
@@ -1625,6 +1676,26 @@ export class ScionTerminalPane extends LitElement {
             ${this.renderTerminalIcon()}
           </button>
         </div>
+        ${this.projectId
+          ? html`<button
+              class="pane-action-btn"
+              title="Open in graph"
+              aria-label="View ${this.agentName || this.agentId} in agent graph"
+              @click=${() => this.openInGraph()}
+            >
+              <sl-icon name="diagram-3"></sl-icon>
+            </button>`
+          : nothing}
+        ${this.userId && isFeatureEnabled('web.native_chat')
+          ? html`<button
+              class="pane-action-btn"
+              title="Open in chat"
+              aria-label="Chat with ${this.agentName || this.agentId}"
+              @click=${() => this.openInChat()}
+            >
+              <sl-icon name="chat-dots"></sl-icon>
+            </button>`
+          : nothing}
         <div class="spacer"></div>
         ${this.renderPortButtons()}
         ${this.showCaptureAuth

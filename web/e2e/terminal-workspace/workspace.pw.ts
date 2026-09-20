@@ -1625,3 +1625,215 @@ test('cross-preset independence: placing in two-columns does not change four-gri
   expect(socket.attaches).toBe(4);
   expect(socket.closes).toBe(0);
 });
+
+// --- Pane header action buttons tests (P2.4) ---
+
+test('graph button navigates to correct URL with project and focus params', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Wait for metadata to load (projectId must be set for graph button to show)
+  const graphBtn = page.locator('scion-terminal-pane').locator('button[title="Open in graph"]');
+  await expect(graphBtn).toBeVisible();
+
+  // Click the graph button
+  await graphBtn.click();
+
+  // Should navigate to the graph URL with correct project and focus params
+  await expect(page).toHaveURL(
+    `/agents/graph?project=${encodeURIComponent('fixture-project')}&focus=${encodeURIComponent(agent)}`
+  );
+
+  // Session stays attached — no socket close
+  expect(socket.closes).toBe(0);
+});
+
+test('graph button hidden when agent has no projectId', async ({ page }) => {
+  const noProjectAgents: Record<string, AgentFixture> = {
+    [agent]: {
+      id: agent,
+      name: 'no-project-agent',
+      phase: 'running',
+      projectId: '',
+    },
+  };
+  const socket = await setup(page, true, true, noProjectAgents);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Wait for the pane to render fully
+  await expect(page.locator('scion-terminal-pane')).toHaveCount(1);
+
+  // Graph button should not be visible (no projectId)
+  const graphBtn = page.locator('scion-terminal-pane').locator('button[title="Open in graph"]');
+  await expect(graphBtn).toHaveCount(0);
+});
+
+test('chat button navigates to DM route with full dm key', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Wait for chat button to appear (requires userId and native chat enabled)
+  const chatBtn = page.locator('scion-terminal-pane').locator('button[title="Open in chat"]');
+  await expect(chatBtn).toBeVisible();
+
+  // Click the chat button
+  await chatBtn.click();
+
+  // Should navigate to the DM route with the full encoded key
+  const expectedKey = `dm:agent:${agent}:user:fixture-user`;
+  await expect(page).toHaveURL(`/chat/dm/${encodeURIComponent(expectedKey)}`);
+
+  // Session stays attached — no socket close
+  expect(socket.closes).toBe(0);
+});
+
+test('chat button hidden when native chat is disabled', async ({ page }) => {
+  const socket = await setup(page, true, true, undefined, false);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Wait for the pane to render
+  await expect(page.locator('scion-terminal-pane')).toHaveCount(1);
+
+  // Graph button should still be visible (projectId is set)
+  const graphBtn = page.locator('scion-terminal-pane').locator('button[title="Open in graph"]');
+  await expect(graphBtn).toBeVisible();
+
+  // Chat button should not be visible (native chat disabled)
+  const chatBtn = page.locator('scion-terminal-pane').locator('button[title="Open in chat"]');
+  await expect(chatBtn).toHaveCount(0);
+});
+
+test('chat button hidden when userId is unavailable', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Verify the chat button is visible with a valid userId
+  const chatBtn = page.locator('scion-terminal-pane').locator('button[title="Open in chat"]');
+  await expect(chatBtn).toBeVisible();
+
+  // Clear the userId on the pane and trigger a re-render via metadata refresh
+  await page.evaluate(async () => {
+    type WorkspaceEl = HTMLElement & {
+      workspaceRoot?: { setUser: (u: null) => void };
+    };
+    const host = document.querySelector('#terminal-workspace') as WorkspaceEl;
+    host.workspaceRoot!.setUser(null);
+
+    // Force a re-render by refreshing agent metadata (triggers reactive state change)
+    const pane = document.querySelector<
+      HTMLElement & {
+        registry: { metadata: { refresh: (agentId: string) => Promise<void> } };
+        agentId: string;
+        requestUpdate: () => Promise<void>;
+      }
+    >('#terminal-workspace scion-terminal-pane');
+    if (pane) await pane.requestUpdate();
+  });
+
+  // Chat button should disappear when userId is cleared
+  await expect(chatBtn).toHaveCount(0);
+});
+
+test('navigation to graph preserves retained sessions', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Record initial identity
+  const initialIdentity = await identity(page);
+  expect(initialIdentity.pane).toBe(true);
+
+  // Click graph button
+  const graphBtn = page.locator('scion-terminal-pane').locator('button[title="Open in graph"]');
+  await expect(graphBtn).toBeVisible();
+  await graphBtn.click();
+
+  // Should have navigated away
+  await expect(page).toHaveURL(/\/agents\/graph/);
+
+  // Session should still be attached (no close)
+  expect(socket.closes).toBe(0);
+  expect(socket.attaches).toBe(1);
+
+  // Navigate back to terminals
+  await page.evaluate(
+    (path) => document.dispatchEvent(new CustomEvent('nav-click', { detail: { path } })),
+    `/terminals/${agent}`
+  );
+
+  // Pane should be preserved (same identity)
+  await expect
+    .poll(() => identity(page))
+    .toEqual({ host: true, pane: true, terminal: true, count: 1 });
+
+  // Still the same socket — no reconnect
+  expect(socket.attaches).toBe(1);
+  expect(socket.closes).toBe(0);
+});
+
+test('each pane buttons target its own agent in multi-pane layout', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj-a' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj-b' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open both agents
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(2);
+
+  // Place both into two-columns
+  await placeInPreset(page, keys[0], 'two-columns', 0);
+  await placeInPreset(page, keys[1], 'two-columns', 1);
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+
+  // Verify each pane's graph button has the correct aria-label targeting its own agent
+  const graphLabels = await page.evaluate(() => {
+    const panes = document.querySelectorAll<HTMLElement>('#terminal-workspace scion-terminal-pane');
+    const labels: Array<{ agentId: string; graphLabel: string | null; chatLabel: string | null }> =
+      [];
+    for (const pane of panes) {
+      if (pane.hidden || pane.style.display === 'none') continue;
+      const shadow = pane.shadowRoot;
+      if (!shadow) continue;
+      const graphBtn = shadow.querySelector('button[title="Open in graph"]');
+      const chatBtn = shadow.querySelector('button[title="Open in chat"]');
+      const sessionProp = (pane as HTMLElement & { session: { state: { agentId: string } } | null })
+        .session;
+      labels.push({
+        agentId: sessionProp?.state.agentId ?? '',
+        graphLabel: graphBtn?.getAttribute('aria-label') ?? null,
+        chatLabel: chatBtn?.getAttribute('aria-label') ?? null,
+      });
+    }
+    return labels;
+  });
+
+  expect(graphLabels.length).toBe(2);
+
+  // Find alpha and beta pane labels
+  const alphaPane = graphLabels.find((l) => l.agentId === agent);
+  const betaPane = graphLabels.find((l) => l.agentId === agentB);
+
+  expect(alphaPane).toBeDefined();
+  expect(betaPane).toBeDefined();
+  expect(alphaPane!.graphLabel).toContain('alpha');
+  expect(betaPane!.graphLabel).toContain('beta');
+  expect(alphaPane!.chatLabel).toContain('alpha');
+  expect(betaPane!.chatLabel).toContain('beta');
+
+  // No new sockets
+  expect(socket.attaches).toBe(2);
+  expect(socket.closes).toBe(0);
+});

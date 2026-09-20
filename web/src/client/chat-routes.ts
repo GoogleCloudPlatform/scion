@@ -48,6 +48,15 @@ export interface ChatConversationTarget {
  * DM keys contain colons, which `encodeURIComponent` escapes — the encoded
  * segment therefore never contains a slash and stays a single path segment.
  */
+/**
+ * Builds the DM conversation key for a direct conversation between
+ * a user and an agent. Returns null if either ID is missing.
+ */
+export function buildAgentDMKey(agentId: string, userId: string): string | null {
+  if (!agentId?.trim() || !userId?.trim()) return null;
+  return `dm:agent:${agentId}:user:${userId}`;
+}
+
 export function chatConversationPath(target: ChatConversationTarget): string | null {
   if (!target) return null;
   const key = target.conversationKey?.trim();

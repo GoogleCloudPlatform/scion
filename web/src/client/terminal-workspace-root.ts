@@ -96,7 +96,10 @@ export class TerminalWorkspaceRoot {
   private refreshQueued = false;
   private narrowQuery: MediaQueryList | null = null;
 
+  private user: User | null = null;
+
   constructor(user: User | null = null) {
+    this.user = user;
     this.element.id = 'terminal-workspace';
     this.element.hidden = true;
     this.element.style.cssText = 'height:100vh;min-height:0;display:none;flex-direction:column';
@@ -213,7 +216,11 @@ export class TerminalWorkspaceRoot {
   }
 
   setUser(user: User | null): void {
+    this.user = user;
     this.header.user = user;
+    for (const pane of this.panes.values()) {
+      pane.userId = user?.id ?? '';
+    }
   }
 
   setCurrentPath(path: string): void {
@@ -226,6 +233,7 @@ export class TerminalWorkspaceRoot {
     const pane = document.createElement('scion-terminal-pane');
     pane.className = 'terminal-pane';
     pane.style.cssText = 'height:100%;width:100%;min-height:0';
+    pane.userId = this.user?.id ?? '';
     pane.setVisible(false);
     this.paneHost.appendChild(pane);
     try {
