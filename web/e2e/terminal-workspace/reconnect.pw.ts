@@ -137,15 +137,16 @@ test('repeated Reconnect clicks produce only one attempt', async ({ page }) => {
   await expect.poll(() => socket.attaches).toBe(1);
 
   // Make the agent metadata fetch slow so the reconnect stays pending
-  // while we click multiple times
-  let resolveSlowFetch: (() => void) | null = null;
+  // while we click multiple times. Use a holder object so TypeScript does
+  // not narrow the property to null at the call site (TS2349).
+  const slowFetch = { resolve: null as (() => void) | null };
   await page.route('**/api/v1/agents/**', (route) => {
     if (route.request().url().endsWith('/pty')) {
       void route.fulfill({ json: {} });
       return;
     }
     // Delay the response to keep reconnect in pending state
-    resolveSlowFetch = () => {
+    slowFetch.resolve = () => {
       void route.fulfill({
         json: {
           id: agent,
@@ -174,7 +175,7 @@ test('repeated Reconnect clicks produce only one attempt', async ({ page }) => {
   await reconnectBtn.click({ force: true });
 
   // Resolve the slow fetch to complete the reconnect
-  resolveSlowFetch?.();
+  slowFetch.resolve?.();
   await expect.poll(() => socket.attaches).toBe(2);
 
   // Despite multiple clicks, only one additional WebSocket connection was made
@@ -261,12 +262,10 @@ test('unavailable agent shows correct state in rail and pane', async ({ page }) 
   await page.goto(`/terminals/${agent}`);
   await expect.poll(() => socket.attaches).toBe(1);
 
-  // Deliver an SSE agent-stopped event through the mocked EventSource, then call
-  // markUnavailable on the session (the intended API for external unavailability
-  // signals — the SSE metadata path updates availability but markUnavailable
-  // sets the session connection state).
+  // Deliver an SSE agent-stopped event through the mocked EventSource.
+  // The production SSE→metadata→session bridge in the workspace root should
+  // call markUnavailable automatically when the metadata reports phase=stopped.
   await page.evaluate((agentId) => {
-    // Deliver SSE update event to trigger metadata availability change
     const instances = (window as unknown as { __sseInstances__: EventTarget[] }).__sseInstances__;
     for (const es of instances) {
       const event = new MessageEvent('update', {
@@ -277,11 +276,6 @@ test('unavailable agent shows correct state in rail and pane', async ({ page }) 
       });
       es.dispatchEvent(event);
     }
-    // markUnavailable sets the session connection state to unavailable
-    const pane = document.querySelector('scion-terminal-pane') as HTMLElement & {
-      session?: { markUnavailable(reason: string, msg: string): void };
-    };
-    pane?.session?.markUnavailable('agent-stopped', 'Agent has stopped.');
   }, agent);
 
   // Rail should show unavailable state, not disconnected
@@ -314,7 +308,7 @@ test('toolbar reconnect button disabled during active reconnect attempt', async 
 
   // Also verify: for terminal-permanent disconnect reasons (agent-deleted),
   // the reconnect button should be disabled.
-  // Deliver SSE deleted event and mark the session unavailable.
+  // Deliver SSE deleted event — the production bridge calls markUnavailable.
   await page.evaluate((agentId) => {
     const instances = (window as unknown as { __sseInstances__: EventTarget[] }).__sseInstances__;
     for (const es of instances) {
@@ -324,10 +318,6 @@ test('toolbar reconnect button disabled during active reconnect attempt', async 
         })
       );
     }
-    const pane = document.querySelector('scion-terminal-pane') as HTMLElement & {
-      session?: { markUnavailable(reason: string, msg: string): void };
-    };
-    pane?.session?.markUnavailable('agent-deleted', 'Agent was deleted.');
   }, agent);
 
   // The reconnect button should now be visible but disabled for agent-deleted reason

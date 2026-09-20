@@ -315,6 +315,27 @@ export class TerminalWorkspaceRoot {
       });
       entry.unsubscribeMetadata = this.registry!.metadata.subscribe(state.agentId, (next) => {
         entry.metadata = next;
+
+        // SSE → session bridge: reconcile metadata availability with session connection
+        try {
+          if (
+            next.availability === 'deleted' &&
+            entry.session.state.connection !== 'closed' &&
+            entry.session.state.connection !== 'unavailable'
+          ) {
+            entry.session.markUnavailable('agent-deleted', next.error ?? 'Agent was deleted.');
+          } else if (
+            next.agent?.phase === 'stopped' &&
+            entry.session.state.connection !== 'closed' &&
+            entry.session.state.connection !== 'unavailable' &&
+            entry.session.state.connection !== 'disconnected'
+          ) {
+            entry.session.markUnavailable('agent-stopped', 'Agent has stopped.');
+          }
+        } catch {
+          // markUnavailable should not throw, but guard the subscription callback
+        }
+
         this.queueRefresh();
       });
       this.entries.set(session.state.key, entry);
