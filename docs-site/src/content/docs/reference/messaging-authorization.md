@@ -14,8 +14,7 @@ For an overview of Scion's messaging features and day-to-day usage, see
 
 ## Overview
 
-Every agent has a **message mode** that governs its conversational reach.
-The mode governs an agent's conversational reach — both who can deliver
+Every agent has a **message mode** that governs its conversational reach — both who can deliver
 messages to the agent and who the agent can deliver messages to. There are
 five modes:
 
@@ -606,7 +605,7 @@ ratified by the project sponsor. Key decisions:
 |----|---------|
 | D1 | `message` is a first-class axis, split from lifecycle/attach |
 | D2 | User-side messaging grant is project-coarse (relay rule) |
-| D3+D9 | Five-tier mode system: none, lineage, branch, project, hub |
+| D3 | Five-tier mode system: none, lineage, branch, project, hub |
 | D4 | Lineage mode: strict user-to-agent only, no agent-to-agent edges |
 | D5 | Mode is fully orthogonal to agent role |
 | D6 | Piercing rules: super-admin pierces all; owner/ancestry pierce lineage/branch; user-identity-only |
@@ -677,13 +676,13 @@ scion message @<project-slug>/<agent-slug> @<other-project>/<other-agent> "messa
 scion hub messaging get
 
 # Enable cross-project messaging on the Hub
-scion hub messaging set --cross-project enabled
+scion hub messaging set --cross-project-enabled=true --revision <N>
 
 # View a project's inbound policy
 scion project messaging get --project <project>
 
 # Set a project's inbound policy (uses CAS)
-scion project messaging set --project <project> --inbound members
+scion project messaging set --project <project> --policy members --revision <N>
 ```
 
 These administration commands are human-only and unavailable in agent mode.
