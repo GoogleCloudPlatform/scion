@@ -2460,3 +2460,46 @@ func TestConvRefSameProjectAllowed(t *testing.T) {
 	}
 	assert.False(t, rejected, "same-project conv: should not be rejected")
 }
+
+// TestConvRefAttachWakeRejection verifies that --attach and --wake are
+// explicitly rejected for conv: references, since the conversation send
+// API (ConversationSendRequest) does not support them.
+func TestConvRefAttachWakeRejection(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	server, _ := crossProjectMockServer(t, "", "", "", "")
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "proj-a-uuid",
+	}
+
+	convID := "conv-uuid-reject-test"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	// Attachments should be rejected
+	err = sendMessageViaConversation(hubCtx, ref, "msg with attach", false, false, []string{"file.txt"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--attach is not supported with conv: references")
+
+	// Wake should be rejected
+	err = sendMessageViaConversation(hubCtx, ref, "msg with wake", false, true, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--wake is not supported with conv: references")
+
+	// Neither attachment nor wake: should succeed
+	err = sendMessageViaConversation(hubCtx, ref, "normal msg", false, false, nil)
+	require.NoError(t, err)
+}

@@ -668,7 +668,15 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		// Cross-project conv:<uuid> reply: use the Messaging().SendMessage API
 		// which hits POST /api/v1/conversations/{id}/messages. This bypasses
 		// the project-scoped agent lookup that rejects cross-project targets.
+		// The conversation send API does not support attachments or wake;
+		// reject explicitly rather than silently dropping them.
 		if ref.Kind == messaging.RefConversation {
+			if len(attachments) > 0 {
+				return fmt.Errorf("--attach is not supported with conv: references; the conversation send API does not support attachments")
+			}
+			if wake {
+				return fmt.Errorf("--wake is not supported with conv: references; the conversation send API does not support wake")
+			}
 			sendReq := &hubclient.ConversationSendRequest{
 				Msg:       message,
 				Type:      "instruction",
