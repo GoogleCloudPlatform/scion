@@ -254,6 +254,14 @@ global endpoint). The provisioner writes `[auth_provider]` and `[model]` entries
 `~/.grok/config.toml` using `gcloud auth print-access-token` for on-demand token refresh.
 Application Default Credentials (ADC) are placed automatically when staged.
 
+:::note[Vertex AI API backend]
+When using the Vertex AI auth method, the provisioner automatically configures grok to use the
+**Chat Completions API backend** (`api_backend = "chat_completions"`) and disables backend search
+(`supports_backend_search = false`). This is required because the Vertex AI Model Garden does not
+return complete usage metadata under the Responses API, and the `x_search` hosted tool is not
+available through Vertex AI.
+:::
+
 If no credentials are found, the agent drops to a shell — run `grok login --device-auth`
 interactively, then capture the credential with the container's `capture_auth.py`
 (see [Harness Authentication](/scion/local/agent-credentials/#capturing-credentials-from-a-running-agent)).
@@ -269,12 +277,13 @@ interactively, then capture the credential with the container's `capture_auth.py
 - **Instructions**: `agent_instructions` are projected into `~/.grok/AGENTS.md`.
 - **System Prompt**: Supported natively via the `--system-prompt-override` flag during launch.
 - **MCP**: `~/.grok/config.toml` under `[mcp_servers.*]` TOML sections (supports `stdio`, `sse`, and `streamable-http` transports). Project-scoped MCP servers are not supported (demoted to global).
-- **Model aliases**: `small` → `grok-3-mini`, `medium` → `grok-3`, `large` → `grok-4.5`, `extra-large` → `grok-4.6` (resolved and injected via `GROK_DEFAULT_MODEL`).
+- **Model aliases**: `small` → `grok-3-mini`, `medium` → `grok-4.5`, `large` → `grok-4.6`, `extra-large` → `grok-4.6` (resolved and injected via `GROK_DEFAULT_MODEL`).
 - **Hooks**: 15 Grok lifecycle event hooks are wired to sciontool via `~/.grok/hooks/scion.json` using the `grok-build` dialect, including `PermissionDenied`, `SubagentStart`, `PreCompact`, and `PostCompact`.
 - **OpenTelemetry**: When telemetry is enabled, Scion injects `GROK_TELEMETRY_ENABLED`, `GROK_EXTERNAL_OTEL`, and standard `OTEL_*` env vars pointing at sciontool's local OTLP receiver.
 
 ### Known Limitations
 - **No max_model_calls** — Grok hooks do not expose model-call start/end events. `max_turns` and `max_duration` are supported.
+- **No backend search** — The `x_search` hosted tool is disabled globally via `--disallowed-tools` to ensure compatibility across all auth modes (including Vertex AI, which does not support it).
 - **No project-scoped MCP**.
 - **OAuth**: not supported — Grok uses xAI auth only.
 
