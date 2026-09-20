@@ -90,7 +90,7 @@ func validateLogs(input []*logspb.ResourceLogs) error {
 				if record == nil {
 					continue
 				}
-				name, err := normalizedLogEventName(record)
+				name, err := normalizedLogEventName(record, sl.GetScope().GetName())
 				if err != nil {
 					return err
 				}

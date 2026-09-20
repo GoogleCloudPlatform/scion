@@ -37,8 +37,10 @@ var nativeFieldAliases = map[string]string{
 	"gen_ai.conversation.id":     "session_id",
 }
 
-// These documented native identity/content keys must not leave the receiver
-// raw or as content-derived hashes, regardless of an explicit field policy.
+// These documented native identity/content keys form a receiver-wide privacy
+// floor, including for other producers that reuse a key. They must not leave
+// the receiver raw or as content-derived hashes, regardless of an explicit
+// field policy.
 var mandatoryRedactFields = map[string]struct{}{
 	"gen_ai.system_instructions": {},
 	// Claude Code 2.1.273 emits prompt/response content and these opaque

@@ -150,7 +150,7 @@ func TestReceiverClaudeIdentityCannotReachEgress(t *testing.T) {
 }
 
 // The installed Claude 2.1.273 logs-only path emits these keys in native
-// user_prompt and api_response records. Keep content and opaque IDs out of
+// user_prompt, api_request and assistant_response records. Keep content and opaque IDs out of
 // Cloud egress even when a custom redaction list omits the default fields.
 func TestReceiverClaudeInstalledLogShapePrivacy(t *testing.T) {
 	for _, tc := range []struct {
@@ -161,7 +161,7 @@ func TestReceiverClaudeInstalledLogShapePrivacy(t *testing.T) {
 		{name: "custom", redaction: RedactionConfig{Redact: []string{"user.email"}, Hash: []string{"session_id"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := NewWithConfig(&Config{Enabled: true, Redaction: tc.redaction})
+			p := NewWithConfig(&Config{Enabled: true, Filter: FilterConfig{Include: []string{"agent.user.prompt", "api_request", "assistant_response"}}, Redaction: tc.redaction})
 			p.retryConfig = fastRetryConfig()
 			var captured []*logspb.ResourceLogs
 			p.exporter = &CloudExporter{logClient: &mockLogClient{exportFunc: func(_ context.Context, req *collogspb.ExportLogsServiceRequest, _ ...grpc.CallOption) (*collogspb.ExportLogsServiceResponse, error) {
@@ -182,6 +182,11 @@ func TestReceiverClaudeInstalledLogShapePrivacy(t *testing.T) {
 							secretKV("user.id", "PRIVATE_USER_ID"),
 						}},
 						{Body: stringProtoValue("PRIVATE_NATIVE_BODY"), Attributes: []*commonpb.KeyValue{
+							secretKV("event.name", "api_request"),
+							secretKV("request_id", "PRIVATE_REQUEST_ID"),
+							secretKV("model", "claude-opus-4-6"),
+						}},
+						{Body: stringProtoValue("PRIVATE_NATIVE_BODY"), Attributes: []*commonpb.KeyValue{
 							secretKV("event.name", "assistant_response"),
 							secretKV("response", "PRIVATE_RESPONSE"),
 							secretKV("request_id", "PRIVATE_REQUEST_ID"),
@@ -200,7 +205,7 @@ func TestReceiverClaudeInstalledLogShapePrivacy(t *testing.T) {
 			if response.Code != http.StatusOK {
 				t.Fatalf("receiver status %d: %s", response.Code, response.Body.String())
 			}
-			if len(captured) != 1 || len(captured[0].ScopeLogs) != 1 || len(captured[0].ScopeLogs[0].LogRecords) != 2 {
+			if len(captured) != 1 || len(captured[0].ScopeLogs) != 1 || len(captured[0].ScopeLogs[0].LogRecords) != 3 {
 				t.Fatalf("unexpected log egress shape: %d resource groups", len(captured))
 			}
 			for _, record := range captured[0].ScopeLogs[0].LogRecords {
@@ -213,11 +218,81 @@ func TestReceiverClaudeInstalledLogShapePrivacy(t *testing.T) {
 				assertRedacted(t, promptAttrs, key)
 			}
 			assertAttr(t, promptAttrs, "session.id", HashValue("session-123"))
-			responseAttrs := captured[0].ScopeLogs[0].LogRecords[1].Attributes
+			responseAttrs := captured[0].ScopeLogs[0].LogRecords[2].Attributes
 			for _, key := range []string{"response", "request_id"} {
 				assertRedacted(t, responseAttrs, key)
 			}
 			assertAttr(t, responseAttrs, "model", "claude-opus-4-6")
+			egressBytes, err := proto.Marshal(&collogspb.ExportLogsServiceRequest{ResourceLogs: captured})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, marker := range []string{"PRIVATE_NATIVE_BODY", "PRIVATE_PROMPT", "PRIVATE_PROMPT_ID", "PRIVATE_MESSAGE_ID", "PRIVATE_REQUEST_ID", "PRIVATE_USER_ID", "PRIVATE_RESPONSE"} {
+				if bytes.Contains(egressBytes, []byte(marker)) {
+					t.Fatalf("private marker survived egress: %s", marker)
+				}
+			}
+		})
+	}
+}
+
+func TestReceiverClaudeNativePromptUsesProductionDefaultExclude(t *testing.T) {
+	t.Setenv(EnvFilterInclude, "")
+	t.Setenv(EnvFilterExclude, "")
+	cfg := LoadConfig()
+	if len(cfg.Filter.Exclude) != 1 || cfg.Filter.Exclude[0] != "agent.user.prompt" {
+		t.Fatalf("production default excludes = %v", cfg.Filter.Exclude)
+	}
+	result := newReceiverPolicy(cfg).processLogs([]*logspb.ResourceLogs{{ScopeLogs: []*logspb.ScopeLogs{
+		{Scope: &commonpb.InstrumentationScope{Name: claudeNativeLogScope}, LogRecords: []*logspb.LogRecord{
+			{Attributes: []*commonpb.KeyValue{secretKV("event.name", "user_prompt")}},
+			{Attributes: []*commonpb.KeyValue{secretKV("event.name", "api_request")}},
+			{Attributes: []*commonpb.KeyValue{secretKV("event.name", "assistant_response")}},
+		}},
+		{Scope: &commonpb.InstrumentationScope{Name: "unrelated.scope"}, LogRecords: []*logspb.LogRecord{
+			{Attributes: []*commonpb.KeyValue{secretKV("event.name", "user_prompt"), secretKV("prompt", "PRIVATE_GENERIC_PROMPT"), secretKV("response", "PRIVATE_GENERIC_RESPONSE")}},
+		}},
+	}}})
+	if result.Rejected != 0 || result.Filtered != 1 || len(result.Data) != 1 || len(result.Data[0].ScopeLogs) != 2 {
+		t.Fatalf("default-filter result: rejected=%d filtered=%d resources=%d", result.Rejected, result.Filtered, len(result.Data))
+	}
+	claudeRecords := result.Data[0].ScopeLogs[0].LogRecords
+	if len(claudeRecords) != 2 || claudeRecords[0].EventName != "api_request" || claudeRecords[1].EventName != "assistant_response" {
+		t.Fatalf("Claude records retained after default filter: %d", len(claudeRecords))
+	}
+	genericRecords := result.Data[0].ScopeLogs[1].LogRecords
+	if len(genericRecords) != 1 || genericRecords[0].EventName != "user_prompt" {
+		t.Fatalf("unrelated scope changed by Claude alias: %d", len(genericRecords))
+	}
+	assertRedacted(t, genericRecords[0].Attributes, "prompt")
+	assertRedacted(t, genericRecords[0].Attributes, "response")
+}
+
+func TestReceiverClaudePromptScopeAliasAllRepresentations(t *testing.T) {
+	for _, storage := range []string{"record", "event.name", "event_name", "event.type", "record and attribute"} {
+		t.Run(storage, func(t *testing.T) {
+			record := &logspb.LogRecord{}
+			switch storage {
+			case "record":
+				record.EventName = "user_prompt"
+			case "record and attribute":
+				record.EventName = "agent.user.prompt"
+				record.Attributes = []*commonpb.KeyValue{secretKV("event.name", "user_prompt")}
+			default:
+				record.Attributes = []*commonpb.KeyValue{secretKV(storage, "user_prompt")}
+			}
+			policy := newReceiverPolicy(&Config{Enabled: true, Filter: FilterConfig{Include: []string{"agent.user.prompt"}}})
+			result := policy.processLogs([]*logspb.ResourceLogs{{ScopeLogs: []*logspb.ScopeLogs{{
+				Scope:      &commonpb.InstrumentationScope{Name: claudeNativeLogScope},
+				LogRecords: []*logspb.LogRecord{record},
+			}}}})
+			if result.Rejected != 0 || result.Filtered != 0 || len(result.Data) != 1 || len(result.Data[0].ScopeLogs) != 1 || len(result.Data[0].ScopeLogs[0].LogRecords) != 1 {
+				t.Fatalf("scope alias result: rejected=%d filtered=%d resources=%d", result.Rejected, result.Filtered, len(result.Data))
+			}
+			got := result.Data[0].ScopeLogs[0].LogRecords[0]
+			if got.EventName != "agent.user.prompt" || attrValue(got.Attributes, "event.name") != "agent.user.prompt" || countAttr(got.Attributes, "event.name") != 1 {
+				t.Fatalf("canonical Claude prompt event was not retained exactly once")
+			}
 		})
 	}
 }

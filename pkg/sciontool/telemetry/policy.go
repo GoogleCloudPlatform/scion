@@ -178,7 +178,7 @@ func (p *receiverPolicy) processLogs(input []*logspb.ResourceLogs) policyResult[
 				if record == nil {
 					continue
 				}
-				eventName, _ := normalizedLogEventName(record)
+				eventName, _ := normalizedLogEventName(record, scopeLogs.GetScope().GetName())
 				if eventName == "" {
 					if p.filter.HasIncludes() {
 						filtered++
@@ -345,13 +345,13 @@ func (p *receiverPolicy) processMetric(metric *metricpb.Metric) {
 	}
 }
 
-func normalizedLogEventName(record *logspb.LogRecord) (string, error) {
+func normalizedLogEventName(record *logspb.LogRecord, scopeName string) (string, error) {
 	if record == nil {
 		return "", nil
 	}
 	values := make([]string, 0, 4)
 	if record.EventName != "" {
-		values = append(values, normalizeNativeEventName(record.EventName))
+		values = append(values, normalizeNativeEventName(record.EventName, scopeName))
 	}
 	for _, attr := range record.Attributes {
 		if attr == nil || !isEventNameAttribute(attr.Key) {
@@ -365,7 +365,7 @@ func normalizedLogEventName(record *logspb.LogRecord) (string, error) {
 			return "", fmt.Errorf("event name attribute must be a string")
 		}
 		if text.StringValue != "" {
-			values = append(values, normalizeNativeEventName(text.StringValue))
+			values = append(values, normalizeNativeEventName(text.StringValue, scopeName))
 		}
 	}
 	if len(values) == 0 {
@@ -380,7 +380,10 @@ func normalizedLogEventName(record *logspb.LogRecord) (string, error) {
 	return canonical, nil
 }
 
-func normalizeNativeEventName(name string) string {
+func normalizeNativeEventName(name, scopeName string) string {
+	if scopeName == claudeNativeLogScope && name == "user_prompt" {
+		return "agent.user.prompt"
+	}
 	if normalized, ok := nativeEventNameAliases[name]; ok {
 		return normalized
 	}
