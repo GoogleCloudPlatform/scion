@@ -24,6 +24,7 @@
  *   - DOM focus ownership: hide/reveal while sibling focused blocks until focused
  *   - DOM focus ownership: window blur (null relatedTarget) blocks OSC 52
  *   - DOM focus ownership: file drop focuses terminal via DOM
+ *   - DOM focus ownership: no public API grants authority without DOM focus
  *   - Protocol: DSR/DA unchanged through focus state transitions
  *   - OSC 52 read generation check: reconnect blocks stale response
  *   - OSC 52 selection types: non-'c' reads get empty response, writes no-op
@@ -356,7 +357,7 @@ test('upload completing after hide does not inject paths', async ({ page }) => {
   expect(afterInput.length).toBe(beforeInput.length);
 });
 
-// --- Visible-but-unfocused tests (setFocused) ---
+// --- Visible-but-unfocused tests (via real DOM focus transitions) ---
 
 test('visible but unfocused pane rejects OSC 52 clipboard write', async ({ page }) => {
   const ctx = await setup(page);
@@ -366,8 +367,15 @@ test('visible but unfocused pane rejects OSC 52 clipboard write', async ({ page 
     window.hiddenFixture.clipboardText = 'original';
   });
 
-  // Pane is visible but unfocused (multi-pane scenario)
-  await page.evaluate(() => window.hiddenFixture.pane.setFocused(false));
+  // Focus the terminal first, then move focus to sibling (real DOM unfocus)
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.evaluate(() => {
+    const target = document.getElementById('drop-target')!;
+    target.setAttribute('tabindex', '0');
+    target.focus();
+  });
+  await page.waitForTimeout(50);
 
   // Send OSC 52 clipboard write while visible+unfocused
   ctx.write('\x1b]52;c;' + Buffer.from('unfocused-write').toString('base64') + '\x07');
@@ -377,8 +385,9 @@ test('visible but unfocused pane rejects OSC 52 clipboard write', async ({ page 
   const afterWrite = await page.evaluate(() => window.hiddenFixture.clipboardText);
   expect(afterWrite).toBe('original');
 
-  // Re-focus and verify write works
-  await page.evaluate(() => window.hiddenFixture.pane.setFocused(true));
+  // Re-focus terminal and verify write works
+  await textarea.focus();
+  await page.waitForTimeout(50);
   ctx.write('\x1b]52;c;' + Buffer.from('focused-write').toString('base64') + '\x07');
   await expect
     .poll(() => page.evaluate(() => window.hiddenFixture.clipboardText))
@@ -393,8 +402,15 @@ test('visible but unfocused pane rejects OSC 52 clipboard read', async ({ page }
     window.hiddenFixture.clipboardText = 'read-me';
   });
 
-  // Unfocus the pane (visible but not focused)
-  await page.evaluate(() => window.hiddenFixture.pane.setFocused(false));
+  // Focus terminal then move to sibling (real DOM unfocus)
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.evaluate(() => {
+    const target = document.getElementById('drop-target')!;
+    target.setAttribute('tabindex', '0');
+    target.focus();
+  });
+  await page.waitForTimeout(50);
 
   const beforeCount = ctx.frames.filter((f) => f.type === 'data').length;
 
@@ -419,8 +435,12 @@ test('focus lost during pending clipboard read does not send paste', async ({ pa
   await textarea.focus();
   await textarea.press('Control+v');
 
-  // Lose focus (but remain visible) before clipboard resolves
-  await page.evaluate(() => window.hiddenFixture.pane.setFocused(false));
+  // Lose focus via real DOM transition (click sibling) before clipboard resolves
+  await page.evaluate(() => {
+    const target = document.getElementById('drop-target')!;
+    target.setAttribute('tabindex', '0');
+    target.focus();
+  });
   await page.waitForTimeout(50);
 
   // Release the clipboard with paste text
@@ -460,8 +480,12 @@ test('focus lost during pending upload does not inject paths', async ({ page }) 
   });
   await page.waitForTimeout(100);
 
-  // Lose focus (but remain visible) while upload is pending
-  await page.evaluate(() => window.hiddenFixture.pane.setFocused(false));
+  // Lose focus via real DOM transition while upload is pending
+  await page.evaluate(() => {
+    const target = document.getElementById('drop-target')!;
+    target.setAttribute('tabindex', '0');
+    target.focus();
+  });
   await page.waitForTimeout(50);
 
   // Complete the upload
@@ -1144,4 +1168,47 @@ test('non-c OSC 52 read returns empty response matching original addon', async (
   // Clipboard should NOT have been read — no OS access for non-'c'
   const clipUnchanged = await page.evaluate(() => window.hiddenFixture.clipboardText);
   expect(clipUnchanged).toBe('system-clipboard-content');
+});
+
+// --- Rev5: No public API grants clipboard authority without DOM focus ---
+
+test('no public API grants clipboard authority without actual DOM focus', async ({ page }) => {
+  const ctx = await setup(page);
+  await ready(page);
+
+  // Focus terminal first, then move to sibling
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.evaluate(() => {
+    const target = document.getElementById('drop-target')!;
+    target.setAttribute('tabindex', '0');
+    target.focus();
+  });
+  await page.waitForTimeout(50);
+  expect(await page.evaluate(() => document.activeElement?.id)).toBe('drop-target');
+
+  await page.evaluate(() => {
+    window.hiddenFixture.clipboardText = 'before-api-test';
+  });
+
+  // setFocused is removed — no competing authority setter exists.
+  // Verify the pane has no public method to grant _focused without DOM focus.
+  const hasSetFocused = await page.evaluate(
+    () => typeof (window.hiddenFixture.pane as unknown as Record<string, unknown>).setFocused
+  );
+  expect(hasSetFocused).toBe('undefined');
+
+  // With sibling focused, OSC 52 must be blocked — only DOM focus grants authority
+  ctx.write('\x1b]52;c;' + Buffer.from('api-write').toString('base64') + '\x07');
+  await page.waitForTimeout(300);
+  const clip = await page.evaluate(() => window.hiddenFixture.clipboardText);
+  expect(clip).toBe('before-api-test');
+
+  // Only real DOM focus restores authority
+  await textarea.focus();
+  await page.waitForTimeout(50);
+  ctx.write('\x1b]52;c;' + Buffer.from('dom-write').toString('base64') + '\x07');
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.clipboardText))
+    .toBe('dom-write');
 });

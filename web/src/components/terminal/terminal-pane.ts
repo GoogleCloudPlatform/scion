@@ -134,8 +134,7 @@ export class ScionTerminalPane extends LitElement {
    * - focusout to external element or null (window blur) → false
    * - setVisible(false) → false (blur + inert)
    * - setVisible(true) → derived from current document.activeElement
-   * - _onDrop → true (file drop is explicit user interaction)
-   * - setFocused() → explicit override for multi-pane workspace root
+   * - _onDrop → terminal.focus() → focusin → true
    *
    * Default false: the first focusin event (from auto-focus or user click)
    * establishes the correct state.
@@ -663,16 +662,6 @@ export class ScionTerminalPane extends LitElement {
       // Remove drop prevention so Chat/Dashboard drops are unaffected.
       this.removeWindowListeners();
     }
-  }
-
-  /**
-   * Control focused state independently of visibility.
-   * Phase 2 multi-pane layouts call setFocused(false) for visible-but-unfocused
-   * panes so clipboard/input guards correctly scope to the active terminal.
-   */
-  setFocused(focused: boolean): void {
-    this._focused = focused;
-    if (!focused) this.terminal?.blur();
   }
 
   /** Explicit lifetime boundary. Navigation is reserved for the legacy adapter. */
