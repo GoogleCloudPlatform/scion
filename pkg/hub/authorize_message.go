@@ -424,9 +424,23 @@ func (s *Server) evaluateCrossProject(
 	decision := MessageDecision{CrossProject: true}
 
 	// Gate (a): Hub cross_project_messaging_enabled must be true.
-	// Read from operational settings (DB-backed cache, periodically refreshed).
+	// Authoritative store read — bypasses the replica-local cache so that the
+	// very next send after a policy change enforces the current setting,
+	// regardless of notification/poll propagation state (#1686).
 	ops := s.GetOperationalSettings()
-	if ops == nil || !ops.CrossProjectMessagingEnabled() {
+	if ops == nil {
+		decision.Code = MessageDenialCrossProjectDisabled
+		decision.Reason = "cross-project messaging is not enabled on this Hub (no operational settings)"
+		return decision
+	}
+	cpmSetting := ops.ReadAuthoritativeCrossProjectEnabled(ctx)
+	if cpmSetting.Err != nil {
+		decision.Code = MessageDenialCrossProjectDisabled
+		decision.Reason = "cross-project messaging setting read failed (failing closed)"
+		return decision
+	}
+	decision.HubPolicyRevision = cpmSetting.Revision
+	if !cpmSetting.Enabled {
 		decision.Code = MessageDenialCrossProjectDisabled
 		decision.Reason = "cross-project messaging is not enabled on this Hub"
 		return decision
@@ -609,10 +623,16 @@ func (s *storedAgentIdentity) OriginUserID() string {
 //  3. Hub cross_project_messaging_enabled must be true.
 //  4. Destination project's crossProjectInbound policy must permit the sender.
 //  5. Both agent and project records must be valid (not deleted).
+//
+// prefetchedCPM, when non-nil, provides a pre-fetched authoritative
+// cross-project setting read so that callers who have already performed the
+// store read (e.g. EvaluateCrossProjectReadAccess) avoid redundant queries.
+// When nil, the method performs its own authoritative read.
 func (s *Server) authorizeCrossProjectAgentMessage(
 	ctx context.Context,
 	senderAgent, targetAgent *store.Agent,
 	sMode, tMode string,
+	prefetchedCPM *CrossProjectSettingResult,
 ) (bool, string) {
 	// 1. Sender must be hub mode — project-mode agents cannot send cross-project.
 	if sMode != store.MessageModeHub {
@@ -625,10 +645,20 @@ func (s *Server) authorizeCrossProjectAgentMessage(
 		return false, "cross_project_target_mode"
 	}
 
-	// 3. Hub-level kill switch.
-	ops := s.GetOperationalSettings()
-	if ops == nil || !ops.CrossProjectMessagingEnabled() {
-		return false, "cross_project_disabled"
+	// 3. Hub-level kill switch — authoritative store read (#1686).
+	if prefetchedCPM != nil {
+		if prefetchedCPM.Err != nil || !prefetchedCPM.Enabled {
+			return false, "cross_project_disabled"
+		}
+	} else {
+		ops := s.GetOperationalSettings()
+		if ops == nil {
+			return false, "cross_project_disabled"
+		}
+		cpmSetting := ops.ReadAuthoritativeCrossProjectEnabled(ctx)
+		if cpmSetting.Err != nil || !cpmSetting.Enabled {
+			return false, "cross_project_disabled"
+		}
 	}
 
 	// 4. Destination project's inbound policy.
@@ -729,18 +759,23 @@ func (s *Server) EvaluateCrossProjectReadAccess(
 		return false, "no_hub_mode_endpoint"
 	}
 
-	// Hub switch must be enabled.
+	// Hub switch must be enabled — authoritative store read (#1686).
 	ops := s.GetOperationalSettings()
-	if ops == nil || !ops.CrossProjectMessagingEnabled() {
+	if ops == nil {
+		return false, "cross_project_disabled"
+	}
+	cpmSetting := ops.ReadAuthoritativeCrossProjectEnabled(ctx)
+	if cpmSetting.Err != nil || !cpmSetting.Enabled {
 		return false, "cross_project_disabled"
 	}
 
-	// Check at least one permitted direction.
+	// Check at least one permitted direction. Pass the pre-fetched
+	// authoritative setting to avoid redundant store reads (#1686).
 	// Forward: reader→peer
-	forwardAllowed, _ := s.authorizeCrossProjectAgentMessage(ctx, readerAgent, peerAgent, rMode, pMode)
+	forwardAllowed, _ := s.authorizeCrossProjectAgentMessage(ctx, readerAgent, peerAgent, rMode, pMode, &cpmSetting)
 
 	// Reverse: peer→reader
-	reverseAllowed, _ := s.authorizeCrossProjectAgentMessage(ctx, peerAgent, readerAgent, pMode, rMode)
+	reverseAllowed, _ := s.authorizeCrossProjectAgentMessage(ctx, peerAgent, readerAgent, pMode, rMode, &cpmSetting)
 
 	if !forwardAllowed && !reverseAllowed {
 		return false, "no_permitted_direction"

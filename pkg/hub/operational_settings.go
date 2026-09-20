@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -1296,6 +1297,63 @@ func (o *OperationalSettings) CrossProjectMessagingEnabled() bool {
 		return *ms.CrossProjectMessagingEnabled
 	}
 	return false // field omitted → compiled default → OFF
+}
+
+// CrossProjectSettingResult holds the authoritative cross-project messaging
+// setting and its revision, read directly from the store (not the cache).
+type CrossProjectSettingResult struct {
+	Enabled  bool
+	Revision int64
+	Err      error
+}
+
+// ReadAuthoritativeCrossProjectEnabled reads the cross_project_messaging_enabled
+// setting directly from the store, bypassing the replica-local cache. This
+// provides an authoritative read for security-critical cross-project admission
+// decisions, ensuring that the very next send after a policy change enforces the
+// current setting regardless of cache/notification propagation state.
+//
+// Defaults:
+//   - Section absent from store → false (off), revision 0.
+//   - Section present but field omitted → false (off).
+//   - Malformed JSON → false (fail closed).
+//   - Store read error → false with Err set (fail closed).
+func (o *OperationalSettings) ReadAuthoritativeCrossProjectEnabled(ctx context.Context) CrossProjectSettingResult {
+	setting, err := o.store.GetHubSetting(ctx, "messaging")
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// Section absent → compiled default → OFF.
+			return CrossProjectSettingResult{Enabled: false, Revision: 0}
+		}
+		// Store infrastructure error → fail closed.
+		slog.Warn("ReadAuthoritativeCrossProjectEnabled: store read failed, failing closed",
+			"error", err)
+		return CrossProjectSettingResult{Enabled: false, Err: fmt.Errorf("authoritative setting read: %w", err)}
+	}
+
+	if !json.Valid(setting.Value) {
+		// Malformed document → fail closed.
+		slog.Warn("ReadAuthoritativeCrossProjectEnabled: malformed JSON in messaging section, failing closed",
+			"revision", setting.Revision)
+		return CrossProjectSettingResult{Enabled: false, Revision: setting.Revision}
+	}
+
+	var ms opsettings.MessagingSettings
+	if err := json.Unmarshal(setting.Value, &ms); err != nil {
+		// Parse error → fail closed.
+		slog.Warn("ReadAuthoritativeCrossProjectEnabled: failed to unmarshal messaging section, failing closed",
+			"revision", setting.Revision, "error", err)
+		return CrossProjectSettingResult{Enabled: false, Revision: setting.Revision}
+	}
+
+	if ms.CrossProjectMessagingEnabled != nil {
+		return CrossProjectSettingResult{
+			Enabled:  *ms.CrossProjectMessagingEnabled,
+			Revision: setting.Revision,
+		}
+	}
+	// Field omitted → compiled default → OFF.
+	return CrossProjectSettingResult{Enabled: false, Revision: setting.Revision}
 }
 
 // applySnapshotLogLevel applies the log-level portion of the snapshot.
