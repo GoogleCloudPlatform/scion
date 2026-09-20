@@ -448,6 +448,122 @@ describe('reconnecting getter (#1659)', () => {
   });
 });
 
+describe('generation guard after extractApiError (#1659 P3.2)', () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  /** Create a Response whose .json() is delayed until the deferred resolves. */
+  function slowErrorResponse(status: number, gate: { promise: Promise<unknown> }): Response {
+    return {
+      ok: false,
+      status,
+      statusText: `Error ${status}`,
+      json: () => gate.promise,
+    } as unknown as Response;
+  }
+
+  it('does not overwrite closed state with disconnected after delayed extractApiError (agent metadata path)', async () => {
+    const f = fixture();
+    const bodyGate = deferred<unknown>();
+
+    // First fetch (agent metadata) returns a slow error response
+    f.fetcher.mockResolvedValueOnce(slowErrorResponse(500, bodyGate));
+
+    const session = f.registry.open(agentId, f.initialize);
+    const attempt = session.connect();
+
+    // Wait until fetch is called
+    await vi.waitFor(() => expect(f.fetcher).toHaveBeenCalledTimes(1));
+
+    // Close the session while extractApiError is waiting on json()
+    session.close();
+    expect(session.state.connection).toBe('closed');
+
+    // Now resolve the slow body — the late continuation should be suppressed
+    bodyGate.resolve({ error: { message: 'server error' } });
+    await attempt;
+
+    // State must remain 'closed', not overwritten to 'disconnected'
+    expect(session.state.connection).toBe('closed');
+  });
+
+  it('does not overwrite unavailable state with disconnected after delayed extractApiError (agent metadata path)', async () => {
+    const f = fixture();
+    const bodyGate = deferred<unknown>();
+
+    f.fetcher.mockResolvedValueOnce(slowErrorResponse(500, bodyGate));
+
+    const session = f.registry.open(agentId, f.initialize);
+    const attempt = session.connect();
+
+    await vi.waitFor(() => expect(f.fetcher).toHaveBeenCalledTimes(1));
+
+    // markUnavailable while extractApiError is waiting
+    session.markUnavailable('agent-stopped', 'Agent has stopped.');
+    expect(session.state.connection).toBe('unavailable');
+
+    bodyGate.resolve({ error: { message: 'server error' } });
+    await attempt;
+
+    // State must remain 'unavailable', not overwritten to 'disconnected'
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-stopped');
+  });
+
+  it('does not overwrite closed state with disconnected after delayed extractApiError (preflight path)', async () => {
+    const f = fixture();
+    const bodyGate = deferred<unknown>();
+
+    // First fetch (agent metadata) succeeds, second fetch (preflight) returns slow error
+    f.fetcher
+      .mockResolvedValueOnce(json(agent))
+      .mockResolvedValueOnce(slowErrorResponse(503, bodyGate));
+
+    const session = f.registry.open(agentId, f.initialize);
+    const attempt = session.connect();
+
+    // Wait until both fetches are called
+    await vi.waitFor(() => expect(f.fetcher).toHaveBeenCalledTimes(2));
+
+    // Close while extractApiError parses the preflight body
+    session.close();
+    expect(session.state.connection).toBe('closed');
+
+    bodyGate.resolve({ error: { message: 'broker unavailable' } });
+    await attempt;
+
+    expect(session.state.connection).toBe('closed');
+  });
+
+  it('does not overwrite unavailable state with disconnected after delayed extractApiError (preflight path)', async () => {
+    const f = fixture();
+    const bodyGate = deferred<unknown>();
+
+    f.fetcher
+      .mockResolvedValueOnce(json(agent))
+      .mockResolvedValueOnce(slowErrorResponse(503, bodyGate));
+
+    const session = f.registry.open(agentId, f.initialize);
+    const attempt = session.connect();
+
+    await vi.waitFor(() => expect(f.fetcher).toHaveBeenCalledTimes(2));
+
+    session.markUnavailable('agent-deleted', 'Agent was deleted.');
+    expect(session.state.connection).toBe('unavailable');
+
+    bodyGate.resolve({ error: { message: 'broker unavailable' } });
+    await attempt;
+
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-deleted');
+  });
+});
+
 describe('disconnect reason cleared on reconnect (#1659)', () => {
   it('connect() clears previous disconnect reason', async () => {
     const f = fixture();

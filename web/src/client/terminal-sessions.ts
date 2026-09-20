@@ -296,10 +296,12 @@ class Session implements TerminalSession {
       if (!response.ok) {
         const reason = classifyHttpStatus(response.status);
         const msg = `HTTP ${response.status}: ${response.statusText}`;
+        const error = await extractApiError(response, msg);
+        if (!current()) return;
         this.update({
           connection: 'disconnected',
           disconnectReason: reason,
-          error: await extractApiError(response, msg),
+          error,
         });
         return;
       }
@@ -337,6 +339,7 @@ class Session implements TerminalSession {
                     preflight,
                     `Terminal connection failed: ${preflight.statusText}`
                   );
+        if (!current()) return;
         this.update({ connection: 'disconnected', disconnectReason: reason, error: message });
         return;
       }

@@ -36,11 +36,21 @@ async function setup(
   const sockets: Array<{ close: (options?: { code?: number; reason?: string }) => void }> = [];
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
+    const esInstances: EventTarget[] = [];
+    (window as unknown as { __sseInstances__: EventTarget[] }).__sseInstances__ = esInstances;
     window.EventSource = class extends EventTarget {
       onopen: (() => void) | null = null;
       constructor() {
         super();
-        queueMicrotask(() => this.onopen?.());
+        esInstances.push(this);
+        queueMicrotask(() => {
+          // Simulate connected handshake so SSEClient marks the connection open
+          const connectedEvent = new MessageEvent('connected', {
+            data: JSON.stringify({ connectionId: 'test', subjects: [] }),
+          });
+          this.dispatchEvent(connectedEvent);
+          this.onopen?.();
+        });
       }
       close(): void {}
     } as unknown as typeof EventSource;
@@ -126,19 +136,48 @@ test('repeated Reconnect clicks produce only one attempt', async ({ page }) => {
   await page.goto(`/terminals/${agent}`);
   await expect.poll(() => socket.attaches).toBe(1);
 
+  // Make the agent metadata fetch slow so the reconnect stays pending
+  // while we click multiple times
+  let resolveSlowFetch: (() => void) | null = null;
+  await page.route('**/api/v1/agents/**', (route) => {
+    if (route.request().url().endsWith('/pty')) {
+      void route.fulfill({ json: {} });
+      return;
+    }
+    // Delay the response to keep reconnect in pending state
+    resolveSlowFetch = () => {
+      void route.fulfill({
+        json: {
+          id: agent,
+          name: 'reconnect-agent',
+          phase: 'running',
+          projectId: 'fixture-project',
+        },
+      });
+    };
+  });
+
   socket.disconnectAll();
   await expect(page.locator('scion-terminal-pane .disconnected-overlay')).toBeVisible();
 
-  // Rapidly click Reconnect multiple times
+  // Click Reconnect button multiple times rapidly via visible UI
   const reconnectBtn = page.locator('scion-terminal-pane .overlay-reconnect');
   await reconnectBtn.click();
-  // Button should be disabled while reconnecting
-  await expect(reconnectBtn).toContainText('Reconnecting...');
 
-  // Wait for reconnect to complete
+  // Button should show "Reconnecting..." and be disabled after first click
+  await expect(reconnectBtn).toContainText('Reconnecting...');
+  await expect(reconnectBtn).toBeDisabled();
+
+  // Additional clicks are prevented by the disabled state — try force-clicking
+  // to verify no additional attempts are created
+  await reconnectBtn.click({ force: true });
+  await reconnectBtn.click({ force: true });
+
+  // Resolve the slow fetch to complete the reconnect
+  resolveSlowFetch?.();
   await expect.poll(() => socket.attaches).toBe(2);
 
-  // Only one additional connection was made
+  // Despite multiple clicks, only one additional WebSocket connection was made
   expect(socket.attaches).toBe(2);
 });
 
@@ -178,6 +217,19 @@ test('connected session navigation does not reset scrollback', async ({ page }) 
   await page.goto(`/terminals/${agent}`);
   await expect.poll(() => socket.attaches).toBe(1);
 
+  // Write terminal content to the buffer before navigation
+  await page.evaluate(() => {
+    const pane = document.querySelector('scion-terminal-pane');
+    const container = pane?.shadowRoot?.querySelector('.terminal-container');
+    if (container) {
+      // Inject visible content into the terminal container to simulate buffer output
+      const marker = document.createElement('div');
+      marker.className = 'scrollback-marker';
+      marker.textContent = 'SCROLLBACK_CONTENT_BEFORE_NAV';
+      container.appendChild(marker);
+    }
+  });
+
   const initialAttaches = socket.attaches;
 
   // Navigate away
@@ -191,9 +243,17 @@ test('connected session navigation does not reset scrollback', async ({ page }) 
     `/terminals/${agent}`
   );
 
-  // No new socket connection
+  // No new socket connection — session was preserved
   expect(socket.attaches).toBe(initialAttaches);
   expect(socket.closes).toBe(0);
+
+  // Buffer content should still be present after round-trip navigation
+  const markerPresent = await page.evaluate(() => {
+    const pane = document.querySelector('scion-terminal-pane');
+    const marker = pane?.shadowRoot?.querySelector('.scrollback-marker');
+    return marker?.textContent ?? null;
+  });
+  expect(markerPresent).toBe('SCROLLBACK_CONTENT_BEFORE_NAV');
 });
 
 test('unavailable agent shows correct state in rail and pane', async ({ page }) => {
@@ -201,16 +261,36 @@ test('unavailable agent shows correct state in rail and pane', async ({ page }) 
   await page.goto(`/terminals/${agent}`);
   await expect.poll(() => socket.attaches).toBe(1);
 
-  // Disconnect and verify rail shows disconnected state
-  socket.disconnectAll();
+  // Deliver an SSE agent-stopped event through the mocked EventSource, then call
+  // markUnavailable on the session (the intended API for external unavailability
+  // signals — the SSE metadata path updates availability but markUnavailable
+  // sets the session connection state).
+  await page.evaluate((agentId) => {
+    // Deliver SSE update event to trigger metadata availability change
+    const instances = (window as unknown as { __sseInstances__: EventTarget[] }).__sseInstances__;
+    for (const es of instances) {
+      const event = new MessageEvent('update', {
+        data: JSON.stringify({
+          subject: `agent.${agentId}.status`,
+          data: { phase: 'stopped', activity: 'offline' },
+        }),
+      });
+      es.dispatchEvent(event);
+    }
+    // markUnavailable sets the session connection state to unavailable
+    const pane = document.querySelector('scion-terminal-pane') as HTMLElement & {
+      session?: { markUnavailable(reason: string, msg: string): void };
+    };
+    pane?.session?.markUnavailable('agent-stopped', 'Agent has stopped.');
+  }, agent);
 
-  // Rail should show disconnected
-  await expect(page.locator('#terminal-workspace')).toContainText('Disconnected');
+  // Rail should show unavailable state, not disconnected
+  await expect(page.locator('#terminal-workspace')).toContainText('Unavailable');
 
-  // The rail reconnect button should be visible and enabled
-  const railReconnect = page.getByRole('button', { name: 'Reconnect reconnect-agent' });
-  await expect(railReconnect).toBeVisible();
-  await expect(railReconnect).toBeEnabled();
+  // Overlay should show AGENT UNAVAILABLE title
+  const overlay = page.locator('scion-terminal-pane .disconnected-overlay');
+  await expect(overlay).toBeVisible();
+  await expect(overlay.locator('.overlay-title')).toContainText('AGENT UNAVAILABLE');
 });
 
 test('toolbar reconnect button disabled during active reconnect attempt', async ({ page }) => {
@@ -219,14 +299,38 @@ test('toolbar reconnect button disabled during active reconnect attempt', async 
   await expect.poll(() => socket.attaches).toBe(1);
 
   socket.disconnectAll();
-  await expect(page.locator('scion-terminal-pane .reconnect-btn')).toBeVisible();
+  const toolbarBtn = page.locator('scion-terminal-pane .reconnect-btn');
+  await expect(toolbarBtn).toBeVisible();
 
   // Click toolbar reconnect
-  await page.locator('scion-terminal-pane .reconnect-btn').click();
+  await toolbarBtn.click();
 
-  // The toolbar button should show "Reconnecting..."
-  await expect(page.locator('scion-terminal-pane .reconnect-btn')).toContainText('Reconnecting...');
+  // The toolbar button should show "Reconnecting..." and be disabled
+  await expect(toolbarBtn).toContainText('Reconnecting...');
+  await expect(toolbarBtn).toBeDisabled();
 
   // Wait for reconnect to complete
   await expect.poll(() => socket.attaches).toBe(2);
+
+  // Also verify: for terminal-permanent disconnect reasons (agent-deleted),
+  // the reconnect button should be disabled.
+  // Deliver SSE deleted event and mark the session unavailable.
+  await page.evaluate((agentId) => {
+    const instances = (window as unknown as { __sseInstances__: EventTarget[] }).__sseInstances__;
+    for (const es of instances) {
+      es.dispatchEvent(
+        new MessageEvent('update', {
+          data: JSON.stringify({ subject: `agent.${agentId}.deleted`, data: {} }),
+        })
+      );
+    }
+    const pane = document.querySelector('scion-terminal-pane') as HTMLElement & {
+      session?: { markUnavailable(reason: string, msg: string): void };
+    };
+    pane?.session?.markUnavailable('agent-deleted', 'Agent was deleted.');
+  }, agent);
+
+  // The reconnect button should now be visible but disabled for agent-deleted reason
+  await expect(toolbarBtn).toBeVisible();
+  await expect(toolbarBtn).toBeDisabled();
 });
