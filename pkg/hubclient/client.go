@@ -127,6 +127,9 @@ type Client interface {
 
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
+
+	// HealthSummary returns the composite health summary aggregating all subsystems from /api/v1/admin/health/summary.
+	HealthSummary(ctx context.Context) (*HealthSummaryResponse, error)
 }
 
 // client is the concrete implementation of Client.
@@ -488,6 +491,15 @@ func (c *client) Health(ctx context.Context) (*HealthResponse, error) {
 		}
 	}
 	return apiclient.DecodeResponse[HealthResponse](resp)
+}
+
+// HealthSummary returns the composite health summary aggregating all subsystems from /api/v1/admin/health/summary.
+func (c *client) HealthSummary(ctx context.Context) (*HealthSummaryResponse, error) {
+	resp, err := c.get(ctx, "/api/v1/admin/health/summary", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[HealthSummaryResponse](resp)
 }
 
 // HealthResponse is the response from health check.

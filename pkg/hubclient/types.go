@@ -642,3 +642,68 @@ type HarnessConfigData struct {
 	ThinkingBudgetConfigKey string            `json:"thinkingBudgetConfigKey,omitempty"`
 	NoAuthBehavior          string            `json:"noAuthBehavior,omitempty"`
 }
+
+// HealthSummaryResponse is the composite health summary returned by
+// GET /api/v1/admin/health/summary.
+type HealthSummaryResponse struct {
+	Status      string                 `json:"status"`
+	Hub         HealthSummaryHub       `json:"hub"`
+	Database    HealthSummaryDB        `json:"database"`
+	Brokers     []HealthSummaryBrkr    `json:"brokers"`
+	Agents      HealthSummaryAgents    `json:"agents"`
+	Dispatch    *HealthSummaryDispatch `json:"dispatch,omitempty"`
+	StallConfig *HealthSummaryStall    `json:"stall_config,omitempty"`
+}
+
+// HealthSummaryHub contains hub-level health telemetry.
+type HealthSummaryHub struct {
+	Status           string `json:"status"`
+	Version          string `json:"version"`
+	Uptime           string `json:"uptime"`
+	ConnectedBrokers int    `json:"connected_brokers"`
+	ActiveAgents     int    `json:"active_agents"`
+	Projects         int    `json:"projects"`
+}
+
+// HealthSummaryDB contains database connection pool stats.
+type HealthSummaryDB struct {
+	Status             string `json:"status"`
+	PoolActive         int64  `json:"pool_active"`
+	PoolMax            int64  `json:"pool_max"`
+	PoolIdle           int64  `json:"pool_idle"`
+	PoolWaitCountTotal int64  `json:"pool_wait_count_total"`
+}
+
+// HealthSummaryBrkr contains per-broker runtime availability and health.
+type HealthSummaryBrkr struct {
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	Status           string    `json:"status"`
+	Runtime          string    `json:"runtime"`
+	RuntimeAvailable bool      `json:"runtime_available"`
+	AgentCount       int       `json:"agent_count"`
+	AgentHealthy     int       `json:"agent_healthy"`
+	LastHeartbeat    time.Time `json:"last_heartbeat"`
+}
+
+// HealthSummaryAgents contains fleet agent status counts and issue lists.
+type HealthSummaryAgents struct {
+	Total   int            `json:"total"`
+	ByPhase map[string]int `json:"by_phase"`
+	Stalled []string       `json:"stalled"`
+	Crashed []string       `json:"crashed"`
+	Errored []string       `json:"errored"`
+}
+
+// HealthSummaryDispatch contains message dispatch queue metrics.
+type HealthSummaryDispatch struct {
+	StuckMessages int `json:"stuck_messages"`
+	Failed1h      int `json:"failed_1h"`
+}
+
+// HealthSummaryStall contains stall detection configuration.
+type HealthSummaryStall struct {
+	ThresholdSeconds int  `json:"threshold_seconds"`
+	AutoSuspend      bool `json:"auto_suspend"`
+}
+

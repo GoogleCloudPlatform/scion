@@ -91,6 +91,48 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestHealthSummary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/admin/health/summary" {
+			t.Errorf("expected path /api/v1/admin/health/summary, got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(HealthSummaryResponse{
+			Status: "healthy",
+			Hub: HealthSummaryHub{
+				Status:           "healthy",
+				Version:          "0c07fdee",
+				Uptime:           "25h",
+				ConnectedBrokers: 1,
+				ActiveAgents:     5,
+				Projects:         2,
+			},
+			Database: HealthSummaryDB{
+				Status:     "healthy",
+				PoolActive: 1,
+				PoolMax:    10,
+				PoolIdle:   2,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL)
+	summary, err := client.HealthSummary(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if summary.Status != "healthy" {
+		t.Errorf("expected status 'healthy', got %q", summary.Status)
+	}
+	if summary.Hub.ActiveAgents != 5 {
+		t.Errorf("expected 5 active agents, got %d", summary.Hub.ActiveAgents)
+	}
+	if summary.Database.PoolMax != 10 {
+		t.Errorf("expected PoolMax 10, got %d", summary.Database.PoolMax)
+	}
+}
+
 func TestAgentsList(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
