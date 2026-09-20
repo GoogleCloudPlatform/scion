@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -229,8 +230,10 @@ func TestPhase5CrossProcessReceiverEvidence(t *testing.T) {
 		cmd := exec.Command(tool, "hook", "--dialect=claude")
 		cmd.Env = baseEnv
 		cmd.Stdin = strings.NewReader(payload)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("independent hook: %v\n%s", err, out)
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("independent hook failed: %v", err)
 		}
 	}
 	phase5PostLog(t, p.receiver.httpListenAddr, phase5NativeLog("user_prompt"), http.StatusOK)

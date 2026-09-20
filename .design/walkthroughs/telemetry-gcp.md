@@ -41,10 +41,18 @@ sha256sum "$TASK_EVIDENCE_DIR/cloud-rows.json" > "$TASK_EVIDENCE_DIR/cloud-rows.
 python3 - "$TASK_EVIDENCE_DIR/cloud-rows.json" <<'PY'
 import collections, json, sys
 rows = json.load(open(sys.argv[1]))
-allowed = {"assistant_response", "api_request", "agent.session.start", "agent.session.end", "agent.turn.start", "user_prompt", "agent.user.prompt"}
+if not isinstance(rows, list):
+    raise SystemExit("readback is not a row list")
+# Replace these counts with the approved fixture plan before each new run.
+expected = {"assistant_response": 2, "api_request": 2, "agent.session.end": 1,
+            "agent.lifecycle.post_start": 1, "agent.lifecycle.pre_start": 1}
 counts = collections.Counter(row.get("jsonPayload", {}).get("event.name", "") for row in rows)
-print({name: counts[name] for name in sorted(allowed) if counts[name]})
-print("unique_insert_ids", len({row.get("insertId") for row in rows}))
+positive = sum(counts[name] for name in expected)
+unexpected = sum(count for name, count in counts.items() if name not in expected)
+ids = {row.get("insertId") for row in rows if row.get("insertId")}
+print("positive_records", positive, "unexpected_names", unexpected, "unique_insert_ids", len(ids))
+if positive == 0 or unexpected or counts != collections.Counter(expected) or len(ids) != len(rows):
+    raise SystemExit("readback does not match the approved fixture plan")
 PY
 ```
 
@@ -63,5 +71,13 @@ Keep hook and native instrumentation scopes separate. For two or more independen
 ## Failure, cleanup and interpretation
 
 Use a local fake destination for induced permanent/transient failure and bounded Stop tests. Record fixed-cardinality diagnostics, attempts, queue residual and the final Stop error; never inject failure into production telemetry. For live runs, capture post-run hub/broker health and exact running/total inventory, remove only the exact stopped fixture container and task credential, then compare inventory and shared binary/config hashes. Preserve restricted raw evidence under a task-owned access-controlled scratch directory and publish only nonsecret summaries and hashes.
+
+## Owner-only rollback gate
+
+Before a pinned rollout, the owner records the prior and candidate source commits, executable SHA256, container image digests, service unit and launch configuration, and exact task fixture image mapping in the restricted audit directory. Preserve the currently installed executable as a uniquely named, hash-verified rollback copy before replacing it. Record pre-rollout `/healthz` status and version, database and connected-broker counts, `/login` result, web asset hash, shared configuration and collector binary hashes, and sorted running/total container inventories. The reviewed release manifest must bind the candidate executable and image digest to its commit; stop if any preflight hash differs. The Phase 4 controlled hub restore pattern is documented in the restricted `phase4-deploy-ed8cb776.sh` audit script; adapt and review it for the new exact paths and hashes rather than rerunning a historical script.
+
+The owner triggers rollback if the pinned artifact or image hash differs, the scoped service restart or health gate fails, database/broker or public `/login` health regresses, original container inventory or shared configuration changes unexpectedly, or the bounded telemetry window shows missing positive controls, a privacy leak, failed delivery, or unexplained residuals. Stop only the exact task fixture if required. Under the reserved maintenance window, the owner verifies the saved prior executable against its recorded SHA256, stages that exact copy, atomically restores the owner-controlled service path, and restarts only the recorded service. Restore a prior task fixture image mapping only for that fixture; do not change shared agent defaults or remove unrelated containers. Record the restore action, operator, UTC time, exact paths, hashes and service result in restricted audit storage.
+
+After restore, require the installed executable SHA256 and version to equal the recorded prior values; verify active service, `/healthz` with healthy database and at least baseline broker count, `/login`, pinned web asset hash, unchanged shared config/collector hashes, and running/total container inventories against preflight. Record exact deviations and keep the rollout blocked if any check fails. Root/owner decides any further recovery; a local source test or receiver acknowledgment cannot clear a failed live rollback gate.
 
 Capability labels must be precise: **accepted** means installed emitter plus receiver and backend proof for the named version and signal; **receiver delivered** means exporter acknowledgment without independent backend readback; **synthetic** means a local OTLP-shaped fixture; **unsupported** means the installed version lacks a usable route; **untested** means no evidence was gathered. Phase 4 R5 accepts bounded Claude Code 2.1.273 GCP logs-first native emission, privacy and cleanup. Gemini 0.52 Cloud-positive native routing remains unsupported; Codex native emission is untested. Phase 5 tests and any later deployment/live gate require separate review and acceptance.
