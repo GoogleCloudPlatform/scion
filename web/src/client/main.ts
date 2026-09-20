@@ -592,6 +592,26 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/agent-configure.js'),
   },
   {
+    // Legacy terminal adapter (flag-off behavior):
+    //
+    // When `web.terminal_workspace` is OFF, navigating to
+    // `/agents/{id}/terminal` renders a disposable standalone page
+    // (`scion-page-terminal`). Each navigation creates a fresh WebSocket
+    // connection and xterm instance. Leaving the page closes the socket
+    // and discards the terminal — no session retention, no rail, no
+    // multi-pane layout. This is the pre-workspace behavior.
+    //
+    // When `web.terminal_workspace` is ON, the router in renderRoute()
+    // intercepts `/agents/{id}/terminal` and redirects to
+    // `/terminals/{id}`, which enters the retained workspace path
+    // instead. The workspace coordinator manages session lifetime,
+    // cross-tab ownership, and layout persistence.
+    //
+    // The `web.terminal_workspace` flag controls the switch between
+    // these two modes. Changing the flag value at runtime (e.g. via
+    // localStorage or server injection) preserves any active sessions
+    // in the workspace until page reload, at which point the flag is
+    // re-evaluated and the appropriate mode takes effect.
     pattern: /^\/agents\/[^/]+\/terminal$/,
     tag: 'scion-page-terminal',
     load: () => import('../components/pages/terminal.js'),
