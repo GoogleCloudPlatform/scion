@@ -2282,23 +2282,38 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 
 	// Merge and deduplicate by message ID, keeping only agent-to-agent
 	// messages (both sender and recipient are agents).
+	//
+	// #1687: Wire ClassifyLegacyViewQuery so cross-project messages are
+	// returned only when the viewer is a conversation participant. For
+	// canonical (cross-project) rows, strip the body if the viewer has
+	// no participant relationship with the message's conversation.
 	seen := make(map[string]bool, len(result.Items))
 	filtered := make([]store.Message, 0, len(result.Items)+len(senderResult.Items))
-	for _, m := range result.Items {
-		if strings.HasPrefix(m.Sender, "agent:") && strings.HasPrefix(m.Recipient, "agent:") {
-			if !seen[m.ID] {
-				seen[m.ID] = true
-				filtered = append(filtered, m)
+	viewerID := user.ID()
+	addMsg := func(m store.Message) {
+		if !strings.HasPrefix(m.Sender, "agent:") || !strings.HasPrefix(m.Recipient, "agent:") {
+			return
+		}
+		if seen[m.ID] {
+			return
+		}
+		seen[m.ID] = true
+		if ClassifyLegacyViewQuery(&m) == LegacyViewCanonical && m.ConversationID != "" {
+			decision := s.AuthorizeCrossProjectContentAccess(
+				ctx, viewerID, m.ConversationID, ContentSurfaceInteragentView,
+			)
+			if !decision.Allowed {
+				// Strip body — viewer is not a participant.
+				m.Msg = ""
 			}
 		}
+		filtered = append(filtered, m)
+	}
+	for _, m := range result.Items {
+		addMsg(m)
 	}
 	for _, m := range senderResult.Items {
-		if strings.HasPrefix(m.Sender, "agent:") && strings.HasPrefix(m.Recipient, "agent:") {
-			if !seen[m.ID] {
-				seen[m.ID] = true
-				filtered = append(filtered, m)
-			}
-		}
+		addMsg(m)
 	}
 
 	writeJSON(w, http.StatusOK, interagentResponse{Messages: filtered})
