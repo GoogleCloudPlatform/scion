@@ -2937,18 +2937,23 @@ test.describe('production icon and title verification', () => {
     const distPath = path.resolve(thisDir, '../../dist/client');
 
     const server = http.createServer((req, res) => {
-      const filePath = path.join(distPath, req.url || '/');
-      try {
-        const content = fs.readFileSync(filePath);
-        res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
-        res.end(content);
-      } catch {
+      if (req.url === '/shoelace/assets/icons/grid.svg') {
+        const filePath = path.join(distPath, 'shoelace/assets/icons/grid.svg');
+        try {
+          const content = fs.readFileSync(filePath);
+          res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
+          res.end(content);
+        } catch {
+          res.writeHead(404);
+          res.end('Not found');
+        }
+      } else {
         res.writeHead(404);
         res.end('Not found');
       }
     });
 
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as { port: number }).port;
 
     try {
