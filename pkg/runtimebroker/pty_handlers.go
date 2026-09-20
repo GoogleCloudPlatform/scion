@@ -455,7 +455,6 @@ type LocalPTYSession struct {
 	ptyMaster   *os.File
 	ptySlave    *os.File
 	writeMu     sync.Mutex
-	ptyMu       sync.Mutex // guards ptyMaster Close vs Setsize race
 
 	// K8s Go client for direct API exec
 	k8sConfig    *rest.Config
@@ -524,76 +523,60 @@ func (s *LocalPTYSession) Run() error {
 	}
 
 	defer func() {
-		// Close PTY under ptyMu to prevent race with in-flight resize
-		// in readFromWebSocket, regardless of which exit path we took.
-		// This covers the normal-exit path where the watcher may exit
-		// via runDone (without closing the PTY) while readFromWebSocket
-		// is mid-resize.
-		s.ptyMu.Lock()
-		if s.ptyMaster != nil {
-			_ = s.ptyMaster.Close()
-		}
-		s.ptyMu.Unlock()
-		// Graceful shutdown: signal escalation (SIGTERM → SIGKILL) and
-		// cmd.Wait. The PTY is already closed above, so gracefulShutdownExec's
-		// Close is a safe no-op (poll.FD tracks closed state). This gives
-		// the container runtime a chance to propagate the hangup to the
-		// container-side tmux attach process (TW-UAT-002 mitigation).
+		// readFromWebSocket has already exited (joined below).
+		// Safe to close PTY — no in-flight resize.
+		// Graceful shutdown: close PTY (terminal hangup) → wait → SIGTERM →
+		// SIGKILL. This gives the container runtime a chance to propagate
+		// the hangup to the container-side tmux attach process (TW-UAT-002
+		// mitigation). If SIGKILL is required and the runtime does not
+		// propagate the kill signal, a residual container-side tmux client
+		// may remain until the container restarts — this is a known gap
+		// pending UAT verification.
 		gracefulShutdownExec(s.cmd, s.ptyMaster, s.agentID)
 	}()
 
-	// Context cancellation watcher: when the parent context is cancelled,
-	// close the WebSocket (unblocking readFromWebSocket) and close the PTY
-	// master (unblocking readFromPTY). The PTY close is guarded by ptyMu to
-	// prevent a race with resizeSandboxTerminal→pty.Setsize (which calls
-	// os.File.Fd()) that may be in progress in readFromWebSocket. The mutex
-	// does NOT protect Read/Write — Go's poll.FD handles close-during-read
-	// atomically (read returns error, no concurrent destroy+Fd() race).
-	//
-	// Without exec.CommandContext, context cancellation alone does not kill
-	// the process or close the PTY, so blocking reads would hang indefinitely.
-	// The deferred gracefulShutdownExec handles the PTY double-close safely
-	// (same *os.File, Go's poll.FD tracks closed state). gracefulShutdownExec
-	// runs without the mutex, but by that point the watcher has already
-	// closed+destroyed the FD (under mutex). Subsequent Close returns
-	// ErrClosed without re-running destroy.
-	//
-	// Both I/O goroutines send to errCh (capacity 2), so neither blocks.
-	runDone := make(chan struct{})
-	defer close(runDone)
-	go func() {
-		select {
-		case <-s.ctx.Done():
-			// Close WebSocket to unblock readFromWebSocket.
-			if s.conn != nil {
-				_ = s.conn.Close()
-			}
-			// Close PTY under ptyMu to prevent race with in-flight Setsize.
-			s.ptyMu.Lock()
-			if s.ptyMaster != nil {
-				_ = s.ptyMaster.Close()
-			}
-			s.ptyMu.Unlock()
-		case <-runDone:
-			// Run() exited normally or on error; watcher no longer needed.
-		}
-	}()
-
 	errCh := make(chan error, 2)
+	wsDone := make(chan struct{})
 
 	// Read from PTY, write to WebSocket
 	go func() {
 		errCh <- s.readFromPTY()
 	}()
 
-	// Read from WebSocket, write to PTY
+	// Read from WebSocket, write to PTY.
+	// wsDone is closed when this goroutine exits, providing a happens-before
+	// guarantee that no in-flight resize (Setsize) is running when we close
+	// the PTY. This mirrors StreamPTYHandler's resizeDone join pattern.
 	go func() {
+		defer close(wsDone)
 		errCh <- s.readFromWebSocket()
 	}()
 
-	// Wait for either direction to fail
-	err := <-errCh
+	// Wait for first I/O completion or context cancellation.
+	// Without exec.CommandContext, context cancellation alone does not kill
+	// the process or close the PTY, so we must handle ctx.Done() explicitly.
+	var err error
+	select {
+	case err = <-errCh:
+	case <-s.ctx.Done():
+		err = s.ctx.Err()
+	}
 	s.cancel()
+
+	// Close WebSocket to unblock readFromWebSocket if still blocked on
+	// conn.ReadMessage(). This also prevents any future resize messages.
+	if s.conn != nil {
+		_ = s.conn.Close()
+	}
+	// Join readFromWebSocket — ensures no in-flight resize (Setsize).
+	// readFromWebSocket exits promptly: ReadMessage returns error from
+	// conn.Close(), or ctx.Done() check at loop top.
+	<-wsDone
+
+	// NOW readFromWebSocket has fully exited — no concurrent Setsize.
+	// PTY close happens in deferred gracefulShutdownExec.
+	// readFromPTY unblocks when gracefulShutdownExec closes PTY.
+	// Both goroutines send to errCh (capacity 2) — no leak.
 	return err
 }
 
@@ -859,9 +842,7 @@ func (s *LocalPTYSession) readFromWebSocket() error {
 			if err := json.Unmarshal(data, &msg); err != nil {
 				continue
 			}
-			s.ptyMu.Lock()
 			resizeSandboxTerminal(s.ctx, s.runtimeCmd, s.containerID, s.agentID, msg.Cols, msg.Rows, s.ptyMaster)
-			s.ptyMu.Unlock()
 		}
 	}
 }

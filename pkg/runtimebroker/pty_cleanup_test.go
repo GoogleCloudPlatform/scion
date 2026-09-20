@@ -1188,15 +1188,11 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 
 // TestPTYCleanup_LocalSessionCancelDuringResize verifies that cancelling the
 // context while resize events are flowing does not cause a data race between
-// the watcher's PTY close and resizeSandboxTerminal→pty.Setsize in
-// readFromWebSocket.
+// PTY close and resizeSandboxTerminal→pty.Setsize in readFromWebSocket.
 //
-// Without the ptyMu mutex, the watcher's Close() can overlap with Setsize's
-// os.File.Fd() call, causing a race on the internal poll.FD state. The mutex
-// ensures these operations are serialized.
-//
-// This test exercises the racy Local path specifically — StreamPTYHandler uses
-// resizeDone join ordering instead of a mutex.
+// LocalPTYSession.Run() joins readFromWebSocket (via <-wsDone) before closing
+// the PTY, ensuring no in-flight Setsize can race with Close/destroy. This
+// mirrors StreamPTYHandler's resizeDone join pattern.
 //
 // Test fixture: real local tmux via shell adapter (not Docker containers).
 func TestPTYCleanup_LocalSessionCancelDuringResize(t *testing.T) {
