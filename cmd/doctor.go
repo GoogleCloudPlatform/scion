@@ -70,7 +70,10 @@ func runDoctor() error {
 		gp = "global"
 	}
 	resolvedSettingsPath, _, _ := config.ResolveProjectPath(gp)
-	settings, _ := config.LoadSettings(resolvedSettingsPath)
+	settings, err := config.LoadSettings(resolvedSettingsPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load settings: %v\n", err)
+	}
 	if settings == nil {
 		settings = &config.Settings{}
 	}
@@ -345,19 +348,26 @@ func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionrunt
 
 	// Prefer authenticated Hub client health check (handles bearer tokens and proxy fallbacks)
 	if client != nil {
-		if healthResp, err := client.Health(ctx); err == nil {
-			if healthResp.Status == "degraded" {
-				return scionruntime.CheckResult{
-					Name:    "hub-connectivity",
-					Status:  "warn",
-					Message: fmt.Sprintf("Hub at %s is degraded", hubEP),
-				}
+		healthResp, err := client.Health(ctx)
+		if err != nil {
+			return scionruntime.CheckResult{
+				Name:        "hub-connectivity",
+				Status:      "fail",
+				Message:     fmt.Sprintf("Cannot reach Hub at %s: %v", hubEP, hubclient.HintProxyError(err)),
+				Remediation: "Verify the Hub is running and the endpoint is correct",
 			}
+		}
+		if healthResp.Status == "degraded" {
 			return scionruntime.CheckResult{
 				Name:    "hub-connectivity",
-				Status:  "pass",
-				Message: fmt.Sprintf("Hub at %s is healthy", hubEP),
+				Status:  "warn",
+				Message: fmt.Sprintf("Hub at %s is degraded", hubEP),
 			}
+		}
+		return scionruntime.CheckResult{
+			Name:    "hub-connectivity",
+			Status:  "pass",
+			Message: fmt.Sprintf("Hub at %s is healthy", hubEP),
 		}
 	}
 
