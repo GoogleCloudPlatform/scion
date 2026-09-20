@@ -2815,6 +2815,39 @@ test.describe('production icon and title verification', () => {
     expect(iconName).toBe('terminal');
   });
 
+  test('header page title shows "🌱 Scion Terminal Viewer"', async ({ page }) => {
+    await setup(page);
+    await page.goto(`/terminals/${agent}`);
+    // The page title inside the header shadow DOM should read "🌱 Scion Terminal Viewer"
+    const titleText = await page.evaluate(() => {
+      const header = document.querySelector('scion-header');
+      const h1 = header?.shadowRoot?.querySelector('.page-title');
+      return h1?.textContent ?? null;
+    });
+    expect(titleText).toBe('🌱 Scion Terminal Viewer');
+  });
+
+  test('header has proper horizontal padding in terminal workspace', async ({ page }) => {
+    await setup(page);
+    await page.goto(`/terminals/${agent}`);
+    // The scion-header in the terminal workspace lives in light DOM where the
+    // global '* { padding: 0 }' reset can override :host padding. Verify the
+    // CSS rule in terminal-workspace-root restores the expected padding.
+    const paddingInline = await page.evaluate(() => {
+      const header = document.querySelector('#terminal-workspace > scion-header');
+      if (!header) return null;
+      const style = getComputedStyle(header);
+      return {
+        left: style.paddingLeft,
+        right: style.paddingRight,
+      };
+    });
+    expect(paddingInline).not.toBeNull();
+    // 1.5rem = 24px at default font size
+    expect(parseFloat(paddingInline!.left)).toBeGreaterThanOrEqual(24);
+    expect(parseFloat(paddingInline!.right)).toBeGreaterThanOrEqual(24);
+  });
+
   test('document title is "Terminals — Scion" when workspace is active', async ({ page }) => {
     await setup(page);
     await page.goto(`/terminals/${agent}`);

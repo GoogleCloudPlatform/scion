@@ -111,7 +111,7 @@ export class TerminalWorkspaceRoot {
     this.installStyles();
     this.header.user = user;
     this.header.currentPath = this.currentPath;
-    this.header.pageTitle = 'Terminals';
+    this.header.pageTitle = '🌱 Scion Terminal Viewer';
     this.header.showMobileMenu = false;
 
     this.shell.className = 'terminal-workspace-shell';
@@ -870,6 +870,12 @@ export class TerminalWorkspaceRoot {
       #terminal-workspace {
         background: var(--scion-bg, #f8fafc);
         color: var(--scion-text, #1e293b);
+      }
+      /* Restore header padding that the global '* { padding: 0 }' reset
+         strips when scion-header lives in light DOM (not inside a shadow
+         root like app-shell / chat-shell). */
+      #terminal-workspace > scion-header {
+        padding-inline: 1.5rem;
       }
       .terminal-workspace-shell {
         flex: 1;
