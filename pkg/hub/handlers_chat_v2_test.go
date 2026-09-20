@@ -4576,3 +4576,134 @@ func TestAutoAdvanceSenderReadState(t *testing.T) {
 	s2 := &Server{}
 	s2.autoAdvanceSenderReadState(ctx, "sender-1", "topic-1", "msg-200")
 }
+
+// ---------------------------------------------------------------------------
+// Interagent endpoint: authorization and cross-project visibility
+// ---------------------------------------------------------------------------
+
+func TestInteragentAuthorizationAndCrossProject(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// --- Setup: two projects, one agent each, cross-project messages ---
+
+	projA := &store.Project{
+		ID:   tid("interagent-proj-a"),
+		Slug: "proj-a",
+		Name: "Project A",
+	}
+	projB := &store.Project{
+		ID:   tid("interagent-proj-b"),
+		Slug: "proj-b",
+		Name: "Project B",
+	}
+	for _, p := range []*store.Project{projA, projB} {
+		if err := s.CreateProject(ctx, p); err != nil {
+			t.Fatalf("CreateProject %s: %v", p.Slug, err)
+		}
+	}
+
+	agentA := &store.Agent{
+		ID:        tid("interagent-agent-a"),
+		Slug:      "agent-a",
+		Name:      "Agent A",
+		ProjectID: projA.ID,
+		Phase:     "running",
+	}
+	agentB := &store.Agent{
+		ID:        tid("interagent-agent-b"),
+		Slug:      "agent-b",
+		Name:      "Agent B",
+		ProjectID: projB.ID,
+		Phase:     "running",
+	}
+	for _, a := range []*store.Agent{agentA, agentB} {
+		if err := s.CreateAgent(ctx, a); err != nil {
+			t.Fatalf("CreateAgent %s: %v", a.Slug, err)
+		}
+	}
+
+	// Create inter-agent messages:
+	// 1. Same-project message: agentA sends to another agent in projA
+	// 2. Cross-project message: agentB (projB) sends to agentA (projA)
+	//    — stored under projA (recipient's project)
+	sameProjectMsg := &store.Message{
+		ID:            tid("interagent-msg-same"),
+		ProjectID:     projA.ID,
+		Sender:        "agent:agent-a",
+		SenderID:      agentA.ID,
+		Recipient:     "agent:agent-a-peer",
+		RecipientID:   tid("interagent-agent-a-peer"),
+		Msg:           "same-project message",
+		Type:          "agent_message",
+		DispatchState: "dispatched",
+		CreatedAt:     time.Now().Add(-2 * time.Minute),
+	}
+	crossProjectMsg := &store.Message{
+		ID:            tid("interagent-msg-cross"),
+		ProjectID:     projA.ID, // stored under recipient's project
+		Sender:        "agent:agent-b",
+		SenderID:      agentB.ID,
+		Recipient:     "agent:agent-a",
+		RecipientID:   agentA.ID,
+		Msg:           "cross-project message",
+		Type:          "agent_message",
+		DispatchState: "dispatched",
+		CreatedAt:     time.Now().Add(-1 * time.Minute),
+	}
+	for _, m := range []*store.Message{sameProjectMsg, crossProjectMsg} {
+		if err := s.CreateMessage(ctx, m); err != nil {
+			t.Fatalf("CreateMessage %s: %v", m.ID, err)
+		}
+	}
+
+	dmKey := fmt.Sprintf("dm:agent:%s:user:%s", agentA.ID, DevUserID)
+	encodedKey := url.PathEscape(dmKey)
+	endpoint := fmt.Sprintf("/api/v1/chat/conversations/%s/interagent", encodedKey)
+
+	// --- Test 1: unauthenticated request is denied ---
+	rec := doRequestNoAuth(t, srv, http.MethodGet, endpoint, nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated: expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// --- Test 2: authenticated request returns both same-project and cross-project messages ---
+	rec = doRequest(t, srv, http.MethodGet, endpoint, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("authenticated: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp interagentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Should see both messages (same-project via ParticipantID, cross-project
+	// now visible because ProjectID filter is removed from Query 1).
+	foundSame := false
+	foundCross := false
+	for _, m := range resp.Messages {
+		switch m.ID {
+		case sameProjectMsg.ID:
+			foundSame = true
+		case crossProjectMsg.ID:
+			foundCross = true
+		}
+	}
+	if !foundSame {
+		t.Errorf("expected same-project message %s in results", sameProjectMsg.ID)
+	}
+	if !foundCross {
+		t.Errorf("expected cross-project message %s in results (CPM-UAT-003 fix)", crossProjectMsg.ID)
+	}
+
+	// --- Test 3: non-participant user is rejected ---
+	// A DM key with a different user ID fails the isDMParticipant check.
+	otherUserID := tid("interagent-other-user")
+	otherDMKey := fmt.Sprintf("dm:agent:%s:user:%s", agentA.ID, otherUserID)
+	otherEndpoint := fmt.Sprintf("/api/v1/chat/conversations/%s/interagent", url.PathEscape(otherDMKey))
+	rec = doRequest(t, srv, http.MethodGet, otherEndpoint, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("non-participant: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

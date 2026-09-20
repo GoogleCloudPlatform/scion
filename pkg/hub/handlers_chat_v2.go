@@ -2208,6 +2208,16 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Enforce agent-read authorization. The DM-participant check above
+	// verifies the caller occupies a user slot in the DM key; this
+	// additionally verifies the caller has read access to the agent
+	// resource, which is required for viewing inter-agent exchanges
+	// (design §7: DM participation alone is insufficient for
+	// cross-project observation).
+	if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		return
+	}
+
 	q := r.URL.Query()
 
 	// Parse optional time-range bounds.
@@ -2235,9 +2245,11 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 	}
 
 	// Query 1: messages where the DM agent's UUID appears in sender_id
-	// or recipient_id.
+	// or recipient_id. No ProjectID filter: the agent UUID is globally
+	// unique, and cross-project inter-agent messages are stored under
+	// the recipient's project. Filtering by the DM agent's project
+	// would drop every message sent to agents in other projects.
 	filter := store.MessageFilter{
-		ProjectID:     agent.ProjectID,
 		ParticipantID: agentID,
 		Before:        before,
 		After:         after,
