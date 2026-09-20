@@ -323,7 +323,11 @@ Examples:
 		// target project slug for cross-project resolution.
 		var crossProjectTarget string
 		senderProjectPath := projectPath
-		if agentName != "" && os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
+		// Cross-project detection: in agent mode, when --project explicitly
+		// selects a different project, treat it as the TARGET project.
+		// This applies to both bare agent names and @agent references.
+		hasAgentTarget := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent)
+		if hasAgentTarget && os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
 			// The --project flag was explicitly set in agent mode.
 			// Use the agent's own project (from environment/config, not --project)
 			// and treat --project as the target.
@@ -395,6 +399,18 @@ Examples:
 			msgAttach = staged
 		}
 
+		// Cross-project agent addressing: intercept @agent and bare agent
+		// names BEFORE the generic convRef dispatch. When crossProjectTarget
+		// is set, both forms route through the cross-project send path.
+		if hubCtx != nil && crossProjectTarget != "" {
+			if convRef != nil && convRef.Kind == messaging.RefAgent {
+				return sendCrossProjectMessage(hubCtx, crossProjectTarget, convRef.Value, message, msgInterrupt, msgWake, msgAttach)
+			}
+			if agentName != "" {
+				return sendCrossProjectMessage(hubCtx, crossProjectTarget, agentName, message, msgInterrupt, msgWake, msgAttach)
+			}
+		}
+
 		// Conversation-reference messages: resolve and send via Hub
 		if convRef != nil {
 			return sendMessageViaConversation(hubCtx, convRef, message, msgInterrupt, msgWake, msgAttach)
@@ -408,12 +424,6 @@ Examples:
 		// User-targeted messages: route to outbound-message endpoint
 		if userRecipient != "" {
 			return sendOutboundMessageViaHub(hubCtx, userRecipient, message, msgInterrupt)
-		}
-
-		// Cross-project agent-to-agent message: resolve target in the
-		// foreign project and send via the non-project-scoped endpoint.
-		if hubCtx != nil && crossProjectTarget != "" && agentName != "" {
-			return sendCrossProjectMessage(hubCtx, crossProjectTarget, agentName, message, msgInterrupt, msgWake, msgAttach)
 		}
 
 		if hubCtx != nil {
