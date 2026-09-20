@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -203,6 +204,23 @@ func (s *Server) sendViaDirectConversation(
 		Msg:            req.Msg,
 		ConversationID: conv.ID,
 	}
+
+	// Render the agent-facing envelope using the same conventions as
+	// the normal messaging pipeline (Phase 9b). This ensures the
+	// harness receives canonical conversation context in the rendered
+	// envelope, not just a populated in-memory ConversationID field.
+	structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+		MessageID: msgID,
+		ConvResult: &messaging.ConversationResult{
+			ConversationID: conv.ID,
+			ExternalRef:    conv.ExternalRef,
+			Kind:           conv.Kind,
+			Surface:        conv.Surface,
+			DisplayName:    conv.DisplayName,
+		},
+		Msg:       structuredMsg,
+		CreatedAt: time.Now().UTC(),
+	})
 
 	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer retryCancel()

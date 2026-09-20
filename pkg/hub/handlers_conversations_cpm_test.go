@@ -540,6 +540,17 @@ func TestConversationSendDispatch(t *testing.T) {
 	if d.structured.RecipientID != targetAgent.ID {
 		t.Errorf("structured.RecipientID = %q, expected %q", d.structured.RecipientID, targetAgent.ID)
 	}
+
+	// --- Test 9: DeliveryText rendered via normal pipeline conventions ---
+	// Verify the dispatched structured message has a non-empty DeliveryText
+	// (rendered by messaging.RenderDeliveryText) that includes the canonical
+	// conversation ID, matching the envelope format used by all other send paths.
+	if d.structured.DeliveryText == "" {
+		t.Error("structured.DeliveryText is empty — expected rendered envelope via RenderDeliveryText")
+	}
+	if d.structured.DeliveryText != "" && !strings.Contains(d.structured.DeliveryText, conv.ID) {
+		t.Errorf("structured.DeliveryText does not contain conversation ID %q", conv.ID)
+	}
 	_ = resp7
 }
 
