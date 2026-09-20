@@ -8,7 +8,8 @@
 ## Summary
 
 Final rollout wiring, documentation, and combined regression tests for the
-terminal workspace feature (P3.5). All gates pass; bundle delivered.
+terminal workspace feature (P3.5). Bundle delivered. Individual gate outcomes
+below; see table for details.
 
 ## Deliverables
 
@@ -100,5 +101,7 @@ verification steps.
 ## Pre-existing Warnings
 
 - 2 ESLint warnings in reconnect.pw.ts (missing return types on arrow functions) — pre-existing, not introduced
-- 2 Vitest failures in unchanged files (role-binding-assignment-form.test.ts, terminal-pane.test.ts), cause UNKNOWN, exit code 1
+- Author gate (HEAD 57150d52): `npx vitest run` exit 1, 1330/1332, 2 failures in unchanged files (role-binding-assignment-form.test.ts, terminal-pane.test.ts), cause UNKNOWN
+- Writer gate (HEAD 57150d52): bounded vitest 1332/1332 PASS, exit 0
+- Discrepancy cause UNKNOWN — not baseline attribution
 - Phase 2 aggregate ci-full FAIL cause UNKNOWN — not attributed without evidence
