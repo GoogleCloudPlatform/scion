@@ -72,9 +72,6 @@ const (
 	// to SIGKILL.
 	processTermTimeout = 2 * time.Second
 
-	// containerCleanupTimeout is the timeout for the container-side attach
-	// process verification and cleanup command.
-	containerCleanupTimeout = 5 * time.Second
 )
 
 // gracefulShutdownExec shuts down a runtime exec process (docker exec, sandbox
@@ -83,11 +80,13 @@ const (
 // escalating through SIGTERM to SIGKILL only if necessary.
 //
 // Background (TW-UAT-002): exec.CommandContext sends SIGKILL on context cancel,
-// which kills the host-side docker exec instantly. Docker/containerd may not
-// clean up the container-side exec session, leaving the tmux attach-session
-// process inside the container as a residual process. By closing the PTY first
-// and using SIGTERM, we give Docker the chance to propagate the hangup signal
-// to the in-container process.
+// which may kill the host-side docker exec instantly without giving the runtime
+// a chance to propagate the signal to the container-side process. This is a
+// hypothesized cause of residual tmux attach-session processes observed in
+// containers. By closing the PTY first and using SIGTERM, we give Docker the
+// chance to propagate the hangup signal to the in-container process. Whether
+// this fully prevents the residual process in all cases requires UAT
+// verification.
 //
 // The caller must not call cmd.Wait() separately; this function reaps the
 // process.
@@ -143,152 +142,6 @@ func gracefulShutdownExec(cmd *exec.Cmd, ptyMaster *os.File, slug string) {
 	slog.Warn("PTY exec did not exit after SIGTERM, sending SIGKILL", "slug", slug)
 	_ = cmd.Process.Kill()
 	<-exited
-}
-
-// listTmuxClientTTYs returns the set of currently attached tmux client TTY
-// devices for the scion session in the given container. Returns nil on any
-// failure (container stopped, tmux not available, etc.).
-func listTmuxClientTTYs(runtimeCmd, containerID, execUser string) map[string]struct{} {
-	if runtimeCmd == "kubernetes" || runtimeCmd == "k8s" || containerID == "" {
-		return nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	execUser = sanitizeExecUser(execUser)
-
-	var cmd *exec.Cmd
-	if runtimeCmd == "cloudrun-sandbox" {
-		cmd = exec.CommandContext(ctx, cloudRunSandboxBin, "exec", containerID, "--",
-			"/usr/bin/tmux", "list-clients", "-t", "scion", "-F", "#{client_tty}")
-	} else {
-		cmd = exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID,
-			"tmux", "list-clients", "-t", "scion", "-F", "#{client_tty}")
-	}
-
-	out, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-
-	clients := make(map[string]struct{})
-	for _, tty := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		tty = strings.TrimSpace(tty)
-		if tty != "" {
-			clients[tty] = struct{}{}
-		}
-	}
-	return clients
-}
-
-// inferAttachedPTY polls the container's tmux client list to infer which PTY
-// device was likely created for THIS attach session. It compares the current
-// client list against the baseline snapshot taken before the exec started.
-// Returns the inferred PTY device path (e.g. "/dev/pts/3") only if exactly one
-// new client appeared — otherwise returns "" when inference is ambiguous.
-//
-// IMPORTANT — inference limitations (not causal proof of ownership):
-//
-// This function uses snapshot-difference heuristics, NOT causal binding between
-// the exec request and the resulting container-side PTY. Known false-certainty
-// windows:
-//   - If an unrelated client (CLI user, another browser session) attaches between
-//     the baseline snapshot and this poll, the function may return that client's
-//     TTY instead of ours. There is no way to distinguish them via snapshot diff.
-//   - The returned TTY device path can be reused by the kernel after the original
-//     process exits (devpts recycling). A stored path may refer to a different
-//     process at detach time.
-//
-// Because of these limitations, the result is suitable for observability logging
-// only — callers MUST NOT use it for destructive operations (e.g. tmux
-// detach-client) without independent causal proof of ownership. Causal proof
-// would require mapping the exec's host-side PID or PTY fd to a specific
-// container-side /dev/pts/N, which is not available through standard Docker/
-// runtime exec APIs.
-func inferAttachedPTY(ctx context.Context, runtimeCmd, containerID, execUser string, baseline map[string]struct{}) string {
-	if runtimeCmd == "kubernetes" || runtimeCmd == "k8s" || containerID == "" {
-		return ""
-	}
-
-	pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-pollCtx.Done():
-			return ""
-		case <-ticker.C:
-			current := listTmuxClientTTYs(runtimeCmd, containerID, execUser)
-			if current == nil {
-				continue
-			}
-			var newTTYs []string
-			for tty := range current {
-				if baseline == nil {
-					newTTYs = append(newTTYs, tty)
-				} else if _, existed := baseline[tty]; !existed {
-					newTTYs = append(newTTYs, tty)
-				}
-			}
-			if len(newTTYs) == 1 {
-				return newTTYs[0]
-			}
-			// Zero or multiple new clients: inference is ambiguous. Continue
-			// polling — a transient client may appear or disappear on the
-			// next tick. If ambiguity persists until the timeout, return "".
-		}
-	}
-}
-
-// detachContainerClient detaches a specific tmux client by its TTY device path
-// inside the container.
-//
-// WARNING: This function is only safe to call when targetTTY is known to belong
-// to this session through causal proof (e.g., PID or fd mapping). It MUST NOT be
-// called with a TTY obtained from snapshot-difference inference (inferAttachedPTY)
-// because inference has known false-certainty windows where the wrong client
-// would be detached. See inferAttachedPTY documentation for details.
-//
-// Additionally, the stored TTY device can be reused by the kernel (devpts
-// recycling) after the original process exits. Callers should validate that
-// targetTTY still belongs to the expected session before detaching.
-//
-// Currently not called from the main cleanup path because no causal binding
-// mechanism is available. Retained for future use if causal proof becomes
-// feasible. If targetTTY is empty, this is a no-op.
-func detachContainerClient(runtimeCmd, containerID, execUser, targetTTY string) {
-	if targetTTY == "" || containerID == "" {
-		return
-	}
-	if runtimeCmd == "kubernetes" || runtimeCmd == "k8s" {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), containerCleanupTimeout)
-	defer cancel()
-
-	execUser = sanitizeExecUser(execUser)
-
-	var cmd *exec.Cmd
-	if runtimeCmd == "cloudrun-sandbox" {
-		cmd = exec.CommandContext(ctx, cloudRunSandboxBin, "exec", containerID, "--",
-			"/usr/bin/tmux", "detach-client", "-t", targetTTY)
-	} else {
-		cmd = exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID,
-			"tmux", "detach-client", "-t", targetTTY)
-	}
-	if err := cmd.Run(); err != nil {
-		// Expected when client was already cleaned up by graceful shutdown.
-		slog.Debug("Container tmux client detach", "containerID", containerID,
-			"tty", targetTTY, "result", "already gone or error", "error", err)
-	} else {
-		slog.Info("Detached residual container tmux client",
-			"containerID", containerID, "tty", targetTTY)
-	}
 }
 
 // resizeSandboxTerminal relays a terminal resize event. For cloudrun-sandbox
@@ -644,12 +497,6 @@ func (s *LocalPTYSession) Run() error {
 	isK8s := (s.runtimeCmd == "kubernetes" || s.runtimeCmd == "k8s") && s.k8sConfig != nil && s.k8sClientset != nil
 	isCloudRunSandbox := s.runtimeCmd == "cloudrun-sandbox"
 
-	// Capture baseline tmux clients before attaching (TW-UAT-002).
-	var baseline map[string]struct{}
-	if !isK8s {
-		baseline = listTmuxClientTTYs(s.runtimeCmd, s.containerID, s.execUser)
-	}
-
 	if isCloudRunSandbox {
 		if err := s.startCloudRunSandboxExec(); err != nil {
 			return fmt.Errorf("failed to start sandbox exec: %w", err)
@@ -676,40 +523,14 @@ func (s *LocalPTYSession) Run() error {
 		}
 	}
 
-	// Infer our container-side PTY concurrently with the data pump (R-2).
-	// The result is for observability logging only — not used for destructive
-	// cleanup because inference has known false-certainty windows (F-1).
-	inferredCh := make(chan string, 1)
-	if !isK8s {
-		go func() {
-			inferredCh <- inferAttachedPTY(s.ctx, s.runtimeCmd, s.containerID, s.execUser, baseline)
-		}()
-	} else {
-		inferredCh <- ""
-	}
-
 	defer func() {
-		// Wait for the inference goroutine to complete before cleanup. The
-		// goroutine returns promptly because s.ctx was cancelled by s.cancel()
-		// before this defer runs.
-		inferredTTY := <-inferredCh
-		if inferredTTY != "" {
-			slog.Info("Inferred container-side PTY for session (observability only)",
-				"agent_id", s.agentID, "inferred_tty", inferredTTY)
-		}
 		// Graceful shutdown: close PTY (terminal hangup) → wait → SIGTERM →
-		// SIGKILL, ensuring the container runtime can propagate the hangup
-		// to the container-side tmux attach process (TW-UAT-002 fix).
-		//
-		// Container-side targeted detach is NOT performed here because the
-		// PTY inference is based on snapshot-difference heuristics with known
-		// false-certainty windows — an unrelated client that attached between
-		// baseline and poll would be misidentified and wrongly detached. The
-		// graceful shutdown sequence is the primary cleanup mechanism. In rare
-		// cases where SIGKILL is needed and the runtime does not propagate the
-		// kill to the container-side process, a residual tmux client may
-		// remain until the container restarts. This is a known limitation
-		// documented in the TW-UAT-002 design notes.
+		// SIGKILL. This gives the container runtime a chance to propagate
+		// the hangup to the container-side tmux attach process (TW-UAT-002
+		// mitigation). If SIGKILL is required and the runtime does not
+		// propagate the kill signal, a residual container-side tmux client
+		// may remain until the container restarts — this is a known gap
+		// pending UAT verification.
 		gracefulShutdownExec(s.cmd, s.ptyMaster, s.agentID)
 	}()
 
@@ -1026,11 +847,6 @@ type StreamPTYHandler struct {
 	k8sConfig    *rest.Config
 	k8sClientset kubernetes.Interface
 
-	// inferredPTY is the container-side PTY device (e.g. "/dev/pts/3") inferred
-	// for this browser attach session by snapshot-difference heuristics. Used
-	// for observability logging ONLY — not for destructive cleanup, because
-	// inference has known false-certainty windows. See inferAttachedPTY docs.
-	inferredPTY string
 }
 
 // NewStreamPTYHandler creates a handler for a PTY stream from the control channel.
@@ -1063,13 +879,6 @@ func (h *StreamPTYHandler) Run() error {
 	isK8s := (runtimeCmd == "kubernetes" || runtimeCmd == "k8s") && h.k8sConfig != nil && h.k8sClientset != nil
 	isCloudRunSandbox := runtimeCmd == "cloudrun-sandbox"
 
-	// Capture baseline tmux clients BEFORE attaching, so we can identify
-	// which PTY device belongs to THIS session after exec starts.
-	var baseline map[string]struct{}
-	if !isK8s {
-		baseline = listTmuxClientTTYs(runtimeCmd, h.containerID, h.execUser)
-	}
-
 	if isCloudRunSandbox {
 		if err := h.startCloudRunSandboxExec(); err != nil {
 			return err
@@ -1094,42 +903,14 @@ func (h *StreamPTYHandler) Run() error {
 		}
 	}
 
-	// Infer the container-side PTY device for this session concurrently with
-	// the data pump (R-2). The result is for observability logging only — not
-	// used for destructive cleanup because inference has known false-certainty
-	// windows (F-1). See inferAttachedPTY documentation.
-	inferredCh := make(chan string, 1)
-	if !isK8s {
-		go func() {
-			inferredCh <- inferAttachedPTY(h.ctx, runtimeCmd, h.containerID, h.execUser, baseline)
-		}()
-	} else {
-		inferredCh <- ""
-	}
-
 	defer func() {
-		// Wait for the inference goroutine to complete before cleanup. The
-		// goroutine returns promptly because h.ctx was cancelled by h.cancel()
-		// before this defer runs.
-		inferredTTY := <-inferredCh
-		h.inferredPTY = inferredTTY
-		if inferredTTY != "" {
-			slog.Info("Inferred container-side PTY for session (observability only)",
-				"slug", h.slug, "inferred_tty", inferredTTY)
-		}
 		// Graceful shutdown: close PTY (terminal hangup) → wait → SIGTERM →
-		// SIGKILL, ensuring the container runtime can propagate the hangup
-		// to the container-side tmux attach process (TW-UAT-002 fix).
-		//
-		// Container-side targeted detach is NOT performed here because the
-		// PTY inference is based on snapshot-difference heuristics with known
-		// false-certainty windows — an unrelated client that attached between
-		// baseline and poll would be misidentified and wrongly detached. The
-		// graceful shutdown sequence is the primary cleanup mechanism. In rare
-		// cases where SIGKILL is needed and the runtime does not propagate the
-		// kill to the container-side process, a residual tmux client may
-		// remain until the container restarts. This is a known limitation
-		// documented in the TW-UAT-002 design notes.
+		// SIGKILL. This gives the container runtime a chance to propagate
+		// the hangup to the container-side tmux attach process (TW-UAT-002
+		// mitigation). If SIGKILL is required and the runtime does not
+		// propagate the kill signal, a residual container-side tmux client
+		// may remain until the container restarts — this is a known gap
+		// pending UAT verification.
 		gracefulShutdownExec(h.cmd, h.ptyMaster, h.slug)
 	}()
 

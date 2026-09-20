@@ -102,35 +102,6 @@ func TestGracefulShutdownExec_ProcessExitsOnPTYClose(t *testing.T) {
 		"process should exit from stdin close without needing SIGTERM")
 }
 
-// TestDetachContainerClient_SkipsK8s verifies that detachContainerClient
-// is a no-op for Kubernetes runtimes.
-func TestDetachContainerClient_SkipsK8s(t *testing.T) {
-	// These should not panic or attempt any exec
-	detachContainerClient("kubernetes", "some-pod", "scion", "/dev/pts/0")
-	detachContainerClient("k8s", "some-pod", "scion", "/dev/pts/0")
-}
-
-// TestDetachContainerClient_SkipsEmptyContainer verifies that
-// detachContainerClient is a no-op when containerID is empty.
-func TestDetachContainerClient_SkipsEmptyContainer(t *testing.T) {
-	detachContainerClient("docker", "", "scion", "/dev/pts/0")
-}
-
-// TestDetachContainerClient_SkipsEmptyTTY verifies that
-// detachContainerClient is a no-op when targetTTY is empty
-// (identification failed or ambiguous).
-func TestDetachContainerClient_SkipsEmptyTTY(t *testing.T) {
-	detachContainerClient("docker", "some-container", "scion", "")
-}
-
-// TestDetachContainerClient_ToleratesCommandFailure verifies that
-// detachContainerClient does not panic or error when the runtime command
-// fails (e.g., container already stopped).
-func TestDetachContainerClient_ToleratesCommandFailure(t *testing.T) {
-	// "false" always exits 1, simulating a failed docker exec
-	detachContainerClient("false", "nonexistent-container", "scion", "/dev/pts/0")
-}
-
 // TestPTYCleanup_ExplicitCloseReleasesAttach tests acceptance criterion 2:
 // explicit close releases the stream and attach process/PTY descriptors;
 // the agent remains running and attachable.
@@ -273,7 +244,7 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
 		return err == nil && out == ""
 	}, 10*time.Second, 50*time.Millisecond,
-		"tmux client must be detached after close — no residual attach process (TW-UAT-002)")
+		"tmux client must be cleaned up after close — graceful shutdown should terminate attach")
 
 	// Verify: agent surrogate still alive
 	out, err := tmuxCommand("display-message", "-p", "-t", "scion", "#{pane_pid}:#{pane_dead}")
@@ -567,13 +538,10 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 	require.Equal(t, "scion", out, "CLI must remain functional")
 }
 
-// TestPTYCleanup_ConcurrentClientSurvivesCleanup is a regression test for the
-// concurrent client race condition identified by the technical advisor: a client
-// opened AFTER the baseline snapshot but BEFORE cleanup must NOT be detached.
-//
-// This tests that the per-attach PTY identity approach correctly targets only
-// the specific PTY device for the browser session, leaving a concurrently
-// opened client untouched.
+// TestPTYCleanup_ConcurrentClientSurvivesCleanup verifies that a client opened
+// concurrently with the browser session is not affected when the browser session
+// closes. The graceful shutdown sequence targets only the specific exec process
+// for the browser session — concurrent clients remain untouched.
 //
 // Test fixture: real local tmux via shell adapter (not Docker containers).
 func TestPTYCleanup_ConcurrentClientSurvivesCleanup(t *testing.T) {
@@ -650,10 +618,9 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 		return err == nil && strings.TrimSpace(out) != ""
 	}, 5*time.Second, 20*time.Millisecond, "browser client should attach")
 
-	// NOW open a concurrent client AFTER the baseline was captured.
-	// This simulates the race condition: a new CLI session opens while the
-	// browser session is active. Under the old baseline subtraction approach,
-	// this client would be incorrectly detached because it wasn't in the baseline.
+	// Open a concurrent client while the browser session is active. This
+	// verifies that the graceful shutdown sequence for the browser session
+	// does not affect the concurrent client.
 	concurrentCmd := exec.Command(tmux, "-S", socket, "attach-session", "-t", "scion")
 	concurrentPtmx, err := pty.Start(concurrentCmd)
 	require.NoError(t, err)
