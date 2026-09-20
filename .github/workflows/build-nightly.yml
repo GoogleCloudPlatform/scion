@@ -72,6 +72,14 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "Created and pushed tag: ${TAG}"
 
+  build:
+    name: Build Nightly Release
+    needs: check-and-tag
+    if: needs.check-and-tag.outputs.tagged == 'true'
+    uses: ./.github/workflows/build-release.yml
+    with:
+      ref: ${{ needs.check-and-tag.outputs.tag }}
+
   cleanup:
     name: Cleanup Old Nightly Releases
     needs: check-and-tag
