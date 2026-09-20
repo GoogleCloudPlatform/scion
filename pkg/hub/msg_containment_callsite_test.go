@@ -66,12 +66,11 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 		class: "guarded", reason: "authorizeAgentMessage called in both routers before this handler"},
 
 	// handlers_agent_messaging.go: handleAgentOutboundMessage — guarded by
-	// agent self-identity gate at :722 and resolveOutboundRouting: S4
-	// CheckDMParticipantKey (:378) + S5 authenticatedSender DM-key
-	// participation (:494) ensure sender is a named DM participant before
-	// deliveryAgentDM dispatch.
+	// agent self-identity gate and S7 authorizeAgentMessage call (#1685).
+	// S4/S5 verify DM-key participation (a prerequisite), and S7 evaluates
+	// mode + cross-project policy before any side effects.
 	{file: "handlers_agent_messaging.go", function: "handleAgentOutboundMessage", symbol: "dispatchWithBrokerRetry",
-		class: "guarded", reason: "agent self-identity gate at :722; resolveOutboundRouting CheckDMParticipantKey (S4 :378) and authenticatedSender DM-key participation (S5 :494) before deliveryAgentDM dispatch"},
+		class: "guarded", reason: "agent self-identity gate; S7 authorizeAgentMessage (#1685) after resolveOutboundRouting, before persistence/dispatch/attachment/SSE side effects"},
 
 	// handlers_agent_messaging.go: handleGroupMessage — guarded at :1286.
 	{file: "handlers_agent_messaging.go", function: "handleGroupMessage", symbol: "dispatchWithBrokerRetry",
