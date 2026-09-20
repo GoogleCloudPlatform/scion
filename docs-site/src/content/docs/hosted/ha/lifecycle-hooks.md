@@ -218,6 +218,7 @@ may appear in the URL, headers, and body.
 | `TRIGGER`      | Trigger that fired (`running`, etc.) |
 | `PROJECT_ID`   | Agent's project ID                   |
 | `PROJECT_NAME` | Agent's project name                 |
+| `PROJECT_SLUG` | Agent's project slug                 |
 | `AGENT_ID`     | Agent record ID                      |
 | `AGENT_SLUG`   | Agent slug (hub-controlled)          |
 | `SA_EMAIL`     | Resolved SA email                    |
