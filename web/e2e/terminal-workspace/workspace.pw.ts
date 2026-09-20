@@ -844,3 +844,296 @@ test('preset control buttons activate correct layout', async ({ page }) => {
     expect(otherActive).toBe(false);
   }
 });
+
+// --- Supplemental populated-preset and narrow-screen tests (manager verification) ---
+
+/** Helper: call layoutManager.place() from the page context. */
+async function placeInPreset(
+  page: Page,
+  sessionKey: string,
+  preset: string,
+  slotIndex: number
+): Promise<void> {
+  await page.evaluate(
+    ({ key, preset, slot }) => {
+      type WorkspaceEl = HTMLElement & {
+        workspaceRoot?: {
+          layoutManager: { place: (k: string, p: string, i: number) => void };
+        };
+      };
+      const host = document.querySelector('#terminal-workspace') as WorkspaceEl;
+      host.workspaceRoot!.layoutManager.place(key, preset, slot);
+    },
+    { key: sessionKey, preset, slot: slotIndex }
+  );
+}
+
+/** Helper: get all session keys from pane elements. */
+async function getPaneSessionKeys(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const panes = document.querySelectorAll<
+      HTMLElement & { session: { state: { key: string } } | null }
+    >('#terminal-workspace scion-terminal-pane');
+    return [...panes].filter((p) => p.session).map((p) => p.session!.state.key);
+  });
+}
+
+/** Helper: get grid-column and grid-row of a visible pane by session key. */
+async function getPaneGridPosition(
+  page: Page,
+  sessionKey: string
+): Promise<{ col: string; row: string; visible: boolean } | null> {
+  return page.evaluate((key) => {
+    const panes = document.querySelectorAll<
+      HTMLElement & { session: { state: { key: string } } | null }
+    >('#terminal-workspace scion-terminal-pane');
+    for (const p of panes) {
+      if (p.session?.state.key === key) {
+        return {
+          col: p.style.gridColumn,
+          row: p.style.gridRow,
+          visible: !p.hidden && p.style.display !== 'none',
+        };
+      }
+    }
+    return null;
+  }, sessionKey);
+}
+
+test('populated two-columns renders two distinct terminals side by side', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open both agents (both go to single[0] via open())
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  // Get session keys
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(2);
+
+  // Place both into two-columns via layoutManager.place()
+  await placeInPreset(page, keys[0], 'two-columns', 0);
+  await placeInPreset(page, keys[1], 'two-columns', 1);
+
+  // Switch to two-columns preset
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+
+  // Both panes should be visible (no placeholders)
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+  await expect.poll(() => placeholderCount(page)).toBe(0);
+
+  // Verify grid positions: slot 0 → col 1, slot 1 → col 2
+  const pos0 = await getPaneGridPosition(page, keys[0]);
+  const pos1 = await getPaneGridPosition(page, keys[1]);
+  expect(pos0).not.toBeNull();
+  expect(pos1).not.toBeNull();
+  expect(pos0!.visible).toBe(true);
+  expect(pos1!.visible).toBe(true);
+  expect(pos0!.col).toBe('1');
+  expect(pos1!.col).toBe('2');
+
+  // No new socket connections from placement or preset switch
+  expect(socket.attaches).toBe(2);
+  expect(socket.closes).toBe(0);
+});
+
+test('populated four-grid renders four distinct terminals with identity', async ({ page }) => {
+  const fourAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'a1', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'a2', phase: 'running', projectId: 'proj' },
+    [agentC]: { id: agentC, name: 'a3', phase: 'running', projectId: 'proj' },
+    [agentD]: { id: agentD, name: 'a4', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, fourAgents);
+
+  // Open all 4 agents
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+  await navigateToTerminal(page, agentC);
+  await expect.poll(() => socket.attaches).toBe(3);
+  await navigateToTerminal(page, agentD);
+  await expect.poll(() => socket.attaches).toBe(4);
+
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(4);
+
+  // Place all 4 into four-grid
+  await placeInPreset(page, keys[0], 'four', 0);
+  await placeInPreset(page, keys[1], 'four', 1);
+  await placeInPreset(page, keys[2], 'four', 2);
+  await placeInPreset(page, keys[3], 'four', 3);
+
+  // Switch to four preset
+  await clickPreset(page, 'four');
+  await expect.poll(() => activePreset(page)).toBe('four');
+
+  // All 4 panes visible, no placeholders
+  await expect.poll(() => visiblePaneCount(page)).toBe(4);
+  await expect.poll(() => placeholderCount(page)).toBe(0);
+
+  // Verify grid positions: (1,1), (2,1), (1,2), (2,2)
+  const positions = await Promise.all(keys.map((k) => getPaneGridPosition(page, k)));
+  for (const pos of positions) expect(pos).not.toBeNull();
+  expect(positions[0]!.col).toBe('1');
+  expect(positions[0]!.row).toBe('1');
+  expect(positions[1]!.col).toBe('2');
+  expect(positions[1]!.row).toBe('1');
+  expect(positions[2]!.col).toBe('1');
+  expect(positions[2]!.row).toBe('2');
+  expect(positions[3]!.col).toBe('2');
+  expect(positions[3]!.row).toBe('2');
+
+  // No new socket connections
+  expect(socket.attaches).toBe(4);
+  expect(socket.closes).toBe(0);
+
+  // Switch to single and back to four — grid assignments preserved
+  await clickPreset(page, 'single');
+  await expect.poll(() => activePreset(page)).toBe('single');
+  await clickPreset(page, 'four');
+  await expect.poll(() => activePreset(page)).toBe('four');
+  await expect.poll(() => visiblePaneCount(page)).toBe(4);
+
+  // Re-check positions — unchanged
+  const positionsAfter = await Promise.all(keys.map((k) => getPaneGridPosition(page, k)));
+  for (const pos of positionsAfter) expect(pos).not.toBeNull();
+  for (let i = 0; i < 4; i++) {
+    expect(positionsAfter[i]!.col).toBe(positions[i]!.col);
+    expect(positionsAfter[i]!.row).toBe(positions[i]!.row);
+    expect(positionsAfter[i]!.visible).toBe(true);
+  }
+
+  // Still no new sockets
+  expect(socket.attaches).toBe(4);
+  expect(socket.closes).toBe(0);
+});
+
+test('populated two-rows rendering with toolbar reachability', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open both agents
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(2);
+
+  // Place both into two-rows
+  await placeInPreset(page, keys[0], 'two-rows', 0);
+  await placeInPreset(page, keys[1], 'two-rows', 1);
+
+  // Switch to two-rows
+  await clickPreset(page, 'two-rows');
+  await expect.poll(() => activePreset(page)).toBe('two-rows');
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+
+  // Verify grid positions: slot 0 → row 1, slot 1 → row 2
+  const pos0 = await getPaneGridPosition(page, keys[0]);
+  const pos1 = await getPaneGridPosition(page, keys[1]);
+  expect(pos0).not.toBeNull();
+  expect(pos1).not.toBeNull();
+  expect(pos0!.row).toBe('1');
+  expect(pos0!.visible).toBe(true);
+  expect(pos1!.row).toBe('2');
+  expect(pos1!.visible).toBe(true);
+
+  // Both panes are setVisible(true) — focus is derived from DOM focus events
+  // Verify both have setVisible(true) by checking pane visibility
+  const bothVisible = await page.evaluate(() => {
+    const panes = document.querySelectorAll<HTMLElement>('#terminal-workspace scion-terminal-pane');
+    return [...panes].filter((p) => !p.hidden && p.style.display !== 'none').length;
+  });
+  expect(bothVisible).toBe(2);
+
+  // Layout toolbar buttons remain reachable (not inside terminal shadow DOM)
+  const toolbarVisible = await page.evaluate(() => {
+    const bar = document.querySelector('.terminal-layout-bar');
+    return bar instanceof HTMLElement && !bar.hidden;
+  });
+  expect(toolbarVisible).toBe(true);
+
+  // No socket recreation from preset switch and rendering
+  expect(socket.attaches).toBe(2);
+  expect(socket.closes).toBe(0);
+});
+
+test('narrow screen shows single pane; wide restores full populated layout', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open both agents
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(2);
+
+  // Place both into two-columns
+  await placeInPreset(page, keys[0], 'two-columns', 0);
+  await placeInPreset(page, keys[1], 'two-columns', 1);
+
+  // Switch to two-columns and verify both visible at desktop width
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+
+  // Narrow the viewport below 760px threshold
+  await page.setViewportSize({ width: 700, height: 600 });
+
+  // Wait for media query to trigger
+  await expect.poll(() => visiblePaneCount(page)).toBe(1);
+
+  // Grid should be forced to single-column
+  const gridCols = await page.evaluate(() => {
+    const host = document.querySelector('.terminal-pane-host') as HTMLElement;
+    return host?.style.gridTemplateColumns ?? '';
+  });
+  expect(gridCols).toBe('1fr');
+
+  // No socket recreation from viewport change
+  expect(socket.attaches).toBe(2);
+  expect(socket.closes).toBe(0);
+
+  // Widen viewport back to desktop
+  await page.setViewportSize({ width: 1280, height: 720 });
+
+  // Wait for restoration — both panes should be visible again
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+
+  // Layout preset still two-columns (not changed by narrow mode)
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+
+  // Verify grid positions restored
+  const pos0 = await getPaneGridPosition(page, keys[0]);
+  const pos1 = await getPaneGridPosition(page, keys[1]);
+  expect(pos0).not.toBeNull();
+  expect(pos1).not.toBeNull();
+  expect(pos0!.visible).toBe(true);
+  expect(pos1!.visible).toBe(true);
+  expect(pos0!.col).toBe('1');
+  expect(pos1!.col).toBe('2');
+
+  // Still no socket recreation
+  expect(socket.attaches).toBe(2);
+  expect(socket.closes).toBe(0);
+});
