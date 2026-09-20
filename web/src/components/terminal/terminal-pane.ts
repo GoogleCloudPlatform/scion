@@ -123,6 +123,16 @@ export class ScionTerminalPane extends LitElement {
   private ownedSession: TerminalSession | null = null;
   /** Explicit visibility state — see setVisible(). */
   private _visible = true;
+  /**
+   * Whether this pane is the user's focused terminal for human input.
+   * System clipboard (OSC 52, paste) and input injection (upload paths)
+   * require BOTH _visible AND _focused. Protocol responses (DSR, DA)
+   * are unrestricted. Default true for legacy/standalone pane usage;
+   * setVisible(false) clears it, setVisible(true) restores it.
+   * Phase 2 multi-pane layouts can override with setFocused(false)
+   * for visible-but-unfocused panes.
+   */
+  private _focused = true;
   private sessionUnsubscribe: (() => void) | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -594,15 +604,27 @@ export class ScionTerminalPane extends LitElement {
     this.inert = !visible;
     this._visible = visible;
     if (visible) {
-      // Re-install global drop prevention for visible workspace panes.
+      this._focused = true;
+      // Re-install scoped drop prevention for visible workspace panes.
       if (this.isConnected && !this.disposed) this.installWindowDragPrevention();
       void this.reveal();
     } else {
+      this._focused = false;
       this.terminal?.blur();
       this.cancelResize();
-      // Remove global drop prevention so Chat/Dashboard drops are unaffected.
+      // Remove drop prevention so Chat/Dashboard drops are unaffected.
       this.removeWindowListeners();
     }
+  }
+
+  /**
+   * Control focused state independently of visibility.
+   * Phase 2 multi-pane layouts call setFocused(false) for visible-but-unfocused
+   * panes so clipboard/input guards correctly scope to the active terminal.
+   */
+  setFocused(focused: boolean): void {
+    this._focused = focused;
+    if (!focused) this.terminal?.blur();
   }
 
   /** Explicit lifetime boundary. Navigation is reserved for the legacy adapter. */
@@ -776,20 +798,27 @@ export class ScionTerminalPane extends LitElement {
       return true;
     });
 
-    // OSC 52 clipboard relay — scoped to visible focused terminal. (P1.8)
-    // Hidden panes continue parsing output but cannot read or write the
-    // system clipboard. Terminal protocol responses (DSR, DA etc.) are
-    // unaffected because they flow through xterm's onData, not this handler.
+    // OSC 52 clipboard relay — scoped to FOCUSED VISIBLE terminal. (P1.8)
+    // Hidden or unfocused panes continue parsing output but cannot read or
+    // write the system clipboard. Terminal protocol responses (DSR, DA etc.)
+    // are unaffected — they flow through xterm's onData → sendData, not this
+    // handler. Limitation: OSC 52 read requests from unfocused/hidden panes
+    // are silently dropped (no error response sent to the server) rather than
+    // queued, because the correct clipboard content to return depends on the
+    // user's focused context at response time. UTF-8 is preserved via
+    // TextEncoder/TextDecoder for multi-byte content.
     this.terminal.parser.registerOscHandler(52, (data: string) => {
       const semi = data.indexOf(';');
       if (semi < 0) return true;
       const payload = data.substring(semi + 1);
       if (payload === '?') {
-        if (!this._visible || this.disposed) return true;
+        // Clipboard read — requires focused + visible.
+        if (!this._visible || !this._focused || this.disposed) return true;
         void navigator.clipboard
           .readText()
           .then((text) => {
-            if (!this._visible || this.disposed) return;
+            // Recheck at completion: focus/visibility may have changed.
+            if (!this._visible || !this._focused || this.disposed) return;
             const bytes = new TextEncoder().encode(text);
             let binary = '';
             for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -797,7 +826,8 @@ export class ScionTerminalPane extends LitElement {
           })
           .catch(() => {});
       } else {
-        if (!this._visible || this.disposed) return true;
+        // Clipboard write — requires focused + visible.
+        if (!this._visible || !this._focused || this.disposed) return true;
         try {
           const binary = atob(payload);
           const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
@@ -866,43 +896,53 @@ export class ScionTerminalPane extends LitElement {
 
       const isMod = event.ctrlKey || event.metaKey;
 
-      // Ctrl/Cmd+C: copy selection if present, otherwise send SIGINT.
-      // Copy only when visible — hidden terminals cannot expose selection.
+      // Ctrl/Cmd+C: copy selection — requires focused + visible.
       if (event.type === 'keydown' && event.key === 'c' && isMod && !event.shiftKey) {
-        if (this._visible && this.terminal?.hasSelection()) {
+        if (this._visible && this._focused && this.terminal?.hasSelection()) {
           void navigator.clipboard.writeText(this.terminal.getSelection());
           return false; // prevent sending to PTY
         }
         return true; // no selection → send SIGINT
       }
 
-      // Ctrl/Cmd+V: paste from clipboard.
-      // Capture generation so a late readText() cannot send to a session
-      // that has since been hidden, closed, or reselected. (P1.8)
+      // Ctrl/Cmd+V: paste — requires focused + visible + generation match
+      // at async completion. (P1.8)
       if (event.type === 'keydown' && event.key === 'v' && isMod && !event.shiftKey) {
         event.preventDefault();
         const gen = this.session?.state.generation ?? 0;
         void navigator.clipboard.readText().then((text) => {
-          if (text && this._visible && !this.disposed && this.session?.state.generation === gen)
+          if (
+            text &&
+            this._visible &&
+            this._focused &&
+            !this.disposed &&
+            this.session?.state.generation === gen
+          )
             this.sendData(text);
         });
         return false;
       }
 
-      // Ctrl+Shift+C: always copy (only when visible)
+      // Ctrl+Shift+C: always copy (focused + visible)
       if (event.type === 'keydown' && event.key === 'C' && event.ctrlKey && event.shiftKey) {
-        if (this._visible && this.terminal?.hasSelection()) {
+        if (this._visible && this._focused && this.terminal?.hasSelection()) {
           void navigator.clipboard.writeText(this.terminal.getSelection());
         }
         return false;
       }
 
-      // Ctrl+Shift+V: always paste (with generation guard)
+      // Ctrl+Shift+V: always paste (focused + visible + generation)
       if (event.type === 'keydown' && event.key === 'V' && event.ctrlKey && event.shiftKey) {
         event.preventDefault();
         const gen = this.session?.state.generation ?? 0;
         void navigator.clipboard.readText().then((text) => {
-          if (text && this._visible && !this.disposed && this.session?.state.generation === gen)
+          if (
+            text &&
+            this._visible &&
+            this._focused &&
+            !this.disposed &&
+            this.session?.state.generation === gen
+          )
             this.sendData(text);
         });
         return false;
@@ -1083,9 +1123,15 @@ export class ScionTerminalPane extends LitElement {
         return;
       }
 
-      // Guard: do not inject paths if pane was hidden, disposed or
-      // reconnected during the upload. (P1.8)
-      if (!this._visible || this.disposed || this.session?.state.generation !== gen) return;
+      // Guard: do not inject paths if pane lost focus, was hidden, disposed
+      // or reconnected during the upload. (P1.8)
+      if (
+        !this._visible ||
+        !this._focused ||
+        this.disposed ||
+        this.session?.state.generation !== gen
+      )
+        return;
 
       // Inject paths into terminal
       const quoted = paths.map((p) => this._quoteForShell(p));
@@ -1133,14 +1179,19 @@ export class ScionTerminalPane extends LitElement {
     this.wasConnected = false;
   }
 
-  /** Prevent the browser from navigating to a dropped file. Idempotent. */
+  /**
+   * Prevent the browser from navigating to a dropped file, but ONLY when the
+   * drag target is within this visible pane. Events targeting Chat/Dashboard
+   * or other workspace areas pass through unmodified. Uses composedPath()
+   * to correctly detect events retargeted across Shadow DOM boundaries.
+   */
   private installWindowDragPrevention(): void {
     if (this._windowDragOver) return;
     this._windowDragOver = (e: DragEvent) => {
-      e.preventDefault();
+      if (this._visible && e.composedPath().includes(this)) e.preventDefault();
     };
     this._windowDrop = (e: DragEvent) => {
-      e.preventDefault();
+      if (this._visible && e.composedPath().includes(this)) e.preventDefault();
     };
     window.addEventListener('dragover', this._windowDragOver);
     window.addEventListener('drop', this._windowDrop);

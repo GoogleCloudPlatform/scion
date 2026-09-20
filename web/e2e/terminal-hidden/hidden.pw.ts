@@ -164,18 +164,16 @@ test('late socket open while hidden does not steal focus', async ({ page }) => {
 
   // Send some output to verify the terminal renders but doesn't steal focus
   ctx.write('hello from hidden test\r\n');
-  await expect.poll(() => page.evaluate(() => window.hiddenFixture.text())).toContain(
-    'hello from hidden test'
-  );
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.text()))
+    .toContain('hello from hidden test');
 
   // Verify focus hasn't moved
   const stillActive = await page.evaluate(() => document.activeElement?.id);
   expect(stillActive).toBe('drop-target');
 });
 
-test('hidden OSC 52 does not write to system clipboard, visible OSC 52 does', async ({
-  page,
-}) => {
+test('hidden OSC 52 does not write to system clipboard, visible OSC 52 does', async ({ page }) => {
   const ctx = await setup(page);
   await ready(page);
 
@@ -201,9 +199,9 @@ test('hidden OSC 52 does not write to system clipboard, visible OSC 52 does', as
 
   // Send OSC 52 clipboard write while visible
   ctx.write('\x1b]52;c;' + Buffer.from('visible-write').toString('base64') + '\x07');
-  await expect.poll(() => page.evaluate(() => window.hiddenFixture.clipboardText)).toBe(
-    'visible-write'
-  );
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.clipboardText))
+    .toBe('visible-write');
 });
 
 test('terminal protocol responses (DSR) continue while hidden', async ({ page }) => {
@@ -215,9 +213,9 @@ test('terminal protocol responses (DSR) continue while hidden', async ({ page })
 
   // Output still parses
   ctx.write('hidden output\r\n');
-  await expect.poll(() => page.evaluate(() => window.hiddenFixture.text())).toContain(
-    'hidden output'
-  );
+  await expect
+    .poll(() => page.evaluate(() => window.hiddenFixture.text()))
+    .toContain('hidden output');
 
   // Send a Device Status Report request (CSI 6 n — cursor position report)
   // xterm.js should respond with CSI row ; col R through onData → sendData
@@ -227,8 +225,10 @@ test('terminal protocol responses (DSR) continue while hidden', async ({ page })
     .poll(() => ctx.frames.filter((f) => f.type === 'data').length)
     .toBeGreaterThan(beforeCount);
 
-  // The response should be a cursor position report (ESC [ row ; col R)
+  // The response should be a cursor position report (ESC [ row ; col R).
+  // Use String.raw + eslint-disable to match the literal ESC byte.
   const response = ctx.input().at(-1)!;
+  // eslint-disable-next-line no-control-regex
   expect(response).toMatch(/^\x1b\[\d+;\d+R$/);
 });
 
