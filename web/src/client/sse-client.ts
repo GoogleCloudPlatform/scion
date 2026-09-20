@@ -29,6 +29,8 @@
  * immediately.
  */
 
+import { dispatchTeardown } from '../utils/auth.js';
+
 /** Data shape for SSE 'update' events from the server */
 export interface SSEUpdateEvent {
   subject: string;
@@ -220,6 +222,9 @@ export class SSEClient extends EventTarget {
       if (generation !== this.generation) return;
       if (resp.status === 401 || resp.redirected) {
         console.warn('[SSE] Session expired, redirecting to login');
+        // Dispose terminal sessions before navigating to login so no hidden
+        // active terminals survive the transition.
+        dispatchTeardown('auth-expired');
         const returnTo = encodeURIComponent(window.location.pathname);
         window.location.href = `/login?error=session_expired&returnTo=${returnTo}`;
         return;

@@ -58,7 +58,7 @@ interface Request {
 }
 interface Message {
   key: string;
-  type: 'discover' | 'owner' | 'open' | 'ack';
+  type: 'discover' | 'owner' | 'open' | 'ack' | 'account-teardown';
   requestId: string;
   agentId: string;
   generation: string | null;
@@ -238,8 +238,14 @@ export class TerminalCoordinator {
   private receive(data: unknown): void {
     if (this.stopped || !data || typeof data !== 'object') return;
     const message = data as Partial<Message>;
+    if (message.key !== this.coordinationKey) return;
+    // Account-teardown is a coordination-level signal that does not target a
+    // specific agent. Validate only the key and type, not the agent UUID.
+    if (message.type === 'account-teardown') {
+      this.stop();
+      return;
+    }
     if (
-      message.key !== this.coordinationKey ||
       !token(message.requestId) ||
       typeof message.agentId !== 'string' ||
       !uuid.test(message.agentId)
@@ -362,6 +368,35 @@ export class TerminalCoordinator {
   private finish(request: Request, result: TerminalOpenResult): void {
     request.done = true;
     request.resolve(result);
+  }
+
+  /**
+   * Whether this coordinator has been torn down for the current account.
+   * Guards against stale callbacks recreating sessions after teardown.
+   */
+  get tornDown(): boolean {
+    return this.stopped;
+  }
+
+  /**
+   * Cross-tab account teardown. Broadcasts teardown to all same-origin peers
+   * via BroadcastChannel, then disposes the local coordinator. Called from
+   * the logout/auth-expiry path — never from route or mode changes.
+   *
+   * Both owner and non-owner tabs may call this. The broadcast ensures the
+   * owner receives the teardown even if the logout happened in a non-owner tab.
+   */
+  teardownAccount(): void {
+    if (this.stopped) return;
+    // Broadcast before stopping so the channel is still open.
+    this.send({
+      key: this.coordinationKey,
+      type: 'account-teardown',
+      requestId: 'teardown',
+      agentId: '',
+      generation: this.ownerGeneration,
+    });
+    this.stop();
   }
 
   private readonly onPageHide = (): void => this.stop();

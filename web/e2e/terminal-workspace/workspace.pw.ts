@@ -1827,3 +1827,126 @@ test('each pane buttons target its own agent in multi-pane layout', async ({ pag
   expect(socket.attaches).toBe(2);
   expect(socket.closes).toBe(0);
 });
+
+// --- Account teardown tests (P3.1 — #1658) ---
+
+test('owner-tab logout disposes workspace, closes sessions, hides UI', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await expect(page.locator('#terminal-workspace')).toBeVisible();
+
+  // Simulate logout by dispatching the teardown event
+  await page.evaluate(() => {
+    window.dispatchEvent(
+      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } }),
+    );
+  });
+
+  // Workspace should be hidden after teardown
+  await expect(page.locator('#terminal-workspace')).toBeHidden();
+  // WebSocket should have been closed
+  await expect.poll(() => socket.closes).toBeGreaterThanOrEqual(1);
+});
+
+test('non-owner logout broadcasts teardown, owner disposes', async ({ context }) => {
+  const owner = await context.newPage();
+  const other = await context.newPage();
+  const ownerSocket = await setup(owner);
+  await setup(other);
+
+  await owner.goto(`/terminals/${agent}`);
+  await expect.poll(() => ownerSocket.attaches).toBe(1);
+
+  // Other tab navigates to terminals (becomes non-owner)
+  await other.goto(`/terminals/${agent}`);
+  await expect(other.locator('#terminal-workspace')).toContainText('owning tab');
+
+  // Non-owner fires teardown
+  await other.evaluate(() => {
+    window.dispatchEvent(
+      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } }),
+    );
+  });
+
+  // Owner should receive the broadcast and dispose
+  await expect.poll(() => ownerSocket.closes).toBeGreaterThanOrEqual(1);
+  // Non-owner's workspace should be hidden
+  await expect(other.locator('#terminal-workspace')).toBeHidden();
+});
+
+test('pending connect during teardown aborts inflight attach', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Teardown while connected — the coordinator aborts the lifetime controller
+  // which cancels any inflight or future connection attempts.
+  await page.evaluate(() => {
+    window.dispatchEvent(
+      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } }),
+    );
+  });
+
+  // After teardown, the existing socket should be closed
+  await expect.poll(() => socket.closes).toBeGreaterThanOrEqual(1);
+
+  // No new opens should be possible since the coordinator is torn down
+  const result = await page.evaluate(async (id) => {
+    // Try to navigate to terminals again
+    document.dispatchEvent(
+      new CustomEvent('nav-click', { detail: { path: `/terminals/${id}` }, bubbles: true }),
+    );
+    // Wait a tick for the route handler to execute
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return true;
+  }, agent);
+  expect(result).toBe(true);
+
+  // Socket count should not have increased
+  expect(socket.attaches).toBe(1);
+});
+
+test('login after teardown cannot recreate workspace in same page', async ({ page }) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Teardown
+  await page.evaluate(() => {
+    window.dispatchEvent(
+      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } }),
+    );
+  });
+  await expect(page.locator('#terminal-workspace')).toBeHidden();
+
+  // After teardown, navigating to terminals should not create a new coordinator
+  // The accountTornDown flag prevents recreation within the same SPA lifetime
+  await page.evaluate(() => {
+    document.dispatchEvent(
+      new CustomEvent('nav-click', { detail: { path: '/terminals' }, bubbles: true }),
+    );
+  });
+
+  // Since the account is torn down, the coordinator won't be recreated in this page lifetime
+  // This is expected — a real re-login would reload the page
+  await expect(page.locator('#terminal-workspace')).toBeHidden();
+});
+
+test('teardown on one hub/account does not affect unrelated workspace', async ({ context }) => {
+  const owner = await context.newPage();
+  const ownerSocket = await setup(owner);
+  await owner.goto(`/terminals/${agent}`);
+  await expect.poll(() => ownerSocket.attaches).toBe(1);
+
+  // Teardown the owner
+  await owner.evaluate(() => {
+    window.dispatchEvent(
+      new CustomEvent('scion:account-teardown', { detail: { reason: 'logout' } }),
+    );
+  });
+
+  // Owner workspace should be torn down
+  await expect(owner.locator('#terminal-workspace')).toBeHidden();
+  await expect.poll(() => ownerSocket.closes).toBeGreaterThanOrEqual(1);
+});

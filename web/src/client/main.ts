@@ -41,6 +41,7 @@ import {
   ROUTE_PERMISSION_MAP,
   SUPERADMIN_ROUTES,
 } from '../lib/admin-permissions.js';
+import { ACCOUNT_TEARDOWN_EVENT } from '../utils/auth.js';
 
 /**
  * Strip the Vite base path prefix from a URL pathname so the client-side
@@ -143,6 +144,8 @@ let cachedAdminStatus: AdminStatus | null = null;
 let terminalWorkspaceEnabled = false;
 let terminalCoordinator: TerminalCoordinator | null = null;
 let terminalWorkspace: TerminalWorkspaceRoot | null = null;
+/** Set after account teardown to prevent stale callbacks from recreating sessions. */
+let accountTornDown = false;
 let routeOutlet: HTMLElement | null = null;
 const terminalNavigations = new Map<string, number>();
 const uuidPath = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
@@ -167,7 +170,7 @@ function ensureRoots(): HTMLElement | null {
 }
 
 function ensureTerminalCoordinator(): TerminalCoordinator | null {
-  if (!terminalWorkspaceEnabled || !currentUser?.id) return null;
+  if (!terminalWorkspaceEnabled || !currentUser?.id || accountTornDown) return null;
   if (terminalCoordinator) return terminalCoordinator;
   const app = document.getElementById('app');
   if (!app) return null;
@@ -808,6 +811,20 @@ async function init(): Promise<void> {
   // Setup client-side router for navigation
   setupRouter();
   await renderRoute(stripBasePath(window.location.pathname));
+
+  // Account teardown: dispose terminals on logout/auth-expiry before redirect.
+  // The event fires synchronously from performLogout() or auth-expiry detection
+  // so cross-tab teardown completes before the page navigates away.
+  window.addEventListener(ACCOUNT_TEARDOWN_EVENT, () => {
+    if (accountTornDown) return;
+    accountTornDown = true;
+    terminalCoordinator?.teardownAccount();
+    terminalCoordinator = null;
+    // Hide the workspace UI immediately so the login page does not show
+    // hidden active terminals underneath.
+    terminalWorkspace?.show(false);
+    terminalWorkspace = null;
+  });
 
   // Disconnect SSE on page unload
   window.addEventListener('beforeunload', () => {

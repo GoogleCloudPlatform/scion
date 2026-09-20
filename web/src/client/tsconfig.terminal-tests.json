@@ -4,7 +4,8 @@
   "include": [
     "terminal-layout.test.ts",
     "terminal-sessions.test.ts",
-    "terminal-metadata.test.ts"
+    "terminal-metadata.test.ts",
+    "terminal-coordinator-teardown.test.ts"
   ],
   "exclude": []
 }
