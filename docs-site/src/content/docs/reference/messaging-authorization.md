@@ -1,18 +1,20 @@
-# Messaging Authorization
+---
+title: Messaging Authorization
+description: Message modes, cross-project messaging, piercing rules, and the authorization decision model.
+---
 
-This document describes the message mode system that controls who can deliver
+This reference describes the message mode system that controls who can deliver
 messages to an agent. It covers mode definitions, the decision table, piercing
 rules, the API for changing modes, and the permissions that underpin the system.
 
-For the full design rationale and decision record, see the
-design notes (internal: `msg-authz-design-notes.md`).
+For an overview of Scion's messaging features and day-to-day usage, see
+[Messaging & Notifications](/scion/hosted/user/messaging/).
 
 ---
 
 ## Overview
 
-Every agent has a **message mode** that governs its conversational reach.
-The mode governs an agent's conversational reach — both who can deliver
+Every agent has a **message mode** that governs its conversational reach — both who can deliver
 messages to the agent and who the agent can deliver messages to. There are
 five modes:
 
@@ -42,7 +44,9 @@ No tightening occurs until someone explicitly sets a non-default mode.
 
 3. **Mode is orthogonal to agent role.** Role governs sender-side capabilities
    over Hub resources; mode governs conversational reach including inbound
-   delivery. All role x mode combinations are coherent.
+   delivery. All role × mode combinations are coherent. See the
+   [Permissions & Access Constraints Reference](/scion/reference/permissions-policy/)
+   for details on agent roles.
 
 ---
 
@@ -58,7 +62,7 @@ for delivery to succeed.
 | Control | Field | Default | Who changes it |
 |---------|-------|---------|----------------|
 | Hub availability | `cross_project_messaging_enabled` (boolean) in Hub messaging settings | `false` | Local, unscoped Hub administrator |
-| Agent outbound reach | Agent `messageMode` set to `hub` | `project` | Existing managers, subject to the grant guard below |
+| Agent outbound reach | Agent `messageMode` set to `hub` | `project` | Existing managers, subject to the [grant guard](#hub-mode-grant-guard) below |
 | Receiving project | `crossProjectInbound` on the destination project | `none` | Active direct project owner or local, unscoped Hub administrator |
 
 The **receiving project's inbound policy** is directional:
@@ -136,7 +140,7 @@ For human-to-agent delivery, `hub` behaves identically to `project`. The
 
 Within the same project, `hub` behaves identically to `project` — it joins
 the same communication cell. The `hub` mode only gains additional
-cross-project reach described below.
+cross-project reach described in [Cross-Project Agent Messaging](#cross-project-agent-messaging).
 
 ### Agent to Agent (cross-project)
 
@@ -174,7 +178,7 @@ All messaging falls into one of two planes:
 - **System plane**: Hub-generated operational notices with fixed templates.
   This includes delivery failure notices, lifecycle notifications (child
   completion, state changes), and scheduled event fires. System-plane
-  messages bypass all mode checks (D8).
+  messages bypass all mode checks.
 
 The system-plane flag is set exclusively by hub-internal code paths. It is
 **never** derived from external request data — including JWT claims — and
@@ -203,7 +207,7 @@ is evaluated on the **human principal at delivery time**.
 - **User-identity-only.** Piercing is never inherited by an owner's agents.
   If a project owner has a `project`-mode agent, that agent cannot deliver
   messages to a `lineage` or `branch` agent. This prevents relay exploits
-  (U -> owner's agent -> restricted agent). Evaluated on the human principal,
+  (U → owner's agent → restricted agent). Evaluated on the human principal,
   never on on-behalf-of markers.
 
 - **UAT caveat.** For User Access Tokens, piercing applies only when the
@@ -400,6 +404,8 @@ PUT  /api/v1/projects/{id}/messaging-policy
 | Project admin (non-owner) | DENIED |
 | All other callers | DENIED |
 
+For related admin settings, see [Admin Settings](/scion/reference/admin-settings/).
+
 ---
 
 ## API Reference: Messaging Capabilities
@@ -475,7 +481,7 @@ POST /api/v1/projects/{pid}/agents/{aid}/action/set_message_mode
 
 ```json
 {
-    "mode": "none|lineage|branch|project",
+    "mode": "none|lineage|branch|project|hub",
     "cascade": false
 }
 ```
@@ -515,10 +521,10 @@ POST /api/v1/projects/{pid}/agents/{aid}/action/set_message_mode
 | Super-admin | ALLOWED | |
 | Project owner | ALLOWED | |
 | Lineage owner (user in agent's ancestry) | ALLOWED | |
-| Full-role agent (same project) | ALLOWED | D7 amendment: full role includes `set_message_mode` scope |
-| Agent callers (non-full role) | DENIED | D7: insufficient role |
-| Project admin (non-owner) | DENIED | D7: admin cannot unseal `none` agents |
-| UATs (any scope) | DENIED | D7: no UAT scope exists for this action |
+| Full-role agent (same project) | ALLOWED | Full role includes `set_message_mode` scope |
+| Agent callers (non-full role) | DENIED | Insufficient role |
+| Project admin (non-owner) | DENIED | Admin cannot unseal `none` agents |
+| UATs (any scope) | DENIED | No UAT scope exists for this action |
 
 **Hub mode grant guard.** When the requested mode is `hub`, agent callers
 must additionally be currently full-role **and** already in `hub` mode. A
@@ -560,6 +566,9 @@ agents. It is project-scoped (not per-agent) because the relay rule makes
 per-agent granularity dishonest: any agent could be asked to relay a message
 across a per-agent boundary.
 
+For more on the permission model, see the
+[Permissions & Access Constraints Reference](/scion/reference/permissions-policy/).
+
 ### agent.set_message_mode
 
 | Field | Value |
@@ -589,14 +598,14 @@ This permission is intentionally restricted:
 
 ## Design Decisions Reference
 
-The messaging authorization system is governed by ten design decisions
-(D1-D10) ratified by the project sponsor. Key decisions:
+The messaging authorization system is governed by a series of design decisions
+ratified by the project sponsor. Key decisions:
 
 | ID | Summary |
 |----|---------|
 | D1 | `message` is a first-class axis, split from lifecycle/attach |
 | D2 | User-side messaging grant is project-coarse (relay rule) |
-| D3+D9 | Five-tier mode system: none, lineage, branch, project, hub |
+| D3 | Five-tier mode system: none, lineage, branch, project, hub |
 | D4 | Lineage mode: strict user-to-agent only, no agent-to-agent edges |
 | D5 | Mode is fully orthogonal to agent role |
 | D6 | Piercing rules: super-admin pierces all; owner/ancestry pierce lineage/branch; user-identity-only |
@@ -609,12 +618,11 @@ The messaging authorization system is governed by ten design decisions
 | D13 | Cross-project DMs only in first release; group expansion must remain possible |
 | D14 | Hub disable blocks cross-project sends and agent history access; retains records |
 
-For the full decision record with rationale, see the
-design notes (internal: `msg-authz-design-notes.md`).
-
 ---
 
 ## CLI Reference
+
+For full CLI documentation, see the [CLI Reference](/scion/reference/cli/).
 
 ### `scion start --message-mode <mode>`
 
@@ -668,13 +676,13 @@ scion message @<project-slug>/<agent-slug> @<other-project>/<other-agent> "messa
 scion hub messaging get
 
 # Enable cross-project messaging on the Hub
-scion hub messaging set --cross-project enabled
+scion hub messaging set --cross-project-enabled=true --revision <N>
 
 # View a project's inbound policy
 scion project messaging get --project <project>
 
 # Set a project's inbound policy (uses CAS)
-scion project messaging set --project <project> --inbound members
+scion project messaging set --project <project> --policy members --revision <N>
 ```
 
 These administration commands are human-only and unavailable in agent mode.
@@ -708,38 +716,3 @@ Prefer rolling back application behavior while retaining additive schema.
 Before downgrading to a binary predating the `hub` enum, export
 configuration, disable the feature, and use an explicit migration to map
 `hub` agents to `project` if required by the old reader.
-
----
-
-## Source Files
-
-| Concept | File |
-|---------|------|
-| Mode decision logic | `pkg/hub/authorize_message.go` |
-| Cross-project evaluator | `pkg/hub/authorize_message.go` (`evaluateCrossProject`, `validateCrossProjectOrigin`, `CheckEffectiveMembership`) |
-| Hub mode grant guard | `pkg/hub/authorize_message_mode_grant.go` |
-| Project messaging policy | `pkg/hub/project_messaging_policy.go` |
-| Hub operational settings | `pkg/hub/operational_settings.go` (`CrossProjectMessagingEnabled`) |
-| Hub admin messaging settings | `pkg/hub/admin_messaging.go` |
-| Target resolution | `pkg/hub/handlers_messaging_targets.go` |
-| Messaging capabilities | `pkg/hub/handlers_messaging_capabilities.go` |
-| Conversation resolver | `pkg/hub/handlers_conversation_resolve.go` |
-| Conversation send | `pkg/hub/handlers_conversation_send.go` |
-| Scheduled message auth | `pkg/hub/authorize_scheduled_message.go` |
-| Fan-out and boundaries | `pkg/hub/handlers_agent_messaging.go` |
-| set_message_mode handler | `pkg/hub/handlers_agent_message_mode.go` |
-| Permission registry | `pkg/hub/permissions/registry.go` |
-| Role seeds (admin exclusion) | `pkg/hub/seed.go` |
-| MessageMode constants | `pkg/store/models.go` |
-| set-message-mode CLI command | `cmd/set_message_mode.go` |
-| Hub client SetMessageMode | `pkg/hubclient/agents.go` |
-| Hub client messaging SDK | `pkg/hubclient/messaging.go` |
-| Conversation CLI commands | `cmd/conversation.go` |
-| Hub messaging CLI commands | `cmd/hub_messaging.go` |
-| Project messaging CLI commands | `cmd/project_messaging.go` |
-| CLI mode allowlist | `cmd/cli_mode.go` |
-| Denial code types (frontend) | `web/src/shared/message-mode.ts` |
-| Cross-project UI badges | `web/src/components/shared/agent-message-viewer.ts` |
-| Hub settings toggle | `web/src/components/pages/admin-server-config.ts` |
-| Project inbound policy UI | `web/src/components/pages/project-settings.ts` |
-| Agent hub mode UI | `web/src/components/pages/agent-create.ts`, `agent-configure.ts`, `agent-detail.ts` |

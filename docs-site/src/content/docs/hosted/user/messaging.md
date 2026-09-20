@@ -254,6 +254,10 @@ Messages are delivered in real-time to the Web Dashboard via Server-Sent Events 
 
 ## Message Authorization & Modes
 
+:::tip[Full Reference]
+For the complete authorization reference — including mode decision tables, cross-project messaging controls, piercing rules, denial codes, and the API for changing modes — see [Messaging Authorization](/scion/reference/messaging-authorization/).
+:::
+
 Every agent is protected by a **Message Mode** that controls which users and other agents can send messages to it. An agent's message mode can be managed in several ways:
 
 - **Web Dashboard**: Use the mode controls on the agent detail page.
