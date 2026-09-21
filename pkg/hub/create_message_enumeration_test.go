@@ -79,6 +79,10 @@ func TestCreateMessageEnumeration(t *testing.T) {
 
 		// createInboxMessage: agent → user inbox notification (e.g. WAITING_FOR_INPUT).
 		"notifications.go:createInboxMessage": "Phase 5 dual-write: agent→user inbox notification DM conversation",
+
+		// sendViaDirectConversation: conversation-send endpoint (#1693).
+		// ConversationID is set from the resolved conversation before CreateMessage.
+		"handlers_conversation_send.go:sendViaDirectConversation": "CPM conversation send: ConversationID set from resolved conv (#1693)",
 	}
 
 	// -------------------------------------------------------------------

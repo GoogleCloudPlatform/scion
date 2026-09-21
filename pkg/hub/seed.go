@@ -100,8 +100,20 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    3,
+			Revision:    4,
 			Permissions: hubAdminPermissionIDs(),
+		},
+		{
+			// global-catalog-author: Phase 1 (ptone/scion#1713) grants only
+			// skill.create_global. Phase 2 extends this to update/delete for
+			// skills and templates. Seeded as a role *definition only* — no
+			// binding is created. An operator grants it deliberately.
+			// See design doc §3.1 (roles).
+			Name:        store.SystemRoleGlobalCatalogAuthor,
+			Description: "Creates global (hub-scoped) skills",
+			ScopeType:   store.RoleScopeSystem,
+			Revision:    1,
+			Permissions: globalCatalogAuthorPermissionIDs(),
 		},
 		{
 			// hub-member: curated read permissions for directory/catalog resources.
@@ -737,12 +749,13 @@ func hubAdminPermissionIDs() []string {
 		"project.list":   true,
 		"project.update": true,
 		// Skill registries
-		"skill.read":     true,
-		"skill.list":     true,
-		"skill.create":   true,
-		"skill.update":   true,
-		"skill.delete":   true,
-		"skill.register": true,
+		"skill.read":          true,
+		"skill.list":          true,
+		"skill.create":        true,
+		"skill.update":        true,
+		"skill.delete":        true,
+		"skill.register":      true,
+		"skill.create_global": true,
 		// Access constraints — full operator control.
 		// hub-admin can read and administer access constraints so that
 		// operators who are not super-admins can manage them via the web UI.
@@ -757,6 +770,16 @@ func hubAdminPermissionIDs() []string {
 		}
 	}
 	return ids
+}
+
+// globalCatalogAuthorPermissionIDs returns the exact permission set for the
+// global-catalog-author role. This role is system-scoped, so its safety relies
+// on the permission set containing ONLY global-catalog IDs — a careless
+// addition would silently grant hub-wide authority. Pin with a test.
+func globalCatalogAuthorPermissionIDs() []string {
+	return []string{
+		"skill.create_global",
+	}
 }
 
 // agentRolePermissionIDs maps an AgentRole to permission IDs by examining

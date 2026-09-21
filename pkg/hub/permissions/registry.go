@@ -61,6 +61,7 @@ const (
 	ActionExecute        = "execute"
 	ActionMessage        = "message"
 	ActionSetMessageMode = "set_message_mode"
+	ActionCreateGlobal   = "create_global"
 
 	UATScopeAgentManage         = "agent:manage"
 	UATScopeSkillManage         = "skill:manage"
@@ -131,6 +132,7 @@ var Registry = []Permission{
 	{ID: "project.set_messaging_policy", Resource: ResourceProject, Action: "set_messaging_policy", CapabilityKind: CapabilityResource, Description: "Set project cross-project messaging policy (owner/admin only)", Enforcement: []string{"pkg/hub/project_messaging_policy.go"}},
 
 	{ID: "skill.create", Resource: ResourceSkill, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "skill:create", Description: "Create skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
+	{ID: "skill.create_global", Resource: ResourceSkill, Action: ActionCreateGlobal, CapabilityKind: CapabilityScope, Description: "Create skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.read", Resource: ResourceSkill, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "skill:read", Description: "Read skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.update", Resource: ResourceSkill, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "skill:update", Description: "Update skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.delete", Resource: ResourceSkill, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "skill:delete", Description: "Delete skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},

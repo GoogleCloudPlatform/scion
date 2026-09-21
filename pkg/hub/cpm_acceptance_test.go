@@ -982,7 +982,7 @@ func TestCPMAcceptance_AC4_StructuredMessage_DeliveryOutcome(t *testing.T) {
 
 	var resp MessageDeliveryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Contains(t, resp.Status, "delivered", "delivery status should contain 'delivered'")
+	assert.Contains(t, resp.Status, "dispatched", "delivery status should be 'dispatched' for broker path (#1689)")
 	assert.NotEmpty(t, resp.MessageID, "message_id should be returned")
 }
 
@@ -1444,7 +1444,7 @@ func TestCPMAcceptance_AC5_CrossProject_MessagePersistence_Correct(t *testing.T)
 	var resp MessageDeliveryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.NotEmpty(t, resp.MessageID, "message should have been persisted")
-	assert.Contains(t, resp.Status, "delivered", "delivery should be successful")
+	assert.Contains(t, resp.Status, "dispatched", "delivery should show truthful dispatch outcome (#1689)")
 }
 
 // =============================================================================

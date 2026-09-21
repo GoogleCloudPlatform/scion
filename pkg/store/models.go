@@ -2503,7 +2503,8 @@ const (
 	SystemRoleSuperAdmin = "super-admin"
 	SystemRoleHubAdmin   = "hub-admin"
 	SystemRoleHubMember  = "hub-member"
-	SystemRoleHubViewer  = "hub-viewer"
+	SystemRoleHubViewer           = "hub-viewer"
+	SystemRoleGlobalCatalogAuthor = "global-catalog-author"
 )
 
 // Project role names

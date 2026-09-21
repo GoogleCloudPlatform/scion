@@ -324,7 +324,7 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "skill"}, ActionCreate)
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "skill"}, globalWriteAction(scope, ActionCreate))
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global skills", nil)
 			return
@@ -1498,6 +1498,21 @@ func expandScopeAliases(uri *api.SkillURI, projectID, userID string) {
 	if uri.Scope == store.SkillScopeUser && uri.ScopeID == "" && userID != "" {
 		uri.ScopeID = userID
 	}
+}
+
+// globalWriteAction maps a CRUD action to its global-catalog twin for records
+// that live in the hub catalog. Project- and user-scoped records are unchanged.
+// Key off the record's stored scope, not parentlessness — user-scoped records
+// are also parentless but must NOT require global permissions. See design §3.1.
+func globalWriteAction(scope string, a Action) Action {
+	switch scope {
+	case store.SkillScopeGlobal, store.SkillScopeCore:
+		switch a {
+		case ActionCreate:
+			return ActionCreateGlobal
+		}
+	}
+	return a
 }
 
 // skillResource constructs a Resource from a store.Skill for capability computation.
