@@ -2500,21 +2500,21 @@ test.describe('combined regression journey', () => {
     expect(socket.closes).toBe(0);
 
     // ---------------------------------------------------------------
-    // Step 3: Open a 5th agent → active preset stays four (#1701)
+    // Step 3: Open a 5th agent → overflow to single (four at capacity)
     // ---------------------------------------------------------------
     await navigateToTerminal(page, agentE);
     await expect.poll(() => socket.attaches).toBe(5);
-    // open() no longer clobbers the preset — stays four
-    await expect.poll(() => activePreset(page)).toBe('four');
-    await expect.poll(() => visiblePaneCount(page)).toBe(4);
+    // open() detects four-pane at capacity → overflow to single
+    await expect.poll(() => activePreset(page)).toBe('single');
+    await expect.poll(() => visiblePaneCount(page)).toBe(1);
 
     // All 5 sessions exist in the rail
     await expect(page.getByRole('button', { name: 'Terminals (5)' })).toBeVisible();
 
     // ---------------------------------------------------------------
-    // Step 4: Explicitly switch to single, then back to four — original restored
+    // Step 4: Switch back to four — grid assignments preserved after overflow
     // ---------------------------------------------------------------
-    await clickPreset(page, 'single');
+    // Already in single after overflow — verify, then switch to four
     await expect.poll(() => activePreset(page)).toBe('single');
     await expect.poll(() => visiblePaneCount(page)).toBe(1);
     await clickPreset(page, 'four');
