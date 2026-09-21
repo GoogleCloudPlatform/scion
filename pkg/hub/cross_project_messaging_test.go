@@ -580,36 +580,3 @@ func TestCrossProject_OneWayPolicy(t *testing.T) {
 	require.False(t, allowed, "reply should be denied because receiver is project-mode, can't send cross-project")
 }
 
-// ---------------------------------------------------------------------------
-// derivePeerFromExternalRef tests
-// ---------------------------------------------------------------------------
-
-func TestDerivePeerFromExternalRef(t *testing.T) {
-	t.Run("agent-agent DM", func(t *testing.T) {
-		ref := "dm:agent:aaa0bb0c-cddd-eeef-ff11-122233344455:agent:ddd0ee0f-faaa-1112-2233-344455566677"
-		kind, id := derivePeerFromExternalRef(ref, "agent", "aaa0bb0c-cddd-eeef-ff11-122233344455")
-		require.Equal(t, "agent", kind)
-		require.Equal(t, "ddd0ee0f-faaa-1112-2233-344455566677", id)
-	})
-
-	t.Run("reverse direction", func(t *testing.T) {
-		ref := "dm:agent:aaa0bb0c-cddd-eeef-ff11-122233344455:agent:ddd0ee0f-faaa-1112-2233-344455566677"
-		kind, id := derivePeerFromExternalRef(ref, "agent", "ddd0ee0f-faaa-1112-2233-344455566677")
-		require.Equal(t, "agent", kind)
-		require.Equal(t, "aaa0bb0c-cddd-eeef-ff11-122233344455", id)
-	})
-
-	t.Run("not a participant", func(t *testing.T) {
-		ref := "dm:agent:aaa:agent:bbb"
-		kind, id := derivePeerFromExternalRef(ref, "agent", "ccc")
-		require.Equal(t, "", kind)
-		require.Equal(t, "", id)
-	})
-
-	t.Run("not a DM ref", func(t *testing.T) {
-		ref := "thread:some-thread"
-		kind, id := derivePeerFromExternalRef(ref, "agent", "aaa")
-		require.Equal(t, "", kind)
-		require.Equal(t, "", id)
-	})
-}

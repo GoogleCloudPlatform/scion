@@ -62,9 +62,6 @@ func TestCreateMessageEnumeration(t *testing.T) {
 		// dispatchRoutedRecipient: routed broker inbound (centralized routing).
 		"handlers_broker_inbound_routed.go:dispatchRoutedRecipient": "Routed inbound: conversation stamped via Phase 11 or Phase 5 before CreateMessage",
 
-		// sendViaDirectConversation: cross-project direct message.
-		"handlers_conversation_send.go:sendViaDirectConversation": "Cross-project messaging: ConversationID set from resolved conversation before CreateMessage",
-
 		// sendAgentRouted primary: web chat user → agent.
 		"handlers_chat_v2.go:sendAgentRouted:primary": "B15 dual-write: web chat user→agent primary message",
 
