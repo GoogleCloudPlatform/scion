@@ -51,20 +51,20 @@ func createGroupClosureConstraint(t *testing.T, s store.Store, groupID string) {
 	require.NoError(t, err)
 }
 
-// helper: create an AccessConstraint with a principal subject of type "group".
+// helper: create an AccessConstraint with a group_closure subject targeting groupID.
+// Groups are collection resources, so constraints must use group_closure (not
+// principal with type "group").
 func createGroupPrincipalConstraint(t *testing.T, s store.Store, groupID string) {
 	t.Helper()
 	ctx := context.Background()
-	principalType := "group"
 	_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
-		Name:                 "test-principal-constraint-" + groupID,
-		SubjectKind:          store.ConstraintSubjectPrincipal,
-		SubjectPrincipalType: &principalType,
-		SubjectPrincipalID:   strPtr(groupID),
-		ScopeType:            store.RoleScopeSystem,
-		MaximumPermissions:   []string{"agent.read"},
-		Purpose:              "test constraint for group principal",
-		CreatedBy:            "test",
+		Name:               "test-principal-constraint-" + groupID,
+		SubjectKind:        store.ConstraintSubjectGroupClosure,
+		SubjectGroupID:     strPtr(groupID),
+		ScopeType:          store.RoleScopeSystem,
+		MaximumPermissions: []string{"agent.read"},
+		Purpose:            "test constraint for group principal",
+		CreatedBy:          "test",
 	})
 	require.NoError(t, err)
 }
