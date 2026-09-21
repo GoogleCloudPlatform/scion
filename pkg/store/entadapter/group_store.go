@@ -774,7 +774,7 @@ func (s *GroupStore) hasPathDown(ctx context.Context, current, target uuid.UUID)
 	}
 
 	drv := s.client.Driver()
-	p1, p2 := sqlPh(drv.Dialect(), 1), sqlPh(drv.Dialect(), 2)
+	p1, p2 := sqlUUIDPh(drv.Dialect(), 1), sqlUUIDPh(drv.Dialect(), 2)
 
 	query := fmt.Sprintf(`WITH RECURSIVE descendants(id, depth) AS (
     SELECT parent_group_id, 1 FROM group_child_groups WHERE group_id = %s
@@ -809,7 +809,7 @@ func (s *GroupStore) GetEffectiveGroups(ctx context.Context, userID string) ([]s
 	}
 
 	drv := s.client.Driver()
-	p1 := sqlPh(drv.Dialect(), 1)
+	p1 := sqlUUIDPh(drv.Dialect(), 1)
 
 	query := fmt.Sprintf(`WITH RECURSIVE effective(id) AS (
     SELECT group_id AS id FROM group_memberships WHERE user_id = %s
@@ -853,7 +853,7 @@ func (s *GroupStore) GetParentGroups(ctx context.Context, groupID string) ([]str
 	}
 
 	drv := s.client.Driver()
-	p1 := sqlPh(drv.Dialect(), 1)
+	p1 := sqlUUIDPh(drv.Dialect(), 1)
 
 	query := fmt.Sprintf(`WITH RECURSIVE ancestors(id, depth) AS (
     SELECT group_id, 1 FROM group_child_groups WHERE parent_group_id = %s
@@ -967,11 +967,16 @@ func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID str
 	drv := s.client.Driver()
 	d := drv.Dialect()
 
-	// Build seed clause: SELECT ? AS id UNION ALL SELECT ? AS id ...
+	// Build seed clause: SELECT $1::uuid AS id UNION ALL ... on Postgres.
+	// The CTE has no column type of its own. google/uuid.UUID's driver.Valuer
+	// returns a string, so database/sql/Ent may still bind text even after
+	// OpenPostgres registers uuid with pgx. An untyped `SELECT $1 AS id` then
+	// types e.id as text and `gc.parent_group_id = e.id` fails with SQLSTATE
+	// 42883 (uuid = text). Casting the seed parameter makes the CTE uuid.
 	parts := make([]string, len(seedIDs))
 	args := make([]any, len(seedIDs))
 	for i, id := range seedIDs {
-		parts[i] = fmt.Sprintf("SELECT %s AS id", sqlPh(d, i+1))
+		parts[i] = fmt.Sprintf("SELECT %s AS id", sqlUUIDPh(d, i+1))
 		args[i] = id
 	}
 	seed := strings.Join(parts, " UNION ALL ")
@@ -1064,4 +1069,16 @@ func sqlPh(d string, pos int) string {
 		return fmt.Sprintf("$%d", pos)
 	}
 	return "?"
+}
+
+// sqlUUIDPh is sqlPh with an explicit uuid cast on Postgres. Use it for raw
+// SQL that compares a parameter to a uuid column (or that seeds a CTE whose
+// column type would otherwise be inferred from an untyped parameter).
+// SQLite stores UUIDs as text, so the placeholder is left uncast.
+func sqlUUIDPh(d string, pos int) string {
+	p := sqlPh(d, pos)
+	if d == dialect.Postgres {
+		return p + "::uuid"
+	}
+	return p
 }
