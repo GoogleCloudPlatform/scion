@@ -12,6 +12,8 @@ interface AgentFixture {
   phase: string;
   projectId: string;
   activity?: string;
+  lastActivityEvent?: string;
+  lastSeen?: string;
 }
 
 async function setup(
@@ -3329,4 +3331,296 @@ test('pane borders are visible in multi-pane layout', async ({ page }) => {
   });
 
   expect(hasBorders).toBe(true);
+});
+
+// --- Rail sorting widget tests (P3 #1703) ---
+
+/** Helper: get the ordered list of agent names in the rail. */
+async function getRailAgentNames(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const items = document.querySelectorAll<HTMLElement>(
+      '#terminal-workspace .terminal-rail-item .terminal-agent-name'
+    );
+    return [...items].map((el) => el.textContent ?? '');
+  });
+}
+
+/** Helper: select a sort option from the rail sort dropdown by dispatching sl-select. */
+async function selectRailSort(page: Page, value: string): Promise<void> {
+  await page.evaluate((v) => {
+    const menu = document.querySelector('.terminal-sort-menu') as HTMLElement;
+    const item = menu.querySelector(`sl-menu-item[value="${v}"]`) as HTMLElement;
+    if (!item) throw new Error(`Sort menu item ${v} not found`);
+    menu.dispatchEvent(
+      new CustomEvent('sl-select', { detail: { item }, bubbles: true, composed: true })
+    );
+  }, value);
+}
+
+/** Helper: get the currently checked sort option value. */
+async function checkedSortValue(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const items = document.querySelectorAll<HTMLElement>(
+      '.terminal-sort-menu sl-menu-item[checked]'
+    );
+    for (const item of items) {
+      return item.getAttribute('value');
+    }
+    return null;
+  });
+}
+
+test('sort widget renders with 3 menu items', async ({ page }) => {
+  await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect(page.locator('#terminal-workspace')).toBeVisible();
+
+  // Sort dropdown trigger is visible
+  await expect(page.locator('.terminal-sort-dropdown')).toBeVisible();
+  await expect(page.locator('.terminal-sort-btn')).toBeVisible();
+
+  // Open the dropdown and verify 3 menu items
+  await page.click('.terminal-sort-btn');
+  const items = page.locator('.terminal-sort-menu sl-menu-item');
+  await expect(items).toHaveCount(3);
+
+  // Verify values
+  await expect(items.nth(0)).toHaveAttribute('value', 'added');
+  await expect(items.nth(1)).toHaveAttribute('value', 'alpha');
+  await expect(items.nth(2)).toHaveAttribute('value', 'activity');
+});
+
+test('default sort is "Added" and entries appear in creation order', async ({ page }) => {
+  const agents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'Zeta', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'Alpha', phase: 'running', projectId: 'proj' },
+    [agentC]: { id: agentC, name: 'Mu', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, agents);
+
+  // Open agents in order: Zeta, Alpha, Mu
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+  await navigateToTerminal(page, agentC);
+  await expect.poll(() => socket.attaches).toBe(3);
+
+  // Default sort is "Added" (checked)
+  await expect.poll(() => checkedSortValue(page)).toBe('added');
+
+  // Entries appear in creation order: Zeta, Alpha, Mu
+  await expect.poll(() => getRailAgentNames(page)).toEqual(['Zeta', 'Alpha', 'Mu']);
+});
+
+test('alphabetical sort reorders entries by agent name', async ({ page }) => {
+  const agents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'Zeta', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'Alpha', phase: 'running', projectId: 'proj' },
+    [agentC]: { id: agentC, name: 'Mu', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, agents);
+
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+  await navigateToTerminal(page, agentC);
+  await expect.poll(() => socket.attaches).toBe(3);
+
+  // Select alphabetical sort
+  await selectRailSort(page, 'alpha');
+
+  // Entries reordered: Alpha, Mu, Zeta
+  await expect.poll(() => getRailAgentNames(page)).toEqual(['Alpha', 'Mu', 'Zeta']);
+
+  // "alpha" is now checked
+  await expect.poll(() => checkedSortValue(page)).toBe('alpha');
+});
+
+test('activity sort reorders entries by most recent activity first', async ({ page }) => {
+  const agents: Record<string, AgentFixture> = {
+    [agent]: {
+      id: agent,
+      name: 'Old',
+      phase: 'running',
+      projectId: 'proj',
+      lastActivityEvent: '2026-01-01T00:00:00Z',
+    },
+    [agentB]: {
+      id: agentB,
+      name: 'Recent',
+      phase: 'running',
+      projectId: 'proj',
+      lastActivityEvent: '2026-09-20T12:00:00Z',
+    },
+    [agentC]: {
+      id: agentC,
+      name: 'Middle',
+      phase: 'running',
+      projectId: 'proj',
+      lastActivityEvent: '2026-06-15T06:00:00Z',
+    },
+  };
+  const socket = await setup(page, true, true, agents);
+
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+  await navigateToTerminal(page, agentC);
+  await expect.poll(() => socket.attaches).toBe(3);
+
+  // Select activity sort
+  await selectRailSort(page, 'activity');
+
+  // Most recent first: Recent, Middle, Old
+  await expect.poll(() => getRailAgentNames(page)).toEqual(['Recent', 'Middle', 'Old']);
+
+  // "activity" is now checked
+  await expect.poll(() => checkedSortValue(page)).toBe('activity');
+});
+
+test('sort preserves active rail selection', async ({ page }) => {
+  const agents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'Zeta', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'Alpha', phase: 'running', projectId: 'proj' },
+    [agentC]: { id: agentC, name: 'Mu', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, agents);
+
+  // Open all agents; last opened (Mu) becomes selected
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+  await navigateToTerminal(page, agentC);
+  await expect.poll(() => socket.attaches).toBe(3);
+
+  // Verify Mu is selected (last opened → in visible slots)
+  await expect(page.locator('.terminal-rail-item[data-selected="true"]')).toHaveCount(1);
+  const selectedBefore = await page.evaluate(() => {
+    const sel = document.querySelector('.terminal-rail-item[data-selected="true"]');
+    return sel?.querySelector('.terminal-agent-name')?.textContent ?? '';
+  });
+  expect(selectedBefore).toBe('Mu');
+
+  // Switch to alphabetical
+  await selectRailSort(page, 'alpha');
+
+  // Selection still on Mu
+  await expect(page.locator('.terminal-rail-item[data-selected="true"]')).toHaveCount(1);
+  const selectedAfter = await page.evaluate(() => {
+    const sel = document.querySelector('.terminal-rail-item[data-selected="true"]');
+    return sel?.querySelector('.terminal-agent-name')?.textContent ?? '';
+  });
+  expect(selectedAfter).toBe('Mu');
+
+  // No new sockets opened — sorting did not trigger reattach
+  expect(socket.attaches).toBe(3);
+  expect(socket.closes).toBe(0);
+});
+
+test('sort preserves layout preset slot assignments', async ({ page }) => {
+  const agents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'Zeta', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'Alpha', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, agents);
+
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(2);
+
+  // Place into two-columns
+  await placeInPreset(page, keys[0], 'two-columns', 0);
+  await placeInPreset(page, keys[1], 'two-columns', 1);
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+
+  // Record slot assignments before sort
+  const slotsBefore = await page.evaluate(() => {
+    type WorkspaceEl = HTMLElement & {
+      workspaceRoot?: {
+        layoutManager: { getState: () => { twoColumns: (string | null)[] } };
+      };
+    };
+    const host = document.querySelector('#terminal-workspace') as WorkspaceEl;
+    return host.workspaceRoot!.layoutManager.getState().twoColumns;
+  });
+
+  // Switch to alphabetical sort
+  await selectRailSort(page, 'alpha');
+
+  // Slot assignments unchanged
+  const slotsAfter = await page.evaluate(() => {
+    type WorkspaceEl = HTMLElement & {
+      workspaceRoot?: {
+        layoutManager: { getState: () => { twoColumns: (string | null)[] } };
+      };
+    };
+    const host = document.querySelector('#terminal-workspace') as WorkspaceEl;
+    return host.workspaceRoot!.layoutManager.getState().twoColumns;
+  });
+
+  expect(slotsAfter).toEqual(slotsBefore);
+
+  // Both panes still visible
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+
+  // No socket changes
+  expect(socket.attaches).toBe(2);
+  expect(socket.closes).toBe(0);
+});
+
+test('deterministic ties: agents with same name sort consistently by session key', async ({
+  page,
+}) => {
+  const agents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'twin', phase: 'running', projectId: 'proj-a' },
+    [agentB]: { id: agentB, name: 'twin', phase: 'running', projectId: 'proj-b' },
+    [agentC]: { id: agentC, name: 'twin', phase: 'running', projectId: 'proj-c' },
+  };
+  const socket = await setup(page, true, true, agents);
+
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+  await navigateToTerminal(page, agentC);
+  await expect.poll(() => socket.attaches).toBe(3);
+
+  // Switch to alphabetical — all have same name "twin", so ties break by session key
+  await selectRailSort(page, 'alpha');
+
+  // Get rail project names as a proxy for order (names are all "twin")
+  const projects = await page.evaluate(() => {
+    const items = document.querySelectorAll<HTMLElement>(
+      '#terminal-workspace .terminal-rail-item .terminal-project-name'
+    );
+    return [...items].map((el) => el.textContent ?? '');
+  });
+  expect(projects.length).toBe(3);
+
+  // Switch back to Added, then back to Alphabetical — order must be identical
+  await selectRailSort(page, 'added');
+  await selectRailSort(page, 'alpha');
+
+  const projectsAgain = await page.evaluate(() => {
+    const items = document.querySelectorAll<HTMLElement>(
+      '#terminal-workspace .terminal-rail-item .terminal-project-name'
+    );
+    return [...items].map((el) => el.textContent ?? '');
+  });
+
+  // Same deterministic order both times
+  expect(projectsAgain).toEqual(projects);
+
+  // No socket changes from sorting
+  expect(socket.attaches).toBe(3);
+  expect(socket.closes).toBe(0);
 });

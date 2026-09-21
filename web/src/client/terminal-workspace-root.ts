@@ -28,6 +28,8 @@ interface RailEntry {
   metadata: TerminalAgentMetadata;
   unsubscribeState: () => void;
   unsubscribeMetadata: () => void;
+  /** Monotonic insertion index for stable chronological sorting. */
+  addedAt: number;
 }
 
 // TERMINAL_DRAG_MIME imported from ./terminal-workspace-events.js
@@ -96,6 +98,10 @@ export class TerminalWorkspaceRoot {
   private currentPath = '/terminals';
   private refreshQueued = false;
   private narrowQuery: MediaQueryList | null = null;
+  /** Monotonic counter for stable chronological rail ordering. */
+  private entryCounter = 0;
+  /** Current rail sort mode. */
+  private railSort: 'added' | 'alpha' | 'activity' = 'added';
 
   private user: User | null = null;
 
@@ -122,7 +128,8 @@ export class TerminalWorkspaceRoot {
     const title = document.createElement('h2');
     title.textContent = 'Open terminals';
     this.count.className = 'terminal-count';
-    railHeader.append(title, this.count);
+    const railSortWidget = this.buildRailSortWidget();
+    railHeader.append(title, this.count, railSortWidget);
     this.railList.className = 'terminal-rail-list';
     this.railList.setAttribute('role', 'list');
     this.railList.setAttribute('aria-label', 'Retained terminal sessions');
@@ -214,6 +221,60 @@ export class TerminalWorkspaceRoot {
       this.layoutManager.unzoom();
     });
     this.layoutBar.append(restoreBtn);
+  }
+
+  /** Build the sort dropdown widget for the rail header. */
+  private buildRailSortWidget(): HTMLElement {
+    const wrapper = document.createElement('sl-dropdown');
+    wrapper.className = 'terminal-sort-dropdown';
+
+    const trigger = document.createElement('sl-icon-button');
+    trigger.setAttribute('slot', 'trigger');
+    trigger.setAttribute('name', 'sort-down');
+    trigger.setAttribute('label', 'Sort rail');
+    trigger.className = 'terminal-sort-btn';
+
+    const menu = document.createElement('sl-menu');
+    menu.className = 'terminal-sort-menu';
+
+    const label = document.createElement('sl-menu-label');
+    label.textContent = 'Sort by';
+    menu.append(label);
+
+    const options: Array<{ value: 'added' | 'alpha' | 'activity'; label: string }> = [
+      { value: 'added', label: 'Added' },
+      { value: 'alpha', label: 'Alphabetical' },
+      { value: 'activity', label: 'Last activity' },
+    ];
+
+    for (const opt of options) {
+      const item = document.createElement('sl-menu-item');
+      item.setAttribute('type', 'checkbox');
+      item.setAttribute('value', opt.value);
+      item.textContent = opt.label;
+      if (opt.value === this.railSort) item.setAttribute('checked', '');
+      menu.append(item);
+    }
+
+    menu.addEventListener('sl-select', (e: Event) => {
+      const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
+      const value = detail?.item?.getAttribute('value');
+      if (value === 'added' || value === 'alpha' || value === 'activity') {
+        this.railSort = value;
+        // Update checked state on all menu items
+        for (const mi of menu.querySelectorAll('sl-menu-item')) {
+          if (mi.getAttribute('value') === value) {
+            mi.setAttribute('checked', '');
+          } else {
+            mi.removeAttribute('checked');
+          }
+        }
+        this.refresh();
+      }
+    });
+
+    wrapper.append(trigger, menu);
+    return wrapper;
   }
 
   setUser(user: User | null): void {
@@ -308,6 +369,7 @@ export class TerminalWorkspaceRoot {
         metadata,
         unsubscribeState: () => {},
         unsubscribeMetadata: () => {},
+        addedAt: this.entryCounter++,
       };
       entry.unsubscribeState = session.subscribe((next) => {
         entry.state = next;
@@ -359,8 +421,44 @@ export class TerminalWorkspaceRoot {
     });
   }
 
+  /** Sort rail entries in place according to the current railSort mode. */
+  private sortEntries(entries: RailEntry[]): void {
+    entries.sort((a, b) => {
+      let cmp = 0;
+      switch (this.railSort) {
+        case 'added':
+          cmp = a.addedAt - b.addedAt;
+          break;
+        case 'alpha': {
+          const nameA = (a.metadata.agent?.name ?? a.state.agentId).toLowerCase();
+          const nameB = (b.metadata.agent?.name ?? b.state.agentId).toLowerCase();
+          cmp = nameA.localeCompare(nameB);
+          break;
+        }
+        case 'activity': {
+          const tsA = a.metadata.agent?.lastActivityEvent ?? a.metadata.agent?.lastSeen ?? '';
+          const tsB = b.metadata.agent?.lastActivityEvent ?? b.metadata.agent?.lastSeen ?? '';
+          // Descending: most recent first
+          cmp = tsB.localeCompare(tsA);
+          break;
+        }
+      }
+      // Deterministic tie-breaking: by agent name, then by session key
+      if (cmp === 0) {
+        const nameA = (a.metadata.agent?.name ?? a.state.agentId).toLowerCase();
+        const nameB = (b.metadata.agent?.name ?? b.state.agentId).toLowerCase();
+        cmp = nameA.localeCompare(nameB);
+      }
+      if (cmp === 0) {
+        cmp = a.state.key.localeCompare(b.state.key);
+      }
+      return cmp;
+    });
+  }
+
   private refresh(): void {
     const entries = [...this.entries.values()];
+    this.sortEntries(entries);
     const total = entries.length;
     const focusedId =
       document.activeElement instanceof HTMLElement &&
@@ -914,6 +1012,16 @@ export class TerminalWorkspaceRoot {
         text-align: center;
         font-size: 0.75rem;
         color: var(--scion-text-muted, #64748b);
+      }
+      .terminal-sort-dropdown {
+        margin-left: auto;
+      }
+      .terminal-sort-btn {
+        font-size: 1rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+      .terminal-sort-btn:hover {
+        color: var(--scion-text, #1e293b);
       }
       .terminal-rail-list {
         flex: 1;
