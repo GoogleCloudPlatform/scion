@@ -2,12 +2,14 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: '.',
+<<<<<<< HEAD
   testMatch: [
     'workspace.pw.ts',
     'reconnect.pw.ts',
     'ownership.pw.ts',
     'dm-buttons.pw.ts',
     'toast-lifecycle.pw.ts',
+    'url-layout.pw.ts',
   ],
   workers: 1,
   timeout: 30000,

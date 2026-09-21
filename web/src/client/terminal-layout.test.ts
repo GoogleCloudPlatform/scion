@@ -1013,7 +1013,9 @@ describe('parseLayoutUrl', () => {
   });
 
   it('deduplicates agent IDs keeping first occurrence', () => {
-    const parsed = parseLayoutUrl(`?lv=1&lp=four&s0=${agentA}&s1=${agentB}&s2=${agentA}&s3=${agentC}`);
+    const parsed = parseLayoutUrl(
+      `?lv=1&lp=four&s0=${agentA}&s1=${agentB}&s2=${agentA}&s3=${agentC}`
+    );
     expect(parsed).not.toBeNull();
     expect(parsed!.slots).toEqual([agentA, agentB, null, agentC]);
   });

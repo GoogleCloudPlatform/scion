@@ -358,7 +358,7 @@ export class TerminalLayoutManager {
 /** Current layout URL format version. */
 export const LAYOUT_URL_VERSION = '1';
 
-/** UUID v4 pattern for agent ID validation. */
+/** UUID format pattern for agent ID validation. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Valid preset names for URL encoding. */
