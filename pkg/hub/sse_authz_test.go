@@ -339,6 +339,127 @@ func TestExpandSSEWildcards_MixedSubjects(t *testing.T) {
 	assert.NotContains(t, expanded, "project.>")
 }
 
+// --- expandSSEWildcards: subject deduplication tests ---
+
+func TestExpandSSEWildcards_DuplicateWildcardInput(t *testing.T) {
+	// Duplicate wildcard input: ["project.>", "project.>", "notification.>"]
+	// Each project.> independently expands to the same project subjects.
+	// After dedup, each project.<uuid>.> should appear exactly once.
+	mockStore := &mockAuthzStore{
+		projects: []store.Project{
+			{ID: "proj-1", OwnerID: "user-1"},
+			{ID: "proj-2", OwnerID: "user-1"},
+		},
+		projectMemberships: map[string]*store.ProjectMembership{
+			"proj-1:user-1": {ProjectID: "proj-1", UserID: "user-1", Role: store.ProjectRoleOwner},
+			"proj-2:user-1": {ProjectID: "proj-2", UserID: "user-1", Role: store.ProjectRoleOwner},
+		},
+	}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "project.>", "notification.>"})
+
+	// Count occurrences of each subject.
+	counts := make(map[string]int)
+	for _, s := range expanded {
+		counts[s]++
+	}
+	assert.Equal(t, 1, counts["project.proj-1.>"],
+		"project.proj-1.> should appear exactly once after dedup")
+	assert.Equal(t, 1, counts["project.proj-2.>"],
+		"project.proj-2.> should appear exactly once after dedup")
+	assert.Equal(t, 1, counts["notification.>"],
+		"notification.> should appear exactly once")
+
+	// Total: 2 projects + 1 notification = 3 (not 2*2 + 1 = 5)
+	assert.Equal(t, 3, len(expanded),
+		"deduped length should be len(projects) + 1, not 2*len(projects) + 1")
+}
+
+func TestExpandSSEWildcards_WildcardExplicitOverlap(t *testing.T) {
+	// Wildcard + explicit overlap: ["project.>", "project.proj-1.>"]
+	// Expansion produces project.proj-1.> from the wildcard, which overlaps
+	// with the explicit project.proj-1.> already in the list.
+	// After dedup, project.proj-1.> should appear exactly once.
+	mockStore := &mockAuthzStore{
+		projects: []store.Project{
+			{ID: "proj-1", OwnerID: "user-1"},
+			{ID: "proj-2", OwnerID: "user-1"},
+		},
+		projectMemberships: map[string]*store.ProjectMembership{
+			"proj-1:user-1": {ProjectID: "proj-1", UserID: "user-1", Role: store.ProjectRoleOwner},
+			"proj-2:user-1": {ProjectID: "proj-2", UserID: "user-1", Role: store.ProjectRoleOwner},
+		},
+	}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "project.proj-1.>"})
+
+	// Count occurrences.
+	counts := make(map[string]int)
+	for _, s := range expanded {
+		counts[s]++
+	}
+	assert.Equal(t, 1, counts["project.proj-1.>"],
+		"project.proj-1.> should appear exactly once (not twice from wildcard + explicit)")
+	assert.Equal(t, 1, counts["project.proj-2.>"],
+		"project.proj-2.> should appear exactly once from wildcard expansion")
+
+	// Total: 2 unique project subjects (proj-1 deduped, proj-2 from wildcard)
+	assert.Equal(t, 2, len(expanded),
+		"deduped length should be 2, not 3")
+
+	// The explicit subject should still be present (independently authorized).
+	assert.Contains(t, expanded, "project.proj-1.>")
+}
+
+func TestExpandSSEWildcards_MixedNotificationDedup(t *testing.T) {
+	// Mixed with notification dedup: ["project.>", "notification.>", "notification.>"]
+	// notification.> appears twice in input — after dedup, only once.
+	mockStore := &mockAuthzStore{
+		projects: []store.Project{
+			{ID: "proj-1", OwnerID: "user-1"},
+		},
+		projectMemberships: map[string]*store.ProjectMembership{
+			"proj-1:user-1": {ProjectID: "proj-1", UserID: "user-1", Role: store.ProjectRoleOwner},
+		},
+	}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "notification.>", "notification.>"})
+
+	counts := make(map[string]int)
+	for _, s := range expanded {
+		counts[s]++
+	}
+	assert.Equal(t, 1, counts["notification.>"],
+		"notification.> should appear exactly once after dedup")
+	assert.Equal(t, 1, counts["project.proj-1.>"],
+		"project.proj-1.> should appear exactly once")
+
+	// Total: 1 project + 1 notification = 2 (not 1 + 2 = 3)
+	assert.Equal(t, 2, len(expanded),
+		"deduped length should be 2")
+}
+
 func TestAuthorizeSSESubjects_WildcardInResourceID_Denied(t *testing.T) {
 	// Belt-and-suspenders: if a wildcard somehow reaches authorizeSSESubjects
 	// in the resource-ID position, it must be denied.

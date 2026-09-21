@@ -1417,6 +1417,22 @@ func (ws *WebServer) expandSSEWildcards(r *http.Request, subjects []string) []st
 		}
 	}
 
+	// Deduplicate expanded subjects preserving first-occurrence order.
+	// This handles two scenarios:
+	// 1. Duplicate wildcards in input (e.g. ["project.>", "project.>"])
+	//    that each expand independently to the same concrete subjects.
+	// 2. Wildcard + explicit overlap (e.g. ["project.>", "project.<uuid>.>"])
+	//    where expansion produces a subject already present explicitly.
+	seen := make(map[string]bool, len(expanded))
+	deduped := make([]string, 0, len(expanded))
+	for _, s := range expanded {
+		if !seen[s] {
+			seen[s] = true
+			deduped = append(deduped, s)
+		}
+	}
+	expanded = deduped
+
 	if len(expanded) == 0 {
 		// All subjects were wildcards that expanded to nothing.
 		// Return an empty slice (authorizeSSESubjects will see 0
