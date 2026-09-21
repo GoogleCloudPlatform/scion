@@ -21,14 +21,19 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+-preview.*' # Preview: v0.3.0-preview.1
       - 'v[0-9]+.[0-9]+.[0-9]+-rc.*'      # RC: v0.3.0-rc.1
       - 'nightly-[0-9]*'                   # Nightly: nightly-20260916
-
-permissions:
-  contents: write
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref (tag) to build'
+        required: true
+        type: string
 
 jobs:
   build:
     name: Build Multi-Arch Binaries
     runs-on: ubuntu-latest
+    permissions:
+      contents: read     # Only needs to read code for building
     strategy:
       matrix:
         include:
@@ -50,6 +55,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
         with:
+          ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -117,6 +123,8 @@ jobs:
   build-plugins:
     name: Build Plugin Binaries
     runs-on: ubuntu-latest
+    permissions:
+      contents: read     # Only needs to read code for building
     strategy:
       matrix:
         include:
@@ -176,6 +184,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
         with:
+          ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -211,18 +220,23 @@ jobs:
     name: Create GitHub Release
     needs: [build, build-plugins]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write    # Needs to create releases and push branches
     outputs:
       channel: ${{ steps.channel.outputs.channel }}
       tag: ${{ steps.channel.outputs.tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Determine release channel
         id: channel
         env:
-          REF: ${{ github.ref }}
+          REF: ${{ inputs.ref || github.ref }}
         run: |
+          # Strip refs/tags/ prefix if present
           TAG="${REF#refs/tags/}"
           if [[ "$TAG" == nightly-* ]]; then
             echo "prerelease=true" >> $GITHUB_OUTPUT
@@ -252,6 +266,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
+          tag_name: ${{ steps.channel.outputs.tag }}
           files: release/*
           draft: false
           prerelease: ${{ steps.channel.outputs.prerelease == 'true' }}
@@ -294,6 +309,8 @@ jobs:
     name: Update LATEST.json
     needs: release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write    # Needs to commit and push to main
     steps:
       - name: Checkout main branch
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
