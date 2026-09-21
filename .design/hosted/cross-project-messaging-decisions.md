@@ -1,9 +1,10 @@
 # Confirmed decisions and messaging-mode delegation check
 
-Updated 2026-09-17. Records the user's 15:16 UTC follow-up in conversation
-`1f0b5c6a-4352-4079-9522-0d7c88976e76`. Source inspection is against commit
-`1b0a25a9774cdfa505c98debf29d7f1812acf6fc`; no product code was changed and no
-runtime exploit or integration test was attempted.
+Updated 2026-09-21. Originally recorded the user's 2026-09-17 15:16 UTC
+follow-up decisions. Now extended with the CPM cleanup implementation decisions
+from Phases 1–4 (#1680, issues #1685–#1696). Source inspection was originally
+against commit `1b0a25a9774cdfa505c98debf29d7f1812acf6fc`; cleanup
+implementation landed on the `cpm-cleanup-integration` branch.
 
 ## Confirmed decisions
 
@@ -127,3 +128,140 @@ The recommended history rule permits a canonical participant to read while at
 least one direction remains authorized and the Hub feature is enabled. It
 allows project-mode recipient reads without an implicit reply grant. None of
 these details weakens the confirmed global-disable behavior.
+
+## CPM cleanup implementation decisions (Phases 1–4)
+
+The following decisions were made during the CPM cleanup implementation
+(#1680, September 2026). CPM has never been deployed; these decisions carry
+no backward compatibility constraints.
+
+### D-C1: Remove duplicate conversation send endpoint
+
+**Decision**: Delete `POST /api/v1/conversations/{id}/messages` for agent
+sends. Route all agent `conv:` references through the outbound endpoint with
+a `conversation_ref` field.
+
+**Rationale**: The original design proposed a separate conversation send
+endpoint for `conv:<uuid>` replies. During implementation it became clear
+this created a duplicate delivery path with independent authorization,
+persistence, and dispatch logic — a maintenance and security burden. Since
+CPM has never been deployed, there are no existing clients to support.
+
+**Consequence**: One transport for all agent sends. The outbound handler's
+`resolveOutboundRouting` derives the peer from the conversation reference
+and feeds the result into `ExecuteAgentDM`. The `handleConversationSend` in
+`handlers_chat_v2.go` remains for the native web chat user path only.
+
+**Implementation**: #1693 (CLI cutover), #1694 (endpoint deletion).
+
+### D-C2: Shared DM operation vs separate paths
+
+**Decision**: Extract a single typed internal operation (`ExecuteAgentDM`)
+that both the structured inbound handler and the outbound handler call for
+all agent-to-agent DMs.
+
+**Rationale**: Before the cleanup, the structured inbound path and the
+outbound path had separate authorization, persistence, audit, and dispatch
+code. This led to inconsistencies in rate limiting, provenance stamping,
+and delivery outcome reporting. A shared operation ensures identical
+admission checks regardless of entry point.
+
+**Consequence**: `AgentDMInput` / `AgentDMResult` / `AgentDMError` are the
+typed contract. Adapters (HTTP handlers) retain routing, conversation
+resolution, group/human routing, and HTTP serialization. The core operation
+owns rate limiting, authorization, foreign attachment rejection, wake,
+conversation resolution, audit, persistence, publication, and dispatch.
+
+**Implementation**: #1688 (extraction), #1689 (truthful outcomes), #1690
+(provenance unification).
+
+### D-C3: Wake behavior — resume only for suspended single-agent targets
+
+**Decision**: Wake (resume from suspended state) is attempted only for
+single-agent targets that are currently suspended. Running agents are not
+restarted. Stopped agents are rejected. Group and human targets do not
+trigger wake. Wake runs after all admission checks.
+
+**Rationale**: Wake is a side effect — resuming a suspended agent costs
+resources. Denied, oversized, or attachment-rejected requests must not
+trigger wake. The post-admission position ensures that only fully
+authorized sends can resume an agent.
+
+**Consequence**: `ExecuteAgentDM` checks wake eligibility after
+authorization and attachment validation. A denied cross-project send
+cannot resume a foreign agent. Managed-runtime agents do not support wake
+(explicit unsupported error).
+
+**Implementation**: #1691 (wake honor), #1712 (fork PR).
+
+### D-C4: Next-send authority across replicas (authoritative store reads)
+
+**Decision**: Cross-project authorization reads the Hub's
+`cross_project_messaging_enabled` setting directly from the shared store
+at every decision boundary, bypassing the replica-local operational
+settings cache.
+
+**Rationale**: The existing cache/event propagation model has a
+notification delay window. During that window, a recently disabled setting
+could still appear enabled on replicas that haven't received the
+invalidation event. For a security-critical kill switch, this delay is
+unacceptable.
+
+**Consequence**: `ReadAuthoritativeCrossProjectEnabled` performs a direct
+store read. The cache continues to drive UI refresh and non-security
+reads. The very next send after a disable observes the current setting.
+Store outages fail closed for new external access.
+
+**Implementation**: #1686 (#1697 fork PR).
+
+### D-C5: Typed outcomes and ambiguous results
+
+**Decision**: The DM operation returns three typed outcomes: `accepted`,
+`failed`, and `ambiguous`. No automatic pending replay is provided.
+
+**Rationale**: Broker acceptance does not guarantee harness consumption.
+Post-persistence failures (e.g. broker timeout, CAS failure on
+MarkMessageDispatched) leave the message in an indeterminate state.
+Reporting this honestly prevents callers from assuming exactly-once
+delivery and prevents the system from silently replaying messages.
+
+**Consequence**: API responses distinguish the three states. `ambiguous`
+means "persisted but dispatch outcome unknown" — callers must not
+automatically retry. The message row may be in "pending" or "dispatched"
+state. No blind retry guidance is returned.
+
+**Implementation**: #1689 (#1709 fork PR for provenance).
+
+### D-C6: Foreign attachment capability limit
+
+**Decision**: Cross-project DMs reject non-empty attachment payloads at
+admission time, before ingestion. This is a clear capability error, not
+a silent drop.
+
+**Rationale**: Cross-project attachment transfer requires Hub-managed
+attachment IDs with conversation-scoped authorization on upload, link,
+and download. This path is not implemented in the first release. Silently
+dropping attachments would be confusing; rejecting at admission makes the
+limit explicit and actionable.
+
+**Consequence**: `ExecuteAgentDM` checks for non-empty `Attachments` on
+cross-project sends and returns an `AgentDMError` with code
+`cross_project_content_unauthorized`. Text-only DMs proceed normally.
+The attachment transfer feature is an intended future extension.
+
+**Implementation**: #1687 (#1700 fork PR).
+
+### D-C7: No-deployment / no-transition decision
+
+**Decision**: No backward compatibility shim, 501 fallback, old-client
+support window, or historical CPM data migration is implemented.
+
+**Rationale**: CPM has never been deployed. There are no existing clients,
+no stored cross-project messages, and no live settings to migrate. Any
+compatibility infrastructure would be dead code with ongoing maintenance
+cost and no users.
+
+**Consequence**: The cleanup deleted the duplicate endpoint (#1694) and
+migrated all test coverage to the surviving outbound path (#1693) without
+any transition period. New deployments start with the consolidated
+architecture from day one.
