@@ -532,6 +532,9 @@ export class TerminalWorkspaceRoot {
     const [cols, rows] = GRID_TEMPLATES[effectivePreset];
     this.paneHost.style.gridTemplateColumns = cols;
     this.paneHost.style.gridTemplateRows = rows;
+
+    // Expose effective layout so CSS can scope focus-outline to multi-pane modes.
+    this.paneHost.dataset.effectiveLayout = effectivePreset;
   }
 
   /** Position each pane in the grid and manage empty slot placeholders. */
@@ -1226,7 +1229,11 @@ export class TerminalWorkspaceRoot {
         border: 1px solid #333;
         border-radius: 4px;
       }
-      scion-terminal-pane[data-focused] {
+      /* Focus outline only in multi-pane layouts — in single-pane mode focus
+         is implicit and the outline is visual noise (#1716). */
+      .terminal-pane-host[data-effective-layout='two-columns'] scion-terminal-pane[data-focused],
+      .terminal-pane-host[data-effective-layout='two-rows'] scion-terminal-pane[data-focused],
+      .terminal-pane-host[data-effective-layout='four'] scion-terminal-pane[data-focused] {
         outline: 2px solid var(--scion-primary, #3b82f6);
         outline-offset: -2px;
         border-color: var(--scion-primary, #3b82f6);

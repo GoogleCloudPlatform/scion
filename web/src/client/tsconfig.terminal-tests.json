@@ -1,13 +1,15 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": { "noEmit": true, "types": ["vite/client"] },
+  "files": ["../../node_modules/@shoelace-style/shoelace/dist/components/alert/alert.d.ts"],
   "include": [
     "terminal-layout.test.ts",
     "terminal-sessions.test.ts",
     "terminal-metadata.test.ts",
     "terminal-coordinator-teardown.test.ts",
     "terminal-coordinator-ownership.test.ts",
-    "terminal-reconnect.test.ts"
+    "terminal-reconnect.test.ts",
+    "terminal-workspace-root.test.ts"
   ],
   "exclude": []
 }
