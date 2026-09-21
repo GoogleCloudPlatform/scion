@@ -76,12 +76,13 @@ const (
 )
 
 // isDockerCompatibleRuntime returns true for runtimes that support docker exec
-// -e for env injection and /proc access for PID lookup. Only docker and
-// container (Podman-compatible) runtimes qualify. K8s exec uses the
-// remotecommand API, CloudRun uses a sandbox binary — these have different exec
-// semantics and are excluded.
+// -e for env injection and /proc access for PID lookup. Only "docker" qualifies.
+// "container" (Apple container) is excluded because its /proc and kill behavior
+// is untested. K8s exec uses the remotecommand API, CloudRun uses a sandbox
+// binary — these have different exec semantics and are excluded. Empty string
+// is also excluded (no runtime identified).
 func isDockerCompatibleRuntime(runtimeCmd string) bool {
-	return runtimeCmd == "docker" || runtimeCmd == "container" || runtimeCmd == ""
+	return runtimeCmd == "docker"
 }
 
 // generateAttachNonce generates a cryptographically random 32-character hex
@@ -100,15 +101,17 @@ func generateAttachNonce() (string, error) {
 // process that this attach session owns, using the per-attach nonce for causal
 // identification.
 //
-// This runs BEFORE the host-side PTY close in gracefulShutdownExec. It uses a
-// fresh context (not the session's canceled context) with a bounded timeout.
-// All failures are non-fatal — the current host-side cleanup always runs.
+// Timing relative to PTY close depends on the caller:
+//   - LocalPTYSession: cleanup runs BEFORE host-side PTY close (Run calls
+//     gracefulShutdownExec while the PTY is still open).
+//   - StreamPTYHandler: Run() closes the PTY before the deferred
+//     gracefulShutdownExec fires, so cleanup runs AFTER the PTY is already closed.
+//
+// Uses a fresh context (not the session's canceled context) with a bounded
+// timeout. All failures are non-fatal — host-side cleanup always runs.
 func cleanupContainerAttach(runtimeCmd, containerID, execUser, nonce string) {
 	if nonce == "" || !isDockerCompatibleRuntime(runtimeCmd) {
 		return
-	}
-	if runtimeCmd == "" {
-		runtimeCmd = "docker"
 	}
 
 	// Fresh context with bounded timeout. The session context is already
@@ -116,31 +119,33 @@ func cleanupContainerAttach(runtimeCmd, containerID, execUser, nonce string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Step 1: Find PID by nonce in /proc/*/environ
-	pid, err := findContainerPIDByNonce(ctx, runtimeCmd, containerID, execUser, nonce)
-	if err != nil || pid == "" {
-		return // No match or error — fall back to host-side cleanup
+	// Step 1: Find PID + start_time by nonce in a single exec (atomically
+	// captures both to avoid cross-exec PID recycling)
+	pid, startTime, err := findContainerPIDByNonce(ctx, runtimeCmd, containerID, execUser, nonce)
+	if err != nil || pid == "" || startTime == "" {
+		return // No match, error, or missing identity — fall back to host-side cleanup
 	}
 
-	// Step 2: Read start time for PID recycling safety
-	startTime, err := readContainerPIDStartTime(ctx, runtimeCmd, containerID, execUser, pid)
-	if err != nil || startTime == "" {
-		return // Cannot verify identity — do nothing
-	}
-
-	// Step 3: Atomic verify-and-kill — re-read start time and signal in one exec
-	// to minimize TOCTOU window (still not eliminated — see design notes)
-	killContainerPID(ctx, runtimeCmd, containerID, execUser, pid, startTime)
+	// Step 2: Verify-and-kill — re-read nonce, cmdline, and start_time, then
+	// signal in one exec to minimize TOCTOU window (still not eliminated —
+	// see design notes)
+	killContainerPID(ctx, runtimeCmd, containerID, execUser, pid, startTime, nonce)
 }
 
 // findContainerPIDByNonce searches /proc/*/environ inside the container for a
 // process whose environment contains the given nonce AND whose cmdline matches
-// *tmux*attach*. Returns the PID string if exactly one match is found, empty
-// string on zero or multiple matches (no-signal-on-ambiguity).
-func findContainerPIDByNonce(ctx context.Context, runtimeCmd, containerID, execUser, nonce string) (string, error) {
+// *tmux*attach*. On exactly one match, it also reads /proc/<pid>/stat to extract
+// the start_time (field 22), returning both PID and start_time in a single exec
+// to prevent cross-exec PID recycling.
+//
+// Returns ("", "", nil) on zero or multiple matches (no-signal-on-ambiguity).
+func findContainerPIDByNonce(ctx context.Context, runtimeCmd, containerID, execUser, nonce string) (string, string, error) {
 	// grep -qz handles NUL-delimited environ entries.
 	// Filter: only match processes whose cmdline contains "tmux" AND
 	// "attach" to exclude children that inherited the env var.
+	// On exactly one match, also read start_time from /proc/<pid>/stat.
+	// Safe parsing: find last ')' (end of comm field), then extract field 20
+	// after it (which is stat field 22 = starttime).
 	script := `found=""
 for p in /proc/[0-9]*/environ; do
   pid="${p#/proc/}"
@@ -158,56 +163,60 @@ for p in /proc/[0-9]*/environ; do
     esac
   fi
 done
-echo "$found"`
-
-	cmd := exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID, "sh", "-c", script)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	pid := strings.TrimSpace(string(out))
-	if pid == "" {
-		return "", nil // No match or multiple matches
-	}
-	return pid, nil
-}
-
-// readContainerPIDStartTime reads the start time from /proc/<pid>/stat inside
-// the container. The start time (field 22) is used for PID recycling safety:
-// if the PID has been recycled, the start time will differ.
-//
-// IMPORTANT: /proc/<pid>/stat field 2 (comm) can contain spaces and
-// parentheses. The correct approach: find the LAST closing paren `)`, then
-// count space-delimited fields after it. Starttime is field 22, which is the
-// 20th field after the closing paren (fields 3-22 = 20 fields).
-func readContainerPIDStartTime(ctx context.Context, runtimeCmd, containerID, execUser, pid string) (string, error) {
-	// Safe parsing: find last ')' (end of comm field), then extract field 20
-	// after it (which is stat field 22 = starttime).
-	script := `stat=$(cat /proc/` + pid + `/stat 2>/dev/null) || exit 1
+if [ -z "$found" ]; then
+  echo ""
+  exit 0
+fi
+stat=$(cat /proc/$found/stat 2>/dev/null) || { echo ""; exit 0; }
 rest="${stat##*) }"
-echo "$rest" | cut -d' ' -f20`
+stime=$(echo "$rest" | cut -d' ' -f20)
+if [ -z "$stime" ]; then
+  echo ""
+  exit 0
+fi
+echo "$found $stime"`
 
 	cmd := exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID, "sh", "-c", script)
 	out, err := cmd.Output()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	result := strings.TrimSpace(string(out))
+	if result == "" {
+		return "", "", nil // No match, multiple matches, or stat read failure
+	}
+	parts := strings.SplitN(result, " ", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", nil
+	}
+	return parts[0], parts[1], nil
 }
 
 // killContainerPID sends SIGTERM to a process inside the container after
-// verifying that its start time still matches the expected value. This
-// minimizes the TOCTOU window between PID verification and signaling by
-// combining both operations in a single docker exec shell script.
+// re-verifying its full identity: nonce in /proc/<pid>/environ, tmux*attach*
+// in /proc/<pid>/cmdline, and start_time in /proc/<pid>/stat. All three must
+// match — any mismatch means the PID was recycled and we do nothing.
+//
+// This combines verification and signaling in a single docker exec shell script
+// to minimize the TOCTOU window.
 //
 // The TOCTOU race is NOT eliminated — it is minimized. The PID could
-// theoretically be recycled between the shell's read of /proc/<pid>/stat and
-// the kill syscall. pidfd_open+pidfd_send_signal is not feasible via docker
-// exec shell scripts (see design doc). No signal on ambiguity.
-func killContainerPID(ctx context.Context, runtimeCmd, containerID, execUser, pid, expectedStartTime string) {
-	// Verify start_time still matches (minimize TOCTOU), then signal.
-	// If start_time does not match, the PID was recycled — do nothing.
-	script := `stat=$(cat /proc/` + pid + `/stat 2>/dev/null) || exit 0
+// theoretically be recycled between the shell's verification reads and the
+// kill syscall. pidfd_open+pidfd_send_signal is not feasible via docker exec
+// shell scripts (see design doc). No signal on ambiguity.
+func killContainerPID(ctx context.Context, runtimeCmd, containerID, execUser, pid, expectedStartTime, nonce string) {
+	// Re-verify all three identity properties, then signal.
+	// If ANY check fails, the PID may have been recycled — do nothing.
+	script := `# 1. Verify nonce still present in environ
+grep -qz 'SCION_ATTACH_NONCE=` + nonce + `' /proc/` + pid + `/environ 2>/dev/null || exit 0
+# 2. Verify cmdline still matches tmux*attach*
+cmd=$(tr '\0' ' ' < /proc/` + pid + `/cmdline 2>/dev/null) || exit 0
+case "$cmd" in
+  *tmux*attach*) ;;
+  *) exit 0 ;;
+esac
+# 3. Verify start_time matches
+stat=$(cat /proc/` + pid + `/stat 2>/dev/null) || exit 0
 rest="${stat##*) }"
 current=$(echo "$rest" | cut -d' ' -f20)
 if [ "$current" = "` + expectedStartTime + `" ]; then

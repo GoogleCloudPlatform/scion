@@ -1312,7 +1312,7 @@ func clearSCIONEnv(t *testing.T) {
 	t.Helper()
 	for _, env := range os.Environ() {
 		if key, _, ok := strings.Cut(env, "="); ok && strings.HasPrefix(key, "SCION_") {
-			os.Unsetenv(key)
+			_ = os.Unsetenv(key)
 		}
 	}
 }
@@ -1360,8 +1360,8 @@ esac
 // TestPTYCleanup_IsDockerCompatibleRuntime tests the runtime guard function.
 func TestPTYCleanup_IsDockerCompatibleRuntime(t *testing.T) {
 	require.True(t, isDockerCompatibleRuntime("docker"))
-	require.True(t, isDockerCompatibleRuntime("container"))
-	require.True(t, isDockerCompatibleRuntime(""))
+	require.False(t, isDockerCompatibleRuntime("container"), "Apple container excluded — /proc/kill untested")
+	require.False(t, isDockerCompatibleRuntime(""), "empty string excluded — no runtime identified")
 	require.False(t, isDockerCompatibleRuntime("kubernetes"))
 	require.False(t, isDockerCompatibleRuntime("k8s"))
 	require.False(t, isDockerCompatibleRuntime("cloudrun-sandbox"))
@@ -1575,17 +1575,21 @@ func TestPTYCleanup_NoncePIDLookup(t *testing.T) {
 	t.Run("ExactMatch", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		pid, err := findContainerPIDByNonce(ctx, adapter, "test-container", "scion", nonce)
+		pid, startTime, err := findContainerPIDByNonce(ctx, adapter, "test-container", "scion", nonce)
 		require.NoError(t, err)
 		require.Equal(t, expectedPID, pid, "must find exact tmux attach PID")
+		require.NotEmpty(t, startTime, "start_time must be returned with PID")
+		_, parseErr := strconv.ParseUint(startTime, 10, 64)
+		require.NoError(t, parseErr, "start_time must be a valid unsigned integer")
 	})
 
 	t.Run("NoMatchWrongNonce", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		pid, err := findContainerPIDByNonce(ctx, adapter, "test-container", "scion", "nonexistent0000nonce1234")
+		pid, startTime, err := findContainerPIDByNonce(ctx, adapter, "test-container", "scion", "nonexistent0000nonce1234")
 		require.NoError(t, err)
 		require.Empty(t, pid, "wrong nonce must not match")
+		require.Empty(t, startTime, "wrong nonce must not return start_time")
 	})
 
 	t.Run("EmptyOnMultipleMatches", func(t *testing.T) {
@@ -1620,14 +1624,16 @@ func TestPTYCleanup_NoncePIDLookup(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		pid, err := findContainerPIDByNonce(ctx, adapter, "test-container", "scion", nonce)
+		pid, startTime, err := findContainerPIDByNonce(ctx, adapter, "test-container", "scion", nonce)
 		require.NoError(t, err)
 		require.Empty(t, pid, "multiple matches must return empty (no-signal-on-ambiguity)")
+		require.Empty(t, startTime, "multiple matches must not return start_time")
 	})
 }
 
-// TestPTYCleanup_NonceStartTimeParsing tests /proc/stat start-time parsing,
-// including comm fields with spaces (e.g., "tmux: client").
+// TestPTYCleanup_NonceStartTimeParsing tests /proc/stat start-time parsing
+// within findContainerPIDByNonce, including comm fields with spaces
+// (e.g., "tmux: client").
 func TestPTYCleanup_NonceStartTimeParsing(t *testing.T) {
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
@@ -1648,9 +1654,16 @@ func TestPTYCleanup_NonceStartTimeParsing(t *testing.T) {
 	t.Setenv("TW_CLEANUP_TMUX", tmux)
 	t.Setenv("TW_CLEANUP_SOCKET", socket)
 
-	// Start tmux attach — its comm field may contain spaces ("tmux: client")
+	nonce, err := generateAttachNonce()
+	require.NoError(t, err)
+
+	// Start tmux attach with a nonce — its comm field may contain spaces
+	// ("tmux: client")
 	attachCmd := exec.Command(tmux, "-S", socket, "attach-session", "-t", "scion")
-	attachCmd.Env = append(filterSCIONEnv(os.Environ()), "TERM=xterm-256color")
+	attachCmd.Env = append(filterSCIONEnv(os.Environ()),
+		"TERM=xterm-256color",
+		"SCION_ATTACH_NONCE="+nonce,
+	)
 	ptmx, err := pty.Start(attachCmd)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -1661,7 +1674,7 @@ func TestPTYCleanup_NonceStartTimeParsing(t *testing.T) {
 		_ = attachCmd.Wait()
 	})
 
-	pid := strconv.Itoa(attachCmd.Process.Pid)
+	expectedPID := strconv.Itoa(attachCmd.Process.Pid)
 
 	require.Eventually(t, func() bool {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1672,8 +1685,9 @@ func TestPTYCleanup_NonceStartTimeParsing(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	startTime, err := readContainerPIDStartTime(ctx, adapter, "test-container", "scion", pid)
+	pid, startTime, err := findContainerPIDByNonce(ctx, adapter, "test-container", "scion", nonce)
 	require.NoError(t, err)
+	require.Equal(t, expectedPID, pid, "must find the tmux attach PID")
 	require.NotEmpty(t, startTime, "start time must be non-empty")
 
 	// Verify it's a valid number (start time is a monotonic tick count)
@@ -1681,45 +1695,173 @@ func TestPTYCleanup_NonceStartTimeParsing(t *testing.T) {
 	require.NoError(t, err, "start time must be a valid unsigned integer")
 
 	// Log the /proc/pid/stat so we can see the comm field format
-	statData, readErr := os.ReadFile(fmt.Sprintf("/proc/%s/stat", pid))
+	statData, readErr := os.ReadFile(fmt.Sprintf("/proc/%s/stat", expectedPID))
 	if readErr == nil {
-		t.Logf("PID %s stat: %s", pid, strings.TrimSpace(string(statData)))
+		t.Logf("PID %s stat: %s", expectedPID, strings.TrimSpace(string(statData)))
 	}
 }
 
 // TestPTYCleanup_NonceVerifyAndKill tests the verify-and-kill flow.
+// killContainerPID now revalidates nonce + cmdline + start_time before signaling.
 func TestPTYCleanup_NonceVerifyAndKill(t *testing.T) {
+	tmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("requires tmux in PATH")
+	}
 	clearSCIONEnv(t)
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TMUX", "")
 	dir := t.TempDir()
-	adapter := nonceTestAdapter(t, dir)
-	t.Setenv("TW_CLEANUP_TMUX", "/bin/true")
-	t.Setenv("TW_CLEANUP_SOCKET", "/dev/null")
+	socket := filepath.Join(dir, "tmux.sock")
 
-	t.Run("MatchingStartTime", func(t *testing.T) {
-		cmd := exec.Command("sleep", "300")
-		require.NoError(t, cmd.Start())
-		pid := strconv.Itoa(cmd.Process.Pid)
+	out, err := exec.Command(tmux, "-S", socket, "-f", "/dev/null",
+		"new-session", "-d", "-s", "scion", "-x", "80", "-y", "24", "exec cat").CombinedOutput()
+	require.NoError(t, err, string(out))
+	t.Cleanup(func() { _ = exec.Command(tmux, "-S", socket, "kill-server").Run() })
+
+	adapter := nonceTestAdapter(t, dir)
+	t.Setenv("TW_CLEANUP_TMUX", tmux)
+	t.Setenv("TW_CLEANUP_SOCKET", socket)
+
+	t.Run("AllIdentityMatch", func(t *testing.T) {
+		nonce, err := generateAttachNonce()
+		require.NoError(t, err)
+
+		attachCmd := exec.Command(tmux, "-S", socket, "attach-session", "-t", "scion")
+		attachCmd.Env = append(filterSCIONEnv(os.Environ()),
+			"TERM=xterm-256color",
+			"SCION_ATTACH_NONCE="+nonce,
+			"TW_CLEANUP_TMUX="+tmux,
+			"TW_CLEANUP_SOCKET="+socket,
+		)
+		ptmx, err := pty.Start(attachCmd)
+		require.NoError(t, err)
 		t.Cleanup(func() {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
+			_ = ptmx.Close()
+			if attachCmd.ProcessState == nil {
+				_ = attachCmd.Process.Kill()
+			}
+			_ = attachCmd.Wait()
 		})
 
+		pid := strconv.Itoa(attachCmd.Process.Pid)
+
+		require.Eventually(t, func() bool {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			o, e := exec.CommandContext(ctx, tmux, "-S", socket, "list-clients", "-t", "scion").CombinedOutput()
+			return e == nil && strings.TrimSpace(string(o)) != ""
+		}, 5*time.Second, 50*time.Millisecond)
+
+		// Get the start_time via findContainerPIDByNonce
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		startTime, err := readContainerPIDStartTime(ctx, adapter, "test-container", "scion", pid)
+		foundPID, startTime, err := findContainerPIDByNonce(ctx, adapter, "test-container", "scion", nonce)
 		require.NoError(t, err)
+		require.Equal(t, pid, foundPID)
 		require.NotEmpty(t, startTime)
 
+		// Kill with matching identity — process should be killed
 		ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel2()
-		killContainerPID(ctx2, adapter, "test-container", "scion", pid, startTime)
+		killContainerPID(ctx2, adapter, "test-container", "scion", pid, startTime, nonce)
 
 		// Process should be dead (SIGTERM)
-		err = cmd.Wait()
+		err = attachCmd.Wait()
 		require.Error(t, err, "process should have been killed by SIGTERM")
 	})
 
 	t.Run("MismatchedStartTime", func(t *testing.T) {
+		nonce, err := generateAttachNonce()
+		require.NoError(t, err)
+
+		attachCmd := exec.Command(tmux, "-S", socket, "attach-session", "-t", "scion")
+		attachCmd.Env = append(filterSCIONEnv(os.Environ()),
+			"TERM=xterm-256color",
+			"SCION_ATTACH_NONCE="+nonce,
+			"TW_CLEANUP_TMUX="+tmux,
+			"TW_CLEANUP_SOCKET="+socket,
+		)
+		ptmx, err := pty.Start(attachCmd)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_ = ptmx.Close()
+			if attachCmd.ProcessState == nil {
+				_ = attachCmd.Process.Kill()
+			}
+			_ = attachCmd.Wait()
+		})
+
+		pid := strconv.Itoa(attachCmd.Process.Pid)
+
+		require.Eventually(t, func() bool {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			o, e := exec.CommandContext(ctx, tmux, "-S", socket, "list-clients", "-t", "scion").CombinedOutput()
+			return e == nil && strings.TrimSpace(string(o)) != ""
+		}, 5*time.Second, 50*time.Millisecond)
+
+		// Kill with wrong start_time — process must survive
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		killContainerPID(ctx, adapter, "test-container", "scion", pid, "999999999999", nonce)
+
+		// Process should still be alive
+		err = attachCmd.Process.Signal(syscall.Signal(0))
+		require.NoError(t, err, "process must survive when start time doesn't match")
+	})
+
+	t.Run("WrongNonce", func(t *testing.T) {
+		nonce, err := generateAttachNonce()
+		require.NoError(t, err)
+
+		attachCmd := exec.Command(tmux, "-S", socket, "attach-session", "-t", "scion")
+		attachCmd.Env = append(filterSCIONEnv(os.Environ()),
+			"TERM=xterm-256color",
+			"SCION_ATTACH_NONCE="+nonce,
+			"TW_CLEANUP_TMUX="+tmux,
+			"TW_CLEANUP_SOCKET="+socket,
+		)
+		ptmx, err := pty.Start(attachCmd)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_ = ptmx.Close()
+			if attachCmd.ProcessState == nil {
+				_ = attachCmd.Process.Kill()
+			}
+			_ = attachCmd.Wait()
+		})
+
+		pid := strconv.Itoa(attachCmd.Process.Pid)
+
+		require.Eventually(t, func() bool {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			o, e := exec.CommandContext(ctx, tmux, "-S", socket, "list-clients", "-t", "scion").CombinedOutput()
+			return e == nil && strings.TrimSpace(string(o)) != ""
+		}, 5*time.Second, 50*time.Millisecond)
+
+		// Get the real start_time
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, startTime, err := findContainerPIDByNonce(ctx, adapter, "test-container", "scion", nonce)
+		require.NoError(t, err)
+		require.NotEmpty(t, startTime)
+
+		// Kill with correct start_time but WRONG nonce — process must survive
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel2()
+		killContainerPID(ctx2, adapter, "test-container", "scion", pid, startTime, "wrongnonce0000000000000000000000")
+
+		// Process should still be alive
+		err = attachCmd.Process.Signal(syscall.Signal(0))
+		require.NoError(t, err, "process must survive when nonce doesn't match")
+	})
+
+	t.Run("NoNonceInEnviron_PIDRecycleSimulation", func(t *testing.T) {
+		// Simulate PID recycling scenario: call killContainerPID on a process
+		// that does NOT have the nonce in its environment. This is equivalent
+		// to a recycled PID — the new process won't have the nonce.
 		cmd := exec.Command("sleep", "300")
 		require.NoError(t, cmd.Start())
 		pid := strconv.Itoa(cmd.Process.Pid)
@@ -1728,13 +1870,14 @@ func TestPTYCleanup_NonceVerifyAndKill(t *testing.T) {
 			_ = cmd.Wait()
 		})
 
+		// Kill with a nonce that this process doesn't have — must not signal
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		killContainerPID(ctx, adapter, "test-container", "scion", pid, "999999999999")
+		killContainerPID(ctx, adapter, "test-container", "scion", pid, "12345", "somenonce0000000000000000000000ab")
 
-		// Process should still be alive
+		// Process should still be alive (nonce check fails first)
 		err := cmd.Process.Signal(syscall.Signal(0))
-		require.NoError(t, err, "process must survive when start time doesn't match")
+		require.NoError(t, err, "process without nonce must not be signaled (PID recycling protection)")
 	})
 }
 
