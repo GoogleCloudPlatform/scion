@@ -23,6 +23,7 @@ jobs:
   check-and-tag:
     name: Check for Changes and Tag
     runs-on: ubuntu-latest
+    if: github.repository == 'GoogleCloudPlatform/scion'
     permissions:
       contents: write    # Needed to push tags
     outputs:
