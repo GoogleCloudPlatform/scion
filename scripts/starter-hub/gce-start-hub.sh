@@ -165,6 +165,10 @@ telemetry:
 SETTINGS_EOF
     substep "Prepared settings.yaml"
 
+    # Merge helper, run right before the file is installed. Uploaded next to
+    # the other config files and lands in /tmp on the instance.
+    cp "${SCRIPT_DIR}/merge-settings.py" "$UPLOAD_DIR/scion-merge-settings.py"
+
     # systemd service file
     # Always enable the runtime broker for combo hub-broker mode.
     # The runtime (docker vs kubernetes) is controlled by settings.yaml, not this flag.
@@ -241,8 +245,27 @@ if $FULL_DEPLOY; then
     sudo mkdir -p /home/scion/.scion
     sudo chown scion:scion /home/scion/.scion
     '"${PLACE_HUB_ENV}"'
-    sudo mv /tmp/scion-settings.yaml /home/scion/.scion/settings.yaml
-    sudo chown scion:scion /home/scion/.scion/settings.yaml
+    # The settings.yaml generated above only holds the keys this script manages.
+    # Installing it over an existing file silently drops everything else, so on
+    # an update merge into the existing file and keep sections we do not own
+    # (broker plugin config, message_broker, ...). --reset-db and fresh
+    # instances still start from the generated file.
+    SETTINGS_PATH=/home/scion/.scion/settings.yaml
+    if [ "$RESET_DB" != "true" ] && sudo test -s "$SETTINGS_PATH"; then
+        if ! python3 -c "import yaml" >/dev/null 2>&1; then
+            echo "  -> Installing python3-yaml for the settings merge..."
+            sudo apt-get update -qq || true
+            sudo apt-get install -y -qq python3-yaml || true
+        fi
+        if sudo python3 /tmp/scion-merge-settings.py "$SETTINGS_PATH" /tmp/scion-settings.yaml; then
+            echo "  -> Merged with the existing settings.yaml"
+        else
+            echo "  -> WARNING: could not merge settings.yaml; keeping a backup before overwriting"
+            sudo cp "$SETTINGS_PATH" "$SETTINGS_PATH.bak"
+        fi
+    fi
+    sudo mv /tmp/scion-settings.yaml "$SETTINGS_PATH"
+    sudo chown scion:scion "$SETTINGS_PATH"
     echo "  -> Installed settings.yaml"
 
     # Ensure all build/runtime dependencies are present (cloud-init may have failed or not finished)
