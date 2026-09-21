@@ -33,6 +33,7 @@ import { chatNotifications } from './chat-notifications.js';
 import { chatUnread } from './chat-unread.js';
 import { TerminalCoordinator } from './terminal-coordinator.js';
 import { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
+import { parseLayoutUrl } from './terminal-layout.js';
 import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
 import { isFeatureEnabled, setFeatureFlag } from '../utils/feature-flags.js';
 import {
@@ -830,7 +831,11 @@ async function init(): Promise<void> {
 
   // Setup client-side router for navigation
   setupRouter();
-  await renderRoute(stripBasePath(window.location.pathname));
+  // Include query string on initial render so terminal layout state
+  // from a shared/bookmarked URL can be restored on page load (#1715).
+  const initialPath = stripBasePath(window.location.pathname);
+  const initialSearch = window.location.search;
+  await renderRoute(initialSearch ? `${initialPath}${initialSearch}` : initialPath);
 
   // Account teardown: dispose terminals on logout/auth-expiry before redirect.
   // The event fires synchronously from performLogout() or auth-expiry detection
@@ -946,6 +951,52 @@ async function renderRoute(path: string): Promise<void> {
       terminalWorkspace?.setCurrentPath(path);
       terminalWorkspace?.show(true);
       setDocumentTitle('Terminals');
+
+      // ── URL layout restoration (#1715) ──────────────────────────────
+      // Parse layout state from query params BEFORE default single-agent
+      // selection to avoid a flash of single → multi layout transition.
+      const queryString = path.includes('?') ? path.split('?')[1] : window.location.search;
+      const layoutUrl = parseLayoutUrl(queryString);
+      if (layoutUrl && coordinator && terminalWorkspace) {
+        // Suppress URL sync while restoring to avoid feedback loops
+        terminalWorkspace.setSuppressUrlSync(true);
+        try {
+          // Restore the layout preset and open agents from URL slots.
+          // Map agent IDs to session keys, opening new sessions as needed.
+          const sessionKeys: Array<string | null> = [];
+          for (const agentId of layoutUrl.slots) {
+            if (!agentId) {
+              sessionKeys.push(null);
+              continue;
+            }
+            // Check if a session for this agent already exists
+            let key = terminalWorkspace.findSessionKeyByAgentId(agentId);
+            if (!key) {
+              // Open a new session — coordinator.open validates auth/existence
+              const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
+              if (requestId) terminalNavigations.set(requestId, thisNav);
+              try {
+                const result = await coordinator.open(agentId, requestId);
+                if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
+                // After coordinator.open, the session should exist
+                key = terminalWorkspace.findSessionKeyByAgentId(agentId);
+              } catch {
+                // Agent unavailable/unauthorized/deleted — slot stays empty
+              }
+            }
+            sessionKeys.push(key);
+          }
+          // Restore the layout manager state with the resolved session keys
+          terminalWorkspace.layoutManager.restore(layoutUrl.preset, sessionKeys);
+        } finally {
+          terminalWorkspace.setSuppressUrlSync(false);
+          // Sync URL once after restoration to ensure canonical form
+          terminalWorkspace.syncUrlFromLayout();
+        }
+        return;
+      }
+
+      // Default behavior: single-agent from path
       const agentId = pathname.match(terminalAgentRoute)?.[1];
       if (agentId && coordinator) {
         const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
@@ -1185,9 +1236,12 @@ function setupRouter(): void {
     }
   }) as EventListener);
 
-  // Handle browser back/forward
+  // Handle browser back/forward.
+  // Include query string so terminal layout state can be restored (#1715).
   window.addEventListener('popstate', () => {
-    void renderRoute(stripBasePath(window.location.pathname));
+    const path = stripBasePath(window.location.pathname);
+    const search = window.location.search;
+    void renderRoute(search ? `${path}${search}` : path);
   });
 }
 

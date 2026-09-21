@@ -288,3 +288,140 @@ describe('focus outline suppression in single-pane mode (#1716)', () => {
     // CSS rule now matches again for focused panes
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// URL layout sync (#1715)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('URL layout sync (#1715)', () => {
+  let root: TerminalWorkspaceRoot;
+  let replaceStateSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: '11111111-1111-4111-8111-111111111111',
+              name: 'test',
+              phase: 'running',
+            }),
+            { status: 200 }
+          )
+        )
+      )
+    );
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+      }
+    );
+    vi.stubGlobal(
+      'EventSource',
+      class extends EventTarget {
+        onopen = null;
+        close = vi.fn();
+        constructor(public url: string) {
+          super();
+        }
+      }
+    );
+    replaceStateSpy = vi.spyOn(window.history, 'replaceState');
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('getActiveSlotAgentIds returns null for empty layout', () => {
+    const ids = root.getActiveSlotAgentIds();
+    expect(ids).toEqual([null]);
+  });
+
+  it('getActiveSlotAgentIds returns agent IDs for occupied slots', () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+    root.create(registry, '11111111-1111-4111-8111-111111111111');
+    const ids = root.getActiveSlotAgentIds();
+    // In single mode, should show the agent ID
+    expect(ids[0]).toBe('11111111-1111-4111-8111-111111111111');
+  });
+
+  it('findSessionKeyByAgentId returns key for existing session', () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+    const session = root.create(registry, '11111111-1111-4111-8111-111111111111');
+    const key = root.findSessionKeyByAgentId('11111111-1111-4111-8111-111111111111');
+    expect(key).toBe(session.state.key);
+  });
+
+  it('findSessionKeyByAgentId returns null for unknown agent', () => {
+    const key = root.findSessionKeyByAgentId('99999999-9999-4999-8999-999999999999');
+    expect(key).toBeNull();
+  });
+
+  it('syncUrlFromLayout updates URL via replaceState for multi-pane presets', () => {
+    replaceStateSpy.mockClear();
+    root.layoutManager.setLayout('two-columns');
+    // Subscriber triggers syncUrlFromLayout synchronously
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const layoutCall = urls.find((u: string) => u.includes('lv=1'));
+    expect(layoutCall).toBeTruthy();
+    expect(layoutCall).toContain('lp=two-columns');
+  });
+
+  it('syncUrlFromLayout clears layout params in single mode', () => {
+    // Switch to multi-pane first so params are set
+    root.layoutManager.setLayout('two-columns');
+    replaceStateSpy.mockClear();
+    root.layoutManager.setLayout('single');
+    // In single mode, URL should not contain layout params
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const lastUrl = urls[urls.length - 1];
+    if (lastUrl) {
+      expect(lastUrl).not.toContain('lv=1');
+      expect(lastUrl).not.toContain('lp=');
+    }
+  });
+
+  it('syncUrlFromLayout is suppressed when flag is set', () => {
+    replaceStateSpy.mockClear();
+    root.setSuppressUrlSync(true);
+    root.layoutManager.setLayout('four');
+    // Subscriber was called but syncUrlFromLayout should have been a no-op
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const layoutCall = urls.find((u: string) => u.includes('lp=four'));
+    expect(layoutCall).toBeUndefined();
+    root.setSuppressUrlSync(false);
+  });
+
+  it('layout changes trigger URL sync via subscriber', async () => {
+    replaceStateSpy.mockClear();
+    root.layoutManager.setLayout('two-columns');
+    await flush();
+    // Should have been called at least once with two-columns
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    expect(urls.length).toBeGreaterThan(0);
+    const layoutCall = urls.find((u: string) => u.includes('lp=two-columns'));
+    expect(layoutCall).toBeTruthy();
+  });
+});

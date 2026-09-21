@@ -15,7 +15,13 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { TerminalLayoutManager, type TerminalLayoutState } from './terminal-layout.js';
+import {
+  TerminalLayoutManager,
+  type TerminalLayoutState,
+  serializeLayoutUrl,
+  parseLayoutUrl,
+  buildLayoutUrl,
+} from './terminal-layout.js';
 
 function manager(): TerminalLayoutManager {
   return new TerminalLayoutManager();
@@ -871,5 +877,230 @@ describe('TerminalLayoutManager', () => {
       m.close('agent-a');
       expect(m.getState().single[0]).toBeNull();
     });
+  });
+
+  describe('restore', () => {
+    it('sets the active preset and slot assignments', () => {
+      const m = manager();
+      m.restore('four', ['a', 'b', 'c', 'd']);
+      expect(m.getState().active).toBe('four');
+      expect(m.getState().four).toEqual(['a', 'b', 'c', 'd']);
+    });
+
+    it('pads short slot arrays with null', () => {
+      const m = manager();
+      m.restore('four', ['a']);
+      expect(m.getState().four).toEqual(['a', null, null, null]);
+    });
+
+    it('truncates long slot arrays', () => {
+      const m = manager();
+      m.restore('two-columns', ['a', 'b', 'c', 'd']);
+      expect(m.getState().twoColumns).toEqual(['a', 'b']);
+    });
+
+    it('clears zoom on restore', () => {
+      const m = manager();
+      m.open('a');
+      m.zoom('a');
+      expect(m.getZoomed()).toBe('a');
+      m.restore('single', ['a']);
+      expect(m.getZoomed()).toBeNull();
+    });
+
+    it('notifies listeners', () => {
+      const m = manager();
+      const listener = vi.fn<(state: TerminalLayoutState) => void>();
+      m.subscribe(listener);
+      listener.mockClear();
+      m.restore('two-rows', ['x', 'y']);
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves other presets', () => {
+      const m = manager();
+      m.place('z', 'four', 3);
+      m.restore('two-columns', ['a', 'b']);
+      expect(m.getState().four).toEqual([null, null, null, 'z']);
+    });
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// URL Layout Encoding/Decoding Tests (#1715)
+// ────────────────────────────────────────────────────────────────────────────
+
+const agentA = '11111111-1111-4111-8111-111111111111';
+const agentB = '22222222-2222-4222-8222-222222222222';
+const agentC = '33333333-3333-4333-8333-333333333333';
+const agentD = '44444444-4444-4444-8444-444444444444';
+
+describe('serializeLayoutUrl', () => {
+  it('produces versioned params for single preset', () => {
+    const params = serializeLayoutUrl('single', [agentA]);
+    expect(params.get('lv')).toBe('1');
+    expect(params.get('lp')).toBe('single');
+    expect(params.get('s0')).toBe(agentA);
+    expect(params.has('s1')).toBe(false);
+  });
+
+  it('produces params for two-columns with one empty slot', () => {
+    const params = serializeLayoutUrl('two-columns', [agentA, null]);
+    expect(params.get('lp')).toBe('two-columns');
+    expect(params.get('s0')).toBe(agentA);
+    expect(params.get('s1')).toBe('');
+  });
+
+  it('produces params for four preset with all slots', () => {
+    const params = serializeLayoutUrl('four', [agentA, agentB, agentC, agentD]);
+    expect(params.get('s0')).toBe(agentA);
+    expect(params.get('s1')).toBe(agentB);
+    expect(params.get('s2')).toBe(agentC);
+    expect(params.get('s3')).toBe(agentD);
+  });
+
+  it('truncates extra slot IDs beyond preset capacity', () => {
+    const params = serializeLayoutUrl('single', [agentA, agentB]);
+    // single only has 1 slot
+    expect(params.has('s1')).toBe(false);
+  });
+
+  it('pads missing slot IDs with empty string', () => {
+    const params = serializeLayoutUrl('four', [agentA]);
+    expect(params.get('s1')).toBe('');
+    expect(params.get('s2')).toBe('');
+    expect(params.get('s3')).toBe('');
+  });
+});
+
+describe('parseLayoutUrl', () => {
+  it('round-trips with serializeLayoutUrl', () => {
+    const original = serializeLayoutUrl('four', [agentA, agentB, null, agentD]);
+    const parsed = parseLayoutUrl(`?${original.toString()}`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.preset).toBe('four');
+    expect(parsed!.slots).toEqual([agentA, agentB, null, agentD]);
+  });
+
+  it('returns null for unknown version', () => {
+    expect(parseLayoutUrl('?lv=2&lp=four&s0=x')).toBeNull();
+  });
+
+  it('returns null for missing version', () => {
+    expect(parseLayoutUrl('?lp=four&s0=x')).toBeNull();
+  });
+
+  it('returns null for invalid preset', () => {
+    expect(parseLayoutUrl('?lv=1&lp=triple&s0=x')).toBeNull();
+  });
+
+  it('returns null for missing preset', () => {
+    expect(parseLayoutUrl('?lv=1&s0=x')).toBeNull();
+  });
+
+  it('handles empty search string', () => {
+    expect(parseLayoutUrl('')).toBeNull();
+  });
+
+  it('handles search without layout params', () => {
+    expect(parseLayoutUrl('?tab=settings')).toBeNull();
+  });
+
+  it('treats malformed UUIDs as empty slots', () => {
+    const parsed = parseLayoutUrl(`?lv=1&lp=two-columns&s0=not-a-uuid&s1=${agentA}`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.slots).toEqual([null, agentA]);
+  });
+
+  it('deduplicates agent IDs keeping first occurrence', () => {
+    const parsed = parseLayoutUrl(`?lv=1&lp=four&s0=${agentA}&s1=${agentB}&s2=${agentA}&s3=${agentC}`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.slots).toEqual([agentA, agentB, null, agentC]);
+  });
+
+  it('treats missing slot params as null', () => {
+    const parsed = parseLayoutUrl(`?lv=1&lp=four&s0=${agentA}`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.slots).toEqual([agentA, null, null, null]);
+  });
+
+  it('treats empty slot params as null', () => {
+    const parsed = parseLayoutUrl(`?lv=1&lp=two-columns&s0=&s1=${agentA}`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.slots).toEqual([null, agentA]);
+  });
+
+  it('validates slot count per preset', () => {
+    // single has 1 slot; extra s1 is ignored
+    const parsed = parseLayoutUrl(`?lv=1&lp=single&s0=${agentA}&s1=${agentB}`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.slots.length).toBe(1);
+    expect(parsed!.slots[0]).toBe(agentA);
+  });
+
+  it('handles two-rows preset', () => {
+    const parsed = parseLayoutUrl(`?lv=1&lp=two-rows&s0=${agentA}&s1=${agentB}`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.preset).toBe('two-rows');
+    expect(parsed!.slots).toEqual([agentA, agentB]);
+  });
+});
+
+describe('buildLayoutUrl', () => {
+  it('builds URL with default base path', () => {
+    const url = buildLayoutUrl('single', [agentA]);
+    expect(url).toContain('/terminals?');
+    expect(url).toContain('lv=1');
+    expect(url).toContain('lp=single');
+    expect(url).toContain(`s0=${agentA}`);
+  });
+
+  it('builds URL with custom base path', () => {
+    const url = buildLayoutUrl('two-columns', [agentA, agentB], '/custom');
+    expect(url).toMatch(/^\/custom\?/);
+  });
+
+  it('produces canonical URLs — same state produces same URL', () => {
+    const url1 = buildLayoutUrl('four', [agentA, agentB, null, agentD]);
+    const url2 = buildLayoutUrl('four', [agentA, agentB, null, agentD]);
+    expect(url1).toBe(url2);
+  });
+
+  it('produces different URLs for different states', () => {
+    const url1 = buildLayoutUrl('four', [agentA, agentB, null, agentD]);
+    const url2 = buildLayoutUrl('four', [agentB, agentA, null, agentD]);
+    expect(url1).not.toBe(url2);
+  });
+});
+
+describe('parseLayoutUrl: case normalization', () => {
+  it('normalizes uppercase UUIDs to lowercase', () => {
+    const upper = agentA.toUpperCase();
+    const parsed = parseLayoutUrl(`?lv=1&lp=single&s0=${upper}`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.slots[0]).toBe(agentA); // lowercase
+  });
+
+  it('deduplicates case-insensitively', () => {
+    const upper = agentA.toUpperCase();
+    const parsed = parseLayoutUrl(`?lv=1&lp=two-columns&s0=${agentA}&s1=${upper}`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.slots).toEqual([agentA, null]); // second occurrence nulled
+  });
+});
+
+describe('restore: single[0] update', () => {
+  it('sets single[0] to the first non-null slot', () => {
+    const m = manager();
+    m.restore('four', [null, 'key-b', 'key-c', null]);
+    expect(m.getState().single[0]).toBe('key-b');
+  });
+
+  it('preserves single[0] when all slots are null', () => {
+    const m = manager();
+    m.open('existing');
+    m.restore('four', [null, null, null, null]);
+    // single[0] should still be 'existing' (fallback)
+    expect(m.getState().single[0]).toBe('existing');
   });
 });

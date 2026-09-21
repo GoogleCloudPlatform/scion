@@ -49,7 +49,7 @@ function initialState(): TerminalLayoutState {
 }
 
 /** Slot counts per preset, used for bounds validation. */
-const SLOT_COUNTS: Record<TerminalLayout, number> = {
+export const SLOT_COUNTS: Record<TerminalLayout, number> = {
   single: 1,
   'two-columns': 2,
   'two-rows': 2,
@@ -315,4 +315,147 @@ export class TerminalLayoutManager {
     const snapshot = this.state;
     for (const listener of this.listeners) listener(snapshot);
   }
+
+  /**
+   * Restore layout from externally provided state (e.g. URL query params).
+   * Sets the active preset and slot assignments for the active preset.
+   * Also sets single[0] to the first non-null slot for rail highlighting.
+   * Does NOT trigger overflow logic — slots are set directly.
+   */
+  restore(preset: TerminalLayout, slots: readonly TerminalSlot[]): void {
+    const expected = SLOT_COUNTS[preset];
+    // Pad or truncate to the expected slot count
+    const normalized = Array.from({ length: expected }, (_, i) => slots[i] ?? null);
+    const firstOccupied = normalized.find((s) => s !== null) ?? null;
+    this.zoomed = null;
+    this.commit({
+      ...this.state,
+      active: preset,
+      ...this.withPresetSlots(preset, normalized),
+      single: [firstOccupied ?? this.state.single[0]],
+    });
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// URL Layout Encoding/Decoding (#1715)
+//
+// Encodes the active layout preset and ordered slot assignments (by agent ID)
+// into URL query parameters. Format:
+//   ?lv=1&lp=<preset>&s0=<agentId>&s1=<agentId>&...
+//
+// - lv: layout version (currently 1). Unknown versions cause fallback.
+// - lp: layout preset name (single, two-columns, two-rows, four).
+// - s0..s3: ordered slot agent IDs. Empty string = empty slot.
+//
+// Design invariants:
+// - Versioned: unknown lv → ignore layout query entirely
+// - Canonical: same logical state → same URL string
+// - Max 4 slot params (matching four-pane layout)
+// - Agent IDs only — no session keys, no transient state
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Current layout URL format version. */
+export const LAYOUT_URL_VERSION = '1';
+
+/** UUID v4 pattern for agent ID validation. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Valid preset names for URL encoding. */
+const VALID_PRESETS = new Set<string>(['single', 'two-columns', 'two-rows', 'four']);
+
+/** Result of parsing layout state from URL query parameters. */
+export interface LayoutUrlState {
+  preset: TerminalLayout;
+  /** Ordered slot agent IDs. null = empty slot. Length matches the preset. */
+  slots: ReadonlyArray<string | null>;
+}
+
+/**
+ * Serialize layout state to URL query parameters.
+ * Returns a URLSearchParams object (caller can merge with existing params).
+ *
+ * @param preset  Active layout preset
+ * @param agentIds  Ordered agent IDs for the active preset slots. null = empty.
+ */
+export function serializeLayoutUrl(
+  preset: TerminalLayout,
+  agentIds: ReadonlyArray<string | null>
+): URLSearchParams {
+  const params = new URLSearchParams();
+  params.set('lv', LAYOUT_URL_VERSION);
+  params.set('lp', preset);
+  const count = SLOT_COUNTS[preset];
+  for (let i = 0; i < count; i++) {
+    params.set(`s${i}`, agentIds[i] ?? '');
+  }
+  return params;
+}
+
+/**
+ * Parse layout state from URL query parameters.
+ * Returns null on any validation failure (unknown version, malformed data).
+ * Deduplicates agent IDs (keeps first occurrence).
+ *
+ * @param search  The URL search string (e.g. window.location.search)
+ */
+export function parseLayoutUrl(search: string): LayoutUrlState | null {
+  const params = new URLSearchParams(search);
+
+  // Version check: unknown version → ignore entirely
+  const version = params.get('lv');
+  if (version !== LAYOUT_URL_VERSION) return null;
+
+  // Preset validation
+  const preset = params.get('lp');
+  if (!preset || !VALID_PRESETS.has(preset)) return null;
+  const layout = preset as TerminalLayout;
+
+  // Parse slot agent IDs
+  const count = SLOT_COUNTS[layout];
+  const seen = new Set<string>();
+  const slots: Array<string | null> = [];
+
+  for (let i = 0; i < count; i++) {
+    const value = params.get(`s${i}`);
+    if (!value) {
+      slots.push(null);
+      continue;
+    }
+    // Validate UUID format
+    if (!UUID_RE.test(value)) {
+      slots.push(null);
+      continue;
+    }
+    // Normalize to lowercase for canonical form
+    const normalized = value.toLowerCase();
+    // Deduplicate: keep first occurrence
+    if (seen.has(normalized)) {
+      slots.push(null);
+      continue;
+    }
+    seen.add(normalized);
+    slots.push(normalized);
+  }
+
+  return { preset: layout, slots };
+}
+
+/**
+ * Build a canonical URL path + query string for a terminal layout.
+ * The path agent ID is the first non-null agent in the slots, or omitted
+ * if all slots are empty.
+ *
+ * @param preset  Active layout preset
+ * @param agentIds  Ordered agent IDs for the active preset slots
+ * @param basePath  Base path prefix (default: '/terminals')
+ */
+export function buildLayoutUrl(
+  preset: TerminalLayout,
+  agentIds: ReadonlyArray<string | null>,
+  basePath = '/terminals'
+): string {
+  const params = serializeLayoutUrl(preset, agentIds);
+  const query = params.toString();
+  return query ? `${basePath}?${query}` : basePath;
 }
