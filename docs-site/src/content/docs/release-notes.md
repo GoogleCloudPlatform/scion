@@ -4,14 +4,15 @@ title: Release Notes
 
 Scion release notes are published weekly.
 
-## Latest: Week of September 7 -- 13, 2026
+## Latest: Week of September 14 -- 20, 2026
 
-The week's defining event was the landing of the full authorization audit — 131 commits classifying every registered route — followed by an intensive stabilization effort that resolved a cascade of P0 regressions across progeny secrets, broker reads, template resolution, and agent scoping. In parallel, GCP identity support for sandbox runtimes was unblocked end-to-end with passthrough-to-assign credential translation, and broker lifecycle management matured with heartbeat timeouts, hub-level default selection, and clean unregistration.
+Cross-project agent messaging was the week's flagship delivery — a 7-phase feature enabling agents to communicate across project boundaries with policy-controlled authorization, multi-target fan-out, and full UI controls. In parallel, native chat received its largest overhaul to date, A2A standalone infrastructure reached production-grade HA, and the release pipeline matured into a three-channel model with nightly automation and CLI version checking.
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-09-07/)
+[Read the full release notes for this week ->](/scion/release-notes/2026-09-14/)
 
 ## Previous Weeks
 
+- [Week of September 7 -- 13, 2026](/scion/release-notes/2026-09-07/)
 - [Week of August 31 -- September 6, 2026](/scion/release-notes/2026-08-31/)
 - [Week of August 24 -- 30, 2026](/scion/release-notes/2026-08-24/)
 - [Week of August 17 -- 23, 2026](/scion/release-notes/2026-08-17/)

@@ -193,6 +193,23 @@ All metrics and traces emitted by Scion are enriched with context-aware OpenTele
 - `scion.broker.name`: The name of the Runtime Broker executing the agent, when available.
 - `scion.project.id`: The authoritative ID of the agent's parent project, when available.
 
+#### Identity Enforcement
+
+The `sciontool` receiver enforces authoritative identity on all incoming telemetry. Reserved identity attributes (`scion.agent.id`, `scion.agent.slug`, `scion.project.id`, `scion.harness`, `scion.model`, `scion.broker.name`, and related keys) are stripped from agent-submitted resource attributes and replaced with Hub-sourced values. This prevents agents from spoofing their identity in exported telemetry.
+
+### Native Event Name Normalization
+
+When harnesses emit native OTLP log records or events, `sciontool` normalizes their harness-specific event names into the canonical `agent.*` namespace before forwarding. This ensures consistent filtering and querying across harnesses:
+
+| Harness | Native event name | Normalized name |
+|---------|------------------|-----------------|
+| Claude Code | `user_prompt` (scope `com.anthropic.claude_code.events`) | `agent.user.prompt` |
+| Codex | `codex.user_prompt` | `agent.user.prompt` |
+| Codex | `codex.tool_result` | `agent.tool.result` |
+| Gemini CLI | `gemini_cli.user_prompt` | `agent.user.prompt` |
+
+Event names that do not match a known alias are forwarded unchanged. All log records carry a normalized `event.name` attribute after processing.
+
 ### Automated Metrics Collection
 
 When harness events occur (via hooks), sciontool automatically records the following metrics:
