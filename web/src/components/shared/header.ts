@@ -111,7 +111,7 @@ export class ScionHeader extends LitElement {
   static override styles = css`
     :host {
       display: grid;
-      grid-template-columns: 1fr auto 1fr;
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
       align-items: center;
       height: var(--scion-header-height, 60px);
       padding: 0 1.5rem;
@@ -179,6 +179,7 @@ export class ScionHeader extends LitElement {
       align-items: center;
       gap: 0.75rem;
       justify-self: end;
+      grid-column: 3;
     }
 
     .header-actions {
@@ -467,42 +468,48 @@ export class ScionHeader extends LitElement {
 
     return html`
       <div class="mode-switch" role="group" aria-label="Switch view">
-        <button
-          class=${!isChat && !isTerminal ? 'active' : ''}
-          @click=${(): void => {
-            void this.handleModeSwitch('dashboard');
-          }}
-          aria-label="Dashboard"
-        >
-          <sl-icon name="house"></sl-icon>
-          <span class="mode-label">Dashboard</span>
-        </button>
+        <sl-tooltip content="Dashboard">
+          <button
+            class=${!isChat && !isTerminal ? 'active' : ''}
+            @click=${(): void => {
+              void this.handleModeSwitch('dashboard');
+            }}
+            aria-label="Dashboard"
+          >
+            <sl-icon name="house"></sl-icon>
+            <span class="mode-label">Dashboard</span>
+          </button>
+        </sl-tooltip>
         ${chatEnabled
           ? html`
-              <button
-                class=${isChat ? 'active' : ''}
-                @click=${(): void => {
-                  void this.handleModeSwitch('chat');
-                }}
-                aria-label="Chat"
-              >
-                <sl-icon name="chat-dots"></sl-icon>
-                <span class="mode-label">Chat</span>
-              </button>
+              <sl-tooltip content="Chat">
+                <button
+                  class=${isChat ? 'active' : ''}
+                  @click=${(): void => {
+                    void this.handleModeSwitch('chat');
+                  }}
+                  aria-label="Chat"
+                >
+                  <sl-icon name="chat-dots"></sl-icon>
+                  <span class="mode-label">Chat</span>
+                </button>
+              </sl-tooltip>
             `
           : ''}
         ${terminalsEnabled
           ? html`
-              <button
-                class=${isTerminal ? 'active' : ''}
-                @click=${(): void => {
-                  void this.handleModeSwitch('terminals');
-                }}
-                aria-label=${`Terminals (${this.terminalSessionCount})`}
-              >
-                <sl-icon name="terminal"></sl-icon>
-                <span class="mode-label">Terminal</span>
-              </button>
+              <sl-tooltip content=${`Terminals (${this.terminalSessionCount})`}>
+                <button
+                  class=${isTerminal ? 'active' : ''}
+                  @click=${(): void => {
+                    void this.handleModeSwitch('terminals');
+                  }}
+                  aria-label=${`Terminals (${this.terminalSessionCount})`}
+                >
+                  <sl-icon name="terminal"></sl-icon>
+                  <span class="mode-label">Terminal</span>
+                </button>
+              </sl-tooltip>
             `
           : ''}
       </div>
