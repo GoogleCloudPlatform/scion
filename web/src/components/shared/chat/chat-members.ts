@@ -764,7 +764,9 @@ export class ScionChatMembers extends LitElement {
             </a>`}
         ${a.projectId
           ? html`<a
-              href="/agents/graph?project=${encodeURIComponent(a.projectId)}&focus=${encodeURIComponent(a.id)}"
+              href="/agents/graph?project=${encodeURIComponent(
+                a.projectId
+              )}&focus=${encodeURIComponent(a.id)}"
               class="agent-graph"
               title="Open in graph"
               @click=${(e: MouseEvent) => {

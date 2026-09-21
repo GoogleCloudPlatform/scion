@@ -3055,7 +3055,8 @@ export class ScionPageChat extends LitElement {
                     label="Open terminal"
                     href=${terminalHref(conv.peerId)}
                     @click=${(e: MouseEvent) => {
-                      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)
+                        return;
                       e.preventDefault();
                       openTerminal(conv.peerId);
                     }}
@@ -3069,7 +3070,8 @@ export class ScionPageChat extends LitElement {
                           label="Open in graph"
                           href=${`/agents/graph?project=${encodeURIComponent(this.getAgentProjectId(conv.peerId))}&focus=${encodeURIComponent(conv.peerId)}`}
                           @click=${(e: MouseEvent) => {
-                            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)
+                              return;
                             e.preventDefault();
                             const projectId = this.getAgentProjectId(conv.peerId);
                             navigateTo(

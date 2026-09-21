@@ -12,6 +12,7 @@ Added Terminal and Graph navigation icons to the agent DM header in the chat vie
 ## Changes
 
 ### `web/src/components/pages/chat.ts`
+
 - Imported `openTerminal` and `terminalHref` from `open-terminal.js`
 - Added `getAgentProjectId()` helper to resolve the project ID for an agent DM peer
 - Added Terminal icon button (`sl-icon name="terminal"`) in header-actions:
@@ -23,6 +24,7 @@ Added Terminal and Graph navigation icons to the agent DM header in the chat vie
 - Both buttons gated on `conv.isDM && conv.peerKind === 'agent'` — do not appear for user DMs or threads
 
 ### `web/src/components/shared/chat/chat-members.ts`
+
 - Replaced `agent-popout` link (box-arrow-up-right icon, `target="_blank"`) with `agent-graph` link (diagram-3 icon)
 - Graph link navigates to `/agents/graph?project={projectId}&focus={agentId}` in-app via `navigateTo()`
 - Preserved modified-click (Ctrl/Cmd/Shift/Alt) handling so those still open in new tabs
