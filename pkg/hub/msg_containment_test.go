@@ -668,7 +668,7 @@ func TestC1_ScheduledMessageDenialReturnsError(t *testing.T) {
 		t.Fatal("handler must return error on authorization denial")
 	}
 	// Error must contain the denial reason for the scheduler to record.
-	if !strings.Contains(err.Error(), "scheduled_message_cross_project") {
+	if !strings.Contains(err.Error(), "cross_project_scheduled_disabled") {
 		t.Errorf("error should contain denial code, got: %v", err)
 	}
 
@@ -774,7 +774,7 @@ func TestC1_FireEvent_DenialRecordsErrorOnEvent(t *testing.T) {
 	require.NotNil(t, e, "event must exist after fireEvent")
 	assert.Equal(t, store.ScheduledEventFailed, e.Status,
 		"fireEvent must set status to 'failed' when the handler returns an error")
-	assert.Contains(t, e.Error, "scheduled_message_cross_project",
+	assert.Contains(t, e.Error, "cross_project_scheduled_disabled",
 		"event error field must contain the denial reason")
 
 	// Zero dispatch calls.
@@ -1359,7 +1359,7 @@ func TestC1_AuthorizeScheduledMessageFire_DirectUnit(t *testing.T) {
 			evt:       store.ScheduledEvent{ID: "e1", ProjectID: "p1", CreatedBy: "u1"},
 			agentID:   "a1",
 			wantAllow: false,
-			wantErr:   "scheduled_message_cross_project",
+			wantErr:   "cross_project_scheduled_disabled",
 		},
 		{
 			name: "creator_user_suspended",

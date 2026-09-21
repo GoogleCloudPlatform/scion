@@ -2156,6 +2156,9 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	// Limit to a single connection so all goroutines share the same in-memory
+	// database (each `:memory:` connection gets its own empty DB otherwise).
+	db.SetMaxOpenConns(1)
 	// Use t.Cleanup instead of defer so that db.Close runs after the W6
 	// notification goroutine (go cn.NotifyDMReceived) has finished — the
 	// backfill now populates req.ThreadID, which makes the non-broker

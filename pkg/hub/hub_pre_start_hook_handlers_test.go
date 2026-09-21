@@ -67,6 +67,21 @@ func createAdminUserForHubPSH(t *testing.T, s store.Store) *store.User {
 func uatTokenForUser(t *testing.T, srv *Server, s store.Store, user *store.User) string {
 	t.Helper()
 	project := createTestProjectForPSH(t, s)
+
+	// RS4: user needs a project-scoped role binding to mint UATs.
+	// Use ProjectRoleOwner so the binding covers the agent:manage scope.
+	rd, err := s.GetRoleDefinitionByName(t.Context(), store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err, "project-owner role definition must exist")
+	_, err = s.CreateRoleBinding(t.Context(), &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
 	// RS4: context must carry actor identity for audit record.
 	ctx := rs4MintContext(user.ID)
 	token, _, err := srv.uatService.CreateToken(

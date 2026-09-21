@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -125,7 +126,8 @@ func msgAuthzAddProjectMember(t *testing.T, s store.Store, userID, projectID, pr
 		ScopeID:          projectID,
 		CreatedBy:        "test",
 	})
-	if err != nil && err != store.ErrAlreadyExists {
+	if err != nil && err != store.ErrAlreadyExists &&
+		!errors.Is(err, store.ErrBuiltInMembershipConflict) {
 		t.Fatalf("failed to create role binding: %v", err)
 	}
 }

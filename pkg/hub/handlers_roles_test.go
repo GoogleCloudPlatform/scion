@@ -532,8 +532,23 @@ func TestRolesAPI_MethodNotAllowed_Bindings(t *testing.T) {
 
 // setupSortBindings creates three bindings with distinct principals, roles, and
 // scopes to exercise every sort axis.  It returns them keyed by a short label.
-func setupSortBindings(t *testing.T, srv *Server) map[string]*store.RoleBinding {
+func setupSortBindings(t *testing.T, srv *Server, s store.Store) map[string]*store.RoleBinding {
 	t.Helper()
+
+	// Create real user entities so principal ID validation passes.
+	aliceID := tid("sort-alice")
+	bobID := tid("sort-bob")
+	charlieID := tid("sort-charlie")
+	seedRolesTestUser(t, s, aliceID, "sort-alice@test.local")
+	seedRolesTestUser(t, s, bobID, "sort-bob@test.local")
+	seedRolesTestUser(t, s, charlieID, "sort-charlie@test.local")
+
+	// Create a real project for the project-scoped binding.
+	projID := tid("sort-proj-1")
+	err := s.CreateProject(t.Context(), &store.Project{
+		ID: projID, Name: "sort-proj-1", Slug: "sort-proj-1",
+	})
+	require.NoError(t, err)
 
 	roleA := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
 		Name:        "sort-alpha-role",
@@ -554,21 +569,21 @@ func setupSortBindings(t *testing.T, srv *Server) map[string]*store.RoleBinding 
 	b1 := createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: roleA.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "alice",
+		PrincipalID:      aliceID,
 		ScopeType:        "system",
 	})
 	b2 := createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: roleB.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "bob",
+		PrincipalID:      bobID,
 		ScopeType:        "system",
 	})
 	b3 := createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: roleC.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "charlie",
+		PrincipalID:      charlieID,
 		ScopeType:        "project",
-		ScopeID:          "proj-1",
+		ScopeID:          projID,
 	})
 
 	return map[string]*store.RoleBinding{
@@ -579,8 +594,8 @@ func setupSortBindings(t *testing.T, srv *Server) map[string]*store.RoleBinding 
 }
 
 func TestRolesAPI_ListRoleBindings_SortByPrincipalAsc(t *testing.T) {
-	srv, _ := testServer(t)
-	bindings := setupSortBindings(t, srv)
+	srv, s := testServer(t)
+	bindings := setupSortBindings(t, srv, s)
 
 	rec := doRequest(t, srv, http.MethodGet,
 		"/api/v1/admin/role-bindings?sort_by=principal&sort_order=asc&limit=100", nil)
@@ -605,8 +620,8 @@ func TestRolesAPI_ListRoleBindings_SortByPrincipalAsc(t *testing.T) {
 }
 
 func TestRolesAPI_ListRoleBindings_SortByPrincipalDesc(t *testing.T) {
-	srv, _ := testServer(t)
-	bindings := setupSortBindings(t, srv)
+	srv, s := testServer(t)
+	bindings := setupSortBindings(t, srv, s)
 
 	rec := doRequest(t, srv, http.MethodGet,
 		"/api/v1/admin/role-bindings?sort_by=principal&sort_order=desc&limit=100", nil)
@@ -629,8 +644,8 @@ func TestRolesAPI_ListRoleBindings_SortByPrincipalDesc(t *testing.T) {
 }
 
 func TestRolesAPI_ListRoleBindings_SortByCreatedAsc(t *testing.T) {
-	srv, _ := testServer(t)
-	bindings := setupSortBindings(t, srv)
+	srv, s := testServer(t)
+	bindings := setupSortBindings(t, srv, s)
 
 	rec := doRequest(t, srv, http.MethodGet,
 		"/api/v1/admin/role-bindings?sort_by=created&sort_order=asc&limit=100", nil)
@@ -654,8 +669,8 @@ func TestRolesAPI_ListRoleBindings_SortByCreatedAsc(t *testing.T) {
 }
 
 func TestRolesAPI_ListRoleBindings_SortByCreatedDesc(t *testing.T) {
-	srv, _ := testServer(t)
-	bindings := setupSortBindings(t, srv)
+	srv, s := testServer(t)
+	bindings := setupSortBindings(t, srv, s)
 
 	rec := doRequest(t, srv, http.MethodGet,
 		"/api/v1/admin/role-bindings?sort_by=created&sort_order=desc&limit=100", nil)
@@ -678,8 +693,8 @@ func TestRolesAPI_ListRoleBindings_SortByCreatedDesc(t *testing.T) {
 }
 
 func TestRolesAPI_ListRoleBindings_SortByRole(t *testing.T) {
-	srv, _ := testServer(t)
-	bindings := setupSortBindings(t, srv)
+	srv, s := testServer(t)
+	bindings := setupSortBindings(t, srv, s)
 
 	rec := doRequest(t, srv, http.MethodGet,
 		"/api/v1/admin/role-bindings?sort_by=role&sort_order=asc&limit=100", nil)
@@ -726,7 +741,16 @@ func TestRolesAPI_ListRoleBindings_SortByRole(t *testing.T) {
 }
 
 func TestRolesAPI_ListRoleBindings_SecondaryScopeOrdering(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
+
+	// Create a real user and project so principal/scope validation passes.
+	scopeUserID := tid("scope-user")
+	seedRolesTestUser(t, s, scopeUserID, "scope-user@test.local")
+	projScopeID := tid("proj-scope-1")
+	err := s.CreateProject(t.Context(), &store.Project{
+		ID: projScopeID, Name: "proj-scope-1", Slug: "proj-scope-1",
+	})
+	require.NoError(t, err)
 
 	// Create two bindings with the same principal but different scopes.
 	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
@@ -738,9 +762,9 @@ func TestRolesAPI_ListRoleBindings_SecondaryScopeOrdering(t *testing.T) {
 	bProj := createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "scope-user",
+		PrincipalID:      scopeUserID,
 		ScopeType:        "project",
-		ScopeID:          "proj-scope-1",
+		ScopeID:          projScopeID,
 	})
 
 	roleSys := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
@@ -751,7 +775,7 @@ func TestRolesAPI_ListRoleBindings_SecondaryScopeOrdering(t *testing.T) {
 	bSys := createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: roleSys.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "scope-user",
+		PrincipalID:      scopeUserID,
 		ScopeType:        "system",
 	})
 
@@ -780,7 +804,13 @@ func TestRolesAPI_ListRoleBindings_SecondaryScopeOrdering(t *testing.T) {
 }
 
 func TestRolesAPI_ListRoleBindings_SortBeforePagination(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
+
+	// Create real user entities so principal ID validation passes.
+	pageUserBID := tid("page-user-b")
+	pageUserAID := tid("page-user-a")
+	seedRolesTestUser(t, s, pageUserBID, "page-user-b@test.local")
+	seedRolesTestUser(t, s, pageUserAID, "page-user-a@test.local")
 
 	// Create enough bindings to span two pages (page size = 1).
 	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
@@ -792,13 +822,13 @@ func TestRolesAPI_ListRoleBindings_SortBeforePagination(t *testing.T) {
 	createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "page-user-b",
+		PrincipalID:      pageUserBID,
 		ScopeType:        "system",
 	})
 	createBindingViaAPI(t, srv, createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "page-user-a",
+		PrincipalID:      pageUserAID,
 		ScopeType:        "system",
 	})
 
@@ -841,8 +871,8 @@ func TestRolesAPI_ListRoleBindings_InvalidSortOrder(t *testing.T) {
 }
 
 func TestRolesAPI_ListRoleBindings_DefaultSortIsCreatedDesc(t *testing.T) {
-	srv, _ := testServer(t)
-	bindings := setupSortBindings(t, srv)
+	srv, s := testServer(t)
+	bindings := setupSortBindings(t, srv, s)
 
 	// No sort params: should default to created desc.
 	rec := doRequest(t, srv, http.MethodGet,
