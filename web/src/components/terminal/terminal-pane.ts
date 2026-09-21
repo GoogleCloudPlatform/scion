@@ -916,6 +916,18 @@ export class ScionTerminalPane extends LitElement {
       return true;
     });
 
+    // Detect active tmux window from OSC 0 title updates emitted by
+    // tmux set-titles. This tracks ongoing window switches (Ctrl-B n/p)
+    // that OSC 7337 (one-shot at attach) cannot follow.
+    this.terminal.parser.registerOscHandler(0, (data: string) => {
+      const trimmed = data.trim();
+      if (trimmed === 'agent' || trimmed === 'shell') {
+        this.activeWindow = trimmed as TmuxWindow;
+      }
+      // Return false to allow other OSC 0 handlers (if any) to also process
+      return false;
+    });
+
     // OSC 52 clipboard relay — scoped to FOCUSED VISIBLE terminal. (P1.8)
     // Hidden or unfocused panes continue parsing output but cannot read or
     // write the system clipboard. Terminal protocol responses (DSR, DA etc.)

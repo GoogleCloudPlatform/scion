@@ -304,6 +304,67 @@ describe('hidden pane interaction isolation (P1.8)', () => {
   });
 });
 
+describe('OSC 0 window-state tracking (F1 fix)', () => {
+  // Retrieve an OSC handler registered on the mock terminal by OSC number.
+  function getOscHandler(oscId: number): ((data: string) => boolean) | undefined {
+    const xt = terminal.instances[0] as unknown as {
+      parser: { registerOscHandler: ReturnType<typeof vi.fn> };
+    };
+    const call = xt.parser.registerOscHandler.mock.calls.find((c: unknown[]) => c[0] === oscId);
+    return call?.[1] as ((data: string) => boolean) | undefined;
+  }
+
+  it('OSC 0 "agent" sets activeWindow to agent', async () => {
+    await mountConnected();
+    const handler = getOscHandler(0);
+    expect(handler).toBeDefined();
+    handler!('agent');
+    expect((page as unknown as { activeWindow: string }).activeWindow).toBe('agent');
+  });
+
+  it('OSC 0 "shell" sets activeWindow to shell', async () => {
+    await mountConnected();
+    const handler = getOscHandler(0);
+    expect(handler).toBeDefined();
+    handler!('shell');
+    expect((page as unknown as { activeWindow: string }).activeWindow).toBe('shell');
+  });
+
+  it('OSC 0 with unknown value does not change activeWindow', async () => {
+    await mountConnected();
+    const handler = getOscHandler(0);
+    expect(handler).toBeDefined();
+    // Set a known baseline via OSC 7337
+    const osc7337 = getOscHandler(7337)!;
+    osc7337('tmuxwindow=shell');
+    expect((page as unknown as { activeWindow: string }).activeWindow).toBe('shell');
+    // Unknown values should be ignored
+    handler!('bash');
+    expect((page as unknown as { activeWindow: string }).activeWindow).toBe('shell');
+    handler!('');
+    expect((page as unknown as { activeWindow: string }).activeWindow).toBe('shell');
+  });
+
+  it('OSC 0 overrides OSC 7337 — last value wins', async () => {
+    await mountConnected();
+    const osc7337 = getOscHandler(7337)!;
+    const osc0 = getOscHandler(0)!;
+    // OSC 7337 sets agent
+    osc7337('tmuxwindow=agent');
+    expect((page as unknown as { activeWindow: string }).activeWindow).toBe('agent');
+    // OSC 0 overrides to shell
+    osc0('shell');
+    expect((page as unknown as { activeWindow: string }).activeWindow).toBe('shell');
+  });
+
+  it('OSC 7337 still works as initial state fallback', async () => {
+    await mountConnected();
+    const osc7337 = getOscHandler(7337)!;
+    osc7337('tmuxwindow=shell');
+    expect((page as unknown as { activeWindow: string }).activeWindow).toBe('shell');
+  });
+});
+
 it('a failed metadata snapshot does not remove the independently authorized terminal host', async () => {
   page.dispose();
   FakeEventSource.instances = [];

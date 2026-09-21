@@ -211,6 +211,25 @@ test('real xterm keyboard, OSC window, selection, clipboard, links and toolbar p
   await popup.close();
 });
 
+test('OSC 0 title update switches toolbar active window and overrides OSC 7337 (F1 fix)', async ({
+  page,
+}) => {
+  const peer = await setup(page);
+  await ready(page);
+  // OSC 7337 sets initial state to "shell"
+  peer.write('\x1b]7337;tmuxwindow=shell\x07');
+  await expect(page.locator('button[title="Shell window"]')).toHaveClass('active');
+  // OSC 0 title update overrides to "agent"
+  peer.write('\x1b]0;agent\x07');
+  await expect(page.locator('button[title="Agent window"]')).toHaveClass('active');
+  // OSC 0 with "shell" switches back
+  peer.write('\x1b]0;shell\x07');
+  await expect(page.locator('button[title="Shell window"]')).toHaveClass('active');
+  // Unknown OSC 0 value does not change toolbar state
+  peer.write('\x1b]0;bash\x07');
+  await expect(page.locator('button[title="Shell window"]')).toHaveClass('active');
+});
+
 test('capture-auth scope/conflict retry and upload use the pane identity after route change', async ({
   page,
 }) => {
