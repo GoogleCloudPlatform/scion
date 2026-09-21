@@ -460,12 +460,12 @@ func TestTemplateAuthz_Update_AllPinnedFieldsImmutable(t *testing.T) {
 		StoragePath:   "evil/path",
 		StorageBucket: "evil-bucket",
 		StorageURI:    "gs://evil-bucket/evil/path",
-		Files:        []store.TemplateFile{},
-		ContentHash:  "sha256:evil",
-		Status:       store.TemplateStatusActive,
-		BaseTemplate: "evil-base-template",
-		SourceURL:    "https://evil.example.com/injected",
-		UpdatedBy:    "evil-updater",
+		Files:         []store.TemplateFile{},
+		ContentHash:   "sha256:evil",
+		Status:        store.TemplateStatusActive,
+		BaseTemplate:  "evil-base-template",
+		SourceURL:     "https://evil.example.com/injected",
+		UpdatedBy:     "evil-updater",
 	})
 	require.Equal(t, http.StatusOK, rec.Code,
 		"update should succeed; got: %s", rec.Body.String())
