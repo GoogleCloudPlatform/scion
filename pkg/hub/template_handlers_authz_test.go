@@ -422,11 +422,14 @@ func TestTemplateAuthz_Update_AllPinnedFieldsImmutable(t *testing.T) {
 		Files: []store.TemplateFile{
 			{Path: "TEMPLATE.md", Size: 42, Hash: "sha256:original-hash"},
 		},
-		ContentHash: "sha256:aabbccdd",
-		Status:      store.TemplateStatusPending,
-		Visibility:  store.VisibilityPrivate,
-		Created:     time.Now(),
-		Updated:     time.Now(),
+		ContentHash:  "sha256:aabbccdd",
+		Status:       store.TemplateStatusPending,
+		BaseTemplate: "original-base-template-id",
+		SourceURL:    "https://github.com/example/original-source",
+		UpdatedBy:    alice.ID,
+		Visibility:   store.VisibilityPrivate,
+		Created:      time.Now(),
+		Updated:      time.Now(),
 	}
 	require.NoError(t, s.CreateTemplate(ctx, tpl))
 
@@ -444,6 +447,8 @@ func TestTemplateAuthz_Update_AllPinnedFieldsImmutable(t *testing.T) {
 	require.Len(t, pre.Files, 1, "pre: Files length")
 	require.Equal(t, "sha256:aabbccdd", pre.ContentHash, "pre: ContentHash")
 	require.Equal(t, store.TemplateStatusPending, pre.Status, "pre: Status")
+	require.Equal(t, "original-base-template-id", pre.BaseTemplate, "pre: BaseTemplate")
+	require.Equal(t, "https://github.com/example/original-source", pre.SourceURL, "pre: SourceURL")
 
 	// Send a PUT body that tries to overwrite every pinned field.
 	rec := doRequestAsUser(t, srv, alice, http.MethodPut, "/api/v1/templates/"+tpl.ID, store.Template{
@@ -455,9 +460,12 @@ func TestTemplateAuthz_Update_AllPinnedFieldsImmutable(t *testing.T) {
 		StoragePath:   "evil/path",
 		StorageBucket: "evil-bucket",
 		StorageURI:    "gs://evil-bucket/evil/path",
-		Files:         []store.TemplateFile{},
-		ContentHash:   "sha256:evil",
-		Status:        store.TemplateStatusActive,
+		Files:        []store.TemplateFile{},
+		ContentHash:  "sha256:evil",
+		Status:       store.TemplateStatusActive,
+		BaseTemplate: "evil-base-template",
+		SourceURL:    "https://evil.example.com/injected",
+		UpdatedBy:    "evil-updater",
 	})
 	require.Equal(t, http.StatusOK, rec.Code,
 		"update should succeed; got: %s", rec.Body.String())
@@ -489,6 +497,16 @@ func TestTemplateAuthz_Update_AllPinnedFieldsImmutable(t *testing.T) {
 		"stored ContentHash must not be overwritten by the update body")
 	assert.Equal(t, store.TemplateStatusPending, stored.Status,
 		"stored Status must not be overwritten by the update body")
+	assert.Equal(t, "original-base-template-id", stored.BaseTemplate,
+		"stored BaseTemplate must not be overwritten by the update body")
+	assert.Equal(t, "https://github.com/example/original-source", stored.SourceURL,
+		"stored SourceURL must not be overwritten by the update body")
+	// UpdatedBy is derived from the authenticated identity, not pinned
+	// from the existing record — verify it is NOT the hostile body value.
+	assert.NotEqual(t, "evil-updater", stored.UpdatedBy,
+		"stored UpdatedBy must not be taken from the request body")
+	assert.Equal(t, alice.ID, stored.UpdatedBy,
+		"stored UpdatedBy must be the authenticated caller's ID")
 
 	// The mutable field (Name) should have changed.
 	assert.Equal(t, "pinned-fixture-renamed", stored.Name,
@@ -523,16 +541,21 @@ func TestTemplateAuthz_Update_StatusPromotionBlocked(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, store.TemplateStatusPending, pre.Status, "pre: Status must be pending")
 
-	// Attempt to promote via PUT body.
+	// Attempt to promote via PUT body — also change Name so we can verify the
+	// write actually landed (a silent no-op returning 200 would pass otherwise).
 	rec := doRequestAsUser(t, srv, alice, http.MethodPut, "/api/v1/templates/"+tpl.ID, store.Template{
-		Name:   "pending-template",
+		Name:   "pending-template-renamed",
 		Status: store.TemplateStatusActive,
 	})
 	require.Equal(t, http.StatusOK, rec.Code, "update should succeed; got: %s", rec.Body.String())
 
-	// Status must still be pending.
+	// Verify the write landed by checking the mutable field changed.
 	stored, err := s.GetTemplate(ctx, tpl.ID)
 	require.NoError(t, err)
+	assert.Equal(t, "pending-template-renamed", stored.Name,
+		"Name (mutable) should be updated — proves the write landed")
+
+	// Status must still be pending.
 	assert.Equal(t, store.TemplateStatusPending, stored.Status,
 		"Status must remain pending — promotion via PUT body bypasses finalize verification")
 }

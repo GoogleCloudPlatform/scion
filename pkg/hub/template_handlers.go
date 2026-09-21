@@ -519,6 +519,8 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	//
 	// Group 1 — identity and authz state: without these a caller could
 	// reparent a template to a different scope or claim ownership.
+	// Scope reparenting requires its own endpoint with dual-scope
+	// authorization; it is not supported through the update body.
 	template.ID = existing.ID
 	template.Created = existing.Created
 	template.CreatedBy = existing.CreatedBy
@@ -535,6 +537,13 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	template.Files = existing.Files
 	template.ContentHash = existing.ContentHash
 	template.Status = existing.Status
+	template.BaseTemplate = existing.BaseTemplate
+	template.SourceURL = existing.SourceURL
+	// Group 3 — audit trail: derived from the authenticated caller,
+	// not trusted from the request body. The deref is safe: authorize
+	// (line 497) returns false on nil identity, so reaching here
+	// guarantees GetIdentityFromContext(ctx) != nil.
+	template.UpdatedBy = GetIdentityFromContext(ctx).ID()
 	if template.Slug == "" {
 		template.Slug = api.Slugify(template.Name)
 	}
