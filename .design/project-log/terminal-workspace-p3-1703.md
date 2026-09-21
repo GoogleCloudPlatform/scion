@@ -41,16 +41,16 @@ Also extended the `AgentFixture` interface with optional `lastActivityEvent` and
 
 ## Gate Results
 
-| Gate | Result |
-|------|--------|
-| `npm run build` | ✅ Pass |
-| `tsc --noEmit --project tsconfig.json` | ✅ Pass |
-| `tsc --noEmit --project tsconfig.client.json` | ✅ Pass |
-| `tsc --noEmit --project src/client/tsconfig.terminal-tests.json` | ✅ Pass |
-| `tsc --noEmit --project e2e/terminal-workspace/tsconfig.json` | ✅ Pass |
-| `eslint e2e/terminal-workspace/ --ext .ts` | ✅ Pass (0 errors, 2 pre-existing warnings in reconnect.pw.ts) |
-| `prettier --check src/client/terminal-workspace-root.ts` | ✅ Pass |
-| Playwright tests (88 total: 81 existing + 7 new) | ✅ All pass |
+| Gate                                                             | Result                                                         |
+| ---------------------------------------------------------------- | -------------------------------------------------------------- |
+| `npm run build`                                                  | ✅ Pass                                                        |
+| `tsc --noEmit --project tsconfig.json`                           | ✅ Pass                                                        |
+| `tsc --noEmit --project tsconfig.client.json`                    | ✅ Pass                                                        |
+| `tsc --noEmit --project src/client/tsconfig.terminal-tests.json` | ✅ Pass                                                        |
+| `tsc --noEmit --project e2e/terminal-workspace/tsconfig.json`    | ✅ Pass                                                        |
+| `eslint e2e/terminal-workspace/ --ext .ts`                       | ✅ Pass (0 errors, 2 pre-existing warnings in reconnect.pw.ts) |
+| `prettier --check src/client/terminal-workspace-root.ts`         | ✅ Pass                                                        |
+| Playwright tests (88 total: 81 existing + 7 new)                 | ✅ All pass                                                    |
 
 ## Test Count
 
