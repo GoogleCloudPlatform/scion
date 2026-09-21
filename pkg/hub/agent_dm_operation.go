@@ -117,6 +117,13 @@ type AgentDMInput struct {
 	// GroupID correlates group-set messages in the store. Empty for
 	// direct 1:1 DMs.
 	GroupID string
+
+	// Wake requests that the target agent be resumed from a suspended
+	// state before message delivery. When true and the target is
+	// suspended, the operation resumes the agent and waits for readiness
+	// before dispatching. Wake runs after all admission checks so that
+	// denied requests cannot resume an agent (#1691 AC-2).
+	Wake bool
 }
 
 // AgentDMOutcome enumerates the possible delivery result states.
@@ -257,6 +264,22 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			Details: map[string]interface{}{
 				"reason": string(MessageDenialCrossProjectAttachUnsupported),
 			},
+		}
+	}
+
+	// ── Phase 1b: Wake handling (#1691) ─────────────────────────────────
+	// Wake runs after all admission checks so that denied, oversized, or
+	// unauthorized requests cannot resume an agent (AC-2). Resume failure
+	// or readiness timeout returns an explicit error and no message is
+	// dispatched (AC-4).
+	if input.Wake {
+		_, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
+		if wakeErr != nil {
+			return nil, wakeErr
+		}
+	} else {
+		if phaseErr := validateAgentDeliverable(input.TargetAgent); phaseErr != nil {
+			return nil, phaseErr
 		}
 	}
 

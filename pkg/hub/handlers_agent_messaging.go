@@ -74,6 +74,11 @@ type OutboundMessageRequest struct {
 	// When set, the hub resolves the reference to a ConversationID via
 	// messaging.Resolve, then routes through the existing DEF-138 path.
 	ConversationRef string `json:"conversation_ref,omitempty"`
+
+	// Wake requests that a suspended target agent be resumed before
+	// message delivery (#1691). Only meaningful for agent-to-agent DMs;
+	// ignored for user and group recipients (zero resumes invoked).
+	Wake bool `json:"wake,omitempty"`
 }
 
 // deliveryPath identifies how an outbound message should be persisted and dispatched.
@@ -899,6 +904,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			ThreadID:       result.ThreadID,
 			ProjectID:      agent.ProjectID,
 			GroupID:        result.GroupID,
+			Wake:           req.Wake,
 		})
 		if dmErr != nil {
 			WriteAgentDMError(w, dmErr)
@@ -1496,76 +1502,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	// Wake handling: if requested, resume a suspended agent before message delivery.
-	if req.Wake {
-		switch state.Phase(agent.Phase) {
-		case state.PhaseSuspended:
-			if !s.checkBrokerAvailability(w, r, agent) {
-				return
-			}
-			dispatcher := s.GetDispatcher()
-			if dispatcher == nil {
-				ServiceNotReady(w, "Dispatch not available — server may still be starting up")
-				return
-			}
-			if agent.RuntimeBrokerID == "" {
-				ServiceNotReady(w, "Agent has no runtime broker assigned")
-				return
-			}
-
-			// Wake always resumes a suspended agent, so the harness must
-			// continue its prior session.
-			if err := dispatcher.DispatchAgentStart(ctx, agent, "", true); err != nil {
-				RuntimeError(w, "Failed to wake agent: "+err.Error())
-				return
-			}
-
-			// Set phase to 'starting' while we wait for readiness.
-			statusUpdate := store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}
-			if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			agent.Phase = string(state.PhaseStarting)
-			s.events.PublishAgentStatus(ctx, agent)
-
-			if err := s.waitForAgentReady(ctx, id, 30*time.Second); err != nil {
-				// On failure, set agent to an error state for clarity.
-				_ = s.store.UpdateAgentStatus(ctx, id, store.AgentStatusUpdate{Phase: string(state.PhaseError), Message: "Failed to become ready after wake"})
-				RuntimeError(w, "Agent resumed but did not become ready: "+err.Error())
-				return
-			}
-
-			// Agent is ready, set phase to 'running'.
-			statusUpdate = store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}
-			if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			agent.Phase = string(state.PhaseRunning)
-			s.events.PublishAgentStatus(ctx, agent)
-
-		case state.PhaseRunning:
-			// no-op
-
-		case state.PhaseStopped:
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-				"Agent is stopped, not suspended — use 'scion resume' to restart it with its previous state", nil)
-			return
-
-		case state.PhaseError:
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-				"Agent is in error state — use 'scion resume' to restart", nil)
-			return
-
-		default:
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-				fmt.Sprintf("Agent is not yet running (phase: %s) — wait for it to reach running state", agent.Phase), nil)
+	// For agent-to-agent DMs, wake is handled by ExecuteAgentDM after admission
+	// checks so that denied requests cannot resume an agent (#1691 AC-2).
+	// For user-to-agent messages, wake is handled inline here using the shared helper.
+	senderIsAgent := GetAgentIdentityFromContext(ctx) != nil
+	if req.Wake && !senderIsAgent {
+		wakeResult, wakeErr := s.wakeAgentForDM(ctx, agent)
+		if wakeErr != nil {
+			WriteAgentDMError(w, wakeErr)
 			return
 		}
+		_ = wakeResult // Phase mutation applied in-place on the agent record.
 	}
 
 	// Reject messages to non-running agents when --wake is not set.
-	if !req.Wake {
+	// For agent-to-agent DMs, phase validation is handled by ExecuteAgentDM.
+	if !req.Wake && !senderIsAgent {
 		switch state.Phase(agent.Phase) {
 		case state.PhaseRunning:
 			// OK — proceed to deliver
@@ -1906,6 +1858,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				ThreadID:       structuredMsg.ThreadID,
 				ProjectID:      agent.ProjectID,
 				GroupID:        groupID,
+				Wake:           req.Wake,
 			})
 			if dmErr != nil {
 				WriteAgentDMError(w, dmErr)
