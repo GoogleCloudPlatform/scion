@@ -90,11 +90,33 @@ export class TerminalLayoutManager {
   }
 
   /**
-   * Open/select a session: sets single[0] without changing the active preset.
-   * NEVER mutates twoColumns, twoRows, or four.
+   * Open/add a new session. Checks whether the current multi preset is at
+   * capacity (every slot filled). When at capacity, overflows to single so the
+   * new agent is immediately visible. When not at capacity (or when already in
+   * single), delegates to select() which sets single[0] without touching the
+   * active preset.
+   *
+   * Multi-pane slot assignments are NEVER cleared on overflow — the user can
+   * switch back to the prior preset and see the original grid.
    */
   open(sessionKey: string): void {
-    this.select(sessionKey);
+    const preset = this.state.active;
+    const slots = this.getPresetSlots(preset);
+    const atCapacity = preset !== 'single' && slots.every((s) => s !== null);
+
+    if (atCapacity) {
+      // Overflow: switch to single to show the new agent.
+      // Multi-pane assignments are preserved.
+      this.zoomed = null;
+      this.commit({
+        ...this.state,
+        active: 'single',
+        single: [sessionKey],
+      });
+    } else {
+      // Not at capacity: just select without changing preset.
+      this.select(sessionKey);
+    }
   }
 
   /**

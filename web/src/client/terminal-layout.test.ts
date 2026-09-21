@@ -122,8 +122,8 @@ describe('TerminalLayoutManager', () => {
     });
   });
 
-  describe('fifth-agent open', () => {
-    it('opens fifth agent into single slot, preserving four-pane preset and assignments', () => {
+  describe('overflow: open at capacity', () => {
+    it('overflows to single when four-pane is at capacity', () => {
       const m = manager();
       m.place('agent-a', 'four', 0);
       m.place('agent-b', 'four', 1);
@@ -133,14 +133,120 @@ describe('TerminalLayoutManager', () => {
       expect(m.getState().active).toBe('four');
       expect(m.getState().four).toEqual(['agent-a', 'agent-b', 'agent-c', 'agent-d']);
 
-      // Fifth agent open — single[0] updates, active stays 'four'
+      // Fifth agent open — overflow to single, showing the new agent
       m.open('agent-e');
 
+      expect(m.getState().active).toBe('single');
       expect(m.getState().single[0]).toBe('agent-e');
-      // active stays 'four' (#1701 fix: open does not clobber preset)
-      expect(m.getState().active).toBe('four');
-      // four-pane is UNCHANGED
+      // four-pane assignments preserved
       expect(m.getState().four).toEqual(['agent-a', 'agent-b', 'agent-c', 'agent-d']);
+    });
+
+    it('restores four-pane grid after overflow to single', () => {
+      const m = manager();
+      m.place('agent-a', 'four', 0);
+      m.place('agent-b', 'four', 1);
+      m.place('agent-c', 'four', 2);
+      m.place('agent-d', 'four', 3);
+      m.setLayout('four');
+
+      m.open('agent-e');
+      expect(m.getState().active).toBe('single');
+
+      // Switch back to four — grid restored
+      m.setLayout('four');
+      expect(m.getState().active).toBe('four');
+      expect(m.getState().four).toEqual(['agent-a', 'agent-b', 'agent-c', 'agent-d']);
+    });
+
+    it('does not overflow when multi preset has available slots', () => {
+      const m = manager();
+      m.place('agent-a', 'four', 0);
+      // Only 1 of 4 slots filled
+      m.setLayout('four');
+      expect(m.getState().active).toBe('four');
+
+      m.open('agent-b');
+      // Not at capacity — stays in four
+      expect(m.getState().active).toBe('four');
+      expect(m.getState().single[0]).toBe('agent-b');
+    });
+
+    it('does not overflow when four-pane has all null slots', () => {
+      const m = manager();
+      m.setLayout('four');
+      expect(m.getState().active).toBe('four');
+      expect(m.getState().four).toEqual([null, null, null, null]);
+
+      m.open('agent-a');
+      // Not at capacity (nulls are empty slots) — stays in four
+      expect(m.getState().active).toBe('four');
+      expect(m.getState().single[0]).toBe('agent-a');
+    });
+
+    it('overflows two-columns at capacity', () => {
+      const m = manager();
+      m.place('agent-a', 'two-columns', 0);
+      m.place('agent-b', 'two-columns', 1);
+      m.setLayout('two-columns');
+
+      m.open('agent-c');
+      expect(m.getState().active).toBe('single');
+      expect(m.getState().single[0]).toBe('agent-c');
+      // two-columns preserved
+      expect(m.getState().twoColumns).toEqual(['agent-a', 'agent-b']);
+    });
+
+    it('overflows two-rows at capacity', () => {
+      const m = manager();
+      m.place('agent-a', 'two-rows', 0);
+      m.place('agent-b', 'two-rows', 1);
+      m.setLayout('two-rows');
+
+      m.open('agent-c');
+      expect(m.getState().active).toBe('single');
+      expect(m.getState().single[0]).toBe('agent-c');
+      // two-rows preserved
+      expect(m.getState().twoRows).toEqual(['agent-a', 'agent-b']);
+    });
+
+    it('does not overflow when active is single', () => {
+      const m = manager();
+      m.open('agent-a');
+      expect(m.getState().active).toBe('single');
+
+      m.open('agent-b');
+      // single never triggers overflow — just replaces single[0]
+      expect(m.getState().active).toBe('single');
+      expect(m.getState().single[0]).toBe('agent-b');
+    });
+
+    it('cancels zoom on overflow', () => {
+      const m = manager();
+      m.place('agent-a', 'four', 0);
+      m.place('agent-b', 'four', 1);
+      m.place('agent-c', 'four', 2);
+      m.place('agent-d', 'four', 3);
+      m.setLayout('four');
+      m.zoom('agent-a');
+      expect(m.getZoomed()).toBe('agent-a');
+
+      m.open('agent-e');
+      expect(m.getZoomed()).toBeNull();
+    });
+
+    it('select never overflows even at capacity (#1701)', () => {
+      const m = manager();
+      m.place('agent-a', 'four', 0);
+      m.place('agent-b', 'four', 1);
+      m.place('agent-c', 'four', 2);
+      m.place('agent-d', 'four', 3);
+      m.setLayout('four');
+
+      // select (navigate to existing agent) must NOT overflow
+      m.select('agent-a');
+      expect(m.getState().active).toBe('four');
+      expect(m.getState().single[0]).toBe('agent-a');
     });
   });
 
@@ -170,7 +276,7 @@ describe('TerminalLayoutManager', () => {
       expect(listener).not.toHaveBeenCalled();
     });
 
-    it('open does not clobber active preset; setLayout still works afterward', () => {
+    it('open overflow switches to single; setLayout still works afterward', () => {
       const m = manager();
       m.place('agent-a', 'four', 0);
       m.place('agent-b', 'four', 1);
@@ -179,11 +285,7 @@ describe('TerminalLayoutManager', () => {
       m.setLayout('four');
 
       m.open('agent-e');
-      // active stays 'four' after open (#1701)
-      expect(m.getState().active).toBe('four');
-
-      // Explicit setLayout('single') still switches to single
-      m.setLayout('single');
+      // overflow → single (four is at capacity)
       expect(m.getState().active).toBe('single');
       expect(m.getState().single[0]).toBe('agent-e');
 

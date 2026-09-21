@@ -301,6 +301,10 @@ export class TerminalWorkspaceRoot {
     try {
       const session = pane.open(registry, agentId);
       this.panes.set(session.state.key, pane);
+      // Check overflow: if the current multi preset is at capacity, switch to
+      // single so the newly opened agent is visible.  Multi-pane assignments
+      // are preserved — the user can switch back to see the prior grid.
+      this.layoutManager.open(session.state.key);
       return session;
     } catch (error) {
       pane.remove();
@@ -312,7 +316,8 @@ export class TerminalWorkspaceRoot {
     const pane = this.panes.get(session.state.key);
     if (!pane) throw new Error('Terminal session has no retained pane.');
     // Sets single[0] without changing the active preset (#1701).
-    this.layoutManager.open(session.state.key);
+    // Navigation of an already-open agent must not trigger overflow.
+    this.layoutManager.select(session.state.key);
     this.status.textContent = '';
     this.show(true);
     this.refresh();

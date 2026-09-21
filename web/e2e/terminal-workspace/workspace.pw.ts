@@ -630,7 +630,7 @@ test('preset rendering shows correct number of pane slots for each preset', asyn
   expect(singleVisible + singlePH).toBe(1);
 });
 
-test('fifth-agent open switches to single; choosing four restores earlier grid', async ({
+test('fifth-agent open overflows to single when four-pane at capacity; four restores grid', async ({
   page,
 }) => {
   const fiveAgents: Record<string, AgentFixture> = {
@@ -642,10 +642,9 @@ test('fifth-agent open switches to single; choosing four restores earlier grid',
   };
   const socket = await setup(page, true, true, fiveAgents);
 
-  // Open 4 agents and place them in the grid
+  // Open 4 agents
   await page.goto(`/terminals/${agent}`);
   await expect.poll(() => socket.attaches).toBe(1);
-
   await navigateToTerminal(page, agentB);
   await expect.poll(() => socket.attaches).toBe(2);
   await navigateToTerminal(page, agentC);
@@ -653,31 +652,86 @@ test('fifth-agent open switches to single; choosing four restores earlier grid',
   await navigateToTerminal(page, agentD);
   await expect.poll(() => socket.attaches).toBe(4);
 
-  // Multi-pane presets start with null slots — populated only via place() (P2.3 drag-drop).
-  // open()/select() only sets single[0]. So the four-grid has 4 empty slots.
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(4);
 
-  // Verify: switch to four, get 4 placeholder slots
+  // Place all 4 into four-grid so it is at capacity
+  await placeInPreset(page, keys[0], 'four', 0);
+  await placeInPreset(page, keys[1], 'four', 1);
+  await placeInPreset(page, keys[2], 'four', 2);
+  await placeInPreset(page, keys[3], 'four', 3);
+
+  // Switch to four — all 4 panes visible, no placeholders
   await clickPreset(page, 'four');
   await expect.poll(() => activePreset(page)).toBe('four');
-  const fourPH = await placeholderCount(page);
-  expect(fourPH).toBe(4);
+  await expect.poll(() => visiblePaneCount(page)).toBe(4);
+  await expect.poll(() => placeholderCount(page)).toBe(0);
 
-  // Open 5th agent — open() no longer clobbers the active preset (#1701)
+  // Open 5th agent — four-pane is at capacity → overflow to single
   await navigateToTerminal(page, agentE);
   await expect.poll(() => socket.attaches).toBe(5);
-  await expect.poll(() => activePreset(page)).toBe('four');
-  // Four-pane grid still shows 4 placeholder slots (unchanged by open)
-  await expect.poll(() => placeholderCount(page)).toBe(4);
-
-  // Explicitly switch to single to see the 5th agent
-  await clickPreset(page, 'single');
   await expect.poll(() => activePreset(page)).toBe('single');
   await expect.poll(() => visiblePaneCount(page)).toBe(1);
 
-  // Switch back to four — grid should still have 4 placeholder slots (unchanged)
+  // Switch back to four — original grid restored with all 4 panes
   await clickPreset(page, 'four');
   await expect.poll(() => activePreset(page)).toBe('four');
-  await expect.poll(() => placeholderCount(page)).toBe(4);
+  await expect.poll(() => visiblePaneCount(page)).toBe(4);
+  await expect.poll(() => placeholderCount(page)).toBe(0);
+});
+
+test('open with empty four-pane slots does not overflow', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'a1', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'a2', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open first agent
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Switch to four — all 4 slots empty (null), not at capacity
+  await clickPreset(page, 'four');
+  await expect.poll(() => activePreset(page)).toBe('four');
+
+  // Open second agent — four has empty slots, no overflow
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+  await expect.poll(() => activePreset(page)).toBe('four');
+});
+
+test('navigating existing agent while multi active preserves preset (#1701)', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open both agents
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(2);
+
+  // Place both in two-columns so it is at capacity
+  await placeInPreset(page, keys[0], 'two-columns', 0);
+  await placeInPreset(page, keys[1], 'two-columns', 1);
+
+  // Switch to two-columns
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+
+  // Navigate to existing agent alpha via rail click — select, not open
+  await page.getByRole('button', { name: /alpha in proj/ }).click();
+
+  // Preset stays two-columns — navigation does not overflow (#1701)
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+  expect(socket.attaches).toBe(2);
 });
 
 test('socket identity preserved across preset switches — no new connections', async ({ page }) => {
