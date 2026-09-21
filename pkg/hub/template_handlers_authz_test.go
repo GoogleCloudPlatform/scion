@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
@@ -397,41 +396,145 @@ func TestTemplateAuthz_Validate_OwnerAllowed(t *testing.T) {
 }
 
 // ============================================================================
-// Scope / ScopeID / OwnerID immutability — stored record assertion
+// Pinned field immutability — all fields preserved from existing record
 // ============================================================================
 
-func TestTemplateAuthz_Update_ScopeFieldsImmutableInStore(t *testing.T) {
+// TestTemplateAuthz_Update_AllPinnedFieldsImmutable seeds a fixture with
+// distinctive non-zero values for every pinned field, sends a PUT body that
+// attempts to overwrite all of them with hostile values, and asserts the
+// stored record (not just the response) retains the originals.
+func TestTemplateAuthz_Update_AllPinnedFieldsImmutable(t *testing.T) {
 	srv, s, alice, _, project := setupTemplateAuthzTest(t)
-	tpl := createAuthzTestTemplate(t, s, "immut-store", store.TemplateScopeProject, project.ID, alice.ID)
+	ctx := context.Background()
 
-	rec := doRequestAsUser(t, srv, alice, http.MethodPut, "/api/v1/templates/"+tpl.ID, store.Template{
-		Name:    "immut-store-renamed",
-		Status:  "active",
-		Scope:   store.TemplateScopeGlobal,
-		ScopeID: "evil-project",
-		OwnerID: "evil-owner",
-	})
-	require.Equal(t, http.StatusOK, rec.Code, "update should succeed; got: %s", rec.Body.String())
+	// Seed a fixture with distinctive non-zero values for every pinned field.
+	tpl := &store.Template{
+		ID:            api.NewUUID(),
+		Name:          "pinned-fixture",
+		Slug:          "pinned-fixture",
+		Scope:         store.TemplateScopeProject,
+		ScopeID:       project.ID,
+		OwnerID:       alice.ID,
+		ProjectID:     project.ID,
+		StoragePath:   "templates/project/pinned-fixture",
+		StorageBucket: "original-bucket",
+		StorageURI:    "gs://original-bucket/templates/project/pinned-fixture",
+		Files: []store.TemplateFile{
+			{Path: "TEMPLATE.md", Size: 42, Hash: "sha256:original-hash"},
+		},
+		ContentHash: "sha256:aabbccdd",
+		Status:      store.TemplateStatusPending,
+		Visibility:  store.VisibilityPrivate,
+		Created:     time.Now(),
+		Updated:     time.Now(),
+	}
+	require.NoError(t, s.CreateTemplate(ctx, tpl))
 
-	// Verify the response body reflects the preserved values.
-	var resp store.Template
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.Equal(t, store.TemplateScopeProject, resp.Scope,
-		"response Scope must be the original, not the attacker's value")
-	assert.Equal(t, project.ID, resp.ScopeID,
-		"response ScopeID must be the original project ID")
-	assert.Equal(t, alice.ID, resp.OwnerID,
-		"response OwnerID must be the original owner")
-
-	// Verify the stored record was NOT modified for Scope, ScopeID, OwnerID.
-	stored, err := s.GetTemplate(context.Background(), tpl.ID)
+	// Pre-state assertion: verify the fixture has the expected values before
+	// the update. If these fail, the test is decorative.
+	pre, err := s.GetTemplate(ctx, tpl.ID)
 	require.NoError(t, err)
+	require.Equal(t, store.TemplateScopeProject, pre.Scope, "pre: Scope")
+	require.Equal(t, project.ID, pre.ScopeID, "pre: ScopeID")
+	require.Equal(t, alice.ID, pre.OwnerID, "pre: OwnerID")
+	require.Equal(t, project.ID, pre.ProjectID, "pre: ProjectID")
+	require.Equal(t, "templates/project/pinned-fixture", pre.StoragePath, "pre: StoragePath")
+	require.Equal(t, "original-bucket", pre.StorageBucket, "pre: StorageBucket")
+	require.Equal(t, "gs://original-bucket/templates/project/pinned-fixture", pre.StorageURI, "pre: StorageURI")
+	require.Len(t, pre.Files, 1, "pre: Files length")
+	require.Equal(t, "sha256:aabbccdd", pre.ContentHash, "pre: ContentHash")
+	require.Equal(t, store.TemplateStatusPending, pre.Status, "pre: Status")
+
+	// Send a PUT body that tries to overwrite every pinned field.
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut, "/api/v1/templates/"+tpl.ID, store.Template{
+		Name:          "pinned-fixture-renamed",
+		Scope:         store.TemplateScopeGlobal,
+		ScopeID:       "evil-project",
+		OwnerID:       "evil-owner",
+		ProjectID:     "evil-project-legacy",
+		StoragePath:   "evil/path",
+		StorageBucket: "evil-bucket",
+		StorageURI:    "gs://evil-bucket/evil/path",
+		Files:         []store.TemplateFile{},
+		ContentHash:   "sha256:evil",
+		Status:        store.TemplateStatusActive,
+	})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"update should succeed; got: %s", rec.Body.String())
+
+	// Verify the stored record retains the original values for all pinned fields.
+	stored, err := s.GetTemplate(ctx, tpl.ID)
+	require.NoError(t, err)
+
+	// Group 1: authz-state fields
 	assert.Equal(t, store.TemplateScopeProject, stored.Scope,
-		"stored Scope must remain project, not be reparented to global")
+		"stored Scope must remain project")
 	assert.Equal(t, project.ID, stored.ScopeID,
 		"stored ScopeID must remain the original project ID")
 	assert.Equal(t, alice.ID, stored.OwnerID,
 		"stored OwnerID must remain the original owner")
+
+	// Group 2: content and storage state
+	assert.Equal(t, project.ID, stored.ProjectID,
+		"stored ProjectID must remain the original (deprecated ScopeID alias)")
+	assert.Equal(t, "templates/project/pinned-fixture", stored.StoragePath,
+		"stored StoragePath must not be overwritten by the update body")
+	assert.Equal(t, "original-bucket", stored.StorageBucket,
+		"stored StorageBucket must not be overwritten by the update body")
+	assert.Equal(t, "gs://original-bucket/templates/project/pinned-fixture", stored.StorageURI,
+		"stored StorageURI must not be overwritten by the update body")
+	assert.Len(t, stored.Files, 1,
+		"stored Files manifest must not be wiped by the update body")
+	assert.Equal(t, "sha256:aabbccdd", stored.ContentHash,
+		"stored ContentHash must not be overwritten by the update body")
+	assert.Equal(t, store.TemplateStatusPending, stored.Status,
+		"stored Status must not be overwritten by the update body")
+
+	// The mutable field (Name) should have changed.
+	assert.Equal(t, "pinned-fixture-renamed", stored.Name,
+		"Name (mutable) should be updated")
+}
+
+// TestTemplateAuthz_Update_StatusPromotionBlocked verifies that a PUT body
+// cannot promote a pending template to active without going through
+// handleTemplateFinalize. This is an integrity bypass: finalize verifies
+// file content (template_handlers.go:755-757) and a direct status write
+// would skip that verification.
+func TestTemplateAuthz_Update_StatusPromotionBlocked(t *testing.T) {
+	srv, s, alice, _, project := setupTemplateAuthzTest(t)
+	ctx := context.Background()
+
+	tpl := &store.Template{
+		ID:         api.NewUUID(),
+		Name:       "pending-template",
+		Slug:       "pending-template",
+		Scope:      store.TemplateScopeProject,
+		ScopeID:    project.ID,
+		OwnerID:    alice.ID,
+		Status:     store.TemplateStatusPending,
+		Visibility: store.VisibilityPrivate,
+		Created:    time.Now(),
+		Updated:    time.Now(),
+	}
+	require.NoError(t, s.CreateTemplate(ctx, tpl))
+
+	// Pre-state: template is pending.
+	pre, err := s.GetTemplate(ctx, tpl.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.TemplateStatusPending, pre.Status, "pre: Status must be pending")
+
+	// Attempt to promote via PUT body.
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut, "/api/v1/templates/"+tpl.ID, store.Template{
+		Name:   "pending-template",
+		Status: store.TemplateStatusActive,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "update should succeed; got: %s", rec.Body.String())
+
+	// Status must still be pending.
+	stored, err := s.GetTemplate(ctx, tpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TemplateStatusPending, stored.Status,
+		"Status must remain pending — promotion via PUT body bypasses finalize verification")
 }
 
 // ============================================================================

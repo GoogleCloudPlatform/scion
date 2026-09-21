@@ -512,18 +512,29 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		}
 	}
 
-	// Preserve immutable fields. Scope, ScopeID, and OwnerID are included
-	// because the request body deserializes a full store.Template and without
-	// pinning these a caller could reparent a template to a different scope or
-	// claim ownership — both are authorization-state writes. Scope reparenting
-	// requires its own endpoint with dual-scope authorization; it is not
-	// supported through the update body.
+	// Preserve immutable fields from the existing record. The store's
+	// UpdateTemplate unconditionally Set()s every column, so any field not
+	// pinned here is overwritten with the request body's value — or its
+	// zero value if the body omits it.
+	//
+	// Group 1 — identity and authz state: without these a caller could
+	// reparent a template to a different scope or claim ownership.
 	template.ID = existing.ID
 	template.Created = existing.Created
 	template.CreatedBy = existing.CreatedBy
 	template.Scope = existing.Scope
 	template.ScopeID = existing.ScopeID
 	template.OwnerID = existing.OwnerID
+	// Group 2 — content and storage state: these are managed by the
+	// upload/finalize workflow and must not be writable through the
+	// update body.
+	template.ProjectID = existing.ProjectID
+	template.StoragePath = existing.StoragePath
+	template.StorageBucket = existing.StorageBucket
+	template.StorageURI = existing.StorageURI
+	template.Files = existing.Files
+	template.ContentHash = existing.ContentHash
+	template.Status = existing.Status
 	if template.Slug == "" {
 		template.Slug = api.Slugify(template.Name)
 	}
