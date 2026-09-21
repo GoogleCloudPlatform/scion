@@ -277,6 +277,10 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",
 		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
 
+		// Global catalog permissions — handler-enforced via globalWriteAction,
+		// no catalog operation or route declaration in Phase 1.
+		"skill.create_global": "Registered in Phase 1; catalog operation deferred to Phase 2 (ptone/scion#1713)",
+
 		// Agent token scopes — not route-enforced
 		"agent.status_update":  "Agent token scope, not route-enforced",
 		"agent.log_append":     "Agent token scope, not route-enforced",
