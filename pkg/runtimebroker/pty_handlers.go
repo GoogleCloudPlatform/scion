@@ -390,6 +390,33 @@ func activeWindowOSC(windowName string) []byte {
 	return []byte(fmt.Sprintf("\033]7337;tmuxwindow=%s\007", windowName))
 }
 
+// activateTmuxSetTitles enables tmux's set-titles option on the "scion" session
+// inside a container. This is needed for existing agent sessions that were
+// created before the template added set-titles to .tmux.conf. When set-titles
+// is on with set-titles-string '#W', tmux emits OSC 0 title updates on window
+// switch, which the frontend uses to sync the toolbar indicator.
+//
+// Best-effort: activation failure is logged at Debug level and does not block
+// terminal attach. Idempotent: safe to call on sessions that already have
+// set-titles enabled (tmux treats a redundant set-option as a no-op).
+func activateTmuxSetTitles(ctx context.Context, runtimeCmd, containerID, execUser string) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	for _, opt := range []struct{ key, val string }{
+		{"set-titles", "on"},
+		{"set-titles-string", "#W"},
+	} {
+		cmd := exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID,
+			"tmux", "set-option", "-t", "scion", opt.key, opt.val)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			slog.Debug("Failed to activate tmux set-titles",
+				"option", opt.key, "containerID", containerID, "error", err,
+				"output", strings.TrimSpace(string(out)))
+			return
+		}
+	}
+}
+
 // queryTmuxActiveWindow queries the currently active tmux window name via
 // container exec (Docker / Apple Virtualization runtimes).
 func queryTmuxActiveWindow(ctx context.Context, runtimeCmd, containerID, execUser string) string {
@@ -703,6 +730,12 @@ func (s *LocalPTYSession) Run() error {
 	} else if isK8s {
 		return s.runK8sExec()
 	} else {
+		// Activate set-titles for existing sessions that predate the template change.
+		// Best-effort — failure doesn't block attach.
+		if isDockerCompatibleRuntime(s.runtimeCmd) {
+			activateTmuxSetTitles(s.ctx, s.runtimeCmd, s.containerID, s.execUser)
+		}
+
 		// Start docker/container exec with PTY
 		if err := s.startDockerExec(); err != nil {
 			return fmt.Errorf("failed to start exec: %w", err)
@@ -1136,6 +1169,12 @@ func (h *StreamPTYHandler) Run() error {
 	} else if isK8s {
 		return h.runK8sExec()
 	} else {
+		// Activate set-titles for existing sessions that predate the template change.
+		// Best-effort — failure doesn't block attach.
+		if isDockerCompatibleRuntime(runtimeCmd) {
+			activateTmuxSetTitles(h.ctx, runtimeCmd, h.containerID, h.execUser)
+		}
+
 		// Start docker/container exec with tmux attach
 		if err := h.startDockerExec(); err != nil {
 			return err

@@ -15,10 +15,19 @@
 package runtimebroker
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/creack/pty"
+	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/tools/remotecommand"
 )
 
@@ -204,4 +213,366 @@ func TestSanitizeExecUser(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- activateTmuxSetTitles tests ---
+
+// TestActivateTmuxSetTitles_FailureBestEffort verifies that calling
+// activateTmuxSetTitles with a non-existent runtime binary does not panic
+// or block — the function returns silently after logging a debug message.
+func TestActivateTmuxSetTitles_FailureBestEffort(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		activateTmuxSetTitles(ctx, "nonexistent-runtime-binary-12345", "fake-container", "scion")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success — returned without panic or hang
+	case <-time.After(4 * time.Second):
+		t.Fatal("activateTmuxSetTitles blocked on bad runtime — expected prompt return")
+	}
+}
+
+// TestActivateTmuxSetTitles_CancelledContext verifies that a cancelled context
+// causes activateTmuxSetTitles to return promptly without blocking.
+func TestActivateTmuxSetTitles_CancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	done := make(chan struct{})
+	go func() {
+		activateTmuxSetTitles(ctx, "docker", "fake-container", "scion")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success — returned promptly
+	case <-time.After(4 * time.Second):
+		t.Fatal("activateTmuxSetTitles blocked on cancelled context — expected prompt return")
+	}
+}
+
+// tmuxAvailable returns true if tmux is on PATH.
+func tmuxAvailable(t *testing.T) bool {
+	t.Helper()
+	_, err := exec.LookPath("tmux")
+	return err == nil
+}
+
+// writeFakeDockerScript creates a shell script that strips the docker exec
+// prefix (exec --user <user> <container>) and runs the remaining args,
+// inserting -S <socket> for tmux commands. Returns the path to the script.
+func writeFakeDockerScript(t *testing.T, socketPath string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-docker")
+	content := fmt.Sprintf(`#!/bin/sh
+# Strip: exec --user <user> <container> → remaining args are the command
+shift 4
+# Insert tmux socket for tmux commands
+case "$1" in
+  tmux) shift; exec tmux -S %q "$@" ;;
+  *)    exec "$@" ;;
+esac
+`, socketPath)
+	err := os.WriteFile(script, []byte(content), 0755)
+	require.NoError(t, err)
+	return script
+}
+
+// startTmuxServer creates a tmux server with the given socket, session name,
+// and initial window. Returns a cleanup function.
+func startTmuxServer(t *testing.T, socketPath, sessionName, windowName string) {
+	t.Helper()
+	cmd := exec.Command("tmux", "-S", socketPath, "new-session", "-d",
+		"-s", sessionName, "-n", windowName)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "tmux new-session failed: %s", string(out))
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "-S", socketPath, "kill-server").Run()
+	})
+}
+
+// TestActivateTmuxSetTitles_RealTmux verifies that activateTmuxSetTitles
+// correctly enables set-titles and set-titles-string on a real tmux server.
+func TestActivateTmuxSetTitles_RealTmux(t *testing.T) {
+	if !tmuxAvailable(t) {
+		t.Skip("tmux not available")
+	}
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "tmux.sock")
+
+	// Start tmux server with session "scion"
+	startTmuxServer(t, socketPath, "scion", "agent")
+
+	// Write a fake docker script that forwards tmux commands with our socket
+	fakeDocker := writeFakeDockerScript(t, socketPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Call activateTmuxSetTitles through the fake docker wrapper
+	activateTmuxSetTitles(ctx, fakeDocker, "fake-container", "scion")
+
+	// Verify set-titles is on (session-level option, query with -t)
+	out, err := exec.CommandContext(ctx, "tmux", "-S", socketPath,
+		"show-option", "-t", "scion", "-v", "set-titles").CombinedOutput()
+	require.NoError(t, err, "show-option set-titles failed: %s", string(out))
+	require.Equal(t, "on", strings.TrimSpace(string(out)))
+
+	// Verify set-titles-string is #W
+	out, err = exec.CommandContext(ctx, "tmux", "-S", socketPath,
+		"show-option", "-t", "scion", "-v", "set-titles-string").CombinedOutput()
+	require.NoError(t, err, "show-option set-titles-string failed: %s", string(out))
+	require.Equal(t, "#W", strings.TrimSpace(string(out)))
+}
+
+// TestActivateTmuxSetTitles_Idempotent verifies that calling
+// activateTmuxSetTitles twice on the same session is safe (no error, same state).
+func TestActivateTmuxSetTitles_Idempotent(t *testing.T) {
+	if !tmuxAvailable(t) {
+		t.Skip("tmux not available")
+	}
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "tmux.sock")
+
+	startTmuxServer(t, socketPath, "scion", "agent")
+	fakeDocker := writeFakeDockerScript(t, socketPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// First call
+	activateTmuxSetTitles(ctx, fakeDocker, "fake-container", "scion")
+
+	// Second call — should not error
+	activateTmuxSetTitles(ctx, fakeDocker, "fake-container", "scion")
+
+	// Verify state is still correct
+	out, err := exec.CommandContext(ctx, "tmux", "-S", socketPath,
+		"show-option", "-t", "scion", "-v", "set-titles").CombinedOutput()
+	require.NoError(t, err)
+	require.Equal(t, "on", strings.TrimSpace(string(out)))
+
+	out, err = exec.CommandContext(ctx, "tmux", "-S", socketPath,
+		"show-option", "-t", "scion", "-v", "set-titles-string").CombinedOutput()
+	require.NoError(t, err)
+	require.Equal(t, "#W", strings.TrimSpace(string(out)))
+}
+
+// TestActivateTmuxSetTitles_NoSessionFallback verifies that calling
+// activateTmuxSetTitles when the "scion" session does not exist returns
+// silently without blocking or panicking.
+func TestActivateTmuxSetTitles_NoSessionFallback(t *testing.T) {
+	if !tmuxAvailable(t) {
+		t.Skip("tmux not available")
+	}
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "tmux.sock")
+
+	// Start tmux with a DIFFERENT session name — "scion" does not exist
+	startTmuxServer(t, socketPath, "other-session", "window0")
+	fakeDocker := writeFakeDockerScript(t, socketPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		activateTmuxSetTitles(ctx, fakeDocker, "fake-container", "scion")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success — returned without blocking
+	case <-time.After(5 * time.Second):
+		t.Fatal("activateTmuxSetTitles blocked when session missing — expected prompt return")
+	}
+}
+
+// readOSC0 reads from the given reader, scanning for an OSC 0 title sequence
+// (\033]0;<title>\007 or \033]0;<title>\033\\). Returns (title, rawBytes) on
+// success. Times out after the given duration.
+func readOSC0(t *testing.T, r *os.File, timeout time.Duration) (string, string) {
+	t.Helper()
+
+	type result struct {
+		title string
+		raw   string
+	}
+	ch := make(chan result, 1)
+
+	go func() {
+		scanner := bufio.NewScanner(r)
+		scanner.Split(bufio.ScanBytes)
+		var buf []byte
+		inOSC := false
+		for scanner.Scan() {
+			b := scanner.Bytes()[0]
+			buf = append(buf, b)
+
+			if !inOSC {
+				// Look for \033]0; sequence start
+				if len(buf) >= 4 {
+					tail := string(buf[len(buf)-4:])
+					if tail == "\033]0;" {
+						inOSC = true
+						buf = nil // reset to capture title only
+					}
+				}
+			} else {
+				// Look for BEL (\007) or ST (\033\\) terminator
+				if b == '\007' {
+					title := string(buf[:len(buf)-1]) // strip BEL
+					ch <- result{title: title, raw: string(buf)}
+					return
+				}
+				if len(buf) >= 2 && buf[len(buf)-2] == '\033' && buf[len(buf)-1] == '\\' {
+					title := string(buf[:len(buf)-2]) // strip ST
+					ch <- result{title: title, raw: string(buf)}
+					return
+				}
+			}
+		}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.title, r.raw
+	case <-time.After(timeout):
+		t.Fatalf("timed out waiting for OSC 0 title (waited %v)", timeout)
+		return "", ""
+	}
+}
+
+// TestActivateTmuxSetTitles_WindowSwitchOSC0 verifies that after activating
+// set-titles, switching tmux windows emits OSC 0 title updates through the PTY.
+// This is the end-to-end proof that the toolbar sync mechanism works.
+func TestActivateTmuxSetTitles_WindowSwitchOSC0(t *testing.T) {
+	if !tmuxAvailable(t) {
+		t.Skip("tmux not available")
+	}
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "tmux.sock")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create tmux server with session "scion", first window "agent"
+	startTmuxServer(t, socketPath, "scion", "agent")
+
+	// Add a second window "shell"
+	cmd := exec.CommandContext(ctx, "tmux", "-S", socketPath,
+		"new-window", "-t", "scion", "-n", "shell")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "new-window failed: %s", string(out))
+
+	// Switch back to window 0 (agent) so we start from a known state
+	cmd = exec.CommandContext(ctx, "tmux", "-S", socketPath,
+		"select-window", "-t", "scion:0")
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, "select-window failed: %s", string(out))
+
+	// Enable set-titles via activateTmuxSetTitles using the fake docker wrapper
+	fakeDocker := writeFakeDockerScript(t, socketPath)
+	activateTmuxSetTitles(ctx, fakeDocker, "fake-container", "scion")
+
+	// Attach to the tmux session with a real PTY so we receive OSC 0 output.
+	// Use TERM=xterm-256color (same as production attach).
+	attachCmd := exec.CommandContext(ctx, "tmux", "-S", socketPath,
+		"attach-session", "-t", "scion")
+	attachCmd.Env = append(os.Environ(), "TERM=xterm-256color")
+
+	ptyMaster, err := startPTYForTest(t, attachCmd)
+	require.NoError(t, err, "failed to start PTY for tmux attach")
+
+	// Give tmux a moment to initialize the attached client
+	time.Sleep(500 * time.Millisecond)
+
+	// Drain the initial OSC 0 emitted on attach (shows current window "agent").
+	// This prevents confusing the initial title with the window-switch title.
+	initTitle, _ := readOSC0(t, ptyMaster, 5*time.Second)
+	t.Logf("initial OSC 0 title on attach: %q", initTitle)
+
+	// Switch to window "shell" — should emit OSC 0 with title "shell"
+	cmd = exec.CommandContext(ctx, "tmux", "-S", socketPath,
+		"select-window", "-t", "scion:shell")
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, "select-window shell failed: %s", string(out))
+
+	title1, raw1 := readOSC0(t, ptyMaster, 5*time.Second)
+	require.NotEmpty(t, title1, "OSC 0 title after switch to shell window was empty (raw: %q)", raw1)
+	require.Contains(t, title1, "shell",
+		"expected OSC 0 title to contain 'shell', got %q", title1)
+
+	// Switch to window "agent" — should emit OSC 0 with title "agent"
+	cmd = exec.CommandContext(ctx, "tmux", "-S", socketPath,
+		"select-window", "-t", "scion:agent")
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, "select-window agent failed: %s", string(out))
+
+	title2, raw2 := readOSC0(t, ptyMaster, 5*time.Second)
+	require.NotEmpty(t, title2, "OSC 0 title after switch to agent window was empty (raw: %q)", raw2)
+	require.Contains(t, title2, "agent",
+		"expected OSC 0 title to contain 'agent', got %q", title2)
+}
+
+// startPTYForTest starts a command with a PTY and returns the master file
+// descriptor. The command is killed on test cleanup.
+func startPTYForTest(t *testing.T, cmd *exec.Cmd) (*os.File, error) {
+	t.Helper()
+
+	master, slave, err := openPTYPair(t)
+	if err != nil {
+		return nil, err
+	}
+
+	cmd.Stdin = slave
+	cmd.Stdout = slave
+	cmd.Stderr = slave
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid:  true,
+		Setctty: true,
+		Ctty:    0,
+	}
+
+	if err := cmd.Start(); err != nil {
+		_ = master.Close()
+		_ = slave.Close()
+		return nil, err
+	}
+
+	// Close slave in parent — only the child uses it
+	_ = slave.Close()
+
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		_ = master.Close()
+	})
+
+	return master, nil
+}
+
+// openPTYPair opens a PTY master/slave pair using the creack/pty package.
+func openPTYPair(t *testing.T) (master, slave *os.File, err error) {
+	t.Helper()
+	m, s, e := pty.Open()
+	if e != nil {
+		return nil, nil, fmt.Errorf("pty.Open: %w", e)
+	}
+	return m, s, nil
 }
