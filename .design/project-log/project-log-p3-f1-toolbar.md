@@ -36,6 +36,7 @@ set -g set-titles-string '#W'
 ```
 
 Files modified:
+
 - `resources/templates/default/home/.tmux.conf`
 - `pkg/config/embeds/templates/default/home/.tmux.conf`
 
@@ -44,6 +45,7 @@ Both files verified identical.
 ### Frontend (terminal-pane.ts)
 
 Added OSC 0 handler after the existing OSC 7337 handler. The handler:
+
 - Trims whitespace from the title data
 - Only matches exact "agent" or "shell" values
 - Sets `activeWindow` on match
@@ -64,6 +66,7 @@ Added 5 tests in `describe('OSC 0 window-state tracking (F1 fix)')`:
 ### Playwright Browser Test (pane.pw.ts)
 
 Added browser test verifying the full OSC 0 → toolbar state flow:
+
 - OSC 7337 sets initial state to "shell"
 - OSC 0 "agent" overrides toolbar to Agent active
 - OSC 0 "shell" switches back
