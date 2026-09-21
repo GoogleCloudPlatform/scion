@@ -1928,12 +1928,16 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg)
 			}
 
-			deliveryStatus := "delivered"
+			// Use "dispatched" for accepted, "ambiguous" for ambiguous (#1689).
+			// API wording does not promise harness consumption (AC-1).
+			deliveryStatus := "dispatched"
+			httpStatus := http.StatusOK
 			if dmResult.Outcome == AgentDMAmbiguous {
-				deliveryStatus = "delivered" // match existing wire contract
+				deliveryStatus = "ambiguous"
+				httpStatus = http.StatusAccepted
 			}
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
+			w.WriteHeader(httpStatus)
 			_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
 				MessageID:      dmResult.MessageID,
 				Status:         deliveryStatus,

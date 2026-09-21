@@ -125,20 +125,24 @@ type AgentDMInput struct {
 type AgentDMOutcome string
 
 const (
-	// AgentDMAccepted: message persisted and dispatch succeeded (or no
-	// dispatcher was available, which is a deployment-time decision).
+	// AgentDMAccepted: message persisted and broker/managed-runtime
+	// accepted the dispatch. The message row is in "dispatched" state.
+	// API wording is "dispatched" — does not promise harness consumption.
 	AgentDMAccepted AgentDMOutcome = "accepted"
 
 	// AgentDMFailed: a pre-flight check failed (rate limit, authorization,
-	// validation, attachment rejection) or persistence failed. No side
-	// effects occurred.
+	// validation, attachment rejection), persistence failed, or dispatch
+	// was definitively rejected. Pre-flight failures produce no side
+	// effects; post-persistence failures persist the "failed" state on
+	// the message row and return non-2xx with the message ID.
 	AgentDMFailed AgentDMOutcome = "failed"
 
-	// AgentDMAmbiguous: message was persisted but dispatch to the target
-	// agent's runtime did not confirm delivery. The message exists in the
-	// store and may be delivered on retry or when the target agent
-	// reconnects. Callers must NOT assume delivery and must NOT
-	// automatically replay.
+	// AgentDMAmbiguous: message was persisted and dispatch may or may not
+	// have succeeded — e.g. the broker accepted the message but the
+	// MarkMessageDispatched CAS failed, or context was cancelled mid-flight.
+	// The message row may be in "pending" or "dispatched" state. Callers
+	// must NOT assume delivery and must NOT automatically replay.
+	// No blind retry guidance is returned.
 	AgentDMAmbiguous AgentDMOutcome = "ambiguous"
 )
 
@@ -283,12 +287,24 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}
 	}
 
+	// 5. Dispatch availability pre-check (#1689).
+	// Verify dispatch infrastructure before persistence so that missing
+	// dispatcher/broker does not leave orphaned pending rows or falsely
+	// report success. This is a pre-flight check: managed-runtime backend
+	// resolution and actual dispatch errors are handled post-persistence.
+	if dmErr := s.checkDispatchAvailability(input); dmErr != nil {
+		return nil, dmErr
+	}
+
 	// ── Phase 2: Side effects ───────────────────────────────────────────
 
-	// 5. Attachment ingestion.
+	// 6. Attachment ingestion.
 	attachmentRefs := s.ingestAgentAttachments(ctx, input.ProjectID, input.SenderAgent.ID, input.Attachments)
 
-	// 6. Build store message.
+	// 7. Build store message.
+	// DispatchState is set to "pending" — the message row is its own
+	// durable dispatch intent. It transitions to "dispatched" only after
+	// broker/managed-runtime acceptance (AC-1, #1689).
 	msgID := api.NewUUID()
 	now := time.Now()
 
@@ -308,14 +324,15 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		ConversationID: input.ConversationID,
 		GroupID:        input.GroupID,
 		CreatedAt:      now,
+		DispatchState:  store.MessageDispatchPending,
 	}
 
-	// 6a. Stamp server-derived provenance (#1690).
+	// 7a. Stamp server-derived provenance (#1690).
 	// SenderProjectID and RecipientProjectID are always derived from the
 	// authoritative agent records, never from client-supplied metadata.
 	StampProvenance(storeMsg, input.SenderAgent, input.TargetAgent)
 
-	// Build structured message for dispatch and observer publication.
+	// 7b. Build structured message for dispatch and observer publication.
 	structuredMsg := &messages.StructuredMessage{
 		Sender:               storeMsg.Sender,
 		SenderID:             storeMsg.SenderID,
@@ -340,7 +357,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		structuredMsg.Metadata[attachmentsMetadataKey] = encoded
 	}
 
-	// 7. Persist message.
+	// 8. Persist message (AC-3: CreateMessage failure prevents dispatch).
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("agent DM: failed to persist message", "error", err)
 		return nil, &AgentDMError{
@@ -350,7 +367,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}
 	}
 
-	// 7a. Audit: body-free admission allow record (#1690).
+	// 8a. Audit: body-free admission allow record (#1690).
 	// Logged after persistence so the message ID is available as correlation.
 	// CrossProject is derived from agent records by DMAuditEntryFromInput,
 	// not from the decision.
@@ -363,7 +380,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	admissionEntry.CorrelationID = msgID
 	LogDMAdmission(admissionEntry)
 
-	// 7b. Validate persisted provenance against authoritative records (#1690).
+	// 8b. Validate persisted provenance against authoritative records (#1690).
 	if !ValidateProvenance(storeMsg, input.SenderAgent, input.TargetAgent) {
 		s.messageLog.Error("agent DM: provenance validation failed after persist",
 			"message_id", msgID,
@@ -372,10 +389,10 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		)
 	}
 
-	// 8. Publish SSE event.
+	// 9. Publish SSE event.
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
-	// 9. Render delivery text envelope.
+	// 10. Render delivery text envelope.
 	if s.writeDenyEnabled() {
 		structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 			MessageID:  storeMsg.ID,
@@ -385,47 +402,89 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		})
 	}
 
-	// 10. Dispatch to target agent runtime.
-	// Dispatch failure after persistence yields an ambiguous outcome —
-	// the message is stored but delivery is uncertain.
+	// 11. Dispatch to target agent runtime (#1689).
+	// Dispatch outcome determines the final message state:
+	//   - Success → CAS pending→dispatched (AC-1)
+	//   - Definite failure → persist failed state, return non-2xx (AC-2)
+	//   - Ambiguous (context cancelled) → leave pending, return ambiguous (AC-4)
 	var dispatchErr error
-	dispatchAttempted := false
 	if isManagedAgentRuntime(input.TargetAgent.Runtime) {
-		dispatchAttempted = true
 		dispatchErr = s.managedAgentMessage(ctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
 	} else if dispatcher := s.GetDispatcher(); dispatcher != nil && input.TargetAgent.RuntimeBrokerID != "" {
-		dispatchAttempted = true
 		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 		dispatchErr = dispatchWithBrokerRetry(retryCtx, dispatcher, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt, structuredMsg)
 		retryCancel()
 	}
+
+	// 12. Finalize dispatch state (#1689).
 	if dispatchErr != nil {
+		if isAmbiguousDispatchError(dispatchErr) {
+			// Ambiguous: dispatch may have succeeded but confirmation was
+			// lost (e.g. context cancelled mid-flight). Leave the row in
+			// pending state for inspection; return ambiguous outcome (AC-4).
+			s.messageLog.Warn("agent DM: dispatch ambiguous (message persisted as pending)",
+				"sender_id", input.SenderAgent.ID,
+				"target_agent_id", input.TargetAgent.ID,
+				"message_id", msgID,
+				"error", dispatchErr,
+			)
+			// Audit: dispatch outcome (#1690).
+			LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchFailed, dispatchErr)
+			return &AgentDMResult{
+				Outcome:     AgentDMAmbiguous,
+				MessageID:   msgID,
+				Recipient:   storeMsg.Recipient,
+				RecipientID: storeMsg.RecipientID,
+				DispatchErr: dispatchErr,
+			}, nil
+		}
+
+		// Definite failure: dispatch was not accepted by the broker or
+		// managed runtime (AC-2). Record the failed state.
 		s.messageLog.Error("agent DM: dispatch failed (message persisted)",
 			"sender_id", input.SenderAgent.ID,
 			"target_agent_id", input.TargetAgent.ID,
+			"message_id", msgID,
 			"error", dispatchErr,
 		)
-		// Message is persisted; dispatch failure is non-fatal but outcome
-		// is ambiguous per AC-5.
-	}
-
-	// 10a. Audit: dispatch outcome (#1690).
-	// Recorded separately from admission so allow ≠ delivered (AC-3).
-	// Uses the dispatchAttempted flag captured at dispatch time to avoid
-	// TOCTOU with GetDispatcher().
-	{
-		var dOutcome DispatchOutcome
-		if dispatchErr != nil {
-			dOutcome = DispatchFailed
-		} else if dispatchAttempted {
-			dOutcome = DispatchSucceeded
-		} else {
-			dOutcome = DispatchSkipped
+		// Audit: dispatch outcome (#1690).
+		LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchFailed, dispatchErr)
+		if markErr := s.markFailed(ctx, msgID, dispatchErr.Error()); markErr != nil {
+			s.messageLog.Error("agent DM: failed to mark message failed",
+				"message_id", msgID, "error", markErr)
 		}
-		LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, dOutcome, dispatchErr)
+		return nil, dispatchFailedError(msgID)
 	}
 
-	// 11. Observer publication.
+	// Dispatch succeeded — CAS pending→dispatched (AC-1).
+	dispatched, casErr := s.markDispatched(ctx, msgID)
+	if casErr != nil {
+		// Store failure after broker acceptance: the message IS dispatched
+		// but our state tracking is uncertain (AC-3). Return ambiguous
+		// with the stable message ID so the caller can correlate.
+		s.messageLog.Error("agent DM: MarkMessageDispatched store error (message dispatched)",
+			"message_id", msgID, "error", casErr)
+		// Audit: dispatch outcome (#1690) — dispatch succeeded but state tracking failed.
+		LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchSucceeded, casErr)
+		return &AgentDMResult{
+			Outcome:     AgentDMAmbiguous,
+			MessageID:   msgID,
+			Recipient:   storeMsg.Recipient,
+			RecipientID: storeMsg.RecipientID,
+			DispatchErr: fmt.Errorf("dispatch succeeded but state transition failed: %w", casErr),
+		}, nil
+	}
+	if !dispatched {
+		// CAS miss — already transitioned by concurrent process.
+		// The dispatch itself succeeded; log for visibility but not an error.
+		s.messageLog.Warn("agent DM: MarkMessageDispatched CAS miss (already transitioned)",
+			"message_id", msgID)
+	}
+
+	// Audit: dispatch outcome (#1690).
+	LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchSucceeded, nil)
+
+	// 13. Observer publication.
 	// Publish observer-only message for agent-to-agent visibility.
 	// ConversationAsserted is forced false on the observer copy to
 	// preserve the pre-refactor observer envelope shape.
@@ -444,25 +503,20 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}
 	}
 
-	// 12. Log delivery.
-	s.logMessage("agent DM: message sent",
+	// 14. Log delivery.
+	s.logMessage("agent DM: message dispatched",
 		"sender_agent_id", input.SenderAgent.ID,
 		"target_agent_id", input.TargetAgent.ID,
 		"project_id", input.ProjectID,
 		"message_id", msgID,
 	)
 
-	// Return result.
-	outcome := AgentDMAccepted
-	if dispatchErr != nil {
-		outcome = AgentDMAmbiguous
-	}
+	// Return accepted result.
 	return &AgentDMResult{
-		Outcome:     outcome,
+		Outcome:     AgentDMAccepted,
 		MessageID:   msgID,
 		Recipient:   storeMsg.Recipient,
 		RecipientID: storeMsg.RecipientID,
-		DispatchErr: dispatchErr,
 	}, nil
 }
 
@@ -478,15 +532,29 @@ func WriteAgentDMError(w http.ResponseWriter, dmErr *AgentDMError) {
 
 // WriteAgentDMResult writes an AgentDMResult as an HTTP JSON response.
 // Adapters call this to translate operation results into wire format.
+//
+// The status wording is "dispatched" (not "sent" or "delivered") to indicate
+// that the broker/managed-runtime accepted the message without promising
+// harness consumption (AC-1, #1689).
+//
+// Ambiguous outcomes (dispatch succeeded but state tracking failed) use
+// HTTP 202 Accepted with status "ambiguous" and the stable message ID
+// for caller correlation. No blind retry guidance is returned (AC-4).
 func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult) {
-	// Always report "sent" — even for ambiguous outcomes (message persisted,
-	// dispatch uncertain) the wire contract is "sent" to match pre-refactor
-	// behavior. Callers must NOT assume delivery for ambiguous results (AC-5).
-	status := "sent"
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"message_id":   result.MessageID,
-		"status":       status,
-		"recipient":    result.Recipient,
-		"recipient_id": result.RecipientID,
-	})
+	switch result.Outcome {
+	case AgentDMAmbiguous:
+		writeJSON(w, http.StatusAccepted, map[string]interface{}{
+			"message_id":   result.MessageID,
+			"status":       "ambiguous",
+			"recipient":    result.Recipient,
+			"recipient_id": result.RecipientID,
+		})
+	default:
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"message_id":   result.MessageID,
+			"status":       "dispatched",
+			"recipient":    result.Recipient,
+			"recipient_id": result.RecipientID,
+		})
+	}
 }
