@@ -40,10 +40,11 @@ describe('TerminalLayoutManager', () => {
   });
 
   describe('open / select', () => {
-    it('sets single[0] and active to single', () => {
+    it('sets single[0] without changing active preset', () => {
       const m = manager();
       m.open('agent-a');
       expect(m.getState().single).toEqual(['agent-a']);
+      // Initial active is 'single', open does not change it
       expect(m.getState().active).toBe('single');
     });
 
@@ -73,22 +74,41 @@ describe('TerminalLayoutManager', () => {
       m.place('agent-p', 'two-rows', 0);
       m.place('agent-q', 'two-rows', 1);
 
-      // Open a new session
+      // Open a new session — active stays 'single' (initial)
       m.open('agent-e');
 
       expect(m.getState().single).toEqual(['agent-e']);
+      // active is still whatever it was before open (initial 'single')
       expect(m.getState().active).toBe('single');
       expect(m.getState().four).toEqual(['agent-a', 'agent-b', 'agent-c', 'agent-d']);
       expect(m.getState().twoColumns).toEqual(['agent-x', 'agent-y']);
       expect(m.getState().twoRows).toEqual(['agent-p', 'agent-q']);
     });
 
-    it('switches back to single from another active preset', () => {
+    it('preserves active multi-pane preset on open (#1701)', () => {
       const m = manager();
       m.setLayout('four');
       expect(m.getState().active).toBe('four');
       m.open('agent-a');
-      expect(m.getState().active).toBe('single');
+      // open must NOT clobber a user-chosen multi-pane preset
+      expect(m.getState().active).toBe('four');
+      expect(m.getState().single).toEqual(['agent-a']);
+    });
+
+    it('preserves active two-columns preset on select', () => {
+      const m = manager();
+      m.setLayout('two-columns');
+      expect(m.getState().active).toBe('two-columns');
+      m.select('agent-a');
+      expect(m.getState().active).toBe('two-columns');
+      expect(m.getState().single).toEqual(['agent-a']);
+    });
+
+    it('preserves active two-rows preset on select', () => {
+      const m = manager();
+      m.setLayout('two-rows');
+      m.select('agent-a');
+      expect(m.getState().active).toBe('two-rows');
     });
 
     it('cancels zoom on open', () => {
@@ -103,7 +123,7 @@ describe('TerminalLayoutManager', () => {
   });
 
   describe('fifth-agent open', () => {
-    it('opens fifth agent into single, preserving four-pane assignments', () => {
+    it('opens fifth agent into single slot, preserving four-pane preset and assignments', () => {
       const m = manager();
       m.place('agent-a', 'four', 0);
       m.place('agent-b', 'four', 1);
@@ -113,11 +133,12 @@ describe('TerminalLayoutManager', () => {
       expect(m.getState().active).toBe('four');
       expect(m.getState().four).toEqual(['agent-a', 'agent-b', 'agent-c', 'agent-d']);
 
-      // Fifth agent open
+      // Fifth agent open — single[0] updates, active stays 'four'
       m.open('agent-e');
 
       expect(m.getState().single[0]).toBe('agent-e');
-      expect(m.getState().active).toBe('single');
+      // active stays 'four' (#1701 fix: open does not clobber preset)
+      expect(m.getState().active).toBe('four');
       // four-pane is UNCHANGED
       expect(m.getState().four).toEqual(['agent-a', 'agent-b', 'agent-c', 'agent-d']);
     });
@@ -149,7 +170,7 @@ describe('TerminalLayoutManager', () => {
       expect(listener).not.toHaveBeenCalled();
     });
 
-    it('restores preset after fifth-agent open', () => {
+    it('open does not clobber active preset; setLayout still works afterward', () => {
       const m = manager();
       m.place('agent-a', 'four', 0);
       m.place('agent-b', 'four', 1);
@@ -158,8 +179,15 @@ describe('TerminalLayoutManager', () => {
       m.setLayout('four');
 
       m.open('agent-e');
-      expect(m.getState().active).toBe('single');
+      // active stays 'four' after open (#1701)
+      expect(m.getState().active).toBe('four');
 
+      // Explicit setLayout('single') still switches to single
+      m.setLayout('single');
+      expect(m.getState().active).toBe('single');
+      expect(m.getState().single[0]).toBe('agent-e');
+
+      // And switching back to four restores its assignments
       m.setLayout('four');
       expect(m.getState().active).toBe('four');
       expect(m.getState().four).toEqual(['agent-a', 'agent-b', 'agent-c', 'agent-d']);

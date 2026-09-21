@@ -90,7 +90,7 @@ export class TerminalLayoutManager {
   }
 
   /**
-   * Open/select a session: sets single[0] and active to 'single'.
+   * Open/select a session: sets single[0] without changing the active preset.
    * NEVER mutates twoColumns, twoRows, or four.
    */
   open(sessionKey: string): void {
@@ -98,7 +98,12 @@ export class TerminalLayoutManager {
   }
 
   /**
-   * Select a session: sets single[0] and active to 'single'.
+   * Select a session: sets single[0] without changing the active preset.
+   *
+   * The user switches presets explicitly via setLayout(). Agent selection
+   * (opening, rail click, coordinator request) must not clobber a
+   * user-chosen multi-pane layout — that is what caused #1701.
+   *
    * NEVER mutates twoColumns, twoRows, or four.
    */
   select(sessionKey: string): void {
@@ -106,7 +111,6 @@ export class TerminalLayoutManager {
     this.zoomed = null;
     this.commit({
       ...this.state,
-      active: 'single',
       single: [sessionKey],
     });
   }

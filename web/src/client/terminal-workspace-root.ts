@@ -311,7 +311,7 @@ export class TerminalWorkspaceRoot {
   select(session: TerminalSession): void {
     const pane = this.panes.get(session.state.key);
     if (!pane) throw new Error('Terminal session has no retained pane.');
-    // Use layoutManager.open() which sets single[0] and active='single'
+    // Sets single[0] without changing the active preset (#1701).
     this.layoutManager.open(session.state.key);
     this.status.textContent = '';
     this.show(true);
