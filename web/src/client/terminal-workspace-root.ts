@@ -16,6 +16,7 @@ import type { ScionHeader } from '../components/shared/header.js';
 import type { ScionTerminalPane } from '../components/terminal/terminal-pane.js';
 import {
   TERMINAL_SESSION_COUNT_EVENT,
+  TERMINAL_DRAG_MIME,
   type TerminalSessionCountDetail,
 } from './terminal-workspace-events.js';
 import '../components/shared/header.js';
@@ -29,8 +30,7 @@ interface RailEntry {
   unsubscribeMetadata: () => void;
 }
 
-/** Custom MIME type for terminal drag payloads. */
-const TERMINAL_DRAG_MIME = 'application/x-scion-terminal';
+// TERMINAL_DRAG_MIME imported from ./terminal-workspace-events.js
 
 /** Preset button definitions for the layout toolbar. */
 const PRESET_BUTTONS: ReadonlyArray<{ preset: TerminalLayout; label: string; title: string }> = [
@@ -368,12 +368,17 @@ export class TerminalWorkspaceRoot {
         ? document.activeElement.dataset.railFocusId
         : null;
     this.count.textContent = String(total);
-    this.empty.hidden = total > 0;
 
     const layoutState = this.layoutManager.getState();
     const visibleSlots = this.layoutManager.getVisibleSlots();
     const hasSelected = visibleSlots.some((s) => s !== null);
-    this.status.hidden = total > 0 && hasSelected;
+
+    // In multi-pane layouts with zero agents, show dotted placeholders instead
+    // of the "No terminals are open." message. This gives the user clear drop
+    // targets even before any session has been created.
+    const isMultiPane = layoutState.active !== 'single';
+    this.empty.hidden = total > 0 || isMultiPane;
+    this.status.hidden = (total > 0 && hasSelected) || (total === 0 && isMultiPane);
 
     // Rail rendering
     this.railList.replaceChildren(...entries.map((entry) => this.renderRailEntry(entry)));
@@ -471,8 +476,10 @@ export class TerminalWorkspaceRoot {
           ph.remove();
           this.placeholders.delete(i);
         }
-      } else {
-        // Show placeholder for empty slot
+      } else if (effectivePreset !== 'single') {
+        // Show placeholder for empty slot in multi-pane layouts.
+        // In single layout with no session the "No terminals" empty state
+        // covers the view, so a placeholder is unnecessary.
         usedPlaceholderIndices.add(i);
         let ph = this.placeholders.get(i);
         if (!ph) {
@@ -1099,6 +1106,13 @@ export class TerminalWorkspaceRoot {
       .terminal-pane {
         min-height: 0;
         min-width: 0;
+        border: 1px solid #333;
+        border-radius: 4px;
+      }
+      scion-terminal-pane[data-focused] {
+        outline: 2px solid var(--scion-primary, #3b82f6);
+        outline-offset: -2px;
+        border-color: var(--scion-primary, #3b82f6);
       }
       .terminal-slot-placeholder {
         display: flex;

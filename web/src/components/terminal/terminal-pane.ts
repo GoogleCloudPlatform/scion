@@ -40,6 +40,7 @@ import '../shared/status-badge.js';
 import { showToast } from '../../utils/toast.js';
 import { buildAgentDMKey, chatConversationPath } from '../../client/chat-routes.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import { TERMINAL_DRAG_MIME } from '../../client/terminal-workspace-events.js';
 
 // xterm.js imports are client-side only — guarded by typeof check in lifecycle
 // These will be imported dynamically in firstUpdated() since they require DOM APIs
@@ -656,7 +657,10 @@ export class ScionTerminalPane extends LitElement {
    * human interaction.
    */
   private _onFocusIn = (): void => {
-    if (this._visible && !this.disposed) this._focused = true;
+    if (this._visible && !this.disposed) {
+      this._focused = true;
+      this.dataset.focused = '';
+    }
   };
 
   /**
@@ -673,6 +677,7 @@ export class ScionTerminalPane extends LitElement {
     // Focus moving within Shadow DOM children (relatedTarget may be in shadowRoot):
     if (related && this.shadowRoot?.contains(related)) return;
     this._focused = false;
+    delete this.dataset.focused;
   };
 
   /**
@@ -723,11 +728,14 @@ export class ScionTerminalPane extends LitElement {
         this.contains(document.activeElement) ||
         this.shadowRoot?.contains(document.activeElement as Node) ||
         false;
+      if (this._focused) this.dataset.focused = '';
+      else delete this.dataset.focused;
       // Re-install scoped drop prevention for visible workspace panes.
       if (this.isConnected && !this.disposed) this.installWindowDragPrevention();
       void this.reveal();
     } else {
       this._focused = false;
+      delete this.dataset.focused;
       this.terminal?.blur();
       this.cancelResize();
       // Remove drop prevention so Chat/Dashboard drops are unaffected.
@@ -1190,6 +1198,10 @@ export class ScionTerminalPane extends LitElement {
 
   private _onDragEnter(e: DragEvent): void {
     e.preventDefault();
+    // Terminal session drags (from the rail) use a custom MIME type and are
+    // handled by the workspace root's drop handlers. Do NOT show the file
+    // upload overlay for those — it would obscure the placement feedback.
+    if (e.dataTransfer?.types.includes(TERMINAL_DRAG_MIME)) return;
     this._dragCounter++;
     if (this._dragCounter === 1) {
       if (this._errorTimer) {
@@ -1201,17 +1213,23 @@ export class ScionTerminalPane extends LitElement {
     }
   }
 
-  private _onDragLeave(_e: DragEvent): void {
+  private _onDragLeave(e: DragEvent): void {
+    // Terminal drags never incremented _dragCounter (skipped in _onDragEnter).
+    if (e.dataTransfer?.types.includes(TERMINAL_DRAG_MIME)) return;
     this._dragCounter = Math.max(0, this._dragCounter - 1);
     if (this._dragCounter === 0) this.isDragOver = false;
   }
 
   private _onDragOver(e: DragEvent): void {
+    // Let terminal drags pass through to the workspace root handler.
+    if (e.dataTransfer?.types.includes(TERMINAL_DRAG_MIME)) return;
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = this.uploadEnabled ? 'copy' : 'none';
   }
 
   private async _onDrop(e: DragEvent): Promise<void> {
+    // Terminal drags are handled by the workspace root — do not intercept.
+    if (e.dataTransfer?.types.includes(TERMINAL_DRAG_MIME)) return;
     e.preventDefault();
     this._dragCounter = 0;
     this.isDragOver = false;

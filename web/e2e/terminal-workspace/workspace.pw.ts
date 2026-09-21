@@ -3043,3 +3043,285 @@ test.describe('production icon and title verification', () => {
 // testing the pane component directly, which is outside the scope of the
 // session registry tests.
 // ---------------------------------------------------------------------------
+
+// --- Terminal pane interaction improvements (#1701) ---
+
+test('terminal drag does not trigger file upload overlay on pane', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open both agents
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(2);
+
+  // Place alpha in two-columns slot 0
+  await placeInPreset(page, keys[0], 'two-columns', 0);
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => visiblePaneCount(page)).toBe(1);
+
+  // Simulate a terminal drag (TERMINAL_DRAG_MIME) entering the pane —
+  // should NOT show the file upload overlay (isDragOver stays false).
+  const terminalDragShowsOverlay = await page.evaluate((mime) => {
+    const pane = document.querySelector<HTMLElement>(
+      '#terminal-workspace scion-terminal-pane:not([hidden])'
+    );
+    if (!pane || !pane.shadowRoot) throw new Error('No visible pane');
+
+    const dt = new DataTransfer();
+    dt.setData(mime, 'some-session-key');
+
+    const enter = new DragEvent('dragenter', { bubbles: true, cancelable: true });
+    Object.defineProperty(enter, 'dataTransfer', { value: dt });
+    // Dispatch on the terminal-wrapper inside shadow DOM
+    const wrapper = pane.shadowRoot.querySelector('.terminal-wrapper');
+    if (!wrapper) throw new Error('No terminal-wrapper');
+    wrapper.dispatchEvent(enter);
+
+    // Check if the drop-overlay has the 'visible' class
+    const overlay = pane.shadowRoot.querySelector('.drop-overlay');
+    const hasVisible = overlay?.classList.contains('visible') ?? false;
+
+    // Clean up with dragleave
+    const leave = new DragEvent('dragleave', { bubbles: true, cancelable: true });
+    Object.defineProperty(leave, 'dataTransfer', { value: dt });
+    wrapper.dispatchEvent(leave);
+
+    return hasVisible;
+  }, TERMINAL_DRAG_MIME);
+
+  // Terminal drag should NOT show the file upload overlay
+  expect(terminalDragShowsOverlay).toBe(false);
+
+  // Now simulate a regular file drag — SHOULD show the file upload overlay.
+  // isDragOver is a @state() reactive property, so we need to wait for Lit
+  // to re-render after the dragenter event before checking the overlay.
+  const fileDragShowsOverlay = await page.evaluate(async () => {
+    const pane = document.querySelector<
+      HTMLElement & { updateComplete: Promise<boolean> }
+    >('#terminal-workspace scion-terminal-pane:not([hidden])');
+    if (!pane || !pane.shadowRoot) throw new Error('No visible pane');
+
+    const dt = new DataTransfer();
+    dt.setData('text/plain', 'file-content');
+
+    const enter = new DragEvent('dragenter', { bubbles: true, cancelable: true });
+    Object.defineProperty(enter, 'dataTransfer', { value: dt });
+    const wrapper = pane.shadowRoot.querySelector('.terminal-wrapper');
+    if (!wrapper) throw new Error('No terminal-wrapper');
+    wrapper.dispatchEvent(enter);
+
+    // Wait for Lit render cycle
+    await pane.updateComplete;
+
+    // Check if the drop-overlay has the 'visible' class
+    const overlay = pane.shadowRoot.querySelector('.drop-overlay');
+    const hasVisible = overlay?.classList.contains('visible') ?? false;
+
+    // Clean up
+    const leave = new DragEvent('dragleave', { bubbles: true, cancelable: true });
+    Object.defineProperty(leave, 'dataTransfer', { value: dt });
+    wrapper.dispatchEvent(leave);
+
+    return hasVisible;
+  });
+
+  // File drag SHOULD show the file upload overlay
+  expect(fileDragShowsOverlay).toBe(true);
+});
+
+test('empty multi-pane layout shows dotted placeholders for all slots', async ({ page }) => {
+  // Start with zero agents assigned, just the empty workspace
+  await setup(page, true, true, {});
+  await page.goto('/terminals');
+
+  // Wait for the workspace to render
+  await expect(page.locator('#terminal-workspace')).toBeVisible();
+
+  // Verify empty state text is shown initially (single layout, zero agents)
+  await expect(page.locator('.terminal-empty')).toBeVisible();
+
+  // Switch to two-columns layout — empty message should be hidden, placeholders shown
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+
+  // Empty state should be hidden
+  await expect(page.locator('.terminal-empty')).toBeHidden();
+
+  // Should show 2 dotted placeholders
+  await expect.poll(() => placeholderCount(page)).toBe(2);
+
+  // Switch to quad layout — should show 4 placeholders
+  await clickPreset(page, 'four');
+  await expect.poll(() => activePreset(page)).toBe('four');
+  await expect.poll(() => placeholderCount(page)).toBe(4);
+  await expect(page.locator('.terminal-empty')).toBeHidden();
+
+  // Switch to two-rows — should show 2 placeholders
+  await clickPreset(page, 'two-rows');
+  await expect.poll(() => activePreset(page)).toBe('two-rows');
+  await expect.poll(() => placeholderCount(page)).toBe(2);
+  await expect(page.locator('.terminal-empty')).toBeHidden();
+
+  // Switch back to single — empty message should reappear
+  await clickPreset(page, 'single');
+  await expect.poll(() => activePreset(page)).toBe('single');
+  await expect(page.locator('.terminal-empty')).toBeVisible();
+  await expect.poll(() => placeholderCount(page)).toBe(0);
+});
+
+test('focused pane has data-focused attribute in multi-pane view', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open both agents
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(2);
+
+  // Place both into two-columns
+  await placeInPreset(page, keys[0], 'two-columns', 0);
+  await placeInPreset(page, keys[1], 'two-columns', 1);
+
+  // Switch to two-columns — both visible
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+
+  // Click the first pane to focus it
+  await page.evaluate((key) => {
+    const panes = document.querySelectorAll<
+      HTMLElement & { session: { state: { key: string } } | null }
+    >('#terminal-workspace scion-terminal-pane');
+    for (const p of panes) {
+      if (p.session?.state.key === key) {
+        // Focus an element inside the pane's shadow DOM to trigger focusin
+        const wrapper = p.shadowRoot?.querySelector('.terminal-wrapper') as HTMLElement;
+        if (wrapper) {
+          // Create a focusable element if needed for testing
+          wrapper.setAttribute('tabindex', '-1');
+          wrapper.focus();
+        }
+      }
+    }
+  }, keys[0]);
+
+  // The first pane should have data-focused attribute
+  const focusedState = await page.evaluate(() => {
+    const panes = document.querySelectorAll<
+      HTMLElement & { session: { state: { key: string } } | null }
+    >('#terminal-workspace scion-terminal-pane');
+    const result: Array<{ key: string; focused: boolean }> = [];
+    for (const p of panes) {
+      if (p.session) {
+        result.push({
+          key: p.session.state.key,
+          focused: p.hasAttribute('data-focused'),
+        });
+      }
+    }
+    return result;
+  });
+
+  // First pane should be focused
+  const first = focusedState.find((s) => s.key === keys[0]);
+  expect(first?.focused).toBe(true);
+
+  // Second pane should NOT be focused
+  const second = focusedState.find((s) => s.key === keys[1]);
+  expect(second?.focused).toBe(false);
+
+  // Now click the second pane to move focus
+  await page.evaluate((key) => {
+    const panes = document.querySelectorAll<
+      HTMLElement & { session: { state: { key: string } } | null }
+    >('#terminal-workspace scion-terminal-pane');
+    for (const p of panes) {
+      if (p.session?.state.key === key) {
+        const wrapper = p.shadowRoot?.querySelector('.terminal-wrapper') as HTMLElement;
+        if (wrapper) {
+          wrapper.setAttribute('tabindex', '-1');
+          wrapper.focus();
+        }
+      }
+    }
+  }, keys[1]);
+
+  // After moving focus, second pane should be focused and first should not
+  const focusedState2 = await page.evaluate(() => {
+    const panes = document.querySelectorAll<
+      HTMLElement & { session: { state: { key: string } } | null }
+    >('#terminal-workspace scion-terminal-pane');
+    const result: Array<{ key: string; focused: boolean }> = [];
+    for (const p of panes) {
+      if (p.session) {
+        result.push({
+          key: p.session.state.key,
+          focused: p.hasAttribute('data-focused'),
+        });
+      }
+    }
+    return result;
+  });
+
+  const first2 = focusedState2.find((s) => s.key === keys[0]);
+  const second2 = focusedState2.find((s) => s.key === keys[1]);
+  expect(first2?.focused).toBe(false);
+  expect(second2?.focused).toBe(true);
+
+  // No extra sockets from focus changes
+  expect(socket.attaches).toBe(2);
+  expect(socket.closes).toBe(0);
+});
+
+test('pane borders are visible in multi-pane layout', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  const keys = await getPaneSessionKeys(page);
+
+  // Place both in two-columns
+  await placeInPreset(page, keys[0], 'two-columns', 0);
+  await placeInPreset(page, keys[1], 'two-columns', 1);
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+
+  // Verify that panes have visible borders (border style from CSS)
+  const hasBorders = await page.evaluate(() => {
+    const panes = document.querySelectorAll<HTMLElement>(
+      '#terminal-workspace scion-terminal-pane:not([hidden])'
+    );
+    let allHaveBorder = true;
+    for (const p of panes) {
+      if (p.style.display === 'none') continue;
+      const style = window.getComputedStyle(p);
+      // Check that border is not zero
+      const borderWidth = parseFloat(style.borderTopWidth || '0');
+      if (borderWidth <= 0) allHaveBorder = false;
+    }
+    return allHaveBorder;
+  });
+
+  expect(hasBorders).toBe(true);
+});
