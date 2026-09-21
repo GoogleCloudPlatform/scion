@@ -32,16 +32,21 @@ package hub
 // ---------------------------------------------------------------------------
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -649,4 +654,68 @@ func TestExecuteAgentDM_Wake_ManagedRuntime_Unsupported(t *testing.T) {
 	// No resume should have been invoked (AC-5).
 	starts := disp.getStartCalls()
 	assert.Empty(t, starts)
+}
+
+// ---------------------------------------------------------------------------
+// Wire-level test: wake:true targeting a human recipient invokes zero resumes
+// (AC-3 regression guard)
+// ---------------------------------------------------------------------------
+
+func TestOutboundMessage_WakeHumanRecipient_ZeroResumes(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "Wake Human Test",
+		Slug: "wake-human-test",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	user := &store.User{
+		ID:     api.NewUUID(),
+		Email:  "human-wake-test@test.example",
+		Role:   store.UserRoleMember,
+		Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	agent := &store.Agent{
+		ID:          api.NewUUID(),
+		Name:        "wake-human-sender",
+		Slug:        "wake-human-sender",
+		ProjectID:   project.ID,
+		Phase:       string(state.PhaseRunning),
+		MessageMode: store.MessageModeProject,
+		Visibility:  store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	disp := &wakeTrackingDispatcher{}
+	srv.SetDispatcher(disp)
+
+	// Send an outbound message with wake:true to a human user.
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:" + user.Email,
+		Msg:       "hello human with wake",
+		Wake:      true,
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+	// Expect success — wake is silently ignored for human recipients.
+	assert.Equal(t, http.StatusOK, rr.Code,
+		"outbound message to human with wake:true should succeed; body: %s", rr.Body.String())
+
+	// Zero DispatchAgentStart calls — wake must not invoke resume on a human.
+	starts := disp.getStartCalls()
+	assert.Empty(t, starts, "wake:true targeting a human recipient must invoke zero resumes")
 }

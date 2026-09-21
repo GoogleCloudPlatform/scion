@@ -1881,10 +1881,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg)
 			}
 
-			deliveryStatus := "delivered"
-			if dmResult.Outcome == AgentDMAmbiguous {
-				deliveryStatus = "delivered" // match existing wire contract
-			}
+			deliveryStatus := "delivered" // AgentDMAmbiguous also maps to "delivered" per wire contract
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
