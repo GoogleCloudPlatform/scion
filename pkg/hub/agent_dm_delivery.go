@@ -82,17 +82,13 @@ func (s *Server) checkDispatchAvailability(input *AgentDMInput) *AgentDMError {
 }
 
 // finalizationContext returns a context suitable for post-dispatch state
-// transitions. If the parent context is still active, it returns a derived
-// context with the finalization timeout. If the parent is already cancelled,
-// it returns a new bounded context detached from the parent so that known
-// outcomes are not silently discarded.
+// transitions. It uses context.WithoutCancel to detach from the parent's
+// cancellation signal while preserving its values, then applies a bounded
+// timeout. This ensures that critical state-transition writes (e.g.
+// MarkMessageDispatched / MarkMessageFailed) complete even if the parent
+// request context is cancelled mid-flight.
 func finalizationContext(parent context.Context) (context.Context, context.CancelFunc) {
-	if parent.Err() != nil {
-		// Parent cancelled — use a fresh bounded context.
-		return context.WithTimeout(context.Background(), finalizationTimeout)
-	}
-	// Parent alive — derive from it but add a deadline.
-	return context.WithTimeout(parent, finalizationTimeout)
+	return context.WithTimeout(context.WithoutCancel(parent), finalizationTimeout)
 }
 
 // markDispatched transitions a message from pending to dispatched after

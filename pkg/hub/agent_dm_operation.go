@@ -204,6 +204,16 @@ func (e *AgentDMError) Error() string { return e.Message }
 // Returns (*AgentDMResult, nil) on success or ambiguous delivery, or
 // (nil, *AgentDMError) on pre-flight failure.
 func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*AgentDMResult, *AgentDMError) {
+	// ── Phase 0: Input validation ───────────────────────────────────────
+	// Guard against nil pointer dereferences from malformed caller input.
+	if input == nil || input.SenderAgent == nil || input.TargetAgent == nil || input.SenderIdentity == nil {
+		return nil, &AgentDMError{
+			Code:       ErrCodeValidationError,
+			Message:    "ExecuteAgentDM: required input fields (input, SenderAgent, TargetAgent, SenderIdentity) must not be nil",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
 	// ── Phase 1: Admission checks (no side effects) ─────────────────────
 	// All checks must pass before any content/lifecycle effects (AC-3).
 

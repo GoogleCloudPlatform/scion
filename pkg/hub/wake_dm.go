@@ -127,10 +127,14 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// Wait for the agent to report its first activity (readiness signal).
 		if err := s.waitForAgentReady(ctx, agent.ID, 30*time.Second); err != nil {
 			// On readiness failure, mark the agent as errored for visibility.
-			_ = s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+			// Use a detached context so this cleanup write succeeds even if
+			// the parent context was cancelled (e.g. client disconnect).
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			_ = s.store.UpdateAgentStatus(cleanupCtx, agent.ID, store.AgentStatusUpdate{
 				Phase:   string(state.PhaseError),
 				Message: "Failed to become ready after wake",
 			})
+			cleanupCancel()
 			return nil, &AgentDMError{
 				Code:       ErrCodeRuntimeError,
 				Message:    "Agent resumed but did not become ready: " + err.Error(),
