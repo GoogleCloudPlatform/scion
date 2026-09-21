@@ -1,10 +1,16 @@
 # Design: controlled agent messaging across projects on one Hub
 
-Status: updated with the user's 2026-09-17 15:16 UTC decisions. Implementation
-details remain proposed. See [investigation](01-investigation.md) for observed
-behavior, [delivery plan](03-delivery-plan.md) for sequencing, and
-[the follow-up record](04-decisions-and-mode-ceiling.md) for the decisions and
-mode-ceiling source check.
+Status: **final** — reflects the architecture delivered by the CPM cleanup
+(Phases 1–4, issues #1685–#1696). Implementation is complete on the
+`cpm-cleanup-integration` branch. The original investigation
+([cross-project-messaging-investigation.md](cross-project-messaging-investigation.md))
+is preserved as historical context; its findings informed this design but some
+proposed paths were superseded by the cleanup work described here and in the
+[decision log](cross-project-messaging-decisions.md).
+
+See [delivery plan](cross-project-messaging-delivery-plan.md) for the phase
+ledger and PR links, and [decisions](cross-project-messaging-decisions.md) for
+the ratified choices and their implementation consequences.
 
 ## 1. Outcome and boundaries
 
@@ -450,7 +456,6 @@ Names below are proposed unless marked existing. Use `/api/v1` throughout.
 | Existing agent `.../message` actions | Same wire routes; use central evaluator and authoritative sender/target IDs; common denials and delivery behavior for standalone and project-scoped routes. |
 | New `GET /conversations/resolve?reference=...&project_id=...` | Read-only canonical resolution shared by CLI; `exists:false` for an authorized peer with no conversation; reject ambiguity; no minting. |
 | Existing `GET /conversations`, `/{id}`, `/{id}/messages` | Unified read authorization, endpoint-aware project filtering, peer/project summaries, stable cursor; caps checked on all reads. |
-| New `POST /conversations/{id}/messages` | Send into an existing authorized conversation. For a two-agent DM derive the other endpoint then reuse normal agent delivery; do not route it through the user-only outbound derivation. |
 | Existing conversation create/participants/default/leave | Preserve group functions; constrain direct functions to immutable pairs and listing preferences. |
 | Existing agent `set_message_mode` actions | Accept `hub`; apply full-role + current hub-mode grant guard for agent callers, including cascade/dry-run; return effective external status and grant capability. |
 | Existing scheduled-event APIs | Add canonical target project/agent fields separate from the event's owning project; validate and reauthorize at fire/retry. |
@@ -533,8 +538,10 @@ Rules:
   project. IDs remain the fallback for ambiguous project slugs.
 - Duplicate permitted project/thread names return an ambiguity error with only
   authorized choices. Project/agent renames do not change existing DM identity.
-- Replies by `conv:` use the conversation send endpoint. Keep the sender's
-  outbound endpoint in its own project for existing user/plugin deliveries.
+- Replies by `conv:` route through the sender's outbound endpoint with a
+  `conversation_ref` field. The outbound handler resolves the conversation
+  reference, derives the peer, and dispatches through `ExecuteAgentDM`. There
+  is no separate conversation send endpoint.
 - Human CLI callers retain human authority; selecting a project does not send
   as one of its agents. Do not add a `--from-agent` impersonation shortcut.
 
@@ -724,3 +731,120 @@ that reply.
 A general ordering/ceiling for the four legacy messaging modes remains outside
 this change. Future group admission/history semantics should be a new additive
 phase using the extension path in section 7, not a rewrite of DM identity.
+
+## 13. Final architecture (post-cleanup)
+
+The CPM cleanup (Phases 1–4, #1680) consolidated the delivery path into a
+single internal operation and removed the duplicate conversation send endpoint.
+This section documents the surviving architecture.
+
+### Shared DM operation: `ExecuteAgentDM`
+
+All agent-to-agent DM delivery flows through a single typed internal operation
+(`ExecuteAgentDM` in `pkg/hub/agent_dm_operation.go`). Both the structured
+inbound handler (agent-to-agent direct route) and the outbound handler
+(user/CLI `conv:` and `@agent` paths) construct an `AgentDMInput` and call
+this operation. The operation performs all admission checks before any side
+effects, then persists, publishes, and dispatches:
+
+Adapters resolve conversations (resolve-or-create DM) before calling the
+operation — `ConversationID` is an input field on `AgentDMInput`.
+
+1. Rate limiting (aggregate ceiling; type-class relabelling cannot buy extra)
+2. Authorization — `authorizeAgentMessage` evaluates the mode matrix for
+   same-project sends and the full cross-project gate sequence for external
+   sends: Hub enabled (authoritative store read), sender mode `hub`, target
+   mode `project` or `hub`, destination project inbound policy, and
+   origin-human membership where required
+3. Foreign attachment rejection at admission — non-empty attachments on
+   cross-project DMs are rejected before ingestion, not silently dropped
+4. Wake — for suspended single-agent targets only; the operation resumes the
+   agent and waits for readiness before dispatching. Wake runs after all
+   admission checks so that denied requests cannot resume an agent. Running
+   agents are not restarted; stopped agents are rejected; group and human
+   targets do not trigger wake
+5. Body-free audit record at admission
+6. Message persistence as transient "pending"
+7. Observer publication (structured message to conversation subscribers)
+8. Dispatch to target agent runtime
+9. Post-dispatch state transition: "dispatched" on broker acceptance,
+   "failed" on definite rejection, "pending" retained on ambiguous outcome
+
+### Three-outcome delivery model
+
+The operation returns one of three typed outcomes (`AgentDMOutcome`):
+
+- **`accepted`**: message persisted and broker/managed-runtime accepted the
+  dispatch. The message row is in "dispatched" state. API wording is
+  "dispatched" — does not promise harness consumption.
+- **`failed`**: a pre-flight check failed (rate limit, authorization,
+  validation, attachment rejection), persistence failed, or dispatch was
+  definitively rejected. Pre-flight failures produce no side effects.
+- **`ambiguous`**: message was persisted and dispatch may or may not have
+  succeeded — e.g. the broker accepted but the MarkMessageDispatched CAS
+  failed, or context was cancelled mid-flight. Callers must NOT assume
+  delivery and must NOT automatically replay. No blind retry guidance is
+  returned.
+
+There is no automatic pending replay and no 501 fallback.
+
+### Single CLI transport: outbound with `conversation_ref`
+
+The CLI sends all agent messages — whether `@agent`, `conv:<uuid>`, or
+`#thread` references — through the sender's outbound endpoint
+(`POST /api/v1/agents/{id}/outbound/message`). The outbound handler
+(`handleAgentOutboundMessage`) calls `resolveOutboundRouting` which proceeds
+through six stages:
+
+- **S1**: Recipient resolution (UUID/email lookup)
+- **S2**: Channel affinity and validation
+- **S3**: ConversationRef resolution — `conv:<uuid>` and `#thread`
+  references resolve the conversation and derive the peer
+- **S4**: Conversation authorization
+- **S5**: Addressee derivation
+- **S6**: Group/direct routing fixups
+
+For agent-to-agent DMs, the routing result feeds into `ExecuteAgentDM`.
+Authorization (including cross-project gates) runs inside `ExecuteAgentDM`
+after routing resolution.
+
+The duplicate `POST /api/v1/conversations/{id}/messages` endpoint was deleted
+(#1694). CPM has never been deployed; no backward compatibility shim, 501
+fallback, old-client support window, or historical transition was needed.
+
+### Authoritative security settings reads
+
+Cross-project authorization reads the Hub's `cross_project_messaging_enabled`
+setting authoritatively from the shared store at decision boundaries (#1686).
+The existing operational-settings cache and event propagation drive UI refresh,
+but a delayed invalidation event does not preserve an old allow decision. The
+very next send after a policy change observes the current setting, regardless
+of notification/poll propagation state across replicas.
+
+### Surviving endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/v1/agents/{id}/outbound/message` | All agent outbound sends (user, agent, conv-ref, thread) |
+| `POST /api/v1/agents/{id}/message` | Structured inbound: direct agent-to-agent delivery |
+| `POST /api/v1/projects/{id}/agents/{slug}/message` | Project-scoped agent-to-agent delivery |
+| `GET /api/v1/conversations`, `/{id}`, `/{id}/messages` | Conversation listing, detail, and message history |
+| `GET /api/v1/messaging/capabilities` | Feature flags and supported modes |
+| `GET /api/v1/messaging/targets/resolve` | Privacy-preserving exact target lookup |
+| `GET /api/v1/conversations/resolve` | Read-only conversation resolution |
+| `GET/PUT /api/v1/admin/messaging` | Hub messaging administration |
+| `GET/PUT /api/v1/projects/{id}/messaging-policy` | Project inbound policy |
+
+### Intentional scope boundaries
+
+The cleanup deliberately does **not** change:
+
+- Cross-project group conversations, broadcasts, or plugin channels — these
+  retain existing project boundaries
+- Human-to-agent delivery semantics — `hub` behaves like `project` for human
+  senders under existing authorization
+- A2A/OIDC federation — cross-Hub communication remains on A2A/OIDC
+- The four legacy messaging modes (`none`, `lineage`, `branch`, `project`) —
+  their existing compatibility matrix is unchanged
+- Generic agent lifecycle, configuration, files, secrets, or credential
+  scopes — a messaging peer gains no foreign project access beyond the DM
