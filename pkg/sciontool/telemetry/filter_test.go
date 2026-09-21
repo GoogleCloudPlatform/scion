@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
 func TestFilter_ShouldProcess(t *testing.T) {
@@ -239,6 +240,148 @@ func TestRedactor_RedactProtoAttributes(t *testing.T) {
 	}
 }
 
+func TestRedactor_RecursivelyAppliesNativeContentAliases(t *testing.T) {
+	r := NewRedactor(RedactionConfig{
+		Redact: []string{"prompt", "tool_output"},
+		Hash:   []string{"session_id"},
+	})
+
+	attrs := []*commonpb.KeyValue{
+		{Key: "gen_ai.input.messages", Value: stringValue("secret prompt")},
+		{Key: "conversation.id", Value: stringValue("current-session")},
+		{Key: "output", Value: stringValue("current output")},
+		{Key: "nested", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{Values: []*commonpb.KeyValue{
+			{Key: "output.value", Value: stringValue("secret output")},
+			{Key: "gen_ai.conversation.id", Value: stringValue("session-123")},
+		}}}}},
+	}
+
+	result := r.RedactProtoAttributes(attrs)
+	if got := getStringValue(result[0]); got != "[REDACTED]" {
+		t.Fatalf("gen_ai.input.messages = %q, want redacted", got)
+	}
+	if got := getStringValue(result[1]); got != HashValue("current-session") {
+		t.Fatalf("conversation.id = %q, want one SHA-256 hash", got)
+	}
+	if got := getStringValue(result[2]); got != "[REDACTED]" {
+		t.Fatalf("output = %q, want redacted", got)
+	}
+	nested := result[3].Value.GetKvlistValue().Values
+	if got := getStringValue(nested[0]); got != "[REDACTED]" {
+		t.Fatalf("output.value = %q, want redacted", got)
+	}
+	if got := getStringValue(nested[1]); got != HashValue("session-123") {
+		t.Fatalf("gen_ai.conversation.id = %q, want one SHA-256 hash", got)
+	}
+}
+
+func TestRedactor_StructuredBodyKeepsContextForArrayScalars(t *testing.T) {
+	r := NewRedactor(RedactionConfig{Redact: []string{"log.body", "prompt"}})
+	body := &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: []*commonpb.AnyValue{
+		stringValue("UNKEYED_SECRET"),
+		{Value: &commonpb.AnyValue_BytesValue{BytesValue: []byte("BYTE_SECRET")}},
+		{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{Values: []*commonpb.KeyValue{
+			{Key: "prompt", Value: stringValue("KEYED_SECRET")},
+			{Key: "public", Value: stringValue("visible")},
+		}}}},
+	}}}}
+
+	got, err := r.RedactStructuredProtoValue("log.body", body)
+	if err != nil {
+		t.Fatalf("RedactStructuredProtoValue: %v", err)
+	}
+	values := got.GetArrayValue().Values
+	if values[0].GetStringValue() != "[REDACTED]" || values[1].GetStringValue() != "[REDACTED]" {
+		t.Fatalf("unkeyed body values were not redacted: %#v", values)
+	}
+	nested := values[2].GetKvlistValue().Values
+	if getStringValue(nested[0]) != "[REDACTED]" || getStringValue(nested[1]) != "visible" {
+		t.Fatalf("keyed body values = %#v", nested)
+	}
+}
+
+func TestAnyValueValidator_Bounds(t *testing.T) {
+	atLimit := stringValue("leaf")
+	for range maxAnyValueDepth - 1 {
+		atLimit = &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: []*commonpb.AnyValue{atLimit}}}}
+	}
+	if err := newAnyValueValidator().Validate(atLimit); err != nil {
+		t.Fatalf("depth at limit rejected: %v", err)
+	}
+	overDepth := &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: []*commonpb.AnyValue{atLimit}}}}
+	if err := newAnyValueValidator().Validate(overDepth); err == nil {
+		t.Fatal("depth over limit accepted")
+	}
+
+	wide := &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: make([]*commonpb.AnyValue, maxAnyValueNodes-1)}}}
+	if err := newAnyValueValidator().Validate(wide); err != nil {
+		t.Fatalf("node count at limit rejected: %v", err)
+	}
+	wide.GetArrayValue().Values = append(wide.GetArrayValue().Values, nil)
+	if err := newAnyValueValidator().Validate(wide); err == nil {
+		t.Fatal("node count over limit accepted")
+	}
+	wideMap := &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{Values: make([]*commonpb.KeyValue, maxAnyValueNodes-1)}}}
+	if err := newAnyValueValidator().Validate(wideMap); err != nil {
+		t.Fatalf("map width at limit rejected: %v", err)
+	}
+	wideMap.GetKvlistValue().Values = append(wideMap.GetKvlistValue().Values, &commonpb.KeyValue{Value: stringValue("over")})
+	if err := newAnyValueValidator().Validate(wideMap); err == nil {
+		t.Fatal("map width over limit accepted")
+	}
+
+	for name, value := range map[string]*commonpb.AnyValue{
+		"nil":    nil,
+		"string": stringValue("ok"),
+		"bytes":  {Value: &commonpb.AnyValue_BytesValue{BytesValue: []byte("ok")}},
+		"bool":   {Value: &commonpb.AnyValue_BoolValue{BoolValue: true}},
+		"int":    {Value: &commonpb.AnyValue_IntValue{IntValue: 7}},
+		"double": {Value: &commonpb.AnyValue_DoubleValue{DoubleValue: 1.25}},
+		"map":    {Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{Values: []*commonpb.KeyValue{{Key: "value", Value: stringValue("ok")}}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := newAnyValueValidator().Validate(value); err != nil {
+				t.Fatalf("valid typed value rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestRedactor_RedactSpanRejectsOverLimitBeforeClone(t *testing.T) {
+	redactor := NewRedactor(RedactionConfig{Redact: []string{"prompt"}})
+	deep := stringValue("DEEP_MARKER")
+	for range maxAnyValueDepth {
+		deep = &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: []*commonpb.AnyValue{deep}}}}
+	}
+	wide := &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: make([]*commonpb.AnyValue, maxAnyValueNodes)}}}
+	attribute := func(value *commonpb.AnyValue) *commonpb.KeyValue {
+		return &commonpb.KeyValue{Key: "public", Value: value}
+	}
+	tests := map[string]*tracepb.Span{
+		"deep span attribute":  {Attributes: []*commonpb.KeyValue{attribute(deep)}},
+		"wide event attribute": {Events: []*tracepb.Span_Event{{Attributes: []*commonpb.KeyValue{attribute(wide)}}}},
+		"wide link attribute":  {Links: []*tracepb.Span_Link{{Attributes: []*commonpb.KeyValue{attribute(wide)}}}},
+		"cross component budget": {
+			Attributes: []*commonpb.KeyValue{attribute(&commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: make([]*commonpb.AnyValue, maxAnyValueNodes/2)}}})},
+			Events:     []*tracepb.Span_Event{{Attributes: []*commonpb.KeyValue{attribute(&commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: make([]*commonpb.AnyValue, maxAnyValueNodes/2)}}})}}},
+		},
+	}
+	for name, span := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := redactor.RedactSpan(span); got != nil {
+				t.Fatalf("RedactSpan accepted over-limit input: %#v", got)
+			}
+		})
+	}
+	if got := deep.GetArrayValue().Values[0]; got == nil {
+		t.Fatal("standalone rejection changed the original value")
+	}
+}
+
+func stringValue(value string) *commonpb.AnyValue {
+	return &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: value}}
+}
+
 func getStringValue(kv *commonpb.KeyValue) string {
 	if sv, ok := kv.Value.Value.(*commonpb.AnyValue_StringValue); ok {
 		return sv.StringValue
@@ -265,6 +408,18 @@ func TestRedactor_DefaultFields(t *testing.T) {
 	}
 	if !foundPrompt {
 		t.Error("DefaultRedactFields should contain 'prompt'")
+	}
+	for _, field := range []string{"log.body", "span.status.message"} {
+		found := false
+		for _, configured := range DefaultRedactFields {
+			if configured == field {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("DefaultRedactFields should contain %q", field)
+		}
 	}
 
 	foundSessionID := false

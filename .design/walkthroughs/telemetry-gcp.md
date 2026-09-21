@@ -1,451 +1,85 @@
-# QA Walkthrough: Telemetry Pipeline with Google Cloud
+# Telemetry GCP evidence runbook
 
-**Created:** 2026-02-19
-**Status:** Ready for QA
-**Goal:** Validate end-to-end telemetry flow from agent container through
-sciontool to Google Cloud Observability (Cloud Trace + Cloud Monitoring).
+**Status:** Phase 4 R5 accepted only for Claude Code 2.1.273 logs first; Phase 5 R4 source checks and pinned `b529e04eac3930230664c86e004f5a9589db16ae` deployment health passed. Phase 5 live evidence and overall acceptance remain pending. This procedure requires an approved, isolated fixture. It does not authorize changing active agents, shared settings, or infrastructure.
 
-This walkthrough covers the "Ready" scenarios in
-[metrics-system.md](../hosted/metrics-system.md) section 13.4, specifically
-the settings-driven configuration path enabled by the section 13.1
-implementation.
+Known lifecycle limit: `agent.Start` may delete a matching stopped agent or an agent restarted with a new task, and may pull an absent image, before rejecting conflicting native telemetry settings. The local full-Start conflict sentinel covers only an empty runtime inventory and a cached image; it proves no runtime child launch in that fixture. The broader ordering fix is deferred to [ptone/scion#1699](https://github.com/ptone/scion/issues/1699). Use a unique task-owned fixture name and confirm its inventory before starting it.
 
----
+## Pin and record the fixture
 
-## Prerequisites
+Before starting, record UTC start and end, integration commit, built `scion` and `sciontool` SHA256, container image digest, installed harness name/version, receiver configuration, Cloud project/log name, exact Scion agent ID, project ID, harness label, and a unique nonsecret marker. Keep the marker and any sensitive controls out of credentials. Preserve an inventory of running and total container IDs and hashes of the shared binaries/configuration. Use a task-owned fixture and short-lived credential; never copy real user content into an evidence fixture.
 
-- Go 1.21+
-- Docker (or macOS `container` CLI)
-- A GCP project with billing enabled
-- `gcloud` CLI installed and authenticated
-- (Optional) `otel-cli` for sending manual OTLP spans
+For the accepted Phase 4 R5 example, the commit was `ed8cb776e2659aae36b877f4d4d0888e43cceee4`, installed harness was Claude Code 2.1.273, and the Cloud Logging destination was `projects/deploy-demo-test/logs/scion-agents`. The restricted evidence and exact query results are in the task scratch area documented by `phase4-r5-native-live-acceptance.md`. These values identify that historical fixture, not a reusable test identity.
 
----
+## Effective configuration checks on isolated fixtures
 
-## 1. GCP Project Setup
+Use only an approved task-owned project, home, agent name and exact fixture container ID. Set `TASK_EVIDENCE_DIR` to a mode `0700` task-owned scratch directory before collecting any environment or raw telemetry. Keep the global settings file in that task home and project settings in that task project; record their hashes, the selected template, and the explicit environment passed to the fixture. Do not edit the operator's home, a shared project, or an active agent. The owner starts and removes each dedicated fixture by its exact ID after checking that it has stopped.
 
-### 1.1 Enable required APIs
+For an enabled fixture, set `schema_version: "1"` and `telemetry.enabled: true`, `telemetry.cloud.enabled: true`, `telemetry.cloud.provider: gcp` in the task settings. Read the exact container's environment with `docker inspect "$FIXTURE_CONTAINER_ID" --format '{{range .Config.Env}}{{println .}}{{end}}' > "$TASK_EVIDENCE_DIR/fixture-env.txt"` into the restricted evidence directory; this file may contain credentials and must not be printed or shared. Confirm `SCION_TELEMETRY_ENABLED=true`, `SCION_TELEMETRY_CLOUD_ENABLED=true`, `SCION_TELEMETRY_CLOUD_PROVIDER=gcp`, the expected filter controls, and the harness's effective loopback OTLP endpoint/port. For Claude, confirm `CLAUDE_CODE_ENABLE_TELEMETRY=1` and loopback `OTEL_EXPORTER_OTLP_ENDPOINT`; Claude native GCP metrics must be disabled while hook metrics remain available. Confirm the receiver actually listens only on loopback at that port before interpreting missing source records.
 
-```bash
-export GCP_PROJECT="your-project-id"
+For a separate disabled fixture, put `telemetry.enabled: false` in its task project settings. Confirm `SCION_TELEMETRY_ENABLED=false`, no native harness telemetry enablement, and no receiver/listener or export diagnostics for that fixture. For precedence, use distinct nonsecret endpoint sentinels at global and project levels, then an explicit fixture environment override. The expected order is global < project < template < explicit environment; inspect the exact fixture's final environment and receiver configuration at each step. A setting present in a file is not evidence that it became effective. Restore or remove only the task-owned files and stopped fixture IDs after recording results.
 
-gcloud services enable cloudtrace.googleapis.com \
-  monitoring.googleapis.com \
-  --project "$GCP_PROJECT"
+## Source to receiver to Cloud counts
+
+1. Capture the fixture's native OTLP source requests at the loopback receiver with exact timestamps, signal type, instrumentation scope and event names. Keep raw payloads restricted. Record SHA256 and a value-free parsed summary. Record normalized hook subprocess inputs separately; synthetic native-shaped requests are local test fixtures and must never be described as installed-vendor emission.
+2. Capture receiver final diagnostics for spans, metrics and logs: Accepted, Filtered, Rejected, Delivered, Failed, SDK errors, Dropped, Unconfirmed, and queue bytes/records/entries. On clean Stop, require every accepted permitted record to be delivered with zero residual and zero terminal uncertainty. If the backend fails, report accepted versus delivered and terminal uncertainty separately; successful ingress is not Cloud proof.
+3. Query Cloud Logging within a fixed, recorded visibility window using the exact fixture agent ID, project ID, harness label, log name and UTC time interval. Save the exact filter, query time, response SHA256, unique insert IDs, event names, scope and resource fields. Query twice if the first readback is incomplete, within the predeclared deadline. Match unique Cloud rows to permitted source and receiver counts. Cloud Trace and Monitoring require their own backend readback before making a Cloud delivery claim for those signals.
+
+Example read-only Logging query after setting task fixture values. The task evidence directory must be on access-controlled durable scratch storage. Disable terminal and CI transcript capture for this command; never print raw rows or attach them to shared reports:
+
+```sh
+TASK_EVIDENCE_DIR=/path/to/restricted/task-evidence
+umask 077
+mkdir -p "$TASK_EVIDENCE_DIR"
+chmod 700 "$TASK_EVIDENCE_DIR"
+GCP_PROJECT=your-project-id
+AGENT_ID=your-fixture-agent-id
+PROJECT_ID=your-fixture-project-id
+HARNESS=claude
+WINDOW_START=2026-09-20T00:00:00Z
+WINDOW_END=2026-09-20T00:05:00Z
+FILTER="logName=\"projects/${GCP_PROJECT}/logs/scion-agents\" AND timestamp>=\"${WINDOW_START}\" AND timestamp<\"${WINDOW_END}\" AND labels.\"scion.agent.id\"=\"${AGENT_ID}\" AND labels.\"scion.project.id\"=\"${PROJECT_ID}\" AND labels.\"scion.harness\"=\"${HARNESS}\""
+gcloud logging read "$FILTER" --project "$GCP_PROJECT" --format=json > "$TASK_EVIDENCE_DIR/cloud-rows.json"
+sha256sum "$TASK_EVIDENCE_DIR/cloud-rows.json" > "$TASK_EVIDENCE_DIR/cloud-rows.sha256"
+python3 - "$TASK_EVIDENCE_DIR/cloud-rows.json" <<'PY'
+import collections, json, sys
+rows = json.load(open(sys.argv[1]))
+if not isinstance(rows, list):
+    raise SystemExit("readback is not a row list")
+# Replace these counts with the approved fixture plan before each new run.
+expected = {"assistant_response": 2, "api_request": 2, "agent.session.end": 1,
+            "agent.lifecycle.post_start": 1, "agent.lifecycle.pre_start": 1}
+counts = collections.Counter(row.get("jsonPayload", {}).get("event.name", "") for row in rows)
+positive = sum(counts[name] for name in expected)
+unexpected = sum(count for name, count in counts.items() if name not in expected)
+ids = {row.get("insertId") for row in rows if row.get("insertId")}
+print("positive_records", positive, "unexpected_names", unexpected, "unique_insert_ids", len(ids))
+if positive == 0 or unexpected or counts != collections.Counter(expected) or len(ids) != len(rows):
+    raise SystemExit("readback does not match the approved fixture plan")
+PY
 ```
 
-### 1.2 Authenticate with Application Default Credentials
+Confirm the actual backend field paths from a value-free sample before relying on the filter; record any corrected literal query and its hash. Publish only value-free counts and hashes. Never infer absence from a broad time-window query alone. The restricted Phase 4 R5 evidence directory contains `preflight.sh`, `launch-fixture.sh`, `fixture.stderr`, `native-event-summary.txt`, `cloud-exact-id.json`, and `cleanup-fixture.sh` as pinned examples; inspect them in restricted storage before adapting a new task-owned capture. Do not run the historical launch or cleanup script against current agents.
 
-The sciontool exporter uses standard Google Cloud ADC. For local QA the
-simplest path is user credentials:
+The accepted R5 fixture had five installed native Claude logs with an empty OTLP `LogRecord.EventName` and string `event.name` attributes: one `user_prompt`, two `api_request`, two `assistant_response`. The receiver filtered the prompt and delivered seven logs total: four retained native records and three lifecycle hook records. Cloud Logging returned seven unique exact-ID rows in the fixed window. Receiver diagnostics also showed spans 3/3 and metrics 1/1 Accepted/Delivered with zero failure/residual, but no independent Trace or Monitoring backend readback was performed. A host-network model metadata-shim request count was not captured.
 
-```bash
-gcloud auth application-default login --project "$GCP_PROJECT"
-```
+## Privacy controls
 
-For CI or remote brokers, use a service account with the `roles/cloudtrace.agent`
-and `roles/monitoring.metricWriter` roles (this matches the `scion-demo-sa`
-created by `scripts/starter-hub/gce-demo-provision.sh`):
+Use a harmless visible marker as a positive control in an allowed event. Use distinct synthetic sensitive markers for body, `message`, response, request/opaque IDs, prompt, tool input/output and span status paths. Check the receiver destination and Cloud rows for the safe marker and for absence or `[REDACTED]` replacement of each sensitive marker. Check the hashed session ID shape and cross-record consistency without storing the original ID. Test a `user_prompt` negative control under the default Claude policy, then an explicit allow configuration to prove that mandatory content and opaque-ID redaction still applies. An absent event only proves filtering after a positive control appears and the finite visibility window closes. The accepted R5 Cloud records retained redacted `assistant_response` records and did not contain the default-filtered prompt.
 
-```bash
-gcloud iam service-accounts create scion-demo-sa \
-  --display-name "Scion Demo Service Account"
+## Metrics and identity
 
-gcloud projects add-iam-policy-binding "$GCP_PROJECT" \
-  --member "serviceAccount:scion-demo-sa@${GCP_PROJECT}.iam.gserviceaccount.com" \
-  --role "roles/cloudtrace.agent"
+Keep hook and native instrumentation scopes separate. For two or more independently launched hook processes inside one 15-second batching interval, record each input event and exact expected increments, then compare the final exported counter total. Do not infer tool duration from unpaired hook ends. For metrics, record name, type, unit, resource, scope, temporality, original source interval, exported interval, reset and retry sequence. Compare source increments with Cloud Monitoring values only after backend readback; avoid interpreting a collector observation timestamp as source time. A synthetic metric fixture establishes local semantics only. For the accepted Claude native GCP route, native exporter metrics are disabled; normalized hook metrics remain enabled. Do not claim Claude native Cloud Monitoring metrics from this route. Query two distinguishable resources/scopes to prove they do not collapse; inspect authoritative Scion identity and retained native service identity.
 
-gcloud projects add-iam-policy-binding "$GCP_PROJECT" \
-  --member "serviceAccount:scion-demo-sa@${GCP_PROJECT}.iam.gserviceaccount.com" \
-  --role "roles/monitoring.metricWriter"
-```
+## Failure, cleanup and interpretation
 
----
+Use a local fake destination for induced permanent/transient failure and bounded Stop tests. Record fixed-cardinality diagnostics, attempts, queue residual and the final Stop error; never inject failure into production telemetry. For live runs, capture post-run hub/broker health and exact running/total inventory, remove only the exact stopped fixture container and task credential, then compare inventory and shared binary/config hashes. Preserve restricted raw evidence under a task-owned access-controlled scratch directory and publish only nonsecret summaries and hashes.
 
-## 2. Build Scion
+## Owner-only rollback gate
 
-```bash
-# From the scion source root
-mkdir -p ../scion-qa-telemetry
-go build -buildvcs=false -o ../scion-qa-telemetry/scion ./cmd/scion/
-cd ../scion-qa-telemetry
-```
+Before a pinned rollout, the owner records the prior and candidate source commits, executable SHA256, container image digests, service unit and launch configuration, and exact task fixture image mapping in the restricted audit directory. Preserve the currently installed executable as a uniquely named, hash-verified rollback copy before replacing it. Record pre-rollout `/healthz` status and version, database and connected-broker counts, `/login` result, web asset hash, shared configuration and collector binary hashes, and sorted running/total container inventories. The reviewed release manifest must bind the candidate executable and image digest to its commit; stop if any preflight hash differs. The Phase 4 controlled hub restore pattern is documented in the restricted `phase4-deploy-ed8cb776.sh` audit script; adapt and review it for the new exact paths and hashes rather than rerunning a historical script.
 
----
+The owner triggers rollback if the pinned artifact or image hash differs, the scoped service restart or health gate fails, database/broker or public `/login` health regresses, original container inventory or shared configuration changes unexpectedly, or the bounded telemetry window shows missing positive controls, a privacy leak, failed delivery, or unexplained residuals. Stop only the exact task fixture if required. Under the reserved maintenance window, the owner verifies the saved prior executable against its recorded SHA256, stages that exact copy, atomically restores the owner-controlled service path, and restarts only the recorded service. Restore a prior task fixture image mapping only for that fixture; do not change shared agent defaults or remove unrelated containers. Record the restore action, operator, UTC time, exact paths, hashes and service result in restricted audit storage.
 
-## 3. Configure Telemetry via Settings
+After restore, require the installed executable SHA256 and version to equal the recorded prior values; verify active service, `/healthz` with healthy database and at least baseline broker count, `/login`, pinned web asset hash, unchanged shared config/collector hashes, and running/total container inventories against preflight. Record exact deviations and keep the rollout blocked if any check fails. Root/owner decides any further recovery; a local source test or receiver acknowledgment cannot clear a failed live rollback gate.
 
-### 3.1 Initialize a test grove
-
-```bash
-./scion grove init
-```
-
-**Verification:** Confirm `.scion/` exists in the current directory and
-`~/.scion/settings.yaml` exists in your home directory.
-
-### 3.2 Set global telemetry settings
-
-Edit `~/.scion/settings.yaml` to add a telemetry block. This is the
-"global scope" layer — it will flow through to every agent container via
-the settings-to-env bridge (`ConvertV1TelemetryToAPI` + `TelemetryConfigToEnv`).
-
-```yaml
-schema_version: "1"
-telemetry:
-  enabled: true
-  cloud:
-    enabled: true
-    provider: "gcp"
-  filter:
-    events:
-      exclude:
-        - "agent.user.prompt"
-    attributes:
-      redact:
-        - "prompt"
-        - "user.email"
-        - "tool_output"
-        - "tool_input"
-      hash:
-        - "session_id"
-```
-
-> **Note:** When `provider: gcp` is set, the GCP-native SDKs (Cloud Trace,
-> Cloud Monitoring, Cloud Logging) handle endpoint routing automatically.
-> No `endpoint` or `protocol` fields are needed. Authentication uses
-> Application Default Credentials (ADC) or an explicit service account key
-> file injected by the broker.
-
-### 3.3 (Optional) Override at grove scope
-
-Create `.scion/settings.yaml` in the test grove to override specific fields.
-Grove-scope settings merge on top of global settings.
-
-```yaml
-schema_version: "1"
-telemetry:
-  cloud:
-    batch:
-      max_size: 256
-      timeout: "5s"
-  local:
-    enabled: true
-```
-
----
-
-## 4. Verify Environment Variable Injection
-
-Start an agent with `--no-auth` and inspect the container environment to
-confirm the settings bridge is working. Use Docker to inspect env vars
-before the agent does any real work.
-
-```bash
-./scion start "hello" --name qa-telem --no-auth
-```
-
-```bash
-docker inspect qa-telem --format '{{range .Config.Env}}{{println .}}{{end}}' \
-  | grep -E "SCION_TELEMETRY|SCION_OTEL"
-```
-
-**Expected output** (values depend on your settings):
-
-```
-SCION_TELEMETRY_ENABLED=true
-SCION_TELEMETRY_CLOUD_ENABLED=true
-SCION_TELEMETRY_CLOUD_PROVIDER=gcp
-SCION_TELEMETRY_FILTER_EXCLUDE=agent.user.prompt
-SCION_TELEMETRY_REDACT=prompt,user.email,tool_output,tool_input
-SCION_TELEMETRY_HASH=session_id
-```
-
-If you added grove-level local debug settings, also check:
-
-```
-SCION_TELEMETRY_LOCAL_ENABLED=true
-SCION_TELEMETRY_DEBUG=true
-SCION_TELEMETRY_CLOUD_BATCH_MAX_SIZE=256
-SCION_TELEMETRY_CLOUD_BATCH_TIMEOUT=5s
-```
-
-Also verify harness-specific telemetry env vars are present. These direct
-the harness's native telemetry to the local OTLP collector:
-
-```bash
-docker inspect qa-telem --format '{{range .Config.Env}}{{println .}}{{end}}' \
-  | grep -E "GEMINI_TELEMETRY"
-```
-
-**Expected output** (for Gemini harness):
-
-```
-GEMINI_TELEMETRY_ENABLED=true
-GEMINI_TELEMETRY_TARGET=local
-GEMINI_TELEMETRY_USE_COLLECTOR=true
-GEMINI_TELEMETRY_OTLP_ENDPOINT=http://localhost:4317
-GEMINI_TELEMETRY_OTLP_PROTOCOL=grpc
-GEMINI_TELEMETRY_LOG_PROMPTS=false
-```
-
-For Claude harness agents, check for `CLAUDE_CODE_ENABLE_TELEMETRY=1` and
-`OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` instead.
-
-**Key verification points:**
-
-- Settings-level telemetry fields appear as container env vars.
-- Harness-specific telemetry env vars are injected when telemetry is enabled.
-- The `SCION_GCP_PROJECT_ID` env var is auto-resolved from the GCP
-  credentials file when present. If using ADC without an explicit
-  credentials file, set `SCION_GCP_PROJECT_ID` explicitly.
-
-Clean up the test agent:
-
-```bash
-./scion stop qa-telem --rm
-```
-
----
-
-## 5. Verify Telemetry Disabled at Grove Scope
-
-This confirms that setting `telemetry.enabled: false` at the grove scope
-suppresses telemetry collection in the agent container.
-
-### 5.1 Set grove-level override
-
-Write `.scion/settings.yaml` in the test grove:
-
-```yaml
-schema_version: "1"
-telemetry:
-  enabled: false
-```
-
-### 5.2 Start agent and inspect
-
-```bash
-./scion start "disabled test" --name qa-telem-off --no-auth
-```
-
-```bash
-docker inspect qa-telem-off --format '{{range .Config.Env}}{{println .}}{{end}}' \
-  | grep SCION_TELEMETRY_ENABLED
-```
-
-**Expected:** `SCION_TELEMETRY_ENABLED=false`
-
-Inside the container, sciontool's `telemetry.LoadConfig()` will read this
-value and `Pipeline.New()` will return nil, skipping all collection.
-
-Clean up:
-
-```bash
-./scion stop qa-telem-off --rm
-```
-
-Restore the grove settings to `enabled: true` (or remove the override)
-before proceeding to the next sections.
-
----
-
-## 6. End-to-End Cloud Trace Verification
-
-This section verifies the full pipeline: agent hook events are converted to
-OTLP spans by sciontool's `TelemetryHandler`, forwarded through the pipeline's
-filter and cloud exporter, and appear in Google Cloud Trace.
-
-### 6.1 Start an agent with telemetry enabled
-
-```bash
-./scion start "trace test task" --name qa-trace --no-auth
-```
-
-### 6.2 Trigger tool executions
-
-Attach to the agent and interact with it to generate hook events. Each tool
-invocation produces `agent.tool.call` and `agent.tool.result` spans:
-
-```bash
-./scion attach qa-trace
-# Ask the agent to run a simple command, e.g. "list files in /tmp"
-# Detach with Ctrl+B then D
-```
-
-### 6.3 Check Cloud Trace
-
-Allow 30-60 seconds for spans to flush, then query Cloud Trace:
-
-```bash
-# Open Cloud Trace in the browser
-echo "https://console.cloud.google.com/traces/list?project=${GCP_PROJECT}"
-```
-
-Or query via gcloud:
-
-```bash
-gcloud traces list --project "$GCP_PROJECT" \
-  --filter "rootSpan.name:agent" \
-  --limit 10
-```
-
-**Verification:**
-
-- Spans with names like `agent.tool.call`, `agent.turn.start`,
-  `agent.session.start` appear in the trace list.
-- Span attributes include `agent.name`, `tool_name`, `model`, etc.
-- `agent.user.prompt` spans are **absent** (filtered by default exclude).
-- Attributes like `prompt` show `[REDACTED]` (redaction filter active).
-- `session_id` values are SHA-256 hashes (hash filter active).
-
-### 6.4 Check Cloud Monitoring (metrics)
-
-The `TelemetryHandler` records OTel metric instruments (`gen_ai.tokens.input`,
-`agent.tool.calls`, etc.). In GCP-native mode, metrics reach Cloud Monitoring
-via the SDK MeterProvider (configured in `providers.go`), **not** through the
-OTLP pipeline forwarding path. The pipeline's `ExportProtoMetrics` is a no-op
-for the GCP exporter because it receives OTLP proto types which cannot be
-converted to the SDK metricdata types required by the GCP metric exporter.
-This means metrics are exported directly by each agent's own MeterProvider:
-
-```bash
-echo "https://console.cloud.google.com/monitoring/metrics-explorer?project=${GCP_PROJECT}"
-```
-
-Search for metrics with the `custom.googleapis.com/` prefix or the
-`gen_ai.tokens.input` name.
-
-Clean up:
-
-```bash
-./scion stop qa-trace --rm
-```
-
----
-
-## 7. Privacy Filtering Verification
-
-### 7.1 Verify default exclude list
-
-By default, `agent.user.prompt` events are excluded. In section 6.3 above,
-confirm these spans do not appear in Cloud Trace.
-
-### 7.2 Test custom include list
-
-Override the filter to only include specific event types:
-
-```yaml
-# ~/.scion/settings.yaml or .scion/settings.yaml
-telemetry:
-  enabled: true
-  cloud:
-    enabled: true
-    provider: "gcp"
-  filter:
-    events:
-      include:
-        - "agent.session.start"
-        - "agent.session.end"
-```
-
-Start an agent, trigger several tool calls, then verify in Cloud Trace that
-only `agent.session.start` and `agent.session.end` spans appear — no tool
-call spans.
-
-### 7.3 Verify redaction
-
-Inspect span attributes in Cloud Trace. Fields listed in the `redact`
-configuration should appear as `[REDACTED]`, while fields in the `hash`
-configuration should appear as hex-encoded SHA-256 digests.
-
----
-
-## 8. Settings Hierarchy Merge Verification
-
-This confirms the merge priority chain: global settings < grove settings
-< template `scion-agent.yaml` < explicit env vars.
-
-### 8.1 Set conflicting values at different scopes
-
-**Global** (`~/.scion/settings.yaml`):
-
-```yaml
-telemetry:
-  enabled: true
-  cloud:
-    endpoint: "global-endpoint.example.com:4317"
-```
-
-**Grove** (`.scion/settings.yaml`):
-
-```yaml
-schema_version: "1"
-telemetry:
-  cloud:
-    endpoint: "grove-endpoint.example.com:4317"
-```
-
-### 8.2 Start and inspect
-
-```bash
-./scion start "merge test" --name qa-merge --no-auth
-docker inspect qa-merge --format '{{range .Config.Env}}{{println .}}{{end}}' \
-  | grep SCION_OTEL_ENDPOINT
-```
-
-**Expected:** `SCION_OTEL_ENDPOINT=grove-endpoint.example.com:4317`
-
-The grove scope overrides the global scope, and `MergeScionConfig` ensures
-template/agent-level values would override both.
-
-Clean up:
-
-```bash
-./scion stop qa-merge --rm
-```
-
-### 8.3 Explicit env override
-
-Pre-set an env var that the bridge should not overwrite:
-
-```bash
-SCION_OTEL_ENDPOINT="explicit-override.example.com:4317" \
-  ./scion start "override test" --name qa-override --no-auth
-
-docker inspect qa-override --format '{{range .Config.Env}}{{println .}}{{end}}' \
-  | grep SCION_OTEL_ENDPOINT
-```
-
-**Expected:** `SCION_OTEL_ENDPOINT=explicit-override.example.com:4317`
-
-The injection logic in `run.go` skips keys already present in `opts.Env`.
-
-Clean up:
-
-```bash
-./scion stop qa-override --rm
-```
-
----
-
-## 9. Cleanup
-
-```bash
-# Remove all scion test containers
-docker rm -f $(docker ps -a -q --filter "label=scion.agent=true") 2>/dev/null
-
-# Remove the test grove
-cd ..
-rm -rf scion-qa-telemetry
-```
-
----
-
-## Related Documentation
-
-| Document | Relevance |
-|----------|-----------|
-| [metrics-system.md](../hosted/metrics-system.md) | Full metrics architecture and QA gap tracker |
-| [sciontool-overview.md](../sciontool-overview.md) | Sciontool architecture and lifecycle |
-| [scion-local.md](scion-local.md) | Local CLI QA walkthrough |
+Capability labels must be precise: **accepted** means installed emitter plus receiver and backend proof for the named version and signal; **receiver delivered** means exporter acknowledgment without independent backend readback; **synthetic** means a local OTLP-shaped fixture; **unsupported** means the installed version lacks a usable route; **untested** means no evidence was gathered. Phase 4 R5 accepts bounded Claude Code 2.1.273 GCP logs-first native emission, privacy and cleanup. Gemini 0.52 Cloud-positive native routing remains unsupported; Codex native emission is untested. Phase 5 tests and any later deployment/live gate require separate review and acceptance.

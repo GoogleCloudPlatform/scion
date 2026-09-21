@@ -12,6 +12,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -28,7 +29,7 @@ func TestNewTelemetryHandler(t *testing.T) {
 	}
 }
 
-func TestNewTelemetryHandler_WithRedactor(t *testing.T) {
+func TestNewTelemetryHandler_AcceptsLegacyRedactorArgument(t *testing.T) {
 	redactor := telemetry.NewRedactor(telemetry.RedactionConfig{
 		Redact: []string{"prompt"},
 		Hash:   []string{"session_id"},
@@ -37,9 +38,6 @@ func TestNewTelemetryHandler_WithRedactor(t *testing.T) {
 	h := NewTelemetryHandler(nil, nil, redactor)
 	if h == nil {
 		t.Fatal("NewTelemetryHandler should not return nil")
-	}
-	if h.redactor == nil {
-		t.Error("handler should have a redactor")
 	}
 }
 
@@ -50,6 +48,24 @@ func TestTelemetryHandler_HandleNilEvent(t *testing.T) {
 	err := h.Handle(nil)
 	if err != nil {
 		t.Errorf("Handle(nil) should not return error, got: %v", err)
+	}
+}
+
+func TestTelemetryHandler_MetricAttrsPreferCanonicalProject(t *testing.T) {
+	t.Setenv("SCION_PROJECT_ID", "canonical-project")
+	h := NewTelemetryHandler(nil, nil, nil)
+	attrs := h.metricAttrs()
+	foundProject := false
+	for _, attr := range attrs {
+		if string(attr.Key) == "project_id" {
+			foundProject = true
+			if attr.Value.AsString() != "canonical-project" {
+				t.Fatalf("project_id = %q, want canonical-project", attr.Value.AsString())
+			}
+		}
+	}
+	if !foundProject {
+		t.Fatal("project_id metric dimension missing")
 	}
 }
 
@@ -182,26 +198,6 @@ func TestSpanMapping(t *testing.T) {
 	}
 }
 
-func TestTelemetryHandler_RedactionApplied(t *testing.T) {
-	redactor := telemetry.NewRedactor(telemetry.RedactionConfig{
-		Redact: []string{"prompt", "tool_input", "tool_output"},
-		Hash:   []string{"session_id"},
-	})
-
-	h := NewTelemetryHandler(nil, nil, redactor)
-
-	// Test that redactor is properly referenced
-	if h.redactor == nil {
-		t.Fatal("redactor should be set")
-	}
-	if !h.redactor.ShouldRedact("prompt") {
-		t.Error("redactor should redact 'prompt'")
-	}
-	if !h.redactor.ShouldHash("session_id") {
-		t.Error("redactor should hash 'session_id'")
-	}
-}
-
 // recordingProcessor captures log records for test assertions.
 type recordingProcessor struct {
 	mu      sync.Mutex
@@ -287,8 +283,8 @@ func TestTelemetryHandler_WithLoggerProvider(t *testing.T) {
 		return true
 	})
 
-	if found["event.name"] != hooks.EventSessionStart {
-		t.Errorf("event.name = %q, want %q", found["event.name"], hooks.EventSessionStart)
+	if found["event.name"] != "agent.session.start" {
+		t.Errorf("event.name = %q, want %q", found["event.name"], "agent.session.start")
 	}
 	if found["session_id"] != "sess-abc" {
 		t.Errorf("session_id = %q, want %q", found["session_id"], "sess-abc")
@@ -298,7 +294,7 @@ func TestTelemetryHandler_WithLoggerProvider(t *testing.T) {
 	}
 }
 
-func TestTelemetryHandler_LogRedaction(t *testing.T) {
+func TestTelemetryHandler_LeavesPolicyTransformationToReceiver(t *testing.T) {
 	proc := &recordingProcessor{}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
 	defer func() { _ = lp.Shutdown(context.Background()) }()
@@ -333,17 +329,13 @@ func TestTelemetryHandler_LogRedaction(t *testing.T) {
 		return true
 	})
 
-	// Prompt should be redacted
-	if found["prompt"] != "[REDACTED]" {
-		t.Errorf("prompt = %q, want [REDACTED]", found["prompt"])
+	// Producers retain raw values so the receiver is the single authoritative
+	// policy boundary and hashes each accepted field exactly once.
+	if found["prompt"] != "my secret prompt" {
+		t.Errorf("prompt = %q, want unprocessed producer value", found["prompt"])
 	}
-
-	// Session ID should be hashed (not the original value)
-	if found["session_id"] == "sess-secret" {
-		t.Error("session_id should be hashed, not plaintext")
-	}
-	if found["session_id"] == "" {
-		t.Error("session_id should be present as hashed value")
+	if found["session_id"] != "sess-secret" {
+		t.Errorf("session_id = %q, want unprocessed producer value", found["session_id"])
 	}
 }
 
@@ -614,6 +606,34 @@ func TestTelemetryHandler_SessionMetrics(t *testing.T) {
 	}
 }
 
+func TestSessionMetricScopesSeparateHookAndLifecycleSources(t *testing.T) {
+	for _, tc := range []struct {
+		name, scope string
+		newHandler  func(metric.MeterProvider) *TelemetryHandler
+	}{
+		{"hook", hookMetricScope, func(mp metric.MeterProvider) *TelemetryHandler { return NewTelemetryHandler(nil, nil, nil, mp) }},
+		{"lifecycle", telemetry.LifecycleMetricScope, func(mp metric.MeterProvider) *TelemetryHandler {
+			return NewLifecycleTelemetryHandler(nil, nil, nil, mp)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := sdkmetric.NewManualReader()
+			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+			defer func() { _ = mp.Shutdown(context.Background()) }()
+			if err := tc.newHandler(mp).Handle(&hooks.Event{Name: hooks.EventSessionEnd}); err != nil {
+				t.Fatal(err)
+			}
+			var rm metricdata.ResourceMetrics
+			if err := reader.Collect(context.Background(), &rm); err != nil {
+				t.Fatal(err)
+			}
+			if len(rm.ScopeMetrics) != 1 || rm.ScopeMetrics[0].Scope.Name != tc.scope || len(rm.ScopeMetrics[0].Metrics) != 1 || rm.ScopeMetrics[0].Metrics[0].Name != "agent.session.count" {
+				t.Fatalf("session metric scope or name changed: %+v", rm.ScopeMetrics)
+			}
+		})
+	}
+}
+
 func TestTelemetryHandler_TokenMetricsOnModelEnd(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -654,26 +674,34 @@ func TestTelemetryHandler_TokenMetricsOnModelEnd(t *testing.T) {
 		}
 	}
 
-	if !found["gen_ai.tokens.input"] {
-		t.Error("expected gen_ai.tokens.input metric to be recorded")
+	if !found["scion.hook.tokens.input"] {
+		t.Error("expected scion.hook.tokens.input metric to be recorded")
 	}
-	if !found["gen_ai.tokens.output"] {
-		t.Error("expected gen_ai.tokens.output metric to be recorded")
+	if !found["scion.hook.tokens.output"] {
+		t.Error("expected scion.hook.tokens.output metric to be recorded")
 	}
-	if !found["gen_ai.tokens.cached"] {
-		t.Error("expected gen_ai.tokens.cached metric to be recorded")
+	if !found["scion.hook.tokens.cached"] {
+		t.Error("expected scion.hook.tokens.cached metric to be recorded")
 	}
 	if !found["gen_ai.api.calls"] {
 		t.Error("expected gen_ai.api.calls metric to be recorded")
 	}
+	for _, oldName := range []string{"gen_ai.tokens.input", "gen_ai.tokens.output", "gen_ai.tokens.cached"} {
+		if found[oldName] {
+			t.Errorf("normalized hook emitted old native token name %s", oldName)
+		}
+	}
 }
 
-func TestTelemetryHandler_TokenMetricsOnSessionEnd(t *testing.T) {
+func TestTelemetryHandler_SessionTotalsDoNotDuplicateModelTokens(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer func() { _ = mp.Shutdown(context.Background()) }()
 
 	h := NewTelemetryHandler(nil, nil, nil, mp)
+	if err := h.Handle(&hooks.Event{Name: hooks.EventModelEnd, Data: hooks.EventData{Success: true, InputTokens: 1500, OutputTokens: 500}}); err != nil {
+		t.Fatal(err)
+	}
 
 	// session-end with cumulative token usage
 	if err := h.Handle(&hooks.Event{
@@ -693,20 +721,23 @@ func TestTelemetryHandler_TokenMetricsOnSessionEnd(t *testing.T) {
 	}
 
 	found := map[string]bool{}
+	totals := map[string]int64{}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
 			found[m.Name] = true
+			if sum, ok := m.Data.(metricdata.Sum[int64]); ok {
+				for _, point := range sum.DataPoints {
+					totals[m.Name] += point.Value
+				}
+			}
 		}
 	}
 
 	if !found["agent.session.count"] {
 		t.Error("expected agent.session.count metric to be recorded")
 	}
-	if !found["gen_ai.tokens.input"] {
-		t.Error("expected gen_ai.tokens.input metric to be recorded on session-end")
-	}
-	if !found["gen_ai.tokens.output"] {
-		t.Error("expected gen_ai.tokens.output metric to be recorded on session-end")
+	if totals["scion.hook.tokens.input"] != 1500 || totals["scion.hook.tokens.output"] != 500 {
+		t.Errorf("session totals duplicated model increments: input=%d output=%d", totals["scion.hook.tokens.input"], totals["scion.hook.tokens.output"])
 	}
 }
 
@@ -778,11 +809,11 @@ func TestTelemetryHandler_UnpairedModelEnd(t *testing.T) {
 	if !found["gen_ai.api.calls"] {
 		t.Error("expected gen_ai.api.calls metric from unpaired model-end")
 	}
-	if !found["gen_ai.tokens.input"] {
-		t.Error("expected gen_ai.tokens.input metric from unpaired model-end")
+	if !found["scion.hook.tokens.input"] {
+		t.Error("expected scion.hook.tokens.input metric from unpaired model-end")
 	}
-	if !found["gen_ai.tokens.output"] {
-		t.Error("expected gen_ai.tokens.output metric from unpaired model-end")
+	if !found["scion.hook.tokens.output"] {
+		t.Error("expected scion.hook.tokens.output metric from unpaired model-end")
 	}
 }
 
@@ -808,7 +839,7 @@ func TestTelemetryHandler_NoTokenMetricsWhenZero(t *testing.T) {
 
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name == "gen_ai.tokens.input" || m.Name == "gen_ai.tokens.output" || m.Name == "gen_ai.tokens.cached" {
+			if m.Name == "scion.hook.tokens.input" || m.Name == "scion.hook.tokens.output" || m.Name == "scion.hook.tokens.cached" {
 				t.Errorf("did not expect %s metric when token counts are zero", m.Name)
 			}
 		}

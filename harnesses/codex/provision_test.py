@@ -170,63 +170,31 @@ class CodexProvisionTest(unittest.TestCase):
 
             self.assertFalse(os.path.exists(agents_path))
 
-    def test_build_otel_section_emits_traces_metrics_environment_and_tls(self) -> None:
-        telemetry = {
-            "enabled": True,
-            "cloud": {
-                "endpoint": "https://otel.example.com/v1/logs",
-                "protocol": "http",
-                "headers": {"x-otlp-meta": "abc123", "authorization": "Bearer token"},
-                "tls": {"ca_file": "/etc/scion/ca.pem"},
-            },
-            "resource": {"deployment.environment": "staging"},
-            "filter": {"events": {"include": ["agent.user.prompt"]}},
-        }
-
-        section = provision._build_otel_section(telemetry, None)
-
-        self.assertIn('environment = "staging"', section)
-        self.assertIn("log_user_prompt = true", section)
-        self.assertIn('metrics_exporter = "statsig"', section)
-        self.assertIn('exporter."otlp-http".endpoint = "https://otel.example.com/v1/logs"', section)
-        self.assertIn('trace_exporter."otlp-http".endpoint = "https://otel.example.com/v1/logs"', section)
-        self.assertIn(
-            'exporter."otlp-http".headers = { "authorization" = "Bearer token", "x-otlp-meta" = "abc123" }',
-            section,
-        )
-        self.assertIn(
-            'trace_exporter."otlp-http".headers = { "authorization" = "Bearer token", "x-otlp-meta" = "abc123" }',
-            section,
-        )
-        self.assertIn('exporter."otlp-http".tls.ca-certificate = "/etc/scion/ca.pem"', section)
-        self.assertIn('trace_exporter."otlp-http".tls.ca-certificate = "/etc/scion/ca.pem"', section)
-
-    def test_build_otel_section_uses_env_overrides_and_production_default(self) -> None:
-        telemetry = {
-            "enabled": True,
-            "cloud": {
-                "endpoint": "localhost:4317",
-                "protocol": "grpc",
-            },
-            "resource": {"deployment.environment": "staging"},
-            "filter": {"events": {"include": ["agent.user.prompt"], "exclude": ["agent.user.prompt"]}},
-        }
-        env = {
-            "SCION_CODEX_OTEL_ENDPOINT": "collector.internal:4317",
-            "SCION_CODEX_OTEL_PROTOCOL": "grpc",
-            "SCION_CODEX_OTEL_ENVIRONMENT": "dev",
-        }
-
+    def test_native_otel_routes_only_to_local_receiver(self) -> None:
+        telemetry = {"enabled": True, "cloud": {"endpoint": "cloudtrace.googleapis.com:443", "protocol": "http", "headers": {"authorization": "secret"}}}
+        env = {"SCION_CODEX_OTEL_ENDPOINT": "external.invalid:4317", "SCION_OTEL_GRPC_PORT": "14317"}
         section = provision._build_otel_section(telemetry, env)
+        self.assertIn('metrics_exporter."otlp-grpc".endpoint = "http://127.0.0.1:14317"', section)
+        self.assertIn('exporter."otlp-grpc".endpoint = "http://127.0.0.1:14317"', section)
+        self.assertIn('trace_exporter."otlp-grpc".endpoint = "http://127.0.0.1:14317"', section)
+        self.assertIn('log_user_prompt = false', section)
+        self.assertNotIn("cloudtrace", section)
+        self.assertNotIn("external.invalid", section)
+        self.assertNotIn("secret", section)
+        self.assertNotIn("statsig", section)
 
-        self.assertIn('environment = "dev"', section)
-        self.assertIn("log_user_prompt = false", section)
-        self.assertIn('exporter."otlp-grpc".endpoint = "collector.internal:4317"', section)
-        self.assertIn('trace_exporter."otlp-grpc".endpoint = "collector.internal:4317"', section)
-
-        defaulted = provision._build_otel_section({"enabled": True}, None)
-        self.assertIn('environment = "production"', defaulted)
-
+    def test_disabled_otel_disables_all_exporters(self) -> None:
+        with tempfile.TemporaryDirectory() as home, temporary_home(home):
+            os.makedirs(os.path.join(home, ".codex"), exist_ok=True)
+            with open(os.path.join(home, ".codex", "config.toml"), "w", encoding="utf-8") as f:
+                f.write('[otel.exporter."otlp-grpc"]\nendpoint = "https://external.invalid:443"\n')
+            provision._reconcile_codex_toml(None, None)
+            with open(os.path.join(home, ".codex", "config.toml"), encoding="utf-8") as f:
+                content = f.read()
+        self.assertIn('exporter = "none"', content)
+        self.assertIn('metrics_exporter = "none"', content)
+        self.assertIn('trace_exporter = "none"', content)
+        self.assertNotIn('external.invalid', content)
 
     def test_resolve_reasoning_effort_maps_thinking_levels(self) -> None:
         self.assertEqual(provision._resolve_reasoning_effort(0), "low")

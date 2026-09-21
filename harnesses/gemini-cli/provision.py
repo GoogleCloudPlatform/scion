@@ -218,6 +218,37 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     _update_gemini_settings(GEMINI_SETTINGS_FILE, gemini_auth_type)
 
     env = _build_env_overlay(resolved.method, resolved.env_key)
+    telemetry = ctx.telemetry
+    config = telemetry.get("telemetry") if isinstance(telemetry, dict) else None
+    enabled = isinstance(config, dict) and config.get("enabled", True)
+    source_env = telemetry.get("env", {}) if isinstance(telemetry, dict) else {}
+    port = str(source_env.get("SCION_OTEL_GRPC_PORT") or "4317")
+    if not port.isdecimal() or not 1 <= int(port) <= 65535:
+        raise scion_harness.ProvisionError("invalid local telemetry gRPC port")
+    env.update({
+        "SCION_NATIVE_TELEMETRY_POLICY": "enabled" if enabled else "disabled",
+        "GEMINI_TELEMETRY_ENABLED": "true" if enabled else "false",
+        "GEMINI_TELEMETRY_TARGET": "local",
+        "GEMINI_TELEMETRY_OTLP_ENDPOINT": f"http://127.0.0.1:{port}",
+        "GEMINI_TELEMETRY_OTLP_PROTOCOL": "grpc",
+        "GEMINI_TELEMETRY_LOG_PROMPTS": "false",
+        "GEMINI_TELEMETRY_TRACES_ENABLED": "false",
+        "GEMINI_TELEMETRY_USE_COLLECTOR": "false",
+        "GEMINI_TELEMETRY_OUTFILE": "",
+    })
+    settings_path = scion_harness.expand_path(GEMINI_SETTINGS_FILE)
+    try:
+        settings = scion_harness.load_json(settings_path) if os.path.isfile(settings_path) else {}
+    except (OSError, json.JSONDecodeError):
+        settings = {}
+    if not isinstance(settings, dict):
+        settings = {}
+    settings["telemetry"] = {
+        "enabled": bool(enabled), "target": "local",
+        "otlpEndpoint": f"http://127.0.0.1:{port}", "otlpProtocol": "grpc",
+        "logPrompts": False, "traces": False, "useCollector": False,
+    }
+    scion_harness.atomic_write_json(settings_path, settings)
     extra: dict[str, Any] | None = None
     if resolved.method == "vertex-ai":
         extra = {"vertex_ai": True}

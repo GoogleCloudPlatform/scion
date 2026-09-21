@@ -29,6 +29,7 @@ func TestProtoResourceSpansToSDK(t *testing.T) {
 
 	resourceSpans := []*tracepb.ResourceSpans{
 		{
+			SchemaUrl: "https://example.test/resource-schema",
 			Resource: &resourcepb.Resource{
 				Attributes: []*commonpb.KeyValue{
 					{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "test-service"}}},
@@ -36,9 +37,13 @@ func TestProtoResourceSpansToSDK(t *testing.T) {
 			},
 			ScopeSpans: []*tracepb.ScopeSpans{
 				{
+					SchemaUrl: "https://example.test/scope-schema",
 					Scope: &commonpb.InstrumentationScope{
 						Name:    "test-scope",
 						Version: "1.0.0",
+						Attributes: []*commonpb.KeyValue{
+							{Key: "scope.safe", Value: stringValue("processed")},
+						},
 					},
 					Spans: []*tracepb.Span{
 						{
@@ -135,6 +140,15 @@ func TestProtoResourceSpansToSDK(t *testing.T) {
 	}
 	if scope.Version != "1.0.0" {
 		t.Errorf("InstrumentationScope.Version = %q, want %q", scope.Version, "1.0.0")
+	}
+	if scope.SchemaURL != "https://example.test/scope-schema" {
+		t.Errorf("InstrumentationScope.SchemaURL = %q", scope.SchemaURL)
+	}
+	if got, ok := scope.Attributes.Value("scope.safe"); !ok || got.AsString() != "processed" {
+		t.Errorf("InstrumentationScope.Attributes = %v", scope.Attributes)
+	}
+	if got := span.Resource().SchemaURL(); got != "https://example.test/resource-schema" {
+		t.Errorf("Resource.SchemaURL() = %q", got)
 	}
 }
 
@@ -247,7 +261,12 @@ func TestProtoLogToCloudEntry(t *testing.T) {
 		},
 	}
 
-	entry := protoLogToCloudEntry(lr, res)
+	scope := &commonpb.InstrumentationScope{
+		Name:       "native.scope",
+		Version:    "1.2.3",
+		Attributes: []*commonpb.KeyValue{{Key: "scope.safe", Value: stringValue("processed")}},
+	}
+	entry := protoLogToCloudEntry(lr, res, "resource-schema", scope, "scope-schema")
 
 	if entry.Severity != logging.Error {
 		t.Errorf("Severity = %v, want %v", entry.Severity, logging.Error)
@@ -264,6 +283,16 @@ func TestProtoLogToCloudEntry(t *testing.T) {
 
 	if comp, ok := payload["component"]; !ok || comp != "auth" {
 		t.Errorf("Payload[component] = %v, want 'auth'", comp)
+	}
+	metadata, ok := payload[cloudLoggingOTelMetadataKey].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Payload[%q] = %#v", cloudLoggingOTelMetadataKey, payload[cloudLoggingOTelMetadataKey])
+	}
+	if metadata["resource_schema_url"] != "resource-schema" || metadata["scope_schema_url"] != "scope-schema" || metadata["scope_name"] != "native.scope" || metadata["scope_version"] != "1.2.3" {
+		t.Fatalf("Cloud Logging OTel metadata = %#v", metadata)
+	}
+	if attrs, ok := metadata["scope_attributes"].(map[string]interface{}); !ok || attrs["scope.safe"] != "processed" {
+		t.Fatalf("Cloud Logging scope attributes = %#v", metadata["scope_attributes"])
 	}
 
 	if _, ok := payload["trace_id"]; !ok {

@@ -190,8 +190,8 @@ All metrics and traces emitted by Scion are enriched with context-aware OpenTele
 
 - `scion.harness`: The type of harness running the agent (e.g., `gemini`, `claude`, `codex`).
 - `scion.model`: The specific LLM model being used.
-- `scion.broker`: The ID of the Runtime Broker executing the agent.
-- `project_id`: The ID of the agent's parent project.
+- `scion.broker.name`: The name of the Runtime Broker executing the agent, when available.
+- `scion.project.id`: The authoritative ID of the agent's parent project, when available.
 
 ### Automated Metrics Collection
 
@@ -199,16 +199,49 @@ When harness events occur (via hooks), sciontool automatically records the follo
 
 | Metric | Type | Unit | Description |
 |--------|------|------|-------------|
-| `gen_ai.tokens.input` | Counter | tokens | Number of input tokens processed |
-| `gen_ai.tokens.output` | Counter | tokens | Number of output tokens generated |
-| `gen_ai.tokens.cached` | Counter | tokens | Number of tokens retrieved from cache |
+| `scion.hook.tokens.input` | Counter | tokens | Input tokens reported by model-end hooks |
+| `scion.hook.tokens.output` | Counter | tokens | Output tokens reported by model-end hooks |
+| `scion.hook.tokens.cached` | Counter | tokens | Cached tokens reported by model-end hooks |
 | `agent.tool.calls` | Counter | calls | Total number of tool executions |
-| `agent.tool.duration` | Histogram | ms | Latency of tool executions |
-| `agent.session.count` | Counter | sessions | Total number of agent sessions |
+| `agent.tool.duration` | Histogram | ms | Tool duration when paired start and end events are available in one process |
+| `agent.session.count` | Counter | sessions | Session-end events emitted by each source |
 | `gen_ai.api.calls` | Counter | calls | Total number of LLM API requests |
-| `gen_ai.api.duration` | Histogram | ms | Latency of LLM API requests |
+| `gen_ai.api.duration` | Histogram | ms | Model duration when paired start and end events are available in one process |
 
-*(Note: The Codex harness has been expanded to capture comprehensive telemetry including tool usage, detailed tool input/output, and granular token counts for input, output, and cached tokens).*
+Hook token counters use the `scion.hook.tokens.*` namespace. Genuine native harness
+`gen_ai.tokens.*` metrics remain separate; normalized hooks do not emit those
+native names. Token counters appear only when a hook provides token usage.
+For Cloud Monitoring, the six normalized hook counters in this table use a
+collector observation epoch and the time sciontool takes each cumulative
+snapshot. A counter's Cloud point time therefore describes when this collector
+observed the total, rather than the time of the last hook event. Retries keep
+the original snapshot time. Generic OTLP forwarding and native metric points
+keep their source timestamps through sciontool. The Monitoring SDK maps
+non-gauge intervals shorter than two milliseconds to a one-millisecond
+interval; admission checks use that mapped end. A native point known to be less than five seconds
+after a possibly written point in the same Cloud series is rejected before
+admission; a request containing that point is rejected as a whole. Scope and
+metric names select the hook counter behavior, so local producers using those
+reserved names also opt into it. This does not authenticate the producer.
+Session-end totals do not add a second copy of model-end usage. Short-lived
+hook processes normally cannot pair start and end events, so duration
+histograms are not guaranteed. This does not establish native Codex token
+emission.
+
+`agent.session.count` has two distinct sources: harness `session-end` hooks and
+the `sciontool init` lifecycle `session-end` event. They keep the same metric
+name and unit, but use distinct instrumentation scopes. In Cloud Monitoring,
+filter the `scion_metric_scope_id` label for the source you intend to inspect:
+the hook scope is `github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers`,
+and the init lifecycle scope adds `/lifecycle`. The Cloud label contains a
+digest of the scope identity, so inspect a sample series to obtain its value.
+These are source event counts; summing both does not produce a canonical count
+of logical sessions. The Hub dashboard does not reconcile them.
+
+The current Hub dashboard still queries historical `gen_ai.tokens.*` names.
+Its charts exclude the new hook token namespace and, because older normalized
+hook samples may remain under the historical names, are neither complete usage
+totals nor native-only usage views.
 
 ### Correlated Logs
 

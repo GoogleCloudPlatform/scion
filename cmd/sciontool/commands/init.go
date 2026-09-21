@@ -48,6 +48,17 @@ var (
 	gracePeriod time.Duration
 )
 
+// telemetryStopBudget permits one safe 15-second metric write interval plus
+// five seconds for the final export after the child has exited. The bound does
+// not guarantee Cloud delivery when the backend is slower.
+const telemetryStopBudget = 20 * time.Second
+
+func stopTelemetryWithTimeout(stop func(context.Context) error, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return stop(ctx)
+}
+
 // initCmd represents the init command
 var initCmd = &cobra.Command{
 	Use:   "init [--] <command> [args...]",
@@ -209,11 +220,9 @@ func runInit(args []string) int {
 			telemetryPipeline = pipeline
 			log.Info("Telemetry pipeline started")
 			defer func() {
-				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				if err := telemetryPipeline.Stop(shutdownCtx); err != nil {
+				if err := stopTelemetryWithTimeout(telemetryPipeline.Stop, telemetryStopBudget); err != nil {
 					log.Error("Failed to stop telemetry: %v", err)
 				}
-				shutdownCancel()
 				telemetryCancel()
 			}()
 		}
@@ -254,23 +263,8 @@ func runInit(args []string) int {
 			log.Error("Failed to create lifecycle telemetry providers: %v", provErr)
 		}
 
-		var tp trace.TracerProvider
-		var lp otellog.LoggerProvider
-		var mp metric.MeterProvider
-		if lifecycleProviders != nil {
-			tp = lifecycleProviders.TracerProvider
-			lp = lifecycleProviders.LoggerProvider
-			if lifecycleProviders.MeterProvider != nil {
-				mp = lifecycleProviders.MeterProvider
-			}
-		}
-		telemetryHandler = handlers.NewTelemetryHandler(tp, lp, redactor, mp)
+		telemetryHandler = registerLifecycleTelemetryHandler(lifecycleManager, lifecycleProviders, redactor)
 		log.Info("Telemetry handler initialized for hook-to-span conversion")
-
-		// Register telemetry handler for lifecycle events
-		for _, eventName := range []string{hooks.EventPreStart, hooks.EventPostStart, hooks.EventPreStop, hooks.EventSessionEnd} {
-			lifecycleManager.RegisterHandler(eventName, telemetryHandler.Handle)
-		}
 	}
 	if lifecycleProviders != nil {
 		defer func() {
@@ -386,6 +380,7 @@ func runInit(args []string) int {
 	// container-script harness — the child would otherwise launch without
 	// its credentials.
 	var harnessEnvOverlay map[string]string
+	var nativeTelemetryPolicy string
 	if harnessReq.EnvOverlayPath != "" {
 		overlayPath := hooks.ResolveContainerPath(harnessReq.EnvOverlayPath, agentHome)
 		allowedRoots := []string{harnessReq.BundleDir, agentHome}
@@ -398,6 +393,14 @@ func runInit(args []string) int {
 				return 1
 			}
 		} else if len(overlay) > 0 {
+			if policy, ok := overlay[hooks.NativeTelemetryPolicyKey]; ok {
+				if policy != "enabled" && policy != "disabled" {
+					log.Error("Invalid native telemetry policy marker")
+					return 1
+				}
+				nativeTelemetryPolicy = policy
+				delete(overlay, hooks.NativeTelemetryPolicyKey)
+			}
 			harnessEnvOverlay = overlay
 			log.Info("Loaded %d env overlay entries from %s", len(overlay), overlayPath)
 		}
@@ -552,13 +555,14 @@ func runInit(args []string) int {
 
 	// Create supervisor with configuration
 	config := supervisor.Config{
-		GracePeriod:     gracePeriod,
-		UID:             targetUID,
-		GID:             targetGID,
-		Username:        "scion",
-		Rootless:        rootless,
-		EnvOverlay:      harnessEnvOverlay,
-		SecretOverrides: secretOverrides,
+		GracePeriod:           gracePeriod,
+		UID:                   targetUID,
+		GID:                   targetGID,
+		Username:              "scion",
+		Rootless:              rootless,
+		EnvOverlay:            harnessEnvOverlay,
+		NativeTelemetryPolicy: nativeTelemetryPolicy,
+		SecretOverrides:       secretOverrides,
 	}
 	sup := supervisor.New(config)
 
@@ -1060,6 +1064,22 @@ waitLoop:
 
 	log.Info("Child exited with code %d", result.code)
 	return result.code
+}
+
+func registerLifecycleTelemetryHandler(manager *hooks.LifecycleManager, providers *telemetry.Providers, redactor *telemetry.Redactor) *handlers.TelemetryHandler {
+	var tp trace.TracerProvider
+	var lp otellog.LoggerProvider
+	var mp metric.MeterProvider
+	if providers != nil {
+		tp = providers.TracerProvider
+		lp = providers.LoggerProvider
+		mp = providers.MeterProvider
+	}
+	handler := handlers.NewLifecycleTelemetryHandler(tp, lp, redactor, mp)
+	for _, eventName := range []string{hooks.EventPreStart, hooks.EventPostStart, hooks.EventPreStop, hooks.EventSessionEnd} {
+		manager.RegisterHandler(eventName, handler.Handle)
+	}
+	return handler
 }
 
 // readHarnessExitCode reads and parses the harness exit-code file written by the

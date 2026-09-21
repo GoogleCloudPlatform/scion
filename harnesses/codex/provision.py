@@ -122,37 +122,12 @@ def _write_codex_auth_file(ctx: scion_harness.ProvisionContext) -> None:
 # --- TOML reconciliation (otel) --------------------------------------------
 
 
-def _list_contains(items: list[Any], target: str) -> bool:
-    for item in items or []:
-        if isinstance(item, str) and item.strip() == target:
-            return True
-    return False
-
-
 def _resolve_endpoint(telemetry: dict[str, Any] | None, env: dict[str, str] | None) -> str:
     env = env or {}
-    for key in ("SCION_CODEX_OTEL_ENDPOINT", "SCION_OTEL_ENDPOINT"):
-        v = (env.get(key) or "").strip()
-        if v:
-            return v
-    if telemetry and isinstance(telemetry.get("cloud"), dict):
-        ep = (telemetry["cloud"].get("endpoint") or "").strip()
-        if ep:
-            return ep
-    return "localhost:4317"
-
-
-def _resolve_protocol(telemetry: dict[str, Any] | None, env: dict[str, str] | None) -> str:
-    env = env or {}
-    for key in ("SCION_CODEX_OTEL_PROTOCOL", "SCION_OTEL_PROTOCOL"):
-        v = (env.get(key) or "").strip()
-        if v:
-            return v
-    if telemetry and isinstance(telemetry.get("cloud"), dict):
-        proto = (telemetry["cloud"].get("protocol") or "").strip()
-        if proto:
-            return proto
-    return "grpc"
+    port = str(env.get("SCION_OTEL_GRPC_PORT") or "4317")
+    if not port.isdecimal() or not 1 <= int(port) <= 65535:
+        raise scion_harness.ProvisionError("invalid local telemetry gRPC port")
+    return f"http://127.0.0.1:{port}"
 
 
 def _resolve_otel_environment(telemetry: dict[str, Any], env: dict[str, str] | None) -> str:
@@ -183,51 +158,18 @@ def _telemetry_enabled(telemetry: dict[str, Any] | None) -> bool:
 
 def _build_otel_section(telemetry: dict[str, Any], env: dict[str, str] | None) -> str:
     endpoint = _resolve_endpoint(telemetry, env)
-    protocol = _resolve_protocol(telemetry, env)
     environment = _resolve_otel_environment(telemetry, env)
 
-    log_user_prompt = False
-    flt = telemetry.get("filter") or {}
-    events = flt.get("events") if isinstance(flt, dict) else None
-    if isinstance(events, dict):
-        if _list_contains(events.get("include") or [], "agent.user.prompt"):
-            log_user_prompt = True
-        if _list_contains(events.get("exclude") or [], "agent.user.prompt"):
-            log_user_prompt = False
-
     exporter_key = "otlp-grpc"
-    if protocol in ("http", "http/protobuf"):
-        exporter_key = "otlp-http"
-
-    cloud = telemetry.get("cloud") or {}
-
-    headers: dict[str, str] = {}
-    if isinstance(cloud, dict) and isinstance(cloud.get("headers"), dict):
-        headers = {str(k): str(v) for k, v in cloud["headers"].items()}
-
-    tls_ca_file = ""
-    if isinstance(cloud, dict) and isinstance(cloud.get("tls"), dict):
-        tls_ca_file = str(cloud["tls"].get("ca_file") or "").strip()
 
     lines = [
         "[otel]",
-        "enabled = true",
         f'environment = "{scion_harness.toml_escape(environment)}"',
-        f"log_user_prompt = {'true' if log_user_prompt else 'false'}",
-        'metrics_exporter = "statsig"',
+        "log_user_prompt = false",
+        f'metrics_exporter."{exporter_key}".endpoint = "{scion_harness.toml_escape(endpoint)}"',
         f'exporter."{exporter_key}".endpoint = "{scion_harness.toml_escape(endpoint)}"',
         f'trace_exporter."{exporter_key}".endpoint = "{scion_harness.toml_escape(endpoint)}"',
     ]
-
-    if headers:
-        header_table = scion_harness.toml_inline_table(headers)
-        lines.append(f'exporter."{exporter_key}".headers = {header_table}')
-        lines.append(f'trace_exporter."{exporter_key}".headers = {header_table}')
-
-    if tls_ca_file:
-        escaped_ca = scion_harness.toml_escape(tls_ca_file)
-        lines.append(f'exporter."{exporter_key}".tls.ca-certificate = "{escaped_ca}"')
-        lines.append(f'trace_exporter."{exporter_key}".tls.ca-certificate = "{escaped_ca}"')
 
     return "\n".join(lines) + "\n"
 
@@ -282,15 +224,15 @@ def _reconcile_codex_toml(
             content = f.read()
     content = _strip_toml_top_level_key(content, "reasoning_effort")
     content = _strip_toml_top_level_key(content, "model_reasoning_effort")
-    content = scion_harness.strip_toml_sections(content, lambda h: h == "[otel]")
+    content = scion_harness.strip_toml_sections(content, lambda h: h == "[otel]" or h.startswith("[otel."))
 
     if reasoning_effort:
         re_line = f'model_reasoning_effort = "{scion_harness.toml_escape(reasoning_effort)}"'
         content = content.rstrip("\n\t ") + "\n" + re_line + "\n"
 
-    if _telemetry_enabled(telemetry):
-        section = _build_otel_section(telemetry or {}, env)
-        content = content.rstrip("\n\t ") + "\n\n" + section
+    section = (_build_otel_section(telemetry or {}, env) if _telemetry_enabled(telemetry)
+               else '[otel]\nexporter = "none"\nmetrics_exporter = "none"\ntrace_exporter = "none"\n')
+    content = content.rstrip("\n\t ") + "\n\n" + section
     content = content.strip() + "\n"
     scion_harness.atomic_write_text(config_path, content)
 
@@ -422,7 +364,10 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     extra: dict[str, Any] | None = None
     if resolved.method == "auth-file":
         extra = {"auth_file_written": True}
-    ctx.write_outputs(resolved, env={}, extra=extra)
+    ctx.write_outputs(resolved, env={
+        "CODEX_HOME": os.path.join(ctx.home, ".codex"),
+        "SCION_NATIVE_TELEMETRY_POLICY": "enabled" if _telemetry_enabled(telemetry) else "disabled",
+    }, extra=extra)
 
     scion_harness.apply_mcp_translated(ctx, _build_mcp_section, _write_mcp_to_config)
 

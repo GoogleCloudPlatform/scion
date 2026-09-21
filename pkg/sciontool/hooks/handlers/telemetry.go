@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
@@ -54,7 +55,6 @@ type inProgressSpan struct {
 type TelemetryHandler struct {
 	tracer       trace.Tracer
 	logger       *slog.Logger
-	redactor     *telemetry.Redactor
 	metricsDebug bool
 	spanStore    sync.Map // map[string]*inProgressSpan - keyed by spanKey
 
@@ -81,17 +81,28 @@ type TelemetryHandler struct {
 // If tp is nil, a noop tracer will be used.
 // If lp is non-nil, correlated log records will be emitted alongside spans.
 // If mp is non-nil, OTel metric instruments will be created for recording counters and histograms.
-func NewTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, redactor *telemetry.Redactor, mp ...metric.MeterProvider) *TelemetryHandler {
+func NewTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, _ *telemetry.Redactor, mp ...metric.MeterProvider) *TelemetryHandler {
+	return newTelemetryHandler(tp, lp, hookMetricScope, mp...)
+}
+
+// NewLifecycleTelemetryHandler gives init lifecycle metrics their own source
+// identity. Hook subprocesses keep the original instrumentation scope.
+func NewLifecycleTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, _ *telemetry.Redactor, mp ...metric.MeterProvider) *TelemetryHandler {
+	return newTelemetryHandler(tp, lp, telemetry.LifecycleMetricScope, mp...)
+}
+
+const hookMetricScope = "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
+
+func newTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, metricScope string, mp ...metric.MeterProvider) *TelemetryHandler {
 	var tracer trace.Tracer
 	if tp != nil {
-		tracer = tp.Tracer("github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers")
+		tracer = tp.Tracer(hookMetricScope)
 	} else {
 		tracer = noop.NewTracerProvider().Tracer("noop")
 	}
 
 	h := &TelemetryHandler{
 		tracer:       tracer,
-		redactor:     redactor,
 		metricsDebug: telemetry.MetricsDebugEnabled(),
 		aggregator:   telemetry.NewAggregator(),
 	}
@@ -104,40 +115,40 @@ func NewTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, red
 
 	// Initialize metric instruments if a MeterProvider is given
 	if len(mp) > 0 && mp[0] != nil {
-		h.initMetrics(mp[0])
+		h.initMetrics(mp[0], metricScope)
 	}
 
 	return h
 }
 
 // initMetrics creates OTel metric instruments on the handler.
-func (h *TelemetryHandler) initMetrics(mp metric.MeterProvider) {
-	meter := mp.Meter("github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers")
+func (h *TelemetryHandler) initMetrics(mp metric.MeterProvider, scope string) {
+	meter := mp.Meter(scope)
 
 	var err error
 
-	h.tokensInput, err = meter.Int64Counter("gen_ai.tokens.input",
+	h.tokensInput, err = meter.Int64Counter("scion.hook.tokens.input",
 		metric.WithUnit("{token}"),
 		metric.WithDescription("Number of input tokens consumed"),
 	)
 	if err != nil {
-		log.Error("Failed to create gen_ai.tokens.input counter: %v", err)
+		log.Error("Failed to create scion.hook.tokens.input counter: %v", err)
 	}
 
-	h.tokensOutput, err = meter.Int64Counter("gen_ai.tokens.output",
+	h.tokensOutput, err = meter.Int64Counter("scion.hook.tokens.output",
 		metric.WithUnit("{token}"),
 		metric.WithDescription("Number of output tokens generated"),
 	)
 	if err != nil {
-		log.Error("Failed to create gen_ai.tokens.output counter: %v", err)
+		log.Error("Failed to create scion.hook.tokens.output counter: %v", err)
 	}
 
-	h.tokensCached, err = meter.Int64Counter("gen_ai.tokens.cached",
+	h.tokensCached, err = meter.Int64Counter("scion.hook.tokens.cached",
 		metric.WithUnit("{token}"),
 		metric.WithDescription("Number of tokens served from cache"),
 	)
 	if err != nil {
-		log.Error("Failed to create gen_ai.tokens.cached counter: %v", err)
+		log.Error("Failed to create scion.hook.tokens.cached counter: %v", err)
 	}
 
 	h.toolCalls, err = meter.Int64Counter("agent.tool.calls",
@@ -193,8 +204,8 @@ func (h *TelemetryHandler) Handle(event *hooks.Event) error {
 
 	if h.metricsDebug && isMetricRelevantEvent(event.Name) {
 		log.TaggedInfo("metrics",
-			"normalized hook event=%s raw=%s dialect=%s input_tokens=%d output_tokens=%d cached_tokens=%d success=%t error=%q",
-			event.Name, event.RawName, event.Dialect, event.Data.InputTokens, event.Data.OutputTokens, event.Data.CachedTokens, event.Data.Success, event.Data.Error)
+			"normalized hook event=%s dialect=%s input_tokens=%d output_tokens=%d cached_tokens=%d success=%t has_error=%t",
+			event.Name, event.Dialect, event.Data.InputTokens, event.Data.OutputTokens, event.Data.CachedTokens, event.Data.Success, event.Data.Error != "")
 	}
 
 	spanName, ok := SpanMapping[event.Name]
@@ -320,7 +331,7 @@ func (h *TelemetryHandler) emitLogRecord(ctx context.Context, event *hooks.Event
 	}
 
 	attrs := []slog.Attr{
-		slog.String("event.name", event.Name),
+		slog.String("event.name", spanName),
 	}
 
 	if event.RawName != "" {
@@ -330,38 +341,22 @@ func (h *TelemetryHandler) emitLogRecord(ctx context.Context, event *hooks.Event
 		attrs = append(attrs, slog.String("event.dialect", event.Dialect))
 	}
 	if event.Data.SessionID != "" {
-		val := event.Data.SessionID
-		if h.redactor != nil && h.redactor.ShouldHash("session_id") {
-			val = telemetry.HashValue(val)
-		}
-		attrs = append(attrs, slog.String("session_id", val))
+		attrs = append(attrs, slog.String("session_id", event.Data.SessionID))
 	}
 	if event.Data.ToolName != "" {
 		attrs = append(attrs, slog.String("tool_name", event.Data.ToolName))
 	}
 	if event.Data.ToolInput != "" {
-		val := event.Data.ToolInput
-		if h.redactor != nil && h.redactor.ShouldRedact("tool_input") {
-			val = "[REDACTED]"
-		}
-		attrs = append(attrs, slog.String("tool_input", val))
+		attrs = append(attrs, slog.String("tool_input", event.Data.ToolInput))
 	}
 	if event.Data.ToolOutput != "" {
-		val := event.Data.ToolOutput
-		if h.redactor != nil && h.redactor.ShouldRedact("tool_output") {
-			val = "[REDACTED]"
-		}
-		attrs = append(attrs, slog.String("tool_output", val))
+		attrs = append(attrs, slog.String("tool_output", event.Data.ToolOutput))
 	}
 	if event.Data.FilePath != "" {
 		attrs = append(attrs, slog.String("file_path", event.Data.FilePath))
 	}
 	if event.Data.Prompt != "" {
-		val := event.Data.Prompt
-		if h.redactor != nil && h.redactor.ShouldRedact("prompt") {
-			val = "[REDACTED]"
-		}
-		attrs = append(attrs, slog.String("prompt", val))
+		attrs = append(attrs, slog.String("prompt", event.Data.Prompt))
 	}
 	if event.Data.Source != "" {
 		attrs = append(attrs, slog.String("source", event.Data.Source))
@@ -393,8 +388,12 @@ func (h *TelemetryHandler) emitLogRecord(ctx context.Context, event *hooks.Event
 
 // eventToAttributes converts event data to span attributes.
 func (h *TelemetryHandler) eventToAttributes(event *hooks.Event) []attribute.KeyValue {
+	eventName := SpanMapping[event.Name]
+	if eventName == "" {
+		eventName = event.Name
+	}
 	attrs := []attribute.KeyValue{
-		attribute.String("event.name", event.Name),
+		attribute.String("event.name", eventName),
 	}
 
 	if event.RawName != "" {
@@ -406,11 +405,7 @@ func (h *TelemetryHandler) eventToAttributes(event *hooks.Event) []attribute.Key
 
 	// Add data fields with redaction
 	if event.Data.SessionID != "" {
-		val := event.Data.SessionID
-		if h.redactor != nil && h.redactor.ShouldHash("session_id") {
-			val = telemetry.HashValue(val)
-		}
-		attrs = append(attrs, attribute.String("session_id", val))
+		attrs = append(attrs, attribute.String("session_id", event.Data.SessionID))
 	}
 
 	if event.Data.ToolName != "" {
@@ -418,19 +413,11 @@ func (h *TelemetryHandler) eventToAttributes(event *hooks.Event) []attribute.Key
 	}
 
 	if event.Data.ToolInput != "" {
-		val := event.Data.ToolInput
-		if h.redactor != nil && h.redactor.ShouldRedact("tool_input") {
-			val = "[REDACTED]"
-		}
-		attrs = append(attrs, attribute.String("tool_input", val))
+		attrs = append(attrs, attribute.String("tool_input", event.Data.ToolInput))
 	}
 
 	if event.Data.ToolOutput != "" {
-		val := event.Data.ToolOutput
-		if h.redactor != nil && h.redactor.ShouldRedact("tool_output") {
-			val = "[REDACTED]"
-		}
-		attrs = append(attrs, attribute.String("tool_output", val))
+		attrs = append(attrs, attribute.String("tool_output", event.Data.ToolOutput))
 	}
 
 	if event.Data.FilePath != "" {
@@ -438,11 +425,7 @@ func (h *TelemetryHandler) eventToAttributes(event *hooks.Event) []attribute.Key
 	}
 
 	if event.Data.Prompt != "" {
-		val := event.Data.Prompt
-		if h.redactor != nil && h.redactor.ShouldRedact("prompt") {
-			val = "[REDACTED]"
-		}
-		attrs = append(attrs, attribute.String("prompt", val))
+		attrs = append(attrs, attribute.String("prompt", event.Data.Prompt))
 	}
 
 	if event.Data.Source != "" {
@@ -476,11 +459,7 @@ func (h *TelemetryHandler) eventToEndAttributes(event *hooks.Event, startTime ti
 
 	// Add tool output for end events
 	if event.Data.ToolOutput != "" {
-		val := event.Data.ToolOutput
-		if h.redactor != nil && h.redactor.ShouldRedact("tool_output") {
-			val = "[REDACTED]"
-		}
-		attrs = append(attrs, attribute.String("tool_output", val))
+		attrs = append(attrs, attribute.String("tool_output", event.Data.ToolOutput))
 	}
 
 	// Add token usage attributes
@@ -506,12 +485,9 @@ func (h *TelemetryHandler) metricAttrs() []attribute.KeyValue {
 	if v := os.Getenv("SCION_HARNESS"); v != "" {
 		attrs = append(attrs, attribute.String("harness", v))
 	}
-	if v := os.Getenv("SCION_GROVE_ID"); v != "" {
-		attrs = append(attrs, attribute.String("grove_id", v))
-		attrs = append(attrs, attribute.String("project_id", v))
-	} else if v := os.Getenv("SCION_PROJECT_ID"); v != "" {
-		attrs = append(attrs, attribute.String("grove_id", v))
-		attrs = append(attrs, attribute.String("project_id", v))
+	projectID := projectcompat.ProjectIDFromEnv(os.Getenv)
+	if projectID != "" {
+		attrs = append(attrs, attribute.String("project_id", projectID))
 	}
 	return attrs
 }
@@ -642,7 +618,8 @@ func (h *TelemetryHandler) recordTokenMetrics(ctx context.Context, event *hooks.
 	}
 }
 
-// recordSessionMetrics records session counters and any cumulative token usage on session end.
+// recordSessionMetrics records session completion. Session-end token totals
+// overlap model-end increments, so they are omitted from normalized counters.
 func (h *TelemetryHandler) recordSessionMetrics(event *hooks.Event) {
 	ctx := context.Background()
 	baseAttrs := h.metricAttrs()
@@ -656,8 +633,6 @@ func (h *TelemetryHandler) recordSessionMetrics(event *hooks.Event) {
 		h.sessionCount.Add(ctx, 1, metric.WithAttributes(sessionAttrs...))
 	}
 
-	// Record cumulative token usage if reported on session-end
-	h.recordTokenMetrics(ctx, event, baseAttrs)
 }
 
 // Flush ends any in-progress spans. Called during shutdown.

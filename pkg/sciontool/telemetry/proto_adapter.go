@@ -29,10 +29,19 @@ import (
 func protoResourceSpansToSDK(resourceSpans []*tracepb.ResourceSpans) []sdktrace.ReadOnlySpan {
 	var result []sdktrace.ReadOnlySpan
 	for _, rs := range resourceSpans {
-		res := protoResourceToSDK(rs.Resource)
+		if rs == nil {
+			continue
+		}
+		res := protoResourceToSDK(rs.Resource, rs.SchemaUrl)
 		for _, ss := range rs.ScopeSpans {
-			scope := protoScopeToSDK(ss.Scope)
+			if ss == nil {
+				continue
+			}
+			scope := protoScopeToSDK(ss.Scope, ss.SchemaUrl)
 			for _, span := range ss.Spans {
+				if span == nil {
+					continue
+				}
 				stub := protoSpanToStub(span, res, scope)
 				result = append(result, stub.Snapshot())
 			}
@@ -44,21 +53,21 @@ func protoResourceSpansToSDK(resourceSpans []*tracepb.ResourceSpans) []sdktrace.
 // protoSpanToStub converts an OTLP proto Span to a tracetest.SpanStub.
 func protoSpanToStub(span *tracepb.Span, res *resource.Resource, scope instrumentation.Scope) tracetest.SpanStub {
 	return tracetest.SpanStub{
-		Name:                   span.Name,
-		SpanContext:            protoSpanContext(span.TraceId, span.SpanId, span.Flags),
-		Parent:                 protoParentSpanContext(span.TraceId, span.ParentSpanId),
-		SpanKind:               protoSpanKindToSDK(span.Kind),
-		StartTime:              time.Unix(0, int64(span.StartTimeUnixNano)),
-		EndTime:                time.Unix(0, int64(span.EndTimeUnixNano)),
-		Attributes:             protoAttrsToSDK(span.Attributes),
-		Events:                 protoEventsToSDK(span.Events),
-		Links:                  protoLinksToSDK(span.Links),
-		Status:                 protoStatusToSDK(span.Status),
-		DroppedAttributes:      int(span.DroppedAttributesCount),
-		DroppedEvents:          int(span.DroppedEventsCount),
-		DroppedLinks:           int(span.DroppedLinksCount),
-		Resource:               res,
-		InstrumentationLibrary: scope,
+		Name:                 span.Name,
+		SpanContext:          protoSpanContext(span.TraceId, span.SpanId, span.Flags),
+		Parent:               protoParentSpanContext(span.TraceId, span.ParentSpanId),
+		SpanKind:             protoSpanKindToSDK(span.Kind),
+		StartTime:            time.Unix(0, int64(span.StartTimeUnixNano)),
+		EndTime:              time.Unix(0, int64(span.EndTimeUnixNano)),
+		Attributes:           protoAttrsToSDK(span.Attributes),
+		Events:               protoEventsToSDK(span.Events),
+		Links:                protoLinksToSDK(span.Links),
+		Status:               protoStatusToSDK(span.Status),
+		DroppedAttributes:    int(span.DroppedAttributesCount),
+		DroppedEvents:        int(span.DroppedEventsCount),
+		DroppedLinks:         int(span.DroppedLinksCount),
+		Resource:             res,
+		InstrumentationScope: scope,
 	}
 }
 
@@ -154,7 +163,7 @@ func protoLinksToSDK(links []*tracepb.Span_Link) []sdktrace.Link {
 func protoAttrsToSDK(attrs []*commonpb.KeyValue) []attribute.KeyValue {
 	result := make([]attribute.KeyValue, 0, len(attrs))
 	for _, kv := range attrs {
-		if kv.Value == nil {
+		if kv == nil || kv.Value == nil {
 			continue
 		}
 		result = append(result, protoKVToSDK(kv))
@@ -215,14 +224,15 @@ func anyValueToString(v *commonpb.AnyValue) string {
 
 // --- Resource/Scope conversion ---
 
-func protoResourceToSDK(r *resourcepb.Resource) *resource.Resource {
+func protoResourceToSDK(r *resourcepb.Resource, schemaURL string) *resource.Resource {
 	if r == nil {
-		return resource.Empty()
+		r = &resourcepb.Resource{}
 	}
 	attrs := protoAttrsToSDK(r.Attributes)
 	res, _ := resource.New(
 		context.Background(),
 		resource.WithAttributes(attrs...),
+		resource.WithSchemaURL(schemaURL),
 	)
 	if res == nil {
 		return resource.Empty()
@@ -230,20 +240,24 @@ func protoResourceToSDK(r *resourcepb.Resource) *resource.Resource {
 	return res
 }
 
-func protoScopeToSDK(s *commonpb.InstrumentationScope) instrumentation.Scope {
+func protoScopeToSDK(s *commonpb.InstrumentationScope, schemaURL string) instrumentation.Scope {
 	if s == nil {
-		return instrumentation.Scope{}
+		return instrumentation.Scope{SchemaURL: schemaURL}
 	}
 	return instrumentation.Scope{
-		Name:    s.Name,
-		Version: s.Version,
+		Name: s.Name, Version: s.Version, SchemaURL: schemaURL,
+		Attributes: attribute.NewSet(protoAttrsToSDK(s.Attributes)...),
 	}
 }
 
 // --- Log conversion ---
 
 // protoLogToCloudEntry converts an OTLP log record to a Cloud Logging entry.
-func protoLogToCloudEntry(lr *logspb.LogRecord, res *resourcepb.Resource) logging.Entry {
+// Cloud Logging has no instrumentation scope/schema fields; embed processed
+// metadata under a dedicated payload key rather than inventing top-level labels.
+const cloudLoggingOTelMetadataKey = "scion_otel_metadata"
+
+func protoLogToCloudEntry(lr *logspb.LogRecord, res *resourcepb.Resource, resourceSchemaURL string, scope *commonpb.InstrumentationScope, scopeSchemaURL string) logging.Entry {
 	entry := logging.Entry{
 		Severity: otlpSeverityToCloud(lr.SeverityNumber),
 	}
@@ -260,16 +274,34 @@ func protoLogToCloudEntry(lr *logspb.LogRecord, res *resourcepb.Resource) loggin
 	}
 
 	for _, kv := range lr.Attributes {
-		if kv.Value != nil {
+		if kv != nil && kv.Value != nil {
 			payload[kv.Key] = anyValueToString(kv.Value)
 		}
 	}
+	metadata := map[string]interface{}{
+		"resource_schema_url": resourceSchemaURL,
+		"scope_schema_url":    scopeSchemaURL,
+	}
+	if scope != nil {
+		metadata["scope_name"] = scope.Name
+		metadata["scope_version"] = scope.Version
+		attrs := make(map[string]interface{}, len(scope.Attributes))
+		for _, kv := range scope.Attributes {
+			if kv != nil && kv.Value != nil {
+				attrs[kv.Key] = anyValueToString(kv.Value)
+			}
+		}
+		metadata["scope_attributes"] = attrs
+	}
+	// Assign after record attributes so a producer cannot override the reserved
+	// metadata key and misrepresent scope or schema provenance.
+	payload[cloudLoggingOTelMetadataKey] = metadata
 
 	labels := make(map[string]string)
 	projectID := ""
 	if res != nil {
 		for _, kv := range res.Attributes {
-			if kv.Value != nil {
+			if kv != nil && kv.Value != nil {
 				val := anyValueToString(kv.Value)
 				labels[kv.Key] = val
 				if kv.Key == "gcp.project_id" && val != "" {

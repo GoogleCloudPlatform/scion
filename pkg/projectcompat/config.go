@@ -34,7 +34,28 @@ const (
 	GroveConfigsDir   = "grove-configs"
 	ProjectsDir       = "projects"
 	GrovesDir         = "groves"
+
+	// LegacyTelemetryProjectIdentityKeys are historic resource attribute keys
+	// which the telemetry receiver must strip before adding trusted identity.
+	LegacyTelemetryGroveKey   = "scion.grove"
+	LegacyTelemetryGroveIDKey = "scion.grove.id"
+	LegacyTelemetryGroveIDAlt = "scion.grove_id"
 )
+
+// LegacyTelemetryIdentityKeys returns the supported legacy resource identity
+// aliases. Callers remove these instead of treating them as trusted values.
+func LegacyTelemetryIdentityKeys() []string {
+	return []string{LegacyTelemetryGroveKey, LegacyTelemetryGroveIDKey, LegacyTelemetryGroveIDAlt}
+}
+
+func IsLegacyTelemetryIdentityKey(key string) bool {
+	for _, alias := range LegacyTelemetryIdentityKeys() {
+		if key == alias {
+			return true
+		}
+	}
+	return false
+}
 
 func IsProjectIDConfigKey(key string) bool {
 	return key == ConfigProjectIDKey || key == ConfigGroveIDKey
@@ -78,4 +99,16 @@ func EnvProjectIDConfigKey(envName string, hubProjectAsTopLevel bool) (string, b
 	default:
 		return "", false
 	}
+}
+
+// ProjectIDFromEnv returns the canonical project identity from an environment
+// lookup. The canonical name wins when both canonical and legacy aliases exist.
+func ProjectIDFromEnv(getenv func(string) string) string {
+	if getenv == nil {
+		return ""
+	}
+	if projectID := getenv(EnvProjectID); projectID != "" {
+		return projectID
+	}
+	return getenv(EnvGroveID)
 }

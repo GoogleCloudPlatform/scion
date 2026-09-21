@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -20,6 +21,76 @@ const maxEnvOverlayBytes = 1 << 20 // 1 MiB
 // files are env values, not arbitrary blobs; legitimate API keys and tokens
 // are well under 64 KiB.
 const maxEnvSecretFileBytes = 64 * 1024
+
+// NativeTelemetryPolicyKey is emitted by provisioners that configure native
+// telemetry. It is a runtime contract, not an environment variable for the child.
+const NativeTelemetryPolicyKey = "SCION_NATIVE_TELEMETRY_POLICY"
+
+// ValidateNativeTelemetryEnv rejects runtime values that could change a
+// provisioner's native telemetry policy. The generated overlay is the complete
+// set of permitted reserved keys; this also rejects alternate endpoint aliases.
+// Errors name keys only, never values.
+func ValidateNativeTelemetryEnv(policy string, env []string, overlay, overrides map[string]string) error {
+	if policy != "enabled" && policy != "disabled" {
+		return fmt.Errorf("invalid native telemetry policy")
+	}
+	for _, entry := range env {
+		i := strings.IndexByte(entry, '=')
+		if i > 0 && entry[:i] == NativeTelemetryPolicyKey {
+			return fmt.Errorf("native telemetry policy conflict: %s", NativeTelemetryPolicyKey)
+		}
+		if i <= 0 || (!reservedNativeTelemetryKey(entry[:i]) && (entry[:i] != "CODEX_HOME" || overlay["CODEX_HOME"] == "")) {
+			continue
+		}
+		key := entry[:i]
+		want, ok := overlay[key]
+		if !ok || entry[i+1:] != want {
+			return fmt.Errorf("native telemetry policy conflict: %s", key)
+		}
+	}
+	keys := make([]string, 0, len(overrides))
+	for key := range overrides {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := overrides[key]
+		if key == NativeTelemetryPolicyKey {
+			return fmt.Errorf("native telemetry policy conflict: %s", key)
+		}
+		if !reservedNativeTelemetryKey(key) && (key != "CODEX_HOME" || overlay["CODEX_HOME"] == "") {
+			continue
+		}
+		want, ok := overlay[key]
+		if !ok || value != want {
+			return fmt.Errorf("native telemetry policy conflict: %s", key)
+		}
+	}
+	return nil
+}
+
+// MergeEnvOverlayWithNativeTelemetryPolicy validates protected keys before
+// applying the ordinary additive merge. Secret overrides are checked here
+// even though the caller applies them after this merge.
+func MergeEnvOverlayWithNativeTelemetryPolicy(policy string, env []string, overlay, overrides map[string]string) ([]string, error) {
+	if err := ValidateNativeTelemetryEnv(policy, env, overlay, overrides); err != nil {
+		return nil, err
+	}
+	return MergeEnvOverlay(env, overlay), nil
+}
+
+// OTEL_ keys can change SDK behavior, including OTEL_SDK_DISABLED. Under an
+// active policy, unknown inherited aliases are rejected rather than allowed
+// to silently change the generated configuration.
+func reservedNativeTelemetryKey(key string) bool {
+	if key == "CLAUDE_CODE_ENABLE_TELEMETRY" || strings.HasPrefix(key, "GEMINI_TELEMETRY_") {
+		return true
+	}
+	if strings.HasPrefix(key, "OTEL_") {
+		return true
+	}
+	return false
+}
 
 // LoadEnvOverlay reads the env overlay JSON written by a container-script
 // harness's pre-start provisioner and returns the resolved key/value pairs.
