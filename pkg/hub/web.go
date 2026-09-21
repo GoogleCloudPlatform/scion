@@ -1470,7 +1470,7 @@ func (ws *WebServer) expandProjectWildcard(r *http.Request, tokens []string) []s
 		ws.logger().Warn("expandProjectWildcard: failed to list projects", "error", err)
 		return nil // fail-closed
 	}
-	if len(allProjects.Items) == 0 {
+	if allProjects == nil || len(allProjects.Items) == 0 {
 		return nil
 	}
 

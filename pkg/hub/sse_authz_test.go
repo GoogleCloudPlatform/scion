@@ -238,6 +238,31 @@ func TestExpandSSEWildcards_ProjectWildcard_ZeroProjects(t *testing.T) {
 		"notification.> should pass through even when no projects")
 }
 
+func TestExpandSSEWildcards_NilListProjectsResult(t *testing.T) {
+	// Regression: if ListProjects returns (nil, nil) — a store contract
+	// violation — expandProjectWildcard must fail-closed (no panic).
+	mockStore := &mockAuthzStore{
+		listProjectsReturnNil: true,
+	}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "notification.>"})
+
+	// project.> should be dropped (fail-closed), notification.> passes through.
+	for _, sub := range expanded {
+		assert.False(t, len(sub) >= 8 && sub[:8] == "project.",
+			"no project subjects should remain when ListProjects returns nil")
+	}
+	assert.Contains(t, expanded, "notification.>",
+		"notification.> should pass through even when ListProjects returns nil")
+}
+
 func TestExpandSSEWildcards_ProjectWildcard_MultipleProjects(t *testing.T) {
 	// User owns proj-1 and proj-2, but NOT proj-3 → only accessible ones expand.
 	mockStore := &mockAuthzStore{
@@ -324,10 +349,10 @@ func TestExpandSSEWildcards_MixedSubjects(t *testing.T) {
 	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
 
 	expanded := ws.expandSSEWildcards(req, []string{
-		"project.>",              // wildcard — should expand
-		"project.proj-99.>",     // specific — should pass through
-		"notification.>",        // passthrough
-		"broker.>",              // passthrough
+		"project.>",         // wildcard — should expand
+		"project.proj-99.>", // specific — should pass through
+		"notification.>",    // passthrough
+		"broker.>",          // passthrough
 	})
 
 	assert.Contains(t, expanded, "project.proj-1.>",
@@ -628,10 +653,11 @@ func mockSuperAdminStore(userID string) *mockAuthzStore {
 type mockAuthzStore struct {
 	store.Store // embed to satisfy interface
 
-	roleBindings       []*store.RoleBinding
-	roleDefinitions    map[string]*store.RoleDefinition
-	projects           []store.Project                     // injectable project list for wildcard expansion tests
-	projectMemberships map[string]*store.ProjectMembership // key: "projectID:userID"
+	roleBindings          []*store.RoleBinding
+	roleDefinitions       map[string]*store.RoleDefinition
+	projects              []store.Project                     // injectable project list for wildcard expansion tests
+	projectMemberships    map[string]*store.ProjectMembership // key: "projectID:userID"
+	listProjectsReturnNil bool                                // when true, ListProjects returns (nil, nil)
 }
 
 func (m *mockAuthzStore) GetEffectiveGroups(_ context.Context, _ string) ([]string, error) {
@@ -702,6 +728,9 @@ func (m *mockAuthzStore) ListAccessConstraints(_ context.Context, _, _ int) ([]*
 }
 
 func (m *mockAuthzStore) ListProjects(_ context.Context, _ store.ProjectFilter, _ store.ListOptions) (*store.ListResult[store.Project], error) {
+	if m.listProjectsReturnNil {
+		return nil, nil
+	}
 	items := m.projects
 	if items == nil {
 		items = []store.Project{}
