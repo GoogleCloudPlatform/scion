@@ -412,14 +412,16 @@ func TestExternalBearer_TokenInfoCached(t *testing.T) {
 	}
 }
 
-// fakeUserStore is an in-memory store.UserStore that only answers
+// emailOnlyUserStore is an in-memory store.UserStore that only answers
 // GetUserByEmail; every other method panics via the nil embedded interface.
-type fakeUserStore struct {
+// (Distinct from ge_exchange_test.go's fuller fakeUserStore, which backs the
+// exchange endpoint tests.)
+type emailOnlyUserStore struct {
 	store.UserStore
 	users map[string]*store.User
 }
 
-func (f *fakeUserStore) GetUserByEmail(_ context.Context, email string) (*store.User, error) {
+func (f *emailOnlyUserStore) GetUserByEmail(_ context.Context, email string) (*store.User, error) {
 	if u, ok := f.users[email]; ok {
 		return u, nil
 	}
@@ -442,7 +444,7 @@ func TestAuthenticateExternalBearer_NoProvisioner_RequiresExistingActiveUser(t *
 			ExpectedAudience: testGEClientID,
 		}),
 		GoogleTokenInfoURL: tokeninfo.URL,
-		UserStore: &fakeUserStore{users: map[string]*store.User{
+		UserStore: &emailOnlyUserStore{users: map[string]*store.User{
 			"active@example.com": {ID: "u-active", Email: "active@example.com", Role: "member", Status: store.UserStatusActive},
 			"frozen@example.com": {ID: "u-frozen", Email: "frozen@example.com", Role: "member", Status: store.UserStatusSuspended},
 		}},

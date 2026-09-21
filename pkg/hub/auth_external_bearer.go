@@ -56,8 +56,8 @@ import (
 const (
 	// googleIssuerURL is the OIDC issuer for Google accounts.
 	googleIssuerURL = "https://accounts.google.com"
-	// googleTokenInfoURL is Google's token introspection endpoint.
-	googleTokenInfoURL = "https://oauth2.googleapis.com/tokeninfo"
+	// googleTokenInfoURL (Google's token introspection endpoint) is shared
+	// with google_credential_validator.go.
 	// googleAccessTokenPrefix identifies opaque Google OAuth2 access tokens.
 	googleAccessTokenPrefix = "ya29."
 

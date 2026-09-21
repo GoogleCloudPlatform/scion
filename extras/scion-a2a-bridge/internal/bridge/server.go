@@ -374,14 +374,16 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	card := s.bridge.GenerateAgentCard(r.Context(), projectSlug, agentSlug)
-	if card != nil {
-		card["protocolVersion"] = "0.3.0"
+	if card != nil && isGEClient(r) {
+		// Gemini Enterprise speaks A2A v0.3 JSON-RPC and is served by the
+		// buffered (non-streaming) translation in handleJSONRPC, so advertise
+		// conservative capabilities to it and make sure every skill carries the
+		// tags its card validation requires. Other clients get the SDK card
+		// unchanged; the legacy flat protocolVersion/url fields are owned by
+		// GenerateAgentCard.
 		card["capabilities"] = map[string]bool{
 			"pushNotifications": false,
 			"streaming":         false,
-		}
-		if ifaces, ok := card["supportedInterfaces"].([]map[string]string); ok && len(ifaces) > 0 {
-			card["url"] = ifaces[0]["url"]
 		}
 		if skills, ok := card["skills"].([]map[string]interface{}); ok {
 			for _, sm := range skills {
@@ -393,10 +395,20 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "public, max-age=300")
+	// The card body varies by client (see isGEClient), so it must not be
+	// served from a shared cache to a different client.
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	w.Header().Add("Vary", "User-Agent")
 	if err := json.NewEncoder(w).Encode(card); err != nil {
 		s.log.Error("failed to encode agent card response", "error", err)
 	}
+}
+
+// isGEClient reports whether the request comes from Gemini Enterprise's A2A
+// client, which identifies itself with a "Google" User-Agent and speaks the
+// A2A v0.3 wire format. It gates the GE-specific card and response shaping.
+func isGEClient(r *http.Request) bool {
+	return strings.Contains(r.UserAgent(), "Google")
 }
 
 type bufferedResponseWriter struct {
@@ -572,7 +584,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	// Enforce request body size limit to prevent memory exhaustion.
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 
-	isV03 := strings.Contains(r.UserAgent(), "Google")
+	isV03 := isGEClient(r)
 	var clientTaskID string
 
 	if bodyBytes, err := io.ReadAll(r.Body); err == nil && len(bodyBytes) > 0 {
