@@ -2,7 +2,6 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: '.',
-<<<<<<< HEAD
   testMatch: [
     'workspace.pw.ts',
     'reconnect.pw.ts',
