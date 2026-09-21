@@ -26,6 +26,24 @@ module.exports = {
         sourceType: 'module',
         project: './tsconfig.json',
     },
+    overrides: [
+        {
+            files: ['e2e/terminal-workspace/*.ts'],
+            parserOptions: { project: './e2e/terminal-workspace/tsconfig.json' },
+        },
+        {
+            files: ['e2e/terminal-entrypoints/*.ts'],
+            parserOptions: { project: './e2e/terminal-entrypoints/tsconfig.json' },
+        },
+        {
+            files: ['e2e/terminal-hidden/*.ts'],
+            parserOptions: { project: './e2e/terminal-hidden/tsconfig.json' },
+        },
+        {
+            files: ['src/client/terminal-*.test.ts'],
+            parserOptions: { project: './src/client/tsconfig.terminal-tests.json' },
+        },
+    ],
     plugins: ['@typescript-eslint', 'prettier'],
     extends: [
         'eslint:recommended',

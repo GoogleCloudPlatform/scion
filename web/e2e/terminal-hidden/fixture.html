@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Hidden terminal interaction isolation fixture</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+      scion-terminal-pane {
+        width: 100%;
+        flex: 1;
+        min-height: 0;
+      }
+      #drop-target {
+        padding: 1rem;
+        background: #222;
+        color: #aaa;
+        min-height: 60px;
+        flex-shrink: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- A sibling drop target simulates Chat/Dashboard areas that must
+         accept file drops even when terminals exist in the DOM. -->
+    <div id="drop-target">Drop files here (Chat/Dashboard area)</div>
+    <script type="module" src="./fixture.ts"></script>
+  </body>
+</html>

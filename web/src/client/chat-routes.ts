@@ -42,6 +42,15 @@ export interface ChatConversationTarget {
 }
 
 /**
+ * Builds the DM conversation key for a direct conversation between
+ * a user and an agent. Returns null if either ID is missing.
+ */
+export function buildAgentDMKey(agentId: string, userId: string): string | null {
+  if (!agentId?.trim() || !userId?.trim()) return null;
+  return `dm:agent:${agentId}:user:${userId}`;
+}
+
+/**
  * Builds the deep link for a conversation, or null when the event did not
  * carry enough to address one (a thread with no project has no route).
  *

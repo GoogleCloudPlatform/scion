@@ -126,6 +126,7 @@ const USED_ICONS = [
   'globe',
   'globe2',
   'graph-up',
+  'grid',
   'grid-3x3-gap',
   'hammer',
   'google',

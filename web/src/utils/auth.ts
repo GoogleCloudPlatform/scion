@@ -22,10 +22,27 @@
  */
 
 /**
+ * Custom event dispatched on `window` before the logout POST begins.
+ * Listeners must run synchronously or queue microtask-level cleanup;
+ * the redirect follows as soon as the POST resolves.
+ */
+export const ACCOUNT_TEARDOWN_EVENT = 'scion:account-teardown';
+
+export interface AccountTeardownDetail {
+  /** Reason the teardown was triggered. */
+  readonly reason: 'logout' | 'auth-expired';
+}
+
+/**
  * Perform a logout by POSTing to the auth endpoint and redirecting to login.
  * Uses the Vite BASE_URL to construct correct paths behind a reverse proxy.
+ *
+ * Before the POST, dispatches a `scion:account-teardown` event so that
+ * cross-tab terminal coordinators and other subsystems can dispose resources
+ * while the document is still alive.
  */
 export function performLogout(): void {
+  dispatchTeardown('logout');
   const base = (import.meta.env?.BASE_URL || '/').replace(/\/$/, '');
   fetch(`${base}/auth/logout`, {
     method: 'POST',
@@ -37,4 +54,16 @@ export function performLogout(): void {
     .catch((error) => {
       console.error('Logout failed:', error);
     });
+}
+
+/**
+ * Dispatch the teardown event for external callers (e.g. auth-expiry detection).
+ * Does not trigger logout itself — the caller is responsible for any redirect.
+ */
+export function dispatchTeardown(reason: AccountTeardownDetail['reason']): void {
+  window.dispatchEvent(
+    new CustomEvent<AccountTeardownDetail>(ACCOUNT_TEARDOWN_EVENT, {
+      detail: { reason },
+    })
+  );
 }

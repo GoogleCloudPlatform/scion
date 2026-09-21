@@ -17,6 +17,8 @@ package runtimebroker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -60,6 +63,278 @@ const (
 	// and is never part of the container image.
 	cloudRunSandboxBin = "/usr/local/gcp/bin/sandbox"
 )
+
+const (
+	// processExitGracePeriod is how long to wait for the runtime exec process
+	// to exit after the PTY master is closed. The PTY close triggers a terminal
+	// hangup (SIGHUP) that should cause the exec process to exit naturally.
+	processExitGracePeriod = 3 * time.Second
+
+	// processTermTimeout is how long to wait after SIGTERM before escalating
+	// to SIGKILL.
+	processTermTimeout = 2 * time.Second
+)
+
+// isDockerCompatibleRuntime returns true for runtimes that support docker exec
+// -e for env injection and /proc access for PID lookup. Only "docker" qualifies.
+// "container" (Apple container) is excluded because its /proc and kill behavior
+// is untested. K8s exec uses the remotecommand API, CloudRun uses a sandbox
+// binary — these have different exec semantics and are excluded. Empty string
+// is also excluded (no runtime identified).
+func isDockerCompatibleRuntime(runtimeCmd string) bool {
+	return runtimeCmd == "docker"
+}
+
+// generateAttachNonce generates a cryptographically random 32-character hex
+// string used as a per-attach process identity token. The nonce is injected
+// into the container-side process environment via docker exec -e, enabling
+// causal identification of the exact tmux client process at cleanup time.
+func generateAttachNonce() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// cleanupContainerAttach identifies and signals the container-side tmux client
+// process that this attach session owns, using the per-attach nonce for causal
+// identification.
+//
+// Timing relative to PTY close depends on the caller:
+//   - LocalPTYSession: cleanup runs BEFORE host-side PTY close (Run calls
+//     gracefulShutdownExec while the PTY is still open).
+//   - StreamPTYHandler: Run() closes the PTY before the deferred
+//     gracefulShutdownExec fires, so cleanup runs AFTER the PTY is already closed.
+//
+// Uses a fresh context (not the session's canceled context) with a bounded
+// timeout. All failures are non-fatal — host-side cleanup always runs.
+func cleanupContainerAttach(runtimeCmd, containerID, execUser, nonce string) {
+	if nonce == "" || !isDockerCompatibleRuntime(runtimeCmd) {
+		return
+	}
+
+	// Fresh context with bounded timeout. The session context is already
+	// canceled by the time gracefulShutdownExec runs.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Step 1: Find PID + start_time by nonce in a single exec (atomically
+	// captures both to avoid cross-exec PID recycling)
+	pid, startTime, err := findContainerPIDByNonce(ctx, runtimeCmd, containerID, execUser, nonce)
+	if err != nil || pid == "" || startTime == "" {
+		return // No match, error, or missing identity — fall back to host-side cleanup
+	}
+
+	// Step 1.5: Defense-in-depth — validate PID and startTime are strictly
+	// numeric before interpolating into shell commands. Values are kernel-
+	// provided (/proc glob for PID, /proc/<pid>/stat field 22 for startTime),
+	// but explicit validation closes any theoretical parser edge case at the
+	// trust boundary.
+	pid, startTime, err = validateCleanupIdentifiers(pid, startTime)
+	if err != nil {
+		return // Invalid identifiers — no signal
+	}
+
+	// Step 2: Verify-and-kill — re-read nonce, cmdline, and start_time, then
+	// signal in one exec to minimize TOCTOU window (still not eliminated —
+	// see design notes)
+	killContainerPID(ctx, runtimeCmd, containerID, execUser, pid, startTime, nonce)
+}
+
+// validateCleanupIdentifiers validates that pid and startTime are strictly
+// numeric (unsigned, base-10, 64-bit) before they are interpolated into shell
+// commands. Returns the canonical decimal representations (from
+// strconv.FormatUint) so that no raw captured string is used in shell
+// interpolation. PID 0 is explicitly rejected because kill -TERM 0 would
+// signal the entire process group.
+//
+// This is defense-in-depth: pid comes from a /proc/[0-9]*/ glob and startTime
+// from kernel-maintained /proc/<pid>/stat field 22 — both are kernel-provided.
+// Explicit validation closes any theoretical parser edge case at the trust
+// boundary.
+func validateCleanupIdentifiers(pid, startTime string) (string, string, error) {
+	pidNum, err := strconv.ParseUint(pid, 10, 64)
+	if err != nil || pidNum == 0 {
+		return "", "", fmt.Errorf("invalid PID %q", pid)
+	}
+	stimeNum, err := strconv.ParseUint(startTime, 10, 64)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid startTime %q", startTime)
+	}
+	return strconv.FormatUint(pidNum, 10), strconv.FormatUint(stimeNum, 10), nil
+}
+
+// findContainerPIDByNonce searches /proc/*/environ inside the container for a
+// process whose environment contains the given nonce AND whose cmdline matches
+// *tmux*attach*. On exactly one match, it also reads /proc/<pid>/stat to extract
+// the start_time (field 22), returning both PID and start_time in a single exec
+// to prevent cross-exec PID recycling.
+//
+// Returns ("", "", nil) on zero or multiple matches (no-signal-on-ambiguity).
+func findContainerPIDByNonce(ctx context.Context, runtimeCmd, containerID, execUser, nonce string) (string, string, error) {
+	// grep -qz handles NUL-delimited environ entries.
+	// Filter: only match processes whose cmdline contains "tmux" AND
+	// "attach" to exclude children that inherited the env var.
+	// On exactly one match, also read start_time from /proc/<pid>/stat.
+	// Safe parsing: find last ')' (end of comm field), then extract field 20
+	// after it (which is stat field 22 = starttime).
+	script := `found=""
+for p in /proc/[0-9]*/environ; do
+  pid="${p#/proc/}"
+  pid="${pid%%/*}"
+  if grep -qz 'SCION_ATTACH_NONCE=` + nonce + `' "$p" 2>/dev/null; then
+    cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+    case "$cmd" in
+      *tmux*attach*)
+        if [ -n "$found" ]; then
+          echo ""
+          exit 0
+        fi
+        found="$pid"
+        ;;
+    esac
+  fi
+done
+if [ -z "$found" ]; then
+  echo ""
+  exit 0
+fi
+stat=$(cat /proc/$found/stat 2>/dev/null) || { echo ""; exit 0; }
+rest="${stat##*) }"
+stime=$(echo "$rest" | cut -d' ' -f20)
+if [ -z "$stime" ]; then
+  echo ""
+  exit 0
+fi
+echo "$found $stime"`
+
+	cmd := exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID, "sh", "-c", script)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", "", err
+	}
+	result := strings.TrimSpace(string(out))
+	if result == "" {
+		return "", "", nil // No match, multiple matches, or stat read failure
+	}
+	parts := strings.SplitN(result, " ", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", nil
+	}
+	return parts[0], parts[1], nil
+}
+
+// killContainerPID sends SIGTERM to a process inside the container after
+// re-verifying its full identity: nonce in /proc/<pid>/environ, tmux*attach*
+// in /proc/<pid>/cmdline, and start_time in /proc/<pid>/stat. All three must
+// match — any mismatch means the PID was recycled and we do nothing.
+//
+// This combines verification and signaling in a single docker exec shell script
+// to minimize the TOCTOU window.
+//
+// The TOCTOU race is NOT eliminated — it is minimized. The PID could
+// theoretically be recycled between the shell's verification reads and the
+// kill syscall. pidfd_open+pidfd_send_signal is not feasible via docker exec
+// shell scripts (see design doc). No signal on ambiguity.
+func killContainerPID(ctx context.Context, runtimeCmd, containerID, execUser, pid, expectedStartTime, nonce string) {
+	// Re-verify all three identity properties, then signal.
+	// If ANY check fails, the PID may have been recycled — do nothing.
+	script := `# 1. Verify nonce still present in environ
+grep -qz 'SCION_ATTACH_NONCE=` + nonce + `' /proc/` + pid + `/environ 2>/dev/null || exit 0
+# 2. Verify cmdline still matches tmux*attach*
+cmd=$(tr '\0' ' ' < /proc/` + pid + `/cmdline 2>/dev/null) || exit 0
+case "$cmd" in
+  *tmux*attach*) ;;
+  *) exit 0 ;;
+esac
+# 3. Verify start_time matches
+stat=$(cat /proc/` + pid + `/stat 2>/dev/null) || exit 0
+rest="${stat##*) }"
+current=$(echo "$rest" | cut -d' ' -f20)
+if [ "$current" = "` + expectedStartTime + `" ]; then
+  kill -TERM ` + pid + ` 2>/dev/null
+fi`
+
+	cmd := exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID, "sh", "-c", script)
+	_ = cmd.Run() // Best-effort, ignore errors
+}
+
+// gracefulShutdownExec shuts down a runtime exec process (docker exec, sandbox
+// exec) by closing the PTY master first — triggering a terminal hangup that the
+// container runtime can propagate to the container-side process — then
+// escalating through SIGTERM to SIGKILL only if necessary.
+//
+// Background (TW-UAT-002): exec.CommandContext sends SIGKILL on context cancel,
+// which may kill the host-side docker exec instantly without giving the runtime
+// a chance to propagate the signal to the container-side process. This is a
+// hypothesized cause of residual tmux attach-session processes observed in
+// containers. By closing the PTY first and using SIGTERM, we give Docker the
+// chance to propagate the hangup signal to the in-container process. Whether
+// this fully prevents the residual process in all cases requires UAT
+// verification.
+//
+// The caller must not call cmd.Wait() separately; this function reaps the
+// process.
+//
+// Close() also closes ptyMaster before this defer runs. Both calls target the
+// same *os.File object, and Go's os.File.Close() uses an internal poll.FD that
+// tracks closed state — the second Close() returns os.ErrClosed without issuing
+// a second syscall.Close on the raw fd, so there is no fd-reuse race.
+func gracefulShutdownExec(cmd *exec.Cmd, ptyMaster *os.File, slug string,
+	runtimeCmd, containerID, execUser, attachNonce string) {
+
+	// NEW: Container-side cleanup before host-side PTY close.
+	// Uses fresh bounded context. All failures fall through to host cleanup.
+	cleanupContainerAttach(runtimeCmd, containerID, execUser, attachNonce)
+
+	// Step 1: Close PTY master — triggers SIGHUP on the slave side. For
+	// Docker exec, this breaks the stdio pipes, which Docker handles by
+	// sending SIGHUP to the container-side process.
+	if ptyMaster != nil {
+		_ = ptyMaster.Close()
+	}
+
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+
+	// Already reaped (e.g., process exited before cleanup started).
+	if cmd.ProcessState != nil {
+		return
+	}
+
+	// Step 2: Wait for process exit from PTY hangup.
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+
+	select {
+	case <-exited:
+		slog.Debug("PTY exec exited after hangup", "slug", slug)
+		return
+	case <-time.After(processExitGracePeriod):
+	}
+
+	// Step 3: SIGTERM — more likely than SIGKILL to propagate to the
+	// container-side process through the runtime's exec infrastructure.
+	slog.Debug("PTY exec did not exit after hangup, sending SIGTERM", "slug", slug)
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+
+	select {
+	case <-exited:
+		slog.Debug("PTY exec exited after SIGTERM", "slug", slug)
+		return
+	case <-time.After(processTermTimeout):
+	}
+
+	// Step 4: SIGKILL — last resort. Container-side process likely survives.
+	slog.Warn("PTY exec did not exit after SIGTERM, sending SIGKILL", "slug", slug)
+	_ = cmd.Process.Kill()
+	<-exited
+}
 
 // resizeSandboxTerminal relays a terminal resize event. For cloudrun-sandbox
 // runtimes, it sends the resize through the sandbox boundary via tmux
@@ -373,6 +648,7 @@ type LocalPTYSession struct {
 	ptyMaster   *os.File
 	ptySlave    *os.File
 	writeMu     sync.Mutex
+	attachNonce string // Per-attach nonce for container-side PID identification (empty = disabled)
 
 	// K8s Go client for direct API exec
 	k8sConfig    *rest.Config
@@ -441,30 +717,61 @@ func (s *LocalPTYSession) Run() error {
 	}
 
 	defer func() {
-		if s.ptyMaster != nil {
-			_ = s.ptyMaster.Close()
-		}
-		if s.cmd != nil && s.cmd.Process != nil {
-			_ = s.cmd.Process.Kill()
-			_ = s.cmd.Wait()
-		}
+		// readFromWebSocket has already exited (joined below).
+		// Safe to close PTY — no in-flight resize.
+		// Graceful shutdown: close PTY (terminal hangup) → wait → SIGTERM →
+		// SIGKILL. This gives the container runtime a chance to propagate
+		// the hangup to the container-side tmux attach process (TW-UAT-002
+		// mitigation). If SIGKILL is required and the runtime does not
+		// propagate the kill signal, a residual container-side tmux client
+		// may remain until the container restarts — this is a known gap
+		// pending UAT verification.
+		gracefulShutdownExec(s.cmd, s.ptyMaster, s.agentID,
+			s.runtimeCmd, s.containerID, s.execUser, s.attachNonce)
 	}()
 
 	errCh := make(chan error, 2)
+	wsDone := make(chan struct{})
 
 	// Read from PTY, write to WebSocket
 	go func() {
 		errCh <- s.readFromPTY()
 	}()
 
-	// Read from WebSocket, write to PTY
+	// Read from WebSocket, write to PTY.
+	// wsDone is closed when this goroutine exits, providing a happens-before
+	// guarantee that no in-flight resize (Setsize) is running when we close
+	// the PTY. This mirrors StreamPTYHandler's resizeDone join pattern.
 	go func() {
+		defer close(wsDone)
 		errCh <- s.readFromWebSocket()
 	}()
 
-	// Wait for either direction to fail
-	err := <-errCh
+	// Wait for first I/O completion or context cancellation.
+	// Without exec.CommandContext, context cancellation alone does not kill
+	// the process or close the PTY, so we must handle ctx.Done() explicitly.
+	var err error
+	select {
+	case err = <-errCh:
+	case <-s.ctx.Done():
+		err = s.ctx.Err()
+	}
 	s.cancel()
+
+	// Close WebSocket to unblock readFromWebSocket if still blocked on
+	// conn.ReadMessage(). This also prevents any future resize messages.
+	if s.conn != nil {
+		_ = s.conn.Close()
+	}
+	// Join readFromWebSocket — ensures no in-flight resize (Setsize).
+	// readFromWebSocket exits promptly: ReadMessage returns error from
+	// conn.Close(), or ctx.Done() check at loop top.
+	<-wsDone
+
+	// NOW readFromWebSocket has fully exited — no concurrent Setsize.
+	// PTY close happens in deferred gracefulShutdownExec.
+	// readFromPTY unblocks when gracefulShutdownExec closes PTY.
+	// Both goroutines send to errCh (capacity 2) — no leak.
 	return err
 }
 
@@ -623,7 +930,9 @@ func (s *LocalPTYSession) startCloudRunSandboxExec() error {
 		"--", "/usr/bin/tmux", "attach-session", "-t", "scion",
 	}
 
-	s.cmd = exec.CommandContext(s.ctx, cloudRunSandboxBin, args...)
+	// Use exec.Command (NOT exec.CommandContext) so that context cancellation
+	// does not immediately SIGKILL the process. See gracefulShutdownExec.
+	s.cmd = exec.Command(cloudRunSandboxBin, args...)
 
 	ptmx, err := pty.StartWithSize(s.cmd, &pty.Winsize{
 		Cols: uint16(s.cols),
@@ -644,15 +953,31 @@ func (s *LocalPTYSession) startDockerExec() error {
 		return err
 	}
 
-	args := []string{
-		"exec", "-it",
-		"-e", "TERM=xterm-256color",
+	// Generate per-attach nonce for container-side PID identification.
+	// Only for Docker-compatible runtimes that support -e env injection.
+	if isDockerCompatibleRuntime(s.runtimeCmd) {
+		nonce, err := generateAttachNonce()
+		if err != nil {
+			// Nonce generation failure is not fatal — cleanup falls back to current behavior
+			slog.Debug("attach nonce generation failed, container cleanup disabled", "error", err)
+		} else {
+			s.attachNonce = nonce
+		}
+	}
+
+	args := []string{"exec", "-it"}
+	if s.attachNonce != "" {
+		args = append(args, "-e", "SCION_ATTACH_NONCE="+s.attachNonce)
+	}
+	args = append(args, "-e", "TERM=xterm-256color",
 		"--user", s.execUser,
 		s.containerID,
 		"tmux", "attach-session", "-t", "scion",
-	}
+	)
 
-	s.cmd = exec.CommandContext(s.ctx, s.runtimeCmd, args...)
+	// Use exec.Command (NOT exec.CommandContext) so that context cancellation
+	// does not immediately SIGKILL the process. See gracefulShutdownExec.
+	s.cmd = exec.Command(s.runtimeCmd, args...)
 
 	ptmx, err := pty.StartWithSize(s.cmd, &pty.Winsize{
 		Cols: uint16(s.cols),
@@ -754,6 +1079,7 @@ type StreamPTYHandler struct {
 	cmd         *exec.Cmd
 	ctx         context.Context
 	cancel      context.CancelFunc
+	attachNonce string // Per-attach nonce for container-side PID identification (empty = disabled)
 
 	// K8s Go client for direct API exec (avoids needing kubectl binary)
 	k8sConfig    *rest.Config
@@ -762,6 +1088,14 @@ type StreamPTYHandler struct {
 
 // NewStreamPTYHandler creates a handler for a PTY stream from the control channel.
 func NewStreamPTYHandler(client *ControlChannelClient, handler *StreamHandler, containerID, runtimeCmd, execUser, namespace string, cols, rows int, k8sConfig *rest.Config, k8sClientset kubernetes.Interface) *StreamPTYHandler {
+	if runtimeCmd == "" {
+		// The caller should provide the resolved runtime from the agent's
+		// RuntimeName or the server's detected RuntimeCommand. Log so the
+		// fallback is visible rather than silently defaulting.
+		slog.Warn("PTY stream handler created without explicit runtime command, falling back to docker",
+			"slug", handler.slug)
+		runtimeCmd = "docker"
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	execUser = sanitizeExecUser(execUser)
 	return &StreamPTYHandler{
@@ -815,19 +1149,15 @@ func (h *StreamPTYHandler) Run() error {
 	}
 
 	defer func() {
-		// With real PTY, ptyMaster and ptySlave are the same fd, so only close once
-		if h.ptyMaster != nil {
-			_ = h.ptyMaster.Close()
-		}
-		if h.cmd != nil && h.cmd.Process != nil {
-			// Kill only if still running
-			if h.cmd.ProcessState == nil {
-				_ = h.cmd.Process.Kill()
-			}
-			if err := h.cmd.Wait(); err != nil {
-				slog.Debug("PTY command exited with error", "slug", h.slug, "error", err)
-			}
-		}
+		// Graceful shutdown: close PTY (terminal hangup) → wait → SIGTERM →
+		// SIGKILL. This gives the container runtime a chance to propagate
+		// the hangup to the container-side tmux attach process (TW-UAT-002
+		// mitigation). If SIGKILL is required and the runtime does not
+		// propagate the kill signal, a residual container-side tmux client
+		// may remain until the container restarts — this is a known gap
+		// pending UAT verification.
+		gracefulShutdownExec(h.cmd, h.ptyMaster, h.slug,
+			h.runtimeCmd, h.containerID, h.execUser, h.attachNonce)
 	}()
 
 	errCh := make(chan error, 2)
@@ -843,10 +1173,34 @@ func (h *StreamPTYHandler) Run() error {
 	}()
 
 	// Handle resize events
-	go h.handleResize()
+	resizeDone := make(chan struct{})
+	go func() {
+		defer close(resizeDone)
+		h.handleResize()
+	}()
 
-	err := <-errCh
+	// Wait for an I/O goroutine to fail OR for context cancellation.
+	// readFromStream is select-driven with ctx.Done() and unblocks
+	// immediately on cancel. readFromPTY blocks on ptySlave.Read —
+	// we close the PTY below (after resize join) to unblock it.
+	var err error
+	select {
+	case err = <-errCh:
+	case <-h.ctx.Done():
+		err = h.ctx.Err()
+	}
 	h.cancel()
+	// Setsize accesses the raw descriptor, so join the resize worker before
+	// closing the PTY. handleResize returns promptly on cancel because its
+	// select includes h.ctx.Done() and h.handler.closeCh.
+	<-resizeDone
+	// Close PTY to unblock readFromPTY (ptySlave.Read). This is safe to do
+	// here because the resize worker has exited — no concurrent Setsize/Fd
+	// calls. The deferred gracefulShutdownExec double-closes safely (same
+	// *os.File, Go's poll.FD tracks closed state).
+	if h.ptyMaster != nil {
+		_ = h.ptyMaster.Close()
+	}
 	return err
 }
 
@@ -1023,7 +1377,9 @@ func (h *StreamPTYHandler) startCloudRunSandboxExec() error {
 		"--", "/usr/bin/tmux", "attach-session", "-t", "scion",
 	}
 
-	h.cmd = exec.CommandContext(h.ctx, cloudRunSandboxBin, args...)
+	// Use exec.Command (NOT exec.CommandContext) so that context cancellation
+	// does not immediately SIGKILL the process. See gracefulShutdownExec.
+	h.cmd = exec.Command(cloudRunSandboxBin, args...)
 
 	ptmx, err := pty.StartWithSize(h.cmd, &pty.Winsize{
 		Cols: uint16(h.cols),
@@ -1052,14 +1408,31 @@ func (h *StreamPTYHandler) startDockerExec() error {
 		return err
 	}
 
-	args := []string{
-		"exec", "-it",
+	// Generate per-attach nonce for container-side PID identification.
+	// Only for Docker-compatible runtimes that support -e env injection.
+	if isDockerCompatibleRuntime(runtimeCmd) {
+		nonce, err := generateAttachNonce()
+		if err != nil {
+			// Nonce generation failure is not fatal — cleanup falls back to current behavior
+			slog.Debug("attach nonce generation failed, container cleanup disabled", "error", err)
+		} else {
+			h.attachNonce = nonce
+		}
+	}
+
+	args := []string{"exec", "-it"}
+	if h.attachNonce != "" {
+		args = append(args, "-e", "SCION_ATTACH_NONCE="+h.attachNonce)
+	}
+	args = append(args,
 		"--user", h.execUser,
 		h.containerID,
 		"tmux", "attach-session", "-t", "scion",
-	}
+	)
 
-	h.cmd = exec.CommandContext(h.ctx, runtimeCmd, args...)
+	// Use exec.Command (NOT exec.CommandContext) so that context cancellation
+	// does not immediately SIGKILL the process. See gracefulShutdownExec.
+	h.cmd = exec.Command(runtimeCmd, args...)
 
 	// Start with a real PTY - this provides proper terminal handling
 	ptmx, err := pty.StartWithSize(h.cmd, &pty.Winsize{
@@ -1117,15 +1490,23 @@ func (h *StreamPTYHandler) readFromStream() error {
 	}
 }
 
-// Close stops the PTY handler.
+// Close stops the PTY handler. It initiates shutdown by canceling the context
+// and sending SIGTERM to the process. Run() handles all PTY closes after
+// joining the resize worker to avoid a data race between os.File.Close() and
+// handleResize's pty.Setsize (which calls os.File.Fd()). The full graceful
+// shutdown sequence (PTY close → wait → SIGTERM → SIGKILL) runs in Run()'s
+// deferred gracefulShutdownExec after the resize worker exits.
+//
+// Close() does NOT close h.ptyMaster directly — that would race with
+// handleResize if the resize worker hasn't exited yet. Context cancellation
+// causes Run()'s select to unblock on ctx.Done(), which then joins
+// resizeDone before closing the PTY.
 func (h *StreamPTYHandler) Close() {
 	h.cancel()
-	// With real PTY, ptyMaster and ptySlave are the same fd, so only close once
-	if h.ptyMaster != nil {
-		_ = h.ptyMaster.Close()
-	}
 	if h.cmd != nil && h.cmd.Process != nil {
-		_ = h.cmd.Process.Kill()
+		// SIGTERM instead of SIGKILL — gives the container runtime a chance
+		// to propagate the signal to the container-side process (TW-UAT-002).
+		_ = h.cmd.Process.Signal(syscall.SIGTERM)
 	}
 }
 

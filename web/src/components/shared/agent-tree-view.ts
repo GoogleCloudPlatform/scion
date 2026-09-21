@@ -60,6 +60,7 @@ import './status-badge.js';
 import { getMessageModeDisplay, getDenialMessage } from '../../shared/message-mode.js';
 import type { MessageMode } from '../../shared/types.js';
 import './quick-message-dialog.js';
+import { terminalHref } from '../../client/open-terminal.js';
 
 /**
  * Determine edge visual style based on parent/child message mode compatibility.
@@ -1074,7 +1075,7 @@ export class ScionAgentTreeView extends LitElement {
                 class="terminal-btn"
                 name="terminal"
                 label="Terminal"
-                href=${isTerminalAvailable(agent) ? `/agents/${agent.id}/terminal` : nothing}
+                href=${isTerminalAvailable(agent) ? terminalHref(agent.id) : nothing}
                 ?disabled=${!isTerminalAvailable(agent)}
               ></sl-icon-button>
             `

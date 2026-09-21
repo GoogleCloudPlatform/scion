@@ -21,7 +21,7 @@
  * Uses Shoelace components for UI and integrates with shared Scion components.
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 // Import shared components
@@ -42,6 +42,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/': 'Dashboard',
   '/projects': 'Projects',
   '/agents': 'Agents',
+  '/terminals': 'Terminals',
   '/brokers': 'Brokers',
   '/settings': 'Settings',
   '/admin/scheduler': 'Scheduler',
@@ -245,7 +246,7 @@ export class ScionApp extends LitElement {
     showAccessDeniedToast(detail);
   }
 
-  override render() {
+  override render(): TemplateResult {
     const pageTitle = this.getPageTitle();
 
     return html`
@@ -291,7 +292,6 @@ export class ScionApp extends LitElement {
           </div>
         </div>
       </main>
-
     `;
   }
 
@@ -328,6 +328,9 @@ export class ScionApp extends LitElement {
     }
     if (this.currentPath.match(/^\/agents\/[^/]+\/terminal$/)) {
       return 'Terminal';
+    }
+    if (this.currentPath === '/terminals' || this.currentPath.match(/^\/terminals\/[^/]+$/)) {
+      return 'Terminals';
     }
     if (this.currentPath.match(/^\/agents\/[^/]+\/configure$/)) {
       return 'Configure Agent';

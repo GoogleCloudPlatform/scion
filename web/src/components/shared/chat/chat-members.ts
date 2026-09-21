@@ -33,6 +33,8 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PropertyValues } from 'lit';
 import { ACTIVITY_DISPLAY } from '../../../shared/agent-state-display.js';
 import { navigateTo } from '../../../client/main.js';
+import { openTerminal, terminalHref } from '../../../client/open-terminal.js';
+import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import './chat-avatar.js';
 import '../status-badge.js';
 
@@ -41,15 +43,16 @@ const TERMINAL_POPOUT_WIDTH = 1024;
 const TERMINAL_POPOUT_HEIGHT = 700;
 
 /**
- * Open an agent's terminal in its own window.
+ * Open an agent's terminal in its own window (legacy mode only).
+ *
+ * When the terminal workspace feature flag is enabled, callers must use
+ * {@link openTerminal} instead so all terminal opens join the singleton
+ * coordinator and reuse a retained session.
  *
  * The window is *named per agent*, which is the whole point: clicking the same
  * agent again focuses the window that is already open instead of spawning
  * another one. Six agents means six windows, not one window per click - the
  * tab pile-up that made this control painful in the first place.
- *
- * A terminal is also a poor fit for in-app navigation, because reaching it
- * replaces the chat you were reading it alongside.
  *
  * Note the deliberate absence of `noopener`: a named window cannot be reused
  * or focused if the opener is severed, and the target is our own same-origin
@@ -75,6 +78,23 @@ function openTerminalPopout(agentId: string): void {
     return;
   }
   navigateTo(`/agents/${agentId}/terminal`);
+}
+
+/**
+ * Open a terminal for the given agent through the appropriate path.
+ *
+ * When the terminal workspace is enabled, routes through the singleton
+ * coordinator so all entry points converge on one owner/session.  Chat source
+ * state remains intact because the route outlet is hidden, not destroyed.
+ *
+ * When the workspace is disabled, falls back to the legacy popup behaviour.
+ */
+function openTerminalFromChat(agentId: string): void {
+  if (isFeatureEnabled('web.terminal_workspace')) {
+    openTerminal(agentId);
+  } else {
+    openTerminalPopout(agentId);
+  }
 }
 
 /**
@@ -261,7 +281,7 @@ export class ScionChatMembers extends LitElement {
     }
 
     .agent-terminal,
-    .agent-popout {
+    .agent-graph {
       display: inline-flex;
       align-items: center;
       color: var(--scion-text-muted, #94a3b8);
@@ -272,12 +292,12 @@ export class ScionChatMembers extends LitElement {
     }
 
     .member-item:hover .agent-terminal,
-    .member-item:hover .agent-popout {
+    .member-item:hover .agent-graph {
       opacity: 1;
     }
 
     .agent-terminal:hover,
-    .agent-popout:hover {
+    .agent-graph:hover {
       color: var(--scion-primary, #3b82f6);
     }
 
@@ -725,9 +745,9 @@ export class ScionChatMembers extends LitElement {
         ${a.canAttach !== true
           ? nothing
           : html`<a
-              href="/agents/${a.id}/terminal"
+              href=${terminalHref(a.id)}
               class="agent-terminal"
-              title="Open terminal in its own window (Ctrl/Cmd-click for a tab)"
+              title="Open terminal"
               @click=${(e: MouseEvent) => {
                 e.stopPropagation();
                 // Leave modified and non-primary clicks to the browser so
@@ -737,20 +757,30 @@ export class ScionChatMembers extends LitElement {
                   return;
                 }
                 e.preventDefault();
-                openTerminalPopout(a.id);
+                openTerminalFromChat(a.id);
               }}
             >
               <sl-icon name="terminal" style="font-size: var(--chat-fs-base);"></sl-icon>
             </a>`}
-        <a
-          href="/agents/${a.id}"
-          target="_blank"
-          class="agent-popout"
-          title="Open agent detail"
-          @click=${(e: Event) => e.stopPropagation()}
-        >
-          <sl-icon name="box-arrow-up-right" style="font-size: var(--chat-fs-base);"></sl-icon>
-        </a>
+        ${a.projectId
+          ? html`<a
+              href="/agents/graph?project=${encodeURIComponent(
+                a.projectId
+              )}&focus=${encodeURIComponent(a.id)}"
+              class="agent-graph"
+              title="Open in graph"
+              @click=${(e: MouseEvent) => {
+                e.stopPropagation();
+                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                e.preventDefault();
+                navigateTo(
+                  `/agents/graph?project=${encodeURIComponent(a.projectId!)}&focus=${encodeURIComponent(a.id)}`
+                );
+              }}
+            >
+              <sl-icon name="diagram-3" style="font-size: var(--chat-fs-base);"></sl-icon>
+            </a>`
+          : nothing}
       </div>
     `;
 
