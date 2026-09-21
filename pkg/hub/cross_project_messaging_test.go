@@ -579,4 +579,3 @@ func TestCrossProject_OneWayPolicy(t *testing.T) {
 	allowed, _, _ = srv.authorizeAgentMessage(ctx, receiverIdent, senderAgent, false)
 	require.False(t, allowed, "reply should be denied because receiver is project-mode, can't send cross-project")
 }
-

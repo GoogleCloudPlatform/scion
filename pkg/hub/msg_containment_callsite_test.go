@@ -169,7 +169,6 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	// authorized notification dispatch.
 	{file: "notification_sweep.go", function: "RetryDispatch", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "retry of previously authorized notification dispatch"},
-
 }
 
 // targetSymbols is the set of function/method names that constitute
