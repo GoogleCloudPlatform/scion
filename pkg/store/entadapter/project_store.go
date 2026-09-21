@@ -727,7 +727,13 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
 	sb.Labels = b.Labels
+	if sb.Labels == nil {
+		sb.Labels = make(map[string]string)
+	}
 	sb.Annotations = b.Annotations
+	if sb.Annotations == nil {
+		sb.Annotations = make(map[string]string)
+	}
 	return sb
 }
 
