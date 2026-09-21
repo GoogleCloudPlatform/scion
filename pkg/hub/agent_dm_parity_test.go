@@ -238,8 +238,8 @@ func TestParityAC1_BothAdaptersProduceSameMessageShape(t *testing.T) {
 	// Both must report "dispatched" status (#1689).
 	assert.Equal(t, "dispatched", outResp["status"],
 		"outbound status should be 'dispatched'")
-	assert.Contains(t, []string{"dispatched", "delivered"}, strResp["status"],
-		"structured status should be 'dispatched' or 'delivered'")
+	assert.Equal(t, "dispatched", strResp["status"],
+		"structured status should be 'dispatched'")
 
 	// Both must have a message_id.
 	assert.NotEmpty(t, outResp["message_id"], "outbound must have message_id")

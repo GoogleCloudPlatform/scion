@@ -399,7 +399,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			s.messageLog.Error("agent DM: failed to mark message failed",
 				"message_id", msgID, "error", markErr)
 		}
-		return nil, dispatchFailedError(msgID, dispatchErr)
+		return nil, dispatchFailedError(msgID)
 	}
 
 	// Dispatch succeeded — CAS pending→dispatched (AC-1).

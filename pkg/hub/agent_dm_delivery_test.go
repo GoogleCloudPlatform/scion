@@ -149,6 +149,55 @@ func deliveryDMInput(sender, target *store.Agent, msg string) *AgentDMInput {
 	}
 }
 
+// spyStateDispatcher is a test dispatcher that invokes a callback before
+// returning, allowing tests to inspect mid-flight state.
+type spyStateDispatcher struct {
+	store      store.Store
+	onDispatch func(msgText string)
+}
+
+func (d *spyStateDispatcher) DispatchAgentMessage(_ context.Context, _ *store.Agent, message string, _ bool, _ *messages.StructuredMessage) error {
+	if d.onDispatch != nil {
+		d.onDispatch(message)
+	}
+	return nil
+}
+
+func (d *spyStateDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error {
+	return nil
+}
+func (d *spyStateDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
+	return nil
+}
+func (d *spyStateDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
+	return nil
+}
+func (d *spyStateDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error { return nil }
+func (d *spyStateDispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error {
+	return nil
+}
+func (d *spyStateDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
+	return nil
+}
+func (d *spyStateDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
+	return nil
+}
+func (d *spyStateDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
+	return "", nil
+}
+func (d *spyStateDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
+	return "", 0, nil
+}
+func (d *spyStateDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
+	return false, nil
+}
+func (d *spyStateDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+	return nil, nil
+}
+func (d *spyStateDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // AC-1: Report dispatched only after broker acceptance
 // ---------------------------------------------------------------------------
@@ -173,32 +222,45 @@ func TestDelivery_DispatchSuccess_MarkedDispatched(t *testing.T) {
 		"DispatchedAt must be set after successful dispatch")
 }
 
-func TestDelivery_DispatchSuccess_PendingOnPersist(t *testing.T) {
-	// Verify that the message is initially persisted as "pending" before
-	// dispatch. We use a dispatcher that captures the message ID mid-flight
-	// and checks the store before returning.
-	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
+func TestDelivery_DispatchSuccess_PendingBeforeDispatch(t *testing.T) {
+	// Verify that the message is in "pending" state when the dispatcher is
+	// called, and transitions to "dispatched" after dispatch completes.
+	srv, s, _, sender, target, _, _ := deliverySetup(t)
 	ctx := context.Background()
 
+	// Use a spy dispatcher that checks the message state mid-flight.
 	var midFlightState string
-	dispatcher.returnErr = nil
-	// Override dispatcher behavior to check state during dispatch.
-	origDispatch := dispatcher.returnErr
-	_ = origDispatch
+	spy := &spyStateDispatcher{
+		store: s,
+		onDispatch: func(msgText string) {
+			// Look up the message by content to find its dispatch state
+			// at the moment the dispatcher is invoked.
+			msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: sender.ID}, store.ListOptions{Limit: 50})
+			if err != nil {
+				return
+			}
+			for _, m := range msgs.Items {
+				if m.Msg == msgText {
+					midFlightState = m.DispatchState
+					break
+				}
+			}
+		},
+	}
+	srv.SetDispatcher(spy)
 
-	// Since recordingDispatcher is synchronous, the message is persisted
-	// before dispatch is called. We verify by checking that after a
-	// successful call the message was persisted with "pending" initially
-	// and then transitioned to "dispatched".
 	result, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "pending-check"))
 	require.Nil(t, dmErr)
-	_ = midFlightState
 
-	// The message should now be dispatched.
+	// Mid-flight state must have been "pending".
+	assert.Equal(t, store.MessageDispatchPending, midFlightState,
+		"message must be in 'pending' state when dispatcher is called")
+
+	// Final state must be "dispatched".
 	msg, err := s.GetMessage(ctx, result.MessageID)
 	require.NoError(t, err)
 	assert.Equal(t, store.MessageDispatchDispatched, msg.DispatchState,
-		"final state must be dispatched")
+		"final state must be 'dispatched'")
 }
 
 // ---------------------------------------------------------------------------
@@ -425,27 +487,13 @@ func TestDelivery_NoDuplicateDispatch_CASGuard(t *testing.T) {
 // ---------------------------------------------------------------------------
 // AC-3: CreateMessage failure prevents dispatch
 // ---------------------------------------------------------------------------
-
-func TestDelivery_CreateMessageFailure_PreventsDispatch(t *testing.T) {
-	srv, _, _, sender, target, _, dispatcher := deliverySetup(t)
-	ctx := context.Background()
-
-	// Send a valid message first to verify the setup works.
-	result, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "baseline"))
-	require.Nil(t, dmErr)
-	require.NotNil(t, result)
-	baselineCalls := len(dispatcher.getCalls())
-
-	// Close the store to force CreateMessage to fail.
-	// (Not practical with in-memory SQLite — tested via the integration
-	// test pattern. Here we verify that the pre-flight check prevents
-	// dispatch when the store would fail.)
-
-	// Instead, verify the logical invariant: if ExecuteAgentDM returns
-	// an error with ErrCodeInternalError, no dispatch occurred after
-	// the baseline.
-	_ = baselineCalls
-}
+//
+// Coverage note: CreateMessage failure → zero dispatch calls is a structural
+// invariant (dispatch is only reachable after CreateMessage returns nil).
+// Verifying this with an injectable store mock requires a test-only Store
+// wrapper, which is beyond the scope of this change. The code path is
+// verified by inspection: the early return on CreateMessage error at step 8
+// in ExecuteAgentDM prevents execution from reaching step 11 (dispatch).
 
 // ---------------------------------------------------------------------------
 // Dispatch failure via HTTP adapters (integration through the contract)
@@ -570,7 +618,7 @@ func TestDelivery_IsAmbiguousDispatchError(t *testing.T) {
 
 func TestDelivery_WriteAgentDMError_DispatchFailedIncludesMessageID(t *testing.T) {
 	w := httptest.NewRecorder()
-	WriteAgentDMError(w, dispatchFailedError("test-msg-123", errors.New("broker down")))
+	WriteAgentDMError(w, dispatchFailedError("test-msg-123"))
 
 	assert.Equal(t, http.StatusBadGateway, w.Code)
 	var resp map[string]interface{}

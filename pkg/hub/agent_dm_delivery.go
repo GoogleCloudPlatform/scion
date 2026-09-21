@@ -119,7 +119,7 @@ func (s *Server) markFailed(ctx context.Context, msgID string, reason string) er
 // dispatchFailedError constructs an AgentDMError for a definite dispatch
 // failure. The message ID is included in the error details so callers can
 // correlate the persisted record with the failure (AC-2).
-func dispatchFailedError(msgID string, dispatchErr error) *AgentDMError {
+func dispatchFailedError(msgID string) *AgentDMError {
 	return &AgentDMError{
 		Code:       ErrCodeDeliveryFailed,
 		Message:    "message persisted but delivery to target agent failed",
