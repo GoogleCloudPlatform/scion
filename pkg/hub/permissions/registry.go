@@ -136,7 +136,7 @@ var Registry = []Permission{
 	{ID: "skill.update", Resource: ResourceSkill, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "skill:update", Description: "Update skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.delete", Resource: ResourceSkill, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "skill:delete", Description: "Delete skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.list", Resource: ResourceSkill, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "skill:list", Description: "List skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
-	{ID: "skill.create_global", Resource: ResourceSkill, Action: ActionCreateGlobal, CapabilityKind: CapabilityScope, UATScope: "skill:create_global", Description: "Create skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
+	{ID: "skill.create_global", Resource: ResourceSkill, Action: ActionCreateGlobal, CapabilityKind: CapabilityScope, Description: "Create skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 
 	{ID: "template.create", Resource: ResourceTemplate, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "template:create", AgentScopes: []string{"project:template:write"}, Description: "Create templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},
 	{ID: "template.read", Resource: ResourceTemplate, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "template:read", AgentScopes: []string{"project:read"}, Description: "Read templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},

@@ -112,31 +112,30 @@ func TestGlobalSkillCreate_HubAdminStillAllowed(t *testing.T) {
 // project they are otherwise a member of. This is the whole point of the
 // design; the permission set contains only global IDs, and they must not
 // grant project-level authority. (Design §3.1, Alternative C rejection.)
+//
+// Charlie has project-member (which grants skill.read/list but NOT skill.create)
+// plus global-catalog-author (system-scoped, only skill.create_global). The
+// denial must come from scope isolation — skill.create_global in a system-scoped
+// binding does not satisfy the project-scoped skill.create check — not from
+// Charlie lacking project membership entirely.
 func TestGlobalSkillCreate_CatalogAuthorDeniedOnProjectSkills(t *testing.T) {
-	srv, s, alice, _, project := setupSkillAuthzTest(t)
+	srv, s, _, _, project := setupSkillAuthzTest(t)
 	ctx := context.Background()
 
-	// Grant alice global-catalog-author but remove any project-scoped skill.create.
-	// She is already a hub member and project owner (from setupSkillAuthzTest).
-	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleGlobalCatalogAuthor, store.RoleScopeSystem)
-	require.NoError(t, err)
-
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      alice.ID,
-		ScopeType:        store.RoleScopeSystem,
-		ScopeID:          "",
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-
-	// Create a new user with ONLY global-catalog-author and no project role.
+	// Create Charlie with hub membership + project-member (has skill.read/list,
+	// NOT skill.create) + global-catalog-author (system-scoped).
 	charlie := createNamedTestUser(t, s, "gca-charlie", store.UserRoleMember)
 	ensureHubMembership(ctx, s, charlie.ID)
 
+	// Give Charlie project-member in the project. project-member has skill.read
+	// and skill.list but NOT skill.create (confirmed in projectMemberCuratedPermissionIDs).
+	createTestUserWithProjectRole(t, s, charlie.ID, charlie.Email, project.ID, store.ProjectRoleMember)
+
+	// Also grant global-catalog-author (system-scoped).
+	gcaRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleGlobalCatalogAuthor, store.RoleScopeSystem)
+	require.NoError(t, err)
 	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
+		RoleDefinitionID: gcaRD.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
 		PrincipalID:      charlie.ID,
 		ScopeType:        store.RoleScopeSystem,
@@ -145,8 +144,9 @@ func TestGlobalSkillCreate_CatalogAuthorDeniedOnProjectSkills(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Charlie tries to create a project skill — should be denied because
-	// global-catalog-author only holds skill.create_global, not skill.create.
+	// Charlie tries to create a project skill — should be denied.
+	// The denial is because skill.create_global (from global-catalog-author,
+	// system-scoped) does NOT satisfy the project-scoped skill.create check.
 	rec := doRequestAsUser(t, srv, charlie, http.MethodPost, "/api/v1/skills", CreateSkillRequest{
 		Name:    "project-skill-denied",
 		Scope:   "project",
@@ -220,42 +220,82 @@ func TestGlobalSkillCreate_SuperAdminHasCreateGlobal(t *testing.T) {
 		"super-admin should include skill.create_global via allPermissionIDs(); has %d perms", len(rd.Permissions))
 }
 
-// TestSeedReconcile_GlobalCatalogAuthorAppearsOnUpgrade simulates a database
-// seeded by the previous code (without global-catalog-author) and verifies
-// that the reconcile path creates the role and updates hub-admin.
+// TestSeedReconcile_GlobalCatalogAuthorAppearsOnUpgrade exercises the genuine
+// revision 3 → 4 upgrade path. It constructs a raw store with hub-admin at
+// revision 3 (no skill.create_global, no global-catalog-author), then runs
+// the new reconciler and asserts both that the role appears and that hub-admin
+// gains the permission.
 func TestSeedReconcile_GlobalCatalogAuthorAppearsOnUpgrade(t *testing.T) {
-	_, s := testServer(t)
+	// Create a raw store — no testServer, so no automatic seeding.
+	s, err := newTestStore(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	require.NoError(t, s.Migrate(context.Background()))
 	ctx := context.Background()
 
-	// testServer() already runs the seeder, so global-catalog-author exists.
-	// Verify it was created.
-	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleGlobalCatalogAuthor, store.RoleScopeSystem)
-	require.NoError(t, err, "global-catalog-author should exist after seeding")
-	assert.Equal(t, store.SystemRoleGlobalCatalogAuthor, rd.Name)
+	// ── Simulate the pre-upgrade state (revision 3 hub-admin, no global-catalog-author) ──
+	// Seed hub-admin at revision 3 with a permission set that does NOT include
+	// skill.create_global. This is the exact set from the previous code.
+	rev3Perms := hubAdminPermissionIDs()
+	// Remove skill.create_global to get the revision-3 set.
+	var rev3PermsFiltered []string
+	for _, p := range rev3Perms {
+		if p != "skill.create_global" {
+			rev3PermsFiltered = append(rev3PermsFiltered, p)
+		}
+	}
+	rev3Role := BuiltInRole{
+		Name:        store.SystemRoleHubAdmin,
+		Description: "Hub administrator with scopeable admin permissions",
+		ScopeType:   store.RoleScopeSystem,
+		Revision:    3,
+		Permissions: rev3PermsFiltered,
+	}
+	reconcileBuiltInRole(ctx, s, rev3Role)
 
-	// Verify hub-admin was reconciled with the new permission.
-	hubAdmin, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	// Verify pre-upgrade state.
+	hubAdminBefore, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err, "hub-admin should exist after initial seed")
+	for _, p := range hubAdminBefore.Permissions {
+		require.NotEqual(t, "skill.create_global", p,
+			"hub-admin should not have skill.create_global before upgrade")
+	}
+	_, err = s.GetRoleDefinitionByName(ctx, store.SystemRoleGlobalCatalogAuthor, store.RoleScopeSystem)
+	require.ErrorIs(t, err, store.ErrNotFound,
+		"global-catalog-author should not exist before upgrade")
+	markerBefore := getAppliedBuiltInRoleMarker(ctx, s, store.SystemRoleHubAdmin)
+	require.Equal(t, 3, markerBefore.Revision,
+		"hub-admin revision marker should be 3 before upgrade")
+
+	// ── Run the new reconciler (simulates server restart with new code) ──
+	for _, role := range BuiltInRoles() {
+		if role.Name == store.SystemRoleHubAdmin || role.Name == store.SystemRoleGlobalCatalogAuthor {
+			reconcileBuiltInRole(ctx, s, role)
+		}
+	}
+
+	// ── Assert post-upgrade state ──
+	// global-catalog-author should now exist.
+	newGCA, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleGlobalCatalogAuthor, store.RoleScopeSystem)
+	require.NoError(t, err, "global-catalog-author should have been created by reconciler")
+	assert.Equal(t, store.SystemRoleGlobalCatalogAuthor, newGCA.Name)
+
+	// hub-admin should now include skill.create_global (revision 3 → 4).
+	hubAdminAfter, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
 	require.NoError(t, err)
-
 	hasCreateGlobal := false
-	for _, p := range hubAdmin.Permissions {
+	for _, p := range hubAdminAfter.Permissions {
 		if p == "skill.create_global" {
 			hasCreateGlobal = true
 			break
 		}
 	}
 	assert.True(t, hasCreateGlobal,
-		"hub-admin should have skill.create_global after reconciliation")
+		"hub-admin should have skill.create_global after revision 3 → 4 upgrade")
 
-	// Now simulate re-seeding (as if on a subsequent restart). The role should
-	// still be present and unchanged.
-	for _, role := range BuiltInRoles() {
-		reconcileBuiltInRole(ctx, s, role)
-	}
-
-	rd2, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleGlobalCatalogAuthor, store.RoleScopeSystem)
-	require.NoError(t, err, "global-catalog-author should still exist after re-seeding")
-	assert.Equal(t, rd.ID, rd2.ID, "role ID should be stable across re-seeds")
+	// Verify the revision marker was updated.
+	marker := getAppliedBuiltInRoleMarker(ctx, s, store.SystemRoleHubAdmin)
+	assert.Equal(t, 4, marker.Revision, "hub-admin revision marker should be 4 after upgrade")
 }
 
 // TestSeedReconcile_OperatorOverrideRespected verifies that when an operator
@@ -283,7 +323,7 @@ func TestSeedReconcile_OperatorOverrideRespected(t *testing.T) {
 }
 
 // TestSkillCreateGlobal_PermissionRegistered verifies that skill.create_global
-// exists in the permissions registry.
+// exists in the permissions registry with the correct fields.
 func TestSkillCreateGlobal_PermissionRegistered(t *testing.T) {
 	found := false
 	for _, p := range permissions.Registry {
@@ -291,11 +331,28 @@ func TestSkillCreateGlobal_PermissionRegistered(t *testing.T) {
 			found = true
 			assert.Equal(t, permissions.ResourceSkill, p.Resource)
 			assert.Equal(t, permissions.ActionCreateGlobal, p.Action)
-			assert.Equal(t, "skill:create_global", p.UATScope)
+			// UATScope intentionally empty: enforceUATConstraints denies every
+			// UAT on hub-level resources (authz.go:~1322), so a UAT scope for
+			// this permission would be a surface we advertise and cannot honour.
+			// Adding it back is gated on open question Q1. See design §3.2.
+			assert.Empty(t, p.UATScope,
+				"skill.create_global must not have a UATScope until Q1 resolves — "+
+					"it would silently widen skill:manage alias expansion and break PAT minting")
 			break
 		}
 	}
 	assert.True(t, found, "skill.create_global should exist in the permissions registry")
+}
+
+// TestActionCreateGlobal_ConstantsAgree guards the duplicated ActionCreateGlobal
+// constant across pkg/hub and pkg/hub/permissions. The packages cannot import
+// each other (circular dependency), so duplication is structurally necessary.
+// This assertion catches drift at the constant level.
+func TestActionCreateGlobal_ConstantsAgree(t *testing.T) {
+	if string(ActionCreateGlobal) != permissions.ActionCreateGlobal {
+		t.Fatalf("ActionCreateGlobal constants diverged: hub=%q, permissions=%q",
+			ActionCreateGlobal, permissions.ActionCreateGlobal)
+	}
 }
 
 // TestGlobalWriteAction_MapsCorrectly verifies the globalWriteAction helper.
