@@ -17,6 +17,7 @@ Two visual polish changes to the terminal workspace header:
 The `scion-header` custom element uses Shadow DOM `:host { padding: 0 1.5rem }` for its horizontal padding. In the chat-shell and app-shell, the header lives inside another LitElement's Shadow DOM, so the global CSS reset (`* { padding: 0 }` in `index.html`) cannot reach it. In the terminal workspace, however, the header is placed in **light DOM** (via `document.createElement`), where the global `*` selector **does** match the element and overrides the `:host` padding — making the sign-out button flush against the right edge.
 
 The fix adds a scoped CSS rule in `terminal-workspace-root.ts`'s `installStyles()`:
+
 ```css
 #terminal-workspace > scion-header {
   padding-inline: 1.5rem;
@@ -30,12 +31,12 @@ The fix adds a scoped CSS rule in `terminal-workspace-root.ts`'s `installStyles(
 
 ## Gates run
 
-| Gate | Result |
-|------|--------|
-| `npm run build` | Pass |
-| `npx tsc --noEmit --project tsconfig.json` | Pass |
-| `npx tsc --noEmit --project tsconfig.client.json` | Pass |
-| `npx tsc --noEmit --project src/client/tsconfig.terminal-tests.json` | Pass |
-| `npx tsc --noEmit --project e2e/terminal-workspace/tsconfig.json` | Pass |
-| `npx eslint e2e/terminal-workspace/ --ext .ts` | Pass (0 errors, 2 pre-existing warnings) |
-| Playwright terminal-workspace tests | 77/77 passed |
+| Gate                                                                 | Result                                   |
+| -------------------------------------------------------------------- | ---------------------------------------- |
+| `npm run build`                                                      | Pass                                     |
+| `npx tsc --noEmit --project tsconfig.json`                           | Pass                                     |
+| `npx tsc --noEmit --project tsconfig.client.json`                    | Pass                                     |
+| `npx tsc --noEmit --project src/client/tsconfig.terminal-tests.json` | Pass                                     |
+| `npx tsc --noEmit --project e2e/terminal-workspace/tsconfig.json`    | Pass                                     |
+| `npx eslint e2e/terminal-workspace/ --ext .ts`                       | Pass (0 errors, 2 pre-existing warnings) |
+| Playwright terminal-workspace tests                                  | 77/77 passed                             |
