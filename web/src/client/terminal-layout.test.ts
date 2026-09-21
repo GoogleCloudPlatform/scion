@@ -62,7 +62,7 @@ describe('TerminalLayoutManager', () => {
       expect(m.getState().single).toEqual(['agent-b']);
     });
 
-    it('NEVER mutates multi-pane presets', () => {
+    it('does not mutate multi-pane presets when active is single', () => {
       const m = manager();
       // Set up four-pane layout with explicit placements
       m.place('agent-a', 'four', 0);
@@ -85,7 +85,7 @@ describe('TerminalLayoutManager', () => {
       expect(m.getState().twoRows).toEqual(['agent-p', 'agent-q']);
     });
 
-    it('preserves active multi-pane preset on open (#1701)', () => {
+    it('preserves active multi-pane preset on open and fills empty slot (#1701)', () => {
       const m = manager();
       m.setLayout('four');
       expect(m.getState().active).toBe('four');
@@ -93,6 +93,8 @@ describe('TerminalLayoutManager', () => {
       // open must NOT clobber a user-chosen multi-pane preset
       expect(m.getState().active).toBe('four');
       expect(m.getState().single).toEqual(['agent-a']);
+      // Agent is placed into the first empty slot of the active preset
+      expect(m.getState().four).toEqual(['agent-a', null, null, null]);
     });
 
     it('preserves active two-columns preset on select', () => {
@@ -119,6 +121,95 @@ describe('TerminalLayoutManager', () => {
       expect(m.getZoomed()).toBe('agent-a');
       m.open('agent-b');
       expect(m.getZoomed()).toBeNull();
+    });
+
+    it('open places agent in first empty slot of four-pane preset (nonzero index)', () => {
+      const m = manager();
+      m.place('agent-a', 'four', 0);
+      m.place('agent-b', 'four', 1);
+      m.setLayout('four');
+      // Slots 0 and 1 occupied, 2 and 3 empty
+      expect(m.getState().four).toEqual(['agent-a', 'agent-b', null, null]);
+
+      m.open('agent-c');
+      // Agent placed into first empty slot (index 2)
+      expect(m.getState().four).toEqual(['agent-a', 'agent-b', 'agent-c', null]);
+      expect(m.getState().active).toBe('four');
+      expect(m.getState().single[0]).toBe('agent-c');
+    });
+
+    it('open places agent in first empty slot of twoColumns', () => {
+      const m = manager();
+      m.place('agent-a', 'two-columns', 0);
+      m.setLayout('two-columns');
+      // Slot 0 occupied, slot 1 empty
+      expect(m.getState().twoColumns).toEqual(['agent-a', null]);
+
+      m.open('agent-b');
+      expect(m.getState().twoColumns).toEqual(['agent-a', 'agent-b']);
+      expect(m.getState().active).toBe('two-columns');
+      expect(m.getState().single[0]).toBe('agent-b');
+    });
+
+    it('open places agent in first empty slot of twoRows', () => {
+      const m = manager();
+      m.place('agent-a', 'two-rows', 0);
+      m.setLayout('two-rows');
+      expect(m.getState().twoRows).toEqual(['agent-a', null]);
+
+      m.open('agent-b');
+      expect(m.getState().twoRows).toEqual(['agent-a', 'agent-b']);
+      expect(m.getState().active).toBe('two-rows');
+      expect(m.getState().single[0]).toBe('agent-b');
+    });
+
+    it('open in single mode does not attempt slot placement', () => {
+      const m = manager();
+      // Active is single (default)
+      m.place('agent-a', 'four', 0);
+      m.place('agent-b', 'two-columns', 0);
+
+      m.open('agent-c');
+      // Single mode: select() behavior, no slot placement in multi presets
+      expect(m.getState().active).toBe('single');
+      expect(m.getState().single[0]).toBe('agent-c');
+      expect(m.getState().four).toEqual(['agent-a', null, null, null]);
+      expect(m.getState().twoColumns).toEqual(['agent-b', null]);
+    });
+
+    it('open fills slots sequentially across multiple opens', () => {
+      const m = manager();
+      m.setLayout('four');
+
+      m.open('agent-a');
+      expect(m.getState().four).toEqual(['agent-a', null, null, null]);
+
+      m.open('agent-b');
+      expect(m.getState().four).toEqual(['agent-a', 'agent-b', null, null]);
+
+      m.open('agent-c');
+      expect(m.getState().four).toEqual(['agent-a', 'agent-b', 'agent-c', null]);
+
+      m.open('agent-d');
+      expect(m.getState().four).toEqual(['agent-a', 'agent-b', 'agent-c', 'agent-d']);
+
+      // All slots filled, active still four
+      expect(m.getState().active).toBe('four');
+    });
+
+    it('open with key already in active preset does not duplicate', () => {
+      const m = manager();
+      m.place('agent-a', 'four', 0);
+      m.place('agent-b', 'four', 2);
+      m.setLayout('four');
+      expect(m.getState().four).toEqual(['agent-a', null, 'agent-b', null]);
+
+      // Open agent-a again — already in four's slots
+      m.open('agent-a');
+      // No duplication: four is unchanged, just single[0] updated
+      expect(m.getState().four).toEqual(['agent-a', null, 'agent-b', null]);
+      expect(m.getState().active).toBe('four');
+      expect(m.getState().single[0]).toBe('agent-a');
     });
   });
 
@@ -159,7 +250,7 @@ describe('TerminalLayoutManager', () => {
       expect(m.getState().four).toEqual(['agent-a', 'agent-b', 'agent-c', 'agent-d']);
     });
 
-    it('does not overflow when multi preset has available slots', () => {
+    it('does not overflow when multi preset has available slots and fills first empty', () => {
       const m = manager();
       m.place('agent-a', 'four', 0);
       // Only 1 of 4 slots filled
@@ -170,9 +261,11 @@ describe('TerminalLayoutManager', () => {
       // Not at capacity — stays in four
       expect(m.getState().active).toBe('four');
       expect(m.getState().single[0]).toBe('agent-b');
+      // Agent placed into the first empty slot (index 1)
+      expect(m.getState().four).toEqual(['agent-a', 'agent-b', null, null]);
     });
 
-    it('does not overflow when four-pane has all null slots', () => {
+    it('does not overflow when four-pane has all null slots and fills slot 0', () => {
       const m = manager();
       m.setLayout('four');
       expect(m.getState().active).toBe('four');
@@ -182,6 +275,8 @@ describe('TerminalLayoutManager', () => {
       // Not at capacity (nulls are empty slots) — stays in four
       expect(m.getState().active).toBe('four');
       expect(m.getState().single[0]).toBe('agent-a');
+      // Agent placed into the first empty slot (index 0)
+      expect(m.getState().four).toEqual(['agent-a', null, null, null]);
     });
 
     it('overflows two-columns at capacity', () => {
