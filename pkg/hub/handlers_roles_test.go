@@ -545,9 +545,10 @@ func setupSortBindings(t *testing.T, srv *Server, s store.Store) map[string]*sto
 
 	// Create a real project for the project-scoped binding.
 	projID := tid("sort-proj-1")
-	_ = s.CreateProject(context.Background(), &store.Project{
+	err := s.CreateProject(t.Context(), &store.Project{
 		ID: projID, Name: "sort-proj-1", Slug: "sort-proj-1",
 	})
+	require.NoError(t, err)
 
 	roleA := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
 		Name:        "sort-alpha-role",
@@ -746,9 +747,10 @@ func TestRolesAPI_ListRoleBindings_SecondaryScopeOrdering(t *testing.T) {
 	scopeUserID := tid("scope-user")
 	seedRolesTestUser(t, s, scopeUserID, "scope-user@test.local")
 	projScopeID := tid("proj-scope-1")
-	_ = s.CreateProject(context.Background(), &store.Project{
+	err := s.CreateProject(t.Context(), &store.Project{
 		ID: projScopeID, Name: "proj-scope-1", Slug: "proj-scope-1",
 	})
+	require.NoError(t, err)
 
 	// Create two bindings with the same principal but different scopes.
 	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
