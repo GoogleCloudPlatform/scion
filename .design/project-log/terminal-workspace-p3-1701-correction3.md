@@ -14,6 +14,7 @@ placeholders remain visible.
 ## Root Cause
 
 In `terminal-layout.ts`, `open()` had two branches:
+
 1. At capacity → overflow to single (correct)
 2. Not at capacity → delegates to `select()` (only sets `single[0]`, never fills
    an empty slot in the active multi preset)
@@ -26,6 +27,7 @@ slot of the active multi preset.
 ## Fix
 
 Added a third branch to `open()`:
+
 - Multi preset with available slot and new session → fill first null slot
 - Multi preset with session already assigned → delegate to select (idempotent)
 - Single mode → delegate to select (unchanged)
@@ -35,21 +37,24 @@ Updated JSDoc for `open()` and `select()` to reflect the changed invariant.
 ## Fixture Gap Diagnosis
 
 The prior E2E test "open with empty slots does not overflow" only verified that:
+
 - The active preset didn't change to single
 - A second socket attach occurred
 
 It did NOT verify:
+
 - That the newly opened agent was visible (not hidden)
 - That the agent had a slot index (grid position)
 - That the placeholder count decreased
 - That the agent's pane was attached in a visible state
 
-This is a **fixture fidelity gap**: the test asserted the *negative* (no overflow)
-without asserting the *positive* (agent is visible in a slot). The defect — agent
+This is a **fixture fidelity gap**: the test asserted the _negative_ (no overflow)
+without asserting the _positive_ (agent is visible in a slot). The defect — agent
 attached but hidden — passed the negative assertion perfectly because the preset
 did stay as `four`.
 
 The updated test now additionally asserts:
+
 - Agent visibility (not hidden, display not none)
 - Grid position (has col/row style)
 - Placeholder count decreased by 1
