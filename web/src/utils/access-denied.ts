@@ -179,14 +179,8 @@ export function showAccessDeniedToast(detail: AccessDeniedDetail): void {
   secondarySpan.style.opacity = '0.8';
   alert.appendChild(secondarySpan);
 
-  alert.addEventListener(
-    'sl-after-hide',
-    () => {
-      alert.remove();
-    },
-    { once: true }
-  );
-
+  // Shoelace's .toast() handles cleanup via its own sl-after-hide listener.
+  // Do NOT register a competing alert.remove() here — see #1733.
   document.body.appendChild(alert);
   void (alert as HTMLElement & { toast(): Promise<void> }).toast();
 }
