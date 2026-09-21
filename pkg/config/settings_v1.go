@@ -1111,10 +1111,17 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	}
 
 	// 4. Load environment variables (SCION_ prefix)
-	_ = k.Load(env.Provider("SCION_", ".", versionedEnvKeyMapper), nil)
+	_ = k.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
+		// An empty plaintext switch is unset, not a request to disable TLS.
+		// Skip it before koanf maps the empty value onto tls.enabled.
+		if key == "SCION_OTEL_INSECURE" && value == "" {
+			return "", nil
+		}
+		return versionedEnvKeyMapper(key), value
+	}), nil)
 	// SCION_OTEL_INSECURE is a plaintext switch. Its value is the inverse of
 	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
-	if raw, present := os.LookupEnv("SCION_OTEL_INSECURE"); present {
+	if raw, present := os.LookupEnv("SCION_OTEL_INSECURE"); present && raw != "" {
 		plaintext, err := strconv.ParseBool(raw)
 		if err != nil {
 			return nil, fmt.Errorf("SCION_OTEL_INSECURE: %w", err)

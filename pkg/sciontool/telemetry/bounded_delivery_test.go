@@ -46,6 +46,13 @@ func TestGenericHTTPDestinationRejectedAtStartup(t *testing.T) {
 	}
 }
 
+func TestNewCloudExporterNilConfigIsUnconfigured(t *testing.T) {
+	exporter, err := NewCloudExporter(context.Background(), nil)
+	if err != nil || exporter != nil {
+		t.Fatalf("NewCloudExporter(nil) = (%v, %v), want (nil, nil)", exporter, err)
+	}
+}
+
 type mixedResultMetricExporter struct {
 	captureMetricExporter
 	calls int

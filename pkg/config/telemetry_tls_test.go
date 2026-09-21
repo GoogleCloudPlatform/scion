@@ -46,4 +46,20 @@ func TestTelemetryTLSPlaintextEnvOverridesSettingsAndRejectsConflict(t *testing.
 	if _, err := LoadVersionedSettings(""); err != nil {
 		t.Fatalf("verified/skip TLS env rejected: %v", err)
 	}
+	t.Setenv("SCION_OTEL_INSECURE", "not-a-bool")
+	if _, err := LoadVersionedSettings(""); err == nil || !strings.Contains(err.Error(), "SCION_OTEL_INSECURE") {
+		t.Fatalf("invalid plaintext switch error = %v", err)
+	}
+}
+
+func TestTelemetryTLSEmptyPlaintextEnvIsUnset(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_OTEL_INSECURE", "")
+	settings, err := LoadVersionedSettings("")
+	if err != nil {
+		t.Fatalf("empty SCION_OTEL_INSECURE should be unset: %v", err)
+	}
+	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil && settings.Telemetry.Cloud.TLS.Enabled != nil && !*settings.Telemetry.Cloud.TLS.Enabled {
+		t.Fatal("empty SCION_OTEL_INSECURE unexpectedly selected plaintext transport")
+	}
 }

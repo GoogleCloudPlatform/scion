@@ -812,8 +812,8 @@ func addNumberValue(dst, src *metricpb.NumberDataPoint) error {
 		if !ok {
 			return errors.New("mixed number point types")
 		}
-		const maxInt = int64(^uint64(0) >> 1)
-		const minInt = -maxInt - 1
+		const maxInt = math.MaxInt64
+		const minInt = math.MinInt64
 		if (s.AsInt > 0 && v.AsInt > maxInt-s.AsInt) || (s.AsInt < 0 && v.AsInt < minInt-s.AsInt) {
 			return errors.New("metric sum overflow")
 		}
