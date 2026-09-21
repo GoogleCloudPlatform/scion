@@ -34,7 +34,7 @@ Three terminal pane interaction improvements for the multi-pane workspace:
   zero agents; skip single-layout placeholder creation; add focus/border CSS
 - `web/src/components/terminal/terminal-pane.ts` — Import TERMINAL_DRAG_MIME;
   skip file-upload overlay for terminal drags in all drag handlers
-  (_onDragEnter, _onDragLeave, _onDragOver, _onDrop); set/clear
+  (\_onDragEnter, \_onDragLeave, \_onDragOver, \_onDrop); set/clear
   `data-focused` attribute on focusin/focusout/setVisible
 - `web/e2e/terminal-workspace/workspace.pw.ts` — 4 new Playwright tests
 
