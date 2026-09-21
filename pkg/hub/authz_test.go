@@ -1231,8 +1231,8 @@ func TestGetEffectivePermissions_AppliesConstraintIntersection(t *testing.T) {
 // ===========================================================================
 
 // TestGetEffectivePermissions_PrincipalConstraintTargetingGroup verifies that
-// a {principal, group, G} constraint is enforced by getEffectivePermissions
-// when the user is a member of group G.
+// a group_closure constraint is enforced by getEffectivePermissions when the
+// user is a member of the targeted group.
 // Regression test for B1 fix 1: exact-principal matching fail-open.
 func TestGetEffectivePermissions_PrincipalConstraintTargetingGroup(t *testing.T) {
 	authz, s := authzTestSetup(t)
@@ -1267,17 +1267,15 @@ func TestGetEffectivePermissions_PrincipalConstraintTargetingGroup(t *testing.T)
 	})
 	require.NoError(t, err)
 
-	// Create a constraint targeting group:b1-target-group that allows only agent.read.
+	// Create a group_closure constraint targeting b1-target-group that allows only agent.read.
 	groupIDStr := groupID
-	principalType := "group"
 	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
-		Name:                 "b1-group-targeting-constraint",
-		SubjectKind:          store.ConstraintSubjectPrincipal,
-		SubjectPrincipalType: &principalType,
-		SubjectPrincipalID:   &groupIDStr,
-		ScopeType:            store.RoleScopeSystem,
-		MaximumPermissions:   []string{"agent.read"},
-		Purpose:              "B1 test: group-targeted principal constraint",
+		Name:               "b1-group-targeting-constraint",
+		SubjectKind:        store.ConstraintSubjectGroupClosure,
+		SubjectGroupID:     &groupIDStr,
+		ScopeType:          store.RoleScopeSystem,
+		MaximumPermissions: []string{"agent.read"},
+		Purpose:            "B1 test: group_closure constraint targeting group members",
 	})
 	require.NoError(t, err)
 
@@ -1286,7 +1284,7 @@ func TestGetEffectivePermissions_PrincipalConstraintTargetingGroup(t *testing.T)
 
 	assert.Contains(t, perms, "agent.read", "agent.read should survive the constraint")
 	assert.NotContains(t, perms, "project.read",
-		"project.read should be removed by group-targeted principal constraint")
+		"project.read should be removed by group_closure constraint")
 }
 
 // TestGetEffectivePermissions_ProjectScopeConstraint verifies that project-scoped
