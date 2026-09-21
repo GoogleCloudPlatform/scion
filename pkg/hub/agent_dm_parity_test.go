@@ -235,11 +235,11 @@ func TestParityAC1_BothAdaptersProduceSameMessageShape(t *testing.T) {
 	var strResp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rrStr.Body.Bytes(), &strResp))
 
-	// Both must report "sent" or "delivered" status.
-	assert.Contains(t, []string{"sent", "delivered"}, outResp["status"],
-		"outbound status should be sent/delivered")
-	assert.Contains(t, []string{"sent", "delivered"}, strResp["status"],
-		"structured status should be sent/delivered")
+	// Both must report "dispatched" status (#1689).
+	assert.Equal(t, "dispatched", outResp["status"],
+		"outbound status should be 'dispatched'")
+	assert.Contains(t, []string{"dispatched", "delivered"}, strResp["status"],
+		"structured status should be 'dispatched' or 'delivered'")
 
 	// Both must have a message_id.
 	assert.NotEmpty(t, outResp["message_id"], "outbound must have message_id")
@@ -776,7 +776,7 @@ func TestWriteAgentDMResult_Success(t *testing.T) {
 	var resp map[string]interface{}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "test-msg-id", resp["message_id"])
-	assert.Equal(t, "sent", resp["status"])
+	assert.Equal(t, "dispatched", resp["status"])
 	assert.Equal(t, "agent:test-agent", resp["recipient"])
 	assert.Equal(t, "test-agent-id", resp["recipient_id"])
 }
