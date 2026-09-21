@@ -81,8 +81,26 @@ describe('data-effective-layout attribute (#1716)', () => {
         )
       )
     );
-    vi.stubGlobal('WebSocket', class { onopen = null; onclose = null; send = vi.fn(); close = vi.fn(); readyState = 0; });
-    vi.stubGlobal('EventSource', class extends EventTarget { onopen = null; close = vi.fn(); constructor(public url: string) { super(); } });
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+      }
+    );
+    vi.stubGlobal(
+      'EventSource',
+      class extends EventTarget {
+        onopen = null;
+        close = vi.fn();
+        constructor(public url: string) {
+          super();
+        }
+      }
+    );
     root = new WorkspaceRoot();
     document.body.append(root.element);
   });
@@ -188,8 +206,26 @@ describe('focus outline suppression in single-pane mode (#1716)', () => {
         )
       )
     );
-    vi.stubGlobal('WebSocket', class { onopen = null; onclose = null; send = vi.fn(); close = vi.fn(); readyState = 0; });
-    vi.stubGlobal('EventSource', class extends EventTarget { onopen = null; close = vi.fn(); constructor(public url: string) { super(); } });
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+      }
+    );
+    vi.stubGlobal(
+      'EventSource',
+      class extends EventTarget {
+        onopen = null;
+        close = vi.fn();
+        constructor(public url: string) {
+          super();
+        }
+      }
+    );
     root = new WorkspaceRoot();
     document.body.append(root.element);
   });

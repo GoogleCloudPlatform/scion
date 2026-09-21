@@ -57,16 +57,16 @@ the fix scopes the CSS rule to only match multi-pane layouts:
 
 ## Files Changed
 
-| File | Lines | Change |
-|------|-------|--------|
-| `web/src/client/terminal-workspace-root.ts` | +8/-1 | CSS scoping + data attribute |
-| `web/src/client/terminal-workspace-root.test.ts` | +260 (new) | 11 tests |
+| File                                             | Lines      | Change                       |
+| ------------------------------------------------ | ---------- | ---------------------------- |
+| `web/src/client/terminal-workspace-root.ts`      | +8/-1      | CSS scoping + data attribute |
+| `web/src/client/terminal-workspace-root.test.ts` | +260 (new) | 11 tests                     |
 
 ## Gate Results
 
-| Gate | Result |
-|------|--------|
-| `terminal-pane.test.ts` | 15/15 passed |
-| `terminal-layout.test.ts` | 70/70 passed |
-| `terminal.test.ts` | 22/22 passed |
+| Gate                                    | Result       |
+| --------------------------------------- | ------------ |
+| `terminal-pane.test.ts`                 | 15/15 passed |
+| `terminal-layout.test.ts`               | 70/70 passed |
+| `terminal.test.ts`                      | 22/22 passed |
 | `terminal-workspace-root.test.ts` (new) | 11/11 passed |
