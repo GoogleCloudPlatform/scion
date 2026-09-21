@@ -59,6 +59,7 @@ const (
 	ActionClone          Action = "clone"
 	ActionExecute        Action = "execute"
 	ActionSetMessageMode Action = "set_message_mode"
+
 	// Global-catalog write actions — see design doc §3.1.
 	// These distinguish hub-catalog mutation from project-scoped CRUD,
 	// so a system-scoped binding carrying only these IDs does not

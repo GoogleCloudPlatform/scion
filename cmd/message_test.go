@@ -569,6 +569,12 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 			_ = json.NewDecoder(r.Body).Decode(&msg)
 			receivedMsg = &msg
 			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":   "msg-test-1",
+				"status":       "sent",
+				"recipient":    msg.Recipient,
+				"recipient_id": "uid-test",
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -934,7 +940,12 @@ func TestSendGroupMessageViaHub_UserRecipientType(t *testing.T) {
 			receivedMsg = &msg
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":   "msg-test-conv",
+				"status":       "sent",
+				"recipient":    msg.Recipient,
+				"recipient_id": "uid-test",
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -2148,13 +2159,18 @@ func TestSendCrossProjectMessage_TargetNotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to resolve agent")
 }
 
+// TestSendCrossProjectConversationReply verifies that conv:<uuid> from an
+// agent context routes through the outbound endpoint (not the conversation
+// send API). CPM cutover (#1693): conv: now uses the same outbound path as
+// @email and #thread.
 func TestSendCrossProjectConversationReply(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
 	t.Setenv("SCION_AGENT_NAME", "sender-agent")
 
-	server, sent := crossProjectMockServer(t, "", "", "", "")
+	projectID := "proj-convref-cross-reply"
+	server, sent, outbound := newConvRefMockHubServer(t, projectID)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
@@ -2163,7 +2179,7 @@ func TestSendCrossProjectConversationReply(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:    client,
 		Endpoint:  server.URL,
-		ProjectID: "proj-a-uuid",
+		ProjectID: projectID,
 	}
 
 	convID := "conv-uuid-5678"
@@ -2176,9 +2192,11 @@ func TestSendCrossProjectConversationReply(t *testing.T) {
 	err = sendMessageViaConversation(hubCtx, ref, "reply message", false, false, nil)
 	require.NoError(t, err)
 
-	require.Len(t, *sent, 1)
-	assert.Equal(t, "conv:"+convID, (*sent)[0].AgentName)
-	assert.Equal(t, "reply message", (*sent)[0].Message)
+	// CPM cutover: conv: now routes through outbound, not conversation send API.
+	assert.Len(t, *sent, 0, "conv: should not go through agent message path")
+	require.Len(t, *outbound, 1, "conv: should go through outbound path")
+	assert.Equal(t, "conv:"+convID, (*outbound)[0].ConversationRef)
+	assert.Equal(t, "reply message", (*outbound)[0].Message)
 }
 
 // TestCrossProjectAtAgentDispatch verifies that @agent-slug with --project
@@ -2461,16 +2479,18 @@ func TestConvRefSameProjectAllowed(t *testing.T) {
 	assert.False(t, rejected, "same-project conv: should not be rejected")
 }
 
-// TestConvRefAttachWakeRejection verifies that --attach and --wake are
-// explicitly rejected for conv: references, since the conversation send
-// API (ConversationSendRequest) does not support them.
-func TestConvRefAttachWakeRejection(t *testing.T) {
+// TestConvRefAttachWakeSupported verifies that --attach and --wake are
+// properly serialized for conv: references via the outbound endpoint.
+// CPM cutover (#1693): conv: now routes through the outbound endpoint
+// which supports both wake and attachments.
+func TestConvRefAttachWakeSupported(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
 	t.Setenv("SCION_AGENT_NAME", "sender-agent")
 
-	server, _ := crossProjectMockServer(t, "", "", "", "")
+	projectID := "proj-convref-attach-wake"
+	server, sent, outbound := newConvRefMockHubServer(t, projectID)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
@@ -2479,27 +2499,37 @@ func TestConvRefAttachWakeRejection(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:    client,
 		Endpoint:  server.URL,
-		ProjectID: "proj-a-uuid",
+		ProjectID: projectID,
 	}
 
-	convID := "conv-uuid-reject-test"
+	convID := "conv-uuid-attach-wake"
 	ref := &messaging.Reference{
 		Kind:  messaging.RefConversation,
 		Value: convID,
 		Raw:   "conv:" + convID,
 	}
 
-	// Attachments should be rejected
+	// Attachments should be supported and serialized
 	err = sendMessageViaConversation(hubCtx, ref, "msg with attach", false, false, []string{"file.txt"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--attach is not supported with conv: references")
+	require.NoError(t, err, "conv: with --attach should succeed via outbound")
 
-	// Wake should be rejected
+	require.Len(t, *outbound, 1)
+	assert.Equal(t, "conv:"+convID, (*outbound)[0].ConversationRef)
+	assert.Equal(t, "msg with attach", (*outbound)[0].Message)
+
+	// Wake should be supported and serialized
 	err = sendMessageViaConversation(hubCtx, ref, "msg with wake", false, true, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--wake is not supported with conv: references")
+	require.NoError(t, err, "conv: with --wake should succeed via outbound")
 
-	// Neither attachment nor wake: should succeed
+	require.Len(t, *outbound, 2)
+	assert.Equal(t, "conv:"+convID, (*outbound)[1].ConversationRef)
+	assert.Equal(t, "msg with wake", (*outbound)[1].Message)
+
+	// Normal message (no attach, no wake): should also succeed
 	err = sendMessageViaConversation(hubCtx, ref, "normal msg", false, false, nil)
 	require.NoError(t, err)
+	require.Len(t, *outbound, 3)
+
+	// Verify no messages went through the agent message path
+	assert.Len(t, *sent, 0, "conv: should not go through agent message path")
 }

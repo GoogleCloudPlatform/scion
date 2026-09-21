@@ -37,11 +37,12 @@ func TestCreateMessageEnumeration(t *testing.T) {
 	// CreateMessage.
 	// -------------------------------------------------------------------
 	stamped := map[string]string{
-		// handleAgentOutboundMessage: agent-to-agent DM (DEF-164 deliveryAgentDM path).
-		"handlers_agent_messaging.go:handleAgentOutboundMessage:agentDM": "Phase 5 dual-write: DEF-164 agent-to-agent direct message persistence",
+		// ExecuteAgentDM: shared agent DM operation (#1688).
+		"agent_dm_operation.go:ExecuteAgentDM": "Phase 5 dual-write: shared agent DM operation (#1688)",
 
 		// handleAgentOutboundMessage: agent-to-user direct (deliveryUserDirect path).
-		"handlers_agent_messaging.go:handleAgentOutboundMessage:userDirect": "Phase 5 dual-write: agent outbound DM or thread conversation",
+		// Only one CreateMessage remains after agent DM extraction (#1688).
+		"handlers_agent_messaging.go:handleAgentOutboundMessage": "Phase 5 dual-write: agent outbound DM or thread conversation",
 
 		// handleAgentMessage direct-persist path: user/agent → agent.
 		"handlers_agent_messaging.go:handleAgentMessage": "Phase 5 dual-write: user/agent → agent (authenticated sender)",
@@ -61,9 +62,6 @@ func TestCreateMessageEnumeration(t *testing.T) {
 		// dispatchRoutedRecipient: routed broker inbound (centralized routing).
 		"handlers_broker_inbound_routed.go:dispatchRoutedRecipient": "Routed inbound: conversation stamped via Phase 11 or Phase 5 before CreateMessage",
 
-		// sendViaDirectConversation: cross-project direct message.
-		"handlers_conversation_send.go:sendViaDirectConversation": "Cross-project messaging: ConversationID set from resolved conversation before CreateMessage",
-
 		// sendAgentRouted primary: web chat user → agent.
 		"handlers_chat_v2.go:sendAgentRouted:primary": "B15 dual-write: web chat user→agent primary message",
 
@@ -81,6 +79,10 @@ func TestCreateMessageEnumeration(t *testing.T) {
 
 		// createInboxMessage: agent → user inbox notification (e.g. WAITING_FOR_INPUT).
 		"notifications.go:createInboxMessage": "Phase 5 dual-write: agent→user inbox notification DM conversation",
+
+		// sendViaDirectConversation: conversation-send endpoint (#1693).
+		// ConversationID is set from the resolved conversation before CreateMessage.
+		"handlers_conversation_send.go:sendViaDirectConversation": "CPM conversation send: ConversationID set from resolved conv (#1693)",
 	}
 
 	// -------------------------------------------------------------------
@@ -257,11 +259,6 @@ func isCreateMessageCall(call *ast.CallExpr) bool {
 // The mapping is hard-coded for known cases.
 func disambiguationSuffixes(file, fn string, idx, total int) []string {
 	switch {
-	case file == "handlers_agent_messaging.go" && fn == "handleAgentOutboundMessage" && total == 2:
-		if idx == 0 {
-			return []string{"agentDM"}
-		}
-		return []string{"userDirect"}
 	case file == "handlers_chat_v2.go" && fn == "sendAgentRouted" && total == 2:
 		if idx == 0 {
 			return []string{"primary"}

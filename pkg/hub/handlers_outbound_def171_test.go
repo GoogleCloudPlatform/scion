@@ -343,36 +343,52 @@ func TestDEF171_AgentDM_PersistAndDispatch_Integrity(t *testing.T) {
 	var resp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.NotEmpty(t, resp["message_id"], "response must include message_id")
-	assert.Equal(t, "sent", resp["status"], "response status must be 'sent'")
+	assert.Equal(t, "dispatched", resp["status"], "response status must be 'dispatched' (#1689)")
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: Dispatch failure is non-fatal — the message is still persisted
-// and the handler returns 200.
+// Test 5: Dispatch definite failure returns non-2xx and persists failed
+// state (#1689). Replaces the pre-#1689 nonfatal-failure test.
 // ---------------------------------------------------------------------------
 
-func TestDEF171_AgentDM_DispatchFailure_NonFatal(t *testing.T) {
+func TestDEF171_AgentDM_DispatchFailure_Returns502AndFailed(t *testing.T) {
 	srv, s, project, agentA, _, convID, dispatcher := def171Setup(t)
 	enableReadSwitch(t, srv)
 
-	// Make the dispatcher return an error.
+	// Make the dispatcher return a definite (non-context) error.
 	dispatcher.returnErr = assert.AnError
 
 	rr := sendAgentDM(t, srv, agentA, convID, project.ID, "DEF-171 dispatch-fail test")
-	require.Equal(t, http.StatusOK, rr.Code,
-		"dispatch failure is non-fatal; handler must still return 200; body: %s",
+	require.Equal(t, http.StatusBadGateway, rr.Code,
+		"dispatch definite failure must return 502; body: %s",
 		rr.Body.String())
 
-	// Message must still be persisted.
+	// Error response must include the message ID for correlation.
+	var errResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	errObj, ok := errResp["error"].(map[string]interface{})
+	require.True(t, ok, "response must contain an error object")
+	details, ok := errObj["details"].(map[string]interface{})
+	require.True(t, ok, "error must contain details")
+	assert.NotEmpty(t, details["message_id"],
+		"error details must include message_id for correlation")
+
+	// Message must still be persisted with dispatch_state="failed".
 	ctx := context.Background()
 	msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agentA.ID}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
-	var found bool
-	for _, m := range msgs.Items {
-		if m.Msg == "DEF-171 dispatch-fail test" {
-			found = true
+	var found *store.Message
+	for i := range msgs.Items {
+		if msgs.Items[i].Msg == "DEF-171 dispatch-fail test" {
+			found = &msgs.Items[i]
 			break
 		}
 	}
-	assert.True(t, found, "message must be persisted even when dispatch fails")
+	require.NotNil(t, found, "message must be persisted even when dispatch fails")
+	assert.Equal(t, store.MessageDispatchFailed, found.DispatchState,
+		"message dispatch_state must be 'failed' after definite dispatch failure")
+	require.NotNil(t, found.DispatchFailureReason,
+		"DispatchFailureReason must be set")
+	assert.NotEmpty(t, *found.DispatchFailureReason,
+		"DispatchFailureReason must be non-empty")
 }

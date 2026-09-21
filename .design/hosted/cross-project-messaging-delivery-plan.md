@@ -1,10 +1,9 @@
 # Incremental delivery plan
 
-This plan implements [the proposed design](02-design.md). Every phase has a
-bounded result and an acceptance gate. The feature remains off by default;
-adding an enum value or relaxing a single handler is not a usable or complete
-release. Updated for the user's 2026-09-17 decisions; see the
-[decision and mode-ceiling record](04-decisions-and-mode-ceiling.md).
+This plan implements [the design](cross-project-messaging.md). Updated
+2026-09-21 to reflect the completed CPM cleanup (Phases 1–4, #1680). All
+cleanup phases are complete; the feature remains off by default. See the
+[decision log](cross-project-messaging-decisions.md) for ratified choices.
 
 ## Dependency order
 
@@ -188,7 +187,8 @@ Deliverables:
 - Advertise `crossProjectConversationKinds: ["direct"]`; clients must not
   hard-code that all future cross-project conversations have one peer.
 - Add the read-only conversation resolver, canonical two-agent `conv:` send
-  path, and unified cross-project history authorization.
+  path (routed through outbound with `conversation_ref`, not a separate
+  conversation send endpoint), and unified cross-project history authorization.
 - Correct project filtering for global DMs; implement authorization-before-
   pagination and return minimal peer/project summaries and stable cursors.
 - Extend hubclient with typed APIs, response/error types, target context,
@@ -424,3 +424,79 @@ historical interagent-view privacy, and unrelated settings/comment drift should
 be triaged separately when not needed for cross-project safety. In particular,
 do not quietly broaden this work into a new project-room authorization model,
 federation rewrite, or general credential-scope refactor.
+
+---
+
+## CPM cleanup delivery ledger
+
+The CPM cleanup (#1680) was executed in four phases. All phases are complete
+as of 2026-09-21 on the `cpm-cleanup-integration` branch.
+
+### Tracker hierarchy
+
+| Level | Issue | Title |
+|---|---|---|
+| Root | [#1680](https://github.com/ptone/scion/issues/1680) | Consolidate cross-project messaging before first deployment |
+| Phase 1 | (contained in #1680) | Authorization and security settings |
+| Phase 2 | (contained in #1680) | Shared DM operation and delivery outcomes |
+| Phase 3 | (contained in #1680) | CLI cutover and endpoint deletion |
+| Phase 4 | [#1684](https://github.com/ptone/scion/issues/1684) | Verify the integrated release and publish the final design |
+
+### Task issues
+
+| Task | Issue | Title | Fork PR |
+|---|---|---|---|
+| 1.1 | [#1685](https://github.com/ptone/scion/issues/1685) | Authorize every outbound agent DM before side effects | [#1698](https://github.com/ptone/scion/pull/1698) |
+| 1.2 | [#1686](https://github.com/ptone/scion/issues/1686) | Read current security settings for cross-project decisions | [#1697](https://github.com/ptone/scion/pull/1697) |
+| 1.3 | [#1687](https://github.com/ptone/scion/issues/1687) | Enforce foreign attachment limits and verify publication | [#1700](https://github.com/ptone/scion/pull/1700) |
+| 2.1 | [#1688](https://github.com/ptone/scion/issues/1688) | Extract one typed internal operation for agent DM sends | [#1708](https://github.com/ptone/scion/pull/1708) |
+| 2.2 | [#1689](https://github.com/ptone/scion/issues/1689) | Truthful broker/managed-runtime delivery outcomes | [#1709](https://github.com/ptone/scion/pull/1709) |
+| 2.3 | [#1690](https://github.com/ptone/scion/issues/1690) | Unify server-derived provenance and body-free DM audit | [#1709](https://github.com/ptone/scion/pull/1709) |
+| 2.4 | [#1691](https://github.com/ptone/scion/issues/1691) | Honor wake for a resolved single-agent DM | [#1712](https://github.com/ptone/scion/pull/1712) |
+| 3.1 | [#1692](https://github.com/ptone/scion/issues/1692) | Expose the outbound request/result contract in hubclient | (merged directly) |
+| 3.2 | [#1693](https://github.com/ptone/scion/issues/1693) | Route conv: sends through outbound endpoint | [#1736](https://github.com/ptone/scion/pull/1736) |
+| 3.3 | [#1694](https://github.com/ptone/scion/issues/1694) | Delete duplicate conversation send endpoint | [#1737](https://github.com/ptone/scion/pull/1737) |
+| 4.1 | [#1695](https://github.com/ptone/scion/issues/1695) | Verify the integrated messaging contract across transports | (in progress) |
+| 4.2 | [#1696](https://github.com/ptone/scion/issues/1696) | Update the tracked design and close the cleanup ledger | (this document) |
+
+### Related issues (linked, not duplicated)
+
+| Issue | Title | Relationship |
+|---|---|---|
+| [#1054](https://github.com/ptone/scion/issues/1054) | Native chat: no rate limiting on send | Pre-existing; rate limiting addressed in ExecuteAgentDM |
+| [#1055](https://github.com/ptone/scion/issues/1055) | Native chat: no idempotency key on send | Pre-existing; CAS on MarkMessageDispatched prevents duplicate dispatch |
+| [#1066](https://github.com/ptone/scion/issues/1066) | Outbound-message accepts unknown message type with 200 | Pre-existing; type validation preserved in shared operation |
+| [#1635](https://github.com/ptone/scion/issues/1635) | Message log missing conversation_id in cloud logging | Pre-existing; DM audit records carry conversation context |
+| [#1500](https://github.com/ptone/scion/issues/1500) | PR 1432 conversation routing, attribution, and rollout review | Historical; routing consolidation completed by this cleanup |
+
+### What was deleted vs what survives
+
+**Deleted:**
+
+- `POST /api/v1/conversations/{id}/messages` for agent sends — the duplicate
+  conversation send endpoint. The native web chat path
+  (`handleConversationSend` in `handlers_chat_v2.go`) remains for human users.
+- Separate outbound-path authorization, persistence, and dispatch code — now
+  unified in `ExecuteAgentDM`.
+- Independent provenance stamping in the outbound handler — now server-derived
+  in the shared operation.
+- Stale 501 fallback for operational settings — both SQLite and PostgreSQL
+  backends are fully supported.
+
+**Survives (intentionally):**
+
+- Outbound routing resolution (`resolveOutboundRouting`) — retains user/email
+  lookup, channel affinity, conversation reference resolution, thread
+  handling, group routing, and mention processing. These are adapter concerns
+  outside the core DM operation.
+- Structured inbound handler (`handleAgentMessage`) — the direct agent-to-agent
+  HTTP route still exists and calls `ExecuteAgentDM`.
+- Project-scoped agent message handler (`handleProjectAgentAction`) — resolves
+  the agent slug within a project, then delegates to the shared operation.
+- The mode matrix distinction between same-project and cross-project sends —
+  same-project sends use the local mode matrix; cross-project sends add the
+  full gate sequence. This is an intentional routing distinction.
+- Human-to-agent delivery paths — these do not use `ExecuteAgentDM` and retain
+  their existing authorization model.
+- Group/broadcast/plugin boundaries — these retain project confinement and are
+  not routed through the cross-project path.

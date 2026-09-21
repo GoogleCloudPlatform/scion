@@ -34,9 +34,6 @@ type MessagingService interface {
 	// Returns exists=false when the peer is valid but no conversation exists yet.
 	ResolveConversation(ctx context.Context, reference string, projectID string) (*ConversationResolveResult, error)
 
-	// SendMessage sends a message into an existing conversation.
-	SendMessage(ctx context.Context, conversationID string, req *ConversationSendRequest) (*ConversationSendResult, error)
-
 	// GetHubMessagingSettings returns the hub-level messaging admin settings.
 	GetHubMessagingSettings(ctx context.Context) (*HubMessagingSettings, error)
 
@@ -92,20 +89,6 @@ type ConversationResolveResult struct {
 	PeerAgent    *TargetAgentInfo    `json:"peerAgent,omitempty"`
 }
 
-// ConversationSendRequest is the request body for sending a message into a conversation.
-type ConversationSendRequest struct {
-	Msg       string `json:"msg"`
-	Type      string `json:"type,omitempty"`
-	Urgent    bool   `json:"urgent,omitempty"`
-	Interrupt bool   `json:"interrupt,omitempty"`
-}
-
-// ConversationSendResult is the response from sending a message.
-type ConversationSendResult struct {
-	MessageID string `json:"messageId"`
-	Status    string `json:"status"`
-}
-
 // Capabilities returns the hub's messaging capabilities.
 func (s *messagingService) Capabilities(ctx context.Context) (*MessagingCapabilities, error) {
 	resp, err := s.c.get(ctx, "/api/v1/messaging/capabilities", nil)
@@ -141,15 +124,6 @@ func (s *messagingService) ResolveConversation(ctx context.Context, reference st
 		return nil, err
 	}
 	return apiclient.DecodeResponse[ConversationResolveResult](resp)
-}
-
-// SendMessage sends a message into an existing conversation.
-func (s *messagingService) SendMessage(ctx context.Context, conversationID string, req *ConversationSendRequest) (*ConversationSendResult, error) {
-	resp, err := s.c.post(ctx, "/api/v1/conversations/"+url.PathEscape(conversationID)+"/messages", req, nil)
-	if err != nil {
-		return nil, err
-	}
-	return apiclient.DecodeResponse[ConversationSendResult](resp)
 }
 
 // ---------------------------------------------------------------------------

@@ -33,6 +33,24 @@ import (
 	"github.com/google/uuid"
 )
 
+// sanitizeCrossProjectObserver strips body and attachment content from an
+// observer StructuredMessage so that cross-project broker publications do not
+// leak payload to unrelated project members. Metadata keys unrelated to
+// attachments are preserved.
+func sanitizeCrossProjectObserver(msg *messages.StructuredMessage) {
+	msg.Msg = ""
+	msg.Attachments = nil
+	if msg.Metadata != nil {
+		sanitized := make(map[string]string, len(msg.Metadata))
+		for k, v := range msg.Metadata {
+			if k != attachmentsMetadataKey {
+				sanitized[k] = v
+			}
+		}
+		msg.Metadata = sanitized
+	}
+}
+
 // OutboundMessageRequest is the request body for POST /api/v1/agents/{id}/outbound-message.
 type OutboundMessageRequest struct {
 	Recipient   string            `json:"recipient,omitempty"`
@@ -56,6 +74,11 @@ type OutboundMessageRequest struct {
 	// When set, the hub resolves the reference to a ConversationID via
 	// messaging.Resolve, then routes through the existing DEF-138 path.
 	ConversationRef string `json:"conversation_ref,omitempty"`
+
+	// Wake requests that a suspended target agent be resumed before
+	// message delivery (#1691). Only meaningful for agent-to-agent DMs;
+	// ignored for user and group recipients (zero resumes invoked).
+	Wake bool `json:"wake,omitempty"`
 }
 
 // deliveryPath identifies how an outbound message should be persisted and dispatched.
@@ -791,27 +814,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		req.Type = "input-needed"
 	}
 
-	// Per-sender send limit (#1054). This is the path a looping agent floods a
-	// thread through, so the limit has to live here and not only on the
-	// browser send path. The response is an explicit 429 with Retry-After
-	// rather than a silent drop, so a caller can back off and resend.
-	//
-	// The traffic class is derived from the (now defaulted) message type so the
-	// automatic assistant-reply transcript mirror — posted by the agent hook,
-	// not written by the agent — cannot spend the whole allowance the agent
-	// needs for a completion report or an escalation. The class only ever
-	// selects a reservation inside the agent's single aggregate ceiling, so a
-	// caller cannot buy extra allowance by relabelling its traffic. A type
-	// this build does not recognise is classified as ordinary agent traffic
-	// and still accepted, exactly as before: tightening the type contract on
-	// the wire is a compatibility change and is tracked separately.
-	//
-	// Charged before the payload is validated: a flood of malformed sends is
-	// still a flood.
-	if !s.allowChatSend(w, agentIdent.ID(), chatSenderClassForMessageType(req.Type)) {
-		return
-	}
-
 	if req.Msg == "" {
 		ValidationError(w, "msg is required", nil)
 		return
@@ -847,10 +849,80 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// ── Agent DM path: delegate to shared operation (#1688) ─────────────
+	// When routing identified an agent-to-agent DM, or the conversation's DM
+	// key names two agents and the recipientID matches, delegate to the
+	// shared ExecuteAgentDM operation. This consolidates rate limiting,
+	// authorization, attachment rejection, persistence, dispatch, and
+	// observer publication into one code path.
+	var outboundTargetAgentID string
+	if result.DeliveryPath == deliveryAgentDM && result.TargetAgent != nil {
+		// Case (a): conversation_ref path — target already resolved.
+		outboundTargetAgentID = result.TargetAgent.ID
+	} else if result.ConvResult != nil && result.ConvResult.Kind == "direct" &&
+		strings.HasPrefix(result.ConvResult.ExternalRef, "dm:") {
+		// Case (b): check if the DM key names two agents and the
+		// recipientID matches the non-sender side.
+		kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(result.ConvResult.ExternalRef)
+		if parseErr == nil {
+			if kindA == "agent" && kindB == "agent" {
+				if idA == agent.ID && idB == result.RecipientID {
+					outboundTargetAgentID = idB
+				} else if idB == agent.ID && idA == result.RecipientID {
+					outboundTargetAgentID = idA
+				}
+			}
+		}
+	}
+
+	if outboundTargetAgentID != "" {
+		// Re-read the target agent to get its current mode. The record
+		// from S5 may come from the same request, but using the fresh
+		// store record ensures the mode is current at decision time.
+		freshTarget, targetErr := s.store.GetAgent(ctx, outboundTargetAgentID)
+		if targetErr != nil {
+			s.messageLog.Error("outbound DM: target agent re-read failed",
+				"target_id", outboundTargetAgentID, "error", targetErr)
+			writeErrorFromErr(w, targetErr, "")
+			return
+		}
+
+		// Delegate to the shared agent DM operation (#1688).
+		dmResult, dmErr := s.ExecuteAgentDM(ctx, &AgentDMInput{
+			SenderAgent:    agent,
+			SenderIdentity: agentIdent,
+			TargetAgent:    freshTarget,
+			Msg:            req.Msg,
+			Type:           req.Type,
+			Urgent:         req.Urgent,
+			Attachments:    req.Attachments,
+			Metadata:       req.Metadata,
+			ConversationID: result.ConversationID,
+			ConvResult:     result.ConvResult,
+			Asserted:       result.Asserted,
+			Channel:        result.Channel,
+			ThreadID:       result.ThreadID,
+			ProjectID:      agent.ProjectID,
+			GroupID:        result.GroupID,
+			Wake:           req.Wake,
+		})
+		if dmErr != nil {
+			WriteAgentDMError(w, dmErr)
+			return
+		}
+		WriteAgentDMResult(w, dmResult)
+		return
+	}
+
+	// ── Non-agent-DM paths: rate limit, then build and dispatch ─────────
+	// Rate limiting for user delivery paths (agent DMs are rate limited
+	// inside ExecuteAgentDM above).
+	if !s.allowChatSend(w, agentIdent.ID(), chatSenderClassForMessageType(req.Type)) {
+		return
+	}
+
 	// Translate @email mentions to @firstname-lastname for user-facing messages.
-	// Agent-to-agent messages (deliveryAgentDM) keep the email format since
-	// agents understand it natively.
-	if result.DeliveryPath != deliveryAgentDM && agent.ProjectID != "" {
+	if agent.ProjectID != "" {
 		if humanMembers := s.resolveProjectHumanMembers(ctx, agent.ProjectID); len(humanMembers) > 0 {
 			req.Msg = translateMentionsInbound(req.Msg, humanMembers)
 		}
@@ -904,7 +976,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		storeMsg.ThreadID = extRef
 		structuredMsg.ThreadID = extRef
 		// Backfill req.ThreadID so the W6 DM notification guard fires
-		// on the non-broker path (line ~997).
+		// on the non-broker path.
 		req.ThreadID = extRef
 
 		// Default Channel to "web" only when no channel was determined
@@ -938,77 +1010,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	// Dispatch based on delivery path.
 	switch result.DeliveryPath {
-	case deliveryAgentDM:
-		// DEF-164: agent-to-agent direct message path.
-		// Persist the message.
-		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
-			s.messageLog.Error("DEF-164: failed to persist agent-to-agent message", "error", err)
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"Failed to persist message", nil)
-			return
-		}
-
-		// Publish SSE event.
-		s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
-
-		// Phase 9b(ii): render the delivery envelope for the agent-to-agent
-		// DM path (DEF-171). Persistence is guaranteed at this point (early
-		// return on CreateMessage failure above), matching the broadcast
-		// guard convention at :2476.
-		if s.writeDenyEnabled() {
-			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-				MessageID:  storeMsg.ID,
-				ConvResult: result.ConvResult,
-				Msg:        structuredMsg,
-				CreatedAt:  storeMsg.CreatedAt,
-			})
-		}
-
-		// Dispatch to the target agent's runtime broker when available.
-		if isManagedAgentRuntime(result.TargetAgent.Runtime) {
-			if err := s.managedAgentMessage(ctx, result.TargetAgent, req.Msg, req.Urgent); err != nil {
-				s.messageLog.Error("DEF-164: managed agent dispatch failed",
-					"agent_id", result.TargetAgent.ID, "error", err)
-				// Message is persisted; dispatch failure is non-fatal.
-			}
-		} else if dispatcher := s.GetDispatcher(); dispatcher != nil && result.TargetAgent.RuntimeBrokerID != "" {
-			retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
-			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, result.TargetAgent, req.Msg, req.Urgent, structuredMsg); err != nil {
-				s.messageLog.Error("DEF-164: broker dispatch failed",
-					"agent_id", result.TargetAgent.ID, "error", err)
-				// Message is persisted; dispatch failure is non-fatal.
-			}
-			retryCancel()
-		}
-
-		// Publish observer message for agent-to-agent visibility.
-		// F6: The pre-refactor DEF-164 path exited before ConversationAsserted
-		// was set, so observer messages always had ConversationAsserted = false.
-		// Restore that behavior to avoid changing the observer envelope shape.
-		if bp := s.GetMessageBrokerProxy(); bp != nil {
-			observerMsg := *structuredMsg
-			observerMsg.ObserverOnly = true
-			observerMsg.ConversationAsserted = false
-			if err := bp.PublishMessage(ctx, result.TargetAgent.ProjectID, &observerMsg); err != nil {
-				s.messageLog.Error("DEF-164: observer publish failed",
-					"agent_id", result.TargetAgent.ID, "error", err)
-			}
-		}
-
-		s.logMessage("DEF-164: agent-to-agent outbound message sent",
-			"agent_id", agent.ID,
-			"target_agent_id", result.TargetAgent.ID,
-			"project_id", agent.ProjectID,
-		)
-
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"message_id":   storeMsg.ID,
-			"status":       "sent",
-			"recipient":    storeMsg.Recipient,
-			"recipient_id": storeMsg.RecipientID,
-		})
-		return
-
 	case deliveryUserBroker:
 		// Broker path: PublishUserMessage handles persistence and SSE.
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
@@ -1356,6 +1357,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 	messaging.RecordStep(ctx, "agent_loaded")
 
+	// ── Foreign attachment rejection (#1687) — inbound path ──────────────
+	// When the authenticated sender is an agent in a different project,
+	// reject any attachments before persistence, dispatch, or publication.
+	if structuredMsg != nil && len(structuredMsg.Attachments) > 0 {
+		if senderAgent := GetAgentIdentityFromContext(ctx); senderAgent != nil {
+			if senderAgent.ProjectID() != "" && senderAgent.ProjectID() != agent.ProjectID {
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeUnsupportedCapability,
+					"cross-project attachment transfer is not supported; send text-only messages across projects",
+					map[string]interface{}{
+						"reason": string(MessageDenialCrossProjectAttachUnsupported),
+					})
+				return
+			}
+		}
+	}
+
 	// AC-33 + Phase 5 D1: Cross-project mention check with fan-out support.
 	// For same-project mentions, validate all agents belong to the same project.
 	// For project-qualified mentions (@project/agent), evaluate per-recipient
@@ -1485,76 +1502,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	// Wake handling: if requested, resume a suspended agent before message delivery.
-	if req.Wake {
-		switch state.Phase(agent.Phase) {
-		case state.PhaseSuspended:
-			if !s.checkBrokerAvailability(w, r, agent) {
-				return
-			}
-			dispatcher := s.GetDispatcher()
-			if dispatcher == nil {
-				ServiceNotReady(w, "Dispatch not available — server may still be starting up")
-				return
-			}
-			if agent.RuntimeBrokerID == "" {
-				ServiceNotReady(w, "Agent has no runtime broker assigned")
-				return
-			}
-
-			// Wake always resumes a suspended agent, so the harness must
-			// continue its prior session.
-			if err := dispatcher.DispatchAgentStart(ctx, agent, "", true); err != nil {
-				RuntimeError(w, "Failed to wake agent: "+err.Error())
-				return
-			}
-
-			// Set phase to 'starting' while we wait for readiness.
-			statusUpdate := store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}
-			if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			agent.Phase = string(state.PhaseStarting)
-			s.events.PublishAgentStatus(ctx, agent)
-
-			if err := s.waitForAgentReady(ctx, id, 30*time.Second); err != nil {
-				// On failure, set agent to an error state for clarity.
-				_ = s.store.UpdateAgentStatus(ctx, id, store.AgentStatusUpdate{Phase: string(state.PhaseError), Message: "Failed to become ready after wake"})
-				RuntimeError(w, "Agent resumed but did not become ready: "+err.Error())
-				return
-			}
-
-			// Agent is ready, set phase to 'running'.
-			statusUpdate = store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}
-			if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			agent.Phase = string(state.PhaseRunning)
-			s.events.PublishAgentStatus(ctx, agent)
-
-		case state.PhaseRunning:
-			// no-op
-
-		case state.PhaseStopped:
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-				"Agent is stopped, not suspended — use 'scion resume' to restart it with its previous state", nil)
-			return
-
-		case state.PhaseError:
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-				"Agent is in error state — use 'scion resume' to restart", nil)
-			return
-
-		default:
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-				fmt.Sprintf("Agent is not yet running (phase: %s) — wait for it to reach running state", agent.Phase), nil)
+	// For agent-to-agent DMs, wake is handled by ExecuteAgentDM after admission
+	// checks so that denied requests cannot resume an agent (#1691 AC-2).
+	// For user-to-agent messages, wake is handled inline here using the shared helper.
+	senderIsAgent := GetAgentIdentityFromContext(ctx) != nil
+	if req.Wake && !senderIsAgent {
+		wakeResult, wakeErr := s.wakeAgentForDM(ctx, agent)
+		if wakeErr != nil {
+			WriteAgentDMError(w, wakeErr)
 			return
 		}
+		_ = wakeResult // Phase mutation applied in-place on the agent record.
 	}
 
 	// Reject messages to non-running agents when --wake is not set.
-	if !req.Wake {
+	// For agent-to-agent DMs, phase validation is handled by ExecuteAgentDM.
+	if !req.Wake && !senderIsAgent {
 		switch state.Phase(agent.Phase) {
 		case state.PhaseRunning:
 			// OK — proceed to deliver
@@ -1856,11 +1819,88 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 		// Propagate GroupID from metadata so CLI-originated group[] messages
 		// preserve correlation in the store.
+		groupID := ""
 		if structuredMsg.Metadata != nil {
 			if gid, ok := structuredMsg.Metadata["group_id"]; ok {
 				storeMsg.GroupID = gid
+				groupID = gid
 			}
 		}
+
+		// ── Agent DM fork (#1688) ────────────────────────────────────────
+		// When the sender is an agent, delegate to the shared ExecuteAgentDM
+		// operation. This consolidates rate limiting, authorization,
+		// persistence, dispatch, and observer publication into one code path
+		// shared with the outbound handler.
+		if senderAgentIdent := GetAgentIdentityFromContext(ctx); senderAgentIdent != nil {
+			senderAgentRec, senderErr := s.store.GetAgent(ctx, senderAgentIdent.ID())
+			if senderErr != nil {
+				s.messageLog.Error("agent DM: sender agent lookup failed",
+					"sender_id", senderAgentIdent.ID(), "error", senderErr)
+				writeErrorFromErr(w, senderErr, "")
+				return
+			}
+
+			dmResult, dmErr := s.ExecuteAgentDM(ctx, &AgentDMInput{
+				SenderAgent:    senderAgentRec,
+				SenderIdentity: senderAgentIdent,
+				TargetAgent:    agent,
+				Msg:            plainMessage,
+				Type:           structuredMsg.Type,
+				Urgent:         structuredMsg.Urgent,
+				Interrupt:      req.Interrupt,
+				Attachments:    structuredMsg.Attachments,
+				Metadata:       structuredMsg.Metadata,
+				ConversationID: storeMsg.ConversationID,
+				ConvResult:     convResult,
+				Asserted:       structuredMsg.ConversationID != "" && storeMsg.ConversationID == structuredMsg.ConversationID,
+				Channel:        structuredMsg.Channel,
+				ThreadID:       structuredMsg.ThreadID,
+				ProjectID:      agent.ProjectID,
+				GroupID:        groupID,
+				Wake:           req.Wake,
+			})
+			if dmErr != nil {
+				WriteAgentDMError(w, dmErr)
+				return
+			}
+			messaging.RecordStep(ctx, "agent_dm_executed")
+
+			// Post-delivery adapter concerns: notification subscription
+			// and mention processing stay outside the core operation.
+			if req.Notify {
+				var notifySubscriberType, notifySubscriberID, createdBy string
+				createdBy = senderAgentIdent.ID()
+				notifySubscriberType = store.SubscriberTypeAgent
+				notifySubscriberID = senderAgentRec.Slug
+				s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
+			}
+
+			var mentionResults []messages.MentionResult
+			if len(req.Mentions) > 0 {
+				mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg)
+			}
+
+			// Use "dispatched" for accepted, "ambiguous" for ambiguous (#1689).
+			// API wording does not promise harness consumption (AC-1).
+			deliveryStatus := "dispatched"
+			httpStatus := http.StatusOK
+			if dmResult.Outcome == AgentDMAmbiguous {
+				deliveryStatus = "ambiguous"
+				httpStatus = http.StatusAccepted
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(httpStatus)
+			_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
+				MessageID:      dmResult.MessageID,
+				Status:         deliveryStatus,
+				Agent:          agent.Slug,
+				AgentPhase:     agent.Phase,
+				MentionResults: mentionResults,
+			})
+			return
+		}
+
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
 		} else {
@@ -1969,11 +2009,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Publish agent-to-agent messages through the broker so plugin observers
 	// (Telegram, broker-log) can see them. ObserverOnly prevents the hub's own
 	// subscription from re-dispatching.
+	//
+	// #1687: For cross-project DMs, strip body and attachment metadata from
+	// the observer message so unrelated project members receive no content
+	// through the broker publication sink.
 	if strings.HasPrefix(structuredMsg.Sender, "agent:") &&
 		strings.HasPrefix(structuredMsg.Recipient, "agent:") {
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
 			observerMsg := *structuredMsg
 			observerMsg.ObserverOnly = true
+			isCrossProjectObs := false
+			if senderAgent := GetAgentIdentityFromContext(ctx); senderAgent != nil {
+				isCrossProjectObs = senderAgent.ProjectID() != "" && senderAgent.ProjectID() != agent.ProjectID
+			}
+			if isCrossProjectObs {
+				sanitizeCrossProjectObserver(&observerMsg)
+			}
 			if err := bp.PublishMessage(ctx, agent.ProjectID, &observerMsg); err != nil {
 				s.messageLog.Error("Failed to publish agent-to-agent observer message",
 					"agent_id", agent.ID, "error", err)

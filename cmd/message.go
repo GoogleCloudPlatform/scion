@@ -663,36 +663,12 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	// DEF-142 P5: when running in an agent context, send ALL ref kinds via
 	// the outbound endpoint with conversation_ref. The server resolves the
 	// ref inline (P3) and routes through the existing DEF-138 auth block.
+	//
+	// CPM cutover (#1693): conv: references now route through the outbound
+	// endpoint like @email and #thread, eliminating the duplicate conversation
+	// send API path. Wake and attachments are fully supported.
 	senderAgent := os.Getenv("SCION_AGENT_NAME")
 	if senderAgent != "" {
-		// Cross-project conv:<uuid> reply: use the Messaging().SendMessage API
-		// which hits POST /api/v1/conversations/{id}/messages. This bypasses
-		// the project-scoped agent lookup that rejects cross-project targets.
-		// The conversation send API does not support attachments or wake;
-		// reject explicitly rather than silently dropping them.
-		if ref.Kind == messaging.RefConversation {
-			if len(attachments) > 0 {
-				return fmt.Errorf("--attach is not supported with conv: references; the conversation send API does not support attachments")
-			}
-			if wake {
-				return fmt.Errorf("--wake is not supported with conv: references; the conversation send API does not support wake")
-			}
-			sendReq := &hubclient.ConversationSendRequest{
-				Msg:       message,
-				Type:      "instruction",
-				Urgent:    interrupt,
-				Interrupt: interrupt,
-			}
-			result, sendErr := hubCtx.Client.Messaging().SendMessage(ctx, ref.Value, sendReq)
-			if sendErr != nil {
-				return wrapHubError(fmt.Errorf("failed to send message to conversation '%s': %w", ref.Value, sendErr))
-			}
-			if !isJSONOutput() {
-				fmt.Printf("Message sent to conversation '%s' (message %s).\n", ref.Value, result.MessageID)
-			}
-			return nil
-		}
-
 		// DEF-164: agent-to-agent messages use the structured message
 		// endpoint, not the outbound (user-only) endpoint. The outbound
 		// handler's resolveAgentDM creates conversation/participant rows
@@ -714,12 +690,16 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			return nil
 		}
 
+		// All non-agent ref kinds (conv:, @email, #thread) route through
+		// the outbound endpoint with conversation_ref. The server resolves
+		// the ref inline and handles wake, attachments, and auth.
 		outMsg := &hubclient.OutboundMessageRequest{
 			Msg:             message,
 			Type:            "instruction",
 			Urgent:          interrupt,
 			ConversationRef: ref.Raw,
 			Attachments:     attachments,
+			Wake:            wake,
 		}
 		if ref.Kind == messaging.RefEmail {
 			outMsg.Recipient = "user:" + ref.Value
@@ -743,11 +723,20 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			return fmt.Errorf("message validation failed: %w", err)
 		}
 
-		if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+		result, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
+		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to send message to %s: %w", ref.Raw, err))
 		}
 		if !isJSONOutput() {
-			fmt.Printf("Message sent to %s.\n", ref.Raw)
+			// Distinguish accepted dispatch from confirmed delivery.
+			if result.Status == "sent" {
+				fmt.Printf("Message sent to %s (message %s).\n", ref.Raw, result.MessageID)
+			} else {
+				fmt.Printf("Message dispatched to %s (message %s, status: %s).\n", ref.Raw, result.MessageID, result.Status)
+			}
+		} else {
+			// JSON output with full result
+			return outputJSON(result)
 		}
 		return nil
 	}
@@ -848,7 +837,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		ThreadID:    msgThreadID,
 	}
 
-	if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+	if _, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to %s: %w", userRecipient, err))
 	}
 
@@ -942,7 +931,7 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 					ThreadID:    msgThreadID,
 					Metadata:    map[string]string{"recipients": recipientsStr, "group_id": groupID},
 				}
-				if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+				if _, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
 					if !isJSONOutput() {
 						fmt.Printf("  Failed: %s: %s\n", recipStr, err)
