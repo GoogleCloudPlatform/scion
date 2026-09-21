@@ -104,12 +104,13 @@ func BuiltInRoles() []BuiltInRole {
 			Permissions: hubAdminPermissionIDs(),
 		},
 		{
-			// global-catalog-author: grants authority to create/update/delete global
-			// (hub-scoped) skills and templates. Seeded as a role *definition only* —
-			// no binding is created. An operator grants it deliberately.
-			// See design doc §3.1 (roles) and issue #1713.
+			// global-catalog-author: Phase 1 (ptone/scion#1713) grants only
+			// skill.create_global. Phase 2 extends this to update/delete for
+			// skills and templates. Seeded as a role *definition only* — no
+			// binding is created. An operator grants it deliberately.
+			// See design doc §3.1 (roles).
 			Name:        store.SystemRoleGlobalCatalogAuthor,
-			Description: "Author of global (hub-scoped) skills and templates",
+			Description: "Creates global (hub-scoped) skills",
 			ScopeType:   store.RoleScopeSystem,
 			Revision:    1,
 			Permissions: globalCatalogAuthorPermissionIDs(),
