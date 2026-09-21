@@ -41,6 +41,7 @@ Three terminal pane interaction improvements for the multi-pane workspace:
 ## Tests
 
 All 81 tests pass (77 existing + 4 new):
+
 - Terminal drag does not trigger file upload overlay on pane
 - Empty multi-pane layout shows dotted placeholders for all slots
 - Focused pane has data-focused attribute in multi-pane view

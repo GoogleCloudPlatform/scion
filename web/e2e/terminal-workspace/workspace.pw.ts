@@ -3069,8 +3069,8 @@ test('terminal drag does not trigger file upload overlay on pane', async ({ page
 
   // Simulate a terminal drag (TERMINAL_DRAG_MIME) entering the pane —
   // should NOT show the file upload overlay (isDragOver stays false).
-  const terminalDragShowsOverlay = await page.evaluate((mime) => {
-    const pane = document.querySelector<HTMLElement>(
+  const terminalDragShowsOverlay = await page.evaluate(async (mime) => {
+    const pane = document.querySelector<HTMLElement & { updateComplete: Promise<boolean> }>(
       '#terminal-workspace scion-terminal-pane:not([hidden])'
     );
     if (!pane || !pane.shadowRoot) throw new Error('No visible pane');
@@ -3085,6 +3085,10 @@ test('terminal drag does not trigger file upload overlay on pane', async ({ page
     if (!wrapper) throw new Error('No terminal-wrapper');
     wrapper.dispatchEvent(enter);
 
+    // Wait for Lit render cycle so isDragOver (a @state() property) would
+    // have triggered a re-render if the filter failed to block it.
+    await pane.updateComplete;
+
     // Check if the drop-overlay has the 'visible' class
     const overlay = pane.shadowRoot.querySelector('.drop-overlay');
     const hasVisible = overlay?.classList.contains('visible') ?? false;
@@ -3093,6 +3097,7 @@ test('terminal drag does not trigger file upload overlay on pane', async ({ page
     const leave = new DragEvent('dragleave', { bubbles: true, cancelable: true });
     Object.defineProperty(leave, 'dataTransfer', { value: dt });
     wrapper.dispatchEvent(leave);
+    await pane.updateComplete;
 
     return hasVisible;
   }, TERMINAL_DRAG_MIME);
