@@ -288,9 +288,45 @@ func TestTemplateAuthz_Finalize_MemberDeniedOnGlobal(t *testing.T) {
 		"ordinary hub member should not be able to finalize a global template they don't own; got: %s", rec.Body.String())
 }
 
+func TestTemplateAuthz_Finalize_OwnerAllowed(t *testing.T) {
+	srv, s, alice, _, project := setupTemplateAuthzTest(t)
+	tpl := createAuthzTestTemplate(t, s, "fin-owner", store.TemplateScopeProject, project.ID, alice.ID)
+
+	// Finalize will fail due to storage not configured, but the authz gate
+	// must pass (we'd get 403 if it didn't, not 500).
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/templates/"+tpl.ID+"/finalize",
+		FinalizeRequest{Manifest: &TemplateManifest{Files: []store.TemplateFile{{Path: "TEMPLATE.md"}}}})
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"project owner should pass the authz gate for finalize; got: %s", rec.Body.String())
+	assert.NotEqual(t, http.StatusUnauthorized, rec.Code,
+		"project owner should not get 401; got: %s", rec.Body.String())
+}
+
 // ============================================================================
 // handleTemplateDownload authorization tests
 // ============================================================================
+
+func TestTemplateAuthz_Download_MemberAllowedOnGlobal(t *testing.T) {
+	// Hub members have template.read via the hub-member-read-all policy
+	// (seed.go:200), so a hub member who is NOT the owner still passes the
+	// ActionRead gate on a global template. This test verifies the authz
+	// gate evaluates correctly — the request proceeds past authz and fails
+	// later (no files / no storage), not at 403.
+	srv, s, _, _, _ := setupTemplateAuthzTest(t)
+	tpl := createAuthzTestTemplate(t, s, "global-dl", store.TemplateScopeGlobal, "", "other-owner-id")
+
+	rec := doRequestAsUser(t, srv, &store.User{
+		ID:          tid("tpl-alice"),
+		Email:       "tpl-alice@test.com",
+		DisplayName: "Alice",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}, http.MethodGet, "/api/v1/templates/"+tpl.ID+"/download", nil)
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"hub member should pass the authz gate for global template download (template.read granted); got: %s", rec.Body.String())
+	assert.NotEqual(t, http.StatusUnauthorized, rec.Code,
+		"hub member should not get 401; got: %s", rec.Body.String())
+}
 
 func TestTemplateAuthz_Download_NonMemberDenied(t *testing.T) {
 	srv, s, alice, bob, project := setupTemplateAuthzTest(t)
@@ -316,6 +352,28 @@ func TestTemplateAuthz_Download_OwnerAllowed(t *testing.T) {
 // ============================================================================
 // handleTemplateValidate authorization tests
 // ============================================================================
+
+func TestTemplateAuthz_Validate_MemberAllowedOnGlobal(t *testing.T) {
+	// Hub members have template.read via the hub-member-read-all policy
+	// (seed.go:200), so a hub member who is NOT the owner still passes the
+	// ActionRead gate on a global template. This test verifies the authz
+	// gate evaluates correctly — the request proceeds past authz and fails
+	// later (no storage), not at 403.
+	srv, s, _, _, _ := setupTemplateAuthzTest(t)
+	tpl := createAuthzTestTemplate(t, s, "global-val", store.TemplateScopeGlobal, "", "other-owner-id")
+
+	rec := doRequestAsUser(t, srv, &store.User{
+		ID:          tid("tpl-alice"),
+		Email:       "tpl-alice@test.com",
+		DisplayName: "Alice",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}, http.MethodGet, "/api/v1/templates/"+tpl.ID+"/validate", nil)
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"hub member should pass the authz gate for global template validate (template.read granted); got: %s", rec.Body.String())
+	assert.NotEqual(t, http.StatusUnauthorized, rec.Code,
+		"hub member should not get 401; got: %s", rec.Body.String())
+}
 
 func TestTemplateAuthz_Validate_NonMemberDenied(t *testing.T) {
 	srv, s, alice, bob, project := setupTemplateAuthzTest(t)
