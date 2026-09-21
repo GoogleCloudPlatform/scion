@@ -61,6 +61,7 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread } from '../../client/chat-unread.js';
 import { isFeatureEnabled, NATIVE_CHAT_V2_FLAG } from '../../utils/feature-flags.js';
+import { openTerminal, terminalHref } from '../../client/open-terminal.js';
 import { hashColor, getInitials } from '../shared/chat/chat-avatar.js';
 import '../shared/chat/chat-thread.js';
 
@@ -2883,6 +2884,13 @@ export class ScionPageChat extends LitElement {
     return '';
   }
 
+  /** Look up the project ID for an agent DM peer. */
+  private getAgentProjectId(peerId: string): string {
+    const agent = this.v2AgentMembers.find((a) => a.id === peerId);
+    if (agent?.projectId) return agent.projectId;
+    return this.v2Conversation?.projectId || '';
+  }
+
   /**
    * Back chevron shown only on mobile, where the neighbouring panels are
    * off-screen and otherwise reachable only by an undiscoverable swipe.
@@ -3039,6 +3047,43 @@ export class ScionPageChat extends LitElement {
           class="header-actions"
           style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;"
         >
+          ${conv.isDM && conv.peerKind === 'agent' && conv.peerId
+            ? html`
+                <sl-tooltip content="Open terminal">
+                  <sl-icon-button
+                    name="terminal"
+                    label="Open terminal"
+                    href=${terminalHref(conv.peerId)}
+                    @click=${(e: MouseEvent) => {
+                      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)
+                        return;
+                      e.preventDefault();
+                      openTerminal(conv.peerId);
+                    }}
+                  ></sl-icon-button>
+                </sl-tooltip>
+                ${this.getAgentProjectId(conv.peerId)
+                  ? html`
+                      <sl-tooltip content="Open in graph">
+                        <sl-icon-button
+                          name="diagram-3"
+                          label="Open in graph"
+                          href=${`/agents/graph?project=${encodeURIComponent(this.getAgentProjectId(conv.peerId))}&focus=${encodeURIComponent(conv.peerId)}`}
+                          @click=${(e: MouseEvent) => {
+                            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)
+                              return;
+                            e.preventDefault();
+                            const projectId = this.getAgentProjectId(conv.peerId);
+                            navigateTo(
+                              `/agents/graph?project=${encodeURIComponent(projectId)}&focus=${encodeURIComponent(conv.peerId)}`
+                            );
+                          }}
+                        ></sl-icon-button>
+                      </sl-tooltip>
+                    `
+                  : nothing}
+              `
+            : nothing}
           <sl-tooltip content=${this.density === 'dense' ? 'Comfortable view' : 'Dense view'}>
             <sl-icon-button
               name=${this.density === 'dense' ? 'arrows-angle-expand' : 'arrows-angle-contract'}
