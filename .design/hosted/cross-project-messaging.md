@@ -747,26 +747,28 @@ inbound handler (agent-to-agent direct route) and the outbound handler
 this operation. The operation performs all admission checks before any side
 effects, then persists, publishes, and dispatches:
 
+Adapters resolve conversations (resolve-or-create DM) before calling the
+operation — `ConversationID` is an input field on `AgentDMInput`.
+
 1. Rate limiting (aggregate ceiling; type-class relabelling cannot buy extra)
-2. Foreign attachment rejection at admission — non-empty attachments on
-   cross-project DMs are rejected before ingestion, not silently dropped
-3. Authorization — `authorizeAgentMessage` evaluates the mode matrix for
+2. Authorization — `authorizeAgentMessage` evaluates the mode matrix for
    same-project sends and the full cross-project gate sequence for external
    sends: Hub enabled (authoritative store read), sender mode `hub`, target
    mode `project` or `hub`, destination project inbound policy, and
    origin-human membership where required
+3. Foreign attachment rejection at admission — non-empty attachments on
+   cross-project DMs are rejected before ingestion, not silently dropped
 4. Wake — for suspended single-agent targets only; the operation resumes the
    agent and waits for readiness before dispatching. Wake runs after all
    admission checks so that denied requests cannot resume an agent. Running
    agents are not restarted; stopped agents are rejected; group and human
    targets do not trigger wake
-5. Conversation resolution (resolve-or-create DM)
-6. Body-free audit record at admission
-7. Message persistence as transient "pending"
-8. Observer publication (structured message to conversation subscribers)
-9. Dispatch to target agent runtime
-10. Post-dispatch state transition: "dispatched" on broker acceptance,
-    "failed" on definite rejection, "pending" retained on ambiguous outcome
+5. Body-free audit record at admission
+6. Message persistence as transient "pending"
+7. Observer publication (structured message to conversation subscribers)
+8. Dispatch to target agent runtime
+9. Post-dispatch state transition: "dispatched" on broker acceptance,
+   "failed" on definite rejection, "pending" retained on ambiguous outcome
 
 ### Three-outcome delivery model
 

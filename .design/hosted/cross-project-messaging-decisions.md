@@ -246,8 +246,9 @@ limit explicit and actionable.
 
 **Consequence**: `ExecuteAgentDM` checks for non-empty `Attachments` on
 cross-project sends and returns an `AgentDMError` with code
-`cross_project_content_unauthorized`. Text-only DMs proceed normally.
-The attachment transfer feature is an intended future extension.
+`unsupported_capability` and reason `cross_project_attachment_unsupported`.
+Text-only DMs proceed normally. The attachment transfer feature is an
+intended future extension.
 
 **Implementation**: #1687 (#1700 fork PR).
 
