@@ -17,10 +17,12 @@
 /**
  * Pure layout state module for the terminal workspace.
  *
- * Tracks independent preset assignments (single, two-columns, two-rows, four)
- * with protection: ordinary terminal opens and rail clicks modify ONLY the
- * single-pane slot. Multi-pane presets are changed exclusively through explicit
- * placement. No DOM, Lit, xterm, or session-registry dependencies.
+ * Tracks independent preset assignments (single, two-columns, two-rows, four).
+ * Navigation (select/rail clicks) modifies ONLY the single-pane slot.
+ * Opening a new agent (open()) fills the first empty slot in the active multi
+ * preset when capacity is available, or overflows to single when at capacity.
+ * Multi-pane presets are also changed through explicit placement.
+ * No DOM, Lit, xterm, or session-registry dependencies.
  */
 
 export type TerminalLayout = 'single' | 'two-columns' | 'two-rows' | 'four';
@@ -90,23 +92,72 @@ export class TerminalLayoutManager {
   }
 
   /**
-   * Open/select a session: sets single[0] and active to 'single'.
-   * NEVER mutates twoColumns, twoRows, or four.
+   * Open/add a new session. Checks whether the current multi preset is at
+   * capacity (every slot filled). When at capacity, overflows to single so the
+   * new agent is immediately visible. When the active preset is a multi layout
+   * with available (null) slots, the new agent is placed into the first empty
+   * slot so it becomes immediately visible. If the session is already assigned
+   * in the active preset, delegates to select() without duplicating.
+   * In single mode, delegates to select().
+   *
+   * Multi-pane slot assignments are NEVER cleared on overflow — the user can
+   * switch back to the prior preset and see the original grid.
    */
   open(sessionKey: string): void {
-    this.select(sessionKey);
+    const preset = this.state.active;
+    const slots = this.getPresetSlots(preset);
+    const atCapacity = preset !== 'single' && slots.every((s) => s !== null);
+
+    if (atCapacity) {
+      // Overflow: switch to single to show the new agent.
+      // Multi-pane assignments are preserved.
+      this.zoomed = null;
+      this.commit({
+        ...this.state,
+        active: 'single',
+        single: [sessionKey],
+      });
+    } else if (preset !== 'single') {
+      // Multi preset with available slot(s).
+      // If the session is already placed in this preset, just select (no duplicate).
+      if (slots.includes(sessionKey)) {
+        this.select(sessionKey);
+        return;
+      }
+      // Fill the first empty (null) slot.
+      const emptyIndex = slots.findIndex((s) => s === null);
+      if (emptyIndex !== -1) {
+        const updated = [...slots] as (string | null)[];
+        updated[emptyIndex] = sessionKey;
+        this.zoomed = null;
+        this.commit({
+          ...this.state,
+          ...this.withPresetSlots(preset, updated),
+          single: [sessionKey],
+        });
+      } else {
+        // No empty slot found (shouldn't happen since not at capacity, but safe fallback).
+        this.select(sessionKey);
+      }
+    } else {
+      // Single mode: just select.
+      this.select(sessionKey);
+    }
   }
 
   /**
-   * Select a session: sets single[0] and active to 'single'.
-   * NEVER mutates twoColumns, twoRows, or four.
+   * Select a session: sets single[0] without changing the active preset.
+   *
+   * Used for navigation between existing sessions (rail clicks, coordinator
+   * requests). Unlike open(), select() NEVER mutates multi-pane preset
+   * assignments (twoColumns, twoRows, four). The user switches presets
+   * explicitly via setLayout().
    */
   select(sessionKey: string): void {
     // Cancel zoom on any navigation action.
     this.zoomed = null;
     this.commit({
       ...this.state,
-      active: 'single',
       single: [sessionKey],
     });
   }

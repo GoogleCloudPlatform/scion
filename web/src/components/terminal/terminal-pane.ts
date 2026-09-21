@@ -1022,7 +1022,12 @@ export class ScionTerminalPane extends LitElement {
     // has its final dimensions (below the toolbar).
     await new Promise((resolve) => requestAnimationFrame(resolve));
     signal.throwIfAborted();
-    if (!this.measurable()) {
+    if (this.measurable()) {
+      // Container is already laid out — fit immediately.
+      this.fitAddon.fit();
+    } else if (!this.hidden) {
+      // Pane is visible but container isn't measurable yet (e.g. mid-layout).
+      // Wait for the ResizeObserver or reveal() to signal readiness.
       await new Promise<void>((resolve, reject) => {
         const abort = (): void => {
           this.layoutReady = null;
@@ -1036,9 +1041,12 @@ export class ScionTerminalPane extends LitElement {
         };
         signal.addEventListener('abort', abort, { once: true });
       });
+      signal.throwIfAborted();
+      this.fitAddon.fit();
     }
-    signal.throwIfAborted();
-    this.fitAddon.fit();
+    // else: pane is hidden — skip fit, use default 80×24 dimensions.
+    // reveal() will call fitAddon.fit() and sendResize() when the pane
+    // becomes visible, updating both the local terminal and the remote PTY.
 
     // Clipboard key bindings & CSI u extended keys — xterm.js inside Shadow DOM
     // needs explicit handling for these since it doesn't natively emit CSI u

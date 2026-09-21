@@ -630,7 +630,7 @@ test('preset rendering shows correct number of pane slots for each preset', asyn
   expect(singleVisible + singlePH).toBe(1);
 });
 
-test('fifth-agent open switches to single; choosing four restores earlier grid', async ({
+test('fifth-agent open overflows to single when four-pane at capacity; four restores grid', async ({
   page,
 }) => {
   const fiveAgents: Record<string, AgentFixture> = {
@@ -642,10 +642,9 @@ test('fifth-agent open switches to single; choosing four restores earlier grid',
   };
   const socket = await setup(page, true, true, fiveAgents);
 
-  // Open 4 agents and place them in the grid
+  // Open 4 agents
   await page.goto(`/terminals/${agent}`);
   await expect.poll(() => socket.attaches).toBe(1);
-
   await navigateToTerminal(page, agentB);
   await expect.poll(() => socket.attaches).toBe(2);
   await navigateToTerminal(page, agentC);
@@ -653,25 +652,199 @@ test('fifth-agent open switches to single; choosing four restores earlier grid',
   await navigateToTerminal(page, agentD);
   await expect.poll(() => socket.attaches).toBe(4);
 
-  // Multi-pane presets start with null slots — populated only via place() (P2.3 drag-drop).
-  // open()/select() only sets single[0]. So the four-grid has 4 empty slots.
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(4);
 
-  // Verify: switch to four, get 4 placeholder slots
+  // Place all 4 into four-grid so it is at capacity
+  await placeInPreset(page, keys[0], 'four', 0);
+  await placeInPreset(page, keys[1], 'four', 1);
+  await placeInPreset(page, keys[2], 'four', 2);
+  await placeInPreset(page, keys[3], 'four', 3);
+
+  // Switch to four — all 4 panes visible, no placeholders
   await clickPreset(page, 'four');
   await expect.poll(() => activePreset(page)).toBe('four');
-  const fourPH = await placeholderCount(page);
-  expect(fourPH).toBe(4);
+  await expect.poll(() => visiblePaneCount(page)).toBe(4);
+  await expect.poll(() => placeholderCount(page)).toBe(0);
 
-  // Open 5th agent — this calls open() which switches to single
+  // Open 5th agent — four-pane is at capacity → overflow to single
   await navigateToTerminal(page, agentE);
   await expect.poll(() => socket.attaches).toBe(5);
   await expect.poll(() => activePreset(page)).toBe('single');
   await expect.poll(() => visiblePaneCount(page)).toBe(1);
 
-  // Switch back to four — grid should still have 4 placeholder slots (unchanged)
+  // Switch back to four — original grid restored with all 4 panes
   await clickPreset(page, 'four');
   await expect.poll(() => activePreset(page)).toBe('four');
-  await expect.poll(() => placeholderCount(page)).toBe(4);
+  await expect.poll(() => visiblePaneCount(page)).toBe(4);
+  await expect.poll(() => placeholderCount(page)).toBe(0);
+});
+
+test('open with empty four-pane slots does not overflow and places agent in visible slot', async ({
+  page,
+}) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'a1', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'a2', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open first agent — active is single, so open → select branch
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Switch to four — agent is not in four's slots yet
+  await clickPreset(page, 'four');
+  await expect.poll(() => activePreset(page)).toBe('four');
+
+  // Record placeholder count before opening second agent
+  const phBefore = await placeholderCount(page);
+
+  // Open second agent — four has empty slots, no overflow
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+  await expect.poll(() => activePreset(page)).toBe('four');
+
+  // The new agent must be visible (placed in a slot), not hidden
+  const agentBVisible = await page.evaluate((id) => {
+    const panes = document.querySelectorAll<
+      HTMLElement & { session: { state: { agentId: string } } | null }
+    >('#terminal-workspace scion-terminal-pane');
+    for (const p of panes) {
+      if (p.session?.state.agentId === id) {
+        return !p.hidden && p.style.display !== 'none';
+      }
+    }
+    return false;
+  }, agentB);
+  expect(agentBVisible).toBe(true);
+
+  // Placeholder count should have decreased by at least 1
+  const phAfter = await placeholderCount(page);
+  expect(phAfter).toBeLessThan(phBefore);
+
+  // The agent must have a slot index (grid position)
+  const keys = await getPaneSessionKeys(page);
+  const agentBKey = keys.find((k) => k !== keys[0]);
+  if (agentBKey) {
+    const pos = await getPaneGridPosition(page, agentBKey);
+    expect(pos).not.toBeNull();
+    expect(pos!.visible).toBe(true);
+  }
+
+  // Only one attach per agent (gen1), no extra attaches
+  expect(socket.attaches).toBe(2);
+  expect(socket.closes).toBe(0);
+});
+
+test('open with available slot places agent in visible slot (full flow)', async ({ page }) => {
+  const threeAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'a1', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'a2', phase: 'running', projectId: 'proj' },
+    [agentC]: { id: agentC, name: 'a3', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, threeAgents);
+
+  // Open first agent
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Switch to four-pane preset
+  await clickPreset(page, 'four');
+  await expect.poll(() => activePreset(page)).toBe('four');
+
+  // Open second agent — fills first empty slot in four
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  // Place agents explicitly so we have a known state:
+  // slots 0/1 occupied, slots 2/3 empty
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(2);
+  await placeInPreset(page, keys[0], 'four', 0);
+  await placeInPreset(page, keys[1], 'four', 1);
+
+  // Verify: 2 visible panes, 2 placeholders
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+  await expect.poll(() => placeholderCount(page)).toBe(2);
+
+  // Open third agent through navigateToTerminal (production UI path)
+  await navigateToTerminal(page, agentC);
+  await expect.poll(() => socket.attaches).toBe(3);
+
+  // Preset stays four (not overflow to single)
+  await expect.poll(() => activePreset(page)).toBe('four');
+
+  // Agent should be placed in slot 2 (first empty)
+  await expect.poll(() => visiblePaneCount(page)).toBe(3);
+  await expect.poll(() => placeholderCount(page)).toBe(1);
+
+  // Verify the new agent is visible and has a grid position
+  const agentCVisible = await page.evaluate((id) => {
+    const panes = document.querySelectorAll<
+      HTMLElement & { session: { state: { agentId: string } } | null }
+    >('#terminal-workspace scion-terminal-pane');
+    for (const p of panes) {
+      if (p.session?.state.agentId === id) {
+        return !p.hidden && p.style.display !== 'none';
+      }
+    }
+    return false;
+  }, agentC);
+  expect(agentCVisible).toBe(true);
+
+  // Verify gen1 (only one attach per agent, no extra attaches)
+  expect(socket.attaches).toBe(3);
+  expect(socket.closes).toBe(0);
+
+  // Verify the layout state has the third agent in slot 2
+  const fourState = await page.evaluate(() => {
+    type WorkspaceEl = HTMLElement & {
+      workspaceRoot?: {
+        layoutManager: { getState: () => { four: (string | null)[] } };
+      };
+    };
+    const host = document.querySelector('#terminal-workspace') as WorkspaceEl;
+    return host.workspaceRoot!.layoutManager.getState().four;
+  });
+  // Slots 0 and 1 occupied (by keys[0] and keys[1]), slot 2 occupied (agent-c), slot 3 empty
+  expect(fourState[0]).toBe(keys[0]);
+  expect(fourState[1]).toBe(keys[1]);
+  expect(fourState[2]).not.toBeNull();
+  expect(fourState[3]).toBeNull();
+});
+
+test('navigating existing agent while multi active preserves preset (#1701)', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open both agents
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(2);
+
+  // Place both in two-columns so it is at capacity
+  await placeInPreset(page, keys[0], 'two-columns', 0);
+  await placeInPreset(page, keys[1], 'two-columns', 1);
+
+  // Switch to two-columns
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+
+  // Navigate to existing agent alpha via rail click — select, not open
+  await page.getByRole('button', { name: /alpha in proj/ }).click();
+
+  // Preset stays two-columns — navigation does not overflow (#1701)
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+  expect(socket.attaches).toBe(2);
 });
 
 test('socket identity preserved across preset switches — no new connections', async ({ page }) => {
@@ -1544,7 +1717,7 @@ test('keyboard "Place in pane" action places session without drag gesture', asyn
   expect(socket.closes).toBe(0);
 });
 
-test('ordinary rail click still opens in single, not place', async ({ page }) => {
+test('ordinary rail click preserves active preset, does not place (#1701)', async ({ page }) => {
   const socket = await setup(page);
 
   await page.goto(`/terminals/${agent}`);
@@ -1555,12 +1728,11 @@ test('ordinary rail click still opens in single, not place', async ({ page }) =>
   await expect.poll(() => activePreset(page)).toBe('two-columns');
   await expect.poll(() => placeholderCount(page)).toBe(2);
 
-  // Click the rail entry name/button (the select button) to go back
+  // Click the rail entry name/button (the select button)
   await page.getByRole('button', { name: /isolated-agent in fixture-project/ }).click();
 
-  // Should navigate via open() which sets active='single'
-  await expect.poll(() => activePreset(page)).toBe('single');
-  await expect.poll(() => visiblePaneCount(page)).toBe(1);
+  // open() no longer clobbers the preset — stays in two-columns (#1701)
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
 
   // Two-columns should still have empty slots (not affected by rail click)
   const twoColSlots = await page.evaluate(() => {
@@ -2441,10 +2613,11 @@ test.describe('combined regression journey', () => {
     expect(socket.closes).toBe(0);
 
     // ---------------------------------------------------------------
-    // Step 3: Open a 5th agent → layout switches to single-pane
+    // Step 3: Open a 5th agent → overflow to single (four at capacity)
     // ---------------------------------------------------------------
     await navigateToTerminal(page, agentE);
     await expect.poll(() => socket.attaches).toBe(5);
+    // open() detects four-pane at capacity → overflow to single
     await expect.poll(() => activePreset(page)).toBe('single');
     await expect.poll(() => visiblePaneCount(page)).toBe(1);
 
@@ -2452,8 +2625,11 @@ test.describe('combined regression journey', () => {
     await expect(page.getByRole('button', { name: 'Terminals (5)' })).toBeVisible();
 
     // ---------------------------------------------------------------
-    // Step 4: Select 4-pane layout → original four restored unchanged
+    // Step 4: Switch back to four — grid assignments preserved after overflow
     // ---------------------------------------------------------------
+    // Already in single after overflow — verify, then switch to four
+    await expect.poll(() => activePreset(page)).toBe('single');
+    await expect.poll(() => visiblePaneCount(page)).toBe(1);
     await clickPreset(page, 'four');
     await expect.poll(() => activePreset(page)).toBe('four');
     await expect.poll(() => visiblePaneCount(page)).toBe(4);
@@ -3182,6 +3358,126 @@ test('empty multi-pane layout shows dotted placeholders for all slots', async ({
   await expect.poll(() => activePreset(page)).toBe('single');
   await expect(page.locator('.terminal-empty')).toBeVisible();
   await expect.poll(() => placeholderCount(page)).toBe(0);
+});
+
+test('multi-pane preset with zero terminals survives agent navigation (#1701)', async ({
+  page,
+}) => {
+  // Start with one available agent but zero terminals open
+  await setup(page, true, true, {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+  });
+  await page.goto('/terminals');
+  await expect(page.locator('#terminal-workspace')).toBeVisible();
+
+  // Select four-pane layout — should show 4 placeholders
+  await clickPreset(page, 'four');
+  await expect.poll(() => activePreset(page)).toBe('four');
+  await expect.poll(() => placeholderCount(page)).toBe(4);
+  await expect(page.locator('.terminal-empty')).toBeHidden();
+
+  // Navigate to an agent terminal — open() fills the first empty slot in four
+  await navigateToTerminal(page, agent);
+
+  // #1701 fix: active preset must stay 'four', NOT revert to 'single'
+  await expect.poll(() => activePreset(page)).toBe('four');
+  // Agent placed into four[0], remaining 3 slots still empty → 3 placeholders
+  await expect.poll(() => placeholderCount(page)).toBe(3);
+  // The opened agent must be visible (not hidden)
+  await expect.poll(() => visiblePaneCount(page)).toBe(1);
+
+  // Navigate back to bare /terminals
+  await page.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('nav-click', { detail: { path: '/terminals' } }))
+  );
+
+  // Layout must still be 'four' — agent stays in slot, placeholders remain
+  await expect.poll(() => activePreset(page)).toBe('four');
+  await expect.poll(() => placeholderCount(page)).toBe(3);
+  await expect(page.locator('.terminal-empty')).toBeHidden();
+});
+
+test('placeholders render in all multi-pane presets before any terminal is added (#1701)', async ({
+  page,
+}) => {
+  // Zero agents available
+  await setup(page, true, true, {});
+  await page.goto('/terminals');
+  await expect(page.locator('#terminal-workspace')).toBeVisible();
+
+  // Initial state: single layout, zero agents — shows empty message
+  await expect(page.locator('.terminal-empty')).toBeVisible();
+  await expect.poll(() => placeholderCount(page)).toBe(0);
+
+  // Switch to each multi-pane preset and verify placeholders
+  for (const [preset, count] of [
+    ['two-columns', 2],
+    ['two-rows', 2],
+    ['four', 4],
+  ] as const) {
+    await clickPreset(page, preset);
+    await expect.poll(() => activePreset(page)).toBe(preset);
+    await expect.poll(() => placeholderCount(page)).toBe(count);
+    await expect(page.locator('.terminal-empty')).toBeHidden();
+  }
+});
+
+test('explicit single-mode selection works after multi-pane preset (#1701)', async ({ page }) => {
+  // Start with one agent
+  const socket = await setup(page, true, true, {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+  });
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // Switch to four-pane
+  await clickPreset(page, 'four');
+  await expect.poll(() => activePreset(page)).toBe('four');
+
+  // select() via navigation does NOT switch to single (#1701)
+  await navigateToTerminal(page, agent);
+  await expect.poll(() => activePreset(page)).toBe('four');
+
+  // But clicking the single layout button DOES switch to single
+  await clickPreset(page, 'single');
+  await expect.poll(() => activePreset(page)).toBe('single');
+  await expect.poll(() => visiblePaneCount(page)).toBe(1);
+  await expect.poll(() => placeholderCount(page)).toBe(0);
+});
+
+test('selecting agent in multi-pane mode does not collapse to single (#1701)', async ({ page }) => {
+  const twoAgents: Record<string, AgentFixture> = {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'proj' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'proj' },
+  };
+  const socket = await setup(page, true, true, twoAgents);
+
+  // Open both agents
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  // Switch to two-columns
+  await clickPreset(page, 'two-columns');
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+
+  // Place agents into the two-column slots
+  const keys = await getPaneSessionKeys(page);
+  expect(keys.length).toBe(2);
+  await placeInPreset(page, keys[0], 'two-columns', 0);
+  await placeInPreset(page, keys[1], 'two-columns', 1);
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+
+  // Navigate to one agent — should NOT collapse to single
+  await navigateToTerminal(page, agent);
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
+
+  // Navigate to the other agent — still in two-columns
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => activePreset(page)).toBe('two-columns');
+  await expect.poll(() => visiblePaneCount(page)).toBe(2);
 });
 
 test('focused pane has data-focused attribute in multi-pane view', async ({ page }) => {
