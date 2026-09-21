@@ -736,7 +736,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			}
 		} else {
 			// JSON output with full result
-			outputJSON(result)
+			return outputJSON(result)
 		}
 		return nil
 	}

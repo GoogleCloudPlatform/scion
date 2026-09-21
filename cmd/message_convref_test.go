@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -960,4 +961,68 @@ func TestSendMessageViaConversation_ConvRef_DispatchError(t *testing.T) {
 	err = sendMessageViaConversation(hubCtx, ref, "should fail", false, false, nil)
 	require.Error(t, err, "policy denial should propagate as error")
 	assert.Contains(t, err.Error(), "failed to send message to conv:")
+}
+
+// TestSendMessageViaConversation_ConvRef_JSONOutputContent verifies that
+// JSON output mode emits the full OutboundMessageResult with message_id,
+// status, recipient, and recipient_id fields. CPM cutover (#1693) AC-4.
+func TestSendMessageViaConversation_ConvRef_JSONOutputContent(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	// Enable JSON output mode
+	oldFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = oldFormat }()
+
+	projectID := "proj-convref-json-output"
+	server, _, _ := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	convID := "aaaaaaaa-bbbb-cccc-dddd-666666666666"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	// Capture stdout to verify JSON content
+	oldStdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stdout = w
+
+	err = sendMessageViaConversation(hubCtx, ref, "json output test", false, false, nil)
+
+	// Restore stdout and read captured output
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	require.NoError(t, err)
+
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+	_ = r.Close()
+	output := string(buf[:n])
+
+	// Parse the JSON output and verify structure
+	var result hubclient.OutboundMessageResult
+	jsonErr := json.Unmarshal([]byte(output), &result)
+	require.NoError(t, jsonErr, "output must be valid JSON; got: %s", output)
+
+	// Verify fields from the mock server response
+	assert.Equal(t, "msg-test-outbound", result.MessageID, "message_id should match mock response")
+	assert.Equal(t, "sent", result.Status, "status should match mock response")
+	assert.Equal(t, "uid-test", result.RecipientID, "recipient_id should match mock response")
 }
