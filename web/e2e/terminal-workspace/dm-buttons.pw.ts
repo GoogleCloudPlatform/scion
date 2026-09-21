@@ -257,6 +257,7 @@ async function injectMembers(page: Page, opts: { agentProjectId?: string } = {})
 
 test.describe('DM header navigation icons (#1702)', () => {
   test('terminal button present in agent DM header', async ({ page }) => {
+    // Unit-level setup: v2AgentMembers injected directly, not loaded via API
     await setupChat(page);
 
     // The terminal button appears immediately — it only needs the DM
@@ -266,6 +267,7 @@ test.describe('DM header navigation icons (#1702)', () => {
   });
 
   test('graph button present in agent DM header when agent has projectId', async ({ page }) => {
+    // Unit-level setup: v2AgentMembers injected directly, not loaded via API
     await setupChat(page);
 
     // Wait for the page to render — terminal button is the first gate
@@ -280,6 +282,7 @@ test.describe('DM header navigation icons (#1702)', () => {
   });
 
   test('graph button href contains correct project and focus params', async ({ page }) => {
+    // Unit-level setup: v2AgentMembers injected directly, not loaded via API
     await setupChat(page);
     await expect(
       page.locator('sl-icon-button[name="terminal"][label="Open terminal"]')
@@ -297,6 +300,7 @@ test.describe('DM header navigation icons (#1702)', () => {
   });
 
   test('terminal button navigates to /terminals/{agentId}', async ({ page }) => {
+    // Unit-level setup: v2AgentMembers injected directly, not loaded via API
     await setupChat(page);
 
     const terminalBtn = page.locator('sl-icon-button[name="terminal"][label="Open terminal"]');
@@ -312,7 +316,45 @@ test.describe('DM header navigation icons (#1702)', () => {
     await expect(page).toHaveURL(`/terminals/${agentId}`);
   });
 
+  test('graph button click navigates to graph URL', async ({ page }) => {
+    // Unit-level setup: v2AgentMembers injected directly, not loaded via API
+    await setupChat(page);
+    await expect(
+      page.locator('sl-icon-button[name="terminal"][label="Open terminal"]')
+    ).toBeVisible({ timeout: 10000 });
+    await injectMembers(page);
+
+    const graphBtn = page.locator('sl-icon-button[name="diagram-3"][label="Open in graph"]');
+    await expect(graphBtn).toBeVisible({ timeout: 5000 });
+
+    // Click the graph button — the @click handler calls navigateTo()
+    await graphBtn.click();
+
+    // The URL should now contain the graph route with project and focus params
+    await expect(page).toHaveURL(/\/agents\/graph\?project=/);
+    expect(page.url()).toContain(`project=${encodeURIComponent(projectId)}`);
+    expect(page.url()).toContain(`&focus=${encodeURIComponent(agentId)}`);
+  });
+
+  test('terminal button navigates to legacy route when workspace flag is OFF', async ({ page }) => {
+    // Unit-level setup: v2AgentMembers injected directly, not loaded via API
+    await setupChat(page, { terminalWorkspace: false });
+
+    const terminalBtn = page.locator('sl-icon-button[name="terminal"][label="Open terminal"]');
+    await expect(terminalBtn).toBeVisible({ timeout: 10000 });
+
+    // With the terminal workspace flag OFF, href should be the legacy route
+    const href = await terminalBtn.getAttribute('href');
+    expect(href).toBe(`/agents/${agentId}/terminal`);
+
+    // Click the terminal button — it dispatches a nav-click event that the
+    // router handles, navigating to the legacy terminal route
+    await terminalBtn.click();
+    await expect(page).toHaveURL(`/agents/${agentId}/terminal`);
+  });
+
   test('graph button absent when agent has no projectId', async ({ page }) => {
+    // Unit-level setup: v2AgentMembers injected directly, not loaded via API
     await setupChat(page, { agentHasProject: false });
     await expect(
       page.locator('sl-icon-button[name="terminal"][label="Open terminal"]')
@@ -327,6 +369,7 @@ test.describe('DM header navigation icons (#1702)', () => {
   });
 
   test('DM buttons do not appear in a thread (non-DM) conversation', async ({ page }) => {
+    // Unit-level setup: v2AgentMembers injected directly, not loaded via API
     // Navigate to a space view (not a DM)
     await setupChat(page, { navigateToDM: false });
     await page.goto('/chat/fixture-proj');
@@ -350,6 +393,7 @@ test.describe('DM header navigation icons (#1702)', () => {
 
 test.describe('Member list graph icon (#1702)', () => {
   test('agent entry shows diagram-3 icon instead of box-arrow-up-right', async ({ page }) => {
+    // Unit-level setup: v2AgentMembers injected directly, not loaded via API
     await setupChat(page);
     await expect(
       page.locator('sl-icon-button[name="terminal"][label="Open terminal"]')
@@ -371,6 +415,7 @@ test.describe('Member list graph icon (#1702)', () => {
   });
 
   test('graph link has correct href with project and focus params', async ({ page }) => {
+    // Unit-level setup: v2AgentMembers injected directly, not loaded via API
     await setupChat(page);
     await expect(
       page.locator('sl-icon-button[name="terminal"][label="Open terminal"]')
@@ -390,7 +435,31 @@ test.describe('Member list graph icon (#1702)', () => {
     expect(href).toContain(`&focus=${encodeURIComponent(agentId)}`);
   });
 
+  test('graph link click navigates to graph URL', async ({ page }) => {
+    // Unit-level setup: v2AgentMembers injected directly, not loaded via API
+    await setupChat(page);
+    await expect(
+      page.locator('sl-icon-button[name="terminal"][label="Open terminal"]')
+    ).toBeVisible({ timeout: 10000 });
+    await injectMembers(page);
+
+    const membersPanel = page.locator('scion-chat-members');
+    await expect(membersPanel).toBeVisible({ timeout: 5000 });
+
+    const graphLink = membersPanel.locator('a.agent-graph');
+    await expect(graphLink).toBeVisible({ timeout: 5000 });
+
+    // Click the graph link — the @click handler calls navigateTo()
+    await graphLink.click();
+
+    // The URL should now contain the graph route with project and focus params
+    await expect(page).toHaveURL(/\/agents\/graph\?project=/);
+    expect(page.url()).toContain(`project=${encodeURIComponent(projectId)}`);
+    expect(page.url()).toContain(`&focus=${encodeURIComponent(agentId)}`);
+  });
+
   test('graph icon absent in member list when agent has no projectId', async ({ page }) => {
+    // Unit-level setup: v2AgentMembers injected directly, not loaded via API
     await setupChat(page, { agentHasProject: false });
     await expect(
       page.locator('sl-icon-button[name="terminal"][label="Open terminal"]')
@@ -405,6 +474,52 @@ test.describe('Member list graph icon (#1702)', () => {
     // The graph link should NOT be present (gated on a.projectId)
     const graphLink = membersPanel.locator('a.agent-graph');
     await expect(graphLink).toHaveCount(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Producer-Path Test — members loaded via mocked API
+// ---------------------------------------------------------------------------
+
+test.describe('Producer-path member loading (#1702)', () => {
+  test('graph button appears after members load via API (no injection)', async ({ page }) => {
+    // Producer-path: members loaded via mocked API, not injected
+    //
+    // This test exercises the production loading path where v2AgentMembers
+    // is populated by loadHubMembers() fetching /api/v1/agents, rather than
+    // being injected directly onto the LitElement.  We navigate to /chat
+    // first so loadHubMembers() runs (it only fires when no conversation is
+    // selected), then click the agent in the sidebar to open the DM within
+    // the same component instance — preserving the loaded member data.
+    await setupChat(page, { navigateToDM: false });
+    await page.goto('/chat');
+
+    // Wait for the members panel to render with the agent loaded via API
+    const membersPanel = page.locator('scion-chat-members');
+    await expect(membersPanel).toBeVisible({ timeout: 10000 });
+
+    // The agent member entry should appear once loadHubMembers() resolves
+    const agentEntry = membersPanel.locator('.member-item').filter({ hasText: 'test-agent' });
+    await expect(agentEntry).toBeVisible({ timeout: 10000 });
+
+    // Click the agent entry to open the DM — this triggers handleMemberClick
+    // → openDM() which uses pushState (no page recreation), so the
+    // v2AgentMembers loaded by loadHubMembers() remain in memory.
+    await agentEntry.click();
+
+    // Wait for the DM header to render with the terminal button
+    const terminalBtn = page.locator('sl-icon-button[name="terminal"][label="Open terminal"]');
+    await expect(terminalBtn).toBeVisible({ timeout: 10000 });
+
+    // The graph button should appear because getAgentProjectId() finds the
+    // agent in v2AgentMembers (populated by the API, not injected)
+    const graphBtn = page.locator('sl-icon-button[name="diagram-3"][label="Open in graph"]');
+    await expect(graphBtn).toBeVisible({ timeout: 5000 });
+
+    // Verify the href is correct
+    const href = await graphBtn.getAttribute('href');
+    expect(href).toContain(`project=${encodeURIComponent(projectId)}`);
+    expect(href).toContain(`&focus=${encodeURIComponent(agentId)}`);
   });
 });
 
