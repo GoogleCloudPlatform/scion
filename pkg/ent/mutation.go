@@ -45127,8 +45127,8 @@ type RuntimeBrokerMutation struct {
 	supported_harnesses            *string
 	resources                      *string
 	runtimes                       *string
-	labels                         *string
-	annotations                    *string
+	labels                         *map[string]string
+	annotations                    *map[string]string
 	endpoint                       *string
 	created_by                     *string
 	auto_provide                   *bool
@@ -45780,12 +45780,12 @@ func (m *RuntimeBrokerMutation) ResetRuntimes() {
 }
 
 // SetLabels sets the "labels" field.
-func (m *RuntimeBrokerMutation) SetLabels(s string) {
-	m.labels = &s
+func (m *RuntimeBrokerMutation) SetLabels(value map[string]string) {
+	m.labels = &value
 }
 
 // Labels returns the value of the "labels" field in the mutation.
-func (m *RuntimeBrokerMutation) Labels() (r string, exists bool) {
+func (m *RuntimeBrokerMutation) Labels() (r map[string]string, exists bool) {
 	v := m.labels
 	if v == nil {
 		return
@@ -45796,7 +45796,7 @@ func (m *RuntimeBrokerMutation) Labels() (r string, exists bool) {
 // OldLabels returns the old "labels" field's value of the RuntimeBroker entity.
 // If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *RuntimeBrokerMutation) OldLabels(ctx context.Context) (v string, err error) {
+func (m *RuntimeBrokerMutation) OldLabels(ctx context.Context) (v map[string]string, err error) {
 	if !m.op.Is(OpUpdateOne) {
 		return v, errors.New("OldLabels is only allowed on UpdateOne operations")
 	}
@@ -45829,12 +45829,12 @@ func (m *RuntimeBrokerMutation) ResetLabels() {
 }
 
 // SetAnnotations sets the "annotations" field.
-func (m *RuntimeBrokerMutation) SetAnnotations(s string) {
-	m.annotations = &s
+func (m *RuntimeBrokerMutation) SetAnnotations(value map[string]string) {
+	m.annotations = &value
 }
 
 // Annotations returns the value of the "annotations" field in the mutation.
-func (m *RuntimeBrokerMutation) Annotations() (r string, exists bool) {
+func (m *RuntimeBrokerMutation) Annotations() (r map[string]string, exists bool) {
 	v := m.annotations
 	if v == nil {
 		return
@@ -45845,7 +45845,7 @@ func (m *RuntimeBrokerMutation) Annotations() (r string, exists bool) {
 // OldAnnotations returns the old "annotations" field's value of the RuntimeBroker entity.
 // If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *RuntimeBrokerMutation) OldAnnotations(ctx context.Context) (v string, err error) {
+func (m *RuntimeBrokerMutation) OldAnnotations(ctx context.Context) (v map[string]string, err error) {
 	if !m.op.Is(OpUpdateOne) {
 		return v, errors.New("OldAnnotations is only allowed on UpdateOne operations")
 	}
@@ -46642,14 +46642,14 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 		m.SetRuntimes(v)
 		return nil
 	case runtimebroker.FieldLabels:
-		v, ok := value.(string)
+		v, ok := value.(map[string]string)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetLabels(v)
 		return nil
 	case runtimebroker.FieldAnnotations:
-		v, ok := value.(string)
+		v, ok := value.(map[string]string)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}

@@ -726,8 +726,14 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	unmarshalRawJSON(b.Capabilities, &sb.Capabilities)
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
-	unmarshalRawJSON(b.Labels, &sb.Labels)
-	unmarshalRawJSON(b.Annotations, &sb.Annotations)
+	sb.Labels = b.Labels
+	if sb.Labels == nil {
+		sb.Labels = make(map[string]string)
+	}
+	sb.Annotations = b.Annotations
+	if sb.Annotations == nil {
+		sb.Annotations = make(map[string]string)
+	}
 	return sb
 }
 
@@ -746,8 +752,8 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		SetAutoProvide(b.AutoProvide).
 		SetCapabilities(marshalRawJSON(b.Capabilities)).
 		SetRuntimes(marshalRawJSON(b.Profiles)).
-		SetLabels(marshalRawJSON(b.Labels)).
-		SetAnnotations(marshalRawJSON(b.Annotations))
+		SetLabels(b.Labels).
+		SetAnnotations(b.Annotations)
 
 	if b.Version != "" {
 		create.SetVersion(b.Version)
@@ -846,8 +852,8 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetLastHeartbeat(b.LastHeartbeat).
 			SetCapabilities(marshalRawJSON(b.Capabilities)).
 			SetRuntimes(marshalRawJSON(b.Profiles)).
-			SetLabels(marshalRawJSON(b.Labels)).
-			SetAnnotations(marshalRawJSON(b.Annotations)).
+			SetLabels(b.Labels).
+			SetAnnotations(b.Annotations).
 			SetEndpoint(b.Endpoint).
 			SetAutoProvide(b.AutoProvide).
 			SetUpdated(now).

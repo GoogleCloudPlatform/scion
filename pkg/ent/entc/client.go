@@ -198,7 +198,10 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 		migrate.WithDropIndex(false),
 	}
 	if client.Driver().Dialect() == dialect.Postgres {
-		migrateOpts = append(migrateOpts, entschema.WithApplyHook(skipExistingRelations))
+		migrateOpts = append(migrateOpts,
+			entschema.WithApplyHook(normalizeBrokerLabels),
+			entschema.WithApplyHook(skipExistingRelations),
+		)
 	}
 	return client.Schema.Create(ctx, migrateOpts...)
 }
@@ -237,5 +240,26 @@ func skipExistingRelations(next entschema.Applier) entschema.Applier {
 			}
 		}
 		return nil
+	})
+}
+
+// normalizeBrokerLabels is an Ent schema ApplyHook that runs before the
+// migration plan to normalize empty-string labels/annotations to NULL on
+// runtime_brokers. A bare empty string cannot be cast to jsonb, so this
+// prevents a failure when AutoMigrate's ALTER COLUMN changes the column
+// type from text to jsonb. The WHERE clause uses ::text so the comparison
+// remains valid on subsequent runs when the column is already jsonb.
+func normalizeBrokerLabels(next entschema.Applier) entschema.Applier {
+	return entschema.ApplyFunc(func(ctx context.Context, conn dialect.ExecQuerier, plan *atlasmigrate.Plan) error {
+		for _, stmt := range []string{
+			`UPDATE runtime_brokers SET labels = NULL WHERE labels::text = ''`,
+			`UPDATE runtime_brokers SET annotations = NULL WHERE annotations::text = ''`,
+		} {
+			if err := conn.Exec(ctx, stmt, []any{}, nil); err != nil {
+				// Table may not exist yet on a fresh database — that is fine.
+				slog.Debug("normalizeBrokerLabels: skipping", "stmt", stmt, "err", err)
+			}
+		}
+		return next.Apply(ctx, conn, plan)
 	})
 }
