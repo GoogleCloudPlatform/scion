@@ -1,9 +1,7 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": { "noEmit": true, "types": ["vite/client"] },
-  "files": [
-    "../../node_modules/@shoelace-style/shoelace/dist/components/alert/alert.d.ts"
-  ],
+  "files": ["../../node_modules/@shoelace-style/shoelace/dist/components/alert/alert.d.ts"],
   "include": [
     "terminal-layout.test.ts",
     "terminal-sessions.test.ts",
