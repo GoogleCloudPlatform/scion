@@ -3067,7 +3067,10 @@ export class ScionPageChat extends LitElement {
                         <sl-icon-button
                           name="diagram-3"
                           label="Open in graph"
-                          @click=${() => {
+                          href=${`/agents/graph?project=${encodeURIComponent(this.getAgentProjectId(conv.peerId))}&focus=${encodeURIComponent(conv.peerId)}`}
+                          @click=${(e: MouseEvent) => {
+                            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                            e.preventDefault();
                             const projectId = this.getAgentProjectId(conv.peerId);
                             navigateTo(
                               `/agents/graph?project=${encodeURIComponent(projectId)}&focus=${encodeURIComponent(conv.peerId)}`
