@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -24,7 +25,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -47,7 +50,7 @@ func TestGracefulShutdownExec_ClosePTYBeforeKill(t *testing.T) {
 	require.NoError(t, cmd.Start())
 
 	// gracefulShutdownExec should close ptmx and reap the process
-	gracefulShutdownExec(cmd, ptmx, "test-graceful")
+	gracefulShutdownExec(cmd, ptmx, "test-graceful", "", "", "", "")
 
 	// Verify: PTY fd is closed
 	_, err = ptmx.Stat()
@@ -61,11 +64,11 @@ func TestGracefulShutdownExec_ClosePTYBeforeKill(t *testing.T) {
 // handles nil cmd and process gracefully.
 func TestGracefulShutdownExec_NilProcess(t *testing.T) {
 	// Should not panic with nil cmd
-	gracefulShutdownExec(nil, nil, "nil-test")
+	gracefulShutdownExec(nil, nil, "nil-test", "", "", "", "")
 
 	// Should not panic with cmd but nil process
 	cmd := &exec.Cmd{}
-	gracefulShutdownExec(cmd, nil, "nil-process-test")
+	gracefulShutdownExec(cmd, nil, "nil-process-test", "", "", "", "")
 }
 
 // TestGracefulShutdownExec_AlreadyExited verifies that gracefulShutdownExec
@@ -75,7 +78,7 @@ func TestGracefulShutdownExec_AlreadyExited(t *testing.T) {
 	require.NoError(t, cmd.Run()) // Run waits for exit
 
 	// Process already exited and reaped — should not block or panic
-	gracefulShutdownExec(cmd, nil, "already-exited")
+	gracefulShutdownExec(cmd, nil, "already-exited", "", "", "", "")
 	require.NotNil(t, cmd.ProcessState)
 }
 
@@ -96,7 +99,7 @@ func TestGracefulShutdownExec_ProcessExitsOnPTYClose(t *testing.T) {
 	_ = stdinR.Close() // Close read end in parent
 
 	start := time.Now()
-	gracefulShutdownExec(cmd, stdinW, "pty-close-test")
+	gracefulShutdownExec(cmd, stdinW, "pty-close-test", "", "", "", "")
 	elapsed := time.Since(start)
 
 	require.NotNil(t, cmd.ProcessState, "process must be reaped")
@@ -1299,4 +1302,689 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 
 	_ = browserConn.Close()
 	_ = serverConn.Close()
+}
+
+// --- Nonce-based container-side cleanup tests ---
+
+// clearSCIONEnv removes all inherited SCION_* environment variables to prevent
+// interference with nonce-based PID identification tests.
+func clearSCIONEnv(t *testing.T) {
+	t.Helper()
+	for _, env := range os.Environ() {
+		if key, _, ok := strings.Cut(env, "="); ok && strings.HasPrefix(key, "SCION_") {
+			os.Unsetenv(key)
+		}
+	}
+}
+
+// filterSCIONEnv returns env with all SCION_* entries removed.
+func filterSCIONEnv(env []string) []string {
+	var filtered []string
+	for _, e := range env {
+		if key, _, ok := strings.Cut(e, "="); ok && strings.HasPrefix(key, "SCION_") {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
+}
+
+// nonceTestAdapter creates a shell adapter script that simulates docker exec
+// for testing. The adapter:
+//   - Exports -e KEY=VALUE args into the process environment (Docker -e behavior)
+//   - For tmux commands: redirects through the fixture tmux socket
+//   - For sh commands: runs locally (used by cleanup PID lookup)
+func nonceTestAdapter(t *testing.T, dir string) string {
+	t.Helper()
+	adapter := filepath.Join(dir, "runtime-exec")
+	require.NoError(t, os.WriteFile(adapter, []byte(`#!/bin/sh
+set -eu
+shift  # exec
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -it|-i|-t) shift ;;
+        -e) export "$2"; shift 2 ;;
+        --user) shift 2 ;;
+        *) break ;;
+    esac
+done
+shift  # containerID
+case "$1" in
+    tmux) shift; exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@" ;;
+    *) exec "$@" ;;
+esac
+`), 0700))
+	return adapter
+}
+
+// TestPTYCleanup_IsDockerCompatibleRuntime tests the runtime guard function.
+func TestPTYCleanup_IsDockerCompatibleRuntime(t *testing.T) {
+	require.True(t, isDockerCompatibleRuntime("docker"))
+	require.True(t, isDockerCompatibleRuntime("container"))
+	require.True(t, isDockerCompatibleRuntime(""))
+	require.False(t, isDockerCompatibleRuntime("kubernetes"))
+	require.False(t, isDockerCompatibleRuntime("k8s"))
+	require.False(t, isDockerCompatibleRuntime("cloudrun-sandbox"))
+}
+
+// TestPTYCleanup_GenerateAttachNonce tests nonce generation.
+func TestPTYCleanup_GenerateAttachNonce(t *testing.T) {
+	clearSCIONEnv(t)
+
+	n1, err := generateAttachNonce()
+	require.NoError(t, err)
+	require.Len(t, n1, 32, "nonce must be 32 hex chars (16 bytes)")
+
+	_, err = hex.DecodeString(n1)
+	require.NoError(t, err, "nonce must be valid hex")
+
+	n2, err := generateAttachNonce()
+	require.NoError(t, err)
+	require.NotEqual(t, n1, n2, "consecutive nonces must differ")
+}
+
+// TestPTYCleanup_NonceInjectionDockerExec verifies that startDockerExec injects
+// the nonce env var into docker exec args for Docker-compatible runtimes,
+// covering both LocalPTYSession and StreamPTYHandler.
+func TestPTYCleanup_NonceInjectionDockerExec(t *testing.T) {
+	tmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("requires tmux in PATH")
+	}
+	clearSCIONEnv(t)
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TMUX", "")
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "tmux.sock")
+
+	out, err := exec.Command(tmux, "-S", socket, "-f", "/dev/null",
+		"new-session", "-d", "-s", "scion", "-x", "80", "-y", "24", "exec cat").CombinedOutput()
+	require.NoError(t, err, string(out))
+	t.Cleanup(func() { _ = exec.Command(tmux, "-S", socket, "kill-server").Run() })
+
+	adapter := nonceTestAdapter(t, dir)
+	dockerBin := filepath.Join(dir, "docker")
+	require.NoError(t, os.Symlink(adapter, dockerBin))
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("TW_CLEANUP_TMUX", tmux)
+	t.Setenv("TW_CLEANUP_SOCKET", socket)
+
+	t.Run("LocalPTYSession", func(t *testing.T) {
+		accepted := make(chan *websocket.Conn, 1)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			u := websocket.Upgrader{}
+			conn, err := u.Upgrade(w, r, nil)
+			if err == nil {
+				accepted <- conn
+			}
+		}))
+		t.Cleanup(srv.Close)
+		browserConn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+		require.NoError(t, err)
+		serverConn := <-accepted
+		t.Cleanup(func() { _ = browserConn.Close(); _ = serverConn.Close() })
+
+		session := newLocalPTYSession(context.Background(), "nonce-test", "test-container", "docker", "scion", "", serverConn, 80, 24, nil, nil)
+		err = session.startDockerExec()
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			if session.cmd != nil && session.cmd.Process != nil {
+				_ = session.cmd.Process.Kill()
+				_ = session.cmd.Wait()
+			}
+			if session.ptyMaster != nil {
+				_ = session.ptyMaster.Close()
+			}
+		})
+
+		require.NotEmpty(t, session.attachNonce)
+		require.Len(t, session.attachNonce, 32)
+		argsStr := strings.Join(session.cmd.Args, " ")
+		require.Contains(t, argsStr, "-e SCION_ATTACH_NONCE="+session.attachNonce)
+	})
+
+	t.Run("StreamPTYHandler", func(t *testing.T) {
+		brokerConn, hubConn, cleanup := newWSPair(t)
+		defer cleanup()
+		client := &ControlChannelClient{conn: brokerConn, connected: true, streams: make(map[string]*StreamHandler)}
+		readerDone := make(chan struct{})
+		go func() {
+			defer close(readerDone)
+			for {
+				var msg json.RawMessage
+				if err := hubConn.ReadJSON(&msg); err != nil {
+					return
+				}
+			}
+		}()
+		defer func() { _ = hubConn.Close(); <-readerDone }()
+
+		handler := &StreamHandler{
+			streamID: "nonce-inject-1", slug: "fixture",
+			dataCh: make(chan []byte, 4), resizeCh: make(chan [2]int, 4),
+			closeCh: make(chan struct{}),
+		}
+		client.streamMu.Lock()
+		client.streams["nonce-inject-1"] = handler
+		client.streamMu.Unlock()
+
+		h := NewStreamPTYHandler(client, handler, "test-container", "docker", "scion", "", 80, 24, nil, nil)
+		err := h.startDockerExec()
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			h.cancel()
+			if h.cmd != nil && h.cmd.Process != nil {
+				_ = h.cmd.Process.Kill()
+				_ = h.cmd.Wait()
+			}
+			if h.ptyMaster != nil {
+				_ = h.ptyMaster.Close()
+			}
+		})
+
+		require.NotEmpty(t, h.attachNonce)
+		require.Len(t, h.attachNonce, 32)
+		argsStr := strings.Join(h.cmd.Args, " ")
+		require.Contains(t, argsStr, "-e SCION_ATTACH_NONCE="+h.attachNonce)
+	})
+}
+
+// TestPTYCleanup_NonceNotInjectedNonDocker verifies that non-Docker runtimes
+// do not generate a nonce.
+func TestPTYCleanup_NonceNotInjectedNonDocker(t *testing.T) {
+	require.False(t, isDockerCompatibleRuntime("kubernetes"))
+	require.False(t, isDockerCompatibleRuntime("k8s"))
+	require.False(t, isDockerCompatibleRuntime("cloudrun-sandbox"))
+
+	brokerConn, hubConn, cleanup := newWSPair(t)
+	defer cleanup()
+	client := &ControlChannelClient{conn: brokerConn, connected: true, streams: make(map[string]*StreamHandler)}
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			var msg json.RawMessage
+			if err := hubConn.ReadJSON(&msg); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() { _ = hubConn.Close(); <-readerDone }()
+
+	handler := &StreamHandler{
+		streamID: "k8s-no-nonce", slug: "test",
+		dataCh: make(chan []byte, 1), resizeCh: make(chan [2]int, 1),
+		closeCh: make(chan struct{}),
+	}
+
+	h := NewStreamPTYHandler(client, handler, "k8s-container", "kubernetes", "scion", "", 80, 24, nil, nil)
+	require.Empty(t, h.attachNonce, "non-Docker runtime must not have nonce")
+	h.cancel()
+}
+
+// TestPTYCleanup_NoncePIDLookup tests finding a tmux attach process by nonce.
+func TestPTYCleanup_NoncePIDLookup(t *testing.T) {
+	tmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("requires tmux in PATH")
+	}
+	clearSCIONEnv(t)
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TMUX", "")
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "tmux.sock")
+
+	out, err := exec.Command(tmux, "-S", socket, "-f", "/dev/null",
+		"new-session", "-d", "-s", "scion", "-x", "80", "-y", "24", "exec cat").CombinedOutput()
+	require.NoError(t, err, string(out))
+	t.Cleanup(func() { _ = exec.Command(tmux, "-S", socket, "kill-server").Run() })
+
+	adapter := nonceTestAdapter(t, dir)
+	t.Setenv("TW_CLEANUP_TMUX", tmux)
+	t.Setenv("TW_CLEANUP_SOCKET", socket)
+
+	nonce, err := generateAttachNonce()
+	require.NoError(t, err)
+
+	// Start a tmux attach with the nonce in its environment
+	attachCmd := exec.Command(tmux, "-S", socket, "attach-session", "-t", "scion")
+	attachCmd.Env = append(filterSCIONEnv(os.Environ()),
+		"TERM=xterm-256color",
+		"SCION_ATTACH_NONCE="+nonce,
+	)
+	ptmx, err := pty.Start(attachCmd)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = ptmx.Close()
+		if attachCmd.ProcessState == nil {
+			_ = attachCmd.Process.Kill()
+		}
+		_ = attachCmd.Wait()
+	})
+
+	expectedPID := strconv.Itoa(attachCmd.Process.Pid)
+
+	// Wait for the attach to be visible
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		o, e := exec.CommandContext(ctx, tmux, "-S", socket, "list-clients", "-t", "scion").CombinedOutput()
+		return e == nil && strings.TrimSpace(string(o)) != ""
+	}, 5*time.Second, 50*time.Millisecond)
+
+	t.Run("ExactMatch", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		pid, err := findContainerPIDByNonce(ctx, adapter, "test-container", "scion", nonce)
+		require.NoError(t, err)
+		require.Equal(t, expectedPID, pid, "must find exact tmux attach PID")
+	})
+
+	t.Run("NoMatchWrongNonce", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		pid, err := findContainerPIDByNonce(ctx, adapter, "test-container", "scion", "nonexistent0000nonce1234")
+		require.NoError(t, err)
+		require.Empty(t, pid, "wrong nonce must not match")
+	})
+
+	t.Run("EmptyOnMultipleMatches", func(t *testing.T) {
+		// Start a second attach with the SAME nonce
+		attachCmd2 := exec.Command(tmux, "-S", socket, "attach-session", "-t", "scion")
+		attachCmd2.Env = append(filterSCIONEnv(os.Environ()),
+			"TERM=xterm-256color",
+			"SCION_ATTACH_NONCE="+nonce,
+		)
+		ptmx2, err := pty.Start(attachCmd2)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_ = ptmx2.Close()
+			if attachCmd2.ProcessState == nil {
+				_ = attachCmd2.Process.Kill()
+			}
+			_ = attachCmd2.Wait()
+		})
+
+		// Wait for second client
+		require.Eventually(t, func() bool {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			o, e := exec.CommandContext(ctx, tmux, "-S", socket,
+				"list-clients", "-t", "scion", "-F", "#{client_pid}").CombinedOutput()
+			if e != nil {
+				return false
+			}
+			lines := strings.Split(strings.TrimSpace(string(o)), "\n")
+			return len(lines) >= 2
+		}, 5*time.Second, 50*time.Millisecond)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		pid, err := findContainerPIDByNonce(ctx, adapter, "test-container", "scion", nonce)
+		require.NoError(t, err)
+		require.Empty(t, pid, "multiple matches must return empty (no-signal-on-ambiguity)")
+	})
+}
+
+// TestPTYCleanup_NonceStartTimeParsing tests /proc/stat start-time parsing,
+// including comm fields with spaces (e.g., "tmux: client").
+func TestPTYCleanup_NonceStartTimeParsing(t *testing.T) {
+	tmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("requires tmux in PATH")
+	}
+	clearSCIONEnv(t)
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TMUX", "")
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "tmux.sock")
+
+	out, err := exec.Command(tmux, "-S", socket, "-f", "/dev/null",
+		"new-session", "-d", "-s", "scion", "-x", "80", "-y", "24", "exec cat").CombinedOutput()
+	require.NoError(t, err, string(out))
+	t.Cleanup(func() { _ = exec.Command(tmux, "-S", socket, "kill-server").Run() })
+
+	adapter := nonceTestAdapter(t, dir)
+	t.Setenv("TW_CLEANUP_TMUX", tmux)
+	t.Setenv("TW_CLEANUP_SOCKET", socket)
+
+	// Start tmux attach — its comm field may contain spaces ("tmux: client")
+	attachCmd := exec.Command(tmux, "-S", socket, "attach-session", "-t", "scion")
+	attachCmd.Env = append(filterSCIONEnv(os.Environ()), "TERM=xterm-256color")
+	ptmx, err := pty.Start(attachCmd)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = ptmx.Close()
+		if attachCmd.ProcessState == nil {
+			_ = attachCmd.Process.Kill()
+		}
+		_ = attachCmd.Wait()
+	})
+
+	pid := strconv.Itoa(attachCmd.Process.Pid)
+
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		o, e := exec.CommandContext(ctx, tmux, "-S", socket, "list-clients", "-t", "scion").CombinedOutput()
+		return e == nil && strings.TrimSpace(string(o)) != ""
+	}, 5*time.Second, 50*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	startTime, err := readContainerPIDStartTime(ctx, adapter, "test-container", "scion", pid)
+	require.NoError(t, err)
+	require.NotEmpty(t, startTime, "start time must be non-empty")
+
+	// Verify it's a valid number (start time is a monotonic tick count)
+	_, err = strconv.ParseUint(startTime, 10, 64)
+	require.NoError(t, err, "start time must be a valid unsigned integer")
+
+	// Log the /proc/pid/stat so we can see the comm field format
+	statData, readErr := os.ReadFile(fmt.Sprintf("/proc/%s/stat", pid))
+	if readErr == nil {
+		t.Logf("PID %s stat: %s", pid, strings.TrimSpace(string(statData)))
+	}
+}
+
+// TestPTYCleanup_NonceVerifyAndKill tests the verify-and-kill flow.
+func TestPTYCleanup_NonceVerifyAndKill(t *testing.T) {
+	clearSCIONEnv(t)
+	dir := t.TempDir()
+	adapter := nonceTestAdapter(t, dir)
+	t.Setenv("TW_CLEANUP_TMUX", "/bin/true")
+	t.Setenv("TW_CLEANUP_SOCKET", "/dev/null")
+
+	t.Run("MatchingStartTime", func(t *testing.T) {
+		cmd := exec.Command("sleep", "300")
+		require.NoError(t, cmd.Start())
+		pid := strconv.Itoa(cmd.Process.Pid)
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		startTime, err := readContainerPIDStartTime(ctx, adapter, "test-container", "scion", pid)
+		require.NoError(t, err)
+		require.NotEmpty(t, startTime)
+
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel2()
+		killContainerPID(ctx2, adapter, "test-container", "scion", pid, startTime)
+
+		// Process should be dead (SIGTERM)
+		err = cmd.Wait()
+		require.Error(t, err, "process should have been killed by SIGTERM")
+	})
+
+	t.Run("MismatchedStartTime", func(t *testing.T) {
+		cmd := exec.Command("sleep", "300")
+		require.NoError(t, cmd.Start())
+		pid := strconv.Itoa(cmd.Process.Pid)
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		killContainerPID(ctx, adapter, "test-container", "scion", pid, "999999999999")
+
+		// Process should still be alive
+		err := cmd.Process.Signal(syscall.Signal(0))
+		require.NoError(t, err, "process must survive when start time doesn't match")
+	})
+}
+
+// TestPTYCleanup_NonceThreeClientTopology tests that nonce-based cleanup kills
+// only the targeted client. Three tmux clients are started: broker attach A
+// (with nonce A), broker attach B (with nonce B), and a CLI client (no nonce).
+// Cleanup for nonce A must kill only A; B and CLI must survive.
+func TestPTYCleanup_NonceThreeClientTopology(t *testing.T) {
+	tmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("requires tmux in PATH")
+	}
+	clearSCIONEnv(t)
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TMUX", "")
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "tmux.sock")
+	tmuxCommand := func(args ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, tmux, append([]string{"-S", socket}, args...)...).CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+
+	_, err = tmuxCommand("-f", "/dev/null", "new-session", "-d", "-s", "scion", "-x", "80", "-y", "24", "exec cat")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = tmuxCommand("kill-server") })
+
+	adapter := nonceTestAdapter(t, dir)
+	dockerBin := filepath.Join(dir, "docker")
+	require.NoError(t, os.Symlink(adapter, dockerBin))
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("TW_CLEANUP_TMUX", tmux)
+	t.Setenv("TW_CLEANUP_SOCKET", socket)
+
+	nonceA, err := generateAttachNonce()
+	require.NoError(t, err)
+	nonceB, err := generateAttachNonce()
+	require.NoError(t, err)
+
+	// Client A (broker attach A, with nonce A)
+	cmdA := exec.Command(tmux, "-S", socket, "attach-session", "-t", "scion")
+	cmdA.Env = append(filterSCIONEnv(os.Environ()),
+		"TERM=xterm-256color",
+		"SCION_ATTACH_NONCE="+nonceA,
+		"TW_CLEANUP_TMUX="+tmux,
+		"TW_CLEANUP_SOCKET="+socket,
+		"PATH="+dir+":"+os.Getenv("PATH"),
+	)
+	ptmxA, err := pty.Start(cmdA)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = ptmxA.Close()
+		if cmdA.ProcessState == nil {
+			_ = cmdA.Process.Kill()
+		}
+		_ = cmdA.Wait()
+	})
+
+	// Client B (broker attach B, with nonce B)
+	cmdB := exec.Command(tmux, "-S", socket, "attach-session", "-t", "scion")
+	cmdB.Env = append(filterSCIONEnv(os.Environ()),
+		"TERM=xterm-256color",
+		"SCION_ATTACH_NONCE="+nonceB,
+		"TW_CLEANUP_TMUX="+tmux,
+		"TW_CLEANUP_SOCKET="+socket,
+		"PATH="+dir+":"+os.Getenv("PATH"),
+	)
+	ptmxB, err := pty.Start(cmdB)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = ptmxB.Close()
+		if cmdB.ProcessState == nil {
+			_ = cmdB.Process.Kill()
+		}
+		_ = cmdB.Wait()
+	})
+
+	// Client C (CLI client, no nonce)
+	cmdC := exec.Command(tmux, "-S", socket, "attach-session", "-t", "scion")
+	cmdC.Env = append(filterSCIONEnv(os.Environ()), "TERM=xterm-256color")
+	ptmxC, err := pty.Start(cmdC)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = ptmxC.Close()
+		if cmdC.ProcessState == nil {
+			_ = cmdC.Process.Kill()
+		}
+		_ = cmdC.Wait()
+	})
+
+	// Wait for all three clients
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
+		if err != nil {
+			return false
+		}
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		return len(lines) == 3
+	}, 5*time.Second, 50*time.Millisecond, "all three clients must be attached")
+
+	pidA := strconv.Itoa(cmdA.Process.Pid)
+	pidB := strconv.Itoa(cmdB.Process.Pid)
+	pidC := strconv.Itoa(cmdC.Process.Pid)
+
+	// Run cleanup for A's nonce — should kill only A
+	cleanupContainerAttach("docker", "test-container", "scion", nonceA)
+
+	// Verify: A is killed (no longer a tmux client)
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
+		if err != nil {
+			return false
+		}
+		return !strings.Contains(out, pidA)
+	}, 5*time.Second, 50*time.Millisecond, "client A must be killed")
+
+	// Verify: B and C survive (still in client list)
+	out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
+	require.NoError(t, err)
+	require.Contains(t, out, pidB, "client B must survive")
+	require.Contains(t, out, pidC, "client C must survive")
+
+	// Verify: exactly 2 clients remain
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.Equal(t, 2, len(lines), "exactly 2 clients must remain")
+}
+
+// TestPTYCleanup_NonceFailurePaths tests that all failure modes fall back
+// gracefully to host-side cleanup.
+func TestPTYCleanup_NonceFailurePaths(t *testing.T) {
+	clearSCIONEnv(t)
+
+	t.Run("EmptyNonce", func(t *testing.T) {
+		cleanupContainerAttach("docker", "any-container", "scion", "")
+	})
+
+	t.Run("NonDockerRuntime", func(t *testing.T) {
+		cleanupContainerAttach("kubernetes", "any-container", "scion", "some-nonce")
+		cleanupContainerAttach("k8s", "any-container", "scion", "some-nonce")
+		cleanupContainerAttach("cloudrun-sandbox", "any-container", "scion", "some-nonce")
+	})
+
+	t.Run("PIDLookupFails", func(t *testing.T) {
+		dir := t.TempDir()
+		failAdapter := filepath.Join(dir, "docker")
+		require.NoError(t, os.WriteFile(failAdapter, []byte("#!/bin/sh\nexit 1\n"), 0700))
+		t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+		cleanupContainerAttach("docker", "any", "scion", "test-nonce-5678")
+	})
+}
+
+// TestPTYCleanup_NonceFullLifecycle tests the complete attach → cancel →
+// cleanupContainerAttach → gracefulShutdownExec flow for StreamPTYHandler.
+func TestPTYCleanup_NonceFullLifecycle(t *testing.T) {
+	tmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("requires tmux in PATH")
+	}
+	clearSCIONEnv(t)
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TMUX", "")
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "tmux.sock")
+	tmuxCommand := func(args ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, tmux, append([]string{"-S", socket}, args...)...).CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+
+	_, err = tmuxCommand("-f", "/dev/null", "new-session", "-d", "-s", "scion", "-x", "80", "-y", "24", "exec cat")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = tmuxCommand("kill-server") })
+
+	panePID, err := tmuxCommand("display-message", "-p", "-t", "scion", "#{pane_pid}")
+	require.NoError(t, err)
+
+	adapter := nonceTestAdapter(t, dir)
+	dockerBin := filepath.Join(dir, "docker")
+	require.NoError(t, os.Symlink(adapter, dockerBin))
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("TW_CLEANUP_TMUX", tmux)
+	t.Setenv("TW_CLEANUP_SOCKET", socket)
+
+	brokerConn, hubConn, wscleanup := newWSPair(t)
+	defer wscleanup()
+	client := &ControlChannelClient{conn: brokerConn, connected: true, streams: make(map[string]*StreamHandler)}
+
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			var msg json.RawMessage
+			if err := hubConn.ReadJSON(&msg); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() { _ = hubConn.Close(); <-readerDone }()
+
+	streamID := "nonce-lifecycle-1"
+	handler := &StreamHandler{
+		streamID: streamID, slug: "fixture",
+		dataCh: make(chan []byte, 4), resizeCh: make(chan [2]int, 4),
+		closeCh: make(chan struct{}),
+	}
+	client.streamMu.Lock()
+	client.streams[streamID] = handler
+	client.streamMu.Unlock()
+
+	bridge := NewStreamPTYHandler(client, handler, "test-container", "docker", "scion", "", 80, 24, nil, nil)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = bridge.Run()
+	}()
+
+	// Wait for attach
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_width}x#{client_height}")
+		return err == nil && out == "80x24"
+	}, 5*time.Second, 20*time.Millisecond)
+
+	// Verify nonce was generated
+	require.NotEmpty(t, bridge.attachNonce, "nonce must be generated for docker runtime")
+
+	// Close the stream → triggers cleanup
+	payload, err := json.Marshal(wsprotocol.NewStreamCloseMessage(streamID, "browser closed", 0))
+	require.NoError(t, err)
+	require.NoError(t, client.handleStreamClose(payload))
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("bridge did not exit")
+	}
+
+	// Verify: process reaped
+	require.NotNil(t, bridge.cmd.ProcessState, "exec process must be reaped")
+
+	// Verify: tmux client cleaned up (nonce-based cleanup + graceful shutdown)
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
+		return err == nil && out == ""
+	}, 10*time.Second, 50*time.Millisecond,
+		"tmux client must be cleaned up after close")
+
+	// Verify: agent surrogate still alive
+	out, err := tmuxCommand("display-message", "-p", "-t", "scion", "#{pane_pid}:#{pane_dead}")
+	require.NoError(t, err)
+	require.Equal(t, panePID+":0", out, "agent must survive cleanup")
 }

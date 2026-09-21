@@ -17,6 +17,8 @@ package runtimebroker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -73,6 +75,149 @@ const (
 	processTermTimeout = 2 * time.Second
 )
 
+// isDockerCompatibleRuntime returns true for runtimes that support docker exec
+// -e for env injection and /proc access for PID lookup. Only docker and
+// container (Podman-compatible) runtimes qualify. K8s exec uses the
+// remotecommand API, CloudRun uses a sandbox binary — these have different exec
+// semantics and are excluded.
+func isDockerCompatibleRuntime(runtimeCmd string) bool {
+	return runtimeCmd == "docker" || runtimeCmd == "container" || runtimeCmd == ""
+}
+
+// generateAttachNonce generates a cryptographically random 32-character hex
+// string used as a per-attach process identity token. The nonce is injected
+// into the container-side process environment via docker exec -e, enabling
+// causal identification of the exact tmux client process at cleanup time.
+func generateAttachNonce() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// cleanupContainerAttach identifies and signals the container-side tmux client
+// process that this attach session owns, using the per-attach nonce for causal
+// identification.
+//
+// This runs BEFORE the host-side PTY close in gracefulShutdownExec. It uses a
+// fresh context (not the session's canceled context) with a bounded timeout.
+// All failures are non-fatal — the current host-side cleanup always runs.
+func cleanupContainerAttach(runtimeCmd, containerID, execUser, nonce string) {
+	if nonce == "" || !isDockerCompatibleRuntime(runtimeCmd) {
+		return
+	}
+	if runtimeCmd == "" {
+		runtimeCmd = "docker"
+	}
+
+	// Fresh context with bounded timeout. The session context is already
+	// canceled by the time gracefulShutdownExec runs.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Step 1: Find PID by nonce in /proc/*/environ
+	pid, err := findContainerPIDByNonce(ctx, runtimeCmd, containerID, execUser, nonce)
+	if err != nil || pid == "" {
+		return // No match or error — fall back to host-side cleanup
+	}
+
+	// Step 2: Read start time for PID recycling safety
+	startTime, err := readContainerPIDStartTime(ctx, runtimeCmd, containerID, execUser, pid)
+	if err != nil || startTime == "" {
+		return // Cannot verify identity — do nothing
+	}
+
+	// Step 3: Atomic verify-and-kill — re-read start time and signal in one exec
+	// to minimize TOCTOU window (still not eliminated — see design notes)
+	killContainerPID(ctx, runtimeCmd, containerID, execUser, pid, startTime)
+}
+
+// findContainerPIDByNonce searches /proc/*/environ inside the container for a
+// process whose environment contains the given nonce AND whose cmdline matches
+// *tmux*attach*. Returns the PID string if exactly one match is found, empty
+// string on zero or multiple matches (no-signal-on-ambiguity).
+func findContainerPIDByNonce(ctx context.Context, runtimeCmd, containerID, execUser, nonce string) (string, error) {
+	// grep -qz handles NUL-delimited environ entries.
+	// Filter: only match processes whose cmdline contains "tmux" AND
+	// "attach" to exclude children that inherited the env var.
+	script := `found=""
+for p in /proc/[0-9]*/environ; do
+  pid="${p#/proc/}"
+  pid="${pid%%/*}"
+  if grep -qz 'SCION_ATTACH_NONCE=` + nonce + `' "$p" 2>/dev/null; then
+    cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+    case "$cmd" in
+      *tmux*attach*)
+        if [ -n "$found" ]; then
+          echo ""
+          exit 0
+        fi
+        found="$pid"
+        ;;
+    esac
+  fi
+done
+echo "$found"`
+
+	cmd := exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID, "sh", "-c", script)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	pid := strings.TrimSpace(string(out))
+	if pid == "" {
+		return "", nil // No match or multiple matches
+	}
+	return pid, nil
+}
+
+// readContainerPIDStartTime reads the start time from /proc/<pid>/stat inside
+// the container. The start time (field 22) is used for PID recycling safety:
+// if the PID has been recycled, the start time will differ.
+//
+// IMPORTANT: /proc/<pid>/stat field 2 (comm) can contain spaces and
+// parentheses. The correct approach: find the LAST closing paren `)`, then
+// count space-delimited fields after it. Starttime is field 22, which is the
+// 20th field after the closing paren (fields 3-22 = 20 fields).
+func readContainerPIDStartTime(ctx context.Context, runtimeCmd, containerID, execUser, pid string) (string, error) {
+	// Safe parsing: find last ')' (end of comm field), then extract field 20
+	// after it (which is stat field 22 = starttime).
+	script := `stat=$(cat /proc/` + pid + `/stat 2>/dev/null) || exit 1
+rest="${stat##*) }"
+echo "$rest" | cut -d' ' -f20`
+
+	cmd := exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID, "sh", "-c", script)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// killContainerPID sends SIGTERM to a process inside the container after
+// verifying that its start time still matches the expected value. This
+// minimizes the TOCTOU window between PID verification and signaling by
+// combining both operations in a single docker exec shell script.
+//
+// The TOCTOU race is NOT eliminated — it is minimized. The PID could
+// theoretically be recycled between the shell's read of /proc/<pid>/stat and
+// the kill syscall. pidfd_open+pidfd_send_signal is not feasible via docker
+// exec shell scripts (see design doc). No signal on ambiguity.
+func killContainerPID(ctx context.Context, runtimeCmd, containerID, execUser, pid, expectedStartTime string) {
+	// Verify start_time still matches (minimize TOCTOU), then signal.
+	// If start_time does not match, the PID was recycled — do nothing.
+	script := `stat=$(cat /proc/` + pid + `/stat 2>/dev/null) || exit 0
+rest="${stat##*) }"
+current=$(echo "$rest" | cut -d' ' -f20)
+if [ "$current" = "` + expectedStartTime + `" ]; then
+  kill -TERM ` + pid + ` 2>/dev/null
+fi`
+
+	cmd := exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID, "sh", "-c", script)
+	_ = cmd.Run() // Best-effort, ignore errors
+}
+
 // gracefulShutdownExec shuts down a runtime exec process (docker exec, sandbox
 // exec) by closing the PTY master first — triggering a terminal hangup that the
 // container runtime can propagate to the container-side process — then
@@ -94,7 +239,13 @@ const (
 // same *os.File object, and Go's os.File.Close() uses an internal poll.FD that
 // tracks closed state — the second Close() returns os.ErrClosed without issuing
 // a second syscall.Close on the raw fd, so there is no fd-reuse race.
-func gracefulShutdownExec(cmd *exec.Cmd, ptyMaster *os.File, slug string) {
+func gracefulShutdownExec(cmd *exec.Cmd, ptyMaster *os.File, slug string,
+	runtimeCmd, containerID, execUser, attachNonce string) {
+
+	// NEW: Container-side cleanup before host-side PTY close.
+	// Uses fresh bounded context. All failures fall through to host cleanup.
+	cleanupContainerAttach(runtimeCmd, containerID, execUser, attachNonce)
+
 	// Step 1: Close PTY master — triggers SIGHUP on the slave side. For
 	// Docker exec, this breaks the stdio pipes, which Docker handles by
 	// sending SIGHUP to the container-side process.
@@ -455,6 +606,7 @@ type LocalPTYSession struct {
 	ptyMaster   *os.File
 	ptySlave    *os.File
 	writeMu     sync.Mutex
+	attachNonce string // Per-attach nonce for container-side PID identification (empty = disabled)
 
 	// K8s Go client for direct API exec
 	k8sConfig    *rest.Config
@@ -532,7 +684,8 @@ func (s *LocalPTYSession) Run() error {
 		// propagate the kill signal, a residual container-side tmux client
 		// may remain until the container restarts — this is a known gap
 		// pending UAT verification.
-		gracefulShutdownExec(s.cmd, s.ptyMaster, s.agentID)
+		gracefulShutdownExec(s.cmd, s.ptyMaster, s.agentID,
+			s.runtimeCmd, s.containerID, s.execUser, s.attachNonce)
 	}()
 
 	errCh := make(chan error, 2)
@@ -758,13 +911,27 @@ func (s *LocalPTYSession) startDockerExec() error {
 		return err
 	}
 
-	args := []string{
-		"exec", "-it",
-		"-e", "TERM=xterm-256color",
+	// Generate per-attach nonce for container-side PID identification.
+	// Only for Docker-compatible runtimes that support -e env injection.
+	if isDockerCompatibleRuntime(s.runtimeCmd) {
+		nonce, err := generateAttachNonce()
+		if err != nil {
+			// Nonce generation failure is not fatal — cleanup falls back to current behavior
+			slog.Debug("attach nonce generation failed, container cleanup disabled", "error", err)
+		} else {
+			s.attachNonce = nonce
+		}
+	}
+
+	args := []string{"exec", "-it"}
+	if s.attachNonce != "" {
+		args = append(args, "-e", "SCION_ATTACH_NONCE="+s.attachNonce)
+	}
+	args = append(args, "-e", "TERM=xterm-256color",
 		"--user", s.execUser,
 		s.containerID,
 		"tmux", "attach-session", "-t", "scion",
-	}
+	)
 
 	// Use exec.Command (NOT exec.CommandContext) so that context cancellation
 	// does not immediately SIGKILL the process. See gracefulShutdownExec.
@@ -870,6 +1037,7 @@ type StreamPTYHandler struct {
 	cmd         *exec.Cmd
 	ctx         context.Context
 	cancel      context.CancelFunc
+	attachNonce string // Per-attach nonce for container-side PID identification (empty = disabled)
 
 	// K8s Go client for direct API exec (avoids needing kubectl binary)
 	k8sConfig    *rest.Config
@@ -938,7 +1106,8 @@ func (h *StreamPTYHandler) Run() error {
 		// propagate the kill signal, a residual container-side tmux client
 		// may remain until the container restarts — this is a known gap
 		// pending UAT verification.
-		gracefulShutdownExec(h.cmd, h.ptyMaster, h.slug)
+		gracefulShutdownExec(h.cmd, h.ptyMaster, h.slug,
+			h.runtimeCmd, h.containerID, h.execUser, h.attachNonce)
 	}()
 
 	errCh := make(chan error, 2)
@@ -1189,12 +1358,27 @@ func (h *StreamPTYHandler) startDockerExec() error {
 		return err
 	}
 
-	args := []string{
-		"exec", "-it",
+	// Generate per-attach nonce for container-side PID identification.
+	// Only for Docker-compatible runtimes that support -e env injection.
+	if isDockerCompatibleRuntime(runtimeCmd) {
+		nonce, err := generateAttachNonce()
+		if err != nil {
+			// Nonce generation failure is not fatal — cleanup falls back to current behavior
+			slog.Debug("attach nonce generation failed, container cleanup disabled", "error", err)
+		} else {
+			h.attachNonce = nonce
+		}
+	}
+
+	args := []string{"exec", "-it"}
+	if h.attachNonce != "" {
+		args = append(args, "-e", "SCION_ATTACH_NONCE="+h.attachNonce)
+	}
+	args = append(args,
 		"--user", h.execUser,
 		h.containerID,
 		"tmux", "attach-session", "-t", "scion",
-	}
+	)
 
 	// Use exec.Command (NOT exec.CommandContext) so that context cancellation
 	// does not immediately SIGKILL the process. See gracefulShutdownExec.
