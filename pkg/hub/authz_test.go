@@ -1268,11 +1268,10 @@ func TestGetEffectivePermissions_PrincipalConstraintTargetingGroup(t *testing.T)
 	require.NoError(t, err)
 
 	// Create a group_closure constraint targeting b1-target-group that allows only agent.read.
-	groupIDStr := groupID
 	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
 		Name:               "b1-group-targeting-constraint",
 		SubjectKind:        store.ConstraintSubjectGroupClosure,
-		SubjectGroupID:     &groupIDStr,
+		SubjectGroupID:     &groupID,
 		ScopeType:          store.RoleScopeSystem,
 		MaximumPermissions: []string{"agent.read"},
 		Purpose:            "B1 test: group_closure constraint targeting group members",
