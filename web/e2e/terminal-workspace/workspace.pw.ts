@@ -3104,9 +3104,9 @@ test('terminal drag does not trigger file upload overlay on pane', async ({ page
   // isDragOver is a @state() reactive property, so we need to wait for Lit
   // to re-render after the dragenter event before checking the overlay.
   const fileDragShowsOverlay = await page.evaluate(async () => {
-    const pane = document.querySelector<
-      HTMLElement & { updateComplete: Promise<boolean> }
-    >('#terminal-workspace scion-terminal-pane:not([hidden])');
+    const pane = document.querySelector<HTMLElement & { updateComplete: Promise<boolean> }>(
+      '#terminal-workspace scion-terminal-pane:not([hidden])'
+    );
     if (!pane || !pane.shadowRoot) throw new Error('No visible pane');
 
     const dt = new DataTransfer();
