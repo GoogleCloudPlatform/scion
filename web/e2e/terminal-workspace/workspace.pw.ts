@@ -3481,6 +3481,50 @@ test('activity sort reorders entries by most recent activity first', async ({ pa
   await expect.poll(() => checkedSortValue(page)).toBe('activity');
 });
 
+test('activity sort handles mixed-precision ISO timestamps correctly', async ({ page }) => {
+  // Regression: localeCompare fails when timestamps mix whole seconds and
+  // fractional seconds because '.' < 'Z' lexicographically.  Numeric
+  // Date.parse comparison handles this correctly.
+  const agents: Record<string, AgentFixture> = {
+    [agent]: {
+      id: agent,
+      name: 'WholeSecond',
+      phase: 'running',
+      projectId: 'proj',
+      lastActivityEvent: '2026-09-21T01:00:00Z',
+    },
+    [agentB]: {
+      id: agentB,
+      name: 'Fractional',
+      phase: 'running',
+      projectId: 'proj',
+      lastActivityEvent: '2026-09-21T01:00:00.500Z',
+    },
+    [agentC]: {
+      id: agentC,
+      name: 'NoActivity',
+      phase: 'running',
+      projectId: 'proj',
+      // No lastActivityEvent — should sort last (oldest)
+    },
+  };
+  const socket = await setup(page, true, true, agents);
+
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+  await navigateToTerminal(page, agentC);
+  await expect.poll(() => socket.attaches).toBe(3);
+
+  await selectRailSort(page, 'activity');
+
+  // Fractional (500ms newer) first, WholeSecond second, NoActivity last
+  await expect
+    .poll(() => getRailAgentNames(page))
+    .toEqual(['Fractional', 'WholeSecond', 'NoActivity']);
+});
+
 test('sort preserves active rail selection', async ({ page }) => {
   const agents: Record<string, AgentFixture> = {
     [agent]: { id: agent, name: 'Zeta', phase: 'running', projectId: 'proj' },

@@ -438,8 +438,12 @@ export class TerminalWorkspaceRoot {
         case 'activity': {
           const tsA = a.metadata.agent?.lastActivityEvent ?? a.metadata.agent?.lastSeen ?? '';
           const tsB = b.metadata.agent?.lastActivityEvent ?? b.metadata.agent?.lastSeen ?? '';
-          // Descending: most recent first
-          cmp = tsB.localeCompare(tsA);
+          // Numeric comparison handles mixed-precision ISO timestamps correctly
+          // (e.g. "…T01:00:00Z" vs "…T01:00:00.500Z" where localeCompare fails
+          // because '.' < 'Z' lexicographically). Missing/invalid → 0 (oldest).
+          const dateA = tsA ? Date.parse(tsA) : 0;
+          const dateB = tsB ? Date.parse(tsB) : 0;
+          cmp = (isNaN(dateB) ? 0 : dateB) - (isNaN(dateA) ? 0 : dateA);
           break;
         }
       }
