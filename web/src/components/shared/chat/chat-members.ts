@@ -281,7 +281,7 @@ export class ScionChatMembers extends LitElement {
     }
 
     .agent-terminal,
-    .agent-popout {
+    .agent-graph {
       display: inline-flex;
       align-items: center;
       color: var(--scion-text-muted, #94a3b8);
@@ -292,12 +292,12 @@ export class ScionChatMembers extends LitElement {
     }
 
     .member-item:hover .agent-terminal,
-    .member-item:hover .agent-popout {
+    .member-item:hover .agent-graph {
       opacity: 1;
     }
 
     .agent-terminal:hover,
-    .agent-popout:hover {
+    .agent-graph:hover {
       color: var(--scion-primary, #3b82f6);
     }
 
@@ -762,15 +762,23 @@ export class ScionChatMembers extends LitElement {
             >
               <sl-icon name="terminal" style="font-size: var(--chat-fs-base);"></sl-icon>
             </a>`}
-        <a
-          href="/agents/${a.id}"
-          target="_blank"
-          class="agent-popout"
-          title="Open agent detail"
-          @click=${(e: Event) => e.stopPropagation()}
-        >
-          <sl-icon name="box-arrow-up-right" style="font-size: var(--chat-fs-base);"></sl-icon>
-        </a>
+        ${a.projectId
+          ? html`<a
+              href="/agents/graph?project=${encodeURIComponent(a.projectId)}&focus=${encodeURIComponent(a.id)}"
+              class="agent-graph"
+              title="Open in graph"
+              @click=${(e: MouseEvent) => {
+                e.stopPropagation();
+                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                e.preventDefault();
+                navigateTo(
+                  `/agents/graph?project=${encodeURIComponent(a.projectId!)}&focus=${encodeURIComponent(a.id)}`
+                );
+              }}
+            >
+              <sl-icon name="diagram-3" style="font-size: var(--chat-fs-base);"></sl-icon>
+            </a>`
+          : nothing}
       </div>
     `;
 
