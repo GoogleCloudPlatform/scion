@@ -89,13 +89,13 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// error check.
 		"handlers_broker_inbound_routed.go:dispatchRoutedRecipient": "Publish in else branch of CreateMessage error check",
 
-		// handleAgentOutboundMessage deliveryAgentDM path: CreateMessage
-		// error triggers early return before publish.
-		"handlers_agent_messaging.go:handleAgentOutboundMessage:agent-dm": "CreateMessage error triggers early return before publish",
+		// ExecuteAgentDM (agent_dm_operation.go): shared agent DM operation.
+		// CreateMessage error triggers early return before publish (#1688).
+		"agent_dm_operation.go:ExecuteAgentDM": "CreateMessage error triggers early return before publish",
 
-		// handleAgentOutboundMessage deliveryUserDirect path: CreateMessage
-		// error triggers early return before publish.
-		"handlers_agent_messaging.go:handleAgentOutboundMessage:user-direct": "CreateMessage error triggers early return before publish",
+		// handleAgentOutboundMessage non-DM path (user delivery):
+		// CreateMessage error triggers early return before publish.
+		"handlers_agent_messaging.go:handleAgentOutboundMessage:publish": "CreateMessage error triggers early return before publish",
 
 		// handleAgentOutboundMessage: DM notification after successful
 		// persist (non-broker path only).
@@ -352,11 +352,9 @@ func persistedRowDisambiguationSuffixes(file, fn, target string, idx, total int)
 			return []string{"agent"}
 		}
 		return []string{"user"}
-	case file == "handlers_agent_messaging.go" && fn == "handleAgentOutboundMessage" && target == "publish" && total == 2:
-		if idx == 0 {
-			return []string{"agent-dm"}
-		}
-		return []string{"user-direct"}
+	case file == "handlers_agent_messaging.go" && fn == "handleAgentOutboundMessage" && target == "publish" && total == 1:
+		// Single non-DM publish path after #1688 refactor.
+		return []string{"publish"}
 	}
 	return nil
 }

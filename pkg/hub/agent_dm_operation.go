@@ -203,23 +203,29 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	rateLimitDecision := s.chatSendLimiter.Allow(input.SenderAgent.ID, class)
 	if !rateLimitDecision.Allowed {
 		seconds := int(math.Ceil(rateLimitDecision.RetryAfter.Seconds()))
-		return nil, &AgentDMError{
+		dmErr := &AgentDMError{
 			Code: ErrCodeRateLimited,
 			Message: fmt.Sprintf("send rate limit exceeded (%d %s per minute); retry in %ds",
 				int(rateLimitDecision.Limit), rateLimitDecision.LimitClass.noun(), seconds),
 			HTTPStatus: http.StatusTooManyRequests,
 			RetryAfter: rateLimitDecision.RetryAfter,
 		}
+		// Audit: body-free denial record (#1690).
+		LogDMAdmission(DMAuditEntryForDenial(input, ErrCodeRateLimited, dmErr.Message))
+		return nil, dmErr
 	}
 
 	// 2. Message length validation.
 	if msgLen := utf8.RuneCountInString(input.Msg); msgLen > messages.MaxMessageLength {
-		return nil, &AgentDMError{
+		dmErr := &AgentDMError{
 			Code: ErrCodeValidationError,
 			Message: fmt.Sprintf("message exceeds %d character limit (current: %d chars). Consider splitting into multiple messages using multiple scion message invocations",
 				messages.MaxMessageLength, msgLen),
 			HTTPStatus: http.StatusUnprocessableEntity,
 		}
+		// Audit: body-free denial record (#1690).
+		LogDMAdmission(DMAuditEntryForDenial(input, ErrCodeValidationError, "message length exceeded"))
+		return nil, dmErr
 	}
 
 	// 3. Authorization — mode + cross-project checks.
@@ -235,6 +241,20 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			"reason", reason,
 			"denial_code", denialCode,
 		)
+		// Audit: body-free denial record with policy revisions (#1690).
+		// CrossProject is derived from agent records by DMAuditEntryFromInput,
+		// not from the decision — avoids relying on the authorization path
+		// to set it.
+		auditDecision := &MessageDecision{
+			Allowed: false,
+			Code:    MessageDenialCode(denialCode),
+			Reason:  reason,
+		}
+		if authDecision != nil {
+			auditDecision.HubPolicyRevision = authDecision.HubPolicyRevision
+			auditDecision.ProjectPolicyRevision = authDecision.ProjectPolicyRevision
+		}
+		LogDMAdmission(DMAuditEntryFromInput(input, auditDecision))
 		return nil, &AgentDMError{
 			Code:       ErrCodeMessageDenied,
 			Message:    "Message delivery denied",
@@ -250,6 +270,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// 4. Foreign attachment rejection (#1687).
 	// Cross-project DMs are text-only until managed transfer is implemented.
 	if len(input.Attachments) > 0 && input.SenderAgent.ProjectID != input.TargetAgent.ProjectID {
+		// Audit: body-free denial record (#1690).
+		LogDMAdmission(DMAuditEntryForDenial(input, string(MessageDenialCrossProjectAttachUnsupported),
+			"cross-project attachment transfer not supported"))
 		return nil, &AgentDMError{
 			Code:       ErrCodeUnsupportedCapability,
 			Message:    "cross-project attachment transfer is not supported; send text-only messages across projects",
@@ -287,6 +310,11 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		CreatedAt:      now,
 	}
 
+	// 6a. Stamp server-derived provenance (#1690).
+	// SenderProjectID and RecipientProjectID are always derived from the
+	// authoritative agent records, never from client-supplied metadata.
+	StampProvenance(storeMsg, input.SenderAgent, input.TargetAgent)
+
 	// Build structured message for dispatch and observer publication.
 	structuredMsg := &messages.StructuredMessage{
 		Sender:               storeMsg.Sender,
@@ -322,6 +350,28 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}
 	}
 
+	// 7a. Audit: body-free admission allow record (#1690).
+	// Logged after persistence so the message ID is available as correlation.
+	// CrossProject is derived from agent records by DMAuditEntryFromInput,
+	// not from the decision.
+	allowDecision := &MessageDecision{Allowed: true}
+	if authDecision != nil {
+		allowDecision.HubPolicyRevision = authDecision.HubPolicyRevision
+		allowDecision.ProjectPolicyRevision = authDecision.ProjectPolicyRevision
+	}
+	admissionEntry := DMAuditEntryFromInput(input, allowDecision)
+	admissionEntry.CorrelationID = msgID
+	LogDMAdmission(admissionEntry)
+
+	// 7b. Validate persisted provenance against authoritative records (#1690).
+	if !ValidateProvenance(storeMsg, input.SenderAgent, input.TargetAgent) {
+		s.messageLog.Error("agent DM: provenance validation failed after persist",
+			"message_id", msgID,
+			"sender_agent_id", input.SenderAgent.ID,
+			"target_agent_id", input.TargetAgent.ID,
+		)
+	}
+
 	// 8. Publish SSE event.
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
@@ -339,9 +389,12 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// Dispatch failure after persistence yields an ambiguous outcome —
 	// the message is stored but delivery is uncertain.
 	var dispatchErr error
+	dispatchAttempted := false
 	if isManagedAgentRuntime(input.TargetAgent.Runtime) {
+		dispatchAttempted = true
 		dispatchErr = s.managedAgentMessage(ctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
 	} else if dispatcher := s.GetDispatcher(); dispatcher != nil && input.TargetAgent.RuntimeBrokerID != "" {
+		dispatchAttempted = true
 		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 		dispatchErr = dispatchWithBrokerRetry(retryCtx, dispatcher, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt, structuredMsg)
 		retryCancel()
@@ -354,6 +407,22 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		)
 		// Message is persisted; dispatch failure is non-fatal but outcome
 		// is ambiguous per AC-5.
+	}
+
+	// 10a. Audit: dispatch outcome (#1690).
+	// Recorded separately from admission so allow ≠ delivered (AC-3).
+	// Uses the dispatchAttempted flag captured at dispatch time to avoid
+	// TOCTOU with GetDispatcher().
+	{
+		var dOutcome DispatchOutcome
+		if dispatchErr != nil {
+			dOutcome = DispatchFailed
+		} else if dispatchAttempted {
+			dOutcome = DispatchSucceeded
+		} else {
+			dOutcome = DispatchSkipped
+		}
+		LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, dOutcome, dispatchErr)
 	}
 
 	// 11. Observer publication.
