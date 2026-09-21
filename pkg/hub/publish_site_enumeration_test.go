@@ -89,12 +89,13 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// error check.
 		"handlers_broker_inbound_routed.go:dispatchRoutedRecipient": "Publish in else branch of CreateMessage error check",
 
-		// ExecuteAgentDM (agent_dm_operation.go): shared agent DM operation.
-		// CreateMessage error triggers early return before publish (#1688).
+		// agent_dm_operation.go:ExecuteAgentDM: the shared agent DM operation
+		// (#1688). CreateMessage error triggers early return before publish.
 		"agent_dm_operation.go:ExecuteAgentDM": "CreateMessage error triggers early return before publish",
 
-		// handleAgentOutboundMessage non-DM path (user delivery):
-		// CreateMessage error triggers early return before publish.
+		// handleAgentOutboundMessage deliveryUserDirect path: CreateMessage
+		// error triggers early return before publish (only non-broker,
+		// non-agent-DM recipient path remains after #1688 extraction).
 		"handlers_agent_messaging.go:handleAgentOutboundMessage:publish": "CreateMessage error triggers early return before publish",
 
 		// handleAgentOutboundMessage: DM notification after successful

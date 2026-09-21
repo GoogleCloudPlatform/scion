@@ -89,10 +89,12 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "handlers_agent_messaging.go", function: "processMentions", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage at handlers_agent_messaging.go:1852"},
 
-	// handlers_agent_messaging.go: wake-on-message DispatchAgentStart —
-	// guarded by the calling routers. Fragile derivative (see F-RS6-16).
-	{file: "handlers_agent_messaging.go", function: "handleAgentMessage", symbol: "DispatchAgentStart",
-		class: "guarded", reason: "guarded by calling routers; fragile derivative (F-RS6-16)"},
+	// wake_dm.go: wakeAgentForDM — shared wake helper (#1691). Called from
+	// ExecuteAgentDM after all admission checks pass (rate limit, message
+	// length, authorization, attachment rejection). Also called inline from
+	// handleAgentMessage for user→agent messages (guarded by calling routers).
+	{file: "wake_dm.go", function: "wakeAgentForDM", symbol: "DispatchAgentStart",
+		class: "guarded", reason: "called after admission checks in ExecuteAgentDM (#1691 AC-2); or guarded by calling routers for user→agent"},
 
 	// handlers_broker_inbound.go: guarded at :164 (authorizeAgentMessage).
 	{file: "handlers_broker_inbound.go", function: "handleBrokerInbound", symbol: "dispatchWithBrokerRetry",
