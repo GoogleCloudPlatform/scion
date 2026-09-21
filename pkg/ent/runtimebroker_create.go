@@ -177,30 +177,14 @@ func (_c *RuntimeBrokerCreate) SetNillableRuntimes(v *string) *RuntimeBrokerCrea
 }
 
 // SetLabels sets the "labels" field.
-func (_c *RuntimeBrokerCreate) SetLabels(v string) *RuntimeBrokerCreate {
+func (_c *RuntimeBrokerCreate) SetLabels(v map[string]string) *RuntimeBrokerCreate {
 	_c.mutation.SetLabels(v)
 	return _c
 }
 
-// SetNillableLabels sets the "labels" field if the given value is not nil.
-func (_c *RuntimeBrokerCreate) SetNillableLabels(v *string) *RuntimeBrokerCreate {
-	if v != nil {
-		_c.SetLabels(*v)
-	}
-	return _c
-}
-
 // SetAnnotations sets the "annotations" field.
-func (_c *RuntimeBrokerCreate) SetAnnotations(v string) *RuntimeBrokerCreate {
+func (_c *RuntimeBrokerCreate) SetAnnotations(v map[string]string) *RuntimeBrokerCreate {
 	_c.mutation.SetAnnotations(v)
-	return _c
-}
-
-// SetNillableAnnotations sets the "annotations" field if the given value is not nil.
-func (_c *RuntimeBrokerCreate) SetNillableAnnotations(v *string) *RuntimeBrokerCreate {
-	if v != nil {
-		_c.SetAnnotations(*v)
-	}
 	return _c
 }
 
@@ -551,11 +535,11 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 		_node.Runtimes = value
 	}
 	if value, ok := _c.mutation.Labels(); ok {
-		_spec.SetField(runtimebroker.FieldLabels, field.TypeString, value)
+		_spec.SetField(runtimebroker.FieldLabels, field.TypeJSON, value)
 		_node.Labels = value
 	}
 	if value, ok := _c.mutation.Annotations(); ok {
-		_spec.SetField(runtimebroker.FieldAnnotations, field.TypeString, value)
+		_spec.SetField(runtimebroker.FieldAnnotations, field.TypeJSON, value)
 		_node.Annotations = value
 	}
 	if value, ok := _c.mutation.Endpoint(); ok {
@@ -837,7 +821,7 @@ func (u *RuntimeBrokerUpsert) ClearRuntimes() *RuntimeBrokerUpsert {
 }
 
 // SetLabels sets the "labels" field.
-func (u *RuntimeBrokerUpsert) SetLabels(v string) *RuntimeBrokerUpsert {
+func (u *RuntimeBrokerUpsert) SetLabels(v map[string]string) *RuntimeBrokerUpsert {
 	u.Set(runtimebroker.FieldLabels, v)
 	return u
 }
@@ -855,7 +839,7 @@ func (u *RuntimeBrokerUpsert) ClearLabels() *RuntimeBrokerUpsert {
 }
 
 // SetAnnotations sets the "annotations" field.
-func (u *RuntimeBrokerUpsert) SetAnnotations(v string) *RuntimeBrokerUpsert {
+func (u *RuntimeBrokerUpsert) SetAnnotations(v map[string]string) *RuntimeBrokerUpsert {
 	u.Set(runtimebroker.FieldAnnotations, v)
 	return u
 }
@@ -1291,7 +1275,7 @@ func (u *RuntimeBrokerUpsertOne) ClearRuntimes() *RuntimeBrokerUpsertOne {
 }
 
 // SetLabels sets the "labels" field.
-func (u *RuntimeBrokerUpsertOne) SetLabels(v string) *RuntimeBrokerUpsertOne {
+func (u *RuntimeBrokerUpsertOne) SetLabels(v map[string]string) *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.SetLabels(v)
 	})
@@ -1312,7 +1296,7 @@ func (u *RuntimeBrokerUpsertOne) ClearLabels() *RuntimeBrokerUpsertOne {
 }
 
 // SetAnnotations sets the "annotations" field.
-func (u *RuntimeBrokerUpsertOne) SetAnnotations(v string) *RuntimeBrokerUpsertOne {
+func (u *RuntimeBrokerUpsertOne) SetAnnotations(v map[string]string) *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.SetAnnotations(v)
 	})
@@ -1943,7 +1927,7 @@ func (u *RuntimeBrokerUpsertBulk) ClearRuntimes() *RuntimeBrokerUpsertBulk {
 }
 
 // SetLabels sets the "labels" field.
-func (u *RuntimeBrokerUpsertBulk) SetLabels(v string) *RuntimeBrokerUpsertBulk {
+func (u *RuntimeBrokerUpsertBulk) SetLabels(v map[string]string) *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.SetLabels(v)
 	})
@@ -1964,7 +1948,7 @@ func (u *RuntimeBrokerUpsertBulk) ClearLabels() *RuntimeBrokerUpsertBulk {
 }
 
 // SetAnnotations sets the "annotations" field.
-func (u *RuntimeBrokerUpsertBulk) SetAnnotations(v string) *RuntimeBrokerUpsertBulk {
+func (u *RuntimeBrokerUpsertBulk) SetAnnotations(v map[string]string) *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.SetAnnotations(v)
 	})

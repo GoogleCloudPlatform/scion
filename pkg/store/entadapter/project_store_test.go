@@ -765,3 +765,65 @@ func TestListProjects_MaxLimit(t *testing.T) {
 	assert.Len(t, result.Items, 1000, "Limit>1000 must be capped at maxProjectListLimit=1000")
 	assert.NotEmpty(t, result.NextCursor, "more projects exist, so NextCursor must be set")
 }
+
+func TestFindEmbeddedBroker_ReturnsLabeledBroker(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	// Create a broker with the embedded label.
+	embedded := newBroker()
+	embedded.Labels = map[string]string{"scion.io/broker-role": "embedded"}
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, embedded))
+
+	got, err := ps.FindEmbeddedBroker(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, got, "expected FindEmbeddedBroker to return the labeled broker")
+	assert.Equal(t, embedded.ID, got.ID)
+}
+
+func TestFindEmbeddedBroker_IgnoresUnlabeledBrokers(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	// Create a broker with the embedded label.
+	embedded := newBroker()
+	embedded.Labels = map[string]string{"scion.io/broker-role": "embedded"}
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, embedded))
+
+	// Create a second broker without the label — FindEmbeddedBroker must still
+	// return only the first.
+	other := newBroker()
+	other.Labels = map[string]string{"team": "infra"}
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, other))
+
+	got, err := ps.FindEmbeddedBroker(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, got, "expected exactly one embedded broker")
+	assert.Equal(t, embedded.ID, got.ID)
+}
+
+func TestFindEmbeddedBroker_NilWhenNone(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	// No brokers at all.
+	got, err := ps.FindEmbeddedBroker(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, got, "expected nil when no embedded broker exists")
+}
+
+func TestFindEmbeddedBroker_NilWhenMultiple(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	// Create two brokers with the embedded label — ambiguous, should return nil.
+	for i := 0; i < 2; i++ {
+		b := newBroker()
+		b.Labels = map[string]string{"scion.io/broker-role": "embedded"}
+		require.NoError(t, ps.CreateRuntimeBroker(ctx, b))
+	}
+
+	got, err := ps.FindEmbeddedBroker(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, got, "expected nil when multiple embedded brokers exist")
+}
