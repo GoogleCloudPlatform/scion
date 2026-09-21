@@ -743,7 +743,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			return fmt.Errorf("message validation failed: %w", err)
 		}
 
-		if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+		if _, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
 			return wrapHubError(fmt.Errorf("failed to send message to %s: %w", ref.Raw, err))
 		}
 		if !isJSONOutput() {
@@ -848,7 +848,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		ThreadID:    msgThreadID,
 	}
 
-	if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+	if _, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to %s: %w", userRecipient, err))
 	}
 
@@ -942,7 +942,7 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 					ThreadID:    msgThreadID,
 					Metadata:    map[string]string{"recipients": recipientsStr, "group_id": groupID},
 				}
-				if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+				if _, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
 					if !isJSONOutput() {
 						fmt.Printf("  Failed: %s: %s\n", recipStr, err)

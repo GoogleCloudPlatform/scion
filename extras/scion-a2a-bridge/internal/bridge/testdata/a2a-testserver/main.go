@@ -223,8 +223,8 @@ func (m *mockProdAgentService) Exec(ctx context.Context, agentID string, command
 func (m *mockProdAgentService) GetLogs(ctx context.Context, agentID string, opts *hubclient.GetLogsOptions) (string, error) {
 	return "", fmt.Errorf("not implemented")
 }
-func (m *mockProdAgentService) SendOutboundMessage(ctx context.Context, agentID string, msg *hubclient.OutboundMessageRequest) error {
-	return fmt.Errorf("not implemented")
+func (m *mockProdAgentService) SendOutboundMessage(ctx context.Context, agentID string, msg *hubclient.OutboundMessageRequest) (*hubclient.OutboundMessageResult, error) {
+	return nil, fmt.Errorf("not implemented")
 }
 func (m *mockProdAgentService) GetCloudLogs(ctx context.Context, agentID string, opts *hubclient.GetCloudLogsOptions) (*hubclient.CloudLogsResponse, error) {
 	return nil, fmt.Errorf("not implemented")

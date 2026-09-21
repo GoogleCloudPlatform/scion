@@ -569,6 +569,12 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 			_ = json.NewDecoder(r.Body).Decode(&msg)
 			receivedMsg = &msg
 			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":   "msg-test-1",
+				"status":       "sent",
+				"recipient":    msg.Recipient,
+				"recipient_id": "uid-test",
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -934,7 +940,12 @@ func TestSendGroupMessageViaHub_UserRecipientType(t *testing.T) {
 			receivedMsg = &msg
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":   "msg-test-conv",
+				"status":       "sent",
+				"recipient":    msg.Recipient,
+				"recipient_id": "uid-test",
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

@@ -1454,7 +1454,7 @@ func ReadTokenFile() string {
 	return token
 }
 
-// OutboundMessage is the payload for sending an agent-to-human outbound message.
+// OutboundMessage is the payload for sending an outbound message from an agent.
 type OutboundMessage struct {
 	Recipient   string            `json:"recipient,omitempty"`
 	RecipientID string            `json:"recipient_id,omitempty"`
@@ -1462,6 +1462,9 @@ type OutboundMessage struct {
 	Type        string            `json:"type,omitempty"`
 	Urgent      bool              `json:"urgent,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
+	// Wake requests that a suspended target agent be resumed before
+	// delivering the message. Ignored for non-agent recipients.
+	Wake bool `json:"wake,omitempty"`
 }
 
 // SendOutboundMessage sends an outbound message from the agent to a human inbox.
