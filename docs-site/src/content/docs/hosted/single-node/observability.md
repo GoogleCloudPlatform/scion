@@ -129,12 +129,17 @@ SCION_TELEMETRY_ENABLED="true"
 
 #### Harness-Specific Configuration
 
-If you are using agents that natively support OpenTelemetry (like `opencode`), you may need to explicitly tell the agent where to find the `sciontool` forwarder (which is `localhost` from the agent's perspective):
+Each harness integrates with `sciontool`'s telemetry pipeline differently depending on its native telemetry support:
 
-- **gRPC (Default)**: `OTEL_EXPORTER_OTLP_ENDPOINT="localhost:4317"`
-- **HTTP**: `OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"`
+- **OpenTelemetry-native harnesses** (e.g. `opencode`): These harnesses emit OTLP data directly. Point them at the `sciontool` forwarder on localhost:
+  - **gRPC (Default)**: `OTEL_EXPORTER_OTLP_ENDPOINT="localhost:4317"`
+  - **HTTP**: `OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"`
 
-These harness-specific env vars are injected at agent start time via the harness config's `env` map and are separate from the Scion telemetry settings.
+- **Claude Code (logs-first route)**: Claude Code emits structured OTLP log records (scope `com.anthropic.claude_code.events`) rather than spans or metrics. The `sciontool` receiver normalizes Claude's event names to the canonical `agent.*` namespace (e.g. `user_prompt` → `agent.user.prompt`) and **unconditionally redacts** all Claude log bodies to protect prompt privacy, regardless of the configured filter policy. When Claude is the active harness and telemetry is enabled, the broker auto-detects the telemetry backend (`gcp` or `otlp`) via the `SCION_TELEMETRY_CLOUD_PROVIDER` environment variable to prevent accidental metrics export before credentials are available.
+
+- **Gemini CLI**: Telemetry comes primarily from harness hook events and session-file parsing — see [Session Metrics (Gemini)](/scion/hosted/single-node/metrics/#session-metrics-gemini).
+
+These harness-specific env vars are injected at agent start time via the harness config's `env` map and are separate from the Scion telemetry settings. Scion automatically injects `SCION_HARNESS` and `SCION_MODEL` into all agent containers to enable harness-aware telemetry attribution.
 
 ## Agent Logs
 
@@ -177,6 +182,7 @@ The server admits at most 16 active HTTP and gRPC processing requests together. 
 | Traces | Agent OTLP | Span data for tool calls, API requests |
 | Metrics | sciontool | Counters and histograms for tokens, tools, and latency |
 | Correlated Logs | sciontool | Log records linked to traces for every hook event |
+| Native Logs | Claude Code OTLP | Structured log records (bodies redacted); event names normalized to `agent.*` namespace |
 | Hook Events | Harness hooks | Tool calls, prompts, model invocations converted to spans |
 | Session Metrics | Gemini session files | Token counts, turn counts, tool statistics |
 
@@ -186,6 +192,7 @@ By default, user prompts (`agent.user.prompt`) are excluded from telemetry to pr
 
 - **Redacted**: `prompt`, `user.email`, `tool_output`, `tool_input`
 - **Hashed**: `session_id`
+- **Claude log bodies**: Unconditionally redacted (`[REDACTED]`) regardless of filter configuration. Claude Code emits free-form text in its OTLP log bodies; the receiver enforces redaction even if a custom policy omits `log.body` from its redaction list.
 
 ## HTTP Request Logs
 
