@@ -493,6 +493,11 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
+	// SECURITY-GATE: authorize update access to this specific template.
+	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
+		return
+	}
+
 	var template store.Template
 	if err := readJSON(r, &template); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -507,10 +512,18 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		}
 	}
 
-	// Preserve immutable fields
+	// Preserve immutable fields. Scope, ScopeID, and OwnerID are included
+	// because the request body deserializes a full store.Template and without
+	// pinning these a caller could reparent a template to a different scope or
+	// claim ownership — both are authorization-state writes. Scope reparenting
+	// requires its own endpoint with dual-scope authorization; it is not
+	// supported through the update body.
 	template.ID = existing.ID
 	template.Created = existing.Created
 	template.CreatedBy = existing.CreatedBy
+	template.Scope = existing.Scope
+	template.ScopeID = existing.ScopeID
+	template.OwnerID = existing.OwnerID
 	if template.Slug == "" {
 		template.Slug = api.Slugify(template.Name)
 	}
@@ -530,6 +543,11 @@ func (s *Server) patchTemplateV2(w http.ResponseWriter, r *http.Request, id stri
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: authorize update access to this specific template.
+	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
 		return
 	}
 
@@ -644,6 +662,11 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// SECURITY-GATE: authorize update access to this template (upload mutates content).
+	if !s.authorize(w, r, templateResource(template), ActionUpdate) {
+		return
+	}
+
 	stor := s.GetStorage()
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")
@@ -707,6 +730,11 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// SECURITY-GATE: authorize update access to this template (finalize mutates state).
+	if !s.authorize(w, r, templateResource(template), ActionUpdate) {
+		return
+	}
+
 	stor := s.GetStorage()
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")
@@ -759,6 +787,18 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// Authenticated runtime brokers download templates during agent creation
+	// (template hydration). They pass HMAC auth via middleware but are not
+	// user principals, so the authorization kernel cannot evaluate them.
+	// Allow read access for brokers; the HMAC credential is the trust basis.
+	// This mirrors the carve-out in getTemplateV2.
+	if GetBrokerIdentityFromContext(ctx) == nil {
+		// SECURITY-GATE: authorize read access to this template's files.
+		if !s.authorize(w, r, templateResource(template), ActionRead) {
+			return
+		}
+	}
+
 	stor := s.GetStorage()
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")
@@ -807,6 +847,11 @@ func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: authorize read access to this template's validation report.
+	if !s.authorize(w, r, templateResource(template), ActionRead) {
 		return
 	}
 
