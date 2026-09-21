@@ -48,7 +48,7 @@ func TestInitLifecycleRegistrationEmitsOnlyLifecycleSessionMetric(t *testing.T) 
 	if err := receiver.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer receiver.Stop(context.Background())
+	defer func() { _ = receiver.Stop(context.Background()) }()
 	providers, err := telemetry.NewProviders(context.Background(), cfg, true)
 	if err != nil {
 		t.Fatal(err)

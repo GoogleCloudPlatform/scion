@@ -431,7 +431,6 @@ func cloneKeyValues(attrs []*commonpb.KeyValue) []*commonpb.KeyValue {
 	return result
 }
 
-
 func isStructuredValue(value *commonpb.AnyValue) bool {
 	if value == nil {
 		return false

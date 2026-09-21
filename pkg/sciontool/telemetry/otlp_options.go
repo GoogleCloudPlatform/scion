@@ -60,4 +60,3 @@ func appendOTLPTraceGRPCSecurityOption(opts []otlptracegrpc.Option, config *Conf
 	}
 	return append(opts, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(tlsConfig))), nil
 }
-
