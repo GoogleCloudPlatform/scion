@@ -1055,6 +1055,14 @@ type StreamPTYHandler struct {
 
 // NewStreamPTYHandler creates a handler for a PTY stream from the control channel.
 func NewStreamPTYHandler(client *ControlChannelClient, handler *StreamHandler, containerID, runtimeCmd, execUser, namespace string, cols, rows int, k8sConfig *rest.Config, k8sClientset kubernetes.Interface) *StreamPTYHandler {
+	if runtimeCmd == "" {
+		// The caller should provide the resolved runtime from the agent's
+		// RuntimeName or the server's detected RuntimeCommand. Log so the
+		// fallback is visible rather than silently defaulting.
+		slog.Warn("PTY stream handler created without explicit runtime command, falling back to docker",
+			"slug", handler.slug)
+		runtimeCmd = "docker"
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	execUser = sanitizeExecUser(execUser)
 	return &StreamPTYHandler{

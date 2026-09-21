@@ -2131,3 +2131,172 @@ func TestPTYCleanup_NonceFullLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, panePID+":0", out, "agent must survive cleanup")
 }
+
+// TestPTYCleanup_EmptyRuntimeNonceCleanup is a regression test for the
+// empty-runtime cleanup path bug. StreamPTYHandler.Run() previously resolved
+// empty runtimeCmd → "docker" in a local variable but passed h.runtimeCmd
+// (still empty) to the deferred gracefulShutdownExec. With
+// isDockerCompatibleRuntime("") returning false, nonce cleanup was skipped
+// entirely for the default Docker case.
+//
+// This test exercises the most common production path: empty runtimeCmd
+// (defaulting to Docker) via StreamPTYHandler. It verifies:
+//  1. The nonce IS injected into docker exec args (startDockerExec resolves)
+//  2. Cleanup IS called with effective "docker" runtime (not empty string)
+//  3. The nonce-owned client IS signaled on cleanup
+//  4. A protected peer client survives
+func TestPTYCleanup_EmptyRuntimeNonceCleanup(t *testing.T) {
+	tmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("requires tmux in PATH")
+	}
+	clearSCIONEnv(t)
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TMUX", "")
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "tmux.sock")
+	tmuxCommand := func(args ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, tmux, append([]string{"-S", socket}, args...)...).CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+
+	_, err = tmuxCommand("-f", "/dev/null", "new-session", "-d", "-s", "scion", "-x", "80", "-y", "24", "exec cat")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = tmuxCommand("kill-server") })
+
+	panePID, err := tmuxCommand("display-message", "-p", "-t", "scion", "#{pane_pid}")
+	require.NoError(t, err)
+
+	adapter := nonceTestAdapter(t, dir)
+	dockerBin := filepath.Join(dir, "docker")
+	require.NoError(t, os.Symlink(adapter, dockerBin))
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("TW_CLEANUP_TMUX", tmux)
+	t.Setenv("TW_CLEANUP_SOCKET", socket)
+
+	// Start a peer CLI client (no nonce) — must survive browser cleanup
+	peerCmd := exec.Command(tmux, "-S", socket, "attach-session", "-t", "scion")
+	peerCmd.Env = append(filterSCIONEnv(os.Environ()), "TERM=xterm-256color")
+	peerPtmx, err := pty.Start(peerCmd)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = peerPtmx.Close()
+		if peerCmd.ProcessState == nil {
+			_ = peerCmd.Process.Kill()
+		}
+		_ = peerCmd.Wait()
+	})
+
+	// Wait for peer client to attach
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
+		return err == nil && strings.TrimSpace(out) != ""
+	}, 5*time.Second, 20*time.Millisecond, "peer client should attach")
+
+	peerPID := strconv.Itoa(peerCmd.Process.Pid)
+
+	brokerConn, hubConn, wscleanup := newWSPair(t)
+	defer wscleanup()
+	client := &ControlChannelClient{conn: brokerConn, connected: true, streams: make(map[string]*StreamHandler)}
+
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			var msg json.RawMessage
+			if err := hubConn.ReadJSON(&msg); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() { _ = hubConn.Close(); <-readerDone }()
+
+	streamID := "empty-runtime-1"
+	handler := &StreamHandler{
+		streamID: streamID, slug: "fixture",
+		dataCh: make(chan []byte, 4), resizeCh: make(chan [2]int, 4),
+		closeCh: make(chan struct{}),
+	}
+	client.streamMu.Lock()
+	client.streams[streamID] = handler
+	client.streamMu.Unlock()
+
+	// KEY: pass runtimeCmd = "" — the production default path
+	bridge := NewStreamPTYHandler(client, handler, "test-container", "", "scion", "", 80, 24, nil, nil)
+
+	// Verify: constructor resolved empty → "docker"
+	require.Equal(t, "docker", bridge.runtimeCmd,
+		"empty runtimeCmd must be resolved to 'docker' at construction time")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = bridge.Run()
+	}()
+
+	// Wait for browser client to attach (should be 2 clients total: peer + browser)
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
+		if err != nil {
+			return false
+		}
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		return len(lines) == 2
+	}, 5*time.Second, 20*time.Millisecond, "browser client should attach (2 total)")
+
+	// Verify: nonce was generated (isDockerCompatibleRuntime("docker") == true)
+	require.NotEmpty(t, bridge.attachNonce,
+		"nonce must be generated for resolved docker runtime")
+	require.Len(t, bridge.attachNonce, 32,
+		"nonce must be 32 hex chars")
+
+	// Verify: nonce was injected into exec args
+	argsStr := strings.Join(bridge.cmd.Args, " ")
+	require.Contains(t, argsStr, "-e SCION_ATTACH_NONCE="+bridge.attachNonce,
+		"nonce must be in docker exec args")
+
+	// Close the stream → triggers gracefulShutdownExec → cleanupContainerAttach
+	// If the fix is missing, cleanupContainerAttach receives runtimeCmd="" and
+	// isDockerCompatibleRuntime("") returns false → cleanup skipped → the browser
+	// client survives when it should be killed.
+	payload, err := json.Marshal(wsprotocol.NewStreamCloseMessage(streamID, "browser closed", 0))
+	require.NoError(t, err)
+	require.NoError(t, client.handleStreamClose(payload))
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("bridge did not exit")
+	}
+
+	// Verify: exec process reaped
+	require.NotNil(t, bridge.cmd.ProcessState, "exec process must be reaped")
+
+	// Verify: nonce-owned browser client is cleaned up
+	// This is the critical assertion — without the fix, the browser client
+	// would remain because cleanupContainerAttach bailed on empty runtimeCmd.
+	require.Eventually(t, func() bool {
+		out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_pid}")
+		if err != nil {
+			return false
+		}
+		lines := strings.TrimSpace(out)
+		if lines == "" {
+			return false // peer should still be there
+		}
+		pids := strings.Split(lines, "\n")
+		return len(pids) == 1 && pids[0] == peerPID
+	}, 10*time.Second, 50*time.Millisecond,
+		"nonce-owned browser client must be cleaned up; peer must survive")
+
+	// Verify: peer client survived (process still running)
+	err = peerCmd.Process.Signal(syscall.Signal(0))
+	require.NoError(t, err, "peer client process must still be running")
+
+	// Verify: agent surrogate still alive
+	out, err := tmuxCommand("display-message", "-p", "-t", "scion", "#{pane_pid}:#{pane_dead}")
+	require.NoError(t, err)
+	require.Equal(t, panePID+":0", out, "agent must survive cleanup")
+}
