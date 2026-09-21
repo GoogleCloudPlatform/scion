@@ -22,6 +22,7 @@ docker exec. This activates the same title-emission behavior that new agents get
 from their `.tmux.conf` template.
 
 The activation is:
+
 - **Best-effort**: failure logged at Debug, does not block terminal attach
 - **Docker-only**: guarded by `isDockerCompatibleRuntime()`
 - **Idempotent**: safe to call on sessions that already have set-titles enabled
@@ -55,6 +56,7 @@ server lifecycle, PTY pair opening, OSC 0 parsing):
 6. **`TestActivateTmuxSetTitles_WindowSwitchOSC0`** — full E2E: real tmux window switch emits OSC 0 with correct window names, strict `require.NotEmpty` + `require.Contains` assertions
 
 Test helpers:
+
 - `writeFakeDockerScript()` — creates shell script that strips docker exec prefix and forwards tmux commands with socket isolation
 - `startTmuxServer()` — creates a real tmux server with cleanup
 - `readOSC0()` — parses OSC 0 title sequences from PTY output with timeout
