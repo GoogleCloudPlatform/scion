@@ -456,6 +456,17 @@ describe('scion-chat-message path links', () => {
     expect(seen).toEqual(['/workspace/src/main.go']);
   });
 
+  it('does not include trailing sentence punctuation in path links', async () => {
+    const el = await mount(
+      'results are in /scion-volumes/scratchpad/final-summary.md. Check them.'
+    );
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.filePath).toBe('/scion-volumes/scratchpad/final-summary.md');
+    expect(links[0].textContent).toBe('/scion-volumes/scratchpad/final-summary.md');
+  });
+
   it('renders multiple path links in the same message', async () => {
     const el = await mount('compare /workspace/a.ts and /scion-volumes/data/b.ts');
     const links = pathLinks(el);

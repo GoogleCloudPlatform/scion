@@ -178,7 +178,7 @@ const ENTITY_PATTERNS: EntityPattern[] = [
   // File paths: /workspace/... and /scion-volumes/... container paths
   {
     regex:
-      /(?:\/scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|\/workspace\/(?:\.scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*))/g,
+      /(?:\/scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|\/workspace\/(?:\.scion-volumes\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*|[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*))(?<=[a-zA-Z0-9_-])/g,
     linkBuilder: (m) => {
       const path = m[0];
       return `<a class="entity-link path-link" data-file-path="${path.replace(/"/g, '&quot;')}" href="javascript:void(0)" title="Open ${path.replace(/"/g, '&quot;')}">${path}</a>`;
