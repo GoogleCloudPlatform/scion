@@ -431,19 +431,6 @@ func cloneKeyValues(attrs []*commonpb.KeyValue) []*commonpb.KeyValue {
 	return result
 }
 
-func upsertAttribute(attrs []*commonpb.KeyValue, key, value string) []*commonpb.KeyValue {
-	found := false
-	for _, attr := range attrs {
-		if attr != nil && attr.Key == key {
-			attr.Value = stringProtoValue(value)
-			found = true
-		}
-	}
-	if found {
-		return attrs
-	}
-	return append(attrs, &commonpb.KeyValue{Key: key, Value: stringProtoValue(value)})
-}
 
 func isStructuredValue(value *commonpb.AnyValue) bool {
 	if value == nil {

@@ -52,12 +52,12 @@ func TestBoundedGRPCAdaptersAcceptGeneratedUnaryClients(t *testing.T) {
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer r.Stop(context.Background())
+	defer func() { _ = r.Stop(context.Background()) }()
 	conn, err := grpc.NewClient(r.grpcListenAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if _, err := coltracepb.NewTraceServiceClient(conn).Export(ctx, &coltracepb.ExportTraceServiceRequest{ResourceSpans: []*tracepb.ResourceSpans{{}}}); err != nil {
@@ -160,7 +160,7 @@ func testBoundedGRPCServer(t *testing.T, extra ...grpc.ServerOption) (*grpc.Clie
 	if err != nil {
 		t.Fatal(err)
 	}
-	go server.Serve(listener)
+	go func() { _ = server.Serve(listener) }()
 	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
@@ -302,12 +302,12 @@ func TestBoundedGRPCAdapterRejectsExtraMessageBeforeExport(t *testing.T) {
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer r.Stop(context.Background())
+	defer func() { _ = r.Stop(context.Background()) }()
 	conn, err := grpc.NewClient(r.grpcListenAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	stream, err := conn.NewStream(ctx, &grpc.StreamDesc{ClientStreams: true, ServerStreams: true}, logExportMethod)
@@ -367,13 +367,13 @@ func TestBoundedGRPCAdapterRetainsCanceledWorkAndRejectsSeventeenth(t *testing.T
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer r.Stop(context.Background())
+	defer func() { _ = r.Stop(context.Background()) }()
 	defer releaseWork()
 	conn, err := grpc.NewClient(r.grpcListenAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	var wg sync.WaitGroup
 	cancels := make([]context.CancelFunc, maxConcurrentIntake)
 	for i := 0; i < maxConcurrentIntake; i++ {
@@ -409,7 +409,7 @@ func TestBoundedGRPCAdapterRetainsCanceledWorkAndRejectsSeventeenth(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer overflowConn.Close()
+	defer func() { _ = overflowConn.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	start := time.Now()
@@ -461,7 +461,7 @@ func TestBoundedGRPCAdapterStopKeepsLiveHandlerOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	callDone := make(chan struct{})
 	go func() {
 		defer close(callDone)
@@ -556,7 +556,7 @@ func TestPipelineStopLeavesActiveReceiverResourcesUntilHandlerReturns(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	callDone := make(chan struct{})
 	go func() {
 		defer close(callDone)

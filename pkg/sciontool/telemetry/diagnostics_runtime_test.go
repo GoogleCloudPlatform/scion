@@ -42,9 +42,9 @@ func TestRuntimeDeliverySnapshotsSurviveBrokenDestination(t *testing.T) {
 	backend.fail.Store(true)
 	server := grpc.NewServer()
 	colLog.RegisterLogsServiceServer(server, backend)
-	go server.Serve(listener)
+	go func() { _ = server.Serve(listener) }()
 	defer server.Stop()
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	p := NewWithConfig(&Config{Enabled: true, CloudEnabled: true, Endpoint: listener.Addr().String(), Protocol: "grpc", Insecure: true})
 	if p.DeliveryState() != "configured" {

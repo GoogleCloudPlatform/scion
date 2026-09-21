@@ -218,12 +218,12 @@ func TestGRPCPredecodeOverloadRespondsAndRecovers(t *testing.T) {
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer r.Stop(context.Background())
+	defer func() { _ = r.Stop(context.Background()) }()
 	conn, err := grpc.NewClient(r.grpcListenAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	for i := 0; i < maxConcurrentIntake; i++ {
 		r.decodeSlots <- struct{}{}
 	}
@@ -253,7 +253,7 @@ func TestIdleGRPCConnectionsDoNotConsumeDecodeSlots(t *testing.T) {
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer r.Stop(context.Background())
+	defer func() { _ = r.Stop(context.Background()) }()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	var connections []*grpc.ClientConn
@@ -289,12 +289,12 @@ func TestGRPCCallerDeadlineReleasesAfterHandlerEnds(t *testing.T) {
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer r.Stop(context.Background())
+	defer func() { _ = r.Stop(context.Background()) }()
 	conn, err := grpc.NewClient(r.grpcListenAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
@@ -342,12 +342,12 @@ func TestGRPCDecodedMessageSizeBoundary(t *testing.T) {
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer r.Stop(context.Background())
+	defer func() { _ = r.Stop(context.Background()) }()
 	conn, err := grpc.NewClient(r.grpcListenAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	for _, size := range []int{maxDecodedBytes - 1, maxDecodedBytes, maxDecodedBytes + 1} {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := conn.Invoke(ctx, "/opentelemetry.proto.collector.logs.v1.LogsService/Export", &collogspb.ExportLogsServiceRequest{}, &collogspb.ExportLogsServiceResponse{}, grpc.ForceCodec(sizedMalformedCodec{size: size}))
@@ -370,12 +370,12 @@ func TestGRPCMalformedOversizeAndUnknownMethodReclaimPermits(t *testing.T) {
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer r.Stop(context.Background())
+	defer func() { _ = r.Stop(context.Background()) }()
 	conn, err := grpc.NewClient(r.grpcListenAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	malformed := conn.Invoke(ctx, "/opentelemetry.proto.collector.logs.v1.LogsService/Export", &collogspb.ExportLogsServiceRequest{}, &collogspb.ExportLogsServiceResponse{}, grpc.ForceCodec(malformedCodec{}))
@@ -416,12 +416,12 @@ func testGRPCSlowRawBodyDeadline(t *testing.T, clientTimeout string, maxElapsed 
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer r.Stop(context.Background())
+	defer func() { _ = r.Stop(context.Background()) }()
 	conn, err := net.DialTimeout("tcp", r.grpcListenAddr, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(maxElapsed + time.Second))
 	if _, err := conn.Write([]byte(http2.ClientPreface)); err != nil {
 		t.Fatal(err)
@@ -476,7 +476,7 @@ func TestGRPCConnectionOverflowClosesPromptly(t *testing.T) {
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer r.Stop(context.Background())
+	defer func() { _ = r.Stop(context.Background()) }()
 	var clients []net.Conn
 	defer func() {
 		for _, c := range clients {
@@ -503,7 +503,7 @@ func TestGRPCConnectionOverflowClosesPromptly(t *testing.T) {
 	if err != nil {
 		return
 	} // An immediate transport refusal is also valid.
-	defer overflow.Close()
+	defer func() { _ = overflow.Close() }()
 	_ = overflow.SetReadDeadline(time.Now().Add(time.Second))
 	start := time.Now()
 	var one [1]byte
@@ -524,12 +524,12 @@ func TestGRPCFailedHandshakeReclaimsConnection(t *testing.T) {
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer r.Stop(context.Background())
+	defer func() { _ = r.Stop(context.Background()) }()
 	conn, err := net.DialTimeout("tcp", r.grpcListenAddr, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	start := time.Now()
 	_ = conn.SetReadDeadline(time.Now().Add(grpcHandshakeTimeout + 2*time.Second))
 	var one [1]byte
@@ -560,7 +560,7 @@ func TestGRPCOversizedHeadersDoNotRetainConnection(t *testing.T) {
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer r.Stop(context.Background())
+	defer func() { _ = r.Stop(context.Background()) }()
 	conn, err := grpc.NewClient(r.grpcListenAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
@@ -591,7 +591,7 @@ func TestHTTPAndGRPCShareIntakeCapacity(t *testing.T) {
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer r.Stop(context.Background())
+	defer func() { _ = r.Stop(context.Background()) }()
 	for i := 0; i < maxConcurrentIntake-1; i++ {
 		r.decodeSlots <- struct{}{}
 	}
@@ -599,7 +599,7 @@ func TestHTTPAndGRPCShareIntakeCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	// Simulate active work on the shared slots, then verify both transports
 	// reject further work and recover after capacity is released.
 	r.decodeSlots <- struct{}{}
@@ -815,14 +815,14 @@ func TestGenericGRPCTransportModesAgainstRealServers(t *testing.T) {
 			}
 			server := grpc.NewServer(options...)
 			collogspb.RegisterLogsServiceServer(server, &logsServiceServer{})
-			go server.Serve(listener)
+			go func() { _ = server.Serve(listener) }()
 			defer server.Stop()
 			config := &Config{CloudEnabled: true, Endpoint: listener.Addr().String(), Protocol: "grpc", Insecure: tc.insecure, SkipTLSVerify: tc.skip, CAFile: tc.ca}
 			exporter, err := NewCloudExporter(context.Background(), config)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer exporter.Shutdown(context.Background())
+			defer func() { _ = exporter.Shutdown(context.Background()) }()
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			err = exporter.ExportProtoLogs(ctx, []*logspb.ResourceLogs{{}})

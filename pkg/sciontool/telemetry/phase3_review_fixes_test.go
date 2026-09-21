@@ -47,12 +47,12 @@ func TestUnsupportedMetricKindsRejectAtReceiverWithoutAdmission(t *testing.T) {
 			if err := r.Start(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			defer r.Stop(context.Background())
+			defer func() { _ = r.Stop(context.Background()) }()
 			conn, err := grpc.NewClient(r.grpcListenAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			_, err = colmetricpb.NewMetricsServiceClient(conn).Export(ctx, request)

@@ -142,7 +142,7 @@ func phase5PostLog(t *testing.T, addr string, request *colLogs.ExportLogsService
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != wantStatus {
 		t.Fatalf("native-shaped OTLP status %d", response.StatusCode)
 	}
@@ -231,9 +231,9 @@ func TestPhase5CrossProcessReceiverEvidence(t *testing.T) {
 	colLogs.RegisterLogsServiceServer(server, sink)
 	colMetrics.RegisterMetricsServiceServer(server, &phase5Metrics{sink: sink})
 	colTrace.RegisterTraceServiceServer(server, &phase5Traces{sink: sink})
-	go server.Serve(listener)
+	go func() { _ = server.Serve(listener) }()
 	defer server.Stop()
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	cfg := &Config{Enabled: true, CloudEnabled: true, Endpoint: listener.Addr().String(), Protocol: "grpc", Insecure: true,
 		Filter: FilterConfig{Exclude: DefaultFilterExclude}, Redaction: RedactionConfig{Redact: DefaultRedactFields, Hash: DefaultHashFields}}
@@ -390,9 +390,9 @@ func TestPhase5ExplicitAllowKeepsMandatoryRedaction(t *testing.T) {
 	sink := &phase5Sink{}
 	server := grpc.NewServer()
 	colLogs.RegisterLogsServiceServer(server, sink)
-	go server.Serve(listener)
+	go func() { _ = server.Serve(listener) }()
 	defer server.Stop()
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	p := NewWithConfig(&Config{Enabled: true, CloudEnabled: true, Endpoint: listener.Addr().String(), Protocol: "grpc", Insecure: true,
 		Filter: FilterConfig{Include: []string{"agent.user.prompt"}}, Redaction: RedactionConfig{}})
 	if err := p.Start(context.Background()); err != nil {
@@ -427,9 +427,9 @@ func TestPhase5BoundedFailureDiagnostics(t *testing.T) {
 	sink := &phase5Sink{failLogs: true}
 	server := grpc.NewServer()
 	colLogs.RegisterLogsServiceServer(server, sink)
-	go server.Serve(listener)
+	go func() { _ = server.Serve(listener) }()
 	defer server.Stop()
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	p := NewWithConfig(&Config{Enabled: true, CloudEnabled: true, Endpoint: listener.Addr().String(), Protocol: "grpc", Insecure: true,
 		Filter: FilterConfig{Exclude: DefaultFilterExclude}, Redaction: RedactionConfig{Redact: DefaultRedactFields}})
 	if err := p.Start(context.Background()); err != nil {
@@ -463,9 +463,9 @@ func TestPhase5TransientRecoveryDoesNotDoubleCount(t *testing.T) {
 	sink := &phase5Sink{transientFailures: 1}
 	server := grpc.NewServer()
 	colLogs.RegisterLogsServiceServer(server, sink)
-	go server.Serve(listener)
+	go func() { _ = server.Serve(listener) }()
 	defer server.Stop()
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	p := NewWithConfig(&Config{Enabled: true, CloudEnabled: true, Endpoint: listener.Addr().String(), Protocol: "grpc", Insecure: true,
 		Filter: FilterConfig{Exclude: DefaultFilterExclude}, Redaction: RedactionConfig{Redact: DefaultRedactFields}})
 	if err := p.Start(context.Background()); err != nil {

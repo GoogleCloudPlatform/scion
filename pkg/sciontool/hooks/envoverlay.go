@@ -39,7 +39,7 @@ func ValidateNativeTelemetryEnv(policy string, env []string, overlay, overrides 
 		if i > 0 && entry[:i] == NativeTelemetryPolicyKey {
 			return fmt.Errorf("native telemetry policy conflict: %s", NativeTelemetryPolicyKey)
 		}
-		if i <= 0 || (!reservedNativeTelemetryKey(entry[:i]) && !(entry[:i] == "CODEX_HOME" && overlay["CODEX_HOME"] != "")) {
+		if i <= 0 || (!reservedNativeTelemetryKey(entry[:i]) && (entry[:i] != "CODEX_HOME" || overlay["CODEX_HOME"] == "")) {
 			continue
 		}
 		key := entry[:i]
@@ -58,7 +58,7 @@ func ValidateNativeTelemetryEnv(policy string, env []string, overlay, overrides 
 		if key == NativeTelemetryPolicyKey {
 			return fmt.Errorf("native telemetry policy conflict: %s", key)
 		}
-		if !reservedNativeTelemetryKey(key) && !(key == "CODEX_HOME" && overlay["CODEX_HOME"] != "") {
+		if !reservedNativeTelemetryKey(key) && (key != "CODEX_HOME" || overlay["CODEX_HOME"] == "") {
 			continue
 		}
 		want, ok := overlay[key]

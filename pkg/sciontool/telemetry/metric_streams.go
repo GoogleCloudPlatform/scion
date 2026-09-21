@@ -982,7 +982,7 @@ func (s *metricStreams) snapshotGCP(observed time.Time, possible map[cloudMetric
 		if !entry.dirty {
 			continue
 		}
-		pointEnd := entry.end
+		var pointEnd uint64
 		if entry.hook {
 			// The pinned Monitoring SDK changes intervals shorter than 2ms to
 			// epoch+1ms. Wait for a real observation that needs no rewrite.

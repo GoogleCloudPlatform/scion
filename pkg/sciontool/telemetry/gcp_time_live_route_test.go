@@ -81,22 +81,22 @@ func TestGCPHookProviderCloudPointCadence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer listener.Close()
+			defer func() { _ = listener.Close() }()
 			fake := &localCadenceMonitoring{last: map[string]time.Time{}}
 			server := grpc.NewServer()
 			monitoringpb.RegisterMetricServiceServer(server, fake)
-			go server.Serve(listener)
+			go func() { _ = server.Serve(listener) }()
 			defer server.Stop()
 			conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			sdk, err := mexporter.New(mexporter.WithProjectID("test-project"), mexporter.WithMonitoringClientOptions(option.WithGRPCConn(conn)))
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer sdk.Shutdown(context.Background())
+			defer func() { _ = sdk.Shutdown(context.Background()) }()
 			cfg := &Config{Enabled: true, CloudProvider: "gcp", GRPCPort: availableTCPPort(t)}
 			p := NewWithConfig(cfg)
 			p.exporter = &CloudExporter{gcpExporter: &GCPExporter{metricExporter: sdk}}
@@ -104,7 +104,7 @@ func TestGCPHookProviderCloudPointCadence(t *testing.T) {
 			if err := receiver.Start(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			defer receiver.Stop(context.Background())
+			defer func() { _ = receiver.Stop(context.Background()) }()
 			for i := 0; i < 10; i++ {
 				cmd := exec.Command(os.Args[0], "-test.run=^TestMetricHookChild$", "-test.count=1")
 				cmd.Env = append(os.Environ(), fmt.Sprintf("SCION_TEST_HOOK_PORT=%d", cfg.GRPCPort), "SCION_AGENT_ID=local-cadence-agent", "SCION_PROJECT_ID=local-cadence-project", "SCION_HARNESS=synthetic")
@@ -169,22 +169,22 @@ func TestGCPNativePointEndBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer listener.Close()
+			defer func() { _ = listener.Close() }()
 			fake := &localCadenceMonitoring{last: map[string]time.Time{}}
 			server := grpc.NewServer()
 			monitoringpb.RegisterMetricServiceServer(server, fake)
-			go server.Serve(listener)
+			go func() { _ = server.Serve(listener) }()
 			defer server.Stop()
 			conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			sdk, err := mexporter.New(mexporter.WithProjectID("test-project"), mexporter.WithMonitoringClientOptions(option.WithGRPCConn(conn)))
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer sdk.Shutdown(context.Background())
+			defer func() { _ = sdk.Shutdown(context.Background()) }()
 			exporter := &GCPExporter{metricExporter: sdk}
 			start := uint64(time.Now().Add(-time.Minute).UnixNano())
 			first := start + uint64(10*time.Second)
@@ -256,7 +256,7 @@ func TestPairedHookCounterHistogramOneRequest(t *testing.T) {
 	if err := receiver.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer receiver.Stop(context.Background())
+	defer func() { _ = receiver.Stop(context.Background()) }()
 	for i := 0; i < 2; i++ {
 		p, err := NewProviders(context.Background(), cfg, false)
 		if err != nil {
@@ -297,22 +297,22 @@ func TestGCPNativeAdmissionUsesPinnedSDKMappedEnd(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer listener.Close()
+				defer func() { _ = listener.Close() }()
 				fake := &localCadenceMonitoring{last: map[string]time.Time{}}
 				server := grpc.NewServer()
 				monitoringpb.RegisterMetricServiceServer(server, fake)
-				go server.Serve(listener)
+				go func() { _ = server.Serve(listener) }()
 				defer server.Stop()
 				conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 				sdk, err := mexporter.New(mexporter.WithProjectID("test-project"), mexporter.WithMonitoringClientOptions(option.WithGRPCConn(conn)))
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer sdk.Shutdown(context.Background())
+				defer func() { _ = sdk.Shutdown(context.Background()) }()
 				p := NewWithConfig(&Config{Enabled: true, CloudProvider: "gcp"})
 				p.exporter = &CloudExporter{gcpExporter: &GCPExporter{metricExporter: sdk}}
 				start := uint64(time.Unix(1000, 0).UnixNano())

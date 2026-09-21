@@ -9,10 +9,7 @@ import (
 	"crypto/tls"
 	"fmt"
 
-	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -64,38 +61,3 @@ func appendOTLPTraceGRPCSecurityOption(opts []otlptracegrpc.Option, config *Conf
 	return append(opts, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(tlsConfig))), nil
 }
 
-func appendOTLPLogGRPCSecurityOption(opts []otlploggrpc.Option, config *Config) ([]otlploggrpc.Option, error) {
-	if config.Insecure {
-		return append(opts, otlploggrpc.WithInsecure()), nil
-	}
-
-	tlsConfig, err := loadSecureOTLPTLSConfig(config)
-	if err != nil {
-		return nil, err
-	}
-	return append(opts, otlploggrpc.WithTLSCredentials(credentials.NewTLS(tlsConfig))), nil
-}
-
-func appendOTLPMetricGRPCSecurityOption(opts []otlpmetricgrpc.Option, config *Config) ([]otlpmetricgrpc.Option, error) {
-	if config.Insecure {
-		return append(opts, otlpmetricgrpc.WithInsecure()), nil
-	}
-
-	tlsConfig, err := loadSecureOTLPTLSConfig(config)
-	if err != nil {
-		return nil, err
-	}
-	return append(opts, otlpmetricgrpc.WithTLSCredentials(credentials.NewTLS(tlsConfig))), nil
-}
-
-func appendOTLPTraceHTTPSecurityOption(opts []otlptracehttp.Option, config *Config) ([]otlptracehttp.Option, error) {
-	if config.Insecure {
-		return append(opts, otlptracehttp.WithInsecure()), nil
-	}
-
-	tlsConfig, err := loadSecureOTLPTLSConfig(config)
-	if err != nil {
-		return nil, err
-	}
-	return append(opts, otlptracehttp.WithTLSClientConfig(tlsConfig)), nil
-}

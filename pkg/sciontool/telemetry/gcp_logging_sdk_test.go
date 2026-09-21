@@ -65,13 +65,13 @@ func testActualLoggingSDKFailureAndRecovery(t *testing.T, overlap bool) {
 	server := grpc.NewServer()
 	fake := &p3LoggingServer{entered: make(chan struct{}), release: make(chan struct{})}
 	lp.RegisterLoggingServiceV2Server(server, fake)
-	go server.Serve(listener)
+	go func() { _ = server.Serve(listener) }()
 	defer server.Stop()
 	conn, e := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if e != nil {
 		t.Fatal(e)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	client, e := logging.NewClient(ctx, "phase3-local-only", option.WithGRPCConn(conn))
@@ -155,7 +155,7 @@ func TestPipelineStopRetriesExpiredLoggingClientClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	client, err := logging.NewClient(context.Background(), "phase3-local-only", option.WithGRPCConn(conn))
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +219,7 @@ func TestPipelineStopMetricBudgetExpiresBeforeLoggingClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	client, err := logging.NewClient(context.Background(), "phase3-local-only", option.WithGRPCConn(conn))
 	if err != nil {
 		t.Fatal(err)
@@ -292,12 +292,12 @@ func TestPipelineStopCompositeGCPOneShotMonitoringAndLogging(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer logConn.Close()
+				defer func() { _ = logConn.Close() }()
 				metricConn, err := grpc.NewClient("127.0.0.1:1", grpc.WithTransportCredentials(insecure.NewCredentials()))
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer metricConn.Close()
+				defer func() { _ = metricConn.Close() }()
 				client, err := logging.NewClient(context.Background(), "phase3-local-only", option.WithGRPCConn(logConn))
 				if err != nil {
 					t.Fatal(err)

@@ -33,7 +33,7 @@ func TestLifecycleAndHookSessionCountsUseDistinctCloudSeries(t *testing.T) {
 	if err := receiver.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer receiver.Stop(context.Background())
+	defer func() { _ = receiver.Stop(context.Background()) }()
 	initP, err := NewProviders(context.Background(), cfg, true)
 	if err != nil {
 		t.Fatal(err)
@@ -124,18 +124,18 @@ func TestLifecycleAndHookSessionCountsUseDistinctCloudSeries(t *testing.T) {
 	capture := &monitoringCapture{}
 	server := grpc.NewServer()
 	monitoringpb.RegisterMetricServiceServer(server, capture)
-	go server.Serve(listener)
+	go func() { _ = server.Serve(listener) }()
 	defer server.Stop()
 	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	sdk, err := mexporter.New(mexporter.WithProjectID("test-project"), mexporter.WithMonitoringClientOptions(option.WithGRPCConn(conn)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sdk.Shutdown(context.Background())
+	defer func() { _ = sdk.Shutdown(context.Background()) }()
 	exp := &GCPExporter{metricExporter: sdk}
 	if err := exp.ExportProtoMetrics(context.Background(), first); err != nil {
 		t.Fatal(err)

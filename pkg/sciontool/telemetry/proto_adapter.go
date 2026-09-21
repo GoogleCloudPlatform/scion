@@ -67,7 +67,7 @@ func protoSpanToStub(span *tracepb.Span, res *resource.Resource, scope instrumen
 		DroppedEvents:          int(span.DroppedEventsCount),
 		DroppedLinks:           int(span.DroppedLinksCount),
 		Resource:               res,
-		InstrumentationLibrary: scope,
+		InstrumentationScope: scope,
 	}
 }
 
