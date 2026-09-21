@@ -493,6 +493,11 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
+	// SECURITY-GATE: authorize update access to this specific template.
+	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
+		return
+	}
+
 	var template store.Template
 	if err := readJSON(r, &template); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -507,10 +512,38 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		}
 	}
 
-	// Preserve immutable fields
+	// Preserve immutable fields from the existing record. The store's
+	// UpdateTemplate unconditionally Set()s every column, so any field not
+	// pinned here is overwritten with the request body's value — or its
+	// zero value if the body omits it.
+	//
+	// Group 1 — identity and authz state: without these a caller could
+	// reparent a template to a different scope or claim ownership.
+	// Scope reparenting requires its own endpoint with dual-scope
+	// authorization; it is not supported through the update body.
 	template.ID = existing.ID
 	template.Created = existing.Created
 	template.CreatedBy = existing.CreatedBy
+	template.Scope = existing.Scope
+	template.ScopeID = existing.ScopeID
+	template.OwnerID = existing.OwnerID
+	// Group 2 — content and storage state: these are managed by the
+	// upload/finalize workflow and must not be writable through the
+	// update body.
+	template.ProjectID = existing.ProjectID
+	template.StoragePath = existing.StoragePath
+	template.StorageBucket = existing.StorageBucket
+	template.StorageURI = existing.StorageURI
+	template.Files = existing.Files
+	template.ContentHash = existing.ContentHash
+	template.Status = existing.Status
+	template.BaseTemplate = existing.BaseTemplate
+	template.SourceURL = existing.SourceURL
+	// Group 3 — audit trail: derived from the authenticated caller,
+	// not trusted from the request body. The deref is safe: authorize
+	// (line 497) returns false on nil identity, so reaching here
+	// guarantees GetIdentityFromContext(ctx) != nil.
+	template.UpdatedBy = GetIdentityFromContext(ctx).ID()
 	if template.Slug == "" {
 		template.Slug = api.Slugify(template.Name)
 	}
@@ -530,6 +563,11 @@ func (s *Server) patchTemplateV2(w http.ResponseWriter, r *http.Request, id stri
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: authorize update access to this specific template.
+	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
 		return
 	}
 
@@ -644,6 +682,11 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// SECURITY-GATE: authorize update access to this template (upload mutates content).
+	if !s.authorize(w, r, templateResource(template), ActionUpdate) {
+		return
+	}
+
 	stor := s.GetStorage()
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")
@@ -707,6 +750,11 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// SECURITY-GATE: authorize update access to this template (finalize mutates state).
+	if !s.authorize(w, r, templateResource(template), ActionUpdate) {
+		return
+	}
+
 	stor := s.GetStorage()
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")
@@ -759,6 +807,18 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// Authenticated runtime brokers download templates during agent creation
+	// (template hydration). They pass HMAC auth via middleware but are not
+	// user principals, so the authorization kernel cannot evaluate them.
+	// Allow read access for brokers; the HMAC credential is the trust basis.
+	// This mirrors the carve-out in getTemplateV2.
+	if GetBrokerIdentityFromContext(ctx) == nil {
+		// SECURITY-GATE: authorize read access to this template's files.
+		if !s.authorize(w, r, templateResource(template), ActionRead) {
+			return
+		}
+	}
+
 	stor := s.GetStorage()
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")
@@ -807,6 +867,11 @@ func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// SECURITY-GATE: authorize read access to this template's validation report.
+	if !s.authorize(w, r, templateResource(template), ActionRead) {
 		return
 	}
 
