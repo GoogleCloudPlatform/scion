@@ -1467,9 +1467,10 @@ type OutboundMessage struct {
 	Wake bool `json:"wake,omitempty"`
 }
 
-// SendOutboundMessage sends an outbound message from the agent to a human inbox.
-// Posts to POST /api/v1/agents/{agentID}/outbound-message using the agent token.
-// No retries — this is a best-effort fire-and-forget call.
+// SendOutboundMessage sends an outbound message from the agent via the hub.
+// The recipient may be a human user or another agent; the hub determines the
+// delivery path. Posts to POST /api/v1/agents/{agentID}/outbound-message using
+// the agent token. No retries — this is a best-effort fire-and-forget call.
 func (c *Client) SendOutboundMessage(ctx context.Context, msg OutboundMessage) error {
 	if !c.IsConfigured() {
 		return fmt.Errorf("hub client not configured")

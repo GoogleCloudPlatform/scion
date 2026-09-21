@@ -569,6 +569,10 @@ type OutboundMessageRequest struct {
 // OutboundMessageResult is the parsed response from a successful outbound
 // message send. It carries the server-assigned message identity and delivery
 // status so callers can correlate the message or detect ambiguous delivery.
+//
+// All fields are populated by the server on every 2xx response; omitempty is
+// intentionally absent because the contract guarantees non-empty values on
+// success. A nil result (with a non-nil error) indicates a non-2xx response.
 type OutboundMessageResult struct {
 	// MessageID is the server-assigned UUID for the persisted message.
 	MessageID string `json:"message_id"`
