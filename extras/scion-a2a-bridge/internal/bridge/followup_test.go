@@ -120,8 +120,8 @@ func (m *mockAgentService) Exec(ctx context.Context, agentID string, command []s
 func (m *mockAgentService) GetLogs(ctx context.Context, agentID string, opts *hubclient.GetLogsOptions) (string, error) {
 	return "", fmt.Errorf("not implemented")
 }
-func (m *mockAgentService) SendOutboundMessage(ctx context.Context, agentID string, msg *hubclient.OutboundMessageRequest) error {
-	return fmt.Errorf("not implemented")
+func (m *mockAgentService) SendOutboundMessage(ctx context.Context, agentID string, msg *hubclient.OutboundMessageRequest) (*hubclient.OutboundMessageResult, error) {
+	return nil, fmt.Errorf("not implemented")
 }
 func (m *mockAgentService) GetCloudLogs(ctx context.Context, agentID string, opts *hubclient.GetCloudLogsOptions) (*hubclient.CloudLogsResponse, error) {
 	return nil, fmt.Errorf("not implemented")

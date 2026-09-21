@@ -101,7 +101,12 @@ func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, 
 			})
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":   "msg-test-outbound",
+				"status":       "sent",
+				"recipient":    body.Recipient,
+				"recipient_id": "uid-test",
+			})
 
 		case r.Method == http.MethodPost && strings.HasPrefix(path, projectPrefix):
 			// Agent message endpoint (human-to-agent via StructuredMessage)

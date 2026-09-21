@@ -90,9 +90,11 @@ type AgentService interface {
 	// GetLogs retrieves agent logs.
 	GetLogs(ctx context.Context, agentID string, opts *GetLogsOptions) (string, error)
 
-	// SendOutboundMessage sends a message from an agent to a human inbox.
-	// Used when agents need to communicate with users (e.g., asking questions).
-	SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) error
+	// SendOutboundMessage sends a message from an agent via the outbound
+	// endpoint and returns the server-assigned message identity and delivery
+	// status. The SDK adds no retry or fallback routing; send budget, policy,
+	// and capabilities are server-enforced.
+	SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) (*OutboundMessageResult, error)
 
 	// GetCloudLogs retrieves structured log entries from Cloud Logging.
 	GetCloudLogs(ctx context.Context, agentID string, opts *GetCloudLogsOptions) (*CloudLogsResponse, error)
@@ -544,7 +546,9 @@ func (s *agentService) SendStructuredMessage(ctx context.Context, agentID string
 	return apiclient.DecodeResponse[MessageResponse](resp)
 }
 
-// OutboundMessageRequest is the request body for sending an agent-to-human outbound message.
+// OutboundMessageRequest is the request body for sending an outbound message
+// from an agent. The recipient may be a human user or another agent; the hub
+// determines the delivery path from the addressing fields.
 type OutboundMessageRequest struct {
 	Recipient       string            `json:"recipient,omitempty"`
 	RecipientID     string            `json:"recipient_id,omitempty"`
@@ -557,15 +561,39 @@ type OutboundMessageRequest struct {
 	Metadata        map[string]string `json:"metadata,omitempty"`
 	ConversationID  string            `json:"conversation_id,omitempty"`
 	ConversationRef string            `json:"conversation_ref,omitempty"`
+	// Wake requests that a suspended target agent be resumed before
+	// delivering the message. Ignored for non-agent recipients.
+	Wake bool `json:"wake,omitempty"`
 }
 
-// SendOutboundMessage sends a message from an agent to a human inbox.
-func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) error {
+// OutboundMessageResult is the parsed response from a successful outbound
+// message send. It carries the server-assigned message identity and delivery
+// status so callers can correlate the message or detect ambiguous delivery.
+//
+// All fields are populated by the server on every 2xx response; omitempty is
+// intentionally absent because the contract guarantees non-empty values on
+// success. A nil result (with a non-nil error) indicates a non-2xx response.
+type OutboundMessageResult struct {
+	// MessageID is the server-assigned UUID for the persisted message.
+	MessageID string `json:"message_id"`
+	// Status is the delivery status reported by the hub (e.g. "sent").
+	Status string `json:"status"`
+	// Recipient is the wire-format recipient (e.g. "user:alice" or "agent:builder").
+	Recipient string `json:"recipient"`
+	// RecipientID is the recipient's UUID.
+	RecipientID string `json:"recipient_id"`
+}
+
+// SendOutboundMessage sends a message from an agent via the outbound endpoint.
+// Returns the server-assigned message identity and delivery status, or a
+// structured error on failure. The SDK adds no retry or fallback routing;
+// send budget, policy, and capabilities are server-enforced.
+func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) (*OutboundMessageResult, error) {
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/outbound-message", msg, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return apiclient.CheckResponse(resp)
+	return apiclient.DecodeResponse[OutboundMessageResult](resp)
 }
 
 // BroadcastResponse is the parsed response from a broadcast message delivery.
