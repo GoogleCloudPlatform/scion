@@ -1216,6 +1216,24 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Expand NATS-style wildcards (e.g. project.>) into specific
+	// resource-scoped subjects before authorization. This ensures the
+	// subscription only covers resources the caller can actually access,
+	// preventing over-subscription to events the user shouldn't see.
+	subjects = ws.expandSSEWildcards(r, subjects)
+	if len(subjects) == 0 {
+		// All wildcard subjects expanded to nothing (e.g. user has no
+		// accessible projects). Fail closed — deny the connection.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		body, _ := json.Marshal(map[string]interface{}{
+			"error":           "no accessible resources for requested subjects",
+			"denied_subjects": []string{},
+		})
+		_, _ = w.Write(body)
+		return
+	}
+
 	// Subject-level authorization: verify the caller has access to every
 	// requested subject. This runs once at connection time, not per-event.
 	if denied := ws.authorizeSSESubjects(r, subjects); len(denied) > 0 {
@@ -1333,6 +1351,175 @@ func validateSSESubjects(subjects []string) string {
 	return ""
 }
 
+// expandSSEWildcards expands NATS-style wildcard subjects into concrete
+// resource-scoped subjects. For example, "project.>" (meaning "all my
+// projects") is expanded to "project.<uuid>.>" for each project the caller
+// has ActionRead access to. Subjects that don't contain wildcards in a
+// resource-ID position pass through unchanged. Subjects whose category
+// passes through authorization without resource checks (notification, broker)
+// also pass through unchanged.
+//
+// This expansion must run before authorizeSSESubjects so the authorization
+// check sees concrete resource IDs, and before Subscribe so the event
+// subscription only covers resources the caller is allowed to see.
+func (ws *WebServer) expandSSEWildcards(r *http.Request, subjects []string) []string {
+	sessionUser := getWebSessionUser(r.Context())
+	if sessionUser == nil {
+		// No session — return as-is; authorizeSSESubjects will deny.
+		return subjects
+	}
+
+	var expanded []string
+	for _, sub := range subjects {
+		tokens := strings.Split(sub, ".")
+		if len(tokens) < 2 || !isNATSWildcard(tokens[1]) {
+			// No wildcard in resource-ID position — keep as-is.
+			expanded = append(expanded, sub)
+			continue
+		}
+
+		switch tokens[0] {
+		case "project":
+			// Expand project.> to project.<uuid>.> for each accessible
+			// project. Fail-closed: if the store is nil or returns an
+			// error, emit nothing (the subject is silently dropped,
+			// which authorizeSSESubjects will not see — equivalent to
+			// deny).
+			projectSubs := ws.expandProjectWildcard(r, tokens)
+			expanded = append(expanded, projectSubs...)
+
+		case "user":
+			// User wildcards: only the caller's own ID is allowed.
+			// Expand user.> to user.<callerID>.> and let authz confirm.
+			var userSuffix []string
+			if tokens[1] == ">" {
+				userSuffix = append(userSuffix, ">")
+			}
+			if len(tokens) > 2 {
+				userSuffix = append(userSuffix, tokens[2:]...)
+			}
+			s := strings.Join(userSuffix, ".")
+			if s == "" {
+				expanded = append(expanded, "user."+sessionUser.UserID)
+			} else {
+				expanded = append(expanded, "user."+sessionUser.UserID+"."+s)
+			}
+
+		case "notification", "broker":
+			// These categories pass through authorization without
+			// resource checks — wildcards are fine as-is.
+			expanded = append(expanded, sub)
+
+		default:
+			// Unknown category with wildcard in ID position — keep
+			// as-is and let authorizeSSESubjects decide.
+			expanded = append(expanded, sub)
+		}
+	}
+
+	// Deduplicate expanded subjects preserving first-occurrence order.
+	// This handles two scenarios:
+	// 1. Duplicate wildcards in input (e.g. ["project.>", "project.>"])
+	//    that each expand independently to the same concrete subjects.
+	// 2. Wildcard + explicit overlap (e.g. ["project.>", "project.<uuid>.>"])
+	//    where expansion produces a subject already present explicitly.
+	seen := make(map[string]bool, len(expanded))
+	deduped := make([]string, 0, len(expanded))
+	for _, s := range expanded {
+		if !seen[s] {
+			seen[s] = true
+			deduped = append(deduped, s)
+		}
+	}
+	expanded = deduped
+
+	if len(expanded) == 0 {
+		// All subjects were wildcards that expanded to nothing.
+		// Return an empty slice (authorizeSSESubjects will see 0
+		// subjects, handleSSE already checked len > 0 above).
+		return expanded
+	}
+
+	return expanded
+}
+
+// expandProjectWildcard expands a project wildcard (project.> or project.*)
+// into concrete project-scoped subjects for all projects the caller can read.
+// Returns an empty slice if no accessible projects exist (fail-closed).
+func (ws *WebServer) expandProjectWildcard(r *http.Request, tokens []string) []string {
+	if ws.store == nil || ws.authzService == nil {
+		return nil // fail-closed
+	}
+
+	sessionUser := getWebSessionUser(r.Context())
+	if sessionUser == nil {
+		return nil
+	}
+
+	identity := NewAuthenticatedUser(
+		sessionUser.UserID,
+		sessionUser.Email,
+		sessionUser.Name,
+		sessionUser.Role,
+		"web",
+	)
+
+	// List all projects and filter by ActionRead.
+	allProjects, err := ws.store.ListProjects(r.Context(), store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+	if err != nil {
+		ws.logger().Warn("expandProjectWildcard: failed to list projects", "error", err)
+		return nil // fail-closed
+	}
+	if allProjects == nil || len(allProjects.Items) == 0 {
+		return nil
+	}
+
+	resources := make([]Resource, len(allProjects.Items))
+	for i := range allProjects.Items {
+		resources[i] = projectResource(&allProjects.Items[i])
+	}
+	caps := ws.authzService.ComputeCapabilitiesBatch(r.Context(), identity, resources, "project")
+
+	// Build the suffix to append after the concrete project ID.
+	//
+	// tokens[1] is the wildcard (> or *):
+	//   - ">" at position 1 means "all descendants" — the user wants all
+	//     sub-events. The expanded subject needs ".>" appended so the
+	//     NATS pattern still matches sub-events (e.g. project.<uuid>.>).
+	//   - "*" at position 1 means "single level" — the expanded subject
+	//     is just project.<uuid> with no descendant matching.
+	//
+	// tokens[2:] contains any further path components after the wildcard,
+	// e.g. for "project.*.agent.>" → tokens[2:] = ["agent", ">"].
+	var suffixParts []string
+	if tokens[1] == ">" {
+		// ">" at position 1 means all descendants — preserve it.
+		suffixParts = append(suffixParts, ">")
+	}
+	if len(tokens) > 2 {
+		suffixParts = append(suffixParts, tokens[2:]...)
+	}
+	suffix := strings.Join(suffixParts, ".")
+
+	var result []string
+	for i, p := range allProjects.Items {
+		if capabilityAllows(caps[i], ActionRead) {
+			if suffix == "" {
+				result = append(result, "project."+p.ID)
+			} else {
+				result = append(result, "project."+p.ID+"."+suffix)
+			}
+		}
+	}
+	return result
+}
+
+// isNATSWildcard returns true if the token is a NATS-style wildcard
+// (> matches all descendants, * matches a single token).
+func isNATSWildcard(token string) bool {
+	return token == ">" || token == "*"
+}
+
 // authorizeSSESubjects checks that the caller has access to every requested
 // subject. Returns the list of denied subjects; an empty slice means all are
 // authorized. For project-scoped subjects (project.<id>.*) the caller must
@@ -1376,23 +1563,44 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 		"web",
 	)
 
-	// Collect unique resource IDs from subjects.
+	// Collect unique resource IDs from subjects. Wildcard tokens (> or *)
+	// in resource-ID positions are rejected for resource-checked categories
+	// (project, user, agent) — expandSSEWildcards should have replaced them
+	// with concrete IDs. If one slips through, it is denied. Passthrough
+	// categories (notification, broker, etc.) are unaffected.
 	projectIDs := map[string]bool{}
 	userIDs := map[string]bool{}
 	agentIDs := map[string]bool{}
+	wildcardDenied := map[string]bool{} // subjects with unresolved wildcards
 	for _, sub := range subjects {
 		tokens := strings.Split(sub, ".")
 		if len(tokens) >= 2 {
 			switch tokens[0] {
 			case "project":
+				// Belt-and-suspenders: reject wildcards in resource-ID position.
+				if isNATSWildcard(tokens[1]) {
+					wildcardDenied[sub] = true
+					continue
+				}
 				projectIDs[tokens[1]] = true
 			case "user":
+				if isNATSWildcard(tokens[1]) {
+					wildcardDenied[sub] = true
+					continue
+				}
 				userIDs[tokens[1]] = true
 			case "agent":
+				if isNATSWildcard(tokens[1]) {
+					wildcardDenied[sub] = true
+					continue
+				}
 				if len(tokens) >= 3 {
 					agentIDs[tokens[1]] = true
 				}
 			}
+			// Other categories (notification, broker, etc.) pass through —
+			// wildcards in their resource-ID position are fine because
+			// these categories have no per-resource authorization checks.
 		}
 	}
 
@@ -1440,6 +1648,11 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 	// Build denied list.
 	var denied []string
 	for _, sub := range subjects {
+		// Deny any subject with an unresolved wildcard in resource-ID position.
+		if wildcardDenied[sub] {
+			denied = append(denied, sub)
+			continue
+		}
 		tokens := strings.Split(sub, ".")
 		if tokens[0] == "agent" {
 			if len(tokens) < 3 || !allowedAgents[tokens[1]] {
