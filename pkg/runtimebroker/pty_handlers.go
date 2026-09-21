@@ -126,10 +126,43 @@ func cleanupContainerAttach(runtimeCmd, containerID, execUser, nonce string) {
 		return // No match, error, or missing identity — fall back to host-side cleanup
 	}
 
+	// Step 1.5: Defense-in-depth — validate PID and startTime are strictly
+	// numeric before interpolating into shell commands. Values are kernel-
+	// provided (/proc glob for PID, /proc/<pid>/stat field 22 for startTime),
+	// but explicit validation closes any theoretical parser edge case at the
+	// trust boundary.
+	pid, startTime, err = validateCleanupIdentifiers(pid, startTime)
+	if err != nil {
+		return // Invalid identifiers — no signal
+	}
+
 	// Step 2: Verify-and-kill — re-read nonce, cmdline, and start_time, then
 	// signal in one exec to minimize TOCTOU window (still not eliminated —
 	// see design notes)
 	killContainerPID(ctx, runtimeCmd, containerID, execUser, pid, startTime, nonce)
+}
+
+// validateCleanupIdentifiers validates that pid and startTime are strictly
+// numeric (unsigned, base-10, 64-bit) before they are interpolated into shell
+// commands. Returns the canonical decimal representations (from
+// strconv.FormatUint) so that no raw captured string is used in shell
+// interpolation. PID 0 is explicitly rejected because kill -TERM 0 would
+// signal the entire process group.
+//
+// This is defense-in-depth: pid comes from a /proc/[0-9]*/ glob and startTime
+// from kernel-maintained /proc/<pid>/stat field 22 — both are kernel-provided.
+// Explicit validation closes any theoretical parser edge case at the trust
+// boundary.
+func validateCleanupIdentifiers(pid, startTime string) (string, string, error) {
+	pidNum, err := strconv.ParseUint(pid, 10, 64)
+	if err != nil || pidNum == 0 {
+		return "", "", fmt.Errorf("invalid PID %q", pid)
+	}
+	stimeNum, err := strconv.ParseUint(startTime, 10, 64)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid startTime %q", startTime)
+	}
+	return strconv.FormatUint(pidNum, 10), strconv.FormatUint(stimeNum, 10), nil
 }
 
 // findContainerPIDByNonce searches /proc/*/environ inside the container for a

@@ -2300,3 +2300,144 @@ func TestPTYCleanup_EmptyRuntimeNonceCleanup(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, panePID+":0", out, "agent must survive cleanup")
 }
+
+// TestPTYCleanup_NumericValidation tests the validateCleanupIdentifiers function
+// that provides defense-in-depth numeric validation for PID and startTime before
+// they are interpolated into shell commands. While values are kernel-provided,
+// explicit validation closes any theoretical parser edge case at the trust boundary.
+func TestPTYCleanup_NumericValidation(t *testing.T) {
+	t.Run("ValidInputs", func(t *testing.T) {
+		tests := []struct {
+			name      string
+			pid       string
+			startTime string
+			wantPID   string
+			wantSTime string
+		}{
+			{"simple", "1234", "567890", "1234", "567890"},
+			{"pid_1", "1", "100", "1", "100"},
+			{"large_pid", "4194304", "99999999", "4194304", "99999999"},
+			{"max_uint64_starttime", "42", "18446744073709551615", "42", "18446744073709551615"},
+			{"leading_zeros_normalized", "0042", "00100", "42", "100"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				gotPID, gotSTime, err := validateCleanupIdentifiers(tt.pid, tt.startTime)
+				require.NoError(t, err)
+				require.Equal(t, tt.wantPID, gotPID, "PID must match canonical form")
+				require.Equal(t, tt.wantSTime, gotSTime, "startTime must match canonical form")
+			})
+		}
+	})
+
+	t.Run("InvalidPID", func(t *testing.T) {
+		tests := []struct {
+			name string
+			pid  string
+		}{
+			// Shell metacharacters
+			{"command_substitution_dollar", "$(whoami)"},
+			{"command_substitution_backtick", "`id`"},
+			{"semicolon_injection", "1; rm -rf /"},
+			{"pipe_injection", "1|cat /etc/passwd"},
+			{"ampersand_injection", "1&echo pwned"},
+			{"newline_injection", "1\necho pwned"},
+			{"dollar_brace_expansion", "${IFS}"},
+			{"subshell", "(1)"},
+			{"redirect", "1>/tmp/x"},
+
+			// Whitespace and signs
+			{"leading_space", " 123"},
+			{"trailing_space", "123 "},
+			{"internal_space", "12 34"},
+			{"plus_sign", "+456"},
+			{"minus_sign", "-1"},
+			{"negative_number", "-100"},
+
+			// Zero PID — kill -TERM 0 sends to entire process group
+			{"zero_pid", "0"},
+			{"zero_padded", "000"},
+
+			// Non-numeric
+			{"alphabetic", "abc"},
+			{"hex_prefix", "0x1234"},
+			{"octal_prefix", "0o777"},
+			{"float", "3.14"},
+			{"empty", ""},
+
+			// Overflow
+			{"overflow_uint64", "18446744073709551616"}, // max uint64 + 1
+
+			// Quoted strings
+			{"double_quoted", `"123"`},
+			{"single_quoted", `'123'`},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				_, _, err := validateCleanupIdentifiers(tt.pid, "12345")
+				require.Error(t, err, "PID %q must be rejected", tt.pid)
+			})
+		}
+	})
+
+	t.Run("InvalidStartTime", func(t *testing.T) {
+		tests := []struct {
+			name      string
+			startTime string
+		}{
+			// Shell metacharacters
+			{"command_substitution", "$(cmd)"},
+			{"semicolon_injection", "1234; evil"},
+			{"backtick", "`uname`"},
+			{"pipe", "1|2"},
+
+			// Whitespace and signs
+			{"leading_space", " 9999"},
+			{"trailing_space", "9999 "},
+			{"plus_sign", "+9999"},
+			{"minus_sign", "-9999"},
+
+			// Non-numeric
+			{"alphabetic", "abc"},
+			{"empty", ""},
+			{"float", "99.99"},
+			{"hex", "0xDEAD"},
+
+			// Overflow
+			{"overflow_uint64", "18446744073709551616"},
+
+			// Quoted
+			{"double_quoted", `"9999"`},
+			{"single_quoted", `'9999'`},
+
+			// Adversarial comm field content — if the shell parser
+			// (##*) ) in findContainerPIDByNonce extracted the wrong
+			// field, startTime could contain ") fake_fields" material.
+			// These values must be rejected by the Go-side validation.
+			{"comm_injection_paren", ") S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345"},
+			{"comm_close_paren_space", "fake) 12345"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				_, _, err := validateCleanupIdentifiers("42", tt.startTime)
+				require.Error(t, err, "startTime %q must be rejected", tt.startTime)
+			})
+		}
+	})
+
+	t.Run("ZeroPIDSpecifically", func(t *testing.T) {
+		// Zero PID is especially dangerous: kill -TERM 0 sends SIGTERM to
+		// every process in the calling process group.
+		_, _, err := validateCleanupIdentifiers("0", "12345")
+		require.Error(t, err, "PID 0 must be rejected (kill -TERM 0 semantics)")
+	})
+
+	t.Run("CanonicalOutputUsed", func(t *testing.T) {
+		// Verify that output is FormatUint canonical form, not the raw input.
+		// Leading zeros in the raw string must be stripped.
+		pid, stime, err := validateCleanupIdentifiers("0042", "00100")
+		require.NoError(t, err)
+		require.Equal(t, "42", pid, "must use canonical FormatUint, not raw input")
+		require.Equal(t, "100", stime, "must use canonical FormatUint, not raw input")
+	})
+}
