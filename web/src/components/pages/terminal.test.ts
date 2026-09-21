@@ -463,7 +463,7 @@ describe('terminal — drag enter/leave counter', () => {
   function makeDragEvent(type: string): DragEvent {
     const event = new Event(type, { bubbles: true }) as any;
     event.preventDefault = vi.fn();
-    event.dataTransfer = { dropEffect: '', files: [] };
+    event.dataTransfer = { dropEffect: '', files: [], types: ['Files'] };
     return event as DragEvent;
   }
 
@@ -519,7 +519,7 @@ describe('terminal — drag enter/leave counter', () => {
 
     // Drop event
     const dropEvent = makeDragEvent('drop') as any;
-    dropEvent.dataTransfer = { files: { length: 0 } };
+    dropEvent.dataTransfer = { files: { length: 0 }, types: ['Files'] };
     await (el as any)._onDrop(dropEvent);
 
     expect((el as any)._dragCounter).toBe(0);
