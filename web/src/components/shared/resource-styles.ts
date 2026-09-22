@@ -552,8 +552,8 @@ export const listPageStyles = css`
     gap: 0.5rem;
     /* A flex item defaults to min-width:auto, so it refuses to shrink below
        its content and a long unbroken name pushes the card header wider than
-       the card. min-width:0 lets it shrink; the overflow rules then truncate
-       rather than spill. */
+       the card. min-width:0 lets it shrink, so the wrapping rules below can
+       break the name onto another line instead of spilling. */
     min-width: 0;
   }
 

@@ -350,8 +350,8 @@ export class ScionPageBrokerDetail extends LitElement {
         flex-shrink: 0;
       }
 
-      /* The name was a bare text node, which text-overflow cannot reach
-         through a flex container — hence the span wrapper in the template. */
+      /* The name was a bare text node, which these rules cannot reach through
+         a flex container — hence the span wrapper in the template. */
       .agent-name > span {
         min-width: 0;
         overflow-wrap: anywhere;

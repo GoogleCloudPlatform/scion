@@ -378,7 +378,7 @@ export class ScionPageProjectDetail extends LitElement {
       flex-wrap: wrap;
     }
 
-    /* Let the name column shrink so .agent-name can truncate; without this a
+    /* Let the name column shrink so .agent-name can wrap; without this a
        flex item's min-width:auto holds the header open at the full name. */
     .agent-header > div {
       /* Full-width basis so the badge always wraps to its own row. A wide
@@ -409,9 +409,9 @@ export class ScionPageProjectDetail extends LitElement {
       flex-shrink: 0;
     }
 
-    /* Truncation lands on the anchor that holds the text — the flex parent
-       only clips. Without this a hyphenated name breaks across several lines
-       instead of ellipsising. */
+    /* Wrapping has to land on the anchor that holds the text; the flex parent
+       only bounds it. overflow-wrap:anywhere covers the hard case — a long
+       name with no spaces or hyphens, which has nowhere else to break. */
     .agent-name > a {
       min-width: 0;
       overflow-wrap: anywhere;
