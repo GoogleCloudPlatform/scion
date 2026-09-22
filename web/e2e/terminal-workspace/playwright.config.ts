@@ -8,6 +8,8 @@ export default defineConfig({
     'ownership.pw.ts',
     'dm-buttons.pw.ts',
     'toast-lifecycle.pw.ts',
+    'url-layout.pw.ts',
+    'url-nav-guard.pw.ts',
   ],
   workers: 1,
   timeout: 30000,

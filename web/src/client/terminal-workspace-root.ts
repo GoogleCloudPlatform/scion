@@ -10,6 +10,7 @@ import {
   TerminalLayoutManager,
   type TerminalLayout,
   type TerminalSlot,
+  serializeLayoutUrl,
 } from './terminal-layout.js';
 import type { TerminalAgentMetadata } from './terminal-metadata.js';
 import type { ScionHeader } from '../components/shared/header.js';
@@ -103,6 +104,13 @@ export class TerminalWorkspaceRoot {
   /** Current rail sort mode. */
   private railSort: 'added' | 'alpha' | 'activity' = 'added';
 
+  /**
+   * Guard flag to prevent infinite loops when URL sync triggers a layout
+   * update that would in turn trigger another URL sync. Set to true while
+   * programmatically restoring layout from URL state.
+   */
+  private suppressUrlSync = false;
+
   private user: User | null = null;
 
   constructor(user: User | null = null) {
@@ -170,8 +178,12 @@ export class TerminalWorkspaceRoot {
     this.shell.append(this.rail, this.createPaneArea());
     this.element.append(this.header, this.shell, this.ariaLive, this.placeMenu);
 
-    // Subscribe to layout state (lives as long as the workspace root)
-    this.layoutManager.subscribe(() => this.queueRefresh());
+    // Subscribe to layout state (lives as long as the workspace root).
+    // Also sync URL on layout changes (#1715).
+    this.layoutManager.subscribe(() => {
+      this.queueRefresh();
+      this.syncUrlFromLayout();
+    });
 
     // Narrow-screen media query
     this.narrowQuery = window.matchMedia('(max-width: 760px)');
@@ -979,6 +991,85 @@ export class TerminalWorkspaceRoot {
         detail: { count: this.entries.size },
       })
     );
+  }
+
+  // ── URL layout sync (#1715) ─────────────────────────────────────────────
+
+  /**
+   * Map session keys in the active preset to agent IDs.
+   * Returns an array of agent IDs (or null for empty slots) matching the
+   * active preset's slot order.
+   */
+  getActiveSlotAgentIds(): ReadonlyArray<string | null> {
+    const state = this.layoutManager.getState();
+    const slots = this.getActivePresetSlots(state.active);
+    return slots.map((key) => {
+      if (!key) return null;
+      const entry = this.entries.get(key);
+      return entry?.state.agentId ?? null;
+    });
+  }
+
+  /**
+   * Find the session key for a given agent ID, if one exists.
+   * Returns null if no session is found for that agent.
+   */
+  findSessionKeyByAgentId(agentId: string): string | null {
+    for (const [key, entry] of this.entries) {
+      if (entry.state.agentId === agentId) return key;
+    }
+    return null;
+  }
+
+  /**
+   * Update the browser URL to reflect the current layout state.
+   * Uses replaceState (does not create a history entry).
+   * Skipped when suppressUrlSync is true (during programmatic restore).
+   *
+   * Layout query params are only added for multi-pane presets. In single
+   * mode the path `/terminals/{agentId}` is sufficient and cleaner — this
+   * preserves backward-compatible URLs for the common case.
+   */
+  syncUrlFromLayout(): void {
+    if (this.suppressUrlSync) return;
+    const state = this.layoutManager.getState();
+    const url = new URL(window.location.href);
+
+    // Helper: clear any existing layout params
+    const clearLayoutParams = (): void => {
+      for (const key of [...url.searchParams.keys()]) {
+        if (key === 'lv' || key === 'lp' || /^s\d+$/.test(key)) {
+          url.searchParams.delete(key);
+        }
+      }
+    };
+
+    if (state.active === 'single') {
+      // In single mode, clear layout params — the path is enough.
+      clearLayoutParams();
+    } else {
+      // Multi-pane: encode layout + slot agent IDs.
+      clearLayoutParams();
+      const agentIds = this.getActiveSlotAgentIds();
+      const params = serializeLayoutUrl(state.active, agentIds);
+      for (const [key, value] of params) {
+        url.searchParams.set(key, value);
+      }
+    }
+
+    const newUrl = url.pathname + url.search;
+    // Only update if URL actually changed
+    if (newUrl !== window.location.pathname + window.location.search) {
+      window.history.replaceState(window.history.state, '', newUrl);
+    }
+  }
+
+  /**
+   * Set the suppressUrlSync flag. Used by external callers (e.g. main.ts)
+   * during URL-driven layout restoration to avoid feedback loops.
+   */
+  setSuppressUrlSync(suppress: boolean): void {
+    this.suppressUrlSync = suppress;
   }
 
   private installStyles(): void {
