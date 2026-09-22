@@ -1246,9 +1246,9 @@ func resolveReleaseAssetURL(ctx context.Context, repo, version string) (string, 
 // BinaryUpdateExecutor downloads, verifies, and installs a new scion binary
 // from a GitHub Release, then restarts the systemd service.
 type BinaryUpdateExecutor struct {
-	serviceName string     // systemd service name (e.g., "scion-hub")
-	githubRepo  string     // GitHub repo for release lookups (e.g., "GoogleCloudPlatform/scion")
-	channel     string     // release channel override (empty = detect from current version)
+	serviceName string      // systemd service name (e.g., "scion-hub")
+	githubRepo  string      // GitHub repo for release lookups (e.g., "GoogleCloudPlatform/scion")
+	channel     string      // release channel override (empty = detect from current version)
 	store       store.Store // optional — used to clear system.update_available on success
 }
 
