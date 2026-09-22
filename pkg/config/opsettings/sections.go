@@ -69,6 +69,10 @@ type AgentDefaultsSettings struct {
 	DefaultMaxAgentRole  string            `json:"default_max_agent_role,omitempty"`
 	DefaultAgentRole     string            `json:"default_agent_role,omitempty"`
 	DefaultRuntimeBroker string            `json:"default_runtime_broker,omitempty"`
+	// DefaultTimezone is the hub-level IANA timezone fallback (e.g.
+	// "America/Los_Angeles"). Applied as TZ when neither the profile's
+	// first-class timezone field nor a raw TZ in the profile env is set.
+	DefaultTimezone string `json:"default_timezone,omitempty"`
 }
 
 // EndpointsSettings holds Layer-1 endpoint configuration.

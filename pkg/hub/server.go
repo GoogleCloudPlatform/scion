@@ -2791,6 +2791,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// is then omitted and broker behaviour is unchanged.
 	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
 
+	// Wire profile timezone provider so dispatch can inject TZ from the
+	// profile's first-class timezone field into agent containers.
+	dispatcher.SetProfileTimezoneProvider(s.profileTimezone)
+
 	// Set image registry so bare image names are rewritten before dispatch
 	dispatcher.SetImageRegistry(s.resolveImageRegistry())
 

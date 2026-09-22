@@ -117,6 +117,40 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 	}
 }
 
+// ProfileTimezone returns the IANA timezone string for the named profile, or
+// "" if the overlay is inactive, the profile does not exist, or has no
+// timezone set. Unlike Profiles(), this reads only the single timezone field
+// under RLock without deep-copying the entire profiles map — safe for hot
+// paths like agent dispatch.
+func (o *SettingsOverlay) ProfileTimezone(name string) string {
+	if o == nil || name == "" {
+		return ""
+	}
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	if !o.active || o.profiles == nil {
+		return ""
+	}
+	if p, ok := o.profiles[name]; ok {
+		return p.Timezone
+	}
+	return ""
+}
+
+// Profiles returns a deep copy of the overlay's profiles map. Returns nil if
+// the overlay has not been activated or no profiles have been set.
+func (o *SettingsOverlay) Profiles() map[string]V1ProfileConfig {
+	if o == nil {
+		return nil
+	}
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	if !o.active || o.profiles == nil {
+		return nil
+	}
+	return cloneProfiles(o.profiles)
+}
+
 // deepCloneJSON performs a deep copy of src into dst via JSON round-trip.
 // This is intentionally generic so that new fields added to V1RuntimeConfig,
 // V1ProfileConfig, or HarnessConfigEntry are automatically deep-copied

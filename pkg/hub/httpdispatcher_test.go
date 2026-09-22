@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -4588,3 +4589,165 @@ func TestDispatchAgentCreate_IncludesHubName(t *testing.T) {
 }
 
 func intPtr(i int) *int { return &i }
+
+// TestHTTPAgentDispatcher_TZInjection_ProfileTimezone verifies that the
+// profile's first-class timezone field is injected as TZ into the agent's
+// resolved env, taking precedence over existing TZ values from config env.
+func TestHTTPAgentDispatcher_TZInjection_ProfileTimezone(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("tz-broker-1"),
+		Name:     "tz-host",
+		Slug:     "tz-host",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("create broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	// Profile timezone provider returns "America/Los_Angeles" for profile "pacific".
+	dispatcher.SetProfileTimezoneProvider(func(name string) string {
+		if name == "pacific" {
+			return "America/Los_Angeles"
+		}
+		return ""
+	})
+
+	agent := &store.Agent{
+		ID:              tid("tz-agent-1"),
+		Name:            "tz-agent",
+		Slug:            "tz-agent",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("tz-broker-1"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			Task:          "test timezone",
+			Profile:       "pacific",
+			// Pre-existing TZ from config env should be overridden.
+			Env: map[string]string{"TZ": "UTC"},
+		},
+	}
+
+	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	if err != nil {
+		t.Fatalf("DispatchAgentCreate failed: %v", err)
+	}
+
+	env := mockClient.lastCreateReq.ResolvedEnv
+	if got := env["TZ"]; got != "America/Los_Angeles" {
+		t.Errorf("TZ = %q, want America/Los_Angeles (profile timezone should win)", got)
+	}
+}
+
+// TestHTTPAgentDispatcher_TZInjection_HubDefault verifies that the hub's
+// default_timezone is used as a fallback when neither the profile timezone
+// nor config env TZ is set.
+func TestHTTPAgentDispatcher_TZInjection_HubDefault(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("tz-broker-2"),
+		Name:     "tz-host-2",
+		Slug:     "tz-host-2",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("create broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	// No profile timezone provider (or returns empty).
+	dispatcher.SetProfileTimezoneProvider(func(name string) string { return "" })
+
+	// Hub default timezone.
+	dispatcher.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings {
+		return opsettings.AgentDefaultsSettings{DefaultTimezone: "America/New_York"}
+	})
+
+	agent := &store.Agent{
+		ID:              tid("tz-agent-2"),
+		Name:            "tz-agent-2",
+		Slug:            "tz-agent-2",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("tz-broker-2"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			Task:          "test hub default tz",
+			Profile:       "no-tz",
+		},
+	}
+
+	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	if err != nil {
+		t.Fatalf("DispatchAgentCreate failed: %v", err)
+	}
+
+	env := mockClient.lastCreateReq.ResolvedEnv
+	if got := env["TZ"]; got != "America/New_York" {
+		t.Errorf("TZ = %q, want America/New_York (hub default should apply)", got)
+	}
+}
+
+// TestHTTPAgentDispatcher_TZInjection_Precedence_ProfileEnvTZ verifies that
+// a raw TZ in profile env prevents the hub default from being applied, but is
+// itself overridden by the first-class profile timezone field.
+func TestHTTPAgentDispatcher_TZInjection_Precedence_ProfileEnvTZ(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("tz-broker-3"),
+		Name:     "tz-host-3",
+		Slug:     "tz-host-3",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("create broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	// Profile timezone returns empty (no first-class timezone set).
+	dispatcher.SetProfileTimezoneProvider(func(name string) string { return "" })
+
+	// Hub default timezone should NOT apply because config env has TZ.
+	dispatcher.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings {
+		return opsettings.AgentDefaultsSettings{DefaultTimezone: "America/Chicago"}
+	})
+
+	agent := &store.Agent{
+		ID:              tid("tz-agent-3"),
+		Name:            "tz-agent-3",
+		Slug:            "tz-agent-3",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("tz-broker-3"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			Task:          "test env tz precedence",
+			Profile:       "env-tz-profile",
+			Env:           map[string]string{"TZ": "Europe/London"},
+		},
+	}
+
+	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	if err != nil {
+		t.Fatalf("DispatchAgentCreate failed: %v", err)
+	}
+
+	env := mockClient.lastCreateReq.ResolvedEnv
+	if got := env["TZ"]; got != "Europe/London" {
+		t.Errorf("TZ = %q, want Europe/London (config env TZ should beat hub default)", got)
+	}
+}
