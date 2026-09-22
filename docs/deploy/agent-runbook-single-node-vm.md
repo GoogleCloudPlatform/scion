@@ -73,6 +73,11 @@ does not exist. Ask them to verify the project ID and their permissions.
 
 ### 2.3 Required APIs
 
+`deploy.sh` enables every API it needs itself (Phase 2) — this preflight
+check exists only to fail fast on permissions before gathering deployment
+details from the user, not because the operator needs to enable anything
+manually.
+
 Check each API. If any is not enabled, enable it.
 
 | API | Check | Enable |
@@ -80,9 +85,20 @@ Check each API. If any is not enabled, enable it.
 | `compute.googleapis.com` | `gcloud services list --enabled --filter="name:compute.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable compute.googleapis.com --project=PROJECT_ID` |
 | `run.googleapis.com` | `gcloud services list --enabled --filter="name:run.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable run.googleapis.com --project=PROJECT_ID` |
 | `iap.googleapis.com` | `gcloud services list --enabled --filter="name:iap.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable iap.googleapis.com --project=PROJECT_ID` |
+| `cloudbuild.googleapis.com` | `gcloud services list --enabled --filter="name:cloudbuild.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable cloudbuild.googleapis.com --project=PROJECT_ID` |
+| `artifactregistry.googleapis.com` | `gcloud services list --enabled --filter="name:artifactregistry.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable artifactregistry.googleapis.com --project=PROJECT_ID` |
 | `iam.googleapis.com` | `gcloud services list --enabled --filter="name:iam.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable iam.googleapis.com --project=PROJECT_ID` |
 
 **Expected:** Each check returns the API name. If empty, run the enable command.
+
+**Timing note:** first-time enablement of an API can take 1-2 minutes per
+API. This is normal `gcloud`/GCP behavior, not something to retry — `gcloud
+services enable` already blocks until the enable operation completes, so do
+not add retry loops around it. If you are executing these commands from an
+agent harness with a short default tool-call timeout (commonly ~2 minutes),
+run the enable/preflight commands with an extended timeout, or run them in
+the background and poll for completion, so the harness timeout doesn't get
+mistaken for a `gcloud` failure.
 
 ### 2.4 Billing
 
