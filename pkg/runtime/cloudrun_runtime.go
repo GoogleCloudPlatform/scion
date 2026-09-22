@@ -72,12 +72,13 @@ type CloudRunRuntime struct {
 	// lifecycle can be exercised without GCP credentials.
 	newClient func(ctx context.Context) (cloudrun.InstancesAPI, error)
 
-	// resolveOnce ensures GCP metadata auto-discovery runs at most once.
-	// When ProjectID and Location are both empty (auto-detected Cloud Run
-	// environment), resolveConfig populates them from the GCE metadata
-	// server on first use.
-	resolveOnce sync.Once
-	resolveErr  error
+	// resolveMu protects the resolution of GCP metadata. When ProjectID
+	// and Location are both empty (auto-detected Cloud Run environment),
+	// resolveConfig populates them from the GCE metadata server on first
+	// use. A mutex+bool is used instead of sync.Once so transient errors
+	// can be retried on subsequent calls.
+	resolveMu sync.Mutex
+	resolved  bool
 }
 
 func NewCloudRunRuntime(cfg *config.CloudRunConfig) (*CloudRunRuntime, error) {
@@ -125,47 +126,58 @@ func NewCloudRunRuntimeFromInstances(cfg *config.V1CloudRunInstancesConfig) (*Cl
 // resolveConfig ensures that ProjectID and Location are populated. When both
 // are empty (auto-detected Cloud Run environment with no explicit settings),
 // this method discovers them from the GCE metadata server. The resolution is
-// idempotent — it runs at most once and caches the result.
+// idempotent — once successful the result is cached. Transient failures are
+// not cached, so subsequent calls will retry.
 //
 // This fills the gap described in NewCloudRunRuntime: "project/region will be
 // discovered from GCP metadata when API calls are made." Without this, Run()
 // formats an empty parent ("projects//locations/") causing
 // RESOURCE_PROJECT_INVALID from the Cloud Run Instances API.
 func (r *CloudRunRuntime) resolveConfig(ctx context.Context) error {
-	r.resolveOnce.Do(func() {
-		if r.config.ProjectID != "" && r.config.Location != "" {
-			return // already configured
-		}
+	r.resolveMu.Lock()
+	defer r.resolveMu.Unlock()
 
-		if r.config.ProjectID == "" {
-			projectID, err := metadata.ProjectIDWithContext(ctx)
-			if err != nil {
-				r.resolveErr = fmt.Errorf("cloudrun: auto-detecting ProjectID from GCE metadata: %w", err)
-				return
-			}
-			r.config.ProjectID = projectID
-		}
+	if r.resolved {
+		return nil
+	}
 
-		if r.config.Location == "" {
-			// On Cloud Run, metadata.Zone() returns a full zone like
-			// "projects/NUM/zones/us-central1-1". We need the region
-			// portion (e.g. "us-central1"), which is the zone minus
-			// the trailing "-<letter/number>" suffix.
-			zone, err := metadata.ZoneWithContext(ctx)
-			if err != nil {
-				r.resolveErr = fmt.Errorf("cloudrun: auto-detecting Location from GCE metadata: %w", err)
-				return
-			}
-			// metadata.Zone() returns the bare zone name (e.g. "us-central1-1").
-			// Strip the last hyphen-delimited segment to derive the region.
-			if idx := strings.LastIndex(zone, "-"); idx > 0 {
-				r.config.Location = zone[:idx]
-			} else {
-				r.config.Location = zone
-			}
+	if r.config.ProjectID != "" && r.config.Location != "" {
+		r.resolved = true
+		return nil
+	}
+
+	projectID := r.config.ProjectID
+	if projectID == "" {
+		var err error
+		projectID, err = metadata.ProjectIDWithContext(ctx)
+		if err != nil {
+			return fmt.Errorf("cloudrun: auto-detecting ProjectID from GCE metadata: %w", err)
 		}
-	})
-	return r.resolveErr
+	}
+
+	location := r.config.Location
+	if location == "" {
+		// On Cloud Run, metadata.Zone() returns a full zone like
+		// "projects/NUM/zones/us-central1-1". We need the region
+		// portion (e.g. "us-central1"), which is the zone minus
+		// the trailing "-<letter/number>" suffix.
+		zone, err := metadata.ZoneWithContext(ctx)
+		if err != nil {
+			return fmt.Errorf("cloudrun: auto-detecting Location from GCE metadata: %w", err)
+		}
+		// metadata.Zone() returns the bare zone name (e.g. "us-central1-1").
+		// Strip the last hyphen-delimited segment to derive the region.
+		if idx := strings.LastIndex(zone, "-"); idx > 0 {
+			location = zone[:idx]
+		} else {
+			location = zone
+		}
+	}
+
+	r.config.ProjectID = projectID
+	r.config.Location = location
+	r.resolved = true
+	return nil
 }
 
 func (r *CloudRunRuntime) Name() string { return "cloudrun" }
@@ -871,6 +883,10 @@ func sanitizeGCPLabelKey(key string) string {
 		}
 		return '_'
 	}, key)
+	// GCP label keys must start with a lowercase letter.
+	if len(key) > 0 && (key[0] < 'a' || key[0] > 'z') {
+		key = "k_" + key
+	}
 	if len(key) > 63 {
 		key = key[:63]
 	}
@@ -894,6 +910,10 @@ func sanitizeGCPLabelValue(value string) string {
 		}
 		return '_'
 	}, value)
+	// GCP label values must start and end with alphanumeric characters.
+	value = strings.TrimFunc(value, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+	})
 	if len(value) > 63 {
 		value = value[:63]
 	}

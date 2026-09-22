@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
@@ -226,11 +227,11 @@ func cloudrunSandboxHubEndpoint(hubListenPort int) (string, error) {
 // Returns an error if any of these cannot be resolved — the agent start must
 // fail rather than fall back to a localhost URL that will never be reachable
 // from a standalone CRI instance.
-func cloudrunInstancesHubEndpoint() (string, error) {
+func cloudrunInstancesHubEndpoint(ctx context.Context) (string, error) {
 	return resolveCloudRunServiceURL(
 		os.Getenv("K_SERVICE"),
-		gcemetadata.NumericProjectID,
-		gcemetadata.Zone,
+		func() (string, error) { return gcemetadata.NumericProjectIDWithContext(ctx) },
+		func() (string, error) { return gcemetadata.ZoneWithContext(ctx) },
 	)
 }
 

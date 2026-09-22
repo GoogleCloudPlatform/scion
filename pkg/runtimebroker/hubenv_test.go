@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -443,18 +444,18 @@ func TestResolveCloudRunServiceURL(t *testing.T) {
 		wantErrSub string
 	}{
 		{
-			name:     "constructs correct URL",
-			kService: "scion-hub",
+			name:      "constructs correct URL",
+			kService:  "scion-hub",
 			projectFn: okProjectID,
 			zoneFn:    okZone,
-			want:     "https://scion-hub-721899303052.us-central1.run.app",
+			want:      "https://scion-hub-721899303052.us-central1.run.app",
 		},
 		{
-			name:     "different region",
-			kService: "scion-hub",
+			name:      "different region",
+			kService:  "scion-hub",
 			projectFn: okProjectID,
 			zoneFn:    func() (string, error) { return "europe-west1-b", nil },
-			want:     "https://scion-hub-721899303052.europe-west1.run.app",
+			want:      "https://scion-hub-721899303052.europe-west1.run.app",
 		},
 		{
 			name:       "empty K_SERVICE",
@@ -504,7 +505,7 @@ func TestResolveCloudRunServiceURL(t *testing.T) {
 func TestCloudrunInstancesHubEndpoint_NoKService(t *testing.T) {
 	// When K_SERVICE is not set, cloudrunInstancesHubEndpoint must fail.
 	t.Setenv("K_SERVICE", "")
-	_, err := cloudrunInstancesHubEndpoint()
+	_, err := cloudrunInstancesHubEndpoint(context.Background())
 	if err == nil {
 		t.Fatal("expected error when K_SERVICE is empty")
 	}

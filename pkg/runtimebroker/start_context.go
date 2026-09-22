@@ -389,7 +389,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// link-local), CRI instances need the hub's public Cloud Run service URL.
 	// Resolve it from the K_SERVICE env var and GCE metadata.
 	if runtimeName == "cloudrun" && isLocalhostEndpoint(hubEndpoint) {
-		criEndpoint, err := cloudrunInstancesHubEndpoint()
+		criEndpoint, err := cloudrunInstancesHubEndpoint(ctx)
 		if err != nil {
 			return nil, &startContextError{
 				Status:  http.StatusInternalServerError,
