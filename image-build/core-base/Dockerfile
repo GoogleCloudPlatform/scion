@@ -19,24 +19,33 @@
 # GitHub CLI version — bump this variable to upgrade gh across all images.
 ARG GH_VERSION=2.100.0
 
+# Git is vendored from the Chainguard git image rather than compiled from
+# source. Chainguard tracks upstream closely (currently 2.55.0) and rebuilds on
+# CVE disclosure, which removes a multi-minute `make` from every core-base
+# build. See the "Vendored git" block in the final stage for the two layout
+# constraints this imposes.
+#
+# NOTE: `:latest` is a floating tag. CI should override this with a digest
+# (`--build-arg GIT_IMAGE=chainguard/git@sha256:...`) so builds are
+# reproducible, and refresh that digest on a schedule — a vendored binary stops
+# receiving Chainguard's rebuild cadence the moment it is copied out.
+ARG GIT_IMAGE=chainguard/git:latest
+
 # Bun runtime source
 FROM oven/bun:latest AS bun-source
 
-FROM node:20-slim AS builder
+# Git source (vendored binary + helpers, see final stage)
+FROM ${GIT_IMAGE} AS git-source
+
+FROM node:24-trixie-slim AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install build dependencies
+# Install build dependencies. The former git-from-source toolchain (make, gcc,
+# libssl-dev, libcurl4-gnutls-dev, libexpat1-dev, zlib1g-dev, gettext,
+# ncurses-term) is no longer needed here — this stage now only fetches Go and
+# dearmors the gcsfuse signing key.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
     curl \
-    make \
-    gcc \
-    libssl-dev \
-    libcurl4-gnutls-dev \
-    libexpat1-dev \
-    zlib1g-dev \
-    gettext \
-    ncurses-term \
     ca-certificates \
     gnupg \
     && rm -rf /var/lib/apt/lists/*
@@ -56,16 +65,8 @@ RUN ARCH=$(dpkg --print-architecture) && \
 # Download gcsfuse GPG key
 RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
 
-# Install Git from source
-WORKDIR /opt
-RUN wget https://www.kernel.org/pub/software/scm/git/git-2.54.0.tar.gz
-RUN tar -xvf git-2.54.0.tar.gz
-WORKDIR /opt/git-2.54.0/
-RUN make -j"$(nproc 2>/dev/null || echo 1)" prefix=/usr/local all && \
-    make -j"$(nproc 2>/dev/null || echo 1)" prefix=/usr/local install
-
 # Final Stage
-FROM node:20-slim
+FROM node:24-trixie-slim
 USER root
 
 # Remove default node user to avoid UID 1000 collision with host user
@@ -77,11 +78,14 @@ COPY --from=builder /usr/share/keyrings/cloud.google.gpg /usr/share/keyrings/clo
 RUN . /etc/os-release && \
     echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt gcsfuse-${VERSION_CODENAME} main" | tee /etc/apt/sources.list.d/gcsfuse.list
 
-# Install runtime dependencies for Git and common tools
+# Install runtime dependencies for Git and common tools.
+# libcurl4t64 (not libcurl4-gnutls-dev) is required: the vendored Chainguard
+# git links against libcurl.so.4, and without it git-remote-https fails to load
+# with "error while loading shared libraries: libcurl.so.4".
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux \
     ca-certificates \
-    libcurl4-gnutls-dev \
+    libcurl4t64 \
     libexpat1 \
     zlib1g \
     python3 \
@@ -131,16 +135,77 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy Go and Git from builder
+# Copy Go from builder
 COPY --from=builder /usr/local/go /usr/local/go
-COPY --from=builder /usr/local/bin/git /usr/local/bin/git
-COPY --from=builder /usr/local/libexec/git-core /usr/local/libexec/git-core
-COPY --from=builder /usr/local/share/git-core /usr/local/share/git-core
+
+# --- Vendored git (Chainguard) ---------------------------------------------
+# Three constraints, all learned the hard way:
+#
+# 1. Helpers MUST land in /usr/libexec/git-core, not /usr/local/libexec.
+#    That path is compiled into the Chainguard binary as GIT_EXEC_PATH. Putting
+#    them anywhere else yields the very misleading "git: 'remote-https' is not
+#    a git command" / "fatal: remote helper 'https' aborted session", which
+#    reads like missing HTTPS support rather than a path error.
+#
+# 2. The binary MUST land at /usr/bin/git specifically. Chainguard ships
+#    /usr/libexec/git-core/git as a relative symlink to ../../bin/git, and git
+#    re-execs itself through that path for internal subcommands (auto
+#    maintenance, etc). Install the binary anywhere else (e.g.
+#    /usr/local/bin/git) on a base that already has a distro git and the
+#    symlink silently resolves to the OLD binary. The failure is baffling:
+#    `git --version` reports 2.55.0 while a subcommand dies with
+#    "error: unknown option \`detach'" followed by
+#    "fatal: unknown repository extension found: relativeworktrees".
+#
+# 3. This COPY must stay AFTER every apt-get above. Several packages pull in
+#    the distro git as a dependency; landing our binary last is what makes it
+#    win — and per (2) it must overwrite /usr/bin/git, not sit beside it.
+#
+# Chainguard builds against a newer glibc, so the base image needs glibc >= 2.38
+# (trixie ships 2.41). This is now a real constraint on future base changes:
+# bookworm (2.36) would fail at exec with "GLIBC_2.38 not found".
+COPY --from=git-source /usr/bin/git          /usr/bin/git
+COPY --from=git-source /usr/libexec/git-core /usr/libexec/git-core
+COPY --from=git-source /usr/share/git-core   /usr/share/git-core
+
+# Chainguard's libpcre2 carries versioned symbols that Debian's build does not.
+# Without it every git invocation prints "libpcre2-8.so.0: no version
+# information available" to stderr — harmless, but it pollutes output that
+# agents parse. Kept in a dedicated directory so it shadows only libpcre2 and
+# not anything else under /usr/local/lib.
+COPY --from=git-source /usr/lib/libpcre2-8.so.0 /usr/local/lib/scion-git/libpcre2-8.so.0
+ENV LD_LIBRARY_PATH=/usr/local/lib/scion-git
+
+# Fail the build, not the agent, if the vendored git is wrong. Each check maps
+# to one real way this lift breaks: the binary being shadowed on PATH, helpers
+# landing outside GIT_EXEC_PATH, a missing shared library, git re-execing into
+# a different (older) binary via the exec-path symlink, and the 2.47.0 feature
+# gate itself. All are network-free.
+RUN set -eu; \
+    test "$(command -v git)" = /usr/bin/git \
+      || { echo "FAIL: vendored git is shadowed on PATH by $(command -v git)"; exit 1; }; \
+    git --version; \
+    test -x /usr/libexec/git-core/git-remote-https \
+      || { echo "FAIL: git helpers missing from compiled-in GIT_EXEC_PATH"; exit 1; }; \
+    if ldd /usr/libexec/git-core/git-remote-https | grep -q "not found"; then \
+      echo "FAIL: unresolved shared libraries in git-remote-https:"; \
+      ldd /usr/libexec/git-core/git-remote-https | grep "not found"; exit 1; \
+    fi; \
+    test "$(/usr/libexec/git-core/git --version)" = "$(git --version)" \
+      || { echo "FAIL: git re-execs into a different binary via GIT_EXEC_PATH: \
+$(/usr/libexec/git-core/git --version) vs $(git --version)"; exit 1; }; \
+    git init -q /tmp/_gitcheck \
+      && git -C /tmp/_gitcheck -c user.email=build@scion.invalid -c user.name=build \
+           commit -q --allow-empty -m check \
+      && git -C /tmp/_gitcheck worktree add --relative-paths -q /tmp/_gitcheck_wt HEAD \
+      || { echo "FAIL: 'git worktree add --relative-paths' did not work end-to-end \
+(scion requires git >= 2.47.0 -- see pkg/util/git.go CheckGitVersion)"; exit 1; }; \
+    rm -rf /tmp/_gitcheck /tmp/_gitcheck_wt
 
 # Install GitHub CLI from official release (pinned version for reproducibility).
 # Bump GH_VERSION at the top of this file to upgrade.
 # Uses the tar.gz archive instead of .deb to avoid dpkg dependency issues
-# (git is compiled from source above and not tracked by dpkg).
+# (the vendored git above is not tracked by dpkg).
 ARG GH_VERSION
 RUN ARCH=$(dpkg --print-architecture) && \
     curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${ARCH}.tar.gz" -o /tmp/gh.tar.gz && \
