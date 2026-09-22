@@ -1893,9 +1893,9 @@ export class ScionChatMessage extends LitElement {
                 <span class="deleted-message">This message was deleted</span>
               </div>`
             : html`<div class="bubble-content">${this.renderBody()}</div>`}
-          ${isDeleted ? nothing : this.renderDeliveryState()}
-          ${isDeleted ? nothing : this.renderBadges()}
           ${isDeleted ? nothing : this.renderAttachments()}
+          ${isDeleted ? nothing : this.renderBadges()}
+          ${isDeleted ? nothing : this.renderDeliveryState()}
         </div>
       </div>
       ${this.renderFullPreview()}
