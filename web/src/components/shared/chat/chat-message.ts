@@ -181,6 +181,8 @@ const ENTITY_PATTERNS: EntityPattern[] = [
       /(?:\/scion-volumes\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-](?:\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-])*|\/workspace\/(?:\.scion-volumes\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-](?:\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-])*|[a-zA-Z0-9_.-]*[a-zA-Z0-9_-](?:\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-])*))/g,
     linkBuilder: (m) => {
       const path = m[0];
+      const lastSegment = path.split('/').pop() || '';
+      if (!lastSegment.includes('.')) return path;
       return `<a class="entity-link path-link" data-file-path="${path.replace(/"/g, '&quot;')}" href="javascript:void(0)" title="Open ${path.replace(/"/g, '&quot;')}">${path}</a>`;
     },
   },
@@ -242,7 +244,7 @@ function styleEntityLinksInText(text: string): string {
  * Follows the exact same skip-region approach as `styleMentions()`.
  */
 function styleEntityLinks(htmlStr: string): string {
-  const skip = new RegExp(MENTION_SKIP_REGION, 'gi');
+  const skip = new RegExp(ENTITY_SKIP_REGION, 'gi');
   let out = '';
   let cursor = 0;
   let match: RegExpExecArray | null;
@@ -351,6 +353,13 @@ function formatFileSize(bytes: number): string {
  * which escapes any `>` appearing inside an attribute value.
  */
 const MENTION_SKIP_REGION = '<pre\\b[^>]*>[\\s\\S]*?</pre>|<code\\b[^>]*>[\\s\\S]*?</code>|<[^>]+>';
+
+/**
+ * Skip regions for entity-link processing. Like MENTION_SKIP_REGION but
+ * does NOT skip inline <code> spans, so file paths inside backticks
+ * are still auto-linked. Fenced code blocks (<pre>) are still skipped.
+ */
+const ENTITY_SKIP_REGION = '<pre\\b[^>]*>[\\s\\S]*?</pre>|<[^>]+>';
 
 /**
  * Wrap @mentions in styled, clickable spans.

@@ -401,12 +401,18 @@ describe('scion-chat-message path links', () => {
     expect(links[0].dataset.filePath).toBe('/workspace/.scion-volumes/data/output.json');
   });
 
-  it('matches paths without file extensions (directories)', async () => {
+  it('does not link directory paths without a file extension', async () => {
     const el = await mount('look in /workspace/src/components for the code');
     const links = pathLinks(el);
 
-    expect(links).toHaveLength(1);
-    expect(links[0].dataset.filePath).toBe('/workspace/src/components');
+    expect(links).toHaveLength(0);
+  });
+
+  it('does not link directory paths (no file extension)', async () => {
+    const el = await mount('check /scion-volumes/scratchpad/projects for details');
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(0);
   });
 
   it('stops at spaces (paths with spaces are not linkable)', async () => {
@@ -474,6 +480,14 @@ describe('scion-chat-message path links', () => {
     expect(links).toHaveLength(2);
     expect(links[0].dataset.filePath).toBe('/workspace/a.ts');
     expect(links[1].dataset.filePath).toBe('/scion-volumes/data/b.ts');
+  });
+
+  it('links file paths inside backtick code spans', async () => {
+    const el = await mount('see `/scion-volumes/scratchpad/report.md` for results');
+    const links = pathLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.filePath).toBe('/scion-volumes/scratchpad/report.md');
   });
 });
 
