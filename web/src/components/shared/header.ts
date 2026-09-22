@@ -273,6 +273,7 @@ export class ScionHeader extends LitElement {
       gap: 0.75rem;
       justify-self: end;
       grid-column: 3;
+      position: relative;
     }
 
     /* ------------------------------------------------------------------ */
@@ -502,6 +503,27 @@ export class ScionHeader extends LitElement {
     }
 
     /* ------------------------------------------------------------------ */
+    /* Icon badge wrapper + count badge for wide-layout icon buttons        */
+    /* ------------------------------------------------------------------ */
+    .icon-badge-wrapper {
+      position: relative;
+      display: inline-flex;
+    }
+    .icon-badge-wrapper .trigger-badge {
+      min-width: 16px;
+      width: auto;
+      height: 16px;
+      padding: 0 4px;
+      border-radius: 8px;
+      background: var(--sl-color-danger-600, #dc2626);
+      color: white;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 16px;
+      text-align: center;
+    }
+
+    /* ------------------------------------------------------------------ */
     /* Menu-item count badge (e.g. "3" next to Messages)                   */
     /* ------------------------------------------------------------------ */
     .count-badge {
@@ -652,18 +674,28 @@ export class ScionHeader extends LitElement {
             ? html`
                 <div class="header-actions">
                   <sl-tooltip content="Messages">
-                    <sl-icon-button
-                      name="envelope"
-                      label="Messages"
-                      @click=${(): void => this.openInboxTray()}
-                    ></sl-icon-button>
+                    <span class="icon-badge-wrapper">
+                      <sl-icon-button
+                        name="envelope"
+                        label="Messages"
+                        @click=${(): void => this.openInboxTray()}
+                      ></sl-icon-button>
+                      ${this.inboxCount > 0
+                        ? html`<span class="trigger-badge">${this.inboxCount}</span>`
+                        : nothing}
+                    </span>
                   </sl-tooltip>
                   <sl-tooltip content="Notifications">
-                    <sl-icon-button
-                      name="bell"
-                      label="Notifications"
-                      @click=${(): void => this.openNotificationTray()}
-                    ></sl-icon-button>
+                    <span class="icon-badge-wrapper">
+                      <sl-icon-button
+                        name="bell"
+                        label="Notifications"
+                        @click=${(): void => this.openNotificationTray()}
+                      ></sl-icon-button>
+                      ${this.notificationCount > 0
+                        ? html`<span class="trigger-badge">${this.notificationCount}</span>`
+                        : nothing}
+                    </span>
                   </sl-tooltip>
                   <sl-tooltip content="Help">
                     <sl-icon-button
