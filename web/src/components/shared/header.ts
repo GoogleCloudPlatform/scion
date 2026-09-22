@@ -335,6 +335,22 @@ export class ScionHeader extends LitElement {
     .sign-in-link:hover {
       background: var(--scion-primary-hover, #2563eb);
     }
+
+    /* ------------------------------------------------------------------ */
+    /* Tray container: zero-size absolute wrapper so hidden tray elements  */
+    /* don't contribute flex items or gap in .header-right.                */
+    /* ------------------------------------------------------------------ */
+    .tray-container {
+      position: absolute;
+      width: 0;
+      height: 0;
+      overflow: visible;
+      pointer-events: none;
+    }
+
+    .tray-container > * {
+      pointer-events: auto;
+    }
   `;
 
   // =========================================================================
@@ -379,8 +395,10 @@ export class ScionHeader extends LitElement {
             `}
 
         <!-- Tray components: triggers hidden, panels open programmatically -->
-        <scion-inbox-tray .user=${this.user}></scion-inbox-tray>
-        <scion-notification-tray .user=${this.user}></scion-notification-tray>
+        <div class="tray-container">
+          <scion-inbox-tray .user=${this.user}></scion-inbox-tray>
+          <scion-notification-tray .user=${this.user}></scion-notification-tray>
+        </div>
       </div>
     `;
   }
@@ -430,6 +448,11 @@ export class ScionHeader extends LitElement {
                 <sl-menu-item value="terminals" ?checked=${isTerminal}>
                   <sl-icon slot="prefix" name="terminal"></sl-icon>
                   Terminal
+                  ${this.terminalSessionCount > 0
+                    ? html`<span slot="suffix" class="count-badge"
+                        >${this.terminalSessionCount}</span
+                      >`
+                    : ''}
                 </sl-menu-item>
               `
             : ''}
@@ -486,9 +509,7 @@ export class ScionHeader extends LitElement {
             <sl-icon slot="prefix" name="bell"></sl-icon>
             Notifications
             ${this.notificationCount > 0
-              ? html`<span slot="suffix" class="count-badge"
-                  >${this.notificationCount}</span
-                >`
+              ? html`<span slot="suffix" class="count-badge">${this.notificationCount}</span>`
               : ''}
           </sl-menu-item>
 
@@ -503,10 +524,7 @@ export class ScionHeader extends LitElement {
             Help
           </sl-menu-item>
           <sl-menu-item value="theme">
-            <sl-icon
-              slot="prefix"
-              name=${this.isDark ? 'sun' : 'moon'}
-            ></sl-icon>
+            <sl-icon slot="prefix" name=${this.isDark ? 'sun' : 'moon'}></sl-icon>
             ${this.isDark ? 'Light Mode' : 'Dark Mode'}
           </sl-menu-item>
 
@@ -565,6 +583,7 @@ export class ScionHeader extends LitElement {
   private closeUserDropdown(): void {
     const dropdown = this.shadowRoot?.querySelector('.user-dropdown') as
       | { hide: () => void }
+      | null
       | undefined;
     dropdown?.hide();
   }
@@ -572,6 +591,16 @@ export class ScionHeader extends LitElement {
   // =========================================================================
   // Tray integration
   // =========================================================================
+
+  // ──────────────────────────────────────────────────────────────────
+  // COUPLING: inbox-tray.ts (.inbox-btn, .messages property)
+  //           notification-tray.ts (.bell-btn, .notifications property)
+  // If either tray renames these selectors or properties, update the
+  // references in openInboxTray(), openNotificationTray(),
+  // hideTrayTriggers(), and syncTrayCounts() below.
+  // TODO: Add public toggle() methods and unreadCount getters to the
+  // tray components so the header does not need to pierce shadow DOMs.
+  // ──────────────────────────────────────────────────────────────────
 
   /**
    * Programmatically open the inbox tray by clicking its (hidden) trigger
@@ -622,6 +651,9 @@ export class ScionHeader extends LitElement {
    * their array lengths after a short delay to let their fetch settle.
    */
   private syncTrayCounts(): void {
+    // Delay initial sync to allow tray components to complete their first
+    // data fetch. 500ms is adequate for typical latencies; SSE events will
+    // correct the count if the trays load slower.
     setTimeout(() => {
       if (!this.isConnected) return;
       const inbox = this.shadowRoot?.querySelector('scion-inbox-tray') as
