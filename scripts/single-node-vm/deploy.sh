@@ -503,6 +503,11 @@ else
   esac
 fi
 
+# Force a rebuild even if the version marker and all 3 images already match
+# the requested VERSION. Defaults to false: normally a matching marker means
+# Phase 3b can skip the 30-45 min build entirely.
+CFG_FORCE_REBUILD="$(config_get 'container_images.force_rebuild' 'false')"
+
 # --- Admin email ---
 ADMIN_EMAIL="$(config_get 'admin_email' '')"
 if [[ -z "$ADMIN_EMAIL" ]]; then
@@ -1027,103 +1032,148 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
   # is mode 0750 once cloud-init's `useradd -m` runs. Every privileged
   # step uses `sudo`; the deployer only needs to traverse /opt and
   # write /tmp.
-  info "Cloning scion repository on VM..."
-  gcloud compute ssh "${INSTANCE_NAME}" \
-    --zone="${ZONE}" --project="${PROJECT_ID}" \
-    --command="
-      set -euo pipefail
-      if [ ! -d /opt/scion-source ]; then
-        sudo git clone --depth 1 --branch '${VERSION}' \
-          https://github.com/GoogleCloudPlatform/scion.git /opt/scion-source
-      else
-        cd /opt/scion-source
-        sudo git fetch --depth 1 origin tag '${VERSION}'
-        sudo git checkout '${VERSION}'
-      fi
-    "
-
-  # Build only the minimal set of images needed for deployment:
-  # core-base (foundation) -> scion-base (adds scion binary) -> scion-antigravity (default harness)
-  # Using --target all would build ALL ~12 images including harnesses with known build issues.
-  info "Building container images (this may take 30-45 minutes)..."
-  gcloud compute ssh "${INSTANCE_NAME}" \
-    --zone="${ZONE}" --project="${PROJECT_ID}" \
-    --command="
-      set -euo pipefail
-      cd /opt/scion-source
-      rm -f /tmp/scion-image-build.exit
-      { nohup bash -c '
-        set -euo pipefail
-        # Step 1: Build core-base
-        echo \"=== Building core-base ===\"
-        sudo bash image-build/scripts/build-images.sh \
-          --builder local-docker \
-          --target core-base \
-          --tag latest
-
-        # Step 2: Build scion-base
-        echo \"=== Building scion-base ===\"
-        sudo bash image-build/scripts/build-images.sh \
-          --builder local-docker \
-          --target scion-base \
-          --tag latest
-
-        # Step 3: Build antigravity harness directly
-        echo \"=== Building scion-antigravity ===\"
-        sudo docker build \
-          -t scion-antigravity:latest \
-          --build-arg BASE_IMAGE=scion-base:latest \
-          -f harnesses/antigravity/Dockerfile \
-          harnesses/antigravity/
-
-        # Step 4: Tag images under localhost/scion for the runtime
-        echo \"=== Tagging images for localhost/scion registry ===\"
-        sudo docker tag core-base:latest localhost/scion/core-base:latest
-        sudo docker tag scion-base:latest localhost/scion/scion-base:latest
-        sudo docker tag scion-antigravity:latest localhost/scion/scion-antigravity:latest
-
-        echo \"=== All images built and tagged successfully ===\"
-      ' > /tmp/scion-image-build.log 2>&1; echo \$? > /tmp/scion-image-build.exit; } >/dev/null 2>&1 </dev/null &
-      echo \$! > /tmp/scion-image-build.pid
-      echo \"Image build started in background (PID \$(cat /tmp/scion-image-build.pid))\"
-    "
-
-  # Poll for build completion
-  info "Waiting for image build to complete..."
-  BUILD_DONE=false
-  POLL_COUNT=0
-  while [[ "$BUILD_DONE" != "true" ]] && [[ $POLL_COUNT -lt $BUILD_POLL_MAX_ATTEMPTS ]]; do
-    sleep "$BUILD_POLL_INTERVAL_SECS"
-    POLL_COUNT=$((POLL_COUNT + 1))
-    # Check if the exit code file exists (build finished)
-    BUILD_EXIT=$(gcloud compute ssh "${INSTANCE_NAME}" \
+  #
+  # Idempotency: a successful build writes a version marker
+  # (/opt/scion-source/.images-built.version) containing $VERSION. A re-run
+  # skips the 30-45 min build iff the marker matches $VERSION AND all 3
+  # expected images are still present — a stale `:latest` tag alone is not
+  # enough, since re-running with --version vNEXT must not silently keep old
+  # images just because something answers to `:latest`. The marker file is
+  # what makes the skip version-aware.
+  IMAGES_BUILT_MARKER="/opt/scion-source/.images-built.version"
+  SKIP_BUILD=false
+  if [[ "$CFG_FORCE_REBUILD" == "true" ]]; then
+    info "container_images.force_rebuild is true; forcing a rebuild."
+  else
+    info "Checking whether images for version ${VERSION} are already built..."
+    BUILD_CHECK=$(gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
-      --command="cat /tmp/scion-image-build.exit 2>/dev/null || echo running" \
-      2>/dev/null) || true
-    if [[ "$BUILD_EXIT" != "running" ]]; then
-      BUILD_DONE=true
-    else
-      # Show progress (last line of build log)
-      LAST_LINE=$(gcloud compute ssh "${INSTANCE_NAME}" \
-        --zone="${ZONE}" --project="${PROJECT_ID}" \
-        --command="tail -1 /tmp/scion-image-build.log 2>/dev/null || echo '(waiting...)'" \
-        2>/dev/null) || true
-      echo "  [${POLL_COUNT}] ${LAST_LINE}"
+      --command="
+        set -euo pipefail
+        MARKER='${IMAGES_BUILT_MARKER}'
+        if [ -f \"\$MARKER\" ] \
+          && [ \"\$(sudo cat \"\$MARKER\" 2>/dev/null)\" = '${VERSION}' ] \
+          && sudo docker image inspect localhost/scion/core-base:latest >/dev/null 2>&1 \
+          && sudo docker image inspect localhost/scion/scion-base:latest >/dev/null 2>&1 \
+          && sudo docker image inspect localhost/scion/scion-antigravity:latest >/dev/null 2>&1; then
+          echo skip
+        else
+          echo build
+        fi
+      " 2>/dev/null) || true
+    if [[ "$BUILD_CHECK" == "skip" ]]; then
+      SKIP_BUILD=true
     fi
-  done
-
-  if [[ "$BUILD_DONE" != "true" ]]; then
-    err "Image build timed out after $((BUILD_POLL_MAX_ATTEMPTS * BUILD_POLL_INTERVAL_SECS / 60)) minutes."
-    echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='cat /tmp/scion-image-build.log'"
-    exit 1
   fi
 
-  if [[ "$BUILD_EXIT" != "0" ]]; then
-    err "Image build failed (exit code: ${BUILD_EXIT})."
-    echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='tail -50 /tmp/scion-image-build.log'"
-    exit 1
+  if [[ "$SKIP_BUILD" == "true" ]]; then
+    info "Images already built for version ${VERSION} (marker + all 3 images present); skipping build."
+    echo "  Set container_images.force_rebuild: true in the config to override."
+  else
+    info "Cloning scion repository on VM..."
+    gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="
+        set -euo pipefail
+        if [ ! -d /opt/scion-source ]; then
+          sudo git clone --depth 1 --branch '${VERSION}' \
+            https://github.com/GoogleCloudPlatform/scion.git /opt/scion-source
+        else
+          cd /opt/scion-source
+          sudo git fetch --depth 1 origin tag '${VERSION}'
+          sudo git checkout '${VERSION}'
+        fi
+      "
+
+    # Build only the minimal set of images needed for deployment:
+    # core-base (foundation) -> scion-base (adds scion binary) -> scion-antigravity (default harness)
+    # Using --target all would build ALL ~12 images including harnesses with known build issues.
+    info "Building container images (this may take 30-45 minutes)..."
+    gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="
+        set -euo pipefail
+        cd /opt/scion-source
+        rm -f /tmp/scion-image-build.exit
+        { nohup bash -c '
+          set -euo pipefail
+          # Step 1: Build core-base
+          echo \"=== Building core-base ===\"
+          sudo bash image-build/scripts/build-images.sh \
+            --builder local-docker \
+            --target core-base \
+            --tag latest
+
+          # Step 2: Build scion-base
+          echo \"=== Building scion-base ===\"
+          sudo bash image-build/scripts/build-images.sh \
+            --builder local-docker \
+            --target scion-base \
+            --tag latest
+
+          # Step 3: Build antigravity harness directly
+          echo \"=== Building scion-antigravity ===\"
+          sudo docker build \
+            -t scion-antigravity:latest \
+            --build-arg BASE_IMAGE=scion-base:latest \
+            -f harnesses/antigravity/Dockerfile \
+            harnesses/antigravity/
+
+          # Step 4: Tag images under localhost/scion for the runtime
+          echo \"=== Tagging images for localhost/scion registry ===\"
+          sudo docker tag core-base:latest localhost/scion/core-base:latest
+          sudo docker tag scion-base:latest localhost/scion/scion-base:latest
+          sudo docker tag scion-antigravity:latest localhost/scion/scion-antigravity:latest
+
+          # Step 5: Record the version marker so re-runs can skip the build.
+          # Written last, only on full success (set -e above aborts before
+          # this line if any prior step failed).
+          echo \"=== Recording image build marker (version ${VERSION}) ===\"
+          echo '${VERSION}' | sudo tee '${IMAGES_BUILT_MARKER}' > /dev/null
+
+          echo \"=== All images built and tagged successfully ===\"
+        ' > /tmp/scion-image-build.log 2>&1; echo \$? > /tmp/scion-image-build.exit; } >/dev/null 2>&1 </dev/null &
+        echo \$! > /tmp/scion-image-build.pid
+        echo \"Image build started in background (PID \$(cat /tmp/scion-image-build.pid))\"
+      "
+
+    # Poll for build completion
+    info "Waiting for image build to complete..."
+    BUILD_DONE=false
+    POLL_COUNT=0
+    while [[ "$BUILD_DONE" != "true" ]] && [[ $POLL_COUNT -lt $BUILD_POLL_MAX_ATTEMPTS ]]; do
+      sleep "$BUILD_POLL_INTERVAL_SECS"
+      POLL_COUNT=$((POLL_COUNT + 1))
+      # Check if the exit code file exists (build finished)
+      BUILD_EXIT=$(gcloud compute ssh "${INSTANCE_NAME}" \
+        --zone="${ZONE}" --project="${PROJECT_ID}" \
+        --command="cat /tmp/scion-image-build.exit 2>/dev/null || echo running" \
+        2>/dev/null) || true
+      if [[ "$BUILD_EXIT" != "running" ]]; then
+        BUILD_DONE=true
+      else
+        # Show progress (last line of build log)
+        LAST_LINE=$(gcloud compute ssh "${INSTANCE_NAME}" \
+          --zone="${ZONE}" --project="${PROJECT_ID}" \
+          --command="tail -1 /tmp/scion-image-build.log 2>/dev/null || echo '(waiting...)'" \
+          2>/dev/null) || true
+        echo "  [${POLL_COUNT}] ${LAST_LINE}"
+      fi
+    done
+
+    if [[ "$BUILD_DONE" != "true" ]]; then
+      err "Image build timed out after $((BUILD_POLL_MAX_ATTEMPTS * BUILD_POLL_INTERVAL_SECS / 60)) minutes."
+      echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='cat /tmp/scion-image-build.log'"
+      exit 1
+    fi
+
+    if [[ "$BUILD_EXIT" != "0" ]]; then
+      err "Image build failed (exit code: ${BUILD_EXIT})."
+      echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='tail -50 /tmp/scion-image-build.log'"
+      exit 1
+    fi
+    echo "  Image build completed successfully."
   fi
-  echo "  Image build completed successfully."
 
   info "Verifying container images..."
   gcloud compute ssh "${INSTANCE_NAME}" \

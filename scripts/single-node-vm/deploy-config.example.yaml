@@ -36,6 +36,11 @@ container_images:
   # Registry path (required when source is "registry", ignored otherwise).
   # Example: "us-docker.pkg.dev/my-project/scion"
   registry: ""
+  # When source is "build": skip the build if a version marker on the VM
+  # already matches --version and all 3 expected images are present.
+  # Set to true to force a rebuild regardless (e.g. images were deleted or
+  # corrupted out of band). Ignored when source is "registry".
+  force_rebuild: false
 
 # Email to grant super-admin access on first login.
 # If empty, defaults to the active gcloud account.
