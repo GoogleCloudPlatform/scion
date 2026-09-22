@@ -19,13 +19,22 @@
  *
  * Provides the top header bar with breadcrumb, user menu, and actions.
  *
- * Layout: two-column grid —
- *   Left:  hamburger (mobile) + page title
- *   Right: mode-selector dropdown + user/account dropdown
+ * Three-tier responsive layout:
  *
- * All header actions (inbox, notifications, help, theme, profile, sign out)
- * are consolidated into the user dropdown so they remain accessible at every
- * viewport width.
+ *   Wide (>850px):     3-column grid -- title | segmented mode switch
+ *                      (with labels) | inline actions + user section.
+ *                      This is the original pre-redesign layout.
+ *
+ *   Medium (<=850px):  2-column grid -- title | icon-only mode segments
+ *                      + user dropdown.  Mode visibility preserved,
+ *                      user actions consolidated into a single dropdown.
+ *
+ *   Narrow (<=768px):  2-column grid -- hamburger + title | mode dropdown
+ *                      + user dropdown.  Fully collapsed for mobile.
+ *
+ * Tray components (inbox, notifications) are always present in the DOM
+ * with hidden triggers; they are opened programmatically from either the
+ * inline action buttons (wide) or the user dropdown (medium/narrow).
  */
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
@@ -40,20 +49,20 @@ import './notification-tray.js';
 import './inbox-tray.js';
 
 // ---------------------------------------------------------------------------
-// Project-context helpers for the dashboard ↔ chat mode switch.
+// Project-context helpers for the dashboard <-> chat mode switch.
 //
-// These are pure functions exported for testing — they map URL paths to
+// These are pure functions exported for testing -- they map URL paths to
 // the project identifier that should carry across the view toggle.
 // ---------------------------------------------------------------------------
 
-/** Extract a project ID from a dashboard-style path (`/projects/:id/…`). */
+/** Extract a project ID from a dashboard-style path (`/projects/:id/...`). */
 export function projectIdFromDashboardPath(path: string): string | null {
   const m = path.match(/^\/projects\/([^/?#]+)/);
   // `/projects/new` is the creation form, not a project-scoped page.
   return m && m[1] !== 'new' ? m[1] : null;
 }
 
-/** Extract a project ID from a legacy chat space path (`/chat/space/:id/…`). */
+/** Extract a project ID from a legacy chat space path (`/chat/space/:id/...`). */
 export function projectIdFromChatSpacePath(path: string): string | null {
   const m = path.match(/^\/chat\/space\/([^/?#]+)/);
   return m ? m[1] : null;
@@ -62,7 +71,7 @@ export function projectIdFromChatSpacePath(path: string): string | null {
 /**
  * Extract a project slug from a readable chat path (`/chat/:slug` or
  * `/chat/:slug/:threadId`). Returns null for space, dm, and bare `/chat`
- * paths — those are handled by dedicated helpers or have no project context.
+ * paths -- those are handled by dedicated helpers or have no project context.
  */
 export function slugFromChatPath(path: string): string | null {
   if (/^\/chat\/space\//.test(path)) return null;
@@ -127,11 +136,14 @@ export class ScionHeader extends LitElement {
 
   static override styles = css`
     /* ------------------------------------------------------------------ */
-    /* Grid: two columns — title (left) + dropdowns (right)               */
+    /* Grid: three-tier responsive                                         */
+    /*   Wide  (>850px):  3-col -- title | mode-switch | actions+user      */
+    /*   Medium (<=850):  2-col -- title | segments(icon-only)+user-dd     */
+    /*   Narrow (<=768):  2-col -- title | mode-dd + user-dd               */
     /* ------------------------------------------------------------------ */
     :host {
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
       align-items: center;
       height: var(--scion-header-height, 60px);
       padding: 0 1.5rem;
@@ -140,7 +152,7 @@ export class ScionHeader extends LitElement {
     }
 
     /* ------------------------------------------------------------------ */
-    /* Left column                                                        */
+    /* Left column                                                         */
     /* ------------------------------------------------------------------ */
     .header-left {
       display: flex;
@@ -160,12 +172,6 @@ export class ScionHeader extends LitElement {
 
     .mobile-menu-btn:hover {
       background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    @media (max-width: 768px) {
-      .mobile-menu-btn {
-        display: flex;
-      }
     }
 
     .page-title {
@@ -198,18 +204,222 @@ export class ScionHeader extends LitElement {
     }
 
     /* ------------------------------------------------------------------ */
-    /* Right column                                                       */
+    /* Wide center column: segmented mode switch (visible >850px)           */
+    /* ------------------------------------------------------------------ */
+    .wide-center {
+      display: flex;
+      justify-content: center;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Mode switch (segmented control) -- used in wide + medium tiers       */
+    /* ------------------------------------------------------------------ */
+    .mode-switch {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0.25rem;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.5rem;
+      background: var(--scion-bg-subtle, #f1f5f9);
+    }
+
+    .mode-switch button {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.5rem 0.75rem;
+      border: none;
+      border-radius: 0.375rem;
+      background: transparent;
+      color: var(--scion-text-muted, #64748b);
+      cursor: pointer;
+      font-size: 0.875rem;
+      font-weight: 500;
+      transition:
+        background 0.15s ease,
+        color 0.15s ease;
+    }
+
+    .mode-switch button:hover {
+      background: var(--scion-surface, #ffffff);
+      color: var(--scion-text, #1e293b);
+    }
+
+    .mode-switch button.active {
+      background: var(--scion-primary, #3b82f6);
+      color: white;
+    }
+
+    .mode-switch button.active:hover {
+      background: var(--scion-primary-hover, #2563eb);
+    }
+
+    .mode-switch button sl-icon {
+      font-size: 1.125rem;
+    }
+
+    .mode-label {
+      font-size: 0.875rem;
+      font-weight: 500;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Right column                                                        */
     /* ------------------------------------------------------------------ */
     .header-right {
       display: flex;
       align-items: center;
       gap: 0.75rem;
       justify-self: end;
-      position: relative;
+      grid-column: 3;
     }
 
     /* ------------------------------------------------------------------ */
-    /* Mode-selector dropdown trigger                                     */
+    /* Wide-only: inline header actions + user section (visible >850px)     */
+    /* ------------------------------------------------------------------ */
+    .wide-right {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .user-section {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .user-buttons {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .profile-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 1rem;
+      border-radius: 0.5rem;
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text, #1e293b);
+      text-decoration: none;
+      font-size: 0.875rem;
+      font-weight: 500;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      transition:
+        background 0.15s ease,
+        border-color 0.15s ease;
+    }
+
+    .profile-link:hover {
+      background: var(--scion-border, #e2e8f0);
+      border-color: var(--scion-text-muted, #64748b);
+    }
+
+    .sign-out-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 1rem;
+      border-radius: 0.5rem;
+      background: transparent;
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.875rem;
+      font-weight: 500;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      cursor: pointer;
+      transition:
+        background 0.15s ease,
+        color 0.15s ease,
+        border-color 0.15s ease;
+    }
+
+    .sign-out-button:hover {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text, #1e293b);
+      border-color: var(--scion-text-muted, #64748b);
+    }
+
+    .theme-switch {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+    }
+
+    .theme-switch sl-icon {
+      font-size: 0.9rem;
+      color: var(--scion-text-muted, #64748b);
+      transition: color 0.2s ease;
+    }
+
+    .theme-switch sl-icon.active-icon {
+      color: var(--scion-primary, #3b82f6);
+    }
+
+    .toggle-track {
+      position: relative;
+      width: 36px;
+      height: 20px;
+      background: var(--scion-border, #e2e8f0);
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background 0.2s ease;
+      border: none;
+      padding: 0;
+    }
+
+    .toggle-track:hover {
+      background: var(--scion-text-muted, #94a3b8);
+    }
+
+    .toggle-track.dark {
+      background: var(--scion-primary, #3b82f6);
+    }
+
+    .toggle-knob {
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 16px;
+      height: 16px;
+      background: white;
+      border-radius: 50%;
+      transition: transform 0.2s ease;
+      pointer-events: none;
+    }
+
+    .toggle-track.dark .toggle-knob {
+      transform: translateX(16px);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Compact-only: mode segments / dropdown + user dropdown (<=850px)     */
+    /* ------------------------------------------------------------------ */
+    .compact-right {
+      display: none;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    /* In compact mode segments, hide the text labels (icon-only) */
+    .compact-mode-segments .mode-label {
+      display: none;
+    }
+
+    .compact-mode-dropdown {
+      display: none;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Mode-selector dropdown trigger (compact narrow tier)                 */
     /* ------------------------------------------------------------------ */
     .mode-trigger {
       display: inline-flex;
@@ -247,14 +457,8 @@ export class ScionHeader extends LitElement {
       font-weight: 500;
     }
 
-    @media (max-width: 768px) {
-      .mode-dropdown-label {
-        display: none;
-      }
-    }
-
     /* ------------------------------------------------------------------ */
-    /* User/account dropdown trigger                                      */
+    /* User/account dropdown trigger (compact tiers)                       */
     /* ------------------------------------------------------------------ */
     .user-trigger {
       position: relative;
@@ -298,7 +502,7 @@ export class ScionHeader extends LitElement {
     }
 
     /* ------------------------------------------------------------------ */
-    /* Menu-item count badge (e.g. "3" next to Messages)                  */
+    /* Menu-item count badge (e.g. "3" next to Messages)                   */
     /* ------------------------------------------------------------------ */
     .count-badge {
       display: inline-flex;
@@ -316,7 +520,7 @@ export class ScionHeader extends LitElement {
     }
 
     /* ------------------------------------------------------------------ */
-    /* Sign-in link (when user is null)                                   */
+    /* Sign-in link (when user is null)                                     */
     /* ------------------------------------------------------------------ */
     .sign-in-link {
       display: inline-flex;
@@ -337,8 +541,8 @@ export class ScionHeader extends LitElement {
     }
 
     /* ------------------------------------------------------------------ */
-    /* Tray container: zero-size absolute wrapper so hidden tray elements  */
-    /* don't contribute flex items or gap in .header-right.                */
+    /* Tray container: zero-size absolute wrapper so hidden tray elements   */
+    /* don't contribute flex items or gap in .header-right.                 */
     /* ------------------------------------------------------------------ */
     .tray-container {
       position: absolute;
@@ -350,6 +554,61 @@ export class ScionHeader extends LitElement {
 
     .tray-container > * {
       pointer-events: auto;
+    }
+
+    /* ================================================================== */
+    /* Tier 2: Medium (<=850px) -- icon-only segments + user dropdown      */
+    /* ================================================================== */
+    @media (max-width: 850px) {
+      :host {
+        grid-template-columns: 1fr auto;
+      }
+
+      .wide-center {
+        display: none;
+      }
+
+      .wide-right {
+        display: none;
+      }
+
+      .compact-right {
+        display: flex;
+      }
+
+      .header-right {
+        grid-column: auto;
+      }
+
+      .compact-mode-segments {
+        display: flex;
+      }
+
+      .compact-mode-dropdown {
+        display: none;
+      }
+
+      /* Hide the mode dropdown label at this tier too */
+      .mode-dropdown-label {
+        display: none;
+      }
+    }
+
+    /* ================================================================== */
+    /* Tier 3: Narrow/mobile (<=768px) -- full dropdown                    */
+    /* ================================================================== */
+    @media (max-width: 768px) {
+      .mobile-menu-btn {
+        display: flex;
+      }
+
+      .compact-mode-segments {
+        display: none;
+      }
+
+      .compact-mode-dropdown {
+        display: flex;
+      }
     }
   `;
 
@@ -383,16 +642,97 @@ export class ScionHeader extends LitElement {
           : html`<h1 class="page-title">${this.pageTitle}</h1>`}
       </div>
 
+      <!-- Wide center column: segmented mode switch with labels (>850px) -->
+      <div class="wide-center">${this.renderModeSwitch()}</div>
+
       <div class="header-right">
-        ${this.renderModeDropdown()}
-        ${this.user
-          ? this.renderUserDropdown()
-          : html`
-              <a href="/auth/login" class="sign-in-link">
-                <sl-icon name="box-arrow-in-right"></sl-icon>
-                Sign in
-              </a>
-            `}
+        <!-- Wide layout (>850px): inline actions + user section -->
+        <div class="wide-right">
+          ${this.user
+            ? html`
+                <div class="header-actions">
+                  <sl-tooltip content="Messages">
+                    <sl-icon-button
+                      name="envelope"
+                      label="Messages"
+                      @click=${(): void => this.openInboxTray()}
+                    ></sl-icon-button>
+                  </sl-tooltip>
+                  <sl-tooltip content="Notifications">
+                    <sl-icon-button
+                      name="bell"
+                      label="Notifications"
+                      @click=${(): void => this.openNotificationTray()}
+                    ></sl-icon-button>
+                  </sl-tooltip>
+                  <sl-tooltip content="Help">
+                    <sl-icon-button
+                      name="question-circle"
+                      label="Help"
+                      @click=${(): void => {
+                        window.open(DOCS_URL, '_blank', 'noopener,noreferrer');
+                      }}
+                    ></sl-icon-button>
+                  </sl-tooltip>
+                  <div class="theme-switch">
+                    <sl-icon
+                      name="sun"
+                      class=${this.isDark ? '' : 'active-icon'}
+                    ></sl-icon>
+                    <button
+                      class="toggle-track ${this.isDark ? 'dark' : ''}"
+                      @click=${(): void => this.toggleTheme()}
+                      aria-label="Toggle dark mode"
+                    >
+                      <span class="toggle-knob"></span>
+                    </button>
+                    <sl-icon
+                      name="moon"
+                      class=${this.isDark ? 'active-icon' : ''}
+                    ></sl-icon>
+                  </div>
+                </div>
+                <div class="user-section">
+                  <div class="user-buttons">
+                    <a
+                      href="/profile"
+                      class="profile-link"
+                      @click=${(e: Event): void => this.handleProfileClick(e)}
+                    >
+                      <sl-icon name="person"></sl-icon>
+                      Profile
+                    </a>
+                    <button
+                      class="sign-out-button"
+                      @click=${(): void => this.handleLogout()}
+                    >
+                      <sl-icon name="box-arrow-right"></sl-icon>
+                      Sign out
+                    </button>
+                  </div>
+                </div>
+              `
+            : html`
+                <a href="/auth/login" class="sign-in-link">
+                  <sl-icon name="box-arrow-in-right"></sl-icon>
+                  Sign in
+                </a>
+              `}
+        </div>
+
+        <!-- Compact layout (<=850px): mode segments/dropdown + user dropdown -->
+        <div class="compact-right">
+          <div class="compact-mode-segments">${this.renderModeSwitch()}</div>
+          <div class="compact-mode-dropdown">${this.renderModeDropdown()}</div>
+          ${this.user
+            ? this.renderUserDropdown()
+            : html`
+                <a href="/auth/login" class="sign-in-link">
+                  <sl-icon name="box-arrow-in-right"></sl-icon>
+                  Sign in
+                </a>
+              `}
+        </div>
 
         <!-- Tray components: triggers hidden, panels open programmatically -->
         <div class="tray-container">
@@ -404,7 +744,75 @@ export class ScionHeader extends LitElement {
   }
 
   // =========================================================================
-  // Mode-selector dropdown
+  // Mode switch (segmented control) -- wide + medium tiers
+  // =========================================================================
+
+  /**
+   * Inline segmented control for switching between Dashboard / Chat /
+   * Terminal modes. Used in the wide center column (with labels) and in
+   * the compact tier (icon-only via CSS). Returns nothing when no
+   * alternative modes are feature-flagged on.
+   */
+  private renderModeSwitch(): TemplateResult | typeof nothing {
+    const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
+    const terminalsEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
+    if (!chatEnabled && !terminalsEnabled) return nothing;
+
+    const isChat = this.isChatView();
+    const isTerminal = this.isTerminalView();
+
+    return html`
+      <div class="mode-switch" role="group" aria-label="Switch view">
+        <sl-tooltip content="Dashboard">
+          <button
+            class=${!isChat && !isTerminal ? 'active' : ''}
+            @click=${(): void => {
+              void this.handleModeSwitch('dashboard');
+            }}
+            aria-label="Dashboard"
+          >
+            <sl-icon name="house"></sl-icon>
+            <span class="mode-label">Dashboard</span>
+          </button>
+        </sl-tooltip>
+        ${chatEnabled
+          ? html`
+              <sl-tooltip content="Chat">
+                <button
+                  class=${isChat ? 'active' : ''}
+                  @click=${(): void => {
+                    void this.handleModeSwitch('chat');
+                  }}
+                  aria-label="Chat"
+                >
+                  <sl-icon name="chat-dots"></sl-icon>
+                  <span class="mode-label">Chat</span>
+                </button>
+              </sl-tooltip>
+            `
+          : ''}
+        ${terminalsEnabled
+          ? html`
+              <sl-tooltip content=${`Terminals (${this.terminalSessionCount})`}>
+                <button
+                  class=${isTerminal ? 'active' : ''}
+                  @click=${(): void => {
+                    void this.handleModeSwitch('terminals');
+                  }}
+                  aria-label=${`Terminals (${this.terminalSessionCount})`}
+                >
+                  <sl-icon name="terminal"></sl-icon>
+                  <span class="mode-label">Terminal</span>
+                </button>
+              </sl-tooltip>
+            `
+          : ''}
+      </div>
+    `;
+  }
+
+  // =========================================================================
+  // Mode-selector dropdown -- narrow tier
   // =========================================================================
 
   /**
@@ -477,7 +885,7 @@ export class ScionHeader extends LitElement {
   }
 
   // =========================================================================
-  // User/account dropdown
+  // User/account dropdown -- compact tiers
   // =========================================================================
 
   /**
@@ -592,7 +1000,7 @@ export class ScionHeader extends LitElement {
   // Tray integration
   // =========================================================================
 
-  // ──────────────────────────────────────────────────────────────────
+  // ----------------------------------------------------------------------
   // COUPLING: inbox-tray.ts (.inbox-btn, .messages property)
   //           notification-tray.ts (.bell-btn, .notifications property)
   // If either tray renames these selectors or properties, update the
@@ -600,7 +1008,7 @@ export class ScionHeader extends LitElement {
   // hideTrayTriggers(), and syncTrayCounts() below.
   // TODO: Add public toggle() methods and unreadCount getters to the
   // tray components so the header does not need to pierce shadow DOMs.
-  // ──────────────────────────────────────────────────────────────────
+  // ----------------------------------------------------------------------
 
   /**
    * Programmatically open the inbox tray by clicking its (hidden) trigger
@@ -647,7 +1055,7 @@ export class ScionHeader extends LitElement {
 
   /**
    * Sync the header's badge counts with the tray components' internal state.
-   * The trays manage their own polling / SSE subscriptions — we just read
+   * The trays manage their own polling / SSE subscriptions -- we just read
    * their array lengths after a short delay to let their fetch settle.
    */
   private syncTrayCounts(): void {
@@ -701,10 +1109,10 @@ export class ScionHeader extends LitElement {
   /**
    * Navigate to the given mode, preserving project context when possible.
    *
-   * Dashboard → Chat:  /projects/:id/… → /chat/space/:id
-   * Chat → Dashboard:  /chat/space/:id/… → /projects/:id
-   *                     /chat/:slug/…     → (resolve slug) → /projects/:id
-   *                     /chat/dm/…        → / (no project context)
+   * Dashboard -> Chat:  /projects/:id/... -> /chat/space/:id
+   * Chat -> Dashboard:  /chat/space/:id/... -> /projects/:id
+   *                     /chat/:slug/...     -> (resolve slug) -> /projects/:id
+   *                     /chat/dm/...        -> / (no project context)
    *
    * Uses the same nav-click event as the sidebar so the router handles it
    * identically in both the app and chat shells.
@@ -866,6 +1274,20 @@ export class ScionHeader extends LitElement {
     this.dispatchEvent(
       new CustomEvent('theme-change', {
         detail: { theme: newTheme },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  /**
+   * Handle profile link click with client-side navigation (wide layout).
+   */
+  private handleProfileClick(e: Event): void {
+    e.preventDefault();
+    this.dispatchEvent(
+      new CustomEvent('nav-click', {
+        detail: { path: '/profile' },
         bubbles: true,
         composed: true,
       })
