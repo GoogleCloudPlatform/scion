@@ -231,9 +231,9 @@ func TestSettingsOverlay_ProfileTimezone(t *testing.T) {
 	}
 
 	o.Update(nil, map[string]V1ProfileConfig{
-		"pacific":  {Runtime: "docker", Timezone: "America/Los_Angeles"},
-		"no-tz":    {Runtime: "docker"},
-		"eastern":  {Runtime: "docker", Timezone: "America/New_York"},
+		"pacific": {Runtime: "docker", Timezone: "America/Los_Angeles"},
+		"no-tz":   {Runtime: "docker"},
+		"eastern": {Runtime: "docker", Timezone: "America/New_York"},
 	}, nil, "")
 
 	tests := []struct {
