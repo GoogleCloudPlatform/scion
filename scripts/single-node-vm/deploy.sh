@@ -26,7 +26,7 @@
 # The script is idempotent: re-running converges without duplication.
 #
 # Usage:
-#   ./deploy.sh [--version VERSION] [--config CONFIG_FILE]
+#   ./deploy.sh [--version VERSION] [--config CONFIG_FILE] [--rebuild-images]
 #   ./deploy.sh --delete
 #
 # Options:
@@ -36,6 +36,11 @@
 #                       prompts. When provided with all required fields, the
 #                       script runs headlessly (no interactive input needed).
 #                       See deploy-config.example.yaml for the format.
+#   --rebuild-images    Force a rebuild of container images on the VM even if
+#                       the version marker and all 3 expected images already
+#                       match VERSION. Equivalent to container_images.
+#                       force_rebuild: true in the config file; either one
+#                       forces a rebuild.
 #   --delete            Tear down all resources created by a previous deploy.
 
 set -euo pipefail
@@ -86,11 +91,13 @@ readonly IAP_ENFORCEMENT_WAIT_SECS=60
 VERSION=""
 DELETE_MODE=false
 CONFIG_FILE=""
+CLI_REBUILD_IMAGES=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
     --config) CONFIG_FILE="$2"; shift 2 ;;
     --delete) DELETE_MODE=true; shift ;;
+    --rebuild-images) CLI_REBUILD_IMAGES=true; shift ;;
     --help|-h)
       sed -n '/^# scripts\/single-node-vm/,/^[^#]/{ /^#/s/^# \?//p }' "${BASH_SOURCE[0]}"
       exit 0
@@ -505,8 +512,12 @@ fi
 
 # Force a rebuild even if the version marker and all 3 images already match
 # the requested VERSION. Defaults to false: normally a matching marker means
-# Phase 3b can skip the 30-45 min build entirely.
+# Phase 3b can skip the 30-45 min build entirely. Either the config key or
+# the --rebuild-images CLI flag forces a rebuild.
 CFG_FORCE_REBUILD="$(config_get 'container_images.force_rebuild' 'false')"
+if [[ "$CLI_REBUILD_IMAGES" == "true" ]]; then
+  CFG_FORCE_REBUILD="true"
+fi
 
 # --- Admin email ---
 ADMIN_EMAIL="$(config_get 'admin_email' '')"
@@ -616,6 +627,19 @@ if [[ -z "$VERSION" ]]; then
   fi
 fi
 echo "  Scion version: ${VERSION}"
+
+# Validate VERSION strictly. It is interpolated into several remote-command
+# strings sent over `gcloud compute ssh --command=...` (git clone/checkout,
+# the Phase 3b idempotency check, and the marker write inside a nested
+# `bash -c '...'` body). A version containing shell metacharacters would
+# otherwise be executed on the VM — git check-ref-format happily accepts a
+# tag name like "v1;id", and this script's own --version flag or the GitHub
+# release auto-detect could pass one through unchecked. Restrict to the
+# characters a real release tag needs.
+if [[ ! "$VERSION" =~ ^v?[0-9A-Za-z._-]+$ ]]; then
+  err "Invalid version: '${VERSION}' (expected characters: letters, digits, '.', '_', '-', optionally prefixed with 'v')."
+  exit 1
+fi
 
 # --- Release channel (auto-detect from version) ---
 CFG_RELEASE_CHANNEL="$(config_get 'release_channel' '')"
@@ -1043,7 +1067,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
   IMAGES_BUILT_MARKER="/opt/scion-source/.images-built.version"
   SKIP_BUILD=false
   if [[ "$CFG_FORCE_REBUILD" == "true" ]]; then
-    info "container_images.force_rebuild is true; forcing a rebuild."
+    info "Forcing a rebuild (container_images.force_rebuild or --rebuild-images is set)."
   else
     info "Checking whether images for version ${VERSION} are already built..."
     BUILD_CHECK=$(gcloud compute ssh "${INSTANCE_NAME}" \
@@ -1068,7 +1092,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
 
   if [[ "$SKIP_BUILD" == "true" ]]; then
     info "Images already built for version ${VERSION} (marker + all 3 images present); skipping build."
-    echo "  Set container_images.force_rebuild: true in the config to override."
+    echo "  Set container_images.force_rebuild: true in the config, or pass --rebuild-images, to override."
   else
     info "Cloning scion repository on VM..."
     gcloud compute ssh "${INSTANCE_NAME}" \
@@ -1095,6 +1119,10 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
         set -euo pipefail
         cd /opt/scion-source
         rm -f /tmp/scion-image-build.exit
+        # Clear the marker before starting: if this build is interrupted or
+        # fails partway, no marker should be left claiming a stale version
+        # is built (Step 4 below only writes it back on full success).
+        sudo rm -f '${IMAGES_BUILT_MARKER}'
         { nohup bash -c '
           set -euo pipefail
           # Step 1: Build core-base
