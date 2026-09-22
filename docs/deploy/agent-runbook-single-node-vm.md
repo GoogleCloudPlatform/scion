@@ -98,9 +98,17 @@ page.
 
 ### 2.5 Compute quota (optional)
 
+The `regions.get` API's quota entries are shaped `{metric, limit, usage,
+owner}` — there is no `name` field, so a `quotas[name=CPUS]` projection
+silently matches nothing (exits 0 with empty output). `[key=value]` bracket
+filtering also isn't valid projection syntax here, and `describe` commands
+don't accept a top-level `--filter` flag (that's `list`-only) — so pick the
+row out with `--flatten` plus a client-side filter instead:
+
 ```bash
 gcloud compute regions describe REGION --project=PROJECT_ID \
-  --format='value(quotas[name=CPUS].limit,quotas[name=CPUS].usage)'
+  --flatten='quotas[]' --format='value(quotas.metric,quotas.limit,quotas.usage)' \
+  | awk '$1=="CPUS"{print "limit="$2" usage="$3}'
 ```
 
 Verify that the available CPU quota (limit minus usage) is sufficient for the
