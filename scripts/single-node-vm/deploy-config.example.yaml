@@ -42,4 +42,6 @@ container_images:
 admin_email: ""
 
 # Update policy: auto, notify, or disabled.
+# Note: Requires the binary auto-update feature (deployment_tier: binary).
+# If not supported by the installed version, this field is ignored.
 update_policy: "auto"

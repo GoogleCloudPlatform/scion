@@ -139,6 +139,19 @@ if [[ -n "$CONFIG_FILE" ]]; then
     err "Config file not found: $CONFIG_FILE"
     exit 1
   fi
+  if ! command -v python3 &>/dev/null; then
+    err "python3 is required to parse the config file but was not found."
+    exit 1
+  fi
+  if ! python3 -c "import yaml" &>/dev/null; then
+    err "Python 'PyYAML' module is required to parse the config file. Please install it (e.g., 'pip install pyyaml' or 'apt-get install python3-yaml')."
+    exit 1
+  fi
+  if ! yaml_err=$(python3 -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]))" "$CONFIG_FILE" 2>&1); then
+    err "Invalid YAML syntax in config file: $CONFIG_FILE"
+    echo "$yaml_err" >&2
+    exit 1
+  fi
   info "Using config file: $CONFIG_FILE"
 fi
 
