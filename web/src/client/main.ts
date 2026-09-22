@@ -975,8 +975,10 @@ async function renderRoute(path: string): Promise<void> {
               // Open a new session — coordinator.open validates auth/existence
               const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
               if (requestId) terminalNavigations.set(requestId, thisNav);
+              if (thisNav !== navigationId) return;
               try {
                 const result = await coordinator.open(agentId, requestId);
+                if (thisNav !== navigationId) return;
                 if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
                 // After coordinator.open, the session should exist
                 key = terminalWorkspace.findSessionKeyByAgentId(agentId);
