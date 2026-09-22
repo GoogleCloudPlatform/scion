@@ -22,11 +22,17 @@ tell the user what is missing.
 | PyYAML | `python3 -c "import yaml; print(yaml.__version__)"` | Version string (any version) |
 | curl | `curl --version` | Version string (any version) |
 
-If PyYAML is missing, install it:
+If PyYAML is missing, install it one of these ways:
 
-```bash
-pip install pyyaml
-```
+| Option | Command | Notes |
+|--------|---------|-------|
+| System package (Debian/Ubuntu) | `apt-get install python3-yaml` | Preferred; avoids PEP 668 entirely. |
+| Virtualenv | `python3 -m venv ~/.venv && ~/.venv/bin/pip install pyyaml && PYTHON=~/.venv/bin/python3 bash deploy.sh ...` | Use when you cannot install system packages; pass `PYTHON=` when invoking `deploy.sh`. |
+| Per-user install (where allowed) | `pip install --user pyyaml` | Fails under PEP 668 ("externally-managed-environment") on Debian >= 12, Ubuntu >= 23.04, and Homebrew Python — prefer one of the options above on those systems. |
+
+`deploy.sh` itself never creates a virtualenv; it only reads `PYTHON` from
+the environment (default `python3`) to locate the interpreter with PyYAML
+installed.
 
 ---
 

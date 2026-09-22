@@ -42,6 +42,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Python interpreter used to parse the YAML config file. Override with
+# PYTHON=/path/to/python3 if the system python3 does not have PyYAML
+# installed and PEP 668 ("externally-managed-environment") blocks a bare
+# `pip install pyyaml` (Debian >= 12, Ubuntu >= 23.04, Homebrew Python).
+PYTHON="${PYTHON:-python3}"
+
 # ---------------------------------------------------------------------------
 # Color helpers
 # ---------------------------------------------------------------------------
@@ -104,7 +110,7 @@ config_get() {
   local default="${2:-}"
   if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
     local val
-    val="$(python3 -c "
+    val="$("$PYTHON" -c "
 import yaml, sys
 d = yaml.safe_load(open(sys.argv[1]))
 keys = sys.argv[2].split('.')
@@ -157,15 +163,19 @@ if [[ -n "$CONFIG_FILE" ]]; then
     err "Config file not found: $CONFIG_FILE"
     exit 1
   fi
-  if ! command -v python3 &>/dev/null; then
-    err "python3 is required to parse the config file but was not found."
+  if ! command -v "$PYTHON" &>/dev/null; then
+    err "Python interpreter '${PYTHON}' is required to parse the config file but was not found."
     exit 1
   fi
-  if ! python3 -c "import yaml" &>/dev/null; then
-    err "Python 'PyYAML' module is required to parse the config file. Please install it (e.g., 'pip install pyyaml' or 'apt-get install python3-yaml')."
+  if ! "$PYTHON" -c "import yaml" &>/dev/null; then
+    err "Python 'PyYAML' module is required to parse the config file ('${PYTHON}' has no 'yaml' module). Install it one of these ways:
+    1. System package (Debian/Ubuntu): apt-get install python3-yaml
+    2. Virtualenv:                     python3 -m venv ~/.venv && ~/.venv/bin/pip install pyyaml && PYTHON=~/.venv/bin/python3 bash deploy.sh ...
+    3. Per-user install (where allowed): pip install --user pyyaml
+    If PyYAML is already installed under a different interpreter, set PYTHON=/path/to/python3 and re-run."
     exit 1
   fi
-  if ! yaml_err=$(python3 -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]))" "$CONFIG_FILE" 2>&1); then
+  if ! yaml_err=$("$PYTHON" -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]))" "$CONFIG_FILE" 2>&1); then
     err "Invalid YAML syntax in config file: $CONFIG_FILE"
     echo "$yaml_err" >&2
     exit 1
