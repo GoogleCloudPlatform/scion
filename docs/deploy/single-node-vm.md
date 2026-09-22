@@ -49,6 +49,7 @@ The script runs interactively, prompting for:
 5. **Chat plugins** — Telegram, Discord, Slack, Teams, or none
 6. **Container images** — provide a registry path or build locally on the VM
 7. **Admin email** — email address to grant super-admin access (defaults to deployer identity)
+8. **Update policy** — Auto (install updates automatically), Notify (check and notify only), or Disabled
 
 To install a specific release version:
 
@@ -164,6 +165,10 @@ server:
     name: "my-hub"
     admin_emails:
       - "you@example.com"
+  maintenance:
+    deployment_tier: "binary"
+    release_channel: "stable"
+    update_policy: "auto"
   storage:
     local_path: /home/scion/.scion/workspace-storage
   secrets:
@@ -189,6 +194,17 @@ Key settings:
 - `auth.mode: proxy` — the Hub trusts the IAP proxy header for user identity.
 - `auth.proxy.iap.audience` — the IAP audience string, computed automatically
   from the project number, region, and proxy service name.
+- `maintenance.deployment_tier` — `"binary"` for release-based deployments
+  (set automatically by the deploy script). Source deployments use `"source"`.
+- `maintenance.release_channel` — which release channel to track for updates:
+  `"stable"` or `"preview"`. Default: `"stable"`.
+- `maintenance.update_policy` — controls automatic update behavior:
+  - `"auto"` — check for updates on a schedule and install automatically
+    (recommended for binary deployments).
+  - `"notify"` — check for updates and show a banner in the admin UI; admin
+    must manually trigger the update.
+  - `"disabled"` — no automatic update checking (manual checks via the admin
+    UI still work).
 
 ### hub.env
 

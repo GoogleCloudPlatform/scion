@@ -68,7 +68,9 @@ interface UpdateCommitInfo {
   subject: string;
 }
 
-interface UpdateCheckResult {
+/** Source-tier update check result (git-based). */
+interface SourceUpdateCheckResult {
+  tier: 'source';
   update_available: boolean;
   current_commit: string;
   latest_commit: string;
@@ -76,6 +78,31 @@ interface UpdateCheckResult {
   tracking_ref: string;
   commits_behind: number;
   new_commits?: UpdateCommitInfo[];
+}
+
+/** Binary-tier update check result (release-based). */
+interface BinaryUpdateCheckResult {
+  tier: 'binary';
+  update_available: boolean;
+  current_version: string;
+  latest_version: string;
+  channel: string;
+  download_url?: string;
+  release_url?: string;
+}
+
+type UpdateCheckResult = SourceUpdateCheckResult | BinaryUpdateCheckResult;
+
+/** Stored update notification from GET /api/v1/admin/maintenance/update-available. */
+interface UpdateAvailableResponse {
+  update_available: boolean;
+  update?: {
+    version: string;
+    channel: string;
+    download_url?: string;
+    release_url?: string;
+    detected_at: string;
+  };
 }
 
 @customElement('scion-page-admin-maintenance')
@@ -147,7 +174,23 @@ export class ScionPageAdminMaintenance extends LitElement {
     total: number;
   } | null = null;
 
-  /** Update check state for rebuild-server. */
+  /** Deployment tier: "binary" or "source" (default). */
+  @state()
+  private deploymentTier: 'binary' | 'source' = 'source';
+
+  /** Stored update-available notification (from scheduled check). */
+  @state()
+  private updateAvailable: UpdateAvailableResponse | null = null;
+
+  /** Whether an update-binary operation is being triggered. */
+  @state()
+  private applyUpdateLoading = false;
+
+  /** Whether the dismiss request is in-flight. */
+  @state()
+  private dismissUpdateLoading = false;
+
+  /** Update check state for rebuild-server / check-for-updates. */
   @state()
   private updateCheckLoading = false;
 
@@ -572,12 +615,78 @@ export class ScionPageAdminMaintenance extends LitElement {
       color: var(--sl-color-danger-700, #b91c1c);
       margin-bottom: 1rem;
     }
+
+    /* -- Update available banner (top-level) ------------------------------- */
+
+    .update-available-banner {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      border: 1px solid var(--sl-color-primary-200, #bfdbfe);
+      background: var(--sl-color-primary-50, #eff6ff);
+    }
+
+    .update-available-banner sl-icon {
+      font-size: 1.25rem;
+      color: var(--sl-color-primary-600, #2563eb);
+      flex-shrink: 0;
+    }
+
+    .update-available-banner .banner-text {
+      flex: 1;
+      font-size: 0.875rem;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .update-available-banner .banner-text strong {
+      font-weight: 600;
+    }
+
+    .update-available-banner .banner-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex-shrink: 0;
+    }
+
+    /* -- Binary update check result --------------------------------------- */
+
+    .release-info {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      margin-top: 0.375rem;
+      font-size: 0.8125rem;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .release-info .release-field {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    .release-info .release-label {
+      color: var(--scion-text-muted, #64748b);
+      min-width: 7rem;
+    }
+
+    .release-info a {
+      color: var(--sl-color-primary-600, #2563eb);
+      text-decoration: none;
+    }
+
+    .release-info a:hover {
+      text-decoration: underline;
+    }
   `;
 
   override connectedCallback(): void {
     super.connectedCallback();
     void this.loadData();
     void this.fetchMaintenanceState();
+    void this.fetchUpdateAvailable();
   }
 
   override disconnectedCallback(): void {
@@ -611,6 +720,68 @@ export class ScionPageAdminMaintenance extends LitElement {
       }
     } catch {
       // Silently ignore — keep current state on failure.
+    }
+  }
+
+  private async fetchUpdateAvailable(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance/update-available');
+      if (res.ok) {
+        const data = (await res.json()) as UpdateAvailableResponse;
+        this.updateAvailable = data;
+        // Infer deployment tier from the presence of update notification.
+        if (data.update_available) {
+          this.deploymentTier = 'binary';
+        }
+      }
+    } catch {
+      // Silently ignore — banner will not show.
+    }
+  }
+
+  private async applyUpdate(): Promise<void> {
+    this.applyUpdateLoading = true;
+    try {
+      const response = await apiFetch(
+        '/api/v1/admin/maintenance/operations/update-binary/run',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ params: {} }),
+        }
+      );
+
+      if (!response.ok) {
+        const errMsg = await extractApiError(response, `HTTP ${response.status}`);
+        throw new Error(errMsg);
+      }
+
+      showToast('Binary update started. The server will restart shortly.', 'success');
+      this.updateAvailable = null;
+
+      // Reload operations and start polling for status.
+      await this.loadData();
+      this.startPolling();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to start binary update');
+    } finally {
+      this.applyUpdateLoading = false;
+    }
+  }
+
+  private async dismissUpdate(): Promise<void> {
+    this.dismissUpdateLoading = true;
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance/update-available', {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        this.updateAvailable = null;
+      }
+    } catch {
+      showToast('Failed to dismiss update notification');
+    } finally {
+      this.dismissUpdateLoading = false;
     }
   }
 
@@ -964,8 +1135,45 @@ export class ScionPageAdminMaintenance extends LitElement {
 
   private renderContent() {
     return html`
-      ${this.renderMaintenanceMode()} ${this.renderQuickActions()} ${this.renderMigrations()}
-      ${this.renderOperations()}
+      ${this.renderUpdateAvailableBanner()} ${this.renderMaintenanceMode()}
+      ${this.renderQuickActions()} ${this.renderMigrations()} ${this.renderOperations()}
+    `;
+  }
+
+  private renderUpdateAvailableBanner() {
+    if (!this.updateAvailable?.update_available || !this.updateAvailable.update) {
+      return nothing;
+    }
+
+    const update = this.updateAvailable.update;
+
+    return html`
+      <div class="update-available-banner">
+        <sl-icon name="arrow-up-circle"></sl-icon>
+        <span class="banner-text">
+          <strong>Update available: ${update.version}</strong>
+          ${update.channel ? html` (${update.channel} channel)` : nothing}
+        </span>
+        <div class="banner-actions">
+          <sl-button
+            variant="primary"
+            size="small"
+            ?loading=${this.applyUpdateLoading}
+            @click=${() => this.applyUpdate()}
+          >
+            <sl-icon slot="prefix" name="download"></sl-icon>
+            Apply Update
+          </sl-button>
+          <sl-button
+            variant="default"
+            size="small"
+            ?loading=${this.dismissUpdateLoading}
+            @click=${() => this.dismissUpdate()}
+          >
+            Dismiss
+          </sl-button>
+        </div>
+      </div>
     `;
   }
 
@@ -1263,18 +1471,38 @@ export class ScionPageAdminMaintenance extends LitElement {
     `;
   }
 
+  /** Operations hidden when deployment tier is "binary" (require git clone). */
+  private static readonly SOURCE_ONLY_OPS = new Set([
+    'rebuild-server',
+    'rebuild-web',
+    'rebuild-container-binaries',
+  ]);
+
+  /** Operations hidden when deployment tier is "source". */
+  private static readonly BINARY_ONLY_OPS = new Set(['update-binary']);
+
+  /** Filter operations based on deployment tier. */
+  private get visibleOperations(): MaintenanceOperationWithRun[] {
+    const hidden =
+      this.deploymentTier === 'binary'
+        ? ScionPageAdminMaintenance.SOURCE_ONLY_OPS
+        : ScionPageAdminMaintenance.BINARY_ONLY_OPS;
+    return this.operations.filter((op) => !hidden.has(op.key));
+  }
+
   private renderOperations() {
+    const ops = this.visibleOperations;
     return html`
       <div class="section">
         <h2 class="section-title">Routine Operations</h2>
         <p class="section-description">
           Repeatable infrastructure tasks that can be run on demand.
         </p>
-        ${this.operations.length === 0
+        ${ops.length === 0
           ? html`<div class="empty-inline">No operations registered.</div>`
           : html`
               <div class="card-list">
-                ${this.operations.map((op) => this.renderOperationCard(op))}
+                ${ops.map((op) => this.renderOperationCard(op))}
               </div>
             `}
       </div>
@@ -1285,7 +1513,8 @@ export class ScionPageAdminMaintenance extends LitElement {
     const isRunning = op.lastRun?.status === 'running';
     const historyExpanded = this.expandedHistory.has(op.key);
     const runs = this.runHistory.get(op.key) ?? [];
-    const isRebuild = op.key === 'rebuild-server';
+    const showCheckButton = op.key === 'rebuild-server' || op.key === 'update-binary';
+    const isDestructiveOp = op.key === 'rebuild-server' || op.key === 'update-binary';
 
     return html`
       <div class="card">
@@ -1294,7 +1523,7 @@ export class ScionPageAdminMaintenance extends LitElement {
             ? html`<sl-spinner style="font-size: 1.25rem;"></sl-spinner>`
             : html`<sl-icon name="play-circle" class="pending"></sl-icon>`}
           <span class="card-title">${op.title}</span>
-          ${isRebuild
+          ${showCheckButton
             ? html`
                 <sl-button
                   size="small"
@@ -1312,7 +1541,7 @@ export class ScionPageAdminMaintenance extends LitElement {
             ? html`<sl-button size="small" disabled loading>Running...</sl-button>`
             : html`
                 <sl-button
-                  variant="primary"
+                  variant="${isDestructiveOp ? 'warning' : 'primary'}"
                   size="small"
                   @click=${() => this.openRunDialog(op.key, 'operation')}
                 >
@@ -1322,7 +1551,7 @@ export class ScionPageAdminMaintenance extends LitElement {
               `}
         </div>
         <div class="card-description">${op.description}</div>
-        ${isRebuild ? this.renderUpdateCheckBanner() : nothing}
+        ${showCheckButton ? this.renderUpdateCheckBanner() : nothing}
         ${op.lastRun
           ? html`
               <div class="card-meta">
@@ -1442,7 +1671,8 @@ export class ScionPageAdminMaintenance extends LitElement {
     const operation = this.operations.find((op) => op.key === this.runDialogKey);
     if (!operation) return nothing;
 
-    const isDestructive = this.runDialogKey === 'rebuild-server';
+    const isDestructive =
+      this.runDialogKey === 'rebuild-server' || this.runDialogKey === 'update-binary';
 
     return html`
       <sl-dialog label="Run Operation" open @sl-request-close=${() => this.closeRunDialog()}>
@@ -1556,7 +1786,13 @@ export class ScionPageAdminMaintenance extends LitElement {
         this.updateCheckError = await extractApiError(res, 'Failed to check for updates');
         return;
       }
-      this.updateCheckResult = (await res.json()) as UpdateCheckResult;
+      const result = (await res.json()) as UpdateCheckResult;
+      this.updateCheckResult = result;
+
+      // Update deployment tier from the check-updates response.
+      if (result.tier === 'binary' || result.tier === 'source') {
+        this.deploymentTier = result.tier;
+      }
     } catch {
       this.updateCheckError = 'Failed to connect to server';
     } finally {
@@ -1571,6 +1807,16 @@ export class ScionPageAdminMaintenance extends LitElement {
     const r = this.updateCheckResult;
     if (!r) return nothing;
 
+    // Binary-tier result: version-based display.
+    if (r.tier === 'binary') {
+      return this.renderBinaryUpdateCheckBanner(r);
+    }
+
+    // Source-tier result: git commit-based display.
+    return this.renderSourceUpdateCheckBanner(r);
+  }
+
+  private renderSourceUpdateCheckBanner(r: SourceUpdateCheckResult) {
     const branchLabel =
       r.current_branch && r.current_branch !== 'main'
         ? html` on <code>${r.current_branch}</code>`
@@ -1603,6 +1849,53 @@ export class ScionPageAdminMaintenance extends LitElement {
               </div>
             `
           : nothing}
+      </div>
+    `;
+  }
+
+  private renderBinaryUpdateCheckBanner(r: BinaryUpdateCheckResult) {
+    if (!r.update_available) {
+      return html`
+        <div class="update-check-banner up-to-date">
+          <div class="update-check-header">
+            <sl-icon name="check-circle"></sl-icon>
+            Server is up to date (${r.current_version})
+          </div>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="update-check-banner">
+        <div class="update-check-header">
+          <sl-icon name="info-circle"></sl-icon>
+          Update available
+        </div>
+        <div class="release-info">
+          <div class="release-field">
+            <span class="release-label">Current version:</span>
+            <span>${r.current_version}</span>
+          </div>
+          <div class="release-field">
+            <span class="release-label">Latest version:</span>
+            <span>${r.latest_version}</span>
+          </div>
+          <div class="release-field">
+            <span class="release-label">Channel:</span>
+            <span>${r.channel}</span>
+          </div>
+          ${r.release_url
+            ? html`
+                <div class="release-field">
+                  <span class="release-label">Release notes:</span>
+                  <a href="${r.release_url}" target="_blank" rel="noopener noreferrer">
+                    View Release Notes
+                    <sl-icon name="box-arrow-up-right" style="font-size: 0.75rem;"></sl-icon>
+                  </a>
+                </div>
+              `
+            : nothing}
+        </div>
       </div>
     `;
   }

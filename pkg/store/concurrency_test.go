@@ -81,6 +81,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockChatLinkCodeEviction,
 		LockWebchatMigration,
 		LockDataMigrations,
+		LockReleaseUpdateCheck,
 	}
 
 	seen := make(map[AdvisoryLockKey]bool, len(singletonKeys)+2)
@@ -164,6 +165,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockWorkspaceProvision", LockWorkspaceProvision},
 		{"LockQuotaEnforcement", LockQuotaEnforcement},
 		{"LockNotificationDispatchSweep", LockNotificationDispatchSweep},
+		{"LockReleaseUpdateCheck", LockReleaseUpdateCheck},
 	}
 
 	// --- Check 1: value uniqueness ---

@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	mathrand "math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -312,6 +313,20 @@ type MaintenanceConfig struct {
 	BinaryDest string
 	// ServiceName is the systemd service name to restart (default: "scion-hub").
 	ServiceName string
+
+	// DeploymentTier selects the update strategy: "source" (git-based) or "binary" (release-based).
+	DeploymentTier string
+	// ReleaseChannel selects which release channel to track: "stable" or "preview".
+	// When empty, derived from the running binary's version string.
+	ReleaseChannel string
+	// UpdatePolicy controls automatic update behavior: "auto", "notify", or "disabled".
+	UpdatePolicy string
+	// CheckIntervalHours sets how often the scheduled update checker runs.
+	// Default: 6. Minimum: 1.
+	CheckIntervalHours int
+	// GitHubRepo is the GitHub repository for release lookups.
+	// Default: "GoogleCloudPlatform/scion".
+	GitHubRepo string
 }
 
 // GitHubAppServerConfig holds the GitHub App configuration for the Hub server.
@@ -3676,6 +3691,30 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 		s.scheduler.RegisterRecurringSingleton("github-app-health-check", interval, store.LockGitHubAppHealthCheck, s.githubAppHealthCheckHandler())
 	}
 
+	// Register scheduled release update check for binary-tier deployments.
+	// Conditional on deployment tier and update policy (design doc §6).
+	mc := s.config.MaintenanceConfig
+	if mc.DeploymentTier == "binary" && mc.UpdatePolicy != "disabled" {
+		intervalHours := mc.CheckIntervalHours
+		if intervalHours < 1 {
+			intervalHours = 6 // default
+		}
+		intervalMinutes := intervalHours * 60
+		// Add jitter: ±30 minutes to avoid thundering-herd when many hubs
+		// check simultaneously (design doc recommendation).
+		jitter := mathrand.Intn(61) - 30 // -30 to +30
+		intervalMinutes += jitter
+		if intervalMinutes < 60 {
+			intervalMinutes = 60 // floor at 1 hour
+		}
+		s.scheduler.RegisterRecurringSingleton(
+			"release-update-check",
+			intervalMinutes,
+			store.LockReleaseUpdateCheck,
+			s.releaseUpdateCheckHandler(),
+		)
+	}
+
 	s.scheduler.Start(ctx)
 
 	// Start the DB connection-pool stats sampler (P3-6 -> P0-5 gauges). It is a
@@ -4162,6 +4201,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/maintenance/operations/", s.guarded("/api/v1/admin/maintenance/operations/", s.handleAdminMaintenanceOps))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/migrations/", s.guarded("/api/v1/admin/maintenance/migrations/", s.handleAdminMaintenanceMigrations))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/check-updates", s.guarded("/api/v1/admin/maintenance/check-updates", s.handleCheckForUpdates))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/update-available", s.guarded("/api/v1/admin/maintenance/update-available", s.handleUpdateAvailable))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/restart", s.guarded("/api/v1/admin/maintenance/restart", s.handleAdminRestart))
 	s.mux.HandleFunc("/api/v1/admin/scheduler", s.guarded("/api/v1/admin/scheduler", s.handleAdminScheduler))
 	s.mux.HandleFunc("/api/v1/admin/allow-list", s.guarded("/api/v1/admin/allow-list", s.handleAdminAllowList))

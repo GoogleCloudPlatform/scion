@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +38,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
+	"github.com/GoogleCloudPlatform/scion/pkg/version/update"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -1116,6 +1119,484 @@ func CheckForUpdates(ctx context.Context, repoPath string) (*UpdateCheckResult, 
 		"latest", remoteCommit[:8])
 
 	return result, nil
+}
+
+// ReleaseUpdateCheckResult contains the result of a release-based update check
+// for binary-tier deployments.
+type ReleaseUpdateCheckResult struct {
+	Tier            string `json:"tier"`
+	UpdateAvailable bool   `json:"update_available"`
+	CurrentVersion  string `json:"current_version"`
+	LatestVersion   string `json:"latest_version"`
+	Channel         string `json:"channel"`
+	DownloadURL     string `json:"download_url,omitempty"`
+	ReleaseURL      string `json:"release_url,omitempty"`
+}
+
+// CheckForReleaseUpdates checks for available binary updates by fetching the
+// release manifest via pkg/version/update. It returns version comparison results
+// and download URLs for binary-tier deployments.
+func CheckForReleaseUpdates(ctx context.Context, currentVersion, channel, repo string) (*ReleaseUpdateCheckResult, error) {
+	log := logging.Subsystem("hub.maintenance.check-release-updates")
+
+	// Determine channel: explicit config takes precedence, then detect from version.
+	if channel == "" {
+		channel = update.DetectChannel(currentVersion)
+	}
+
+	result := &ReleaseUpdateCheckResult{
+		Tier:           "binary",
+		CurrentVersion: currentVersion,
+		Channel:        channel,
+	}
+
+	// If no channel can be determined (dev builds), return early.
+	if channel == "" {
+		log.Debug("No release channel detected, skipping update check", "version", currentVersion)
+		return result, nil
+	}
+
+	// Build the manifest URL for the configured repo.
+	manifestURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/main/LATEST.json", repo)
+
+	manifest, err := update.FetchManifest(ctx, update.WithManifestURL(manifestURL))
+	if err != nil {
+		return nil, fmt.Errorf("fetch release manifest: %w", err)
+	}
+
+	latest, ok := manifest.Channels[channel]
+	if !ok || latest.Version == "" {
+		log.Debug("No version found for channel", "channel", channel)
+		return result, nil
+	}
+
+	result.LatestVersion = latest.Version
+	result.ReleaseURL = latest.URL
+
+	// Compare versions using the same logic as pkg/version/update.
+	info, err := update.CheckForUpdate(ctx, currentVersion,
+		update.WithManifestURL(manifestURL))
+	if err != nil {
+		return nil, fmt.Errorf("check for update: %w", err)
+	}
+	result.UpdateAvailable = info.UpdateAvailable
+
+	// If an update is available, resolve the download URL from GitHub Releases.
+	if result.UpdateAvailable {
+		downloadURL, err := resolveReleaseAssetURL(ctx, repo, result.LatestVersion)
+		if err != nil {
+			log.Warn("Failed to resolve download URL", "version", result.LatestVersion, "error", err)
+			// Non-fatal: we still know an update is available.
+		} else {
+			result.DownloadURL = downloadURL
+		}
+	}
+
+	log.Info("Release update check complete",
+		"current", currentVersion,
+		"latest", result.LatestVersion,
+		"channel", channel,
+		"update_available", result.UpdateAvailable)
+
+	return result, nil
+}
+
+// resolveReleaseAssetURL queries the GitHub Releases API to find the download URL
+// for the platform-appropriate binary tarball in a given release tag.
+func resolveReleaseAssetURL(ctx context.Context, repo, version string) (string, error) {
+	// Query the GitHub Releases API for the tag.
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", repo, version)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("create GitHub release request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch GitHub release: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub release API returned %s", resp.Status)
+	}
+
+	var release struct {
+		Assets []struct {
+			Name               string `json:"name"`
+			BrowserDownloadURL string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", fmt.Errorf("decode GitHub release: %w", err)
+	}
+
+	// Look for the platform-appropriate tarball.
+	wantName := fmt.Sprintf("scion-linux-%s.tar.gz", runtime.GOARCH)
+	for _, asset := range release.Assets {
+		if asset.Name == wantName {
+			return asset.BrowserDownloadURL, nil
+		}
+	}
+
+	return "", fmt.Errorf("no asset matching %q found in release %s", wantName, version)
+}
+
+// BinaryUpdateExecutor downloads, verifies, and installs a new scion binary
+// from a GitHub Release, then restarts the systemd service.
+type BinaryUpdateExecutor struct {
+	serviceName string     // systemd service name (e.g., "scion-hub")
+	githubRepo  string     // GitHub repo for release lookups (e.g., "GoogleCloudPlatform/scion")
+	channel     string     // release channel override (empty = detect from current version)
+	store       store.Store // optional — used to clear system.update_available on success
+}
+
+func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
+	log := logging.Subsystem("hub.maintenance.update-binary")
+
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("update-binary is only supported on Linux (requires systemd); current OS is %s", runtime.GOOS)
+	}
+
+	// ── Step 1: PRE-FLIGHT ──────────────────────────────────────────────
+
+	serviceName := e.serviceName
+	if serviceName == "" {
+		serviceName = "scion-hub"
+	}
+
+	binaryPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to determine current binary path: %w", err)
+	}
+	binaryPath, err = filepath.EvalSymlinks(binaryPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve binary symlinks: %w", err)
+	}
+
+	_, _ = fmt.Fprintf(logger, "Current binary: %s\n", binaryPath)
+	_, _ = fmt.Fprintf(logger, "Service name: %s\n", serviceName)
+
+	// Get target version and download URL — from params or by running a release check.
+	targetVersion := params["target_version"]
+	downloadURL := params["download_url"]
+
+	if targetVersion == "" || downloadURL == "" {
+		_, _ = fmt.Fprintln(logger, "Checking for release updates...")
+		currentVersion := params["current_version"]
+		if currentVersion == "" {
+			currentVersion = version.Version
+		}
+		repo := e.githubRepo
+		if repo == "" {
+			repo = "GoogleCloudPlatform/scion"
+		}
+
+		result, err := CheckForReleaseUpdates(ctx, currentVersion, e.channel, repo)
+		if err != nil {
+			return fmt.Errorf("release update check failed: %w", err)
+		}
+		if !result.UpdateAvailable {
+			_, _ = fmt.Fprintf(logger, "No update available (current: %s, latest: %s, channel: %s)\n",
+				result.CurrentVersion, result.LatestVersion, result.Channel)
+			return nil
+		}
+		if targetVersion == "" {
+			targetVersion = result.LatestVersion
+		}
+		if downloadURL == "" {
+			downloadURL = result.DownloadURL
+		}
+	}
+
+	if downloadURL == "" {
+		return fmt.Errorf("no download URL available for version %s", targetVersion)
+	}
+
+	_, _ = fmt.Fprintf(logger, "Target version: %s\n", targetVersion)
+	_, _ = fmt.Fprintf(logger, "Download URL: %s\n", downloadURL)
+	log.Info("Starting binary update",
+		"target_version", targetVersion,
+		"download_url", downloadURL,
+		"binary_path", binaryPath)
+
+	// ── Step 2: DOWNLOAD ────────────────────────────────────────────────
+
+	// Create temp directory in the system default temp location (e.g., /tmp).
+	// The hub process runs as a non-root user and cannot write to the binary's
+	// directory (typically /usr/local/bin). The sudo install command handles
+	// the cross-filesystem copy, so same-filesystem is not required.
+	tmpDir, err := os.MkdirTemp("", "scion-update-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	tarballPath := filepath.Join(tmpDir, "release.tar.gz")
+	_, _ = fmt.Fprintf(logger, "\n==> Downloading release asset...\n")
+
+	if err := downloadFile(ctx, downloadURL, tarballPath, logger); err != nil {
+		return fmt.Errorf("download failed: %w", err)
+	}
+
+	// ── Step 3: VERIFY ──────────────────────────────────────────────────
+
+	_, _ = fmt.Fprintf(logger, "\n==> Extracting and verifying binary...\n")
+
+	extractedBinary, err := extractScionBinary(tarballPath, tmpDir, logger)
+	if err != nil {
+		return fmt.Errorf("extraction failed: %w", err)
+	}
+
+	if err := verifyScionBinary(ctx, extractedBinary, targetVersion, logger); err != nil {
+		return fmt.Errorf("verification failed: %w", err)
+	}
+
+	// ── Step 4: SWAP ────────────────────────────────────────────────────
+
+	_, _ = fmt.Fprintf(logger, "\n==> Installing new binary...\n")
+
+	// Place backup in the temp directory — the hub user cannot write to the
+	// binary's directory (typically /usr/local/bin). Use sudo to read the
+	// binary into the backup location.
+	backupPath := filepath.Join(tmpDir, "scion.bak")
+	if err := backupBinary(ctx, binaryPath, backupPath, logger); err != nil {
+		return fmt.Errorf("backup failed: %w", err)
+	}
+
+	installCmd := exec.CommandContext(ctx, "sudo", "install", "-m", "755", extractedBinary, binaryPath)
+	var installStderr bytes.Buffer
+	installCmd.Stdout = logger
+	installCmd.Stderr = io.MultiWriter(logger, &installStderr)
+	if err := installCmd.Run(); err != nil {
+		_, _ = fmt.Fprintf(logger, "Install failed, restoring backup...\n")
+		if restoreErr := restoreBackup(backupPath, binaryPath, logger); restoreErr != nil {
+			log.Error("Failed to restore backup after install failure",
+				"install_error", err, "restore_error", restoreErr)
+			return fmt.Errorf("install failed (%w) AND backup restore failed (%v)", err, restoreErr)
+		}
+		_, _ = fmt.Fprintf(logger, "Backup restored successfully.\n")
+		errDetail := strings.TrimSpace(installStderr.String())
+		if errDetail != "" {
+			return fmt.Errorf("installing binary failed: %s", errDetail)
+		}
+		return fmt.Errorf("installing binary failed: %w", err)
+	}
+	_, _ = fmt.Fprintf(logger, "Binary installed to %s\n", binaryPath)
+
+	// ── Step 4b: CLEAR STALE NOTIFICATION ───────────────────────────────
+
+	// Clear system.update_available to prevent showing a stale notification
+	// after the update is applied. Best-effort: a failure here should not
+	// block the update itself.
+	if e.store != nil {
+		if delErr := e.store.DeleteHubSetting(ctx, HubSettingSectionUpdateAvailable); delErr != nil && delErr != store.ErrNotFound {
+			_, _ = fmt.Fprintf(logger, "Warning: failed to clear update_available setting: %v\n", delErr)
+			log.Warn("Failed to clear update_available setting", "error", delErr)
+		} else {
+			_, _ = fmt.Fprintf(logger, "Cleared update_available notification.\n")
+		}
+	}
+
+	// ── Step 5: RESTART ─────────────────────────────────────────────────
+
+	_, _ = fmt.Fprintf(logger, "\n==> Restarting service...\n")
+	_, _ = fmt.Fprintf(logger, "Update: %s -> %s\n", version.Version, targetVersion)
+	_, _ = fmt.Fprintf(logger, "Timestamp: %s\n", time.Now().UTC().Format(time.RFC3339))
+
+	log.Info("Binary update complete, initiating restart",
+		"old_version", version.Version,
+		"new_version", targetVersion,
+		"binary_path", binaryPath,
+		"service_name", serviceName)
+
+	// Fire-and-forget: start the restart but don't wait for it to finish.
+	// "systemctl restart" sends SIGTERM to this very process, so cmd.Run()
+	// would never return. Using cmd.Start() lets us return success so the
+	// calling goroutine can persist the completed run status to the DB
+	// before the process is killed. Same pattern as RebuildServerExecutor.
+	restartCmd := exec.Command("sudo", "systemctl", "restart", serviceName)
+	restartCmd.Stdout = logger
+	restartCmd.Stderr = logger
+	if err := restartCmd.Start(); err != nil {
+		log.Error("Failed to initiate service restart", "error", err)
+		return fmt.Errorf("restarting service failed: %w", err)
+	}
+
+	_, _ = fmt.Fprintln(logger, "\nBinary update complete, restart initiated.")
+	return nil
+}
+
+// downloadFile fetches a URL and streams it to a local file, logging progress.
+func downloadFile(ctx context.Context, url, destPath string, logger io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("create download request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("download request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download returned HTTP %s", resp.Status)
+	}
+
+	out, err := os.Create(destPath)
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	defer func() { _ = out.Close() }()
+
+	written, err := io.Copy(out, resp.Body)
+	if err != nil {
+		return fmt.Errorf("write download: %w", err)
+	}
+
+	_, _ = fmt.Fprintf(logger, "Downloaded %d bytes to %s\n", written, destPath)
+	return nil
+}
+
+// extractScionBinary extracts a .tar.gz archive and returns the path to the
+// scion binary found within it. It looks for a file named "scion" at any
+// depth in the archive.
+func extractScionBinary(tarballPath, destDir string, logger io.Writer) (string, error) {
+	f, err := os.Open(tarballPath)
+	if err != nil {
+		return "", fmt.Errorf("open tarball: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return "", fmt.Errorf("create gzip reader: %w", err)
+	}
+	defer func() { _ = gz.Close() }()
+
+	tr := tar.NewReader(gz)
+	extractDir := filepath.Join(destDir, "extracted")
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		return "", fmt.Errorf("create extract directory: %w", err)
+	}
+
+	var scionBinaryPath string
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("read tarball entry: %w", err)
+		}
+
+		// Sanitize: skip entries that try to escape the extract directory.
+		cleanName := filepath.Clean(header.Name)
+		if strings.HasPrefix(cleanName, "..") || strings.HasPrefix(cleanName, "/") {
+			continue
+		}
+
+		targetPath := filepath.Join(extractDir, cleanName)
+		if !strings.HasPrefix(targetPath, extractDir+string(os.PathSeparator)) && targetPath != extractDir {
+			continue
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(targetPath, 0o755); err != nil {
+				return "", fmt.Errorf("create directory %q: %w", cleanName, err)
+			}
+
+		case tar.TypeReg:
+			// Ensure parent directory exists.
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+				return "", fmt.Errorf("create parent for %q: %w", cleanName, err)
+			}
+
+			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(header.Mode))
+			if err != nil {
+				return "", fmt.Errorf("create file %q: %w", cleanName, err)
+			}
+			if _, err := io.Copy(outFile, tr); err != nil {
+				_ = outFile.Close()
+				return "", fmt.Errorf("write file %q: %w", cleanName, err)
+			}
+			_ = outFile.Close()
+
+			// Track the scion binary — look for a file named "scion" (base name).
+			if filepath.Base(cleanName) == "scion" {
+				scionBinaryPath = targetPath
+				_, _ = fmt.Fprintf(logger, "Found scion binary: %s\n", cleanName)
+			}
+		}
+	}
+
+	if scionBinaryPath == "" {
+		return "", fmt.Errorf("no 'scion' binary found in tarball")
+	}
+
+	// Ensure the extracted binary is executable.
+	if err := os.Chmod(scionBinaryPath, 0o755); err != nil {
+		return "", fmt.Errorf("chmod extracted binary: %w", err)
+	}
+
+	return scionBinaryPath, nil
+}
+
+// verifyScionBinary runs the extracted binary to confirm it reports the
+// expected version. This doubles as an integrity check — a corrupt or
+// truncated download will fail to execute.
+func verifyScionBinary(ctx context.Context, binaryPath, expectedVersion string, logger io.Writer) error {
+	cmd := exec.CommandContext(ctx, binaryPath, "version", "--format", "json")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	_, _ = fmt.Fprintf(logger, "Running: %s version --format json\n", binaryPath)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("binary version check failed: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+	}
+
+	var versionOutput struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &versionOutput); err != nil {
+		return fmt.Errorf("failed to parse version output: %w (raw: %s)", err, strings.TrimSpace(stdout.String()))
+	}
+
+	if versionOutput.Version != expectedVersion {
+		return fmt.Errorf("version mismatch: binary reports %q, expected %q", versionOutput.Version, expectedVersion)
+	}
+
+	_, _ = fmt.Fprintf(logger, "Version verified: %s\n", versionOutput.Version)
+	return nil
+}
+
+// backupBinary copies the current binary to a backup path using sudo cp.
+// The source binary is typically owned by root (e.g., /usr/local/bin/scion),
+// so sudo is required to read it reliably.
+func backupBinary(ctx context.Context, srcPath, backupPath string, logger io.Writer) error {
+	cmd := exec.CommandContext(ctx, "sudo", "cp", srcPath, backupPath)
+	cmd.Stdout = logger
+	cmd.Stderr = logger
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("backup copy failed: %w", err)
+	}
+
+	_, _ = fmt.Fprintf(logger, "Backed up current binary to %s\n", backupPath)
+	return nil
+}
+
+// restoreBackup copies the backup binary back to the original path using
+// sudo install. This is the rollback mechanism when install fails.
+func restoreBackup(backupPath, destPath string, logger io.Writer) error {
+	cmd := exec.Command("sudo", "install", "-m", "755", backupPath, destPath)
+	cmd.Stdout = logger
+	cmd.Stderr = logger
+	return cmd.Run()
 }
 
 // parseMigrationParams extracts and validates migration-specific parameters from the request body.

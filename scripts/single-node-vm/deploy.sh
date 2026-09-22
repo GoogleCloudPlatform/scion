@@ -497,6 +497,20 @@ if [[ -z "$ADMIN_EMAIL" ]]; then
   warn "No admin email provided. You can add one later in settings.yaml under server.hub.admin_emails."
 fi
 
+# --- Update policy ---
+echo ""
+echo "Automatic update policy:"
+echo "  1) Auto - automatically install new releases (recommended)"
+echo "  2) Notify - check for updates, notify admin only"
+echo "  3) Disabled - no automatic update checking"
+read -rp "Select [1]: " UPDATE_CHOICE
+case "${UPDATE_CHOICE:-1}" in
+  1) UPDATE_POLICY="auto" ;;
+  2) UPDATE_POLICY="notify" ;;
+  3) UPDATE_POLICY="disabled" ;;
+  *) UPDATE_POLICY="auto" ;;
+esac
+
 # Derived values
 info "Selecting zone in ${REGION}..."
 ZONE="$(gcloud compute zones list \
@@ -537,6 +551,7 @@ fi
 if [[ -n "$ADMIN_EMAIL" ]]; then
   echo "  Admin:        ${ADMIN_EMAIL}"
 fi
+echo "  Update policy: ${UPDATE_POLICY}"
 
 # --- Release version ---
 if [[ -z "$VERSION" ]]; then
@@ -893,6 +908,10 @@ server:
     name: \"${HUB_NAME}\"
 ${ADMIN_EMAIL:+    admin_emails:
       - \"${ADMIN_EMAIL}\"}
+  maintenance:
+    deployment_tier: \"binary\"
+    release_channel: \"stable\"
+    update_policy: \"${UPDATE_POLICY}\"
   storage:
     local_path: /home/scion/.scion/workspace-storage
   secrets:
@@ -1194,6 +1213,10 @@ server:
     name: \"${HUB_NAME}\"
 ${ADMIN_EMAIL:+    admin_emails:
       - \"${ADMIN_EMAIL}\"}
+  maintenance:
+    deployment_tier: \"binary\"
+    release_channel: \"stable\"
+    update_policy: \"${UPDATE_POLICY}\"
   storage:
     local_path: /home/scion/.scion/workspace-storage
   secrets:

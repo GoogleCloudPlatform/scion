@@ -2946,8 +2946,10 @@ func resolveHubEndpointForBroker(cfg *config.GlobalConfig, settings *config.Sett
 // and environment variables.
 func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	mc := hub.MaintenanceConfig{
-		ServiceName: "scion-hub",
-		BinaryDest:  "/usr/local/bin/scion",
+		ServiceName:        "scion-hub",
+		BinaryDest:         "/usr/local/bin/scion",
+		CheckIntervalHours: 6,
+		GitHubRepo:         "GoogleCloudPlatform/scion",
 	}
 
 	// Pull from versioned settings if available.
@@ -2959,6 +2961,26 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 		}
 		if mc.RepoPath == "" {
 			mc.RepoPath = vs.WorkspacePath
+		}
+
+		// Read new binary auto-update fields from server.maintenance.
+		if vs.Server != nil && vs.Server.Maintenance != nil {
+			m := vs.Server.Maintenance
+			if m.DeploymentTier != "" {
+				mc.DeploymentTier = m.DeploymentTier
+			}
+			if m.ReleaseChannel != "" {
+				mc.ReleaseChannel = m.ReleaseChannel
+			}
+			if m.UpdatePolicy != "" {
+				mc.UpdatePolicy = m.UpdatePolicy
+			}
+			if m.CheckIntervalHours > 0 {
+				mc.CheckIntervalHours = m.CheckIntervalHours
+			}
+			if m.GitHubRepo != "" {
+				mc.GitHubRepo = m.GitHubRepo
+			}
 		}
 	}
 
@@ -2989,6 +3011,29 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	}
 	if v := os.Getenv("SCION_MAINTENANCE_SERVICE_NAME"); v != "" {
 		mc.ServiceName = v
+	}
+
+	// Apply deployment tier defaults if not explicitly configured.
+	if mc.DeploymentTier == "" {
+		if mc.RepoPath != "" {
+			mc.DeploymentTier = "source"
+		} else {
+			mc.DeploymentTier = "binary"
+		}
+	}
+
+	// Apply update policy default based on deployment tier.
+	if mc.UpdatePolicy == "" {
+		if mc.DeploymentTier == "binary" {
+			mc.UpdatePolicy = "auto"
+		} else {
+			mc.UpdatePolicy = "disabled"
+		}
+	}
+
+	// Enforce minimum check interval.
+	if mc.CheckIntervalHours < 1 {
+		mc.CheckIntervalHours = 1
 	}
 
 	return mc

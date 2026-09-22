@@ -50,6 +50,7 @@ const USED_ICONS = [
   'arrow-return-right',
   'arrow-right-circle',
   'arrow-up',
+  'arrow-up-circle',
   'arrows-angle-contract',
   'arrows-angle-expand',
   'bar-chart',
