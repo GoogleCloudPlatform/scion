@@ -34,6 +34,12 @@ If PyYAML is missing, install it one of these ways:
 the environment (default `python3`) to locate the interpreter with PyYAML
 installed.
 
+**VM operating system:** the deployed GCE VM's image is pinned to Ubuntu
+22.04 LTS (`ubuntu-2204-lts` / `ubuntu-os-cloud`) and is not currently
+configurable — `cloud-init.yaml`'s Docker apt-repo setup is written for this
+specific image. This is not something the operator needs to prepare locally;
+it's noted here because it affects what the deployed VM looks like.
+
 ---
 
 ## 2. GCP Preflight

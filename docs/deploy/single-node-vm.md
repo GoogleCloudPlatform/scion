@@ -31,6 +31,7 @@ Key properties:
 | `gcloud` CLI | Authenticated (`gcloud auth login`) with a project set (`gcloud config set project PROJECT_ID`) |
 | Required APIs | `compute`, `run`, `iap`, `cloudbuild`, `artifactregistry` — enabled automatically by the script |
 | Permissions | Project Editor or equivalent (create VMs, Cloud Run services, service accounts, IAM bindings). The script also grants `roles/iap.tunnelResourceAccessor` to the deployer for SSH access to the private VM. |
+| VM OS image | Ubuntu 22.04 LTS — pinned, not currently configurable (see [Architecture](#architecture)). |
 
 ## Quick Start
 
@@ -119,6 +120,13 @@ and runs `deploy.sh --config` headlessly.
   with the runtime broker co-located in the same process (`--enable-runtime-broker`).
   Has no public IP address. Sits on the default VPC so the Cloud Run proxy
   can reach it via internal networking. Docker is installed by cloud-init.
+  The VM image is pinned to **Ubuntu 22.04 LTS** (`ubuntu-2204-lts` /
+  `ubuntu-os-cloud` in `deploy.sh`); `cloud-init.yaml`'s Docker apt-repo setup
+  is written specifically for this image. This is a deliberate design
+  decision, not currently configurable — there is no demand for other
+  distros, and making the image configurable would multiply an already-zero
+  test matrix. Ubuntu 22.04 standard support ends April 2027; a bump to
+  24.04 LTS should be its own tested change when the time comes.
 - **Agents** — launched as Docker containers on the VM by the runtime broker;
   they connect to the Hub at `localhost:8080`, no IAP needed.
 
