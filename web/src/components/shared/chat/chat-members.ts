@@ -219,8 +219,14 @@ export class ScionChatMembers extends LitElement {
       display: flex;
       flex-direction: column;
       height: 100%;
-      overflow-y: auto;
+      overflow: hidden;
       font-family: var(--sl-font-sans);
+    }
+
+    .members-body {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
     }
 
     .section-label {
@@ -534,7 +540,10 @@ export class ScionChatMembers extends LitElement {
   }
 
   override render() {
-    return html` ${this.renderToolbar()} ${this.renderHumans()} ${this.renderAgents()} `;
+    return html`
+      ${this.renderToolbar()}
+      <div class="members-body">${this.renderHumans()} ${this.renderAgents()}</div>
+    `;
   }
 
   /** Render the filter + sort toolbar at the top of the members sidebar. */
@@ -622,11 +631,13 @@ export class ScionChatMembers extends LitElement {
 
     return html`
       <div class="section-label">People — ${sorted.length}</div>
-      ${sorted.length === 0
-        ? html`<div class="empty-note">
-            ${this.memberFilter === 'unread' ? 'No unread' : 'No members'}
-          </div>`
-        : sorted.map((m) => this.renderHuman(m))}
+      ${
+        sorted.length === 0
+          ? html`<div class="empty-note">
+              ${this.memberFilter === 'unread' ? 'No unread' : 'No members'}
+            </div>`
+          : sorted.map((m) => this.renderHuman(m))
+      }
     `;
   }
 
@@ -649,9 +660,11 @@ export class ScionChatMembers extends LitElement {
             presence-state="${m.presenceState || ''}"
           ></scion-chat-avatar>
           ${hasUnread ? html`<div class="unread-dot"></div>` : nothing}
-          ${isTyping
-            ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
-            : nothing}
+          ${
+            isTyping
+              ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
+              : nothing
+          }
         </div>
         <div class="member-info">
           <div class="member-name">${m.displayName}</div>
@@ -685,11 +698,13 @@ export class ScionChatMembers extends LitElement {
 
     return html`
       <div class="section-label">Agents — ${sorted.length}</div>
-      ${sorted.length === 0
-        ? html`<div class="empty-note">
-            ${this.memberFilter === 'unread' ? 'No unread' : 'No agents'}
-          </div>`
-        : sorted.map((a) => this.renderAgent(a))}
+      ${
+        sorted.length === 0
+          ? html`<div class="empty-note">
+              ${this.memberFilter === 'unread' ? 'No unread' : 'No agents'}
+            </div>`
+          : sorted.map((a) => this.renderAgent(a))
+      }
     `;
   }
 
@@ -733,54 +748,60 @@ export class ScionChatMembers extends LitElement {
             size="28"
           ></scion-chat-avatar>
           ${hasUnread ? html`<div class="unread-dot"></div>` : nothing}
-          ${isTyping
-            ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
-            : nothing}
+          ${
+            isTyping
+              ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
+              : nothing
+          }
         </div>
         <div class="member-info">
           <div class="member-name">${a.displayName}</div>
           ${isDefault ? html`<span class="default-agent-label">thread default</span>` : nothing}
           <scion-status-badge status=${badgeStatus} size="small"></scion-status-badge>
         </div>
-        ${a.canAttach !== true
-          ? nothing
-          : html`<a
-              href=${terminalHref(a.id)}
-              class="agent-terminal"
-              title="Open terminal"
-              @click=${(e: MouseEvent) => {
-                e.stopPropagation();
-                // Leave modified and non-primary clicks to the browser so
-                // Ctrl/Cmd-click, Shift-click and middle-click behave as they
-                // do on any other link.
-                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
-                  return;
-                }
-                e.preventDefault();
-                openTerminalFromChat(a.id);
-              }}
-            >
-              <sl-icon name="terminal" style="font-size: var(--chat-fs-base);"></sl-icon>
-            </a>`}
-        ${a.projectId
-          ? html`<a
-              href="/agents/graph?project=${encodeURIComponent(
-                a.projectId
-              )}&focus=${encodeURIComponent(a.id)}"
-              class="agent-graph"
-              title="Open in graph"
-              @click=${(e: MouseEvent) => {
-                e.stopPropagation();
-                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-                e.preventDefault();
-                navigateTo(
-                  `/agents/graph?project=${encodeURIComponent(a.projectId!)}&focus=${encodeURIComponent(a.id)}`
-                );
-              }}
-            >
-              <sl-icon name="diagram-3" style="font-size: var(--chat-fs-base);"></sl-icon>
-            </a>`
-          : nothing}
+        ${
+          a.canAttach !== true
+            ? nothing
+            : html`<a
+                href=${terminalHref(a.id)}
+                class="agent-terminal"
+                title="Open terminal"
+                @click=${(e: MouseEvent) => {
+                  e.stopPropagation();
+                  // Leave modified and non-primary clicks to the browser so
+                  // Ctrl/Cmd-click, Shift-click and middle-click behave as they
+                  // do on any other link.
+                  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+                    return;
+                  }
+                  e.preventDefault();
+                  openTerminalFromChat(a.id);
+                }}
+              >
+                <sl-icon name="terminal" style="font-size: var(--chat-fs-base);"></sl-icon>
+              </a>`
+        }
+        ${
+          a.projectId
+            ? html`<a
+                href="/agents/graph?project=${encodeURIComponent(
+                  a.projectId
+                )}&focus=${encodeURIComponent(a.id)}"
+                class="agent-graph"
+                title="Open in graph"
+                @click=${(e: MouseEvent) => {
+                  e.stopPropagation();
+                  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                  e.preventDefault();
+                  navigateTo(
+                    `/agents/graph?project=${encodeURIComponent(a.projectId!)}&focus=${encodeURIComponent(a.id)}`
+                  );
+                }}
+              >
+                <sl-icon name="diagram-3" style="font-size: var(--chat-fs-base);"></sl-icon>
+              </a>`
+            : nothing
+        }
       </div>
     `;
 
