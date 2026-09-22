@@ -219,8 +219,13 @@ export class ScionChatMembers extends LitElement {
       display: flex;
       flex-direction: column;
       height: 100%;
-      overflow-y: auto;
+      overflow: hidden;
       font-family: var(--sl-font-sans);
+    }
+
+    .members-body {
+      flex: 1;
+      overflow-y: auto;
     }
 
     .section-label {
@@ -534,7 +539,10 @@ export class ScionChatMembers extends LitElement {
   }
 
   override render() {
-    return html` ${this.renderToolbar()} ${this.renderHumans()} ${this.renderAgents()} `;
+    return html`
+      ${this.renderToolbar()}
+      <div class="members-body">${this.renderHumans()} ${this.renderAgents()}</div>
+    `;
   }
 
   /** Render the filter + sort toolbar at the top of the members sidebar. */
