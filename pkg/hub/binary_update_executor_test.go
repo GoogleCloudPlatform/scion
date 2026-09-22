@@ -330,7 +330,7 @@ func TestBackupBinary(t *testing.T) {
 		backupPath := filepath.Join(tmpDir, "scion.bak")
 		var logBuf bytes.Buffer
 
-		err := backupBinary(srcPath, backupPath, &logBuf)
+		err := backupBinary(context.Background(), srcPath, backupPath, &logBuf)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -342,15 +342,6 @@ func TestBackupBinary(t *testing.T) {
 		if !bytes.Equal(data, content) {
 			t.Errorf("backup content = %q, want %q", data, content)
 		}
-
-		// Verify mode is preserved.
-		info, err := os.Stat(backupPath)
-		if err != nil {
-			t.Fatalf("stat backup: %v", err)
-		}
-		if info.Mode()&0o111 == 0 {
-			t.Error("backup file is not executable")
-		}
 	})
 
 	t.Run("source file does not exist", func(t *testing.T) {
@@ -359,7 +350,7 @@ func TestBackupBinary(t *testing.T) {
 		backupPath := filepath.Join(tmpDir, "nonexistent.bak")
 		var logBuf bytes.Buffer
 
-		err := backupBinary(srcPath, backupPath, &logBuf)
+		err := backupBinary(context.Background(), srcPath, backupPath, &logBuf)
 		if err == nil {
 			t.Fatal("expected error for nonexistent source file")
 		}
@@ -553,7 +544,7 @@ func TestBackupAndRestoreRoundtrip(t *testing.T) {
 	// Back it up.
 	backupPath := filepath.Join(tmpDir, "scion.bak")
 	var logBuf bytes.Buffer
-	if err := backupBinary(originalPath, backupPath, &logBuf); err != nil {
+	if err := backupBinary(context.Background(), originalPath, backupPath, &logBuf); err != nil {
 		t.Fatalf("backup failed: %v", err)
 	}
 

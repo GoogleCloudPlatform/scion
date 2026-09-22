@@ -1323,8 +1323,11 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 
 	// ── Step 2: DOWNLOAD ────────────────────────────────────────────────
 
-	// Create temp directory on the same filesystem as the binary (required for atomic rename).
-	tmpDir, err := os.MkdirTemp(filepath.Dir(binaryPath), "scion-update-*")
+	// Create temp directory in the system default temp location (e.g., /tmp).
+	// The hub process runs as a non-root user and cannot write to the binary's
+	// directory (typically /usr/local/bin). The sudo install command handles
+	// the cross-filesystem copy, so same-filesystem is not required.
+	tmpDir, err := os.MkdirTemp("", "scion-update-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
@@ -1354,8 +1357,11 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 
 	_, _ = fmt.Fprintf(logger, "\n==> Installing new binary...\n")
 
-	backupPath := binaryPath + ".bak"
-	if err := backupBinary(binaryPath, backupPath, logger); err != nil {
+	// Place backup in the temp directory — the hub user cannot write to the
+	// binary's directory (typically /usr/local/bin). Use sudo to read the
+	// binary into the backup location.
+	backupPath := filepath.Join(tmpDir, "scion.bak")
+	if err := backupBinary(ctx, binaryPath, backupPath, logger); err != nil {
 		return fmt.Errorf("backup failed: %w", err)
 	}
 
@@ -1569,28 +1575,15 @@ func verifyScionBinary(ctx context.Context, binaryPath, expectedVersion string, 
 	return nil
 }
 
-// backupBinary copies the current binary to a backup path.
-func backupBinary(srcPath, backupPath string, logger io.Writer) error {
-	src, err := os.Open(srcPath)
-	if err != nil {
-		return fmt.Errorf("open current binary: %w", err)
-	}
-	defer func() { _ = src.Close() }()
-
-	dst, err := os.Create(backupPath)
-	if err != nil {
-		return fmt.Errorf("create backup file: %w", err)
-	}
-	defer func() { _ = dst.Close() }()
-
-	if _, err := io.Copy(dst, src); err != nil {
-		return fmt.Errorf("copy to backup: %w", err)
-	}
-
-	// Preserve the original mode.
-	info, err := os.Stat(srcPath)
-	if err == nil {
-		_ = os.Chmod(backupPath, info.Mode())
+// backupBinary copies the current binary to a backup path using sudo cp.
+// The source binary is typically owned by root (e.g., /usr/local/bin/scion),
+// so sudo is required to read it reliably.
+func backupBinary(ctx context.Context, srcPath, backupPath string, logger io.Writer) error {
+	cmd := exec.CommandContext(ctx, "sudo", "cp", srcPath, backupPath)
+	cmd.Stdout = logger
+	cmd.Stderr = logger
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("backup copy failed: %w", err)
 	}
 
 	_, _ = fmt.Fprintf(logger, "Backed up current binary to %s\n", backupPath)
