@@ -204,6 +204,7 @@ These built-in roles bundle common permissions for human users:
 |------|-------------|
 | `hub-admin` | Full control over the entire Hub (System Role). |
 | `hub:member` | Standard user; can create their own projects. |
+| `global-catalog-author` | Non-admin global skill authoring; grants only `skill.create_global` (System Role). |
 | `project:admin` | Full control over a specific project and its agents. |
 | `project:developer` | Can create and manage agents within a project. |
 | `project:viewer` | Read-only access to project status and logs. |
