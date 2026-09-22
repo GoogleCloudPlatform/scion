@@ -26,12 +26,16 @@
 # The script is idempotent: re-running converges without duplication.
 #
 # Usage:
-#   ./deploy.sh [--version VERSION]
+#   ./deploy.sh [--version VERSION] [--config CONFIG_FILE]
 #   ./deploy.sh --delete
 #
 # Options:
 #   --version VERSION   Scion release version to install (e.g. v0.5.0).
 #                       If omitted, the latest release is fetched from GitHub.
+#   --config FILE       Path to a YAML config file that pre-answers interactive
+#                       prompts. When provided with all required fields, the
+#                       script runs headlessly (no interactive input needed).
+#                       See deploy-config.example.yaml for the format.
 #   --delete            Tear down all resources created by a previous deploy.
 
 set -euo pipefail
@@ -57,9 +61,11 @@ section() { echo ""; echo -e "${BOLD}--- $* ---${RESET}"; }
 # ---------------------------------------------------------------------------
 VERSION=""
 DELETE_MODE=false
+CONFIG_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
+    --config) CONFIG_FILE="$2"; shift 2 ;;
     --delete) DELETE_MODE=true; shift ;;
     --help|-h)
       sed -n '/^# scripts\/single-node-vm/,/^[^#]/{ /^#/s/^# \?//p }' "${BASH_SOURCE[0]}"
@@ -70,24 +76,111 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---------------------------------------------------------------------------
+# Config file helper
+# ---------------------------------------------------------------------------
+# Reads a value from the YAML config file using dot-separated keys.
+# Falls back to the provided default when the key is missing or the config
+# file is not set.  Lists are returned as space-separated strings.
+config_get() {
+  local key="$1"
+  local default="${2:-}"
+  if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
+    local val
+    val="$(python3 -c "
+import yaml, sys
+d = yaml.safe_load(open(sys.argv[1]))
+keys = sys.argv[2].split('.')
+v = d
+for k in keys:
+    if isinstance(v, dict):
+        v = v.get(k)
+    else:
+        v = None
+        break
+if v is not None:
+    if isinstance(v, list):
+        print(' '.join(str(i) for i in v))
+    elif isinstance(v, bool):
+        print(str(v).lower())
+    else:
+        print(v)
+" "$CONFIG_FILE" "$key" 2>/dev/null)" || true
+    if [[ -n "$val" ]]; then
+      echo "$val"
+      return
+    fi
+  fi
+  echo "$default"
+}
+
+# Helper: prompt the user for input, or error in non-interactive mode.
+# Usage: config_prompt VAR "Prompt text" "default_value"
+config_prompt() {
+  local varname="$1"
+  local prompt="$2"
+  local default="$3"
+  if [[ -n "$CONFIG_FILE" && ! -t 0 ]]; then
+    if [[ -n "$default" ]]; then
+      printf -v "$varname" '%s' "$default"
+    else
+      err "Required value for '${varname}' is missing from config and stdin is not a terminal."
+      exit 1
+    fi
+  else
+    local input=""
+    read -rp "$prompt" input
+    printf -v "$varname" '%s' "${input:-$default}"
+  fi
+}
+
+# Validate config file exists if specified
+if [[ -n "$CONFIG_FILE" ]]; then
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    err "Config file not found: $CONFIG_FILE"
+    exit 1
+  fi
+  if ! command -v python3 &>/dev/null; then
+    err "python3 is required to parse the config file but was not found."
+    exit 1
+  fi
+  if ! python3 -c "import yaml" &>/dev/null; then
+    err "Python 'PyYAML' module is required to parse the config file. Please install it (e.g., 'pip install pyyaml' or 'apt-get install python3-yaml')."
+    exit 1
+  fi
+  if ! yaml_err=$(python3 -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]))" "$CONFIG_FILE" 2>&1); then
+    err "Invalid YAML syntax in config file: $CONFIG_FILE"
+    echo "$yaml_err" >&2
+    exit 1
+  fi
+  info "Using config file: $CONFIG_FILE"
+fi
+
+# ---------------------------------------------------------------------------
 # Teardown flow (--delete)
 # ---------------------------------------------------------------------------
 if [[ "$DELETE_MODE" == "true" ]]; then
   section "Teardown: Delete Single-Node-VM Resources"
 
-  info "Detecting GCP project..."
-  PROJECT_ID="$(gcloud config get-value project 2>/dev/null)" || true
+  PROJECT_ID="$(config_get 'project_id' '')"
   if [[ -z "$PROJECT_ID" ]]; then
-    err "No GCP project configured. Run: gcloud config set project PROJECT_ID"
+    info "Detecting GCP project..."
+    PROJECT_ID="$(gcloud config get-value project 2>/dev/null)" || true
+  fi
+  if [[ -z "$PROJECT_ID" ]]; then
+    err "No GCP project configured. Set project_id in config or run: gcloud config set project PROJECT_ID"
     exit 1
   fi
   echo "  Project: ${PROJECT_ID}"
 
-  read -rp "Hub name [my-hub]: " HUB_NAME
-  HUB_NAME="${HUB_NAME:-my-hub}"
+  HUB_NAME="$(config_get 'hub_name' '')"
+  if [[ -z "$HUB_NAME" ]]; then
+    config_prompt HUB_NAME "Hub name [my-hub]: " "my-hub"
+  fi
 
-  read -rp "GCP region [us-central1]: " REGION
-  REGION="${REGION:-us-central1}"
+  REGION="$(config_get 'region' '')"
+  if [[ -z "$REGION" ]]; then
+    config_prompt REGION "GCP region [us-central1]: " "us-central1"
+  fi
 
   INSTANCE_NAME="scion-hub-${HUB_NAME}"
   PROXY_SERVICE="${INSTANCE_NAME}-iap-proxy"
@@ -124,10 +217,14 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Service account:   ${SA_EMAIL}"
   echo "  Firewall rule:     ${FW_RULE_NAME}"
   echo ""
-  read -rp "Continue? [y/N]: " CONFIRM
-  if [[ "${CONFIRM,,}" != "y" ]]; then
-    echo "Aborted."
-    exit 0
+  if [[ -n "$CONFIG_FILE" && ! -t 0 ]]; then
+    info "Non-interactive mode: proceeding with teardown."
+  else
+    read -rp "Continue? [y/N]: " CONFIRM
+    if [[ "${CONFIRM,,}" != "y" ]]; then
+      echo "Aborted."
+      exit 0
+    fi
   fi
 
   info "Deleting Cloud Run IAP proxy service..."
@@ -203,122 +300,198 @@ fi
 section "Phase 1: Prerequisites"
 
 # --- GCP project ---
-info "Detecting GCP project..."
-PROJECT_ID="$(gcloud config get-value project 2>/dev/null)" || true
+PROJECT_ID="$(config_get 'project_id' '')"
 if [[ -z "$PROJECT_ID" ]]; then
-  err "No GCP project configured. Run: gcloud config set project PROJECT_ID"
+  info "Detecting GCP project..."
+  PROJECT_ID="$(gcloud config get-value project 2>/dev/null)" || true
+fi
+if [[ -z "$PROJECT_ID" ]]; then
+  err "No GCP project configured. Set project_id in config or run: gcloud config set project PROJECT_ID"
   exit 1
 fi
 echo "  Project: ${PROJECT_ID}"
 
-# --- Interactive prompts ---
-while true; do
-  read -rp "Hub name [my-hub]: " HUB_NAME
-  HUB_NAME="${HUB_NAME:-my-hub}"
+# --- Interactive prompts (or config file values) ---
+HUB_NAME="$(config_get 'hub_name' '')"
+if [[ -n "$HUB_NAME" ]]; then
+  # Validate config-provided hub name
   if [[ ${#HUB_NAME} -gt 20 ]]; then
-    warn "Hub name '${HUB_NAME}' is ${#HUB_NAME} chars; max is 20 (GCP service-account ID limit)."
-    echo "  Please choose a shorter name."
-    continue
+    err "Hub name '${HUB_NAME}' from config is ${#HUB_NAME} chars; max is 20."
+    exit 1
   fi
   if [[ ! "$HUB_NAME" =~ ^[a-z][a-z0-9-]*$ ]]; then
-    warn "Hub name '${HUB_NAME}' is invalid. It must start with a lowercase letter and contain only lowercase letters, numbers, and hyphens."
-    echo "  Please choose a valid name."
-    continue
+    err "Hub name '${HUB_NAME}' from config is invalid. It must start with a lowercase letter and contain only lowercase letters, numbers, and hyphens."
+    exit 1
   fi
-  break
-done
-
-read -rp "GCP region [us-central1]: " REGION
-REGION="${REGION:-us-central1}"
-
-echo "Machine size:"
-echo "  1) Small  (e2-standard-4,  4 vCPU,  16GB) - up to ~10 agents"
-echo "  2) Medium (n2-standard-16, 16 vCPU, 64GB) - up to ~50 agents"
-read -rp "Select [1]: " SIZE_CHOICE
-SIZE_CHOICE="${SIZE_CHOICE:-1}"
-
-case "$SIZE_CHOICE" in
-  1) MACHINE_TYPE="e2-standard-4" ;;
-  2) MACHINE_TYPE="n2-standard-16" ;;
-  *) err "Invalid selection: $SIZE_CHOICE"; exit 1 ;;
-esac
-
-echo "Disk size:"
-echo "  1) 200 GB (default)"
-echo "  2) 500 GB"
-echo "  3) Custom"
-read -rp "Select [1]: " DISK_CHOICE
-DISK_CHOICE="${DISK_CHOICE:-1}"
-
-case "$DISK_CHOICE" in
-  1) DISK_SIZE="200GB" ;;
-  2) DISK_SIZE="500GB" ;;
-  3)
-    read -rp "Enter disk size in GB: " CUSTOM_DISK
-    if [[ -z "$CUSTOM_DISK" ]] || ! [[ "$CUSTOM_DISK" =~ ^[0-9]+$ ]]; then
-      err "Invalid disk size: $CUSTOM_DISK"
-      exit 1
+else
+  if [[ -n "$CONFIG_FILE" && ! -t 0 ]]; then
+    err "Required config value 'hub_name' is missing and stdin is not a terminal."
+    exit 1
+  fi
+  while true; do
+    read -rp "Hub name [my-hub]: " HUB_NAME
+    HUB_NAME="${HUB_NAME:-my-hub}"
+    if [[ ${#HUB_NAME} -gt 20 ]]; then
+      warn "Hub name '${HUB_NAME}' is ${#HUB_NAME} chars; max is 20 (GCP service-account ID limit)."
+      echo "  Please choose a shorter name."
+      continue
     fi
-    DISK_SIZE="${CUSTOM_DISK}GB"
-    ;;
-  *) err "Invalid selection: $DISK_CHOICE"; exit 1 ;;
-esac
+    if [[ ! "$HUB_NAME" =~ ^[a-z][a-z0-9-]*$ ]]; then
+      warn "Hub name '${HUB_NAME}' is invalid. It must start with a lowercase letter and contain only lowercase letters, numbers, and hyphens."
+      echo "  Please choose a valid name."
+      continue
+    fi
+    break
+  done
+fi
 
-echo "Chat integrations to install:"
-echo "  1) Telegram"
-echo "  2) Discord"
-echo "  3) Slack"
-echo "  4) Teams"
-echo "  5) None"
-read -rp "Select (comma-separated) [5]: " CHAT_CHOICE
-CHAT_CHOICE="${CHAT_CHOICE:-5}"
+REGION="$(config_get 'region' '')"
+if [[ -z "$REGION" ]]; then
+  config_prompt REGION "GCP region [us-central1]: " "us-central1"
+fi
 
-# Parse chat plugin selections into an array
-CHAT_PLUGINS=()
-IFS=',' read -ra CHAT_SELECTIONS <<< "$CHAT_CHOICE"
-for sel in "${CHAT_SELECTIONS[@]}"; do
-  sel="$(echo "$sel" | tr -d ' ')"
-  case "$sel" in
-    1) CHAT_PLUGINS+=("telegram") ;;
-    2) CHAT_PLUGINS+=("discord") ;;
-    3) CHAT_PLUGINS+=("slack") ;;
-    4) CHAT_PLUGINS+=("teams") ;;
-    5) ;;  # None
-    *) warn "Ignoring unknown chat selection: $sel" ;;
+CFG_MACHINE_SIZE="$(config_get 'machine_size' '')"
+if [[ -n "$CFG_MACHINE_SIZE" ]]; then
+  case "$CFG_MACHINE_SIZE" in
+    small)  MACHINE_TYPE="e2-standard-4" ;;
+    medium) MACHINE_TYPE="n2-standard-16" ;;
+    *) err "Invalid machine_size in config: '$CFG_MACHINE_SIZE' (expected: small, medium)"; exit 1 ;;
   esac
-done
+else
+  echo "Machine size:"
+  echo "  1) Small  (e2-standard-4,  4 vCPU,  16GB) - up to ~10 agents"
+  echo "  2) Medium (n2-standard-16, 16 vCPU, 64GB) - up to ~50 agents"
+  config_prompt SIZE_CHOICE "Select [1]: " "1"
 
-echo "Container images:"
-echo "  1) Provide a registry path (images already pushed)"
-echo "  2) Build images locally on the VM (requires 30-45 min, ~30GB disk)"
-read -rp "Select [2]: " IMAGE_CHOICE
-IMAGE_CHOICE="${IMAGE_CHOICE:-2}"
+  case "$SIZE_CHOICE" in
+    1) MACHINE_TYPE="e2-standard-4" ;;
+    2) MACHINE_TYPE="n2-standard-16" ;;
+    *) err "Invalid selection: $SIZE_CHOICE"; exit 1 ;;
+  esac
+fi
 
-case "$IMAGE_CHOICE" in
-  1)
-    IMAGE_SOURCE="registry"
-    read -rp "Registry path (e.g. us-docker.pkg.dev/my-project/scion): " IMAGE_REGISTRY
-    if [[ -z "$IMAGE_REGISTRY" ]]; then
-      err "Registry path cannot be empty."
-      exit 1
-    fi
-    ;;
-  2)
-    IMAGE_SOURCE="build"
-    IMAGE_REGISTRY="localhost/scion"
-    ;;
-  *) err "Invalid selection: $IMAGE_CHOICE"; exit 1 ;;
-esac
+CFG_DISK_SIZE="$(config_get 'disk_size_gb' '')"
+if [[ -n "$CFG_DISK_SIZE" ]]; then
+  if ! [[ "$CFG_DISK_SIZE" =~ ^[0-9]+$ ]]; then
+    err "Invalid disk_size_gb in config: '$CFG_DISK_SIZE' (must be a number)"
+    exit 1
+  fi
+  DISK_SIZE="${CFG_DISK_SIZE}GB"
+else
+  echo "Disk size:"
+  echo "  1) 200 GB (default)"
+  echo "  2) 500 GB"
+  echo "  3) Custom"
+  config_prompt DISK_CHOICE "Select [1]: " "1"
+
+  case "$DISK_CHOICE" in
+    1) DISK_SIZE="200GB" ;;
+    2) DISK_SIZE="500GB" ;;
+    3)
+      config_prompt CUSTOM_DISK "Enter disk size in GB: " ""
+      if [[ -z "$CUSTOM_DISK" ]] || ! [[ "$CUSTOM_DISK" =~ ^[0-9]+$ ]]; then
+        err "Invalid disk size: $CUSTOM_DISK"
+        exit 1
+      fi
+      DISK_SIZE="${CUSTOM_DISK}GB"
+      ;;
+    *) err "Invalid selection: $DISK_CHOICE"; exit 1 ;;
+  esac
+fi
+
+CFG_CHAT_PLUGINS="$(config_get 'chat_plugins' '')"
+CHAT_PLUGINS=()
+if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
+  # Parse chat_plugins from config (space-separated list from config_get)
+  if [[ -n "$CFG_CHAT_PLUGINS" ]]; then
+    for plugin in $CFG_CHAT_PLUGINS; do
+      case "$plugin" in
+        telegram|discord|slack|teams) CHAT_PLUGINS+=("$plugin") ;;
+        *) warn "Ignoring unknown chat plugin in config: $plugin" ;;
+      esac
+    done
+  fi
+  # Empty list or missing key = no plugins (this is fine)
+else
+  echo "Chat integrations to install:"
+  echo "  1) Telegram"
+  echo "  2) Discord"
+  echo "  3) Slack"
+  echo "  4) Teams"
+  echo "  5) None"
+  config_prompt CHAT_CHOICE "Select (comma-separated) [5]: " "5"
+
+  IFS=',' read -ra CHAT_SELECTIONS <<< "$CHAT_CHOICE"
+  for sel in "${CHAT_SELECTIONS[@]}"; do
+    sel="$(echo "$sel" | tr -d ' ')"
+    case "$sel" in
+      1) CHAT_PLUGINS+=("telegram") ;;
+      2) CHAT_PLUGINS+=("discord") ;;
+      3) CHAT_PLUGINS+=("slack") ;;
+      4) CHAT_PLUGINS+=("teams") ;;
+      5) ;;  # None
+      *) warn "Ignoring unknown chat selection: $sel" ;;
+    esac
+  done
+fi
+
+CFG_IMAGE_SOURCE="$(config_get 'container_images.source' '')"
+if [[ -n "$CFG_IMAGE_SOURCE" ]]; then
+  case "$CFG_IMAGE_SOURCE" in
+    registry)
+      IMAGE_SOURCE="registry"
+      IMAGE_REGISTRY="$(config_get 'container_images.registry' '')"
+      if [[ -z "$IMAGE_REGISTRY" ]]; then
+        err "container_images.source is 'registry' but container_images.registry is missing from config."
+        exit 1
+      fi
+      ;;
+    build)
+      IMAGE_SOURCE="build"
+      IMAGE_REGISTRY="localhost/scion"
+      ;;
+    *) err "Invalid container_images.source in config: '$CFG_IMAGE_SOURCE' (expected: registry, build)"; exit 1 ;;
+  esac
+else
+  echo "Container images:"
+  echo "  1) Provide a registry path (images already pushed)"
+  echo "  2) Build images locally on the VM (requires 30-45 min, ~30GB disk)"
+  config_prompt IMAGE_CHOICE "Select [2]: " "2"
+
+  case "$IMAGE_CHOICE" in
+    1)
+      IMAGE_SOURCE="registry"
+      config_prompt IMAGE_REGISTRY "Registry path (e.g. us-docker.pkg.dev/my-project/scion): " ""
+      if [[ -z "$IMAGE_REGISTRY" ]]; then
+        err "Registry path cannot be empty."
+        exit 1
+      fi
+      ;;
+    2)
+      IMAGE_SOURCE="build"
+      IMAGE_REGISTRY="localhost/scion"
+      ;;
+    *) err "Invalid selection: $IMAGE_CHOICE"; exit 1 ;;
+  esac
+fi
 
 # --- Admin email ---
-echo ""
-echo "Hub admin email (will be granted super-admin access):"
-DEPLOYER_DEFAULT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)" || true
-if [[ -n "$DEPLOYER_DEFAULT" ]]; then
-  read -rp "Admin email [${DEPLOYER_DEFAULT}]: " ADMIN_EMAIL
-  ADMIN_EMAIL="${ADMIN_EMAIL:-$DEPLOYER_DEFAULT}"
-else
-  read -rp "Admin email: " ADMIN_EMAIL
+ADMIN_EMAIL="$(config_get 'admin_email' '')"
+if [[ -z "$ADMIN_EMAIL" ]]; then
+  DEPLOYER_DEFAULT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)" || true
+  if [[ -n "$CONFIG_FILE" && ! -t 0 ]]; then
+    # Non-interactive: use deployer identity as default
+    ADMIN_EMAIL="${DEPLOYER_DEFAULT:-}"
+  else
+    echo ""
+    echo "Hub admin email (will be granted super-admin access):"
+    if [[ -n "$DEPLOYER_DEFAULT" ]]; then
+      read -rp "Admin email [${DEPLOYER_DEFAULT}]: " ADMIN_EMAIL
+      ADMIN_EMAIL="${ADMIN_EMAIL:-$DEPLOYER_DEFAULT}"
+    else
+      read -rp "Admin email: " ADMIN_EMAIL
+    fi
+  fi
 fi
 if [[ -z "$ADMIN_EMAIL" ]]; then
   warn "No admin email provided. You can add one later in settings.yaml under server.hub.admin_emails."

@@ -1,0 +1,47 @@
+# Scion single-node VM deployment configuration
+#
+# Pre-answers the interactive wizard prompts in deploy.sh.
+# Pass this file with: ./deploy.sh --config deploy-config.yaml
+#
+# All fields are optional. Missing fields trigger interactive prompts
+# (or use defaults when running non-interactively without a terminal).
+
+# Hub name (used in resource naming: scion-hub-<hub_name>).
+# Must be <= 20 chars, start with a lowercase letter, and contain only
+# lowercase letters, numbers, and hyphens.
+hub_name: "my-hub"
+
+# GCP project ID. If empty, defaults to the current gcloud project.
+project_id: ""
+
+# GCP region for the VM and Cloud Run proxy.
+region: "us-central1"
+
+# VM machine size:
+#   "small"  -> e2-standard-4  (4 vCPU, 16 GB) - up to ~10 agents
+#   "medium" -> n2-standard-16 (16 vCPU, 64 GB) - up to ~50 agents
+machine_size: "small"
+
+# Boot disk size in GB.
+disk_size_gb: 200
+
+# Chat plugins to deploy. Valid values: telegram, discord, slack, teams.
+# Use an empty list [] for no plugins.
+chat_plugins: []
+
+# Container image source.
+container_images:
+  # "registry" to use pre-built images, "build" to build locally on the VM.
+  source: "build"
+  # Registry path (required when source is "registry", ignored otherwise).
+  # Example: "us-docker.pkg.dev/my-project/scion"
+  registry: ""
+
+# Email to grant super-admin access on first login.
+# If empty, defaults to the active gcloud account.
+admin_email: ""
+
+# Update policy: auto, notify, or disabled.
+# Note: Requires the binary auto-update feature (deployment_tier: binary).
+# If not supported by the installed version, this field is ignored.
+update_policy: "auto"

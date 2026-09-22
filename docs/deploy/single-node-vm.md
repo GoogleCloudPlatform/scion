@@ -56,6 +56,41 @@ To install a specific release version:
 ./scripts/single-node-vm/deploy.sh --version v0.5.0
 ```
 
+### Config File (Headless Mode)
+
+To run the deployment without interactive prompts, create a YAML config file
+that pre-answers all wizard questions and pass it with `--config`:
+
+```bash
+./scripts/single-node-vm/deploy.sh --config my-deploy-config.yaml
+```
+
+See `scripts/single-node-vm/deploy-config.example.yaml` for a documented
+template with all available fields.
+
+When a config file is provided:
+- Fields present in the config are used directly (no prompt).
+- Missing fields fall back to interactive prompts (if a terminal is
+  attached) or sensible defaults.
+- In fully non-interactive mode (no terminal on stdin), missing required
+  fields cause the script to exit with an error rather than hanging on a
+  `read`.
+
+Example minimal config for headless deployment:
+
+```yaml
+hub_name: "my-hub"
+region: "us-central1"
+machine_size: "small"
+disk_size_gb: 200
+container_images:
+  source: "build"
+```
+
+This is particularly useful for agent-driven deployments where a
+conversational agent gathers answers from a user, writes the config file,
+and runs `deploy.sh --config` headlessly.
+
 ## Architecture
 
 ```
