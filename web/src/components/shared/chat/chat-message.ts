@@ -145,6 +145,22 @@ interface EntityPattern {
   linkBuilder: (match: RegExpExecArray) => string;
 }
 
+/** Known filenames that should be linked even without a file extension. */
+const EXTENSIONLESS_FILES = new Set([
+  'makefile',
+  'dockerfile',
+  'license',
+  'readme',
+  'changelog',
+  'gemfile',
+  'rakefile',
+  'procfile',
+  'vagrantfile',
+  'justfile',
+  'taskfile',
+  'caddyfile',
+]);
+
 /**
  * Configurable entity patterns for deep-linking. Order matters: the first
  * match wins, so more specific patterns must come before less specific ones.
@@ -181,6 +197,10 @@ const ENTITY_PATTERNS: EntityPattern[] = [
       /(?:\/scion-volumes\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-](?:\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-])*|\/workspace\/(?:\.scion-volumes\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-](?:\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-])*|[a-zA-Z0-9_.-]*[a-zA-Z0-9_-](?:\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-])*))/g,
     linkBuilder: (m) => {
       const path = m[0];
+      const lastSegment = path.split('/').pop() || '';
+      if (!lastSegment.includes('.') && !EXTENSIONLESS_FILES.has(lastSegment.toLowerCase())) {
+        return path;
+      }
       return `<a class="entity-link path-link" data-file-path="${path.replace(/"/g, '&quot;')}" href="javascript:void(0)" title="Open ${path.replace(/"/g, '&quot;')}">${path}</a>`;
     },
   },
@@ -242,7 +262,7 @@ function styleEntityLinksInText(text: string): string {
  * Follows the exact same skip-region approach as `styleMentions()`.
  */
 function styleEntityLinks(htmlStr: string): string {
-  const skip = new RegExp(MENTION_SKIP_REGION, 'gi');
+  const skip = new RegExp(ENTITY_SKIP_REGION, 'gi');
   let out = '';
   let cursor = 0;
   let match: RegExpExecArray | null;
@@ -351,6 +371,17 @@ function formatFileSize(bytes: number): string {
  * which escapes any `>` appearing inside an attribute value.
  */
 const MENTION_SKIP_REGION = '<pre\\b[^>]*>[\\s\\S]*?</pre>|<code\\b[^>]*>[\\s\\S]*?</code>|<[^>]+>';
+
+/**
+ * Skip regions for entity-link processing. Like MENTION_SKIP_REGION but
+ * does NOT skip inline <code> spans, so file paths inside backticks
+ * are still auto-linked. Fenced code blocks (<pre>) are still skipped.
+ * Anchor elements (`<a>…</a>`) are skipped in full, including their text
+ * content, so a path already inside a link is never re-wrapped in a nested
+ * `<a>` — the `<a>` pattern must come before the generic `<[^>]+>` pattern
+ * so the full anchor element is consumed first.
+ */
+const ENTITY_SKIP_REGION = '<pre\\b[^>]*>[\\s\\S]*?</pre>|<a\\b[^>]*>[\\s\\S]*?</a>|<[^>]+>';
 
 /**
  * Wrap @mentions in styled, clickable spans.
