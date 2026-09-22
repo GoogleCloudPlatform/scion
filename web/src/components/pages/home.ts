@@ -109,7 +109,11 @@ export class ScionPageHome extends LitElement {
       const [agentsResp, projectsResp, inviteStatsResp] = await Promise.all([
         apiFetch('/api/v1/agents'),
         apiFetch('/api/v1/projects'),
-        isAdmin ? apiFetch('/api/v1/admin/invites/stats').catch(() => null) : Promise.resolve(null),
+        isAdmin
+          ? apiFetch('/api/v1/admin/invites/stats', {
+              suppressAccessDeniedToast: true,
+            }).catch(() => null)
+          : Promise.resolve(null),
       ]);
 
       if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;

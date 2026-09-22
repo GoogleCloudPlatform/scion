@@ -83,16 +83,10 @@ export function showToast(
   span.textContent = message;
   alert.appendChild(span);
 
-  // Remove the alert element from the DOM after it hides to prevent
-  // accumulation — same pattern used in confirm-dialog.ts.
-  alert.addEventListener(
-    'sl-after-hide',
-    () => {
-      alert.remove();
-    },
-    { once: true }
-  );
-
+  // Shoelace's .toast() appends the alert to its own toast stack and
+  // registers an sl-after-hide listener that calls toastStack.removeChild().
+  // Do NOT register a competing sl-after-hide → alert.remove() here —
+  // that causes a double-removal NotFoundError (#1733).
   document.body.appendChild(alert);
   void (alert as HTMLElement & { toast(): Promise<void> }).toast();
 }

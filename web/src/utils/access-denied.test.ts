@@ -316,6 +316,106 @@ describe('showAccessDeniedToast', () => {
 });
 
 // ---------------------------------------------------------------------------
+// showAccessDeniedToast — no competing sl-after-hide listener (#1733)
+// ---------------------------------------------------------------------------
+
+describe('showAccessDeniedToast cleanup (#1733)', () => {
+  beforeEach(() => {
+    _resetDedupState();
+  });
+
+  afterEach(() => {
+    document.querySelectorAll('sl-alert').forEach((el) => el.remove());
+    vi.restoreAllMocks();
+    _resetDedupState();
+  });
+
+  it('does NOT register an app-owned sl-after-hide listener on the two-line toast', () => {
+    // Track sl-after-hide listeners registered on sl-alert elements
+    const afterHideListeners: Array<() => void> = [];
+    const origCreate = document.createElement.bind(document);
+    vi.spyOn(document, 'createElement').mockImplementation(
+      (tag: string, options?: ElementCreationOptions) => {
+        const el = origCreate(tag, options);
+        if (tag === 'sl-alert') {
+          const origAdd = el.addEventListener.bind(el);
+          vi.spyOn(el, 'addEventListener').mockImplementation(
+            (type: string, listener: EventListenerOrEventListenerObject, opts?: unknown) => {
+              if (type === 'sl-after-hide' && typeof listener === 'function') {
+                afterHideListeners.push(listener as () => void);
+              }
+              origAdd(type, listener, opts as AddEventListenerOptions);
+            }
+          );
+          (el as unknown as Record<string, unknown>).toast = vi.fn();
+        }
+        return el;
+      }
+    );
+
+    showAccessDeniedToast({
+      action: 'delete',
+      resource: 'agent',
+      reason: 'Insufficient permissions',
+    });
+
+    // The two-line path in showAccessDeniedToast must NOT register
+    // any sl-after-hide listener — Shoelace's toast() handles cleanup.
+    expect(afterHideListeners.length).toBe(0);
+  });
+
+  it('does NOT register an app-owned sl-after-hide listener on the single-line toast', () => {
+    const afterHideListeners: Array<() => void> = [];
+    const origCreate = document.createElement.bind(document);
+    vi.spyOn(document, 'createElement').mockImplementation(
+      (tag: string, options?: ElementCreationOptions) => {
+        const el = origCreate(tag, options);
+        if (tag === 'sl-alert') {
+          const origAdd = el.addEventListener.bind(el);
+          vi.spyOn(el, 'addEventListener').mockImplementation(
+            (type: string, listener: EventListenerOrEventListenerObject, opts?: unknown) => {
+              if (type === 'sl-after-hide' && typeof listener === 'function') {
+                afterHideListeners.push(listener as () => void);
+              }
+              origAdd(type, listener, opts as AddEventListenerOptions);
+            }
+          );
+          (el as unknown as Record<string, unknown>).toast = vi.fn();
+        }
+        return el;
+      }
+    );
+
+    // Legacy 403 with no detail → goes through showToast() single-line path
+    showAccessDeniedToast({});
+
+    // Neither path should register sl-after-hide listeners
+    expect(afterHideListeners.length).toBe(0);
+  });
+
+  it('element is not removed from DOM by app code on sl-after-hide', () => {
+    stubAlertToast();
+
+    showAccessDeniedToast({
+      action: 'delete',
+      resource: 'agent',
+      reason: 'Insufficient permissions',
+    });
+
+    const alert = document.querySelector('sl-alert');
+    expect(alert).not.toBeNull();
+    expect(document.body.contains(alert)).toBe(true);
+
+    // Simulate Shoelace firing sl-after-hide
+    alert!.dispatchEvent(new Event('sl-after-hide'));
+
+    // Element should still be in DOM — only Shoelace's toast() cleanup
+    // (which is stubbed in tests) should remove it.
+    expect(document.body.contains(alert)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // showAccessDeniedToast — dedup coalescing with mocked Date.now
 // ---------------------------------------------------------------------------
 
