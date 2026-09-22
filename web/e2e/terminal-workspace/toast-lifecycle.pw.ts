@@ -302,11 +302,12 @@ test('dashboard invite-stats 403 produces no toast when suppressed', async ({ pa
   });
 
   await setupDashboard(page, { inviteStats403: true });
-  await page.goto('/');
 
-  // Wait long enough for any toast to appear (the invite-stats call
-  // returns 403 but uses suppressAccessDeniedToast, so no toast should fire)
-  await page.waitForTimeout(1000);
+  const statsResponse = page.waitForResponse('**/api/v1/admin/invites/stats');
+  await page.goto('/');
+  await statsResponse;
+  // Brief post-response settling window for the access-denied promise chain
+  await page.waitForTimeout(200);
 
   // No sl-alert in the toast stack
   expect(await toastStackCount(page)).toBe(0);
@@ -334,9 +335,7 @@ test('unsuppressed toast lifecycle — no double-removal, no pageerror', async (
 
   await setupDashboard(page, { inviteStats403: false });
   await page.goto('/');
-
-  // Wait for the dashboard to render
-  await page.waitForTimeout(500);
+  await expect(page.locator('scion-page-home')).toBeVisible();
 
   // Trigger a real toast via the access-denied event path (Approach B)
   await triggerAccessDeniedToast(page);
@@ -354,7 +353,9 @@ test('unsuppressed toast lifecycle — no double-removal, no pageerror', async (
   });
   expect(toastText).toContain('Test access denied');
 
-  // Wait for auto-dismiss: 6000ms duration + 2000ms buffer for animation
+  // 8s observation window: 6000ms warning-variant auto-dismiss + ~260ms
+  // close animation + margin. A poll-until-zero would resolve before the
+  // sl-after-hide listener fires, weakening the #1733 regression guard.
   await page.waitForTimeout(8000);
 
   // After dismiss, no sl-alert remains in the toast stack
@@ -377,7 +378,7 @@ test('route transition during active toast — no pageerror', async ({ page }) =
   // the scion:access-denied listener). Navigating to /terminals/ first
   // would skip shell creation.
   await page.goto('/');
-  await page.waitForTimeout(500);
+  await expect(page.locator('scion-page-home')).toBeVisible();
 
   // Trigger a toast while on the dashboard
   await triggerAccessDeniedToast(page);
@@ -394,7 +395,9 @@ test('route transition during active toast — no pageerror', async ({ page }) =
   await expect(page.locator('#terminal-workspace')).toHaveCount(1);
   await expect.poll(() => socket.attaches).toBe(1);
 
-  // Wait through the full toast dismiss/animation cycle
+  // 8s observation window: 6000ms warning-variant auto-dismiss + ~260ms
+  // close animation + margin. A poll-until-zero would resolve before the
+  // sl-after-hide listener fires, weakening the #1733 regression guard.
   await page.waitForTimeout(8000);
 
   // After dismiss, no toast residue
@@ -418,7 +421,7 @@ test('terminal pane identity stable across toast + route transition', async ({ p
   // Navigate to dashboard first to bootstrap the app-shell (which registers
   // the scion:access-denied listener needed for toast triggering).
   await page.goto('/');
-  await page.waitForTimeout(500);
+  await expect(page.locator('scion-page-home')).toBeVisible();
 
   // Now navigate to the terminal workspace
   await page.evaluate(
@@ -464,7 +467,9 @@ test('terminal pane identity stable across toast + route transition', async ({ p
     `/terminals/${agent}`
   );
 
-  // Wait through the toast dismiss cycle
+  // 8s observation window: 6000ms warning-variant auto-dismiss + ~260ms
+  // close animation + margin. A poll-until-zero would resolve before the
+  // sl-after-hide listener fires, weakening the #1733 regression guard.
   await page.waitForTimeout(8000);
 
   // Verify pane/socket identity is unchanged — same DOM elements
