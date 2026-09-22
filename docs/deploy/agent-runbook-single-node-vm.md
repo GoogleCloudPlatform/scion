@@ -298,6 +298,15 @@ gcloud run services describe scion-hub-HUB_NAME-iap-proxy \
 
 **Expected:** A URL like `https://scion-hub-HUB_NAME-iap-proxy-HASH-REGION.a.run.app`
 
+**Do not** treat a successful `curl .../healthz` on this `*.run.app` URL as
+proof the proxy or hub is reachable. On Cloud Run, `/healthz` is answered
+directly by the Google Front End (GFE), before the request ever reaches the
+proxy container — it proves the Cloud Run service exists, nothing more. The
+proxy binary deliberately exposes `/proxy-healthz` instead (see
+`extras/cloudrun-iap-proxy/main.go`) for anyone who needs an uptime check
+that actually reaches the proxy. The cheap way to check that IAP is
+enforcing on this URL is in §6.5 below.
+
 ### 6.3 Hub health check
 
 SSH to the VM and check the health endpoint:
@@ -332,8 +341,23 @@ and `localhost/scion/scion-antigravity`, all tagged `latest`.
 
 ### 6.5 IAP access
 
-Provide the access URL (from section 5.3) to the user and ask them to open it
-in their browser.
+A cheap way to confirm IAP is actually enforcing on the proxy URL, without
+involving a browser, is a plain unauthenticated request to the site root
+(not `/healthz` — see the note in §6.2, GFE answers that one, not IAP):
+
+```bash
+curl -sI "https://scion-hub-HUB_NAME-iap-proxy-HASH-REGION.a.run.app/"
+```
+
+**Expected:** Either a `302` redirect (to `accounts.google.com`, the
+browser-oriented login flow) or a `401` with an `Invalid IAP credentials`
+body. Either response is proof IAP is enforcing on the service. Do not use a
+service-account identity-token `curl` recipe for this check — it requires
+the IAP OAuth client ID, which is out of scope for a first deploy.
+
+For end-to-end verification (does auth actually complete and does the UI
+load), provide the access URL (from section 5.3) to the user and ask them to
+open it in their browser.
 
 **Expected:** The user is prompted to authenticate with their Google account,
 then sees the Scion Hub UI.
