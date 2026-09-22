@@ -214,6 +214,10 @@ scion skills publish ./deploy-checklist --version 1.1.0 --skill-id <skill-id>
 | `--scope` | `global` | Scope for a **newly created** skill: `core`, `global`, `project`, or `user`. |
 | `--skill-id` | *(auto)* | Publish a new version for an existing skill ID. If omitted, Scion matches by directory name and creates the skill when no match exists. |
 
+:::note[Global scope permissions]
+Publishing a skill to the `global` scope requires either the `hub-admin` role or the `global-catalog-author` role. The `global-catalog-author` role grants only the `skill.create_global` permission, allowing non-admin users to author global catalog skills without full Hub administrator authority. See [Permissions & Policy](/scion/hosted/ha/permissions/#roles) for role details.
+:::
+
 **Per-version limits:** at most **50 files**, **10 MB** per file, and **50 MB** total. `.git/`, `.DS_Store`, `__pycache__`, and files matching `.gitignore` patterns are excluded automatically.
 
 On success the command reports the resolved version and its `sha256:` content hash:

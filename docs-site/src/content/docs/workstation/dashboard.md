@@ -18,10 +18,13 @@ The dashboard features an integrated notification framework with real-time SSE d
 - **Notification Tray**: Provides agent-scoped filtering for status events, accessible directly from the top navigation.
 - **Browser Push Notifications**: Opt-in native browser push notifications ensure you receive alerts even when the dashboard is in the background. Default triggers include `stalled` and `error` states, as well as requests for user input.
 
+### Mode Switcher
+The header features a three-column layout with a centered **mode switcher** that lets you move between the three top-level workspaces: **Dashboard**, **Chat**, and **Terminal**. Above 768 px, each mode displays a text label alongside its icon with clear active and hover states.
+
 ### Native Web Chat
 When enabled via the `web.native_chat` feature flag, the dashboard includes a top-level **Native Web Chat** workspace (a fourth ShellType in the SPA). It offers a rich interface for direct communication and coordination with your running agents and team.
 - **Project-Scoped Spaces & Shared Threads**: Conversations are organized into distinct spaces scoped to specific Projects. Within these spaces, users and agents can collaborate on shared discussion threads.
-- **Project Context Preservation (Dashboard ↔ Chat Toggle)**: When you switch between dashboard and chat modes using the header buttons, the system maintains your active project context so you do not lose your place:
+- **Project Context Preservation (Mode Switching)**: When you switch between Dashboard, Chat, and Terminal modes using the header mode switcher, the system maintains your active project context so you do not lose your place:
   - **Dashboard → Chat**: Clicking the **Chat** icon while on a project-scoped dashboard page (e.g., `/projects/:id/...`) takes you straight to that project's chat space (`/chat/space/:id`).
   - **Chat → Dashboard**: Clicking the **Dashboard** icon while in a project chat space (`/chat/space/:id/...` or `/chat/:slug/...`) takes you directly back to that project's detail page (`/projects/:id`).
   - **DMs / General Chat**: If there is no active project context (such as when in Direct Messages or bare `/chat`), the view defaults back to the top-level dashboard `/`.
@@ -41,6 +44,14 @@ When enabled via the `web.native_chat` feature flag, the dashboard includes a to
 - **Bidirectional Mention Translation**: `@-mentions` are automatically translated between the `@firstname-lastname` format used in the web chat and the `@email` format used by agents, ensuring natural display for each context.
 - **Agent-to-Agent Message Expansion**: Background inter-agent communications (displayed in the **Full** density view) are collapsed into a compact pill to preserve screen space. Expanding the pill displays the messages with a 2-line limit; truncated messages feature a zoom/expand icon (`arrows-angle-expand`) that opens a rich, full-screen Markdown-rendered dialog overlay, closeable via its X button or by clicking outside.
 - **Coherence Sync**: Real-time sync ensures actions taken on external channels (e.g. Discord or Teams) propagate instantly to the Web UI, with delivery state tooltips indicating whether messages succeeded.
+
+### Terminal Workspace
+The **Terminal Workspace** (enabled via the `web.terminal_workspace` feature flag, default **ON**) provides a dedicated, multi-pane terminal environment as a top-level workspace alongside Dashboard and Chat. It allows you to manage interactive terminal sessions with your agents in a persistent, multi-pane layout.
+- **Multi-Pane Layout**: Open multiple agent terminals side by side. The workspace preserves your active pane layout during navigation and places newly opened terminals into available slots.
+- **Cross-Tab Ownership**: Terminal sessions are tracked across browser tabs, preventing conflicts when the same agent is accessed from multiple tabs.
+- **Reconnect Controls**: If a terminal session is interrupted, the workspace provides reconnect controls to resume where you left off.
+- **Scoped PTY Cleanup**: When you close a terminal or navigate away, the workspace performs scoped cleanup of its PTY sessions to reclaim resources.
+- **Pane Focus**: In multi-pane layouts, the active pane is highlighted with a focus outline. Switching to a single-pane view automatically removes the outline.
 
 ### Projects
 View and manage your registered projects.

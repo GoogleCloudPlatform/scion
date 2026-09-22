@@ -143,6 +143,12 @@ The web dashboard includes both user-facing and admin surfaces for skills:
 
 Registry administration is capability-gated; it is available to users with the appropriate admin permissions.
 
+### Global catalog authoring
+
+Publishing skills to the `global` scope requires the `skill.create_global` permission. Hub administrators hold this permission by default. For non-admin users who need to author global skills, assign the system-scoped `global-catalog-author` role. This role grants only `skill.create_global`, decoupling global skill authoring from full Hub administration authority.
+
+See [Permissions & Policy — Roles](/scion/hosted/ha/permissions/#roles) for the complete role listing.
+
 ## See also
 
 - [Skills — Authoring & Publishing](/scion/local/skills/) — authoring, publishing, versioning, and the `scion skills` commands.
