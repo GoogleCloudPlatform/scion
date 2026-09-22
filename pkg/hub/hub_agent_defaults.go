@@ -169,8 +169,9 @@ func (s *Server) warnHubDefaultTemplateUnusable(ctx context.Context, name, proje
 }
 
 // profileTimezone returns the IANA timezone string for the named profile, or ""
-// if the profile does not exist or has no timezone set. Thread-safe: reads the
-// profiles from the global settings overlay under lock.
+// if the profile does not exist or has no timezone set. Thread-safe: delegates
+// to SettingsOverlay.ProfileTimezone which reads the single timezone field
+// under RLock without deep-copying the entire profiles map.
 func (s *Server) profileTimezone(profileName string) string {
 	if profileName == "" {
 		return ""
@@ -179,14 +180,7 @@ func (s *Server) profileTimezone(profileName string) string {
 	if overlay == nil {
 		return ""
 	}
-	profiles := overlay.Profiles()
-	if profiles == nil {
-		return ""
-	}
-	if p, ok := profiles[profileName]; ok {
-		return p.Timezone
-	}
-	return ""
+	return overlay.ProfileTimezone(profileName)
 }
 
 // hubDefaultHarnessConfigCtxKey marks a request context in which

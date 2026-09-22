@@ -222,6 +222,43 @@ func TestSettingsOverlay_ImageRegistryDBWinsWhenNoEnvVar(t *testing.T) {
 	}
 }
 
+func TestSettingsOverlay_ProfileTimezone(t *testing.T) {
+	o := NewSettingsOverlay()
+
+	// Inactive overlay returns empty.
+	if got := o.ProfileTimezone("any"); got != "" {
+		t.Errorf("inactive overlay: want empty, got %q", got)
+	}
+
+	o.Update(nil, map[string]V1ProfileConfig{
+		"pacific":  {Runtime: "docker", Timezone: "America/Los_Angeles"},
+		"no-tz":    {Runtime: "docker"},
+		"eastern":  {Runtime: "docker", Timezone: "America/New_York"},
+	}, nil, "")
+
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"pacific", "America/Los_Angeles"},
+		{"eastern", "America/New_York"},
+		{"no-tz", ""},
+		{"nonexistent", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := o.ProfileTimezone(tt.name); got != tt.want {
+			t.Errorf("ProfileTimezone(%q): want %q, got %q", tt.name, tt.want, got)
+		}
+	}
+
+	// Nil receiver is safe.
+	var nilOverlay *SettingsOverlay
+	if got := nilOverlay.ProfileTimezone("pacific"); got != "" {
+		t.Errorf("nil overlay: want empty, got %q", got)
+	}
+}
+
 func TestSettingsOverlay_GlobalOverlay(t *testing.T) {
 	// Clean state.
 	old := GetGlobalSettingsOverlay()
