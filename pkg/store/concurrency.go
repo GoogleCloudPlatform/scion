@@ -142,6 +142,11 @@ const (
 	// after upstream added it; renumbered to 0x5C100017.
 	LockNotificationDispatchSweep AdvisoryLockKey = 0x5C100017
 
+	// LockReleaseUpdateCheck guards the scheduled release update check so only
+	// one replica per tick checks for a new binary release (binary-tier
+	// deployments). See design doc §6 "Scheduled Update Check".
+	LockReleaseUpdateCheck AdvisoryLockKey = 0x5C100018
+
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
 	// pg_try_advisory_lock(classid, objid), where classid is this constant

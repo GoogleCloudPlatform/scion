@@ -308,6 +308,7 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			serviceName: mc.ServiceName,
 			githubRepo:  mc.GitHubRepo,
 			channel:     mc.ReleaseChannel,
+			store:       s.store,
 		}, nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)
@@ -698,6 +699,78 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 			resp["new_commits"] = result.NewCommits
 		}
 		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// handleGetUpdateAvailable handles GET /api/v1/admin/maintenance/update-available.
+// It returns the stored system.update_available hub setting, or a null/empty
+// response if no update notification is stored. This allows the admin UI to
+// show an "update available" banner without performing a live check.
+//
+// Authorization: enforced by routeGuard via hub.maintenance.execute permission.
+func (s *Server) handleGetUpdateAvailable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	setting, err := s.store.GetHubSetting(r.Context(), HubSettingSectionUpdateAvailable)
+	if err != nil {
+		if err == store.ErrNotFound {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"update_available": false,
+			})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Failed to read update_available setting", nil)
+		return
+	}
+
+	// Return the stored update info with update_available=true wrapper.
+	var info UpdateAvailableInfo
+	if err := json.Unmarshal(setting.Value, &info); err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Failed to parse update_available setting", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"update_available": true,
+		"update":           info,
+	})
+}
+
+// handleDismissUpdateAvailable handles DELETE /api/v1/admin/maintenance/update-available.
+// It clears the stored update notification so the admin UI banner is dismissed.
+//
+// Authorization: enforced by routeGuard via hub.maintenance.execute permission.
+func (s *Server) handleDismissUpdateAvailable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		MethodNotAllowed(w)
+		return
+	}
+
+	if err := s.store.DeleteHubSetting(r.Context(), HubSettingSectionUpdateAvailable); err != nil && err != store.ErrNotFound {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Failed to clear update_available setting", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"update_available": false,
+	})
+}
+
+// handleUpdateAvailable dispatches GET and DELETE to the appropriate handler.
+func (s *Server) handleUpdateAvailable(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleGetUpdateAvailable(w, r)
+	case http.MethodDelete:
+		s.handleDismissUpdateAvailable(w, r)
+	default:
+		MethodNotAllowed(w)
 	}
 }
 

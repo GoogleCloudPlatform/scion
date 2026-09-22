@@ -1246,9 +1246,10 @@ func resolveReleaseAssetURL(ctx context.Context, repo, version string) (string, 
 // BinaryUpdateExecutor downloads, verifies, and installs a new scion binary
 // from a GitHub Release, then restarts the systemd service.
 type BinaryUpdateExecutor struct {
-	serviceName string // systemd service name (e.g., "scion-hub")
-	githubRepo  string // GitHub repo for release lookups (e.g., "GoogleCloudPlatform/scion")
-	channel     string // release channel override (empty = detect from current version)
+	serviceName string     // systemd service name (e.g., "scion-hub")
+	githubRepo  string     // GitHub repo for release lookups (e.g., "GoogleCloudPlatform/scion")
+	channel     string     // release channel override (empty = detect from current version)
+	store       store.Store // optional — used to clear system.update_available on success
 }
 
 func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
@@ -1377,6 +1378,20 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 		return fmt.Errorf("installing binary failed: %w", err)
 	}
 	_, _ = fmt.Fprintf(logger, "Binary installed to %s\n", binaryPath)
+
+	// ── Step 4b: CLEAR STALE NOTIFICATION ───────────────────────────────
+
+	// Clear system.update_available to prevent showing a stale notification
+	// after the update is applied. Best-effort: a failure here should not
+	// block the update itself.
+	if e.store != nil {
+		if delErr := e.store.DeleteHubSetting(ctx, HubSettingSectionUpdateAvailable); delErr != nil && delErr != store.ErrNotFound {
+			_, _ = fmt.Fprintf(logger, "Warning: failed to clear update_available setting: %v\n", delErr)
+			log.Warn("Failed to clear update_available setting", "error", delErr)
+		} else {
+			_, _ = fmt.Fprintf(logger, "Cleared update_available notification.\n")
+		}
+	}
 
 	// ── Step 5: RESTART ─────────────────────────────────────────────────
 
