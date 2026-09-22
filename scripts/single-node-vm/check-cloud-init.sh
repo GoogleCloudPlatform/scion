@@ -63,6 +63,7 @@ trap 'rm -f "$RUNCMD_SCRIPT"' EXIT
 # and quoting rules aren't safely hand-parsed) and join it into one shell
 # script in list order, the same order cloud-init executes it under /bin/sh.
 "$PYTHON" -c "
+import shlex
 import sys
 import yaml
 
@@ -80,9 +81,11 @@ with open(sys.argv[2], 'w') as out:
         if isinstance(item, str):
             out.write(item.rstrip('\n') + '\n')
         else:
-            # cloud-init also allows list-of-args runcmd entries; join
-            # defensively even though this file only uses string entries.
-            out.write(' '.join(str(x) for x in item) + '\n')
+            # cloud-init also allows list-of-args runcmd entries (argv form,
+            # run without a shell) -- shlex.join matches that argv-quoting
+            # semantics more closely than a plain ' '.join. Dead code today:
+            # every entry in this file is a string.
+            out.write(shlex.join(str(x) for x in item) + '\n')
 " "$CLOUD_INIT_FILE" "$RUNCMD_SCRIPT"
 
 echo "Extracted runcmd body from ${CLOUD_INIT_FILE}:"
