@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	atlasmigrate "ariga.io/atlas/sql/migrate"
@@ -245,10 +246,16 @@ func skipExistingRelations(next entschema.Applier) entschema.Applier {
 
 // normalizeBrokerLabels is an Ent schema ApplyHook that runs before the
 // migration plan to normalize empty-string labels/annotations to NULL on
-// runtime_brokers. A bare empty string cannot be cast to jsonb, so this
-// prevents a failure when AutoMigrate's ALTER COLUMN changes the column
-// type from text to jsonb. The WHERE clause uses ::text so the comparison
-// remains valid on subsequent runs when the column is already jsonb.
+// runtime_brokers and inject USING clauses for varchar→jsonb casts.
+//
+// PostgreSQL cannot automatically cast varchar to jsonb (SQLSTATE 42804),
+// so any ALTER COLUMN … TYPE jsonb must include a USING col::jsonb clause.
+// The ent framework does not emit USING, so we patch the plan here.
+//
+// The empty-string→NULL normalization is still needed because even with
+// USING, a bare empty string is not valid JSON and would fail the cast.
+// The WHERE clause uses ::text so the comparison remains valid on
+// subsequent runs when the column is already jsonb.
 func normalizeBrokerLabels(next entschema.Applier) entschema.Applier {
 	return entschema.ApplyFunc(func(ctx context.Context, conn dialect.ExecQuerier, plan *atlasmigrate.Plan) error {
 		for _, stmt := range []string{
@@ -258,6 +265,25 @@ func normalizeBrokerLabels(next entschema.Applier) entschema.Applier {
 			if err := conn.Exec(ctx, stmt, []any{}, nil); err != nil {
 				// Table may not exist yet on a fresh database — that is fine.
 				slog.Debug("normalizeBrokerLabels: skipping", "stmt", stmt, "err", err)
+			}
+		}
+		// Patch the plan to add USING clauses for varchar→jsonb column casts
+		// on runtime_brokers. Without this, Postgres rejects the ALTER with
+		// SQLSTATE 42804 ("column cannot be cast automatically to type jsonb").
+		for _, c := range plan.Changes {
+			for _, col := range []string{"labels", "annotations"} {
+				// Match "ALTER COLUMN "<col>" TYPE jsonb" that is NOT already
+				// followed by " USING". We check for the bare target (without
+				// USING) and the extended target (with USING) separately, so
+				// that adding USING for one column doesn't block the other
+				// when both appear in the same statement.
+				bare := fmt.Sprintf("ALTER COLUMN \"%s\" TYPE jsonb", col)
+				withUsing := fmt.Sprintf("ALTER COLUMN \"%s\" TYPE jsonb USING", col)
+				if strings.Contains(c.Cmd, bare) && !strings.Contains(c.Cmd, withUsing) {
+					replacement := fmt.Sprintf("ALTER COLUMN \"%s\" TYPE jsonb USING \"%s\"::jsonb", col, col)
+					c.Cmd = strings.Replace(c.Cmd, bare, replacement, 1)
+					slog.Debug("normalizeBrokerLabels: added USING clause", "col", col, "cmd", c.Cmd)
+				}
 			}
 		}
 		return next.Apply(ctx, conn, plan)
