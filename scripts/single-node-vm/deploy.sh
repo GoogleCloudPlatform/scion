@@ -70,7 +70,7 @@ readonly CLOUD_INIT_MAX_ATTEMPTS=6
 readonly CLOUD_INIT_RETRY_SECS=15
 readonly HEALTH_CHECK_MAX_ATTEMPTS=12
 readonly HEALTH_CHECK_RETRY_SECS=5
-readonly BUILD_POLL_MAX_ATTEMPTS=180   # 180 * 15s = 45 min max
+readonly BUILD_POLL_MAX_ATTEMPTS=180
 readonly BUILD_POLL_INTERVAL_SECS=15
 readonly IAP_ENFORCEMENT_WAIT_SECS=60
 
@@ -1014,8 +1014,9 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
   # NOTE: the checkout lives under /opt (root-owned, world-traversable),
   # not /home/scion — the deployer identity running this over `gcloud
   # compute ssh` is never a member of the `scion` group, and /home/scion
-  # is mode 0750 once cloud-init's `useradd -m` runs. Everything here
-  # runs as root via `sudo`; the deployer is only the SSH transport.
+  # is mode 0750 once cloud-init's `useradd -m` runs. Every privileged
+  # step uses `sudo`; the deployer only needs to traverse /opt and
+  # write /tmp.
   info "Cloning scion repository on VM..."
   gcloud compute ssh "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
@@ -1081,8 +1082,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
   info "Waiting for image build to complete..."
   BUILD_DONE=false
   POLL_COUNT=0
-  MAX_POLLS="$BUILD_POLL_MAX_ATTEMPTS"
-  while [[ "$BUILD_DONE" != "true" ]] && [[ $POLL_COUNT -lt $MAX_POLLS ]]; do
+  while [[ "$BUILD_DONE" != "true" ]] && [[ $POLL_COUNT -lt $BUILD_POLL_MAX_ATTEMPTS ]]; do
     sleep "$BUILD_POLL_INTERVAL_SECS"
     POLL_COUNT=$((POLL_COUNT + 1))
     # Check if the exit code file exists (build finished)
@@ -1103,7 +1103,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
   done
 
   if [[ "$BUILD_DONE" != "true" ]]; then
-    err "Image build timed out after 45 minutes."
+    err "Image build timed out after $((BUILD_POLL_MAX_ATTEMPTS * BUILD_POLL_INTERVAL_SECS / 60)) minutes."
     echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='cat /tmp/scion-image-build.log'"
     exit 1
   fi
