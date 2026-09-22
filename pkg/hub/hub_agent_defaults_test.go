@@ -171,3 +171,61 @@ func TestHubAgentDefaults_ConcurrentWithApplySnapshot(t *testing.T) {
 
 	wg.Wait()
 }
+
+// TestApplySnapshot_DefaultTimezone verifies that the hub-level DefaultTimezone
+// field flows through Snapshot → ApplySnapshot → hubAgentDefaults.
+func TestApplySnapshot_DefaultTimezone(t *testing.T) {
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+	ApplySnapshot(srv, Layer1Snapshot{DefaultTimezone: "America/Los_Angeles"})
+
+	got := srv.hubAgentDefaults()
+	if got.DefaultTimezone != "America/Los_Angeles" {
+		t.Errorf("DefaultTimezone: want America/Los_Angeles, got %q", got.DefaultTimezone)
+	}
+}
+
+// TestAgentDefaultsEqual_Timezone ensures that agentDefaultsEqual detects
+// changes in the DefaultTimezone field.
+func TestAgentDefaultsEqual_Timezone(t *testing.T) {
+	a := opsettings.AgentDefaultsSettings{DefaultTimezone: "UTC"}
+	b := opsettings.AgentDefaultsSettings{DefaultTimezone: "America/New_York"}
+	if agentDefaultsEqual(a, b) {
+		t.Error("agentDefaultsEqual should return false for different timezones")
+	}
+	b.DefaultTimezone = "UTC"
+	if !agentDefaultsEqual(a, b) {
+		t.Error("agentDefaultsEqual should return true for equal timezones")
+	}
+}
+
+// TestProfileTimezone_ReturnsTimezoneFromOverlay verifies the profileTimezone
+// method returns the timezone from the global settings overlay.
+func TestProfileTimezone_ReturnsTimezoneFromOverlay(t *testing.T) {
+	// Set up global overlay with a profile that has a timezone.
+	overlay := config.NewSettingsOverlay()
+	overlay.Update(nil, map[string]config.V1ProfileConfig{
+		"pacific": {Runtime: "docker", Timezone: "America/Los_Angeles"},
+		"no-tz":   {Runtime: "docker"},
+	}, nil, "")
+	config.SetGlobalSettingsOverlay(overlay)
+	defer config.SetGlobalSettingsOverlay(nil)
+
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+
+	// Profile with timezone.
+	if got := srv.profileTimezone("pacific"); got != "America/Los_Angeles" {
+		t.Errorf("profileTimezone(pacific): want America/Los_Angeles, got %q", got)
+	}
+	// Profile without timezone.
+	if got := srv.profileTimezone("no-tz"); got != "" {
+		t.Errorf("profileTimezone(no-tz): want empty, got %q", got)
+	}
+	// Non-existent profile.
+	if got := srv.profileTimezone("nonexistent"); got != "" {
+		t.Errorf("profileTimezone(nonexistent): want empty, got %q", got)
+	}
+	// Empty profile name.
+	if got := srv.profileTimezone(""); got != "" {
+		t.Errorf("profileTimezone(\"\"): want empty, got %q", got)
+	}
+}

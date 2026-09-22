@@ -71,6 +71,9 @@ type ServerConfigResponse struct {
 	// Default runtime broker (hub-level)
 	DefaultRuntimeBroker string `json:"default_runtime_broker,omitempty"`
 
+	// DefaultTimezone is the hub-level IANA timezone fallback.
+	DefaultTimezone string `json:"default_timezone,omitempty"`
+
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC bool `json:"auto_inject_gcloud_adc,omitempty"`
 
@@ -116,6 +119,9 @@ type ServerConfigUpdateRequest struct {
 
 	// Default runtime broker (hub-level)
 	DefaultRuntimeBroker *string `json:"default_runtime_broker,omitempty"`
+
+	// DefaultTimezone is the hub-level IANA timezone fallback.
+	DefaultTimezone *string `json:"default_timezone,omitempty"`
 
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC *bool `json:"auto_inject_gcloud_adc,omitempty"`
@@ -307,6 +313,7 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		DefaultMaxAgentRole:  vs.DefaultMaxAgentRole,
 		DefaultAgentRole:     vs.DefaultAgentRole,
 		DefaultRuntimeBroker: vs.DefaultRuntimeBroker,
+		DefaultTimezone:      vs.DefaultTimezone,
 		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
 		AutoExposePorts:      vs.AutoExposePorts,
 	}
@@ -545,6 +552,13 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 			raw["default_runtime_broker"] = *req.DefaultRuntimeBroker
 		} else {
 			delete(raw, "default_runtime_broker")
+		}
+	}
+	if req.DefaultTimezone != nil {
+		if *req.DefaultTimezone != "" {
+			raw["default_timezone"] = *req.DefaultTimezone
+		} else {
+			delete(raw, "default_timezone")
 		}
 	}
 	if req.AutoInjectGcloudADC != nil {

@@ -2769,3 +2769,77 @@ func TestPutThenGetServerConfigDB_RuntimesRoundTrip(t *testing.T) {
 		t.Error("expected runtimes in section_metadata")
 	}
 }
+
+// TestPutServerConfigDB_ProfileTimezone_Valid accepts a valid IANA timezone.
+func TestPutServerConfigDB_ProfileTimezone_Valid(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{
+		"profiles": {"pacific": {"runtime": "docker", "timezone": "America/Los_Angeles"}}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for valid timezone, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPutServerConfigDB_ProfileTimezone_Invalid rejects an invalid timezone.
+func TestPutServerConfigDB_ProfileTimezone_Invalid(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{
+		"profiles": {"broken": {"runtime": "docker", "timezone": "Foo/Bar"}}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for invalid timezone, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "Foo/Bar") {
+		t.Errorf("error message should mention the invalid timezone: %s", rr.Body.String())
+	}
+}
+
+// TestPutServerConfigDB_DefaultTimezone_Valid accepts a valid hub default timezone.
+func TestPutServerConfigDB_DefaultTimezone_Valid(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{
+		"default_timezone": "Europe/Berlin"
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for valid default_timezone, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPutServerConfigDB_DefaultTimezone_Invalid rejects an invalid hub default timezone.
+func TestPutServerConfigDB_DefaultTimezone_Invalid(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{
+		"default_timezone": "Not/A/Timezone"
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for invalid default_timezone, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "Not/A/Timezone") {
+		t.Errorf("error message should mention the invalid timezone: %s", rr.Body.String())
+	}
+}

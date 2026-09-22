@@ -112,6 +112,7 @@ type Layer1Snapshot struct {
 	DefaultModel         string
 	DefaultThinkingLevel *int
 	DefaultRuntimeBroker string
+	DefaultTimezone      string
 
 	// Endpoints
 	PublicURL     string
@@ -794,6 +795,7 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.DefaultMaxDuration = k.String("default_max_duration")
 	snap.DefaultModel = k.String("default_model")
 	snap.DefaultRuntimeBroker = k.String("default_runtime_broker")
+	snap.DefaultTimezone = k.String("default_timezone")
 	if k.Exists("default_thinking_level") {
 		v := k.Int("default_thinking_level")
 		snap.DefaultThinkingLevel = &v
@@ -1049,6 +1051,7 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		DefaultModel:         snap.DefaultModel,
 		DefaultThinkingLevel: snap.DefaultThinkingLevel,
 		DefaultRuntimeBroker: snap.DefaultRuntimeBroker,
+		DefaultTimezone:      snap.DefaultTimezone,
 	}
 	// Deep-copy the one pointer field, symmetrically with hubAgentDefaults()'s
 	// read side. Aliasing the snapshot's pointee would leave the CALLER of

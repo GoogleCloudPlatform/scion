@@ -117,6 +117,20 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 	}
 }
 
+// Profiles returns a deep copy of the overlay's profiles map. Returns nil if
+// the overlay has not been activated or no profiles have been set.
+func (o *SettingsOverlay) Profiles() map[string]V1ProfileConfig {
+	if o == nil {
+		return nil
+	}
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	if !o.active || o.profiles == nil {
+		return nil
+	}
+	return cloneProfiles(o.profiles)
+}
+
 // deepCloneJSON performs a deep copy of src into dst via JSON round-trip.
 // This is intentionally generic so that new fields added to V1RuntimeConfig,
 // V1ProfileConfig, or HarnessConfigEntry are automatically deep-copied

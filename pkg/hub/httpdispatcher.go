@@ -180,6 +180,11 @@ type HTTPAgentDispatcher struct {
 	// accessor reads under its lock. Nil = no hub defaults (local dispatcher,
 	// tests) and the wire field is omitted.
 	hubAgentDefaultsProvider func() opsettings.AgentDefaultsSettings
+
+	// profileTimezoneProvider returns the IANA timezone string for the named
+	// profile, or "" if the profile does not exist or has no timezone set.
+	// Used by buildCreateRequest to inject TZ into agent containers.
+	profileTimezoneProvider func(profileName string) string
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -303,6 +308,12 @@ func (d *HTTPAgentDispatcher) SetHarnessConfigRepairer(fn func(ctx context.Conte
 // without a restart. Mirrors SetHarnessConfigRepairer.
 func (d *HTTPAgentDispatcher) SetHubAgentDefaultsProvider(fn func() opsettings.AgentDefaultsSettings) {
 	d.hubAgentDefaultsProvider = fn
+}
+
+// SetProfileTimezoneProvider registers the accessor for looking up a profile's
+// timezone by name. The callback reads the profile map under the server lock.
+func (d *HTTPAgentDispatcher) SetProfileTimezoneProvider(fn func(profileName string) string) {
+	d.profileTimezoneProvider = fn
 }
 
 // SetImageRegistry sets the image registry prefix for rewriting bare image
@@ -561,6 +572,26 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	injectThinkingLevelEnv(req.ResolvedEnv, agent.AppliedConfig)
 	if _, ok := req.ResolvedEnv["SCION_THINKING_LEVEL"]; ok {
 		classifyEnv(&req.EnvClassifications, "SCION_THINKING_LEVEL", api.EnvKindPlain)
+	}
+
+	// Inject TZ from the profile's first-class timezone field. Precedence:
+	//   1. Profile timezone  (first-class field — wins over everything)
+	//   2. Profile env TZ     (already in ResolvedEnv from config merge)
+	//   3. Hub default_timezone (fallback when neither profile source sets TZ)
+	//   4. UTC                (container default — no injection needed)
+	if d.profileTimezoneProvider != nil && agent.AppliedConfig != nil && agent.AppliedConfig.Profile != "" {
+		if tz := d.profileTimezoneProvider(agent.AppliedConfig.Profile); tz != "" {
+			req.ResolvedEnv["TZ"] = tz
+			classifyEnv(&req.EnvClassifications, "TZ", api.EnvKindPlain)
+		}
+	}
+	if _, hasTZ := req.ResolvedEnv["TZ"]; !hasTZ {
+		if d.hubAgentDefaultsProvider != nil {
+			if hubTZ := d.hubAgentDefaultsProvider().DefaultTimezone; hubTZ != "" {
+				req.ResolvedEnv["TZ"] = hubTZ
+				classifyEnv(&req.EnvClassifications, "TZ", api.EnvKindPlain)
+			}
+		}
 	}
 
 	// Inject hub name so agents can label their Cloud Logging entries with the

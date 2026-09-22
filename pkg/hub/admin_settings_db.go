@@ -197,6 +197,7 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.DefaultModel = snap.DefaultModel
 	resp.DefaultThinkingLevel = snap.DefaultThinkingLevel
 	resp.DefaultRuntimeBroker = snap.DefaultRuntimeBroker
+	resp.DefaultTimezone = snap.DefaultTimezone
 
 	// Telemetry — always set from snapshot (nil = no telemetry configured).
 	resp.Telemetry = snap.TelemetryConfig
@@ -567,6 +568,35 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// Validate profile timezones (beyond JSON schema — IANA name check).
+	if doc, ok := sectionDocs["profiles"]; ok {
+		var profiles opsettings.ProfilesSettings
+		if err := json.Unmarshal(doc, &profiles); err == nil {
+			for name, profile := range profiles {
+				if profile.Timezone != "" {
+					if _, err := time.LoadLocation(profile.Timezone); err != nil {
+						writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+							fmt.Sprintf("profile %q: invalid timezone %q: %v", name, profile.Timezone, err), nil)
+						return
+					}
+				}
+			}
+		}
+	}
+	// Validate hub-level default_timezone (IANA name check).
+	if doc, ok := sectionDocs["agent_defaults"]; ok {
+		var agentDefaults opsettings.AgentDefaultsSettings
+		if err := json.Unmarshal(doc, &agentDefaults); err == nil {
+			if agentDefaults.DefaultTimezone != "" {
+				if _, err := time.LoadLocation(agentDefaults.DefaultTimezone); err != nil {
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+						fmt.Sprintf("invalid default_timezone %q: %v", agentDefaults.DefaultTimezone, err), nil)
+					return
+				}
+			}
+		}
+	}
+
 	// Validate ALL sections before writing ANY (atomic: all-or-nothing).
 	// Collect errors from every section so the client sees all invalid
 	// sections in one response, not just the first one (N6).
@@ -735,6 +765,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 	}
 	if req.DefaultRuntimeBroker != nil {
 		keys = append(keys, "default_runtime_broker")
+	}
+	if req.DefaultTimezone != nil {
+		keys = append(keys, "default_timezone")
 	}
 
 	if req.AutoExposePorts != nil {
@@ -1100,6 +1133,9 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		}
 		if req.DefaultRuntimeBroker != nil {
 			d.DefaultRuntimeBroker = *req.DefaultRuntimeBroker
+		}
+		if req.DefaultTimezone != nil {
+			d.DefaultTimezone = *req.DefaultTimezone
 		}
 		doc = d
 
