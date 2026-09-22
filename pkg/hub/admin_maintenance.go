@@ -300,6 +300,15 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			tag:        mc.ImageTag,
 			gcpProject: s.config.GCPProjectID,
 		}, nil
+	case "update-binary":
+		log.Debug("Resolved update-binary executor",
+			"service_name", mc.ServiceName, "github_repo", mc.GitHubRepo,
+			"release_channel", mc.ReleaseChannel)
+		return &BinaryUpdateExecutor{
+			serviceName: mc.ServiceName,
+			githubRepo:  mc.GitHubRepo,
+			channel:     mc.ReleaseChannel,
+		}, nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)
 	}

@@ -80,6 +80,12 @@ var defaultSeedOperations = []store.MaintenanceOperation{
 		Description: "Builds a container image from a harness-config's bundled Dockerfile. The base image is resolved from the configured image registry.",
 		Category:    store.MaintenanceCategoryOperation,
 	},
+	{
+		Key:         "update-binary",
+		Title:       "Update Binary from Release",
+		Description: "Downloads the latest release binary from GitHub, verifies it, swaps the current binary, and restarts the hub service. Only available for binary-tier deployments.",
+		Category:    store.MaintenanceCategoryOperation,
+	},
 }
 
 // ============================================================================
