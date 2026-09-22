@@ -993,18 +993,23 @@ fi
 if [[ "$IMAGE_SOURCE" == "build" ]]; then
   section "Phase 3b: Build Container Images on VM"
 
+  # NOTE: the checkout lives under /opt (root-owned, world-traversable),
+  # not /home/scion — the deployer identity running this over `gcloud
+  # compute ssh` is never a member of the `scion` group, and /home/scion
+  # is mode 0750 once cloud-init's `useradd -m` runs. Everything here
+  # runs as root via `sudo`; the deployer is only the SSH transport.
   info "Cloning scion repository on VM..."
   gcloud compute ssh "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --command="
       set -euo pipefail
-      if [ ! -d /home/scion/scion-source ]; then
-        sudo -u scion git clone --depth 1 --branch '${VERSION}' \
-          https://github.com/GoogleCloudPlatform/scion.git /home/scion/scion-source
+      if [ ! -d /opt/scion-source ]; then
+        sudo git clone --depth 1 --branch '${VERSION}' \
+          https://github.com/GoogleCloudPlatform/scion.git /opt/scion-source
       else
-        cd /home/scion/scion-source
-        sudo -u scion git fetch --depth 1 origin tag '${VERSION}'
-        sudo -u scion git checkout '${VERSION}'
+        cd /opt/scion-source
+        sudo git fetch --depth 1 origin tag '${VERSION}'
+        sudo git checkout '${VERSION}'
       fi
     "
 
@@ -1016,7 +1021,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --command="
       set -euo pipefail
-      cd /home/scion/scion-source
+      cd /opt/scion-source
       rm -f /tmp/scion-image-build.exit
       { nohup bash -c '
         set -euo pipefail
@@ -1095,7 +1100,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
   info "Verifying container images..."
   gcloud compute ssh "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
-    --command="docker images | grep -E 'localhost/scion|core-base|scion-base|scion-antigravity'"
+    --command="sudo docker images | grep -E 'localhost/scion|core-base|scion-base|scion-antigravity'"
   echo "  Container images built and tagged successfully."
 else
   section "Phase 3b: Container Images (Registry)"
