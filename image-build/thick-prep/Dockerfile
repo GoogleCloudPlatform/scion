@@ -23,10 +23,24 @@
 #   2. Missing packages   - zsh (required by useradd -s /bin/zsh), fzf (claude
 #      harness keybindings), gh and ripgrep (core scion tools).
 #   3. Missing directory  - /usr/local/share/npm-global (scion-base chowns it).
+#   4. git too old        - the Cloud Workstations base is Ubuntu 24.04 (noble),
+#      which ships git 2.43.0 with no newer apt candidate. Scion hard-requires
+#      2.47.0 (pkg/util/git.go CheckGitVersion, for `worktree add
+#      --relative-paths`). This matters only on the thick chain: scion-base
+#      never installs git, and targets.sh routes thick as
+#      thick-prep -> scion-base, bypassing core-base -- which is the only other
+#      place git is provided. Without the vendored git below, every thick image
+#      silently loses worktree-per-agent mode.
 #
 # Architecture: amd64 only (Cloud Workstations base has no arm64 variant).
 
 ARG BASE_IMAGE=us-central1-docker.pkg.dev/cloud-workstations-images/predefined/base:latest
+
+# Keep in sync with image-build/core-base/Dockerfile. See that file for the
+# rationale and for the digest-pinning note.
+ARG GIT_IMAGE=chainguard/git:latest
+FROM ${GIT_IMAGE} AS git-source
+
 FROM ${BASE_IMAGE}
 
 USER root
@@ -39,13 +53,60 @@ RUN userdel -r ubuntu 2>/dev/null || true && \
 # Install packages that scion-base and harnesses expect but the thick base lacks.
 # tmux: required by sandbox entrypoint (buildEntrypoint in cloudrun_sandbox_runtime.go)
 # for agent session management. Without it, every sandbox dies on launch (exit 127).
+# libcurl4t64 is required by the vendored git's HTTPS helper (see below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     zsh \
     fzf \
     gh \
     ripgrep \
     tmux \
+    ca-certificates \
+    zlib1g \
+    libcurl4t64 \
     && rm -rf /var/lib/apt/lists/*
+
+# --- Vendored git (Chainguard) ---------------------------------------------
+# Mirrors core-base so both chains get the same git from the same place. See
+# core-base/Dockerfile for the full rationale; the short version:
+#   - helpers MUST go to /usr/libexec/git-core (compiled-in GIT_EXEC_PATH);
+#   - the binary MUST overwrite /usr/bin/git, because Chainguard ships
+#     /usr/libexec/git-core/git as a symlink to ../../bin/git and git re-execs
+#     itself through it. This base DOES ship its own /usr/bin/git (2.43), so
+#     installing ours anywhere else leaves that symlink pointing at the old
+#     binary — `git --version` says 2.55.0 while subcommands fail with
+#     "fatal: unknown repository extension found: relativeworktrees".
+#     This is not hypothetical: it is exactly what this image did before.
+# Must stay after apt-get so nothing reinstates the distro git over it.
+# Ubuntu 24.04 ships glibc 2.39, clearing Chainguard's 2.38 floor — by a single
+# release, so any future change of BASE_IMAGE needs to re-check this.
+COPY --from=git-source /usr/bin/git          /usr/bin/git
+COPY --from=git-source /usr/libexec/git-core /usr/libexec/git-core
+COPY --from=git-source /usr/share/git-core   /usr/share/git-core
+COPY --from=git-source /usr/lib/libpcre2-8.so.0 /usr/local/lib/scion-git/libpcre2-8.so.0
+ENV LD_LIBRARY_PATH=/usr/local/lib/scion-git
+
+# Same build-time assertions as core-base: PATH precedence, GIT_EXEC_PATH,
+# shared-library resolution, re-exec target, and the 2.47.0 worktree gate.
+RUN set -eu; \
+    test "$(command -v git)" = /usr/bin/git \
+      || { echo "FAIL: vendored git is shadowed on PATH by $(command -v git)"; exit 1; }; \
+    git --version; \
+    test -x /usr/libexec/git-core/git-remote-https \
+      || { echo "FAIL: git helpers missing from compiled-in GIT_EXEC_PATH"; exit 1; }; \
+    if ldd /usr/libexec/git-core/git-remote-https | grep -q "not found"; then \
+      echo "FAIL: unresolved shared libraries in git-remote-https:"; \
+      ldd /usr/libexec/git-core/git-remote-https | grep "not found"; exit 1; \
+    fi; \
+    test "$(/usr/libexec/git-core/git --version)" = "$(git --version)" \
+      || { echo "FAIL: git re-execs into a different binary via GIT_EXEC_PATH: \
+$(/usr/libexec/git-core/git --version) vs $(git --version)"; exit 1; }; \
+    git init -q /tmp/_gitcheck \
+      && git -C /tmp/_gitcheck -c user.email=build@scion.invalid -c user.name=build \
+           commit -q --allow-empty -m check \
+      && git -C /tmp/_gitcheck worktree add --relative-paths -q /tmp/_gitcheck_wt HEAD \
+      || { echo "FAIL: 'git worktree add --relative-paths' did not work end-to-end \
+(scion requires git >= 2.47.0 -- see pkg/util/git.go CheckGitVersion)"; exit 1; }; \
+    rm -rf /tmp/_gitcheck /tmp/_gitcheck_wt
 
 # Create the npm-global directory that scion-base expects to chown.
 RUN mkdir -p /usr/local/share/npm-global
