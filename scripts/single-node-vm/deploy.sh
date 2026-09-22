@@ -455,7 +455,7 @@ if [[ -n "$CFG_IMAGE_SOURCE" ]]; then
 else
   echo "Container images:"
   echo "  1) Provide a registry path (images already pushed)"
-  echo "  2) Build images locally on the VM (requires 30-45 min, ~30GB disk)"
+  echo "  2) Build images on the VM (requires 30-45 min, ~30GB disk)"
   config_prompt IMAGE_CHOICE "Select [2]: " "2"
 
   case "$IMAGE_CHOICE" in
@@ -498,18 +498,26 @@ if [[ -z "$ADMIN_EMAIL" ]]; then
 fi
 
 # --- Update policy ---
-echo ""
-echo "Automatic update policy:"
-echo "  1) Auto - automatically install new releases (recommended)"
-echo "  2) Notify - check for updates, notify admin only"
-echo "  3) Disabled - no automatic update checking"
-read -rp "Select [1]: " UPDATE_CHOICE
-case "${UPDATE_CHOICE:-1}" in
-  1) UPDATE_POLICY="auto" ;;
-  2) UPDATE_POLICY="notify" ;;
-  3) UPDATE_POLICY="disabled" ;;
-  *) UPDATE_POLICY="auto" ;;
-esac
+CFG_UPDATE_POLICY="$(config_get 'update_policy' '')"
+if [[ -n "$CFG_UPDATE_POLICY" ]]; then
+  case "$CFG_UPDATE_POLICY" in
+    auto|notify|disabled) UPDATE_POLICY="$CFG_UPDATE_POLICY" ;;
+    *) err "Invalid update_policy in config: '$CFG_UPDATE_POLICY' (expected: auto, notify, disabled)"; exit 1 ;;
+  esac
+else
+  echo ""
+  echo "Automatic update policy:"
+  echo "  1) Auto - automatically install new releases (recommended)"
+  echo "  2) Notify - check for updates, notify admin only"
+  echo "  3) Disabled - no automatic update checking"
+  read -rp "Select [1]: " UPDATE_CHOICE
+  case "${UPDATE_CHOICE:-1}" in
+    1) UPDATE_POLICY="auto" ;;
+    2) UPDATE_POLICY="notify" ;;
+    3) UPDATE_POLICY="disabled" ;;
+    *) UPDATE_POLICY="auto" ;;
+  esac
+fi
 
 # Derived values
 info "Selecting zone in ${REGION}..."
@@ -546,7 +554,7 @@ fi
 if [[ "$IMAGE_SOURCE" == "registry" ]]; then
   echo "  Images:       registry (${IMAGE_REGISTRY})"
 else
-  echo "  Images:       build locally on VM"
+  echo "  Images:       build on VM"
 fi
 if [[ -n "$ADMIN_EMAIL" ]]; then
   echo "  Admin:        ${ADMIN_EMAIL}"
@@ -575,6 +583,20 @@ if [[ -z "$VERSION" ]]; then
   fi
 fi
 echo "  Scion version: ${VERSION}"
+
+# --- Release channel (auto-detect from version) ---
+CFG_RELEASE_CHANNEL="$(config_get 'release_channel' '')"
+if [[ -n "$CFG_RELEASE_CHANNEL" ]]; then
+  RELEASE_CHANNEL="$CFG_RELEASE_CHANNEL"
+else
+  # Auto-detect from version string (matches pkg/version/update.DetectChannel)
+  case "$VERSION" in
+    nightly-*) RELEASE_CHANNEL="nightly" ;;
+    *-rc*|*-alpha*|*-beta*) RELEASE_CHANNEL="preview" ;;
+    *) RELEASE_CHANNEL="stable" ;;
+  esac
+fi
+echo "  Release channel: ${RELEASE_CHANNEL}"
 
 # --- Validate gcloud auth ---
 info "Validating gcloud authentication..."
@@ -910,7 +932,7 @@ ${ADMIN_EMAIL:+    admin_emails:
       - \"${ADMIN_EMAIL}\"}
   maintenance:
     deployment_tier: \"binary\"
-    release_channel: \"stable\"
+    release_channel: \"${RELEASE_CHANNEL}\"
     update_policy: \"${UPDATE_POLICY}\"
   storage:
     local_path: /home/scion/.scion/workspace-storage
@@ -1215,7 +1237,7 @@ ${ADMIN_EMAIL:+    admin_emails:
       - \"${ADMIN_EMAIL}\"}
   maintenance:
     deployment_tier: \"binary\"
-    release_channel: \"stable\"
+    release_channel: \"${RELEASE_CHANNEL}\"
     update_policy: \"${UPDATE_POLICY}\"
   storage:
     local_path: /home/scion/.scion/workspace-storage

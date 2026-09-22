@@ -31,7 +31,7 @@ chat_plugins: []
 
 # Container image source.
 container_images:
-  # "registry" to use pre-built images, "build" to build locally on the VM.
+  # "registry" to use pre-built images, "build" to build images on the VM.
   source: "build"
   # Registry path (required when source is "registry", ignored otherwise).
   # Example: "us-docker.pkg.dev/my-project/scion"
@@ -45,3 +45,9 @@ admin_email: ""
 # Note: Requires the binary auto-update feature (deployment_tier: binary).
 # If not supported by the installed version, this field is ignored.
 update_policy: "auto"
+
+# Release channel: stable, preview, or nightly.
+# If omitted, auto-detected from the installed version string.
+# "stable" for release versions (e.g., v0.5.0), "preview" for pre-releases
+# (e.g., v0.5.0-rc1), "nightly" for nightly builds.
+release_channel: ""
