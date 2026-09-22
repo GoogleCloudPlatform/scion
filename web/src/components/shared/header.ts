@@ -21,11 +21,11 @@
  *
  * Three-tier responsive layout:
  *
- *   Wide (>960px):     3-column grid -- title | segmented mode switch
+ *   Wide (>1100px):     3-column grid -- title | segmented mode switch
  *                      (with labels) | inline actions + user section.
  *                      This is the original pre-redesign layout.
  *
- *   Medium (<=960px):  2-column grid -- title | icon-only mode segments
+ *   Medium (<=1100px):  2-column grid -- title | icon-only mode segments
  *                      + user dropdown.  Mode visibility preserved,
  *                      user actions consolidated into a single dropdown.
  *
@@ -137,8 +137,8 @@ export class ScionHeader extends LitElement {
   static override styles = css`
     /* ------------------------------------------------------------------ */
     /* Grid: three-tier responsive                                         */
-    /*   Wide  (>960px):  3-col -- title | mode-switch | actions+user      */
-    /*   Medium (<=960):  2-col -- title | segments(icon-only)+user-dd     */
+    /*   Wide  (>1100px):  3-col -- title | mode-switch | actions+user      */
+    /*   Medium (<=1100):  2-col -- title | segments(icon-only)+user-dd     */
     /*   Narrow (<=768):  2-col -- title | mode-dd + user-dd               */
     /* ------------------------------------------------------------------ */
     :host {
@@ -204,7 +204,7 @@ export class ScionHeader extends LitElement {
     }
 
     /* ------------------------------------------------------------------ */
-    /* Wide center column: segmented mode switch (visible >960px)           */
+    /* Wide center column: segmented mode switch (visible >1100px)           */
     /* ------------------------------------------------------------------ */
     .wide-center {
       display: flex;
@@ -277,7 +277,7 @@ export class ScionHeader extends LitElement {
     }
 
     /* ------------------------------------------------------------------ */
-    /* Wide-only: inline header actions + user section (visible >960px)     */
+    /* Wide-only: inline header actions + user section (visible >1100px)     */
     /* ------------------------------------------------------------------ */
     .wide-right {
       display: flex;
@@ -402,7 +402,7 @@ export class ScionHeader extends LitElement {
     }
 
     /* ------------------------------------------------------------------ */
-    /* Compact-only: mode segments / dropdown + user dropdown (<=960px)     */
+    /* Compact-only: mode segments / dropdown + user dropdown (<=1100px)     */
     /* ------------------------------------------------------------------ */
     .compact-right {
       display: none;
@@ -579,9 +579,9 @@ export class ScionHeader extends LitElement {
     }
 
     /* ================================================================== */
-    /* Tier 2: Medium (<=960px) -- icon-only segments + user dropdown      */
+    /* Tier 2: Medium (<=1100px) -- icon-only segments + user dropdown      */
     /* ================================================================== */
-    @media (max-width: 960px) {
+    @media (max-width: 1100px) {
       :host {
         grid-template-columns: 1fr auto;
       }
@@ -664,11 +664,11 @@ export class ScionHeader extends LitElement {
           : html`<h1 class="page-title">${this.pageTitle}</h1>`}
       </div>
 
-      <!-- Wide center column: segmented mode switch with labels (>960px) -->
+      <!-- Wide center column: segmented mode switch with labels (>1100px) -->
       <div class="wide-center">${this.renderModeSwitch()}</div>
 
       <div class="header-right">
-        <!-- Wide layout (>960px): inline actions + user section -->
+        <!-- Wide layout (>1100px): inline actions + user section -->
         <div class="wide-right">
           ${this.user
             ? html`
@@ -752,7 +752,7 @@ export class ScionHeader extends LitElement {
               `}
         </div>
 
-        <!-- Compact layout (<=960px): mode segments/dropdown + user dropdown -->
+        <!-- Compact layout (<=1100px): mode segments/dropdown + user dropdown -->
         <div class="compact-right">
           <div class="compact-mode-segments">${this.renderModeSwitch()}</div>
           <div class="compact-mode-dropdown">${this.renderModeDropdown()}</div>
