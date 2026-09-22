@@ -223,6 +223,63 @@ func TestCloudRunRun_CreatesInstanceWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestCloudRunRun_RestartPolicyAlways(t *testing.T) {
+	fake := &fakeInstancesClient{getErr: notFoundErr()}
+	rt := newFakeCloudRunRuntime(t, fake)
+
+	_, err := rt.Run(context.Background(), runConfigForTest())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(fake.createReqs) != 1 {
+		t.Fatalf("CreateInstance called %d times, want 1", len(fake.createReqs))
+	}
+	inst := fake.createReqs[0].Instance
+	if inst.Annotations == nil {
+		t.Fatal("Instance.Annotations is nil, expected restart policy annotation")
+	}
+	const wantKey = "run.googleapis.com/restart-policy"
+	const wantVal = "Always"
+	if got := inst.Annotations[wantKey]; got != wantVal {
+		t.Errorf("Instance.Annotations[%q] = %q, want %q", wantKey, got, wantVal)
+	}
+}
+
+func TestCloudRunRun_HubEndpointEnvPassthrough(t *testing.T) {
+	fake := &fakeInstancesClient{getErr: notFoundErr()}
+	rt := newFakeCloudRunRuntime(t, fake)
+
+	cfg := runConfigForTest()
+	cfg.Env = []string{
+		"SCION_HUB_ENDPOINT=https://hub.example.com",
+		"SCION_HUB_URL=https://hub.example.com",
+	}
+
+	_, err := rt.Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(fake.createReqs) != 1 {
+		t.Fatalf("CreateInstance called %d times, want 1", len(fake.createReqs))
+	}
+	container := fake.createReqs[0].Instance.Containers[0]
+	foundEndpoint := false
+	for _, ev := range container.Env {
+		if ev.Name == "SCION_HUB_ENDPOINT" {
+			val := ev.GetValues().(*runpb.EnvVar_Value).Value
+			if val != "https://hub.example.com" {
+				t.Errorf("SCION_HUB_ENDPOINT = %q, want %q", val, "https://hub.example.com")
+			}
+			foundEndpoint = true
+		}
+	}
+	if !foundEndpoint {
+		t.Error("SCION_HUB_ENDPOINT env var not found in container")
+	}
+}
+
 func TestCloudRunRun_StartsExistingInstance(t *testing.T) {
 	wantID := cloudRunInstanceID("agent-1")
 	wantName := "projects/test-project/locations/us-central1/instances/" + wantID
@@ -407,21 +464,22 @@ func TestCloudRunTeardown_ErrorPaths(t *testing.T) {
 func TestCloudRunList_FiltersByLabelsAndMapsAgentInfo(t *testing.T) {
 	const wanted = "projects/test-project/locations/us-central1/instances/agent-wanted-0000000000"
 
-	// The "scion.name" key here is the label the runtime emits today
-	// (pkg/agent/run.go). It is a fixture, not a contract: if label-key
-	// sanitization is introduced for GCP resource labels, these fixtures and
-	// the filter key below need updating to the sanitized form.
+	// Label keys stored in Cloud Run are sanitized by buildCloudRunInstance
+	// (dots/slashes → underscores via sanitizeGCPLabelKey). The fixtures
+	// below use the sanitized form ("scion_name") to match what the runtime
+	// actually stores. The filter key passed to List uses the original form
+	// ("scion.name") because List sanitizes it before lookup.
 	newFake := func() *fakeInstancesClient {
 		return &fakeInstancesClient{
 			listResult: []*runpb.Instance{
 				{
 					Name:              wanted,
-					Labels:            map[string]string{"scion.name": "wanted", "agent_id": "agent-1"},
+					Labels:            map[string]string{"scion_name": "wanted", "agent_id": "agent-1"},
 					TerminalCondition: &runpb.Condition{State: runpb.Condition_CONDITION_SUCCEEDED},
 				},
 				{
 					Name:   "projects/test-project/locations/us-central1/instances/agent-other-1111111111",
-					Labels: map[string]string{"scion.name": "other", "agent_id": "agent-2"},
+					Labels: map[string]string{"scion_name": "other", "agent_id": "agent-2"},
 				},
 			},
 		}
@@ -431,7 +489,7 @@ func TestCloudRunList_FiltersByLabelsAndMapsAgentInfo(t *testing.T) {
 		fake := newFake()
 		rt := newFakeCloudRunRuntime(t, fake)
 
-		agents, err := rt.List(context.Background(), map[string]string{"scion.name": "wanted"})
+		agents, err := rt.List(context.Background(), map[string]string{"scion_name": "wanted"})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -459,7 +517,7 @@ func TestCloudRunList_FiltersByLabelsAndMapsAgentInfo(t *testing.T) {
 		if a.ContainerStatus != runpb.Condition_CONDITION_SUCCEEDED.String() {
 			t.Errorf("AgentInfo.ContainerStatus = %q, want %q", a.ContainerStatus, runpb.Condition_CONDITION_SUCCEEDED.String())
 		}
-		if a.Labels["scion.name"] != "wanted" {
+		if a.Labels["scion_name"] != "wanted" {
 			t.Errorf("AgentInfo.Labels = %v, want the instance labels", a.Labels)
 		}
 		if fake.closeCount != 1 {

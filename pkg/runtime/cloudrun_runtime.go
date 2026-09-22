@@ -32,9 +32,12 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/run/apiv2/runpb"
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
@@ -46,7 +49,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const cloudRunInstanceIDMaxLength = 63
+const cloudRunInstanceIDMaxLength = 49
 
 var defaultCallOpts = []gax.CallOption{
 	gax.WithRetry(func() gax.Retryer {
@@ -68,6 +71,14 @@ type CloudRunRuntime struct {
 	// production (the real Cloud Run Admin API); tests inject a fake so the
 	// lifecycle can be exercised without GCP credentials.
 	newClient func(ctx context.Context) (cloudrun.InstancesAPI, error)
+
+	// resolveMu protects the resolution of GCP metadata. When ProjectID
+	// and Location are both empty (auto-detected Cloud Run environment),
+	// resolveConfig populates them from the GCE metadata server on first
+	// use. A mutex+bool is used instead of sync.Once so transient errors
+	// can be retried on subsequent calls.
+	resolveMu sync.Mutex
+	resolved  bool
 }
 
 func NewCloudRunRuntime(cfg *config.CloudRunConfig) (*CloudRunRuntime, error) {
@@ -112,6 +123,64 @@ func NewCloudRunRuntimeFromInstances(cfg *config.V1CloudRunInstancesConfig) (*Cl
 	}, nil
 }
 
+// resolveConfig ensures that ProjectID and Location are populated. When both
+// are empty (auto-detected Cloud Run environment with no explicit settings),
+// this method discovers them from the GCE metadata server. The resolution is
+// idempotent and retryable — on success the result is cached; on failure
+// subsequent calls will retry, allowing recovery from transient errors.
+//
+// This fills the gap described in NewCloudRunRuntime: "project/region will be
+// discovered from GCP metadata when API calls are made." Without this, Run()
+// formats an empty parent ("projects//locations/") causing
+// RESOURCE_PROJECT_INVALID from the Cloud Run Instances API.
+func (r *CloudRunRuntime) resolveConfig(ctx context.Context) error {
+	r.resolveMu.Lock()
+	defer r.resolveMu.Unlock()
+
+	if r.resolved {
+		return nil
+	}
+
+	if r.config.ProjectID != "" && r.config.Location != "" {
+		r.resolved = true
+		return nil
+	}
+
+	projectID := r.config.ProjectID
+	if projectID == "" {
+		var err error
+		projectID, err = metadata.ProjectIDWithContext(ctx)
+		if err != nil {
+			return fmt.Errorf("cloudrun: auto-detecting ProjectID from GCE metadata: %w", err)
+		}
+	}
+
+	location := r.config.Location
+	if location == "" {
+		// On Cloud Run, metadata.Zone() returns a full zone like
+		// "projects/NUM/zones/us-central1-1". We need the region
+		// portion (e.g. "us-central1"), which is the zone minus
+		// the trailing "-<letter/number>" suffix.
+		zone, err := metadata.ZoneWithContext(ctx)
+		if err != nil {
+			return fmt.Errorf("cloudrun: auto-detecting Location from GCE metadata: %w", err)
+		}
+		// metadata.Zone() returns the bare zone name (e.g. "us-central1-1").
+		// Strip the last hyphen-delimited segment to derive the region.
+		if idx := strings.LastIndex(zone, "-"); idx > 0 {
+			location = zone[:idx]
+		} else {
+			location = zone
+		}
+	}
+
+	// Commit both values atomically only after both resolve successfully.
+	r.config.ProjectID = projectID
+	r.config.Location = location
+	r.resolved = true
+	return nil
+}
+
 func (r *CloudRunRuntime) Name() string { return "cloudrun" }
 
 func (r *CloudRunRuntime) ExecUser() string {
@@ -127,6 +196,9 @@ func (r *CloudRunRuntime) client(ctx context.Context) (cloudrun.InstancesAPI, er
 }
 
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
+	if err := r.resolveConfig(ctx); err != nil {
+		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	parent := fmt.Sprintf("projects/%s/locations/%s", r.config.ProjectID, r.config.Location)
 	agentID := cfg.Labels["agent_id"]
 	if agentID == "" {
@@ -277,22 +349,70 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 
 	labels := make(map[string]string)
 	for k, v := range cfg.Labels {
-		labels[k] = v
+		labels[sanitizeGCPLabelKey(k)] = sanitizeGCPLabelValue(v)
 	}
+
+	// Build the container command. Cloud Run Instances have no TTY, so the
+	// harness is wrapped in tmux (which allocates a PTY) following the same
+	// pattern as cloudrun-sandbox (buildEntrypoint in
+	// cloudrun_sandbox_runtime.go).
+	//
+	// The image ENTRYPOINT is "sciontool init --" (from scion-base), so we
+	// set Args (CMD override) to the tmux-wrapped command. sciontool init
+	// receives it as the child process to supervise.
+	//
+	// Previously, cfg.CommandArgs was passed as Container.Command (which
+	// overrides ENTRYPOINT), bypassing both GetCommand() and tmux. The CLI
+	// then ran without a PTY and crashed: "bubbletea: could not open TTY".
+	container := &runpb.Container{
+		Name:         "scion-agent",
+		Image:        cfg.Image,
+		Env:          envVars,
+		VolumeMounts: volumeMounts,
+	}
+
+	if cfg.NoAuth {
+		cmdLine := buildNoAuthCmdLine(cfg.NoAuthMessage, cfg.NoAuthCommand)
+		agentWindowCmd := "/bin/sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
+		tmuxCmd := fmt.Sprintf(
+			"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent; while tmux has-session -t scion 2>/dev/null; do sleep 2; done",
+			agentWindowCmd,
+		)
+		container.Args = []string{"/bin/sh", "-c", tmuxCmd}
+	} else if cfg.Harness != nil {
+		harnessArgs := cfg.Harness.GetCommand(cfg.Task, cfg.Resume, cfg.CommandArgs)
+		var quotedArgs []string
+		for _, a := range harnessArgs {
+			quotedArgs = append(quotedArgs, shellQuote(a))
+		}
+		cmdLine := strings.Join(quotedArgs, " ")
+		agentWindowCmd := "/bin/sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
+		// Use poll loop instead of attach-session: CRI has no TTY for PID 1,
+		// so tmux attach-session would fail with "not a terminal". The poll
+		// loop tracks the tmux session's lifetime without needing a terminal,
+		// matching the cloudrun-sandbox pattern.
+		tmuxCmd := fmt.Sprintf(
+			"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent; while tmux has-session -t scion 2>/dev/null; do sleep 2; done",
+			agentWindowCmd,
+		)
+		container.Args = []string{"/bin/sh", "-c", tmuxCmd}
+	} else if len(cfg.CommandArgs) > 0 {
+		// Fallback: no harness, pass raw command args as CMD override.
+		container.Args = cfg.CommandArgs
+	}
+	// If none of the above, image defaults (ENTRYPOINT + CMD) are used.
 
 	inst := &runpb.Instance{
 		LaunchStage: googleapi.LaunchStage_ALPHA,
-		Containers: []*runpb.Container{
-			{
-				Name:         "scion-agent",
-				Image:        cfg.Image,
-				Command:      cfg.CommandArgs,
-				Env:          envVars,
-				VolumeMounts: volumeMounts,
-			},
+		Annotations: map[string]string{
+			// Cloud Run Instances default to OnFailure, which kills the instance
+			// permanently on clean exit (code 0). Agents that complete a task and
+			// exit 0 must be restarted so they stay available for new messages.
+			"run.googleapis.com/restart-policy": "Always",
 		},
-		Volumes: volumes,
-		Labels:  labels,
+		Containers: []*runpb.Container{container},
+		Volumes:    volumes,
+		Labels:     labels,
 	}
 
 	if r.config != nil {
@@ -535,6 +655,9 @@ func mkdirNFSAgentDir(dir string, uid, gid int) error {
 }
 
 func (r *CloudRunRuntime) Stop(ctx context.Context, id string) error {
+	if err := r.resolveConfig(ctx); err != nil {
+		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	c, err := r.client(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
@@ -559,6 +682,9 @@ func (r *CloudRunRuntime) Stop(ctx context.Context, id string) error {
 }
 
 func (r *CloudRunRuntime) Delete(ctx context.Context, id string) error {
+	if err := r.resolveConfig(ctx); err != nil {
+		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	c, err := r.client(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
@@ -583,6 +709,9 @@ func (r *CloudRunRuntime) Delete(ctx context.Context, id string) error {
 }
 
 func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+	if err := r.resolveConfig(ctx); err != nil {
+		return nil, fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	c, err := r.client(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client: %w", err)
@@ -607,7 +736,7 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 
 		match := true
 		for k, v := range labelFilter {
-			if inst.Labels[k] != v {
+			if inst.Labels[sanitizeGCPLabelKey(k)] != v {
 				match = false
 				break
 			}
@@ -635,6 +764,9 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 }
 
 func (r *CloudRunRuntime) GetLogs(ctx context.Context, id string) (string, error) {
+	if err := r.resolveConfig(ctx); err != nil {
+		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	logClient, err := cloudrun.NewLogClient(ctx, r.config.ProjectID)
 	if err != nil {
 		return "", fmt.Errorf("initializing log client: %w", err)
@@ -683,11 +815,17 @@ func (r *CloudRunRuntime) Sync(ctx context.Context, id string, direction SyncDir
 }
 
 func (r *CloudRunRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
+	if err := r.resolveConfig(ctx); err != nil {
+		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	out, err := r.exec.Exec(ctx, r.config.ProjectID, r.config.Location, id, cmd)
 	return string(out), err
 }
 
 func (r *CloudRunRuntime) Attach(ctx context.Context, id string) error {
+	if err := r.resolveConfig(ctx); err != nil {
+		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	return r.exec.Connect(ctx, r.config.ProjectID, r.config.Location, id)
 }
 
@@ -697,6 +835,9 @@ func (r *CloudRunRuntime) GetWorkspacePath(ctx context.Context, id string) (stri
 
 // StreamLogs tails log output in real time (for scion look / scion logs -f).
 func (r *CloudRunRuntime) StreamLogs(ctx context.Context, instanceName string, opts cloudrun.LogOptions) (<-chan cloudrun.LogEntry, error) {
+	if err := r.resolveConfig(ctx); err != nil {
+		return nil, fmt.Errorf("failed to resolve Cloud Run config: %w", err)
+	}
 	logClient, err := cloudrun.NewLogClient(ctx, r.config.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("initializing log client: %w", err)
@@ -724,4 +865,59 @@ func (r *CloudRunRuntime) StreamLogs(ctx context.Context, instanceName string, o
 		}
 	}()
 	return outCh, nil
+}
+
+// sanitizeGCPLabelKey converts a label key to comply with GCP naming constraints.
+// GCP label keys must: start with a lowercase letter, contain only lowercase letters,
+// digits, underscores, and dashes, and be at most 63 characters long.
+// Dots are replaced with underscores.
+func sanitizeGCPLabelKey(key string) string {
+	key = strings.Map(func(r rune) rune {
+		if r == '.' || r == '/' {
+			return '_'
+		}
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			return r
+		}
+		if r >= 'A' && r <= 'Z' {
+			return r + 32 // lowercase
+		}
+		return '_'
+	}, key)
+	// GCP label keys must start with a lowercase letter. Prepend "k_" if
+	// the sanitized key begins with a digit, underscore, or dash.
+	if len(key) > 0 && (key[0] < 'a' || key[0] > 'z') {
+		key = "k_" + key
+	}
+	if len(key) > 63 {
+		key = key[:63]
+	}
+	return key
+}
+
+// sanitizeGCPLabelValue ensures a label value complies with GCP constraints.
+// Values must be at most 63 characters, contain only lowercase letters, digits,
+// underscores, and dashes, and must start and end with alphanumeric characters.
+// Empty values are allowed.
+func sanitizeGCPLabelValue(value string) string {
+	if value == "" {
+		return value
+	}
+	value = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			return r
+		}
+		if r >= 'A' && r <= 'Z' {
+			return r + 32 // lowercase
+		}
+		return '_'
+	}, value)
+	// GCP label values must start and end with an alphanumeric character.
+	value = strings.TrimFunc(value, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
+	if len(value) > 63 {
+		value = value[:63]
+	}
+	return value
 }

@@ -15,6 +15,8 @@
 package runtimebroker
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -426,6 +428,89 @@ func TestCloudrunSandboxHubEndpoint_LinkLocalFallback(t *testing.T) {
 	}
 	if !strings.HasPrefix(ep, "http://169.254.") {
 		t.Fatalf("expected http://169.254.x.x:8080, got %q", ep)
+	}
+}
+
+func TestResolveCloudRunServiceURL(t *testing.T) {
+	okProjectID := func() (string, error) { return "721899303052", nil }
+	okZone := func() (string, error) { return "us-central1-1", nil }
+
+	tests := []struct {
+		name       string
+		kService   string
+		projectFn  func() (string, error)
+		zoneFn     func() (string, error)
+		want       string
+		wantErrSub string
+	}{
+		{
+			name:      "constructs correct URL",
+			kService:  "scion-hub",
+			projectFn: okProjectID,
+			zoneFn:    okZone,
+			want:      "https://scion-hub-721899303052.us-central1.run.app",
+		},
+		{
+			name:      "different region",
+			kService:  "scion-hub",
+			projectFn: okProjectID,
+			zoneFn:    func() (string, error) { return "europe-west1-b", nil },
+			want:      "https://scion-hub-721899303052.europe-west1.run.app",
+		},
+		{
+			name:       "empty K_SERVICE",
+			kService:   "",
+			projectFn:  okProjectID,
+			zoneFn:     okZone,
+			wantErrSub: "K_SERVICE not set",
+		},
+		{
+			name:       "numeric project ID error",
+			kService:   "scion-hub",
+			projectFn:  func() (string, error) { return "", fmt.Errorf("metadata unavailable") },
+			zoneFn:     okZone,
+			wantErrSub: "numeric project ID",
+		},
+		{
+			name:       "zone error",
+			kService:   "scion-hub",
+			projectFn:  okProjectID,
+			zoneFn:     func() (string, error) { return "", fmt.Errorf("metadata unavailable") },
+			wantErrSub: "zone",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveCloudRunServiceURL(tt.kService, tt.projectFn, tt.zoneFn)
+			if tt.wantErrSub != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErrSub)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("error %q does not contain %q", err, tt.wantErrSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("resolveCloudRunServiceURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCloudrunInstancesHubEndpoint_NoKService(t *testing.T) {
+	// When K_SERVICE is not set, cloudrunInstancesHubEndpoint must fail.
+	t.Setenv("K_SERVICE", "")
+	_, err := cloudrunInstancesHubEndpoint(context.Background())
+	if err == nil {
+		t.Fatal("expected error when K_SERVICE is empty")
+	}
+	if !strings.Contains(err.Error(), "K_SERVICE not set") {
+		t.Fatalf("expected 'K_SERVICE not set' error, got: %v", err)
 	}
 }
 

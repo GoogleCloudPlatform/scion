@@ -15,11 +15,14 @@
 package runtimebroker
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
+	"strings"
 
+	gcemetadata "cloud.google.com/go/compute/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 )
@@ -208,6 +211,51 @@ func cloudrunSandboxHubEndpoint(hubListenPort int) (string, error) {
 	}
 
 	return fmt.Sprintf("http://%s", net.JoinHostPort(linkLocal, fmt.Sprintf("%d", hubListenPort))), nil
+}
+
+// cloudrunInstancesHubEndpoint computes the external hub endpoint for agents
+// running on the cloudrun (Cloud Run Instances) runtime. Unlike cloudrun-sandbox
+// (where the sandbox is co-located on the same Instance and can use a link-local
+// address), CRI agents run on standalone VMs in potentially different regions
+// and need the hub's public Cloud Run service URL.
+//
+// The URL is constructed from:
+//   - K_SERVICE (env var set by Cloud Run, giving the service name)
+//   - Numeric project ID (from GCE metadata server)
+//   - Zone → region (from GCE metadata server, stripped to region)
+//
+// Returns an error if any of these cannot be resolved — the agent start must
+// fail rather than fall back to a localhost URL that will never be reachable
+// from a standalone CRI instance.
+func cloudrunInstancesHubEndpoint(ctx context.Context) (string, error) {
+	return resolveCloudRunServiceURL(
+		os.Getenv("K_SERVICE"),
+		func() (string, error) { return gcemetadata.NumericProjectIDWithContext(ctx) },
+		func() (string, error) { return gcemetadata.ZoneWithContext(ctx) },
+	)
+}
+
+// resolveCloudRunServiceURL constructs a Cloud Run service URL from the service
+// name, numeric project ID, and zone. The zone is converted to a region by
+// stripping the trailing segment (e.g. "us-central1-1" → "us-central1").
+// Extracted from cloudrunInstancesHubEndpoint for testability.
+func resolveCloudRunServiceURL(kService string, numericProjectIDFn func() (string, error), zoneFn func() (string, error)) (string, error) {
+	if kService == "" {
+		return "", fmt.Errorf("cloudrun hub endpoint: K_SERVICE not set (not running on Cloud Run)")
+	}
+	numericProjectID, err := numericProjectIDFn()
+	if err != nil {
+		return "", fmt.Errorf("cloudrun hub endpoint: numeric project ID: %w", err)
+	}
+	zone, err := zoneFn()
+	if err != nil {
+		return "", fmt.Errorf("cloudrun hub endpoint: zone: %w", err)
+	}
+	region := zone
+	if idx := strings.LastIndex(zone, "-"); idx > 0 {
+		region = zone[:idx]
+	}
+	return fmt.Sprintf("https://%s-%s.%s.run.app", kService, numericProjectID, region), nil
 }
 
 func redactEnvValueForLog(key, value string) string {
