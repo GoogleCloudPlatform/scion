@@ -77,7 +77,8 @@ jobs:
     needs: check-and-tag
     if: needs.check-and-tag.outputs.tagged == 'true'
     permissions:
-      contents: write    # Inherited by workflow_call
+      contents: write
+      pull-requests: write    # Needed by update-manifest job
     uses: ./.github/workflows/build-release.yml
     with:
       ref: ${{ needs.check-and-tag.outputs.tag }}
