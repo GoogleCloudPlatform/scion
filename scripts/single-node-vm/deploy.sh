@@ -635,9 +635,11 @@ echo "  Scion version: ${VERSION}"
 # otherwise be executed on the VM — git check-ref-format happily accepts a
 # tag name like "v1;id", and this script's own --version flag or the GitHub
 # release auto-detect could pass one through unchecked. Restrict to the
-# characters a real release tag needs.
-if [[ ! "$VERSION" =~ ^v?[0-9A-Za-z._-]+$ ]]; then
-  err "Invalid version: '${VERSION}' (expected characters: letters, digits, '.', '_', '-', optionally prefixed with 'v')."
+# characters a real release tag needs. Require an alphanumeric first
+# character (after the optional 'v') so a leading '-' can never be mistaken
+# for a flag by a downstream command.
+if [[ ! "$VERSION" =~ ^v?[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+  err "Invalid version: '${VERSION}' (expected characters: letters, digits, '.', '_', '-', optionally prefixed with 'v'; must not start with '-')."
   exit 1
 fi
 
@@ -1121,7 +1123,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
         rm -f /tmp/scion-image-build.exit
         # Clear the marker before starting: if this build is interrupted or
         # fails partway, no marker should be left claiming a stale version
-        # is built (Step 4 below only writes it back on full success).
+        # is built (Step 5 below only writes it back on full success).
         sudo rm -f '${IMAGES_BUILT_MARKER}'
         { nohup bash -c '
           set -euo pipefail
