@@ -8,9 +8,6 @@ import type { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import { TerminalSessionRegistry } from './terminal-sessions.js';
 
 // Mock terminal-pane custom element before importing workspace root
-const terminalMock = vi.hoisted(() => ({
-  instances: [] as Array<{ dispose: ReturnType<typeof vi.fn>; reset: ReturnType<typeof vi.fn> }>,
-}));
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
     cols = 80;
@@ -27,9 +24,6 @@ vi.mock('@xterm/xterm', () => ({
     onData = vi.fn();
     onBinary = vi.fn();
     attachCustomKeyEventHandler = vi.fn();
-    constructor() {
-      terminalMock.instances.push(this);
-    }
   },
 }));
 vi.mock('@xterm/addon-fit', () => ({

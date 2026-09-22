@@ -44,6 +44,7 @@ beforeEach(() => {
     localStorage.removeItem('scion:feature:web.native_chat_v2');
     localStorage.removeItem('scion:feature:web.access_boundaries_read');
     localStorage.removeItem('scion:feature:web.access_boundaries_authoring');
+    localStorage.removeItem('scion:feature:web.terminal_workspace');
     localStorage.removeItem('scion:feature:test.flag');
   } catch {
     // ignore in environments without localStorage
@@ -87,6 +88,36 @@ describe('feature-flags: native_chat flags retained', () => {
 
   it('web.native_chat_v2 defaults to ON', () => {
     expect(isFeatureEnabled('web.native_chat_v2')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// terminal_workspace default-on
+// ---------------------------------------------------------------------------
+
+describe('feature-flags: terminal_workspace default-on', () => {
+  it('web.terminal_workspace defaults to ON (absent override → enabled)', () => {
+    expect(isFeatureEnabled('web.terminal_workspace')).toBe(true);
+  });
+
+  it('server-injected false overrides default-on for terminal_workspace', () => {
+    window.__SCION_FEATURES__ = { 'web.terminal_workspace': false };
+    expect(isFeatureEnabled('web.terminal_workspace')).toBe(false);
+  });
+
+  it('localStorage false overrides default-on for terminal_workspace', () => {
+    localStorage.setItem('scion:feature:web.terminal_workspace', 'false');
+    expect(isFeatureEnabled('web.terminal_workspace')).toBe(false);
+  });
+
+  it('other default-on flags are unaffected', () => {
+    expect(isFeatureEnabled('web.native_chat')).toBe(true);
+    expect(isFeatureEnabled('web.native_chat_v2')).toBe(true);
+  });
+
+  it('unrelated flags not in DEFAULT_ON_FLAGS still default to false', () => {
+    expect(isFeatureEnabled('test.flag')).toBe(false);
+    expect(isFeatureEnabled('web.access_boundaries_read')).toBe(false);
   });
 });
 
