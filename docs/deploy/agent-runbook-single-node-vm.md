@@ -396,6 +396,55 @@ gcloud iap web add-iam-policy-binding \
 | SSH connection fails to VM | IAP tunnel access not granted or firewall rule missing | Verify IAP tunnel role: `gcloud projects get-iam-policy PROJECT_ID --flatten="bindings[].members" --filter="bindings.role:roles/iap.tunnelResourceAccessor" --format="value(bindings.members)"`. Verify firewall rule exists: `gcloud compute firewall-rules describe scion-hub-HUB_NAME-allow-iap-ssh --project=PROJECT_ID`. |
 | `403 Forbidden` accessing the hub URL | User missing IAP access binding | Grant access: `gcloud iap web add-iam-policy-binding --resource-type=cloud-run --service=scion-hub-HUB_NAME-iap-proxy --region=REGION --project=PROJECT_ID --member=user:USER_EMAIL --role=roles/iap.httpsResourceAccessor` |
 | VM has no outbound internet | Cloud NAT not created or misconfigured | Verify router and NAT exist: `gcloud compute routers nats describe scion-hub-HUB_NAME-nat --router=scion-hub-HUB_NAME-router --region=REGION --project=PROJECT_ID` |
+| IAP auth fails outright, or shows an unexpected/unrecognized consent screen | Deployer account is in a different GCP organization (or domain) than the target project | See "Cross-org IAP" below. `deploy.sh` prints a warning during Phase 2 if it detects this; the warning is best-effort and can be wrong or silent (permissions, no-org projects) — trust the symptom over the absence of the warning. |
+
+### Cross-org IAP: custom OAuth client required
+
+**Symptom:** authentication through the Cloud Run IAP proxy fails outright,
+or the browser shows a consent/login screen that looks wrong for your
+organization (e.g. a generic or unrelated Google Workspace branding, or an
+explicit "access blocked" / "this app hasn't been verified" message) instead
+of the expected sign-in flow.
+
+**Why it happens:** IAP's OAuth consent screen is configured per-project and
+is normally scoped to the project's own GCP organization. If the deployer's
+Google account belongs to a different organization (or a personal account,
+or a project with no organization) than the one the OAuth consent screen is
+scoped to, the default consent screen does not recognize the account and
+blocks authentication. This is unrelated to any IAM role or IAP binding —
+`roles/iap.httpsResourceAccessor` can be correctly granted and auth will
+still fail.
+
+`deploy.sh` makes a best-effort attempt to detect this ahead of time (Phase
+2): it compares the deployer's email domain against the project's
+organization domain (via `gcloud projects get-ancestors` and `gcloud
+organizations describe`) and prints a warning if they don't match or if it
+can't tell. This is a heuristic, not a guarantee — a matching domain doesn't
+guarantee IAP will work, and the check silently skips (no warning either
+way) when the project has no organization, or when the gcloud calls fail for
+permissions reasons. Treat the actual symptom above as authoritative.
+
+**Fix:** the default OAuth consent screen cannot be made to accept
+cross-org accounts. A custom OAuth client (with its own consent screen
+configuration) must be created for the project and IAP must be configured to
+use it, instead of the default. This is a manual, one-time GCP Console
+operation:
+
+1. In the target project's GCP Console, go to **APIs & Services > OAuth
+   consent screen** and configure a consent screen that includes the
+   deployer's account (e.g. an "External" user type with the deployer added
+   as a test user, or a configuration appropriate for your organization's
+   policy).
+2. Go to **APIs & Services > Credentials** and create an OAuth 2.0 Client ID
+   of the type IAP expects for the resource (web application).
+3. Under **Security > Identity-Aware Proxy**, associate the custom OAuth
+   client with the Cloud Run service (`scion-hub-HUB_NAME-iap-proxy`)
+   instead of the project's default-generated client.
+
+Consult Google Cloud's current IAP documentation for the exact
+consent-screen and OAuth-client steps for your GCP Console version — the
+menu paths above can shift between Console releases. `deploy.sh` does not
+and will not automate this step; it is detection-and-warning only.
 
 ### Diagnostic commands
 
