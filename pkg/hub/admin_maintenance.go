@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // maintenanceLogAttrs returns common slog attributes for maintenance operation logging.
@@ -636,7 +637,10 @@ func toMaintenanceRunResponse(run store.MaintenanceOperationRun) maintenanceRunR
 }
 
 // handleCheckForUpdates handles POST /api/v1/admin/maintenance/check-updates.
-// It fetches from origin and compares the local HEAD against origin/main.
+// It dispatches to the appropriate update checker based on the deployment tier:
+//   - "binary": checks for release updates via LATEST.json manifest
+//   - "source" (default): checks for git updates via origin fetch
+//
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -645,20 +649,47 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mc := s.config.MaintenanceConfig
-	if mc.RepoPath == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-			"No repository path configured; set maintenance.repo_path in settings", nil)
-		return
-	}
 
-	result, err := CheckForUpdates(r.Context(), mc.RepoPath)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"Failed to check for updates: "+err.Error(), nil)
-		return
-	}
+	switch mc.DeploymentTier {
+	case "binary":
+		result, err := CheckForReleaseUpdates(r.Context(), version.Version, mc.ReleaseChannel, mc.GitHubRepo)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to check for release updates: "+err.Error(), nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
 
-	writeJSON(w, http.StatusOK, result)
+	default:
+		// Source tier: existing git-based check.
+		if mc.RepoPath == "" {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				"No repository path configured; set maintenance.repo_path in settings", nil)
+			return
+		}
+
+		result, err := CheckForUpdates(r.Context(), mc.RepoPath)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to check for updates: "+err.Error(), nil)
+			return
+		}
+
+		// Wrap the existing result with a tier discriminator.
+		resp := map[string]interface{}{
+			"tier":             "source",
+			"update_available": result.UpdateAvailable,
+			"current_commit":   result.CurrentCommit,
+			"latest_commit":    result.LatestCommit,
+			"current_branch":   result.CurrentBranch,
+			"tracking_ref":     result.TrackingRef,
+			"commits_behind":   result.CommitsBehind,
+		}
+		if len(result.NewCommits) > 0 {
+			resp["new_commits"] = result.NewCommits
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
 }
 
 // handleAdminRestart handles POST /api/v1/admin/maintenance/restart.

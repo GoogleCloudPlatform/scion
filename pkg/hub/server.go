@@ -312,6 +312,20 @@ type MaintenanceConfig struct {
 	BinaryDest string
 	// ServiceName is the systemd service name to restart (default: "scion-hub").
 	ServiceName string
+
+	// DeploymentTier selects the update strategy: "source" (git-based) or "binary" (release-based).
+	DeploymentTier string
+	// ReleaseChannel selects which release channel to track: "stable" or "preview".
+	// When empty, derived from the running binary's version string.
+	ReleaseChannel string
+	// UpdatePolicy controls automatic update behavior: "auto", "notify", or "disabled".
+	UpdatePolicy string
+	// CheckIntervalHours sets how often the scheduled update checker runs.
+	// Default: 6. Minimum: 1.
+	CheckIntervalHours int
+	// GitHubRepo is the GitHub repository for release lookups.
+	// Default: "GoogleCloudPlatform/scion".
+	GitHubRepo string
 }
 
 // GitHubAppServerConfig holds the GitHub App configuration for the Hub server.

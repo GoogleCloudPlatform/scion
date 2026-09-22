@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/version/update"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -1116,6 +1118,128 @@ func CheckForUpdates(ctx context.Context, repoPath string) (*UpdateCheckResult, 
 		"latest", remoteCommit[:8])
 
 	return result, nil
+}
+
+// ReleaseUpdateCheckResult contains the result of a release-based update check
+// for binary-tier deployments.
+type ReleaseUpdateCheckResult struct {
+	Tier            string `json:"tier"`
+	UpdateAvailable bool   `json:"update_available"`
+	CurrentVersion  string `json:"current_version"`
+	LatestVersion   string `json:"latest_version"`
+	Channel         string `json:"channel"`
+	DownloadURL     string `json:"download_url,omitempty"`
+	ReleaseURL      string `json:"release_url,omitempty"`
+}
+
+// CheckForReleaseUpdates checks for available binary updates by fetching the
+// release manifest via pkg/version/update. It returns version comparison results
+// and download URLs for binary-tier deployments.
+func CheckForReleaseUpdates(ctx context.Context, currentVersion, channel, repo string) (*ReleaseUpdateCheckResult, error) {
+	log := logging.Subsystem("hub.maintenance.check-release-updates")
+
+	// Determine channel: explicit config takes precedence, then detect from version.
+	if channel == "" {
+		channel = update.DetectChannel(currentVersion)
+	}
+
+	result := &ReleaseUpdateCheckResult{
+		Tier:           "binary",
+		CurrentVersion: currentVersion,
+		Channel:        channel,
+	}
+
+	// If no channel can be determined (dev builds), return early.
+	if channel == "" {
+		log.Debug("No release channel detected, skipping update check", "version", currentVersion)
+		return result, nil
+	}
+
+	// Build the manifest URL for the configured repo.
+	manifestURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/main/LATEST.json", repo)
+
+	manifest, err := update.FetchManifest(ctx, update.WithManifestURL(manifestURL))
+	if err != nil {
+		return nil, fmt.Errorf("fetch release manifest: %w", err)
+	}
+
+	latest, ok := manifest.Channels[channel]
+	if !ok || latest.Version == "" {
+		log.Debug("No version found for channel", "channel", channel)
+		return result, nil
+	}
+
+	result.LatestVersion = latest.Version
+	result.ReleaseURL = latest.URL
+
+	// Compare versions using the same logic as pkg/version/update.
+	info, err := update.CheckForUpdate(ctx, currentVersion,
+		update.WithManifestURL(manifestURL))
+	if err != nil {
+		return nil, fmt.Errorf("check for update: %w", err)
+	}
+	result.UpdateAvailable = info.UpdateAvailable
+
+	// If an update is available, resolve the download URL from GitHub Releases.
+	if result.UpdateAvailable {
+		downloadURL, err := resolveReleaseAssetURL(ctx, repo, result.LatestVersion)
+		if err != nil {
+			log.Warn("Failed to resolve download URL", "version", result.LatestVersion, "error", err)
+			// Non-fatal: we still know an update is available.
+		} else {
+			result.DownloadURL = downloadURL
+		}
+	}
+
+	log.Info("Release update check complete",
+		"current", currentVersion,
+		"latest", result.LatestVersion,
+		"channel", channel,
+		"update_available", result.UpdateAvailable)
+
+	return result, nil
+}
+
+// resolveReleaseAssetURL queries the GitHub Releases API to find the download URL
+// for the platform-appropriate binary tarball in a given release tag.
+func resolveReleaseAssetURL(ctx context.Context, repo, version string) (string, error) {
+	// Query the GitHub Releases API for the tag.
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", repo, version)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("create GitHub release request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch GitHub release: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub release API returned %s", resp.Status)
+	}
+
+	var release struct {
+		Assets []struct {
+			Name               string `json:"name"`
+			BrowserDownloadURL string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", fmt.Errorf("decode GitHub release: %w", err)
+	}
+
+	// Look for the platform-appropriate tarball.
+	wantName := fmt.Sprintf("scion-linux-%s.tar.gz", runtime.GOARCH)
+	for _, asset := range release.Assets {
+		if asset.Name == wantName {
+			return asset.BrowserDownloadURL, nil
+		}
+	}
+
+	return "", fmt.Errorf("no asset matching %q found in release %s", wantName, version)
 }
 
 // parseMigrationParams extracts and validates migration-specific parameters from the request body.

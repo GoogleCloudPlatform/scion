@@ -314,6 +314,17 @@ type ProjectDefaultsSettings struct {
 	DefaultScratchpad *bool `json:"default_scratchpad,omitempty" yaml:"default_scratchpad,omitempty" koanf:"default_scratchpad"`
 }
 
+// V1MaintenanceConfig holds maintenance/update configuration under server.maintenance
+// in settings.yaml. Controls the deployment tier, release channel, update policy,
+// and related settings for the binary auto-update feature.
+type V1MaintenanceConfig struct {
+	DeploymentTier     string `json:"deployment_tier,omitempty" yaml:"deployment_tier,omitempty" koanf:"deployment_tier"`
+	ReleaseChannel     string `json:"release_channel,omitempty" yaml:"release_channel,omitempty" koanf:"release_channel"`
+	UpdatePolicy       string `json:"update_policy,omitempty" yaml:"update_policy,omitempty" koanf:"update_policy"`
+	CheckIntervalHours int    `json:"check_interval_hours,omitempty" yaml:"check_interval_hours,omitempty" koanf:"check_interval_hours"`
+	GitHubRepo         string `json:"github_repo,omitempty" yaml:"github_repo,omitempty" koanf:"github_repo"`
+}
+
 // V1ServerConfig holds server-side configuration in the versioned settings format.
 // This mirrors GlobalConfig but uses snake_case koanf/yaml tags.
 // Only valid at the global level (~/.scion/settings.yaml), never in project-level settings.
@@ -333,6 +344,9 @@ type V1ServerConfig struct {
 	Secrets          *V1SecretsConfig          `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
 	LogLevel         string                    `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
 	LogFormat        string                    `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+
+	// Maintenance holds binary auto-update and deployment tier settings.
+	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
 
 	// NotificationChannels configures external notification delivery channels.
 	// Secrets (webhook URLs, API tokens) are held in memory only — never persisted to a database.
