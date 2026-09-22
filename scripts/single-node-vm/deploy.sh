@@ -57,6 +57,24 @@ err()     { echo -e "${RED}ERROR:${RESET} $*" >&2; }
 section() { echo ""; echo -e "${BOLD}--- $* ---${RESET}"; }
 
 # ---------------------------------------------------------------------------
+# Retry / timing budgets
+# ---------------------------------------------------------------------------
+# Tuned for a cold VM on first boot: guest-agent start, OS Login / metadata
+# key propagation, sshd host-key generation, and IAP tunnel setup all stack
+# on top of package_upgrade: true restarting services.
+readonly SSH_MAX_ATTEMPTS=30           # ~5 min ceiling (see backoff below)
+readonly SSH_BACKOFF_FAST_ATTEMPTS=5   # attempts 1..N-1 use the fast backoff
+readonly SSH_BACKOFF_FAST_SECS=5
+readonly SSH_BACKOFF_SLOW_SECS=10
+readonly CLOUD_INIT_MAX_ATTEMPTS=6
+readonly CLOUD_INIT_RETRY_SECS=15
+readonly HEALTH_CHECK_MAX_ATTEMPTS=12
+readonly HEALTH_CHECK_RETRY_SECS=5
+readonly BUILD_POLL_MAX_ATTEMPTS=180   # 180 * 15s = 45 min max
+readonly BUILD_POLL_INTERVAL_SECS=15
+readonly IAP_ENFORCEMENT_WAIT_SECS=60
+
+# ---------------------------------------------------------------------------
 # Parse flags
 # ---------------------------------------------------------------------------
 VERSION=""
@@ -758,7 +776,7 @@ fi
 info "Waiting for SSH access to VM..."
 SSH_READY=false
 SSH_STDERR_FILE="$(mktemp)"
-for attempt in $(seq 1 20); do
+for attempt in $(seq 1 "$SSH_MAX_ATTEMPTS"); do
   if gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
       --command="echo ssh-ok" \
@@ -767,13 +785,13 @@ for attempt in $(seq 1 20); do
     SSH_READY=true
     break
   fi
-  BACKOFF=$((attempt < 5 ? 5 : 10))
-  echo "  SSH attempt ${attempt}/20 - retrying in ${BACKOFF}s..."
+  BACKOFF=$((attempt < SSH_BACKOFF_FAST_ATTEMPTS ? SSH_BACKOFF_FAST_SECS : SSH_BACKOFF_SLOW_SECS))
+  echo "  SSH attempt ${attempt}/${SSH_MAX_ATTEMPTS} - retrying in ${BACKOFF}s..."
   sleep "$BACKOFF"
 done
 
 if [[ "$SSH_READY" != "true" ]]; then
-  err "Could not establish SSH connection to ${INSTANCE_NAME} after 20 attempts."
+  err "Could not establish SSH connection to ${INSTANCE_NAME} after ${SSH_MAX_ATTEMPTS} attempts."
   if [[ -s "${SSH_STDERR_FILE}" ]]; then
     echo "  Last SSH error:" >&2
     cat "${SSH_STDERR_FILE}" >&2
@@ -790,7 +808,7 @@ echo "  SSH connection established."
 # it completes causes "No such file or directory" errors.
 info "Waiting for cloud-init to complete (this may take a few minutes)..."
 CLOUD_INIT_OK=false
-for ci_attempt in $(seq 1 6); do
+for ci_attempt in $(seq 1 "$CLOUD_INIT_MAX_ATTEMPTS"); do
   if gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
       --command="sudo cloud-init status --wait" \
@@ -798,13 +816,13 @@ for ci_attempt in $(seq 1 6); do
     CLOUD_INIT_OK=true
     break
   fi
-  if [[ $ci_attempt -lt 6 ]]; then
-    echo "  cloud-init check attempt ${ci_attempt}/6 returned non-zero, retrying in 15s..."
-    sleep 15
+  if [[ $ci_attempt -lt $CLOUD_INIT_MAX_ATTEMPTS ]]; then
+    echo "  cloud-init check attempt ${ci_attempt}/${CLOUD_INIT_MAX_ATTEMPTS} returned non-zero, retrying in ${CLOUD_INIT_RETRY_SECS}s..."
+    sleep "$CLOUD_INIT_RETRY_SECS"
   fi
 done
 if [[ "$CLOUD_INIT_OK" != "true" ]]; then
-  err "cloud-init did not complete successfully after 6 attempts."
+  err "cloud-init did not complete successfully after ${CLOUD_INIT_MAX_ATTEMPTS} attempts."
   echo "  Check cloud-init logs: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='sudo cloud-init status --long'"
   exit 1
 fi
@@ -964,7 +982,7 @@ SERVICEEOF
 # --- Health check ---
 info "Running health check..."
 HEALTH_OK=false
-for i in $(seq 1 12); do
+for i in $(seq 1 "$HEALTH_CHECK_MAX_ATTEMPTS"); do
   if gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
       --command="curl -sf http://localhost:8080/healthz" \
@@ -972,15 +990,15 @@ for i in $(seq 1 12); do
     HEALTH_OK=true
     break
   fi
-  echo "  Attempt ${i}/12 - waiting 5s..."
-  sleep 5
+  echo "  Attempt ${i}/${HEALTH_CHECK_MAX_ATTEMPTS} - waiting ${HEALTH_CHECK_RETRY_SECS}s..."
+  sleep "$HEALTH_CHECK_RETRY_SECS"
 done
 
 if [[ "$HEALTH_OK" == "true" ]]; then
   echo ""
   echo -e "${GREEN}  Health check passed.${RESET}"
 else
-  err "Health check did not pass within 60s. The hub is not running."
+  err "Health check did not pass within $((HEALTH_CHECK_MAX_ATTEMPTS * HEALTH_CHECK_RETRY_SECS))s. The hub is not running."
   echo "  Check the service logs:"
   echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
   echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
@@ -1063,9 +1081,9 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
   info "Waiting for image build to complete..."
   BUILD_DONE=false
   POLL_COUNT=0
-  MAX_POLLS=180  # 180 * 15s = 45 min max
+  MAX_POLLS="$BUILD_POLL_MAX_ATTEMPTS"
   while [[ "$BUILD_DONE" != "true" ]] && [[ $POLL_COUNT -lt $MAX_POLLS ]]; do
-    sleep 15
+    sleep "$BUILD_POLL_INTERVAL_SECS"
     POLL_COUNT=$((POLL_COUNT + 1))
     # Check if the exit code file exists (build finished)
     BUILD_EXIT=$(gcloud compute ssh "${INSTANCE_NAME}" \
@@ -1207,8 +1225,8 @@ fi
 # --- Wait for IAP enforcement ---
 info "Waiting for IAP enforcement to activate..."
 echo "  IAP takes 30-60 seconds to begin enforcing after being enabled."
-echo "  Waiting 60 seconds..."
-sleep 60
+echo "  Waiting ${IAP_ENFORCEMENT_WAIT_SECS} seconds..."
+sleep "$IAP_ENFORCEMENT_WAIT_SECS"
 echo "  Wait complete."
 
 # ===================================================================
@@ -1274,7 +1292,7 @@ gcloud compute ssh "${INSTANCE_NAME}" \
 # --- Post-restart health check ---
 info "Running post-restart health check..."
 HEALTH_OK=false
-for i in $(seq 1 12); do
+for i in $(seq 1 "$HEALTH_CHECK_MAX_ATTEMPTS"); do
   if gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
       --command="curl -sf http://localhost:8080/healthz" \
@@ -1282,15 +1300,15 @@ for i in $(seq 1 12); do
     HEALTH_OK=true
     break
   fi
-  echo "  Attempt ${i}/12 - waiting 5s..."
-  sleep 5
+  echo "  Attempt ${i}/${HEALTH_CHECK_MAX_ATTEMPTS} - waiting ${HEALTH_CHECK_RETRY_SECS}s..."
+  sleep "$HEALTH_CHECK_RETRY_SECS"
 done
 
 if [[ "$HEALTH_OK" == "true" ]]; then
   echo ""
   echo -e "${GREEN}  Health check passed.${RESET}"
 else
-  err "Post-restart health check did not pass within 60s. The hub is not running."
+  err "Post-restart health check did not pass within $((HEALTH_CHECK_MAX_ATTEMPTS * HEALTH_CHECK_RETRY_SECS))s. The hub is not running."
   echo "  Check the service logs:"
   echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
   echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
