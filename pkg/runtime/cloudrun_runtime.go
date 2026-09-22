@@ -126,8 +126,8 @@ func NewCloudRunRuntimeFromInstances(cfg *config.V1CloudRunInstancesConfig) (*Cl
 // resolveConfig ensures that ProjectID and Location are populated. When both
 // are empty (auto-detected Cloud Run environment with no explicit settings),
 // this method discovers them from the GCE metadata server. The resolution is
-// idempotent — once successful the result is cached. Transient failures are
-// not cached, so subsequent calls will retry.
+// idempotent and retryable — on success the result is cached; on failure
+// subsequent calls will retry, allowing recovery from transient errors.
 //
 // This fills the gap described in NewCloudRunRuntime: "project/region will be
 // discovered from GCP metadata when API calls are made." Without this, Run()
@@ -174,6 +174,7 @@ func (r *CloudRunRuntime) resolveConfig(ctx context.Context) error {
 		}
 	}
 
+	// Commit both values atomically only after both resolve successfully.
 	r.config.ProjectID = projectID
 	r.config.Location = location
 	r.resolved = true
@@ -883,7 +884,8 @@ func sanitizeGCPLabelKey(key string) string {
 		}
 		return '_'
 	}, key)
-	// GCP label keys must start with a lowercase letter.
+	// GCP label keys must start with a lowercase letter. Prepend "k_" if
+	// the sanitized key begins with a digit, underscore, or dash.
 	if len(key) > 0 && (key[0] < 'a' || key[0] > 'z') {
 		key = "k_" + key
 	}
@@ -910,9 +912,9 @@ func sanitizeGCPLabelValue(value string) string {
 		}
 		return '_'
 	}, value)
-	// GCP label values must start and end with alphanumeric characters.
+	// GCP label values must start and end with an alphanumeric character.
 	value = strings.TrimFunc(value, func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
 	})
 	if len(value) > 63 {
 		value = value[:63]

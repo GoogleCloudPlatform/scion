@@ -489,7 +489,7 @@ func TestCloudRunList_FiltersByLabelsAndMapsAgentInfo(t *testing.T) {
 		fake := newFake()
 		rt := newFakeCloudRunRuntime(t, fake)
 
-		agents, err := rt.List(context.Background(), map[string]string{"scion.name": "wanted"})
+		agents, err := rt.List(context.Background(), map[string]string{"scion_name": "wanted"})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
