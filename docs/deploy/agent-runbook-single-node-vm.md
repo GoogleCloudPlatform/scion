@@ -115,10 +115,11 @@ the user does not have a preference. Validate each answer before moving on.
 | 3 | GCP region | `us-central1` | Must be a valid GCP region. Offer: `us-central1`, `us-east1`, `europe-west1`, `asia-east1` | `region` |
 | 4 | Machine size | `small` | Must be `small` or `medium`. Explain: **small** = e2-standard-4 (4 vCPU, 16 GB, up to ~10 agents). **medium** = n2-standard-16 (16 vCPU, 64 GB, up to ~50 agents). | `machine_size` |
 | 5 | Disk size in GB | `200` | Must be a positive integer | `disk_size_gb` |
-| 6 | Container images: build locally or use a registry? | `build` (build locally) | Must be `build` or `registry`. If `registry`, ask for the registry path (e.g., `us-docker.pkg.dev/my-project/scion`). | `container_images.source`, `container_images.registry` |
+| 6 | Container images: build on VM or use a registry? | `build` (build on VM) | Must be `build` or `registry`. If `registry`, ask for the registry path (e.g., `us-docker.pkg.dev/my-project/scion`). | `container_images.source`, `container_images.registry` |
 | 7 | Admin email | Active gcloud account | Must be a valid email address | `admin_email` |
 | 8 | Update policy | `auto` | Must be `auto`, `notify`, or `disabled`. Explain: **auto** = install updates automatically (recommended). **notify** = check for updates, show banner in admin UI. **disabled** = no automatic checking. | `update_policy` |
-| 9 | Chat plugins | none (empty list) | Each must be one of: `telegram`, `discord`, `slack`, `teams`. Multiple allowed. | `chat_plugins` |
+| 9 | Release channel | auto-detect from version | Must be `stable`, `preview`, or `nightly`. Usually auto-detected — only ask if the user wants to override. **stable** = GA releases. **preview** = pre-releases (rc, alpha, beta). **nightly** = nightly builds. | `release_channel` |
+| 10 | Chat plugins | none (empty list) | Each must be one of: `telegram`, `discord`, `slack`, `teams`. Multiple allowed. | `chat_plugins` |
 
 ---
 
@@ -144,6 +145,8 @@ container_images:
   registry: "REGISTRY"
 admin_email: "ADMIN_EMAIL"
 update_policy: "UPDATE_POLICY"
+# Only include if the user explicitly chose a channel (usually auto-detected)
+# release_channel: "stable"
 ```
 
 Replace each placeholder with the gathered value:
