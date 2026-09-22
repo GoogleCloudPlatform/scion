@@ -510,7 +510,7 @@ else
   echo "  1) Auto - automatically install new releases (recommended)"
   echo "  2) Notify - check for updates, notify admin only"
   echo "  3) Disabled - no automatic update checking"
-  read -rp "Select [1]: " UPDATE_CHOICE
+  config_prompt UPDATE_CHOICE "Select [1]: " "1"
   case "${UPDATE_CHOICE:-1}" in
     1) UPDATE_POLICY="auto" ;;
     2) UPDATE_POLICY="notify" ;;
@@ -587,7 +587,10 @@ echo "  Scion version: ${VERSION}"
 # --- Release channel (auto-detect from version) ---
 CFG_RELEASE_CHANNEL="$(config_get 'release_channel' '')"
 if [[ -n "$CFG_RELEASE_CHANNEL" ]]; then
-  RELEASE_CHANNEL="$CFG_RELEASE_CHANNEL"
+  case "$CFG_RELEASE_CHANNEL" in
+    stable|preview|nightly) RELEASE_CHANNEL="$CFG_RELEASE_CHANNEL" ;;
+    *) err "Invalid release_channel in config: '$CFG_RELEASE_CHANNEL' (expected: stable, preview, nightly)"; exit 1 ;;
+  esac
 else
   # Auto-detect from version string (matches pkg/version/update.DetectChannel)
   case "$VERSION" in
