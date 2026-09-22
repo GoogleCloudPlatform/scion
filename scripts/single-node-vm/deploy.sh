@@ -1054,7 +1054,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
         sudo docker tag scion-antigravity:latest localhost/scion/scion-antigravity:latest
 
         echo \"=== All images built and tagged successfully ===\"
-      ' > /tmp/scion-image-build.log 2>&1; echo \$? > /tmp/scion-image-build.exit; } &
+      ' > /tmp/scion-image-build.log 2>&1; echo \$? > /tmp/scion-image-build.exit; } >/dev/null 2>&1 </dev/null &
       echo \$! > /tmp/scion-image-build.pid
       echo \"Image build started in background (PID \$(cat /tmp/scion-image-build.pid))\"
     "
