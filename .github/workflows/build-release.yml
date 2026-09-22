@@ -310,13 +310,13 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     permissions:
-      contents: write    # Needs to commit and push to main
+      contents: write
+      pull-requests: write    # Needed to create and merge PRs
     steps:
       - name: Checkout main branch
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
         with:
           ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update manifest
         env:
@@ -369,17 +369,33 @@ jobs:
             fi
           fi
 
-      - name: Commit and push manifest
+      - name: Create manifest update PR
         env:
           TAG: ${{ needs.release.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Check if there are actual changes
+          if git diff --quiet LATEST.json; then
+            echo "No changes to LATEST.json"
+            exit 0
+          fi
+
+          BRANCH="automated/update-manifest-${TAG}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${BRANCH}"
           git add LATEST.json
-          # Only commit if there are changes
-          if git diff --cached --quiet; then
-            echo "No changes to LATEST.json"
-          else
-            git commit -m "chore: update LATEST.json for ${TAG}"
-            git push origin main
-          fi
+          git commit -m "chore: update LATEST.json for ${TAG}"
+          git push origin "${BRANCH}"
+
+          # Create PR and enable auto-merge
+          PR_URL=$(gh pr create \
+            --title "chore: update LATEST.json for ${TAG}" \
+            --body "Automated manifest update for release ${TAG}." \
+            --base main \
+            --head "${BRANCH}")
+
+          echo "Created PR: ${PR_URL}"
+
+          # Enable auto-merge (will merge once required checks pass)
+          gh pr merge "${PR_URL}" --auto --squash || echo "Auto-merge not available, PR created for manual merge"
