@@ -489,34 +489,30 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	now := time.Now().UTC()
-	conv := &store.Conversation{
-		ID:             api.NewUUID(),
-		Kind:           kind,
-		Surface:        "native",
-		DisplayName:    req.DisplayName,
-		DriftState:     "active",
-		LastActivityAt: now,
-		CreatedAt:      now,
-	}
-
-	if req.ProjectID != "" {
-		conv.ProjectID = &req.ProjectID
-	}
-
-	if err := s.store.CreateConversation(ctx, conv); err != nil {
-		writeErrorFromErr(w, err, "")
+	// kind == "group" from here (direct was rejected above). Route creation
+	// through the same atomic topic-creation path every other native group
+	// mint site uses (design doc: chat-thread-bridge §3), instead of a bare
+	// store.CreateConversation that never mints a topic or an external_ref.
+	conv, apiErr := s.createGroupConversation(ctx, "native", createGroupParams{
+		ProjectID:   req.ProjectID,
+		DisplayName: req.DisplayName,
+		CreatedBy:   identity.ID(),
+	})
+	if apiErr != nil {
+		apiErr.write(w)
 		return
 	}
 
-	// Auto-add the caller as a participant.
+	// Auto-add the caller as a participant. This is a listing-index entry
+	// only (design doc §2.4.2.1 / §3.5) — project membership remains the
+	// access authority for group conversations.
 	participant := &store.ConversationParticipant{
 		ID:             api.NewUUID(),
 		ConversationID: conv.ID,
 		PrincipalKind:  identity.Type(),
 		PrincipalID:    identity.ID(),
 		Role:           "member",
-		JoinedAt:       now,
+		JoinedAt:       time.Now().UTC(),
 	}
 
 	if err := s.store.AddParticipant(ctx, participant); err != nil {
