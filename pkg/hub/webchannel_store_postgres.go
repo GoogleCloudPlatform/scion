@@ -478,7 +478,12 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 	return topics, nil
 }
 
-// UpdateTopic applies partial updates to a topic.
+// UpdateTopic applies partial updates to a topic. When updates.DefaultAgentID
+// is set, it also converges the linked conversation's default_agent_id in
+// the same transaction (design doc: F1 write-time convergence). Postgres
+// migrations guarantee the conversations table exists (see CreateTopic's
+// DEF-89 comment above), so unlike the SQLite store there is no
+// hasConversationsTable() gate here.
 func (s *pgWebChatStore) UpdateTopic(ctx context.Context, topicID string, updates TopicUpdate) error {
 	var sets []string
 	var args []interface{}
@@ -498,16 +503,45 @@ func (s *pgWebChatStore) UpdateTopic(ctx context.Context, topicID string, update
 		args = append(args, val)
 		argIdx++
 	}
-	if len(sets) == 0 {
+	if len(sets) == 0 && updates.DefaultAgentID == nil {
 		return nil
 	}
 
-	args = append(args, topicID)
-	query := fmt.Sprintf("UPDATE webchat_topic SET %s WHERE id = $%d AND deleted_at IS NULL",
-		strings.Join(sets, ", "), argIdx)
-	_, err := s.db.ExecContext(ctx, query, args...)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("webchat store: update topic: %w", err)
+		return fmt.Errorf("webchat store: begin update topic tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if len(sets) > 0 {
+		topicArgs := append(append([]interface{}{}, args...), topicID)
+		query := fmt.Sprintf("UPDATE webchat_topic SET %s WHERE id = $%d AND deleted_at IS NULL",
+			strings.Join(sets, ", "), argIdx)
+		if _, err := tx.ExecContext(ctx, query, topicArgs...); err != nil {
+			return fmt.Errorf("webchat store: update topic: %w", err)
+		}
+	}
+
+	if updates.DefaultAgentID != nil {
+		// The subquery naturally no-ops (zero rows affected, not an error)
+		// when the topic's conversation_id is NULL — a legacy unlinked
+		// topic. This UPDATE only ever touches default_agent_id.
+		var val interface{}
+		if *updates.DefaultAgentID != "" {
+			val = *updates.DefaultAgentID
+		}
+		_, err := tx.ExecContext(ctx,
+			`UPDATE conversations SET default_agent_id = $1
+			  WHERE id = (SELECT conversation_id FROM webchat_topic WHERE id = $2)
+			    AND deleted_at IS NULL`,
+			val, topicID)
+		if err != nil {
+			return fmt.Errorf("webchat store: update linked conversation default agent: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("webchat store: commit update topic tx: %w", err)
 	}
 	return nil
 }

@@ -638,8 +638,7 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 		}
 	}
 
-	conv.DefaultAgentID = &req.AgentID
-	if err := s.store.UpdateConversation(ctx, conv); err != nil {
+	if err := s.setGroupDefaultAgent(ctx, conv, agent); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}

@@ -309,6 +309,17 @@ type PromoteKeys struct {
 type TopicUpdate struct {
 	Name         *string // nil = no change
 	DefaultAgent *string // nil = no change, pointer to empty = clear
+
+	// DefaultAgentID mirrors DefaultAgent onto the linked conversation's
+	// owner column (conversations.default_agent_id), in the same
+	// transaction as the topic UPDATE (design doc: F1 write-time
+	// convergence). nil = don't touch the conversation row; pointer to
+	// empty = clear it (SQL NULL); else the agent UUID.
+	//
+	// This is a companion field, not a replacement for DefaultAgent: the
+	// topic column stays the UI-facing projection (slug or ID), while this
+	// field always carries the UUID that the conversation column owns.
+	DefaultAgentID *string
 }
 
 // WebChatReadState holds per-user, per-conversation state.
@@ -874,7 +885,12 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 	return topics, nil
 }
 
-// UpdateTopic applies partial updates to a topic.
+// UpdateTopic applies partial updates to a topic. When updates.DefaultAgentID
+// is set, it also converges the linked conversation's default_agent_id in
+// the same transaction (design doc: F1 write-time convergence) — skipped
+// when the topic has no linked conversation or the conversations table
+// doesn't exist (INVARIANT U-TX-1: hasConversationsTable() is called before
+// BeginTx).
 func (s *sqliteWebChatStore) UpdateTopic(ctx context.Context, topicID string, updates TopicUpdate) error {
 	var sets []string
 	var args []interface{}
@@ -887,16 +903,45 @@ func (s *sqliteWebChatStore) UpdateTopic(ctx context.Context, topicID string, up
 		sets = append(sets, "default_agent = ?")
 		args = append(args, nullableString(*updates.DefaultAgent))
 	}
-	if len(sets) == 0 {
+	if len(sets) == 0 && updates.DefaultAgentID == nil {
 		return nil
 	}
 
-	args = append(args, topicID)
-	query := fmt.Sprintf("UPDATE webchat_topic SET %s WHERE id = ? AND deleted_at IS NULL",
-		strings.Join(sets, ", "))
-	_, err := s.db.ExecContext(ctx, query, args...)
+	// INVARIANT U-TX-1: hasConversationsTable() touches s.db — must be
+	// called BEFORE BeginTx.
+	updateConv := updates.DefaultAgentID != nil && s.hasConversationsTable()
+
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("webchat store: update topic: %w", err)
+		return fmt.Errorf("webchat store: begin update topic tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if len(sets) > 0 {
+		topicArgs := append(append([]interface{}{}, args...), topicID)
+		query := fmt.Sprintf("UPDATE webchat_topic SET %s WHERE id = ? AND deleted_at IS NULL",
+			strings.Join(sets, ", "))
+		if _, err := tx.ExecContext(ctx, query, topicArgs...); err != nil {
+			return fmt.Errorf("webchat store: update topic: %w", err)
+		}
+	}
+
+	if updateConv {
+		// The subquery naturally no-ops (zero rows affected, not an error)
+		// when the topic's conversation_id is NULL — a legacy unlinked
+		// topic. This UPDATE only ever touches default_agent_id.
+		_, err := tx.ExecContext(ctx,
+			`UPDATE conversations SET default_agent_id = ?
+			  WHERE id = (SELECT conversation_id FROM webchat_topic WHERE id = ?)
+			    AND deleted_at IS NULL`,
+			nullableString(*updates.DefaultAgentID), topicID)
+		if err != nil {
+			return fmt.Errorf("webchat store: update linked conversation default agent: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("webchat store: commit update topic tx: %w", err)
 	}
 	return nil
 }

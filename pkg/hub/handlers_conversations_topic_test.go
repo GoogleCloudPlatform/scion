@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
@@ -579,6 +580,104 @@ func TestValidateThreadName(t *testing.T) {
 			require.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// TestPhase1_SetDefaultAgent_ConvergesAndDispatches is the Phase 1
+// vertical-slice gate for the conv-default-mention fix (design doc §8): a
+// default agent set through the conversation API on a topic-linked group
+// must converge both storage columns in one transaction, publish a topic
+// "updated" SSE event, appear on the topic API, and actually drive web-post
+// routing — not just sit in a column nothing reads (design doc F1 / findings
+// F1).
+func TestPhase1_SetDefaultAgent_ConvergesAndDispatches(t *testing.T) {
+	srv, s, wcs, spy := setupGroupConvTopicTest(t)
+	ctx := context.Background()
+
+	project, agent, _ := setupConvTestData(t, s)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	// Create the group through the conversation API — the exact write path
+	// this issue's F1 fix targets — so the conversation is topic-linked.
+	createBody := createConversationRequest{
+		DisplayName: "default-agent-e2e",
+		ProjectID:   project.ID,
+		Kind:        "group",
+	}
+	createBytes, _ := json.Marshal(createBody)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(createBytes))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq = createReq.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	createRR := httptest.NewRecorder()
+	srv.handleCreateConversation(createRR, createReq)
+	require.Equal(t, http.StatusCreated, createRR.Code, "body: %s", createRR.Body.String())
+
+	var created conversationResponse
+	require.NoError(t, json.Unmarshal(createRR.Body.Bytes(), &created))
+	_, topicID, err := messaging.ParseThreadConversationExternalRef(created.ExternalRef)
+	require.NoError(t, err)
+
+	// The creating agent (`agent`) was auto-added as a participant by
+	// handleCreateConversation, so it can call PUT default-agent under the
+	// still-current participant authorization (design §8 Phase 1 keeps this
+	// unchanged; §3.2 project-based read auth is Phase 3).
+	defaultAgent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "default-bot",
+		Slug:       "default-bot",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, defaultAgent))
+
+	putBody := setDefaultAgentRequest{AgentID: defaultAgent.ID}
+	putBytes, _ := json.Marshal(putBody)
+	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+created.ID+"/default-agent", bytes.NewReader(putBytes))
+	putReq.Header.Set("Content-Type", "application/json")
+	putReq = putReq.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	putRR := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(putRR, putReq, created.ID)
+	require.Equal(t, http.StatusOK, putRR.Code, "body: %s", putRR.Body.String())
+
+	// webchat_topic.default_agent == agent.Slug.
+	topic, err := wcs.GetTopic(ctx, topicID)
+	require.NoError(t, err)
+	require.NotNil(t, topic)
+	require.Equal(t, defaultAgent.Slug, topic.DefaultAgent)
+
+	// conversations.default_agent_id == agent.ID.
+	conv, err := s.GetConversation(ctx, created.ID)
+	require.NoError(t, err)
+	require.NotNil(t, conv.DefaultAgentID, "conversations.default_agent_id must be set")
+	require.Equal(t, defaultAgent.ID, *conv.DefaultAgentID)
+
+	// A topic "updated" SSE event was published (the create above already
+	// published one "created" event, so look for the "updated" one).
+	var sawUpdated bool
+	for _, e := range spy.events() {
+		if e.action == "updated" && e.topic.ID == topicID {
+			sawUpdated = true
+			require.Equal(t, defaultAgent.Slug, e.topic.DefaultAgent)
+		}
+	}
+	require.True(t, sawUpdated, "expected a topic 'updated' SSE event after PUT default-agent")
+
+	// GET of the topic API returns defaultAgent.
+	getRR := doRequest(t, srv, http.MethodGet, "/api/v1/chat/topics/"+topicID, nil)
+	require.Equal(t, http.StatusOK, getRR.Code, "body: %s", getRR.Body.String())
+	var gotTopic WebChatTopic
+	require.NoError(t, json.Unmarshal(getRR.Body.Bytes(), &gotTopic))
+	require.Equal(t, defaultAgent.Slug, gotTopic.DefaultAgent)
+
+	// A web post with no @mention is dispatched to the default agent
+	// (agent-routed messages get type "instruction", not "chat").
+	postRR := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
+		map[string]string{"content": "please help"})
+	require.Equal(t, http.StatusCreated, postRR.Code, "body: %s", postRR.Body.String())
+	var msgResp chatMessageResponse
+	require.NoError(t, json.Unmarshal(postRR.Body.Bytes(), &msgResp))
+	require.Equal(t, messages.TypeInstruction, msgResp.Type,
+		"expected the no-mention post to be routed to the default agent")
 }
 
 func TestIsTopicNameConflict(t *testing.T) {

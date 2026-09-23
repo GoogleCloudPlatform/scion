@@ -18,12 +18,14 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -192,4 +194,99 @@ func (s *Server) createNativeGroupConversation(ctx context.Context, p createGrou
 	s.events.PublishChatTopicEvent(ctx, p.ProjectID, "created", topic)
 
 	return conv, nil
+}
+
+// linkedTopic returns the webchat topic linked to conv, or nil if conv has
+// no linked topic — an external-surface group (no "thread:" external_ref),
+// a legacy unlinked native group, or no webchat store wired.
+//
+// It requires topic.ConversationID == conv.ID (design doc §0, mirroring the
+// reverse-pointer direction from the chat-thread-bridge design §2.6.3): a
+// topic whose external_ref round-trips to conv's ID but no longer points
+// back at it is treated the same as "no topic", rather than silently
+// updating the wrong topic.
+func (s *Server) linkedTopic(ctx context.Context, conv *store.Conversation) (*WebChatTopic, error) {
+	_, topicID, err := messaging.ParseThreadConversationExternalRef(conv.ExternalRef)
+	if err != nil {
+		// Not a thread-backed conversation: external-surface group, or a
+		// legacy conversation with no (or a non-thread) external_ref.
+		return nil, nil
+	}
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return nil, nil
+	}
+
+	topic, err := wcs.GetTopic(ctx, topicID)
+	if err != nil {
+		return nil, fmt.Errorf("linkedTopic: get topic %s: %w", topicID, err)
+	}
+	if topic == nil || topic.ConversationID != conv.ID {
+		return nil, nil
+	}
+	return topic, nil
+}
+
+// setGroupDefaultAgent sets or clears the default agent of a group
+// conversation. agent == nil clears. The caller has already authorized and
+// validated the request (design doc §3.1) — this is the single write path
+// for the group default agent, converging conversations.default_agent_id
+// (the owner, design doc §0) and webchat_topic.default_agent (the
+// projection) in one transaction when the conversation is topic-linked.
+func (s *Server) setGroupDefaultAgent(ctx context.Context, conv *store.Conversation, agent *store.Agent) error {
+	topic, err := s.linkedTopic(ctx, conv)
+	if err != nil {
+		return err
+	}
+
+	var newDefaultAgentID *string
+	if agent != nil {
+		id := agent.ID
+		newDefaultAgentID = &id
+	}
+
+	if topic == nil {
+		// External-surface or unlinked group: conversation column only
+		// (design doc §3.1 table, "else" branch).
+		conv.DefaultAgentID = newDefaultAgentID
+		if err := s.store.UpdateConversation(ctx, conv); err != nil {
+			return fmt.Errorf("setGroupDefaultAgent: update conversation: %w", err)
+		}
+		return nil
+	}
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return errors.New("setGroupDefaultAgent: webchat store unavailable")
+	}
+
+	// The projection value is the agent slug — the form the UI shows and
+	// the web send path resolves first (design doc §3.1); the owner value
+	// is always the UUID. Both go through one TopicUpdate so UpdateTopic
+	// converges them in the same transaction.
+	slug, id := "", ""
+	if agent != nil {
+		slug, id = agent.Slug, agent.ID
+	}
+	if err := wcs.UpdateTopic(ctx, topic.ID, TopicUpdate{
+		DefaultAgent:   &slug,
+		DefaultAgentID: &id,
+	}); err != nil {
+		return fmt.Errorf("setGroupDefaultAgent: update topic: %w", err)
+	}
+	conv.DefaultAgentID = newDefaultAgentID
+
+	updated, err := wcs.GetTopic(ctx, topic.ID)
+	if err != nil {
+		return fmt.Errorf("setGroupDefaultAgent: reload topic: %w", err)
+	}
+	if updated != nil {
+		s.events.PublishChatTopicEvent(ctx, updated.ProjectID, "updated", *updated)
+	}
+	return nil
 }
