@@ -1372,9 +1372,11 @@ var knownCompoundFields = []string{
 	"authorized_domains",
 	"platform_auth_sa",
 	"interval_seconds",
+	"public_key_file",
 	"max_concurrency",
 	"oidc_audience",
 	"jwks_url",
+	"jwks_file",
 	"broker_nickname",
 	"allowed_origins",
 	"allowed_methods",
@@ -1385,6 +1387,7 @@ var knownCompoundFields = []string{
 	"client_secret",
 	"write_timeout",
 	"read_timeout",
+	"display_name",
 	"broker_token",
 	"admin_emails",
 	"hub_endpoint",
@@ -1467,8 +1470,8 @@ func mapEnvKeyRecursive(key string) string {
 func isSectionName(name string) bool {
 	switch name {
 	case "hub", "broker", "database", "auth", "oauth", "storage", "secrets", "cors",
-		"web", "cli", "device", "google", "github", "proxy", "iap", "transport",
-		"scheduler":
+		"web", "cli", "device", "google", "github", "proxy", "iap", "jwt", "claims",
+		"transport", "scheduler":
 		return true
 	}
 	return false

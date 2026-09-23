@@ -2212,6 +2212,19 @@ func TestVersionedEnvKeyMapper_DeepServerNesting(t *testing.T) {
 		{"SCION_SERVER_HUB_CORS_ALLOWED_ORIGINS", "server.hub.cors.allowed_origins"},
 		{"SCION_SERVER_HUB_CORS_MAX_AGE", "server.hub.cors.max_age"},
 		{"SCION_SERVER_BROKER_CORS_ENABLED", "server.broker.cors.enabled"},
+		// JWT proxy auth provider keys
+		{"SCION_SERVER_AUTH_PROXY_PROVIDER", "server.auth.proxy.provider"},
+		{"SCION_SERVER_AUTH_PROXY_JWT_HEADER", "server.auth.proxy.jwt.header"},
+		{"SCION_SERVER_AUTH_PROXY_JWT_ALGORITHM", "server.auth.proxy.jwt.algorithm"},
+		{"SCION_SERVER_AUTH_PROXY_JWT_ISSUER", "server.auth.proxy.jwt.issuer"},
+		{"SCION_SERVER_AUTH_PROXY_JWT_AUDIENCE", "server.auth.proxy.jwt.audience"},
+		{"SCION_SERVER_AUTH_PROXY_JWT_JWKS_URL", "server.auth.proxy.jwt.jwks_url"},
+		{"SCION_SERVER_AUTH_PROXY_JWT_JWKS_FILE", "server.auth.proxy.jwt.jwks_file"},
+		{"SCION_SERVER_AUTH_PROXY_JWT_PUBLIC_KEY_FILE", "server.auth.proxy.jwt.public_key_file"},
+		{"SCION_SERVER_AUTH_PROXY_JWT_CLAIMS_EMAIL", "server.auth.proxy.jwt.claims.email"},
+		{"SCION_SERVER_AUTH_PROXY_JWT_CLAIMS_SUBJECT", "server.auth.proxy.jwt.claims.subject"},
+		{"SCION_SERVER_AUTH_PROXY_JWT_CLAIMS_DISPLAY_NAME", "server.auth.proxy.jwt.claims.display_name"},
+		{"SCION_SERVER_AUTH_PROXY_JWT_CLAIMS_DOMAIN", "server.auth.proxy.jwt.claims.domain"},
 	}
 
 	for _, tt := range tests {
