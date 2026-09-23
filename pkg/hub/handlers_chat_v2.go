@@ -1156,11 +1156,14 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 
 	// F2b (design doc §3.3): agents actually dispatched into a group
 	// conversation become participants (a listing index, not an ACL —
-	// project membership already gates reads per §3.2). The primary is
-	// always dispatched past this point; mentioned agents are added below
-	// only when their own authorization passes, never for a named-but-
-	// skipped mention (AC-11).
-	dispatchedAgents := []*store.Agent{primaryAgent}
+	// project membership already gates reads per §3.2). Review round 1
+	// finding #5: the rule at all three F2b sites is "participant =
+	// dispatched successfully" — an agent is appended below only after its
+	// own conversation-resolution continue point and only when its dispatch
+	// attempt did not return an error. A nil dispatcher is a no-op here
+	// (not a failure — same as everywhere else in this function), so it
+	// still counts as dispatched.
+	var dispatchedAgents []*store.Agent
 
 	// Validate through the messaging choke point (AC-8).
 	// Runs after authorization so unauthorized users see 403, not 400.
@@ -1290,13 +1293,18 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 
 	// Dispatch to the primary agent.
 	dispatcher := s.GetDispatcher()
+	primaryDispatchOK := true
 	if dispatcher != nil {
 		retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, false, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
 			_ = s.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error())
+			primaryDispatchOK = false
 		}
+	}
+	if primaryDispatchOK {
+		dispatchedAgents = append(dispatchedAgents, primaryAgent)
 	}
 
 	// Handle additional mentioned agents (fan-out).
@@ -1318,7 +1326,6 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				}
 				continue
 			}
-			dispatchedAgents = append(dispatchedAgents, mentionAgent)
 			mentionMsg := messages.NewMention(msg.Sender, "agent:"+mentionAgent.Slug, agentContent, msg.Recipient)
 			mentionMsg.SenderID = msg.SenderID
 			mentionMsg.RecipientID = mentionAgent.ID
@@ -1404,12 +1411,17 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				})
 			}
 
+			mentionDispatchOK := true
 			if dispatcher != nil {
 				retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				if err := dispatchWithBrokerRetry(retryCtx, dispatcher, mentionAgent, agentContent, false, mentionMsg); err != nil {
 					s.messageLog.Error("Failed to dispatch mention", "slug", mentionAgent.Slug, "error", err)
+					mentionDispatchOK = false
 				}
 				cancel()
+			}
+			if mentionDispatchOK {
+				dispatchedAgents = append(dispatchedAgents, mentionAgent)
 			}
 		}
 	}
@@ -2716,6 +2728,7 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		ProjectID:      projectID,
 		Name:           body.Name,
 		DefaultAgent:   agentID,
+		DefaultAgentID: agentID, // review round 1 finding #4: agentID is already the UUID here
 		CreatedBy:      user.ID(),
 		CreatedAt:      now,
 		LastActivityAt: now,

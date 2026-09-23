@@ -384,6 +384,56 @@ VALUES
 	require.Equal(t, "Promoted Thread", c.displayName)
 }
 
+// TestPromoteDM_DualWrite_SetsConversationDefaultAgentID is review round 1
+// finding #4: PromoteDM was a missed F1 writer. DM->thread promotion sets
+// topic.DefaultAgent to the DM agent's UUID, but the linked conversation
+// INSERT left out default_agent_id — a promoted thread started with its
+// topic default set and its conversation default NULL, the exact drift
+// this PR exists to eliminate.
+func TestPromoteDM_DualWrite_SetsConversationDefaultAgentID(t *testing.T) {
+	s, db := newPromoteTestStoreWithConversations(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	dmKey := "dm:agent:agent-2:user:user-2"
+	agentID := uuid.New().String()
+
+	_, err := db.Exec(`
+INSERT INTO messages (id, project_id, sender, sender_id, recipient, recipient_id, channel, thread_id, msg, created)
+VALUES
+    ('msg-da-1', 'proj-1', 'user:alice', 'user-2', 'agent:coder', ?, 'web', ?, 'hello', '2026-08-22T10:00:00Z')
+`, agentID, dmKey)
+	require.NoError(t, err)
+
+	require.NoError(t, s.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey,
+		ParticipantID:   "user-2",
+		PeerID:          agentID,
+		PeerKind:        "agent",
+	}))
+
+	convID := uuid.New().String()
+	now := time.Now().UTC().Truncate(time.Second)
+	topic := WebChatTopic{
+		ID:             "promoted-topic-da",
+		ProjectID:      "proj-1",
+		Name:           "Promoted Thread With Default",
+		ConversationID: convID,
+		CreatedBy:      "user-2",
+		CreatedAt:      now,
+		LastActivityAt: now,
+		DefaultAgent:   agentID,
+		DefaultAgentID: agentID,
+	}
+
+	result, err := s.PromoteDM(ctx, topic, PromoteKeys{DMKey: dmKey})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.Equal(t, agentID, getConversationDefaultAgentID(t, db, convID),
+		"finding #4: the promoted conversation's default_agent_id must match the topic's DefaultAgentID")
+}
+
 // ---------------------------------------------------------------------------
 // TestPromoteDM_DualWrite_RePointsConversationID — when ConversationID is
 // supplied, the re-key UPDATE must set conversation_id on every moved message.

@@ -89,6 +89,7 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 	kindFilter := q.Get("kind")
 	surfaceFilter := q.Get("surface")
 	projectFilter := q.Get("project_id")
+	includeProjectGroups := q.Get("include_project_groups")
 	limitStr := q.Get("limit")
 
 	limit := 0
@@ -101,26 +102,25 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 		limit = n
 	}
 
-	// Listing union (design doc §3.2, Q2 = b): when project_id is supplied
-	// and the caller can read that project, also include every group
-	// conversation in it — not just the ones the caller participates in.
-	// This is additive only: an unauthorized or unknown project_id quietly
-	// gets no union rather than a hard failure, because project_id already
-	// narrows the participant-based list below on its own (unauthenticated
-	// callers never reach here — identity is checked above). Without
-	// project_id, behavior is unchanged, to avoid enumerating every project
-	// a caller belongs to.
-	if projectFilter != "" && s.canReadProject(ctx, identity, projectFilter) {
-		groupResult, groupErr := s.store.ListConversations(ctx, store.ConversationFilter{
-			ProjectID: projectFilter,
-			Kind:      "group",
-		}, store.ListOptions{})
-		if groupErr == nil && groupResult != nil {
+	// Listing union (design doc §3.2 addendum, review round 1 finding #2):
+	// a separate, purely additive query parameter drives the union, so it
+	// can never narrow the rest of the list. project_id keeps its existing
+	// narrowing semantics for API callers, unchanged — reusing it to also
+	// gate the union meant every conversation whose ProjectID didn't match
+	// (including every DM, which has ProjectID == nil) was silently
+	// dropped. Without include_project_groups, behavior is unchanged, to
+	// avoid enumerating every project a caller belongs to.
+	if includeProjectGroups != "" && s.canReadProject(ctx, identity, includeProjectGroups) {
+		groupConvs, groupErr := s.listAllGroupConversations(ctx, includeProjectGroups)
+		if groupErr != nil {
+			slog.WarnContext(ctx, "handleListConversations: include_project_groups union failed",
+				"projectID", includeProjectGroups, "error", groupErr)
+		} else {
 			seen := make(map[string]bool, len(conversations))
 			for _, c := range conversations {
 				seen[c.ID] = true
 			}
-			for _, c := range groupResult.Items {
+			for _, c := range groupConvs {
 				if !seen[c.ID] {
 					conversations = append(conversations, c)
 					seen[c.ID] = true
@@ -619,21 +619,39 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// Verify the agent exists before setting it as default.
-	agent, err := s.store.GetAgent(ctx, req.AgentID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
+	// Review round 1 finding #7: for project-scoped conversations, resolve
+	// and validate through validateDefaultAgent — the single source of
+	// truth (DEF-31) the web topic PATCH and thread-create writers already
+	// use. It checks project membership AND soft-delete in one call; the
+	// previous manual GetAgent + project-equality check here let a
+	// soft-deleted agent be written into webchat_topic.default_agent (which
+	// drives web routing) after ClearTopicDefaultAgent had already run for
+	// it. Any resolution failure is a 400, matching the other two writers.
+	var agent *store.Agent
+	if conv.ProjectID != nil {
+		var vErr error
+		agent, vErr = s.validateDefaultAgent(ctx, *conv.ProjectID, req.AgentID)
+		if vErr != nil {
+			ValidationError(w, vErr.Error(), nil)
 			return
 		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Verify the agent belongs to the same project as the conversation.
-	if conv.ProjectID != nil && agent.ProjectID != *conv.ProjectID {
-		BadRequest(w, "agent does not belong to the conversation's project")
-		return
+	} else {
+		// Legacy projectless / external-surface group: no project to
+		// validate against. Still reject a soft-deleted agent.
+		var err error
+		agent, err = s.store.GetAgent(ctx, req.AgentID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !agent.DeletedAt.IsZero() {
+			BadRequest(w, "agent is deleted")
+			return
+		}
 	}
 
 	// Authorize: caller must have read access to the agent's project.
@@ -855,9 +873,15 @@ func (s *Server) authorizeGroupConversationAccess(w http.ResponseWriter, r *http
 
 	project, err := s.store.GetProject(ctx, *conv.ProjectID)
 	if err != nil {
-		// Including not-found: fail closed rather than leak whether the
-		// project exists.
-		Forbidden(w)
+		// Review round 1 finding #6: a missing project fails closed (403),
+		// but any other error (transient DB failure, timeout, ...) is not
+		// an authorization decision — surfacing it as 403 would be
+		// misleading to debug. Distinguish the two.
+		if errors.Is(err, store.ErrNotFound) {
+			Forbidden(w)
+			return false
+		}
+		writeErrorFromErr(w, err, "")
 		return false
 	}
 
@@ -868,7 +892,7 @@ func (s *Server) authorizeGroupConversationAccess(w http.ResponseWriter, r *http
 // without writing an HTTP response. It applies the same strict
 // agent-project rule as authorizeGroupConversationAccess. Used by the
 // conversation listing union (design doc §3.2), where a caller who cannot
-// read the requested project_id degrades to no union rather than a hard
+// read the requested project degrades to no union rather than a hard
 // failure — see handleListConversations.
 func (s *Server) canReadProject(ctx context.Context, identity Identity, projectID string) bool {
 	if agentIdent, ok := identity.(AgentIdentity); ok {
@@ -878,10 +902,52 @@ func (s *Server) canReadProject(ctx context.Context, identity Identity, projectI
 	}
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
+		// Review round 1 finding #6: not-found quietly degrades to
+		// no-union (expected for a bad or unknown project ID); any other
+		// error is unexpected and gets a warn log so it doesn't look like
+		// an ordinary authorization denial to whoever is debugging it.
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.WarnContext(ctx, "canReadProject: GetProject failed", "projectID", projectID, "error", err)
+		}
 		return false
 	}
 	decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionRead)
 	return decision.Allowed
+}
+
+// listAllGroupConversations pages through every group conversation in
+// projectID until the store reports no more pages (review round 1 finding
+// #3: the listing union must include every group in the project, not just
+// the first page — AC-10 says "every group"). pageSize matches
+// entadapter's internal maxListLimit so each page is as large as the store
+// allows; iterations is a defensive cap against a store bug that never
+// returns an empty NextCursor.
+func (s *Server) listAllGroupConversations(ctx context.Context, projectID string) ([]store.Conversation, error) {
+	const pageSize = 200
+	const maxIterations = 1000 // 200k conversations; well beyond any real project
+
+	var all []store.Conversation
+	cursor := ""
+	for i := 0; i < maxIterations; i++ {
+		page, err := s.store.ListConversations(ctx, store.ConversationFilter{
+			ProjectID: projectID,
+			Kind:      "group",
+		}, store.ListOptions{Limit: pageSize, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			return all, err
+		}
+		if page == nil {
+			return all, nil
+		}
+		all = append(all, page.Items...)
+		if page.NextCursor == "" {
+			return all, nil
+		}
+		cursor = page.NextCursor
+	}
+	slog.WarnContext(ctx, "listAllGroupConversations: hit the pagination iteration cap",
+		"projectID", projectID, "collected", len(all))
+	return all, nil
 }
 
 // authorizeDMRead checks whether a principal may read a conversation.

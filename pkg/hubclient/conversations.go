@@ -57,10 +57,20 @@ type conversationService struct {
 
 // ListConversationsOptions configures conversation listing.
 type ListConversationsOptions struct {
-	Kind      string
-	Surface   string
+	Kind    string
+	Surface string
+	// ProjectID narrows the list to conversations in exactly this project —
+	// it drops every conversation whose ProjectID doesn't match, including
+	// every DM (DMs have no ProjectID). This is the existing, unchanged
+	// semantics for API callers.
 	ProjectID string
-	Limit     int
+	// IncludeProjectGroups is purely additive (design doc §3.2 addendum,
+	// review round 1 finding #2): it unions in every group conversation in
+	// this project that the caller can read, without narrowing the rest of
+	// the list. Use this instead of ProjectID to add "all my project's
+	// groups" without losing DMs or other projects' conversations.
+	IncludeProjectGroups string
+	Limit                int
 }
 
 // ConversationMessagesOptions configures message listing within a conversation.
@@ -108,6 +118,9 @@ func (s *conversationService) List(ctx context.Context, opts *ListConversationsO
 		}
 		if opts.ProjectID != "" {
 			query.Set("project_id", opts.ProjectID)
+		}
+		if opts.IncludeProjectGroups != "" {
+			query.Set("include_project_groups", opts.IncludeProjectGroups)
 		}
 		if opts.Limit > 0 {
 			query.Set("limit", strconv.Itoa(opts.Limit))

@@ -616,10 +616,11 @@ func TestPhase1_SetDefaultAgent_ConvergesAndDispatches(t *testing.T) {
 	_, topicID, err := messaging.ParseThreadConversationExternalRef(created.ExternalRef)
 	require.NoError(t, err)
 
-	// The creating agent (`agent`) was auto-added as a participant by
-	// handleCreateConversation, so it can call PUT default-agent under the
-	// still-current participant authorization (design §8 Phase 1 keeps this
-	// unchanged; §3.2 project-based read auth is Phase 3).
+	// The creating agent (`agent`) was granted project access above via
+	// grantAgentProjectAccess, so it can call PUT default-agent under the
+	// project-based gate (design §3.2, landed in Phase 3;
+	// authorizeGroupConversationAccess replaced the participant-row check
+	// this comment used to describe — review round 1 finding #8).
 	defaultAgent := &store.Agent{
 		ID:         api.NewUUID(),
 		Name:       "default-bot",

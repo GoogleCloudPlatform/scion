@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -296,8 +297,11 @@ func TestPhase3_GroupRead_LegacyProjectlessGroup_ParticipantCheck(t *testing.T) 
 }
 
 // TestPhase3_ListConversations_ProjectUnion_IncludesNonParticipatedGroup is
-// AC-10: GET /conversations?project_id=P includes every group in P for an
-// authorized caller, not just the ones the caller participates in.
+// AC-10: GET /conversations?include_project_groups=P includes every group
+// in P for an authorized caller, not just the ones the caller participates
+// in. Review round 1 finding #2: the union query parameter is purely
+// additive — it must not drop the caller's DM, which the old project_id-gated
+// union always did (DMs have ProjectID == nil).
 func TestPhase3_ListConversations_ProjectUnion_IncludesNonParticipatedGroup(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -319,7 +323,15 @@ func TestPhase3_ListConversations_ProjectUnion_IncludesNonParticipatedGroup(t *t
 	require.NoError(t, s.CreateConversation(ctx, otherConv))
 	// Deliberately no participant row for `agent` on otherConv.
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?project_id="+project.ID, nil)
+	// The caller's own DM must survive alongside the union (finding #2).
+	dmPeer := &store.Agent{
+		ID: api.NewUUID(), Name: "phase3-dm-peer", Slug: "phase3-dm-peer",
+		ProjectID: project.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, dmPeer))
+	dmConv := setupDMConversation(t, s, agent.ID, dmPeer.ID)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?include_project_groups="+project.ID, nil)
 	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleListConversations(rr, req)
@@ -328,7 +340,7 @@ func TestPhase3_ListConversations_ProjectUnion_IncludesNonParticipatedGroup(t *t
 	var result conversationListResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
 
-	var sawParticipated, sawOther bool
+	var sawParticipated, sawOther, sawDM bool
 	for _, c := range result.Conversations {
 		if c.ID == participatedConv.ID {
 			sawParticipated = true
@@ -336,15 +348,19 @@ func TestPhase3_ListConversations_ProjectUnion_IncludesNonParticipatedGroup(t *t
 		if c.ID == otherConv.ID {
 			sawOther = true
 		}
+		if c.ID == dmConv.ID {
+			sawDM = true
+		}
 	}
 	require.True(t, sawParticipated, "the participated group must still appear")
-	require.True(t, sawOther, "AC-10: a non-participated group in the same project must appear when project_id is supplied")
+	require.True(t, sawOther, "AC-10: a non-participated group in the same project must appear when include_project_groups is supplied")
+	require.True(t, sawDM, "finding #2: the caller's DM must not be dropped by the additive union")
 }
 
 // TestPhase3_ListConversations_ProjectUnion_UnauthorizedProjectIDNoUnion
-// covers the additive-only degrade path: an unauthorized project_id must
-// not error or leak other projects' groups — it just gets no union, same
-// as passing an unknown project_id.
+// covers the additive-only degrade path: an unauthorized
+// include_project_groups value must not error or leak other projects'
+// groups — it just gets no union, same as passing an unknown project ID.
 func TestPhase3_ListConversations_ProjectUnion_UnauthorizedProjectIDNoUnion(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -366,15 +382,205 @@ func TestPhase3_ListConversations_ProjectUnion_UnauthorizedProjectIDNoUnion(t *t
 	require.NoError(t, s.CreateConversation(ctx, otherConv))
 
 	// The caller has no access to otherProject at all.
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?project_id="+otherProject.ID, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?include_project_groups="+otherProject.ID, nil)
 	req = req.WithContext(agentContext(agent.ID, otherProject.ID))
 	rr := httptest.NewRecorder()
 	srv.handleListConversations(rr, req)
 
-	require.Equal(t, http.StatusOK, rr.Code, "an unauthorized project_id must degrade quietly, not error; body: %s", rr.Body.String())
+	require.Equal(t, http.StatusOK, rr.Code, "an unauthorized include_project_groups must degrade quietly, not error; body: %s", rr.Body.String())
 	var result conversationListResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
 	for _, c := range result.Conversations {
 		require.NotEqual(t, otherConv.ID, c.ID, "must not leak a group from a project the caller cannot read")
+	}
+}
+
+// TestPhase3_ListConversations_ProjectUnion_PagesBeyondFirstPage is review
+// round 1 finding #3: AC-10 says the union includes "every group in P" —
+// listAllGroupConversations must page through the store fully rather than
+// silently truncating at the store's default page size (50). 61 groups
+// (more than one 50-row default page) exercises the pagination loop.
+func TestPhase3_ListConversations_ProjectUnion_PagesBeyondFirstPage(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project, agent, _ := setupConvTestData(t, s)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	const totalGroups = 61
+	want := make(map[string]bool, totalGroups)
+	for i := 0; i < totalGroups; i++ {
+		now := time.Now().UTC()
+		conv := &store.Conversation{
+			ID:             api.NewUUID(),
+			ProjectID:      &project.ID,
+			Kind:           "group",
+			Surface:        "native",
+			DisplayName:    "Bulk Group",
+			DriftState:     "active",
+			LastActivityAt: now,
+			CreatedAt:      now,
+		}
+		require.NoError(t, s.CreateConversation(ctx, conv))
+		want[conv.ID] = true
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?include_project_groups="+project.ID, nil)
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleListConversations(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var result conversationListResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+
+	got := make(map[string]bool, len(result.Conversations))
+	for _, c := range result.Conversations {
+		got[c.ID] = true
+	}
+	for id := range want {
+		require.True(t, got[id], "AC-10: group %s beyond the first page must still appear in the union", id)
+	}
+}
+
+// TestPhase3_ForeignAgent_DeniedOnAllFourEndpoints is review round 1 finding
+// #9: the foreign-agent denial (AC-8) was only directly exercised on GET
+// /conversations/{id}. This table closes the gap for the other three
+// endpoints that share authorizeGroupConversationAccess.
+func TestPhase3_ForeignAgent_DeniedOnAllFourEndpoints(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project, _, conv := setupConvTestData(t, s)
+	msg := seedGroupMessage(t, s, project.ID, api.NewUUID(), conv.ID)
+
+	otherProject := &store.Project{ID: api.NewUUID(), Name: "phase3-table-other", Slug: "phase3-table-other"}
+	require.NoError(t, s.CreateProject(ctx, otherProject))
+	foreignAgent := &store.Agent{
+		ID: api.NewUUID(), Name: "phase3-table-foreign", Slug: "phase3-table-foreign",
+		ProjectID: otherProject.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, foreignAgent))
+	foreignCtx := func() context.Context {
+		return agentContextWithScopes(foreignAgent.ID, otherProject.ID, []AgentTokenScope{ScopeProjectRead})
+	}
+	putBody, err := json.Marshal(setDefaultAgentRequest{AgentID: api.NewUUID()})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+		do   func() *httptest.ResponseRecorder
+	}{
+		{"GetConversation", func() *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID, nil).WithContext(foreignCtx())
+			rr := httptest.NewRecorder()
+			srv.handleGetConversation(rr, req, conv.ID)
+			return rr
+		}},
+		{"ListMessages", func() *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages", nil).WithContext(foreignCtx())
+			rr := httptest.NewRecorder()
+			srv.handleConvListMessages(rr, req, conv.ID)
+			return rr
+		}},
+		{"GetMessage", func() *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+msg.ID, nil).WithContext(foreignCtx())
+			rr := httptest.NewRecorder()
+			srv.handleGetConversationMessage(rr, req, conv.ID, msg.ID)
+			return rr
+		}},
+		{"SetDefaultAgent", func() *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(putBody)).WithContext(foreignCtx())
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			srv.handleSetDefaultAgent(rr, req, conv.ID)
+			return rr
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := tt.do()
+			require.Equal(t, http.StatusForbidden, rr.Code, "body: %s", rr.Body.String())
+		})
+	}
+}
+
+// TestPhase3_SetDefaultAgent_SameProjectNonParticipant_Allowed is review
+// round 1 finding #9: the PUT authorization change itself wasn't directly
+// tested (only GET/messages/message were) — a same-project caller who is
+// not a participant must get 200.
+func TestPhase3_SetDefaultAgent_SameProjectNonParticipant_Allowed(t *testing.T) {
+	srv, s := testServer(t)
+	project, _, conv := setupConvTestData(t, s)
+	ctx := context.Background()
+
+	caller := &store.Agent{
+		ID: api.NewUUID(), Name: "phase3-put-caller", Slug: "phase3-put-caller",
+		ProjectID: project.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, caller))
+	grantAgentProjectAccess(t, s, caller.ID, project.ID)
+	// Deliberately NOT added as a participant of conv.
+
+	newDefault := &store.Agent{
+		ID: api.NewUUID(), Name: "phase3-put-target", Slug: "phase3-put-target",
+		ProjectID: project.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, newDefault))
+
+	body, err := json.Marshal(setDefaultAgentRequest{AgentID: newDefault.ID})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContextWithScopes(caller.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusOK, rr.Code,
+		"a same-project non-participant must be able to PUT default-agent; body: %s", rr.Body.String())
+}
+
+// TestPhase3_ListConversations_ForeignAgentWithRoleBinding_NoUnion is
+// review round 1 finding #9: canReadProject's strict agent-project equality
+// check must gate the listing union, not just its authzService.CheckAccess
+// call. A foreign agent that also happens to hold a role binding on P
+// (e.g. it belongs to two projects) still gets no union when its own token
+// project differs from P.
+func TestPhase3_ListConversations_ForeignAgentWithRoleBinding_NoUnion(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project, _, _ := setupConvTestData(t, s)
+
+	otherProject := &store.Project{ID: api.NewUUID(), Name: "phase3-union-foreign-other", Slug: "phase3-union-foreign-other"}
+	require.NoError(t, s.CreateProject(ctx, otherProject))
+
+	foreignAgent := &store.Agent{
+		ID: api.NewUUID(), Name: "phase3-union-foreign", Slug: "phase3-union-foreign",
+		ProjectID: otherProject.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, foreignAgent))
+	// The foreign agent DOES hold a role binding on `project` — proving the
+	// denial comes from the strict identity check, not from a missing
+	// binding.
+	grantAgentProjectAccess(t, s, foreignAgent.ID, project.ID)
+
+	otherConv := &store.Conversation{
+		ID: api.NewUUID(), ProjectID: &project.ID, Kind: "group", Surface: "native",
+		DisplayName: "Should Not Leak", DriftState: "active",
+		LastActivityAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateConversation(ctx, otherConv))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?include_project_groups="+project.ID, nil)
+	// The agent's token project is otherProject.ID, not project.ID.
+	req = req.WithContext(agentContextWithScopes(foreignAgent.ID, otherProject.ID, []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleListConversations(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var result conversationListResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	for _, c := range result.Conversations {
+		require.NotEqual(t, otherConv.ID, c.ID,
+			"a foreign agent must get no union even when it holds a role binding on P (strict identity check)")
 	}
 }

@@ -269,27 +269,29 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Design doc §3.2 / AC-10: default --project to the hub-context project
-	// (flag > hub-linked project > local project) — the same resolution
-	// runConversationCreate uses (§3.6) — so a human sees all groups in
-	// their current project, the same way an agent already does via its
-	// token project. Unlike create, an unresolved project here is not an
-	// error: it just falls back to today's behavior (no project_id sent,
-	// so the caller's participations plus canonical DMs).
-	if convProject == "" {
-		if resolved, resolveErr := resolveProjectID(settings, convProject); resolveErr == nil {
-			convProject = resolved
-		}
-	}
-
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	opts := &hubclient.ListConversationsOptions{
-		Kind:      convKind,
-		Surface:   convSurface,
-		ProjectID: convProject,
-		Limit:     convLimit,
+		Kind:    convKind,
+		Surface: convSurface,
+		Limit:   convLimit,
+	}
+
+	// Review round 1 finding #2 / design §3.2 addendum: project_id keeps
+	// its existing narrowing semantics (it drops every conversation whose
+	// ProjectID doesn't match, including every DM, which has ProjectID ==
+	// nil), so it must stay opt-in via an explicit --project. The
+	// hub-context default instead drives the purely additive
+	// include_project_groups union, which can only add groups the caller
+	// wasn't already listing — it never narrows out DMs or other
+	// projects' conversations. Unlike create, an unresolved project here
+	// is not an error: it just falls back to today's behavior (nothing
+	// sent, so the caller's participations plus canonical DMs).
+	if convProject != "" {
+		opts.ProjectID = convProject
+	} else if resolved, resolveErr := resolveProjectID(settings, ""); resolveErr == nil {
+		opts.IncludeProjectGroups = resolved
 	}
 
 	result, err := client.Conversations().List(ctx, opts)

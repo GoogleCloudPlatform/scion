@@ -259,6 +259,61 @@ func TestPhase4_ChatV2_UnresolvedMention_NoParticipant(t *testing.T) {
 	}
 }
 
+// TestPhase4_ChatV2_DeniedMention_NoParticipant is review round 1 finding
+// #5's replacement for the vacuous unresolved-name test: a *resolvable*
+// agent that is named but denied by authorizeAgentMessage (MessageMode
+// "none") must not become a participant, even though it is a real agent in
+// plan.Agents. This proves the fix (record only after conversation
+// resolution's continue AND a successful dispatch) actually gates on
+// authorization outcome, not merely on whether a slug resolves to an agent.
+func TestPhase4_ChatV2_DeniedMention_NoParticipant(t *testing.T) {
+	srv, s, wcs, proj, db := setupSendTest(t)
+	ctx := context.Background()
+	srv.createProjectMembersGroup(ctx, proj)
+
+	sender := &store.User{
+		ID: tid("phase4-denied-sender"), Email: "phase4-denied-sender@example.com",
+		DisplayName: "Sender", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, sender))
+	msgAuthzAddProjectMember(t, s, sender.ID, proj.ID, proj.Slug, store.GroupMemberRoleMember)
+	// Upstream removed agent.message from the project-member role (see
+	// setupRoutedTestEnv); grant it explicitly so the *allowed* mention
+	// isn't denied for the wrong reason.
+	msgAuthzGrantAgentMessage(t, s, sender.ID, proj.ID)
+
+	allowedAgent := &store.Agent{
+		ID: tid("phase4-denied-allowed"), ProjectID: proj.ID, Name: "Allowed", Slug: "phase4-allowed",
+		Phase: "idle", OwnerID: DevUserID, CreatedBy: DevUserID, MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, s.CreateAgent(ctx, allowedAgent))
+
+	deniedAgent := &store.Agent{
+		ID: tid("phase4-denied-target"), ProjectID: proj.ID, Name: "Denied", Slug: "phase4-denied",
+		Phase: "idle", OwnerID: DevUserID, CreatedBy: DevUserID, MessageMode: store.MessageModeNone,
+	}
+	require.NoError(t, s.CreateAgent(ctx, deniedAgent))
+
+	topicID := tid("phase4-topic-denied")
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: topicID, ProjectID: proj.ID, Name: "phase4-denied-thread",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}))
+	setTopicConversationID(t, db, s, topicID, proj.ID)
+
+	conv, err := s.GetConversationByExternalRef(ctx, "native", "thread:"+proj.ID+":"+topicID)
+	require.NoError(t, err)
+
+	rec := doRequestAsUser(t, srv, sender, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
+		map[string]string{"content": "@phase4-allowed @phase4-denied please look"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	require.True(t, hasParticipant(t, s, conv.ID, allowedAgent.ID),
+		"the authorized mention recipient must become a participant")
+	require.False(t, hasParticipant(t, s, conv.ID, deniedAgent.ID),
+		"AC-11: a resolvable but authorization-denied mention must not become a participant")
+}
+
 // failingParticipantStore wraps a real store.Store and makes both
 // AddParticipant and EnsureParticipant always fail, to exercise AC-12: a
 // participant-row insert failure must never fail or alter the send response.

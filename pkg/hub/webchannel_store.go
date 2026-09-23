@@ -2358,11 +2358,17 @@ func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, 
 		// Group conversation participants are derived from project membership, not
 		// from an explicit participant table. The participant table is a listing
 		// index, NEVER the access authority (design doc §2.4.2.1).
+		//
+		// Review round 1 finding #4: this INSERT must also seed
+		// default_agent_id from topic.DefaultAgentID (NULL when empty), the
+		// same as CreateTopic's mint branch — otherwise a promoted DM starts
+		// with its topic default set and its conversation default NULL,
+		// which is exactly the F1 drift this PR exists to eliminate.
 		now := topic.CreatedAt.UTC().Format(time.RFC3339Nano)
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-			 VALUES (?, ?, 'group', 'native', ?, '', ?, 'active', ?, ?)`,
-			topic.ConversationID, topic.ProjectID, extRef, topic.Name, now, now)
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, default_agent_id, drift_state, last_activity_at, created_at)
+			 VALUES (?, ?, 'group', 'native', ?, '', ?, ?, 'active', ?, ?)`,
+			topic.ConversationID, topic.ProjectID, extRef, topic.Name, nullableString(topic.DefaultAgentID), now, now)
 		if err != nil {
 			return nil, fmt.Errorf("webchat store: create conversation in promote: %w", err)
 		}

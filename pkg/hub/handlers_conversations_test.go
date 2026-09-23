@@ -688,10 +688,17 @@ func TestSetDefaultAgent_HappyPath(t *testing.T) {
 	require.Equal(t, newAgent.ID, *updated.DefaultAgentID)
 }
 
-func TestSetDefaultAgent_NotParticipant(t *testing.T) {
+// TestSetDefaultAgent_NoProjectAccess is review round 1 finding #8: renamed
+// from TestSetDefaultAgent_NotParticipant. It still passes, but for a
+// different reason since Phase 3 — the gate is project membership
+// (authorizeGroupConversationAccess), not the participant table, so a
+// caller with no role binding on the conversation's project is denied
+// regardless of whether it is a participant.
+func TestSetDefaultAgent_NoProjectAccess(t *testing.T) {
 	srv, s := testServer(t)
 	_, agent, conv := setupConvTestData(t, s)
-	// Don't add the agent as a participant.
+	// Don't grant the agent project access (and don't add it as a
+	// participant either — that table no longer gates this endpoint).
 
 	body := setDefaultAgentRequest{AgentID: api.NewUUID()}
 	bodyBytes, _ := json.Marshal(body)
@@ -793,7 +800,46 @@ func TestSetDefaultAgent_AgentNotFound(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.handleSetDefaultAgent(rr, req, conv.ID)
 
-	require.Equal(t, http.StatusNotFound, rr.Code)
+	// Review round 1 finding #7: conv is project-scoped, so this now
+	// resolves through validateDefaultAgent (DEF-31, the single source of
+	// truth also used by the topic PATCH and thread-create writers), which
+	// reports every resolution failure — not found, wrong project, or
+	// soft-deleted — as one 400, not a 404.
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+// TestSetDefaultAgent_SoftDeletedAgentRejected is review round 1 finding #7:
+// a soft-deleted agent must not be set as a group's default agent — it
+// would drive web routing after ClearTopicDefaultAgent has already run for
+// it, since ClearTopicDefaultAgent only fires on the deletion event itself.
+func TestSetDefaultAgent_SoftDeletedAgentRejected(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	deletedAgent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "soft-deleted-agent",
+		Slug:       "soft-deleted-agent",
+		ProjectID:  project.ID,
+		Phase:      "terminated",
+		DeletedAt:  time.Now().UTC(),
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), deletedAgent))
+
+	body := setDefaultAgentRequest{AgentID: deletedAgent.ID}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"a soft-deleted agent must be rejected; body: %s", rr.Body.String())
 }
 
 func TestCreateConversation_ProjectNotFound(t *testing.T) {

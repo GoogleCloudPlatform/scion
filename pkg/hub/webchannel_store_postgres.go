@@ -540,9 +540,16 @@ func (s *pgWebChatStore) UpdateTopic(ctx context.Context, topicID string, update
 		if *updates.DefaultAgentID != "" {
 			val = *updates.DefaultAgentID
 		}
+		// Review round 1 finding #1 (Critical): conversations.id is a native
+		// Postgres uuid column (Ent field.UUID), but webchat_topic.conversation_id
+		// is TEXT — Postgres has no implicit text->uuid cast for a column
+		// comparison, so this failed at runtime with "operator does not
+		// exist: uuid = text" and rolled back the whole transaction,
+		// including the topic UPDATE above. The explicit ::uuid cast is safe
+		// because every conversation_id value is a minted UUID string.
 		_, err := tx.ExecContext(ctx,
 			`UPDATE conversations SET default_agent_id = $1
-			  WHERE id = (SELECT conversation_id FROM webchat_topic WHERE id = $2 AND deleted_at IS NULL)
+			  WHERE id = (SELECT conversation_id::uuid FROM webchat_topic WHERE id = $2 AND deleted_at IS NULL)
 			    AND deleted_at IS NULL`,
 			val, topicID)
 		if err != nil {
@@ -1836,10 +1843,20 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys
 		// Group conversation participants are derived from project membership, not
 		// from an explicit participant table. The participant table is a listing
 		// index, NEVER the access authority (design doc §2.4.2.1).
+		//
+		// Review round 1 finding #4: also seed default_agent_id from
+		// topic.DefaultAgentID (NULL when empty) — same as CreateTopic's mint
+		// branch — so a promoted DM doesn't start with a topic default that
+		// has no conversation-side counterpart. The bound parameter is
+		// inferred as uuid, same as id/project_id above; no cast needed.
+		var defaultAgentID interface{}
+		if topic.DefaultAgentID != "" {
+			defaultAgentID = topic.DefaultAgentID
+		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-			 VALUES ($1, $2, 'group', 'native', $3, '', $4, 'active', $5, $6)`,
-			topic.ConversationID, topic.ProjectID, extRef, topic.Name, topic.CreatedAt, topic.CreatedAt)
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, default_agent_id, drift_state, last_activity_at, created_at)
+			 VALUES ($1, $2, 'group', 'native', $3, '', $4, $5, 'active', $6, $7)`,
+			topic.ConversationID, topic.ProjectID, extRef, topic.Name, defaultAgentID, topic.CreatedAt, topic.CreatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("webchat store: create conversation in promote: %w", err)
 		}
