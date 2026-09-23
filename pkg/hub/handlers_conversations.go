@@ -489,6 +489,17 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// Q2 (design doc chat-thread-bridge §7, ptone decided (a)): a group
+	// conversation must always be project-scoped; only DMs are global. Check
+	// this before any write (AC-10: no conversation/topic row on this path) —
+	// an agent with no projectId already fell back to its token project
+	// above, so only a user with neither a body projectId nor a token
+	// project reaches this.
+	if req.ProjectID == "" {
+		BadRequest(w, "projectId is required")
+		return
+	}
+
 	// kind == "group" from here (direct was rejected above). Route creation
 	// through the same atomic topic-creation path every other native group
 	// mint site uses (design doc: chat-thread-bridge §3), instead of a bare
@@ -505,24 +516,31 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 
 	// Auto-add the caller as a participant. This is a listing-index entry
 	// only (design doc §2.4.2.1 / §3.5) — project membership remains the
-	// access authority for group conversations.
-	participant := &store.ConversationParticipant{
-		ID:             api.NewUUID(),
-		ConversationID: conv.ID,
-		PrincipalKind:  identity.Type(),
-		PrincipalID:    identity.ID(),
-		Role:           "member",
-		JoinedAt:       time.Now().UTC(),
-	}
+	// access authority for group conversations. The ConversationParticipant
+	// principal_kind enum only allows "user"/"agent" (ent schema); the dev
+	// pseudo-identity (Identity.Type()=="dev") is neither, so skip the insert
+	// rather than fail the create after the topic already exists.
+	participants := []store.ConversationParticipant{}
+	if identity.Type() != "dev" {
+		participant := &store.ConversationParticipant{
+			ID:             api.NewUUID(),
+			ConversationID: conv.ID,
+			PrincipalKind:  identity.Type(),
+			PrincipalID:    identity.ID(),
+			Role:           "member",
+			JoinedAt:       time.Now().UTC(),
+		}
 
-	if err := s.store.AddParticipant(ctx, participant); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
+		if err := s.store.AddParticipant(ctx, participant); err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		participants = append(participants, *participant)
 	}
 
 	writeJSON(w, http.StatusCreated, conversationResponse{
 		Conversation: *conv,
-		Participants: []store.ConversationParticipant{*participant},
+		Participants: participants,
 	})
 }
 

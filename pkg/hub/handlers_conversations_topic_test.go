@@ -26,7 +26,9 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
@@ -206,6 +208,182 @@ func TestCreateConversation_GroupServiceUnavailable(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, rr.Code, "body: %s", rr.Body.String())
 }
 
+// TestCreateConversation_InvalidName is a Phase 2 edge case (design §8):
+// a name that fails validateThreadName's rules is rejected with 400 before
+// any topic/conversation row is written.
+func TestCreateConversation_InvalidName(t *testing.T) {
+	srv, s, wcs, _ := setupGroupConvTopicTest(t)
+	project, agent, _ := setupConvTestData(t, s)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	body := createConversationRequest{
+		DisplayName: "bad/name",
+		ProjectID:   project.ID,
+		Kind:        "group",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleCreateConversation(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+
+	topics, err := wcs.ListTopics(context.Background(), project.ID)
+	require.NoError(t, err)
+	require.Empty(t, topics, "an invalid name must not write a topic row")
+}
+
+// TestCreateConversation_NameConflict is a Phase 2 edge case (design §8,
+// AC-7): a duplicate name (case-insensitive) in the same project is
+// rejected with 409 NAME_CONFLICT, and the failed attempt leaves no orphan
+// topic or conversation row behind (CreateTopic's insert is atomic).
+func TestCreateConversation_NameConflict(t *testing.T) {
+	srv, s, wcs, _ := setupGroupConvTopicTest(t)
+	ctx := context.Background()
+	project, agent, _ := setupConvTestData(t, s)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        api.NewUUID(),
+		ProjectID: project.ID,
+		Name:      "Design Review",
+		CreatedBy: agent.ID,
+		CreatedAt: time.Now().UTC(),
+	}))
+
+	body := createConversationRequest{
+		DisplayName: "design review", // case-insensitive collision
+		ProjectID:   project.ID,
+		Kind:        "group",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleCreateConversation(rr, req)
+
+	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	require.Equal(t, "NAME_CONFLICT", errResp.Error.Code)
+
+	// AC-7: no orphan conversation or topic row is left behind.
+	topics, err := wcs.ListTopics(ctx, project.ID)
+	require.NoError(t, err)
+	require.Len(t, topics, 1, "the failed create must not have minted a second topic")
+}
+
+// TestCreateConversation_ProjectRequired is a Phase 2 edge case (design §7
+// Q2, AC-10): a user identity with no projectId in the body and no token
+// project to fall back to (only agents have one) gets 400 before any write.
+func TestCreateConversation_ProjectRequired(t *testing.T) {
+	srv, s := testServer(t)
+	wireSharedWebChatStore(t, srv, s)
+
+	userCtx := contextWithIdentity(context.Background(),
+		NewAuthenticatedUser(api.NewUUID(), "noproj@example.com", "No Project User", "user", "web"))
+
+	body := createConversationRequest{
+		DisplayName: "orphan-attempt",
+		Kind:        "group",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(userCtx)
+	rr := httptest.NewRecorder()
+	srv.handleCreateConversation(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+
+	// AC-10: no conversation or topic row was written for this attempt.
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok)
+	var convCount, topicCount int
+	require.NoError(t, dbProvider.DB().QueryRow(
+		`SELECT COUNT(*) FROM conversations WHERE display_name = ?`, "orphan-attempt").Scan(&convCount))
+	require.Equal(t, 0, convCount, "no conversation row should exist")
+	require.NoError(t, dbProvider.DB().QueryRow(
+		`SELECT COUNT(*) FROM webchat_topic WHERE name = ?`, "orphan-attempt").Scan(&topicCount))
+	require.Equal(t, 0, topicCount, "no topic row should exist")
+}
+
+// TestCreateConversation_AgentNoProjectUsesTokenProject verifies the other
+// half of AC-10: an agent identity with no projectId in the body uses its
+// token project instead of 400ing (unchanged from Phase 1's defaulting
+// behavior, re-asserted here alongside the new project-required guard so
+// the two don't regress into each other).
+func TestCreateConversation_AgentNoProjectUsesTokenProject(t *testing.T) {
+	srv, s, _, _ := setupGroupConvTopicTest(t)
+	project, agent, _ := setupConvTestData(t, s)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	body := createConversationRequest{DisplayName: "agent-default-project"}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleCreateConversation(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+
+	var result conversationResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.NotNil(t, result.ProjectID)
+	require.Equal(t, project.ID, *result.ProjectID)
+}
+
+// TestCreateConversation_DevIdentitySkipsParticipant is a Phase 2 edge case
+// (design §8): ConversationParticipant.principal_kind only allows
+// "user"/"agent" (ent schema), so the dev pseudo-identity used by
+// SCION_DEV_AUTH_TOKEN cannot be inserted as a participant. The create must
+// still succeed — skipping the participant insert — rather than fail after
+// the topic (and its linked conversation) already exist.
+func TestCreateConversation_DevIdentitySkipsParticipant(t *testing.T) {
+	srv, s, wcs, _ := setupGroupConvTopicTest(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: api.NewUUID(), Name: "dev-identity-project", Slug: "dev-identity-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	devCtx := contextWithIdentity(context.Background(), NewDevUser(DevUserConfig{}))
+
+	body := createConversationRequest{
+		DisplayName: "dev-created",
+		ProjectID:   project.ID,
+		Kind:        "group",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(devCtx)
+	rr := httptest.NewRecorder()
+	srv.handleCreateConversation(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+
+	var result conversationResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Empty(t, result.Participants, "dev identity is not a valid participant principal_kind; the insert must be skipped, not fail the create")
+
+	// The topic itself was still created — only the participant insert was skipped.
+	_, topicID, err := messaging.ParseThreadConversationExternalRef(result.ExternalRef)
+	require.NoError(t, err)
+	topic, err := wcs.GetTopic(ctx, topicID)
+	require.NoError(t, err)
+	require.NotNil(t, topic)
+}
+
 func TestValidateThreadName(t *testing.T) {
 	tooLongRunes := make([]rune, 101)
 	for i := range tooLongRunes {
@@ -240,7 +418,32 @@ func TestValidateThreadName(t *testing.T) {
 func TestIsTopicNameConflict(t *testing.T) {
 	require.False(t, isTopicNameConflict(nil))
 	require.True(t, isTopicNameConflict(errors.New("name conflict: pstack2")))
-	require.True(t, isTopicNameConflict(errors.New("UNIQUE constraint failed: webchat_topic.project_id, webchat_topic.name")))
-	require.True(t, isTopicNameConflict(errors.New(`pq: duplicate key value violates unique constraint "idx_webchat_topic_project_name"`)))
+
+	// SQLite (mattn/go-sqlite3) reports column names, not the index name,
+	// even for the named expression index idx_webchat_topic_project_name.
+	require.True(t, isTopicNameConflict(errors.New(
+		"webchat store: create topic: UNIQUE constraint failed: webchat_topic.project_id, webchat_topic.name")))
+
+	// Postgres reports the constraint/index name verbatim.
+	require.True(t, isTopicNameConflict(errors.New(
+		`webchat store: create topic: pq: duplicate key value violates unique constraint "idx_webchat_topic_project_name"`)))
+
+	// Not a name conflict: a *different* webchat_topic unique index (the
+	// one-#general-per-project guard) hitting the same "UNIQUE constraint
+	// failed" shape.
+	require.False(t, isTopicNameConflict(errors.New(
+		"UNIQUE constraint failed: webchat_topic.project_id")))
+
+	// Not a name conflict: the UNRELATED conversations(surface, external_ref)
+	// partial unique index. CreateTopic/UpdateTopic/PromoteDM write to both
+	// webchat_topic and conversations in the same transaction, so a race on
+	// the external_ref index (DEF-156) can produce this same "unique
+	// violation" shape — a bare "unique"/"duplicate key" substring match
+	// would misreport it as NAME_CONFLICT.
+	require.False(t, isTopicNameConflict(errors.New(
+		"UNIQUE constraint failed: conversations.surface, conversations.external_ref")))
+	require.False(t, isTopicNameConflict(errors.New(
+		`pq: duplicate key value violates unique constraint "conversation_surface_external_ref"`)))
+
 	require.False(t, isTopicNameConflict(errors.New("some other failure")))
 }

@@ -445,20 +445,12 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
-	body.Name = strings.TrimSpace(body.Name)
-	if body.Name == "" {
-		ValidationError(w, "name is required", nil)
+	validatedName, err := validateThreadName(body.Name)
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
 		return
 	}
-	nameRunes := []rune(body.Name)
-	if len(nameRunes) > 100 {
-		ValidationError(w, "name must be 100 characters or fewer", nil)
-		return
-	}
-	if !threadNameRegexp.MatchString(body.Name) {
-		ValidationError(w, "name contains invalid characters", nil)
-		return
-	}
+	body.Name = validatedName
 
 	// Validate defaultAgent when provided: length and resolution are checked
 	// by validateDefaultAgent (single source of truth — DEF-31).
@@ -485,7 +477,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	if err := wcs.CreateTopic(r.Context(), topic); err != nil {
-		if strings.Contains(err.Error(), "name conflict") || strings.Contains(err.Error(), "UNIQUE constraint") {
+		if isTopicNameConflict(err) {
 			ValidationError(w, "a thread with that name already exists in this space", nil)
 			return
 		}
@@ -619,7 +611,7 @@ func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicI
 	}
 
 	if err := wcs.UpdateTopic(r.Context(), topicID, updates); err != nil {
-		if strings.Contains(err.Error(), "name conflict") || strings.Contains(err.Error(), "UNIQUE constraint") {
+		if isTopicNameConflict(err) {
 			ValidationError(w, "a thread with that name already exists in this space", nil)
 			return
 		}
@@ -2735,10 +2727,8 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		DirectConversationID: directConvID,
 	})
 	if err != nil {
-		// Check for name conflict (unique constraint violation)
-		if strings.Contains(err.Error(), "UNIQUE constraint") ||
-			strings.Contains(err.Error(), "unique") ||
-			strings.Contains(err.Error(), "duplicate key") {
+		// Check for name conflict (unique constraint violation).
+		if isTopicNameConflict(err) {
 			writeError(w, http.StatusConflict, "NAME_CONFLICT",
 				"a thread with that name already exists in this space", nil)
 			return

@@ -68,15 +68,40 @@ func validateThreadName(raw string) (string, error) {
 // This centralizes the string sniffing that handleCreateThread, UpdateTopic,
 // and handleConversationPromote each did independently, so every call site
 // maps the same underlying store errors to the same outcome.
+//
+// The match is deliberately narrower than "any unique/duplicate-key error":
+// CreateTopic, UpdateTopic, and PromoteDM each write to both webchat_topic
+// and conversations in the same transaction, so the same call can also fail
+// on the unrelated conversations(surface, external_ref) partial unique index
+// (e.g. a DEF-156 lookup-then-insert race). A bare "unique" or "duplicate
+// key" substring match would misreport that as a name conflict. So beyond
+// requiring a unique-violation shape, this also requires a signal that ties
+// the violation to the topic name index specifically:
+//   - SQLite (mattn/go-sqlite3) reports column names, not the index name,
+//     even for a named expression index — e.g. "UNIQUE constraint failed:
+//     webchat_topic.project_id, webchat_topic.name".
+//   - Postgres reports the constraint/index name verbatim — e.g.
+//     `duplicate key value violates unique constraint "idx_webchat_topic_project_name"`.
+//
+// Verified against the real mattn/go-sqlite3 error text for both the topic
+// name index and the conversations external_ref index (they differ exactly
+// as described above); the Postgres format matches the standard
+// "duplicate key value violates unique constraint %q" wording this codebase
+// already relies on elsewhere (entadapter/conversation_store.go isUniqueConstraintError).
 func isTopicNameConflict(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "name conflict") ||
-		strings.Contains(msg, "UNIQUE constraint") ||
-		strings.Contains(msg, "unique") ||
-		strings.Contains(msg, "duplicate key")
+	if strings.Contains(msg, "name conflict") {
+		return true
+	}
+	isUniqueViolation := strings.Contains(msg, "UNIQUE constraint") || strings.Contains(msg, "duplicate key")
+	if !isUniqueViolation {
+		return false
+	}
+	return strings.Contains(msg, "idx_webchat_topic_project_name") ||
+		strings.Contains(msg, "webchat_topic.name")
 }
 
 // createGroupParams bundles the inputs needed to mint a group conversation
