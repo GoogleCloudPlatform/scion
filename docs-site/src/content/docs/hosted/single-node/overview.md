@@ -70,7 +70,7 @@ The two tiers are distinguished purely by the **availability tier** dimension �
 ## Next steps
 
 - [Hub Setup](/scion/hosted/single-node/hub-server/) — configure and run the Hub.
-- [Deploy on a VM (GCE)](/scion/hosted/single-node/hub-setup-gce/) — the Developer Hub path.
+- [Deploy on a VM (GCE)](/scion/hosted/single-node/hub-setup-gce/) — the Developer Hub path (build from source), or the binary-release single-node VM script with IAP, headless `--config` installs, and automatic updates.
 - [Deploy on Cloud Run (Sandbox)](/scion/hosted/single-node/hub-setup-cloudrun/) — one-command deploy on a Cloud Run Instance with IAP.
 - [Auth & Tenancy](/scion/hosted/single-node/auth/) — single- vs multi-user access.
 - [Connecting to a Hub](/scion/hosted/user/hosted-user/) — the user-facing journey.
