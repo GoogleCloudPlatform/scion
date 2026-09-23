@@ -459,7 +459,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 	body.DefaultAgent = strings.TrimSpace(body.DefaultAgent)
 	var defaultAgentID string
 	if body.DefaultAgent != "" {
-		resolved, err := s.validateDefaultAgent(r.Context(), projectID, body.DefaultAgent)
+		resolved, err := s.validateDefaultAgent(r.Context(), projectID, body.DefaultAgent, "defaultAgent")
 		if err != nil {
 			ValidationError(w, err.Error(), nil)
 			return
@@ -602,7 +602,7 @@ func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicI
 		da := strings.TrimSpace(*body.DefaultAgent)
 		agentID := ""
 		if da != "" {
-			resolved, err := s.validateDefaultAgent(r.Context(), topic.ProjectID, da)
+			resolved, err := s.validateDefaultAgent(r.Context(), topic.ProjectID, da, "defaultAgent")
 			if err != nil {
 				ValidationError(w, err.Error(), nil)
 				return
@@ -699,10 +699,17 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 // (design doc §3.1) so callers can seed conversations.default_agent_id (the
 // UUID) without a second lookup after already resolving the same
 // slug-or-UUID identifier here.
-func (s *Server) validateDefaultAgent(ctx context.Context, projectID, agentRef string) (*store.Agent, error) {
+//
+// field names the request field the caller wants echoed back in the error
+// message (e.g. "defaultAgent" for the topic PATCH/create callers,
+// "agentId" for the conversations PUT default-agent endpoint). Review
+// round 4 finding #1: this replaces a caller-side strings.Replace of the
+// literal "defaultAgent" text, which was coupled to this function's exact
+// wording and untested.
+func (s *Server) validateDefaultAgent(ctx context.Context, projectID, agentRef, field string) (*store.Agent, error) {
 	// Length gate: reject unreasonably long identifiers before hitting the DB.
 	if len([]rune(agentRef)) > 200 {
-		return nil, fmt.Errorf("defaultAgent identifier is too long")
+		return nil, fmt.Errorf("%s identifier is too long", field)
 	}
 
 	// Try slug lookup first (project-scoped, excludes soft-deleted).
@@ -714,10 +721,10 @@ func (s *Server) validateDefaultAgent(ctx context.Context, projectID, agentRef s
 	// Fall back to UUID lookup.
 	a, err = s.store.GetAgent(ctx, agentRef)
 	if err != nil || a == nil {
-		return nil, fmt.Errorf("defaultAgent %q not found in this project", agentRef)
+		return nil, fmt.Errorf("%s %q not found in this project", field, agentRef)
 	}
 	if a.ProjectID != projectID || !a.DeletedAt.IsZero() {
-		return nil, fmt.Errorf("defaultAgent %q not found in this project", agentRef)
+		return nil, fmt.Errorf("%s %q not found in this project", field, agentRef)
 	}
 	return a, nil
 }

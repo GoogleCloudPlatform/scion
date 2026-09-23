@@ -344,10 +344,18 @@ func (s *Server) ensureGroupParticipants(ctx context.Context, conversationID str
 //   - the managed-runtime path, after managedAgentMessage
 //   - the broker-dispatched path, after dispatchWithBrokerRetry
 //
-// groupConversationID is empty for direct conversations and for the
-// caller-supplied conversation_id branch's own registration path, so this
-// is a deliberate no-op there; ensureGroupParticipants' use of
-// store.EnsureParticipant also makes a redundant call harmless.
+// groupConversationID is empty for direct conversations, which makes this a
+// no-op. On the caller-supplied conversation_id branch, groupConversationID
+// is set too (convResult carries the existing conversation's own Kind), but
+// that branch's primary was already registered before dispatch — this call
+// still runs there and is a second, redundant EnsureParticipant, made
+// harmless by ensureGroupParticipants' idempotent use of
+// store.EnsureParticipant (review round 4 finding #2).
+//
+// The groupConversationID == "" guard below is redundant with the identical
+// guard in ensureGroupParticipants; it's kept as a fast path so callers
+// that pass "" for a direct conversation skip building the one-element
+// agents slice.
 func (s *Server) registerGroupPrimary(ctx context.Context, groupConversationID string, agent *store.Agent) {
 	if groupConversationID == "" {
 		return

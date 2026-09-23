@@ -3295,6 +3295,12 @@ func (stubManagedAgentBackend) StreamInteraction(ctx context.Context, interactio
 // target agent reaches this branch the same way the broker-dispatched test
 // does. Deleting only this branch's registerGroupPrimary call fails this
 // test without affecting the other two.
+//
+// Must not run in parallel (no t.Parallel()): it swaps the package-level
+// managedBackendInst var under managedBackendMu and restores it in
+// t.Cleanup — a concurrent test that also reaches getManagedBackend could
+// observe or clobber the stub mid-swap (review round 4 finding #1's
+// optional note).
 func TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered_ManagedRuntime(t *testing.T) {
 	srv, s, projectID, targetAgent, userID := def49Setup(t)
 	ctx := context.Background()

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -806,6 +807,62 @@ func TestSetDefaultAgent_AgentNotFound(t *testing.T) {
 	// reports every resolution failure — not found, wrong project, or
 	// soft-deleted — as one 400, not a 404.
 	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+// TestSetDefaultAgent_TooLongAgentID_MessageNamesAgentIdField is review
+// round 4 finding #1: validateDefaultAgent now takes a field parameter
+// instead of the handler string-editing its "defaultAgent"-worded message
+// with strings.Replace. Pins both halves of that contract for the
+// too-long-identifier case: 400, and a message containing "agentId" and
+// "too long" (not the validator's internal "defaultAgent" wording).
+func TestSetDefaultAgent_TooLongAgentID_MessageNamesAgentIdField(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	body := setDefaultAgentRequest{AgentID: strings.Repeat("a", 201)}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	require.Contains(t, errResp.Error.Message, "agentId")
+	require.Contains(t, errResp.Error.Message, "too long")
+}
+
+// TestSetDefaultAgent_NotFound_MessageNamesAgentIdField is review round 4
+// finding #1's second pinned case: a nonexistent agentId on a
+// project-scoped group must produce a message naming "agentId", not
+// validateDefaultAgent's internal "defaultAgent" wording.
+func TestSetDefaultAgent_NotFound_MessageNamesAgentIdField(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	body := setDefaultAgentRequest{AgentID: api.NewUUID()}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	require.Contains(t, errResp.Error.Message, "agentId")
+	require.NotContains(t, errResp.Error.Message, "defaultAgent")
 }
 
 // TestSetDefaultAgent_SoftDeletedAgentRejected is review round 1 finding #7:

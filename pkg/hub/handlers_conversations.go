@@ -662,14 +662,13 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 	var agent *store.Agent
 	if conv.ProjectID != nil {
 		var vErr error
-		agent, vErr = s.validateDefaultAgent(ctx, *conv.ProjectID, req.AgentID)
+		// Review round 4 finding #1: validateDefaultAgent now takes the
+		// field name to echo in its own message directly, instead of a
+		// caller-side strings.Replace of its "defaultAgent" wording —
+		// this endpoint's own request field is "agentId".
+		agent, vErr = s.validateDefaultAgent(ctx, *conv.ProjectID, req.AgentID, "agentId")
 		if vErr != nil {
-			// Review round 3 finding #4: keep validateDefaultAgent's own
-			// message (including the "identifier is too long" case) —
-			// only the field name changes, from its internal "defaultAgent"
-			// wording (correct for the topic PATCH/create callers) to
-			// "agentId" (this endpoint's own request field).
-			ValidationError(w, strings.Replace(vErr.Error(), "defaultAgent", "agentId", 1), nil)
+			ValidationError(w, vErr.Error(), nil)
 			return
 		}
 	} else {

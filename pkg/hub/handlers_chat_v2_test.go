@@ -4085,7 +4085,7 @@ func TestDEF31_Rebinding_AfterSoftDelete(t *testing.T) {
 	// The validateDefaultAgent helper (called from ingress) would reject this,
 	// but we're testing the resolver's defence too. Call validateDefaultAgent
 	// directly to confirm.
-	if _, vErr := f.srv.validateDefaultAgent(ctx, f.projA.ID, liveAgent.ID); vErr == nil {
+	if _, vErr := f.srv.validateDefaultAgent(ctx, f.projA.ID, liveAgent.ID, "defaultAgent"); vErr == nil {
 		t.Error("validateDefaultAgent should reject a soft-deleted agent, but returned nil")
 	}
 }
@@ -4190,7 +4190,7 @@ func TestDEF31_MutationTest_LookupScoping(t *testing.T) {
 		// validateDefaultAgent uses the same two-step lookup as the resolver.
 		// Without the projectID guard, this would return nil (agent found by
 		// GetAgent, no project filter).
-		_, err := f.srv.validateDefaultAgent(ctx, f.projA.ID, f.agentB.ID)
+		_, err := f.srv.validateDefaultAgent(ctx, f.projA.ID, f.agentB.ID, "defaultAgent")
 		if err == nil {
 			t.Fatal("MUTATION DETECTED: validateDefaultAgent accepted a foreign-project " +
 				"agent UUID. The project-scoping guard in the GetAgent fallback has been " +
@@ -4206,7 +4206,7 @@ func TestDEF31_MutationTest_LookupScoping(t *testing.T) {
 	t.Run("soft_deleted_guard", func(t *testing.T) {
 		// Without the DeletedAt guard, this would return nil (agent found by
 		// GetAgent, no deletion filter).
-		_, err := f.srv.validateDefaultAgent(ctx, f.projA.ID, f.deletedA.ID)
+		_, err := f.srv.validateDefaultAgent(ctx, f.projA.ID, f.deletedA.ID, "defaultAgent")
 		if err == nil {
 			t.Fatal("MUTATION DETECTED: validateDefaultAgent accepted a soft-deleted " +
 				"agent UUID. The DeletedAt guard in the GetAgent fallback has been " +
@@ -4220,7 +4220,7 @@ func TestDEF31_MutationTest_LookupScoping(t *testing.T) {
 
 	t.Run("valid_agent_still_accepted", func(t *testing.T) {
 		// Sanity check: the guards must not reject a valid same-project agent.
-		_, err := f.srv.validateDefaultAgent(ctx, f.projA.ID, f.agentA.ID)
+		_, err := f.srv.validateDefaultAgent(ctx, f.projA.ID, f.agentA.ID, "defaultAgent")
 		if err != nil {
 			t.Fatalf("validateDefaultAgent rejected a valid same-project agent: %v", err)
 		}
