@@ -633,10 +633,12 @@ type V1TransportConfig struct {
 
 // V1ProxyConfig holds proxy authentication settings (consulted when auth.mode == "proxy").
 type V1ProxyConfig struct {
-	// Provider selects the proxy auth provider: "iap" or "header".
+	// Provider selects the proxy auth provider: "iap", "jwt", or "header".
 	Provider string `json:"provider,omitempty" yaml:"provider,omitempty" koanf:"provider"`
 	// IAP holds Google IAP-specific settings.
 	IAP *V1IAPConfig `json:"iap,omitempty" yaml:"iap,omitempty" koanf:"iap"`
+	// JWT holds settings for the generic JWT proxy auth provider.
+	JWT *V1JWTAuthConfig `json:"jwt,omitempty" yaml:"jwt,omitempty" koanf:"jwt"`
 	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
 	RequireTrustedProxyIP bool `json:"require_trusted_proxy_ip,omitempty" yaml:"require_trusted_proxy_ip,omitempty" koanf:"require_trusted_proxy_ip"`
 }
@@ -649,6 +651,28 @@ type V1IAPConfig struct {
 	Issuer string `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
 	// JWKSURL overrides the default IAP JWKS URL (for testing).
 	JWKSURL string `json:"jwks_url,omitempty" yaml:"jwks_url,omitempty" koanf:"jwks_url"`
+}
+
+// V1JWTAuthConfig holds settings for the generic JWT proxy auth provider
+// (V1/snake_case settings.yaml equivalent of JWTAuthConfig).
+type V1JWTAuthConfig struct {
+	Header        string             `json:"header,omitempty" yaml:"header,omitempty" koanf:"header"`
+	Algorithm     string             `json:"algorithm,omitempty" yaml:"algorithm,omitempty" koanf:"algorithm"`
+	Issuer        string             `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
+	Audience      string             `json:"audience,omitempty" yaml:"audience,omitempty" koanf:"audience"`
+	JWKSURL       string             `json:"jwks_url,omitempty" yaml:"jwks_url,omitempty" koanf:"jwks_url"`
+	JWKSFile      string             `json:"jwks_file,omitempty" yaml:"jwks_file,omitempty" koanf:"jwks_file"`
+	PublicKeyFile string             `json:"public_key_file,omitempty" yaml:"public_key_file,omitempty" koanf:"public_key_file"`
+	Claims        *V1JWTClaimsConfig `json:"claims,omitempty" yaml:"claims,omitempty" koanf:"claims"`
+}
+
+// V1JWTClaimsConfig maps JWT claim names to identity fields (V1/snake_case
+// settings.yaml equivalent of JWTClaimsConfig).
+type V1JWTClaimsConfig struct {
+	Email       string `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
+	Subject     string `json:"subject,omitempty" yaml:"subject,omitempty" koanf:"subject"`
+	DisplayName string `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
+	Domain      string `json:"domain,omitempty" yaml:"domain,omitempty" koanf:"domain"`
 }
 
 // V1OAuthConfig holds OAuth provider configurations.
@@ -1348,9 +1372,11 @@ var knownCompoundFields = []string{
 	"authorized_domains",
 	"platform_auth_sa",
 	"interval_seconds",
+	"public_key_file",
 	"max_concurrency",
 	"oidc_audience",
 	"jwks_url",
+	"jwks_file",
 	"broker_nickname",
 	"allowed_origins",
 	"allowed_methods",
@@ -1361,6 +1387,7 @@ var knownCompoundFields = []string{
 	"client_secret",
 	"write_timeout",
 	"read_timeout",
+	"display_name",
 	"broker_token",
 	"admin_emails",
 	"hub_endpoint",
@@ -1443,8 +1470,8 @@ func mapEnvKeyRecursive(key string) string {
 func isSectionName(name string) bool {
 	switch name {
 	case "hub", "broker", "database", "auth", "oauth", "storage", "secrets", "cors",
-		"web", "cli", "device", "google", "github", "proxy", "iap", "transport",
-		"scheduler":
+		"web", "cli", "device", "google", "github", "proxy", "iap", "jwt", "claims",
+		"transport", "scheduler":
 		return true
 	}
 	return false
@@ -1742,6 +1769,25 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 					JWKSURL:  v1.Auth.Proxy.IAP.JWKSURL,
 				}
 			}
+			if v1.Auth.Proxy.JWT != nil {
+				gc.Auth.Proxy.JWT = &JWTAuthConfig{
+					Header:        v1.Auth.Proxy.JWT.Header,
+					Algorithm:     v1.Auth.Proxy.JWT.Algorithm,
+					Issuer:        v1.Auth.Proxy.JWT.Issuer,
+					Audience:      v1.Auth.Proxy.JWT.Audience,
+					JWKSURL:       v1.Auth.Proxy.JWT.JWKSURL,
+					JWKSFile:      v1.Auth.Proxy.JWT.JWKSFile,
+					PublicKeyFile: v1.Auth.Proxy.JWT.PublicKeyFile,
+				}
+				if v1.Auth.Proxy.JWT.Claims != nil {
+					gc.Auth.Proxy.JWT.Claims = &JWTClaimsConfig{
+						Email:       v1.Auth.Proxy.JWT.Claims.Email,
+						Subject:     v1.Auth.Proxy.JWT.Claims.Subject,
+						DisplayName: v1.Auth.Proxy.JWT.Claims.DisplayName,
+						Domain:      v1.Auth.Proxy.JWT.Claims.Domain,
+					}
+				}
+			}
 		}
 		if v1.Auth.Transport != nil {
 			gc.Auth.Transport = &TransportAuthConfig{
@@ -1995,6 +2041,25 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 				Audience: gc.Auth.Proxy.IAP.Audience,
 				Issuer:   gc.Auth.Proxy.IAP.Issuer,
 				JWKSURL:  gc.Auth.Proxy.IAP.JWKSURL,
+			}
+		}
+		if gc.Auth.Proxy.JWT != nil {
+			v1.Auth.Proxy.JWT = &V1JWTAuthConfig{
+				Header:        gc.Auth.Proxy.JWT.Header,
+				Algorithm:     gc.Auth.Proxy.JWT.Algorithm,
+				Issuer:        gc.Auth.Proxy.JWT.Issuer,
+				Audience:      gc.Auth.Proxy.JWT.Audience,
+				JWKSURL:       gc.Auth.Proxy.JWT.JWKSURL,
+				JWKSFile:      gc.Auth.Proxy.JWT.JWKSFile,
+				PublicKeyFile: gc.Auth.Proxy.JWT.PublicKeyFile,
+			}
+			if gc.Auth.Proxy.JWT.Claims != nil {
+				v1.Auth.Proxy.JWT.Claims = &V1JWTClaimsConfig{
+					Email:       gc.Auth.Proxy.JWT.Claims.Email,
+					Subject:     gc.Auth.Proxy.JWT.Claims.Subject,
+					DisplayName: gc.Auth.Proxy.JWT.Claims.DisplayName,
+					Domain:      gc.Auth.Proxy.JWT.Claims.Domain,
+				}
 			}
 		}
 	}

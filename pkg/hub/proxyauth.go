@@ -15,11 +15,14 @@
 package hub
 
 import (
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -373,4 +376,305 @@ func (c *jwksCache) refresh() error {
 
 	slog.Debug("jwks cache refreshed", "url", c.url, "keyCount", len(newKeys))
 	return nil
+}
+
+// ---- Generic JWT Proxy Authenticator ----
+
+const (
+	// DefaultJWTHeader is the default HTTP header carrying the JWT assertion
+	// for the generic JWT proxy auth provider.
+	DefaultJWTHeader = "X-Auth-Proxy-JWT"
+
+	// Default claim names used to populate JWTClaimMapping when a field is
+	// left empty. These match standard OIDC claim names.
+	DefaultJWTClaimEmail       = "email"
+	DefaultJWTClaimSubject     = "sub"
+	DefaultJWTClaimDisplayName = "name"
+	DefaultJWTClaimDomain      = "hd"
+
+	// jwtClockSkew is the allowed clock skew for exp/iat validation, matching
+	// IAP's tolerance.
+	jwtClockSkew = 30 * time.Second
+)
+
+// asymmetricJWTAlgorithms is the set of signing algorithms accepted by the
+// generic JWT proxy auth provider. Symmetric (HMAC) algorithms are
+// deliberately excluded: allowing them alongside asymmetric algorithms opens
+// the door to algorithm-confusion attacks where a known public key is reused
+// as an HMAC secret.
+var asymmetricJWTAlgorithms = map[jose.SignatureAlgorithm]bool{
+	jose.RS256: true,
+	jose.RS384: true,
+	jose.RS512: true,
+	jose.ES256: true,
+	jose.ES384: true,
+	jose.ES512: true,
+	jose.PS256: true,
+	jose.PS384: true,
+	jose.PS512: true,
+}
+
+// IsAsymmetricJWTAlgorithm reports whether alg names one of the asymmetric
+// signing algorithms supported by the JWT proxy auth provider.
+func IsAsymmetricJWTAlgorithm(alg string) bool {
+	return asymmetricJWTAlgorithms[jose.SignatureAlgorithm(alg)]
+}
+
+// JWTClaimMapping configures which JWT claim names map to identity fields.
+// Empty fields fall back to OIDC-standard claim names via resolve().
+type JWTClaimMapping struct {
+	Email       string
+	Subject     string
+	DisplayName string
+	Domain      string
+}
+
+// resolve returns a copy of m with OIDC-standard defaults filled in for any
+// empty field.
+func (m JWTClaimMapping) resolve() JWTClaimMapping {
+	if m.Email == "" {
+		m.Email = DefaultJWTClaimEmail
+	}
+	if m.Subject == "" {
+		m.Subject = DefaultJWTClaimSubject
+	}
+	if m.DisplayName == "" {
+		m.DisplayName = DefaultJWTClaimDisplayName
+	}
+	if m.Domain == "" {
+		m.Domain = DefaultJWTClaimDomain
+	}
+	return m
+}
+
+// jwtKeySource abstracts key retrieval for the generic JWT proxy auth
+// provider. Phase 1 implements only staticKeySource (the `public_key_file`
+// key source); Phase 2 adds JWKS URL/file backed sources that resolve keys by
+// kid, reusing jwksCache for the URL case.
+type jwtKeySource interface {
+	// GetKey returns the public key used to verify a JWT's signature. Static
+	// sources ignore kid and always return their single configured key.
+	GetKey(kid string) (interface{}, error)
+}
+
+// staticKeySource is a jwtKeySource backed by a single PEM-encoded public key
+// loaded from disk at construction time. It backs the `public_key_file` key
+// source and returns the same key regardless of kid.
+type staticKeySource struct {
+	key interface{}
+}
+
+// NewStaticJWTKeySource loads a PEM-encoded public key (PKIX "PUBLIC KEY", or
+// legacy PKCS1 "RSA PUBLIC KEY") from path. The key is parsed eagerly —
+// intended to be called during server startup — so a missing file or
+// malformed key is reported at construction time rather than on the first
+// incoming request.
+func NewStaticJWTKeySource(path string) (jwtKeySource, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read public key file %q: %w", path, err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("no PEM block found in %q", path)
+	}
+	key, err := parseJWTPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse public key in %q: %w", path, err)
+	}
+	return &staticKeySource{key: key}, nil
+}
+
+// parseJWTPublicKey parses a DER-encoded public key, trying the standard PKIX
+// (SubjectPublicKeyInfo) form first — what `openssl ... -pubout` produces —
+// then falling back to the legacy RSA-only PKCS1 form, and finally to an
+// X.509 certificate (in which case the certificate's public key is used).
+// The certificate fallback lets operators point publicKeyFile at a cert file
+// they already have on hand instead of extracting the raw public key.
+func parseJWTPublicKey(der []byte) (interface{}, error) {
+	if key, err := x509.ParsePKIXPublicKey(der); err == nil {
+		return key, nil
+	}
+	if key, err := x509.ParsePKCS1PublicKey(der); err == nil {
+		return key, nil
+	}
+	if cert, err := x509.ParseCertificate(der); err == nil {
+		return cert.PublicKey, nil
+	}
+	return nil, fmt.Errorf("unsupported public key encoding (expected PKIX, PKCS1, or Certificate)")
+}
+
+// GetKey implements jwtKeySource. kid is ignored: a static key source has
+// exactly one key and applies it to every token regardless of kid.
+func (s *staticKeySource) GetKey(kid string) (interface{}, error) {
+	return s.key, nil
+}
+
+// JWTProxyAuthenticator verifies JWTs from a custom auth proxy. Implements
+// ProxyAuthenticator. Unlike IAPAuthenticator (hardcoded to Google's
+// header/issuer/JWKS/claim-prefix conventions), JWTProxyAuthenticator is
+// fully configurable so operators running bespoke auth proxies can plug in
+// their own JWT contract.
+type JWTProxyAuthenticator struct {
+	// Header is the HTTP header containing the JWT assertion. Defaults to
+	// DefaultJWTHeader ("X-Auth-Proxy-JWT") when empty.
+	Header string
+
+	// Algorithm is the required JWT signing algorithm — MANDATORY, and must
+	// be one of the asymmetric algorithms accepted by IsAsymmetricJWTAlgorithm.
+	// This is the single algorithm passed to jwt.ParseSigned; a JWT signed
+	// with any other algorithm is rejected.
+	Algorithm string
+
+	// Issuer, if set, is validated against the JWT "iss" claim. Empty skips
+	// issuer validation.
+	Issuer string
+
+	// Audience, if set, is validated against the JWT "aud" claim. Empty skips
+	// audience validation.
+	Audience string
+
+	// Claims configures which JWT claim names map to identity fields. Empty
+	// fields fall back to OIDC-standard defaults (email/sub/name/hd).
+	Claims JWTClaimMapping
+
+	// KeySource resolves the public key used to verify JWT signatures.
+	// MANDATORY. Construct via NewStaticJWTKeySource (Phase 1's only key
+	// source) and set it eagerly at startup so a misconfigured or missing key
+	// file is reported before the first request rather than on it.
+	KeySource jwtKeySource
+}
+
+// Name returns "jwt" for logging/metrics.
+func (a *JWTProxyAuthenticator) Name() string { return "jwt" }
+
+// Authenticate reads the configured JWT assertion header, verifies the JWT,
+// and returns the verified ProxyUserInfo. Returns (nil, nil) if no assertion
+// is present (fall through); (nil, err) if an assertion is present but
+// invalid (reject).
+func (a *JWTProxyAuthenticator) Authenticate(r *http.Request) (*ProxyUserInfo, error) {
+	header := a.Header
+	if header == "" {
+		header = DefaultJWTHeader
+	}
+
+	assertion := r.Header.Get(header)
+	if assertion == "" {
+		return nil, nil // no assertion present, fall through
+	}
+
+	if a.Algorithm == "" {
+		return nil, fmt.Errorf("jwt: no algorithm configured")
+	}
+	if a.KeySource == nil {
+		return nil, fmt.Errorf("jwt: no key source configured")
+	}
+
+	// Parse the JWT (compact serialization), constraining to the single
+	// configured algorithm.
+	tok, err := jwt.ParseSigned(assertion, []jose.SignatureAlgorithm{jose.SignatureAlgorithm(a.Algorithm)})
+	if err != nil {
+		return nil, fmt.Errorf("jwt: failed to parse JWT: %w", err)
+	}
+	if len(tok.Headers) == 0 {
+		return nil, fmt.Errorf("jwt: JWT has no headers")
+	}
+	kid := tok.Headers[0].KeyID
+
+	key, err := a.KeySource.GetKey(kid)
+	if err != nil {
+		return nil, fmt.Errorf("jwt: key lookup failed for kid %q: %w", kid, err)
+	}
+
+	// Verify signature and decode claims into a generic map so that
+	// operator-configured claim names can be looked up dynamically.
+	var rawClaims map[string]interface{}
+	if err := tok.Claims(key, &rawClaims); err != nil {
+		return nil, fmt.Errorf("jwt: signature verification failed: %w", err)
+	}
+
+	if err := a.validateStandardClaims(rawClaims, time.Now()); err != nil {
+		return nil, err
+	}
+
+	claims := a.Claims.resolve()
+
+	email, _ := rawClaims[claims.Email].(string)
+	if email == "" {
+		return nil, fmt.Errorf("jwt: missing required claim %q", claims.Email)
+	}
+	subject, _ := rawClaims[claims.Subject].(string)
+	if subject == "" {
+		subject = email // sub is optional; falls back to email
+	}
+	displayName, _ := rawClaims[claims.DisplayName].(string)
+	domain, _ := rawClaims[claims.Domain].(string)
+
+	return &ProxyUserInfo{
+		Subject:     subject,
+		Email:       strings.ToLower(email),
+		DisplayName: displayName,
+		Domain:      domain,
+	}, nil
+}
+
+// validateStandardClaims validates iss/aud (only when configured) and exp/iat
+// (always required) from the raw claim map, applying jwtClockSkew tolerance —
+// matching IAP's expiry/issued-at validation behavior.
+func (a *JWTProxyAuthenticator) validateStandardClaims(claims map[string]interface{}, now time.Time) error {
+	if a.Issuer != "" {
+		iss, _ := claims["iss"].(string)
+		if iss != a.Issuer {
+			return fmt.Errorf("jwt: invalid issuer %q, expected %q", iss, a.Issuer)
+		}
+	}
+
+	if a.Audience != "" {
+		if !jwtAudienceContains(claims["aud"], a.Audience) {
+			return fmt.Errorf("jwt: audience mismatch: got %v, expected %q", claims["aud"], a.Audience)
+		}
+	}
+
+	exp, ok := jwtNumericDate(claims["exp"])
+	if !ok {
+		return fmt.Errorf("jwt: missing exp claim")
+	}
+	if now.After(exp.Add(jwtClockSkew)) {
+		return fmt.Errorf("jwt: token expired at %v", exp)
+	}
+
+	if iat, ok := jwtNumericDate(claims["iat"]); ok {
+		if iat.After(now.Add(jwtClockSkew)) {
+			return fmt.Errorf("jwt: token issued in the future: iat=%v", iat)
+		}
+	}
+
+	return nil
+}
+
+// jwtNumericDate converts a decoded JSON claim value into a time.Time,
+// interpreting it as a Unix timestamp in seconds. JSON numbers unmarshaled
+// into map[string]interface{} decode as float64.
+func jwtNumericDate(v interface{}) (time.Time, bool) {
+	n, ok := v.(float64)
+	if !ok {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(n), 0), true
+}
+
+// jwtAudienceContains reports whether the "aud" claim — a string or array of
+// strings per the JWT spec — contains want.
+func jwtAudienceContains(v interface{}, want string) bool {
+	switch aud := v.(type) {
+	case string:
+		return aud == want
+	case []interface{}:
+		for _, e := range aud {
+			if s, ok := e.(string); ok && s == want {
+				return true
+			}
+		}
+	}
+	return false
 }

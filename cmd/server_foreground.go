@@ -1573,6 +1573,59 @@ func parseBoolEnv(key string) bool {
 	return false
 }
 
+// newJWTProxyAuthenticator builds a hub.JWTProxyAuthenticator from
+// auth.proxy.jwt config, shared by the hub and web server init paths so both
+// authenticate identically (mirrors the IAP construction pattern).
+//
+// Validation happens eagerly here — at server startup — rather than being
+// deferred to the first request, so a misconfigured algorithm, missing key
+// source, or unreadable key file is reported immediately (load-bearing
+// decision from the design doc).
+func newJWTProxyAuthenticator(jwtCfg *config.JWTAuthConfig) (*hub.JWTProxyAuthenticator, error) {
+	if jwtCfg == nil {
+		return nil, fmt.Errorf("auth.proxy.jwt config required when provider=jwt")
+	}
+	if jwtCfg.Algorithm == "" {
+		return nil, fmt.Errorf("auth.proxy.jwt.algorithm is required")
+	}
+	if !hub.IsAsymmetricJWTAlgorithm(jwtCfg.Algorithm) {
+		return nil, fmt.Errorf("auth.proxy.jwt.algorithm %q is not a supported asymmetric algorithm (expected one of RS256, RS384, RS512, ES256, ES384, ES512, PS256, PS384, PS512)", jwtCfg.Algorithm)
+	}
+
+	// Phase 1 supports only the public_key_file key source; jwks_url and
+	// jwks_file are reserved for Phase 2.
+	if jwtCfg.JWKSURL != "" || jwtCfg.JWKSFile != "" {
+		return nil, fmt.Errorf("auth.proxy.jwt: jwks_url and jwks_file key sources are not yet supported; use publicKeyFile")
+	}
+	if jwtCfg.PublicKeyFile == "" {
+		return nil, fmt.Errorf("auth.proxy.jwt.publicKeyFile is required (exactly one key source must be configured)")
+	}
+
+	keySource, err := hub.NewStaticJWTKeySource(jwtCfg.PublicKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("auth.proxy.jwt.publicKeyFile: %w", err)
+	}
+
+	claims := hub.JWTClaimMapping{}
+	if jwtCfg.Claims != nil {
+		claims = hub.JWTClaimMapping{
+			Email:       jwtCfg.Claims.Email,
+			Subject:     jwtCfg.Claims.Subject,
+			DisplayName: jwtCfg.Claims.DisplayName,
+			Domain:      jwtCfg.Claims.Domain,
+		}
+	}
+
+	return &hub.JWTProxyAuthenticator{
+		Header:    jwtCfg.Header,
+		Algorithm: jwtCfg.Algorithm,
+		Issuer:    jwtCfg.Issuer,
+		Audience:  jwtCfg.Audience,
+		Claims:    claims,
+		KeySource: keySource,
+	}, nil
+}
+
 // initHubServer creates and configures the Hub server.
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := hub.ServerConfig{
@@ -1715,6 +1768,13 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 				JWKSURL:  cfg.Auth.Proxy.IAP.JWKSURL,
 			}
 			log.Printf("Proxy auth configured: provider=iap, audience=%s", cfg.Auth.Proxy.IAP.Audience)
+		case "jwt":
+			jwtAuth, err := newJWTProxyAuthenticator(cfg.Auth.Proxy.JWT)
+			if err != nil {
+				return nil, err
+			}
+			hubCfg.ProxyAuth = jwtAuth
+			log.Printf("Proxy auth configured: provider=jwt, algorithm=%s", cfg.Auth.Proxy.JWT.Algorithm)
 		case "header":
 			// TODO: HeaderProxyAuthenticator (refactor of extractProxyUser)
 			log.Printf("Proxy auth configured: provider=header (legacy IP-trust mode)")
@@ -2287,6 +2347,12 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 				Issuer:   cfg.Auth.Proxy.IAP.Issuer,
 				JWKSURL:  cfg.Auth.Proxy.IAP.JWKSURL,
 			}
+		case "jwt":
+			jwtAuth, err := newJWTProxyAuthenticator(cfg.Auth.Proxy.JWT)
+			if err != nil {
+				return nil, err
+			}
+			webProxyAuth = jwtAuth
 		default:
 			return nil, fmt.Errorf("unsupported auth.proxy.provider: %q", cfg.Auth.Proxy.Provider)
 		}
