@@ -256,7 +256,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     info "Non-interactive mode: proceeding with teardown."
   else
     read -rp "Continue? [y/N]: " CONFIRM
-    if [[ "${CONFIRM,,}" != "y" ]]; then
+    if [[ "$(echo "$CONFIRM" | tr '[:upper:]' '[:lower:]')" != "y" ]]; then
       echo "Aborted."
       exit 0
     fi
@@ -740,7 +740,7 @@ else
       echo "  Could not read metadata for organization ${ORG_ID} (likely a permissions gap); skipping cross-org IAP check."
     else
       DEPLOYER_DOMAIN="${ACCOUNT##*@}"
-      if [[ "${ORG_DOMAIN,,}" != "${DEPLOYER_DOMAIN,,}" ]]; then
+      if [[ "$(echo "$ORG_DOMAIN" | tr '[:upper:]' '[:lower:]')" != "$(echo "$DEPLOYER_DOMAIN" | tr '[:upper:]' '[:lower:]')" ]]; then
         warn "Deployer account (${ACCOUNT}) does not appear to belong to project ${PROJECT_ID}'s organization (${ORG_DOMAIN})."
         warn "Cross-org IAP typically requires a custom OAuth consent screen / OAuth client -- the default consent screen will block authentication."
         warn "(This can also be a false positive if the deployer is on a secondary or alias domain of the same organization.)"
@@ -881,6 +881,7 @@ fi
 info "Waiting for SSH access to VM..."
 SSH_READY=false
 SSH_STDERR_FILE="$(mktemp)"
+trap 'rm -f "$SSH_STDERR_FILE"' EXIT
 for attempt in $(seq 1 "$SSH_MAX_ATTEMPTS"); do
   if gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
@@ -1189,44 +1190,47 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
         # fails partway, no marker should be left claiming a stale version
         # is built (Step 5 below only writes it back on full success).
         sudo rm -f '${IMAGES_BUILT_MARKER}'
-        { nohup bash -c '
-          set -euo pipefail
-          # Step 1: Build core-base
-          echo \"=== Building core-base ===\"
-          sudo bash image-build/scripts/build-images.sh \
-            --builder local-docker \
-            --target core-base \
-            --tag latest
+        nohup bash -c '
+          {
+            set -euo pipefail
+            # Step 1: Build core-base
+            echo \"=== Building core-base ===\"
+            sudo bash image-build/scripts/build-images.sh \
+              --builder local-docker \
+              --target core-base \
+              --tag latest
 
-          # Step 2: Build scion-base
-          echo \"=== Building scion-base ===\"
-          sudo bash image-build/scripts/build-images.sh \
-            --builder local-docker \
-            --target scion-base \
-            --tag latest
+            # Step 2: Build scion-base
+            echo \"=== Building scion-base ===\"
+            sudo bash image-build/scripts/build-images.sh \
+              --builder local-docker \
+              --target scion-base \
+              --tag latest
 
-          # Step 3: Build antigravity harness directly
-          echo \"=== Building scion-antigravity ===\"
-          sudo docker build \
-            -t scion-antigravity:latest \
-            --build-arg BASE_IMAGE=scion-base:latest \
-            -f harnesses/antigravity/Dockerfile \
-            harnesses/antigravity/
+            # Step 3: Build antigravity harness directly
+            echo \"=== Building scion-antigravity ===\"
+            sudo docker build \
+              -t scion-antigravity:latest \
+              --build-arg BASE_IMAGE=scion-base:latest \
+              -f harnesses/antigravity/Dockerfile \
+              harnesses/antigravity/
 
-          # Step 4: Tag images under localhost/scion for the runtime
-          echo \"=== Tagging images for localhost/scion registry ===\"
-          sudo docker tag core-base:latest localhost/scion/core-base:latest
-          sudo docker tag scion-base:latest localhost/scion/scion-base:latest
-          sudo docker tag scion-antigravity:latest localhost/scion/scion-antigravity:latest
+            # Step 4: Tag images under localhost/scion for the runtime
+            echo \"=== Tagging images for localhost/scion registry ===\"
+            sudo docker tag core-base:latest localhost/scion/core-base:latest
+            sudo docker tag scion-base:latest localhost/scion/scion-base:latest
+            sudo docker tag scion-antigravity:latest localhost/scion/scion-antigravity:latest
 
-          # Step 5: Record the version marker so re-runs can skip the build.
-          # Written last, only on full success (set -e above aborts before
-          # this line if any prior step failed).
-          echo \"=== Recording image build marker (version ${VERSION}) ===\"
-          echo '${VERSION}' | sudo tee '${IMAGES_BUILT_MARKER}' > /dev/null
+            # Step 5: Record the version marker so re-runs can skip the build.
+            # Written last, only on full success (set -e above aborts before
+            # this line if any prior step failed).
+            echo \"=== Recording image build marker (version ${VERSION}) ===\"
+            echo '${VERSION}' | sudo tee '${IMAGES_BUILT_MARKER}' > /dev/null
 
-          echo \"=== All images built and tagged successfully ===\"
-        ' > /tmp/scion-image-build.log 2>&1; echo \$? > /tmp/scion-image-build.exit; } >/dev/null 2>&1 </dev/null &
+            echo \"=== All images built and tagged successfully ===\"
+          } > /tmp/scion-image-build.log 2>&1
+          echo \$? > /tmp/scion-image-build.exit
+        ' >/dev/null 2>&1 </dev/null &
         echo \$! > /tmp/scion-image-build.pid
         echo \"Image build started in background (PID \$(cat /tmp/scion-image-build.pid))\"
       "

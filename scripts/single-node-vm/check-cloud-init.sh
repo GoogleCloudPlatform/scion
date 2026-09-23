@@ -82,10 +82,10 @@ with open(sys.argv[2], 'w') as out:
             out.write(item.rstrip('\n') + '\n')
         else:
             # cloud-init also allows list-of-args runcmd entries (argv form,
-            # run without a shell) -- shlex.join matches that argv-quoting
-            # semantics more closely than a plain ' '.join. Dead code today:
-            # every entry in this file is a string.
-            out.write(shlex.join(str(x) for x in item) + '\n')
+            # run without a shell) -- shlex.quote each element to match
+            # argv-quoting semantics. Dead code today: every entry in this
+            # file is a string.
+            out.write(' '.join(shlex.quote(str(x)) for x in item) + '\n')
 " "$CLOUD_INIT_FILE" "$RUNCMD_SCRIPT"
 
 echo "Extracted runcmd body from ${CLOUD_INIT_FILE}:"
