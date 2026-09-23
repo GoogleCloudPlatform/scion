@@ -40,9 +40,10 @@ import (
 // production caller, pkg/agent.resolveSharedDirs, which package boundaries
 // prevent (pkg/runtime cannot import pkg/agent). The production wiring
 // itself is pinned by the pkg/agent run.go-level tests
-// (TestStartPropagatesSharedDirStorageToKubernetesRunConfig and siblings)
-// and by TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs, which
-// calls resolveSharedDirs end to end from the agent side.
+// (TestStartSharedDirStorage_GlobalWinsOverProjectLevel and siblings in
+// run_shared_dir_storage_test.go) and by
+// TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs, which calls
+// resolveSharedDirs end to end from the agent side.
 func TestSharedDirStorage_DockerAndK8s_SameLayout(t *testing.T) {
 	sdCfg := &config.V1SharedDirStorageConfig{
 		Backend: "nfs",

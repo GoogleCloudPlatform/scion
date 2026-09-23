@@ -270,3 +270,147 @@ exposure, explicitly called out as a separate follow-up, not touched here).
   ok  github.com/GoogleCloudPlatform/scion/pkg/agent/state          0.0s
   ```
 - `gofmt -l pkg/agent pkg/config pkg/runtime` — clean.
+
+---
+
+## Round 2 review fixes (PR #1779 @f75607b2 → this round)
+
+hy-em's round 2 dispositions (`reviews/r2-dispositions.md`, from `r2-code.md`,
+`r2-test.md`, `r2-security.md`) marked 9 items FIX, 1 DECLINED, 2 NOTED.
+Headline: round 1's AC5 fix (`LoadEffectiveSettings("")`) was **not**
+global-only — an empty path resolves a project from the process's current
+working directory (`FindProjectRoot`) and merges it on top of global — and a
+new HIGH security finding showed shared-dir names and the project ID were
+never validated in the nfs branch, allowing cross-project traversal inside
+the shared export. All FIX items are addressed below; none conflicted with
+the design.
+
+1. **AC5 still CWD-dependent (C1/T1/S-F2, High).** Added
+   `config.LoadGlobalSettings()` (`pkg/config/settings_v1.go`): resolves
+   `config.GetGlobalDir()` explicitly and calls
+   `LoadEffectiveSettings(globalDir)`, so the project-layer steps in
+   `LoadVersionedSettings` are skipped (`projectPath == globalDir`) —
+   regardless of the caller's CWD. `pkg/agent/run.go` now calls this helper
+   instead of `LoadEffectiveSettings("")`. Updated the doc comments on
+   `V1SharedDirStorageConfig` and in run.go, which previously described the
+   old (broken) call as "global-only". The test fixture
+   (`newSharedDirStorageRunFixture`) now `chdir`s into the **project**
+   directory (not `$HOME`) by default, so every test built on it exercises
+   the realistic CWD; verified by hand that `TestStartSharedDirStorage_
+   ProjectLevelOnly_Ignored` fails against the old
+   `LoadEffectiveSettings("")` call and passes with the fix.
+2. **HIGH security — shared-dir name / project-ID traversal (S-F1).** In the
+   nfs branch of `resolveSharedDirs`, before `Resolve`: `api.ValidateSharedDirs(dirs)`
+   (names must be plain slugs — no `.`/`/`) and a new `validSharedDirProjectID`
+   check (rejects empty, `.`, `..`, or any `/`/`\`). Added a confinement
+   check after `Resolve`: every shared dir's `HostPath` parent must equal
+   `<HostBase>/<subpath_root>/<projectID>/shared-dirs` exactly (defense in
+   depth; also protects the K8s subPath, since it comes from the same
+   `Resolve` output). Tests: `TestResolveSharedDirs_NFS_PoC_
+   TraversalNamesAndProjectID` for all three published PoC inputs (`../../../projects`,
+   `../../victim/shared-dirs/scratchpad`, project ID `../victim`), each on
+   both `docker` and `kubernetes` runtime names — error returned, nothing
+   created; plus `TestValidSharedDirProjectID_RejectsTraversal`.
+3. **Project ID source in nfs mode (S-F4).** Before changing this, per the
+   disposition's stop-and-report condition, I confirmed the hub→broker
+   dispatch path: `pkg/hub/httpdispatcher.go` `DispatchAgentStart` (lines
+   ~2049-2054) and `DispatchAgentRestart` (~2317-2327, explicitly commented
+   "Identity vars at highest precedence") both set
+   `resolvedEnv["SCION_PROJECT_ID"]`/`SCION_GROVE_ID` unconditionally, after
+   merging `agent.AppliedConfig.Env` (user-supplied), `envFromStorage`, and
+   `resolvedSecrets` — so user-supplied env cannot override the
+   hub-authoritative project ID. This holds, so I proceeded (no stop/report
+   needed). `run.go`'s nfs branch now sources the project ID for
+   `resolveSharedDirs` from `opts.Env["SCION_PROJECT_ID"]`/`SCION_GROVE_ID`
+   only, not from the general `projectID` variable (which still falls back
+   to `settings.Hub.ProjectID` / the project-id file, and is unchanged for
+   everything else — labels, `RunConfig.ProjectID`, etc.). Test:
+   `TestStartSharedDirStorageNFS_ProjectSettingsProjectID_Ignored` — a
+   project-level `hub.project_id` with no env project ID still errors "hub
+   project ID"; verified by hand that it fails without the fix.
+4. **Symlink confinement (S-F3).** After `MkdirAll`, `resolveSharedDirs` now
+   requires `filepath.EvalSymlinks(sd.HostPath)` to equal the expected path
+   under `filepath.EvalSymlinks(res.HostBase)`, before any chmod and before
+   the path is returned as a mount source. Tests:
+   `TestResolveSharedDirs_NFS_SymlinkedLeaf_FailsClosed` (pre-existing
+   symlinked leaf pointing outside the export; chmod never runs) and
+   `..._SymlinkedIntermediate_FailsClosed` (the project directory itself is
+   a symlink outside the export — `MkdirAll` following the symlink to
+   create the leaf underneath it is a known, accepted limitation per the
+   disposition's "after MkdirAll" framing; what matters is that chmod and a
+   successful return never happen).
+5. **Global-settings load error fails open (C3/T5).** `run.go` now returns
+   the error (`"loading global settings for server.shared_dir_storage: %w"`)
+   when `config.LoadGlobalSettings()` fails and there are shared dirs to
+   mount, instead of logging at Debug and silently falling back to the local
+   layout. Test: `TestStartSharedDirStorage_MalformedGlobalSettings_FailsClosed`
+   (malformed global settings.yaml) — Start errors, Run is never called.
+6. **AC3 in the nfs-set Start tests (C2/T3).** Moved/added the AC3
+   assertions (`WorkspaceBackendName==""`, `NFSPVClaimName==""`,
+   `NFSUID==0`/`NFSGID==0`, exact `Workspace` path) into
+   `TestStartSharedDirStorage_GlobalWinsOverProjectLevel` (k8s) and
+   `TestStartPropagatesSharedDirStorageToLocalContainerRunConfig` (docker) —
+   the cases that actually set `shared_dir_storage: nfs`. `Workspace`'s
+   expected value (the project root, `filepath.Dir(projectScionDir)`) was
+   confirmed by instrumenting a throwaway debug test against the fixture,
+   then hardcoded as an exact `assert.Equal`, replacing the old, nearly
+   vacuous `NotContains(Workspace, "srv")`.
+7. **AC1 at the Start level (T2).** Renamed the unset test to
+   `TestStartSharedDirStorage_Unset_AC1` (its AC3 assertions held only
+   trivially and are superseded by item 6) and added real assertions:
+   `RunConfig.Volumes` contains the legacy
+   `<GetSharedDirsBasePath(projectDir)>/scratchpad → /scion-volumes/scratchpad`
+   entry, the directory exists on disk, and `SCION_VOLUMES` is set on the
+   caller's env map. Added
+   `TestStartSharedDirStorage_NoSharedDirs_SCIONVolumesNotSet` for the
+   complementary case.
+8. **Test (b) couldn't detect a missing `EnsureSharedDirs` call (T4).**
+   `TestResolveSharedDirs_Unset_MatchesLegacyBehavior` now calls
+   `resolveSharedDirs` FIRST on a fresh project dir, asserts the shared dirs
+   exist from *that* call, and only then computes `want` via
+   `SharedDirsToVolumeMounts` alone (no mkdir) against the same dir — the
+   previous version called `EnsureSharedDirs` itself before
+   `resolveSharedDirs`, so the "exists" assertion was pre-satisfied
+   regardless of what the code under test did.
+9. **Nits.** Reworded the `TestResolveSharedDirs_NFS_ResolveLevelMisconfig_FailsClosed`
+   comment (C4: `Validate` *does* catch empty `mount_root`/`shares[0].id`;
+   the old comment implied otherwise). Fixed a stale test name in
+   `pkg/runtime/shared_dir_storage_test.go`'s comment (C5/T7: referenced a
+   test that doesn't exist; now points at
+   `TestStartSharedDirStorage_GlobalWinsOverProjectLevel`). Reworded the
+   guard-ordering comment in `shared_dir_storage.go` (S-F5: it previously
+   implied the export-root guard alone stopped "a traversal in a malformed
+   project ID" — it only ever bounded the host base; the new confinement
+   check from item 2 is what closes the per-project-subtree gap).
+10. **DECLINED — T6** (local branch swallows the `SharedDirsToVolumeMounts`
+    error untested): intentionally preserved pre-existing behaviour (AC1
+    byte-identical). No action.
+11. **NOTED — C6/C7:** legacy-format global settings silently drop the
+    server block (design already requires `schema_version: "1"`); no code
+    change, a Phase 2 docs/startup-log item. Performance (one extra settings
+    load per `Start` when shared dirs exist): no action, negligible.
+
+No design conflicts found. Confirmed the item-3 stop-and-report precondition
+held (see above) rather than improvising past it.
+
+### Gate results (round 3 verification, env: clean `env -i PATH=$PATH HOME=<tmp> GOPATH=... GOCACHE=... GOMODCACHE=...`, `-count=1`)
+
+- `go build ./...` — pass.
+- `go vet ./pkg/config/... ./pkg/runtime/... ./pkg/agent/...` — pass, no output.
+- `go test ./pkg/config/... ./pkg/runtime/... ./pkg/agent/... -count=1` — pass:
+  ```
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config              2.1s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config/opsettings    0.1s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config/templateimport 0.0s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/runtime              32.8s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun     0.0s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/agent                6.7s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/agent/state          0.0s
+  ```
+- `gofmt -l pkg/agent pkg/config pkg/runtime` — clean.
+- Manually verified (temporary local revert, not committed) that two of the
+  new regression tests fail against the pre-fix code:
+  `TestStartSharedDirStorage_ProjectLevelOnly_Ignored` against the old
+  `LoadEffectiveSettings("")` call, and
+  `TestStartSharedDirStorageNFS_ProjectSettingsProjectID_Ignored` against
+  reading the general `projectID` variable instead of `opts.Env` directly.

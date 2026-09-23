@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,14 +47,17 @@ type sharedDirStorageRunFixture struct {
 	projectScionDir string
 }
 
+// newSharedDirStorageRunFixture sets the process's current working
+// directory to INSIDE the project fixture (not $HOME/tmpDir) — round 2
+// review finding C1/T1/S-F2 showed that the naive "global-only" load,
+// LoadEffectiveSettings(""), actually resolves a project from the current
+// working directory via FindProjectRoot(). `scion start` run from inside a
+// project checkout is the common case, so every test built on this fixture
+// exercises that realistic CWD; a regression to LoadEffectiveSettings("")
+// would make the AC5 tests below fail.
 func newSharedDirStorageRunFixture(t *testing.T) sharedDirStorageRunFixture {
 	t.Helper()
 	tmpDir := t.TempDir()
-
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	require.NoError(t, os.Chdir(tmpDir))
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 	t.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
@@ -72,6 +76,11 @@ func newSharedDirStorageRunFixture(t *testing.T) sharedDirStorageRunFixture {
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	require.NoError(t, os.MkdirAll(projectScionDir, 0755))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(projectDir))
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
 	return sharedDirStorageRunFixture{tmpDir: tmpDir, globalScionDir: globalScionDir, projectScionDir: projectScionDir}
 }
@@ -167,7 +176,9 @@ func TestStartSharedDirStorage_ProjectLevelOnly_Ignored(t *testing.T) {
 // item 1 (AC5, C1/T2), the "global wins" half, and also covers item 3(i)
 // (T1-i): with a global shared_dir_storage=nfs block and a conflicting
 // project-level block, the global block wins, and a kubernetes-named mock
-// runtime gets RunConfig.SharedDirStorage populated from it.
+// runtime gets RunConfig.SharedDirStorage populated from it. Round 2 review
+// finding C2/T3 (AC3): also asserts that setting shared_dir_storage=nfs
+// leaves the workspace fields exactly as they'd be if it were unset.
 func TestStartSharedDirStorage_GlobalWinsOverProjectLevel(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 
@@ -204,6 +215,14 @@ func TestStartSharedDirStorage_GlobalWinsOverProjectLevel(t *testing.T) {
 	assert.Equal(t, "nfs", capturedConfig.SharedDirStorage.Backend)
 	assert.Equal(t, "global-pv", capturedConfig.SharedDirStorage.PVClaimName)
 	assert.Equal(t, "projects/pid-global-wins/shared-dirs/scratchpad", capturedConfig.SharedDirStorage.SubPaths["scratchpad"])
+
+	// AC3: shared_dir_storage=nfs must not touch workspace storage.
+	assert.Equal(t, "", capturedConfig.WorkspaceBackendName)
+	assert.Equal(t, "", capturedConfig.NFSPVClaimName)
+	assert.Equal(t, 0, capturedConfig.NFSUID)
+	assert.Equal(t, 0, capturedConfig.NFSGID)
+	wantWorkspace := filepath.Dir(f.projectScionDir) // the project root
+	assert.Equal(t, wantWorkspace, capturedConfig.Workspace)
 }
 
 // TestStartPropagatesSharedDirStorageToLocalContainerRunConfig is round 1
@@ -254,6 +273,15 @@ func TestStartPropagatesSharedDirStorageToLocalContainerRunConfig(t *testing.T) 
 	}
 	assert.True(t, found, "expected a /scion-volumes/scratchpad volume in RunConfig.Volumes")
 	assert.Equal(t, "/scion-volumes", envMap["SCION_VOLUMES"])
+
+	// AC3 (round 2 review finding C2/T3): shared_dir_storage=nfs must not
+	// touch workspace storage, even for the local-container runtime.
+	assert.Equal(t, "", capturedConfig.WorkspaceBackendName)
+	assert.Equal(t, "", capturedConfig.NFSPVClaimName)
+	assert.Equal(t, 0, capturedConfig.NFSUID)
+	assert.Equal(t, 0, capturedConfig.NFSGID)
+	wantWorkspace := filepath.Dir(f.projectScionDir) // the project root
+	assert.Equal(t, wantWorkspace, capturedConfig.Workspace)
 }
 
 // TestStartSharedDirStorageNFS_MissingProjectID_ErrorsAndNeverRuns is round 1
@@ -290,12 +318,61 @@ func TestStartSharedDirStorageNFS_MissingProjectID_ErrorsAndNeverRuns(t *testing
 	assert.Equal(t, 0, ranCount, "Run must never be called when shared_dir_storage=nfs fails closed")
 }
 
-// TestStartSharedDirStorage_Unset_AC1AndAC3 is the unset-block variant of
-// item 3 / T8: with no shared_dir_storage configured anywhere,
-// RunConfig.SharedDirStorage is nil (AC1), and AC3's workspace claims hold
-// trivially since nothing in this code path touches workspace fields:
-// WorkspaceBackendName=="" and Workspace is a local (non-NFS) path.
-func TestStartSharedDirStorage_Unset_AC1AndAC3(t *testing.T) {
+// TestStartSharedDirStorageNFS_ProjectSettingsProjectID_Ignored is round 2
+// review item 3 (S-F4): the nfs branch must use only the dispatch-provided
+// SCION_PROJECT_ID/SCION_GROVE_ID (opts.Env), never the broker-local
+// project-settings fallback (settings.Hub.ProjectID) that the general
+// projectID variable elsewhere in run.go may carry. A project's settings —
+// including in-repo settings.yaml content from a cloned repository — must
+// not be able to choose which project's shared tree an nfs-backed agent
+// mounts. With a project-level hub.project_id set but no env project ID,
+// Start must still fail closed with the same "hub project ID" error as if
+// no project ID were configured anywhere.
+func TestStartSharedDirStorageNFS_ProjectSettingsProjectID_Ignored(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	f.writeGlobalSettings(t, sprintfServerYAML(sharedDirStorageNFSGlobalYAML, filepath.Join(f.tmpDir, "srv"), "share", "pv"))
+	require.NoError(t, os.WriteFile(filepath.Join(f.projectScionDir, "settings.yaml"), []byte(`schema_version: "1"
+hub:
+  project_id: victim-project-id
+`), 0644))
+
+	ranCount := 0
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			ranCount++
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env: map[string]string{
+			"SCION_AGENT_ID": "agent-8",
+			// No SCION_PROJECT_ID / SCION_GROVE_ID — only the project
+			// settings' hub.project_id, which the nfs branch must ignore.
+		},
+		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hub project ID")
+	assert.Equal(t, 0, ranCount, "Run must never be called when the project-settings project ID is used instead of the dispatch-provided one")
+}
+
+// TestStartSharedDirStorage_Unset_AC1 is the unset-block variant of item 3 /
+// T8 (renamed from ..._Unset_AC1AndAC3 per round 2 review finding C2/T8: the
+// AC3 claims held here trivially, since nothing in this path touches
+// workspace fields regardless of shared_dir_storage — the real AC3
+// assertions now live in the nfs-set tests above, where shared_dir_storage
+// is actually exercised). This test is AC1: with no shared_dir_storage
+// configured anywhere, RunConfig.SharedDirStorage is nil, the legacy local
+// shared-dir volume is still produced byte-identically, and SCION_VOLUMES is
+// set (round 2 review finding T2 — this used to be proven only at the
+// resolveSharedDirs level, not at the Start/RunConfig wiring level).
+func TestStartSharedDirStorage_Unset_AC1(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	f.writeGlobalSettings(t, "")
 	f.writeProjectSettings(t, "")
@@ -310,22 +387,105 @@ func TestStartSharedDirStorage_Unset_AC1AndAC3(t *testing.T) {
 	}
 	mgr := NewManager(mockRT)
 
+	envMap := map[string]string{
+		"SCION_AGENT_ID":   "agent-5",
+		"SCION_PROJECT_ID": "pid-unset",
+	}
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env:         envMap,
+		SharedDirs:  []api.SharedDir{{Name: "scratchpad"}},
+	})
+	require.NoError(t, err)
+
+	assert.Nil(t, capturedConfig.SharedDirStorage, "AC1: unset shared_dir_storage never populates SharedDirStorage")
+
+	basePath, err := config.GetSharedDirsBasePath(f.projectScionDir)
+	require.NoError(t, err)
+	wantSource := filepath.Join(basePath, "scratchpad")
+	var found bool
+	for _, v := range capturedConfig.Volumes {
+		if v.Target == "/scion-volumes/scratchpad" {
+			found = true
+			assert.Equal(t, wantSource, v.Source)
+		}
+	}
+	assert.True(t, found, "expected the legacy local /scion-volumes/scratchpad volume (AC1)")
+	info, statErr := os.Stat(wantSource)
+	require.NoError(t, statErr, "the legacy shared dir should exist on disk")
+	assert.True(t, info.IsDir())
+	assert.Equal(t, "/scion-volumes", envMap["SCION_VOLUMES"])
+}
+
+// TestStartSharedDirStorage_NoSharedDirs_SCIONVolumesNotSet is the other
+// half of item 7/T2: when a project declares no shared dirs at all,
+// SCION_VOLUMES must not be set (matching pre-existing, byte-identical
+// behaviour — resolveSharedDirs short-circuits on len(dirs)==0).
+func TestStartSharedDirStorage_NoSharedDirs_SCIONVolumesNotSet(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	f.writeGlobalSettings(t, "")
+	f.writeProjectSettings(t, "")
+
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+	}
+	mgr := NewManager(mockRT)
+
+	envMap := map[string]string{
+		"SCION_AGENT_ID":   "agent-6",
+		"SCION_PROJECT_ID": "pid-no-shared-dirs",
+	}
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env:         envMap,
+		// No SharedDirs.
+	})
+	require.NoError(t, err)
+
+	_, ok := envMap["SCION_VOLUMES"]
+	assert.False(t, ok, "SCION_VOLUMES must not be set when there are no shared dirs")
+}
+
+// TestStartSharedDirStorage_MalformedGlobalSettings_FailsClosed is round 2
+// review finding C3/T5: a global settings.yaml that fails to parse must not
+// silently fall back to the local shared-dir layout on a broker with shared
+// dirs to mount — that would be exactly the G5 split-brain failure mode
+// this feature exists to prevent. Start must return the load error, and Run
+// must never be called.
+func TestStartSharedDirStorage_MalformedGlobalSettings_FailsClosed(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	// Invalid YAML: an unterminated flow mapping.
+	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"),
+		[]byte("schema_version: \"1\"\nserver: {shared_dir_storage: [\n"), 0644))
+	f.writeProjectSettings(t, "")
+
+	ranCount := 0
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			ranCount++
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:        "test-agent",
 		ProjectPath: f.projectScionDir,
 		NoAuth:      true,
 		Env: map[string]string{
-			"SCION_AGENT_ID":   "agent-5",
-			"SCION_PROJECT_ID": "pid-unset",
+			"SCION_AGENT_ID":   "agent-7",
+			"SCION_PROJECT_ID": "pid-malformed-global",
 		},
 		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
 	})
-	require.NoError(t, err)
-
-	assert.Nil(t, capturedConfig.SharedDirStorage, "AC1: unset shared_dir_storage never populates SharedDirStorage")
-	assert.Equal(t, "", capturedConfig.WorkspaceBackendName, "AC3: workspace backend is untouched by shared_dir_storage")
-	assert.NotEmpty(t, capturedConfig.Workspace, "AC3: workspace should resolve to a local path")
-	assert.NotContains(t, capturedConfig.Workspace, "srv", "AC3: workspace must not be redirected onto any NFS mount")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server.shared_dir_storage")
+	assert.Equal(t, 0, ranCount, "Run must never be called when the global settings load fails closed")
 }
 
 // sprintfServerYAML formats the sharedDirStorageNFSGlobalYAML template.

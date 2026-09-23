@@ -788,11 +788,14 @@ func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 // shared_dir_storage is Layer-0 (see opsettings/koanf.go layer0Prefixes):
 // never written to the DB, requires a restart to take effect, and — per
 // design §3.2.1 "global-only" and AC5 — read from each broker process's
-// GLOBAL settings.yaml only. Callers (pkg/agent.resolveSharedDirs) must
-// source this block from a global-only settings load, not from the
-// project-merged VersionedSettings that config.LoadEffectiveSettings(dir)
-// returns for a project directory; a project's settings must not be able to
-// redirect Docker bind-mount sources to an operator-unapproved host path.
+// GLOBAL settings.yaml only. Callers must source this block via
+// LoadGlobalSettings(), not from the project-merged VersionedSettings that
+// LoadEffectiveSettings(dir) returns for a project directory, AND NOT via
+// LoadEffectiveSettings("") — an empty path resolves a project from the
+// current working directory (FindProjectRoot) and merges it on top of
+// global, so it is not global-only either (round 2 review findings
+// C1/T1/S-F2). A project's settings must not be able to redirect Docker
+// bind-mount sources to an operator-unapproved host path.
 //
 // The workspace-storage-only fields on V1NFSConfig (UID, GID, MountOptions,
 // StorageClass) are not used by shared_dir_storage. Warning about them being
@@ -2411,6 +2414,34 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 		o.Apply(vs)
 	}
 	return vs, warnings, nil
+}
+
+// LoadGlobalSettings loads settings from the broker's global directory
+// (~/.scion) ONLY — no project-level file is merged on top, regardless of
+// the calling process's current working directory.
+//
+// This is deliberately NOT the same as LoadEffectiveSettings(""): an empty
+// projectPath does not mean "global only". resolveEffectiveProjectPath("")
+// calls FindProjectRoot(), which walks up from os.Getwd() and, if the
+// process happens to be running inside a project checkout (the common case
+// for `scion start` run from a repo, or a broker started from a project
+// directory), merges that project's settings.yaml on top of global (design
+// deploy-config-explore round 2 review findings C1/S-F2). Passing the
+// global directory explicitly short-circuits that: with projectPath equal
+// to the global directory, LoadVersionedSettings's project-layer steps are
+// skipped entirely (they each check projectPath != globalDir).
+//
+// Use this for any Layer-0, global-only setting (see
+// opsettings/koanf.go's layer0Prefixes) that must not be overridable by a
+// project's settings.yaml — for example server.shared_dir_storage, which
+// must not let a project (including in-repo settings.yaml content from a
+// cloned repository) redirect where its shared directories are mounted.
+func LoadGlobalSettings() (*VersionedSettings, []string, error) {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolving global settings directory: %w", err)
+	}
+	return LoadEffectiveSettings(globalDir)
 }
 
 // MigrationResult reports what happened during a migration.

@@ -957,26 +957,46 @@ authDone:
 		effectiveSharedDirs = opts.SharedDirs
 	}
 	// server.shared_dir_storage is global-only (design §3.2.1, AC5): read it
-	// from a global-only settings load, never from the project-merged
-	// `settings` above. LoadVersionedSettings/LoadEffectiveSettings merge
-	// project-level server.* on top of global with no filtering, so reading
-	// settings.Server.SharedDirStorage directly would let a project's
-	// settings.yaml (including in-repo content from a cloned repository)
-	// redirect Docker bind-mount sources to an operator-unapproved host
-	// path (round 1 review finding C1/T2). workspace_storage is untouched
+	// via config.LoadGlobalSettings(), never from the project-merged
+	// `settings` above and never via LoadEffectiveSettings("") — an empty
+	// path is NOT global-only, since it resolves a project from the
+	// process's current working directory and merges that project's
+	// settings.yaml on top of global (round 2 review findings C1/T1/S-F2).
+	// A project's settings, including in-repo content from a cloned
+	// repository, must not be able to redirect Docker bind-mount sources or
+	// override the operator's NFS config. workspace_storage is untouched
 	// and keeps its existing (pre-existing, out of scope) project-level
 	// exposure — see design §3.2.6.
 	var sharedDirStorageCfg *config.V1SharedDirStorageConfig
 	if len(effectiveSharedDirs) > 0 {
-		globalSettings, _, gErr := config.LoadEffectiveSettings("")
+		globalSettings, _, gErr := config.LoadGlobalSettings()
 		if gErr != nil {
-			util.Debugf("Start: failed to load global settings for shared_dir_storage: %v", gErr)
-		} else if globalSettings != nil && globalSettings.Server != nil {
+			// Fail closed (design G5): a broken global settings file must
+			// not silently fall back to the local shared-dir layout on an
+			// nfs-configured broker (round 2 review finding C3/T5).
+			return nil, fmt.Errorf("loading global settings for server.shared_dir_storage: %w", gErr)
+		}
+		if globalSettings != nil && globalSettings.Server != nil {
 			sharedDirStorageCfg = globalSettings.Server.SharedDirStorage
 		}
 	}
+	// nfs shared_dir_storage keys its layout on the hub-authoritative
+	// project ID the hub injects via SCION_PROJECT_ID (design §3.2.2), not
+	// on the broker-local project-settings fallback that the general
+	// projectID variable above may carry (settings.Hub.ProjectID / the
+	// project-id file). Project settings must not be able to choose which
+	// project's shared tree an nfs-backed agent mounts (round 2 review
+	// finding S-F4). The hub sets SCION_PROJECT_ID/SCION_GROVE_ID
+	// unconditionally after merging any user-supplied env
+	// (pkg/hub/httpdispatcher.go DispatchAgentStart/DispatchAgentRestart,
+	// "Identity vars at highest precedence"), so this is authoritative
+	// whenever the hub dispatched this agent.
+	sharedDirProjectID := opts.Env["SCION_PROJECT_ID"]
+	if sharedDirProjectID == "" {
+		sharedDirProjectID = opts.Env["SCION_GROVE_ID"]
+	}
 	sharedDirVolumes, sharedDirStorage, err := resolveSharedDirs(
-		sharedDirStorageCfg, projectDir, projectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace)
+		sharedDirStorageCfg, projectDir, sharedDirProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace)
 	if err != nil {
 		return nil, err
 	}
