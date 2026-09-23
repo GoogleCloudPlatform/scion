@@ -953,6 +953,78 @@ func TestSetDefaultAgent_ProjectlessGroup_AgentNotFound_ReturnsValidationError(t
 	require.Equal(t, ErrCodeValidationError, errResp.Error.Code)
 }
 
+// nilAgentStore wraps a real store and forces GetAgent to return (nil, nil)
+// for one specific ID. No real store.Store implementation does this — a
+// successful lookup always returns a non-nil agent — but the handler must
+// not rely on that invariant when err == nil.
+type nilAgentStore struct {
+	store.Store
+	nilForID string
+}
+
+func (s *nilAgentStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if id == s.nilForID {
+		return nil, nil
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// TestSetDefaultAgent_ProjectlessGroup_NilAgentNoPanic is the upstream
+// review fix for GoogleCloudPlatform/scion#1864 (gemini-code-assist,
+// medium): handleSetDefaultAgent's projectless branch dereferenced
+// agent.DeletedAt right after a nil-error GetAgent call, assuming err == nil
+// implies agent != nil — a nil, nil result would panic instead of reporting
+// not-found. Forces exactly that response via nilAgentStore and asserts a
+// clean 400 validation_error, not a panic.
+func TestSetDefaultAgent_ProjectlessGroup_NilAgentNoPanic(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	legacyConv := &store.Conversation{
+		ID:             api.NewUUID(),
+		Kind:           "group",
+		Surface:        "native",
+		DisplayName:    "Legacy Projectless Group Nil Agent",
+		DriftState:     "active",
+		LastActivityAt: now,
+		CreatedAt:      now,
+	}
+	require.NoError(t, s.CreateConversation(ctx, legacyConv))
+
+	project := &store.Project{ID: api.NewUUID(), Name: "phase3-legacy-nil-agent-project", Slug: "phase3-legacy-nil-agent-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	participant := &store.Agent{
+		ID: api.NewUUID(), Name: "phase3-legacy-nil-agent-participant", Slug: "phase3-legacy-nil-agent-participant",
+		ProjectID: project.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, participant))
+	addConvParticipant(t, s, legacyConv.ID, "agent", participant.ID)
+
+	nilForID := api.NewUUID()
+	srv.store = &nilAgentStore{Store: s, nilForID: nilForID}
+
+	body := setDefaultAgentRequest{AgentID: nilForID}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+legacyConv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(participant.ID, project.ID))
+	rr := httptest.NewRecorder()
+
+	require.NotPanics(t, func() {
+		srv.handleSetDefaultAgent(rr, req, legacyConv.ID)
+	})
+
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"a nil agent from GetAgent must be reported as not-found, not panic; body: %s", rr.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	require.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+}
+
 func TestCreateConversation_ProjectNotFound(t *testing.T) {
 	srv, s := testServer(t)
 	_, agent, _ := setupConvTestData(t, s)

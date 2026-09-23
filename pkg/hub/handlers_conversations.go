@@ -690,7 +690,12 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if !agent.DeletedAt.IsZero() {
+		// Upstream review (GoogleCloudPlatform/scion#1864, gemini-code-assist):
+		// nil-check agent before dereferencing DeletedAt — a nil, nil result
+		// from GetAgent (defensive; validateDefaultAgent's own GetAgent
+		// fallback already guards against exactly this) would otherwise
+		// panic here instead of reporting not-found.
+		if agent == nil || !agent.DeletedAt.IsZero() {
 			ValidationError(w, fmt.Sprintf("agentId %q not found", req.AgentID), nil)
 			return
 		}
