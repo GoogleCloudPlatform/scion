@@ -785,6 +785,16 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 		return nil
 	}
 
+	// server.shared_dir_storage backend=nfs: shared dirs use subPaths on the
+	// dedicated shared NFS PVC, no separate PVCs needed (design
+	// deploy-config-explore §3.2.4). Takes precedence over the
+	// workspace_storage:nfs branch below.
+	if config.SharedDirStorage != nil && config.SharedDirStorage.Backend == "nfs" {
+		runtimeLog.Info("shared_dir_storage nfs: shared dirs served via NFS subPath, skipping PVC creation",
+			"shared_dir_count", len(config.SharedDirs))
+		return nil
+	}
+
 	// NFS backend: shared dirs use subPaths on the workspace NFS PVC,
 	// no separate PVCs needed (design §5.3).
 	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" {
@@ -1404,7 +1414,11 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		k8sContainerWorkspace = "/workspace"
 	}
 	sharedDirTargets := make(map[string]bool, len(config.SharedDirs))
-	nfsSharedDirs := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
+	// server.shared_dir_storage backend=nfs takes precedence over the
+	// existing workspace_storage:nfs shared-dir branch when both are set
+	// (design deploy-config-explore §3.2.4).
+	sharedDirStorageNFS := config.SharedDirStorage != nil && config.SharedDirStorage.Backend == "nfs"
+	nfsSharedDirs := !sharedDirStorageNFS && config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 	for i, sd := range config.SharedDirs {
 		target := fmt.Sprintf("/scion-volumes/%s", sd.Name)
 		if sd.InWorkspace {
@@ -1412,7 +1426,36 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 		sharedDirTargets[target] = true
 
-		if nfsSharedDirs {
+		if sharedDirStorageNFS {
+			// shared_dir_storage nfs: mount the dedicated shared PVC by
+			// subPath. Fail closed (design G5) rather than falling back to
+			// an unclaimed/EmptyDir volume when the claim name is missing.
+			if config.SharedDirStorage.PVClaimName == "" {
+				return nil, fmt.Errorf(
+					"shared dir %q: server.shared_dir_storage.nfs.shares[0].pv_name is empty; cannot mount shared dir", sd.Name)
+			}
+			sdSubPath, ok := config.SharedDirStorage.SubPaths[sd.Name]
+			if !ok || sdSubPath == "" {
+				return nil, fmt.Errorf("shared dir %q: no resolved subPath in server.shared_dir_storage", sd.Name)
+			}
+			volName := fmt.Sprintf("shared-dir-%d", i)
+
+			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+				Name: volName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: config.SharedDirStorage.PVClaimName,
+						ReadOnly:  sd.ReadOnly,
+					},
+				},
+			})
+			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+				Name:      volName,
+				MountPath: target,
+				SubPath:   sdSubPath,
+				ReadOnly:  sd.ReadOnly,
+			})
+		} else if nfsSharedDirs {
 			// NFS backend: mount from the workspace PVC with a shared-dir subPath.
 			// SubPath root mirrors the nfsBackend.Resolve layout:
 			//   <SubPathRoot>/<projectID>/shared-dirs/<name>

@@ -346,6 +346,10 @@ type V1ServerConfig struct {
 	OAuth            *V1OAuthConfig            `json:"oauth,omitempty" yaml:"oauth,omitempty" koanf:"oauth"`
 	Storage          *V1StorageConfig          `json:"storage,omitempty" yaml:"storage,omitempty" koanf:"storage"`
 	WorkspaceStorage *V1WorkspaceStorageConfig `json:"workspace_storage,omitempty" yaml:"workspace_storage,omitempty" koanf:"workspace_storage"`
+	// SharedDirStorage selects the storage backend for project shared
+	// directories, independent of WorkspaceStorage (design
+	// deploy-config-explore §3.2). See V1SharedDirStorageConfig.
+	SharedDirStorage *V1SharedDirStorageConfig `json:"shared_dir_storage,omitempty" yaml:"shared_dir_storage,omitempty" koanf:"shared_dir_storage"`
 	Secrets          *V1SecretsConfig          `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
 	LogLevel         string                    `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
 	LogFormat        string                    `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
@@ -767,6 +771,55 @@ func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 	if ws.NFS == nil || len(ws.NFS.Shares) == 0 {
 		return fmt.Errorf("workspace_storage.backend is \"nfs\" but no NFS shares are defined; " +
 			"add at least one entry under workspace_storage.nfs.shares")
+	}
+	return nil
+}
+
+// V1SharedDirStorageConfig selects the storage backend for a project's
+// shared directories (design deploy-config-explore §3.2), decoupled from
+// V1WorkspaceStorageConfig. Backend defaults to "local" (today's behavior:
+// shared dirs live next to the project's local config, resolved by
+// GetSharedDirsBasePath). When set to "nfs", the reused V1NFSConfig block
+// configures the shared NFS export that both Docker/Podman/Apple and
+// Kubernetes runtimes resolve into the same layout:
+//
+//	<nfs.mount_root>/<nfs.shares[0].id>/<nfs.subpath_root>/<projectID>/shared-dirs/<name>
+//
+// shared_dir_storage is Layer-0 (see opsettings/koanf.go layer0Prefixes):
+// read per-broker from each process's own settings.yaml, never written to
+// the DB, and requires a restart to take effect.
+//
+// The workspace-storage-only fields on V1NFSConfig (UID, GID, MountOptions,
+// StorageClass) are not used by shared_dir_storage. Warning about them being
+// set-but-ignored is phase 2 (design §3.2.1), not implemented here.
+type V1SharedDirStorageConfig struct {
+	Backend string       `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"` // "" | "local" | "nfs"
+	NFS     *V1NFSConfig `json:"nfs,omitempty" yaml:"nfs,omitempty" koanf:"nfs"`
+}
+
+// Validate returns an error if Backend is "nfs" but the block is
+// misconfigured. Unlike V1WorkspaceStorageConfig.ValidateNFS, this requires
+// MountRoot and the first share's ID to be non-empty: shared_dir_storage has
+// no other source for the host mount point used by local-container bind
+// mounts (design deploy-config-explore §3.2.1).
+func (s *V1SharedDirStorageConfig) Validate() error {
+	if s == nil || !strings.EqualFold(s.Backend, "nfs") {
+		return nil
+	}
+	if s.NFS == nil {
+		return fmt.Errorf(
+			"server.shared_dir_storage.backend is \"nfs\" but no nfs block is configured; add server.shared_dir_storage.nfs")
+	}
+	if len(s.NFS.Shares) == 0 {
+		return fmt.Errorf(
+			"server.shared_dir_storage.backend is \"nfs\" but no NFS shares are defined; " +
+				"add at least one entry under server.shared_dir_storage.nfs.shares")
+	}
+	if s.NFS.MountRoot == "" {
+		return fmt.Errorf("server.shared_dir_storage.backend is \"nfs\" but nfs.mount_root is empty")
+	}
+	if s.NFS.Shares[0].ID == "" {
+		return fmt.Errorf("server.shared_dir_storage.backend is \"nfs\" but nfs.shares[0].id is empty")
 	}
 	return nil
 }

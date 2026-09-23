@@ -4232,6 +4232,101 @@ func TestWorkspaceStorageConfig_BackendUnset_IsLocal(t *testing.T) {
 	assert.Nil(t, ws.NFS, "no NFS block when backend is local/empty")
 }
 
+// TestSharedDirStorageConfig_Validate covers design deploy-config-explore
+// §3.2.1's validation rule: backend=nfs ⇒ NFS!=nil, len(Shares)>=1,
+// MountRoot!="", Shares[0].ID!="". Unlike V1WorkspaceStorageConfig.ValidateNFS,
+// shared_dir_storage requires MountRoot and the first share's ID, because it
+// has no other source for the host mount point used by local-container bind
+// mounts (test (c) / AC4).
+func TestSharedDirStorageConfig_Validate(t *testing.T) {
+	t.Run("nil receiver is safe", func(t *testing.T) {
+		var s *V1SharedDirStorageConfig
+		require.NoError(t, s.Validate())
+	})
+
+	t.Run("unset backend skips validation", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{}
+		require.NoError(t, s.Validate())
+	})
+
+	t.Run("local backend skips validation", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{Backend: "local"}
+		require.NoError(t, s.Validate())
+	})
+
+	t.Run("nfs backend with nil NFS block errors", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{Backend: "nfs"}
+		err := s.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no nfs block is configured")
+	})
+
+	t.Run("nfs backend with no shares errors", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS:     &V1NFSConfig{MountRoot: "/srv"},
+		}
+		err := s.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no NFS shares are defined")
+	})
+
+	t.Run("nfs backend with empty mount_root errors", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				Shares: []V1NFSShare{{ID: "scion-shared"}},
+			},
+		}
+		err := s.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mount_root is empty")
+	})
+
+	t.Run("nfs backend with empty share id errors", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot: "/srv",
+				Shares:    []V1NFSShare{{ID: ""}},
+			},
+		}
+		err := s.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "shares[0].id is empty")
+	})
+
+	t.Run("fully configured nfs backend passes", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot: "/srv",
+				Shares: []V1NFSShare{
+					{ID: "scion-shared", Server: "10.128.15.241", Export: "/srv/scion-shared", PVName: "scion-shared"},
+				},
+			},
+		}
+		require.NoError(t, s.Validate())
+	})
+}
+
+// TestServerConfig_SharedDirStorage_Field ensures V1ServerConfig carries the
+// new block through koanf's field name so settings.yaml round-trips it.
+func TestServerConfig_SharedDirStorage_Field(t *testing.T) {
+	sc := &V1ServerConfig{
+		SharedDirStorage: &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot: "/srv",
+				Shares:    []V1NFSShare{{ID: "scion-shared"}},
+			},
+		},
+	}
+	require.NotNil(t, sc.SharedDirStorage)
+	assert.Equal(t, "nfs", sc.SharedDirStorage.Backend)
+	assert.Equal(t, "scion-shared", sc.SharedDirStorage.NFS.Shares[0].ID)
+}
+
 // ============================================================================
 // Scheduler Config Tests
 // ============================================================================

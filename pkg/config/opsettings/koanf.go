@@ -52,6 +52,7 @@ var layer0Prefixes = []string{
 	"server.secrets",
 	"server.storage",
 	"server.workspace_storage",
+	"server.shared_dir_storage",
 	// Identity/mode
 	"server.mode",
 	"server.env",

@@ -956,19 +956,18 @@ authDone:
 	} else if len(opts.SharedDirs) > 0 {
 		effectiveSharedDirs = opts.SharedDirs
 	}
-	var sharedDirVolumes []api.VolumeMount
-	if len(effectiveSharedDirs) > 0 {
-		if err := config.EnsureSharedDirs(projectDir, effectiveSharedDirs); err != nil {
-			util.Debugf("Start: failed to ensure shared dirs: %v", err)
-		}
-		sdVolumes, err := config.SharedDirsToVolumeMounts(projectDir, effectiveSharedDirs, containerWorkspace)
-		if err != nil {
-			util.Debugf("Start: failed to resolve shared dir volumes: %v", err)
-		} else {
-			sharedDirVolumes = sdVolumes
-			// Add SCION_VOLUMES env var for discoverability
-			opts.Env["SCION_VOLUMES"] = "/scion-volumes"
-		}
+	var sharedDirStorageCfg *config.V1SharedDirStorageConfig
+	if settings != nil && settings.Server != nil {
+		sharedDirStorageCfg = settings.Server.SharedDirStorage
+	}
+	sharedDirVolumes, sharedDirStorage, err := resolveSharedDirs(
+		sharedDirStorageCfg, projectDir, projectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace)
+	if err != nil {
+		return nil, err
+	}
+	if len(sharedDirVolumes) > 0 {
+		// Add SCION_VOLUMES env var for discoverability
+		opts.Env["SCION_VOLUMES"] = "/scion-volumes"
 	}
 
 	workspaceBackendName := ""
@@ -1097,9 +1096,10 @@ authDone:
 			}
 			return nil
 		}(),
-		GitClone:   opts.GitClone,
-		SharedDirs: effectiveSharedDirs,
-		BrokerMode: opts.BrokerMode,
+		GitClone:         opts.GitClone,
+		SharedDirs:       effectiveSharedDirs,
+		SharedDirStorage: sharedDirStorage,
+		BrokerMode:       opts.BrokerMode,
 		NoAuth: opts.NoAuth && noAuthConfig != nil &&
 			(noAuthConfig.Behavior == "drop-to-shell" || noAuthConfig.Behavior == "allow"),
 		NoAuthMessage: func() string {
