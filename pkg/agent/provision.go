@@ -335,6 +335,82 @@ func StopProjectContainers(ctx context.Context, mgr Manager, projectName string,
 	return stopped
 }
 
+// Reprovision re-renders an existing agent's on-disk configuration
+// (scion-agent.json, agent-info.json, home dotfiles, and skills) from the
+// current template/harness-config catalog, for a `scion reincarnate` request
+// (design §3.4). Unlike Provision, it always calls ProvisionAgent directly
+// rather than through GetAgent's "agent dir already exists → keep the
+// persisted config" branch: reincarnation's entire point is to replace that
+// persisted config with a freshly resolved one.
+//
+// Preconditions: the caller (the broker's reprovision handler) has already
+// stopped the agent's container. Reprovision itself never touches:
+//   - the agent's clone-per-agent git workspace, when it already holds a real
+//     clone (ProvisionAgent's git-clone branch leaves it in place);
+//   - the agent's branch;
+//   - unrelated files already in the agent's home directory (only files the
+//     template/harness-config/platform-skill layers themselves own are
+//     overlaid — see ContextWithReprovision's ForceOverwrite wiring for
+//     platform skills specifically).
+func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	ctx = api.ContextWithReprovision(ctx)
+	if opts.BrokerMode {
+		ctx = api.ContextWithBrokerMode(ctx)
+	}
+	if opts.GitClone != nil {
+		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
+	}
+	if opts.SharedWorkspace {
+		ctx = api.ContextWithSharedWorkspace(ctx)
+	}
+	if opts.HarnessConfigPath != "" {
+		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
+	}
+	inlineCfg := opts.InlineConfig
+	if opts.HarnessAuth != "" {
+		if inlineCfg == nil {
+			inlineCfg = &api.ScionConfig{}
+		}
+		inlineCfg.AuthSelectedType = opts.HarnessAuth
+	}
+
+	agentHome, _, cfg, err := ProvisionAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
+	if err != nil {
+		return cfg, err
+	}
+
+	projectDir, pdErr := config.GetResolvedProjectDir(opts.ProjectPath)
+	if pdErr != nil {
+		return cfg, fmt.Errorf("resolve project dir: %w", pdErr)
+	}
+	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
+	agentDir := config.GetAgentDir(projectDir, opts.Name, sharedWorkspace)
+
+	_ = UpdateAgentConfig(opts.Name, opts.ProjectPath, "created", m.Runtime.Name(), opts.Profile)
+
+	// Re-stage the project-level pre-start hook, same as Provision. Called
+	// unconditionally: an empty script removes any previously staged file, so
+	// a hook that no longer applies (e.g. deactivated between generations)
+	// cannot survive on the reused agent home.
+	if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
+		return cfg, fmt.Errorf("stage project pre-start hook: %w", err)
+	}
+
+	// Persist harness auth override to the on-disk config, same as Provision.
+	if opts.HarnessAuth != "" && cfg != nil {
+		cfg.AuthSelectedType = opts.HarnessAuth
+		cfgData, marshalErr := json.MarshalIndent(cfg, "", "  ")
+		if marshalErr == nil {
+			_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), cfgData, 0644)
+		}
+	}
+
+	// Deliberately no prompt.md write here: the new generation's first task
+	// (the hub-built preamble plus handoff) is delivered by the subsequent
+	// DispatchAgentStart call, not pre-staged as a file.
+	return cfg, nil
+}
+
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	if opts.BrokerMode {
 		ctx = api.ContextWithBrokerMode(ctx)
@@ -882,12 +958,27 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	h := resolved.Harness
 	util.Debugf("ProvisionAgent: harness implementation=%s for harness=%q", resolved.Implementation, finalScionCfg.Harness)
 	skillsDir := h.SkillsDir()
+	// templateSkillNames records which skill directory names the current
+	// template chain provides, independent of what may already be on disk
+	// from a previous provisioning of this same agent home. Platform-skill
+	// injection (Step 3a2) uses this — rather than a plain "does the
+	// directory already exist" check — to decide precedence, so that
+	// force-overwrite (reincarnation reprovisioning) can refresh a stale
+	// platform skill without clobbering a template's intentional override.
+	templateSkillNames := make(map[string]bool)
 	if skillsDir != "" {
 		skillsDest := filepath.Join(agentHome, skillsDir)
 
 		// Copy skills from each template in the chain (overlay behavior)
 		for _, tpl := range chain {
 			tplSkills := filepath.Join(tpl.Path, "skills")
+			if entries, err := os.ReadDir(tplSkills); err == nil {
+				for _, e := range entries {
+					if e.IsDir() {
+						templateSkillNames[e.Name()] = true
+					}
+				}
+			}
 			if info, err := os.Stat(tplSkills); err == nil && info.IsDir() {
 				if err := os.MkdirAll(skillsDest, 0755); err != nil {
 					return "", "", nil, fmt.Errorf("failed to create skills dir: %w", err)
@@ -903,8 +994,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Step 3a2: Inject platform skills from embedded resources
 	hubEnabled := (settings != nil && settings.IsHubEnabled()) || api.IsBrokerModeFromContext(ctx)
 	injCtx := workspaceSkillsInjectionContext{
-		IsGit:      isGitWorkspace,
-		HubEnabled: hubEnabled,
+		IsGit:              isGitWorkspace,
+		HubEnabled:         hubEnabled,
+		ForceOverwrite:     api.IsReprovisionFromContext(ctx),
+		TemplateSkillNames: templateSkillNames,
 	}
 	if skillsDir != "" {
 		if err := injectPlatformSkills(resources.PlatformSkillsFS(), agentHome, skillsDir, injCtx); err != nil {
@@ -1438,6 +1531,19 @@ func parseSkillFrontmatter(data []byte) skillFrontmatter {
 type workspaceSkillsInjectionContext struct {
 	IsGit      bool
 	HubEnabled bool
+	// ForceOverwrite re-injects a platform skill even when a directory of the
+	// same name already exists in the agent's home, provided it wasn't just
+	// placed there by a template in this same provisioning call (which still
+	// takes precedence — see TemplateSkillNames). Set for reincarnation
+	// reprovisioning (design §3.4), where a newer broker binary may carry
+	// updated platform-skill content that a plain existence check would
+	// otherwise leave stale.
+	ForceOverwrite bool
+	// TemplateSkillNames holds the skill directory names provided by the
+	// current template chain (independent of what's already on disk), so
+	// ForceOverwrite can still respect "template skills take precedence"
+	// rather than clobbering a template's intentional override.
+	TemplateSkillNames map[string]bool
 }
 
 // shouldInjectSkill checks whether a skill should be injected based on its
@@ -1506,9 +1612,16 @@ func composeInstructions(preamble, templateContent []byte) []byte {
 // injectPlatformSkills copies platform skills from the embedded filesystem
 // into the agent's skills directory. Skills with inject_when conditions are
 // evaluated against the injection context (e.g. git_workspace skills are
-// only injected when isGit is true). Template skills take precedence: if a
-// template already installed a skill with the same directory name, the
-// platform skill is skipped.
+// only injected when isGit is true). Template skills take precedence: if the
+// current template chain provides a skill with the same directory name
+// (injCtx.TemplateSkillNames), the platform skill is skipped.
+//
+// Otherwise, a platform skill whose directory already exists on disk is
+// normally left alone (idempotent restart/resume). injCtx.ForceOverwrite
+// (reincarnation reprovisioning) refreshes it instead, so a newer broker
+// binary's platform-skill content actually reaches an agent that already had
+// an older copy — a plain existence check cannot distinguish "up to date"
+// from "stale leftover from a previous generation".
 func injectPlatformSkills(
 	skillsFS fs.FS,
 	agentHome string,
@@ -1540,10 +1653,19 @@ func injectPlatformSkills(
 
 		skillDest := filepath.Join(agentHome, skillsDir, skillName)
 
-		// Template skills take precedence
-		if _, err := os.Stat(skillDest); err == nil {
+		// Template skills take precedence, regardless of ForceOverwrite: a
+		// template's intentional override must never be clobbered by the
+		// platform default.
+		if injCtx.TemplateSkillNames[skillName] {
 			util.Debugf("provision: platform skill %q skipped (template skill takes precedence)", skillName)
 			continue
+		}
+
+		if !injCtx.ForceOverwrite {
+			if _, err := os.Stat(skillDest); err == nil {
+				util.Debugf("provision: platform skill %q skipped (already present)", skillName)
+				continue
+			}
 		}
 
 		// Walk the embedded skill directory and copy all files
