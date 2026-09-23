@@ -61,6 +61,7 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread } from '../../client/chat-unread.js';
 import { isFeatureEnabled, NATIVE_CHAT_V2_FLAG } from '../../utils/feature-flags.js';
+import { isProjectChimeEnabled, setProjectChimeEnabled } from '../../utils/audio.js';
 import { openTerminal, terminalHref } from '../../client/open-terminal.js';
 import { hashColor, getInitials } from '../shared/chat/chat-avatar.js';
 import '../shared/chat/chat-thread.js';
@@ -232,6 +233,9 @@ export class ScionPageChat extends LitElement {
   // ---- V2 state ----
   @state() private v2Conversation: V2ConversationState | null = null;
   @state() private v2Members: SpaceMember[] = [];
+  /** Per-project chat chime preference for the currently open conversation's project. */
+  @state() private projectChimeOn = true;
+  private _chimeProjectId = '';
 
   private mentionAgentsSource: SpaceMember[] | null = null;
   private mentionAgentsProjectId = '';
@@ -911,6 +915,26 @@ export class ScionPageChat extends LitElement {
     // rather than from each of the twenty places v2Conversation is assigned.
     if (changedProperties.has('v2Conversation')) {
       chatNotifications.setActiveConversation(this.v2Conversation?.conversationKey ?? null);
+
+      const projectId = this.v2Conversation?.projectId || '';
+      if (projectId !== this._chimeProjectId) {
+        this._chimeProjectId = projectId;
+        this.projectChimeOn = projectId ? isProjectChimeEnabled(projectId) : true;
+      }
+    }
+  }
+
+  /** Handle selections from the rail header's options menu (currently: chime toggle). */
+  private handleRailMenuSelect(e: Event): void {
+    const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
+    const value = detail?.item?.getAttribute('value');
+    if (value === 'toggle-chime') {
+      const projectId = this.v2Conversation?.projectId;
+      if (projectId) {
+        this.projectChimeOn = !this.projectChimeOn;
+        this._chimeProjectId = projectId;
+        setProjectChimeEnabled(projectId, this.projectChimeOn);
+      }
     }
   }
 
@@ -3155,6 +3179,26 @@ export class ScionPageChat extends LitElement {
               `
             : nothing}
           ${conv.isDM ? this.renderDMMuteButton(conv) : nothing}
+          ${conv.projectId
+            ? html`
+                <sl-dropdown>
+                  <sl-icon-button
+                    slot="trigger"
+                    name="three-dots-vertical"
+                    label="Options"
+                  ></sl-icon-button>
+                  <sl-menu @sl-select=${this.handleRailMenuSelect}>
+                    <sl-menu-item value="toggle-chime">
+                      <sl-icon
+                        slot="prefix"
+                        name=${this.projectChimeOn ? 'volume-up' : 'volume-mute'}
+                      ></sl-icon>
+                      ${this.projectChimeOn ? 'Chime on' : 'Chime off'}
+                    </sl-menu-item>
+                  </sl-menu>
+                </sl-dropdown>
+              `
+            : nothing}
           <sl-dropdown>
             <sl-tooltip content="Export conversation" slot="trigger">
               <sl-icon-button name="download" label="Export conversation"></sl-icon-button>

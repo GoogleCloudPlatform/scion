@@ -33,6 +33,7 @@ import {
   PUSH_PREFERENCE_EVENT,
   type PushPermissionState,
 } from '../../client/push-preference.js';
+import { isChimeEnabled, setChimeEnabled } from '../../utils/audio.js';
 import '../shared/subscription-manager.js';
 
 @customElement('scion-page-profile-settings')
@@ -42,6 +43,9 @@ export class ScionPageProfileSettings extends LitElement {
 
   @state()
   private _permissionState: PushPermissionState = 'default';
+
+  @state()
+  private _chimeEnabled = isChimeEnabled();
 
   @state()
   private _gcloudADCAvailable = false;
@@ -227,6 +231,12 @@ export class ScionPageProfileSettings extends LitElement {
     target.checked = this._pushEnabled;
   }
 
+  private _handleChimeToggle(e: Event): void {
+    const target = e.target as HTMLInputElement & { checked: boolean };
+    setChimeEnabled(target.checked);
+    this._chimeEnabled = isChimeEnabled();
+  }
+
   private async _handleADCToggle(e: Event): Promise<void> {
     const target = e.target as HTMLInputElement & { checked: boolean };
     const enabled = target.checked;
@@ -318,6 +328,17 @@ export class ScionPageProfileSettings extends LitElement {
         </div>
 
         ${this._renderPermissionStatus()}
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <p class="setting-label">Chat chime sound</p>
+            <p class="setting-description">Play a subtle chime when new chat messages arrive.</p>
+          </div>
+          <div class="setting-control">
+            <sl-switch ?checked=${this._chimeEnabled} @sl-change=${this._handleChimeToggle}>
+            </sl-switch>
+          </div>
+        </div>
       </div>
 
       ${this._gcloudADCAvailable && this._isWorkstation
