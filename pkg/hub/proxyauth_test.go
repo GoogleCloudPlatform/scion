@@ -18,9 +18,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -602,5 +607,515 @@ func TestJWKSCache_StampedePreventionDuringOutage(t *testing.T) {
 	}
 	if key2 == nil {
 		t.Fatal("expected last-good key to be served during outage")
+	}
+}
+
+// ---- Generic JWT Proxy Authenticator tests ----
+
+// testRSAKeyPair holds a self-generated RSA key pair for JWT provider tests.
+type testRSAKeyPair struct {
+	privateKey *rsa.PrivateKey
+}
+
+func newTestRSAKeyPair(t *testing.T) *testRSAKeyPair {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate RSA key: %v", err)
+	}
+	return &testRSAKeyPair{privateKey: key}
+}
+
+// writePublicKeyPEM PKIX-encodes the public key and writes it to a temp file,
+// returning the path.
+func (kp *testRSAKeyPair) writePublicKeyPEM(t *testing.T) string {
+	t.Helper()
+	der, err := x509.MarshalPKIXPublicKey(&kp.privateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("failed to marshal public key: %v", err)
+	}
+	block := &pem.Block{Type: "PUBLIC KEY", Bytes: der}
+	path := filepath.Join(t.TempDir(), "pubkey.pem")
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatalf("failed to write public key file: %v", err)
+	}
+	return path
+}
+
+// signJWT creates an RS256-signed compact JWT serialization.
+func (kp *testRSAKeyPair) signJWT(t *testing.T, claims interface{}) string {
+	t.Helper()
+	signerKey := jose.SigningKey{Algorithm: jose.RS256, Key: kp.privateKey}
+	signer, err := jose.NewSigner(signerKey, (&jose.SignerOptions{}).WithType("JWT"))
+	if err != nil {
+		t.Fatalf("failed to create signer: %v", err)
+	}
+	raw, err := jwt.Signed(signer).Claims(claims).Serialize()
+	if err != nil {
+		t.Fatalf("failed to sign JWT: %v", err)
+	}
+	return raw
+}
+
+// newTestJWTKeySource loads kp's public key via NewStaticJWTKeySource,
+// failing the test on error.
+func newTestJWTKeySource(t *testing.T, kp *testRSAKeyPair) jwtKeySource {
+	t.Helper()
+	ks, err := NewStaticJWTKeySource(kp.writePublicKeyPEM(t))
+	if err != nil {
+		t.Fatalf("NewStaticJWTKeySource failed: %v", err)
+	}
+	return ks
+}
+
+func TestJWTProxyAuthenticator_ValidAssertion(t *testing.T) {
+	kp := newTestRSAKeyPair(t)
+	keySource := newTestJWTKeySource(t, kp)
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"email": "User@Example.com",
+		"sub":   "user-123",
+		"name":  "Preston Holmes",
+		"hd":    "example.com",
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+	}
+	assertion := kp.signJWT(t, claims)
+
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.RS256),
+		KeySource: keySource,
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(DefaultJWTHeader, assertion)
+
+	info, err := auth.Authenticate(req)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if info == nil {
+		t.Fatal("expected ProxyUserInfo, got nil")
+	}
+	if info.Subject != "user-123" {
+		t.Errorf("expected subject 'user-123', got %q", info.Subject)
+	}
+	if info.Email != "user@example.com" {
+		t.Errorf("expected lowercased email 'user@example.com', got %q", info.Email)
+	}
+	if info.DisplayName != "Preston Holmes" {
+		t.Errorf("expected display name 'Preston Holmes', got %q", info.DisplayName)
+	}
+	if info.Domain != "example.com" {
+		t.Errorf("expected domain 'example.com', got %q", info.Domain)
+	}
+}
+
+func TestJWTProxyAuthenticator_MissingHeader(t *testing.T) {
+	kp := newTestRSAKeyPair(t)
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.RS256),
+		KeySource: newTestJWTKeySource(t, kp),
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	// No assertion header set.
+
+	info, err := auth.Authenticate(req)
+	if err != nil {
+		t.Fatalf("expected nil error for missing header, got: %v", err)
+	}
+	if info != nil {
+		t.Fatal("expected nil info for missing header")
+	}
+}
+
+func TestJWTProxyAuthenticator_CustomHeader(t *testing.T) {
+	kp := newTestRSAKeyPair(t)
+	now := time.Now()
+	claims := map[string]interface{}{
+		"email": "user@example.com",
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+	}
+	assertion := kp.signJWT(t, claims)
+
+	auth := &JWTProxyAuthenticator{
+		Header:    "X-Custom-JWT",
+		Algorithm: string(jose.RS256),
+		KeySource: newTestJWTKeySource(t, kp),
+	}
+
+	// Default header must NOT work when a custom header is configured.
+	reqDefault := httptest.NewRequest("GET", "/", nil)
+	reqDefault.Header.Set(DefaultJWTHeader, assertion)
+	if info, err := auth.Authenticate(reqDefault); err != nil || info != nil {
+		t.Fatalf("expected fallthrough on default header when custom header configured, got info=%v err=%v", info, err)
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("X-Custom-JWT", assertion)
+	info, err := auth.Authenticate(req)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if info == nil || info.Email != "user@example.com" {
+		t.Fatalf("expected verified user, got info=%v", info)
+	}
+}
+
+func TestJWTProxyAuthenticator_BadSignature(t *testing.T) {
+	kp1 := newTestRSAKeyPair(t)
+	kp2 := newTestRSAKeyPair(t)
+
+	// Key source is built from kp2's public key, but the token is signed by kp1.
+	keySource := newTestJWTKeySource(t, kp2)
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"email": "user@example.com",
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+	}
+	assertion := kp1.signJWT(t, claims)
+
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.RS256),
+		KeySource: keySource,
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(DefaultJWTHeader, assertion)
+
+	info, err := auth.Authenticate(req)
+	if err == nil {
+		t.Fatal("expected error for bad signature, got nil")
+	}
+	if info != nil {
+		t.Fatal("expected nil info for bad signature")
+	}
+}
+
+func TestJWTProxyAuthenticator_WrongIssuer(t *testing.T) {
+	kp := newTestRSAKeyPair(t)
+	now := time.Now()
+	claims := map[string]interface{}{
+		"iss":   "https://evil.example.com",
+		"email": "user@example.com",
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+	}
+	assertion := kp.signJWT(t, claims)
+
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.RS256),
+		Issuer:    "my-auth-proxy",
+		KeySource: newTestJWTKeySource(t, kp),
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(DefaultJWTHeader, assertion)
+
+	info, err := auth.Authenticate(req)
+	if err == nil {
+		t.Fatal("expected error for wrong issuer, got nil")
+	}
+	if info != nil {
+		t.Fatal("expected nil info for wrong issuer")
+	}
+	t.Logf("expected error: %v", err)
+}
+
+func TestJWTProxyAuthenticator_WrongAudience(t *testing.T) {
+	kp := newTestRSAKeyPair(t)
+	now := time.Now()
+	claims := map[string]interface{}{
+		"aud":   "some-other-audience",
+		"email": "user@example.com",
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+	}
+	assertion := kp.signJWT(t, claims)
+
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.RS256),
+		Audience:  "scion-hub",
+		KeySource: newTestJWTKeySource(t, kp),
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(DefaultJWTHeader, assertion)
+
+	info, err := auth.Authenticate(req)
+	if err == nil {
+		t.Fatal("expected error for wrong audience, got nil")
+	}
+	if info != nil {
+		t.Fatal("expected nil info for wrong audience")
+	}
+	t.Logf("expected error: %v", err)
+}
+
+func TestJWTProxyAuthenticator_ExpiredToken(t *testing.T) {
+	kp := newTestRSAKeyPair(t)
+	now := time.Now()
+	claims := map[string]interface{}{
+		"email": "user@example.com",
+		"iat":   now.Add(-10 * time.Minute).Unix(),
+		"exp":   now.Add(-5 * time.Minute).Unix(), // expired well past the 30s skew
+	}
+	assertion := kp.signJWT(t, claims)
+
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.RS256),
+		KeySource: newTestJWTKeySource(t, kp),
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(DefaultJWTHeader, assertion)
+
+	info, err := auth.Authenticate(req)
+	if err == nil {
+		t.Fatal("expected error for expired token, got nil")
+	}
+	if info != nil {
+		t.Fatal("expected nil info for expired token")
+	}
+	t.Logf("expected error: %v", err)
+}
+
+func TestJWTProxyAuthenticator_EmailLowercased(t *testing.T) {
+	kp := newTestRSAKeyPair(t)
+	now := time.Now()
+	claims := map[string]interface{}{
+		"email": "User@EXAMPLE.COM",
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+	}
+	assertion := kp.signJWT(t, claims)
+
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.RS256),
+		KeySource: newTestJWTKeySource(t, kp),
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(DefaultJWTHeader, assertion)
+
+	info, err := auth.Authenticate(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Email != "user@example.com" {
+		t.Errorf("expected lowercased email 'user@example.com', got %q", info.Email)
+	}
+}
+
+func TestJWTProxyAuthenticator_ClaimMapping(t *testing.T) {
+	kp := newTestRSAKeyPair(t)
+	now := time.Now()
+	claims := map[string]interface{}{
+		"user_email": "user@example.com",
+		"user_id":    "12345",
+		"full_name":  "Preston Holmes",
+		"domain":     "example.com",
+		"iat":        now.Add(-1 * time.Minute).Unix(),
+		"exp":        now.Add(5 * time.Minute).Unix(),
+	}
+	assertion := kp.signJWT(t, claims)
+
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.RS256),
+		KeySource: newTestJWTKeySource(t, kp),
+		Claims: JWTClaimMapping{
+			Email:       "user_email",
+			Subject:     "user_id",
+			DisplayName: "full_name",
+			Domain:      "domain",
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(DefaultJWTHeader, assertion)
+
+	info, err := auth.Authenticate(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Subject != "12345" {
+		t.Errorf("expected subject '12345', got %q", info.Subject)
+	}
+	if info.Email != "user@example.com" {
+		t.Errorf("expected email 'user@example.com', got %q", info.Email)
+	}
+	if info.DisplayName != "Preston Holmes" {
+		t.Errorf("expected display name 'Preston Holmes', got %q", info.DisplayName)
+	}
+	if info.Domain != "example.com" {
+		t.Errorf("expected domain 'example.com', got %q", info.Domain)
+	}
+}
+
+func TestJWTProxyAuthenticator_SubjectFallsBackToEmail(t *testing.T) {
+	kp := newTestRSAKeyPair(t)
+	now := time.Now()
+	claims := map[string]interface{}{
+		"email": "user@example.com",
+		// no "sub" claim
+		"iat": now.Add(-1 * time.Minute).Unix(),
+		"exp": now.Add(5 * time.Minute).Unix(),
+	}
+	assertion := kp.signJWT(t, claims)
+
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.RS256),
+		KeySource: newTestJWTKeySource(t, kp),
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(DefaultJWTHeader, assertion)
+
+	info, err := auth.Authenticate(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Subject != "user@example.com" {
+		t.Errorf("expected subject to fall back to email 'user@example.com', got %q", info.Subject)
+	}
+}
+
+func TestJWTProxyAuthenticator_MissingEmailClaim(t *testing.T) {
+	kp := newTestRSAKeyPair(t)
+	now := time.Now()
+	claims := map[string]interface{}{
+		"sub": "user-123",
+		"iat": now.Add(-1 * time.Minute).Unix(),
+		"exp": now.Add(5 * time.Minute).Unix(),
+	}
+	assertion := kp.signJWT(t, claims)
+
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.RS256),
+		KeySource: newTestJWTKeySource(t, kp),
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(DefaultJWTHeader, assertion)
+
+	info, err := auth.Authenticate(req)
+	if err == nil {
+		t.Fatal("expected error for missing email claim, got nil")
+	}
+	if info != nil {
+		t.Fatal("expected nil info for missing email claim")
+	}
+	t.Logf("expected error: %v", err)
+}
+
+func TestJWTProxyAuthenticator_NoAlgorithmConfigured(t *testing.T) {
+	kp := newTestRSAKeyPair(t)
+	auth := &JWTProxyAuthenticator{
+		KeySource: newTestJWTKeySource(t, kp),
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(DefaultJWTHeader, "irrelevant.token.value")
+
+	if _, err := auth.Authenticate(req); err == nil {
+		t.Fatal("expected error when no algorithm is configured")
+	}
+}
+
+func TestJWTProxyAuthenticator_NoKeySourceConfigured(t *testing.T) {
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.RS256),
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(DefaultJWTHeader, "irrelevant.token.value")
+
+	if _, err := auth.Authenticate(req); err == nil {
+		t.Fatal("expected error when no key source is configured")
+	}
+}
+
+func TestJWTProxyAuthenticator_Name(t *testing.T) {
+	auth := &JWTProxyAuthenticator{}
+	if auth.Name() != "jwt" {
+		t.Errorf("expected Name()='jwt', got %q", auth.Name())
+	}
+}
+
+func TestJWTStaticKeySource_LoadsPEMKey(t *testing.T) {
+	kp := newTestRSAKeyPair(t)
+	path := kp.writePublicKeyPEM(t)
+
+	ks, err := NewStaticJWTKeySource(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	key1, err := ks.GetKey("some-kid")
+	if err != nil {
+		t.Fatalf("unexpected error from GetKey: %v", err)
+	}
+	key2, err := ks.GetKey("a-different-kid")
+	if err != nil {
+		t.Fatalf("unexpected error from GetKey: %v", err)
+	}
+	rsaKey1, ok := key1.(*rsa.PublicKey)
+	if !ok {
+		t.Fatalf("expected *rsa.PublicKey, got %T", key1)
+	}
+	if !rsaKey1.Equal(key2.(*rsa.PublicKey)) {
+		t.Error("expected GetKey to return the same key regardless of kid")
+	}
+	if !rsaKey1.Equal(&kp.privateKey.PublicKey) {
+		t.Error("expected loaded key to match the original public key")
+	}
+}
+
+func TestJWTStaticKeySource_MissingFile(t *testing.T) {
+	_, err := NewStaticJWTKeySource(filepath.Join(t.TempDir(), "does-not-exist.pem"))
+	if err == nil {
+		t.Fatal("expected error for missing public key file")
+	}
+}
+
+func TestJWTStaticKeySource_InvalidPEM(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "invalid.pem")
+	if err := os.WriteFile(path, []byte("not a pem file"), 0o600); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	_, err := NewStaticJWTKeySource(path)
+	if err == nil {
+		t.Fatal("expected error for invalid PEM content")
+	}
+}
+
+func TestIsAsymmetricJWTAlgorithm(t *testing.T) {
+	tests := []struct {
+		alg  string
+		want bool
+	}{
+		{"RS256", true},
+		{"RS384", true},
+		{"RS512", true},
+		{"ES256", true},
+		{"ES384", true},
+		{"ES512", true},
+		{"PS256", true},
+		{"PS384", true},
+		{"PS512", true},
+		{"HS256", false},
+		{"none", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := IsAsymmetricJWTAlgorithm(tt.alg); got != tt.want {
+			t.Errorf("IsAsymmetricJWTAlgorithm(%q) = %v, want %v", tt.alg, got, tt.want)
+		}
 	}
 }
