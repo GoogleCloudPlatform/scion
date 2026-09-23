@@ -1808,8 +1808,10 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys
 	// The WHERE uses two arms:
 	//   1. conversation_id = directConvID (modern population — 99.7% of DM rows)
 	//   2. thread_id = dmKey (legacy arm — pre-conversation-stamp rows)
-	// The $N <> '' guard on arm 1 prevents an empty directConvID from matching
-	// every unstamped message on the hub (design §3.1 C2).
+	// NULLIF($N, '')::uuid on arm 1 turns an empty directConvID into NULL so it
+	// never matches, preventing it from matching every unstamped message on the
+	// hub (design §3.1 C2), while keeping the conversation_id uuid comparison
+	// sargable for index usage.
 	//
 	// C2a guard: if topic.ConversationID is empty, set only thread_id to
 	// avoid blanking conversation_id on moved rows (design §3.1 C2a).
@@ -1817,7 +1819,7 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys
 	if topic.ConversationID != "" {
 		res, err = tx.ExecContext(ctx,
 			`UPDATE messages SET thread_id = $1, conversation_id = $2
-			 WHERE ($3 <> '' AND conversation_id = $3)
+			 WHERE conversation_id = NULLIF($3, '')::uuid
 			    OR thread_id = $4`,
 			topic.ID, topic.ConversationID,
 			directConvID,
@@ -1825,7 +1827,7 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys
 	} else {
 		res, err = tx.ExecContext(ctx,
 			`UPDATE messages SET thread_id = $1
-			 WHERE ($2 <> '' AND conversation_id = $2)
+			 WHERE conversation_id = NULLIF($2, '')::uuid
 			    OR thread_id = $3`,
 			topic.ID,
 			directConvID,
