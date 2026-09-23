@@ -343,17 +343,16 @@ deferred — item 6 arrived mid-round (see below) and is included.
   `defer func() { _ = f.Close() }()`. `GOGC=40 golangci-lint run --new-from-rev=ca486fa
   --concurrency=1 ./pkg/hub/...` now reports 0 issues.
 
-**Note on the R8 verification command.** The disposition's second command
-(`git diff ca486fa..HEAD | grep -nE '^\+.*(^|[^/A-Za-z0-9])#[0-9]{3,}'`) has a quirk in GNU grep:
-the `^` inside the alternation, not being at the true start of the overall pattern, does not act as
-a real "start of line" anchor once preceded by `^\+.*` — empirically it degrades the alternation to
-"always satisfiable", so the command flags every `#NNN` occurrence on a `+` line regardless of the
-preceding character, including fully-qualified `GoogleCloudPlatform/scion#1847` references. I
-verified this with a minimal repro (`printf` into the same `grep -nE` invocation) before concluding
-the extra hits were false positives, and cross-checked with a plain `grep -rn "#1847"
-pkg/hub/*.go .design/project-log/*.md | grep -v "scion#1847"` (no qualifier stripped), which found
-nothing after the fixes above. Flagging this rather than silently working around it, in case the EM
-wants the command itself corrected for future rounds.
+**Correction (fix round 3, r3 review F1).** The claim originally recorded here — that the r2
+disposition's second verification command flags fully-qualified references as false positives — was
+wrong, and is retracted. The command is sound with real GNU grep (verified directly against
+`/usr/bin/grep`, GNU grep 3.8: it matches only genuinely bare issue-number tokens, not qualified
+`GoogleCloudPlatform/scion#1847` ones). The apparent quirk in my original check was an artifact of
+this environment: the interactive `grep` in the agent shell is a function that shells out to `ugrep`
+(for gitignore-aware search), not real GNU grep, and `ugrep` evaluates that same pattern differently.
+Invoking `/usr/bin/grep` directly (bypassing the shell function) reproduces the reviewer's clean
+result. Re-ran the disposition's exact two commands after this round's fixes; both print nothing —
+see the report to ap-em for the transcript.
 
 ### Optional
 
@@ -404,3 +403,69 @@ wants the command itself corrected for future rounds.
   and middleware tests) — all green.
 - Full `go test -buildvcs=false -timeout 40m ./pkg/hub/ ./pkg/hub/authzop/` — see the report to
   ap-em for the final pass/fail breakdown.
+
+## Fix round 3 (review r3, verdict REQUEST CHANGES: 0 Critical, 1 Required, 2 Optional, 0 Nit, 5 FYI)
+
+Reviewer: `ap-p1-rev-3`. Report: `/scion-volumes/scratchpad/projects/auth-passthrough/reviews/p1-r3-ap-p1-rev-3.md`.
+EM dispositions: `/scion-volumes/scratchpad/projects/auth-passthrough/briefs/ap-p1-dev-fix-r3.md`, plus
+a mid-round message bringing F2 into scope with a concrete rule from the issue owner. All round-2
+findings (1-9) and item 6 were independently re-verified resolved by this reviewer (fresh mutation
+testing: M11, M21, M22 all killed; item-6 mutations I6a-I6h in both directions killed).
+
+### Required
+
+- **1 (bare issue-number reference still present).** The `3fd8fc437` commit body (whose whole
+  purpose was removing bare references) and project-log line ~353 both still quoted a bare
+  issue-number token. Fixed by rewording the project-log line (see the F1 correction just above this
+  section) and rewriting the `3fd8fc437` commit message via rebase (approved, `--force-with-lease`
+  as in prior rounds) to describe the topic without using the token itself.
+
+### Optional
+
+- **2 (`classifyResolveError` allowlist redundant, misroute risk).** Fixed as suggested: it now
+  always wraps every `Resolve` error with `errExternalBearerResolveFailed` (renamed from
+  `errExternalBearerInternalError`) via a second `%w`. A `Resolve` error can therefore structurally
+  never reach the 401 default — the specific 403 arms in `serveExternalBearer` are still checked
+  first, against the same intact error chain, and still win. This also makes the `I6g` mutant
+  (second `%w` → `%v`) killable going forward, per the reviewer's note.
+- **3 (prefix-only oracles in findings 2 and 8's tests).**
+  `TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable` and
+  `TestExternalBearer_NoTrustProductionShape_Golden401` now assert exact bytes via `wantErrorBody`
+  fed with the live `ValidateUserToken` error — the same pattern as golden cases (a)/(b)/(c) — instead
+  of a message prefix.
+
+### F1 — corrected above (see the "Correction" note in the fix-round-2 section)
+
+The claim that the EM's r2 verification command has a GNU-grep anchor quirk was wrong; retracted.
+Root cause was this environment's interactive `grep` shell function shelling out to `ugrep`, not
+real GNU grep. `/usr/bin/grep` (real GNU grep 3.8) matches the disposition's intent exactly.
+
+### F2 — now in scope (issue owner decision, mid-round)
+
+`GoogleIdentityResolver.Resolve` treated any `GetExternalIdentity` error as "no binding," not just
+`store.ErrNotFound`. Per the issue owner's rule (impl-design §4.3's 4th allowed resolver delta): only
+`store.ErrNotFound` means "no binding yet"; any other error is wrapped (`%w`) and returned
+immediately. On the external-bearer path this reaches item 6's 503 `store_error` arm unchanged. On
+the exchange path, `ge_exchange.go`'s existing `default: 500 "user resolution failed"` arm already
+covered it — no exchange-side code change was needed, but this **does change exchange behaviour**
+for this specific fault, from 403 "no binding" to 5xx, which is the intended correction (mentioned in
+the fix commit's message per the issue owner's instruction).
+
+### F3-F5
+
+No action (reviewer confirmed correct as-is / follow-up work outside Phase 1's allowed resolver
+deltas, to be raised separately with the issue owner if not already covered by the F2 decision).
+
+### Verification (fix round 3)
+
+- `gofmt -l` clean.
+- `go build -buildvcs=false ./...` (whole repo) — clean.
+- `go vet -buildvcs=false ./pkg/hub/...` — clean.
+- `GOGC=40 golangci-lint run --new-from-rev=ca486fa --concurrency=1 ./pkg/hub/...` — 0 issues.
+- Targeted run of every Phase-1-relevant test — 130+ tests, all green (includes the new F2 tests and
+  the two re-hardened exact-byte tests).
+- `go test -buildvcs=false ./pkg/hub/ -run TestGEExchange_Route` — all green.
+- Both of the EM's r2 bare-reference verification commands, re-run after this round's fixes, using
+  `/usr/bin/grep` directly: both print nothing (see the report to ap-em for the transcript). Full
+  `pkg/hub` + `authzop` run not required this round per the brief (the change stayed within
+  `auth_external_bearer*.go`, `google_identity_resolver.go`, `ge_exchange_test.go`, and this log).
