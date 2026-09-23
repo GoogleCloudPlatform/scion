@@ -296,31 +296,49 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 //     is untouched if it was already empty, and unaffected if
 //     AppliedConfig.Model was not an alias).
 //   - The auto-no-auth fallback can flip NoAuth to true and HarnessAuth from
-//     "" to "none" based on a live credential check.
-//   - The project's TelemetryEnabled annotation always overwrites
-//     InlineConfig.Telemetry.Enabled, even when the requester set it inline.
+//     "" to "none" based on a live credential check, and, once written, that
+//     result is indistinguishable from an explicit --harness-auth none.
+//   - The project's TelemetryEnabled annotation, when set to a valid bool,
+//     overwrites InlineConfig.Telemetry.Enabled, even when the requester set
+//     it inline.
 //   - InlineConfig.Skills is always rewritten by mergeInjectedSkills, and it
 //     is neither fill-if-empty nor additive: whatever is already in Skills
 //     on entry is relabeled Scope="template" (highest precedence), merged
 //     with the *current* hub/user/project injections, and the result
 //     overwrites Skills. The precondition this assumes is that incoming
-//     Skills holds template skills only. Calling this on a config whose
-//     Skills was already merged (by a prior call to this function) promotes
-//     every hub/user/project skill in it to template scope, permanently
-//     outranking the live injections — deleting the injection can no longer
-//     remove it. A caller reconstructing explicit inputs for reincarnate
-//     must capture Skills before this ever runs, not read it back out
-//     afterward, and a legacy caller with no such capture must drop Skills
-//     entirely rather than pass through whatever InlineConfig currently has.
+//     Skills holds only the requester's explicit inline-config skills
+//     (req.Config.Skills on create) — which this function labels
+//     Scope="template" — and nothing a previous merge produced. (The Hub
+//     template's own skills are not read here; dispatch adds them
+//     separately.) Calling this on a config whose Skills was already merged
+//     (by a prior call to this function) promotes every hub/user/project
+//     skill in it to template scope, permanently outranking the live
+//     injections — deleting the injection can no longer remove it. A caller
+//     reconstructing explicit inputs for reincarnate must capture Skills
+//     before this ever runs, not read it back out afterward, and a legacy
+//     caller with no such capture must drop Skills entirely rather than pass
+//     through whatever InlineConfig currently has.
 //
 // InlineConfig is not a record of the requester's explicit inputs after this
 // runs: this function creates it when nil (mergeInjectedSkills always does,
 // which is why a bare create's InlineConfig is never nil) and writes into it
 // — template/hub/project telemetry defaults, the project- or hub-level
 // SCION_AUTO_EXPOSE_PORTS default (in InlineConfig.Env), the resolved Model
-// alias, and InlineConfig.Skills (see above). A caller that needs the
-// original explicit request inputs (reincarnate does) must capture them
-// before this runs, not read them back out of InlineConfig afterward.
+// alias, and InlineConfig.Skills (see above). It also receives the template
+// env merge below by aliasing, not by a write in this function: the caller,
+// buildAppliedConfig, sets AppliedConfig.Env and AppliedConfig.InlineConfig
+// to the same req.Config and req.Config.Env, so when the requester supplies
+// any env, AppliedConfig.Env and InlineConfig.Env are the same map, and the
+// template-env-merge writes below land in both (and in the caller's
+// req.Config.Env). InlineConfig.Telemetry can be aliased the same way, to
+// resolvedTemplate.Config.Telemetry, so the project TelemetryEnabled write
+// above can mutate the template object through that shared pointer.
+// InlineConfig therefore cannot be stripped back to explicit inputs by
+// removing known hub/project keys alone — the aliased template-env keys are
+// indistinguishable from explicit ones by inspecting InlineConfig alone. A
+// caller that needs the original explicit request inputs (reincarnate does)
+// must capture them before this runs, not read them back out of InlineConfig
+// afterward.
 //
 // Precondition: agent.AppliedConfig must be non-nil (populateAgentConfig's
 // caller-facing guard covers today's only call site; a direct caller must
