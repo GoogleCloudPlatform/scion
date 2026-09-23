@@ -263,7 +263,12 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	case PrincipalKindFederatedService:
 		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, principal, credential)
 	case PrincipalKindBroker:
-		return decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, principal, credential)
+		result := decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, principal, credential)
+		// Emit the audit before returning so broker denies are diagnosable.
+		if a.decisionAuditEmitter != nil {
+			a.emitDecisionAudit(ctx, request, result)
+		}
+		return result
 	}
 
 	// Resolve permission ID. When the caller provides an explicit permission,

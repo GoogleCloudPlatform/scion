@@ -398,6 +398,35 @@ func TestSkillAuthz_CreateSkill_UserScope_UnauthenticatedRejected(t *testing.T) 
 		"unauthenticated user-scope create should be rejected; got: %s", rec.Body.String())
 }
 
+func TestSkillAuthz_CreateSkill_ProjectScope_RequiresScopeID(t *testing.T) {
+	srv, _, _, _, _ := setupSkillAuthzTest(t)
+
+	// Even a super-admin must supply a scopeId for project-scoped skills;
+	// otherwise a parentless project skill would be created (ptone/scion#1786).
+	admin := &store.User{ID: DevUserID, Email: "dev@localhost", DisplayName: "Development User", Role: store.UserRoleAdmin}
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/skills", CreateSkillRequest{
+		Name:  "orphan-project-skill",
+		Scope: "project",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"project scope create without scopeId should be rejected; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "scope_id_required")
+}
+
+func TestSkillAuthz_CreateSkill_ProjectScope_WithScopeIDSucceeds(t *testing.T) {
+	srv, _, alice, _, project := setupSkillAuthzTest(t)
+
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills", CreateSkillRequest{
+		Name:    "project-skill",
+		Scope:   "project",
+		ScopeID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "got: %s", rec.Body.String())
+	var resp CreateSkillResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, project.ID, resp.Skill.ScopeID)
+}
+
 // ============================================================================
 // Unauthenticated access to private skills
 // ============================================================================

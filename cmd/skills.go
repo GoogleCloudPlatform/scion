@@ -296,9 +296,17 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 			if scope == "" {
 				scope = "global"
 			}
+			var projectID string
+			if scope == "project" {
+				projectID, err = GetProjectID(hubCtx)
+				if err != nil {
+					return err
+				}
+			}
 			createResp, err := skillSvc.Create(ctx, &hubclient.CreateSkillRequest{
-				Name:  name,
-				Scope: scope,
+				Name:    name,
+				Scope:   scope,
+				ScopeID: projectID,
 			})
 			if err != nil {
 				return fmt.Errorf("failed to create skill: %w", err)
