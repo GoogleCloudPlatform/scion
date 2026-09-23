@@ -144,6 +144,43 @@ export class ScionPageAgents extends LitElement {
         align-items: flex-start;
         justify-content: space-between;
         margin-bottom: 0.75rem;
+        gap: 0.5rem;
+        /* Cards are minmax(320px, 1fr), so the header has ~270px to work with
+           and the badges claim most of it. Wrapping lets them drop to their own
+           line instead of squeezing the name into a few characters. */
+        flex-wrap: wrap;
+      }
+
+      /* The name column must be allowed to shrink for the wrapping in
+         .resource-name to take effect — min-width:auto on this flex item
+         would otherwise hold the header open at the full name width. It is
+         the only div in the header; the siblings are badge elements.
+
+         flex:1 matters as much as min-width:0. With only min-width:0 the
+         column sizes to its content and, because the badges never shrink,
+         absorbs the entire overflow — collapsing to a few characters and
+         wrapping the meta lines into a narrow ribbon. Growing into the space
+         the badges leave keeps names on as few lines as possible. */
+      .agent-header > div {
+        /* Full-width basis, so the badges always wrap to their own row rather
+           than sometimes fitting beside the name and sometimes not. A per-card
+           decision left the grid looking ragged — one card with its status
+           badge on the title row, the next with it underneath.
+
+           This also removes the crushing problem at its root: the name column
+           is never asked to share the row, so it cannot be squeezed down to a
+           few characters. Long names still wrap inside .resource-name, which
+           keeps its own min-width:0. */
+        flex: 1 1 100%;
+        min-width: 0;
+      }
+
+      /* The badges keep their intrinsic size so the name absorbs the
+         shrinking rather than squeezing the status indicators. */
+      .agent-header > scion-status-badge,
+      .agent-header > scion-message-mode-badge,
+      .agent-header > scion-messageability-indicator {
+        flex-shrink: 0;
       }
 
       .agent-meta {

@@ -317,6 +317,21 @@ export class ScionPageBrokerDetail extends LitElement {
         align-items: flex-start;
         justify-content: space-between;
         margin-bottom: 0.75rem;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
+
+      /* Full-width basis so the status badge always wraps to its own row. A
+         wide label like "Waiting_for_input" would otherwise crush the name to
+         a few characters — it is the badge's width that matters, not how many
+         there are. */
+      .agent-header > div {
+        flex: 1 1 100%;
+        min-width: 0;
+      }
+
+      .agent-header > scion-status-badge {
+        flex-shrink: 0;
       }
 
       .agent-name {
@@ -327,10 +342,19 @@ export class ScionPageBrokerDetail extends LitElement {
         display: flex;
         align-items: center;
         gap: 0.5rem;
+        min-width: 0;
       }
 
       .agent-name sl-icon {
         color: var(--scion-primary, #3b82f6);
+        flex-shrink: 0;
+      }
+
+      /* The name was a bare text node, which these rules cannot reach through
+         a flex container — hence the span wrapper in the template. */
+      .agent-name > span {
+        min-width: 0;
+        overflow-wrap: anywhere;
       }
 
       .agent-meta {
@@ -823,7 +847,7 @@ export class ScionPageBrokerDetail extends LitElement {
           <div>
             <h3 class="agent-name">
               <sl-icon name="cpu"></sl-icon>
-              ${agent.name}
+              <span>${agent.name}</span>
             </h3>
             <div class="agent-meta"><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
           </div>

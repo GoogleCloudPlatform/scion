@@ -41,6 +41,10 @@ telemetry:
 
   cloud:
     enabled: true
+    # Required when exporting to Google Cloud. The metrics dashboard queries
+    # Cloud Monitoring for this project, so without it the export has no
+    # destination and the dashboard stays empty with no error shown.
+    gcp_project_id: "my-gcp-project"
     endpoint: "monitoring.googleapis.com:443"
     protocol: grpc
     headers:

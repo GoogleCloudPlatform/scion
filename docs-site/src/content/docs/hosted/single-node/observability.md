@@ -107,6 +107,9 @@ telemetry:
   enabled: true
   cloud:
     enabled: true
+    # Required when exporting to Google Cloud — without it the metrics
+    # dashboard has no project to query and stays empty.
+    gcp_project_id: "my-gcp-project"
     endpoint: "monitoring.googleapis.com:443"
     protocol: grpc
   filter:
