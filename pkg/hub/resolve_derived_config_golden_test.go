@@ -44,8 +44,11 @@ import (
 // merge precedence (see the "mergeInjectedSkills integration tests" in
 // handlers_agent_create_helpers_test.go).
 //
-// The expected JSON below was captured from this exact code path. If it ever
-// needs to change, the reason must be "the derivation logic changed on
+// The expected JSON below was captured from this exact code path, and this
+// test also passes unchanged against the pre-extraction parent commit
+// (73eb1c85f) — confirmed by copying it there and running it, since
+// populateAgentConfig existed as a single function at that commit. If it
+// ever needs to change, the reason must be "the derivation logic changed on
 // purpose" — never "the resolveDerivedConfig extraction changed something".
 func TestResolveDerivedConfig_GoldenCreatePath(t *testing.T) {
 	srv, s := testServer(t)

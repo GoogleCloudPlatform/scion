@@ -226,20 +226,49 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
 }
 
-// resolveDerivedConfig recomputes every field of agent.AppliedConfig that is
-// derived from the template, the harness config, or project/hub-level
-// defaults, against the *current* catalog (template, harness config,
-// pre-start hook, model aliases, telemetry). Fields that were set explicitly
-// (by the caller, before this runs) are left untouched — each derived field
-// is only applied when the corresponding slot on AppliedConfig is still
-// empty.
+// resolveDerivedConfig is fill-if-empty, not recompute-against-the-catalog:
+// for most fields (Image, Model, Env entries, HarnessConfigID/Hash,
+// ProjectPreStartHookID/Script, template-derived InlineConfig.Telemetry) it
+// only writes a slot on agent.AppliedConfig that is still empty, and leaves
+// an already-populated slot alone. Calling it on an agent's EXISTING
+// (already-derived) AppliedConfig therefore keeps every stale value from
+// that derivation — it cannot tell "the caller set this explicitly" from
+// "a previous call to this function derived it". To recompute against the
+// current template/harness-config catalog (what `scion reincarnate` needs),
+// call this on a freshly built AppliedConfig that holds only kept fields and
+// explicit inputs — never on an existing agent's config.
 //
-// This is the reusable half of populateAgentConfig: create and reincarnate
-// both call it, so a migrated agent's derived config is computed exactly the
-// way a freshly created agent's would be, given the same explicit inputs.
-// What it deliberately does NOT touch: GitClone, Workspace, and Branch (kept
-// verbatim across a reincarnation per design §3.3) — those are populated by
-// populateAgentConfig above this call, before AppliedConfig is handed here.
+// Exceptions — these are unconditional overwrites, not fill-if-empty:
+//   - TemplateID, TemplateHash, and HubAccessScopes are always replaced from
+//     resolvedTemplate.
+//   - Model-alias resolution always rewrites Model and InlineConfig.Model to
+//     the resolved concrete name, even when both were explicit.
+//   - The auto-no-auth fallback can flip NoAuth to true and HarnessAuth from
+//     "" to "none" based on a live credential check.
+//   - The project's TelemetryEnabled annotation always overwrites
+//     InlineConfig.Telemetry.Enabled, even when the requester set it inline.
+//
+// InlineConfig is not a record of the requester's explicit inputs after this
+// runs: this function creates it when nil (mergeInjectedSkills always does,
+// which is why a bare create's InlineConfig is never nil) and writes into it
+// — template/hub/project telemetry defaults, the project's
+// SCION_AUTO_EXPOSE_PORTS default, the resolved Model alias, and
+// InlineConfig.Skills. A caller that needs the original explicit request
+// inputs (reincarnate does) must capture them before this runs, not read
+// them back out of InlineConfig afterward.
+//
+// Precondition: agent.AppliedConfig must be non-nil (populateAgentConfig's
+// caller-facing guard covers today's only call site; a direct caller must
+// check first).
+//
+// This is the reusable half of populateAgentConfig: create calls it today,
+// and reincarnate is intended to call it too (against a freshly built
+// config, per above), so a migrated agent's derived config is computed
+// exactly the way a freshly created agent's would be, given the same
+// explicit inputs. What it deliberately does NOT touch: GitClone, Workspace,
+// and Branch (kept verbatim across a reincarnation per design §3.3) — those
+// are populated by populateAgentConfig above this call, before AppliedConfig
+// is handed here.
 func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
 	// Populate template ID, hash, and hub access scopes if template was resolved.
 	if resolvedTemplate != nil {
