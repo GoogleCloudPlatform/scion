@@ -66,12 +66,20 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 
-	// Ensure the workspace directory exists
-	if err := os.MkdirAll(workspacePath, 0755); err != nil {
-		slog.Error("failed to create project workspace directory", "project_id", projectID, "error", err)
+	// Open the workspace as a confined root. Every path the WebDAV handler
+	// resolves below is resolved through this root, so a symlink stored in the
+	// workspace cannot be used to reach a file outside it. Creating the
+	// directory when it is absent is the long-standing behaviour of this
+	// endpoint — a client syncs into a workspace that does not exist yet — and
+	// openConfinedBase keeps that while refusing a base that is itself a link.
+	root, err := openConfinedBase(workspacePath, true)
+	if err != nil {
+		slog.Error("failed to open project workspace directory",
+			"project_id", projectID, "path", workspacePath, "error", err)
 		InternalError(w)
 		return
 	}
+	defer func() { _ = root.Close() }()
 
 	// Build the prefix that the WebDAV handler should strip.
 	// The full URL path is /api/v1/{projects|projects}/{id}/dav/...
@@ -109,7 +117,7 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 
 	handler := &webdav.Handler{
 		Prefix:     prefix,
-		FileSystem: &filteredFS{root: webdav.Dir(workspacePath)},
+		FileSystem: &filteredFS{root: &confinedDavFS{root: root}},
 		LockSystem: lockStore.(webdav.LockSystem),
 		Logger: func(r *http.Request, err error) {
 			if err != nil {
@@ -249,6 +257,122 @@ func walkFilteredDirRecursive(root, prefix string, fn func(relPath string, info 
 		fn(relPath, info)
 	}
 	return nil
+}
+
+// confinedDavFS serves a directory over WebDAV through an *os.Root, so that
+// every path is resolved one component at a time inside that directory.
+//
+// It replaces webdav.Dir, which joins the request path onto the directory and
+// hands the result to the os package: that check is lexical and is done once,
+// before the filesystem sees the path, so it says nothing about what the path
+// resolves to. A workspace holds content the hub does not control — it is a git
+// checkout, and agents write into it — so a symlink in it is an expected
+// condition rather than an anomaly, and following one would take a request to
+// whatever the link named. Resolving through the root removes the question:
+// the kernel refuses a component that leaves the directory, with no window
+// between the check and the operation.
+//
+// Symlinks that resolve inside the workspace keep working as they did.
+type confinedDavFS struct {
+	root *os.Root
+}
+
+// davRelPath converts a WebDAV path, which is slash-separated and normally
+// rooted, into a path relative to the root.
+//
+// path.Clean collapses any ".." before the root sees it, which matches what
+// webdav.Dir did; it is kept as a first pass rather than relied on, since the
+// root rejects an escaping component regardless.
+func davRelPath(name string) (string, error) {
+	if name == "" {
+		return "", os.ErrNotExist
+	}
+	if !strings.HasPrefix(name, "/") {
+		name = "/" + name
+	}
+	rel := strings.TrimPrefix(path.Clean(name), "/")
+	if rel == "" {
+		return ".", nil
+	}
+	return rel, nil
+}
+
+func (d *confinedDavFS) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
+	rel, err := davRelPath(name)
+	if err != nil {
+		return err
+	}
+	return d.root.Mkdir(rel, perm)
+}
+
+func (d *confinedDavFS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (webdav.File, error) {
+	rel, err := davRelPath(name)
+	if err != nil {
+		return nil, err
+	}
+	f, err := d.root.OpenFile(rel, flag, perm)
+	if err != nil {
+		// Returning the error alone would discard the typed nil *os.File that
+		// callers compare against nil.
+		return nil, err
+	}
+	return f, nil
+}
+
+func (d *confinedDavFS) RemoveAll(ctx context.Context, name string) error {
+	rel, err := davRelPath(name)
+	if err != nil {
+		return err
+	}
+	if rel == "." {
+		// Deleting the workspace itself is not a sync operation.
+		return os.ErrPermission
+	}
+	return d.root.RemoveAll(rel)
+}
+
+func (d *confinedDavFS) Rename(ctx context.Context, oldName, newName string) error {
+	oldRel, err := davRelPath(oldName)
+	if err != nil {
+		return err
+	}
+	newRel, err := davRelPath(newName)
+	if err != nil {
+		return err
+	}
+	if oldRel == "." || newRel == "." {
+		return os.ErrPermission
+	}
+	return d.root.Rename(oldRel, newRel)
+}
+
+// Stat resolves the path, and where it cannot, describes the link itself.
+//
+// Following the link is the behaviour callers depend on: a symlink inside the
+// workspace is a transparent file to a sync client, and reporting it as a link
+// would give a size that disagrees with the bytes a GET returns. So the follow
+// is tried first and is what succeeds for anything resolvable in the workspace.
+//
+// When the follow fails on a symlink — it leaves the workspace, or dangles —
+// returning the error would be worse than useless. WebDAV stats a path before
+// deleting it, so an unstattable link could never be removed, and it is
+// visible in a listing: the workspace would show an entry that no client could
+// clear, and every sync would keep failing on it. Reporting the link itself
+// leaves it inert and removable. Nothing is read through it either way; that
+// is decided by OpenFile, which does not have this fallback.
+func (d *confinedDavFS) Stat(ctx context.Context, name string) (os.FileInfo, error) {
+	rel, err := davRelPath(name)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := d.root.Stat(rel)
+	if err == nil {
+		return fi, nil
+	}
+	if linkInfo, linkErr := d.root.Lstat(rel); linkErr == nil && linkInfo.Mode()&os.ModeSymlink != 0 {
+		return linkInfo, nil
+	}
+	return nil, err
 }
 
 // filteredFS wraps a webdav.FileSystem to exclude sync-excluded paths.
