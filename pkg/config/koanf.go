@@ -239,6 +239,59 @@ func LoadSettingsFromDir(dir string) (*Settings, error) {
 	return settings, nil
 }
 
+// loadVersionedSettingsFileOnly is LoadVersionedSettings restricted to a
+// single directory's settings file plus embedded defaults: no project
+// layers (no resolveEffectiveProjectPath, no GetProjectConfigDir), no
+// SCION_ environment provider, no DB-backed settings overlay. Used only by
+// loadGlobalSettingsOnly (round 6 addendum — see LoadGlobalSettings' doc
+// comment in settings_v1.go for why the global-only, Layer-0
+// server.shared_dir_storage read needs a loader this narrow).
+func loadVersionedSettingsFileOnly(dir string) (*VersionedSettings, error) {
+	k := koanf.New(".")
+
+	if defaultData, err := GetDefaultSettingsDataYAML(); err == nil {
+		_ = k.Load(rawbytes.Provider(defaultData), yaml.Parser())
+	}
+	if err := loadSettingsFile(k, dir); err != nil {
+		return nil, err
+	}
+
+	settings := &VersionedSettings{
+		Runtimes:       make(map[string]V1RuntimeConfig),
+		HarnessConfigs: make(map[string]HarnessConfigEntry),
+		Profiles:       make(map[string]V1ProfileConfig),
+	}
+	if err := k.Unmarshal("", settings); err != nil {
+		return nil, err
+	}
+	return settings, nil
+}
+
+// loadLegacySettingsFileOnly is LoadSettingsKoanf restricted to a single
+// directory's settings file plus embedded defaults: no project layers, no
+// SCION_ environment provider. Used only by loadGlobalSettingsOnly (see
+// loadVersionedSettingsFileOnly above).
+func loadLegacySettingsFileOnly(dir string) (*Settings, error) {
+	k := koanf.New(".")
+
+	if defaultData, err := GetDefaultSettingsData(); err == nil {
+		_ = k.Load(rawbytes.Provider(defaultData), json.Parser())
+	}
+	if err := loadSettingsFile(k, dir); err != nil {
+		return nil, err
+	}
+
+	settings := &Settings{
+		Runtimes:  make(map[string]RuntimeConfig),
+		Harnesses: make(map[string]HarnessConfig),
+		Profiles:  make(map[string]ProfileConfig),
+	}
+	if err := k.Unmarshal("", settings); err != nil {
+		return nil, err
+	}
+	return settings, nil
+}
+
 // loadSettingsFile loads settings from a directory, preferring YAML over JSON
 func loadSettingsFile(k *koanf.Koanf, dir string) error {
 	yamlPath := filepath.Join(dir, "settings.yaml")

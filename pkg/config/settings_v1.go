@@ -346,6 +346,10 @@ type V1ServerConfig struct {
 	OAuth            *V1OAuthConfig            `json:"oauth,omitempty" yaml:"oauth,omitempty" koanf:"oauth"`
 	Storage          *V1StorageConfig          `json:"storage,omitempty" yaml:"storage,omitempty" koanf:"storage"`
 	WorkspaceStorage *V1WorkspaceStorageConfig `json:"workspace_storage,omitempty" yaml:"workspace_storage,omitempty" koanf:"workspace_storage"`
+	// SharedDirStorage selects the storage backend for project shared
+	// directories, independent of WorkspaceStorage (design
+	// deploy-config-explore §3.2). See V1SharedDirStorageConfig.
+	SharedDirStorage *V1SharedDirStorageConfig `json:"shared_dir_storage,omitempty" yaml:"shared_dir_storage,omitempty" koanf:"shared_dir_storage"`
 	Secrets          *V1SecretsConfig          `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
 	LogLevel         string                    `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
 	LogFormat        string                    `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
@@ -767,6 +771,109 @@ func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 	if ws.NFS == nil || len(ws.NFS.Shares) == 0 {
 		return fmt.Errorf("workspace_storage.backend is \"nfs\" but no NFS shares are defined; " +
 			"add at least one entry under workspace_storage.nfs.shares")
+	}
+	return nil
+}
+
+// V1SharedDirStorageConfig selects the storage backend for a project's
+// shared directories (design deploy-config-explore §3.2), decoupled from
+// V1WorkspaceStorageConfig. Backend defaults to "local" (today's behavior:
+// shared dirs live next to the project's local config, resolved by
+// GetSharedDirsBasePath). When set to "nfs", the reused V1NFSConfig block
+// configures the shared NFS export that both Docker/Podman/Apple and
+// Kubernetes runtimes resolve into the same layout:
+//
+//	<nfs.mount_root>/<nfs.shares[0].id>/<nfs.subpath_root>/<projectID>/shared-dirs/<name>
+//
+// shared_dir_storage is Layer-0 (see opsettings/koanf.go layer0Prefixes):
+// never written to the DB, requires a restart to take effect, and — per
+// design §3.2.1 "global-only" and AC5 — read from each broker process's
+// GLOBAL settings.yaml only. Callers must source this block via
+// LoadGlobalSettings(), not from the project-merged VersionedSettings that
+// LoadEffectiveSettings(dir) returns for a project directory, AND NOT via
+// LoadEffectiveSettings("") — an empty path resolves a project from the
+// current working directory (FindProjectRoot) and merges it on top of
+// global, so it is not global-only either (round 2 review findings
+// C1/T1/S-F2). A project's settings must not be able to redirect Docker
+// bind-mount sources to an operator-unapproved host path.
+//
+// The workspace-storage-only fields on V1NFSConfig (UID, GID, MountOptions,
+// StorageClass) are not used by shared_dir_storage. Warning about them being
+// set-but-ignored is phase 2 (design §3.2.1), not implemented here.
+type V1SharedDirStorageConfig struct {
+	Backend string       `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"` // "" | "local" | "nfs"
+	NFS     *V1NFSConfig `json:"nfs,omitempty" yaml:"nfs,omitempty" koanf:"nfs"`
+}
+
+// Validate returns an error unless Backend is exactly one of "", "local", or
+// "nfs" — no trimming or case folding, so a typo such as "NFS " or "Nfs"
+// fails closed rather than silently taking the local-layout branch (design
+// G5) — and, when Backend is "nfs", unless the block is fully configured.
+// Unlike V1WorkspaceStorageConfig.ValidateNFS, this requires MountRoot and
+// the first share's ID to be non-empty: shared_dir_storage has no other
+// source for the host mount point used by local-container bind mounts
+// (design deploy-config-explore §3.2.1).
+func (s *V1SharedDirStorageConfig) Validate() error {
+	if s == nil {
+		return nil
+	}
+	switch s.Backend {
+	case "", "local":
+		return nil
+	case "nfs":
+		// fall through to the nfs-specific checks below.
+	default:
+		return fmt.Errorf(
+			"server.shared_dir_storage.backend must be \"\", \"local\", or \"nfs\" (got %q)", s.Backend)
+	}
+	if s.NFS == nil {
+		return fmt.Errorf(
+			"server.shared_dir_storage.backend is \"nfs\" but no nfs block is configured; add server.shared_dir_storage.nfs")
+	}
+	if len(s.NFS.Shares) == 0 {
+		return fmt.Errorf(
+			"server.shared_dir_storage.backend is \"nfs\" but no NFS shares are defined; " +
+				"add at least one entry under server.shared_dir_storage.nfs.shares")
+	}
+	if s.NFS.MountRoot == "" {
+		return fmt.Errorf("server.shared_dir_storage.backend is \"nfs\" but nfs.mount_root is empty")
+	}
+	if s.NFS.Shares[0].ID == "" {
+		return fmt.Errorf("server.shared_dir_storage.backend is \"nfs\" but nfs.shares[0].id is empty")
+	}
+	if s.NFS.SubPathRoot != "" {
+		if err := validateSubPathRoot(s.NFS.SubPathRoot); err != nil {
+			return fmt.Errorf("server.shared_dir_storage.nfs.subpath_root %w", err)
+		}
+	}
+	return nil
+}
+
+// validateSubPathRoot rejects a subpath_root that would produce a
+// confusing error or an unsafe path-component chain once joined with the
+// project ID and shared-dir name (round 6 review nit #6). An absolute
+// value (e.g. "/projects") produces a leading empty path component when
+// the resulting relative path is split on "/", which the component walk in
+// pkg/agent/shared_dir_storage_unix.go then reports as a confusing
+// low-level "mkdir path component \"\": no such file or directory" instead
+// of a clear configuration error — it still fails closed either way, but
+// this catches the operator mistake at config-validation time with an
+// actionable message instead. "." and ".." components have no meaningful
+// interpretation here either: subpath_root exists to name one literal,
+// fixed subdirectory of the export, not to navigate the tree.
+func validateSubPathRoot(subPathRoot string) error {
+	if filepath.IsAbs(subPathRoot) {
+		return fmt.Errorf("must be relative, not absolute (got %q)", subPathRoot)
+	}
+	for _, comp := range strings.Split(filepath.ToSlash(subPathRoot), "/") {
+		switch comp {
+		case "":
+			return fmt.Errorf("must not contain an empty path component (got %q)", subPathRoot)
+		case ".":
+			return fmt.Errorf("must not contain a \".\" path component (got %q)", subPathRoot)
+		case "..":
+			return fmt.Errorf("must not contain a \"..\" path component (got %q)", subPathRoot)
+		}
 	}
 	return nil
 }
@@ -2210,49 +2317,56 @@ func convertVersionedToLegacy(vs *VersionedSettings) *Settings {
 	return s
 }
 
+// detectDirSettingsFormat checks a single directory's settings file (NOT the
+// hierarchy — no project resolution, no walking up from anywhere) to
+// determine whether it uses the versioned format. Returns (false, false) if
+// dir is empty, has no settings file, or the file cannot be read.
+//
+// Extracted from detectHierarchyFormat (which uses this for both its global
+// and project checks) so that a caller needing a strictly single-file,
+// global-only answer — detectGlobalSettingsFormatOnly, round 6 addendum —
+// can get one without going anywhere near resolveEffectiveProjectPath.
+func detectDirSettingsFormat(dir string) (hasVersioned bool, missingSchemaVersion bool) {
+	if dir == "" {
+		return false, false
+	}
+	path := GetSettingsPath(dir)
+	if path == "" {
+		return false, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, false
+	}
+	version, _ := DetectSettingsFormat(data)
+	if version == "" {
+		return false, false
+	}
+	var raw map[string]interface{}
+	hasExplicitVersion := false
+	if err := yamlv3.Unmarshal(data, &raw); err == nil && raw != nil {
+		_, hasExplicitVersion = raw["schema_version"]
+	}
+	return true, !hasExplicitVersion
+}
+
 // detectHierarchyFormat checks settings files in the global and project directories
 // to determine if any user file uses the versioned format.
 // Returns:
 //   - hasVersioned: true if any user file is versioned (has schema_version or v1 structural indicators)
 //   - missingSchemaVersion: true if versioned was detected via v1 structural indicators only (schema_version absent)
 func detectHierarchyFormat(projectPath string) (hasVersioned bool, missingSchemaVersion bool) {
-	// fileIsVersionedViaSV returns true if data has an explicit schema_version key.
-	fileHasExplicitVersion := func(data []byte) bool {
-		var raw map[string]interface{}
-		if err := yamlv3.Unmarshal(data, &raw); err != nil || raw == nil {
-			return false
-		}
-		_, ok := raw["schema_version"]
-		return ok
-	}
-
 	// Check global settings
 	globalDir, _ := GetGlobalDir()
-	if globalDir != "" {
-		if path := GetSettingsPath(globalDir); path != "" {
-			if data, err := os.ReadFile(path); err == nil {
-				if version, _ := DetectSettingsFormat(data); version != "" {
-					if !fileHasExplicitVersion(data) {
-						missingSchemaVersion = true
-					}
-					return true, missingSchemaVersion
-				}
-			}
-		}
+	if hv, missing := detectDirSettingsFormat(globalDir); hv {
+		return true, missing
 	}
 
 	// Check project settings
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
 	if effectiveProjectPath != "" && effectiveProjectPath != globalDir {
-		if path := GetSettingsPath(effectiveProjectPath); path != "" {
-			if data, err := os.ReadFile(path); err == nil {
-				if version, _ := DetectSettingsFormat(data); version != "" {
-					if !fileHasExplicitVersion(data) {
-						missingSchemaVersion = true
-					}
-					return true, missingSchemaVersion
-				}
-			}
+		if hv, missing := detectDirSettingsFormat(effectiveProjectPath); hv {
+			return true, missing
 		}
 	}
 
@@ -2342,6 +2456,194 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 	}
 	return vs, warnings, nil
 }
+
+// LoadGlobalSettings loads settings from the broker's global directory
+// (~/.scion) ONLY — no project-level file is merged on top, regardless of
+// the calling process's current working directory.
+//
+// This is deliberately NOT the same as LoadEffectiveSettings(""): an empty
+// projectPath does not mean "global only". resolveEffectiveProjectPath("")
+// calls FindProjectRoot(), which walks up from os.Getwd() and, if the
+// process happens to be running inside a project checkout (the common case
+// for `scion start` run from a repo, or a broker started from a project
+// directory), merges that project's settings.yaml on top of global (design
+// deploy-config-explore round 2 review findings C1/S-F2). Passing the
+// global directory explicitly short-circuits that: with projectPath equal
+// to the global directory, LoadVersionedSettings's project-layer steps are
+// skipped entirely (they each check projectPath != globalDir).
+//
+// Use this for any Layer-0, global-only setting (see
+// opsettings/koanf.go's layer0Prefixes) that must not be overridable by a
+// project's settings.yaml — for example server.shared_dir_storage, which
+// must not let a project (including in-repo settings.yaml content from a
+// cloned repository) redirect where its shared directories are mounted.
+//
+// Round 6 addendum (nfs-gke UAT blocker, hy-em/hy-rev-6/hy-aud-6): this read
+// is now a fully dedicated, standalone loader (loadGlobalSettingsOnly,
+// below) rather than a call into LoadEffectiveSettings/LoadVersionedSettings/
+// LoadSettingsKoanf, for two independent reasons found in the same round:
+//
+//  1. Env-free. Those three functions all merge koanf's SCION_ environment
+//     provider unconditionally. There is no env mapping for
+//     server.shared_dir_storage itself, so an env-free read of the file is
+//     semantically identical for this setting — but koanf's env provider
+//     merges EVERY SCION_* variable present in the broker's process
+//     environment, not just ones this setting cares about, and unmarshals
+//     the merged result as a single struct. A broker env can contain
+//     SCION_* variables with no business being here at all (the ii2 hub's
+//     own 21-variable set, findings/ii2-hub-env-names.txt, or an
+//     in-container helper var like SCION_AUTO_EXPOSE_PORTS) whose mapped
+//     key happens to collide with a struct-typed field elsewhere in
+//     VersionedSettings — e.g. SCION_AUTO_EXPOSE_PORTS maps to the bare key
+//     "auto_expose_ports", and koanf's Unmarshal fails outright if that
+//     collides with a nested map/struct. Before this fix, such a collision
+//     made the ENTIRE global settings load fail to decode, and because
+//     GlobalSettingsMentions found "shared_dir_storage" in the raw file
+//     bytes (an unrelated part of the same file), every agent Start failed
+//     closed — even though the operator's shared_dir_storage config was
+//     never at risk and nothing about it depends on any environment
+//     variable. This is not hypothetical: it reproduces in any shell/agent
+//     container that happens to export SCION_AUTO_EXPOSE_PORTS or similar.
+//  2. Global-only, for real this time. resolveEffectiveProjectPath, called
+//     internally by LoadVersionedSettings/LoadSettingsKoanf/
+//     detectHierarchyFormat, treats WHATEVER path it is given as if it
+//     might be a project directory: if ~/.scion itself contains a
+//     project-id or grove-id file (plausible — a broker's ~/.scion can
+//     double as its own hub-side project identity), it resolves to
+//     GetProjectConfigDir(globalDir), i.e.
+//     ~/.scion/project-configs/<slug>__<id>/.scion — a completely
+//     unrelated project's split-storage settings.yaml — and merges it on
+//     top. That defeats the entire point of "global-only, a project's
+//     settings.yaml cannot override this", which is this setting's core
+//     security property (see the CWD-independence paragraph above).
+//
+// loadGlobalSettingsOnly therefore reads ONLY GetSettingsPath(GetGlobalDir())
+// (plus embedded defaults): no resolveEffectiveProjectPath, no
+// GetProjectConfigDir, no SCION_ environment provider, no DB-backed
+// settings overlay. Every other property is unchanged: global-only (still
+// via GetGlobalDir), CWD-independent, legacy-format detection (via
+// GlobalSettingsIsLegacyFormat, itself rewritten the same way — see its doc
+// comment), the 6' malformed-file substring heuristic, and
+// v1-loader-authoritative behavior for a successfully-parsed file.
+func LoadGlobalSettings() (*VersionedSettings, []string, error) {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolving global settings directory: %w", err)
+	}
+	return loadGlobalSettingsOnly(globalDir)
+}
+
+// GlobalSettingsMentions reports whether the RAW bytes of the global
+// settings file (read directly, without parsing) contain substr. Intended
+// for a caller that has already failed to parse the global settings file
+// via LoadGlobalSettings and needs to decide whether the operator likely
+// intended to configure a specific Layer-0 setting — round 3 review
+// disposition 6': failing closed on every malformed global settings file
+// would regress every deployment with a default shared-dir scratchpad, even
+// ones that never configured server.shared_dir_storage. Checking for the
+// raw key name lets a caller fail closed only when the setting in question
+// was plausibly in play, and otherwise degrade the way `main` already does.
+//
+// Returns false — "assume not configured" — if the global directory or its
+// settings file cannot be resolved or read; a caller in that situation is
+// already handling a read/parse error itself and should not additionally
+// fail closed because of an unrelated problem finding the raw bytes.
+func GlobalSettingsMentions(substr string) bool {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	path := GetSettingsPath(globalDir)
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), substr)
+}
+
+// GlobalSettingsIsLegacyFormat reports whether the global settings file was
+// loaded via the legacy (pre-schema_version) format, as opposed to a
+// well-formed versioned (schema_version: "1") file.
+//
+// Round 5 review finding C1=T1=S-L2: GlobalSettingsMentions' raw substring
+// check is a deliberately crude heuristic, accepted ONLY for a global
+// settings file that failed to parse at all (round 3 disposition 6' — see
+// GlobalSettingsMentions' doc comment). It must not also be applied to a
+// file that DID load successfully as a v1 file: a well-formed v1 file with,
+// say, a commented-out "# shared_dir_storage:" block mentions the substring
+// but was not configured, and the loader — not a substring match — is
+// authoritative for what a successfully-parsed file means. Callers must
+// gate any GlobalSettingsMentions-based fail-closed decision on this
+// function returning true, so that a successfully-loaded v1 file's absence
+// of a parsed block is trusted at face value, exactly like main.
+//
+// This calls detectDirSettingsFormat directly on GetGlobalDir(), NOT
+// detectHierarchyFormat(globalDir) as an earlier version of this function
+// did. Round 6 addendum (hy-aud-6): detectHierarchyFormat(globalDir) is NOT
+// actually global-only — it calls resolveEffectiveProjectPath(globalDir)
+// internally, which treats the global directory as if it might itself be a
+// project directory and, if ~/.scion contains a project-id or grove-id
+// file, resolves to a completely unrelated project's split-storage
+// settings.yaml under ~/.scion/project-configs/<slug>__<id>/.scion and
+// merges its format in too. detectDirSettingsFormat never calls
+// resolveEffectiveProjectPath or GetProjectConfigDir, so this function now
+// keys the legacy-format decision off the global settings file alone, with
+// no project layer involved at all — matching LoadGlobalSettings' own
+// global-only, project-free read exactly (see loadGlobalSettingsOnly).
+//
+// Returns true — "treat as legacy" — if the global directory cannot be
+// resolved at all, since there is then no versioned file to trust as
+// authoritative and the caller's substring-based fallback is the only
+// remaining signal.
+func GlobalSettingsIsLegacyFormat() bool {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return true
+	}
+	hasVersioned, _ := detectDirSettingsFormat(globalDir)
+	return !hasVersioned
+}
+
+// loadGlobalSettingsOnly loads the broker's global settings file — and
+// ONLY that file, GetSettingsPath(globalDir), plus embedded defaults — into
+// a VersionedSettings struct. It is entirely independent of
+// LoadVersionedSettings/LoadSettingsKoanf/LoadEffectiveSettings: no
+// resolveEffectiveProjectPath, no GetProjectConfigDir, no SCION_
+// environment provider, no DB-backed settings overlay. See
+// LoadGlobalSettings' doc comment for why (round 6 addendum). The
+// versioned/legacy format decision is made via detectDirSettingsFormat on
+// this same single file, matching GlobalSettingsIsLegacyFormat exactly.
+func loadGlobalSettingsOnly(globalDir string) (*VersionedSettings, []string, error) {
+	hasVersioned, missingSchemaVersion := detectDirSettingsFormat(globalDir)
+
+	if hasVersioned {
+		vs, err := loadVersionedSettingsFileOnly(globalDir)
+		if err != nil {
+			return nil, nil, fmt.Errorf("loading versioned settings: %w", err)
+		}
+		var warnings []string
+		if missingSchemaVersion {
+			warnings = append(warnings, `settings.yaml contains v1 runtime fields (type, cloudrun, gke, list_all_namespaces) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`)
+		}
+		return vs, warnings, nil
+	}
+
+	legacy, err := loadLegacySettingsFileOnly(globalDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading legacy settings: %w", err)
+	}
+	vs, warnings := AdaptLegacySettings(legacy)
+	return vs, warnings, nil
+}
+
+// loadVersionedSettingsFileOnly and loadLegacySettingsFileOnly (the two
+// helpers loadGlobalSettingsOnly calls) live in koanf.go, which already
+// imports the koanf JSON parser under the bare name "json" — settings_v1.go
+// imports the standard library "encoding/json" under that name instead, so
+// they cannot both live here without an import alias.
 
 // MigrationResult reports what happened during a migration.
 type MigrationResult struct {

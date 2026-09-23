@@ -22,29 +22,37 @@ import (
 )
 
 type RunConfig struct {
-	Name                 string
-	Template             string
-	UnixUsername         string
-	Image                string
-	HomeDir              string
-	Workspace            string
-	RepoRoot             string
-	ContainerWorkspace   string // The container-side workspace path (e.g., /workspace or /repo-root/.scion/agents/foo/workspace)
-	Env                  []string
-	ResolvedSecrets      []api.ResolvedSecret
-	Volumes              []api.VolumeMount
-	Labels               map[string]string
-	Annotations          map[string]string
-	ResolvedAuth         *api.ResolvedAuth
-	Harness              api.Harness
-	Task                 string
-	CommandArgs          []string
-	Resume               bool
-	TelemetryEnabled     bool
-	Resources            *api.ResourceSpec
-	Kubernetes           *api.KubernetesConfig
-	GitClone             *api.GitCloneConfig
-	SharedDirs           []api.SharedDir
+	Name               string
+	Template           string
+	UnixUsername       string
+	Image              string
+	HomeDir            string
+	Workspace          string
+	RepoRoot           string
+	ContainerWorkspace string // The container-side workspace path (e.g., /workspace or /repo-root/.scion/agents/foo/workspace)
+	Env                []string
+	ResolvedSecrets    []api.ResolvedSecret
+	Volumes            []api.VolumeMount
+	Labels             map[string]string
+	Annotations        map[string]string
+	ResolvedAuth       *api.ResolvedAuth
+	Harness            api.Harness
+	Task               string
+	CommandArgs        []string
+	Resume             bool
+	TelemetryEnabled   bool
+	Resources          *api.ResourceSpec
+	Kubernetes         *api.KubernetesConfig
+	GitClone           *api.GitCloneConfig
+	SharedDirs         []api.SharedDir
+	// SharedDirStorage holds the resolved shared-dir storage plan when
+	// server.shared_dir_storage.backend is "nfs" (design
+	// deploy-config-explore §3.2.3/§3.2.4). It is independent of
+	// WorkspaceBackendName/NFS* above, which describe workspace storage
+	// only. Nil means shared dirs use the default local layout (or, on K8s,
+	// fall back to the existing workspace_storage:nfs subPath branch or
+	// per-dir dynamic PVCs).
+	SharedDirStorage     *SharedDirRealization
 	BrokerMode           bool
 	NoAuth               bool
 	NoAuthMessage        string
@@ -102,6 +110,27 @@ type RunConfig struct {
 	// wait-for-sentinel init container instead of the cloning one.
 	// Callers should not set this field.
 	nfsProvisionLockLost bool
+}
+
+// SharedDirRealization holds the plan for realizing a project's shared
+// directories when server.shared_dir_storage.backend is "nfs" (design
+// deploy-config-explore §3.2.3/§3.2.4). It is computed once (in
+// pkg/agent.resolveSharedDirs) and consumed by the K8s runtime's buildPod,
+// which mounts PVClaimName by subPath instead of creating per-dir dynamic
+// PVCs. Docker/Podman/Apple consume the equivalent bind-mount VolumeMounts
+// directly (from runtime.NFSSharedDirsToVolumeMounts) rather than this
+// struct.
+type SharedDirRealization struct {
+	// Backend is "nfs" — the only realized backend today.
+	Backend string
+	// PVClaimName is the K8s PVC claim name holding the shared NFS export
+	// root. Empty means shared_dir_storage nfs is misconfigured (missing
+	// pv_name); buildPod must fail closed rather than fall back to EmptyDir
+	// (design G5).
+	PVClaimName string
+	// SubPaths maps each shared dir name to its subPath within PVClaimName,
+	// e.g. "projects/<pid>/shared-dirs/<name>".
+	SubPaths map[string]string
 }
 
 type Runtime interface {

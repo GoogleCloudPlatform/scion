@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/user"
@@ -94,6 +95,18 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			projectID = opts.Env["SCION_GROVE_ID"]
 		}
 	}
+	// Snapshot the dispatch-provided project ID now, before any
+	// settings-driven env merging (resolveAuthEnvOverlay copying
+	// harness-config env into opts.Env for absent keys, telemetry env, etc.)
+	// can inject a project-controlled SCION_PROJECT_ID/SCION_GROVE_ID.
+	// Used only by the nfs shared_dir_storage branch below (round 3 review
+	// finding C1/S-L1): a project's harness_configs.<name>.env can set
+	// these keys, and since resolveAuthEnvOverlay only fills in *absent*
+	// keys, capturing the value here — before that overlay ever runs — is
+	// what keeps it from being attacker-influenced. The general `projectID`
+	// below is unaffected and keeps its existing settings.Hub.ProjectID
+	// fallback for labels, RunConfig.ProjectID, etc.
+	hubDispatchedProjectID := projectID
 
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
@@ -956,19 +969,90 @@ authDone:
 	} else if len(opts.SharedDirs) > 0 {
 		effectiveSharedDirs = opts.SharedDirs
 	}
-	var sharedDirVolumes []api.VolumeMount
+	// server.shared_dir_storage is global-only (design §3.2.1, AC5): read it
+	// via config.LoadGlobalSettings(), never from the project-merged
+	// `settings` above and never via LoadEffectiveSettings("") — an empty
+	// path is NOT global-only, since it resolves a project from the
+	// process's current working directory and merges that project's
+	// settings.yaml on top of global (round 2 review findings C1/T1/S-F2).
+	// A project's settings, including in-repo content from a cloned
+	// repository, must not be able to redirect Docker bind-mount sources or
+	// override the operator's NFS config. workspace_storage is untouched
+	// and keeps its existing (pre-existing, out of scope) project-level
+	// exposure — see design §3.2.6.
+	var sharedDirStorageCfg *config.V1SharedDirStorageConfig
 	if len(effectiveSharedDirs) > 0 {
-		if err := config.EnsureSharedDirs(projectDir, effectiveSharedDirs); err != nil {
-			util.Debugf("Start: failed to ensure shared dirs: %v", err)
+		globalSettings, _, gErr := config.LoadGlobalSettings()
+		if gErr != nil {
+			// A broken global settings file must fail closed (design G5)
+			// ONLY when the operator plausibly intended to configure
+			// shared_dir_storage — round 3 review disposition 6' (amended):
+			// failing closed on every malformed global settings file,
+			// including deployments that never touched this feature, would
+			// regress essentially every agent start, since every project
+			// has a default scratchpad shared dir (main tolerates this
+			// exact input and starts with the legacy local layout). We
+			// can't parse the broken file to check the real value, so fall
+			// back to a raw substring check on its bytes.
+			if config.GlobalSettingsMentions("shared_dir_storage") {
+				return nil, fmt.Errorf("loading global settings for server.shared_dir_storage: %w", gErr)
+			}
+			slog.Warn("Start: failed to load global settings; server.shared_dir_storage was not found in the raw file, proceeding with the local shared-dir layout",
+				"error", gErr)
+		} else if globalSettings != nil && globalSettings.Server != nil && globalSettings.Server.SharedDirStorage != nil {
+			sharedDirStorageCfg = globalSettings.Server.SharedDirStorage
+		} else if config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
+			// Round 4 review finding S-L1: a global settings.yaml with no
+			// "schema_version: \"1\"" takes the LEGACY loader path, which
+			// silently drops the entire server block — LoadGlobalSettings
+			// returns err == nil with Server == nil, so the gErr != nil
+			// branch above never runs. Without this check, an operator's
+			// shared_dir_storage config would vanish with only a generic
+			// "unrecognized keys" WARN, which is a worse silent failure
+			// than the malformed-YAML case, and contradicts G5 fail-closed
+			// for an operator who plausibly intended to configure it.
+			//
+			// Round 5 review finding C1=T1=S-L2: GlobalSettingsMentions is a
+			// raw substring check, so it also fires on a well-formed v1 file
+			// whose only mention of the key is a YAML comment (e.g. a
+			// commented-out "# shared_dir_storage:" block, which is the
+			// design's documented rollback path). For a file that LOADED
+			// successfully as v1, the loader above is authoritative — no
+			// parsed block means it genuinely was not configured, exactly
+			// like main. The GlobalSettingsIsLegacyFormat() gate restricts
+			// this fail-closed substring check to files that actually took
+			// the legacy loader path, where there is no parsed struct to
+			// trust and the substring is the only available signal; the
+			// "(missing schema_version...)" wording below is therefore
+			// always accurate when this branch fires.
+			return nil, fmt.Errorf(
+				"global settings mention server.shared_dir_storage but it was not loaded (missing schema_version: \"1\"?)")
 		}
-		sdVolumes, err := config.SharedDirsToVolumeMounts(projectDir, effectiveSharedDirs, containerWorkspace)
-		if err != nil {
-			util.Debugf("Start: failed to resolve shared dir volumes: %v", err)
-		} else {
-			sharedDirVolumes = sdVolumes
-			// Add SCION_VOLUMES env var for discoverability
-			opts.Env["SCION_VOLUMES"] = "/scion-volumes"
-		}
+	}
+	// nfs shared_dir_storage keys its layout on hubDispatchedProjectID,
+	// snapshotted above at Start entry — NOT the general projectID variable
+	// (which falls back to settings.Hub.ProjectID / the project-id file)
+	// and NOT a fresh read of opts.Env here. By this point opts.Env may
+	// already have been filled in from project-level harness-config env by
+	// resolveAuthEnvOverlay (it only fills *absent* keys, but that includes
+	// SCION_PROJECT_ID/SCION_GROVE_ID when the hub didn't dispatch this
+	// start), so re-reading opts.Env at this line would reopen exactly the
+	// hole this snapshot closes (round 3 review finding C1/S-L1). The hub
+	// sets SCION_PROJECT_ID/SCION_GROVE_ID unconditionally after merging any
+	// user-supplied env for hub-dispatched starts
+	// (pkg/hub/httpdispatcher.go DispatchAgentStart/DispatchAgentRestart,
+	// "Identity vars at highest precedence"), so hubDispatchedProjectID is
+	// authoritative whenever the hub dispatched this agent, and correctly
+	// empty otherwise — project settings cannot choose which project's
+	// shared tree an nfs-backed agent mounts (round 2 review finding S-F4).
+	sharedDirVolumes, sharedDirStorage, err := resolveSharedDirs(
+		sharedDirStorageCfg, projectDir, hubDispatchedProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace)
+	if err != nil {
+		return nil, err
+	}
+	if len(sharedDirVolumes) > 0 {
+		// Add SCION_VOLUMES env var for discoverability
+		opts.Env["SCION_VOLUMES"] = "/scion-volumes"
 	}
 
 	workspaceBackendName := ""
@@ -1097,9 +1181,10 @@ authDone:
 			}
 			return nil
 		}(),
-		GitClone:   opts.GitClone,
-		SharedDirs: effectiveSharedDirs,
-		BrokerMode: opts.BrokerMode,
+		GitClone:         opts.GitClone,
+		SharedDirs:       effectiveSharedDirs,
+		SharedDirStorage: sharedDirStorage,
+		BrokerMode:       opts.BrokerMode,
 		NoAuth: opts.NoAuth && noAuthConfig != nil &&
 			(noAuthConfig.Behavior == "drop-to-shell" || noAuthConfig.Behavior == "allow"),
 		NoAuthMessage: func() string {
