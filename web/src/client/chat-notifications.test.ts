@@ -27,6 +27,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
+const { playChimeThrottled } = vi.hoisted(() => ({ playChimeThrottled: vi.fn() }));
+vi.mock('../utils/audio.js', () => ({ playChimeThrottled }));
+
 import {
   ChatNotificationDispatcher,
   chatNotificationTitle,
@@ -111,6 +114,7 @@ function dispatcher(): ChatNotificationDispatcher {
 beforeEach(() => {
   popups = [];
   started = [];
+  playChimeThrottled.mockClear();
   FakeNotification.permission = 'granted';
   (window as unknown as { Notification: unknown }).Notification = FakeNotification;
   localStorage.setItem(PUSH_STORAGE_KEY, 'true');
@@ -257,6 +261,31 @@ describe('chat notification dispatch', () => {
     );
 
     expect(popups).toHaveLength(0);
+  });
+});
+
+describe('background chime', () => {
+  it('chimes for a mention that would otherwise pop a notification', () => {
+    dispatcher().handle(mention());
+    expect(playChimeThrottled).toHaveBeenCalledWith('proj-1');
+  });
+
+  it('does not chime for my own message', () => {
+    dispatcher().handle(dm({ senderId: ME }));
+    expect(playChimeThrottled).not.toHaveBeenCalled();
+  });
+
+  it('does not chime for the conversation already on screen', () => {
+    const d = dispatcher();
+    d.setActiveConversation('topic-1');
+    d.handle(mention({ conversationKey: 'topic-1' }));
+    expect(playChimeThrottled).not.toHaveBeenCalled();
+  });
+
+  it('chimes even when desktop push is disabled — the two are independent', () => {
+    localStorage.setItem(PUSH_STORAGE_KEY, 'false');
+    expect(dispatcher().handle(mention())).toBe('push-disabled');
+    expect(playChimeThrottled).toHaveBeenCalledWith('proj-1');
   });
 });
 

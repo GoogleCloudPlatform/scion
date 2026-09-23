@@ -44,6 +44,7 @@ import type { Agent, Message } from '../../../shared/types.js';
 import type { ChatSendDetail } from './chat-composer.js';
 import { stateManager } from '../../../client/main.js';
 import { showToast } from '../../../utils/toast.js';
+import { playChimeThrottled } from '../../../utils/audio.js';
 import './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
@@ -1235,6 +1236,9 @@ export class ScionChatThread extends LitElement {
       try {
         const msg = JSON.parse((event as MessageEvent).data as string) as Message;
         this.mergeMessages([msg]);
+        if (msg.senderId && msg.senderId !== this.selfUserId()) {
+          playChimeThrottled(this.projectId || msg.projectId || '');
+        }
         this.scrollToBottomAfterRender();
       } catch {
         // Skip unparseable entries
@@ -1521,6 +1525,12 @@ export class ScionChatThread extends LitElement {
       }
 
       this.mergeMessages([msg]);
+
+      // Play a chime for messages from others — never for our own echoed
+      // back to this tab.
+      if (msg.senderId && msg.senderId !== this.selfUserId()) {
+        playChimeThrottled(this.projectId || msg.projectId || '');
+      }
 
       this.scrollToBottomAfterRender();
       this.maybeAdvanceReadWatermark();
