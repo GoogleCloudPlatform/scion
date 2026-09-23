@@ -321,3 +321,36 @@ func TestRewriteLocalDownloadURLsRelative(t *testing.T) {
 	assert.Equal(t, "/api/v1/skills/skill-id/files/SKILL.md?raw=1", urls[0].URL)
 	assert.Equal(t, "https://storage.example.com/signed", urls[1].URL)
 }
+
+// On local storage the dispatch path emits Hub-relative files-route URLs
+// pinned to the resolved version (#1785), which the broker absolutizes
+// against its Hub endpoint.
+func TestPreResolveAgentSkills_LocalStorageRelativeVersionedURLs(t *testing.T) {
+	srv, s, alice, _, project := setupSkillAuthzTest(t)
+	ctx := context.Background()
+	stor, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
+	require.NoError(t, err)
+	srv.SetStorage(stor)
+
+	skill := createTestSkill(t, s, "local-private", store.SkillScopeGlobal, "", alice.ID)
+	content := []byte("# local skill\n")
+	_, err = stor.Upload(ctx, skill.StoragePath+"/1.0.0/SKILL.md", bytes.NewReader(content), storage.UploadOptions{})
+	require.NoError(t, err)
+	require.NoError(t, s.CreateSkillVersion(ctx, &store.SkillVersion{
+		ID:          api.NewUUID(),
+		SkillID:     skill.ID,
+		Version:     "1.0.0",
+		ContentHash: "sha256:test",
+		Status:      store.SkillVersionStatusPublished,
+		Files:       []store.TemplateFile{{Path: "SKILL.md", Size: int64(len(content)), Hash: sha256Hex(content)}},
+		Created:     time.Now(),
+	}))
+
+	uri := "skill://scion/global/local-private@latest"
+	resp := srv.preResolveAgentSkills(ctx, dispatchTestAgent(alice.ID, project.ID, uri))
+	require.NotNil(t, resp)
+	require.Empty(t, resp.Errors)
+	require.Len(t, resp.Resolved, 1)
+	require.Len(t, resp.Resolved[0].Files, 1)
+	assert.Equal(t, "/api/v1/skills/"+skill.ID+"/files/SKILL.md?raw=1&version=1.0.0", resp.Resolved[0].Files[0].URL)
+}
