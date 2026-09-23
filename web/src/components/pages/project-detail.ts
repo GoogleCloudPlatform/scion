@@ -375,6 +375,16 @@ export class ScionPageProjectDetail extends LitElement {
       scrollbar-color: var(--scion-border, #cbd5e1) transparent;
     }
 
+    /* Keep column headers visible while the collapsed table scrolls. With
+       border-collapse the th border-bottom does not stick, so draw the
+       divider with an inset shadow instead. */
+    .agent-table-container.agents-collapsed th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      box-shadow: inset 0 -1px 0 var(--scion-border, #e2e8f0);
+    }
+
     .agent-grid.agents-collapsed {
       /* Room so card hover shadows/borders are not clipped by the scroller. */
       padding: 2px 0.5rem 2px 2px;
