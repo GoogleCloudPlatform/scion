@@ -538,12 +538,13 @@ func TestValidSharedDirProjectID_RejectsTraversal(t *testing.T) {
 }
 
 // TestResolveSharedDirs_NFS_SymlinkedLeaf_FailsClosed is round 2 security
-// review finding S-F3 (rewritten in round 3, disposition 7', for the
-// os.Root-based traversal): a shared dir whose leaf directory is a symlink
-// (plantable by anything that can write to the export, e.g. another
-// all_squash-ed NFS client) pointing outside the export must be refused —
-// os.Root's Mkdir won't create an entry over the existing symlink and won't
-// follow it — and nothing outside the export may be touched.
+// review finding S-F3 (superseded in round 5 by the race-free component
+// walk in shared_dir_storage_unix.go): a shared dir whose leaf directory is
+// a symlink (plantable by anything that can write to the export, e.g.
+// another all_squash-ed NFS client) pointing outside the export must be
+// refused — the component walk's openat(O_NOFOLLOW) refuses to open or
+// create through the existing symlink at all — and nothing outside the
+// export may be touched.
 func TestResolveSharedDirs_NFS_SymlinkedLeaf_FailsClosed(t *testing.T) {
 	mountRoot := newResolvedTempDir(t)
 	shareID := "scion-shared"
@@ -564,8 +565,9 @@ func TestResolveSharedDirs_NFS_SymlinkedLeaf_FailsClosed(t *testing.T) {
 
 	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a leaf symlink pointing outside the export must be refused")
-	// Round 4 review nit T4/S-N2: pin the primary layer — the Lstat-based
-	// leaf check (C4/C5), which runs before os.Root ever attempts a mkdir.
+	// Round 4 review nit T4/S-N2 (still pinned after the round 5 rewrite):
+	// the component walk's openat(O_NOFOLLOW) on the leaf is what refuses
+	// this, before anything is created or chmod'd.
 	assert.Contains(t, err.Error(), "is a symlink")
 	assert.Nil(t, volumes)
 	assert.Nil(t, realization)
@@ -668,6 +670,86 @@ func TestResolveSharedDirs_NFS_ComponentSymlinkToExportRoot_FailsClosed(t *testi
 	assert.Nil(t, realization)
 
 	_, statErr := os.Stat(filepath.Join(hostBase, "scratchpad"))
+	assert.True(t, os.IsNotExist(statErr), "nothing should be created at the export root")
+}
+
+// TestResolveSharedDirs_NFS_SubPathRootComponentSymlinkToDot_FailsClosed is
+// round 6 review finding #4 (hy-rev-6): the FIRST component the walk
+// processes is subpath_root ("projects" by default). There was no unit test
+// pinning that O_NOFOLLOW applies uniformly starting on the very first
+// iteration — a mutant that skipped it only for the first component would
+// have survived. Here "projects" itself is a symlink resolving back to the
+// host base (".") instead of a real directory.
+func TestResolveSharedDirs_NFS_SubPathRootComponentSymlinkToDot_FailsClosed(t *testing.T) {
+	mountRoot := newResolvedTempDir(t)
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+	require.NoError(t, os.MkdirAll(hostBase, 0o775))
+	require.NoError(t, os.Symlink(".", filepath.Join(hostBase, "projects")))
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+	require.Error(t, err, "a symlinked subpath_root (first walk component) resolving to the export root must be refused")
+	assert.Contains(t, err.Error(), "is a symlink")
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+
+	_, statErr := os.Stat(filepath.Join(hostBase, "pid-1"))
+	assert.True(t, os.IsNotExist(statErr), "nothing should be created at the export root")
+}
+
+// TestResolveSharedDirs_NFS_SubPathRootComponentSymlinkedOutside_FailsClosed
+// is the outside-pointing half of round 6 finding #4: the first walk
+// component (subpath_root) is a symlink escaping the export entirely, not
+// just resolving back inside it.
+func TestResolveSharedDirs_NFS_SubPathRootComponentSymlinkedOutside_FailsClosed(t *testing.T) {
+	mountRoot := newResolvedTempDir(t)
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+	require.NoError(t, os.MkdirAll(hostBase, 0o775))
+
+	outside := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(hostBase, "projects")))
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+	require.Error(t, err, "a symlinked subpath_root (first walk component) pointing outside the export must be refused")
+	assert.Contains(t, err.Error(), "is a symlink")
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+	assertDirEmpty(t, outside)
+}
+
+// TestResolveSharedDirs_NFS_PidComponentSymlinkToDotDot_FailsClosed is round
+// 6 review finding #4's second listed shape: projects/<pid> -> ".." (a
+// relative symlink resolving to the export root, the two-dot form, as
+// distinct from the existing "resolves to the host base via an absolute
+// target" and "-> victim" shapes already covered above).
+func TestResolveSharedDirs_NFS_PidComponentSymlinkToDotDot_FailsClosed(t *testing.T) {
+	mountRoot := newResolvedTempDir(t)
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+	projectsDir := filepath.Join(hostBase, "projects")
+	require.NoError(t, os.MkdirAll(projectsDir, 0o775))
+	require.NoError(t, os.Symlink("..", filepath.Join(projectsDir, "pid-1")))
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+	require.Error(t, err, "a pid component symlinked to \"..\" (the export root) must be refused")
+	assert.Contains(t, err.Error(), "is a symlink")
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+
+	_, statErr := os.Stat(filepath.Join(hostBase, "shared-dirs"))
 	assert.True(t, os.IsNotExist(statErr), "nothing should be created at the export root")
 }
 
@@ -910,10 +992,10 @@ func TestResolveSharedDirs_NFS_IntermediateIsRegularFile_FailsClosed(t *testing.
 // TestResolveSharedDirs_NFS_SymlinkedHostBase_StillWorks is round 3 review
 // item 4 / disposition 7': a symlinked mount_root (or share directory) is a
 // legitimate operator layout (e.g. mount_root pointing at a separately
-// mounted disk) and must still work — the confinement and os.Root-based
-// checks must accept it, not just reject attacker-planted symlinks. Also
-// pins that the returned Docker bind source is the resolved real path, not
-// the unresolved (symlinked) one.
+// mounted disk) and must still work — the confinement check and the
+// component walk (round 5) must accept it, not just reject attacker-planted
+// symlinks. Also pins that the returned Docker bind source is the resolved
+// real path, not the unresolved (symlinked) one.
 func TestResolveSharedDirs_NFS_SymlinkedHostBase_StillWorks(t *testing.T) {
 	mountRoot := newResolvedTempDir(t)
 	shareID := "scion-shared"

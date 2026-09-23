@@ -28,6 +28,36 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// ii2HubEnvNames is the full 21-name SCION_* env var list of the running
+// scion-hub process on scion-integration2 (findings/ii2-hub-env-names.txt,
+// round 6 addendum Update 04:40), with plausible values: comma lists for
+// AUTHORIZEDDOMAINS/ADMINEMAILS, "true" for CLOUD_LOGGING, strings
+// elsewhere. Mirrors pkg/config's copy of the same fixture — duplicated
+// rather than shared across packages, since it's test-only data.
+var ii2HubEnvNames = map[string]string{
+	"SCION_CLOUD_LOGGING":                           "true",
+	"SCION_DEV_BINARIES":                            "false",
+	"SCION_GCP_PROJECT_ID":                          "deploy-demo-test",
+	"SCION_HUB_ENDPOINT":                            "https://community.projects.scion-ai.dev",
+	"SCION_HUB_STORAGE_BUCKET":                      "scion-hub-storage",
+	"SCION_IMAGE_REGISTRY":                          "us-docker.pkg.dev/deploy-demo-test/scion",
+	"SCION_MAINTENANCE_REPO_BRANCH":                 "main",
+	"SCION_MAINTENANCE_REPO_PATH":                   "/srv/scion-maintenance",
+	"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS":           "example.com,corp.example.com",
+	"SCION_SERVER_BASE_URL":                         "https://community.projects.scion-ai.dev",
+	"SCION_SERVER_HUB_ADMINEMAILS":                  "admin@example.com,ops@example.com",
+	"SCION_SERVER_HUB_GCPPROJECTID":                 "deploy-demo-test",
+	"SCION_SERVER_LOG_LEVEL":                        "info",
+	"SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID":        "cli-client-id.apps.googleusercontent.com",
+	"SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTSECRET":    "cli-client-secret",
+	"SCION_SERVER_OAUTH_DEVICE_GOOGLE_CLIENTID":     "device-client-id.apps.googleusercontent.com",
+	"SCION_SERVER_OAUTH_DEVICE_GOOGLE_CLIENTSECRET": "device-client-secret",
+	"SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTID":        "web-client-id.apps.googleusercontent.com",
+	"SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTSECRET":    "web-client-secret",
+	"SCION_SERVER_SECRETS_BACKEND":                  "gcp",
+	"SCION_SERVER_SECRETS_GCPPROJECTID":             "deploy-demo-test",
+}
+
 // Round 1 review findings C1/T2 (AC5) and High-1/High-2 in r1-test.md: the
 // unit tests below drive the real Manager.Start entry point end to end,
 // modelled on TestStartPropagatesNFSWorkspaceBackendToRunConfig
@@ -478,6 +508,96 @@ func TestStartSharedDirStorageNFS_GroveIDFallback_Succeeds(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, capturedConfig.SharedDirStorage)
 	assert.Equal(t, "projects/grove-pid/shared-dirs/scratchpad", capturedConfig.SharedDirStorage.SubPaths["scratchpad"])
+}
+
+// TestStartSharedDirStorageNFS_AmbientHubEnv_ColidingVar_StillSucceeds is the
+// Start-level half of the round 6 addendum's headline fix (hy-em/hy-rev-6/
+// hy-aud-6, nfs-gke UAT blocker): with the full ii2 hub 21-variable SCION_*
+// env set (findings/ii2-hub-env-names.txt) PLUS a variable whose mapped key
+// collides with a struct-typed VersionedSettings field, Start must still
+// resolve and mount the configured nfs shared_dir_storage block — not fail
+// closed just because the process's environment happens to carry unrelated
+// SCION_* variables. Before this fix, LoadGlobalSettings went through the
+// general env-merging loader, so SCION_AUTO_EXPOSE_PORTS=true (a real,
+// common in-container variable) made the entire global settings decode
+// fail, and — because the file mentions "shared_dir_storage" — Start failed
+// closed for every agent on that broker.
+func TestStartSharedDirStorageNFS_AmbientHubEnv_ColidingVar_StillSucceeds(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	f.writeGlobalSettings(t, sprintfServerYAML(sharedDirStorageNFSGlobalYAML, filepath.Join(f.tmpDir, "srv"), "share", "pv"))
+	f.writeProjectSettings(t, "")
+
+	// This simulates the BROKER PROCESS's own ambient environment — the
+	// actual vulnerable surface — not the started agent's opts.Env (which
+	// LoadGlobalSettings never consulted even before this fix).
+	for k, v := range ii2HubEnvNames {
+		t.Setenv(k, v)
+	}
+	t.Setenv("SCION_AUTO_EXPOSE_PORTS", "true") // the exact colliding var from the addendum probe
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-16",
+			"SCION_PROJECT_ID": "pid-ambient-env",
+		},
+		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
+	})
+	require.NoError(t, err, "an unrelated ambient SCION_* variable must never break the shared_dir_storage read")
+	require.NotNil(t, capturedConfig.SharedDirStorage)
+	assert.Equal(t, "projects/pid-ambient-env/shared-dirs/scratchpad", capturedConfig.SharedDirStorage.SubPaths["scratchpad"])
+}
+
+// TestStartSharedDirStorage_AmbientHubEnv_ColidingVar_UnsetBlock_SucceedsAsMain
+// is the companion half: the same ambient env, but with NO shared_dir_storage
+// block configured at all, must behave exactly like main (AC1) — the env
+// leak must not fail Start even when there is nothing to protect.
+func TestStartSharedDirStorage_AmbientHubEnv_ColidingVar_UnsetBlock_SucceedsAsMain(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	f.writeGlobalSettings(t, "")
+	f.writeProjectSettings(t, "")
+
+	for k, v := range ii2HubEnvNames {
+		t.Setenv(k, v)
+	}
+	t.Setenv("SCION_AUTO_EXPOSE_PORTS", "true")
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	envMap := map[string]string{
+		"SCION_AGENT_ID":   "agent-17",
+		"SCION_PROJECT_ID": "pid-ambient-env-unset",
+	}
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env:         envMap,
+		SharedDirs:  []api.SharedDir{{Name: "scratchpad"}},
+	})
+	require.NoError(t, err)
+	assertLegacyLocalSharedDirBehavior(t, capturedConfig, envMap, f.projectScionDir)
 }
 
 // TestStartSharedDirStorage_Unset_AC1 is the unset-block variant of item 3 /

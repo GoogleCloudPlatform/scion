@@ -870,3 +870,146 @@ same-named helper), run, and removed — never committed:
 - `gofmt -l` on every touched file — clean.
 - PR body updated (item 4) — confirmed via `gh api .../pulls/1779` that the
   patched body was applied as sent.
+
+## Round 6 addendum: env-free + project-free global read, hermeticity, test/nit cleanup (PR #1779 @9174c89c → this round)
+
+hy-em raised this mid-round-6 (not part of `reviews/r6-dispositions.md` proper — round 6's own
+code/test/security reviews were interim at @9174c89c, blocking on this fix): nfs-gke flagged the
+round-5 env-free work as still incomplete, in three escalating messages folded into
+`reviews/r6-addendum-env.md`. hy-rev-6's interim review (`reviews/r6-code.md`) independently
+confirmed the same Medium and raised four more small items, all folded into the same push.
+
+**Headline finding (Medium, blocking UAT): `LoadGlobalSettings` still went through the general,
+env-merging loader chain.** Round 5 added `LoadGlobalSettings()` believing it was already
+global-only and CWD-independent, but it still called `LoadEffectiveSettings(globalDir)` →
+`LoadVersionedSettings`/`LoadSettingsKoanf`, both of which unconditionally merge koanf's `SCION_`
+environment provider. hy-em reproduced live against the ii2 hub: `SCION_AUTO_EXPOSE_PORTS=true`
+(an ordinary in-container variable, also present in every scion-agent's own container) maps to the
+bare key `auto_expose_ports`, which collides with a struct-typed field elsewhere in
+`VersionedSettings` and makes koanf's `Unmarshal` fail outright — and because the file separately
+mentions `shared_dir_storage`, the round-4/5 fail-closed branch then failed *every* agent Start on
+that broker, configured or not. The full 21-variable ii2 hub env set alone (`findings/
+ii2-hub-env-names.txt`) does NOT trigger this — only a collision does — but the broker's full env is
+not fully known, so the risk could not be ruled out in general.
+
+**A second, independent finding surfaced in the same message (Low, hy-aud-6, folded in because the
+loader was being rewritten anyway): `LoadGlobalSettings`/`GlobalSettingsIsLegacyFormat` were not
+actually global-only when `~/.scion` itself contains a `project-id` or `grove-id` file.**
+`resolveEffectiveProjectPath(globalDir)`, called internally by the general loaders and by
+`detectHierarchyFormat`, treats whatever directory it is given as if it might itself be a project
+directory: if `~/.scion` has its own `project-id` file (plausible — a broker's `~/.scion` can double
+as its own hub-side project identity), it resolves to
+`~/.scion/project-configs/<slug>__<id>/.scion/settings.yaml` — a completely unrelated project's
+split-storage settings file — and merges it in on top. hy-aud-6 reproduced this with a
+`mount_root: /evil` block showing up from that file.
+
+**Fix — a fully dedicated, standalone loader.** `LoadGlobalSettings()` (`pkg/config/settings_v1.go`)
+no longer calls `LoadEffectiveSettings`/`LoadVersionedSettings`/`LoadSettingsKoanf` at all. It now
+calls a new `loadGlobalSettingsOnly(globalDir)`, which reads ONLY
+`GetSettingsPath(GetGlobalDir())` plus embedded defaults:
+- New `detectDirSettingsFormat(dir string) (hasVersioned, missingSchemaVersion bool)`
+  (`pkg/config/settings_v1.go`) — a single-directory, no-project-resolution version/format check,
+  extracted from `detectHierarchyFormat`'s global-check block (behavior-preserving refactor;
+  `detectHierarchyFormat` itself is unchanged for its other, legitimate callers that DO want project
+  layering).
+- `GlobalSettingsIsLegacyFormat()` rewritten to call `detectDirSettingsFormat(globalDir)` directly
+  instead of `detectHierarchyFormat(globalDir)` — closing the exact leak hy-aud-6 found, since
+  `detectDirSettingsFormat` never calls `resolveEffectiveProjectPath`/`GetProjectConfigDir` at all.
+- New `loadGlobalSettingsOnly(globalDir)`, `loadVersionedSettingsFileOnly(dir)` (in `koanf.go`,
+  where the koanf JSON parser import doesn't collide with `settings_v1.go`'s `encoding/json`
+  import), and `loadLegacySettingsFileOnly(dir)` (also in `koanf.go`) — each a narrowed copy of the
+  corresponding general loader with the project-layer steps (in-repo settings, external
+  project-config settings) and the `SCION_` environment provider step removed entirely. No DB-backed
+  settings overlay is applied either (shared_dir_storage is Layer-0 / broker-local anyway).
+- Every other property is unchanged: global-only via `GetGlobalDir`, CWD-independent, the legacy vs.
+  v1 format decision, the 6' malformed-file substring heuristic, and v1-loader-authoritative
+  behavior for a successfully-parsed file.
+- I first attempted a narrower fix — adding a `loadEnv bool` parameter to
+  `LoadVersionedSettings`/`LoadSettingsKoanf`/`LoadEffectiveSettings` internally, keeping their
+  public signatures unchanged via a thin wrapper — before hy-aud-6's project-configs-leak finding
+  arrived. Once that second finding made clear the loader needed to skip project resolution too
+  (not just env), the parameterized approach would have left `loadEnv=false` as a half-measure that
+  still called `resolveEffectiveProjectPath`. I reverted that plumbing entirely (back to the
+  original, single-purpose `LoadVersionedSettings`/`LoadSettingsKoanf`/`LoadEffectiveSettings`, no
+  behavior change for their other callers) and replaced it with the fully standalone
+  `loadGlobalSettingsOnly` path described above.
+
+**Tests** (`pkg/config/settings_v1_test.go`, `pkg/agent/run_shared_dir_storage_test.go`):
+- `TestLoadGlobalSettings_EnvFree`: the full 21-name ii2 hub env set (`ii2HubEnvNames`, mirrored as
+  test-only data in both packages) alone; the same set plus each of three struct-colliding variables
+  (`SCION_AUTO_EXPOSE_PORTS`, `SCION_SERVER`, `SCION_TELEMETRY`) — asserts the nfs block still loads,
+  and that an unset block still behaves like `main` under the same colliding env; plus a
+  `mount_root` env-override attempt confirming it has no effect (there never was an env mapping for
+  this setting).
+- `TestLoadGlobalSettings_GlobalOnly_IgnoresProjectConfigsLeak`: a `~/.scion/project-id` file plus an
+  external `project-configs/<slug>__<id>/.scion/settings.yaml` carrying its own nfs block with
+  `mount_root: /evil` — both when the real global file has a block (must read the global file's
+  value, not the leaked one) and when it doesn't (must not inject one).
+- Start-level companions: `TestStartSharedDirStorageNFS_AmbientHubEnv_ColidingVar_StillSucceeds` and
+  `..._UnsetBlock_SucceedsAsMain`, which set the ii2 set + `SCION_AUTO_EXPOSE_PORTS=true` as the TEST
+  PROCESS's own environment (`t.Setenv`, simulating the broker's real ambient environment) — not
+  `opts.Env` (the started agent's env, which `LoadGlobalSettings` never consulted even before this
+  fix and would have been the wrong thing to test against).
+
+**hy-rev-6 interim items (`reviews/r6-code.md`), folded into the same push:**
+- **#3 (Low) — hermeticity.** hy-rev-6 found 9 of this PR's own tests failing outside `env -i` in
+  their environment; I independently confirmed the underlying mechanism in a much more heavily
+  SCION_*-polluted container (this agent's own runtime env has 44 SCION_* variables, including
+  `SCION_AUTO_EXPOSE_PORTS`). Running the full target suite in an ordinary shell showed 40 failures;
+  I checked each one against base commit `af48a545` (temporarily checking out the affected files via
+  `git checkout af48a545 -- <files>`, confirming the same failures reproduce with zero PR changes
+  applied, then restoring via `git checkout 9174c89c8 -- <files>` and `git stash pop` to recover
+  in-progress work) and found 39 of the 40 are pre-existing, general `LoadVersionedSettings`/
+  `Provision`/`Start` hermeticity issues against ambient `SCION_*`, entirely unrelated to this PR's
+  diff (confirmed: none of those 39 test names exist in any file this PR touches). Only
+  `TestSharedDirStorageConfig_YAMLRoundTrip` (`pkg/config`, added this PR) was mine to fix: it
+  legitimately exercises the general `LoadEffectiveSettings` loader (not the new env-free one, since
+  it's testing that the general v1 loader parses the block correctly), so it now clears every
+  ambient `SCION_*` variable in its own fixture before running, matching the existing
+  `native_telemetry_provision_test.go` pattern (`t.Setenv(key, "")` + `os.Unsetenv(key)`, so the
+  original value is restored automatically at test end). The other 39 pre-existing failures are out
+  of scope for this PR (analogous to the round-5 "SCION_ env-prefix leaks into LoadGlobalSettings"
+  FYI, which hy-em already flagged for a separate nfs-gke follow-up) — not fixed here.
+- **#4 (Low) — missing component-walk test shapes.** Added
+  `TestResolveSharedDirs_NFS_SubPathRootComponentSymlinkToDot_FailsClosed` (`projects` itself, the
+  walk's first component, symlinked to `.` — resolving back to the export root),
+  `TestResolveSharedDirs_NFS_SubPathRootComponentSymlinkedOutside_FailsClosed` (same first component,
+  symlinked OUTSIDE the export instead), and `TestResolveSharedDirs_NFS_PidComponentSymlinkToDotDot_FailsClosed`
+  (`projects/<pid> → ..`, the two-dot form distinct from the existing absolute/victim-relative
+  shapes). All three assert refusal and that nothing new was created.
+- **#5 (Nit) — stale test comments.** Updated the `os.Root`/`Lstat`-era doc comments on
+  `TestResolveSharedDirs_NFS_SymlinkedLeaf_FailsClosed` (and its inline nit comment) and
+  `TestResolveSharedDirs_NFS_SymlinkedHostBase_StillWorks` to describe the round-5 component walk
+  instead. The two comments hy-rev-6 confirmed as correct history (the round-4/5 comparison prose)
+  were left as-is.
+- **#6 (Nit) — unhelpful error for a malformed `subpath_root`.** Added `validateSubPathRoot` and a
+  call to it from `V1SharedDirStorageConfig.Validate()`: an absolute `subpath_root`, or one
+  containing an empty, `.`, or `..` path component, now fails config validation with a clear message
+  instead of surfacing a confusing low-level `mkdir path component "": no such file or directory`
+  from the component walk. New table-driven test cases added to `TestSharedDirStorageConfig_Validate`.
+- **#7/#8** — FYI, no action (matches hy-rev-6's own classification: harmless fd-based chmod-on-a-
+  leaf-we-didn't-create when a concurrent creator wins the mkdirat race; a legacy-format file with a
+  comment-only mention still fails closed, which is the accepted 6' trade-off, not a defect).
+
+### Gate results (round 6, env: clean `env -i PATH=$PATH HOME=<tmp> GOPATH=... GOCACHE=... GOMODCACHE=...`, `-count=1`, AND separately in an ordinary shell)
+
+- `go build ./...` — pass.
+- `GOOS=darwin go build ./pkg/...` — pass.
+- `go vet ./pkg/config/... ./pkg/runtime/... ./pkg/agent/...` — pass, no output.
+- Clean-env `go test ./pkg/config/... ./pkg/runtime/... ./pkg/agent/... -count=1` — pass:
+  ```
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config              2.2s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config/opsettings    0.1s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config/templateimport 0.0s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/runtime              32.9s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun     0.0s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/agent                7.2s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/agent/state          0.0s
+  ```
+- Ordinary-shell (ambient, ~44 `SCION_*` vars including `SCION_AUTO_EXPOSE_PORTS`) same command:
+  39 failures, all confirmed pre-existing at base `af48a545` and outside this PR's touched files —
+  see hy-rev-6 item #3 above. `TestSharedDirStorageConfig_YAMLRoundTrip` (this PR's own test) now
+  passes in this shell too.
+- `gofmt -l` on every touched file — clean.
+- PR body updated with the env-free/project-free loader rationale, new test names, and the
+  hermeticity finding.
