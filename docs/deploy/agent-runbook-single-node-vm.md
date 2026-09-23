@@ -290,7 +290,7 @@ bash scripts/single-node-vm/deploy.sh --config /tmp/scion-deploy-config.json
 - The script runs 5 phases: Prerequisites, GCP Resources, VM Setup, IAP Proxy,
   Finalize.
 - Total time: 10-20 minutes for a registry-based deployment.
-- If building images locally: add 30-45 minutes for the image build phase.
+- If building images locally: add 10-15 minutes for the image build phase.
 - The script outputs progress to stdout. Watch for phase transitions
   (`--- Phase N: ... ---`).
 
