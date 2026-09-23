@@ -1116,15 +1116,25 @@ func (s *trackingExtIDStore) GetExternalIdentitiesByUserID(_ context.Context, _ 
 // trackingUserStore is a UserStore whose GetUserByEmail records whether it
 // was ever called. Embedding store.UserStore (nil) means any other method
 // call panics loudly, which is exactly what we want: Resolve must not reach
-// any of them either when GetExternalIdentity faults.
+// any of them either when GetExternalIdentity faults. CreateUser is
+// overridden (rather than left to panic on the nil embed) so that a
+// regression which disables the F2 guard fails at this test's own
+// getByEmailCalled/createUserCalled assertions instead of a SIGSEGV that
+// aborts the whole test binary (review r4, optional finding 1).
 type trackingUserStore struct {
 	store.UserStore
 	getByEmailCalled bool
+	createUserCalled bool
 }
 
 func (s *trackingUserStore) GetUserByEmail(_ context.Context, _ string) (*store.User, error) {
 	s.getByEmailCalled = true
 	return nil, store.ErrNotFound
+}
+
+func (s *trackingUserStore) CreateUser(_ context.Context, _ *store.User) error {
+	s.createUserCalled = true
+	return errors.New("trackingUserStore: CreateUser must not be reached")
 }
 
 func TestExternalBearer_GetExternalIdentityFault_ServiceUnavailable(t *testing.T) {
@@ -1161,6 +1171,9 @@ func TestExternalBearer_GetExternalIdentityFault_ServiceUnavailable(t *testing.T
 	}
 	if userStore.getByEmailCalled {
 		t.Error("GetUserByEmail must not be called: a GetExternalIdentity fault is not \"no binding\"")
+	}
+	if userStore.createUserCalled {
+		t.Error("CreateUser must not be called: a GetExternalIdentity fault must fail closed before bootstrap")
 	}
 	if extStore.createCalled {
 		t.Error("CreateExternalIdentity must not be called: a GetExternalIdentity fault must fail closed before bootstrap")

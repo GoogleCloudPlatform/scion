@@ -466,6 +466,9 @@ deltas, to be raised separately with the issue owner if not already covered by t
   the two re-hardened exact-byte tests).
 - `go test -buildvcs=false ./pkg/hub/ -run TestGEExchange_Route` — all green.
 - Both of the EM's r2 bare-reference verification commands, re-run after this round's fixes, using
-  `/usr/bin/grep` directly: both print nothing (see the report to ap-em for the transcript). Full
-  `pkg/hub` + `authzop` run not required this round per the brief (the change stayed within
-  `auth_external_bearer*.go`, `google_identity_resolver.go`, `ge_exchange_test.go`, and this log).
+  `/usr/bin/grep` directly: both print nothing (see the report to ap-em for the transcript). The
+  full `pkg/hub` + `authzop` run *was* required this round per the brief, since the fix touched
+  `google_identity_resolver.go` (beyond `auth_external_bearer*.go` and this log): it was run and
+  is clean apart from the four known pre-existing failures (r4 confirmed no gap in coverage;
+  corrected here per r4 nit 2, which flagged the prior wording of this note as misreading the
+  brief's full-run condition).

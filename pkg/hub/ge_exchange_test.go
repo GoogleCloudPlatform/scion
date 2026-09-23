@@ -602,11 +602,18 @@ func TestGEExchange_ExternalIdentityLookupFault_ServerError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a store fault")
 	}
-	if status < 500 {
-		t.Errorf("status = %d, want a 5xx server error (not 403 \"no binding\")", status)
+	// Pinned to the exact mapping (review r4, optional finding 1), not just
+	// "some 5xx": the exchange's default arm maps every unclassified Resolve
+	// error to exactly 500, and a mutation widening that to any other 5xx
+	// should fail this test.
+	if status != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d (not 403 \"no binding\")", status, http.StatusInternalServerError)
 	}
 	if userStore.getByEmailCalled {
 		t.Error("GetUserByEmail must not be called: a GetExternalIdentity fault is not \"no binding\"")
+	}
+	if userStore.createUserCalled {
+		t.Error("CreateUser must not be called: a GetExternalIdentity fault must fail closed before bootstrap")
 	}
 	if extStore.createCalled {
 		t.Error("CreateExternalIdentity must not be called: a GetExternalIdentity fault must fail closed before bootstrap")
