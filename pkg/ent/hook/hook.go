@@ -57,6 +57,18 @@ func (f AgentCredentialFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Va
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentCredentialMutation", m)
 }
 
+// The AgentReincarnationFunc type is an adapter to allow the use of ordinary
+// function as AgentReincarnation mutator.
+type AgentReincarnationFunc func(context.Context, *ent.AgentReincarnationMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AgentReincarnationFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AgentReincarnationMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentReincarnationMutation", m)
+}
+
 // The AgentSessionMetricsFunc type is an adapter to allow the use of ordinary
 // function as AgentSessionMetrics mutator.
 type AgentSessionMetricsFunc func(context.Context, *ent.AgentSessionMetricsMutation) (ent.Value, error)

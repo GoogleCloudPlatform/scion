@@ -161,6 +161,22 @@ func (Agent) Fields() []ent.Field {
 		// guard to detect concurrent modifications under multi-replica Postgres.
 		field.Int64("state_version").
 			Default(1),
+
+		// --- Reincarnation (design: agent-reincarnate, ptone/scion#1821) ---
+		// generation counts completed `scion reincarnate` migrations of this
+		// agent row; a brand-new agent starts at 1. It is incremented only by
+		// the reincarnation worker on a completed migration.
+		field.Int("generation").
+			Default(1),
+		// reincarnation_state tracks an in-flight reincarnation and is kept
+		// separate from `phase` so existing phase consumers are unaffected;
+		// phase still moves through stopping/provisioning/starting/running as
+		// normal during a reincarnation. Empty means no reincarnation is in
+		// flight. A non-empty value here is also what gates the (future,
+		// Phase 2) migration message delivery gate.
+		field.String("reincarnation_state").
+			Optional().
+			Default(""),
 	}
 }
 

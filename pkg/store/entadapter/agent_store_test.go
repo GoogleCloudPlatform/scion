@@ -1205,3 +1205,43 @@ func TestAgentStore_InlineConfigEnvAndTelemetrySurvivePersistence(t *testing.T) 
 	require.NotNil(t, reGot.AppliedConfig.InlineConfig.Telemetry.Cloud)
 	assert.Equal(t, "Bearer must-survive-the-round-trip", reGot.AppliedConfig.InlineConfig.Telemetry.Cloud.Headers["Authorization"])
 }
+
+// TestAgentStore_GenerationAndReincarnationState covers the agent-reincarnate
+// schema addition (design ptone/scion#1821): a new agent always starts at
+// generation 1 with no reincarnation in flight, and both fields round-trip
+// through UpdateAgent — the reincarnate worker's persistence path.
+func TestAgentStore_GenerationAndReincarnationState(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "reincarnate-1")
+	// A caller-supplied Generation must not survive create: a freshly
+	// created agent is always generation 1.
+	a.Generation = 99
+	require.NoError(t, s.CreateAgent(ctx, a))
+	assert.Equal(t, 1, a.Generation, "a new agent must always start at generation 1")
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.Generation)
+	assert.Equal(t, "", got.ReincarnationState, "no reincarnation in flight for a new agent")
+
+	// The reincarnate worker marks a reincarnation in flight...
+	got.ReincarnationState = store.ReincarnationStatePending
+	require.NoError(t, s.UpdateAgent(ctx, got))
+
+	reread, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStatePending, reread.ReincarnationState)
+	assert.Equal(t, 1, reread.Generation, "generation is untouched while a reincarnation is only pending")
+
+	// ...and on completion, increments Generation and clears the state.
+	reread.Generation = 2
+	reread.ReincarnationState = store.ReincarnationStateNone
+	require.NoError(t, s.UpdateAgent(ctx, reread))
+
+	final, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, final.Generation)
+	assert.Equal(t, "", final.ReincarnationState)
+}

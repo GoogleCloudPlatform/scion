@@ -94,6 +94,10 @@ const (
 	FieldDeletedAt = "deleted_at"
 	// FieldStateVersion holds the string denoting the state_version field in the database.
 	FieldStateVersion = "state_version"
+	// FieldGeneration holds the string denoting the generation field in the database.
+	FieldGeneration = "generation"
+	// FieldReincarnationState holds the string denoting the reincarnation_state field in the database.
+	FieldReincarnationState = "reincarnation_state"
 	// EdgeProject holds the string denoting the project edge name in mutations.
 	EdgeProject = "project"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -167,6 +171,8 @@ var Columns = []string{
 	FieldStartedAt,
 	FieldDeletedAt,
 	FieldStateVersion,
+	FieldGeneration,
+	FieldReincarnationState,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -202,6 +208,10 @@ var (
 	UpdateDefaultUpdated func() time.Time
 	// DefaultStateVersion holds the default value on creation for the "state_version" field.
 	DefaultStateVersion int64
+	// DefaultGeneration holds the default value on creation for the "generation" field.
+	DefaultGeneration int
+	// DefaultReincarnationState holds the default value on creation for the "reincarnation_state" field.
+	DefaultReincarnationState string
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
@@ -449,6 +459,16 @@ func ByDeletedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByStateVersion orders the results by the state_version field.
 func ByStateVersion(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStateVersion, opts...).ToFunc()
+}
+
+// ByGeneration orders the results by the generation field.
+func ByGeneration(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldGeneration, opts...).ToFunc()
+}
+
+// ByReincarnationState orders the results by the reincarnation_state field.
+func ByReincarnationState(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldReincarnationState, opts...).ToFunc()
 }
 
 // ByProjectField orders the results by project field.

@@ -18,6 +18,9 @@ type Agent func(*sql.Selector)
 // AgentCredential is the predicate function for agentcredential builders.
 type AgentCredential func(*sql.Selector)
 
+// AgentReincarnation is the predicate function for agentreincarnation builders.
+type AgentReincarnation func(*sql.Selector)
+
 // AgentSessionMetrics is the predicate function for agentsessionmetrics builders.
 type AgentSessionMetrics func(*sql.Selector)
 

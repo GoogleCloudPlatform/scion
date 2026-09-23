@@ -118,6 +118,8 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		MessageMode:         string(a.MessageMode),
 		Ancestry:            a.Ancestry,
 		StateVersion:        a.StateVersion,
+		Generation:          a.Generation,
+		ReincarnationState:  a.ReincarnationState,
 	}
 	if a.CreatedBy != nil {
 		sa.CreatedBy = a.CreatedBy.String()
@@ -212,6 +214,9 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	a.Created = now
 	a.Updated = now
 	a.StateVersion = 1
+	// A freshly created agent is always generation 1, regardless of what the
+	// caller's struct happened to carry (e.g. a zero value).
+	a.Generation = 1
 
 	create := s.client.Agent.Create().
 		SetID(uid).
@@ -238,7 +243,8 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		SetMessage(a.Message).
 		SetCreated(now).
 		SetUpdated(now).
-		SetStateVersion(a.StateVersion)
+		SetStateVersion(a.StateVersion).
+		SetGeneration(a.Generation)
 
 	if a.MessageMode != "" {
 		create.SetMessageMode(agent.MessageMode(a.MessageMode))
@@ -391,7 +397,9 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		SetTaskSummary(a.TaskSummary).
 		SetMessage(a.Message).
 		SetUpdated(now).
-		SetStateVersion(newVersion)
+		SetStateVersion(newVersion).
+		SetGeneration(a.Generation).
+		SetReincarnationState(a.ReincarnationState)
 
 	if a.MessageMode != "" {
 		update.SetMessageMode(agent.MessageMode(a.MessageMode))

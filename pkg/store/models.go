@@ -96,7 +96,25 @@ type Agent struct {
 
 	// Optimistic locking
 	StateVersion int64 `json:"stateVersion"`
+
+	// Reincarnation (design: agent-reincarnate, ptone/scion#1821).
+	// Generation counts completed `scion reincarnate` migrations; a
+	// brand-new agent starts at 1. ReincarnationState tracks an in-flight
+	// reincarnation ("" when none is in flight) and is deliberately kept
+	// separate from Phase, so existing phase consumers are unaffected.
+	Generation         int    `json:"generation"`
+	ReincarnationState string `json:"reincarnationState,omitempty"`
 }
+
+// ReincarnationState values for Agent.ReincarnationState.
+const (
+	ReincarnationStateNone         = ""
+	ReincarnationStatePending      = "pending"
+	ReincarnationStateStopping     = "stopping"
+	ReincarnationStateProvisioning = "provisioning"
+	ReincarnationStateStarting     = "starting"
+	ReincarnationStateFailed       = "failed"
+)
 
 // ExposedPort is a Hub-registered local port that may be reached through an
 // authenticated agent-held tunnel.

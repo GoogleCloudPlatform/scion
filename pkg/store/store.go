@@ -219,6 +219,9 @@ type Store interface {
 
 	// External Identity operations (GE Google Credential Exchange)
 	ExternalIdentityStore
+
+	// Agent Reincarnation operations (agent-reincarnate, ptone/scion#1821)
+	AgentReincarnationStore
 }
 
 // AgentStore defines agent-related persistence operations.

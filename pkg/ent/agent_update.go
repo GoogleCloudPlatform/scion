@@ -722,6 +722,47 @@ func (_u *AgentUpdate) AddStateVersion(v int64) *AgentUpdate {
 	return _u
 }
 
+// SetGeneration sets the "generation" field.
+func (_u *AgentUpdate) SetGeneration(v int) *AgentUpdate {
+	_u.mutation.ResetGeneration()
+	_u.mutation.SetGeneration(v)
+	return _u
+}
+
+// SetNillableGeneration sets the "generation" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableGeneration(v *int) *AgentUpdate {
+	if v != nil {
+		_u.SetGeneration(*v)
+	}
+	return _u
+}
+
+// AddGeneration adds value to the "generation" field.
+func (_u *AgentUpdate) AddGeneration(v int) *AgentUpdate {
+	_u.mutation.AddGeneration(v)
+	return _u
+}
+
+// SetReincarnationState sets the "reincarnation_state" field.
+func (_u *AgentUpdate) SetReincarnationState(v string) *AgentUpdate {
+	_u.mutation.SetReincarnationState(v)
+	return _u
+}
+
+// SetNillableReincarnationState sets the "reincarnation_state" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableReincarnationState(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetReincarnationState(*v)
+	}
+	return _u
+}
+
+// ClearReincarnationState clears the value of the "reincarnation_state" field.
+func (_u *AgentUpdate) ClearReincarnationState() *AgentUpdate {
+	_u.mutation.ClearReincarnationState()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdate) SetProject(v *Project) *AgentUpdate {
 	return _u.SetProjectID(v.ID)
@@ -1096,6 +1137,18 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.AddedStateVersion(); ok {
 		_spec.AddField(agent.FieldStateVersion, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.Generation(); ok {
+		_spec.SetField(agent.FieldGeneration, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedGeneration(); ok {
+		_spec.AddField(agent.FieldGeneration, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.ReincarnationState(); ok {
+		_spec.SetField(agent.FieldReincarnationState, field.TypeString, value)
+	}
+	if _u.mutation.ReincarnationStateCleared() {
+		_spec.ClearField(agent.FieldReincarnationState, field.TypeString)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -1924,6 +1977,47 @@ func (_u *AgentUpdateOne) AddStateVersion(v int64) *AgentUpdateOne {
 	return _u
 }
 
+// SetGeneration sets the "generation" field.
+func (_u *AgentUpdateOne) SetGeneration(v int) *AgentUpdateOne {
+	_u.mutation.ResetGeneration()
+	_u.mutation.SetGeneration(v)
+	return _u
+}
+
+// SetNillableGeneration sets the "generation" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableGeneration(v *int) *AgentUpdateOne {
+	if v != nil {
+		_u.SetGeneration(*v)
+	}
+	return _u
+}
+
+// AddGeneration adds value to the "generation" field.
+func (_u *AgentUpdateOne) AddGeneration(v int) *AgentUpdateOne {
+	_u.mutation.AddGeneration(v)
+	return _u
+}
+
+// SetReincarnationState sets the "reincarnation_state" field.
+func (_u *AgentUpdateOne) SetReincarnationState(v string) *AgentUpdateOne {
+	_u.mutation.SetReincarnationState(v)
+	return _u
+}
+
+// SetNillableReincarnationState sets the "reincarnation_state" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableReincarnationState(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetReincarnationState(*v)
+	}
+	return _u
+}
+
+// ClearReincarnationState clears the value of the "reincarnation_state" field.
+func (_u *AgentUpdateOne) ClearReincarnationState() *AgentUpdateOne {
+	_u.mutation.ClearReincarnationState()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdateOne) SetProject(v *Project) *AgentUpdateOne {
 	return _u.SetProjectID(v.ID)
@@ -2328,6 +2422,18 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if value, ok := _u.mutation.AddedStateVersion(); ok {
 		_spec.AddField(agent.FieldStateVersion, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.Generation(); ok {
+		_spec.SetField(agent.FieldGeneration, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedGeneration(); ok {
+		_spec.AddField(agent.FieldGeneration, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.ReincarnationState(); ok {
+		_spec.SetField(agent.FieldReincarnationState, field.TypeString, value)
+	}
+	if _u.mutation.ReincarnationStateCleared() {
+		_spec.ClearField(agent.FieldReincarnationState, field.TypeString)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{

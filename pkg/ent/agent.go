@@ -99,6 +99,10 @@ type Agent struct {
 	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 	// StateVersion holds the value of the "state_version" field.
 	StateVersion int64 `json:"state_version,omitempty"`
+	// Generation holds the value of the "generation" field.
+	Generation int `json:"generation,omitempty"`
+	// ReincarnationState holds the value of the "reincarnation_state" field.
+	ReincarnationState string `json:"reincarnation_state,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the AgentQuery when eager-loading is set.
 	Edges        AgentEdges `json:"edges"`
@@ -158,9 +162,9 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case agent.FieldDelegationEnabled, agent.FieldDetached, agent.FieldWebPtyEnabled:
 			values[i] = new(sql.NullBool)
-		case agent.FieldExitCode, agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion:
+		case agent.FieldExitCode, agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion, agent.FieldGeneration:
 			values[i] = new(sql.NullInt64)
-		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig:
+		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldReincarnationState:
 			values[i] = new(sql.NullString)
 		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt:
 			values[i] = new(sql.NullTime)
@@ -436,6 +440,18 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.StateVersion = value.Int64
 			}
+		case agent.FieldGeneration:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field generation", values[i])
+			} else if value.Valid {
+				_m.Generation = int(value.Int64)
+			}
+		case agent.FieldReincarnationState:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field reincarnation_state", values[i])
+			} else if value.Valid {
+				_m.ReincarnationState = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -617,6 +633,12 @@ func (_m *Agent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("state_version=")
 	builder.WriteString(fmt.Sprintf("%v", _m.StateVersion))
+	builder.WriteString(", ")
+	builder.WriteString("generation=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Generation))
+	builder.WriteString(", ")
+	builder.WriteString("reincarnation_state=")
+	builder.WriteString(_m.ReincarnationState)
 	builder.WriteByte(')')
 	return builder.String()
 }
