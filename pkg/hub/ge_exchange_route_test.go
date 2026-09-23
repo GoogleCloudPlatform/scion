@@ -420,3 +420,51 @@ func TestGEExchange_Route_GoogleStackBuiltWithoutExchangeOrTrust(t *testing.T) {
 		t.Error("expected authConfig.GoogleResolver to be built unconditionally (O3)")
 	}
 }
+
+// TestGEExchange_Route_ProductionResolverHonoursAdminEmails is r2 finding 1:
+// both existing U5 tests inject a hand-written stub roleFor into
+// NewGoogleIdentityResolver directly, proving only that the resolver *uses*
+// roleFor — not that server.go's real closure (func(ctx, email) string {
+// return srv.getUserRole(ctx, email, "", "") }) actually honours AdminEmails
+// in production. This resolves against the actual resolver New() builds.
+func TestGEExchange_Route_ProductionResolverHonoursAdminEmails(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.AdminEmails = []string{"admin@gmail.com"}
+
+	srv, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	if srv.authConfig.GoogleResolver == nil {
+		t.Fatal("expected authConfig.GoogleResolver to be set")
+	}
+
+	adminIdentity := validGmailIdentity()
+	adminIdentity.Subject = "admin-sub-1"
+	adminIdentity.Email = "admin@gmail.com"
+	adminUser, err := srv.authConfig.GoogleResolver.Resolve(context.Background(), adminIdentity, ResolvePolicy{})
+	if err != nil {
+		t.Fatalf("Resolve(admin@gmail.com): %v", err)
+	}
+	if adminUser.Role != "admin" {
+		t.Errorf("admin@gmail.com role = %q, want %q (production roleFor must honour AdminEmails, M11)", adminUser.Role, "admin")
+	}
+
+	memberIdentity := validGmailIdentity()
+	memberIdentity.Subject = "member-sub-1"
+	memberIdentity.Email = "someone-else@gmail.com"
+	memberUser, err := srv.authConfig.GoogleResolver.Resolve(context.Background(), memberIdentity, ResolvePolicy{})
+	if err != nil {
+		t.Fatalf("Resolve(someone-else@gmail.com): %v", err)
+	}
+	if memberUser.Role != "member" {
+		t.Errorf("someone-else@gmail.com role = %q, want %q", memberUser.Role, "member")
+	}
+}
