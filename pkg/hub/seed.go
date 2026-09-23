@@ -143,14 +143,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    2, // R2: remove agent-self and hub-level permissions
+			Revision:    3, // R3: attach/port_access → agent.lifecycle (miller79/scion#88)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    2, // R2: remove agent-self and hub-level permissions
+			Revision:    3, // R3: attach/port_access → agent.lifecycle (miller79/scion#88)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
@@ -280,12 +280,19 @@ func projectOwnerPermissionIDs() []string {
 		// Agent-self credential permissions (status_update, log_append,
 		// token_refresh, identity_token, port_forward, notify) are excluded:
 		// those are intended for agent identities, not human project admins.
-		"agent.attach",
+		//
+		// agent.attach and agent.port_access are excluded (R3,
+		// miller79/scion#88): agents run with their creator's user-scoped
+		// secrets, so terminal/port access to another member's agent would
+		// expose that member's credentials. Owners reach their own agents
+		// and progeny via the resource-owner and ancestor relationship grants.
+		// agent.lifecycle (start/stop/suspend/restart/restore) is retained so
+		// owners keep management oversight of members' agents.
 		"agent.create",
 		"agent.delete",
+		"agent.lifecycle",
 		"agent.list",
 		"agent.message",
-		"agent.port_access",
 		"agent.read",
 		"agent.set_message_mode",
 		"agent.stop_all",
@@ -344,12 +351,12 @@ func projectOwnerPermissionIDs() []string {
 func projectAdminPermissionIDs() []string {
 	return []string{
 		// Agent lifecycle and operations (no delete, no set_message_mode,
-		// no agent-self credential permissions)
-		"agent.attach",
+		// no agent-self credential permissions, no attach/port_access — see
+		// projectOwnerPermissionIDs for the miller79/scion#88 rationale)
 		"agent.create",
+		"agent.lifecycle",
 		"agent.list",
 		"agent.message",
-		"agent.port_access",
 		"agent.read",
 		"agent.stop_all",
 		"agent.update",

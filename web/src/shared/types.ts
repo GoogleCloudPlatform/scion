@@ -878,22 +878,29 @@ export function can(capabilities: Capabilities | undefined, action: string): boo
 
 /**
  * Whether the viewer may run agent lifecycle actions (start, stop, suspend,
- * resume).
+ * restart, restore).
  *
- * These are authorized server-side by `authorizeAgentLifecycle`, the same gate
- * that governs `attach` (see handlers_projects_core.go, where AgentActionStart
- * and AgentActionStop route through it). The permission registry defines no
- * `agent.start` and no per-agent `agent.stop` - only the scope-level
- * `agent.stop_all` - so `ComputeCapabilities` can never emit "start" or "stop",
- * and gating on those names hides the controls from every user including
- * super-admins.
- *
- * Gating on the capability the Hub actually enforces keeps the UI truthful. If
- * start/stop should become separately governed, that needs registry entries
- * plus role updates, and this helper is the single place to change.
+ * These are authorized server-side by `authorizeAgentLifecycle` with the
+ * `agent.lifecycle` permission (ActionLifecycle). Project owners/admins hold
+ * it for every agent in the project; other users get it on agents they own or
+ * spawned. It is deliberately separate from `attach`, which gates terminal /
+ * exec / env access and is NOT granted to owners/admins on other members'
+ * agents, because those agents run with their owner's secrets
+ * (miller79/scion#88).
  */
 export function canLifecycle(capabilities: Capabilities | undefined): boolean {
-  return can(capabilities, 'attach');
+  return can(capabilities, 'lifecycle');
+}
+
+/**
+ * Whether the viewer may offer the message composer for an agent. Messaging is
+ * authorized server-side by `authorizeAgentMessage` (a scope-level axis with no
+ * per-agent capability), so the UI uses per-agent management capability as the
+ * proxy: `lifecycle` (owners/admins and the agent's creator) or `attach`.
+ * `_messageability` remains the authoritative per-agent signal where present.
+ */
+export function canMessageAgent(capabilities: Capabilities | undefined): boolean {
+  return can(capabilities, 'lifecycle') || can(capabilities, 'attach');
 }
 
 /**

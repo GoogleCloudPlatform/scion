@@ -94,7 +94,7 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 	// against the agent; an agent passes on ScopeAgentLifecycle within its own
 	// project. Attaching a PTY is not read-class, so the agent project read
 	// baseline deliberately does not reach it.
-	if !s.authorizeAgentLifecycle(w, r, agent) {
+	if !s.authorizeAgentLifecycle(w, r, agent, ActionAttach) {
 		return
 	}
 

@@ -691,12 +691,11 @@ func TestR2_ProjectOwnerRetainsHumanAgentManagement(t *testing.T) {
 
 	// Human agent-management permissions that MUST remain.
 	humanAgentPerms := []string{
-		"agent.attach",
 		"agent.create",
 		"agent.delete",
+		"agent.lifecycle",
 		"agent.list",
 		"agent.message",
-		"agent.port_access",
 		"agent.read",
 		"agent.set_message_mode",
 		"agent.stop_all",
@@ -705,6 +704,14 @@ func TestR2_ProjectOwnerRetainsHumanAgentManagement(t *testing.T) {
 	for _, p := range humanAgentPerms {
 		assert.True(t, permSet[p],
 			"project-owner MUST retain human agent-management permission %s", p)
+	}
+
+	// R3 (miller79/scion#88): attach/port_access to another member's agent
+	// would expose that member's user-scoped secrets. Owners reach their own
+	// agents via relationship grants instead.
+	for _, p := range []string{"agent.attach", "agent.port_access"} {
+		assert.False(t, permSet[p],
+			"project-owner must NOT carry %s (cross-member secret exposure)", p)
 	}
 }
 
@@ -736,8 +743,8 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-owner",
 			perms: projectOwnerPermissionIDs(),
 			want: []string{
-				"agent.attach", "agent.create", "agent.delete", "agent.list",
-				"agent.message", "agent.port_access", "agent.read",
+				"agent.create", "agent.delete", "agent.lifecycle", "agent.list",
+				"agent.message", "agent.read",
 				"agent.set_message_mode", "agent.stop_all", "agent.update",
 				"harness_config.create", "harness_config.delete",
 				"harness_config.list", "harness_config.read", "harness_config.update",
@@ -755,8 +762,8 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-admin",
 			perms: projectAdminPermissionIDs(),
 			want: []string{
-				"agent.attach", "agent.create", "agent.list",
-				"agent.message", "agent.port_access", "agent.read",
+				"agent.create", "agent.lifecycle", "agent.list",
+				"agent.message", "agent.read",
 				"agent.stop_all", "agent.update",
 				"harness_config.create",
 				"harness_config.list", "harness_config.read", "harness_config.update",
@@ -794,8 +801,8 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:  2,
-		store.ProjectRoleAdmin:  2,
+		store.ProjectRoleOwner:  3,
+		store.ProjectRoleAdmin:  3,
 		store.ProjectRoleMember: 3,
 	}
 	for _, role := range BuiltInRoles() {
@@ -819,8 +826,8 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 2, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, 2, projectAdminPermissionIDs},
+		{store.ProjectRoleOwner, 3, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 3, projectAdminPermissionIDs},
 		{store.ProjectRoleMember, 3, projectMemberCuratedPermissionIDs},
 	}
 

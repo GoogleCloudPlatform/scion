@@ -39,6 +39,7 @@ import type {
 import {
   can,
   canLifecycle,
+  canMessageAgent,
   isTerminalAvailable,
   getAgentDisplayStatus,
   isAgentRunning,
@@ -1143,7 +1144,7 @@ export class ScionPageAgentDetail extends LitElement {
         <scion-agent-message-viewer
           agentId=${this.agentId}
           agentName=${agent.name || ''}
-          ?canSend=${can(agent._capabilities, 'attach') &&
+          ?canSend=${canMessageAgent(agent._capabilities) &&
           agent._messageability?.canMessage !== false}
           ?cloudLogging=${agent.cloudLogging || false}
         ></scion-agent-message-viewer>
@@ -1179,7 +1180,7 @@ export class ScionPageAgentDetail extends LitElement {
         .projectId=${agent.projectId || ''}
         .currentUserId=${this.currentUserId}
         ?isDM=${true}
-        ?canSend=${can(agent._capabilities, 'attach') &&
+        ?canSend=${canMessageAgent(agent._capabilities) &&
         agent._messageability?.canMessage !== false}
         ?showVisibilityToggle=${true}
         style="display: ${this.chatViewActive ? '' : 'none'}"
@@ -1188,7 +1189,7 @@ export class ScionPageAgentDetail extends LitElement {
         agentId=${this.agentId}
         agentName=${agent.name || ''}
         .projectId=${agent.projectId || ''}
-        ?canSend=${can(agent._capabilities, 'attach') &&
+        ?canSend=${canMessageAgent(agent._capabilities) &&
         agent._messageability?.canMessage !== false}
         ?cloudLogging=${agent.cloudLogging || false}
         style="display: ${this.chatViewActive ? 'none' : ''}"
@@ -1254,7 +1255,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   </sl-tooltip>
                 `
-              : can(agent._capabilities, 'attach')
+              : canMessageAgent(agent._capabilities)
                 ? html`
                     <sl-button
                       variant="default"

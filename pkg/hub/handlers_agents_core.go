@@ -2869,7 +2869,7 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 				writeErrorFromErr(w, err, "")
 				return
 			}
-			decision := s.authzService.CheckAccess(r.Context(), userIdent, agentResource(targetAgent), ActionAttach)
+			decision := s.authzService.CheckAccess(r.Context(), userIdent, agentResource(targetAgent), agentActionPermission(action))
 			if !decision.Allowed {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden,
 					"Only the agent's creator can interact with it", nil)

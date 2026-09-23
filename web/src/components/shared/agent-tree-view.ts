@@ -36,7 +36,12 @@
 import { LitElement, html, css, svg, nothing } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import type { Agent } from '../../shared/types.js';
-import { getAgentDisplayStatus, can, isTerminalAvailable } from '../../shared/types.js';
+import {
+  getAgentDisplayStatus,
+  can,
+  canMessageAgent,
+  isTerminalAvailable,
+} from '../../shared/types.js';
 import { getStateDisplay, type StatusVariant } from '../../shared/agent-state-display.js';
 import {
   buildLineageForest,
@@ -1053,7 +1058,7 @@ export class ScionAgentTreeView extends LitElement {
                   ></sl-icon-button>
                 </sl-tooltip>
               `
-            : can(agent._capabilities, 'attach')
+            : canMessageAgent(agent._capabilities)
               ? html`
                   <sl-icon-button
                     class="message-btn"

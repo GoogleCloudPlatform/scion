@@ -61,6 +61,7 @@ const (
 	ActionExecute        = "execute"
 	ActionMessage        = "message"
 	ActionSetMessageMode = "set_message_mode"
+	ActionLifecycle      = "lifecycle"
 	ActionCreateGlobal   = "create_global"
 
 	UATScopeAgentManage         = "agent:manage"
@@ -103,6 +104,13 @@ type Permission struct {
 	Description    string
 	Enforcement    []string
 	NonRouteUse    []string
+	// ExcludeFromManageAlias keeps this permission's UAT scope out of the
+	// resource's "<resource>:manage" convenience alias. Used for observation
+	// permissions (agent.attach, agent.port_access) that project owners/admins
+	// no longer hold through their role, so that they can still mint
+	// agent:manage tokens (miller79/scion#88). The scope remains available
+	// for explicit selection.
+	ExcludeFromManageAlias bool
 }
 
 // Registry is the canonical permission/resource vocabulary for Hub authz.
@@ -116,8 +124,9 @@ var Registry = []Permission{
 	{ID: "agent.list", Resource: ResourceAgent, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "agent:list", Description: "List agents in the project", Enforcement: []string{"pkg/hub/handlers_agents_core.go", "pkg/hub/authz.go"}},
 	{ID: "agent.update", Resource: ResourceAgent, Action: ActionUpdate, CapabilityKind: CapabilityResource, Description: "Update agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
 	{ID: "agent.delete", Resource: ResourceAgent, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "agent:delete", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Delete agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go", "pkg/hub/handlers_agent_delete_authz_test.go"}},
-	{ID: "agent.attach", Resource: ResourceAgent, Action: ActionAttach, CapabilityKind: CapabilityResource, UATScope: "agent:attach", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Attach to agent sessions", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/pty_handlers.go"}},
-	{ID: "agent.port_access", Resource: ResourceAgent, Action: ActionPortAccess, CapabilityKind: CapabilityResource, UATScope: "agent:port_access", Description: "Access agent forwarded ports", Enforcement: []string{"pkg/hub/port_forward_handlers.go"}},
+	{ID: "agent.attach", Resource: ResourceAgent, Action: ActionAttach, CapabilityKind: CapabilityResource, UATScope: "agent:attach", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Attach to agent sessions (terminal, exec, env, reset-auth)", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/pty_handlers.go"}, ExcludeFromManageAlias: true},
+	{ID: "agent.lifecycle", Resource: ResourceAgent, Action: ActionLifecycle, CapabilityKind: CapabilityResource, UATScope: "agent:lifecycle", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Start, stop, suspend, restart, and restore agents", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/handlers_agents_core.go:handleAgentAction"}},
+	{ID: "agent.port_access", Resource: ResourceAgent, Action: ActionPortAccess, CapabilityKind: CapabilityResource, UATScope: "agent:port_access", Description: "Access agent forwarded ports", Enforcement: []string{"pkg/hub/port_forward_handlers.go"}, ExcludeFromManageAlias: true},
 	{ID: "agent.stop_all", Resource: ResourceAgent, Action: ActionStopAll, CapabilityKind: CapabilityScope, Description: "Stop all agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
 	{ID: "agent.message", Resource: ResourceAgent, Action: ActionMessage, CapabilityKind: CapabilityScope, UATScope: "agent:message", Description: "Send messages to agents", NonRouteUse: []string{"Phase 2: pkg/hub/authorize.go:authorizeAgentMessage"}},
 	{ID: "agent.set_message_mode", Resource: ResourceAgent, Action: ActionSetMessageMode, CapabilityKind: CapabilityResource, AgentScopes: []string{"project:agent:set_message_mode"}, Description: "Change agent message mode", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
@@ -360,9 +369,19 @@ func UATScopeHelp() string {
 func uatScopesForResource(resource string) []string {
 	var out []string
 	for _, permission := range Registry {
-		if permission.Resource == resource && permission.UATScope != "" {
+		if permission.Resource == resource && permission.UATScope != "" && !permission.ExcludeFromManageAlias {
 			out = append(out, permission.UATScope)
 		}
 	}
 	return out
+}
+
+// LegacyUATScopeImplications maps a UAT scope to additional scopes it
+// implicitly carries for tokens minted before a permission split. Before
+// agent.lifecycle existed, start/stop/suspend/restart/restore were enforced
+// through agent.attach, and agent:manage expanded (at mint time) to include
+// agent:attach. Tokens holding agent:attach therefore keep lifecycle authority
+// so that existing CI tokens continue to work (miller79/scion#88).
+var LegacyUATScopeImplications = map[string][]string{
+	"agent:attach": {"agent:lifecycle"},
 }

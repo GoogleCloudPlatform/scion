@@ -54,7 +54,7 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Capabilities, Agent } from '../../shared/types.js';
-import { can } from '../../shared/types.js';
+import { canMessageAgent } from '../../shared/types.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, stateManager } from '../../client/main.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
@@ -1005,7 +1005,7 @@ export class ScionPageChat extends LitElement {
 
   private async fetchAgentCapabilities(agentId: string): Promise<void> {
     if (this.agentCapabilities.has(agentId)) {
-      this.selectedAgentCanSend = can(this.agentCapabilities.get(agentId), 'attach');
+      this.selectedAgentCanSend = canMessageAgent(this.agentCapabilities.get(agentId));
       return;
     }
 
@@ -1014,7 +1014,7 @@ export class ScionPageChat extends LitElement {
       if (res.ok) {
         const agent = (await res.json()) as { _capabilities?: Capabilities };
         this.agentCapabilities.set(agentId, agent._capabilities);
-        this.selectedAgentCanSend = can(agent._capabilities, 'attach');
+        this.selectedAgentCanSend = canMessageAgent(agent._capabilities);
       }
     } catch {
       this.selectedAgentCanSend = false;

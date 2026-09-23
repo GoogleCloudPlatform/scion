@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -193,15 +194,22 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 	}
 }
 
-// authorizeAgentLifecycle gates start/stop/suspend/restart/message/exec on an
-// existing agent, for every caller kind. Exhaustive and fail-closed.
+// authorizeAgentLifecycle gates operations on an existing agent, for every
+// caller kind. Exhaustive and fail-closed. action selects the permission a
+// user caller must hold (see agentActionPermission):
+//   - ActionLifecycle for management (start/stop/suspend/restart/restore)
+//   - ActionAttach for observation (terminal, exec, env, reset-auth)
+//
+// Project owners/admins hold agent.lifecycle through their role but not
+// agent.attach, so they can manage members' agents without being able to
+// observe them (miller79/scion#88).
 //
 // An agent caller passes on ScopeAgentLifecycle within its own project, which
 // includes project peers as well as its own descendants. That breadth is
 // deliberate (design Q3): the scope is template-administered rather than
 // ambient, and handleProjectBroadcast already reads it as conferring exactly
 // this authority. Narrowing it later is a change to this one function.
-func (s *Server) authorizeAgentLifecycle(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
+func (s *Server) authorizeAgentLifecycle(w http.ResponseWriter, r *http.Request, agent *store.Agent, action Action) bool {
 	ctx := r.Context()
 
 	identity := GetIdentityFromContext(ctx)
@@ -211,7 +219,7 @@ func (s *Server) authorizeAgentLifecycle(w http.ResponseWriter, r *http.Request,
 	}
 	if agent == nil {
 		// Caller bug rather than a policy outcome; deny rather than panic.
-		logAuthzDenial(r, identity, Resource{Type: "agent"}, ActionAttach, "nil agent")
+		logAuthzDenial(r, identity, Resource{Type: "agent"}, action, "nil agent")
 		writeForbidden(w, "")
 		return false
 	}
@@ -221,18 +229,18 @@ func (s *Server) authorizeAgentLifecycle(w http.ResponseWriter, r *http.Request,
 	case "agent":
 		agentIdent, ok := identity.(AgentIdentity)
 		if !ok {
-			logAuthzDenial(r, identity, resource, ActionAttach, "invalid agent identity")
+			logAuthzDenial(r, identity, resource, action, "invalid agent identity")
 			writeForbidden(w, "")
 			return false
 		}
 		if !agentIdent.HasScope(ScopeAgentLifecycle) {
-			logAuthzDenial(r, identity, resource, ActionAttach,
+			logAuthzDenial(r, identity, resource, action,
 				"missing scope "+string(ScopeAgentLifecycle))
 			writeForbidden(w, "Missing required scope: "+string(ScopeAgentLifecycle))
 			return false
 		}
 		if agentIdent.ProjectID() != agent.ProjectID {
-			logAuthzDenial(r, identity, resource, ActionAttach, "agent project mismatch")
+			logAuthzDenial(r, identity, resource, action, "agent project mismatch")
 			writeForbidden(w, "Agents can only manage agents within their own project")
 			return false
 		}
@@ -241,23 +249,37 @@ func (s *Server) authorizeAgentLifecycle(w http.ResponseWriter, r *http.Request,
 	case "user", "dev":
 		userIdent, ok := identity.(UserIdentity)
 		if !ok {
-			logAuthzDenial(r, identity, resource, ActionAttach, "invalid user identity")
+			logAuthzDenial(r, identity, resource, action, "invalid user identity")
 			writeForbidden(w, "")
 			return false
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, resource, ActionAttach)
+		decision := s.authzService.CheckAccess(ctx, userIdent, resource, action)
 		if !decision.Allowed {
-			logAuthzDenial(r, identity, resource, ActionAttach, decision.Reason)
+			logAuthzDenial(r, identity, resource, action, decision.Reason)
 			writeForbidden(w, "")
 			return false
 		}
 		return true
 
 	default:
-		logAuthzDenial(r, identity, resource, ActionAttach,
+		logAuthzDenial(r, identity, resource, action,
 			"identity type may not act on agent lifecycle")
 		writeForbidden(w, "")
 		return false
+	}
+}
+
+// agentActionPermission maps an agent action name (api.AgentAction*) to the
+// authz action a user caller must hold. Management actions map to
+// ActionLifecycle; everything else (exec, env, reset-auth, message history,
+// terminal) maps to ActionAttach, which carries the owner's secrets exposure.
+func agentActionPermission(action string) Action {
+	switch action {
+	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend,
+		api.AgentActionRestart, api.AgentActionRestore:
+		return ActionLifecycle
+	default:
+		return ActionAttach
 	}
 }
 

@@ -42,6 +42,7 @@ const (
 	ActionStop         Action = "stop"
 	ActionMessage      Action = "message"
 	ActionAttach       Action = "attach"
+	ActionLifecycle    Action = "lifecycle"
 	ActionPortAccess   Action = "port_access"
 	ActionRegister     Action = "register"
 	ActionAddMember    Action = "addMember"
@@ -1041,6 +1042,9 @@ func uatScopeRestriction(scopes []string) Restriction {
 	scopeSet := make(map[string]bool, len(scopes))
 	for _, s := range scopes {
 		scopeSet[s] = true
+		for _, implied := range permissions.LegacyUATScopeImplications[s] {
+			scopeSet[implied] = true
+		}
 	}
 	// Build the set of allowed permission IDs from the scopes.
 	allowed := make(map[string]struct{})
