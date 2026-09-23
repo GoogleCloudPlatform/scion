@@ -20,6 +20,11 @@ git clone --depth 1 https://github.com/GoogleCloudPlatform/scion.git /tmp/scion-
 cd /tmp/scion-repo
 ```
 
+> **Important for AI agents:** Always clone the repository locally rather than
+> reading the runbook via URL-fetching tools. Web-reading tools may silently
+> truncate long documents — this runbook is 500+ lines and critical deployment
+> steps in later sections will be missed if truncated.
+
 A shallow clone (`--depth 1`) is sufficient — the deploy script does not need
 git history. The `/tmp/scion-repo` path is consistent with Section 5.1; if you
 already have the repo cloned or checked out elsewhere, skip this step and
