@@ -128,11 +128,28 @@ the two `UnifiedAuthMiddleware` hook sites, `AuthTypeExternalBearer`, and the
 ## Verification
 
 - `gofmt -l` clean on all touched files.
-- `go build -buildvcs=false ./pkg/hub/...` — clean.
+- `go build -buildvcs=false ./...` (whole repo, not just `pkg/hub`) — clean.
 - `go vet -buildvcs=false ./pkg/hub/...` — clean.
-- `go test -buildvcs=false ./pkg/hub/...` — full package + subpackages (see
-  report to ap-em for the final run's pass/fail breakdown).
+- `go test -buildvcs=false -timeout 15m ./pkg/hub/` — 557.98s, 4 failures:
+  `TestDEF164_AtAgentSlug_DeliversToAgent`,
+  `TestDEF164_AtAgentSlug_DMConversationCreated`,
+  `TestDEF152_AgentToAgentDM_DeliversViaOutbound`,
+  `TestCreateTemplateV2_ScopeIDInjectionBlocked`. Confirmed all 4 pre-exist on
+  `ca486fa` via a detached baseline worktree (`git worktree add --detach
+  /tmp/baseline-check ca486fa`) — unrelated areas (agent-to-agent DM delivery,
+  template scope injection), not touched by this change.
+- `go test -buildvcs=false ./pkg/hub/authzop/... ./pkg/hub/auth/...
+  ./pkg/hub/githubapp/... ./pkg/hub/imagecheck/...` — all green (authzop
+  needed the `catalog.go` mutation-classification update above).
 - Targeted run of every test added/touched in this phase
   (`TestExternalBearer_*`, `TestHasGoogleUserTrust`,
   `TestNoTokenInfoOutsideGoogleCredentialValidator`, all `TestGEExchange_*`,
-  all `TestProductionValidator_*`) — all green.
+  all `TestProductionValidator_*`) — all green, verbose, individually confirmed.
+- `make ci`: `fmt-check`/`lint`/`check-custom` all green. `test-fast` (`go test
+  -tags no_sqlite ./...`, whole repo) has widespread pre-existing failures
+  outside `pkg/hub` (`pkg/config`, `pkg/agent`, `pkg/runtime`,
+  `pkg/runtimebroker`, `cmd`, ...); spot-checked `pkg/config` against the
+  `ca486fa` baseline and confirmed the same failures there — a config-decoding
+  issue (`'auto_expose_ports' expected a map or struct, got "string"`)
+  unrelated to auth-passthrough. Did not touch those packages.
+- `make build` — clean.
