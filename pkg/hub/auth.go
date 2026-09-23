@@ -473,10 +473,12 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 
 			default:
-				// Opaque or unrecognized bearer tokens are also given a chance
-				// against the external-bearer path (e.g. a Google ID token
-				// whose "typ" isn't detected as a Hub token); anything it
-				// cannot vouch for falls through to the rejection below.
+				// Reserved for opaque (non-JWT) bearer tokens, e.g. Google
+				// OAuth2 access tokens in a later phase. detectTokenType
+				// routes every 3-segment token to tokenTypeUser, so in Phase 1
+				// this arm never sees a JWT and serveExternalBearer always
+				// returns false (not applicable) here — the ID-token path is
+				// reached only from the tokenTypeUser case above.
 				if serveExternalBearer(w, r, next, ctx, token, cfg, log) {
 					return
 				}

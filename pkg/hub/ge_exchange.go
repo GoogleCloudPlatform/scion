@@ -77,11 +77,6 @@ type ExternalIdentityStore = store.ExternalIdentityStore
 // GEExchangeService — the core exchange logic.
 // ---------------------------------------------------------------------------
 
-// UserAuthChecker checks whether a user email is authorized to access the Hub
-// per the configured domain restrictions, invite-only mode, and admin list.
-// Returns true if the user is authorized.
-type UserAuthChecker func(ctx context.Context, email string) bool
-
 // GEExchangeService handles the credential exchange flow.
 type GEExchangeService struct {
 	config           GEGoogleExchangeConfig
@@ -92,14 +87,17 @@ type GEExchangeService struct {
 	nowFunc          func() time.Time
 }
 
-// NewGEExchangeService creates a new GE exchange service.
+// NewGEExchangeService creates a new GE exchange service. resolver is shared
+// with the external-bearer auth path (server.go's New constructs one
+// GoogleIdentityResolver and passes the same instance to both), so the
+// exchange endpoint and external-bearer authentication reach identical
+// resolution decisions — including the admin_emails-aware role for newly
+// provisioned users — during the soak between the two mechanisms (design §4.4).
 func NewGEExchangeService(
 	config GEGoogleExchangeConfig,
 	validator GoogleCredentialValidator,
 	userTokenService *UserTokenService,
-	extIDStore ExternalIdentityStore,
-	userStore store.Store,
-	authChecker UserAuthChecker,
+	resolver *GoogleIdentityResolver,
 	logger *slog.Logger,
 ) *GEExchangeService {
 	if config.TokenTTL == 0 {
@@ -108,33 +106,14 @@ func NewGEExchangeService(
 	if config.TokenTTL > MaxGETokenTTL {
 		config.TokenTTL = MaxGETokenTTL
 	}
-	if authChecker == nil {
-		// Fail closed: if no auth checker is provided, reject all provisioning.
-		authChecker = func(ctx context.Context, email string) bool { return false }
-	}
-	// roleFor defaults to "member" (nil -> resolver default), matching the
-	// exchange's pre-refactor hardcoded role. server.go's New wires a shared
-	// resolver via SetResolver whose roleFor honours admin_emails.
 	return &GEExchangeService{
 		config:           config,
 		validator:        validator,
 		userTokenService: userTokenService,
-		resolver:         NewGoogleIdentityResolver(userStore, extIDStore, authChecker, nil, logger),
+		resolver:         resolver,
 		logger:           logger,
 		nowFunc:          time.Now,
 	}
-}
-
-// SetResolver overrides the exchange service's identity resolver. server.go
-// uses this to share one GoogleIdentityResolver instance — backed by the real
-// admin_emails-aware role function — between the exchange endpoint and the
-// external-bearer path, so both mechanisms produce identical resolution
-// decisions during the soak (design §4.4, §7 reuse map).
-func (s *GEExchangeService) SetResolver(r *GoogleIdentityResolver) {
-	if r == nil {
-		return
-	}
-	s.resolver = r
 }
 
 // ExchangeRequest is the request body for the exchange endpoint.
@@ -195,8 +174,6 @@ func (s *GEExchangeService) Exchange(ctx context.Context, req *ExchangeRequest) 
 		case errors.Is(err, ErrGoogleUntrustedAudience),
 			errors.Is(err, ErrGoogleUntrustedIssuer):
 			return nil, http.StatusUnauthorized, fmt.Errorf("credential not trusted")
-		case errors.Is(err, ErrGoogleServiceAccount):
-			return nil, http.StatusForbidden, fmt.Errorf("service account credentials not accepted for user exchange")
 		case errors.Is(err, ErrGoogleUnverifiedEmail):
 			return nil, http.StatusForbidden, fmt.Errorf("email not verified")
 		case errors.Is(err, ErrGENotConfigured):

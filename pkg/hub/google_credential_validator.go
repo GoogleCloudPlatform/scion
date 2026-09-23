@@ -117,7 +117,6 @@ var (
 	ErrGoogleUntrustedIssuer   = errors.New("untrusted Google issuer")
 	ErrGoogleUnverifiedEmail   = errors.New("google email not verified")
 	ErrGoogleMissingSubject    = errors.New("missing Google subject")
-	ErrGoogleServiceAccount    = errors.New("service account credentials not accepted")
 	ErrGoogleFieldDisagreement = errors.New("google token metadata fields disagree")
 	ErrGoogleMissingField      = errors.New("required field missing from Google response")
 	ErrGoogleUpstreamError     = errors.New("google upstream validation failed")
@@ -164,7 +163,7 @@ func NewGoogleCredentialValidator(httpClient *http.Client) GoogleCredentialValid
 //   - Expiry/not-before/issued-at with bounded skew
 //   - Non-empty stable sub
 //   - email_verified == true
-//   - Not a service account
+//   - Classifies (does not reject) service accounts; see IsServiceAccount
 func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token string, allowedClientIDs []string) (*ValidatedGoogleIdentity, error) {
 	if len(allowedClientIDs) == 0 {
 		return nil, fmt.Errorf("%w: no allowed client IDs configured", ErrGENotConfigured)

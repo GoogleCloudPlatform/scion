@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -53,6 +52,14 @@ import (
 // isn't a JWT with a Google issuer, or — in later phases — no issuer for the
 // token shape). Callers fall back to their normal rejection message.
 var errExternalBearerNotApplicable = errors.New("external bearer: not applicable")
+
+// errExternalBearerPrincipalRejected reports that the verified identity's
+// principal type is not accepted on this path in this phase (currently:
+// service accounts — SA support lands in a later phase). It is a distinct
+// sentinel, rather than an ad-hoc error, so a future outcome metric (design
+// §4.7) can label this rejection without string matching, and so the mapping
+// in serveExternalBearer stays entirely errors.Is-driven.
+var errExternalBearerPrincipalRejected = errors.New("external bearer: principal type not accepted in this phase")
 
 // externalBearerKind classifies a bearer token for the external-bearer path.
 type externalBearerKind int
@@ -98,33 +105,6 @@ func peekJWTIssuer(token string) (string, bool) {
 		return "", false
 	}
 	return claims.Issuer, true
-}
-
-// hasGoogleUserTrust reports whether the federation config declares a
-// user-type trusted issuer for Google (accounts.google.com) with a non-empty
-// expected_audience — the minimum configuration the external-bearer path
-// needs to admit Google ID tokens. server.go's New uses this at startup
-// (before the FederationAuthenticator exists) to decide whether to build the
-// Google validator/resolver stack; googleTrust below performs the equivalent
-// check at request time, through the hot-reloadable FederationAuthenticator.
-func hasGoogleUserTrust(fed config.FederationConfig) bool {
-	if !fed.Enabled {
-		return false
-	}
-	for _, issuer := range fed.TrustedIssuers {
-		normalized := strings.TrimRight(issuer.IssuerURL, "/")
-		if normalized != googleIssuerHTTPS && normalized != googleIssuerBare {
-			continue
-		}
-		if IssuerType(issuer.IssuerType) != IssuerTypeUser {
-			continue
-		}
-		if issuer.ExpectedAudience == "" {
-			continue
-		}
-		return true
-	}
-	return false
 }
 
 // googleTrust returns the trusted-issuer configuration for Google
@@ -230,7 +210,7 @@ func authenticateExternalBearer(ctx context.Context, token string, cfg AuthConfi
 	if id.IsServiceAccount {
 		// No SA branch in this phase (design §5 Phase 1): reject explicitly
 		// rather than falling through to user resolution.
-		return nil, fmt.Errorf("external bearer: service account identities are not accepted in this phase")
+		return nil, errExternalBearerPrincipalRejected
 	}
 
 	u, err := cfg.GoogleResolver.Resolve(ctx, id, ResolvePolicy{})
