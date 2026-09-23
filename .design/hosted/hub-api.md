@@ -857,6 +857,43 @@ Internal endpoint for runtime brokers to report health.
 - `X-Scion-Nonce`: Random nonce for replay prevention
 - `X-Scion-Signature`: HMAC-SHA256 signature
 
+### 5.7 Runtime Broker Message Delivery Failures
+
+```
+POST /api/v1/runtime-brokers/{brokerId}/message-failures
+```
+
+Internal endpoint for a runtime broker to report messages it accepted into its
+debounce buffer (answering 200, so the hub marked them `dispatched`) but then
+failed to deliver to the agent. The hub moves each reported message from
+`pending`/`dispatched` to `failed` and sends a `DELIVERY_FAILED` notice to an
+agent sender. See ptone/scion#1820.
+
+The hub passes its message ID to the broker as `message_id` on the agent
+message request, for agent-to-agent DMs and broker/pub-sub deliveries. Only
+those messages can be reported.
+
+Only the broker itself may call this endpoint (HMAC broker identity must match
+`{brokerId}`). Reports are ignored for unknown message IDs, for messages whose
+recipient agent is not assigned to the reporting broker, and for rows already
+in a terminal state. At most 50 failures may be sent per request.
+
+**Request Body:**
+```json
+{
+  "failures": [
+    {
+      "messageId": "string",   // hub message ID (required)
+      "agentId": "string",     // broker-side agent identifier (informational)
+      "projectId": "string",   // informational
+      "reason": "string"       // stored as the dispatch failure reason
+    }
+  ]
+}
+```
+
+**Response:** `200 OK` with `{"marked": 1, "ignored": 0}`.
+
 ---
 
 ## 6. Template Endpoints

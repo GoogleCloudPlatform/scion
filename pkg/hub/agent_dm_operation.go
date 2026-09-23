@@ -444,7 +444,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	if isManagedAgentRuntime(input.TargetAgent.Runtime) {
 		dispatchErr = s.managedAgentMessage(ctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
 	} else if dispatcher := s.GetDispatcher(); dispatcher != nil && input.TargetAgent.RuntimeBrokerID != "" {
-		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+		retryCtx, retryCancel := context.WithTimeout(withDispatchMessageID(ctx, msgID), 30*time.Second)
 		dispatchErr = dispatchWithBrokerRetry(retryCtx, dispatcher, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt, structuredMsg)
 		retryCancel()
 	}

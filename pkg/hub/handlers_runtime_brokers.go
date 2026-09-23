@@ -237,6 +237,12 @@ func (s *Server) handleRuntimeBrokerByIDInternal(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// Handle buffered-delivery failure reports (#1820)
+	if subPath == "message-failures" && r.Method == http.MethodPost {
+		s.handleBrokerMessageFailures(w, r, id)
+		return
+	}
+
 	// Handle projects action
 	if subPath == "projects" && r.Method == http.MethodGet {
 		s.getBrokerProjects(w, r, id)

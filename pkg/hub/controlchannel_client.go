@@ -269,6 +269,11 @@ func (c *ControlChannelBrokerClient) MessageAgent(ctx context.Context, brokerID,
 	} else {
 		reqBody["message"] = message
 	}
+	// #1820: carry the persisted hub message ID so the broker can report a
+	// buffered-delivery failure back against the right row.
+	if msgID := dispatchMessageIDFromContext(ctx); msgID != "" {
+		reqBody["message_id"] = msgID
+	}
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {

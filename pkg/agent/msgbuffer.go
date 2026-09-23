@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"context"
 	"log/slog"
 	"strings"
 	"sync"
@@ -55,6 +56,40 @@ type agentBuffer struct {
 	messages  []string    // accumulated messages waiting for delivery
 	timer     *time.Timer // debounce timer; fires to trigger delivery
 	projectID string      // project scope for delivery
+
+	// onFailure holds per-message failure callbacks registered by the
+	// sender (nil entries allowed). They are invoked when the coalesced
+	// delivery fails, because the caller was already told the message was
+	// accepted and has no other way to learn it was lost (#1820).
+	onFailure []DeliveryFailureHandler
+}
+
+// DeliveryFailureHandler is called when a buffered message could not be
+// delivered after the caller was told it was accepted. It is invoked from
+// the buffer's timer goroutine and must not block for long.
+type DeliveryFailureHandler func(err error)
+
+type deliveryFailureHandlerKey struct{}
+
+// WithDeliveryFailureHandler returns a context carrying fn. When passed to
+// AgentManager.Message for a non-interrupt message, fn is invoked if the
+// buffered delivery later fails. Only the value is read from ctx; its
+// cancellation does not affect the buffered delivery.
+func WithDeliveryFailureHandler(ctx context.Context, fn DeliveryFailureHandler) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, deliveryFailureHandlerKey{}, fn)
+}
+
+// DeliveryFailureHandlerFromContext returns the handler attached with
+// WithDeliveryFailureHandler, or nil.
+func DeliveryFailureHandlerFromContext(ctx context.Context) DeliveryFailureHandler {
+	if ctx == nil {
+		return nil
+	}
+	fn, _ := ctx.Value(deliveryFailureHandlerKey{}).(DeliveryFailureHandler)
+	return fn
 }
 
 // NewMessageBuffer creates a new MessageBuffer with the given debounce delay
@@ -74,6 +109,12 @@ func NewMessageBuffer(delay time.Duration, deliverFunc func(agentID, projectID s
 // asynchronously once the timer fires.
 // projectID scopes delivery to a specific project.
 func (mb *MessageBuffer) Send(agentID, projectID string, message string) {
+	mb.SendWithFailureHandler(agentID, projectID, message, nil)
+}
+
+// SendWithFailureHandler is Send with a callback that is invoked if the
+// eventual coalesced delivery containing this message fails.
+func (mb *MessageBuffer) SendWithFailureHandler(agentID, projectID string, message string, onFailure DeliveryFailureHandler) {
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 
@@ -86,6 +127,7 @@ func (mb *MessageBuffer) Send(agentID, projectID string, message string) {
 
 	// Append the message to the pending list.
 	buf.messages = append(buf.messages, message)
+	buf.onFailure = append(buf.onFailure, onFailure)
 	util.Debugf("msgbuffer: queued message for agent %s project %s (%d pending)", agentID, projectID, len(buf.messages))
 
 	// Reset or start the debounce timer. If a timer is already running,
@@ -114,6 +156,7 @@ func (mb *MessageBuffer) flush(agentID, key string) {
 
 	// Take ownership of the pending messages and clean up the buffer entry.
 	pending := buf.messages
+	handlers := buf.onFailure
 	projectID := buf.projectID
 	delete(mb.buffers, key)
 	mb.mu.Unlock()
@@ -130,6 +173,11 @@ func (mb *MessageBuffer) flush(agentID, key string) {
 			"pending_count", len(pending),
 			"error", err,
 		)
+		for _, fn := range handlers {
+			if fn != nil {
+				fn(err)
+			}
+		}
 	}
 }
 

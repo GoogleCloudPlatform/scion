@@ -45,12 +45,14 @@ type dispatchCall struct {
 	Message           string
 	Interrupt         bool
 	StructuredMessage *messages.StructuredMessage
+	// MessageID is the hub message ID carried on the dispatch context (#1820).
+	MessageID string
 }
 
-func (d *recordingDispatcher) DispatchAgentMessage(_ context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
+func (d *recordingDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(d.calls, dispatchCall{Agent: agent, Message: message, Interrupt: interrupt, StructuredMessage: structuredMsg})
+	d.calls = append(d.calls, dispatchCall{Agent: agent, Message: message, Interrupt: interrupt, StructuredMessage: structuredMsg, MessageID: dispatchMessageIDFromContext(ctx)})
 	return d.returnErr
 }
 

@@ -741,6 +741,20 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		}
 	}
 
+	// #1820: admission gate — mirror the phase check applied to direct
+	// sends (handleAgentMessage for humans, ExecuteAgentDM for agents).
+	// A non-running agent cannot receive terminal input; accepting the
+	// message would persist a "dispatched" row that the broker then
+	// silently drops. Reject before persistence and tell an agent sender.
+	// Runs after reauthorization so a denied sender learns nothing about
+	// the recipient's phase.
+	if phaseErr := validateAgentDeliverable(agent); phaseErr != nil {
+		p.log.Warn("Rejecting broker message to non-running agent",
+			"agentSlug", agentSlug, "projectID", projectID, "phase", agent.Phase)
+		p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, errors.New(phaseErr.Message))
+		return
+	}
+
 	// Persist to message store before delivery attempt (no pending rows).
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
@@ -843,7 +857,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 
 	// The 30s brokerCallbackTimeout is shared with pre-dispatch work above
 	// (agent lookup, persistence), so retries get slightly less than 30s.
-	if err := dispatchWithBrokerRetry(ctx, dispatcher, agent, msg.Msg, msg.Urgent, msg); err != nil {
+	if err := dispatchWithBrokerRetry(withDispatchMessageID(ctx, storeMsg.ID), dispatcher, agent, msg.Msg, msg.Urgent, msg); err != nil {
 		p.log.Error("Failed to dispatch broker message to agent",
 			"agentSlug", agentSlug, "error", err)
 		if markErr := p.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
