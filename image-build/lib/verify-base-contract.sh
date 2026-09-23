@@ -46,6 +46,13 @@
 # Usage: verify-base-contract.sh
 #   GO_MIN_VERSION   minimum acceptable Go (default 1.26.1; see go.mod)
 #   NODE_MIN_VERSION minimum acceptable Node major (default 24)
+#   TARGETARCH       BuildKit automatic arg — the arch being built (e.g. arm64)
+#   BUILDARCH        BuildKit automatic arg — the arch doing the building
+#
+# When TARGETARCH and BUILDARCH differ the leg is running under qemu-user, and
+# the few checks that emulation cannot support are skipped with a printed
+# reason. Both unset (running the script inside a finished container) means
+# native, and everything runs.
 #
 # All checks are network-free. All failures are collected and reported together:
 # seeing every violation in one build beats fixing them one round-trip at a time.
@@ -56,6 +63,30 @@ GO_MIN_VERSION="${GO_MIN_VERSION:-1.26.1}"
 NODE_MIN_VERSION="${NODE_MIN_VERSION:-24}"
 GIT_MIN_VERSION="2.47.0" # pkg/util/git.go CheckGitVersion — hard floor, not a preference
 
+# --- Emulation awareness ----------------------------------------------------
+#
+# Multi-arch builds run the non-native leg under qemu-user, where some things
+# genuinely cannot work no matter how correct the image is. qemu-user does not
+# implement ptrace, so anything depending on it (chromium's crashpad, and by
+# extension its whole multi-process startup) aborts. A check that cannot pass
+# in the environment it runs in does not measure the image; it measures the
+# emulator, and it fails every multi-arch build.
+#
+# BuildKit supplies TARGETARCH and BUILDARCH as automatic build args; the
+# Dockerfiles forward them. When they differ, this leg is emulated.
+#
+# Defaults are deliberate: with neither set — running the script inside a
+# finished container to re-check a live image, which is a supported use — this
+# is real hardware, so EMULATED is false and every check runs. Assuming native
+# is the safe default, because the cost of being wrong is a spurious failure
+# that gets investigated, not a defect that ships.
+BUILD_ARCH="${BUILDARCH:-}"
+EXPECTED_ARCH="${TARGETARCH:-}"
+EMULATED="false"
+if [ -n "$BUILD_ARCH" ] && [ -n "$EXPECTED_ARCH" ] && [ "$BUILD_ARCH" != "$EXPECTED_ARCH" ]; then
+  EMULATED="true"
+fi
+
 FAILURES=0
 
 fail() {
@@ -65,6 +96,34 @@ fail() {
 
 ok() {
   printf 'ok    %s\n' "$*"
+}
+
+# note — something deliberately not asserted here, with the reason. Distinct
+# from ok (which claims a check passed) and from silence (which hides that a
+# check was skipped). A skipped check must be visible in the build log or the
+# next person will believe it ran.
+note() {
+  printf 'note  %s\n' "$*"
+}
+
+# is_elf <path> — true when the file starts with the ELF magic number.
+is_elf() {
+  [ -f "$1" ] && [ "$(head -c 4 "$1" 2>/dev/null | tr -d '\0')" = "$(printf '\177ELF')" ]
+}
+
+# elf_arch <path> — echoes amd64 | arm64 | unknown.
+#
+# Reads e_machine (2 bytes, little-endian, at offset 0x12) with od rather than
+# calling readelf or file: binutils is not installed in these final images, and
+# adding a package so a verification script can run is the wrong trade.
+elf_arch() {
+  local b
+  b="$(od -An -tu1 -j18 -N1 "$1" 2>/dev/null | tr -d ' ')"
+  case "$b" in
+    62)  echo amd64 ;;   # EM_X86_64
+    183) echo arm64 ;;   # EM_AARCH64
+    *)   echo unknown ;;
+  esac
 }
 
 # ver_ge <have> <want> — true when <have> >= <want>, numeric-aware.
@@ -266,17 +325,98 @@ need_cmd sudo "scion-base passwordless sudo for the scion user"
 # satisfies this by symlinking google-chrome-stable into place.
 # ---------------------------------------------------------------------------
 if command -v chromium >/dev/null 2>&1; then
-  # Keep stderr: when this fails it is almost always a missing shared library
-  # (libnss3, libgbm1, ...) or a sandbox refusal, and the loader names the
-  # culprit precisely. Discarding it turns a one-line diagnosis into a bisect.
-  # --dump-dom writes the DOM to stdout, which is noise here, so stdout goes to
-  # /dev/null and stderr is what gets captured.
-  if chromium_err="$(chromium --headless --no-sandbox --disable-gpu --dump-dom about:blank 2>&1 >/dev/null)"; then
-    ok "chromium runs headless ($(chromium --version 2>&1 | head -n1))"
+  chromium_bin="$(command -v chromium)"
+
+  # /usr/bin/chromium is a ~5KB wrapper *script* on Debian, and a symlink to
+  # google-chrome-stable on the Ubuntu chain. Neither is an ELF file, so the
+  # architecture check below has to find the real payload first. Checking the
+  # wrapper directly reports "unknown" for every image and is worse than no
+  # check at all, because it looks like it passed.
+  chromium_payload="$(readlink -f "$chromium_bin")"
+  if ! is_elf "$chromium_payload"; then
+    for _cand in /usr/lib/chromium/chromium \
+                 /usr/lib/chromium-browser/chromium-browser \
+                 /opt/google/chrome/chrome \
+                 /opt/google/chrome/google-chrome; do
+      if [ -x "$_cand" ] && is_elf "$_cand"; then
+        chromium_payload="$_cand"
+        break
+      fi
+    done
+  fi
+
+  # 1. Architecture. Catches a cross-install landing the wrong binary — which
+  #    an execution test cannot distinguish from an emulation failure, so this
+  #    is the check that actually earns its place on an emulated leg.
+  if is_elf "$chromium_payload"; then
+    chromium_arch="$(elf_arch "$chromium_payload")"
+    if [ -z "$EXPECTED_ARCH" ] || [ "$chromium_arch" = "$EXPECTED_ARCH" ]; then
+      ok "chromium payload is $chromium_arch ($chromium_payload)"
+    else
+      fail "chromium payload $chromium_payload is $chromium_arch but this image
+      targets $EXPECTED_ARCH — a wrong-architecture browser will fail at runtime
+      on the host it ships to, long after this build"
+    fi
   else
-    fail "chromium is on PATH but failed a headless smoke test — a browser that
+    note "could not locate an ELF payload behind $chromium_bin; skipping the
+      architecture check (the execution checks below still apply)"
+  fi
+
+  # 2. Dynamic linkage. This is what usually breaks — libnss3, libgbm1 and
+  #    friends go missing when a package set changes — and it is checkable
+  #    without running the browser's multi-process machinery.
+  if command -v ldd >/dev/null 2>&1 && is_elf "$chromium_payload"; then
+    chromium_missing="$(ldd "$chromium_payload" 2>/dev/null | grep 'not found' || true)"
+    if [ -z "$chromium_missing" ]; then
+      ok "chromium shared libraries all resolve"
+    else
+      fail "chromium is missing shared libraries:
+${chromium_missing}"
+    fi
+  fi
+
+  # 3. Execution. --version starts the real binary and exercises the whole
+  #    dynamic-link path, but stays single-process, so it works under qemu.
+  if chromium_ver="$(chromium --version 2>&1)"; then
+    ok "chromium executes (${chromium_ver%%$'\n'*})"
+  else
+    fail "chromium is on PATH but 'chromium --version' failed — the binary
+      cannot start at all. Its output:
+${chromium_ver:-(no output)}"
+  fi
+
+  # 4. Headless. Deliberately NOT run under emulation.
+  #
+  # qemu-user does not implement ptrace (the log line is literally
+  # "ptrace: Function not implemented (38)"). Chromium's crashpad handler needs
+  # it, so the GPU process cannot be launched or supervised and the browser
+  # aborts with SIGABRT — even with --disable-gpu, which suppresses GPU *use*
+  # but not the process launch. This is a property of the emulator, not of the
+  # image: the previously shipped core-base arm64 (7ee54fa), built before this
+  # check existed, fails here identically. Asserting it on an emulated leg
+  # tests qemu and fails every multi-arch build.
+  #
+  # The checks above still catch every defect this one was written for — a
+  # missing binary, the Ubuntu snap-shim that installs nothing, a broken
+  # symlink, missing libraries, a wrong-architecture payload.
+  if [ "$EMULATED" = "true" ]; then
+    note "skipping the chromium headless smoke test: building $EXPECTED_ARCH on
+      $BUILD_ARCH, so this runs under qemu-user, which cannot support chromium's
+      multi-process model (no ptrace). Checks 1-3 above still ran. Headless is
+      verified on the native leg of this same build."
+  else
+    # Keep stderr: when this fails it is almost always a missing shared library
+    # (libnss3, libgbm1, ...) or a sandbox refusal, and the loader names the
+    # culprit precisely. Discarding it turns a one-line diagnosis into a bisect.
+    # --dump-dom writes the DOM to stdout, which is noise here, so stdout goes to
+    # /dev/null and stderr is what gets captured.
+    if chromium_err="$(chromium --headless --no-sandbox --disable-gpu --dump-dom about:blank 2>&1 >/dev/null)"; then
+      ok "chromium runs headless"
+    else
+      fail "chromium is on PATH but failed a headless smoke test — a browser that
       cannot start headless is no use to the web-dev template. Its stderr:
 ${chromium_err:-(no output)}"
+    fi
   fi
 else
   fail "chromium missing from PATH — required by name (not just 'a browser') by

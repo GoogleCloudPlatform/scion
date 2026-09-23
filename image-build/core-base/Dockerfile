@@ -172,7 +172,18 @@ RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
 # Fail the build, not the agent, when this image does not satisfy what
 # scion-base needs from the layer beneath it. thick-prep ends with the exact
 # same line.
+#
+# TARGETARCH/BUILDARCH are BuildKit automatic args, forwarded so the script can
+# tell a native leg from an emulated one. On the emulated leg of a multi-arch
+# build it skips checks that qemu-user cannot support (chromium's multi-process
+# headless startup needs ptrace, which qemu does not implement) while still
+# asserting architecture, linkage and executability. Without these the arm64 leg
+# fails on the emulator rather than on anything wrong with the image.
+ARG TARGETARCH
+ARG BUILDARCH
 RUN GO_MIN_VERSION="${GO_MIN_VERSION}" \
+    TARGETARCH="${TARGETARCH}" \
+    BUILDARCH="${BUILDARCH}" \
     /opt/scion-image-build/lib/verify-base-contract.sh
 
 # Default to bash - no scion-specific entrypoint
