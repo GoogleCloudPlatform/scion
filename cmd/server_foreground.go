@@ -1592,20 +1592,6 @@ func newJWTProxyAuthenticator(jwtCfg *config.JWTAuthConfig) (*hub.JWTProxyAuthen
 		return nil, fmt.Errorf("auth.proxy.jwt.algorithm %q is not a supported asymmetric algorithm (expected one of RS256, RS384, RS512, ES256, ES384, ES512, PS256, PS384, PS512)", jwtCfg.Algorithm)
 	}
 
-	// Phase 1 supports only the public_key_file key source; jwks_url and
-	// jwks_file are reserved for Phase 2.
-	if jwtCfg.JWKSURL != "" || jwtCfg.JWKSFile != "" {
-		return nil, fmt.Errorf("auth.proxy.jwt: jwks_url and jwks_file key sources are not yet supported; use publicKeyFile")
-	}
-	if jwtCfg.PublicKeyFile == "" {
-		return nil, fmt.Errorf("auth.proxy.jwt.publicKeyFile is required (exactly one key source must be configured)")
-	}
-
-	keySource, err := hub.NewStaticJWTKeySource(jwtCfg.PublicKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("auth.proxy.jwt.publicKeyFile: %w", err)
-	}
-
 	claims := hub.JWTClaimMapping{}
 	if jwtCfg.Claims != nil {
 		claims = hub.JWTClaimMapping{
@@ -1616,14 +1602,46 @@ func newJWTProxyAuthenticator(jwtCfg *config.JWTAuthConfig) (*hub.JWTProxyAuthen
 		}
 	}
 
-	return &hub.JWTProxyAuthenticator{
-		Header:    jwtCfg.Header,
-		Algorithm: jwtCfg.Algorithm,
-		Issuer:    jwtCfg.Issuer,
-		Audience:  jwtCfg.Audience,
-		Claims:    claims,
-		KeySource: keySource,
-	}, nil
+	// Exactly one key source must be configured.
+	switch {
+	case jwtCfg.PublicKeyFile != "" && jwtCfg.JWKSURL == "" && jwtCfg.JWKSFile == "":
+		keySource, err := hub.NewStaticJWTKeySource(jwtCfg.PublicKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("auth.proxy.jwt.publicKeyFile: %w", err)
+		}
+		return &hub.JWTProxyAuthenticator{
+			Header:    jwtCfg.Header,
+			Algorithm: jwtCfg.Algorithm,
+			Issuer:    jwtCfg.Issuer,
+			Audience:  jwtCfg.Audience,
+			Claims:    claims,
+			KeySource: keySource,
+		}, nil
+	case jwtCfg.JWKSURL != "" && jwtCfg.PublicKeyFile == "" && jwtCfg.JWKSFile == "":
+		return &hub.JWTProxyAuthenticator{
+			Header:    jwtCfg.Header,
+			Algorithm: jwtCfg.Algorithm,
+			Issuer:    jwtCfg.Issuer,
+			Audience:  jwtCfg.Audience,
+			Claims:    claims,
+			KeySource: hub.NewJWKSURLKeySource(jwtCfg.JWKSURL),
+		}, nil
+	case jwtCfg.JWKSFile != "" && jwtCfg.PublicKeyFile == "" && jwtCfg.JWKSURL == "":
+		keySource, err := hub.NewJWKSFileKeySource(jwtCfg.JWKSFile)
+		if err != nil {
+			return nil, fmt.Errorf("auth.proxy.jwt.jwksFile: %w", err)
+		}
+		return &hub.JWTProxyAuthenticator{
+			Header:    jwtCfg.Header,
+			Algorithm: jwtCfg.Algorithm,
+			Issuer:    jwtCfg.Issuer,
+			Audience:  jwtCfg.Audience,
+			Claims:    claims,
+			KeySource: keySource,
+		}, nil
+	default:
+		return nil, fmt.Errorf("auth.proxy.jwt: exactly one key source must be configured (publicKeyFile, jwksURL, or jwksFile)")
+	}
 }
 
 // initHubServer creates and configures the Hub server.

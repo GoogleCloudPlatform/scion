@@ -448,9 +448,9 @@ func (m JWTClaimMapping) resolve() JWTClaimMapping {
 }
 
 // jwtKeySource abstracts key retrieval for the generic JWT proxy auth
-// provider. Phase 1 implements only staticKeySource (the `public_key_file`
-// key source); Phase 2 adds JWKS URL/file backed sources that resolve keys by
-// kid, reusing jwksCache for the URL case.
+// provider. Three implementations back the three mutually exclusive key
+// source config fields: staticKeySource (`public_key_file`), jwksCacheSource
+// (`jwks_url`), and jwksFileSource (`jwks_file`).
 type jwtKeySource interface {
 	// GetKey returns the public key used to verify a JWT's signature. Static
 	// sources ignore kid and always return their single configured key.
@@ -508,6 +508,100 @@ func parseJWTPublicKey(der []byte) (interface{}, error) {
 // exactly one key and applies it to every token regardless of kid.
 func (s *staticKeySource) GetKey(kid string) (interface{}, error) {
 	return s.key, nil
+}
+
+// jwksCacheSource is a jwtKeySource backed by the existing jwksCache. It
+// backs the `jwks_url` key source. This is a thin wrapper: all fetch,
+// caching, proactive refresh, debounce, and last-good-key fallback behavior
+// is inherited from jwksCache (the same infrastructure IAPAuthenticator
+// uses) — there is no new network code here.
+type jwksCacheSource struct {
+	cache *jwksCache
+}
+
+// NewJWKSURLKeySource constructs a jwtKeySource backed by a jwksCache for
+// url. Fetching is lazy — the cache does not hit the network until the first
+// GetKey call — so, unlike the file-backed sources, construction never fails
+// on an unreachable or misconfigured endpoint. A transient outage at request
+// time is handled by jwksCache's existing last-good-key fallback.
+func NewJWKSURLKeySource(url string) jwtKeySource {
+	return &jwksCacheSource{
+		cache: &jwksCache{
+			url:    url,
+			client: defaultJWKSHTTPClient,
+		},
+	}
+}
+
+// GetKey implements jwtKeySource by delegating to the wrapped jwksCache,
+// which resolves the key by kid, triggering a refresh on an unknown kid.
+func (s *jwksCacheSource) GetKey(kid string) (interface{}, error) {
+	return s.cache.GetKey(kid)
+}
+
+// jwksFileSource is a jwtKeySource backed by a JWKS JSON document loaded from
+// disk once at construction time. It backs the `jwks_file` key source.
+// Unlike jwksCacheSource, there is no hot-reload — replacing the file
+// requires a restart (or, in the future, a SIGHUP-triggered reload; see the
+// design doc's open questions).
+type jwksFileSource struct {
+	keys map[string]jose.JSONWebKey // kid -> key
+}
+
+// NewJWKSFileKeySource loads a JWKS JSON document from path and indexes its
+// keys by kid. The file is read and parsed eagerly — intended to be called
+// during server startup — so a missing file, malformed JSON, a key with a
+// kid but no usable public key, or a file with no valid keyed keys at all is
+// reported at construction time rather than on the first incoming request.
+// Keys without a kid are ignored, since this source resolves exclusively by
+// kid.
+func NewJWKSFileKeySource(path string) (jwtKeySource, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read jwks file %q: %w", path, err)
+	}
+	var jwks jose.JSONWebKeySet
+	if err := json.Unmarshal(data, &jwks); err != nil {
+		return nil, fmt.Errorf("failed to parse jwks file %q: %w", path, err)
+	}
+	keys, err := indexJWKSKeysByKid(jwks, path)
+	if err != nil {
+		return nil, err
+	}
+	return &jwksFileSource{keys: keys}, nil
+}
+
+// indexJWKSKeysByKid builds the kid -> key map for jwksFileSource, rejecting
+// a keyed entry whose public key material is nil/invalid (which would
+// otherwise fail silently at signature-verification time on first use rather
+// than at startup) and rejecting a JWKS with no valid keyed keys at all
+// (catches empty or malformed files early). Split out from
+// NewJWKSFileKeySource so this validation can be tested directly against a
+// jose.JSONWebKeySet value.
+func indexJWKSKeysByKid(jwks jose.JSONWebKeySet, path string) (map[string]jose.JSONWebKey, error) {
+	keys := make(map[string]jose.JSONWebKey, len(jwks.Keys))
+	for _, k := range jwks.Keys {
+		if k.KeyID != "" {
+			if k.Key == nil {
+				return nil, fmt.Errorf("jwks file %q contains a key with kid %q but nil/invalid public key", path, k.KeyID)
+			}
+			keys[k.KeyID] = k
+		}
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("jwks file %q contains no keys with a valid 'kid'", path)
+	}
+	return keys, nil
+}
+
+// GetKey implements jwtKeySource with a simple map lookup by kid — the file
+// is loaded once at startup, so there is no refresh path.
+func (s *jwksFileSource) GetKey(kid string) (interface{}, error) {
+	k, ok := s.keys[kid]
+	if !ok {
+		return nil, fmt.Errorf("unknown kid %q in jwks file", kid)
+	}
+	return k.Key, nil
 }
 
 // JWTProxyAuthenticator verifies JWTs from a custom auth proxy. Implements
