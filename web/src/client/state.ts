@@ -90,7 +90,8 @@ export type StateEventType =
   | 'chat-read-state-updated'
   | 'chat-message-edited'
   | 'chat-message-deleted'
-  | 'chat-dm-promoted';
+  | 'chat-dm-promoted'
+  | 'agent-created';
 
 export class StateManager extends EventTarget {
   private state: AppState = {
@@ -508,6 +509,13 @@ export class StateManager extends EventTarget {
         updated._capabilities = base._capabilities;
       }
       this.state.agents.set(agentId, updated as Agent);
+      if (eventType === 'created') {
+        // A legitimate SSE creation for this ID. Signal it separately from
+        // the generic agents-updated notify so consumers that suppress
+        // re-adding a server-omitted agent (see chat.ts loop guard) know
+        // the suppression no longer applies to this ID.
+        this.notifyWithData('agent-created', { agentId });
+      }
     }
     this.notify('agents-updated');
   }
@@ -574,6 +582,19 @@ export class StateManager extends EventTarget {
     for (const agent of agents) {
       this.state.agents.set(agent.id, agent);
     }
+  }
+
+  /**
+   * Remove a stale agent from the shared map, e.g. one an authoritative
+   * members fetch no longer returns because the client missed its SSE
+   * `deleted` event (backgrounded tab, dropped connection). Does not
+   * notify — the caller already owns the UI update from its own fetch,
+   * and notifying here would re-trigger SSE merge consumers that read
+   * from this map, re-adding the entry they're removing.
+   */
+  removeAgent(id: string): void {
+    this.state.agents.delete(id);
+    this.pendingAgentDeltas.delete(id);
   }
 
   /**

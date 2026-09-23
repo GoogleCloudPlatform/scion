@@ -251,6 +251,7 @@ export class ScionPageChat extends LitElement {
   private _onChatTyping = this.handleChatTyping.bind(this);
   private _onRailLoaded = this.handleRailLoaded.bind(this);
   private _onAgentsUpdated = this._handleAgentsUpdated.bind(this);
+  private _onAgentCreated = this._handleAgentCreated.bind(this);
   private _onScopeChanged = this._handleScopeChanged.bind(this);
   private _onReadStateUpdated = this._handleReadStateUpdated.bind(this);
   private _unreadDMRequestId = 0;
@@ -293,6 +294,12 @@ export class ScionPageChat extends LitElement {
   private _fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
   /** Debounced re-fetch of members after a new agent appears via SSE. */
   private _canAttachRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  // IDs an authoritative members fetch has just left out (see loadV2Members
+  // reconciliation). Blocks _handleAgentsUpdated from re-adding a stale
+  // stateManager entry the server has already rejected, breaking the
+  // SSE-merge/refetch feedback loop. Cleared when a legitimate SSE
+  // `created` event arrives for that ID.
+  private _serverOmittedAgentIds = new Set<string>();
   /**
    * Which of the three panels is on screen. Only meaningful under the mobile
    * breakpoint — on desktop all three are visible and this is inert.
@@ -859,6 +866,7 @@ export class ScionPageChat extends LitElement {
       stateManager.removeEventListener('chat-presence-updated', this._onPresenceUpdated);
       stateManager.removeEventListener('chat-typing-received', this._onChatTyping);
       stateManager.removeEventListener('agents-updated', this._onAgentsUpdated);
+      stateManager.removeEventListener('agent-created', this._onAgentCreated);
       stateManager.removeEventListener('scope-changed', this._onScopeChanged);
       stateManager.removeEventListener('chat-dm-promoted', this._onDMPromoted);
       this.removeEventListener('rail-loaded', this._onRailLoaded);
@@ -1076,6 +1084,7 @@ export class ScionPageChat extends LitElement {
     stateManager.addEventListener('chat-presence-updated', this._onPresenceUpdated);
     stateManager.addEventListener('chat-typing-received', this._onChatTyping);
     stateManager.addEventListener('agents-updated', this._onAgentsUpdated);
+    stateManager.addEventListener('agent-created', this._onAgentCreated);
     stateManager.addEventListener('scope-changed', this._onScopeChanged);
     stateManager.addEventListener('chat-dm-promoted', this._onDMPromoted);
 
@@ -1544,6 +1553,12 @@ export class ScionPageChat extends LitElement {
     for (const agent of stateManager.getAgents()) {
       const existing = byId.get(agent.id);
       if (!existing && !inScope(agent.projectId || '')) continue;
+      // A prior authoritative refetch left this ID out of the members
+      // response. Don't re-add it from stateManager's stale cache until a
+      // legitimate SSE `created` event confirms it (see _handleAgentCreated) —
+      // otherwise every SSE tick re-adds it and re-triggers the refetch that
+      // removes it again (the flicker loop).
+      if (!existing && this._serverOmittedAgentIds.has(agent.id)) continue;
       if (!existing) hasNewAgent = true;
       byId.set(agent.id, {
         id: agent.id,
@@ -1601,6 +1616,20 @@ export class ScionPageChat extends LitElement {
     const conv = this.v2Conversation;
     if (conv?.defaultAgent && deletedRefs.has(conv.defaultAgent)) {
       this.v2Conversation = { ...conv, defaultAgent: '' };
+    }
+  }
+
+  /**
+   * A legitimate SSE `created` event arrived for this agent ID. Lift the
+   * loop guard set by loadV2Members' reconciliation, if any, so a real
+   * re-creation (or ID reuse) isn't permanently suppressed.
+   */
+  private _handleAgentCreated(e: Event): void {
+    const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
+    const eventData = (detail?.data ?? detail) as Record<string, unknown> | undefined;
+    const agentId = eventData?.agentId as string | undefined;
+    if (agentId) {
+      this._serverOmittedAgentIds.delete(agentId);
     }
   }
 
@@ -2231,6 +2260,28 @@ export class ScionPageChat extends LitElement {
           // dropped before the sidebar sees it.
           canAttach: a.canAttach,
         }));
+        // Reconcile stateManager: remove agents the server no longer returns
+        // for this project. This handles agents deleted while the client was
+        // disconnected (e.g., Safari backgrounded, missed SSE `deleted`
+        // event) — stateManager.seedAgents is add-only, so a stale entry
+        // would otherwise linger and get re-added by every SSE tick,
+        // triggering this same refetch in a loop (see _handleAgentsUpdated).
+        const serverAgentIds = new Set((data.agents || []).map((a) => a.id));
+        // If an agent the server now returns was previously marked as omitted,
+        // lift the suppression — it is active and should not be blocked.
+        for (const id of serverAgentIds) {
+          this._serverOmittedAgentIds.delete(id);
+        }
+        const staleIds: string[] = [];
+        for (const agent of stateManager.getAgents()) {
+          if (agent.projectId === projectId && !serverAgentIds.has(agent.id)) {
+            staleIds.push(agent.id);
+          }
+        }
+        for (const id of staleIds) {
+          stateManager.removeAgent(id);
+          this._serverOmittedAgentIds.add(id);
+        }
         // Seed the shared agent map so SSE status deltas have a baseline to
         // merge onto — otherwise they are buffered and never notify.
         stateManager.seedAgents(this.v2AgentMembers.map(agentMemberToAgent));
