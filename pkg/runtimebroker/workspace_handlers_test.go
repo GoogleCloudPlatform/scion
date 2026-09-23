@@ -39,6 +39,10 @@ func (m *mockAgentManager) Provision(ctx context.Context, opts api.StartOptions)
 	return nil, nil
 }
 
+func (m *mockAgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	return nil, nil
+}
+
 func (m *mockAgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	return nil, nil
 }

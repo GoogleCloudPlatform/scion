@@ -104,6 +104,10 @@ func (m *heartbeatMockManager) Provision(ctx context.Context, opts api.StartOpti
 	return nil, nil
 }
 
+func (m *heartbeatMockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	return nil, nil
+}
+
 func (m *heartbeatMockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	return nil, nil
 }

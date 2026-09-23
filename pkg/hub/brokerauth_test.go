@@ -118,6 +118,98 @@ func TestBrokerRegistrationAndJoin(t *testing.T) {
 	}
 }
 
+// TestCompleteBrokerJoin_PersistsCapabilities is a regression test for the
+// pre-existing gap where BrokerJoinRequest.Capabilities was accepted on the
+// wire but never read: a broker reporting "reprovision" at join time must
+// have that reach store.RuntimeBroker.Capabilities, since the hub's
+// `scion reincarnate` broker-capability gate (design §5) reads it from there.
+func TestCompleteBrokerJoin_PersistsCapabilities(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+
+	req := CreateBrokerRegistrationRequest{Name: "cap-test-host"}
+	resp, err := svc.CreateBrokerRegistration(ctx, req, "admin-user-id")
+	if err != nil {
+		t.Fatalf("CreateBrokerRegistration failed: %v", err)
+	}
+
+	joinReq := BrokerJoinRequest{
+		BrokerID:     resp.BrokerID,
+		JoinToken:    resp.JoinToken,
+		Hostname:     "cap-test-host",
+		Version:      "1.0.0",
+		Capabilities: []string{"sync", "attach", "reprovision", "some-future-capability"},
+	}
+	if _, err := svc.CompleteBrokerJoin(ctx, joinReq, "http://localhost:9810"); err != nil {
+		t.Fatalf("CompleteBrokerJoin failed: %v", err)
+	}
+
+	broker, err := s.GetRuntimeBroker(ctx, resp.BrokerID)
+	if err != nil {
+		t.Fatalf("GetRuntimeBroker failed: %v", err)
+	}
+	if broker.Capabilities == nil {
+		t.Fatal("expected broker.Capabilities to be set")
+	}
+	if !broker.Capabilities.Sync || !broker.Capabilities.Attach || !broker.Capabilities.Reprovision {
+		t.Errorf("expected sync/attach/reprovision all true, got %+v", broker.Capabilities)
+	}
+	if broker.Capabilities.WebPTY {
+		t.Errorf("expected webPty false (not in the reported list), got true")
+	}
+}
+
+// TestCompleteBrokerJoin_NoCapabilitiesLeavesExisting verifies an empty
+// capabilities list on join (e.g. an old CLI that predates the field) does
+// not wipe out a capability set recorded by a previous join.
+func TestCompleteBrokerJoin_NoCapabilitiesLeavesExisting(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+
+	req := CreateBrokerRegistrationRequest{Name: "cap-test-host-2"}
+	resp, err := svc.CreateBrokerRegistration(ctx, req, "admin-user-id")
+	if err != nil {
+		t.Fatalf("CreateBrokerRegistration failed: %v", err)
+	}
+
+	// First join reports reprovision support.
+	if _, err := svc.CompleteBrokerJoin(ctx, BrokerJoinRequest{
+		BrokerID:     resp.BrokerID,
+		JoinToken:    resp.JoinToken,
+		Hostname:     "cap-test-host-2",
+		Version:      "1.0.0",
+		Capabilities: []string{"reprovision"},
+	}, "http://localhost:9810"); err != nil {
+		t.Fatalf("first CompleteBrokerJoin failed: %v", err)
+	}
+
+	// Re-registration flow: create + join again, this time with no
+	// capabilities in the request (simulating an older client).
+	resp2, err := svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{
+		Name:     "cap-test-host-2",
+		BrokerID: resp.BrokerID,
+	}, "admin-user-id")
+	if err != nil {
+		t.Fatalf("second CreateBrokerRegistration failed: %v", err)
+	}
+	if _, err := svc.CompleteBrokerJoin(ctx, BrokerJoinRequest{
+		BrokerID:  resp2.BrokerID,
+		JoinToken: resp2.JoinToken,
+		Hostname:  "cap-test-host-2",
+		Version:   "1.0.0",
+	}, "http://localhost:9810"); err != nil {
+		t.Fatalf("second CompleteBrokerJoin failed: %v", err)
+	}
+
+	broker, err := s.GetRuntimeBroker(ctx, resp.BrokerID)
+	if err != nil {
+		t.Fatalf("GetRuntimeBroker failed: %v", err)
+	}
+	if broker.Capabilities == nil || !broker.Capabilities.Reprovision {
+		t.Errorf("expected reprovision capability to survive a join with no capabilities field, got %+v", broker.Capabilities)
+	}
+}
+
 func TestJoinWithInvalidToken(t *testing.T) {
 	svc, _ := setupTestBrokerAuthService(t)
 	ctx := context.Background()

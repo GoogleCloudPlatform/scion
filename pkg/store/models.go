@@ -594,6 +594,11 @@ type BrokerCapabilities struct {
 	WebPTY bool `json:"webPty"`
 	Sync   bool `json:"sync"`
 	Attach bool `json:"attach"`
+	// Reprovision indicates the broker supports the reincarnation reprovision
+	// primitive. The hub gates `scion reincarnate` on this, returning 412 when
+	// unset (design /scion-volumes/scratchpad/projects/agent-migrate/design.md
+	// §5 "Broker/hub version skew").
+	Reprovision bool `json:"reprovision"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.

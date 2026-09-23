@@ -35,6 +35,12 @@ type Manager interface {
 	// Provision prepares the agent directory and configuration without starting it
 	Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error)
 
+	// Reprovision re-renders an existing agent's on-disk configuration from
+	// the current template/harness-config catalog (a `scion reincarnate`
+	// request), preserving its home directory and clone-per-agent workspace.
+	// See AgentManager.Reprovision for the full contract.
+	Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error)
+
 	// Start launches a new agent with the given configuration
 	Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error)
 

@@ -162,10 +162,11 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Name:     s.config.BrokerName,
 		Version:  s.version,
 		Capabilities: &BrokerCapabilities{
-			WebPTY: false, // TODO: Implement WebSocket PTY
-			Sync:   true,
-			Attach: true,
-			Exec:   true,
+			WebPTY:      false, // TODO: Implement WebSocket PTY
+			Sync:        true,
+			Attach:      true,
+			Exec:        true,
+			Reprovision: true,
 		},
 		Profiles: s.buildInfoProfiles(runtimeType),
 	}
@@ -906,8 +907,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Branch based on provision-only flag
 	if req.ProvisionOnly {
-		// Provision only: set up dirs, worktree, templates without starting the container
-		cfg, err := sc.Manager.Provision(ctx, opts)
+		// Provision only: set up dirs, worktree, templates without starting the container.
+		// Reprovision (reincarnation) forces a fresh render of an existing agent's
+		// config instead of reusing what's persisted — see Manager.Reprovision.
+		var cfg *api.ScionConfig
+		var err error
+		if req.Reprovision {
+			cfg, err = sc.Manager.Reprovision(ctx, opts)
+		} else {
+			cfg, err = sc.Manager.Provision(ctx, opts)
+		}
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
@@ -923,6 +932,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		s.agentLifecycleLog.Info("Agent provisioned",
 			"agent_id", req.ID, "project_id", req.ProjectID,
 			"name", req.Name, "slug", req.Slug,
+			"reprovision", req.Reprovision,
 			"phase", string(state.PhaseCreated))
 
 		// Build a response with "created" status (no container launched)

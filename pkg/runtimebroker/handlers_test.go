@@ -60,6 +60,10 @@ func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*ap
 	return &api.ScionConfig{}, nil
 }
 
+func (m *mockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	return &api.ScionConfig{}, nil
+}
+
 func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	m.startCalls++
 	m.lastStartOpts = opts
@@ -1086,6 +1090,12 @@ func (m *provisionCapturingManager) Provision(ctx context.Context, opts api.Star
 	m.provisionCalled = true
 	m.lastOpts = opts
 	m.lastProvisionCtx = ctx
+	return &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}, nil
+}
+
+func (m *provisionCapturingManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	m.provisionCalled = true
+	m.lastOpts = opts
 	return &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}, nil
 }
 
