@@ -130,6 +130,26 @@ func (t *Template) LoadConfig() (*api.ScionConfig, error) {
 // unmarshalYAMLNormalized parses YAML into a ScionConfig, normalizing
 // top-level hyphenated keys to underscored keys. This allows template
 // authors to use either `harness-config` or `harness_config` style keys.
+// ParseScionAgentConfig decodes scion-agent config bytes the same way
+// Template.LoadConfig does (hyphenated top-level YAML keys normalized), without
+// running LoadConfig's volume/service validation. name selects the format:
+// ".yaml"/".yml" suffixes are parsed as YAML, anything else as JSON. Used by
+// the Hub to read template configs straight from storage.
+func ParseScionAgentConfig(name string, data []byte) (*api.ScionConfig, error) {
+	var cfg api.ScionConfig
+	ext := filepath.Ext(name)
+	if ext == ".yaml" || ext == ".yml" {
+		if err := unmarshalYAMLNormalized(data, &cfg); err != nil {
+			return nil, fmt.Errorf("failed to parse YAML config %s: %w", name, err)
+		}
+		return &cfg, nil
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON config %s: %w", name, err)
+	}
+	return &cfg, nil
+}
+
 func unmarshalYAMLNormalized(data []byte, cfg *api.ScionConfig) error {
 	var node yaml.Node
 	if err := yaml.Unmarshal(data, &node); err != nil {

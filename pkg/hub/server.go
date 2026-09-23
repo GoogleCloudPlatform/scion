@@ -560,6 +560,12 @@ type RemoteCreateAgentRequest struct {
 	// Passed to the broker so it can include them in env-gather requirements.
 	RequiredSecrets []api.RequiredSecret `json:"requiredSecrets,omitempty"`
 
+	// PreResolvedSkills carries the Hub-registry skill references the Hub
+	// resolved at dispatch, authorized as the agent's creator (#1784). The
+	// broker installs these without calling the Hub's resolve endpoint (which
+	// denies broker identities) and resolves only what is not covered here.
+	PreResolvedSkills *ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
+
 	// EnvSources tracks which scope provided each env var key (for reporting to CLI).
 	// Only populated when GatherEnv is true.
 	EnvSources map[string]string `json:"envSources,omitempty"`
@@ -2799,6 +2805,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// manifests when the shared GCS bucket was updated by another hub.
 	dispatcher.SetHarnessConfigRepairer(s.syncHarnessConfigFromStorage)
 	dispatcher.SetTemplateRepairer(s.syncTemplateFromStorage)
+
+	// Resolve Hub-registry skills at dispatch as the agent's creator so the
+	// broker never needs to read non-public skills with its own identity (#1784).
+	dispatcher.SetSkillPreResolver(s.preResolveAgentSkills)
 
 	// Wire the hub's operational agent_defaults so dispatch can carry the
 	// limit/resource ones to the broker's low-precedence tier. The accessor

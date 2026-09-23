@@ -787,7 +787,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Inject skill resolver from Hub connection for skill provisioning.
-	if conn := s.resolveHubConnection(r); conn != nil && conn.HubClient != nil {
+	conn := s.resolveHubConnection(r)
+	if conn != nil && conn.HubClient != nil {
 		hubResolver := agent.NewHubSkillResolver(conn.HubClient.Skills())
 		defaultGHToken := req.ResolvedEnv["GITHUB_TOKEN"]
 		ghResolver := agent.NewGitHubSkillResolverWithCredentials(defaultGHToken, req.ProvisionCredentials, s.ghResolutionCache)
@@ -816,6 +817,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if s.skCache != nil {
 			resolver = agent.NewCachingSkillResolver(resolver, s.skCache)
 		}
+		// Skills the Hub resolved at dispatch as the agent's creator are
+		// served first: the broker's own identity cannot read non-public
+		// skills (#1784). Outermost so pre-resolved results never enter the
+		// broker's resolution cache.
+		if req.PreResolvedSkills != nil {
+			resolver = agent.NewPreResolvedSkillResolver(req.PreResolvedSkills, resolver, preResolvedHubEndpoint(conn, req.HubEndpoint))
+		}
 		ctx = agent.ContextWithSkillResolver(ctx, resolver)
 		// Credential for install-phase downloads of gh:// skills resolved by
 		// the Hub, which returns raw.githubusercontent.com URLs but not the
@@ -823,6 +831,18 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if defaultGHToken != "" {
 			ctx = agent.ContextWithGitHubToken(ctx, defaultGHToken)
 		}
+		if req.ProjectID != "" {
+			ctx = agent.ContextWithResolveProjectID(ctx, req.ProjectID)
+		}
+		if req.UserID != "" {
+			ctx = agent.ContextWithResolveUserID(ctx, req.UserID)
+		}
+	} else if req.PreResolvedSkills != nil {
+		// No usable Hub connection for this request, but the Hub already
+		// resolved its skills: install those, and fail closed (per skill)
+		// for anything it did not cover.
+		ctx = agent.ContextWithSkillResolver(ctx,
+			agent.NewPreResolvedSkillResolver(req.PreResolvedSkills, nil, preResolvedHubEndpoint(conn, req.HubEndpoint)))
 		if req.ProjectID != "" {
 			ctx = agent.ContextWithResolveProjectID(ctx, req.ProjectID)
 		}
@@ -2888,4 +2908,16 @@ func (s *Server) ensureNFSMountsReady() error {
 		}
 	}
 	return nil
+}
+
+// preResolvedHubEndpoint picks the Hub base URL used to absolutize the
+// Hub-relative download URLs the Hub emits for local-storage skills in
+// PreResolvedSkills: the broker's own connection endpoint when known (the
+// address this broker actually reaches the Hub on), else the endpoint the
+// Hub advertised in the request.
+func preResolvedHubEndpoint(conn *HubConnection, advertised string) string {
+	if conn != nil && conn.HubEndpoint != "" {
+		return conn.HubEndpoint
+	}
+	return advertised
 }

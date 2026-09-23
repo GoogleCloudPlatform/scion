@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
@@ -326,6 +327,12 @@ type CreateAgentRequest struct {
 	// RequiredSecrets contains declared secrets from the template config.
 	// Passed by the Hub so the broker can include them in env-gather requirements.
 	RequiredSecrets []api.RequiredSecret `json:"requiredSecrets,omitempty"`
+
+	// PreResolvedSkills carries the Hub-registry skills the Hub resolved at
+	// dispatch as the agent's creator (#1784). Refs covered here are installed
+	// from this payload; the broker's own resolver handles the rest. Nil when
+	// the Hub predates this field or had nothing to resolve.
+	PreResolvedSkills *hubclient.ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
 
 	// InlineConfig carries the full ScionConfig provided via the Hub API.
 	// When set, the broker applies this during agent provisioning, enabling
