@@ -1132,3 +1132,143 @@ VALUES ('msg-wg-bystander', 'proj-other', 'user:bob', 'user-other', 'agent:other
 	require.Equal(t, "", bystanderConvID,
 		"bystander conversation_id must be unchanged — wildcard guard failed")
 }
+
+// ---------------------------------------------------------------------------
+// TestUpdateTopic_DefaultAgentID_* — Phase 2 (conv-default-mention, F1
+// write-time convergence, design doc §3.1): UpdateTopic's DefaultAgentID
+// companion field converges the linked conversation's default_agent_id in
+// the same transaction as the topic UPDATE.
+// ---------------------------------------------------------------------------
+
+// getConversationDefaultAgentID reads default_agent_id directly from the
+// conversations table, returning "" for SQL NULL.
+func getConversationDefaultAgentID(t *testing.T, db *sql.DB, convID string) string {
+	t.Helper()
+	var id string
+	err := db.QueryRow(
+		"SELECT COALESCE(default_agent_id, '') FROM conversations WHERE id = ?", convID).Scan(&id)
+	require.NoError(t, err)
+	return id
+}
+
+func TestUpdateTopic_DefaultAgentID_SetsLinkedConversation(t *testing.T) {
+	s, db := newTestWebChatStoreWithConversations(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	convID := uuid.New().String()
+	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-da-set", ProjectID: "proj-1", Name: "da-set",
+		ConversationID: convID, CreatedBy: "user-1", CreatedAt: time.Now().UTC(),
+	}))
+	require.Empty(t, getConversationDefaultAgentID(t, db, convID), "sanity: starts unset")
+
+	agentID := uuid.New().String()
+	require.NoError(t, s.UpdateTopic(ctx, "topic-da-set", TopicUpdate{DefaultAgentID: &agentID}))
+
+	require.Equal(t, agentID, getConversationDefaultAgentID(t, db, convID))
+}
+
+// TestUpdateTopic_DefaultAgentID_EmptyClearsToNull covers the reviewer's
+// point 3: DefaultAgentID: "" (pointer to empty string) must clear the
+// column to SQL NULL, not write a literal empty string.
+func TestUpdateTopic_DefaultAgentID_EmptyClearsToNull(t *testing.T) {
+	s, db := newTestWebChatStoreWithConversations(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	convID := uuid.New().String()
+	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-da-clear", ProjectID: "proj-1", Name: "da-clear",
+		ConversationID: convID, CreatedBy: "user-1", CreatedAt: time.Now().UTC(),
+	}))
+
+	agentID := uuid.New().String()
+	require.NoError(t, s.UpdateTopic(ctx, "topic-da-clear", TopicUpdate{DefaultAgentID: &agentID}))
+	require.Equal(t, agentID, getConversationDefaultAgentID(t, db, convID))
+
+	empty := ""
+	require.NoError(t, s.UpdateTopic(ctx, "topic-da-clear", TopicUpdate{DefaultAgentID: &empty}))
+
+	var isNull bool
+	require.NoError(t, db.QueryRow(
+		"SELECT default_agent_id IS NULL FROM conversations WHERE id = ?", convID).Scan(&isNull))
+	require.True(t, isNull, "DefaultAgentID: \"\" must set the column to SQL NULL, not an empty string")
+}
+
+// TestUpdateTopic_DefaultAgentID_NilLeavesConversationUntouched covers the
+// reviewer's point 3: DefaultAgentID left nil (as opposed to a pointer to
+// empty string) must not touch the conversation row at all — verified here
+// via a Name-only update that leaves an already-set default agent in place.
+func TestUpdateTopic_DefaultAgentID_NilLeavesConversationUntouched(t *testing.T) {
+	s, db := newTestWebChatStoreWithConversations(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	convID := uuid.New().String()
+	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-da-untouched", ProjectID: "proj-1", Name: "da-untouched",
+		ConversationID: convID, CreatedBy: "user-1", CreatedAt: time.Now().UTC(),
+	}))
+
+	agentID := uuid.New().String()
+	require.NoError(t, s.UpdateTopic(ctx, "topic-da-untouched", TopicUpdate{DefaultAgentID: &agentID}))
+	require.Equal(t, agentID, getConversationDefaultAgentID(t, db, convID))
+
+	newName := "renamed"
+	require.NoError(t, s.UpdateTopic(ctx, "topic-da-untouched", TopicUpdate{Name: &newName}))
+
+	require.Equal(t, agentID, getConversationDefaultAgentID(t, db, convID),
+		"a nil DefaultAgentID must leave the conversation's default_agent_id untouched")
+}
+
+// TestUpdateTopic_DefaultAgentID_UnlinkedTopicNoError covers the reviewer's
+// point 3: a topic whose conversation_id is NULL (a legacy unlinked topic)
+// must not error — the subquery naturally matches no conversation row.
+func TestUpdateTopic_DefaultAgentID_UnlinkedTopicNoError(t *testing.T) {
+	s, db := newTestWebChatStoreWithConversations(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-da-unlinked", ProjectID: "proj-1", Name: "da-unlinked",
+		CreatedBy: "user-1", CreatedAt: time.Now().UTC(),
+	}))
+	// CreateTopic auto-generates a conversation_id whenever the conversations
+	// table exists (DEF-89), so force the legacy unlinked state directly.
+	_, err := db.Exec("UPDATE webchat_topic SET conversation_id = NULL WHERE id = ?", "topic-da-unlinked")
+	require.NoError(t, err)
+
+	agentID := uuid.New().String()
+	require.NoError(t, s.UpdateTopic(ctx, "topic-da-unlinked", TopicUpdate{DefaultAgentID: &agentID}),
+		"UpdateTopic must not error when the topic has no linked conversation")
+}
+
+// TestUpdateTopic_DefaultAgentID_SoftDeletedTopicNoOp covers the reviewer's
+// point 1: the linked-conversation UPDATE's subquery must itself filter
+// deleted_at IS NULL on webchat_topic, not rely solely on the outer
+// conversations.deleted_at filter — otherwise a soft-deleted topic would
+// still resolve its (still-live) conversation_id and change a conversation
+// the topic no longer represents.
+func TestUpdateTopic_DefaultAgentID_SoftDeletedTopicNoOp(t *testing.T) {
+	s, db := newTestWebChatStoreWithConversations(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	convID := uuid.New().String()
+	require.NoError(t, s.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-da-deleted", ProjectID: "proj-1", Name: "da-deleted",
+		ConversationID: convID, CreatedBy: "user-1", CreatedAt: time.Now().UTC(),
+	}))
+	// Soft-delete the topic directly (bypassing DeleteTopic's last-thread
+	// guard, which isn't the concern of this test).
+	_, err := db.Exec("UPDATE webchat_topic SET deleted_at = ? WHERE id = ?",
+		time.Now().UTC().Format(time.RFC3339Nano), "topic-da-deleted")
+	require.NoError(t, err)
+
+	agentID := uuid.New().String()
+	require.NoError(t, s.UpdateTopic(ctx, "topic-da-deleted", TopicUpdate{DefaultAgentID: &agentID}))
+
+	require.Empty(t, getConversationDefaultAgentID(t, db, convID),
+		"a soft-deleted topic's linked conversation must not change")
+}

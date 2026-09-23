@@ -680,6 +680,145 @@ func TestPhase1_SetDefaultAgent_ConvergesAndDispatches(t *testing.T) {
 		"expected the no-mention post to be routed to the default agent")
 }
 
+// TestPhase2_CreateThread_DefaultAgent_SetsBothColumns is AC-4 (design doc
+// §9): creating a web thread with a defaultAgent must set
+// conversations.default_agent_id on the conversation CreateTopic mints
+// alongside it, not just webchat_topic.default_agent.
+func TestPhase2_CreateThread_DefaultAgent_SetsBothColumns(t *testing.T) {
+	srv, s, _, _ := setupGroupConvTopicTest(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: api.NewUUID(), Name: "phase2-create-thread", Slug: "phase2-create-thread"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "phase2-agent",
+		Slug:       "phase2-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	body := map[string]string{"name": "phase2-thread", "defaultAgent": agent.Slug}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/spaces/"+project.ID+"/threads", body)
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var topic WebChatTopic
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &topic))
+	require.Equal(t, agent.Slug, topic.DefaultAgent)
+
+	// The response's topic doesn't carry ConversationID back (CreateTopic
+	// takes WebChatTopic by value and auto-generates it internally), so look
+	// the conversation up the same way the reverse-pointer design relies on:
+	// by its derived thread: external_ref.
+	extRef, err := messaging.ThreadConversationExternalRef(project.ID, topic.ID)
+	require.NoError(t, err)
+	conv, err := s.GetConversationByExternalRef(ctx, "native", extRef)
+	require.NoError(t, err)
+	require.NotNil(t, conv)
+	require.NotNil(t, conv.DefaultAgentID, "AC-4: creating a web thread with a defaultAgent must also set the conversation's default_agent_id")
+	require.Equal(t, agent.ID, *conv.DefaultAgentID)
+}
+
+// TestPhase2_TopicPatch_DefaultAgent_ConvergesBothColumns is AC-3 (design doc
+// §9): setting or clearing the default via the topic PATCH must update
+// conversations.default_agent_id, not just the topic projection.
+func TestPhase2_TopicPatch_DefaultAgent_ConvergesBothColumns(t *testing.T) {
+	srv, s, wcs, _ := setupGroupConvTopicTest(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: api.NewUUID(), Name: "phase2-patch", Slug: "phase2-patch"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "phase2-patch-agent",
+		Slug:       "phase2-patch-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	topicID := api.NewUUID()
+	convID := api.NewUUID()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: topicID, ProjectID: project.ID, Name: "phase2-patch-thread",
+		ConversationID: convID, CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}))
+
+	// Set via PATCH.
+	slug := agent.Slug
+	setRec := doRequest(t, srv, http.MethodPatch, "/api/v1/chat/topics/"+topicID,
+		map[string]*string{"defaultAgent": &slug})
+	require.Equal(t, http.StatusOK, setRec.Code, "body: %s", setRec.Body.String())
+
+	conv, err := s.GetConversation(ctx, convID)
+	require.NoError(t, err)
+	require.NotNil(t, conv.DefaultAgentID, "AC-3: setting via topic PATCH must set conversations.default_agent_id")
+	require.Equal(t, agent.ID, *conv.DefaultAgentID)
+
+	// Clear via PATCH.
+	empty := ""
+	clearRec := doRequest(t, srv, http.MethodPatch, "/api/v1/chat/topics/"+topicID,
+		map[string]*string{"defaultAgent": &empty})
+	require.Equal(t, http.StatusOK, clearRec.Code, "body: %s", clearRec.Body.String())
+
+	conv, err = s.GetConversation(ctx, convID)
+	require.NoError(t, err)
+	require.Nil(t, conv.DefaultAgentID, "AC-3: clearing via topic PATCH must clear conversations.default_agent_id")
+}
+
+// TestPhase2_ClearTopicDefaultAgent_ClearsBothColumns is AC-5 (design doc
+// §9): deleting an agent must clear it from both the topic projection and
+// the conversation owner column.
+func TestPhase2_ClearTopicDefaultAgent_ClearsBothColumns(t *testing.T) {
+	srv, s, wcs, _ := setupGroupConvTopicTest(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: api.NewUUID(), Name: "phase2-agent-delete", Slug: "phase2-agent-delete"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "phase2-delete-agent",
+		Slug:       "phase2-delete-agent",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	topicID := api.NewUUID()
+	convID := api.NewUUID()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: topicID, ProjectID: project.ID, Name: "phase2-delete-thread",
+		DefaultAgent:   agent.Slug,
+		ConversationID: convID, CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}))
+
+	// Simulate a topic whose default agent was already converged onto its
+	// conversation (e.g. by a Phase-1/2 writer) before deletion.
+	agentID := agent.ID
+	require.NoError(t, wcs.UpdateTopic(ctx, topicID, TopicUpdate{DefaultAgentID: &agentID}))
+
+	conv, err := s.GetConversation(ctx, convID)
+	require.NoError(t, err)
+	require.NotNil(t, conv.DefaultAgentID, "sanity: conversation default agent is set before delete")
+
+	srv.ClearTopicDefaultAgent(ctx, agent.ID, agent.Slug, project.ID)
+
+	topic, err := wcs.GetTopic(ctx, topicID)
+	require.NoError(t, err)
+	require.Empty(t, topic.DefaultAgent, "AC-5: topic default agent must be cleared")
+
+	conv, err = s.GetConversation(ctx, convID)
+	require.NoError(t, err)
+	require.Nil(t, conv.DefaultAgentID, "AC-5: deleting an agent must also clear the conversation's default_agent_id")
+}
+
 func TestIsTopicNameConflict(t *testing.T) {
 	require.False(t, isTopicNameConflict(nil))
 	require.True(t, isTopicNameConflict(errors.New("name conflict: pstack2")))

@@ -392,10 +392,14 @@ func (s *pgWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic) er
 		// Group conversation participants are derived from project membership, not
 		// from an explicit participant table. The participant table is a listing
 		// index, NEVER the access authority (design doc §2.4.2.1).
+		var defaultAgentID interface{}
+		if topic.DefaultAgentID != "" {
+			defaultAgentID = topic.DefaultAgentID
+		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-			 VALUES ($1, $2, 'group', 'native', $3, '', $4, 'active', $5, $6)`,
-			topic.ConversationID, topic.ProjectID, extRef, topic.Name, topic.CreatedAt, topic.CreatedAt)
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, default_agent_id, drift_state, last_activity_at, created_at)
+			 VALUES ($1, $2, 'group', 'native', $3, '', $4, $5, 'active', $6, $7)`,
+			topic.ConversationID, topic.ProjectID, extRef, topic.Name, defaultAgentID, topic.CreatedAt, topic.CreatedAt)
 		if err != nil {
 			return fmt.Errorf("webchat store: create conversation for topic: %w", err)
 		}
@@ -526,13 +530,19 @@ func (s *pgWebChatStore) UpdateTopic(ctx context.Context, topicID string, update
 		// The subquery naturally no-ops (zero rows affected, not an error)
 		// when the topic's conversation_id is NULL — a legacy unlinked
 		// topic. This UPDATE only ever touches default_agent_id.
+		//
+		// The subquery's own "AND deleted_at IS NULL" (review round 1)
+		// matters even though the outer WHERE also filters deleted_at:
+		// without it, a soft-deleted topic would still resolve its
+		// conversation_id and change a conversation that the topic no
+		// longer represents.
 		var val interface{}
 		if *updates.DefaultAgentID != "" {
 			val = *updates.DefaultAgentID
 		}
 		_, err := tx.ExecContext(ctx,
 			`UPDATE conversations SET default_agent_id = $1
-			  WHERE id = (SELECT conversation_id FROM webchat_topic WHERE id = $2)
+			  WHERE id = (SELECT conversation_id FROM webchat_topic WHERE id = $2 AND deleted_at IS NULL)
 			    AND deleted_at IS NULL`,
 			val, topicID)
 		if err != nil {

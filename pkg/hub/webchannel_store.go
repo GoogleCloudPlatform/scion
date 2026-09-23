@@ -292,6 +292,13 @@ type WebChatTopic struct {
 	LastActivityAt time.Time  `json:"lastActivityAt"`
 	DeletedAt      *time.Time `json:"deletedAt,omitempty"`    // nil = not deleted
 	MessageCount   int        `json:"messageCount,omitempty"` // populated by PromoteDM
+
+	// DefaultAgentID is write-only input to CreateTopic (design doc §3.1
+	// F1 table, topic-create row): when set and CreateTopic mints a new
+	// linked conversation, it seeds that conversation's default_agent_id
+	// in the same INSERT. It is not a webchat_topic column — GetTopic and
+	// ListTopics never populate it — so it always reads back empty.
+	DefaultAgentID string `json:"-"`
 }
 
 // PromoteKeys bundles the two keys needed to identify a DM's messages during
@@ -797,9 +804,9 @@ VALUES (?, ?, ?, ?, ?, ?, ?)
 		// index, NEVER the access authority (design doc §2.4.2.1).
 		now := topic.CreatedAt.UTC().Format(time.RFC3339Nano)
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-			 VALUES (?, ?, 'group', 'native', ?, '', ?, 'active', ?, ?)`,
-			topic.ConversationID, topic.ProjectID, extRef, topic.Name, now, now)
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, default_agent_id, drift_state, last_activity_at, created_at)
+			 VALUES (?, ?, 'group', 'native', ?, '', ?, ?, 'active', ?, ?)`,
+			topic.ConversationID, topic.ProjectID, extRef, topic.Name, nullableString(topic.DefaultAgentID), now, now)
 		if err != nil {
 			return fmt.Errorf("webchat store: create conversation for topic: %w", err)
 		}
@@ -930,9 +937,15 @@ func (s *sqliteWebChatStore) UpdateTopic(ctx context.Context, topicID string, up
 		// The subquery naturally no-ops (zero rows affected, not an error)
 		// when the topic's conversation_id is NULL — a legacy unlinked
 		// topic. This UPDATE only ever touches default_agent_id.
+		//
+		// The subquery's own "AND deleted_at IS NULL" (review round 1)
+		// matters even though the outer WHERE also filters deleted_at:
+		// without it, a soft-deleted topic would still resolve its
+		// conversation_id and change a conversation that the topic no
+		// longer represents.
 		_, err := tx.ExecContext(ctx,
 			`UPDATE conversations SET default_agent_id = ?
-			  WHERE id = (SELECT conversation_id FROM webchat_topic WHERE id = ?)
+			  WHERE id = (SELECT conversation_id FROM webchat_topic WHERE id = ? AND deleted_at IS NULL)
 			    AND deleted_at IS NULL`,
 			nullableString(*updates.DefaultAgentID), topicID)
 		if err != nil {

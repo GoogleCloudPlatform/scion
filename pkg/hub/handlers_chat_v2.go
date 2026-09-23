@@ -457,11 +457,14 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 	// Trim first so whitespace-only input is treated as "no default agent"
 	// (matching the PATCH/clear behavior).
 	body.DefaultAgent = strings.TrimSpace(body.DefaultAgent)
+	var defaultAgentID string
 	if body.DefaultAgent != "" {
-		if err := s.validateDefaultAgent(r.Context(), projectID, body.DefaultAgent); err != nil {
+		resolved, err := s.validateDefaultAgent(r.Context(), projectID, body.DefaultAgent)
+		if err != nil {
 			ValidationError(w, err.Error(), nil)
 			return
 		}
+		defaultAgentID = resolved.ID
 	}
 
 	topicID := uuid.New().String()
@@ -471,6 +474,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 		ProjectID:      projectID,
 		Name:           body.Name,
 		DefaultAgent:   body.DefaultAgent,
+		DefaultAgentID: defaultAgentID,
 		CreatedBy:      user.ID(),
 		CreatedAt:      now,
 		LastActivityAt: now,
@@ -596,13 +600,20 @@ func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicI
 		// Length and resolution are checked by validateDefaultAgent (single
 		// source of truth — DEF-31).
 		da := strings.TrimSpace(*body.DefaultAgent)
+		agentID := ""
 		if da != "" {
-			if err := s.validateDefaultAgent(r.Context(), topic.ProjectID, da); err != nil {
+			resolved, err := s.validateDefaultAgent(r.Context(), topic.ProjectID, da)
+			if err != nil {
 				ValidationError(w, err.Error(), nil)
 				return
 			}
+			agentID = resolved.ID
 		}
+		// Design doc §3.1 F1 table: the topic PATCH now writes the owner too
+		// (conversations.default_agent_id), converged in the same
+		// UpdateTopic transaction. Clearing (da == "") clears both.
 		updates.DefaultAgent = &da
+		updates.DefaultAgentID = &agentID
 	}
 
 	if updates.Name == nil && updates.DefaultAgent == nil {
@@ -678,33 +689,37 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 }
 
 // validateDefaultAgent checks that the given identifier (slug or UUID) is a
-// valid length and resolves to a non-deleted agent within the specified project.
-// Returns nil on success or a user-facing error describing the validation failure.
+// valid length and resolves to a non-deleted agent within the specified
+// project. Returns the resolved agent on success, or a user-facing error
+// describing the validation failure.
 //
 // All defaultAgent format and length validation lives here so that create and
 // patch call sites share a single rule set — two copies of a validation rule
-// drift, and the drift is the bug (DEF-31).
-func (s *Server) validateDefaultAgent(ctx context.Context, projectID, agentRef string) error {
+// drift, and the drift is the bug (DEF-31). It returns the resolved agent
+// (design doc §3.1) so callers can seed conversations.default_agent_id (the
+// UUID) without a second lookup after already resolving the same
+// slug-or-UUID identifier here.
+func (s *Server) validateDefaultAgent(ctx context.Context, projectID, agentRef string) (*store.Agent, error) {
 	// Length gate: reject unreasonably long identifiers before hitting the DB.
 	if len([]rune(agentRef)) > 200 {
-		return fmt.Errorf("defaultAgent identifier is too long")
+		return nil, fmt.Errorf("defaultAgent identifier is too long")
 	}
 
 	// Try slug lookup first (project-scoped, excludes soft-deleted).
 	a, err := s.store.GetAgentBySlug(ctx, projectID, agentRef)
 	if err == nil && a != nil {
-		return nil // found by slug in this project, not deleted
+		return a, nil // found by slug in this project, not deleted
 	}
 
 	// Fall back to UUID lookup.
 	a, err = s.store.GetAgent(ctx, agentRef)
 	if err != nil || a == nil {
-		return fmt.Errorf("defaultAgent %q not found in this project", agentRef)
+		return nil, fmt.Errorf("defaultAgent %q not found in this project", agentRef)
 	}
 	if a.ProjectID != projectID || !a.DeletedAt.IsZero() {
-		return fmt.Errorf("defaultAgent %q not found in this project", agentRef)
+		return nil, fmt.Errorf("defaultAgent %q not found in this project", agentRef)
 	}
-	return nil
+	return a, nil
 }
 
 // ClearTopicDefaultAgent drops the default-agent binding from every topic in
@@ -741,7 +756,9 @@ func (s *Server) ClearTopicDefaultAgent(ctx context.Context, agentID, agentSlug,
 		if t.DefaultAgent != agentID && t.DefaultAgent != agentSlug {
 			continue
 		}
-		if err := wcs.UpdateTopic(ctx, t.ID, TopicUpdate{DefaultAgent: &cleared}); err != nil {
+		// Design doc §3.1 F1 table: also clears conversations.default_agent_id
+		// on any linked conversation, in the same UpdateTopic transaction.
+		if err := wcs.UpdateTopic(ctx, t.ID, TopicUpdate{DefaultAgent: &cleared, DefaultAgentID: &cleared}); err != nil {
 			slog.Warn("Failed to clear deleted agent as thread default",
 				"topic_id", t.ID, "agent_id", agentID, "error", err)
 			continue
