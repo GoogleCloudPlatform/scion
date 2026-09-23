@@ -157,6 +157,14 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "handlers_agent_lifecycle.go", function: "handleAgentLifecycle", symbol: "DispatchAgentStart",
 		class: "guarded", reason: "authorizeAgentLifecycle at handlers_agent_lifecycle.go"},
 
+	// reincarnate_worker.go: DispatchAgentStart in runReincarnationWorker —
+	// the detached background worker for `scion reincarnate` (design §3.1).
+	// Started only from handleReincarnateAgent, after authorizeAgentReincarnate
+	// (design §3.8, decision D2) has already authorized the request; the
+	// worker itself does not re-check authorization.
+	{file: "reincarnate_worker.go", function: "runReincarnationWorker", symbol: "DispatchAgentStart",
+		class: "guarded", reason: "authorizeAgentReincarnate in handleReincarnateAgent runs before the worker is started"},
+
 	// handlers_agents_core.go: DispatchAgentCreateWithGather in createAgentInProject.
 	{file: "handlers_agents_core.go", function: "createAgentInProject", symbol: "DispatchAgentCreateWithGather",
 		class: "guarded", reason: "authorizeAgentCreate at handlers_agents_core.go"},

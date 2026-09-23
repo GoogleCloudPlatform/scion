@@ -3899,50 +3899,26 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				if tmpl.Slug != "" {
 					agent.Template = tmpl.Slug
 				}
-				// Only fall back to the template's harness config when the
-				// project has no default-harness-config annotation — the
-				// project setting outranks the template, matching the
-				// default-template block above and the agent-create path.
-				//
-				// MECHANISM NOTE — leaving AppliedConfig.HarnessConfig empty
-				// when the annotation is present is deliberate:
-				// applyProjectDefaults below is what actually applies the
-				// project value on this path. The agent-create path in
-				// handlers_agents_core.go reads the same annotation inline
-				// instead, which makes applyProjectDefaults' harness-config
-				// branch unreachable there. Behaviourally identical today —
-				// keep the two in sync, and if you change
-				// applyProjectDefaults' harness handling, check BOTH paths.
-				projectHarnessConfig := ""
-				if project != nil && project.Annotations != nil {
-					projectHarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
-				}
-				if projectHarnessConfig == "" {
-					if harnessConfig := s.getHarnessConfigFromTemplate(tmpl, ""); harnessConfig != "" {
-						agent.AppliedConfig.HarnessConfig = harnessConfig
-					}
-				}
+				// Harness-config resolution (project annotation, then this
+				// template's default) happens later, in deriveAgentConfig,
+				// along with the rest of create's config-resolution pipeline
+				// — not here. See deriveAgentConfig's doc comment.
 			}
 		}
 
-		// Apply project-level defaults (harness config, limits, resources) from annotations
-		applyProjectDefaults(agent.AppliedConfig, project)
-
-		// Hub operational agent_defaults — strictly between applyProjectDefaults
-		// and populateAgentConfig, exactly as on the agent-create path. See
-		// applyHubAgentDefaults for why that placement is the whole point.
-		if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
-			ctx = withHubDefaultHarnessConfig(ctx)
-		}
-
 		// Project-default GCP identity, gated against the schedule creator as
-		// the immediate agent creator — twin of the create path (#1797).
+		// the immediate agent creator — twin of the create path (#1797). It
+		// must run before deriveAgentConfig: populateAgentConfig reads
+		// AppliedConfig.GCPIdentity when checking auth credentials.
 		if err := s.applyScheduledProjectDefaultGCPIdentity(
 			contextWithIdentity(ctx, creatorIdentity), agent, project); err != nil {
 			return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
 		}
 
-		s.populateAgentConfig(ctx, agent, project, tmpl)
+		// Apply project-level defaults, hub operational defaults, and the
+		// template/harness-config derivation pipeline, exactly as on the
+		// agent-create path. See deriveAgentConfig.
+		s.deriveAgentConfig(ctx, agent, project, tmpl)
 
 		if err := s.store.CreateAgent(ctx, agent); err != nil {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)

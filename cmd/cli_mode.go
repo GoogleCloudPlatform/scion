@@ -41,6 +41,7 @@ var agentAllowed = map[string]bool{
 	"logs":                        true,
 	"look":                        true,
 	"message":                     true,
+	"reincarnate":                 true,
 	"resume":                      true,
 	"start":                       true,
 	"stop":                        true,

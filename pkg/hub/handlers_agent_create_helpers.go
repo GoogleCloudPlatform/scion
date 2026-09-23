@@ -132,10 +132,14 @@ func (s *Server) getHarnessConfigFromTemplate(template *store.Template, fallback
 // buildAppliedConfig constructs an AgentAppliedConfig from a CreateAgentRequest.
 // When req.Config is a ScionConfig, its fields are extracted into the applied config
 // and the full ScionConfig is preserved as InlineConfig for threading to the broker.
-func (s *Server) buildAppliedConfig(req CreateAgentRequest, harnessConfig string, creatorName string, effectiveRole AgentRole) *store.AgentAppliedConfig {
+func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, effectiveRole AgentRole) *store.AgentAppliedConfig {
 	ac := &store.AgentAppliedConfig{
-		Profile:       req.Profile,
-		HarnessConfig: harnessConfig,
+		Profile: req.Profile,
+		// HarnessConfig starts at the requester's explicit value only.
+		// Project-annotation and template-default resolution happen later, in
+		// deriveAgentConfig — not here — so this stays a true record of what
+		// the requester asked for (CreateInputs relies on that below).
+		HarnessConfig: req.HarnessConfig,
 		HarnessAuth:   req.HarnessAuth,
 		Task:          req.Task,
 		Attach:        req.Attach,
@@ -272,6 +276,63 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	}
 
 	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
+}
+
+// deriveAgentConfig is create's whole config-resolution pipeline, run after
+// an agent's explicit inputs are set up (buildAppliedConfig on the create
+// path; the scheduled-dispatch path's equivalent inline setup in server.go):
+// resolve the harness-config name (project annotation, then template
+// default, when the requester didn't give one explicitly), apply
+// project-level defaults, then hub operational defaults (recording via ctx
+// whether the hub default supplied HarnessConfig, for
+// resolveDerivedConfig's not-found log-level attribution), then the full
+// populateAgentConfig pass (GitClone/Workspace/Branch, then
+// resolveDerivedConfig).
+//
+// Both agent-create call sites call this instead of open-coding these steps
+// — the harness-config rung included — so the two pipelines cannot drift,
+// and a future change here cannot silently go missing from one of them (or
+// from a hand-written "recipe" comment: see resolveDerivedConfig's doc
+// comment for how many review rounds that took to notice). `scion
+// reincarnate` calls it too, on a freshly built AppliedConfig containing
+// only kept fields and explicit inputs — including GCPIdentity, which the
+// auto-no-auth check below reads — never on an existing agent's config.
+//
+// Per-field precedence differs by field, because of where each tier is
+// applied:
+//   - Model: request > project > hub > template. Project and hub run here,
+//     BEFORE resolveDerivedConfig's template fill.
+//   - HarnessConfig: request > project > template > hub. The template rung
+//     also runs here, but BEFORE applyHubAgentDefaults, so the hub-wide
+//     default only fills a slot that request, project, AND template all
+//     left empty (design §5.2 risk (b);
+//     TestCreateAgent_HubDefaultHarnessConfig_LosesToTemplate pins this).
+func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
+	// Harness-config resolution: request (already on AppliedConfig.HarnessConfig
+	// from the explicit-inputs setup) > project annotation > template default.
+	if agent.AppliedConfig.HarnessConfig == "" && project != nil && project.Annotations != nil {
+		agent.AppliedConfig.HarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
+	}
+	if agent.AppliedConfig.HarnessConfig == "" {
+		agent.AppliedConfig.HarnessConfig = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
+	}
+
+	// Project-level defaults: limits, resources, and any of HarnessConfig/
+	// HarnessAuth/Model/ThinkingLevel/Profile the rungs above left empty. Its
+	// own harness-config fill is a no-op here in practice (the rung above
+	// already applied the same annotation), kept for parity with the
+	// non-harness-config fields it also fills.
+	applyProjectDefaults(agent.AppliedConfig, project)
+
+	// Hub operational agent_defaults — strictly between applyProjectDefaults
+	// and populateAgentConfig. See applyHubAgentDefaults for why that
+	// placement is the whole point: running it before the template rung
+	// above would let the hub default beat the template for HarnessConfig.
+	if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
+		ctx = withHubDefaultHarnessConfig(ctx)
+	}
+
+	s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
 }
 
 // resolveDerivedConfig is fill-if-empty, not recompute-against-the-catalog:

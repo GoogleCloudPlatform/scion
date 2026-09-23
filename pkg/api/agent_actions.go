@@ -39,6 +39,7 @@ const (
 	AgentActionResetAuth         = "reset-auth"
 	AgentActionMetrics           = "metrics"
 	AgentActionSetMessageMode    = "set_message_mode"
+	AgentActionReincarnate       = "reincarnate"
 )
 
 // RuntimeBrokerAgentActionMethod returns the HTTP method for actions routed

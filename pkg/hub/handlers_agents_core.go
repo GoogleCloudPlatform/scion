@@ -1147,32 +1147,6 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
-	// Resolve harness config: prefer the user's explicit choice, then the
-	// project-level default annotation, then the template default. The project
-	// annotation deliberately outranks the template so that harness_config
-	// follows the same precedence as every other project setting
-	// (request > project > template).
-	// Do NOT use req.Template as fallback since it may contain a UUID.
-	//
-	// MECHANISM NOTE — this path and the scheduler-dispatch path in
-	// server.go (dispatchAgentEventHandler) enforce the same rule by
-	// different means. Here the annotation is read inline, so by the time
-	// applyProjectDefaults runs below, AppliedConfig.HarnessConfig is
-	// already set and that function's harness-config branch cannot fire on
-	// this path. The scheduler path instead reads the annotation only to
-	// decide *not* to stamp the template, and lets applyProjectDefaults
-	// apply the project value. The asymmetry is forced: the scheduler needs
-	// tmpl.Slug for agent.Template even when it skips the harness stamp.
-	// Behaviourally identical today — keep the two in sync, and if you
-	// change applyProjectDefaults' harness handling, check BOTH paths.
-	harnessConfig := req.HarnessConfig
-	if harnessConfig == "" && project != nil && project.Annotations != nil {
-		harnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
-	}
-	if harnessConfig == "" {
-		harnessConfig = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
-	}
-
 	agent := &store.Agent{
 		ID:              api.NewUUID(),
 		Slug:            slug,
@@ -1199,7 +1173,10 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
-	agent.AppliedConfig = s.buildAppliedConfig(req, harnessConfig, creatorName, effectiveRole)
+	// Harness-config resolution (request > project annotation > template
+	// default) happens later, in deriveAgentConfig, along with the rest of
+	// create's config-resolution pipeline — not here.
+	agent.AppliedConfig = s.buildAppliedConfig(req, creatorName, effectiveRole)
 
 	// Resolve message_mode (D10 spawn defaults):
 	//   1. Explicit req.MessageMode from CLI flag → use it (after validation).
@@ -1376,17 +1353,9 @@ func (s *Server) createAgentInProject(
 		agent.Detached = true
 	}
 
-	// Apply project-level defaults (harness config, limits, resources) from annotations
-	applyProjectDefaults(agent.AppliedConfig, project)
-
-	// Hub operational agent_defaults — strictly between applyProjectDefaults
-	// and populateAgentConfig. See applyHubAgentDefaults for why that placement
-	// is the whole point.
-	if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
-		ctx = withHubDefaultHarnessConfig(ctx)
-	}
-
-	s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
+	// Apply project-level defaults, hub operational defaults, and the
+	// template/harness-config derivation pipeline. See deriveAgentConfig.
+	s.deriveAgentConfig(ctx, agent, project, resolvedTemplate)
 
 	// Quota enforcement, in order:
 	//  1. Per-broker agent ceiling (ptone/scion#1303). Exceeding the ceiling
@@ -2872,6 +2841,15 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 	// not lifecycle authorization. Must be routed before the generic authz block.
 	if action == api.AgentActionSetMessageMode {
 		s.handleSetMessageMode(w, r, id)
+		return
+	}
+
+	// --- reincarnate action: own permission model (design §3.8, decision D2) ---
+	// A self-reincarnation is allowed for any role with no scope check, which
+	// the generic lifecycle-authz block below does not support. Must be
+	// routed before it, like set_message_mode above.
+	if action == api.AgentActionReincarnate {
+		s.handleReincarnateAgent(w, r, id)
 		return
 	}
 

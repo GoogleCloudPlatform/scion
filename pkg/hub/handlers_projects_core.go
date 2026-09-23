@@ -2379,6 +2379,14 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// reincarnate action: own permission model (design §3.8, decision D2).
+	// A self-reincarnation is allowed for any role with no scope check, which
+	// the generic lifecycle-authz block below does not support.
+	if action == api.AgentActionReincarnate {
+		s.handleReincarnateAgent(w, r, agent.ID)
+		return
+	}
+
 	// Message action: route through authorizeAgentMessage (D1/D8).
 	if action == api.AgentActionMessage {
 		identity := GetIdentityFromContext(r.Context())
