@@ -213,8 +213,16 @@ profiles:
 | `default_harness_auth` | string | Default authentication type for new agents under this profile. |
 | `image_registry` | string | Profile-level registry override. Takes precedence over the top-level `image_registry`. |
 | `env` | map | Environment variables merged into the runtime environment. |
+| `timezone` | string | IANA timezone name (e.g., `America/Los_Angeles`) injected as `TZ` into agent containers dispatched by a Hub under this profile. Validated on write; an invalid name is rejected with `422`. |
 | `harness_overrides` | map | Per-harness-config overrides. Keys match `harness_configs` names. |
 | `secrets` | list | Required secrets for agents created under this profile. |
+
+**Agent timezone (Hub-dispatched agents).** The Hub sets `TZ` in the agent container from the first source that is set:
+
+1. The profile's `timezone` field.
+2. A `TZ` entry in the profile's `env` map.
+3. The Hub-level `agent_defaults.default_timezone` (see [Operational settings](/scion/reference/server-config/#layer-1--operational-postgres-hub_settings-table)).
+4. Otherwise `TZ` is not injected and the container uses its default (UTC).
 
 ## Telemetry Configuration (`telemetry`)
 
