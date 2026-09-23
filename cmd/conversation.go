@@ -360,9 +360,24 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
+	}
+
+	// §3.6: --project documents "defaults to current project" but previously
+	// sent "" as-is, relying entirely on the server's agent-token fallback —
+	// which only applies to agent callers, so a human CLI user with no
+	// --project got a NULL-project group with no web audience. Fill it from
+	// the resolved hub context (flag > hub-linked project > local project),
+	// the same resolution every other project-scoped command uses. If none
+	// resolves, leave it empty: the server-side agent-token fallback (or,
+	// for a user identity with neither, a clear "projectId is required"
+	// error) still applies.
+	if convProject == "" {
+		if resolved, resolveErr := resolveProjectID(settings, convProject); resolveErr == nil {
+			convProject = resolved
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)

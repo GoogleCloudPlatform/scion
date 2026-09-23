@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -255,6 +256,59 @@ func TestSubscriptionDeleteEndToEnd(t *testing.T) {
 	if deletedID != "sub-123" {
 		t.Errorf("deleted ID = %q, want %q", deletedID, "sub-123")
 	}
+}
+
+// TestResolveProjectID covers the resolution order runConversationCreate
+// (cmd/conversation.go, chat-thread-bridge §3.6) now relies on to fill
+// --project when it is empty: flag > hub-linked project > local project,
+// erroring only when none is available.
+func TestResolveProjectID(t *testing.T) {
+	t.Run("flag wins over everything", func(t *testing.T) {
+		settings := &config.Settings{
+			ProjectID: "local-proj",
+			Hub:       &config.HubClientConfig{ProjectID: "hub-proj"},
+		}
+		got, err := resolveProjectID(settings, "flag-proj")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "flag-proj" {
+			t.Errorf("projectID = %q, want %q", got, "flag-proj")
+		}
+	})
+
+	t.Run("hub project used when flag empty", func(t *testing.T) {
+		settings := &config.Settings{
+			ProjectID: "local-proj",
+			Hub:       &config.HubClientConfig{ProjectID: "hub-proj"},
+		}
+		got, err := resolveProjectID(settings, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "hub-proj" {
+			t.Errorf("projectID = %q, want %q", got, "hub-proj")
+		}
+	})
+
+	t.Run("local project used when no flag and no hub project", func(t *testing.T) {
+		settings := &config.Settings{ProjectID: "local-proj"}
+		got, err := resolveProjectID(settings, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "local-proj" {
+			t.Errorf("projectID = %q, want %q", got, "local-proj")
+		}
+	})
+
+	t.Run("error when nothing resolves", func(t *testing.T) {
+		settings := &config.Settings{}
+		_, err := resolveProjectID(settings, "")
+		if err == nil {
+			t.Fatal("expected an error when no project can be determined, got nil")
+		}
+	})
 }
 
 func TestDefaultTriggers(t *testing.T) {
