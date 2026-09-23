@@ -139,6 +139,23 @@ func TestDecisionAudit_AllowAndDeny(t *testing.T) {
 	}
 }
 
+func TestDecisionAudit_BrokerDenyAudited(t *testing.T) {
+	srv, _ := testServer(t)
+
+	emitter := &recordingDecisionAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(emitter)
+
+	broker := NewBrokerIdentity(tid("audit-broker"))
+	decision := srv.authzService.CheckAccess(context.Background(), broker, Resource{Type: "skill", ID: tid("skill-1")}, ActionRead)
+	require.False(t, decision.Allowed)
+
+	require.Len(t, emitter.records, 1, "broker deny must emit a decision audit record")
+	rec := emitter.records[0]
+	assert.Equal(t, "deny", rec.Result)
+	assert.Equal(t, string(PrincipalKindBroker), rec.PrincipalKind)
+	assert.Equal(t, "broker identities are not supported by authorization", rec.Reason)
+}
+
 func TestDecisionAudit_NoSecrets(t *testing.T) {
 	srv, _ := testServer(t)
 

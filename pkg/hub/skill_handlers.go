@@ -330,6 +330,11 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case store.SkillScopeProject:
+		if req.ScopeID == "" {
+			writeError(w, http.StatusBadRequest, "scope_id_required",
+				"scopeId is required for project-scoped skills", nil)
+			return
+		}
 		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			if !agentIdent.HasScope(ScopeAgentCreate) {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope", nil)
@@ -1379,6 +1384,10 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 			}
 			decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
 			if !decision.Allowed {
+				slog.WarnContext(ctx, "skill resolve denied",
+					"uri", skillRef.URI,
+					"identity_type", identity.Type(),
+					"reason", decision.Reason)
 				resolveErrors = append(resolveErrors, ResolveSkillError{
 					URI: skillRef.URI, Code: "forbidden",
 					Message: "you do not have permission to access this skill",
