@@ -18,12 +18,14 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -192,4 +194,171 @@ func (s *Server) createNativeGroupConversation(ctx context.Context, p createGrou
 	s.events.PublishChatTopicEvent(ctx, p.ProjectID, "created", topic)
 
 	return conv, nil
+}
+
+// linkedTopic returns the webchat topic linked to conv, or nil if conv has
+// no linked topic — an external-surface group (no "thread:" external_ref),
+// a legacy unlinked native group, or no webchat store wired.
+//
+// It requires topic.ConversationID == conv.ID (design doc §0, mirroring the
+// reverse-pointer direction from the chat-thread-bridge design §2.6.3): a
+// topic whose external_ref round-trips to conv's ID but no longer points
+// back at it is treated the same as "no topic", rather than silently
+// updating the wrong topic.
+func (s *Server) linkedTopic(ctx context.Context, conv *store.Conversation) (*WebChatTopic, error) {
+	_, topicID, err := messaging.ParseThreadConversationExternalRef(conv.ExternalRef)
+	if err != nil {
+		// Not a thread-backed conversation: external-surface group, or a
+		// legacy conversation with no (or a non-thread) external_ref.
+		return nil, nil
+	}
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return nil, nil
+	}
+
+	topic, err := wcs.GetTopic(ctx, topicID)
+	if err != nil {
+		return nil, fmt.Errorf("linkedTopic: get topic %s: %w", topicID, err)
+	}
+	if topic == nil || topic.ConversationID != conv.ID {
+		return nil, nil
+	}
+	return topic, nil
+}
+
+// setGroupDefaultAgent sets or clears the default agent of a group
+// conversation. agent == nil clears. The caller has already authorized and
+// validated the request (design doc §3.1) — this is the single write path
+// for the group default agent, converging conversations.default_agent_id
+// (the owner, design doc §0) and webchat_topic.default_agent (the
+// projection) in one transaction when the conversation is topic-linked.
+func (s *Server) setGroupDefaultAgent(ctx context.Context, conv *store.Conversation, agent *store.Agent) error {
+	topic, err := s.linkedTopic(ctx, conv)
+	if err != nil {
+		return err
+	}
+
+	var newDefaultAgentID *string
+	if agent != nil {
+		id := agent.ID
+		newDefaultAgentID = &id
+	}
+
+	if topic == nil {
+		// External-surface or unlinked group: conversation column only
+		// (design doc §3.1 table, "else" branch).
+		conv.DefaultAgentID = newDefaultAgentID
+		if err := s.store.UpdateConversation(ctx, conv); err != nil {
+			return fmt.Errorf("setGroupDefaultAgent: update conversation: %w", err)
+		}
+		return nil
+	}
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return errors.New("setGroupDefaultAgent: webchat store unavailable")
+	}
+
+	// The projection value is the agent slug — the form the UI shows and
+	// the web send path resolves first (design doc §3.1); the owner value
+	// is always the UUID. Both go through one TopicUpdate so UpdateTopic
+	// converges them in the same transaction.
+	slug, id := "", ""
+	if agent != nil {
+		slug, id = agent.Slug, agent.ID
+	}
+	if err := wcs.UpdateTopic(ctx, topic.ID, TopicUpdate{
+		DefaultAgent:   &slug,
+		DefaultAgentID: &id,
+	}); err != nil {
+		return fmt.Errorf("setGroupDefaultAgent: update topic: %w", err)
+	}
+	conv.DefaultAgentID = newDefaultAgentID
+
+	updated, err := wcs.GetTopic(ctx, topic.ID)
+	if err != nil {
+		return fmt.Errorf("setGroupDefaultAgent: reload topic: %w", err)
+	}
+	if updated != nil {
+		s.events.PublishChatTopicEvent(ctx, updated.ProjectID, "updated", *updated)
+	}
+	return nil
+}
+
+// ensureGroupParticipants records agents as participants of a group
+// conversation (design doc §3.3, F2b). Participant rows are a listing
+// index only — §3.2 already made project membership the read authority —
+// so this is best-effort: a failure here is logged at warn and never fails
+// the caller's send (AC-12).
+//
+// Uses store.EnsureParticipant, the same idempotent, race-safe primitive
+// handleAgentMessage's own auto-registration already uses (existing row —
+// active or soft-removed — is left untouched; a concurrent insert loses
+// the race safely rather than erroring). This avoids the plain AddParticipant
+// duplicate-key error on every repeat message from an already-participating
+// agent.
+//
+// Rule: participant means woken (design §3.3 / §4). Callers must pass only
+// agents that were actually dispatched into the conversation, not every
+// agent merely named (e.g. an @-mention denied by authorization, or a
+// human-mention notification target).
+func (s *Server) ensureGroupParticipants(ctx context.Context, conversationID string, agents []*store.Agent) {
+	if conversationID == "" {
+		return
+	}
+	for _, agent := range agents {
+		if agent == nil || agent.ID == "" {
+			continue
+		}
+		if err := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
+			ConversationID: conversationID,
+			PrincipalKind:  "agent",
+			PrincipalID:    agent.ID,
+			Role:           "member",
+		}); err != nil {
+			slog.WarnContext(ctx, "ensureGroupParticipants: ensure participant failed",
+				"conversationID", conversationID, "agentID", agent.ID, "error", err)
+		}
+	}
+}
+
+// registerGroupPrimary records the primary recipient of a handleAgentMessage
+// dispatch as a participant of a thread-derived group conversation (review
+// round 2 finding #2, factored out per round 3 finding #7).
+//
+// handleAgentMessage's caller-supplied conversation_id branch already
+// registers its primary recipient before dispatch (pre-existing, out of
+// scope per the round-2 design addendum). The thread-derived branch
+// (DeriveConversationKey, no conversation_id) does not, so without this
+// call the mention co-recipients processMentions adds would be the only
+// participants — the agent the message was actually addressed to and
+// dispatched to would have no row. Call this once per dispatch path, after
+// that path's own dispatch step has already returned success:
+//   - the agent-DM fork, after ExecuteAgentDM
+//   - the managed-runtime path, after managedAgentMessage
+//   - the broker-dispatched path, after dispatchWithBrokerRetry
+//
+// groupConversationID is empty for direct conversations, which makes this a
+// no-op. On the caller-supplied conversation_id branch, groupConversationID
+// is set too (convResult carries the existing conversation's own Kind), but
+// that branch's primary was already registered before dispatch — this call
+// still runs there and is a second, redundant EnsureParticipant, made
+// harmless by ensureGroupParticipants' idempotent use of
+// store.EnsureParticipant (review round 4 finding #2).
+//
+// The groupConversationID == "" guard below is redundant with the identical
+// guard in ensureGroupParticipants; it's kept as a fast path so callers
+// that pass "" for a direct conversation skip building the one-element
+// agents slice.
+func (s *Server) registerGroupPrimary(ctx context.Context, groupConversationID string, agent *store.Agent) {
+	if groupConversationID == "" {
+		return
+	}
+	s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{agent})
 }

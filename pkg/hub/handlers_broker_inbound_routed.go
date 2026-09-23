@@ -601,6 +601,13 @@ func (s *Server) dispatchRoutedRecipient(
 		)
 	}
 
+	// F2b (design doc §3.3): the agent was just dispatched and persisted
+	// into a group conversation — record it as a participant (listing
+	// index only, best-effort, never fails this response — AC-12).
+	if effectiveConv != nil && effectiveConv.Kind == "group" {
+		s.ensureGroupParticipants(ctx, effectiveConv.ConversationID, []*store.Agent{agent})
+	}
+
 	result.Status = "delivered"
 	return result
 }

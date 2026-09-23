@@ -1574,6 +1574,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Persist to message store before delivery attempt. Set dispatch_state
 	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
+	// F2b (design doc §3.3): the resolved conversation's ID when it is a
+	// group conversation, hoisted above the conversation-resolution block
+	// (like persistedMsgID) so every processMentions call site below —
+	// including branches outside that block's scope — can register
+	// dispatched mention recipients as participants. Empty for direct
+	// conversations (a mention target is by definition not a DM
+	// participant, invariant D-1) or when nothing resolved.
+	var groupConversationID string
 	if structuredMsg != nil {
 		storeMsg := &store.Message{
 			ID:            api.NewUUID(),
@@ -1792,6 +1800,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
 			}
 		}
+		if convResult != nil && convResult.Kind == "group" {
+			groupConversationID = convResult.ConversationID
+		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.
 		oldRouting := messaging.OldRoutingFromMessage(structuredMsg.SenderID, agent.ID, structuredMsg.ThreadID)
 		convID := ""
@@ -1866,6 +1877,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			}
 			messaging.RecordStep(ctx, "agent_dm_executed")
 
+			// Review round 2 finding #2 (see registerGroupPrimary): the
+			// primary recipient `agent` was dispatched above via
+			// ExecuteAgentDM and must be registered on a thread-derived
+			// group — this is the agent-sender path (scion message
+			// --thread-id between agents).
+			s.registerGroupPrimary(ctx, groupConversationID, agent)
+
 			// Post-delivery adapter concerns: notification subscription
 			// and mention processing stay outside the core operation.
 			if req.Notify {
@@ -1878,7 +1896,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 			var mentionResults []messages.MentionResult
 			if len(req.Mentions) > 0 {
-				mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg)
+				mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, groupConversationID)
 			}
 
 			// Use "dispatched" for accepted, "ambiguous" for ambiguous (#1689).
@@ -1949,10 +1967,15 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		})
 		s.events.PublishAgentStatus(ctx, agent)
 
+		// Review round 2 finding #2 (see registerGroupPrimary): the
+		// managed-runtime path's primary must also be registered on a
+		// thread-derived group.
+		s.registerGroupPrimary(ctx, groupConversationID, agent)
+
 		// Process @mentions for managed agents too.
 		var managedMentionResults []messages.MentionResult
 		if len(req.Mentions) > 0 && structuredMsg != nil {
-			managedMentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg)
+			managedMentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, groupConversationID)
 		}
 
 		// B11/B13: reflect persistence failure in the response status.
@@ -2049,10 +2072,15 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
 	}
 
+	// Review round 2 finding #2 (see registerGroupPrimary): the
+	// broker-dispatched path's primary must also be registered on a
+	// thread-derived group.
+	s.registerGroupPrimary(ctx, groupConversationID, agent)
+
 	// Process @mentions: validate slugs, fan out mention messages to resolved agents.
 	var mentionResults []messages.MentionResult
 	if len(req.Mentions) > 0 && structuredMsg != nil {
-		mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg)
+		mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, groupConversationID)
 	}
 
 	// B11/B13: reflect persistence failure in the response status.
@@ -2785,7 +2813,16 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 // processMentions validates mention slugs against project agents, fans out
 // NewMention messages to each valid recipient, and returns per-slug results.
 // The primary recipient (the agent the message was sent to) is excluded.
-func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, primaryAgent *store.Agent, originalMsg *messages.StructuredMessage) []messages.MentionResult {
+//
+// groupConversationID, when non-empty, names a group conversation that the
+// dispatched mention recipients should be recorded as participants of
+// (design doc §3.3, F2b). The primary recipient is registered separately by
+// handleAgentMessage's callers — either the caller-supplied conversation_id
+// case's own pre-dispatch registration, or (for a thread-derived group)
+// registerGroupPrimary, called at each dispatch path right before it calls
+// this function (review round 2 finding #2). Pass "" to skip participant
+// registration (direct conversations, or no conversation resolved).
+func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, primaryAgent *store.Agent, originalMsg *messages.StructuredMessage, groupConversationID string) []messages.MentionResult {
 	if len(mentionSlugs) == 0 {
 		return nil
 	}
@@ -2934,6 +2971,13 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			continue
 		}
 		cancel()
+
+		// F2b (design doc §3.3): the mention target was actually dispatched
+		// into a group conversation — record it as a participant. Best
+		// effort, never affects the response (AC-12).
+		if groupConversationID != "" {
+			s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{mentionAgent})
+		}
 	}
 
 	return results

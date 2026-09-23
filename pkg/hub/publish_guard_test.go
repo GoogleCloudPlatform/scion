@@ -568,7 +568,7 @@ func TestProcessMentions_SkipsPublishOnPersistFailure(t *testing.T) {
 	ctx = contextWithIdentity(ctx,
 		NewAuthenticatedUser(tid("user-tester"), "tester@example.com", "Tester", "admin", "web"))
 
-	results := srv.processMentions(ctx, []string{"mentioned"}, primary, originalMsg)
+	results := srv.processMentions(ctx, []string{"mentioned"}, primary, originalMsg, "")
 
 	// The mention should still produce a result (dispatch may fail, but that's OK).
 	t.Logf("mention results: %+v", results)
@@ -638,7 +638,7 @@ func TestProcessMentions_PublishesOnPersistSuccess(t *testing.T) {
 	ctx = contextWithIdentity(ctx,
 		NewAuthenticatedUser(tid("user-tester"), "tester@example.com", "Tester", "admin", "web"))
 
-	results := srv.processMentions(ctx, []string{"mentioned2"}, primary, originalMsg)
+	results := srv.processMentions(ctx, []string{"mentioned2"}, primary, originalMsg, "")
 	t.Logf("mention ok results: %+v", results)
 
 	// The publish MUST have fired because CreateMessage succeeded.

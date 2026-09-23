@@ -264,7 +264,7 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
 	}
@@ -273,10 +273,25 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	opts := &hubclient.ListConversationsOptions{
-		Kind:      convKind,
-		Surface:   convSurface,
-		ProjectID: convProject,
-		Limit:     convLimit,
+		Kind:    convKind,
+		Surface: convSurface,
+		Limit:   convLimit,
+	}
+
+	// Review round 1 finding #2 / design §3.2 addendum: project_id keeps
+	// its existing narrowing semantics (it drops every conversation whose
+	// ProjectID doesn't match, including every DM, which has ProjectID ==
+	// nil), so it must stay opt-in via an explicit --project. The
+	// hub-context default instead drives the purely additive
+	// include_project_groups union, which can only add groups the caller
+	// wasn't already listing — it never narrows out DMs or other
+	// projects' conversations. Unlike create, an unresolved project here
+	// is not an error: it just falls back to today's behavior (nothing
+	// sent, so the caller's participations plus canonical DMs).
+	if convProject != "" {
+		opts.ProjectID = convProject
+	} else if resolved, resolveErr := resolveProjectID(settings, ""); resolveErr == nil {
+		opts.IncludeProjectGroups = resolved
 	}
 
 	result, err := client.Conversations().List(ctx, opts)

@@ -226,6 +226,35 @@ func TestConversationListPagination(t *testing.T) {
 	assert.Empty(t, result3.NextCursor)
 }
 
+// TestConversationListSkipTotalCount is review round 2 finding #5:
+// ListConversations previously ran the full COUNT query regardless of
+// opts.SkipTotalCount, unlike every other store's List method. A caller
+// paging through every row (e.g. the conversation listing union) paid for
+// a COUNT on every page for no reason.
+func TestConversationListSkipTotalCount(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		conv := &store.Conversation{
+			ID:             uuid.NewString(),
+			Kind:           "group",
+			Surface:        "native",
+			LastActivityAt: time.Now().Add(time.Duration(i) * time.Second),
+		}
+		require.NoError(t, s.CreateConversation(ctx, conv))
+	}
+
+	skipped, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{Limit: 2, SkipTotalCount: true})
+	require.NoError(t, err)
+	assert.Len(t, skipped.Items, 2)
+	assert.Zero(t, skipped.TotalCount, "SkipTotalCount must skip the COUNT query")
+
+	counted, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{Limit: 2})
+	require.NoError(t, err)
+	assert.Equal(t, 3, counted.TotalCount, "without SkipTotalCount, behavior is unchanged")
+}
+
 // ---------------------------------------------------------------------------
 // DefaultAgentID validation
 // ---------------------------------------------------------------------------

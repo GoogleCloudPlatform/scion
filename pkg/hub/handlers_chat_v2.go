@@ -457,11 +457,14 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 	// Trim first so whitespace-only input is treated as "no default agent"
 	// (matching the PATCH/clear behavior).
 	body.DefaultAgent = strings.TrimSpace(body.DefaultAgent)
+	var defaultAgentID string
 	if body.DefaultAgent != "" {
-		if err := s.validateDefaultAgent(r.Context(), projectID, body.DefaultAgent); err != nil {
+		resolved, err := s.validateDefaultAgent(r.Context(), projectID, body.DefaultAgent, "defaultAgent")
+		if err != nil {
 			ValidationError(w, err.Error(), nil)
 			return
 		}
+		defaultAgentID = resolved.ID
 	}
 
 	topicID := uuid.New().String()
@@ -471,6 +474,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 		ProjectID:      projectID,
 		Name:           body.Name,
 		DefaultAgent:   body.DefaultAgent,
+		DefaultAgentID: defaultAgentID,
 		CreatedBy:      user.ID(),
 		CreatedAt:      now,
 		LastActivityAt: now,
@@ -596,13 +600,20 @@ func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicI
 		// Length and resolution are checked by validateDefaultAgent (single
 		// source of truth — DEF-31).
 		da := strings.TrimSpace(*body.DefaultAgent)
+		agentID := ""
 		if da != "" {
-			if err := s.validateDefaultAgent(r.Context(), topic.ProjectID, da); err != nil {
+			resolved, err := s.validateDefaultAgent(r.Context(), topic.ProjectID, da, "defaultAgent")
+			if err != nil {
 				ValidationError(w, err.Error(), nil)
 				return
 			}
+			agentID = resolved.ID
 		}
+		// Design doc §3.1 F1 table: the topic PATCH now writes the owner too
+		// (conversations.default_agent_id), converged in the same
+		// UpdateTopic transaction. Clearing (da == "") clears both.
 		updates.DefaultAgent = &da
+		updates.DefaultAgentID = &agentID
 	}
 
 	if updates.Name == nil && updates.DefaultAgent == nil {
@@ -678,33 +689,44 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 }
 
 // validateDefaultAgent checks that the given identifier (slug or UUID) is a
-// valid length and resolves to a non-deleted agent within the specified project.
-// Returns nil on success or a user-facing error describing the validation failure.
+// valid length and resolves to a non-deleted agent within the specified
+// project. Returns the resolved agent on success, or a user-facing error
+// describing the validation failure.
 //
 // All defaultAgent format and length validation lives here so that create and
 // patch call sites share a single rule set — two copies of a validation rule
-// drift, and the drift is the bug (DEF-31).
-func (s *Server) validateDefaultAgent(ctx context.Context, projectID, agentRef string) error {
+// drift, and the drift is the bug (DEF-31). It returns the resolved agent
+// (design doc §3.1) so callers can seed conversations.default_agent_id (the
+// UUID) without a second lookup after already resolving the same
+// slug-or-UUID identifier here.
+//
+// field names the request field the caller wants echoed back in the error
+// message (e.g. "defaultAgent" for the topic PATCH/create callers,
+// "agentId" for the conversations PUT default-agent endpoint). Review
+// round 4 finding #1: this replaces a caller-side strings.Replace of the
+// literal "defaultAgent" text, which was coupled to this function's exact
+// wording and untested.
+func (s *Server) validateDefaultAgent(ctx context.Context, projectID, agentRef, field string) (*store.Agent, error) {
 	// Length gate: reject unreasonably long identifiers before hitting the DB.
 	if len([]rune(agentRef)) > 200 {
-		return fmt.Errorf("defaultAgent identifier is too long")
+		return nil, fmt.Errorf("%s identifier is too long", field)
 	}
 
 	// Try slug lookup first (project-scoped, excludes soft-deleted).
 	a, err := s.store.GetAgentBySlug(ctx, projectID, agentRef)
 	if err == nil && a != nil {
-		return nil // found by slug in this project, not deleted
+		return a, nil // found by slug in this project, not deleted
 	}
 
 	// Fall back to UUID lookup.
 	a, err = s.store.GetAgent(ctx, agentRef)
 	if err != nil || a == nil {
-		return fmt.Errorf("defaultAgent %q not found in this project", agentRef)
+		return nil, fmt.Errorf("%s %q not found in this project", field, agentRef)
 	}
 	if a.ProjectID != projectID || !a.DeletedAt.IsZero() {
-		return fmt.Errorf("defaultAgent %q not found in this project", agentRef)
+		return nil, fmt.Errorf("%s %q not found in this project", field, agentRef)
 	}
-	return nil
+	return a, nil
 }
 
 // ClearTopicDefaultAgent drops the default-agent binding from every topic in
@@ -741,7 +763,9 @@ func (s *Server) ClearTopicDefaultAgent(ctx context.Context, agentID, agentSlug,
 		if t.DefaultAgent != agentID && t.DefaultAgent != agentSlug {
 			continue
 		}
-		if err := wcs.UpdateTopic(ctx, t.ID, TopicUpdate{DefaultAgent: &cleared}); err != nil {
+		// Design doc §3.1 F1 table: also clears conversations.default_agent_id
+		// on any linked conversation, in the same UpdateTopic transaction.
+		if err := wcs.UpdateTopic(ctx, t.ID, TopicUpdate{DefaultAgent: &cleared, DefaultAgentID: &cleared}); err != nil {
 			slog.Warn("Failed to clear deleted agent as thread default",
 				"topic_id", t.ID, "agent_id", agentID, "error", err)
 			continue
@@ -1137,6 +1161,17 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		return ""
 	}
 
+	// F2b (design doc §3.3): agents actually dispatched into a group
+	// conversation become participants (a listing index, not an ACL —
+	// project membership already gates reads per §3.2). Review round 1
+	// finding #5: the rule at all three F2b sites is "participant =
+	// dispatched successfully" — an agent is appended below only after its
+	// own conversation-resolution continue point and only when its dispatch
+	// attempt did not return an error. A nil dispatcher is a no-op here
+	// (not a failure — same as everywhere else in this function), so it
+	// still counts as dispatched.
+	var dispatchedAgents []*store.Agent
+
 	// Validate through the messaging choke point (AC-8).
 	// Runs after authorization so unauthorized users see 403, not 400.
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
@@ -1265,13 +1300,18 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 
 	// Dispatch to the primary agent.
 	dispatcher := s.GetDispatcher()
+	primaryDispatchOK := true
 	if dispatcher != nil {
 		retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, false, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
 			_ = s.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error())
+			primaryDispatchOK = false
 		}
+	}
+	if primaryDispatchOK {
+		dispatchedAgents = append(dispatchedAgents, primaryAgent)
 	}
 
 	// Handle additional mentioned agents (fan-out).
@@ -1378,14 +1418,27 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				})
 			}
 
+			mentionDispatchOK := true
 			if dispatcher != nil {
 				retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				if err := dispatchWithBrokerRetry(retryCtx, dispatcher, mentionAgent, agentContent, false, mentionMsg); err != nil {
 					s.messageLog.Error("Failed to dispatch mention", "slug", mentionAgent.Slug, "error", err)
+					mentionDispatchOK = false
 				}
 				cancel()
 			}
+			if mentionDispatchOK {
+				dispatchedAgents = append(dispatchedAgents, mentionAgent)
+			}
 		}
+	}
+
+	// F2b (design doc §3.3): record every actually-dispatched agent as a
+	// group participant. Skipped for DM keys (Kind == "direct") and for
+	// unlinked/unresolved conversations (chatV2ConvResult == nil) — best
+	// effort, never affects the response (AC-12).
+	if chatV2ConvResult != nil && chatV2ConvResult.Kind == "group" {
+		s.ensureGroupParticipants(ctx, chatV2ConvResult.ConversationID, dispatchedAgents)
 	}
 
 	// Update topic/DM watermark.
@@ -2682,6 +2735,7 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		ProjectID:      projectID,
 		Name:           body.Name,
 		DefaultAgent:   agentID,
+		DefaultAgentID: agentID, // review round 1 finding #4: agentID is already the UUID here
 		CreatedBy:      user.ID(),
 		CreatedAt:      now,
 		LastActivityAt: now,
