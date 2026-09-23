@@ -25,6 +25,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // External bearer authentication.
@@ -60,6 +61,15 @@ var errExternalBearerNotApplicable = errors.New("external bearer: not applicable
 // §4.7) can label this rejection without string matching, and so the mapping
 // in serveExternalBearer stays entirely errors.Is-driven.
 var errExternalBearerPrincipalRejected = errors.New("external bearer: principal type not accepted in this phase")
+
+// errExternalBearerInternalError marks a Resolve failure that is neither a
+// recognized policy outcome (suspended, access denied, non-authoritative
+// email, binding conflict) nor a "the bound user record is gone"
+// (store.ErrNotFound) — i.e. a store fault or other internal error. It maps
+// to 503, distinct from a credential rejection (401), matching the Hub-JWT
+// path's store-fault handling (auth.go's UserStore.GetUser check). Decision:
+// EM item 6, fix round 2.
+var errExternalBearerInternalError = errors.New("external bearer: internal resolver error")
 
 // externalBearerKind classifies a bearer token for the external-bearer path.
 type externalBearerKind int
@@ -149,7 +159,8 @@ func serveExternalBearer(w http.ResponseWriter, r *http.Request, next http.Handl
 		case errors.Is(err, ErrAccessDenied),
 			errors.Is(err, errNonAuthoritativeEmail),
 			errors.Is(err, errBindingConflict),
-			errors.Is(err, errAmbiguousLinkage):
+			errors.Is(err, errAmbiguousLinkage),
+			errors.Is(err, store.ErrNotFound):
 			log.Warn("External bearer rejected: forbidden", "error", err)
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"access denied", nil)
@@ -158,6 +169,11 @@ func serveExternalBearer(w http.ResponseWriter, r *http.Request, next http.Handl
 			log.Warn("External bearer: upstream verification unavailable", "error", err)
 			writeError(w, http.StatusServiceUnavailable, "upstream_unavailable",
 				"external identity provider unavailable", nil)
+			return true
+		case errors.Is(err, errExternalBearerInternalError):
+			log.Error("External bearer: internal resolver error", "error", err)
+			writeError(w, http.StatusServiceUnavailable, "store_error",
+				"unable to verify user status", nil)
 			return true
 		default:
 			// The token targeted a trusted issuer but failed verification or
@@ -215,7 +231,28 @@ func authenticateExternalBearer(ctx context.Context, token string, cfg AuthConfi
 
 	u, err := cfg.GoogleResolver.Resolve(ctx, id, ResolvePolicy{})
 	if err != nil {
-		return nil, err
+		return nil, classifyResolveError(err)
 	}
 	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb)), nil
+}
+
+// classifyResolveError distinguishes the resolver outcomes serveExternalBearer
+// already maps specifically (suspension, access denial, non-authoritative
+// email, binding conflict, or the bound user record having disappeared —
+// store.ErrNotFound) from everything else: a store fault or other internal
+// error, which is not a credential rejection and must not be reported as one
+// (503, not 401 or 403). errors.Is only, and %w wrapping is preserved end to
+// end so the original error is still loggable and matchable.
+func classifyResolveError(err error) error {
+	switch {
+	case errors.Is(err, ErrUserSuspended),
+		errors.Is(err, ErrAccessDenied),
+		errors.Is(err, errNonAuthoritativeEmail),
+		errors.Is(err, errBindingConflict),
+		errors.Is(err, errAmbiguousLinkage),
+		errors.Is(err, store.ErrNotFound):
+		return err
+	default:
+		return fmt.Errorf("%w: %w", errExternalBearerInternalError, err)
+	}
 }
