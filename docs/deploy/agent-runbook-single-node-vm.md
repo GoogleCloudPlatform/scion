@@ -20,6 +20,11 @@ git clone --depth 1 https://github.com/GoogleCloudPlatform/scion.git /tmp/scion-
 cd /tmp/scion-repo
 ```
 
+> **Important for AI agents:** Always clone the repository locally rather than
+> reading the runbook via URL-fetching tools. Web-reading tools may silently
+> truncate long documents — this runbook is 500+ lines and critical deployment
+> steps in later sections will be missed if truncated.
+
 A shallow clone (`--depth 1`) is sufficient — the deploy script does not need
 git history. The `/tmp/scion-repo` path is consistent with Section 5.1; if you
 already have the repo cloned or checked out elsewhere, skip this step and
@@ -160,12 +165,44 @@ Verify that the available CPU quota (limit minus usage) is sufficient for the
 chosen machine type (4 CPUs for small, 16 for medium). If quota is tight, warn
 the user and suggest a different region.
 
+### 2.6 Organization & IAP Compatibility
+
+Check whether your account's domain matches the project's organization:
+
+```bash
+ANCESTORS="$(gcloud projects get-ancestors PROJECT_ID --format='value(id,type)')"
+ORG_ID="$(echo "$ANCESTORS" | awk '$2=="organization"{print $1; exit}')"
+if [[ -z "$ORG_ID" ]]; then
+  echo "WARNING: Project has no organization. IAP requires a custom OAuth client."
+else
+  ORG_DOMAIN="$(gcloud organizations describe "$ORG_ID" --format='value(displayName)')"
+  echo "Organization domain: $ORG_DOMAIN"
+fi
+```
+
+**If the project has no organization, or if the deployer's email domain does not
+match the organization domain:** IAP will require a custom OAuth client before
+the deployer can log in. See Section 7 (Troubleshooting) for setup instructions.
+Inform the user immediately — do not wait until after deployment.
+
 ---
 
 ## 3. Gather Deployment Details
 
 Ask the user each question below in natural conversation. Use the defaults when
 the user does not have a preference. Validate each answer before moving on.
+
+> **Agent optimization:** Rather than prompting the user for each question
+> individually (10 round trips), detect defaults from the ambient GCP environment
+> first, then present the full candidate configuration as a single table and ask
+> for confirmation or targeted overrides in one prompt:
+>
+> ```bash
+> # Detect defaults
+> gcloud config get-value project        # -> project_id
+> gcloud config get-value compute/region # -> region
+> gcloud config get-value account        # -> admin_email
+> ```
 
 | # | Question | Default | Validation | Config field |
 |---|----------|---------|------------|--------------|
@@ -270,7 +307,7 @@ bash scripts/single-node-vm/deploy.sh --config /tmp/scion-deploy-config.json
 - The script runs 5 phases: Prerequisites, GCP Resources, VM Setup, IAP Proxy,
   Finalize.
 - Total time: 10-20 minutes for a registry-based deployment.
-- If building images locally: add 30-45 minutes for the image build phase.
+- If building images locally: add 10-15 minutes for the image build phase.
 - The script outputs progress to stdout. Watch for phase transitions
   (`--- Phase N: ... ---`).
 
@@ -473,7 +510,17 @@ of either warning.
 cross-org or no-org accounts. A custom OAuth client (with its own consent
 screen configuration) must be created for the project and IAP must be
 configured to use it, instead of the default. This is a manual, one-time GCP
-Console operation:
+Console operation. The simplest path is directly from the Cloud Run service:
+
+1. Navigate to **Cloud Run** in the GCP Console.
+2. Click on the IAP proxy service (`scion-hub-HUB_NAME-iap-proxy`).
+3. Go to the **Security** tab > **Identity-Aware Proxy** section.
+4. Use the inline OAuth consent screen and client configuration presented
+   there — redirect URIs are pre-populated for this service.
+
+If that inline flow isn't available in your Console version, or you need to
+configure the consent screen or client independently of a specific service,
+use the longer manual path instead:
 
 1. In the target project's GCP Console, go to **APIs & Services > OAuth
    consent screen** and configure a consent screen that includes the

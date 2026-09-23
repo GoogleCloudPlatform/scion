@@ -504,7 +504,7 @@ if [[ -n "$CFG_IMAGE_SOURCE" ]]; then
 else
   echo "Container images:"
   echo "  1) Provide a registry path (images already pushed)"
-  echo "  2) Build images on the VM (requires 30-45 min, ~30GB disk)"
+  echo "  2) Build images on the VM (requires 10-15 min, ~30GB disk)"
   config_prompt IMAGE_CHOICE "Select [2]: " "2"
 
   case "$IMAGE_CHOICE" in
@@ -526,7 +526,7 @@ fi
 
 # Force a rebuild even if the version marker and all 3 images already match
 # the requested VERSION. Defaults to false: normally a matching marker means
-# Phase 3b can skip the 30-45 min build entirely. Either the config key or
+# Phase 3b can skip the 10-15 min build entirely. Either the config key or
 # the --rebuild-images CLI flag forces a rebuild.
 CFG_FORCE_REBUILD="$(config_get 'container_images.force_rebuild' 'false')"
 if [[ "$CLI_REBUILD_IMAGES" == "true" ]]; then
@@ -1138,7 +1138,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
   #
   # Idempotency: a successful build writes a version marker
   # (/opt/scion-source/.images-built.version) containing $VERSION. A re-run
-  # skips the 30-45 min build iff the marker matches $VERSION AND all 3
+  # skips the 10-15 min build iff the marker matches $VERSION AND all 3
   # expected images are still present — a stale `:latest` tag alone is not
   # enough, since re-running with --version vNEXT must not silently keep old
   # images just because something answers to `:latest`. The marker file is
@@ -1191,7 +1191,7 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
     # Build only the minimal set of images needed for deployment:
     # core-base (foundation) -> scion-base (adds scion binary) -> scion-antigravity (default harness)
     # Using --target all would build ALL ~12 images including harnesses with known build issues.
-    info "Building container images (this may take 30-45 minutes)..."
+    info "Building container images (this may take 10-15 minutes)..."
     gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
       --command="
