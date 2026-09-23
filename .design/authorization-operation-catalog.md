@@ -1663,6 +1663,8 @@
 | http_route | POST | `/api/v1/admin/maintenance/restart` |
 | http_route | POST | `/api/v1/admin/maintenance/check-updates` |
 | http_route | POST | `/api/v1/admin/maintenance/migrations/{id}` |
+| http_route | GET | `/api/v1/admin/maintenance/update-available` |
+| http_route | DELETE | `/api/v1/admin/maintenance/update-available` |
 
 **Principals:** `user`
 
