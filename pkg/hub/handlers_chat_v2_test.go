@@ -632,6 +632,46 @@ func TestChatV2_CreateThread_Validation(t *testing.T) {
 	}
 }
 
+// TestChatV2_CreateThread_DuplicateNameCaseInsensitive_Returns400 is N3
+// (chat-thread-bridge review round 2): pins the narrowed isTopicNameConflict
+// matcher against the real SQLite driver on the create-thread path. Before
+// the narrowing this depended only on a unit-level string test
+// (TestIsTopicNameConflict); this exercises the actual CreateTopic ->
+// isTopicNameConflict -> ValidationError round trip. A name differing only
+// in case from an existing thread in the same space must still 400, not 500.
+func TestChatV2_CreateThread_DuplicateNameCaseInsensitive_Returns400(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("dup-name-test"), Name: "dup-name-test", Slug: "dup-name-test", Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	wcs := NewWebChatStore(db, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/spaces/"+proj.ID+"/threads", map[string]string{"name": "Design Review"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first create: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Same name, differing only in case — idx_webchat_topic_project_name is
+	// case-insensitive (COLLATE NOCASE).
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/spaces/"+proj.ID+"/threads", map[string]string{"name": "design review"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate (case-insensitive) create: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestChatV2_PatchThread(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -676,6 +716,57 @@ func TestChatV2_PatchThread(t *testing.T) {
 	}
 	if updated.Name != "new-name" {
 		t.Errorf("name = %q, want %q", updated.Name, "new-name")
+	}
+}
+
+// TestChatV2_PatchThread_RenameToExistingName_Returns400 is the rename half
+// of N3 (chat-thread-bridge review round 2): pins the narrowed
+// isTopicNameConflict matcher against the real SQLite driver on the
+// UpdateTopic path. Renaming a topic to a name already taken by another
+// topic in the same space must 400, not 500.
+func TestChatV2_PatchThread_RenameToExistingName_Returns400(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("rename-conflict-test"), Name: "rename-conflict-test", Slug: "rename-conflict-test", Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	wcs := NewWebChatStore(db, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        "topic-existing",
+		ProjectID: proj.ID,
+		Name:      "taken-name",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic (existing): %v", err)
+	}
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        "topic-to-rename",
+		ProjectID: proj.ID,
+		Name:      "original-name",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic (to rename): %v", err)
+	}
+
+	newName := "taken-name"
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/chat/topics/topic-to-rename", map[string]*string{"name": &newName})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("rename into existing name: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

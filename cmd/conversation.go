@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -397,11 +398,16 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 	conv, err := client.Conversations().Create(ctx, req)
 	if err != nil {
 		// If we couldn't resolve a project locally and the server's 400 is
-		// exactly the projectId-required guard, the resolveProjectID error
-		// ("Use --project flag or link this project with 'scion hub link'")
-		// is the more actionable message — surface both.
+		// specifically the projectId-required guard, the resolveProjectID
+		// error ("Use --project flag or link this project with 'scion hub
+		// link'") is the more actionable message — surface both. Checking
+		// the message (not just "any 400") matters: an agent whose local
+		// settings don't resolve a project but whose token does still hits
+		// projectResolveErr != nil, and a 400 for an unrelated reason (e.g.
+		// an invalid name) must not be misreported as a project problem.
 		var apiErr *apiclient.APIError
-		if projectResolveErr != nil && errors.As(err, &apiErr) && apiErr.IsBadRequest() {
+		if projectResolveErr != nil && errors.As(err, &apiErr) && apiErr.IsBadRequest() &&
+			strings.Contains(apiErr.Message, "projectId is required") {
 			return fmt.Errorf("failed to create conversation: %w (%v)", err, projectResolveErr)
 		}
 		return fmt.Errorf("failed to create conversation: %w", err)
@@ -409,6 +415,16 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 
 	if isJSONOutput() {
 		return outputJSON(conv)
+	}
+
+	if len(conv.Participants) == 0 {
+		// See handleCreateConversation's AddParticipant-failure path
+		// (pkg/hub/handlers_conversations.go): the conversation exists and
+		// is visible on the web, but until a participant row exists the
+		// creator can't read it back via `scion conversation
+		// show/messages/participants` or see it in `scion conversation list`.
+		fmt.Fprintf(os.Stderr, "warning: created conversation %s but could not add you as a participant; "+
+			"it won't appear in `scion conversation list` or be readable via `scion conversation show` yet\n", conv.ID)
 	}
 
 	fmt.Printf("Conversation created: %s\n", conv.ID)

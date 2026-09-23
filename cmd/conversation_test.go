@@ -414,3 +414,83 @@ func TestRunConversationCreate_NoProjectResolvable_SendsEmpty(t *testing.T) {
 	require.True(t, sawRequest, "expected the create request to reach the mock hub")
 	assert.Empty(t, gotProjectID, "projectId must be empty, not fabricated, when nothing resolves")
 }
+
+// newConversationCreateBadRequestServer returns an httptest server that
+// always responds to POST /api/v1/conversations with a 400 carrying the
+// given error message, in the same {"error":{"code","message"}} shape
+// writeError (pkg/hub/errors.go) produces.
+func newConversationCreateBadRequestServer(t *testing.T, message string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations" && r.Method == http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]string{
+					"code":    "invalid_request",
+					"message": message,
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+}
+
+// TestRunConversationCreate_ProjectRequiredHint_AppendsResolveHint covers N2
+// (review round 2): when the server's 400 is specifically "projectId is
+// required" and the CLI itself couldn't resolve a project locally, the
+// error is augmented with resolveProjectID's actionable hint.
+func TestRunConversationCreate_ProjectRequiredHint_AppendsResolveHint(t *testing.T) {
+	orig := saveConversationCreateTestState()
+	defer orig.restore()
+
+	server := newConversationCreateBadRequestServer(t, "projectId is required")
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "") // nothing resolves locally
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "")
+	projectPath = projectDir
+	convProject = ""
+	convCreateJSON = true
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationCreate(cmd, []string{"needs-project"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "projectId is required")
+	assert.Contains(t, err.Error(), "Use --project flag",
+		"N2: the resolve hint must be appended when the server's 400 is exactly projectId-required")
+}
+
+// TestRunConversationCreate_UnrelatedBadRequest_NoResolveHint is the other
+// half of N2: a 400 for a different reason (e.g. an invalid name) must not
+// be misreported as a project-resolution problem, even when the CLI itself
+// also couldn't resolve a project locally — e.g. an agent whose local
+// settings resolve nothing but whose token project the server used anyway,
+// only to reject the name.
+func TestRunConversationCreate_UnrelatedBadRequest_NoResolveHint(t *testing.T) {
+	orig := saveConversationCreateTestState()
+	defer orig.restore()
+
+	server := newConversationCreateBadRequestServer(t, "name contains invalid characters")
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "") // nothing resolves locally either
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "")
+	projectPath = projectDir
+	convProject = ""
+	convCreateJSON = true
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationCreate(cmd, []string{"bad/name"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "name contains invalid characters")
+	assert.NotContains(t, err.Error(), "Use --project flag",
+		"N2: an unrelated 400 must not be misreported as a project-resolution problem")
+}

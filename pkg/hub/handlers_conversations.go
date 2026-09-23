@@ -537,11 +537,17 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 			// createGroupConversation). Failing the request here would give
 			// the client a 500 for a resource that in fact exists, and a
 			// retry with the same name would now 409 NAME_CONFLICT with no
-			// way to recover the participant row. Log and proceed: the
-			// web-visible topic is the authoritative artifact (participants
-			// are a listing index, not the access authority — §2.4.2.1), and
-			// the response's empty participants array tells the caller the
-			// insert didn't happen.
+			// way to recover the participant row. Log and proceed with 201
+			// rather than fail a create that, in fact, succeeded.
+			//
+			// This is not free: unlike web access (project-based, §2.4.2.1),
+			// the conversation API gates group reads on the participant row
+			// itself (handleGetConversation, handleConvListMessages). Until
+			// a participant row exists for this conversation, the creator
+			// will get 403 from `scion conversation show/messages/participants`
+			// for it, and it will not appear in `scion conversation list`.
+			// The response's empty participants array is the caller's only
+			// signal that this happened.
 			slog.ErrorContext(ctx, "handleCreateConversation: AddParticipant failed after topic commit",
 				"conversationID", conv.ID, "externalRef", conv.ExternalRef, "error", err)
 		} else {

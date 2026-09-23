@@ -591,9 +591,10 @@ func TestIsTopicNameConflict(t *testing.T) {
 	require.True(t, isTopicNameConflict(errors.New(
 		"webchat store: create topic: constraint failed: UNIQUE constraint failed: webchat_topic.project_id, webchat_topic.name (2067)")))
 
-	// Postgres reports the constraint/index name verbatim.
+	// Postgres (pgx, the hub's actual Postgres driver) reports the
+	// constraint/index name verbatim.
 	require.True(t, isTopicNameConflict(errors.New(
-		`webchat store: create topic: pq: duplicate key value violates unique constraint "idx_webchat_topic_project_name"`)))
+		`webchat store: create topic: ERROR: duplicate key value violates unique constraint "idx_webchat_topic_project_name" (SQLSTATE 23505)`)))
 
 	// Not a name conflict: a *different* webchat_topic unique index (the
 	// one-#general-per-project guard) hitting the same "UNIQUE constraint
@@ -610,7 +611,7 @@ func TestIsTopicNameConflict(t *testing.T) {
 	require.False(t, isTopicNameConflict(errors.New(
 		"UNIQUE constraint failed: conversations.surface, conversations.external_ref")))
 	require.False(t, isTopicNameConflict(errors.New(
-		`pq: duplicate key value violates unique constraint "conversation_surface_external_ref"`)))
+		`ERROR: duplicate key value violates unique constraint "conversation_surface_external_ref" (SQLSTATE 23505)`)))
 
 	require.False(t, isTopicNameConflict(errors.New("some other failure")))
 }
