@@ -786,8 +786,13 @@ func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 //	<nfs.mount_root>/<nfs.shares[0].id>/<nfs.subpath_root>/<projectID>/shared-dirs/<name>
 //
 // shared_dir_storage is Layer-0 (see opsettings/koanf.go layer0Prefixes):
-// read per-broker from each process's own settings.yaml, never written to
-// the DB, and requires a restart to take effect.
+// never written to the DB, requires a restart to take effect, and — per
+// design §3.2.1 "global-only" and AC5 — read from each broker process's
+// GLOBAL settings.yaml only. Callers (pkg/agent.resolveSharedDirs) must
+// source this block from a global-only settings load, not from the
+// project-merged VersionedSettings that config.LoadEffectiveSettings(dir)
+// returns for a project directory; a project's settings must not be able to
+// redirect Docker bind-mount sources to an operator-unapproved host path.
 //
 // The workspace-storage-only fields on V1NFSConfig (UID, GID, MountOptions,
 // StorageClass) are not used by shared_dir_storage. Warning about them being
@@ -797,14 +802,26 @@ type V1SharedDirStorageConfig struct {
 	NFS     *V1NFSConfig `json:"nfs,omitempty" yaml:"nfs,omitempty" koanf:"nfs"`
 }
 
-// Validate returns an error if Backend is "nfs" but the block is
-// misconfigured. Unlike V1WorkspaceStorageConfig.ValidateNFS, this requires
-// MountRoot and the first share's ID to be non-empty: shared_dir_storage has
-// no other source for the host mount point used by local-container bind
-// mounts (design deploy-config-explore §3.2.1).
+// Validate returns an error unless Backend is exactly one of "", "local", or
+// "nfs" — no trimming or case folding, so a typo such as "NFS " or "Nfs"
+// fails closed rather than silently taking the local-layout branch (design
+// G5) — and, when Backend is "nfs", unless the block is fully configured.
+// Unlike V1WorkspaceStorageConfig.ValidateNFS, this requires MountRoot and
+// the first share's ID to be non-empty: shared_dir_storage has no other
+// source for the host mount point used by local-container bind mounts
+// (design deploy-config-explore §3.2.1).
 func (s *V1SharedDirStorageConfig) Validate() error {
-	if s == nil || !strings.EqualFold(s.Backend, "nfs") {
+	if s == nil {
 		return nil
+	}
+	switch s.Backend {
+	case "", "local":
+		return nil
+	case "nfs":
+		// fall through to the nfs-specific checks below.
+	default:
+		return fmt.Errorf(
+			"server.shared_dir_storage.backend must be \"\", \"local\", or \"nfs\" (got %q)", s.Backend)
 	}
 	if s.NFS == nil {
 		return fmt.Errorf(

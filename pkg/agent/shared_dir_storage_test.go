@@ -17,6 +17,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -39,9 +40,11 @@ func newTestProjectDir(t *testing.T) string {
 
 // TestResolveSharedDirs_Unset_MatchesLegacyBehavior is test (b) / AC1: with
 // shared_dir_storage unset, resolveSharedDirs must produce output identical
-// to calling config.EnsureSharedDirs + config.SharedDirsToVolumeMounts
-// directly (today's pre-existing run.go:952-972 behaviour), and no
-// SharedDirRealization.
+// (not merely same-basename — round 1 review finding #5/#8) to calling
+// config.EnsureSharedDirs + config.SharedDirsToVolumeMounts directly
+// (today's pre-existing run.go:952-972 behaviour), and no
+// SharedDirRealization. Uses a single project dir for both the "legacy" and
+// "new" calls, since both operations are idempotent mkdirs.
 func TestResolveSharedDirs_Unset_MatchesLegacyBehavior(t *testing.T) {
 	dirs := []api.SharedDir{
 		{Name: "build-cache"},
@@ -57,24 +60,25 @@ func TestResolveSharedDirs_Unset_MatchesLegacyBehavior(t *testing.T) {
 		{name: "explicit local backend", sdCfg: &config.V1SharedDirStorageConfig{Backend: "local"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			legacyDir := newTestProjectDir(t)
-			require.NoError(t, config.EnsureSharedDirs(legacyDir, dirs))
-			wantVolumes, err := config.SharedDirsToVolumeMounts(legacyDir, dirs, "/workspace")
-			require.NoError(t, err)
+			projectDir := newTestProjectDir(t)
 
-			gotDir := newTestProjectDir(t)
-			gotVolumes, gotRealization, err := resolveSharedDirs(tc.sdCfg, gotDir, "pid-1", "docker", dirs, "/workspace")
+			require.NoError(t, config.EnsureSharedDirs(projectDir, dirs))
+			wantVolumes, err := config.SharedDirsToVolumeMounts(projectDir, dirs, "/workspace")
+			require.NoError(t, err)
+			require.NotEmpty(t, wantVolumes)
+
+			gotVolumes, gotRealization, err := resolveSharedDirs(tc.sdCfg, projectDir, "pid-1", "docker", dirs, "/workspace")
 			require.NoError(t, err)
 			assert.Nil(t, gotRealization, "no SharedDirRealization for local/unset backend")
 
-			require.Len(t, gotVolumes, len(wantVolumes))
-			for i := range wantVolumes {
-				// Sources differ only in the tmpDir prefix (each test uses its
-				// own project dir) — compare the parts that matter: the
-				// directory name suffix and the container-side target/flags.
-				assert.Equal(t, filepath.Base(wantVolumes[i].Source), filepath.Base(gotVolumes[i].Source))
-				assert.Equal(t, wantVolumes[i].Target, gotVolumes[i].Target)
-				assert.Equal(t, wantVolumes[i].ReadOnly, gotVolumes[i].ReadOnly)
+			assert.Equal(t, wantVolumes, gotVolumes, "byte-identical to the legacy call (AC1)")
+
+			basePath, err := config.GetSharedDirsBasePath(projectDir)
+			require.NoError(t, err)
+			for _, d := range dirs {
+				info, statErr := os.Stat(filepath.Join(basePath, d.Name))
+				require.NoError(t, statErr, "shared dir %q should exist", d.Name)
+				assert.True(t, info.IsDir())
 			}
 		})
 	}
@@ -123,14 +127,121 @@ func TestResolveSharedDirs_NFS_MissingProjectID_FailsClosed(t *testing.T) {
 // TestResolveSharedDirs_NFS_InvalidConfig_FailsClosed exercises
 // V1SharedDirStorageConfig.Validate() being consulted before any resolution
 // is attempted (AC4/AC5 — a broken shared_dir_storage block must error with
-// a message naming the problem, not silently resolve garbage paths).
+// a message naming the problem, not silently resolve garbage paths). Round 1
+// review finding #7: assert the *specific* message, not just the common
+// "server.shared_dir_storage" prefix every error shares — otherwise removing
+// the Validate() call entirely (and letting Resolve's own, different error
+// through) would still pass.
 func TestResolveSharedDirs_NFS_InvalidConfig_FailsClosed(t *testing.T) {
-	sdCfg := &config.V1SharedDirStorageConfig{Backend: "nfs"} // no NFS block
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	_, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+	t.Run("nil NFS block", func(t *testing.T) {
+		sdCfg := &config.V1SharedDirStorageConfig{Backend: "nfs"} // no NFS block
+		_, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no nfs block is configured")
+	})
+
+	t.Run("unknown backend", func(t *testing.T) {
+		for _, backend := range []string{"nsf", "NFS ", "Nfs", "garbage"} {
+			t.Run(backend, func(t *testing.T) {
+				sdCfg := &config.V1SharedDirStorageConfig{Backend: backend}
+				_, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "must be")
+			})
+		}
+	})
+}
+
+// TestResolveSharedDirs_NFS_ResolveLevelMisconfig_FailsClosed covers the two
+// misconfigurations Validate() itself does not catch as errors on their own
+// combination but that nfsBackend.Resolve would otherwise silently turn into
+// a relative or malformed host path: empty mount_root and an empty
+// shares[0].id (round 1 review finding #7 — "resolver-level cases").
+func TestResolveSharedDirs_NFS_ResolveLevelMisconfig_FailsClosed(t *testing.T) {
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	t.Run("empty mount_root", func(t *testing.T) {
+		sdCfg := &config.V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &config.V1NFSConfig{
+				MountRoot: "",
+				Shares:    []config.V1NFSShare{{ID: "scion-shared"}},
+			},
+		}
+		_, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mount_root is empty")
+	})
+
+	t.Run("empty shares[0].id", func(t *testing.T) {
+		sdCfg := &config.V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &config.V1NFSConfig{
+				MountRoot: "/srv",
+				Shares:    []config.V1NFSShare{{ID: ""}},
+			},
+		}
+		_, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "shares[0].id is empty")
+	})
+}
+
+// TestResolveSharedDirs_NFS_UnsupportedRuntime_FailsClosed is item C8/T11:
+// with backend=nfs, a runtime that neither bind-mounts a host path
+// (Docker/Podman/Apple) nor consumes RunConfig.SharedDirStorage
+// (Kubernetes) — e.g. cloudrun — must fail closed instead of silently
+// succeeding with unread volumes/realization (design G5).
+func TestResolveSharedDirs_NFS_UnsupportedRuntime_FailsClosed(t *testing.T) {
+	hostBase := t.TempDir()
+	sdCfg := nfsSharedDirStorageCfg(filepath.Dir(hostBase))
+	sdCfg.NFS.Shares[0].ID = filepath.Base(hostBase)
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	for _, runtimeName := range []string{"cloudrun", "cloudrun-sandbox", "unknown-runtime"} {
+		t.Run(runtimeName, func(t *testing.T) {
+			volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", runtimeName, dirs, "/workspace")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "not supported on runtime")
+			assert.Contains(t, err.Error(), runtimeName)
+			assert.Nil(t, volumes)
+			assert.Nil(t, realization)
+		})
+	}
+}
+
+// TestResolveSharedDirs_NFS_TraversalProjectID_GuardBeforeMkdir is item
+// C3/T4: the export-root isolation guard must run before any directory is
+// created on disk. A malformed/traversal project ID must both error and
+// leave no directory behind outside the export root.
+func TestResolveSharedDirs_NFS_TraversalProjectID_GuardBeforeMkdir(t *testing.T) {
+	mountRoot := t.TempDir()
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+	require.NoError(t, os.MkdirAll(hostBase, 0o775))
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	// "projects/../../escaped/shared-dirs/scratchpad" cleans to a path
+	// outside hostBase entirely (a sibling of hostBase's parent).
+	traversalProjectID := "../../escaped"
+	sdRelPath := filepath.Join("projects", traversalProjectID, "shared-dirs", "scratchpad")
+	escapedPath := filepath.Join(hostBase, sdRelPath)
+	require.False(t, strings.HasPrefix(escapedPath, hostBase+string(filepath.Separator)),
+		"test fixture must actually escape hostBase, got %q", escapedPath)
+
+	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", traversalProjectID, "docker", dirs, "/workspace")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "server.shared_dir_storage")
+	assert.Contains(t, err.Error(), "isolation violation")
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+
+	_, statErr := os.Stat(escapedPath)
+	assert.True(t, os.IsNotExist(statErr), "escaped path must not have been created: %s", escapedPath)
 }
 
 // TestResolveSharedDirs_NFS_MissingHostBase_LocalContainerRuntime_FailsClosed
@@ -193,22 +304,15 @@ func TestResolveSharedDirs_NFS_MissingHostBase_Kubernetes_Succeeds(t *testing.T)
 
 // TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs is a real
 // (non-stubbed) integration check: when the resolved host base exists on
-// disk, resolveSharedDirs must mkdir each shared dir (0o2775) under it —
-// never the host base itself — and return a Docker bind-mount volume
-// pointing at the same path used to populate the K8s subPath.
+// disk, resolveSharedDirs must mkdir each shared dir it creates and chmod it
+// to 0o2775 (design §3.5(5)) — never the host base itself — and return a
+// Docker bind-mount volume pointing at the same path used to populate the
+// K8s subPath.
 func TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs(t *testing.T) {
 	mountRoot := t.TempDir()
 	shareID := "scion-shared"
 	hostBase := filepath.Join(mountRoot, shareID)
 	require.NoError(t, os.MkdirAll(hostBase, 0o775))
-	// Simulate the export root as provisioned in design §3.5.5 ("owned by
-	// scion:scion mode 2775"). The kernel only ever applies setgid to a new
-	// directory via inheritance from an already-setgid parent (mkdir(2)'s
-	// mode argument alone can't set it) — and os.FileMode's ModeSetgid bit
-	// must be OR'd in explicitly; the traditional octal literal 0o2775 is
-	// not the same bit in Go's os package and os.Chmod would silently
-	// ignore it.
-	require.NoError(t, os.Chmod(hostBase, os.ModeSetgid|0o775))
 
 	sdCfg := nfsSharedDirStorageCfg(mountRoot)
 	sdCfg.NFS.Shares[0].ID = shareID
@@ -225,12 +329,13 @@ func TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs(t *testing.T) {
 	info, statErr := os.Stat(wantHostPath)
 	require.NoError(t, statErr, "shared dir should have been mkdir'd")
 	assert.True(t, info.IsDir())
-	// os.MkdirAll applies the process umask like any other mkdir, so only
-	// assert the bits that matter here: setgid inherited from the already-
-	// setgid host base, and the owner has full access. Exact group/other
-	// bits depend on the test process umask.
-	assert.NotZero(t, info.Mode()&os.ModeSetgid, "setgid should be inherited from the setgid host base")
-	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm()&0o700, "owner should have full rwx")
+	// resolveSharedDirs chmods the leaf it created explicitly (item 13):
+	// unlike mkdir(2) (which only ever applies setgid via inheritance from
+	// an already-setgid parent), chmod(2) is not subject to the process
+	// umask, so the resulting mode is deterministic here regardless of the
+	// host base's own mode.
+	assert.Equal(t, os.FileMode(0o775), info.Mode().Perm(), "leaf permission bits")
+	assert.NotZero(t, info.Mode()&os.ModeSetgid, "leaf setgid bit")
 
 	require.NotNil(t, realization)
 	assert.Equal(t, "projects/pid-42/shared-dirs/scratchpad", realization.SubPaths["scratchpad"])
@@ -240,11 +345,46 @@ func TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs(t *testing.T) {
 	assert.NotEqual(t, hostBase, wantHostPath)
 }
 
+// TestResolveSharedDirs_NFS_PreexistingSharedDir_NotChmoded is the other
+// half of item 13: resolveSharedDirs must not chmod a shared dir that
+// already existed before this call (an operator or a previous agent may
+// have set it up deliberately).
+func TestResolveSharedDirs_NFS_PreexistingSharedDir_NotChmoded(t *testing.T) {
+	mountRoot := t.TempDir()
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+	require.NoError(t, os.MkdirAll(hostBase, 0o775))
+
+	leaf := filepath.Join(hostBase, "projects", "pid-42", "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(leaf, 0o700))
+	before, statErr := os.Stat(leaf)
+	require.NoError(t, statErr)
+	require.Zero(t, before.Mode()&os.ModeSetgid, "fixture sanity check: must start without setgid")
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	_, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-42", "docker", dirs, "/workspace")
+	require.NoError(t, err)
+
+	after, statErr := os.Stat(leaf)
+	require.NoError(t, statErr)
+	assert.Equal(t, before.Mode(), after.Mode(), "pre-existing shared dir must not be chmod'd")
+}
+
 func TestIsLocalContainerRuntime(t *testing.T) {
 	for _, name := range []string{"docker", "podman", "container"} {
 		assert.True(t, isLocalContainerRuntime(name), "%s should be a local-container runtime", name)
 	}
 	for _, name := range []string{"kubernetes", "cloudrun", "cloudrun-sandbox", ""} {
 		assert.False(t, isLocalContainerRuntime(name), "%s should not be a local-container runtime", name)
+	}
+}
+
+func TestIsKubernetesRuntime(t *testing.T) {
+	assert.True(t, isKubernetesRuntime("kubernetes"))
+	for _, name := range []string{"docker", "podman", "container", "cloudrun", "cloudrun-sandbox", ""} {
+		assert.False(t, isKubernetesRuntime(name), "%s should not be the kubernetes runtime", name)
 	}
 }

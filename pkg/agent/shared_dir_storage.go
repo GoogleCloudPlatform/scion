@@ -17,7 +17,6 @@ package agent
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -54,7 +53,17 @@ func resolveSharedDirs(
 		return nil, nil, nil
 	}
 
-	if sdCfg == nil || !strings.EqualFold(sdCfg.Backend, "nfs") {
+	// Validate whenever a block is configured, regardless of backend, so an
+	// unrecognized value (a typo, wrong case, trailing space) fails closed
+	// instead of silently taking the local-layout branch below (design G5;
+	// round 1 review finding C2/T3).
+	if sdCfg != nil {
+		if err := sdCfg.Validate(); err != nil {
+			return nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
+		}
+	}
+
+	if sdCfg == nil || sdCfg.Backend == "" || sdCfg.Backend == "local" {
 		// Default/unset/"local": today's local layout. Errors here are
 		// logged and swallowed, not propagated — this preserves exact
 		// pre-existing behaviour (design AC1).
@@ -69,13 +78,18 @@ func resolveSharedDirs(
 		return volumes, nil, nil
 	}
 
-	// backend == "nfs": fail closed on misconfiguration (design G5).
-	if err := sdCfg.Validate(); err != nil {
-		return nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
-	}
+	// sdCfg.Backend == "nfs" — Validate above already rejected every other
+	// value, so this is the only remaining case.
 	if projectID == "" {
 		return nil, nil, fmt.Errorf(
 			"server.shared_dir_storage backend is \"nfs\" but no hub project ID is available; shared dirs cannot be resolved")
+	}
+	if !isLocalContainerRuntime(runtimeName) && !isKubernetesRuntime(runtimeName) {
+		// e.g. cloudrun/cloudrun-sandbox: neither bind-mounts a host path nor
+		// consumes RunConfig.SharedDirStorage, so silently succeeding would
+		// produce volumes/realizations nobody reads (design G5; round 1
+		// review finding C8/T11).
+		return nil, nil, fmt.Errorf("server.shared_dir_storage=nfs is not supported on runtime %q", runtimeName)
 	}
 
 	names := make([]string, 0, len(dirs))
@@ -91,6 +105,17 @@ func resolveSharedDirs(
 		return nil, nil, fmt.Errorf("server.shared_dir_storage: resolve: %w", err)
 	}
 
+	// Compute the Docker-shaped volumes — and, inside NFSSharedDirsToVolumeMounts,
+	// run the export-root isolation guard (ValidateNotExportRoot) — BEFORE
+	// touching the filesystem below. This function does no I/O, so if any
+	// shared dir's resolved path would escape the host base (e.g. a
+	// traversal in a malformed project ID), the whole call fails here and no
+	// directory is ever created (round 1 review finding C3/T4).
+	volumes, err := runtime.NFSSharedDirsToVolumeMounts(res, dirs, containerWorkspace)
+	if err != nil {
+		return nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
+	}
+
 	// Local-container runtimes (Docker/Podman/Apple) bind-mount the resolved
 	// host path directly, so it must exist. Never create the host base
 	// itself (design §3.2.3) — only mkdir the per-shared-dir subtree, and
@@ -99,26 +124,24 @@ func resolveSharedDirs(
 	if _, statErr := os.Stat(res.HostBase); statErr == nil {
 		for _, name := range names {
 			sd := res.SharedDirs[name]
-			// os.FileMode's setgid bit (os.ModeSetgid) is not the same bit
-			// as the traditional Unix octal 02000 — Go's os.Mkdir* only
-			// recognizes the named ModeSetgid constant, so it must be
-			// OR'd in explicitly rather than written as a literal 0o2775.
-			// In practice mkdir(2) only ever applies setgid via kernel
-			// inheritance from an already-setgid parent (the export root,
-			// provisioned per design §3.5.5); this OR makes that intent
-			// explicit rather than relying on an accidental no-op bit.
-			if err := os.MkdirAll(sd.HostPath, os.ModeSetgid|0o775); err != nil {
+			_, existsErr := os.Stat(sd.HostPath)
+			alreadyExisted := existsErr == nil
+			if err := os.MkdirAll(sd.HostPath, 0o775); err != nil {
 				return nil, nil, fmt.Errorf("server.shared_dir_storage: mkdir shared dir %q: %w", name, err)
+			}
+			if !alreadyExisted {
+				// mkdir(2) only ever applies setgid via kernel inheritance
+				// from an already-setgid parent, so chmod the directory we
+				// just created explicitly (design §3.5(5): 0o2775). Only the
+				// leaf this call created — never a pre-existing shared dir.
+				if err := os.Chmod(sd.HostPath, os.ModeSetgid|0o775); err != nil {
+					return nil, nil, fmt.Errorf("server.shared_dir_storage: chmod shared dir %q: %w", name, err)
+				}
 			}
 		}
 	} else if isLocalContainerRuntime(runtimeName) {
 		return nil, nil, fmt.Errorf(
 			"server.shared_dir_storage host base %q does not exist; provision the NFS export before starting agents", res.HostBase)
-	}
-
-	volumes, err := runtime.NFSSharedDirsToVolumeMounts(res, dirs, containerWorkspace)
-	if err != nil {
-		return nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
 	}
 
 	subPaths := make(map[string]string, len(names))
@@ -148,4 +171,11 @@ func isLocalContainerRuntime(name string) bool {
 	default:
 		return false
 	}
+}
+
+// isKubernetesRuntime reports whether name identifies the Kubernetes
+// runtime, the only other runtime that consumes shared_dir_storage=nfs (via
+// RunConfig.SharedDirStorage / buildPod's PVC-by-subPath branch).
+func isKubernetesRuntime(name string) bool {
+	return name == "kubernetes"
 }

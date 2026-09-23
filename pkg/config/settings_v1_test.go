@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -4308,23 +4309,66 @@ func TestSharedDirStorageConfig_Validate(t *testing.T) {
 		}
 		require.NoError(t, s.Validate())
 	})
+
+	// Round 1 review (r1-code.md #2 / r1-test.md #3): an unrecognized
+	// backend must fail closed rather than silently taking the local-layout
+	// branch. Exact match only — no trimming or case folding.
+	unknownBackends := []string{"nsf", "NFS ", "Nfs", "garbage", "nfs2", " nfs"}
+	for _, backend := range unknownBackends {
+		t.Run("unknown backend "+strconv.Quote(backend)+" errors", func(t *testing.T) {
+			s := &V1SharedDirStorageConfig{Backend: backend}
+			err := s.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "must be")
+			assert.Contains(t, err.Error(), strconv.Quote(backend))
+		})
+	}
 }
 
-// TestServerConfig_SharedDirStorage_Field ensures V1ServerConfig carries the
-// new block through koanf's field name so settings.yaml round-trips it.
-func TestServerConfig_SharedDirStorage_Field(t *testing.T) {
-	sc := &V1ServerConfig{
-		SharedDirStorage: &V1SharedDirStorageConfig{
-			Backend: "nfs",
-			NFS: &V1NFSConfig{
-				MountRoot: "/srv",
-				Shares:    []V1NFSShare{{ID: "scion-shared"}},
-			},
-		},
-	}
-	require.NotNil(t, sc.SharedDirStorage)
-	assert.Equal(t, "nfs", sc.SharedDirStorage.Backend)
-	assert.Equal(t, "scion-shared", sc.SharedDirStorage.NFS.Shares[0].ID)
+// TestSharedDirStorageConfig_YAMLRoundTrip replaces a prior tautological
+// test that built the struct in Go and read the same fields back (r1-test.md
+// #9: a koanf tag typo would have gone undetected). This writes the design
+// §3.2.1 YAML to a global settings.yaml and loads it through
+// LoadEffectiveSettings, pinning the koanf/yaml tags end to end.
+func TestSharedDirStorageConfig_YAMLRoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+
+	settingsYAML := `
+schema_version: "1"
+server:
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: /srv
+      subpath_root: projects
+      shares:
+        - id: scion-shared
+          server: 10.128.15.241
+          export: /srv/scion-shared
+          pv_name: scion-shared
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	vs, warnings, err := LoadEffectiveSettings("")
+	require.NoError(t, err)
+	assert.Empty(t, warnings)
+
+	require.NotNil(t, vs.Server)
+	require.NotNil(t, vs.Server.SharedDirStorage)
+	sd := vs.Server.SharedDirStorage
+	assert.Equal(t, "nfs", sd.Backend)
+	require.NotNil(t, sd.NFS)
+	assert.Equal(t, "/srv", sd.NFS.MountRoot)
+	assert.Equal(t, "projects", sd.NFS.SubPathRoot)
+	require.Len(t, sd.NFS.Shares, 1)
+	assert.Equal(t, "scion-shared", sd.NFS.Shares[0].ID)
+	assert.Equal(t, "10.128.15.241", sd.NFS.Shares[0].Server)
+	assert.Equal(t, "/srv/scion-shared", sd.NFS.Shares[0].Export)
+	assert.Equal(t, "scion-shared", sd.NFS.Shares[0].PVName)
 }
 
 // ============================================================================

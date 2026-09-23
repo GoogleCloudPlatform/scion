@@ -956,9 +956,24 @@ authDone:
 	} else if len(opts.SharedDirs) > 0 {
 		effectiveSharedDirs = opts.SharedDirs
 	}
+	// server.shared_dir_storage is global-only (design §3.2.1, AC5): read it
+	// from a global-only settings load, never from the project-merged
+	// `settings` above. LoadVersionedSettings/LoadEffectiveSettings merge
+	// project-level server.* on top of global with no filtering, so reading
+	// settings.Server.SharedDirStorage directly would let a project's
+	// settings.yaml (including in-repo content from a cloned repository)
+	// redirect Docker bind-mount sources to an operator-unapproved host
+	// path (round 1 review finding C1/T2). workspace_storage is untouched
+	// and keeps its existing (pre-existing, out of scope) project-level
+	// exposure — see design §3.2.6.
 	var sharedDirStorageCfg *config.V1SharedDirStorageConfig
-	if settings != nil && settings.Server != nil {
-		sharedDirStorageCfg = settings.Server.SharedDirStorage
+	if len(effectiveSharedDirs) > 0 {
+		globalSettings, _, gErr := config.LoadEffectiveSettings("")
+		if gErr != nil {
+			util.Debugf("Start: failed to load global settings for shared_dir_storage: %v", gErr)
+		} else if globalSettings != nil && globalSettings.Server != nil {
+			sharedDirStorageCfg = globalSettings.Server.SharedDirStorage
+		}
 	}
 	sharedDirVolumes, sharedDirStorage, err := resolveSharedDirs(
 		sharedDirStorageCfg, projectDir, projectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace)

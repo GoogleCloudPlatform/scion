@@ -15,6 +15,8 @@
 package runtime
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -30,9 +32,17 @@ import (
 // ("Reproduction"). With one shared_dir_storage nfs settings block, the
 // Docker bind-mount source and the K8s PVC subPath must resolve to the same
 // projects/<pid>/shared-dirs/scratchpad path under the same base (AC2), and
-// there must be no dynamic scion-shared-* PVC. This is the production caller
-// AC6 requires for NFSSharedDirsToVolumeMounts, and it exercises the
-// export-root guard (ValidateNotExportRoot) inside it.
+// there must be no dynamic scion-shared-* PVC. It exercises the export-root
+// guard (ValidateNotExportRoot) inside NFSSharedDirsToVolumeMounts.
+//
+// Note (round 1 review finding #10): this test calls NewNFSBackend(...).Resolve
+// and NFSSharedDirsToVolumeMounts directly — it does not call the actual
+// production caller, pkg/agent.resolveSharedDirs, which package boundaries
+// prevent (pkg/runtime cannot import pkg/agent). The production wiring
+// itself is pinned by the pkg/agent run.go-level tests
+// (TestStartPropagatesSharedDirStorageToKubernetesRunConfig and siblings)
+// and by TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs, which
+// calls resolveSharedDirs end to end from the agent side.
 func TestSharedDirStorage_DockerAndK8s_SameLayout(t *testing.T) {
 	sdCfg := &config.V1SharedDirStorageConfig{
 		Backend: "nfs",
@@ -58,7 +68,7 @@ func TestSharedDirStorage_DockerAndK8s_SameLayout(t *testing.T) {
 	assert.Equal(t, wantHostBase, res.HostBase)
 	assert.Equal(t, wantRel, res.SharedDirs["scratchpad"].ServerRelativePath)
 
-	// --- Docker/Podman/Apple side: NFSSharedDirsToVolumeMounts (production caller, AC6) ---
+	// --- Docker/Podman/Apple side: NFSSharedDirsToVolumeMounts (AC6: exercised here; the actual production caller is pkg/agent.resolveSharedDirs) ---
 	mounts, err := NFSSharedDirsToVolumeMounts(res, dirs, "/workspace")
 	require.NoError(t, err)
 	require.Len(t, mounts, 1)
@@ -111,6 +121,15 @@ func TestSharedDirStorage_DockerAndK8s_SameLayout(t *testing.T) {
 				"only the static shared PVC claim should appear, no dynamic per-dir PVCs")
 		}
 	}
+
+	// AC3: shared_dir_storage=nfs with no workspace_storage leaves the
+	// workspace on its default EmptyDir — no workspace PVC of any kind
+	// appears just because shared dirs are NFS-backed (round 1 review
+	// finding #4/#6).
+	wsVol := findVolume(pod, "workspace")
+	require.NotNil(t, wsVol, "expected a workspace volume")
+	assert.NotNil(t, wsVol.EmptyDir, "workspace volume should be EmptyDir (AC3)")
+	assert.Nil(t, wsVol.PersistentVolumeClaim, "workspace volume must not be a PVC (AC3)")
 }
 
 // TestCreateSharedDirPVCs_SharedDirStorageNFS_SkipsPVCCreation is part of
@@ -257,4 +276,92 @@ func TestBuildPod_SharedDirStorageNFS_Unset_UnaffectedLocalBehavior(t *testing.T
 	assert.Equal(t, "scion-shared-myproject-build-cache", sdVol.PersistentVolumeClaim.ClaimName)
 	assert.Empty(t, findVolumeMount(&pod.Spec.Containers[0], "shared-dir-0").SubPath,
 		"local per-dir PVCs are mounted without a subPath")
+}
+
+// TestBuildPod_SharedDirStorageNFS_PerDirDetails is round 1 review finding
+// #5/T5: the earlier tests only ever exercised one dir with
+// ReadOnly=false/InWorkspace=false. §3.2.4 explicitly requires "honours
+// ReadOnly", and per-index volume naming must not collide across multiple
+// dirs. This table asserts, per dir: volume name, ClaimName, PVC.ReadOnly,
+// mount.ReadOnly, SubPath, and MountPath (including the InWorkspace target).
+func TestBuildPod_SharedDirStorageNFS_PerDirDetails(t *testing.T) {
+	rt := newNFSTestK8sRuntime()
+	cfg := RunConfig{
+		Name:               "test-agent",
+		Image:              "test-image",
+		UnixUsername:       "scion",
+		ContainerWorkspace: "/workspace",
+		Labels:             map[string]string{"scion.grove": "myproject"},
+		SharedDirs: []api.SharedDir{
+			{Name: "scratchpad", ReadOnly: true},
+			{Name: "b", InWorkspace: true},
+		},
+		SharedDirStorage: &SharedDirRealization{
+			Backend:     "nfs",
+			PVClaimName: "scion-shared",
+			SubPaths: map[string]string{
+				"scratchpad": "projects/pid-1/shared-dirs/scratchpad",
+				"b":          "projects/pid-1/shared-dirs/b",
+			},
+		},
+	}
+
+	pod, err := rt.buildPod("default", cfg)
+	require.NoError(t, err)
+
+	tests := []struct {
+		dirIndex     int
+		wantVolName  string
+		wantSubPath  string
+		wantMount    string
+		wantReadOnly bool
+	}{
+		{0, "shared-dir-0", "projects/pid-1/shared-dirs/scratchpad", "/scion-volumes/scratchpad", true},
+		{1, "shared-dir-1", "projects/pid-1/shared-dirs/b", "/workspace/.scion-volumes/b", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.wantVolName, func(t *testing.T) {
+			vol := findVolume(pod, tc.wantVolName)
+			require.NotNil(t, vol, "volume %s not found", tc.wantVolName)
+			require.NotNil(t, vol.PersistentVolumeClaim)
+			assert.Equal(t, "scion-shared", vol.PersistentVolumeClaim.ClaimName)
+			assert.Equal(t, tc.wantReadOnly, vol.PersistentVolumeClaim.ReadOnly, "PVC source ReadOnly")
+
+			mount := findVolumeMount(&pod.Spec.Containers[0], tc.wantVolName)
+			require.NotNil(t, mount, "mount %s not found", tc.wantVolName)
+			assert.Equal(t, tc.wantSubPath, mount.SubPath)
+			assert.Equal(t, tc.wantMount, mount.MountPath)
+			assert.Equal(t, tc.wantReadOnly, mount.ReadOnly, "VolumeMount ReadOnly")
+		})
+	}
+
+	// Distinct volume names — a regression to a shared name would produce a
+	// pod the API server rejects for duplicate volume names.
+	assert.NotEqual(t, findVolume(pod, "shared-dir-0").Name, findVolume(pod, "shared-dir-1").Name)
+}
+
+// TestBuildCommonRunArgs_SharedDirStorageNFS_DoesNotAffectHostUID is part of
+// AC3: with shared_dir_storage=nfs set but WorkspaceBackendName left at ""
+// (the case whenever workspace_storage is unset), Docker/Podman/Apple must
+// still advertise the broker's own host UID/GID — the UID/GID branch in
+// buildCommonRunArgs keys only on WorkspaceBackendName, which
+// shared_dir_storage never touches.
+func TestBuildCommonRunArgs_SharedDirStorageNFS_DoesNotAffectHostUID(t *testing.T) {
+	cfg := minimalRunConfig()
+	cfg.SharedDirStorage = &SharedDirRealization{
+		Backend:     "nfs",
+		PVClaimName: "scion-shared",
+		SubPaths:    map[string]string{"scratchpad": "projects/pid-1/shared-dirs/scratchpad"},
+	}
+	// WorkspaceBackendName stays "" (zero value) — shared_dir_storage does
+	// not set it.
+
+	args, err := buildCommonRunArgs(cfg)
+	require.NoError(t, err)
+
+	wantUID := fmt.Sprintf("SCION_HOST_UID=%d", os.Getuid())
+	wantGID := fmt.Sprintf("SCION_HOST_GID=%d", os.Getgid())
+	assertEnvInArgs(t, args, wantUID, "shared_dir_storage nfs must not affect host UID (AC3)")
+	assertEnvInArgs(t, args, wantGID, "shared_dir_storage nfs must not affect host GID (AC3)")
 }
