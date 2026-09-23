@@ -223,6 +223,24 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		agent.AppliedConfig.Branch = defaultBranch
 	}
 
+	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
+}
+
+// resolveDerivedConfig recomputes every field of agent.AppliedConfig that is
+// derived from the template, the harness config, or project/hub-level
+// defaults, against the *current* catalog (template, harness config,
+// pre-start hook, model aliases, telemetry). Fields that were set explicitly
+// (by the caller, before this runs) are left untouched — each derived field
+// is only applied when the corresponding slot on AppliedConfig is still
+// empty.
+//
+// This is the reusable half of populateAgentConfig: create and reincarnate
+// both call it, so a migrated agent's derived config is computed exactly the
+// way a freshly created agent's would be, given the same explicit inputs.
+// What it deliberately does NOT touch: GitClone, Workspace, and Branch (kept
+// verbatim across a reincarnation per design §3.3) — those are populated by
+// populateAgentConfig above this call, before AppliedConfig is handed here.
+func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
 	// Populate template ID, hash, and hub access scopes if template was resolved.
 	if resolvedTemplate != nil {
 		agent.AppliedConfig.TemplateID = resolvedTemplate.ID
