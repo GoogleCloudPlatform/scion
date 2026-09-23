@@ -4766,3 +4766,38 @@ func TestNativeChatConfig_ThreadedToGlobalConfig(t *testing.T) {
 	gcDefault := ConvertV1ServerToGlobalConfig(&V1ServerConfig{})
 	assert.Nil(t, gcDefault.NativeChat.EnabledSetting())
 }
+
+// TestGlobalSettingsMentions covers round 3 review disposition 6': the raw
+// substring check pkg/agent.Start uses to decide whether a malformed global
+// settings.yaml plausibly configured server.shared_dir_storage.
+func TestGlobalSettingsMentions(t *testing.T) {
+	t.Run("mentions the substring", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		globalScionDir := filepath.Join(tmpDir, ".scion")
+		require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"),
+			[]byte("schema_version: \"1\"\nserver: {shared_dir_storage: [\n"), 0644))
+
+		assert.True(t, GlobalSettingsMentions("shared_dir_storage"))
+	})
+
+	t.Run("does not mention the substring", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		globalScionDir := filepath.Join(tmpDir, ".scion")
+		require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"),
+			[]byte("schema_version: \"1\"\nsomething: [\n"), 0644))
+
+		assert.False(t, GlobalSettingsMentions("shared_dir_storage"))
+	})
+
+	t.Run("no global settings file at all", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".scion"), 0755))
+
+		assert.False(t, GlobalSettingsMentions("shared_dir_storage"))
+	})
+}

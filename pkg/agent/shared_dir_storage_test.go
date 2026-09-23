@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -394,20 +395,27 @@ func TestResolveSharedDirs_NFS_PreexistingSharedDir_NotChmoded(t *testing.T) {
 // climbs out of the project's own subtree in the NFS layout
 // (<HostBase>/<subpath_root>/<projectID>/shared-dirs/<name>) must be
 // rejected before Resolve, for both a local-container and a kubernetes
-// runtime name. Confirms the three published PoC inputs, and that nothing
-// is created under the export.
+// runtime name. Confirms the three published PoC inputs, that nothing is
+// created anywhere under the export (round 3 review finding C2/T1 part 2 —
+// the previous version only compared mountRoot's direct-child count, which
+// can't change no matter where inside the pre-existing hostBase a rejected
+// PoC would have created something), and — per round 3 finding T1 part 1 —
+// that the specific layer expected to catch each input is the one that
+// actually does (api.ValidateSharedDirs for the name PoCs,
+// validSharedDirProjectID for the project-ID PoC), not just "some layer".
 func TestResolveSharedDirs_NFS_PoC_TraversalNamesAndProjectID(t *testing.T) {
 	pocs := []struct {
-		name      string
-		dirName   string
-		projectID string
+		name        string
+		dirName     string
+		projectID   string
+		wantErrSubs string // the specific validation layer that must catch this input
 	}{
 		// name escapes to every project's shared dirs (no victim ID needed).
-		{name: "name climbs to the projects root", dirName: "../../../projects", projectID: "pid-1"},
+		{name: "name climbs to the projects root", dirName: "../../../projects", projectID: "pid-1", wantErrSubs: "invalid name"},
 		// name escapes to one specific victim project.
-		{name: "name climbs into a victim project", dirName: "../../victim/shared-dirs/scratchpad", projectID: "pid-1"},
+		{name: "name climbs into a victim project", dirName: "../../victim/shared-dirs/scratchpad", projectID: "pid-1", wantErrSubs: "invalid name"},
 		// project ID itself escapes into a victim project's subtree.
-		{name: "project ID climbs into a victim project", dirName: "scratchpad", projectID: "../victim"},
+		{name: "project ID climbs into a victim project", dirName: "scratchpad", projectID: "../victim", wantErrSubs: "invalid hub project ID"},
 	}
 
 	for _, poc := range pocs {
@@ -419,9 +427,6 @@ func TestResolveSharedDirs_NFS_PoC_TraversalNamesAndProjectID(t *testing.T) {
 					hostBase := filepath.Join(mountRoot, shareID)
 					require.NoError(t, os.MkdirAll(hostBase, 0o775))
 
-					before, err := os.ReadDir(mountRoot)
-					require.NoError(t, err)
-
 					sdCfg := nfsSharedDirStorageCfg(mountRoot)
 					sdCfg.NFS.Shares[0].ID = shareID
 					dirs := []api.SharedDir{{Name: poc.dirName}}
@@ -429,35 +434,102 @@ func TestResolveSharedDirs_NFS_PoC_TraversalNamesAndProjectID(t *testing.T) {
 					volumes, realization, err := resolveSharedDirs(
 						sdCfg, "/unused", poc.projectID, runtimeName, dirs, "/workspace")
 					require.Error(t, err, "PoC input must be rejected")
+					assert.Contains(t, err.Error(), poc.wantErrSubs,
+						"expected the primary validation layer to catch this input, not just some layer")
 					assert.Nil(t, volumes)
 					assert.Nil(t, realization)
 
-					after, err := os.ReadDir(mountRoot)
-					require.NoError(t, err)
-					assert.Equal(t, len(before), len(after),
-						"nothing should be created under mountRoot for a rejected PoC input")
+					assertDirEmpty(t, hostBase)
 				})
 			}
 		})
 	}
 }
 
+// TestConfineSharedDir directly pins the confinement check (round 3 review
+// finding N1/T1 part 1), independent of name/project-ID validation and
+// nfsBackend.Resolve: an input that passes slug validation and the
+// project-ID allow-list on their own must still be rejected here if it
+// resolves to the wrong parent directory — a defense-in-depth backstop for
+// a hypothetical Resolve bug, not reachable through resolveSharedDirs' own
+// input validation today.
+func TestConfineSharedDir(t *testing.T) {
+	hostBase := "/srv/scion-shared"
+
+	t.Run("path directly under the expected parent passes", func(t *testing.T) {
+		hostPath := filepath.Join(hostBase, "projects", "pid-1", "shared-dirs", "scratchpad")
+		require.NoError(t, confineSharedDir(hostPath, hostBase, "projects", "pid-1", "scratchpad"))
+	})
+
+	t.Run("wrong subpath_root component fails despite valid name/ID", func(t *testing.T) {
+		// "scratchpad" and "pid-1" both pass their own validators; only the
+		// resolved parent is wrong (as if Resolve used a different
+		// subpath_root than the one confineSharedDir was told to expect).
+		hostPath := filepath.Join(hostBase, "other-root", "pid-1", "shared-dirs", "scratchpad")
+		err := confineSharedDir(hostPath, hostBase, "projects", "pid-1", "scratchpad")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "resolved outside its project subtree")
+	})
+
+	t.Run("wrong project ID component fails despite valid name/ID", func(t *testing.T) {
+		hostPath := filepath.Join(hostBase, "projects", "someone-else", "shared-dirs", "scratchpad")
+		err := confineSharedDir(hostPath, hostBase, "projects", "pid-1", "scratchpad")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "resolved outside its project subtree")
+	})
+
+	t.Run("missing the shared-dirs segment fails", func(t *testing.T) {
+		hostPath := filepath.Join(hostBase, "projects", "pid-1", "scratchpad")
+		err := confineSharedDir(hostPath, hostBase, "projects", "pid-1", "scratchpad")
+		require.Error(t, err)
+	})
+}
+
 // TestValidSharedDirProjectID_RejectsTraversal directly pins the format
-// rules validSharedDirProjectID enforces (round 2 security review F1/F4).
+// rules validSharedDirProjectID enforces (round 2 security review F1/F4;
+// round 3 review finding S-N2: moved from a deny-list to an allow-list,
+// `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, which also rejects pure-dot names,
+// control characters/spaces and unbounded length).
 func TestValidSharedDirProjectID_RejectsTraversal(t *testing.T) {
-	for _, bad := range []string{"", ".", "..", "../victim", "victim/..", "a/b", `a\b`, "/etc/passwd"} {
-		assert.False(t, validSharedDirProjectID(bad), "expected %q to be rejected", bad)
+	tests := []struct {
+		id    string
+		valid bool
+	}{
+		{"", false},
+		{".", false},
+		{"..", false},
+		{"...", false}, // pure-dot names, S-N2
+		{"../victim", false},
+		{"victim/..", false},
+		{"a/b", false},
+		{`a\b`, false},
+		{"/etc/passwd", false},
+		{".hidden", false},                // must start alphanumeric
+		{"-leading", false},               // must start alphanumeric
+		{"a b", false},                    // space
+		{"a\x00b", false},                 // NUL
+		{"a\nb", false},                   // control character
+		{strings.Repeat("a", 129), false}, // over the 128-char limit
+		{"pid-1", true},
+		{"550e8400-e29b-41d4-a716-446655440000", true},
+		{"a", true},
+		{"a.b_c-d", true},
+		{strings.Repeat("a", 128), true}, // at the limit
 	}
-	for _, good := range []string{"pid-1", "550e8400-e29b-41d4-a716-446655440000", "a"} {
-		assert.True(t, validSharedDirProjectID(good), "expected %q to be accepted", good)
+	for _, tc := range tests {
+		t.Run(fmt.Sprintf("%q", tc.id), func(t *testing.T) {
+			assert.Equal(t, tc.valid, validSharedDirProjectID(tc.id))
+		})
 	}
 }
 
 // TestResolveSharedDirs_NFS_SymlinkedLeaf_FailsClosed is round 2 security
-// review finding S-F3: a shared dir whose leaf directory is a symlink
+// review finding S-F3 (rewritten in round 3, disposition 7', for the
+// os.Root-based traversal): a shared dir whose leaf directory is a symlink
 // (plantable by anything that can write to the export, e.g. another
-// all_squash-ed NFS client) must not be chmod'd or returned as a mount
-// source if it resolves outside the project's own subtree.
+// all_squash-ed NFS client) pointing outside the export must be refused —
+// os.Root's Mkdir won't create an entry over the existing symlink and won't
+// follow it — and nothing outside the export may be touched.
 func TestResolveSharedDirs_NFS_SymlinkedLeaf_FailsClosed(t *testing.T) {
 	mountRoot := t.TempDir()
 	shareID := "scion-shared"
@@ -477,8 +549,7 @@ func TestResolveSharedDirs_NFS_SymlinkedLeaf_FailsClosed(t *testing.T) {
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
 	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "symlink")
+	require.Error(t, err, "a leaf symlink pointing outside the export must be refused")
 	assert.Nil(t, volumes)
 	assert.Nil(t, realization)
 
@@ -487,15 +558,20 @@ func TestResolveSharedDirs_NFS_SymlinkedLeaf_FailsClosed(t *testing.T) {
 	require.NoError(t, statErr)
 	assert.Equal(t, before.Mode(), after.Mode(), "symlinked leaf must not be chmod'd")
 	assert.NotZero(t, after.Mode()&os.ModeSymlink, "leaf should still be a symlink")
+
+	// Nothing was created inside the symlink's target (disposition 7': "do
+	// not create anything outside the host base on any failure path").
+	assertDirEmpty(t, outside)
 }
 
 // TestResolveSharedDirs_NFS_SymlinkedIntermediate_FailsClosed is the other
-// half of S-F3: a symlinked intermediate component (here, the project
-// directory itself) must also be caught before the shared dir is chmod'd or
-// returned as a mount source. os.MkdirAll following the symlink to create
-// the leaf underneath it is a known, accepted limitation (the disposition's
-// fix runs the check "after MkdirAll"); what must not happen is chmod or a
-// successful return.
+// half of S-F3, rewritten for the os.Root-based traversal (round 3
+// disposition 7'): a symlinked intermediate component (here, the project
+// directory itself) must be refused, and — unlike the pre-os.Root
+// implementation, which accepted MkdirAll creating directories through the
+// symlink as a known limitation — nothing may be created inside the
+// symlink's target at all, because os.Root refuses to traverse an escaping
+// symlink in the first place.
 func TestResolveSharedDirs_NFS_SymlinkedIntermediate_FailsClosed(t *testing.T) {
 	mountRoot := t.TempDir()
 	shareID := "scion-shared"
@@ -511,10 +587,117 @@ func TestResolveSharedDirs_NFS_SymlinkedIntermediate_FailsClosed(t *testing.T) {
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
 	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "symlink")
+	require.Error(t, err, "a symlinked intermediate component pointing outside the export must be refused")
 	assert.Nil(t, volumes)
 	assert.Nil(t, realization)
+
+	// os.Root must refuse to traverse the symlink at all, so — unlike the
+	// pre-os.Root implementation — nothing is ever created inside its
+	// target.
+	assertDirEmpty(t, outside)
+}
+
+// TestResolveSharedDirs_NFS_SymlinkedShareDirsComponent_FailsClosed extends
+// the intermediate-symlink case to the "shared-dirs" component itself
+// (disposition 7' explicitly calls out "projects/<pid>, shared-dirs" as the
+// two intermediate components to check).
+func TestResolveSharedDirs_NFS_SymlinkedShareDirsComponent_FailsClosed(t *testing.T) {
+	mountRoot := t.TempDir()
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+	projectDir := filepath.Join(hostBase, "projects", "pid-1")
+	require.NoError(t, os.MkdirAll(projectDir, 0o775))
+
+	outside := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(projectDir, "shared-dirs")))
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+	require.Error(t, err, "a symlinked shared-dirs component pointing outside the export must be refused")
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+	assertDirEmpty(t, outside)
+}
+
+// TestResolveSharedDirs_NFS_SymlinkedHostBase_StillWorks is round 3 review
+// item 4 / disposition 7': a symlinked mount_root (or share directory) is a
+// legitimate operator layout (e.g. mount_root pointing at a separately
+// mounted disk) and must still work — the confinement and os.Root-based
+// checks must accept it, not just reject attacker-planted symlinks. Also
+// pins that the returned Docker bind source is the resolved real path, not
+// the unresolved (symlinked) one.
+func TestResolveSharedDirs_NFS_SymlinkedHostBase_StillWorks(t *testing.T) {
+	mountRoot := t.TempDir()
+	shareID := "scion-shared"
+	realHostBase := filepath.Join(t.TempDir(), "real-export")
+	require.NoError(t, os.MkdirAll(realHostBase, 0o775))
+	symlinkedHostBase := filepath.Join(mountRoot, shareID)
+	require.NoError(t, os.Symlink(realHostBase, symlinkedHostBase))
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+	require.NoError(t, err)
+	require.Len(t, volumes, 1)
+	require.NotNil(t, realization)
+
+	wantResolvedSource := filepath.Join(realHostBase, "projects", "pid-1", "shared-dirs", "scratchpad")
+	assert.Equal(t, wantResolvedSource, volumes[0].Source,
+		"the bind source must be the resolved real path, not the symlinked mount_root")
+
+	info, statErr := os.Stat(wantResolvedSource)
+	require.NoError(t, statErr, "the shared dir should exist under the real (resolved) export")
+	assert.True(t, info.IsDir())
+}
+
+// assertDirEmpty is a test helper asserting dir has no entries — used to
+// confirm nothing was created outside the export through a symlink
+// (round 3 disposition 7').
+func assertDirEmpty(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "expected %q to remain empty", dir)
+}
+
+// TestResolveSharedDirs_NFS_CustomSubPathRoot_StillWorks is round 3 review
+// item 4/T2: subpath_root is a documented operator field (§3.2.1) with a
+// default of "projects" — the confinement check (which duplicates that
+// default) must still accept a non-default value rather than false-positive
+// reject every agent start for an otherwise valid config.
+func TestResolveSharedDirs_NFS_CustomSubPathRoot_StillWorks(t *testing.T) {
+	for _, runtimeName := range []string{"docker", "kubernetes"} {
+		t.Run(runtimeName, func(t *testing.T) {
+			mountRoot := t.TempDir()
+			shareID := "scion-shared"
+			hostBase := filepath.Join(mountRoot, shareID)
+			require.NoError(t, os.MkdirAll(hostBase, 0o775))
+
+			sdCfg := nfsSharedDirStorageCfg(mountRoot)
+			sdCfg.NFS.Shares[0].ID = shareID
+			sdCfg.NFS.SubPathRoot = "shared"
+			dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+			volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", runtimeName, dirs, "/workspace")
+			require.NoError(t, err)
+			require.NotNil(t, realization)
+			assert.Equal(t, "shared/pid-1/shared-dirs/scratchpad", realization.SubPaths["scratchpad"])
+
+			if runtimeName == "docker" {
+				require.Len(t, volumes, 1)
+				wantSource := filepath.Join(hostBase, "shared", "pid-1", "shared-dirs", "scratchpad")
+				assert.Equal(t, wantSource, volumes[0].Source)
+				info, statErr := os.Stat(wantSource)
+				require.NoError(t, statErr)
+				assert.True(t, info.IsDir())
+			}
+		})
+	}
 }
 
 func TestIsLocalContainerRuntime(t *testing.T) {

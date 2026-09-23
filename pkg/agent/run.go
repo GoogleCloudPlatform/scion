@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/user"
@@ -94,6 +95,18 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			projectID = opts.Env["SCION_GROVE_ID"]
 		}
 	}
+	// Snapshot the dispatch-provided project ID now, before any
+	// settings-driven env merging (resolveAuthEnvOverlay copying
+	// harness-config env into opts.Env for absent keys, telemetry env, etc.)
+	// can inject a project-controlled SCION_PROJECT_ID/SCION_GROVE_ID.
+	// Used only by the nfs shared_dir_storage branch below (round 3 review
+	// finding C1/S-L1): a project's harness_configs.<name>.env can set
+	// these keys, and since resolveAuthEnvOverlay only fills in *absent*
+	// keys, capturing the value here — before that overlay ever runs — is
+	// what keeps it from being attacker-influenced. The general `projectID`
+	// below is unaffected and keeps its existing settings.Hub.ProjectID
+	// fallback for labels, RunConfig.ProjectID, etc.
+	hubDispatchedProjectID := projectID
 
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
@@ -971,32 +984,43 @@ authDone:
 	if len(effectiveSharedDirs) > 0 {
 		globalSettings, _, gErr := config.LoadGlobalSettings()
 		if gErr != nil {
-			// Fail closed (design G5): a broken global settings file must
-			// not silently fall back to the local shared-dir layout on an
-			// nfs-configured broker (round 2 review finding C3/T5).
-			return nil, fmt.Errorf("loading global settings for server.shared_dir_storage: %w", gErr)
-		}
-		if globalSettings != nil && globalSettings.Server != nil {
+			// A broken global settings file must fail closed (design G5)
+			// ONLY when the operator plausibly intended to configure
+			// shared_dir_storage — round 3 review disposition 6' (amended):
+			// failing closed on every malformed global settings file,
+			// including deployments that never touched this feature, would
+			// regress essentially every agent start, since every project
+			// has a default scratchpad shared dir (main tolerates this
+			// exact input and starts with the legacy local layout). We
+			// can't parse the broken file to check the real value, so fall
+			// back to a raw substring check on its bytes.
+			if config.GlobalSettingsMentions("shared_dir_storage") {
+				return nil, fmt.Errorf("loading global settings for server.shared_dir_storage: %w", gErr)
+			}
+			slog.Warn("Start: failed to load global settings; server.shared_dir_storage was not found in the raw file, proceeding with the local shared-dir layout",
+				"error", gErr)
+		} else if globalSettings != nil && globalSettings.Server != nil {
 			sharedDirStorageCfg = globalSettings.Server.SharedDirStorage
 		}
 	}
-	// nfs shared_dir_storage keys its layout on the hub-authoritative
-	// project ID the hub injects via SCION_PROJECT_ID (design §3.2.2), not
-	// on the broker-local project-settings fallback that the general
-	// projectID variable above may carry (settings.Hub.ProjectID / the
-	// project-id file). Project settings must not be able to choose which
-	// project's shared tree an nfs-backed agent mounts (round 2 review
-	// finding S-F4). The hub sets SCION_PROJECT_ID/SCION_GROVE_ID
-	// unconditionally after merging any user-supplied env
+	// nfs shared_dir_storage keys its layout on hubDispatchedProjectID,
+	// snapshotted above at Start entry — NOT the general projectID variable
+	// (which falls back to settings.Hub.ProjectID / the project-id file)
+	// and NOT a fresh read of opts.Env here. By this point opts.Env may
+	// already have been filled in from project-level harness-config env by
+	// resolveAuthEnvOverlay (it only fills *absent* keys, but that includes
+	// SCION_PROJECT_ID/SCION_GROVE_ID when the hub didn't dispatch this
+	// start), so re-reading opts.Env at this line would reopen exactly the
+	// hole this snapshot closes (round 3 review finding C1/S-L1). The hub
+	// sets SCION_PROJECT_ID/SCION_GROVE_ID unconditionally after merging any
+	// user-supplied env for hub-dispatched starts
 	// (pkg/hub/httpdispatcher.go DispatchAgentStart/DispatchAgentRestart,
-	// "Identity vars at highest precedence"), so this is authoritative
-	// whenever the hub dispatched this agent.
-	sharedDirProjectID := opts.Env["SCION_PROJECT_ID"]
-	if sharedDirProjectID == "" {
-		sharedDirProjectID = opts.Env["SCION_GROVE_ID"]
-	}
+	// "Identity vars at highest precedence"), so hubDispatchedProjectID is
+	// authoritative whenever the hub dispatched this agent, and correctly
+	// empty otherwise — project settings cannot choose which project's
+	// shared tree an nfs-backed agent mounts (round 2 review finding S-F4).
 	sharedDirVolumes, sharedDirStorage, err := resolveSharedDirs(
-		sharedDirStorageCfg, projectDir, sharedDirProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace)
+		sharedDirStorageCfg, projectDir, hubDispatchedProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace)
 	if err != nil {
 		return nil, err
 	}

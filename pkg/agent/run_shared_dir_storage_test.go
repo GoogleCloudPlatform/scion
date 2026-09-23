@@ -362,6 +362,124 @@ hub:
 	assert.Equal(t, 0, ranCount, "Run must never be called when the project-settings project ID is used instead of the dispatch-provided one")
 }
 
+// TestStartSharedDirStorageNFS_HarnessConfigEnvProjectID_Ignored is round 3
+// review finding C1/S-L1 (Medium): resolveAuthEnvOverlay copies a project's
+// harness_configs.<name>.env into opts.Env for any key not already present
+// — including SCION_PROJECT_ID — before the nfs branch used to re-read
+// opts.Env. On a hubless start (no dispatch-provided project ID), a
+// project's settings (including in-repo settings.yaml content from a cloned
+// repository) could therefore pick another project's shared tree. The nfs
+// branch must use only the project ID snapshotted at Start entry, before
+// any settings-driven env merging runs.
+func TestStartSharedDirStorageNFS_HarnessConfigEnvProjectID_Ignored(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	f.writeGlobalSettings(t, sprintfServerYAML(sharedDirStorageNFSGlobalYAML, filepath.Join(f.tmpDir, "srv"), "share", "pv"))
+	require.NoError(t, os.WriteFile(filepath.Join(f.projectScionDir, "settings.yaml"), []byte(`schema_version: "1"
+harness_configs:
+  test-harness:
+    harness: gemini
+    env:
+      SCION_PROJECT_ID: victim-project
+`), 0644))
+
+	ranCount := 0
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			ranCount++
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env: map[string]string{
+			"SCION_AGENT_ID": "agent-9",
+			// No SCION_PROJECT_ID / SCION_GROVE_ID — only the harness
+			// config's env, which the nfs branch must not pick up.
+		},
+		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hub project ID")
+	assert.Equal(t, 0, ranCount, "Run must never be called when a harness-config env project ID is used instead of the dispatch-provided one")
+}
+
+// TestStartSharedDirStorageNFS_HarnessConfigEnvGroveID_Ignored is the
+// SCION_GROVE_ID variant of the same finding (C1/S-L1).
+func TestStartSharedDirStorageNFS_HarnessConfigEnvGroveID_Ignored(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	f.writeGlobalSettings(t, sprintfServerYAML(sharedDirStorageNFSGlobalYAML, filepath.Join(f.tmpDir, "srv"), "share", "pv"))
+	require.NoError(t, os.WriteFile(filepath.Join(f.projectScionDir, "settings.yaml"), []byte(`schema_version: "1"
+harness_configs:
+  test-harness:
+    harness: gemini
+    env:
+      SCION_GROVE_ID: victim-project
+`), 0644))
+
+	ranCount := 0
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			ranCount++
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env: map[string]string{
+			"SCION_AGENT_ID": "agent-10",
+		},
+		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hub project ID")
+	assert.Equal(t, 0, ranCount, "Run must never be called when a harness-config env grove ID is used instead of the dispatch-provided one")
+}
+
+// TestStartSharedDirStorageNFS_GroveIDFallback_Succeeds is round 3 test
+// review Low #3 / disposition item 1's T3: the SCION_GROVE_ID fallback
+// (older hubs / grove-era dispatch) must still work when it is the
+// dispatch-provided value, not a project-settings injection.
+func TestStartSharedDirStorageNFS_GroveIDFallback_Succeeds(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	f.writeGlobalSettings(t, sprintfServerYAML(sharedDirStorageNFSGlobalYAML, filepath.Join(f.tmpDir, "srv"), "share", "pv"))
+	f.writeProjectSettings(t, "")
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env: map[string]string{
+			"SCION_AGENT_ID": "agent-11",
+			"SCION_GROVE_ID": "grove-pid",
+			// No SCION_PROJECT_ID.
+		},
+		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, capturedConfig.SharedDirStorage)
+	assert.Equal(t, "projects/grove-pid/shared-dirs/scratchpad", capturedConfig.SharedDirStorage.SubPaths["scratchpad"])
+}
+
 // TestStartSharedDirStorage_Unset_AC1 is the unset-block variant of item 3 /
 // T8 (renamed from ..._Unset_AC1AndAC3 per round 2 review finding C2/T8: the
 // AC3 claims held here trivially, since nothing in this path touches
@@ -450,15 +568,18 @@ func TestStartSharedDirStorage_NoSharedDirs_SCIONVolumesNotSet(t *testing.T) {
 	assert.False(t, ok, "SCION_VOLUMES must not be set when there are no shared dirs")
 }
 
-// TestStartSharedDirStorage_MalformedGlobalSettings_FailsClosed is round 2
-// review finding C3/T5: a global settings.yaml that fails to parse must not
-// silently fall back to the local shared-dir layout on a broker with shared
-// dirs to mount — that would be exactly the G5 split-brain failure mode
-// this feature exists to prevent. Start must return the load error, and Run
-// must never be called.
-func TestStartSharedDirStorage_MalformedGlobalSettings_FailsClosed(t *testing.T) {
+// TestStartSharedDirStorage_MalformedGlobalSettings_MentionsKey_FailsClosed
+// is round 2 review finding C3/T5, amended in round 3 disposition 6': a
+// global settings.yaml that fails to parse, and whose raw bytes mention
+// "shared_dir_storage", must not silently fall back to the local shared-dir
+// layout on a broker with shared dirs to mount — that would be exactly the
+// G5 split-brain failure mode this feature exists to prevent, and here the
+// operator plausibly intended to configure it. Start must return the load
+// error, and Run must never be called.
+func TestStartSharedDirStorage_MalformedGlobalSettings_MentionsKey_FailsClosed(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
-	// Invalid YAML: an unterminated flow mapping.
+	// Invalid YAML: an unterminated flow mapping, but the raw bytes still
+	// mention shared_dir_storage.
 	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"),
 		[]byte("schema_version: \"1\"\nserver: {shared_dir_storage: [\n"), 0644))
 	f.writeProjectSettings(t, "")
@@ -486,6 +607,56 @@ func TestStartSharedDirStorage_MalformedGlobalSettings_FailsClosed(t *testing.T)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "server.shared_dir_storage")
 	assert.Equal(t, 0, ranCount, "Run must never be called when the global settings load fails closed")
+}
+
+// TestStartSharedDirStorage_MalformedGlobalSettings_NoKey_SucceedsAsMain is
+// the amended half of disposition 6': a malformed global settings.yaml that
+// does NOT mention shared_dir_storage must behave exactly like main —
+// Start succeeds with the legacy local shared-dir layout — because every
+// project has a default scratchpad shared dir, so failing closed here would
+// regress essentially every agent start on any broker whose global settings
+// happen to be broken, whether or not it ever used this feature.
+func TestStartSharedDirStorage_MalformedGlobalSettings_NoKey_SucceedsAsMain(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	// Invalid YAML that never mentions shared_dir_storage at all.
+	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"),
+		[]byte("schema_version: \"1\"\nsomething: [\n"), 0644))
+	f.writeProjectSettings(t, "")
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-12",
+			"SCION_PROJECT_ID": "pid-malformed-global-no-key",
+		},
+		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
+	})
+	require.NoError(t, err)
+	assert.Nil(t, capturedConfig.SharedDirStorage)
+
+	basePath, err := config.GetSharedDirsBasePath(f.projectScionDir)
+	require.NoError(t, err)
+	wantSource := filepath.Join(basePath, "scratchpad")
+	var found bool
+	for _, v := range capturedConfig.Volumes {
+		if v.Target == "/scion-volumes/scratchpad" {
+			found = true
+			assert.Equal(t, wantSource, v.Source)
+		}
+	}
+	assert.True(t, found, "expected the legacy local /scion-volumes/scratchpad volume, matching main's behaviour")
 }
 
 // sprintfServerYAML formats the sharedDirStorageNFSGlobalYAML template.

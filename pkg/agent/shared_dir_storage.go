@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+	"regexp"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -125,25 +125,26 @@ func resolveSharedDirs(
 		return nil, nil, fmt.Errorf("server.shared_dir_storage: resolve: %w", err)
 	}
 
-	// Defense in depth alongside the name/ID validation above: every
-	// resolved shared dir must sit directly under <HostBase>/<subpath_root>/
-	// <projectID>/shared-dirs — never anywhere else in the export, even if a
-	// name/ID somehow validated but Resolve computed something unexpected
-	// (round 2 review finding F1). This confinement check also protects the
-	// K8s subPath, since it comes from the same ServerRelativePath.
+	// Defense in depth alongside the name/ID validation above, extracted
+	// into confineSharedDir so it can be tested independently of Resolve
+	// and the name/ID checks (round 3 review finding N1/T1 part 1): every
+	// resolved shared dir must sit directly under
+	// <HostBase>/<subpath_root>/<projectID>/shared-dirs — never anywhere
+	// else in the export, even if a name/ID somehow validated but Resolve
+	// computed something unexpected (round 2 review finding F1). This also
+	// protects the K8s subPath, since it comes from the same
+	// ServerRelativePath.
 	subPathRoot := sdCfg.NFS.SubPathRoot
 	if subPathRoot == "" {
 		subPathRoot = "projects"
 	}
-	wantParent := filepath.Join(res.HostBase, subPathRoot, projectID, "shared-dirs")
 	for _, name := range names {
 		sd, ok := res.SharedDirs[name]
 		if !ok {
 			return nil, nil, fmt.Errorf("server.shared_dir_storage: shared dir %q not found in NFS resolution", name)
 		}
-		if filepath.Dir(sd.HostPath) != wantParent {
-			return nil, nil, fmt.Errorf(
-				"server.shared_dir_storage: shared dir %q resolved outside its project subtree", name)
+		if err := confineSharedDir(sd.HostPath, res.HostBase, subPathRoot, projectID, name); err != nil {
+			return nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
 		}
 	}
 
@@ -157,6 +158,8 @@ func resolveSharedDirs(
 	// guard covers the base itself (round 2 review finding S-F5: the guard
 	// only ever bounded the host base, not the per-project subtree — that
 	// gap is closed by the confinement check above, not by this call).
+	// Sources are patched to the resolved real path below (disposition 7');
+	// this call only produces the Target/ReadOnly shape and runs the guard.
 	volumes, err := runtime.NFSSharedDirsToVolumeMounts(res, dirs, containerWorkspace)
 	if err != nil {
 		return nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
@@ -168,47 +171,64 @@ func resolveSharedDirs(
 	// only when the host base is present (it won't be inside a future
 	// in-cluster GKE broker, design §3.3 T1 compatibility).
 	if _, statErr := os.Stat(res.HostBase); statErr == nil {
+		// Round 3 security review finding S-L2 / disposition 7': traverse,
+		// mkdir and chmod through an os.Root rooted at the (symlink-
+		// resolved) host base, so no path component — including one
+		// swapped for a symlink mid-operation — can ever cause a create or
+		// chmod outside the export. This replaces the earlier "mkdir, then
+		// check with EvalSymlinks" approach: that could already have
+		// created a directory outside the export through a symlinked
+		// intermediate component before the check ever ran. os.Root
+		// refuses to traverse an escaping symlink at all (see os.Root's
+		// doc: "symbolic links may not reference a location outside the
+		// root"), so nothing is created outside the base on any failure
+		// path. The previous manual EvalSymlinks-equality assertion is
+		// dropped as redundant — os.Root enforces the same property
+		// structurally, for every operation, not as a one-time check after
+		// the side effect already happened.
 		resolvedHostBase, err := filepath.EvalSymlinks(res.HostBase)
 		if err != nil {
 			return nil, nil, fmt.Errorf("server.shared_dir_storage: resolve host base symlinks: %w", err)
 		}
-		for _, name := range names {
-			sd := res.SharedDirs[name]
-			_, existsErr := os.Stat(sd.HostPath)
-			alreadyExisted := existsErr == nil
-			if err := os.MkdirAll(sd.HostPath, 0o775); err != nil {
-				return nil, nil, fmt.Errorf("server.shared_dir_storage: mkdir shared dir %q: %w", name, err)
-			}
+		root, err := os.OpenRoot(resolvedHostBase)
+		if err != nil {
+			return nil, nil, fmt.Errorf("server.shared_dir_storage: open host base: %w", err)
+		}
+		defer root.Close()
 
-			// Round 2 security review finding S-F3: os.Stat/MkdirAll/Chmod
-			// and the eventual Docker/kubelet bind all follow symlinks. If
-			// any path component under the host base was planted as a
-			// symlink (reachable by anything that can write to the NFS
-			// export, e.g. another squashed client), the resolved path
-			// could point outside the export entirely. Require the fully
-			// resolved leaf to still sit exactly where the clean path says
-			// it should, before this call ever chmods or the caller mounts
-			// it.
-			resolvedLeaf, err := filepath.EvalSymlinks(sd.HostPath)
-			if err != nil {
-				return nil, nil, fmt.Errorf("server.shared_dir_storage: resolve shared dir %q symlinks: %w", name, err)
-			}
-			wantResolvedLeaf := filepath.Join(resolvedHostBase, subPathRoot, projectID, "shared-dirs", name)
-			if resolvedLeaf != wantResolvedLeaf {
-				return nil, nil, fmt.Errorf(
-					"server.shared_dir_storage: shared dir %q escapes the export root through a symlink", name)
+		for i, name := range names {
+			sd := res.SharedDirs[name]
+			rel := sd.ServerRelativePath // relative to HostBase, e.g. projects/<pid>/shared-dirs/<name>
+
+			_, existsErr := root.Stat(rel)
+			alreadyExisted := existsErr == nil
+
+			if err := root.MkdirAll(rel, 0o775); err != nil {
+				return nil, nil, fmt.Errorf("server.shared_dir_storage: mkdir shared dir %q: %w", name, err)
 			}
 
 			if !alreadyExisted {
 				// mkdir(2) only ever applies setgid via kernel inheritance
 				// from an already-setgid parent, so chmod the directory we
-				// just created explicitly (design §3.5(5): 0o2775). Only the
-				// leaf this call created — never a pre-existing shared dir —
-				// and only after the symlink check above has passed.
-				if err := os.Chmod(sd.HostPath, os.ModeSetgid|0o775); err != nil {
+				// just created explicitly (design §3.5(5): 0o2775). Only
+				// the leaf this call created — never a pre-existing shared
+				// dir.
+				if err := root.Chmod(rel, os.ModeSetgid|0o775); err != nil {
 					return nil, nil, fmt.Errorf("server.shared_dir_storage: chmod shared dir %q: %w", name, err)
 				}
 			}
+
+			// The bind-mount source must be the resolved real path, not
+			// the unresolved sd.HostPath (disposition 7'). By this point
+			// os.Root has already guaranteed nothing escaped the host
+			// base, so this is canonicalization (an internal, non-
+			// escaping symlink is a legitimate operator layout), not a
+			// security check.
+			resolvedLeaf, err := filepath.EvalSymlinks(sd.HostPath)
+			if err != nil {
+				return nil, nil, fmt.Errorf("server.shared_dir_storage: resolve shared dir %q: %w", name, err)
+			}
+			volumes[i].Source = resolvedLeaf
 		}
 	} else if isLocalContainerRuntime(runtimeName) {
 		return nil, nil, fmt.Errorf(
@@ -231,16 +251,35 @@ func resolveSharedDirs(
 	}, nil
 }
 
-// validSharedDirProjectID reports whether projectID is safe to use as a
-// path segment when resolving shared_dir_storage=nfs paths (round 2 security
-// review finding F1/F4). Hub project IDs are UUIDs in practice, but this
-// only guards against path traversal and separator injection, not full UUID
-// format, since other callers may use grove/legacy IDs.
-func validSharedDirProjectID(projectID string) bool {
-	if projectID == "" || projectID == "." || projectID == ".." {
-		return false
+// confineSharedDir returns an error unless hostPath's parent directory is
+// exactly <hostBase>/<subPathRoot>/<projectID>/shared-dirs. Extracted out of
+// resolveSharedDirs so this defense-in-depth check can be tested directly,
+// independent of name/project-ID validation and nfsBackend.Resolve (round 3
+// review finding N1/T1 part 1).
+func confineSharedDir(hostPath, hostBase, subPathRoot, projectID, name string) error {
+	wantParent := filepath.Join(hostBase, subPathRoot, projectID, "shared-dirs")
+	if filepath.Dir(hostPath) != wantParent {
+		return fmt.Errorf("shared dir %q resolved outside its project subtree", name)
 	}
-	return !strings.ContainsAny(projectID, "/\\")
+	return nil
+}
+
+// sharedDirProjectIDPattern is an allow-list for hub project IDs used as an
+// NFS path segment (round 3 security review finding S-N2). Hub IDs are
+// UUIDs in practice; legacy grove IDs are slugs. Requiring the first
+// character to be alphanumeric rejects "." and ".." (and any run of dots)
+// along with path separators, so this subsumes the earlier deny-list
+// (empty / "." / ".." / "/" / "\\"). It also rejects control characters,
+// spaces and unbounded length, none of which are valid in either ID scheme
+// — those wouldn't escape the export, but they would produce confusing
+// errors or odd subPaths.
+var sharedDirProjectIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// validSharedDirProjectID reports whether projectID is safe to use as a
+// path segment when resolving shared_dir_storage=nfs paths (round 2/3
+// security review findings F1/F4/S-N2).
+func validSharedDirProjectID(projectID string) bool {
+	return sharedDirProjectIDPattern.MatchString(projectID)
 }
 
 // isLocalContainerRuntime reports whether name identifies a runtime that

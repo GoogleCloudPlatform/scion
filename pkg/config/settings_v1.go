@@ -2444,6 +2444,37 @@ func LoadGlobalSettings() (*VersionedSettings, []string, error) {
 	return LoadEffectiveSettings(globalDir)
 }
 
+// GlobalSettingsMentions reports whether the RAW bytes of the global
+// settings file (read directly, without parsing) contain substr. Intended
+// for a caller that has already failed to parse the global settings file
+// via LoadGlobalSettings and needs to decide whether the operator likely
+// intended to configure a specific Layer-0 setting — round 3 review
+// disposition 6': failing closed on every malformed global settings file
+// would regress every deployment with a default shared-dir scratchpad, even
+// ones that never configured server.shared_dir_storage. Checking for the
+// raw key name lets a caller fail closed only when the setting in question
+// was plausibly in play, and otherwise degrade the way `main` already does.
+//
+// Returns false — "assume not configured" — if the global directory or its
+// settings file cannot be resolved or read; a caller in that situation is
+// already handling a read/parse error itself and should not additionally
+// fail closed because of an unrelated problem finding the raw bytes.
+func GlobalSettingsMentions(substr string) bool {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	path := GetSettingsPath(globalDir)
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), substr)
+}
+
 // MigrationResult reports what happened during a migration.
 type MigrationResult struct {
 	Path             string   `json:"path"`               // settings file that was migrated

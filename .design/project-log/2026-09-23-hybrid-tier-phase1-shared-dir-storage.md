@@ -414,3 +414,143 @@ held (see above) rather than improvising past it.
   `LoadEffectiveSettings("")` call, and
   `TestStartSharedDirStorageNFS_ProjectSettingsProjectID_Ignored` against
   reading the general `projectID` variable instead of `opts.Env` directly.
+
+---
+
+## Round 3 review fixes (PR #1779 @76e7e425 → this round)
+
+hy-em's round 3 dispositions (`reviews/r3-dispositions.md`, from `r3-code.md`,
+`r3-test.md`, `r3-security.md`) marked 5 items FIX, plus two live amendments
+delivered mid-round (item 6 superseded by 6′; item 7 superseded by 7′, both
+from nfs-gke via hy-em). Verdicts going in: code REQUEST CHANGES (1 Medium),
+security APPROVE (2 Low/2 Nit), tests APPROVE (4 Low/3 Nit). All R2 items
+were confirmed resolved by all three reviewers.
+
+1. **Medium (C1 = S-L1) — project settings could still choose the nfs
+   project ID via harness-config env on non-hub starts.** The R2 fix
+   (round 2 item 3) restricted the nfs branch to `opts.Env`, but
+   `resolveAuthEnvOverlay` (called earlier in `Start`) copies a project's
+   `harness_configs.<name>.env` into `opts.Env` for any key not already
+   present — including `SCION_PROJECT_ID`/`SCION_GROVE_ID` — so on a
+   hubless start (no dispatch-provided ID), a project's settings could still
+   fill the key before the nfs branch read it. Fix: snapshot
+   `hubDispatchedProjectID := projectID` immediately after the initial
+   `opts.Env`-only computation at the top of `Start` (before the
+   `settings.Hub.ProjectID` fallback and before any settings-driven env
+   merging runs), and use only that snapshot in the nfs branch — deleting
+   the late re-read of `opts.Env`. Rewrote the run.go comment block to state
+   the invariant accurately (it only holds because the snapshot happens
+   before the overlay, not because `opts.Env` is somehow immutable).
+   Before implementing, per the disposition's explicit stop-and-report
+   condition, I re-confirmed (this time reading httpdispatcher.go myself
+   again for the exact line ranges hy-rev-3/hy-aud-3 cited) that hub
+   dispatch sets the identity vars unconditionally after merging user env in
+   both `DispatchAgentStart` and `DispatchAgentRestart` — holds, so no
+   escalation was needed. Tests: harness-config env `SCION_PROJECT_ID` and
+   `SCION_GROVE_ID` (no dispatch ID) ⇒ "hub project ID" error, `Run` never
+   called; a dispatch-only `SCION_GROVE_ID` (no `SCION_PROJECT_ID`) still
+   resolves correctly. Manually verified the two "ignored" tests fail
+   against a reverted (re-read `opts.Env`) version of the fix.
+2. **Low (C2/T1 part 2) — the PoC "nothing created" check couldn't detect
+   creation.** The old check compared `len(os.ReadDir(mountRoot))` before
+   and after; since `hostBase` was already the only entry there, nothing
+   inside `hostBase` could move that count. Replaced with `assertDirEmpty`,
+   asserting `hostBase` itself has zero entries after a rejected PoC input —
+   meaningful because every mkdir in the nfs branch creates its first new
+   component as a direct child of `hostBase`.
+3. **Low (T1 part 1/S-N1) — traversal defenses weren't pinned
+   independently.** Extracted the confinement check into `confineSharedDir`
+   (hostPath, hostBase, subPathRoot, projectID, name) so it can be unit
+   tested directly with inputs that pass name/ID validation but resolve to
+   the wrong parent (`TestConfineSharedDir`). The PoC table now asserts the
+   *specific* layer expected to catch each input (`"invalid name"` for the
+   two name PoCs via `api.ValidateSharedDirs`, `"invalid hub project ID"`
+   for the project-ID PoC via `validSharedDirProjectID`), not just "some
+   error".
+4. **Low (T2) — confinement/symlink checks untested with a non-default
+   `subpath_root` or a symlinked `mount_root`.** Both are legitimate
+   operator layouts (§3.2.1 documents `subpath_root`; a symlinked
+   `mount_root` is a normal way to point at a separately mounted disk), and
+   a false positive in either check would reject every nfs agent start.
+   Added `TestResolveSharedDirs_NFS_CustomSubPathRoot_StillWorks` (docker +
+   kubernetes) and `TestResolveSharedDirs_NFS_SymlinkedHostBase_StillWorks`
+   (also pins that the returned Docker bind source is the resolved real
+   path, satisfying part of disposition 7').
+5. **Nit (S-N2) — `validSharedDirProjectID` was deny-list only.** Replaced
+   with an allow-list, `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`. Requiring the
+   first character to be alphanumeric subsumes the old deny-list (rejects
+   `.`, `..`, any run of dots, and both path separators) and additionally
+   rejects control characters, spaces, and unbounded length. Table test
+   covers both the traversal cases and the new allow-list boundaries
+   (length limit, control chars).
+6′. **FIX, amended mid-round by hy-em/nfs-gke, superseding the original
+    item 6 — malformed global settings must not regress unset deployments.**
+    hy-tst-3's probe showed that on `main`, a malformed global
+    `settings.yaml` with one shared dir still starts the agent (legacy local
+    volume); the R2 fix made this fail closed unconditionally, which would
+    hit essentially every agent, since every project has a default
+    scratchpad. New behaviour: on a `LoadGlobalSettings()` error, read the
+    raw global settings bytes (new `config.GlobalSettingsMentions(substr)`
+    helper in `pkg/config`) — fail closed only if they mention
+    `"shared_dir_storage"` (the operator plausibly intended to configure
+    it); otherwise `slog.Warn` and proceed exactly like `main`. Tests:
+    malformed file *without* the key ⇒ Start succeeds with the legacy
+    volume (`..._NoKey_SucceedsAsMain`); malformed file *with* an
+    nfs block ⇒ Start still errors, `Run` never called
+    (`..._MentionsKey_FailsClosed`, renamed from the R2 test). Also added a
+    direct `pkg/config` unit test for `GlobalSettingsMentions`. Removed the
+    one-line PR-body note the original item 6 had asked for (superseded).
+7′. **FIX, amended mid-round by hy-em/nfs-gke, superseding the original
+    item 7 (POSTPONED-ACCEPTED) — eliminate the symlink TOCTOU with
+    `os.Root`.** The R2 fix (mkdir, then check with `EvalSymlinks`) could
+    already have created a directory outside the export through a
+    symlinked intermediate component before the check ever ran. Rewrote the
+    mkdir/chmod section to open an `os.Root` (Go 1.26) at the
+    (symlink-resolved) host base and do `root.MkdirAll`/`root.Stat`/
+    `root.Chmod` through it — `os.Root` refuses to traverse a symlink that
+    would escape the root at all, so nothing is created outside the base on
+    any failure path, including the symlinked-intermediate case R2 had
+    accepted as a known limitation. Dropped the manual `EvalSymlinks`-
+    equality assertion as redundant: `os.Root` enforces the same property
+    structurally, for every operation, not as a one-time check after the
+    side effect already happened (documented in the code comment as
+    requested, rather than silently dropped). The returned Docker bind
+    `Source` is now the resolved real path (`filepath.EvalSymlinks` on the
+    already-`os.Root`-verified leaf), not the unresolved one — patched onto
+    the `[]api.VolumeMount` slice `NFSSharedDirsToVolumeMounts` produced,
+    matched by index since both are built from the same ordered `dirs`
+    slice. Tests: symlinked leaf, symlinked `projects/<pid>` intermediate,
+    symlinked `shared-dirs` intermediate — all refused, and (unlike R2)
+    nothing created inside the symlink's target at all; a symlinked
+    `mount_root`/host base (valid layout) still works, with the resolved
+    Source pinned. Added the short PR-body threat note the disposition
+    asked for (design Erratum E1 precondition: pods can't reach nfsd
+    directly, so only kubelet mounts for pod specs naming the PVC, or local
+    VM access, can write above a project's leaf).
+8. **DECLINED (T5, T6, T7 nits).** No action: dead-code guard kept as
+   defence, `GetGlobalDir` error branch not portably testable, k8s
+   `Backend=="nfs"` guard equivalent to today's only-ever-nfs case.
+
+No design conflicts found. The item-3 stop-and-report precondition
+(confirming the hub dispatch path) was re-verified and held, so no
+escalation was needed this round either.
+
+### Gate results (round 4 verification, env: clean `env -i PATH=$PATH HOME=<tmp> GOPATH=... GOCACHE=... GOMODCACHE=...`, `-count=1`)
+
+- `go build ./...` — pass.
+- `go vet ./pkg/config/... ./pkg/runtime/... ./pkg/agent/...` — pass, no output.
+- `go test ./pkg/config/... ./pkg/runtime/... ./pkg/agent/... -count=1` — pass:
+  ```
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config              2.0s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config/opsettings    0.1s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config/templateimport 0.1s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/runtime              32.6s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun     0.0s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/agent                7.3s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/agent/state          0.0s
+  ```
+- `gofmt -l pkg/agent pkg/config pkg/runtime` — clean.
+- PR body updated: "Behaviour note" on the malformed-global-settings
+  exception, and a "Security" section summarizing the CWD fix, traversal
+  validation, project-ID snapshot, os.Root hardening, and the threat-model
+  precondition (design Erratum E1) per disposition 7'.
