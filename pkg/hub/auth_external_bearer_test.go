@@ -572,15 +572,15 @@ func TestExternalBearer_NoTrustProductionShape_Golden401(t *testing.T) {
 	if result.reached {
 		t.Fatal("handler must not be reached: no trust is configured")
 	}
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
+	// Exact bytes (r3 review optional finding 3), the same way golden cases
+	// (a)/(b)/(c) pin this fallback.
+	_, verifyErr := userTokenSvc.ValidateUserToken(token)
+	if verifyErr == nil {
+		t.Fatal("test token must be invalid as a Hub JWT")
 	}
-	var errResp ErrorResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &errResp); err != nil {
-		t.Fatalf("decode error body: %v", err)
-	}
-	if !strings.HasPrefix(errResp.Error.Message, "invalid access token:") {
-		t.Errorf("message = %q, want the original invalid-access-token rejection", errResp.Error.Message)
+	wantBody := wantErrorBody(t, ErrCodeUnauthorized, "invalid access token: "+verifyErr.Error())
+	if w.Code != http.StatusUnauthorized || !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Fatalf("status/body = %d %s, want %d %s (the original invalid-access-token rejection)", w.Code, w.Body.String(), http.StatusUnauthorized, wantBody)
 	}
 	if counting.totalCalls() != 0 {
 		t.Errorf("Google validator was called %d time(s); want 0 (googleTrust must gate before the validator, even in production shape)", counting.totalCalls())
@@ -854,9 +854,17 @@ func TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable(t *testing.
 	if result.reached {
 		t.Fatal("handler must not be reached: Google is trusted as issuer_type service_account, not user")
 	}
-	wantBody := []byte(`{"error":{"code":"unauthorized","message":"invalid access token: `)
-	if w.Code != http.StatusUnauthorized || !bytes.HasPrefix(w.Body.Bytes(), wantBody) {
-		t.Fatalf("status/body = %d %s, want the original invalid-access-token rejection", w.Code, w.Body.String())
+	// Exact bytes, the same way golden cases (b)/(c) pin the tokenTypeUser
+	// fallback (r3 review optional finding 3): a valid Google-signed JWT is
+	// still not a valid Hub JWT, so it fails the same way any other JWT with
+	// an issuer google's classifier won't route would.
+	_, verifyErr := userTokenSvc.ValidateUserToken(token)
+	if verifyErr == nil {
+		t.Fatal("test token must be invalid as a Hub JWT")
+	}
+	wantBody := wantErrorBody(t, ErrCodeUnauthorized, "invalid access token: "+verifyErr.Error())
+	if w.Code != http.StatusUnauthorized || !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Fatalf("status/body = %d %s, want %d %s (the original invalid-access-token rejection)", w.Code, w.Body.String(), http.StatusUnauthorized, wantBody)
 	}
 	if counting.totalCalls() != 0 {
 		t.Errorf("Google validator was called %d time(s); want 0 (issuer_type guard must stop it before validation)", counting.totalCalls())
@@ -1065,6 +1073,97 @@ func TestExternalBearer_ResolveInternalError_ServiceUnavailable(t *testing.T) {
 	wantBody := wantErrorBody(t, "store_error", "unable to verify user status")
 	if !bytes.Equal(w.Body.Bytes(), wantBody) {
 		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F2 (fix round 3, now in scope per the issue owner: impl-design §4.3's 4th
+// allowed resolver delta). A GetExternalIdentity fault that is NOT
+// store.ErrNotFound must not be treated as "no binding" — that would let a
+// transient store error provision a duplicate user, or (for a
+// non-authoritative email) surface as 403 instead of the store fault it
+// actually is. It must be wrapped and reach the item-6 503 store_error arm,
+// the same as any other internal Resolve fault, having touched neither the
+// email lookup nor binding creation.
+// ---------------------------------------------------------------------------
+
+// trackingExtIDStore is a minimal ExternalIdentityStore whose
+// GetExternalIdentity always fails with a configured error, and which
+// records whether CreateExternalIdentity was ever called — it must not be,
+// since Resolve should fail before ever reaching the bootstrap path.
+type trackingExtIDStore struct {
+	getErr       error
+	createCalled bool
+}
+
+func (s *trackingExtIDStore) GetExternalIdentity(_ context.Context, _, _, _ string) (*store.ExternalIdentityBinding, error) {
+	return nil, s.getErr
+}
+
+func (s *trackingExtIDStore) CreateExternalIdentity(_ context.Context, _ *store.ExternalIdentityBinding) error {
+	s.createCalled = true
+	return nil
+}
+
+func (s *trackingExtIDStore) UpdateExternalIdentityEmail(_ context.Context, _, _ string) error {
+	return nil
+}
+
+func (s *trackingExtIDStore) GetExternalIdentitiesByUserID(_ context.Context, _ string) ([]*store.ExternalIdentityBinding, error) {
+	return nil, nil
+}
+
+// trackingUserStore is a UserStore whose GetUserByEmail records whether it
+// was ever called. Embedding store.UserStore (nil) means any other method
+// call panics loudly, which is exactly what we want: Resolve must not reach
+// any of them either when GetExternalIdentity faults.
+type trackingUserStore struct {
+	store.UserStore
+	getByEmailCalled bool
+}
+
+func (s *trackingUserStore) GetUserByEmail(_ context.Context, _ string) (*store.User, error) {
+	s.getByEmailCalled = true
+	return nil, store.ErrNotFound
+}
+
+func TestExternalBearer_GetExternalIdentityFault_ServiceUnavailable(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(gcvJWKSJSON(kp))
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	extStore := &trackingExtIDStore{getErr: errors.New("connection refused")}
+	userStore := &trackingUserStore{}
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	cfg := newExternalBearerConfig(t, newTestValidator(endpoints), resolver)
+
+	claims := validIDTokenClaims()
+	claims["aud"] = externalBearerTestAudience
+	token := signIDToken(kp, claims)
+
+	w, result := doExternalBearerRequest(cfg, token)
+	if result.reached {
+		t.Fatal("handler must not be reached")
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: body=%s", w.Code, w.Body.String())
+	}
+	wantBody := wantErrorBody(t, "store_error", "unable to verify user status")
+	if !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+	}
+	if userStore.getByEmailCalled {
+		t.Error("GetUserByEmail must not be called: a GetExternalIdentity fault is not \"no binding\"")
+	}
+	if extStore.createCalled {
+		t.Error("CreateExternalIdentity must not be called: a GetExternalIdentity fault must fail closed before bootstrap")
 	}
 }
 

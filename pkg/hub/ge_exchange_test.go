@@ -572,6 +572,47 @@ func TestGEExchange_AdminEmails_ProvisionsAdminRole(t *testing.T) {
 	}
 }
 
+// TestGEExchange_ExternalIdentityLookupFault_ServerError is F2 (fix round 3,
+// now in scope): a GetExternalIdentity fault that is not store.ErrNotFound
+// must surface as a server error (5xx), not the 403 "no binding" treatment a
+// non-authoritative or conflicting-binding case gets. Exercises the exchange
+// side of the same resolver fix that auth_external_bearer_test.go's
+// TestExternalBearer_GetExternalIdentityFault_ServiceUnavailable exercises
+// on the external-bearer side.
+func TestGEExchange_ExternalIdentityLookupFault_ServerError(t *testing.T) {
+	identity := validGmailIdentity()
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+	extStore := &trackingExtIDStore{getErr: errors.New("connection refused")}
+	userStore := &trackingUserStore{}
+	resolver := newTestResolver(userStore, extStore, alwaysAuthorized, nil)
+	tokenSvc, _ := NewUserTokenService(UserTokenConfig{AccessTokenDuration: DefaultGETokenTTL})
+	svc := NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         DefaultGETokenTTL,
+		},
+		validator, tokenSvc, resolver, slog.Default(),
+	)
+
+	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "token",
+		CredentialType: "id_token",
+	})
+	if err == nil {
+		t.Fatal("expected an error for a store fault")
+	}
+	if status < 500 {
+		t.Errorf("status = %d, want a 5xx server error (not 403 \"no binding\")", status)
+	}
+	if userStore.getByEmailCalled {
+		t.Error("GetUserByEmail must not be called: a GetExternalIdentity fault is not \"no binding\"")
+	}
+	if extStore.createCalled {
+		t.Error("CreateExternalIdentity must not be called: a GetExternalIdentity fault must fail closed before bootstrap")
+	}
+}
+
 func TestGEExchange_UnverifiedEmail(t *testing.T) {
 	validator := &fakeGoogleValidator{
 		idTokenErr: ErrGoogleUnverifiedEmail,
