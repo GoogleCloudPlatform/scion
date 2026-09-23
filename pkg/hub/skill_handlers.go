@@ -1384,7 +1384,7 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 			}
 			decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
 			if !decision.Allowed {
-				slog.Warn("skill resolve denied",
+				slog.WarnContext(ctx, "skill resolve denied",
 					"uri", skillRef.URI,
 					"identity_type", identity.Type(),
 					"reason", decision.Reason)
