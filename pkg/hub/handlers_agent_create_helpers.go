@@ -287,23 +287,40 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 // explicit inputs — never on an existing agent's config.
 //
 // Exceptions — these are unconditional overwrites, not fill-if-empty:
-//   - TemplateID, TemplateHash, and HubAccessScopes are always replaced from
-//     resolvedTemplate.
-//   - Model-alias resolution always rewrites Model and InlineConfig.Model to
-//     the resolved concrete name, even when both were explicit.
+//   - TemplateID and TemplateHash are replaced whenever resolvedTemplate is
+//     non-nil; HubAccessScopes too, but only when the template declares
+//     hubAccess (otherwise an existing value is left as-is).
+//   - Model-alias resolution: when AppliedConfig.Model is an alias, rewrites
+//     it to the resolved concrete name, and overwrites a non-empty
+//     InlineConfig.Model with that same resolved value (InlineConfig.Model
+//     is untouched if it was already empty, and unaffected if
+//     AppliedConfig.Model was not an alias).
 //   - The auto-no-auth fallback can flip NoAuth to true and HarnessAuth from
 //     "" to "none" based on a live credential check.
 //   - The project's TelemetryEnabled annotation always overwrites
 //     InlineConfig.Telemetry.Enabled, even when the requester set it inline.
+//   - InlineConfig.Skills is always rewritten by mergeInjectedSkills, and it
+//     is neither fill-if-empty nor additive: whatever is already in Skills
+//     on entry is relabeled Scope="template" (highest precedence), merged
+//     with the *current* hub/user/project injections, and the result
+//     overwrites Skills. The precondition this assumes is that incoming
+//     Skills holds template skills only. Calling this on a config whose
+//     Skills was already merged (by a prior call to this function) promotes
+//     every hub/user/project skill in it to template scope, permanently
+//     outranking the live injections — deleting the injection can no longer
+//     remove it. A caller reconstructing explicit inputs for reincarnate
+//     must capture Skills before this ever runs, not read it back out
+//     afterward, and a legacy caller with no such capture must drop Skills
+//     entirely rather than pass through whatever InlineConfig currently has.
 //
 // InlineConfig is not a record of the requester's explicit inputs after this
 // runs: this function creates it when nil (mergeInjectedSkills always does,
 // which is why a bare create's InlineConfig is never nil) and writes into it
-// — template/hub/project telemetry defaults, the project's
-// SCION_AUTO_EXPOSE_PORTS default, the resolved Model alias, and
-// InlineConfig.Skills. A caller that needs the original explicit request
-// inputs (reincarnate does) must capture them before this runs, not read
-// them back out of InlineConfig afterward.
+// — template/hub/project telemetry defaults, the project- or hub-level
+// SCION_AUTO_EXPOSE_PORTS default (in InlineConfig.Env), the resolved Model
+// alias, and InlineConfig.Skills (see above). A caller that needs the
+// original explicit request inputs (reincarnate does) must capture them
+// before this runs, not read them back out of InlineConfig afterward.
 //
 // Precondition: agent.AppliedConfig must be non-nil (populateAgentConfig's
 // caller-facing guard covers today's only call site; a direct caller must
