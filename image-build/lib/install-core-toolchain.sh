@@ -338,12 +338,33 @@ step_npm_tools() {
 # `ubuntu`, and the next base will pick a third name.
 step_free_uid_1000() {
   local occupant
-  if occupant="$(getent passwd 1000 | cut -d: -f1)" && [ -n "$occupant" ]; then
-    log "removing user '$occupant' to free uid 1000 for scion"
-    userdel -r "$occupant" 2>/dev/null || userdel "$occupant"
-    groupdel "$occupant" 2>/dev/null || true
-  else
+  occupant="$(getent passwd 1000 | cut -d: -f1 || true)"
+  if [ -z "$occupant" ]; then
     skip "uid 1000 already free"
+    return 0
+  fi
+
+  log "removing user '$occupant' to free uid 1000 for scion"
+  # Ignore the exit status of every removal, then check the postcondition.
+  #
+  # `userdel -r` exits 12 for "could not remove home directory or mail spool"
+  # *after* it has already removed the passwd entry — the uid is free and the
+  # only casualty is a leftover file. Chaining a plain `userdel` onto that
+  # failure then fails with "user does not exist", and under `set -e` that
+  # aborts the whole build over a stale file in /var/mail.
+  #
+  # The inverse is just as bad: `|| true` on its own can't fail, so a uid that
+  # genuinely stayed occupied would sail through this step and surface much
+  # later. Neither exit status answers the question that matters, so ask the
+  # question directly.
+  userdel -r "$occupant" 2>/dev/null || userdel "$occupant" 2>/dev/null || true
+  groupdel "$occupant" 2>/dev/null || true
+
+  if getent passwd 1000 >/dev/null 2>&1; then
+    echo "FAIL: uid 1000 is still held by '$(getent passwd 1000 | cut -d: -f1)'" >&2
+    echo "      after trying to remove '$occupant'. scion-base runs" >&2
+    echo "      'useradd -u 1000 scion' and will fail with 'UID 1000 is not unique'." >&2
+    exit 1
   fi
 }
 

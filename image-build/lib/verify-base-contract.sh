@@ -266,11 +266,17 @@ need_cmd sudo "scion-base passwordless sudo for the scion user"
 # satisfies this by symlinking google-chrome-stable into place.
 # ---------------------------------------------------------------------------
 if command -v chromium >/dev/null 2>&1; then
-  if chromium --headless --no-sandbox --disable-gpu --dump-dom about:blank >/dev/null 2>&1; then
+  # Keep stderr: when this fails it is almost always a missing shared library
+  # (libnss3, libgbm1, ...) or a sandbox refusal, and the loader names the
+  # culprit precisely. Discarding it turns a one-line diagnosis into a bisect.
+  # --dump-dom writes the DOM to stdout, which is noise here, so stdout goes to
+  # /dev/null and stderr is what gets captured.
+  if chromium_err="$(chromium --headless --no-sandbox --disable-gpu --dump-dom about:blank 2>&1 >/dev/null)"; then
     ok "chromium runs headless ($(chromium --version 2>&1 | head -n1))"
   else
     fail "chromium is on PATH but failed a headless smoke test — a browser that
-      cannot start headless is no use to the web-dev template"
+      cannot start headless is no use to the web-dev template. Its stderr:
+${chromium_err:-(no output)}"
   fi
 else
   fail "chromium missing from PATH — required by name (not just 'a browser') by
