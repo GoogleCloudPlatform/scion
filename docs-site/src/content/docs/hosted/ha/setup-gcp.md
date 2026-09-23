@@ -602,12 +602,18 @@ The default `.gcloudignore` excludes the `web/` frontend directory. Because the 
 
 #### 3. Build the Core Base Image
 ```bash
-gcloud builds submit . \
+gcloud builds submit image-build \
   --tag="$IMAGE_REGISTRY/core-base:latest" \
-  --dockerfile=image-build/core-base/Dockerfile \
+  --dockerfile=core-base/Dockerfile \
   --project=$PROJECT_ID \
   --quiet
 ```
+:::caution[Submit `image-build`, not the repository root]
+`core-base/Dockerfile` copies `image-build/lib/` (the shared toolchain and
+base-contract scripts it runs, also used by `thick-prep/Dockerfile`). Docker
+cannot read anything outside the build context, so the context has to be
+`image-build/` and the Dockerfile path is relative to it.
+:::
 
 #### 4. Build the Scion Base Image
 Create a single-arch temporary build file to inject the custom `BASE_IMAGE` cleanly:

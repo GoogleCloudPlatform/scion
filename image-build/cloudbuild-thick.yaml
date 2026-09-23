@@ -36,8 +36,8 @@ steps:
   # Stage 1: Build thick-prep from Cloud Workstations base
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-thick-prep'
-    dir: 'image-build/thick-prep'
-    args: ['buildx', 'build', '--platform', 'linux/amd64', '-t', '$_REGISTRY/thick-prep:$_SHORT_SHA', '-t', '$_REGISTRY/thick-prep:$_TAG', '-f', 'Dockerfile', '--push', '.']
+    dir: 'image-build'
+    args: ['buildx', 'build', '--platform', 'linux/amd64', '-t', '$_REGISTRY/thick-prep:$_SHORT_SHA', '-t', '$_REGISTRY/thick-prep:$_TAG', '-f', 'thick-prep/Dockerfile', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 

@@ -33,15 +33,15 @@ steps:
 
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-core-base'
-    dir: 'image-build/core-base'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--cache-to', 'type=local,dest=/workspace/buildx-cache-core,mode=max', '-t', '$_REGISTRY/core-base:$_SHORT_SHA', '-t', '$_REGISTRY/core-base:$_TAG', '-f', 'Dockerfile', '.']
+    dir: 'image-build'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--cache-to', 'type=local,dest=/workspace/buildx-cache-core,mode=max', '-t', '$_REGISTRY/core-base:$_SHORT_SHA', '-t', '$_REGISTRY/core-base:$_TAG', '-f', 'core-base/Dockerfile', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-core-base'
-    dir: 'image-build/core-base'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--cache-from', 'type=local,src=/workspace/buildx-cache-core', '-t', '$_REGISTRY/core-base:$_SHORT_SHA', '-t', '$_REGISTRY/core-base:$_TAG', '-f', 'Dockerfile', '--push', '.']
+    dir: 'image-build'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--cache-from', 'type=local,src=/workspace/buildx-cache-core', '-t', '$_REGISTRY/core-base:$_SHORT_SHA', '-t', '$_REGISTRY/core-base:$_TAG', '-f', 'core-base/Dockerfile', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
