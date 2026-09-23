@@ -304,3 +304,103 @@ Every finding resolved per the EM's disposition table; details below.
   route/wiring tests, `//go:build !no_sqlite`) — all green.
 - Full `go test -buildvcs=false -timeout 40m ./pkg/hub/ ./pkg/hub/authzop/` —
   see the report to ap-em for the final pass/fail breakdown.
+
+## Fix round 2 (review r2, verdict REQUEST CHANGES: 0 Critical, 4 Required, 4 Optional, 1 Nit, 3 FYI)
+
+Reviewer: `ap-p1-rev-2`. Report: `/scion-volumes/scratchpad/projects/auth-passthrough/reviews/p1-r2-ap-p1-rev-2.md`.
+EM dispositions: `/scion-volumes/scratchpad/projects/auth-passthrough/briefs/ap-p1-dev-fix-r2.md`.
+All r1 findings were independently re-verified resolved by this reviewer (fresh mutation testing:
+M5, M6, M7, M7b, M8, M10 and the R1 probe all killed). Every r2 finding resolved below except none
+deferred — item 6 arrived mid-round (see below) and is included.
+
+### Required
+
+- **1 (production `roleFor` untested, M11 survived).** Both existing U5 tests injected a
+  hand-written stub `roleFor` into `NewGoogleIdentityResolver` directly, proving only that the
+  resolver *uses* `roleFor` — not that `server.go`'s actual closure
+  (`func(ctx, email) string { return srv.getUserRole(ctx, email, "", "") }`) honours `admin_emails`
+  in production. Added `TestGEExchange_Route_ProductionResolverHonoursAdminEmails`: builds a real
+  server via `New()` with `cfg.AdminEmails = []string{"admin@gmail.com"}`, calls
+  `srv.authConfig.GoogleResolver.Resolve` directly for both a listed and an unlisted Gmail address,
+  and asserts `admin`/`member` respectively.
+- **2 (`issuer_type: user` guard untested, M21 survived).** Added
+  `newGoogleFederationAuthWithIssuerType` (sibling to `newGoogleTrustFederationAuth`, configurable
+  issuer type) and `TestGoogleTrust_RequiresIssuerTypeUser` (table-driven over
+  `user`/`service_account`/`hub`). Added the middleware-level case,
+  `TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable`: a validly-signed Google user ID
+  token, with Google trusted only as `issuer_type: service_account`, falls through to the original
+  401 with zero validator calls.
+- **3 (three remaining bare `#1847` refs).** Two were in test comments
+  (`auth_external_bearer_test.go:528,1145` at the time of review): the `:528` comment lived inside
+  the now-deleted `_Golden401` test (see finding 9) and went with it; the `:1145` comment (the O4
+  section header) reworded to `GoogleCloudPlatform/scion#1847`. The third was the `58544e50e` commit
+  message itself — reworded via the same rebase that carries this round's commits (approved,
+  `--force-with-lease` as last round). Verified with the two commands the disposition specified
+  (`git log ... | grep -nE ...` and `git diff ... | grep -nE ...`) — see the note below on that
+  second command's behavior.
+- **4 (golangci-lint errcheck).** `auth_external_bearer_test.go`'s
+  `TestNoTokenInfoOutsideGoogleCredentialValidator` had a bare `defer f.Close()`. Changed to
+  `defer func() { _ = f.Close() }()`. `GOGC=40 golangci-lint run --new-from-rev=ca486fa
+  --concurrency=1 ./pkg/hub/...` now reports 0 issues.
+
+**Note on the R8 verification command.** The disposition's second command
+(`git diff ca486fa..HEAD | grep -nE '^\+.*(^|[^/A-Za-z0-9])#[0-9]{3,}'`) has a quirk in GNU grep:
+the `^` inside the alternation, not being at the true start of the overall pattern, does not act as
+a real "start of line" anchor once preceded by `^\+.*` — empirically it degrades the alternation to
+"always satisfiable", so the command flags every `#NNN` occurrence on a `+` line regardless of the
+preceding character, including fully-qualified `GoogleCloudPlatform/scion#1847` references. I
+verified this with a minimal repro (`printf` into the same `grep -nE` invocation) before concluding
+the extra hits were false positives, and cross-checked with a plain `grep -rn "#1847"
+pkg/hub/*.go .design/project-log/*.md | grep -v "scion#1847"` (no qualifier stripped), which found
+nothing after the fixes above. Flagging this rather than silently working around it, in case the EM
+wants the command itself corrected for future rounds.
+
+### Optional
+
+- **5 (R6 golden oracle recomputed at HEAD, not pinned to `ca486fa`).** Disposition: deviation
+  accepted (recorded here) — go-jose error-string wording is library-version-dependent, and the
+  reviewer's own 22-case replay against `ca486fa` proved byte-identity. Did the requested cheap
+  hardening: golden case (d), plus two new cases with no library-dependent text (an empty
+  `Authorization` header, and a `scion_pat_`-shaped token with no `UATSvc` configured), now assert
+  against true hardcoded byte literals instead of `wantErrorBody`'s live reconstruction. Cases (a),
+  (b), (c) keep the live-reconstruction approach, since their text does depend on go-jose's wording.
+- **6 (internal resolver errors → 401) — arrived mid-round, un-held.** EM decision: validator/
+  principal-policy errors stay 401; a `Resolve` error wrapping `store.ErrNotFound` (the bound user's
+  record is gone) → 403 `forbidden`, logged at Warn; any other `Resolve` error → 503 `store_error`,
+  logged at Error (matching the Hub-JWT path's store-fault handling, `auth.go`'s `UserStore.GetUser`
+  check) — `errors.Is` only, `%w` wrapping preserved end to end. Implemented via a new
+  `classifyResolveError` helper and `errExternalBearerInternalError` sentinel (wraps the original
+  error with a second `%w`, so both the sentinel and the original chain remain `errors.Is`-matchable
+  and the original error is still loggable). Tests: `TestExternalBearer_ResolveErrNotFound_Forbidden`
+  and `TestExternalBearer_ResolveInternalError_ServiceUnavailable`, both using a `stubUserStore` and
+  a pre-seeded orphan binding, asserting exact bodies.
+- **7 (bare `accounts.google.com` untested, M22 survived).** Added
+  `TestExternalBearer_ClassifyBareGoogleIssuer_IDToken` (classifier unit test) and
+  `TestExternalBearer_BareGoogleIssuer_Authenticates` (U1 end-to-end variant with
+  `claims["iss"] = "accounts.google.com"`).
+- **8 (I1 production shape only indirectly covered).** Added
+  `TestExternalBearer_NoTrustProductionShape_Golden401`: `GoogleValidator`/`GoogleResolver` non-nil
+  (matching O3's always-built production shape) but `FederationAuth` empty, with a real
+  Google-signed token for the configured audience — asserts the original 401 prefix and validator
+  calls = 0, so the `googleTrust` gate (not the nil-guard that only golden case (a) exercised) is
+  what's actually proven.
+- **9 (over-claiming `_Golden401` name).** Deleted `TestExternalBearer_NoGoogleTrustConfigured_Golden401`
+  — golden case (a) in `TestExternalBearer_ConfiguredTrustInvariant_Golden` supersedes it with an
+  exact byte comparison instead of a prefix check.
+
+### FYI
+
+- **F1–F3.** No action (reviewer confirmed correct as-is; F1 re-verified resolver-extraction
+  fidelity, F2 confirmed `Co-authored-by` placement, F3 was a security pass with no findings).
+
+### Verification (fix round 2)
+
+- `gofmt -l` clean.
+- `go build -buildvcs=false ./...` (whole repo) — clean.
+- `go vet -buildvcs=false ./pkg/hub/...` — clean.
+- `GOGC=40 golangci-lint run --new-from-rev=ca486fa --concurrency=1 ./pkg/hub/...` — 0 issues.
+- Targeted run of every Phase-1-relevant test — 130+ tests, all green.
+- `go test -buildvcs=false ./pkg/hub/ -run TestGEExchange_Route` (includes the new item 1/2 wiring
+  and middleware tests) — all green.
+- Full `go test -buildvcs=false -timeout 40m ./pkg/hub/ ./pkg/hub/authzop/` — see the report to
+  ap-em for the final pass/fail breakdown.
