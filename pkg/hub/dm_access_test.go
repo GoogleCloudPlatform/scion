@@ -456,12 +456,16 @@ func TestDMAccess_MalformedKeyFailsClosed(t *testing.T) {
 
 func TestDMAccess_GroupConversationsUnchanged(t *testing.T) {
 	srv, s := testServer(t)
-	_, agent, conv := setupConvTestData(t, s)
+	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	// Phase 3 (design doc §3.2, Q2 = b): group reads are project-based, not
+	// participant-based, so the happy-path caller now also needs project
+	// access — this is the intended behavior change, not a DM regression.
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
-	// Verify group conversation GET still works with participant-based auth.
+	// Verify group conversation GET still works, now via project-based auth.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID, nil)
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleGetConversation(rr, req, conv.ID)
 

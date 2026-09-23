@@ -101,6 +101,34 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 		limit = n
 	}
 
+	// Listing union (design doc §3.2, Q2 = b): when project_id is supplied
+	// and the caller can read that project, also include every group
+	// conversation in it — not just the ones the caller participates in.
+	// This is additive only: an unauthorized or unknown project_id quietly
+	// gets no union rather than a hard failure, because project_id already
+	// narrows the participant-based list below on its own (unauthenticated
+	// callers never reach here — identity is checked above). Without
+	// project_id, behavior is unchanged, to avoid enumerating every project
+	// a caller belongs to.
+	if projectFilter != "" && s.canReadProject(ctx, identity, projectFilter) {
+		groupResult, groupErr := s.store.ListConversations(ctx, store.ConversationFilter{
+			ProjectID: projectFilter,
+			Kind:      "group",
+		}, store.ListOptions{})
+		if groupErr == nil && groupResult != nil {
+			seen := make(map[string]bool, len(conversations))
+			for _, c := range conversations {
+				seen[c.ID] = true
+			}
+			for _, c := range groupResult.Items {
+				if !seen[c.ID] {
+					conversations = append(conversations, c)
+					seen[c.ID] = true
+				}
+			}
+		}
+	}
+
 	// Apply client-side filtering.
 	// For direct conversations, verify canonical DM key authorization to ensure
 	// stale or forged participant rows cannot grant list visibility.
@@ -220,7 +248,8 @@ func (s *Server) handleGetConversation(w http.ResponseWriter, r *http.Request, i
 	// Authorization: for direct conversations, use canonical DM key (kind+ID).
 	// This prevents a third principal from reading a DM by adding a participant
 	// row or knowing its UUID. A matching ID with the wrong principal kind is
-	// denied. For group conversations, use participant rows.
+	// denied. For group conversations, project membership is the gate (design
+	// doc §3.2, Q2 = b) — participant rows are a listing index only.
 	if conv.Kind == "direct" {
 		if !authorizeDMRead(conv, identity.Type(), identity.ID()) {
 			Forbidden(w)
@@ -231,28 +260,17 @@ func (s *Server) handleGetConversation(w http.ResponseWriter, r *http.Request, i
 		if !s.enforceCrossProjectReadGate(w, r, conv) {
 			return
 		}
+	} else {
+		if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
+			return
+		}
 	}
 
-	// Fetch participants — used for authorization (groups) and response.
+	// Fetch participants — the response still includes them (design doc §3.2 table).
 	participants, err := s.store.ListParticipants(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
-	}
-
-	// For non-direct conversations, authorize via participant rows.
-	if conv.Kind != "direct" {
-		isParticipant := false
-		for _, p := range participants {
-			if p.PrincipalKind == identity.Type() && p.PrincipalID == identity.ID() {
-				isParticipant = true
-				break
-			}
-		}
-		if !isParticipant {
-			Forbidden(w)
-			return
-		}
 	}
 
 	// For direct conversations, filter participants to only include canonical
@@ -289,7 +307,8 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Authorization: for direct conversations, use canonical DM key (kind+ID).
-	// For group conversations, use participant rows.
+	// For group conversations, project membership is the gate (design doc
+	// §3.2, Q2 = b) — participant rows are a listing index only.
 	conv, err := s.store.GetConversation(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "Conversation")
@@ -307,13 +326,7 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	} else {
-		isParticipant, partErr := isConversationParticipant(ctx, s.store, id, identity.Type(), identity.ID())
-		if partErr != nil {
-			writeErrorFromErr(w, partErr, "")
-			return
-		}
-		if !isParticipant {
-			Forbidden(w)
+		if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
 			return
 		}
 	}
@@ -377,7 +390,8 @@ func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Req
 	}
 
 	// Authorization: for direct conversations, use canonical DM key (kind+ID).
-	// For group conversations, use participant rows.
+	// For group conversations, project membership is the gate (design doc
+	// §3.2, Q2 = b) — participant rows are a listing index only.
 	conv, err := s.store.GetConversation(ctx, conversationID)
 	if err != nil {
 		writeErrorFromErr(w, err, "Conversation")
@@ -395,13 +409,7 @@ func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Req
 			return
 		}
 	} else {
-		isParticipant, partErr := isConversationParticipant(ctx, s.store, conversationID, identity.Type(), identity.ID())
-		if partErr != nil {
-			writeErrorFromErr(w, partErr, "")
-			return
-		}
-		if !isParticipant {
-			Forbidden(w)
+		if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
 			return
 		}
 	}
@@ -576,7 +584,7 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 	}
 
 	// Fetch the conversation first: DM-specific rejection must run before
-	// the participant-row auth check so that DMs without participant rows
+	// the project-based auth check so that DMs without project access
 	// return 400 (bad request) instead of 403 (forbidden).
 	conv, err := s.store.GetConversation(ctx, id)
 	if err != nil {
@@ -592,14 +600,11 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// Authorization: caller must be a participant.
-	isParticipant, err := isConversationParticipant(ctx, s.store, id, identity.Type(), identity.ID())
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	if !isParticipant {
-		Forbidden(w)
+	// Authorization: project membership is the gate (design doc §3.2),
+	// matching the web topic PATCH, which any project member may call. The
+	// separate check that the AGENT BEING SET belongs to conv's project
+	// (below) is unrelated and unchanged.
+	if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
 		return
 	}
 
@@ -803,6 +808,80 @@ func isConversationParticipant(ctx context.Context, st store.Store, conversation
 		}
 	}
 	return false, nil
+}
+
+// authorizeGroupConversationAccess is the read gate for group conversations
+// on the conversation API (design doc §3.2, F2a, Q2 = b decided with ptone):
+// project membership is the authority, not the participant table — the
+// participant table is a listing index only (messaging-conversation-model
+// §2.4.2.1 / DEF-36). It writes the error response and returns false on
+// deny. Never call this for conv.Kind == "direct"; DM authorization is
+// authorizeDMRead + enforceCrossProjectReadGate and is untouched.
+func (s *Server) authorizeGroupConversationAccess(w http.ResponseWriter, r *http.Request, conv *store.Conversation, action Action) bool {
+	ctx := r.Context()
+
+	// Legacy projectless groups (pre-#1846, chat-thread-bridge design) have
+	// no project to gate on. Fall back to the participant check — today's
+	// behavior, preserved rather than widened.
+	if conv.ProjectID == nil || *conv.ProjectID == "" {
+		identity := GetIdentityFromContext(ctx)
+		if identity == nil {
+			Forbidden(w)
+			return false
+		}
+		isParticipant, err := isConversationParticipant(ctx, s.store, conv.ID, identity.Type(), identity.ID())
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return false
+		}
+		if !isParticipant {
+			Forbidden(w)
+			return false
+		}
+		return true
+	}
+
+	// Strict cross-project rule (ptone decision, design §3.2): an agent from
+	// project B can never read a group in project A, whatever cross-project
+	// messaging settings say. This explicit equality check makes the rule
+	// independent of how authorize/CheckAccess treats agent tokens — it
+	// mirrors the DEF-138/DEF-49 checks already on the send paths.
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if agentIdent.ProjectID() != *conv.ProjectID {
+			Forbidden(w)
+			return false
+		}
+	}
+
+	project, err := s.store.GetProject(ctx, *conv.ProjectID)
+	if err != nil {
+		// Including not-found: fail closed rather than leak whether the
+		// project exists.
+		Forbidden(w)
+		return false
+	}
+
+	return s.authorize(w, r, projectResource(project), action)
+}
+
+// canReadProject reports whether identity may read the given project,
+// without writing an HTTP response. It applies the same strict
+// agent-project rule as authorizeGroupConversationAccess. Used by the
+// conversation listing union (design doc §3.2), where a caller who cannot
+// read the requested project_id degrades to no union rather than a hard
+// failure — see handleListConversations.
+func (s *Server) canReadProject(ctx context.Context, identity Identity, projectID string) bool {
+	if agentIdent, ok := identity.(AgentIdentity); ok {
+		if agentIdent.ProjectID() != projectID {
+			return false
+		}
+	}
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		return false
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionRead)
+	return decision.Allowed
 }
 
 // authorizeDMRead checks whether a principal may read a conversation.

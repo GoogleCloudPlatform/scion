@@ -281,11 +281,12 @@ func TestListConversations_MethodNotAllowed(t *testing.T) {
 
 func TestGetConversation_HappyPath(t *testing.T) {
 	srv, s := testServer(t)
-	_, agent, conv := setupConvTestData(t, s)
+	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID, nil)
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleGetConversation(rr, req, conv.ID)
 
@@ -330,6 +331,7 @@ func TestConvListMessages_HappyPath(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	// Create a test message in the conversation.
 	recipientID := api.NewUUID()
@@ -349,7 +351,7 @@ func TestConvListMessages_HappyPath(t *testing.T) {
 	require.NoError(t, s.CreateMessage(context.Background(), msg))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages", nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleConvListMessages(rr, req, conv.ID)
 
@@ -378,6 +380,7 @@ func TestGetConversationMessage_HappyPath(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	msg := &store.Message{
 		ID:             api.NewUUID(),
@@ -395,7 +398,7 @@ func TestGetConversationMessage_HappyPath(t *testing.T) {
 	require.NoError(t, s.CreateMessage(context.Background(), msg))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+msg.ID, nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleConversationRoutes(rr, req)
 
@@ -478,6 +481,7 @@ func TestGetConversationMessage_WrongConversation(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	otherConv := &store.Conversation{
 		ID:             api.NewUUID(),
@@ -506,7 +510,7 @@ func TestGetConversationMessage_WrongConversation(t *testing.T) {
 	require.NoError(t, s.CreateMessage(context.Background(), msg))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+msg.ID, nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleGetConversationMessage(rr, req, conv.ID, msg.ID)
 
@@ -517,10 +521,11 @@ func TestGetConversationMessage_NotFound(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	messageID := api.NewUUID()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+messageID, nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleGetConversationMessage(rr, req, conv.ID, messageID)
 
@@ -541,6 +546,7 @@ func TestConvListMessages_WithPagination(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	// Create multiple messages.
 	recipientID := api.NewUUID()
@@ -563,7 +569,7 @@ func TestConvListMessages_WithPagination(t *testing.T) {
 
 	// Request with limit=2.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages?limit=2", nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleConvListMessages(rr, req, conv.ID)
 
@@ -701,15 +707,16 @@ func TestSetDefaultAgent_NotParticipant(t *testing.T) {
 
 func TestSetDefaultAgent_MissingAgentID(t *testing.T) {
 	srv, s := testServer(t)
-	_, agent, conv := setupConvTestData(t, s)
+	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	body := setDefaultAgentRequest{} // empty agent ID
 	bodyBytes, _ := json.Marshal(body)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleSetDefaultAgent(rr, req, conv.ID)
 
@@ -718,12 +725,13 @@ func TestSetDefaultAgent_MissingAgentID(t *testing.T) {
 
 func TestConversationRoutes_MethodNotAllowed(t *testing.T) {
 	srv, s := testServer(t)
-	_, agent, conv := setupConvTestData(t, s)
+	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	// GET on get conversation endpoint works.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID, nil)
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleGetConversation(rr, req, conv.ID)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -771,8 +779,9 @@ func TestListConversations_AsUser(t *testing.T) {
 
 func TestSetDefaultAgent_AgentNotFound(t *testing.T) {
 	srv, s := testServer(t)
-	_, agent, conv := setupConvTestData(t, s)
+	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	// Use a non-existent agent ID.
 	body := setDefaultAgentRequest{AgentID: api.NewUUID()}
@@ -780,7 +789,7 @@ func TestSetDefaultAgent_AgentNotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleSetDefaultAgent(rr, req, conv.ID)
 
@@ -862,11 +871,12 @@ func TestMux_ListConversations(t *testing.T) {
 
 func TestMux_GetConversation(t *testing.T) {
 	srv, s := testServer(t)
-	_, agent, conv := setupConvTestData(t, s)
+	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID, nil)
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rr, req)
 
@@ -884,6 +894,7 @@ func TestMux_ListMessages(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	// Create a test message.
 	msg := &store.Message{
@@ -902,7 +913,7 @@ func TestMux_ListMessages(t *testing.T) {
 	require.NoError(t, s.CreateMessage(context.Background(), msg))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages", nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rr, req)
 
@@ -1268,6 +1279,7 @@ func TestHandleSetDefaultAgent_CrossProjectDenied(t *testing.T) {
 	srv, s := testServer(t)
 	project, agent, conv := setupConvTestData(t, s)
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
 	// Create an agent in a DIFFERENT project.
 	otherProject := &store.Project{
@@ -1292,7 +1304,7 @@ func TestHandleSetDefaultAgent_CrossProjectDenied(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+conv.ID+"/default-agent", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleSetDefaultAgent(rr, req, conv.ID)
 

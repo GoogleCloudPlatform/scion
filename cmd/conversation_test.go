@@ -494,3 +494,135 @@ func TestRunConversationCreate_UnrelatedBadRequest_NoResolveHint(t *testing.T) {
 	assert.NotContains(t, err.Error(), "Use --project flag",
 		"N2: an unrelated 400 must not be misreported as a project-resolution problem")
 }
+
+// conversationListTestState saves/restores the package-level flag variables
+// runConversationList reads, mirroring conversationCreateTestState.
+type conversationListTestState struct {
+	home         string
+	projectPath  string
+	convProject  string
+	convJSON     bool
+	outputFormat string
+}
+
+func saveConversationListTestState() conversationListTestState {
+	return conversationListTestState{
+		home:         os.Getenv("HOME"),
+		projectPath:  projectPath,
+		convProject:  convProject,
+		convJSON:     convJSON,
+		outputFormat: outputFormat,
+	}
+}
+
+func (s conversationListTestState) restore() {
+	_ = os.Setenv("HOME", s.home)
+	projectPath = s.projectPath
+	convProject = s.convProject
+	convJSON = s.convJSON
+	outputFormat = s.outputFormat
+}
+
+// newConversationListServer returns an httptest server that records the
+// project_id query parameter of GET /api/v1/conversations and responds with
+// an empty list.
+func newConversationListServer(gotProjectID *string, sawRequest *bool) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations" && r.Method == http.MethodGet {
+			*gotProjectID = r.URL.Query().Get("project_id")
+			*sawRequest = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"conversations": []interface{}{}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+}
+
+// TestRunConversationList_DefaultsProjectFromHubContext is AC-10's CLI half
+// (design doc §3.2/§9): "scion conversation list with no flags sends the
+// hub-context project," the same resolution (flag > hub-linked project >
+// local project) runConversationCreate already uses (§3.6).
+func TestRunConversationList_DefaultsProjectFromHubContext(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	var gotProjectID string
+	var sawRequest bool
+	server := newConversationListServer(&gotProjectID, &sawRequest)
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "hub-linked-project-id")
+	projectPath = projectDir
+	convProject = ""
+	convJSON = true // routes output through outputJSON instead of a tabwriter
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationList(cmd, nil)
+	require.NoError(t, err)
+	require.True(t, sawRequest, "expected the list request to reach the mock hub")
+	assert.Equal(t, "hub-linked-project-id", gotProjectID,
+		"AC-10: with no --project, the CLI must send the hub-linked project ID")
+}
+
+// TestRunConversationList_NoProjectResolvable_SendsEmpty covers the other
+// half: when nothing resolves (no --project, no hub-linked project, no local
+// project), the CLI sends no project_id and gets today's behavior — no
+// error, unlike runConversationCreate's 400 path.
+func TestRunConversationList_NoProjectResolvable_SendsEmpty(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	var gotProjectID string
+	var sawRequest bool
+	server := newConversationListServer(&gotProjectID, &sawRequest)
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "") // no local/hub project ID anywhere
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "") // no hub.projectId
+	projectPath = projectDir
+	convProject = ""
+	convJSON = true
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationList(cmd, nil)
+	require.NoError(t, err, "an unresolved project must not error for list, unlike create")
+	require.True(t, sawRequest, "expected the list request to reach the mock hub")
+	assert.Empty(t, gotProjectID, "project_id must be empty, not fabricated, when nothing resolves")
+}
+
+// TestRunConversationList_ExplicitProjectFlag_Wins verifies the flag still
+// takes precedence over hub context, matching resolveProjectID's order.
+func TestRunConversationList_ExplicitProjectFlag_Wins(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	var gotProjectID string
+	var sawRequest bool
+	server := newConversationListServer(&gotProjectID, &sawRequest)
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "hub-linked-project-id")
+	projectPath = projectDir
+	convProject = "explicit-flag-project-id"
+	convJSON = true
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationList(cmd, nil)
+	require.NoError(t, err)
+	require.True(t, sawRequest, "expected the list request to reach the mock hub")
+	assert.Equal(t, "explicit-flag-project-id", gotProjectID,
+		"an explicit --project flag must win over the hub-linked project")
+}

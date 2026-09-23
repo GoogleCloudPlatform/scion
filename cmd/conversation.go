@@ -264,9 +264,22 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
+	}
+
+	// Design doc §3.2 / AC-10: default --project to the hub-context project
+	// (flag > hub-linked project > local project) — the same resolution
+	// runConversationCreate uses (§3.6) — so a human sees all groups in
+	// their current project, the same way an agent already does via its
+	// token project. Unlike create, an unresolved project here is not an
+	// error: it just falls back to today's behavior (no project_id sent,
+	// so the caller's participations plus canonical DMs).
+	if convProject == "" {
+		if resolved, resolveErr := resolveProjectID(settings, convProject); resolveErr == nil {
+			convProject = resolved
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
