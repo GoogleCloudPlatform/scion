@@ -194,6 +194,14 @@ func (s *Server) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 		s.handleSkillDownload(w, r, skillID)
 	case "resolve":
 		s.handleSkillResolveSingle(w, r, skillID)
+	case "files":
+		// parts is split into at most 3 segments, so parts[2] carries the
+		// full (possibly nested) file path.
+		filePath := ""
+		if len(parts) == 3 {
+			filePath = parts[2]
+		}
+		s.handleSkillFiles(w, r, skillID, filePath)
 	default:
 		NotFound(w, "Skill action")
 	}
@@ -780,6 +788,7 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 				if stor.Provider() == storage.ProviderLocal {
 					hubURL := requestBaseURL(r)
 					uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "skills", skillID)
+					uploadURLs = withSkillVersionUploadQuery(uploadURLs, req.Version)
 				}
 				response.UploadURLs = uploadURLs
 			}
@@ -1046,6 +1055,7 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 	if stor.Provider() == storage.ProviderLocal {
 		hubURL := requestBaseURL(r)
 		uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "skills", skillID)
+		uploadURLs = withSkillVersionUploadQuery(uploadURLs, req.Version)
 	}
 
 	writeJSON(w, http.StatusOK, UploadResponse{
@@ -1223,6 +1233,7 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 	if stor.Provider() == storage.ProviderLocal {
 		hubURL := requestBaseURL(r)
 		downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "skills", skillID)
+		downloadURLs = withSkillVersionDownloadQuery(downloadURLs, sv.Version)
 	}
 
 	writeJSON(w, http.StatusOK, DownloadResponse{
@@ -1416,6 +1427,7 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 			if stor.Provider() == storage.ProviderLocal {
 				hubURL := requestBaseURL(r)
 				downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "skills", skill.ID)
+				downloadURLs = withSkillVersionDownloadQuery(downloadURLs, sv.Version)
 			}
 			entry.Files = downloadURLs
 		}
