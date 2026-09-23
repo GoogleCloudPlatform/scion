@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -2484,6 +2485,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		return err
 	}
 
+	// For a linked project, tell the broker where the project lives on its
+	// filesystem so it can find a file-only agent (container gone) there.
+	// The broker checks the path's project identity before using it.
+	if pp := d.resolveDispatchProjectInfo(ctx, agent).projectPath; pp != "" {
+		ctx = withDeleteProjectPath(ctx, pp)
+	}
+
 	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, deleteFiles, removeBranch, softDelete, deletedAt)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt)
@@ -2922,4 +2930,24 @@ func classifyEnvKeys(m *map[string]api.EnvKind, keys map[string]string, kind api
 	for k := range keys {
 		(*m)[k] = kind
 	}
+}
+
+type deleteProjectPathKey struct{}
+
+// withDeleteProjectPath attaches the broker-local project path (a linked
+// project's provider LocalPath) to a delete request context. The broker
+// transports send it as the projectPath query parameter. It is carried on the
+// context rather than as a parameter to keep the RuntimeBrokerClient
+// interface unchanged.
+func withDeleteProjectPath(ctx context.Context, projectPath string) context.Context {
+	return context.WithValue(ctx, deleteProjectPathKey{}, projectPath)
+}
+
+// deleteProjectPathQuery returns "&projectPath=<escaped>" if a project path
+// was attached with withDeleteProjectPath, otherwise "".
+func deleteProjectPathQuery(ctx context.Context) string {
+	if pp, _ := ctx.Value(deleteProjectPathKey{}).(string); pp != "" {
+		return "&projectPath=" + url.QueryEscape(pp)
+	}
+	return ""
 }

@@ -141,3 +141,46 @@ func TestDeleteTarget_FileOnlyAgentSkipsRuntime(t *testing.T) {
 		t.Error("expected no runtime call for a file-only agent")
 	}
 }
+
+// UAT F5 (#1846): StopProjectContainers must actually remove each matching
+// container. The runtime mock filters like a real runtime (every label in the
+// filter must match), so resolving the container by passing its ID where an
+// agent name is expected would find nothing and remove nothing.
+func TestStopProjectContainers_RemovesMatchingContainers(t *testing.T) {
+	all := []api.AgentInfo{
+		{Name: "dev", ContainerID: "cid-dev", Labels: map[string]string{"scion.agent": "true", "scion.name": "dev", "scion.project": "proj-a"}},
+		{Name: "qa", ContainerID: "cid-qa", Labels: map[string]string{"scion.agent": "true", "scion.name": "qa", "scion.project": "proj-a"}},
+		{Name: "dev", ContainerID: "cid-dev-b", Labels: map[string]string{"scion.agent": "true", "scion.name": "dev", "scion.project": "proj-b"}},
+	}
+	var deleted []string
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			var out []api.AgentInfo
+			for _, a := range all {
+				ok := true
+				for k, v := range filter {
+					if a.Labels[k] != v {
+						ok = false
+						break
+					}
+				}
+				if ok {
+					out = append(out, a)
+				}
+			}
+			return out, nil
+		},
+		StopFunc:   func(ctx context.Context, id string) error { return nil },
+		DeleteFunc: func(ctx context.Context, id string) error { deleted = append(deleted, id); return nil },
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	stopped := StopProjectContainers(context.Background(), mgr, "proj-a", []string{"dev"})
+
+	if len(stopped) != 1 || stopped[0] != "dev" {
+		t.Errorf("stopped = %v, want [dev]", stopped)
+	}
+	if len(deleted) != 1 || deleted[0] != "cid-dev" {
+		t.Errorf("deleted containers = %v, want [cid-dev] only", deleted)
+	}
+}

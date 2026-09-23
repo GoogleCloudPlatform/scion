@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,12 +122,14 @@ func assertUntouched(t *testing.T, scionDir, agentName, infoPath string) {
 
 func TestDeleteAgent_SameSlugDifferentProjects_DeletesOnlyRequested(t *testing.T) {
 	mgr := &filteringMockManager{}
+	srv, home := newScopeTestServer(t, mgr)
+	scionA, _ := makeHubProject(t, home, "proj-a", scopeProjA, "dev")
+	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
 	// projA's agent is listed first: a first-match resolver would pick it.
 	mgr.agents = []api.AgentInfo{
-		labelled("dev", "cid-a", scopeProjA, "/projects/a/.scion"),
-		labelled("dev", "cid-b", scopeProjB, "/projects/b/.scion"),
+		labelled("dev", "cid-a", scopeProjA, scionA),
+		labelled("dev", "cid-b", scopeProjB, scionB),
 	}
-	srv, _ := newScopeTestServer(t, mgr)
 
 	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true")
 	if rec.Code != http.StatusNoContent {
@@ -138,8 +141,8 @@ func TestDeleteAgent_SameSlugDifferentProjects_DeletesOnlyRequested(t *testing.T
 	if mgr.lastDeleteContainerID != "cid-b" {
 		t.Errorf("deleted container %q, want cid-b", mgr.lastDeleteContainerID)
 	}
-	if mgr.lastDeleteProjectPath != "/projects/b/.scion" {
-		t.Errorf("file deletion project path %q, want projB's", mgr.lastDeleteProjectPath)
+	if mgr.lastDeleteProjectPath != scionB {
+		t.Errorf("file deletion project path %q, want projB's %q", mgr.lastDeleteProjectPath, scionB)
 	}
 }
 
@@ -274,13 +277,9 @@ func TestDeleteAgent_MatchedEntryWithoutProjectPath_NoProjectDir_SkipsFiles(t *t
 
 func TestDeleteAgent_UnlabelledLegacyContainerAccepted(t *testing.T) {
 	mgr := &filteringMockManager{}
-	mgr.agents = []api.AgentInfo{{
-		Name:        "dev",
-		ContainerID: "cid-legacy",
-		ProjectPath: "/legacy/.scion",
-		Labels:      map[string]string{"scion.agent": "true", "scion.name": "dev"},
-	}}
-	srv, _ := newScopeTestServer(t, mgr)
+	srv, home := newScopeTestServer(t, mgr)
+	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	mgr.agents = []api.AgentInfo{legacyEntry("dev", "cid-legacy", scionB)}
 
 	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB)
 	if rec.Code != http.StatusNoContent {
@@ -353,5 +352,248 @@ func TestDeleteAgent_ListFailure_NotReportedAs404(t *testing.T) {
 	}
 	if mgr.deleteCalls != 0 || auxMgr.deleteCalls != 0 {
 		t.Errorf("expected no delete calls")
+	}
+}
+
+// makeLinkedGitProject creates a linked (non hub-managed) git-style project
+// outside ~/.scion: <root>/.scion is a directory with a project-id file and an
+// in-project agent directory. It returns the project root.
+func makeLinkedGitProject(t *testing.T, projectID, agentName string) string {
+	t.Helper()
+	root := t.TempDir()
+	scionDir := filepath.Join(root, ".scion")
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents", agentName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteProjectID(scionDir, projectID); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func resolvedScionDir(t *testing.T, path string) string {
+	t.Helper()
+	dir, err := config.GetResolvedProjectDir(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// UAT regression for #1846: a linked project's agent whose container is gone
+// but whose files remain must be found through the project path the hub
+// sends, not reported as 404.
+func TestDeleteAgent_FileOnlyAgentInLinkedProject_UsesHubPathHint(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, _ := newScopeTestServer(t, mgr)
+	root := makeLinkedGitProject(t, scopeProjB, "dev")
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true&projectPath="+url.QueryEscape(root))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.deleteCalls != 1 || mgr.lastDeleteContainerID != "" {
+		t.Fatalf("expected 1 file-only delete, got %d calls, container %q", mgr.deleteCalls, mgr.lastDeleteContainerID)
+	}
+	if want := resolvedScionDir(t, root); mgr.lastDeleteProjectPath != want {
+		t.Errorf("file deletion project path %q, want %q", mgr.lastDeleteProjectPath, want)
+	}
+}
+
+// A hint whose project identity differs from the requested project must be
+// ignored, so a wrong or stale path can never redirect deletion.
+func TestDeleteAgent_LinkedProjectHintForOtherProject_404NoSideEffects(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, _ := newScopeTestServer(t, mgr)
+	rootA := makeLinkedGitProject(t, scopeProjA, "dev")
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true&projectPath="+url.QueryEscape(rootA))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.deleteCalls != 0 {
+		t.Fatalf("expected no delete calls, got %d", mgr.deleteCalls)
+	}
+	if _, err := os.Stat(filepath.Join(rootA, ".scion", "agents", "dev")); err != nil {
+		t.Errorf("other project's agent dir was touched: %v", err)
+	}
+}
+
+// Without a hint, an embedded broker running inside the linked project still
+// finds the agent through its own working project (identity-checked).
+func TestDeleteAgent_FileOnlyAgentInBrokerWorkingProject(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, _ := newScopeTestServer(t, mgr)
+	root := makeLinkedGitProject(t, scopeProjB, "dev")
+	if err := os.Chdir(root); err != nil { // restored by newScopeTestServer's cleanup
+		t.Fatal(err)
+	}
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.deleteCalls != 1 || mgr.lastDeleteProjectPath == "" {
+		t.Fatalf("expected a file-only delete with a project path, got %d calls, path %q", mgr.deleteCalls, mgr.lastDeleteProjectPath)
+	}
+
+	// A different project ID does not match the working project.
+	mgr.deleteCalls = 0
+	rec = doDelete(t, srv, "dev", "projectId="+scopeProjA+"&deleteFiles=true")
+	if rec.Code != http.StatusNotFound || mgr.deleteCalls != 0 {
+		t.Fatalf("expected 404 with no delete for another project, got %d / %d calls", rec.Code, mgr.deleteCalls)
+	}
+}
+
+// Non-git linked projects use a .scion marker file pointing at an external
+// config dir under ~/.scion/project-configs/.
+func TestDeleteAgent_FileOnlyAgentInLinkedMarkerProject(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, _ := newScopeTestServer(t, mgr)
+	root := t.TempDir()
+	marker := &config.ProjectMarker{ProjectID: scopeProjB, ProjectName: "linked", ProjectSlug: "linked"}
+	if err := config.WriteProjectMarker(filepath.Join(root, ".scion"), marker); err != nil {
+		t.Fatal(err)
+	}
+	extDir, err := marker.ExternalProjectPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(extDir, "agents", "dev"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true&projectPath="+url.QueryEscape(root))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.lastDeleteProjectPath != extDir {
+		t.Errorf("file deletion project path %q, want %q", mgr.lastDeleteProjectPath, extDir)
+	}
+}
+
+// legacyEntry is a pre-label container: no project ID in labels or fields.
+func legacyEntry(name, cid, projectPath string) api.AgentInfo {
+	return api.AgentInfo{
+		Name:        name,
+		ContainerID: cid,
+		ProjectPath: projectPath,
+		Labels:      map[string]string{"scion.agent": "true", "scion.name": name},
+	}
+}
+
+// UAT F2: a legacy container belonging to another project must not be
+// deleted just because it carries no project ID.
+func TestDeleteAgent_LegacyContainerFromOtherProject_404NoSideEffects(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, home := newScopeTestServer(t, mgr)
+	scionA, infoA := makeHubProject(t, home, "proj-a", scopeProjA, "worker")
+
+	for _, tc := range []struct {
+		name  string
+		entry api.AgentInfo
+	}{
+		{"path of other project", legacyEntry("worker", "cid-legacy-a", scionA)},
+		{"no project path", legacyEntry("worker", "cid-legacy-x", "")},
+		{"path without identity", legacyEntry("worker", "cid-legacy-y", t.TempDir())},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr.agents = []api.AgentInfo{tc.entry}
+			mgr.deleteCalls = 0
+			rec := doDelete(t, srv, "worker", "projectId="+scopeProjB+"&deleteFiles=true")
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+			}
+			if mgr.deleteCalls != 0 {
+				t.Fatalf("expected no delete calls, got %d", mgr.deleteCalls)
+			}
+		})
+	}
+	assertUntouched(t, scionA, "worker", infoA)
+}
+
+// UAT F3: a project path from a runtime label is used for file deletion only
+// if it verifiably belongs to the requested project.
+func TestDeleteAgent_UntrustedEntryProjectPathIgnored(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, home := newScopeTestServer(t, mgr)
+	scionA, infoA := makeHubProject(t, home, "proj-a", scopeProjA, "dev")
+
+	// Label points at another project's dir: no project dir of our own
+	// exists, so file cleanup is skipped but the container is removed.
+	mgr.agents = []api.AgentInfo{labelled("dev", "cid-b", scopeProjB, scionA)}
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true&softDelete=true&deletedAt=2026-01-01T00:00:00Z")
+	if rec.Code != http.StatusOK && rec.Code != http.StatusNoContent {
+		t.Fatalf("expected success, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.lastDeleteContainerID != "cid-b" {
+		t.Errorf("deleted container %q, want cid-b", mgr.lastDeleteContainerID)
+	}
+	if mgr.lastDeleteProjectPath != "" || mgr.lastDeleteFiles {
+		t.Errorf("file deletion must not use an untrusted path, got path %q files=%v", mgr.lastDeleteProjectPath, mgr.lastDeleteFiles)
+	}
+	assertUntouched(t, scionA, "dev", infoA)
+
+	// A crafted path outside any project is ignored and the broker's own
+	// identity-checked resolution finds the real project dir.
+	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	mgr.agents = []api.AgentInfo{labelled("dev", "cid-b", scopeProjB, t.TempDir())}
+	rec = doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.lastDeleteProjectPath != scionB {
+		t.Errorf("file deletion project path %q, want %q", mgr.lastDeleteProjectPath, scionB)
+	}
+}
+
+// Non-git linked projects record the external config dir as the agent's
+// project path. Its <slug>__<short-id> name ties it to a project, so it is
+// trusted for its own project only.
+func TestDeleteAgent_ExternalConfigDirProjectPath(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, home := newScopeTestServer(t, mgr)
+	extDir := func(projectID string) string {
+		d, err := (config.ProjectMarker{ProjectID: projectID, ProjectSlug: "linked"}).ExternalProjectPath()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(d, home) {
+			t.Fatalf("external dir %q not under test HOME %q", d, home)
+		}
+		if err := os.MkdirAll(filepath.Join(d, "agents", "dev"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	extB := extDir(scopeProjB)
+	extA := extDir(scopeProjA)
+
+	// Labelled entry, own project's external dir: used for files.
+	mgr.agents = []api.AgentInfo{labelled("dev", "cid-b", scopeProjB, extB)}
+	if rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true"); rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.lastDeleteProjectPath != extB {
+		t.Errorf("file deletion project path %q, want %q", mgr.lastDeleteProjectPath, extB)
+	}
+
+	// Labelled entry, another project's external dir: ignored.
+	mgr.agents = []api.AgentInfo{labelled("dev", "cid-b", scopeProjB, extA)}
+	if rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true"); rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.lastDeleteProjectPath == extA {
+		t.Errorf("file deletion used another project's external dir %q", extA)
+	}
+
+	// Legacy entry: accepted only for the project its external dir encodes.
+	mgr.agents = []api.AgentInfo{legacyEntry("dev", "cid-legacy", extA)}
+	mgr.deleteCalls = 0
+	if rec := doDelete(t, srv, "dev", "projectId="+scopeProjB); rec.Code != http.StatusNotFound || mgr.deleteCalls != 0 {
+		t.Fatalf("expected 404 with no delete, got %d / %d calls", rec.Code, mgr.deleteCalls)
+	}
+	if rec := doDelete(t, srv, "dev", "projectId="+scopeProjA); rec.Code != http.StatusNoContent || mgr.lastDeleteContainerID != "cid-legacy" {
+		t.Fatalf("expected 204 deleting cid-legacy, got %d / %q", rec.Code, mgr.lastDeleteContainerID)
 	}
 }

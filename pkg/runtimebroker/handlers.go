@@ -1271,7 +1271,10 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	// its container ID and the file deletion uses its project path. Nothing
 	// re-resolves by bare slug, so a same-slug agent in another project can
 	// never be touched, whatever the runtime.
-	target, err := s.resolveDeleteTarget(ctx, id, projectID, deleteFiles)
+	// projectPath is an optional hint from the hub (the provider's LocalPath
+	// for a linked project); resolveDeleteTarget verifies it belongs to
+	// projectID before using it.
+	target, err := s.resolveDeleteTarget(ctx, id, projectID, query.Get("projectPath"), deleteFiles)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, errDeleteTargetNotFound) {
@@ -2900,17 +2903,21 @@ func agentHasNoProjectIdentity(a api.AgentInfo) bool {
 //   - runtime entries positively labelled for projectID are preferred; the
 //     List call carries the project scope label;
 //   - if none exist, a legacy container carrying no project identity at all
-//     is accepted (pre-label containers). File-only entries synthesised from
-//     the broker's CWD project are never accepted this way;
+//     is accepted only if its recorded project path identifies as projectID
+//     (pre-label containers). File-only entries synthesised from the
+//     broker's CWD project are never accepted this way;
+//   - a runtime entry's project path is used for files only if it verifiably
+//     belongs to projectID;
 //   - if no runtime entry matches, agent files are looked for only in the
-//     hub-managed project directory whose recorded project ID is projectID;
+//     project directory (hub-managed, or linked via the hub's path hint or
+//     the broker's working project) whose recorded project ID is projectID;
 //   - otherwise errDeleteTargetNotFound.
 //
 // Without a projectID (solo/CLI), any same-named entry matches, and the
 // hub-managed directory scan must find exactly one project.
 //
 // More than one distinct match is an error (fail closed) rather than a guess.
-func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID string, deleteFiles bool) (*deleteTarget, error) {
+func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, projectPathHint string, deleteFiles bool) (*deleteTarget, error) {
 	type candidate struct {
 		mgr   agent.Manager
 		entry api.AgentInfo
@@ -2968,8 +2975,13 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID string, 
 			projectcompat.LabelProjectID: projectID,
 		}, func(a api.AgentInfo) bool { return agentInProjectStrict(a, projectID) })
 		if len(matches) == 0 {
+			// Legacy (pre-label) containers carry no project ID. Accept one
+			// only if its recorded project path positively identifies as
+			// projectID; otherwise a same-named legacy container from another
+			// project could be deleted.
 			matches = collect(map[string]string{"scion.agent": "true"}, func(a api.AgentInfo) bool {
-				return a.ContainerID != "" && agentHasNoProjectIdentity(a)
+				return a.ContainerID != "" && agentHasNoProjectIdentity(a) &&
+					pathIdentifiesAs(a.ProjectPath, projectID)
 			})
 		}
 	} else {
@@ -2991,11 +3003,21 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID string, 
 		if t.projectID == "" {
 			t.projectID = m.entry.Project
 		}
+		if t.projectPath != "" && !trustedEntryProjectPath(t.projectPath, projectID) {
+			// The path comes from a runtime label/annotation, which may be
+			// stale or crafted. Never delete files there unless the path is
+			// verifiably this project's; fall back to the broker's own,
+			// identity-checked resolution below.
+			s.agentLifecycleLog.Warn("Agent delete: ignoring runtime project path that does not belong to the project",
+				"agent_id", id, "project_id", projectID, "path", t.projectPath)
+			t.projectPath = ""
+		}
 		if t.projectPath == "" && deleteFiles {
 			// The runtime entry carries no project path (e.g. no
 			// annotation). Resolve it only from this project's own
-			// hub-managed directory, never by a project-blind scan.
-			resolved, err := findAgentInHubManagedProjects(id, projectID)
+			// directory (hub-managed or linked), never by a project-blind
+			// scan.
+			resolved, err := s.findAgentProjectDir(id, projectID, projectPathHint)
 			if err != nil {
 				return nil, err
 			}
@@ -3006,7 +3028,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID string, 
 
 	// No runtime entry: the agent may exist only as files (never started, or
 	// its container is gone). Look only in this project's directory.
-	resolved, err := findAgentInHubManagedProjects(id, projectID)
+	resolved, err := s.findAgentProjectDir(id, projectID, projectPathHint)
 	if err != nil {
 		return nil, err
 	}
@@ -3019,7 +3041,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID string, 
 		}
 		return nil, errDeleteTargetNotFound
 	}
-	s.agentLifecycleLog.Debug("Resolved agent project path from hub-managed project",
+	s.agentLifecycleLog.Debug("Resolved agent project path for file-only delete",
 		"agent_id", id, "project_id", projectID, "path", resolved)
 	return &deleteTarget{
 		mgr:         s.manager,
@@ -3027,6 +3049,158 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID string, 
 		projectPath: resolved,
 		projectID:   projectID,
 	}, nil
+}
+
+// findAgentProjectDir returns the .scion dir of the project that owns the
+// agent's files, or "" if none. It checks the hub-managed project directories
+// first. When projectID is set it then checks linked (non hub-managed)
+// projects: the path the hub registered for this project on this broker
+// (projectPathHint, i.e. the provider's LocalPath) and the broker's own
+// working project. A linked path is used only if its recorded project identity
+// equals projectID, so a stale or wrong hint can never redirect deletion to
+// another project's files.
+func (s *Server) findAgentProjectDir(agentName, projectID, projectPathHint string) (string, error) {
+	resolved, err := findAgentInHubManagedProjects(agentName, projectID)
+	if err != nil || resolved != "" || projectID == "" {
+		return resolved, err
+	}
+	candidates := []string{projectPathHint}
+	if cwdProject, err := config.GetResolvedProjectDir(""); err == nil {
+		candidates = append(candidates, cwdProject)
+	}
+	for _, c := range candidates {
+		if dir := linkedProjectAgentDir(c, agentName, projectID); dir != "" {
+			return dir, nil
+		}
+	}
+	return "", nil
+}
+
+// linkedProjectAgentDir returns the resolved .scion dir of the linked project
+// at path if that project's identity is projectID and it holds files for
+// agentName, otherwise "". path may be the project root or its .scion entry.
+// Identity comes from the project-id file (git projects, .scion directory) or
+// the marker file (non-git projects, .scion file).
+func linkedProjectAgentDir(path, agentName, projectID string) string {
+	if path == "" || projectID == "" {
+		return ""
+	}
+	if !pathIdentifiesAs(path, projectID) {
+		return ""
+	}
+	scionDir, err := config.GetResolvedProjectDir(scionEntry(path))
+	if err != nil || scionDir == "" {
+		return ""
+	}
+	if !hubManagedProjectHasAgent(scionDir, agentName) {
+		return ""
+	}
+	return scionDir
+}
+
+// scionEntry returns the .scion entry for path, which may be the project root
+// or the .scion entry itself.
+func scionEntry(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	if filepath.Base(abs) == config.DotScion {
+		return abs
+	}
+	return filepath.Join(abs, config.DotScion)
+}
+
+// projectIDAtPath returns the project identity recorded at path, or "".
+// For a .scion directory it is the project-id (or legacy grove-id) file. For a
+// .scion marker file (non-git linked project) it is the marker's project ID.
+// If path is a project's external config dir, which has no project-id file,
+// the result is "".
+func projectIDAtPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	marker := scionEntry(path)
+	if marker == "" {
+		return ""
+	}
+	info, err := os.Stat(marker)
+	if err != nil {
+		return ""
+	}
+	if info.IsDir() {
+		id, _ := config.ReadProjectID(marker)
+		return id
+	}
+	if m, err := config.ReadProjectMarker(marker); err == nil {
+		return m.ProjectID
+	}
+	return ""
+}
+
+// pathIdentifiesAs reports whether the project at path verifiably belongs to
+// projectID: either its recorded identity (projectIDAtPath) equals projectID,
+// or path is the project's external config dir
+// ~/.scion/{project-configs,grove-configs}/<slug>__<short-id>/.scion, whose
+// name encodes the project ID (non-git linked projects record that dir as
+// the agent's project path).
+func pathIdentifiesAs(path, projectID string) bool {
+	if path == "" || projectID == "" {
+		return false
+	}
+	if projectIDAtPath(path) == projectID {
+		return true
+	}
+	short, ok := externalConfigShortID(path)
+	return ok && short == (config.ProjectMarker{ProjectID: projectID}).ShortUUID()
+}
+
+// externalConfigShortID returns the short project ID encoded in path if path
+// is an external project config dir
+// ~/.scion/{project-configs,grove-configs}/<slug>__<short-id>/.scion.
+func externalConfigShortID(path string) (string, bool) {
+	abs, err := filepath.Abs(path)
+	if err != nil || filepath.Base(abs) != config.DotScion {
+		return "", false
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return "", false
+	}
+	projectDir := filepath.Dir(abs)
+	parent := filepath.Dir(projectDir)
+	if parent != filepath.Join(globalDir, config.ProjectConfigsDir) && parent != filepath.Join(globalDir, config.GroveConfigsDir) {
+		return "", false
+	}
+	name := filepath.Base(projectDir)
+	i := strings.LastIndex(name, "__")
+	if i <= 0 || i+2 >= len(name) {
+		return "", false
+	}
+	return name[i+2:], true
+}
+
+// trustedEntryProjectPath reports whether a project path taken from a runtime
+// entry may be used for file operations. With a projectID, the path must
+// identify as that project (pathIdentifiesAs). Without one, the path must
+// carry some project identity, be an external project config dir, or be the
+// global project directory.
+func trustedEntryProjectPath(path, projectID string) bool {
+	if projectID != "" {
+		return pathIdentifiesAs(path, projectID)
+	}
+	if projectIDAtPath(path) != "" {
+		return true
+	}
+	if _, ok := externalConfigShortID(path); ok {
+		return true
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	abs, err := filepath.Abs(path)
+	return err == nil && filepath.Clean(abs) == filepath.Clean(globalDir)
 }
 
 // findAgentInHubManagedProjects scans hub-managed project directories

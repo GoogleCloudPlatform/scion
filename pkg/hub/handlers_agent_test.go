@@ -364,6 +364,33 @@ func TestDeleteAgent_DispatchFailure_ReturnsError(t *testing.T) {
 	assert.NoError(t, err, "agent should still exist when broker dispatch fails")
 }
 
+// UAT F4 (#1846): a broker 409 (ambiguous target) is surfaced as a 409 with
+// the broker's message, not as a 502 runtime error.
+func TestDeleteAgent_BrokerConflict_Returns409(t *testing.T) {
+	srv, s := testServer(t)
+
+	disp := &deleteDispatcher{
+		deleteErr: fmt.Errorf("dispatch: %w", &brokerStatusError{
+			StatusCode: http.StatusConflict,
+			Body:       `{"error":{"code":"conflict","message":"agent 'dev' is ambiguous: 2 agents match in project \"p\""}}`,
+		}),
+	}
+	srv.SetDispatcher(disp)
+
+	_, _, agent := setupOnlineBrokerAgent(t, s, "ambig")
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeConflict, errResp.Error.Code)
+	assert.Contains(t, errResp.Error.Message, "ambiguous")
+
+	_, err := s.GetAgent(context.Background(), agent.ID)
+	assert.NoError(t, err, "agent should still exist when the broker refuses the delete")
+}
+
 func TestDeleteAgent_DispatchFailure_ForceDeleteSucceeds(t *testing.T) {
 	srv, s := testServer(t)
 

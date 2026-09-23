@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,7 @@ type mockControlChannelTunnel struct {
 	connected   bool
 	lastBroker  string
 	lastRequest *wsprotocol.RequestEnvelope
+	status      int // response status; 0 means 200
 }
 
 func (m *mockControlChannelTunnel) IsConnected(string) bool {
@@ -38,7 +40,11 @@ func (m *mockControlChannelTunnel) IsConnected(string) bool {
 func (m *mockControlChannelTunnel) TunnelRequest(_ context.Context, brokerID string, req *wsprotocol.RequestEnvelope) (*wsprotocol.ResponseEnvelope, error) {
 	m.lastBroker = brokerID
 	m.lastRequest = req
-	return wsprotocol.NewResponseEnvelope(req.RequestID, http.StatusOK, nil, nil), nil
+	status := m.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	return wsprotocol.NewResponseEnvelope(req.RequestID, status, nil, nil), nil
 }
 
 type mockBrokerSigner struct {
@@ -149,4 +155,58 @@ func headerValue(headers map[string]string, name string) string {
 		}
 	}
 	return ""
+}
+
+// A broker 404 on delete means "no such agent in this project" and must be an
+// idempotent success, matching brokerHTTPTransport.DeleteAgent. Previously
+// doRequest turned every >=400 status into an error, so the 404 allowance in
+// DeleteAgent was dead code (ptone/scion#1819 UAT).
+func TestControlChannelBrokerClient_DeleteAgent404IsIdempotentSuccess(t *testing.T) {
+	tunnel := &mockControlChannelTunnel{connected: true, status: http.StatusNotFound}
+	client := &ControlChannelBrokerClient{manager: tunnel}
+
+	if err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{}); err != nil {
+		t.Fatalf("expected nil error for broker 404 on delete, got %v", err)
+	}
+}
+
+func TestControlChannelBrokerClient_DeleteAgentOtherErrorsPropagate(t *testing.T) {
+	for _, status := range []int{http.StatusConflict, http.StatusInternalServerError} {
+		tunnel := &mockControlChannelTunnel{connected: true, status: status}
+		client := &ControlChannelBrokerClient{manager: tunnel}
+
+		err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{})
+		if err == nil {
+			t.Fatalf("status %d: expected error, got nil", status)
+		}
+		if !isBrokerStatus(err, status) {
+			t.Errorf("status %d: expected brokerStatusError carrying the status, got %v", status, err)
+		}
+	}
+}
+
+// A linked project's broker-local path is forwarded so the broker can find a
+// file-only agent there.
+func TestControlChannelBrokerClient_DeleteAgentForwardsProjectPath(t *testing.T) {
+	tunnel := &mockControlChannelTunnel{connected: true}
+	client := &ControlChannelBrokerClient{manager: tunnel}
+
+	ctx := withDeleteProjectPath(context.Background(), "/home/u/my repo")
+	if err := client.DeleteAgent(ctx, "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	q, err := url.ParseQuery(tunnel.lastRequest.Query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := q.Get("projectPath"); got != "/home/u/my repo" {
+		t.Errorf("projectPath = %q, want %q (query %q)", got, "/home/u/my repo", tunnel.lastRequest.Query)
+	}
+
+	if err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if q, _ := url.ParseQuery(tunnel.lastRequest.Query); q.Has("projectPath") {
+		t.Errorf("projectPath sent without a hint: %q", tunnel.lastRequest.Query)
+	}
 }
