@@ -290,3 +290,40 @@ func (s *Server) setGroupDefaultAgent(ctx context.Context, conv *store.Conversat
 	}
 	return nil
 }
+
+// ensureGroupParticipants records agents as participants of a group
+// conversation (design doc §3.3, F2b). Participant rows are a listing
+// index only — §3.2 already made project membership the read authority —
+// so this is best-effort: a failure here is logged at warn and never fails
+// the caller's send (AC-12).
+//
+// Uses store.EnsureParticipant, the same idempotent, race-safe primitive
+// handleAgentMessage's own auto-registration already uses (existing row —
+// active or soft-removed — is left untouched; a concurrent insert loses
+// the race safely rather than erroring). This avoids the plain AddParticipant
+// duplicate-key error on every repeat message from an already-participating
+// agent.
+//
+// Rule: participant means woken (design §3.3 / §4). Callers must pass only
+// agents that were actually dispatched into the conversation, not every
+// agent merely named (e.g. an @-mention denied by authorization, or a
+// human-mention notification target).
+func (s *Server) ensureGroupParticipants(ctx context.Context, conversationID string, agents []*store.Agent) {
+	if conversationID == "" {
+		return
+	}
+	for _, agent := range agents {
+		if agent == nil || agent.ID == "" {
+			continue
+		}
+		if err := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
+			ConversationID: conversationID,
+			PrincipalKind:  "agent",
+			PrincipalID:    agent.ID,
+			Role:           "member",
+		}); err != nil {
+			slog.WarnContext(ctx, "ensureGroupParticipants: ensure participant failed",
+				"conversationID", conversationID, "agentID", agent.ID, "error", err)
+		}
+	}
+}
