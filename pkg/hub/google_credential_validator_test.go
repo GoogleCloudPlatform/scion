@@ -379,13 +379,16 @@ func TestProductionValidator_IDToken_ServiceAccount(t *testing.T) {
 	claims["email"] = "sa@my-project.iam.gserviceaccount.com"
 	token := signIDToken(kp, claims)
 
-	_, err := validator.ValidateIDToken(t.Context(), token,
+	// The validator classifies service accounts but does not reject them —
+	// rejection (or admission, under other policy) is the caller's
+	// responsibility (design §4.2(i)).
+	identity, err := validator.ValidateIDToken(t.Context(), token,
 		[]string{"test-client-id.apps.googleusercontent.com"})
-	if err == nil {
-		t.Fatal("expected error for service account")
+	if err != nil {
+		t.Fatalf("ValidateIDToken failed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "service account") {
-		t.Errorf("error = %q, expected service account rejection", err)
+	if !identity.IsServiceAccount {
+		t.Error("expected IsServiceAccount=true for a service-account email")
 	}
 }
 
@@ -783,13 +786,16 @@ func TestProductionValidator_AccessToken_ServiceAccount(t *testing.T) {
 	defer endpoints.close()
 
 	validator := newTestValidator(endpoints)
-	_, err := validator.ValidateAccessToken(t.Context(), "sa-token",
+	// The validator classifies service accounts but does not reject them —
+	// rejection (or admission, under other policy) is the caller's
+	// responsibility (design §4.2(i)).
+	identity, err := validator.ValidateAccessToken(t.Context(), "sa-token",
 		[]string{"test-client-id.apps.googleusercontent.com"})
-	if err == nil {
-		t.Fatal("expected error for service account access token")
+	if err != nil {
+		t.Fatalf("ValidateAccessToken failed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "service account") {
-		t.Errorf("error = %q, expected service account rejection", err)
+	if !identity.IsServiceAccount {
+		t.Error("expected IsServiceAccount=true for a service-account email")
 	}
 }
 

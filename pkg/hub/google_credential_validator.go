@@ -263,10 +263,12 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 		return nil, ErrGoogleUnverifiedEmail
 	}
 
-	// Reject service accounts (identified by email suffix).
-	if isGoogleServiceAccount(claims.Email) {
-		return nil, ErrGoogleServiceAccount
-	}
+	// Classify service accounts by the verified email claim. Rejection is the
+	// caller's responsibility (design §4.2(i)): GEExchangeService rejects SA
+	// identities immediately after validation to keep its behaviour unchanged,
+	// while other callers (e.g. the external-bearer path) may admit them under
+	// their own policy.
+	isServiceAccount := isGoogleServiceAccount(claims.Email)
 
 	expiry := claims.Expiry.Time()
 
@@ -300,7 +302,7 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 		Audience:         audience,
 		UpstreamExpiry:   expiry,
 		HostedDomain:     claims.HD,
-		IsServiceAccount: false,
+		IsServiceAccount: isServiceAccount,
 	}, nil
 }
 
@@ -392,22 +394,19 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 			ErrGoogleFieldDisagreement)
 	}
 
-	// Reject service accounts.
-	if isGoogleServiceAccount(userInfo.Email) {
-		return nil, ErrGoogleServiceAccount
-	}
-
 	return &ValidatedGoogleIdentity{
-		Subject:          userInfo.Sub,
-		Email:            userInfo.Email,
-		EmailVerified:    bool(userInfo.EmailVerified),
-		DisplayName:      userInfo.Name,
-		AvatarURL:        userInfo.Picture,
-		Issuer:           googleCanonicalIssuer,
-		Audience:         tokenInfo.AZP,
-		UpstreamExpiry:   upstreamExpiry,
-		HostedDomain:     userInfo.HD,
-		IsServiceAccount: false,
+		Subject:        userInfo.Sub,
+		Email:          userInfo.Email,
+		EmailVerified:  bool(userInfo.EmailVerified),
+		DisplayName:    userInfo.Name,
+		AvatarURL:      userInfo.Picture,
+		Issuer:         googleCanonicalIssuer,
+		Audience:       tokenInfo.AZP,
+		UpstreamExpiry: upstreamExpiry,
+		HostedDomain:   userInfo.HD,
+		// Classify service accounts by the verified email claim. Rejection is
+		// the caller's responsibility (design §4.2(i)); see ValidateIDToken.
+		IsServiceAccount: isGoogleServiceAccount(userInfo.Email),
 	}, nil
 }
 
