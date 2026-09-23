@@ -1126,6 +1126,32 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 // that as_needed env vars (e.g. GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION) are
 // resolved before auth provisioning runs on the broker.
 func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
+	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false)
+}
+
+// DispatchAgentReprovision re-renders an EXISTING agent's on-disk config
+// (scion-agent.json, agent-info.json, home dotfiles, skills) on the runtime
+// broker from the agent's current AppliedConfig, for a `scion reincarnate`
+// request (design §3.4). The caller (the reincarnate worker) must have
+// already replaced agent.AppliedConfig with a freshly resolved config before
+// calling this — buildCreateRequest below reads directly from it, the same
+// way it does for a brand new agent.
+//
+// Unlike DispatchAgentProvision, this always sets Reprovision on the wire
+// request, which tells the broker to overwrite the persisted config rather
+// than reuse it (see runtimebroker.CreateAgentRequest.Reprovision and
+// agent.Manager.Reprovision). It does not start the container; the caller
+// does that separately via DispatchAgentStart. Precondition: the agent's
+// container is already stopped.
+func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
+	return d.dispatchProvision(ctx, agent, "DispatchAgentReprovision", true)
+}
+
+// dispatchProvision is the shared implementation behind DispatchAgentProvision
+// and DispatchAgentReprovision: build a provision-only create request, dispatch
+// it with the GatherEnv two-pass mechanism, and merge any resolved storage env
+// back into AppliedConfig.
+func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
@@ -1135,11 +1161,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 		return err
 	}
 
-	req, err := d.buildCreateRequest(ctx, agent, "DispatchAgentProvision")
+	req, err := d.buildCreateRequest(ctx, agent, callerName)
 	if err != nil {
 		return err
 	}
 	req.ProvisionOnly = true
+	req.Reprovision = reprovision
 	req.GatherEnv = true
 
 	// Track which scope provided each key
@@ -1157,7 +1184,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 		// deferredCreateWithGather dispatches via DispatchAgentCreateWithGather which
 		// does not set ProvisionOnly — fall back to returning the error rather than
 		// accidentally triggering a full create on the remote node.
-		return fmt.Errorf("provision not supported for cross-node broker: %w", err)
+		return fmt.Errorf("%s not supported for cross-node broker: %w", callerName, err)
 	} else if err != nil {
 		return err
 	} else if resp != nil {
@@ -1190,7 +1217,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 				return err2
 			}
 			if envReqs2 != nil && len(envReqs2.Needs) > 0 {
-				d.log.Warn("DispatchAgentProvision: env vars still missing after second pass",
+				d.log.Warn(callerName+": env vars still missing after second pass",
 					"agent", agent.Name, "needs", envReqs2.Needs)
 			}
 			if resp2 != nil {

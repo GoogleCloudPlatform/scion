@@ -392,6 +392,14 @@ type AgentDispatcher interface {
 	// This sets up directories, worktree, templates, and settings but does not launch the container.
 	DispatchAgentProvision(ctx context.Context, agent *store.Agent) error
 
+	// DispatchAgentReprovision re-renders an EXISTING agent's on-disk config
+	// on the runtime broker from its current AppliedConfig, for a
+	// `scion reincarnate` request (design §3.4). Unlike DispatchAgentProvision
+	// it overwrites the persisted config rather than reusing it, while
+	// preserving the agent's home directory and clone-per-agent workspace. It
+	// does not start the container.
+	DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error
+
 	// DispatchAgentStart resumes a stopped agent on the runtime broker.
 	// task is an optional task string to pass to the agent on start.
 	// resume requests harness session continuation (e.g. Claude --continue);
@@ -570,6 +578,11 @@ type RemoteCreateAgentRequest struct {
 	// ProvisionOnly indicates the agent should be provisioned (dirs, worktree, templates)
 	// but not started. The container will not be launched.
 	ProvisionOnly bool `json:"provisionOnly,omitempty"`
+	// Reprovision indicates this ProvisionOnly request targets an existing
+	// agent whose on-disk config should be replaced from the current
+	// catalog rather than reused (`scion reincarnate`, design §3.4). See
+	// runtimebroker.CreateAgentRequest.Reprovision, the wire twin this maps to.
+	Reprovision bool `json:"reprovision,omitempty"`
 	// ProjectPath is the local filesystem path to the project on the target runtime broker.
 	// This is looked up from the project provider record for the target broker.
 	ProjectPath string `json:"projectPath,omitempty"`

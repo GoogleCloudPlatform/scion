@@ -71,6 +71,10 @@ func (d *recordingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Ag
 func (d *recordingDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
 }
+
+func (d *recordingDispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error {
+	return nil
+}
 func (d *recordingDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
 	return nil
 }

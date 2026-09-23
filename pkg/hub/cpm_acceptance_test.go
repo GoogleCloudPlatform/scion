@@ -121,6 +121,10 @@ func (d *acceptanceDispatcher) DispatchAgentCreate(_ context.Context, _ *store.A
 func (d *acceptanceDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
 }
+
+func (d *acceptanceDispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error {
+	return nil
+}
 func (d *acceptanceDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, _ string, cont bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

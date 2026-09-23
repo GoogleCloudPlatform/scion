@@ -173,6 +173,15 @@ func (d *mockDispatcher) DispatchAgentProvision(_ context.Context, agent *store.
 	agent.Phase = string(state.PhaseCreated)
 	return nil
 }
+
+func (d *mockDispatcher) DispatchAgentReprovision(_ context.Context, agent *store.Agent) error {
+	if d.returnErr != nil {
+		return d.returnErr
+	}
+	d.dispatchedAgents = append(d.dispatchedAgents, agent)
+	agent.Phase = string(state.PhaseCreated)
+	return nil
+}
 func (d *mockDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, _ string, _ bool) error {
 	d.startedAgents = append(d.startedAgents, agent)
 	return nil

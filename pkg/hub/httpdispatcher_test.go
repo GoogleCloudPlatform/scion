@@ -836,6 +836,95 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision(t *testing.T) {
 	}
 }
 
+// TestHTTPAgentDispatcher_DispatchAgentReprovision covers the Phase 1 vertical
+// slice's broker dispatch step (design §3.4): reprovision must set BOTH
+// ProvisionOnly (don't start the container) AND Reprovision (overwrite the
+// persisted config rather than reuse it) on the wire request, and must read
+// the config to send from the agent's CURRENT AppliedConfig — the reincarnate
+// worker is expected to have already replaced it with the freshly resolved
+// generation N+1 config before calling this.
+func TestHTTPAgentDispatcher_DispatchAgentReprovision(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("host-1"),
+		Name:     "test-host",
+		Slug:     "test-host",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-1"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			TemplateHash:  "new-generation-hash",
+			Image:         "new-generation-image:v2",
+		},
+	}
+
+	if err := dispatcher.DispatchAgentReprovision(ctx, agent); err != nil {
+		t.Fatalf("DispatchAgentReprovision failed: %v", err)
+	}
+
+	if !mockClient.createCalled {
+		t.Fatal("expected CreateAgent to be called for reprovision")
+	}
+	if !mockClient.lastCreateReq.ProvisionOnly {
+		t.Error("expected ProvisionOnly to be true in the request")
+	}
+	if !mockClient.lastCreateReq.Reprovision {
+		t.Error("expected Reprovision to be true in the request")
+	}
+	if mockClient.lastCreateReq.Config == nil || mockClient.lastCreateReq.Config.TemplateHash != "new-generation-hash" {
+		t.Errorf("expected the new generation's TemplateHash to be sent, got %+v", mockClient.lastCreateReq.Config)
+	}
+	if mockClient.lastCreateReq.Config == nil || mockClient.lastCreateReq.Config.Image != "new-generation-image:v2" {
+		t.Errorf("expected the new generation's Image to be sent, got %+v", mockClient.lastCreateReq.Config)
+	}
+	if mockClient.lastEndpoint != "http://localhost:9800" {
+		t.Errorf("expected endpoint 'http://localhost:9800', got '%s'", mockClient.lastEndpoint)
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentReprovision_NoBroker mirrors the
+// no-broker-assigned guard on DispatchAgentProvision: AC-9's 412 gate lives
+// one layer up (the hub handler checks broker capability before dispatch at
+// all), but the dispatcher itself must still fail closed if somehow called
+// against an agent with no assigned broker.
+func TestHTTPAgentDispatcher_DispatchAgentReprovision_NoBroker(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-1"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		RuntimeBrokerID: "",
+	}
+
+	if err := dispatcher.DispatchAgentReprovision(ctx, agent); err == nil {
+		t.Fatal("expected error when no runtime broker is assigned")
+	}
+	if mockClient.createCalled {
+		t.Fatal("CreateAgent should not be called when no broker is assigned")
+	}
+}
+
 func TestHTTPAgentDispatcher_DispatchAgentProvision_NoBroker(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
