@@ -121,3 +121,31 @@ func TestScheduledDispatch_UnverifiedProjectDefaultSAFailsDispatch(t *testing.T)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not verified")
 }
+
+// The scheduler calls evaluateSAAssignment with no *http.Request. Every denial
+// path logs through logAuthzDenial with that nil request; these pin that a nil
+// request is accepted rather than dereferenced. The callerPrincipal-failure
+// site calls the same logAuthzDenial with the same r, so the direct test
+// covers it; it is not independently reachable past the policy layer.
+func TestEvaluateSAAssignment_NilRequestLogAuthzDenial(t *testing.T) {
+	assert.NotPanics(t, func() {
+		logAuthzDenial(nil, nil, Resource{Type: "gcp_service_account"}, ActionAssign, "test")
+	})
+}
+
+func TestEvaluateSAAssignment_NilRequestPolicyDenial(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	sa := bypassAgentsCreateSA(t, f, f.proj.ID, true)
+
+	// A user with no membership anywhere: the Hub policy layer denies, which
+	// is the first logAuthzDenial call site in evaluateSAAssignment.
+	stranger := NewAuthenticatedUser("stranger-user", "stranger@example.com", "Stranger", store.UserRoleMember, "scheduler")
+	ctx := contextWithIdentity(context.Background(), stranger)
+
+	var denial *saAssignDenial
+	require.NotPanics(t, func() {
+		denial = f.srv.evaluateSAAssignment(ctx, nil, sa, SurfaceProjectDefault)
+	})
+	require.NotNil(t, denial, "a stranger must be denied")
+	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
+}

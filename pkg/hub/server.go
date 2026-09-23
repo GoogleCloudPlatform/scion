@@ -3337,7 +3337,9 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 			return nil
 		}
 		sa, err := s.store.GetGCPServiceAccount(ctx, projectSettings.DefaultGCPIdentityServiceAccountID)
-		if err != nil || !sa.ReachableFromProject(agent.ProjectID) {
+		// sa == nil is explicit even though ReachableFromProject is nil-safe,
+		// so a store returning (nil, nil) visibly takes this branch.
+		if err != nil || sa == nil || !sa.ReachableFromProject(agent.ProjectID) {
 			slog.Warn("project-default SA assignment failed: service account not available",
 				"surface", SurfaceProjectDefault,
 				"project_id", agent.ProjectID,

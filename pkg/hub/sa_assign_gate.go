@@ -310,7 +310,8 @@ func (d *saAssignDenial) write(w http.ResponseWriter) {
 // authorizeSAAssignment: every check, log line and audit record, with the
 // caller taken from the identity on ctx. It returns nil when the assignment
 // may proceed. r is used only to name the request path in denial logs and may
-// be nil for callers with no HTTP request (the scheduler).
+// be nil for callers with no HTTP request (the scheduler); logAuthzDenial
+// accepts a nil request, and TestEvaluateSAAssignment_NilRequest* pin that.
 func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *store.GCPServiceAccount, surface string) *saAssignDenial {
 	if sa == nil {
 		// Caller bug rather than a policy outcome; deny rather than panic.
