@@ -2281,6 +2281,13 @@ export class ScionChatThread extends LitElement {
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     this.pinnedToBottom = distFromBottom < SCROLL_BOTTOM_THRESHOLD;
 
+    // A tap-opened (or right-clicked) context menu is positioned at a fixed
+    // viewport point; once the thread scrolls it no longer points at the
+    // message it targets, so dismiss it rather than leave it stranded.
+    if (this.contextMenuMessage) {
+      this.closeContextMenu();
+    }
+
     // Load older messages when scrolled near top
     if (
       el.scrollTop < SCROLL_TOP_THRESHOLD &&
@@ -2554,6 +2561,29 @@ export class ScionChatThread extends LitElement {
     this.contextMenuMessage = msg;
     this.contextMenuPosition = { x: e.clientX, y: e.clientY };
     document.addEventListener('keydown', this.handleContextMenuKeydown);
+  }
+
+  /**
+   * Touch devices have no `:hover` state to reveal message actions, and a
+   * long-press (which would otherwise fire `contextmenu`) is consumed by
+   * iOS's native text-selection gesture instead. A plain tap opens the same
+   * context menu a desktop right-click would, positioned at the tap point,
+   * so touch users have a reachable path to reply/edit/delete/copy.
+   */
+  private handleMessageTap(e: MouseEvent, msg: Message): void {
+    // Desktop already has hover-revealed actions and a working right-click
+    // menu — only intervene on devices that cannot hover.
+    if (!window.matchMedia('(hover: none)').matches) return;
+
+    // <scion-chat-message> renders into its own shadow root, so `e.target`
+    // here is retargeted to the message host itself regardless of what was
+    // actually clicked inside it. `composedPath()[0]` is the real innermost
+    // element, which is what "was a link/button tapped?" needs to inspect.
+    const target = e.composedPath()[0] as HTMLElement;
+    if (target.closest?.('a, button, sl-icon-button, .entity-link, .mention, .reply-preview'))
+      return;
+
+    this.handleMessageContextMenu(e, msg);
   }
 
   /** Dismiss context menu on Escape key. */
@@ -3395,6 +3425,7 @@ export class ScionChatThread extends LitElement {
       rows.push(html`
         <scion-chat-message
           @contextmenu=${(e: MouseEvent) => this.handleMessageContextMenu(e, msg)}
+          @click=${(e: MouseEvent) => this.handleMessageTap(e, msg)}
           id="msg-${msg.id}"
           body=${msg.msg}
           sender=${msg.sender}

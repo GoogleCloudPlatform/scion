@@ -411,29 +411,56 @@ describe('scion-chat-thread read watermark', () => {
     ['2026-09-19T00:00:00.100000001Z', '2026-09-19T00:00:00.1Z', 'a', 'b'],
     ['2026-09-19T00:00:00.000002Z', '2026-09-19T00:00:00.000001Z', 'a', 'b'],
     ['2026-09-19T01:00:00+01:00', '2026-09-19T00:00:00Z', 'b', 'a'],
-  ])('acknowledges the server tail for tied millisecond timestamps (%s / %s)', async (newer, older, tailID, oldID) => {
-    vi.useFakeTimers();
-    try {
-      apiFetch.mockImplementation((url: string) => Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve(String(url).includes('/messages?') ? { items: [
-          { id: tailID, sender: 'user:them', msg: 'newest', type: 'chat', createdAt: newer },
-          { id: oldID, sender: 'user:them', msg: 'older', type: 'chat', createdAt: older },
-        ] } : {}),
-      } as Response));
-      const el = await mount();
-      await vi.advanceTimersByTimeAsync(600);
-      const readCall = apiFetch.mock.calls.find(
-        (c) => String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
-      );
-      expect(readCall).toBeDefined();
-      expect(JSON.parse(String((readCall![1] as RequestInit).body))).toEqual({ messageId: tailID });
-      const bubbles = el.shadowRoot!.querySelectorAll('scion-chat-message');
-      expect(bubbles[bubbles.length - 1].id).toBe(`msg-${tailID}`);
-    } finally {
-      vi.useRealTimers();
+  ])(
+    'acknowledges the server tail for tied millisecond timestamps (%s / %s)',
+    async (newer, older, tailID, oldID) => {
+      vi.useFakeTimers();
+      try {
+        apiFetch.mockImplementation((url: string) =>
+          Promise.resolve({
+            ok: true,
+            json: () =>
+              Promise.resolve(
+                String(url).includes('/messages?')
+                  ? {
+                      items: [
+                        {
+                          id: tailID,
+                          sender: 'user:them',
+                          msg: 'newest',
+                          type: 'chat',
+                          createdAt: newer,
+                        },
+                        {
+                          id: oldID,
+                          sender: 'user:them',
+                          msg: 'older',
+                          type: 'chat',
+                          createdAt: older,
+                        },
+                      ],
+                    }
+                  : {}
+              ),
+          } as Response)
+        );
+        const el = await mount();
+        await vi.advanceTimersByTimeAsync(600);
+        const readCall = apiFetch.mock.calls.find(
+          (c) =>
+            String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
+        );
+        expect(readCall).toBeDefined();
+        expect(JSON.parse(String((readCall![1] as RequestInit).body))).toEqual({
+          messageId: tailID,
+        });
+        const bubbles = el.shadowRoot!.querySelectorAll('scion-chat-message');
+        expect(bubbles[bubbles.length - 1].id).toBe(`msg-${tailID}`);
+      } finally {
+        vi.useRealTimers();
+      }
     }
-  });
+  );
 
   it('drops a watermark response that lands after a conversation switch', async () => {
     const el = await mount();
@@ -486,11 +513,20 @@ describe('scion-chat-thread receipt expiry', () => {
       applyPeerReadState(id: string, readAt: string): void;
       seenExpired: boolean;
     };
-    internals.mergeMessages([{
-      id: 'receipt-1', projectId: '', sender: 'user:me@example.com', senderId: 'user-me',
-      recipient: '', msg: 'hello', type: 'chat', agentId: '', dispatchState: 'dispatched',
-      createdAt: new Date().toISOString(),
-    }]);
+    internals.mergeMessages([
+      {
+        id: 'receipt-1',
+        projectId: '',
+        sender: 'user:me@example.com',
+        senderId: 'user-me',
+        recipient: '',
+        msg: 'hello',
+        type: 'chat',
+        agentId: '',
+        dispatchState: 'dispatched',
+        createdAt: new Date().toISOString(),
+      },
+    ]);
     internals.applyPeerReadState('receipt-1', new Date().toISOString());
     await el.updateComplete;
     const bubble = () => el.shadowRoot!.querySelector('scion-chat-message')!;
@@ -1254,5 +1290,178 @@ describe('scion-chat-thread mention message filtering', () => {
     expect(messageMap.has('msg-mention-mixed')).toBe(true);
     expect(messageMap.has('msg-instr')).toBe(true);
     expect(messageMap.has('msg-reply')).toBe(true);
+  });
+});
+
+/**
+ * Touch devices have no `:hover` state to reveal message actions, and a
+ * long-press (which would fire `contextmenu`) is consumed by iOS's native
+ * text-selection gesture instead. A tap on the message must open the same
+ * context menu a desktop right-click does — but only on touch, and never
+ * when the tap actually landed on a link/button inside the message.
+ */
+describe('scion-chat-thread touch tap-to-open context menu', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
+
+  /** Stub `matchMedia('(hover: none)')` to report a touch or hover-capable device. */
+  function mockHoverCapability(hoverNone: boolean): void {
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === '(hover: none)' ? hoverNone : false,
+          media: query,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList
+    );
+  }
+
+  /** Mount a thread with one rendered message bubble. */
+  async function mountWithMessage(): Promise<{ el: ScionChatThread; bubble: HTMLElement }> {
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'm1',
+              sender: 'them@example.com',
+              senderId: 'user-them',
+              msg: 'hello there',
+              type: 'chat',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+          ],
+        }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+    await vi.waitFor(() =>
+      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(1)
+    );
+    const bubble = el.shadowRoot!.querySelector('scion-chat-message') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await bubble.updateComplete;
+    return { el, bubble };
+  }
+
+  function tap(target: Element): void {
+    target.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, composed: true, clientX: 10, clientY: 20 })
+    );
+  }
+
+  it('opens the context menu on tap when the device cannot hover', async () => {
+    mockHoverCapability(true);
+    const { el, bubble } = await mountWithMessage();
+
+    tap(bubble);
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.context-menu')).not.toBeNull();
+  });
+
+  it('does not open the context menu on tap on a hover-capable (desktop) device', async () => {
+    mockHoverCapability(false);
+    const { el, bubble } = await mountWithMessage();
+
+    tap(bubble);
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.context-menu')).toBeNull();
+  });
+
+  it('ignores a tap that lands on a link inside the message', async () => {
+    mockHoverCapability(true);
+    const { el, bubble } = await mountWithMessage();
+
+    // e.target is retargeted to the <scion-chat-message> host once the click
+    // crosses its shadow boundary, so the handler must consult
+    // composedPath()[0] to see the real element that was tapped.
+    const anchor = document.createElement('a');
+    anchor.setAttribute('class', 'entity-link');
+    anchor.href = '#';
+    bubble.shadowRoot!.querySelector('.bubble')!.appendChild(anchor);
+
+    tap(anchor);
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.context-menu')).toBeNull();
+  });
+
+  it('shows actions for a newly tapped message and hides the previous one', async () => {
+    mockHoverCapability(true);
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'm1',
+              sender: 'them@example.com',
+              senderId: 'user-them',
+              msg: 'first',
+              type: 'chat',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+            {
+              id: 'm2',
+              sender: 'them@example.com',
+              senderId: 'user-them',
+              msg: 'second',
+              type: 'chat',
+              createdAt: '2026-01-01T00:01:00Z',
+            },
+          ],
+        }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+    await vi.waitFor(() =>
+      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(2)
+    );
+    const [first, second] = Array.from(el.shadowRoot!.querySelectorAll('scion-chat-message'));
+
+    tap(first);
+    await el.updateComplete;
+    expect(
+      (el as unknown as { contextMenuMessage: { id: string } | null }).contextMenuMessage?.id
+    ).toBe('m1');
+
+    tap(second);
+    await el.updateComplete;
+    expect(
+      (el as unknown as { contextMenuMessage: { id: string } | null }).contextMenuMessage?.id
+    ).toBe('m2');
+  });
+
+  it('dismisses an open context menu when the thread scrolls', async () => {
+    mockHoverCapability(true);
+    const { el, bubble } = await mountWithMessage();
+
+    tap(bubble);
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.context-menu')).not.toBeNull();
+
+    const scrollEl = el.shadowRoot!.querySelector('.messages-scroll')!;
+    scrollEl.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.context-menu')).toBeNull();
   });
 });
