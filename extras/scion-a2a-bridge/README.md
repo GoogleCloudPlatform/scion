@@ -107,7 +107,7 @@ Once installed, the bridge's admin-managed settings can be edited from the integ
 
 | Setting | Description |
 |---------|-------------|
-| **Auth scheme** | Client authentication mode: `apiKey`, `bearer`, `none`, `hubUAT`, or `hubJWT`. Select from the dropdown. |
+| **Auth scheme** | Client authentication mode: `apiKey`, `bearer`, `none`, `hubUAT`, `hubBearer`, or `hubJWT`. Select from the dropdown. `hubBearer` forwards any bearer credential the Hub itself accepts (e.g. a Google credential attached by an upstream caller) verbatim, admitted via Hub `/api/v1/auth/me`; it requires a matching trusted issuer on the Hub. |
 | **API key** | Static API key for `apiKey`/`bearer` schemes. Stored in the Hub secret backend — never written to YAML files. Only shown when the auth scheme requires it. |
 | **External URL** | Public URL where A2A clients reach the bridge (e.g., `https://a2a.example.com`). Used in generated agent cards. |
 | **Rate limiting** | Enable/disable per-client rate limiting, with configurable requests-per-second and burst size. |

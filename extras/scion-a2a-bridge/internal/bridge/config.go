@@ -65,15 +65,15 @@ type PluginConfig struct {
 type AuthConfig struct {
 	// Scheme selects the auth mode.
 	// Existing: "apiKey" | "bearer" | "none"
-	// New:      "hubUAT" | "hubJWT" | "geGoogle"
+	// New:      "hubUAT" | "hubBearer" | "hubJWT" | "geGoogle"
 	Scheme string `yaml:"scheme"`
 
 	// APIKey is the shared static key for "apiKey" and "bearer" schemes.
-	// Not used for hubUAT or hubJWT.
+	// Not used for hubUAT, hubBearer, or hubJWT.
 	APIKey string `yaml:"api_key"`
 
-	// UATCacheTTL is the UAT introspection cache TTL for hubUAT mode.
-	// Default: 60s. Maximum: 300s.
+	// UATCacheTTL is the Hub /auth/me introspection cache TTL for hubUAT and
+	// hubBearer modes. Default: 60s. Maximum: 300s.
 	UATCacheTTL time.Duration `yaml:"uat_cache_ttl"`
 
 	// GEExchange holds GE Google credential exchange configuration.

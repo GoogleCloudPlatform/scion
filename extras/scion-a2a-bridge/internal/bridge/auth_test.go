@@ -15,6 +15,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -55,11 +56,22 @@ func TestAuthMiddleware_AllSchemes(t *testing.T) {
 			return
 		}
 		auth := r.Header.Get("Authorization")
-		if auth == "Bearer scion_pat_valid" {
-			json.NewEncoder(w).Encode(userResponse{
+		switch auth {
+		case "Bearer scion_pat_valid":
+			_ = json.NewEncoder(w).Encode(userResponse{
 				ID:    "uat-user-1",
 				Email: "alice@example.com",
 				Role:  "user",
+			})
+			return
+		case "Bearer google-id-token-valid":
+			// Not a scion_pat_* token — stands in for a Google credential the
+			// Hub's external-bearer path admitted via its own trust config.
+			// hubBearer has no prefix check, so this must be accepted.
+			_ = json.NewEncoder(w).Encode(userResponse{
+				ID:    "bearer-user-1",
+				Email: "bearer-user@example.com",
+				Role:  "member",
 			})
 			return
 		}
@@ -151,6 +163,43 @@ func TestAuthMiddleware_AllSchemes(t *testing.T) {
 		{
 			name:       "hubUAT/missing",
 			scheme:     "hubUAT",
+			header:     "",
+			headerVal:  "",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			// B1: a Google-shaped (non scion_pat_) credential is admitted via
+			// /auth/me under hubBearer, unlike hubUAT (see hubUAT/not-pat-prefix
+			// above, and TestAuthMiddleware_HubUATVsHubBearer_PrefixGuard for the
+			// direct contrast on the identical token).
+			name:       "hubBearer/valid-google-token",
+			scheme:     "hubBearer",
+			header:     "Authorization",
+			headerVal:  "Bearer google-id-token-valid",
+			wantStatus: http.StatusOK,
+			wantCaller: "bearer-user-1",
+		},
+		{
+			// hubBearer also still accepts a scion_pat_* token — the Hub is
+			// the sole arbiter, the bridge does not gate on the prefix.
+			name:       "hubBearer/valid-pat-token",
+			scheme:     "hubBearer",
+			header:     "Authorization",
+			headerVal:  "Bearer scion_pat_valid",
+			wantStatus: http.StatusOK,
+			wantCaller: "uat-user-1",
+		},
+		{
+			name:       "hubBearer/rejected-by-hub",
+			scheme:     "hubBearer",
+			header:     "Authorization",
+			headerVal:  "Bearer garbage-token",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			// B4 (empty token -> 401).
+			name:       "hubBearer/missing",
+			scheme:     "hubBearer",
 			header:     "",
 			headerVal:  "",
 			wantStatus: http.StatusUnauthorized,
@@ -482,6 +531,26 @@ func TestValidateConfig_NewSchemes(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "hubBearer/valid",
+			auth:    AuthConfig{Scheme: "hubBearer"},
+			wantErr: false,
+		},
+		{
+			name:    "hubBearer/no-api-key-needed",
+			auth:    AuthConfig{Scheme: "hubBearer"},
+			wantErr: false,
+		},
+		{
+			name:    "hubBearer/with-ttl",
+			auth:    AuthConfig{Scheme: "hubBearer", UATCacheTTL: 120 * time.Second},
+			wantErr: false,
+		},
+		{
+			name:    "hubBearer/ttl-too-high",
+			auth:    AuthConfig{Scheme: "hubBearer", UATCacheTTL: 600 * time.Second},
+			wantErr: true,
+		},
+		{
 			name:    "unsupported/scheme",
 			auth:    AuthConfig{Scheme: "oauth2"},
 			wantErr: true,
@@ -511,4 +580,137 @@ func TestValidateConfig_NewSchemes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// wantPlainErrorBody reconstructs the exact bytes http.Error writes for a
+// given message: the message plus a single trailing newline (net/http's
+// Error calls fmt.Fprintln). Comparing against this — rather than a prefix
+// or substring — fails the test if the wording changes, or if an underlying
+// error reason ever leaks into the body.
+func wantPlainErrorBody(message string) []byte {
+	return []byte(message + "\n")
+}
+
+func newHubBearerMiddleware(t *testing.T, hubURL, scheme string) http.Handler {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := &Config{
+		Bridge: BridgeConfig{ExternalURL: "https://test"},
+		Hub:    HubConfig{Endpoint: hubURL, User: "admin@test"},
+		Auth:   AuthConfig{Scheme: scheme},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	b := New(store, nil, nil, cfg, nil, log)
+	srv := NewServer(b, cfg, nil, log, testHandler())
+	return srv.authMiddleware(testHandler())
+}
+
+// TestAuthMiddleware_HubBearer_EmptyToken proves the empty-token guard in the
+// hubBearer case (server.go) — not an incidental Hub-side rejection — is what
+// rejects a missing credential. The mock Hub below is deliberately
+// permissive: it treats ANY request (including one with no Authorization
+// header) as a valid identity. If the "token == \"\"" guard were ever
+// deleted, the request would fall through to uatV.Validate and this
+// permissive Hub would admit it, turning this test's expected 401 into a 200
+// and failing it.
+func TestAuthMiddleware_HubBearer_EmptyToken(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(userResponse{ID: "should-never-be-reached", Email: "nobody@example.com", Role: "member"})
+	}))
+	defer hub.Close()
+
+	mw := newHubBearerMiddleware(t, hub.URL, "hubBearer")
+
+	req := httptest.NewRequest(http.MethodPost, "/projects/p/agents/a/jsonrpc", nil)
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (empty-token guard must reject before reaching the permissive mock Hub)", w.Code)
+	}
+	want := wantPlainErrorBody("unauthorized: missing bearer token")
+	if !bytes.Equal(w.Body.Bytes(), want) {
+		t.Errorf("body = %q, want %q", w.Body.Bytes(), want)
+	}
+}
+
+// TestAuthMiddleware_HubBearer_RejectedByHub proves the exact rejection
+// response the design mandates (§4.6): 401, fixed message, and the
+// underlying Hub rejection reason never appears in the response body
+// (logged at Info instead). Exact-byte comparison catches a mutation that
+// leaks the reason (e.g. interpolating err.Error() into the message).
+func TestAuthMiddleware_HubBearer_RejectedByHub(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "very specific reason the caller must never see", http.StatusUnauthorized)
+	}))
+	defer hub.Close()
+
+	mw := newHubBearerMiddleware(t, hub.URL, "hubBearer")
+
+	req := httptest.NewRequest(http.MethodPost, "/projects/p/agents/a/jsonrpc", nil)
+	req.Header.Set("Authorization", "Bearer some-token-the-hub-rejects")
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	want := wantPlainErrorBody("unauthorized: token rejected by Scion Hub")
+	if !bytes.Equal(w.Body.Bytes(), want) {
+		t.Errorf("body = %q, want %q", w.Body.Bytes(), want)
+	}
+}
+
+// TestAuthMiddleware_HubUATVsHubBearer_PrefixGuard sends the identical
+// non-scion_pat_ credential to both schemes against the same Hub. B2 (hubUAT
+// is unchanged) and hubBearer's defining difference (no prefix check) are
+// proven side by side, against the same fixture, so a change that
+// accidentally shares hubUAT's prefix guard with hubBearer (or removes
+// hubUAT's) fails one half or the other.
+func TestAuthMiddleware_HubUATVsHubBearer_PrefixGuard(t *testing.T) {
+	const token = "not-a-scion-pat-but-a-valid-hub-credential"
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer "+token {
+			_ = json.NewEncoder(w).Encode(userResponse{ID: "user-1", Email: "user@example.com", Role: "member"})
+			return
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer hub.Close()
+
+	t.Run("hubUAT_still_rejects", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/projects/p/agents/a/jsonrpc", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		newHubBearerMiddleware(t, hub.URL, "hubUAT").ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("hubUAT status = %d, want 401", w.Code)
+		}
+		want := wantPlainErrorBody("unauthorized: expected scion_pat_* token")
+		if !bytes.Equal(w.Body.Bytes(), want) {
+			t.Errorf("hubUAT body = %q, want %q", w.Body.Bytes(), want)
+		}
+	})
+
+	t.Run("hubBearer_accepts_same_token", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/projects/p/agents/a/jsonrpc", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		newHubBearerMiddleware(t, hub.URL, "hubBearer").ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("hubBearer status = %d, want 200; body=%s", w.Code, w.Body.String())
+		}
+		var body map[string]string
+		if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["user_id"] != "user-1" || body["token_type"] != "bearer" {
+			t.Errorf("hubBearer caller = %+v, want user_id=user-1 token_type=bearer", body)
+		}
+	})
 }

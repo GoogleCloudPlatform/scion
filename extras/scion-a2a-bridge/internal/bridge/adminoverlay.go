@@ -95,7 +95,7 @@ type ConfigSnapshot struct {
 // AuthValidators holds the active auth validation functions.
 type AuthValidators struct {
 	Scheme              string
-	UATValidator        *UATValidator        // non-nil when scheme is hubUAT
+	UATValidator        *UATValidator        // non-nil when scheme is hubUAT or hubBearer
 	JWTValidator        *JWTValidator        // non-nil when scheme is hubJWT
 	GEExchangeValidator *GEExchangeValidator // non-nil when scheme is geGoogle
 	APIKey              string               // non-empty when scheme is apiKey or bearer
@@ -327,7 +327,9 @@ func BuildAuthValidators(cfg *Config, geOpts ...GEValidatorOption) AuthValidator
 		Scheme: cfg.Auth.Scheme,
 	}
 	switch cfg.Auth.Scheme {
-	case "hubUAT":
+	case "hubUAT", "hubBearer":
+		// hubBearer shares hubUAT's Hub-introspecting validator; the schemes
+		// differ only in authMiddleware's prefix check (server.go).
 		ttl := cfg.Auth.UATCacheTTL
 		av.UATValidator = NewUATValidator(cfg.Hub.Endpoint, ttl)
 	case "hubJWT":
