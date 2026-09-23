@@ -1,0 +1,226 @@
+# auth-passthrough — Phase 5, bridge half (`hubBearer`)
+
+**Agent:** ap-p5b-dev · **Branch:** `scion/auth-passthrough` · **Date:** 2026-09-23
+
+## Summary
+
+Implemented the bridge half of Phase 5 (`impl-design.md` §4.6, §5): a new A2A
+bridge auth scheme, `hubBearer`, that forwards any bearer credential the Hub
+itself accepts (in particular a Google user ID token attached by an upstream
+caller such as Gemini Enterprise) to the Hub's `GET /api/v1/auth/me` for
+admission, then forwards the same token verbatim on every downstream Hub
+call. No credential exchange, no widening of `hubUAT`. The observability half
+(§4.7) is out of scope for this phase (comes after Phases 2-4, per the
+brief). `geGoogle` and the v0.3 JSON-RPC/agent-card work from
+`GoogleCloudPlatform/scion#1847` are untouched.
+
+## What changed
+
+All changes are inside `extras/scion-a2a-bridge/**`, per the shared-branch
+ownership split (Hub developers own `pkg/**`).
+
+- **`internal/bridge/server.go`**
+  - `ValidateConfig`'s scheme allowlist (`:154`) and no-api-key exception list
+    (`:164`) both admit `hubBearer`.
+  - `NewServer`'s per-scheme validator construction: `case "hubUAT",
+    "hubBearer":` — both share the same `UATValidator` (identical `/auth/me`
+    introspection + cache; the schemes differ only in the middleware guard).
+  - `WarnOnOpenAuth`: added the `hubBearer` startup log line.
+  - `authMiddleware`: new `case "hubBearer":`, structurally `hubUAT`'s case
+    minus the `scion_pat_` prefix check. Empty token → 401
+    `unauthorized: missing bearer token` (mirrors `hubJWT`'s existing
+    empty-token message, and is what GoogleCloudPlatform/scion#1847 used for its `hubUAT` widening —
+    reused here for the new scheme instead). On Hub rejection, logs at Info
+    and returns exactly `unauthorized: token rejected by Scion Hub` (cherry-
+    picked wording from GoogleCloudPlatform/scion#1847's `hubUAT`-widening hunk, since design §4.6
+    asks for the identical message on the new scheme).
+- **`internal/bridge/adminoverlay.go`** (`BuildAuthValidators`) — **not** in
+  the brief's file list, but required for the feature to work at all in
+  production: `cmd/scion-a2a-bridge/main.go` always calls `SetSnapshot`, and
+  `authMiddleware` reads `uatV` from the snapshot whenever one is set (which
+  is unconditionally, in the real binary) — `NewServer`'s constructor-time
+  `s.uatValidator` is dead in that path. Without this change, a real
+  deployment configured with `auth.scheme: hubBearer` would 500 on every
+  request (`uatV == nil`) despite `NewServer`/`authMiddleware` being correct,
+  and every unit test that goes through `NewServer` directly (no snapshot)
+  would still pass — so this gap would not have been caught by any test the
+  brief's file list implied. Added `case "hubUAT", "hubBearer":` there too,
+  mirroring the `hubUAT` construction. Did **not** add `hubBearer` to
+  `validAuthSchemes` (used only to gate the Admin-UI hot-apply `Configure()`
+  path) — `geGoogle` is excluded from that map today for the same reason
+  (schemes not yet exposed to the admin overlay), so this preserves existing
+  precedent rather than introducing a new one; `hubBearer` is set via the
+  static YAML `auth.scheme` key, which `main.go`'s initial `BuildSnapshot`
+  already picks up at boot.
+- **`internal/bridge/uatvalidator.go`** — cherry-picked GoogleCloudPlatform/scion#1847's `TokenType`
+  split: `scion_pat_*` → `"uat"`, anything else the Hub accepted → `"bearer"`
+  (reachable only via `hubBearer`, since `hubUAT`'s prefix check keeps
+  non-PAT tokens from ever reaching `Validate`).
+- **`internal/bridge/bridge.go`** (`callerHubClient`) — cherry-picked GoogleCloudPlatform/scion#1847's
+  `case "uat", "bearer":`, forwarding `RawToken` verbatim with transport auth
+  composed, exactly like `"uat"` already did. Did **not** port GoogleCloudPlatform/scion#1847's
+  `Channel = "a2a-bridge"` or the `securitySchemes`/agent-card block (v0.3
+  work, explicitly out of scope per the design and the brief).
+- **`internal/bridge/caller.go`** — documented `"bearer"` in the `TokenType`
+  field comment.
+- **`internal/bridge/config.go`** — `AuthConfig.Scheme`/`.APIKey`/
+  `.UATCacheTTL` doc comments mention `hubBearer`.
+- **`README.md`**, **`scion-a2a-bridge.yaml.sample`** — documented the new
+  scheme (admin-UI auth-scheme table, sample config comments + a commented
+  example block), per the brief's "bridge config docs/sample config" item.
+  Hub-side docs (`docs-site/...`) are Phase 4's job, untouched.
+- **`internal/bridge/auth_test.go`, `uatvalidator_test.go`,
+  `v0_compat_test.go`** — new/extended tests, see the acceptance-row table
+  below.
+- **`integration/auth_transport_process_test.go`,
+  `integration/alternator_harness_test.go`** — B3 process-level test, see
+  below.
+
+## B3 investigation: pointing the Hub under test at a test Google JWKS
+
+The brief asked me to investigate this before building anything, and to stop
+and ask `ap-em` if the process test couldn't inject a test Google JWKS
+without a new production config knob or a `pkg/` change. It doesn't need
+one — the existing seam already covers it:
+
+- `pkg/hub/google_credential_validator.go`'s `NewGoogleCredentialValidator`
+  takes an `*http.Client` parameter; when passed `nil` (which is what
+  `pkg/hub/server.go`'s `New()` does), the constructed `&http.Client{}` has
+  no `Transport` set, so `net/http` resolves it to `http.DefaultTransport`
+  **at call time**, not at construction time.
+- `extras/scion-a2a-bridge/integration/auth_transport_process_test.go`'s
+  `serveHubProcess` (the Hub subprocess used by the existing `geGoogle`
+  exchange tests) already overrides the **process-global**
+  `http.DefaultTransport` with `rewritePinnedGoogleTransport` before calling
+  `hub.New(cfg, store)`. Every Google-bound HTTPS request the Hub process
+  makes afterwards — including `GoogleCredentialValidator`'s hardcoded JWKS
+  fetch (`https://www.googleapis.com/oauth2/v3/certs`) — is transparently
+  redirected to the fake Google test process.
+- This is the exact seam the design sanctions (`*http.Client`/custom
+  `RoundTripper`), already proven to work for the exchange path (which
+  shares the same base validator instance in production, per Phase 1's
+  server.go wiring). No new production seam, config knob, or `pkg/` change
+  was needed; I did not ask `ap-em` because the investigation had a clean
+  answer within existing constraints.
+
+What *was* needed, entirely inside `extras/scion-a2a-bridge/integration/`:
+1. `serveHubProcess` now also sets `cfg.Federation` (a `user`-type trusted
+   issuer for `https://accounts.google.com`, `ExpectedAudience:
+   testGoogleClientID`, and an explicit placeholder `JWKSURL` so
+   `NewFederationAuthenticator` doesn't attempt live OIDC discovery of the
+   real `accounts.google.com` at Hub startup — the placeholder is never
+   fetched, since `googleTrust()` only reads `IssuerConfig`'s audience/type
+   fields, and cryptographic verification goes through
+   `GoogleCredentialValidator` against the pinned, hardcoded JWKS URL
+   instead). This mirrors the pattern already used by `pkg/hub`'s own
+   `auth_external_bearer_test.go` (`newGoogleTrustFederationAuth`).
+2. `serveHubProcess`'s mock router now forwards `GET /api/v1/auth/me` to the
+   real `productionHandler` (the same `hubServer.Handler()` already used for
+   the exchange endpoint), so the request actually exercises
+   `UnifiedAuthMiddleware` → `serveExternalBearer` — real production code,
+   not a test double.
+3. The mock `/message` endpoint (used only for the test harness's own
+   message-receipt bookkeeping) now accepts either a Hub-minted JWT
+   (existing `geGoogle`-exchange tests) or, falling back, a Google ID token
+   verified via a second `hub.NewGoogleCredentialValidator(nil)` instance —
+   needed because `hubBearer` forwards the *original* Google token
+   downstream, not an exchanged Hub JWT.
+4. New `serveHubBearerBridgeProcess` (factored out of `serveFullBridgeProcess`
+   into a shared `serveScionA2ABridgeProcess` helper parameterized by
+   `AuthConfig`) and a new harness mode, `hub-bearer-bridge`.
+5. `TestHubBearerProcessPassthrough`: fake-Google → real-Hub → real-bridge
+   (`hubBearer`) → real-Hub again. Asserts the JSON-RPC call succeeds, the
+   Hub's exchange counter stays at **0** (no exchange ever happens), and the
+   token the Hub receives on the downstream `/message` call is byte-for-byte
+   the token the client originally presented.
+
+## Acceptance rows → tests
+
+| Row | Description | Test(s) |
+|---|---|---|
+| B1 | Google token admitted via `/auth/me`, forwarded verbatim downstream | `TestAuthMiddleware_AllSchemes/hubBearer/valid-google-token` (admission), `TestUATValidator_TokenTypeClassification` (classified `"bearer"`, `RawToken` untouched), `TestCallerHubClient_BearerTokenType` (forwarding case, mutation-sensitive to reverting `case "uat","bearer"` → `case "uat"`), `TestHubBearer_EndToEnd_PassThrough` (full production wiring: real `New()`/`Server`/executor/SDK handler, asserts the Hub's captured `Authorization` header on the downstream message-send call is byte-identical to the client's original token, and that zero exchange calls occurred) |
+| B2 | `hubUAT` still rejects non-`scion_pat_` tokens (unchanged) | `TestAuthMiddleware_AllSchemes/hubUAT/not-pat-prefix` (pre-existing, still green), `TestAuthMiddleware_HubUATVsHubBearer_PrefixGuard/hubUAT_still_rejects` (new: identical token/Hub fixture as the `hubBearer` acceptance case in the same test, exact-byte body assertion) |
+| B3 | Process integration test: bridge → Hub pass-through, test Google issuer | `TestHubBearerProcessPassthrough` (`extras/scion-a2a-bridge/integration/auth_transport_process_test.go`) |
+| Empty token → 401, exact message | — | `TestAuthMiddleware_HubBearer_EmptyToken` (mock Hub is deliberately permissive — accepts even an empty token — so the test only passes if the bridge's own empty-token guard rejects before ever reaching the Hub; exact-byte body assertion) |
+| Rejection message exact, no reason leak | — | `TestAuthMiddleware_HubBearer_RejectedByHub` (mock Hub's rejection body contains a sentinel string that must never appear in the bridge's response; exact-byte body assertion against `wantPlainErrorBody("unauthorized: token rejected by Scion Hub")`) |
+
+Config-validation coverage: `TestValidateConfig_NewSchemes` gained
+`hubBearer/valid`, `hubBearer/no-api-key-needed`, `hubBearer/with-ttl`,
+`hubBearer/ttl-too-high` rows (mirroring the existing `hubUAT` rows).
+
+## Mutation-resistance notes
+
+Per the brief's quality bar (Phase 1's reviewers ran mutation checks):
+
+- `TestAuthMiddleware_HubBearer_EmptyToken` uses a Hub mock that would
+  **admit** an empty-token request if the bridge-side guard were deleted —
+  so deleting `if token == "" { ... }` flips this test from pass to fail
+  (200 instead of 401), not just from-pass-to-different-401.
+- `TestAuthMiddleware_HubUATVsHubBearer_PrefixGuard` runs the identical
+  credential and Hub fixture through both schemes in one test: reverting
+  `hubBearer`'s case to reuse `hubUAT`'s prefix check fails the
+  `hubBearer_accepts_same_token` subtest; accidentally dropping `hubUAT`'s
+  own prefix check fails the `hubUAT_still_rejects` subtest.
+- `TestCallerHubClient_BearerTokenType` / `TestHubBearer_EndToEnd_PassThrough`
+  fail with `unknown token type: bearer` (surfaced as a JSON-RPC/500 error)
+  if `bridge.go`'s `case "uat", "bearer":` is ever reverted to `case "uat":`
+  alone — the same regression shape `TestCallerHubClient_GEExchangeTokenType`
+  already guards for `"ge_exchange"`.
+- `TestUATValidator_TokenTypeClassification` fails if the `scion_pat_*` /
+  else split in `uatvalidator.go` is ever collapsed back to always `"uat"`.
+- All exact-byte body assertions (`wantPlainErrorBody`, mirroring
+  `pkg/hub/auth_external_bearer_test.go`'s `wantErrorBody` pattern, adapted
+  to the bridge's plain-text `http.Error` responses rather than the Hub's
+  JSON `ErrorResponse` shape) fail on a wording change or on an underlying
+  error reason leaking into the response.
+
+## Source material (`GoogleCloudPlatform/scion#1847`, closed upstream)
+
+Used the durable copies (`/scion-volumes/scratchpad/projects/auth-passthrough/ref/1847.diff`,
+branch `ref/upstream-pr-1847` head `4df5374`, read-only — never committed to
+it). Re-applied by hand: `uatvalidator.go`'s `TokenType` split and
+`bridge.go`'s `callerHubClient` `case "uat", "bearer":`. Both commits carrying
+these hunks have the `Co-authored-by: Bobby Matthews <bobbymatthews@google.com>`
+trailer. Did not port: the `hubUAT`-widening approach itself (implemented as
+the new `hubBearer` scheme instead, per design §4.6), `Channel =
+"a2a-bridge"`, the `securitySchemes`/agent-card block, or any v0.3
+JSON-RPC/agent-card changes (all out of scope).
+
+## Deviations / design questions
+
+None requiring `ap-em`'s input — the one gap I found (`adminoverlay.go`'s
+`BuildAuthValidators`, see above) was a straightforward correctness fix
+within my owned files, not a design ambiguity, so I made the fix and I'm
+recording it here rather than blocking on it.
+
+## Verification
+
+- `cd extras/scion-a2a-bridge && go build -buildvcs=false ./...` — clean.
+- `gofmt -l .` (from `extras/scion-a2a-bridge/`) — clean (also fixed a
+  pre-existing misalignment in `caller.go`'s struct tags that `gofmt` wanted
+  reformatted once the `TokenType` field's comment grew to multiple lines).
+- `go vet ./...` (module-scoped) — clean.
+- `GOGC=40 golangci-lint run --new-from-rev=upstream-main --concurrency=1
+  ./...` (module-scoped; also re-run scoped to `./internal/bridge/...
+  ./integration/...`) — 0 issues. (`upstream-main` fetched via `git fetch
+  https://github.com/GoogleCloudPlatform/scion.git main:upstream-main`.)
+- `go test ./...` (whole `extras/scion-a2a-bridge` module, includes
+  `internal/bridge`, `integration`, `internal/state`) — all green, no
+  regressions in any existing test (`TestGEEnvelopeCompatibility`,
+  `TestColdReplicaAndRotation`, `TestControlPlanePrincipalIsolation`,
+  `TestCombinedStartupMatrix`, `TestCredentialRedaction`, and the full
+  `internal/bridge` suite all still pass unchanged).
+- Bare-issue-number checks (both must print nothing; run with `/usr/bin/grep`
+  directly, not the interactive shell's `grep`, per Phase 1's r3 finding
+  about this environment's `grep` being a `ugrep` wrapper):
+  `git log upstream-main..HEAD --format=%B | /usr/bin/grep -nE '(^|[^/A-Za-z])#[0-9]+'`
+  and `git diff upstream-main..HEAD -- extras/scion-a2a-bridge |
+  /usr/bin/grep -nE '^\+.*(^|[^/A-Za-z0-9])#[0-9]{3,}'` — both clean for my
+  commits.
+
+I did not run the full `pkg/hub` suite (`-timeout 40m`) — I did not touch
+anything under `pkg/`, so it is out of my change's blast radius; the whole-
+module `go build`/`go vet`/`golangci-lint` runs above are repo-scoped where
+that matters (confirming I haven't broken cross-module compilation), and the
+targeted `extras/scion-a2a-bridge` test/lint runs are exhaustive for the
+files I actually touched.
