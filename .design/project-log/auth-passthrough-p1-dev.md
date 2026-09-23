@@ -222,7 +222,7 @@ Every finding resolved per the EM's disposition table; details below.
   `wantErrorBody`) to `TestExternalBearer_UnverifiedEmail_Unauthorized` (U2),
   the new R4 SA test, a new `TestExternalBearer_WrongAudience_Unauthorized`,
   and `TestExternalBearer_NonAuthoritativeEmail_Forbidden` (U3).
-- **R8 (bare `#1847`).** Reworded to `GoogleCloudPlatform/scion#1847` in this
+- **R8 (bare issue-number reference).** Reworded to `GoogleCloudPlatform/scion#1847` in this
   project log (the two remaining bare mentions) and rewrote the `d5717da37`
   commit message (history rewrite, approved by ap-em — see the new head SHA
   reported to ap-em).
@@ -330,7 +330,7 @@ deferred — item 6 arrived mid-round (see below) and is included.
   `TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable`: a validly-signed Google user ID
   token, with Google trusted only as `issuer_type: service_account`, falls through to the original
   401 with zero validator calls.
-- **3 (three remaining bare `#1847` refs).** Two were in test comments
+- **3 (three remaining bare issue-number references).** Two were in test comments
   (`auth_external_bearer_test.go:528,1145` at the time of review): the `:528` comment lived inside
   the now-deleted `_Golden401` test (see finding 9) and went with it; the `:1145` comment (the O4
   section header) reworded to `GoogleCloudPlatform/scion#1847`. The third was the `58544e50e` commit
