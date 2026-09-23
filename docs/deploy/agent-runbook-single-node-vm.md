@@ -421,12 +421,15 @@ still fail.
 `deploy.sh` detects both cases ahead of time (Phase 2):
 
 - **No organization:** if the project has no GCP organization, it always
-  warns — the Google-managed client can never work here, so there's nothing
-  to guess.
+  warns (unless the project's ancestry can't be read) — the Google-managed
+  client can never work here, so there's nothing to guess.
 - **Cross-org:** if the project does have an organization, it compares the
   deployer's email domain against the organization's domain (via `gcloud
   projects get-ancestors` and `gcloud organizations describe`) and warns on
-  a mismatch. This part is a heuristic, not a guarantee, with two known
+  a mismatch. For service-account deployers, this domain comparison is
+  skipped — comparing a service account's domain to an org isn't a
+  meaningful check — but the no-org warning above still applies to them
+  like anyone else. This part is a heuristic, not a guarantee, with two known
   failure modes:
   - **False negative:** if either gcloud call fails (a permissions gap is
     common — reading organization metadata needs a role the deployer may
