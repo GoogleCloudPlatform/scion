@@ -345,12 +345,14 @@ export class ScionPageProjectDetail extends LitElement {
       margin: 0;
     }
 
+    /* Matches the shared .resource-grid in resource-styles.ts, which every
+       other resource list uses. No max-height: the page already scrolls, and
+       capping the section hid agents behind a nested scrollbar that the outer
+       page gave no hint of. */
     .agent-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
       gap: 1.5rem;
-      max-height: 26rem;
-      overflow-y: auto;
     }
 
     .agent-card {
@@ -434,12 +436,14 @@ export class ScionPageProjectDetail extends LitElement {
       border-top: 1px solid var(--scion-border, #e2e8f0);
     }
 
+    /* The list view had the same cap, so switching view modes did not escape
+       the nested scrollbar. overflow-x: auto keeps the rounded corners clipping
+       the table while allowing horizontal scrolling on smaller screens. */
     .agent-table-container {
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius-lg, 0.75rem);
-      max-height: 26rem;
-      overflow-y: auto;
+      overflow-x: auto;
     }
 
     .agent-table-container table {
