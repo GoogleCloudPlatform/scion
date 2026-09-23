@@ -32,25 +32,47 @@
 # Options:
 #   --version VERSION   Scion release version to install (e.g. v0.5.0).
 #                       If omitted, the latest release is fetched from GitHub.
-#   --config FILE       Path to a YAML config file that pre-answers interactive
+#   --config FILE       Path to a JSON config file that pre-answers interactive
 #                       prompts. When provided with all required fields, the
 #                       script runs headlessly (no interactive input needed).
-#                       See deploy-config.example.yaml for the format.
+#                       See deploy-config.example.json for the format.
 #   --rebuild-images    Force a rebuild of container images on the VM even if
 #                       the version marker and all 3 expected images already
 #                       match VERSION. Equivalent to container_images.
 #                       force_rebuild: true in the config file; either one
 #                       forces a rebuild.
 #   --delete            Tear down all resources created by a previous deploy.
+#
+# Config file fields (all optional; see deploy-config.example.json):
+#   hub_name                     Resource name suffix (scion-hub-<hub_name>).
+#                                 <= 20 chars, lowercase letters/digits/hyphens,
+#                                 must start with a lowercase letter.
+#   project_id                   GCP project ID. Empty = current gcloud project.
+#   region                       GCP region for the VM and Cloud Run proxy.
+#   machine_size                 "small" (e2-standard-4, ~10 agents) or
+#                                 "medium" (n2-standard-16, ~50 agents).
+#   disk_size_gb                 Boot disk size in GB.
+#   chat_plugins                 List of: telegram, discord, slack, teams.
+#   container_images.source      "registry" (pre-built images) or "build"
+#                                 (build on the VM).
+#   container_images.registry    Registry path; required when source is
+#                                 "registry" (e.g. us-docker.pkg.dev/PROJECT/scion).
+#   container_images.force_rebuild
+#                                 Force a rebuild even if the VM's version
+#                                 marker and images already match VERSION.
+#   admin_email                  Granted super-admin on first login. Empty =
+#                                 active gcloud account.
+#   update_policy                auto, notify, or disabled. Requires the
+#                                 binary auto-update feature.
+#   release_channel              stable, preview, or nightly. Defaults to
+#                                 nightly if not specified.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Python interpreter used to parse the YAML config file. Override with
-# PYTHON=/path/to/python3 if the system python3 does not have PyYAML
-# installed and PEP 668 ("externally-managed-environment") blocks a bare
-# `pip install pyyaml` (Debian >= 12, Ubuntu >= 23.04, Homebrew Python).
+# Python interpreter used to parse the JSON config file. Override with
+# PYTHON=/path/to/python3 if python3 is not on PATH.
 PYTHON="${PYTHON:-python3}"
 
 # ---------------------------------------------------------------------------
@@ -109,7 +131,7 @@ done
 # ---------------------------------------------------------------------------
 # Config file helper
 # ---------------------------------------------------------------------------
-# Reads a value from the YAML config file using dot-separated keys.
+# Reads a value from the JSON config file using dot-separated keys.
 # Falls back to the provided default when the key is missing or the config
 # file is not set.  Lists are returned as space-separated strings.
 config_get() {
@@ -118,8 +140,8 @@ config_get() {
   if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
     local val
     val="$("$PYTHON" -c "
-import yaml, sys
-d = yaml.safe_load(open(sys.argv[1]))
+import json, sys
+d = json.load(open(sys.argv[1]))
 keys = sys.argv[2].split('.')
 v = d
 for k in keys:
@@ -174,17 +196,9 @@ if [[ -n "$CONFIG_FILE" ]]; then
     err "Python interpreter '${PYTHON}' is required to parse the config file but was not found."
     exit 1
   fi
-  if ! "$PYTHON" -c "import yaml" &>/dev/null; then
-    err "Python 'PyYAML' module is required to parse the config file ('${PYTHON}' has no 'yaml' module). Install it one of these ways:
-    1. System package (Debian/Ubuntu): apt-get install python3-yaml
-    2. Virtualenv:                     python3 -m venv ~/.venv && ~/.venv/bin/pip install pyyaml && PYTHON=~/.venv/bin/python3 bash deploy.sh ...
-    3. Per-user install (where allowed): pip install --user pyyaml
-    If PyYAML is already installed under a different interpreter, set PYTHON=/path/to/python3 and re-run."
-    exit 1
-  fi
-  if ! yaml_err=$("$PYTHON" -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]))" "$CONFIG_FILE" 2>&1); then
-    err "Invalid YAML syntax in config file: $CONFIG_FILE"
-    echo "$yaml_err" >&2
+  if ! json_err=$("$PYTHON" -c "import json, sys; json.load(open(sys.argv[1]))" "$CONFIG_FILE" 2>&1); then
+    err "Invalid JSON syntax in config file: $CONFIG_FILE"
+    echo "$json_err" >&2
     exit 1
   fi
   info "Using config file: $CONFIG_FILE"
@@ -643,7 +657,7 @@ if [[ ! "$VERSION" =~ ^v?[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
   exit 1
 fi
 
-# --- Release channel (auto-detect from version) ---
+# --- Release channel ---
 CFG_RELEASE_CHANNEL="$(config_get 'release_channel' '')"
 if [[ -n "$CFG_RELEASE_CHANNEL" ]]; then
   case "$CFG_RELEASE_CHANNEL" in
@@ -651,12 +665,10 @@ if [[ -n "$CFG_RELEASE_CHANNEL" ]]; then
     *) err "Invalid release_channel in config: '$CFG_RELEASE_CHANNEL' (expected: stable, preview, nightly)"; exit 1 ;;
   esac
 else
-  # Auto-detect from version string (matches pkg/version/update.DetectChannel)
-  case "$VERSION" in
-    nightly-*) RELEASE_CHANNEL="nightly" ;;
-    *-rc*|*-alpha*|*-beta*) RELEASE_CHANNEL="preview" ;;
-    *) RELEASE_CHANNEL="stable" ;;
-  esac
+  # Default to nightly. When running from a git clone (the common agent
+  # path), there is no release artifact to detect a channel from. Nightly
+  # is the appropriate default for latest-code deployments.
+  RELEASE_CHANNEL="nightly"
 fi
 echo "  Release channel: ${RELEASE_CHANNEL}"
 
