@@ -2968,6 +2968,61 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
+   * Resolve a thread's `defaultAgent` (which holds either an agent ID or a
+   * slug) to the agent's ID, so it can be used wherever DM code expects
+   * `conv.peerId`. Empty string when the agent isn't a known space member.
+   */
+  private resolveDefaultAgentId(defaultAgent: string): string {
+    if (!defaultAgent) return '';
+    const byId = this.v2AgentMembers.find((a) => a.id === defaultAgent);
+    if (byId) return byId.id;
+    const bySlug = this.v2AgentMembers.find((a) => a.slug === defaultAgent);
+    return bySlug?.id || '';
+  }
+
+  /**
+   * Terminal + graph icon buttons for an agent, shared by the DM header and
+   * the thread header (when the thread has a default agent). Graph link is
+   * omitted when the agent's project can't be resolved.
+   */
+  private renderAgentToolbarButtons(agentId: string): TemplateResult | typeof nothing {
+    if (!agentId) return nothing;
+    const projectId = this.getAgentProjectId(agentId);
+    return html`
+      <sl-tooltip content="Open terminal">
+        <sl-icon-button
+          name="terminal"
+          label="Open terminal"
+          href=${terminalHref(agentId)}
+          @click=${(e: MouseEvent) => {
+            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            e.preventDefault();
+            openTerminal(agentId);
+          }}
+        ></sl-icon-button>
+      </sl-tooltip>
+      ${projectId
+        ? html`
+            <sl-tooltip content="Open in graph">
+              <sl-icon-button
+                name="diagram-3"
+                label="Open in graph"
+                href=${`/agents/graph?project=${encodeURIComponent(projectId)}&focus=${encodeURIComponent(agentId)}`}
+                @click=${(e: MouseEvent) => {
+                  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                  e.preventDefault();
+                  navigateTo(
+                    `/agents/graph?project=${encodeURIComponent(projectId)}&focus=${encodeURIComponent(agentId)}`
+                  );
+                }}
+              ></sl-icon-button>
+            </sl-tooltip>
+          `
+        : nothing}
+    `;
+  }
+
+  /**
    * Back chevron shown only on mobile, where the neighbouring panels are
    * off-screen and otherwise reachable only by an undiscoverable swipe.
    * The conversation header steps back to the rail; the members header
@@ -3124,41 +3179,10 @@ export class ScionPageChat extends LitElement {
           style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;"
         >
           ${conv.isDM && conv.peerKind === 'agent' && conv.peerId
-            ? html`
-                <sl-tooltip content="Open terminal">
-                  <sl-icon-button
-                    name="terminal"
-                    label="Open terminal"
-                    href=${terminalHref(conv.peerId)}
-                    @click=${(e: MouseEvent) => {
-                      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)
-                        return;
-                      e.preventDefault();
-                      openTerminal(conv.peerId);
-                    }}
-                  ></sl-icon-button>
-                </sl-tooltip>
-                ${this.getAgentProjectId(conv.peerId)
-                  ? html`
-                      <sl-tooltip content="Open in graph">
-                        <sl-icon-button
-                          name="diagram-3"
-                          label="Open in graph"
-                          href=${`/agents/graph?project=${encodeURIComponent(this.getAgentProjectId(conv.peerId))}&focus=${encodeURIComponent(conv.peerId)}`}
-                          @click=${(e: MouseEvent) => {
-                            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)
-                              return;
-                            e.preventDefault();
-                            const projectId = this.getAgentProjectId(conv.peerId);
-                            navigateTo(
-                              `/agents/graph?project=${encodeURIComponent(projectId)}&focus=${encodeURIComponent(conv.peerId)}`
-                            );
-                          }}
-                        ></sl-icon-button>
-                      </sl-tooltip>
-                    `
-                  : nothing}
-              `
+            ? this.renderAgentToolbarButtons(conv.peerId)
+            : nothing}
+          ${!conv.isDM && conv.defaultAgent
+            ? this.renderAgentToolbarButtons(this.resolveDefaultAgentId(conv.defaultAgent))
             : nothing}
           <sl-tooltip content=${this.density === 'dense' ? 'Comfortable view' : 'Dense view'}>
             <sl-icon-button
