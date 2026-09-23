@@ -331,7 +331,7 @@ func (a *AuthzService) computeCapabilitiesWithContext(ctx context.Context, ident
 // user-scoped secrets, so attach and port access to another member's agent
 // would expose that member's credentials (miller79/scion#88). The seeded
 // project-owner/project-admin roles do not carry these permissions; access is
-// resolved per resource via CheckAccess (resource-owner/ancestor grants).
+// resolved per resource from the resource-owner/ancestor relationship grants.
 var ownerAdminExcludedActions = map[Action]bool{
 	ActionAttach:     true,
 	ActionPortAccess: true,
@@ -339,14 +339,19 @@ var ownerAdminExcludedActions = map[Action]bool{
 
 // projectOwnerAdminCapabilities returns the capability set for a project
 // owner/admin: every action except those in ownerAdminExcludedActions, which
-// are evaluated individually through CheckAccess.
+// are included only when the user owns the resource or appears in its
+// ancestry. This is a local check (no CheckAccess/DB lookup per action) so
+// ComputeCapabilitiesBatch stays O(resources) for owners/admins.
 func (a *AuthzService) projectOwnerAdminCapabilities(ctx context.Context, identity Identity, resource Resource, actions []Action) *Capabilities {
 	strs := make([]string, 0, len(actions))
+	userID := ""
+	if u, ok := identity.(UserIdentity); ok {
+		userID = u.ID()
+	}
+	ownsOrAncestor := userID != "" && (resource.OwnerID == userID || canAccessAsAncestor(userID, resource))
 	for _, action := range actions {
-		if ownerAdminExcludedActions[action] {
-			if !a.CheckAccess(ctx, identity, resource, action).Allowed {
-				continue
-			}
+		if ownerAdminExcludedActions[action] && !ownsOrAncestor {
+			continue
 		}
 		strs = append(strs, string(action))
 	}
