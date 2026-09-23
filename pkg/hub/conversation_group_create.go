@@ -327,3 +327,30 @@ func (s *Server) ensureGroupParticipants(ctx context.Context, conversationID str
 		}
 	}
 }
+
+// registerGroupPrimary records the primary recipient of a handleAgentMessage
+// dispatch as a participant of a thread-derived group conversation (review
+// round 2 finding #2, factored out per round 3 finding #7).
+//
+// handleAgentMessage's caller-supplied conversation_id branch already
+// registers its primary recipient before dispatch (pre-existing, out of
+// scope per the round-2 design addendum). The thread-derived branch
+// (DeriveConversationKey, no conversation_id) does not, so without this
+// call the mention co-recipients processMentions adds would be the only
+// participants — the agent the message was actually addressed to and
+// dispatched to would have no row. Call this once per dispatch path, after
+// that path's own dispatch step has already returned success:
+//   - the agent-DM fork, after ExecuteAgentDM
+//   - the managed-runtime path, after managedAgentMessage
+//   - the broker-dispatched path, after dispatchWithBrokerRetry
+//
+// groupConversationID is empty for direct conversations and for the
+// caller-supplied conversation_id branch's own registration path, so this
+// is a deliberate no-op there; ensureGroupParticipants' use of
+// store.EnsureParticipant also makes a redundant call harmless.
+func (s *Server) registerGroupPrimary(ctx context.Context, groupConversationID string, agent *store.Agent) {
+	if groupConversationID == "" {
+		return
+	}
+	s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{agent})
+}

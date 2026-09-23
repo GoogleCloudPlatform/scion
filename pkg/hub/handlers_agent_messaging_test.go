@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +34,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -3173,6 +3175,178 @@ func TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered(t *testing.T) {
 	}
 	require.True(t, agentFound,
 		"AC-11/G3: the primary agent dispatched into a thread-derived group must become a participant")
+}
+
+// TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered_AgentSender is
+// review round 3 finding #1: the sibling test above sends as a *user*, so it
+// only exercises the broker-dispatched registerGroupPrimary call. When the
+// sender is an *agent* — the ordinary `scion message --thread-id ...`
+// agent-to-agent path — handleAgentMessage forks into the Agent DM path
+// (ExecuteAgentDM), a different call site entirely (registerGroupPrimary in
+// the agent-DM-fork branch). This proves that site independently: deleting
+// its call, and only its call, fails this test without affecting the
+// user-sender test above.
+func TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered_AgentSender(t *testing.T) {
+	srv, s, projectID, targetAgent, _ := def49Setup(t)
+	ctx := context.Background()
+
+	senderAgent := &store.Agent{
+		ID:              tid("thread-derived-sender-agent"),
+		Name:            "thread-derived-sender-agent",
+		Slug:            "thread-derived-sender-agent",
+		ProjectID:       projectID,
+		RuntimeBrokerID: targetAgent.RuntimeBrokerID,
+		Phase:           "running",
+		Visibility:      store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, senderAgent))
+
+	threadID := "thread-derived-topic-agent-sender"
+	extRef, err := messaging.ThreadConversationExternalRef(projectID, threadID)
+	require.NoError(t, err)
+
+	sm := &messages.StructuredMessage{
+		Version:     messages.Version,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Type:        messages.TypeInstruction,
+		Sender:      "agent:" + senderAgent.Slug,
+		SenderID:    senderAgent.ID,
+		Recipient:   "agent:" + targetAgent.Slug,
+		RecipientID: targetAgent.ID,
+		Msg:         "hello via thread-derived group, agent sender",
+		Channel:     "web",
+		ThreadID:    threadID,
+	}
+	reqBody, err := json.Marshal(MessageRequest{StructuredMessage: sm})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+targetAgent.ProjectID+"/agents/"+targetAgent.ID+"/message",
+		bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: senderAgent.ID},
+		ProjectID: senderAgent.ProjectID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentMessage(rr, req, targetAgent.ID)
+	require.Equal(t, http.StatusOK, rr.Code, "message to agent should succeed: %s", rr.Body.String())
+
+	conv, err := s.GetConversationByExternalRef(ctx, "native", extRef)
+	require.NoError(t, err)
+	require.Equal(t, "group", conv.Kind)
+
+	parts, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	var agentFound bool
+	for _, p := range parts {
+		if p.PrincipalKind == "agent" && p.PrincipalID == targetAgent.ID {
+			agentFound = true
+		}
+	}
+	require.True(t, agentFound,
+		"AC-11/G3: the primary agent dispatched into a thread-derived group (agent sender / ExecuteAgentDM fork) must become a participant")
+}
+
+// stubManagedAgentBackend is a minimal managedagent.ManagedAgentBackend used
+// to exercise the managed-runtime dispatch path (handlers_managed_agents.go)
+// without touching real cloud config or the network. getManagedBackend
+// returns managedBackendInst immediately when it's already non-nil, before
+// any config/API-key loading — swapping that unexported package-level var
+// from within this package's own test file is an *existing* seam, not a new
+// production one (review round 3 finding #2).
+type stubManagedAgentBackend struct{}
+
+func (stubManagedAgentBackend) Name() string { return "stub" }
+
+func (stubManagedAgentBackend) CreateAgent(ctx context.Context, cfg managedagent.CreateAgentConfig) (string, error) {
+	return "stub-cloud-agent", nil
+}
+
+func (stubManagedAgentBackend) DeleteAgent(ctx context.Context, cloudAgentID string) error {
+	return nil
+}
+
+func (stubManagedAgentBackend) CreateInteraction(ctx context.Context, req managedagent.InteractionRequest) (*managedagent.InteractionHandle, error) {
+	return &managedagent.InteractionHandle{InteractionID: "stub-interaction"}, nil
+}
+
+func (stubManagedAgentBackend) GetInteraction(ctx context.Context, interactionID string) (*managedagent.InteractionState, error) {
+	return &managedagent.InteractionState{InteractionID: interactionID}, nil
+}
+
+func (stubManagedAgentBackend) CancelInteraction(ctx context.Context, interactionID string) error {
+	return nil
+}
+
+func (stubManagedAgentBackend) StreamInteraction(ctx context.Context, interactionID string, lastEventID string) (io.ReadCloser, error) {
+	return nil, fmt.Errorf("stubManagedAgentBackend: streaming not supported")
+}
+
+// TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered_ManagedRuntime is
+// review round 3 finding #2 (conditional, accepted): the managed-runtime
+// dispatch branch in handleAgentMessage (isManagedAgentRuntime, "bypass
+// broker") has its own registerGroupPrimary call, a third call site distinct
+// from the agent-DM-fork and broker-dispatched sites already covered above.
+// Conversation/group resolution (groupConversationID) happens earlier in
+// handleAgentMessage, shared by every dispatch path regardless of
+// agent.Runtime, so a plain user-sender request against a managed-runtime
+// target agent reaches this branch the same way the broker-dispatched test
+// does. Deleting only this branch's registerGroupPrimary call fails this
+// test without affecting the other two.
+func TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered_ManagedRuntime(t *testing.T) {
+	srv, s, projectID, targetAgent, userID := def49Setup(t)
+	ctx := context.Background()
+
+	managedBackendMu.Lock()
+	prevBackend := managedBackendInst
+	managedBackendInst = stubManagedAgentBackend{}
+	managedBackendMu.Unlock()
+	t.Cleanup(func() {
+		managedBackendMu.Lock()
+		managedBackendInst = prevBackend
+		managedBackendMu.Unlock()
+	})
+
+	targetAgent.Runtime = ManagedRuntimePrefix + "stub"
+	require.NoError(t, s.UpdateAgent(ctx, targetAgent))
+
+	threadID := "thread-derived-topic-managed-runtime"
+	extRef, err := messaging.ThreadConversationExternalRef(projectID, threadID)
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+targetAgent.ProjectID+"/agents/"+targetAgent.Slug+"/message",
+		MessageRequest{
+			StructuredMessage: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Sender:    "user:dev",
+				SenderID:  userID,
+				Recipient: "agent:" + targetAgent.Slug,
+				Msg:       "hello via thread-derived group, managed runtime",
+				Type:      messages.TypeInstruction,
+				Channel:   "web",
+				ThreadID:  threadID,
+			},
+		})
+	require.Equal(t, http.StatusOK, rec.Code, "message to managed agent should succeed: %s", rec.Body.String())
+
+	conv, err := s.GetConversationByExternalRef(ctx, "native", extRef)
+	require.NoError(t, err)
+	require.Equal(t, "group", conv.Kind)
+
+	parts, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	var agentFound bool
+	for _, p := range parts {
+		if p.PrincipalKind == "agent" && p.PrincipalID == targetAgent.ID {
+			agentFound = true
+		}
+	}
+	require.True(t, agentFound,
+		"AC-11/G3: the primary agent dispatched into a thread-derived group (managed-runtime path) must become a participant")
 }
 
 // TestOutboundMessage_NativeGroupConvRef verifies that sending an agent

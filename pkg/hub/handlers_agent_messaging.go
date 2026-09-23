@@ -1877,18 +1877,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			}
 			messaging.RecordStep(ctx, "agent_dm_executed")
 
-			// Review round 2 finding #2: on a thread-derived group
-			// (groupConversationID set from the DeriveConversationKey
-			// branch, not the caller-supplied conversation_id branch),
-			// the primary recipient `agent` was dispatched above via
-			// ExecuteAgentDM but never registered as a participant — only
-			// its mention co-recipients were, via processMentions below.
-			// EnsureParticipant is idempotent, so this is a no-op on the
-			// conversation_id branch, which already registered the
-			// primary at (:1709-ish) before this fork.
-			if groupConversationID != "" {
-				s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{agent})
-			}
+			// Review round 2 finding #2 (see registerGroupPrimary): the
+			// primary recipient `agent` was dispatched above via
+			// ExecuteAgentDM and must be registered on a thread-derived
+			// group — this is the agent-sender path (scion message
+			// --thread-id between agents).
+			s.registerGroupPrimary(ctx, groupConversationID, agent)
 
 			// Post-delivery adapter concerns: notification subscription
 			// and mention processing stay outside the core operation.
@@ -1973,12 +1967,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		})
 		s.events.PublishAgentStatus(ctx, agent)
 
-		// Review round 2 finding #2: register the primary recipient for a
-		// thread-derived group (see the agent-DM-fork site above for the
-		// full rationale). Idempotent, so harmless if already registered.
-		if groupConversationID != "" {
-			s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{agent})
-		}
+		// Review round 2 finding #2 (see registerGroupPrimary): the
+		// managed-runtime path's primary must also be registered on a
+		// thread-derived group.
+		s.registerGroupPrimary(ctx, groupConversationID, agent)
 
 		// Process @mentions for managed agents too.
 		var managedMentionResults []messages.MentionResult
@@ -2080,12 +2072,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
 	}
 
-	// Review round 2 finding #2: register the primary recipient for a
-	// thread-derived group (see the agent-DM-fork site above for the full
-	// rationale). Idempotent, so harmless if already registered.
-	if groupConversationID != "" {
-		s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{agent})
-	}
+	// Review round 2 finding #2 (see registerGroupPrimary): the
+	// broker-dispatched path's primary must also be registered on a
+	// thread-derived group.
+	s.registerGroupPrimary(ctx, groupConversationID, agent)
 
 	// Process @mentions: validate slugs, fan out mention messages to resolved agents.
 	var mentionResults []messages.MentionResult
@@ -2826,10 +2816,12 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 //
 // groupConversationID, when non-empty, names a group conversation that the
 // dispatched mention recipients should be recorded as participants of
-// (design doc §3.3, F2b) — the primary recipient is already registered by
-// the caller-supplied conversation_id case in handleAgentMessage. Pass ""
-// to skip participant registration (direct conversations, or no
-// conversation resolved).
+// (design doc §3.3, F2b). The primary recipient is registered separately by
+// handleAgentMessage's callers — either the caller-supplied conversation_id
+// case's own pre-dispatch registration, or (for a thread-derived group)
+// registerGroupPrimary, called at each dispatch path right before it calls
+// this function (review round 2 finding #2). Pass "" to skip participant
+// registration (direct conversations, or no conversation resolved).
 func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, primaryAgent *store.Agent, originalMsg *messages.StructuredMessage, groupConversationID string) []messages.MentionResult {
 	if len(mentionSlugs) == 0 {
 		return nil

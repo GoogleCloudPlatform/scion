@@ -842,6 +842,60 @@ func TestSetDefaultAgent_SoftDeletedAgentRejected(t *testing.T) {
 		"a soft-deleted agent must be rejected; body: %s", rr.Body.String())
 }
 
+// TestSetDefaultAgent_ProjectlessGroup_AgentNotFound_ReturnsValidationError is
+// review round 3 finding #3: pin the round-2 #6 behavior for the *projectless*
+// branch of handleSetDefaultAgent (conv.ProjectID == nil, a legacy group with
+// no validateDefaultAgent to delegate to) — a nonexistent agentId must come
+// back as 400 validation_error, not 404. Round-2 #6 fixed the status code;
+// round-3 #4 then split this branch further so only store.ErrNotFound and
+// soft-delete map to 400, with any other store error going to 500 instead.
+// This test's mutation coverage is for the not-found case specifically:
+// reverting the round-2 #6 fix (mapping ErrNotFound to NotFound(w, ...)
+// instead of ValidationError) makes this fail, without touching the
+// project-scoped tests above.
+func TestSetDefaultAgent_ProjectlessGroup_AgentNotFound_ReturnsValidationError(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	legacyConv := &store.Conversation{
+		ID:             api.NewUUID(),
+		Kind:           "group",
+		Surface:        "native",
+		DisplayName:    "Legacy Projectless Group",
+		DriftState:     "active",
+		LastActivityAt: now,
+		CreatedAt:      now,
+	}
+	require.NoError(t, s.CreateConversation(ctx, legacyConv))
+
+	project := &store.Project{ID: api.NewUUID(), Name: "phase3-legacy-def-agent-project", Slug: "phase3-legacy-def-agent-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	participant := &store.Agent{
+		ID: api.NewUUID(), Name: "phase3-legacy-def-agent-participant", Slug: "phase3-legacy-def-agent-participant",
+		ProjectID: project.ID, Phase: "running", Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, participant))
+	addConvParticipant(t, s, legacyConv.ID, "agent", participant.ID)
+
+	body := setDefaultAgentRequest{AgentID: api.NewUUID()} // non-existent agent
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/conversations/"+legacyConv.ID+"/default-agent", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContext(participant.ID, project.ID))
+	rr := httptest.NewRecorder()
+	srv.handleSetDefaultAgent(rr, req, legacyConv.ID)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"a nonexistent agentId on a projectless group must be a validation error, not a 404; body: %s", rr.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	require.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+}
+
 func TestCreateConversation_ProjectNotFound(t *testing.T) {
 	srv, s := testServer(t)
 	_, agent, _ := setupConvTestData(t, s)

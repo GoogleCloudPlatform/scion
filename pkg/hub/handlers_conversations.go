@@ -172,9 +172,13 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 	// Sort by the same order the store itself uses (last_activity_at DESC,
 	// id DESC as tie-break) before limiting, so the N most recently active
 	// conversations win regardless of which side of the union they came
-	// from. Note: the union itself is not cursor-paged (design doc §3.2
-	// round-2 addendum) — a cursor page after the first doesn't re-add
-	// union groups, only this initial unlimited fetch does.
+	// from.
+	//
+	// Review round 3 finding #5: GET /conversations is not cursor-paged at
+	// all — it reads no cursor parameter, and conversationListResponse
+	// never sets one (hubclient's Cursor field belongs to
+	// ConversationMessagesOptions, a different type). limit truncates this
+	// sorted, merged list in one shot; a caller wanting more raises limit.
 	sort.Slice(filtered, func(i, j int) bool {
 		if !filtered[i].LastActivityAt.Equal(filtered[j].LastActivityAt) {
 			return filtered[i].LastActivityAt.After(filtered[j].LastActivityAt)
@@ -652,26 +656,42 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 	// as default") must map to one status on this endpoint, so the
 	// projectless branch below also returns 400, not 404 — matching the
 	// project-scoped branch instead of the old GetAgent-not-found status.
-	// The message names agentId, this endpoint's own request field, rather
-	// than validateDefaultAgent's "defaultAgent" wording (that field name
-	// belongs to the topic PATCH/create callers, not this one). Accepting
-	// a slug here (validateDefaultAgent tries slug-by-project first) is an
-	// intentional, documented widening — see the PR body's Behaviour
-	// changes list.
+	// Accepting a slug here (validateDefaultAgent tries slug-by-project
+	// first) is an intentional, documented widening — see the PR body's
+	// Behaviour changes list.
 	var agent *store.Agent
 	if conv.ProjectID != nil {
 		var vErr error
 		agent, vErr = s.validateDefaultAgent(ctx, *conv.ProjectID, req.AgentID)
 		if vErr != nil {
-			ValidationError(w, fmt.Sprintf("agentId %q not found in this project", req.AgentID), nil)
+			// Review round 3 finding #4: keep validateDefaultAgent's own
+			// message (including the "identifier is too long" case) —
+			// only the field name changes, from its internal "defaultAgent"
+			// wording (correct for the topic PATCH/create callers) to
+			// "agentId" (this endpoint's own request field).
+			ValidationError(w, strings.Replace(vErr.Error(), "defaultAgent", "agentId", 1), nil)
 			return
 		}
 	} else {
 		// Legacy projectless / external-surface group: no project to
-		// validate against. Still reject a soft-deleted agent.
+		// validate against validateDefaultAgent-style.
+		//
+		// Review round 3 finding #4: a store error that isn't
+		// store.ErrNotFound is not a validation decision — collapsing a
+		// transient DB failure into "agent not found" is the same class
+		// of problem round-1 #6 fixed in authorizeGroupConversationAccess.
+		// Only not-found and soft-deleted map to 400; anything else is 500.
 		var err error
 		agent, err = s.store.GetAgent(ctx, req.AgentID)
-		if err != nil || !agent.DeletedAt.IsZero() {
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				ValidationError(w, fmt.Sprintf("agentId %q not found", req.AgentID), nil)
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !agent.DeletedAt.IsZero() {
 			ValidationError(w, fmt.Sprintf("agentId %q not found", req.AgentID), nil)
 			return
 		}
