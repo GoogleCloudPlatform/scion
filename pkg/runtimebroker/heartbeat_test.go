@@ -32,6 +32,8 @@ type mockRuntimeBrokerService struct {
 	mu             sync.Mutex
 	heartbeatCalls []mockHeartbeatCall
 	heartbeatErr   error
+
+	messageFailureReports []*hubclient.MessageFailuresReport
 }
 
 type mockHeartbeatCall struct {
@@ -77,6 +79,13 @@ func (m *mockRuntimeBrokerService) Heartbeat(ctx context.Context, brokerID strin
 		Time:      time.Now(),
 	})
 	return m.heartbeatErr
+}
+
+func (m *mockRuntimeBrokerService) ReportMessageFailures(ctx context.Context, brokerID string, req *hubclient.MessageFailuresReport) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messageFailureReports = append(m.messageFailureReports, req)
+	return nil
 }
 
 func (m *mockRuntimeBrokerService) getHeartbeatCalls() []mockHeartbeatCall {

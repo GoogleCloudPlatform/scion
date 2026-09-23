@@ -49,6 +49,24 @@ type RuntimeBrokerService interface {
 
 	// Heartbeat sends a heartbeat for a broker.
 	Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) error
+
+	// ReportMessageFailures reports hub messages that the broker accepted
+	// into its delivery buffer but failed to deliver, so the hub can mark
+	// them failed instead of leaving them "dispatched".
+	ReportMessageFailures(ctx context.Context, brokerID string, req *MessageFailuresReport) error
+}
+
+// MessageFailure is one buffered delivery that failed on the broker.
+type MessageFailure struct {
+	MessageID string `json:"messageId"`
+	AgentID   string `json:"agentId,omitempty"`
+	ProjectID string `json:"projectId,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// MessageFailuresReport is the body of a message-failures report.
+type MessageFailuresReport struct {
+	Failures []MessageFailure `json:"failures"`
 }
 
 // runtimeBrokerService is the implementation of RuntimeBrokerService.
@@ -332,6 +350,15 @@ func (s *runtimeBrokerService) ListProjects(ctx context.Context, brokerID string
 // Heartbeat sends a heartbeat for a broker.
 func (s *runtimeBrokerService) Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) error {
 	resp, err := s.c.post(ctx, "/api/v1/runtime-brokers/"+brokerID+"/heartbeat", status, nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// ReportMessageFailures reports buffered deliveries that failed on the broker.
+func (s *runtimeBrokerService) ReportMessageFailures(ctx context.Context, brokerID string, req *MessageFailuresReport) error {
+	resp, err := s.c.post(ctx, "/api/v1/runtime-brokers/"+url.PathEscape(brokerID)+"/message-failures", req, nil)
 	if err != nil {
 		return err
 	}

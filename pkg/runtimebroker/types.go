@@ -514,6 +514,10 @@ type MessageRequest struct {
 
 	// ProjectID is the project ID for the target agent (used for message log labels).
 	ProjectID string `json:"projectId,omitempty"`
+
+	// MessageID is the hub's persisted message ID, when the hub wants to be
+	// told about a buffered delivery that fails after acceptance (#1820).
+	MessageID string `json:"message_id,omitempty"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to support legacy grove fields.

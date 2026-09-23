@@ -43,6 +43,7 @@ type brokerDispatchedMsg struct {
 	msg        string
 	interrupt  bool
 	structured *messages.StructuredMessage
+	messageID  string // hub message ID carried on the dispatch context (#1820)
 }
 
 func (d *brokerMockDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) error {
@@ -74,6 +75,7 @@ func (d *brokerMockDispatcher) DispatchAgentMessage(ctx context.Context, agent *
 		msg:        message,
 		interrupt:  interrupt,
 		structured: structuredMsg,
+		messageID:  dispatchMessageIDFromContext(ctx),
 	})
 	return nil
 }

@@ -198,7 +198,10 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 	// that a rapid burst of messages (e.g. from multiple senders or broadcast
 	// fan-out) is coalesced into a single delivery, avoiding contention on
 	// the agent's tmux input.
-	m.msgBuffer.Send(agentID, projectID, message)
+	// A failure handler on ctx (set by the runtime broker) is invoked if the
+	// buffered delivery later fails, so the hub can mark the message failed
+	// rather than leave it "dispatched" (#1820).
+	m.msgBuffer.SendWithFailureHandler(agentID, projectID, message, DeliveryFailureHandlerFromContext(ctx))
 	return nil
 }
 

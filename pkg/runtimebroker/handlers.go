@@ -1827,7 +1827,28 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 			return
 		}
 	} else {
-		if err := mgr.Message(ctx, id, projectID, deliveryText, req.Interrupt); err != nil {
+		msgCtx := ctx
+		if !req.Interrupt && req.MessageID != "" {
+			// Non-interrupt messages are buffered and delivered after this
+			// handler has already answered 200. Register a callback so a
+			// later delivery failure is reported back to the hub, which
+			// then marks the message failed instead of "dispatched" (#1820).
+			failure := hubclient.MessageFailure{
+				MessageID: req.MessageID,
+				AgentID:   id,
+				ProjectID: projectID,
+			}
+			if failure.ProjectID == "" {
+				failure.ProjectID = req.ProjectID
+			}
+			connName := r.Header.Get("X-Scion-Hub-Connection")
+			msgCtx = agent.WithDeliveryFailureHandler(ctx, func(deliveryErr error) {
+				f := failure
+				f.Reason = "broker delivery failed: " + deliveryErr.Error()
+				go s.reportMessageFailure(connName, f)
+			})
+		}
+		if err := mgr.Message(msgCtx, id, projectID, deliveryText, req.Interrupt); err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			if strings.Contains(err.Error(), "not found") {
 				NotFound(w, "Agent")

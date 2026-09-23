@@ -15,6 +15,8 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -279,5 +281,74 @@ func TestMessageBuffer_Close(t *testing.T) {
 	defer mu.Unlock()
 	if len(deliveries) != 2 {
 		t.Fatalf("expected 2 deliveries after Close, got %d", len(deliveries))
+	}
+}
+
+// TestMessageBuffer_FailureHandlersInvokedOnFlushFailure covers #1820: when a
+// coalesced delivery fails, every sender that was told "accepted" is told it
+// failed; a successful flush invokes no handlers.
+func TestMessageBuffer_FailureHandlersInvokedOnFlushFailure(t *testing.T) {
+	var fail bool
+	var mu sync.Mutex
+	flushed := make(chan struct{}, 4)
+	buf := NewMessageBuffer(20*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
+		mu.Lock()
+		defer mu.Unlock()
+		defer func() { flushed <- struct{}{} }()
+		if fail {
+			return errors.New("container gone")
+		}
+		return nil
+	})
+	defer buf.Close()
+
+	var calls []string
+	var cmu sync.Mutex
+	handler := func(id string) DeliveryFailureHandler {
+		return func(err error) {
+			cmu.Lock()
+			defer cmu.Unlock()
+			calls = append(calls, id+":"+err.Error())
+		}
+	}
+
+	// Successful flush: no handler calls.
+	buf.SendWithFailureHandler("a", "p", "ok", handler("ok"))
+	<-flushed
+	cmu.Lock()
+	if len(calls) != 0 {
+		t.Fatalf("expected no failure calls on success, got %v", calls)
+	}
+	cmu.Unlock()
+
+	// Failing flush with two coalesced messages, one without a handler.
+	mu.Lock()
+	fail = true
+	mu.Unlock()
+	buf.SendWithFailureHandler("a", "p", "m1", handler("m1"))
+	buf.Send("a", "p", "no-handler")
+	buf.SendWithFailureHandler("a", "p", "m2", handler("m2"))
+	<-flushed
+
+	cmu.Lock()
+	defer cmu.Unlock()
+	if len(calls) != 2 || calls[0] != "m1:container gone" || calls[1] != "m2:container gone" {
+		t.Fatalf("expected both handlers invoked with the error, got %v", calls)
+	}
+}
+
+func TestDeliveryFailureHandlerContext(t *testing.T) {
+	ctx := context.Background()
+	if DeliveryFailureHandlerFromContext(ctx) != nil {
+		t.Fatal("expected nil handler on bare context")
+	}
+	if WithDeliveryFailureHandler(ctx, nil) != ctx {
+		t.Fatal("nil handler must not wrap the context")
+	}
+	called := false
+	ctx = WithDeliveryFailureHandler(ctx, func(error) { called = true })
+	DeliveryFailureHandlerFromContext(ctx)(errors.New("x"))
+	if !called {
+		t.Fatal("handler from context was not the one stored")
 	}
 }
