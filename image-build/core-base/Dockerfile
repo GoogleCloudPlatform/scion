@@ -37,6 +37,51 @@ FROM oven/bun:latest AS bun-source
 # Git source (vendored binary + helpers, see final stage)
 FROM ${GIT_IMAGE} AS git-source
 
+# --- Stage the vendored git and localize its libpcre2 ------------------------
+# Chainguard's git links against a libpcre2 carrying versioned symbols that
+# Debian's build does not have. Against the system copy git still works, but
+# every single invocation prints
+#   git: /lib/x86_64-linux-gnu/libpcre2-8.so.0: no version information
+#   available (required by git)
+# to stderr — harmless, but it pollutes output that agents parse. So we ship
+# Chainguard's libpcre2 alongside.
+#
+# The override is applied as a RUNPATH on the five binaries that actually need
+# it, NOT as a global `ENV LD_LIBRARY_PATH`. An image-wide LD_LIBRARY_PATH
+# forces *every* process in the container — node, python, any agent-built
+# binary — to prefer Chainguard's libpcre2 over the system one, which is a much
+# larger blast radius than the problem being solved.
+#
+# patchelf and binutils live only in this stage, so neither reaches the final
+# image.
+FROM node:24-trixie-slim AS git-patched
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    patchelf \
+    binutils \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=git-source /usr/bin/git          /staged/usr/bin/git
+COPY --from=git-source /usr/libexec/git-core /staged/usr/libexec/git-core
+COPY --from=git-source /usr/share/git-core   /staged/usr/share/git-core
+COPY --from=git-source /usr/lib/libpcre2-8.so.0 /staged/usr/local/lib/scion-git/libpcre2-8.so.0
+# `-type f` matters: git-core is ~151 symlinks around 4 real binaries, and
+# patchelf must not be pointed at the symlinks.
+RUN set -eu; \
+    command -v readelf >/dev/null \
+      || { echo "FAIL: readelf missing — the NEEDED scan below would silently \
+match nothing and quietly patch zero binaries"; exit 1; }; \
+    patched=0; \
+    for f in /staged/usr/bin/git $(find /staged/usr/libexec/git-core -maxdepth 1 -type f); do \
+      readelf -d "$f" 2>/dev/null | grep -q libpcre2 || continue; \
+      patchelf --set-rpath /usr/local/lib/scion-git "$f"; \
+      patched=$((patched + 1)); \
+    done; \
+    echo "patched ${patched} binaries with RUNPATH=/usr/local/lib/scion-git"; \
+    test "${patched}" -gt 0 \
+      || { echo "FAIL: no binary declared libpcre2 as NEEDED — either the \
+vendored libpcre2 is now unnecessary (drop it) or the scan is broken"; exit 1; }; \
+    readelf -d /staged/usr/bin/git | grep -qE 'RPATH|RUNPATH' \
+      || { echo "FAIL: /usr/bin/git has no RUNPATH after patchelf"; exit 1; }
+
 FROM node:24-trixie-slim AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -164,17 +209,13 @@ COPY --from=builder /usr/local/go /usr/local/go
 # Chainguard builds against a newer glibc, so the base image needs glibc >= 2.38
 # (trixie ships 2.41). This is now a real constraint on future base changes:
 # bookworm (2.36) would fail at exec with "GLIBC_2.38 not found".
-COPY --from=git-source /usr/bin/git          /usr/bin/git
-COPY --from=git-source /usr/libexec/git-core /usr/libexec/git-core
-COPY --from=git-source /usr/share/git-core   /usr/share/git-core
-
-# Chainguard's libpcre2 carries versioned symbols that Debian's build does not.
-# Without it every git invocation prints "libpcre2-8.so.0: no version
-# information available" to stderr — harmless, but it pollutes output that
-# agents parse. Kept in a dedicated directory so it shadows only libpcre2 and
-# not anything else under /usr/local/lib.
-COPY --from=git-source /usr/lib/libpcre2-8.so.0 /usr/local/lib/scion-git/libpcre2-8.so.0
-ENV LD_LIBRARY_PATH=/usr/local/lib/scion-git
+# Taken from git-patched, not git-source: those binaries carry a RUNPATH that
+# points at the vendored libpcre2 below, so no image-wide LD_LIBRARY_PATH is
+# needed. See the git-patched stage for why.
+COPY --from=git-patched /staged/usr/bin/git          /usr/bin/git
+COPY --from=git-patched /staged/usr/libexec/git-core /usr/libexec/git-core
+COPY --from=git-patched /staged/usr/share/git-core   /usr/share/git-core
+COPY --from=git-patched /staged/usr/local/lib/scion-git /usr/local/lib/scion-git
 
 # Fail the build, not the agent, if the vendored git is wrong. Each check maps
 # to one real way this lift breaks: the binary being shadowed on PATH, helpers
@@ -200,6 +241,14 @@ $(/usr/libexec/git-core/git --version) vs $(git --version)"; exit 1; }; \
       && git -C /tmp/_gitcheck worktree add --relative-paths -q /tmp/_gitcheck_wt HEAD \
       || { echo "FAIL: 'git worktree add --relative-paths' did not work end-to-end \
 (scion requires git >= 2.47.0 -- see pkg/util/git.go CheckGitVersion)"; exit 1; }; \
+    test -z "${LD_LIBRARY_PATH:-}" \
+      || { echo "FAIL: LD_LIBRARY_PATH is set to '${LD_LIBRARY_PATH}'. The \
+vendored libpcre2 is reached via a RUNPATH on the git binaries; an image-wide \
+LD_LIBRARY_PATH would impose it on every process in the container"; exit 1; }; \
+    test -z "$(git --version 2>&1 1>/dev/null)" \
+      || { echo "FAIL: git writes to stderr on a plain --version, so the \
+dynamic loader is unhappy and agent output will be polluted: \
+$(git --version 2>&1 1>/dev/null)"; exit 1; }; \
     rm -rf /tmp/_gitcheck /tmp/_gitcheck_wt
 
 # Install GitHub CLI from official release (pinned version for reproducibility).
