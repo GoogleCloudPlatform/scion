@@ -1338,11 +1338,20 @@ gcloud artifacts repositories create "${AR_REPO}" \
 echo "  Artifact Registry repo ready: ${AR_REPO}"
 
 # --- Build proxy image on the VM ---
+# When IMAGE_SOURCE=registry, Phase 3b is skipped and /opt/scion-source may
+# not exist on the VM. Ensure the repo is cloned (shallow) before building.
 info "Building proxy image on VM..."
 echo "  Image: ${PROXY_IMAGE}"
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
-  --command="sudo docker build -t ${PROXY_IMAGE} /opt/scion-source/extras/cloudrun-iap-proxy"
+  --command="
+    set -euo pipefail
+    if [ ! -d /opt/scion-source ]; then
+      sudo git clone --depth 1 \
+        https://github.com/GoogleCloudPlatform/scion.git /opt/scion-source
+    fi
+    sudo docker build -t ${PROXY_IMAGE} /opt/scion-source/extras/cloudrun-iap-proxy
+  "
 echo "  Proxy image built on VM."
 
 # --- Push proxy image to Artifact Registry ---
