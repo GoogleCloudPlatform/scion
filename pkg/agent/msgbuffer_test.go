@@ -304,8 +304,12 @@ func TestMessageBuffer_FailureHandlersInvokedOnFlushFailure(t *testing.T) {
 
 	var calls []string
 	var cmu sync.Mutex
+	// Failure handlers run after deliverFunc returns, so completion is
+	// signalled from the handlers themselves rather than from deliverFunc.
+	var handled sync.WaitGroup
 	handler := func(id string) DeliveryFailureHandler {
 		return func(err error) {
+			defer handled.Done()
 			cmu.Lock()
 			defer cmu.Unlock()
 			calls = append(calls, id+":"+err.Error())
@@ -325,10 +329,17 @@ func TestMessageBuffer_FailureHandlersInvokedOnFlushFailure(t *testing.T) {
 	mu.Lock()
 	fail = true
 	mu.Unlock()
+	handled.Add(2)
 	buf.SendWithFailureHandler("a", "p", "m1", handler("m1"))
 	buf.Send("a", "p", "no-handler")
 	buf.SendWithFailureHandler("a", "p", "m2", handler("m2"))
-	<-flushed
+	done := make(chan struct{})
+	go func() { handled.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for failure handlers")
+	}
 
 	cmu.Lock()
 	defer cmu.Unlock()
