@@ -101,4 +101,12 @@ type AgentReincarnationStore interface {
 	// (composite.go's DeleteAgent), matching the notification-subscription
 	// precedent — agent_id is a plain field with no DB-level FK.
 	DeleteAgentReincarnationsForAgent(ctx context.Context, agentID string) error
+
+	// ListNonTerminalAgentReincarnations returns every reincarnation record,
+	// across all agents, currently in a non-terminal state
+	// (AgentReincarnationNonTerminalStates). Used by the hub-restart boot
+	// sweep (design §3.7 F4, p1b-r1): a record left non-terminal can only
+	// mean the hub restarted mid-flight, since R1's claim-then-create order
+	// prevents an orphan from ever being created by a failed request.
+	ListNonTerminalAgentReincarnations(ctx context.Context) ([]*AgentReincarnation, error)
 }

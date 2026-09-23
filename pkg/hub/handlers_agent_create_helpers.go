@@ -193,7 +193,17 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, 
 	// telemetry defaults), and CreateInputs must not observe that mutation
 	// through a shared pointer.
 	ac.CreateInputs = &store.AgentCreateInputs{
-		InlineConfig:  deepCopyScionConfig(req.Config),
+		InlineConfig: deepCopyScionConfig(req.Config),
+		// NoAuth is req.NoAuth, NOT ac.NoAuth: by this point ac.NoAuth may
+		// already have been flipped true by the ac.HarnessAuth=="none" check
+		// just above, which is a derived consequence of an explicit
+		// HarnessAuth request, not an explicit NoAuth request in its own
+		// right. req.NoAuth already reflects the role=none mapping the
+		// caller applies before calling buildAppliedConfig (role is itself a
+		// kept field, so its NoAuth consequence must be captured as
+		// explicit too — see p1b-r1 C1 and AgentCreateInputs.NoAuth's doc
+		// comment).
+		NoAuth:        req.NoAuth,
 		HarnessConfig: ac.HarnessConfig,
 		HarnessAuth:   ac.HarnessAuth,
 		Profile:       ac.Profile,
@@ -293,7 +303,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 // — the harness-config rung included — so the two pipelines cannot drift,
 // and a future change here cannot silently go missing from one of them (or
 // from a hand-written "recipe" comment: see resolveDerivedConfig's doc
-// comment for how many review rounds that took to notice). `scion
+// comment for why that's a rule here rather than a list). `scion
 // reincarnate` calls it too, on a freshly built AppliedConfig containing
 // only kept fields and explicit inputs — including GCPIdentity, which the
 // auto-no-auth check below reads — never on an existing agent's config.
@@ -345,8 +355,9 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // "a previous call to this function derived it".
 //
 // This function alone does not reproduce what create does to an agent's
-// config, and five review rounds have each found one more pre-step that a
-// hand-written recipe left out. So this is a rule, not a list: a caller that
+// config: a hand-written recipe of "call this plus N other steps" is fragile,
+// because a future change to the pipeline can add a step and update only one
+// caller. So this is a rule, not a list: a caller that
 // wants create's result — `scion reincarnate` is the only one — must reuse
 // create's own code for everything from harness-config resolution through
 // populateAgentConfig, not re-derive a shortened version of it. That shared
@@ -366,11 +377,11 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // tier is applied. Model is request > project > hub > template, because the
 // project and hub tiers (applyProjectDefaults, then applyHubAgentDefaults)
 // run before this function's template fill. HarnessConfig is
-// request > project > template > hub, because both create call sites stamp
-// the template's harness config (getHarnessConfigFromTemplate) into
-// AppliedConfig.HarnessConfig themselves, before applyProjectDefaults ever
-// runs — so the hub-wide default_harness_config only applies when the
-// request, the project annotation and the template all left the slot empty.
+// request > project > template > hub, because deriveAgentConfig fills the
+// harness-config rung (request > project annotation > template) before
+// applyProjectDefaults/applyHubAgentDefaults run — so the hub-wide
+// default_harness_config only applies when the request, the project
+// annotation and the template all left the slot empty.
 // applyHubAgentDefaults reports whether it supplied HarnessConfig via its
 // bool return; it does not set the ctx flag itself — the caller does that by
 // wrapping ctx with withHubDefaultHarnessConfig, and this function reads

@@ -743,6 +743,14 @@ type RemoteGCPIdentityConfig struct {
 type RemoteAgentResponse struct {
 	Agent   *RemoteAgentInfo `json:"agent,omitempty"`
 	Created bool             `json:"created"`
+
+	// Reprovisioned mirrors runtimebroker.CreateAgentResponse.Reprovisioned:
+	// set by the broker ONLY on the branch that actually ran
+	// Manager.Reprovision (p1a-r1 R1(a)). dispatchProvision treats a
+	// reprovision dispatch whose final response lacks this as a failure —
+	// an old broker has no such field and silently ran a plain Provision
+	// instead, which must not be reported as reincarnate success.
+	Reprovisioned bool `json:"reprovisioned,omitempty"`
 }
 
 // RemoteEnvRequirementsResponse is returned by the broker when env gather is needed.
@@ -1580,6 +1588,18 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	} else if runs > 0 || migrations > 0 {
 		slog.Info("Aborted stalled maintenance operations from previous run",
 			"runs", runs, "migrations", migrations)
+	}
+
+	// Same shape, for `scion reincarnate` (design §3.7 F4, p1b-r1): a
+	// reincarnation record and its agent's reincarnation_state left
+	// non-terminal can only mean the hub restarted mid-flight — R1's
+	// claim-then-create order means a failed request never leaves one
+	// behind. Without this sweep those agents would be stuck behind a
+	// permanent 409 forever (Phase 3 owns actually resuming them).
+	if n, err := srv.sweepStaleReincarnations(ctx); err != nil {
+		slog.Warn("Failed to sweep stale reincarnations", "error", err)
+	} else if n > 0 {
+		slog.Info("Marked stale reincarnations failed after restart", "count", n)
 	}
 
 	// Initialize federation authenticator if enabled.
@@ -3794,6 +3814,19 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		}
 		if payload.Branch != "" {
 			agent.AppliedConfig.Branch = payload.Branch
+		}
+		// CreateInputs (p1b-r1 R6): without this, every scheduled agent looks
+		// "legacy" to `scion reincarnate` forever — not just until its first
+		// reincarnation, since the legacy fallback pins whatever HarnessConfig/
+		// HarnessAuth/Profile/ThinkingLevel it resolved to into CreateInputs
+		// permanently, so a template change is never picked up on a second
+		// reincarnation either. Branch and NoAuth=true are the only explicit
+		// inputs a scheduled agent has; everything else this path sets
+		// (AgentRole, Task) is either a kept field or replaced by the
+		// preamble+handoff on reincarnate.
+		agent.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
+			Branch: payload.Branch,
+			NoAuth: true,
 		}
 
 		// Apply project-level default template if none specified

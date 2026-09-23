@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -222,6 +223,10 @@ func newReincarnateTestAgent(t *testing.T, s store.Store, project *store.Project
 			CreatorName: "user-creator",
 			AgentRole:   "baseline",
 			Workspace:   "/tmp/reincarnate-workspace",
+			// GitClone: clone-per-agent, the only workspace mode Phase 1
+			// supports (p1b-r1 R4 / Amendment A2); a test that wants the
+			// non-clone-per-agent rejection path sets this to nil explicitly.
+			GitClone: &api.GitCloneConfig{URL: "https://example.com/reincarnate-test-repo.git"},
 			CreateInputs: &store.AgentCreateInputs{
 				Workspace: "/tmp/reincarnate-workspace",
 			},
@@ -360,6 +365,102 @@ func TestReincarnateAgent_RejectsUnsupportedOverrides(t *testing.T) {
 	}
 }
 
+// TestBrokerHeartbeat_RefreshesCapabilities is the p1a-r1 R1(c) regression
+// test for the chosen fix (heartbeat, not a live hub->broker /info query —
+// see hubclient.BrokerHeartbeat.Capabilities' doc comment for why): a
+// heartbeat that reports capabilities must overwrite whatever
+// CompleteBrokerJoin last stored, so an already-registered broker's
+// Reprovision capability is never stuck stale until a manual --force
+// re-registration.
+func TestBrokerHeartbeat_RefreshesCapabilities(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("broker-cap-refresh"),
+		Name:   "Cap Refresh Broker",
+		Slug:   "cap-refresh-broker",
+		Status: store.BrokerStatusOnline,
+		// nil: simulates a broker registered before Reprovision existed —
+		// the exact false-412 case R1 describes.
+		Capabilities: nil,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	heartbeat := brokerHeartbeatRequest{
+		Status:       "online",
+		Capabilities: &store.BrokerCapabilities{Sync: true, Attach: true, Reprovision: true},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", heartbeat)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated.Capabilities)
+	assert.True(t, updated.Capabilities.Reprovision,
+		"a heartbeat reporting capabilities must refresh the stored ones")
+}
+
+// TestBrokerHeartbeat_NoCapabilities_LeavesStoredCapabilitiesUntouched
+// covers the other half: an old broker's heartbeat has no Capabilities field
+// at all, and that must not be misread as "clear the stored capabilities" —
+// the field is a "refresh if present" signal, not a full replace.
+func TestBrokerHeartbeat_NoCapabilities_LeavesStoredCapabilitiesUntouched(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:           tid("broker-cap-old"),
+		Name:         "Old Broker",
+		Slug:         "old-broker",
+		Status:       store.BrokerStatusOnline,
+		Capabilities: &store.BrokerCapabilities{Sync: true, Attach: true, Reprovision: true},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat",
+		brokerHeartbeatRequest{Status: "online"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated.Capabilities)
+	assert.True(t, updated.Capabilities.Reprovision,
+		"a heartbeat with no Capabilities field must not clear the stored ones")
+}
+
+// TestEmbeddedBrokerCapabilities_PassesReincarnateGate is the p1a-r1 R1(b)
+// regression test: an embedded broker's capabilities (as cmd/server_broker.go
+// now writes them, on both create and update) must pass the reincarnate 412
+// gate, unlike the pre-fix Capabilities{Sync,Attach} literal that omitted
+// Reprovision entirely.
+func TestEmbeddedBrokerCapabilities_PassesReincarnateGate(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, _ := setupReincarnateTestServer(t, disp)
+
+	// Mirrors cmd/server_broker.go's embedded-broker Capabilities literal
+	// after the R1(b) fix, rather than importing cmd (which would pull the
+	// whole CLI package into this test binary).
+	embeddedBroker := &store.RuntimeBroker{
+		ID:           tid("embedded-broker-" + t.Name()),
+		Name:         "embedded",
+		Slug:         "embedded-" + tidSlugSafe(t.Name()),
+		Status:       store.BrokerStatusOnline,
+		Capabilities: &store.BrokerCapabilities{WebPTY: false, Sync: true, Attach: true, Reprovision: true},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(context.Background(), embeddedBroker))
+
+	agent := newReincarnateTestAgent(t, s, project, embeddedBroker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{DryRun: true})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, req, agent.ID)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
 // AC-9: migrating an agent on a broker without the capability returns 412,
 // and the agent is untouched.
 func TestReincarnateAgent_AC9_OldBrokerReturns412AndAgentUntouched(t *testing.T) {
@@ -408,6 +509,38 @@ func TestReincarnateAgent_AC9_NilCapabilities_Returns412(t *testing.T) {
 	srv.handleReincarnateAgent(rec, req, agent.ID)
 
 	assert.Equal(t, http.StatusPreconditionFailed, rec.Code)
+}
+
+// TestReincarnateAgent_NonCloneWorkspace_Returns400 is the Amendment A2 /
+// p1b-r1 R4 regression test: Phase 1 targets clone-per-agent workspaces only
+// (design §7). An agent with no GitClone (worktree-per-agent or
+// shared-workspace) must be rejected before anything is persisted or
+// computed — including on a dry run, so --dry-run reports the restriction
+// instead of showing a plan a real request could not safely execute.
+func TestReincarnateAgent_NonCloneWorkspace_Returns400(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.GitClone = nil // worktree-per-agent / shared-workspace
+	})
+	beforeVersion := agent.StateVersion
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	for _, dryRun := range []bool{true, false} {
+		req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun})
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "dryRun=%v: body: %s", dryRun, rec.Body.String())
+	}
+
+	after, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, beforeVersion, after.StateVersion, "agent must be untouched")
+	assert.Equal(t, "", after.ReincarnationState)
+
+	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, list, "no reincarnation record should be created")
 }
 
 // =============================================================================
@@ -613,7 +746,12 @@ func TestReincarnateAgent_LegacyAgent_TemplateEnvV1ToV2(t *testing.T) {
 	foundDroppedWarning := false
 	foundKeptWarning := false
 	for _, w := range resp.Plan.Warnings {
-		if containsAll(w, "dropped", "TEMPLATE_ENV_KEY", `old="v1"`, `new="v2"`) {
+		// p1b-r1 N2: the old value ("v1") must NEVER appear in the plan — it
+		// came from a legacy agent's live env, indistinguishable from a
+		// genuine per-agent secret that happens to share this key name. Only
+		// the template's own new value is safe to surface.
+		if containsAll(w, "dropped", "TEMPLATE_ENV_KEY", `new="v2"`) {
+			assert.NotContains(t, w, `old="v1"`, "the old value must be masked, never shown in the plan")
 			foundDroppedWarning = true
 		}
 		if containsAll(w, "kept", "AGENT_SPECIFIC_KEY") {
@@ -686,27 +824,133 @@ func containsAll(s string, subs ...string) bool {
 
 func TestReincarnateAgent_AC8_ConflictWhenAlreadyPending(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
-	// Block the worker from ever reaching Start, so the pending record stays
-	// pending for the duration of the test.
-	disp.stopErr = fmt.Errorf("network blip") // tolerated by the worker, doesn't block
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
 
 	// Manually seed a pending reincarnation, simulating one already in flight
-	// (avoids a timing-dependent race against the real worker goroutine).
+	// (avoids a timing-dependent race against the real worker goroutine). The
+	// 409 gate (p1b-r1 R1) checks agent.ReincarnationState, not the
+	// agent_reincarnations table directly, so both must be set together —
+	// exactly the invariant handleReincarnateAgent's claim-then-create order
+	// maintains for a real request.
 	require.NoError(t, s.CreateAgentReincarnation(context.Background(), &store.AgentReincarnation{
 		AgentID:        agent.ID,
 		FromGeneration: 1,
 		ToGeneration:   2,
 		State:          store.AgentReincarnationStatePending,
 	}))
+	agent.ReincarnationState = store.ReincarnationStatePending
+	require.NoError(t, s.UpdateAgent(context.Background(), agent))
 
 	req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"})
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, req, agent.ID)
 
 	assert.Equal(t, http.StatusConflict, rec.Code)
+}
+
+// TestReincarnateAgent_AC8_OrphanCannotWedgeAfterConflict is the p1b-r1 R1
+// regression test: a version conflict on the claim write (the guarded
+// UpdateAgent that sets reincarnation_state=pending) must leave nothing
+// behind — no orphaned agent_reincarnations row, and no stuck claim — so a
+// retry succeeds. Before the fix, the record was created FIRST, so any
+// failure on the following UpdateAgent left a permanent pending row with no
+// worker running for it and no way to clear it.
+type failOnceUpdateStore struct {
+	store.Store
+	mu     sync.Mutex
+	failed bool
+}
+
+func (f *failOnceUpdateStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+	f.mu.Lock()
+	if !f.failed {
+		f.failed = true
+		f.mu.Unlock()
+		return store.ErrVersionConflict
+	}
+	f.mu.Unlock()
+	return f.Store.UpdateAgent(ctx, a)
+}
+
+func TestReincarnateAgent_AC8_OrphanCannotWedgeAfterConflict(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	orig := srv.store
+	srv.store = &failOnceUpdateStore{Store: orig}
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	assert.Equal(t, http.StatusConflict, rec.Code, "first request hits the injected version conflict on the claim write")
+	srv.store = orig
+
+	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, list, "the claim write fails before the record is ever created, so nothing is orphaned")
+
+	after, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateNone, after.ReincarnationState, "the failed claim must not stick")
+
+	rec = httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	assert.Equal(t, http.StatusAccepted, rec.Code, "retry after a transient conflict must succeed; got %d %s", rec.Code, rec.Body.String())
+}
+
+// phaseObservingDispatcher simulates the container reporting a status-only
+// phase update (as sciontool/the broker do via UpdateAgentStatus, which does
+// not bump state_version) during Stop, and records the persisted phase seen
+// at Reprovision time — the p1b-r1 R2 regression test.
+type phaseObservingDispatcher struct {
+	*reincarnateTestDispatcher
+	s                  store.Store
+	phaseAtReprovision string
+}
+
+func (d *phaseObservingDispatcher) DispatchAgentStop(ctx context.Context, a *store.Agent) error {
+	_ = d.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped"})
+	return d.reincarnateTestDispatcher.DispatchAgentStop(ctx, a)
+}
+
+func (d *phaseObservingDispatcher) DispatchAgentReprovision(ctx context.Context, a *store.Agent) error {
+	cur, err := d.s.GetAgent(ctx, a.ID)
+	if err == nil {
+		d.phaseAtReprovision = cur.Phase
+	}
+	return d.reincarnateTestDispatcher.DispatchAgentReprovision(ctx, a)
+}
+
+// TestReincarnateAgent_R2_WorkerDoesNotClobberReportedPhase: the worker's
+// per-step writes must merge onto the CURRENT row (re-read each time), not
+// overwrite it with a stale in-memory copy. Before the fix, the worker wrote
+// back the whole agent object it loaded before Stop, on every subsequent
+// step — including a step wholly unrelated to the concurrent status report —
+// so a status-only phase update landing during Stop was silently reverted at
+// Reprovision time.
+func TestReincarnateAgent_R2_WorkerDoesNotClobberReportedPhase(t *testing.T) {
+	base := newReincarnateTestDispatcher()
+	disp := &phaseObservingDispatcher{reincarnateTestDispatcher: base}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	disp.s = s
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	waitForReincarnationSettled(t, s, agent.ID)
+	assert.NotEqual(t, "running", disp.phaseAtReprovision,
+		"while the container is stopped and being reprovisioned, the row must not claim phase=running")
+	// The worker explicitly moves the phase to "provisioning" for this step
+	// (p1b-r1 R2's "set phase to stopping, then provisioning, then
+	// starting"); a status-only "stopped" report from mid-Stop is expected
+	// to be superseded by that transition, not preserved forever. What must
+	// NOT happen is the pre-Stop "running" value silently surviving because
+	// the worker overwrote the status report with a stale in-memory copy.
+	assert.Equal(t, "provisioning", disp.phaseAtReprovision)
 }
 
 // =============================================================================
@@ -796,6 +1040,106 @@ func TestReincarnateAgent_AC6_StartFailureMarksFailed(t *testing.T) {
 	assert.Contains(t, list[0].Error, "no such image")
 	require.NotNil(t, list[0].PreviousAppliedConfig, "previous config snapshot must remain retrievable")
 	assert.Equal(t, "old-image:v1", list[0].PreviousAppliedConfig.Image)
+}
+
+// TestReincarnateAgent_R3_StopFailureIsFatal is the p1b-r1 R3 regression
+// test: a DispatchAgentStop error must fail the reincarnation before any
+// config write, not be tolerated. Before the fix, a stop failure was logged
+// and ignored, so the worker went on to reprovision and start a new session
+// while the old generation's container was potentially still running.
+func TestReincarnateAgent_R3_StopFailureIsFatal(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.stopErr = fmt.Errorf("broker unreachable")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, req, agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "error", final.Phase)
+	assert.Equal(t, store.ReincarnationStateFailed, final.ReincarnationState)
+	assert.Equal(t, 1, final.Generation, "generation must not increment when stop fails")
+	assert.Contains(t, final.Message, "broker unreachable")
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "config must not be overwritten when stop fails")
+
+	assert.Zero(t, disp.reprovisionCalls, "reprovision must not run when stop fails")
+	assert.Zero(t, disp.startCalls, "start must not run when stop fails")
+
+	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, store.AgentReincarnationStateFailed, list[0].State)
+	assert.Contains(t, list[0].Error, "broker unreachable")
+}
+
+// TestSweepStaleReincarnations_MarksNonTerminalFailed is the design §3.7 F4 /
+// p1b-r1 boot-sweep regression test: a reincarnation record and its agent's
+// reincarnation_state left non-terminal (simulating a hub restart mid-flight,
+// since the running worker never gets to finish either way) must both be
+// marked failed with reason "hub restarted during reincarnation".
+func TestSweepStaleReincarnations_MarksNonTerminalFailed(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	// CreateAgent does not persist ReincarnationState (it is always ""/None
+	// for a brand-new agent in practice); set it via UpdateAgent afterward,
+	// exactly as the real reincarnate worker would leave it mid-flight.
+	agent.ReincarnationState = store.ReincarnationStateProvisioning
+	agent.Phase = "provisioning"
+	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+	require.NoError(t, s.CreateAgentReincarnation(context.Background(), &store.AgentReincarnation{
+		AgentID:        agent.ID,
+		FromGeneration: 1,
+		ToGeneration:   2,
+		State:          store.AgentReincarnationStatePending,
+	}))
+
+	n, err := srv.sweepStaleReincarnations(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	after, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateFailed, after.ReincarnationState)
+	assert.Equal(t, "error", after.Phase)
+	assert.Contains(t, after.Message, "hub restarted during reincarnation")
+
+	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, store.AgentReincarnationStateFailed, list[0].State)
+	assert.Equal(t, "hub restarted during reincarnation", list[0].Error)
+}
+
+// TestSweepStaleReincarnations_IgnoresTerminalRecords is the companion test:
+// a completed or already-failed record must not be touched, and an agent
+// with no in-flight reincarnation must not be counted or modified.
+func TestSweepStaleReincarnations_IgnoresTerminalRecords(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	beforeVersion := agent.StateVersion
+	require.NoError(t, s.CreateAgentReincarnation(context.Background(), &store.AgentReincarnation{
+		AgentID:        agent.ID,
+		FromGeneration: 1,
+		ToGeneration:   2,
+		State:          store.AgentReincarnationStateCompleted,
+	}))
+
+	n, err := srv.sweepStaleReincarnations(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+
+	after, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, beforeVersion, after.StateVersion, "an agent with no in-flight reincarnation must be untouched")
 }
 
 // =============================================================================
@@ -945,6 +1289,37 @@ func TestReincarnateAgent_AC2b_CreateInputsHarnessConfigEmptyWhenNotExplicit(t *
 // Before deriveAgentConfig's harness-config resolution rung was moved ahead
 // of applyHubAgentDefaults, the hub tier would have won by reaching the
 // still-empty slot first.
+// TestDispatchAgentEventHandler_SetsCreateInputs is the p1b-r1 R6 regression
+// test: without CreateInputs, every scheduled agent looks "legacy" to
+// `scion reincarnate` forever, and the legacy fallback would permanently pin
+// whatever HarnessConfig/HarnessAuth/Profile/ThinkingLevel it resolved to
+// into CreateInputs on the FIRST reincarnation — so even a second
+// reincarnation would never pick up a template change. Branch and
+// NoAuth=true are the only explicit inputs a scheduled agent has.
+func TestDispatchAgentEventHandler_SetsCreateInputs(t *testing.T) {
+	ms := newMockStore()
+	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
+	srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
+
+	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+		ID:        "dispatch-createinputs-1",
+		ProjectID: "project-1",
+		EventType: "dispatch_agent",
+		Payload:   `{"agentName":"sched-createinputs","task":"Do the thing","branch":"sched-branch"}`,
+		CreatedBy: creatorID,
+	})
+	require.NoError(t, err)
+
+	created := findMockAgent(ms, "sched-createinputs")
+	require.NotNil(t, created, "agent was not created")
+	require.NotNil(t, created.AppliedConfig)
+	require.NotNil(t, created.AppliedConfig.CreateInputs,
+		"scheduled dispatch must persist CreateInputs, or the agent is stuck looking legacy to reincarnate forever")
+	assert.Equal(t, "sched-branch", created.AppliedConfig.CreateInputs.Branch)
+	assert.True(t, created.AppliedConfig.CreateInputs.NoAuth, "every scheduled agent is NoAuth by construction")
+}
+
 func TestReincarnateAgent_AC2b_TemplateHarnessConfigBeatsHubDefault(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -982,6 +1357,7 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 		templateHC         string
 		templateModel      string
 		explicit           CreateAgentRequest
+		autoNoAuthHC       bool // seed a harness config with no_auth.behavior=drop-to-shell and no satisfiable creds
 	}{
 		{
 			name: "explicit beats everything",
@@ -989,7 +1365,11 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 				HarnessConfig: "explicit-hc",
 				HarnessAuth:   "explicit-auth",
 				Profile:       "explicit-profile",
-				Config:        &api.ScionConfig{Model: "explicit-model", ThinkingLevel: tl(2)},
+				Config: &api.ScionConfig{
+					Model:         "explicit-model",
+					ThinkingLevel: tl(2),
+					Skills:        []api.SkillReference{{URI: "skill://explicit-skill"}},
+				},
 			},
 		},
 		{
@@ -1020,16 +1400,36 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 			name:     "explicit none auth derives NoAuth",
 			explicit: CreateAgentRequest{HarnessAuth: "none"},
 		},
+		{
+			// p1b-r1 C1: role=none must survive the round trip exactly like
+			// an explicit --no-auth would, because AgentRole is itself kept.
+			name:     "role=none derives NoAuth",
+			explicit: CreateAgentRequest{AgentRole: "none"},
+		},
+		{
+			// p1b-r1 R5: the auto-no-auth fallback (resolveDerivedConfig) must
+			// fire identically on both sides for a harness config that
+			// declares no_auth.behavior=drop-to-shell with no satisfiable
+			// credentials — this is NOT an explicit NoAuth input, so it is
+			// the one case createInputs.NoAuth does NOT cover on its own; the
+			// fresh.HarnessAuth=="none" OR-term in buildFreshAppliedConfig
+			// (fed by deriveAgentConfig's own auto-fallback re-running) is
+			// what must catch it.
+			name:         "auto-no-auth from harness config with no credentials",
+			explicit:     CreateAgentRequest{HarnessConfig: "auto-noauth-hc"},
+			autoNoAuthHC: true,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
 			disp := newReincarnateTestDispatcher()
-			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			srv, s, project, _ := setupReincarnateTestServer(t, disp)
 
 			if len(tc.projectAnnotations) > 0 {
 				project.Annotations = tc.projectAnnotations
-				require.NoError(t, s.UpdateProject(context.Background(), project))
+				require.NoError(t, s.UpdateProject(ctx, project))
 			}
 			setHubAgentDefaults(srv, tc.hubDefaults)
 
@@ -1046,11 +1446,36 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 					Status:               store.TemplateStatusActive,
 					Config:               &store.TemplateConfig{Model: tc.templateModel},
 				}
-				require.NoError(t, s.CreateTemplate(context.Background(), template))
+				require.NoError(t, s.CreateTemplate(ctx, template))
 				templateSlug = template.Slug
 			}
 
-			// --- create side: the real create HTTP path. ---
+			if tc.autoNoAuthHC {
+				hc := &store.HarnessConfig{
+					ID:          tid("hc-matrix-" + tc.name + "-" + t.Name()),
+					Name:        "auto-noauth-hc",
+					Slug:        "auto-noauth-hc",
+					Harness:     "claude",
+					ContentHash: "auto-noauth-hash",
+					Scope:       store.HarnessConfigScopeGlobal,
+					Status:      store.HarnessConfigStatusActive,
+					Config: &store.HarnessConfigData{
+						NoAuthBehavior: "drop-to-shell",
+						AuthMeta: &api.HarnessAuthMetadata{
+							Types: map[string]api.HarnessAuthTypeMetadata{
+								"api-key": {
+									RequiredEnv: []api.HarnessAuthEnvRequirement{
+										{AnyOf: []string{"ANTHROPIC_API_KEY"}},
+									},
+								},
+							},
+						},
+					},
+				}
+				require.NoError(t, s.CreateHarnessConfig(ctx, hc))
+			}
+
+			// --- create: the real create HTTP path. ---
 			createReq := tc.explicit
 			createReq.Name = "matrix-create-" + tidSlugSafe(tc.name)
 			createReq.ProjectID = project.ID
@@ -1059,49 +1484,80 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 			var createResp CreateAgentResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &createResp))
-			created, err := s.GetAgent(context.Background(), createResp.Agent.ID)
+			created, err := s.GetAgent(ctx, createResp.Agent.ID)
 			require.NoError(t, err)
 			require.NotNil(t, created.AppliedConfig)
+			require.NotNil(t, created.AppliedConfig.CreateInputs,
+				"create must always persist CreateInputs (p1b-r1 R6); a nil here would silently fall back to the legacy heuristic")
 
-			// --- reincarnate side: an agent on the same template/project,
-			// whose CreateInputs mirror the same explicit request, but whose
-			// LIVE AppliedConfig is deliberately stale — proving the fresh
-			// values come from re-derivation, not from the old generation. ---
-			var explicitThinkingLevel *int
-			if tc.explicit.Config != nil {
-				explicitThinkingLevel = tc.explicit.Config.ThinkingLevel
-			}
+			// GCPIdentity resolution/access-checking is out of scope for
+			// AC-2b (it happens in the create handler, not the derivation
+			// pipeline); stamp one directly to test the KEPT-field round
+			// trip in isolation.
 			gcpIdentity := &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: "kept-sa"}
-			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
-				a.Template = templateSlug
-				a.AppliedConfig.HarnessConfig = "stale-hc-from-old-generation"
-				a.AppliedConfig.HarnessAuth = "stale-auth"
-				a.AppliedConfig.Model = "stale-model"
-				a.AppliedConfig.Profile = "stale-profile"
-				a.AppliedConfig.ThinkingLevel = tl(99)
-				a.AppliedConfig.GCPIdentity = gcpIdentity
-				a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
-					HarnessConfig: tc.explicit.HarnessConfig,
-					HarnessAuth:   tc.explicit.HarnessAuth,
-					Profile:       tc.explicit.Profile,
-					ThinkingLevel: explicitThinkingLevel,
-					InlineConfig:  tc.explicit.Config,
-				}
-			})
+			created.AppliedConfig.GCPIdentity = gcpIdentity
+			require.NoError(t, s.UpdateAgent(ctx, created))
 
-			fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project)
+			// --- snapshot what create actually produced, BEFORE staling the
+			// live row (p1b-r1 R5: round-trip the CREATED agent's own
+			// CreateInputs, do not hand-build a second one). ---
+			wantVal := *created.AppliedConfig // shallow copy: decouple from the in-place staling below
+			want := &wantVal
+			wantEnv := maps.Clone(want.Env)
+			var wantSkills []api.SkillReference
+			if want.InlineConfig != nil {
+				wantSkills = want.InlineConfig.Skills
+			}
+			wantHubAccessScopes := append([]string(nil), want.HubAccessScopes...)
+
+			// --- stale the live row: every derived field gets garbage that
+			// does not appear anywhere else in this test, so a passing
+			// assertion below can only mean the value was re-derived, not
+			// coincidentally inherited. CreateInputs is left untouched —
+			// it's the real one create persisted. ---
+			staleThinking := 99
+			created.AppliedConfig.HarnessConfig = "stale-hc-from-old-generation"
+			created.AppliedConfig.HarnessAuth = "stale-auth"
+			created.AppliedConfig.NoAuth = false
+			created.AppliedConfig.Model = "stale-model"
+			created.AppliedConfig.Profile = "stale-profile"
+			created.AppliedConfig.ThinkingLevel = &staleThinking
+			created.AppliedConfig.Image = "stale-image:v0"
+			created.AppliedConfig.Env = map[string]string{"STALE_KEY": "stale-value"}
+			created.AppliedConfig.HarnessConfigID = "stale-hcid"
+			created.AppliedConfig.HarnessConfigHash = "stale-hash"
+			created.AppliedConfig.TemplateHash = "stale-template-hash"
+			created.AppliedConfig.HubAccessScopes = []string{"stale-scope"}
+			require.NoError(t, s.UpdateAgent(ctx, created))
+
+			fresh, _, err := srv.buildFreshAppliedConfig(ctx, created, project)
 			require.NoError(t, err)
 
-			assert.Equal(t, created.AppliedConfig.HarnessConfig, fresh.HarnessConfig, "HarnessConfig must agree")
-			assert.Equal(t, created.AppliedConfig.Model, fresh.Model, "Model must agree")
-			assert.Equal(t, created.AppliedConfig.HarnessAuth, fresh.HarnessAuth, "HarnessAuth must agree")
-			assert.Equal(t, created.AppliedConfig.NoAuth, fresh.NoAuth, "NoAuth must agree")
-			assert.Equal(t, created.AppliedConfig.Profile, fresh.Profile, "Profile must agree")
-			if assert.Equal(t, created.AppliedConfig.ThinkingLevel == nil, fresh.ThinkingLevel == nil, "ThinkingLevel nilness must agree") &&
-				created.AppliedConfig.ThinkingLevel != nil {
-				assert.Equal(t, *created.AppliedConfig.ThinkingLevel, *fresh.ThinkingLevel, "ThinkingLevel must agree")
+			assert.Equal(t, want.HarnessConfig, fresh.HarnessConfig, "HarnessConfig must match what create produced")
+			assert.Equal(t, want.Model, fresh.Model, "Model must match what create produced")
+			assert.Equal(t, want.HarnessAuth, fresh.HarnessAuth, "HarnessAuth must match what create produced")
+			assert.Equal(t, want.NoAuth, fresh.NoAuth, "NoAuth must match what create produced")
+			assert.Equal(t, want.Profile, fresh.Profile, "Profile must match what create produced")
+			if assert.Equal(t, want.ThinkingLevel == nil, fresh.ThinkingLevel == nil, "ThinkingLevel nilness must agree") &&
+				want.ThinkingLevel != nil {
+				assert.Equal(t, *want.ThinkingLevel, *fresh.ThinkingLevel, "ThinkingLevel must match what create produced")
 			}
+			assert.Equal(t, want.Image, fresh.Image, "Image must match what create produced")
+			assert.Equal(t, wantEnv, fresh.Env, "Env must match what create produced")
+			assert.Equal(t, want.HarnessConfigID, fresh.HarnessConfigID, "HarnessConfigID must match what create produced")
+			assert.Equal(t, want.HarnessConfigHash, fresh.HarnessConfigHash, "HarnessConfigHash must match what create produced")
+			assert.Equal(t, want.TemplateHash, fresh.TemplateHash, "TemplateHash must match what create produced")
+			assert.Equal(t, wantHubAccessScopes, fresh.HubAccessScopes, "HubAccessScopes must match what create produced")
+			var freshSkills []api.SkillReference
+			if fresh.InlineConfig != nil {
+				freshSkills = fresh.InlineConfig.Skills
+			}
+			assert.Equal(t, wantSkills, freshSkills, "InlineConfig.Skills must match what create produced")
 			assert.Equal(t, gcpIdentity, fresh.GCPIdentity, "GCPIdentity must be kept unchanged")
+
+			if tc.autoNoAuthHC {
+				require.True(t, want.NoAuth, "precondition: create must have taken the auto-no-auth fallback")
+			}
 		})
 	}
 }

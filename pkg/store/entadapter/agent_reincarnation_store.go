@@ -231,3 +231,24 @@ func (s *AgentReincarnationStore) DeleteAgentReincarnationsForAgent(ctx context.
 	}
 	return nil
 }
+
+// ListNonTerminalAgentReincarnations returns every non-terminal reincarnation
+// record across all agents, for the hub-restart boot sweep (design §3.7 F4).
+func (s *AgentReincarnationStore) ListNonTerminalAgentReincarnations(ctx context.Context) ([]*store.AgentReincarnation, error) {
+	states := make([]agentreincarnation.State, 0, len(store.AgentReincarnationNonTerminalStates))
+	for _, st := range store.AgentReincarnationNonTerminalStates {
+		states = append(states, agentreincarnation.State(st))
+	}
+	rows, err := s.client.AgentReincarnation.Query().
+		Where(agentreincarnation.StateIn(states...)).
+		Order(ent.Desc(agentreincarnation.FieldRequestedAt)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.AgentReincarnation, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, entAgentReincarnationToStore(r))
+	}
+	return out, nil
+}

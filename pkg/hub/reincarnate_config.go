@@ -27,7 +27,7 @@ import (
 
 // buildFreshAppliedConfig replays create's config-resolution pipeline against
 // the current template/harness-config catalog, for a `scion reincarnate`
-// request (design §3.3, amended per Phase 0 review round 5). It builds a
+// request (design §3.3, Amendment A1). It builds a
 // brand-new AgentAppliedConfig — never mutating agent.AppliedConfig —
 // containing:
 //   - fields kept verbatim from the agent's CURRENT AppliedConfig: only the
@@ -39,9 +39,9 @@ import (
 //   - the requester's original explicit inputs (Image, Model, Env,
 //     InlineConfig, HarnessConfig, HarnessAuth, Profile, ThinkingLevel), from
 //     AppliedConfig.CreateInputs, or a heuristic reconstruction for an agent
-//     that predates that field. Round 5 correction: HarnessConfig and
-//     HarnessAuth are dual-purpose exactly like Model, NOT kept fields —
-//     left empty here (rather than copied from the live config) is what lets
+//     that predates that field. HarnessConfig and HarnessAuth are
+//     dual-purpose exactly like Model, NOT kept fields — left empty here
+//     (rather than copied from the live config) is what lets
 //     deriveAgentConfig's project/template/hub resolution below fill them
 //     fresh from the CURRENT catalog when the requester never set them,
 //     instead of freezing in whatever generation N happened to resolve;
@@ -91,22 +91,27 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		// Kept verbatim: identity-adjacent fields the pipeline never touches,
 		// and (for Phase 1, which accepts no --harness/--reset-overrides/etc.
 		// request overrides) never overridden by the request either.
-		Attach:      old.Attach,
-		CreatorName: old.CreatorName,
-		AgentRole:   old.AgentRole,
-		GitClone:    old.GitClone,
-		Workspace:   old.Workspace,
-		Branch:      old.Branch,
-		GCPIdentity: old.GCPIdentity,
+		// WorkspaceStoragePath and AgentRoleGrandfathered were missing here
+		// (p1b-r1 R4): without the storage path a remote broker gets the
+		// hub-local path populateAgentConfig stamps for an empty Workspace
+		// instead of the GCS path it actually needs, and grandfathered-role
+		// provenance is audit data, not something to re-derive.
+		Attach:                 old.Attach,
+		CreatorName:            old.CreatorName,
+		AgentRole:              old.AgentRole,
+		AgentRoleGrandfathered: old.AgentRoleGrandfathered,
+		GitClone:               old.GitClone,
+		Workspace:              old.Workspace,
+		WorkspaceStoragePath:   old.WorkspaceStoragePath,
+		Branch:                 old.Branch,
+		GCPIdentity:            old.GCPIdentity,
 
 		// Explicit-only: empty here (rather than copied from `old`) is what
 		// lets deriveAgentConfig's pipeline fill these fresh from the CURRENT
 		// project/template/hub configuration when the requester never set
 		// them, instead of freezing in whatever generation N resolved.
-		// HarnessConfig and HarnessAuth moved here in round 5 — they are NOT
-		// kept fields, despite design §3.3's original table; NoAuth follows
-		// the same logic below, derived from HarnessAuth exactly as
-		// buildAppliedConfig derives it at create.
+		// HarnessConfig and HarnessAuth are NOT kept fields (design §3.3
+		// Amendment A1) — they are explicit-only, exactly like Model.
 		HarnessConfig: createInputs.HarnessConfig,
 		HarnessAuth:   createInputs.HarnessAuth,
 		Profile:       createInputs.Profile,
@@ -146,7 +151,16 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		fresh.Env = maps.Clone(fresh.InlineConfig.Env)
 	}
 
-	if fresh.HarnessAuth == "none" {
+	// p1b-r1 C1 (SECURITY): NoAuth must be re-derived from every source that
+	// can produce it at create time, not just an explicit HarnessAuth="none".
+	// createInputs.NoAuth carries an explicit --no-auth AND a role=none
+	// mapping (role is itself kept, so its NoAuth consequence must be too —
+	// see AgentCreateInputs.NoAuth's doc comment). Missing this let a
+	// role=none or --no-auth agent — including every scheduled-dispatch
+	// agent — reincarnate with NoAuth reset to false and regain injected
+	// secrets on its next start. This is OR'd, never overwritten: nothing
+	// here can flip a true back to false.
+	if createInputs.NoAuth || fresh.HarnessAuth == "none" || fresh.AgentRole == string(AgentRoleNone) {
 		fresh.NoAuth = true
 	}
 
@@ -162,7 +176,7 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	// then populateAgentConfig/resolveDerivedConfig). Calling
 	// resolveDerivedConfig alone would skip the project/hub defaulting step
 	// and let the template win over a project or hub default (design §3.3
-	// Amendment A1 property 1, corrected after Phase 0 review round 4).
+	// Amendment A1 property 1).
 	s.deriveAgentConfig(ctx, freshAgent, project, resolvedTemplate)
 
 	return fresh, warnings, nil
@@ -170,8 +184,7 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 
 // legacyCreateInputsFromAppliedConfig reconstructs a best-effort
 // AgentCreateInputs for an agent created before AppliedConfig.CreateInputs
-// existed (design §3.3 Amendment A1 and its two Phase-0-review addenda:
-// round 2's skills addendum and round 3's env addendum, R3-2). It cannot
+// existed (design §3.3 Amendment A1's skills and env addenda). It cannot
 // reliably tell "the requester set this" from "the template/hub/project
 // defaulted it", so it is deliberately conservative:
 //
@@ -238,7 +251,14 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig, template
 			var dropped, kept []string
 			for k := range inline.Env {
 				if newVal, definedByTemplate := templateEnv[k]; definedByTemplate {
-					dropped = append(dropped, fmt.Sprintf("%s (old=%q new=%q)", k, inline.Env[k], newVal))
+					// p1b-r1 N2: never surface the OLD value. It came from a
+					// legacy agent's live InlineConfig.Env, which is
+					// indistinguishable-by-inspection from an explicit
+					// per-agent override — and that override could be a
+					// secret that merely happens to share a key name with a
+					// template default. The new value is the template's own
+					// current default, not user data, so it is safe to show.
+					dropped = append(dropped, fmt.Sprintf("%s (new=%q)", k, newVal))
 					delete(inline.Env, k)
 				} else {
 					kept = append(kept, k)
@@ -260,7 +280,15 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig, template
 	}
 
 	return &store.AgentCreateInputs{
-		InlineConfig:  inline,
+		InlineConfig: inline,
+		// NoAuth: carried forward only when already true. A legacy agent's
+		// live NoAuth cannot be told apart from an explicit request versus
+		// the auto-no-auth fallback (resolveDerivedConfig), so a true value
+		// is kept (the safe direction — see p1b-r1 C1) but a false value is
+		// NOT trusted as "definitely never wanted no-auth"; fresh.AgentRole
+		// and buildFreshAppliedConfig's own HarnessAuth=="none" check still
+		// apply independently below.
+		NoAuth:        old.NoAuth,
 		HarnessConfig: old.HarnessConfig,
 		HarnessAuth:   old.HarnessAuth,
 		Profile:       old.Profile,

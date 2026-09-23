@@ -226,11 +226,6 @@ var (
 		PrimaryKey: []*schema.Column{AgentReincarnationsColumns[0]},
 		Indexes: []*schema.Index{
 			{
-				Name:    "agentreincarnation_agent_id",
-				Unique:  false,
-				Columns: []*schema.Column{AgentReincarnationsColumns[1]},
-			},
-			{
 				Name:    "agentreincarnation_agent_id_state",
 				Unique:  false,
 				Columns: []*schema.Column{AgentReincarnationsColumns[1], AgentReincarnationsColumns[7]},

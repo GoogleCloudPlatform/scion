@@ -417,6 +417,15 @@ type AgentCreateInputs struct {
 	Profile       string `json:"profile,omitempty"`
 	ThinkingLevel *int   `json:"thinkingLevel,omitempty"`
 
+	// NoAuth is the explicit no-credentials request, captured AFTER the
+	// role=none -> req.NoAuth mapping (handlers_agents_core.go) so that a
+	// role-derived NoAuth is preserved exactly like an explicitly-requested
+	// one — role is itself a kept field, so its NoAuth consequence must be
+	// too. Reincarnate ORs this with the auto-no-auth outcome
+	// (HarnessAuth=="none") rather than overwriting it, so neither source can
+	// clear the other; see buildFreshAppliedConfig.
+	NoAuth bool `json:"noAuth,omitempty"`
+
 	// Branch and Workspace are the raw request values (possibly empty),
 	// captured before populateAgentConfig's project-derived defaulting
 	// (hub-managed workspace path, shared-workspace default branch) ran.

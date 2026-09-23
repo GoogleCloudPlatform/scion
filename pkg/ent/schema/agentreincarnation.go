@@ -84,12 +84,12 @@ func (AgentReincarnation) Fields() []ent.Field {
 // Indexes of the AgentReincarnation.
 func (AgentReincarnation) Indexes() []ent.Index {
 	return []ent.Index{
-		// History listing for an agent, most recent first (paired with
-		// requested_at in queries).
-		index.Fields("agent_id"),
 		// The 409-concurrency check (AC-8) and the hub-restart resume path
 		// (Phase 3, AC-12) both query "is there a non-terminal reincarnation
-		// for this agent".
+		// for this agent". This composite index also covers plain agent_id
+		// lookups (history listing for an agent) since agent_id is its
+		// leading column — a separate single-column index would be
+		// redundant (p1a-r1 N3).
 		index.Fields("agent_id", "state"),
 	}
 }

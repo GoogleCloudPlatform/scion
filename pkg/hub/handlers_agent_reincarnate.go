@@ -190,6 +190,20 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// Amendment A2 / p1b-r1 R4: Phase 1 targets clone-per-agent workspaces
+	// only (design §7). GitClone is set exactly for that mode
+	// (populateAgentConfig) — nil covers both worktree-per-agent and
+	// shared-workspace. Checked here, before any plan is computed or
+	// anything persisted, as defense in depth alongside the broker's own
+	// refusal (Reprovision refuses to touch a non-clone workspace): this is
+	// what makes --dry-run report the restriction too, instead of a dry run
+	// showing a plan that a real request could not safely execute.
+	if agent.AppliedConfig == nil || agent.AppliedConfig.GitClone == nil {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"reincarnate currently supports clone-per-agent workspaces only", nil)
+		return
+	}
+
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
@@ -248,11 +262,27 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// AC-8: 409 when a reincarnation is already pending for this agent.
-	if _, err := s.store.GetPendingAgentReincarnation(ctx, agent.ID); err == nil {
+	// AC-8 / p1b-r1 R1: claim the agent BEFORE creating the reincarnation
+	// record, guarded by the agent row's own optimistic lock (state_version).
+	// The previous order — create the record, then a guarded UpdateAgent —
+	// was check-then-act: a version conflict (or any error) on that second
+	// write left the just-created record stuck in "pending" forever, with no
+	// worker running for it and no API to clear it, wedging every later
+	// request behind a permanent 409. Claiming first means a conflict here
+	// happens before anything else is written, so there is nothing to leave
+	// behind: the request simply fails, unclaimed.
+	if agent.ReincarnationState != store.ReincarnationStateNone && agent.ReincarnationState != store.ReincarnationStateFailed {
 		Conflict(w, "a reincarnation is already pending for this agent")
 		return
-	} else if !errors.Is(err, store.ErrNotFound) {
+	}
+
+	previousReincarnationState := agent.ReincarnationState
+	agent.ReincarnationState = store.ReincarnationStatePending
+	if err := s.store.UpdateAgent(ctx, agent); err != nil {
+		if errors.Is(err, store.ErrVersionConflict) {
+			Conflict(w, "agent was concurrently modified; retry")
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -272,15 +302,15 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		Handoff:               req.Handoff,
 	}
 	if err := s.store.CreateAgentReincarnation(ctx, rec); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	agent.ReincarnationState = store.ReincarnationStatePending
-	if err := s.store.UpdateAgent(ctx, agent); err != nil {
-		if errors.Is(err, store.ErrVersionConflict) {
-			Conflict(w, "agent was concurrently modified; retry")
-			return
+		// The claim above already landed. Revert it so this failure does not
+		// wedge the agent behind a permanent 409 with no record to show for
+		// it. Best effort: if the revert itself fails, log loudly — an
+		// operator can clear agents.reincarnation_state by hand, which is a
+		// far smaller recovery than an unrecoverable stuck claim.
+		agent.ReincarnationState = previousReincarnationState
+		if revertErr := s.store.UpdateAgent(ctx, agent); revertErr != nil {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: failed to revert claimed reincarnation_state after record creation failure",
+				"agent_id", agent.ID, "revert_error", revertErr, "original_error", err)
 		}
 		writeErrorFromErr(w, err, "")
 		return
