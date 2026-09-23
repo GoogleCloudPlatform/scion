@@ -1377,79 +1377,17 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Expand scope aliases from request context
-		expandScopeAliases(uri, req.ProjectID, req.UserID)
-
-		skill, sv, err := s.resolveSkill(ctx, uri, req.ProjectID)
-		if err != nil {
-			resolveErrors = append(resolveErrors, ResolveSkillError{
-				URI: skillRef.URI, Code: "not_found", Message: err.Error(),
-			})
+		baseURL := ""
+		if stor != nil && stor.Provider() == storage.ProviderLocal {
+			baseURL = requestBaseURL(r)
+		}
+		entry, resolveErr := s.resolveRegistrySkillRef(ctx, GetIdentityFromContext(ctx), skillRef.URI, uri,
+			req.ProjectID, req.UserID, baseURL, "you do not have permission to access this skill")
+		if resolveErr != nil {
+			resolveErrors = append(resolveErrors, *resolveErr)
 			continue
 		}
-
-		if skill.Visibility != store.VisibilityPublic {
-			identity := GetIdentityFromContext(ctx)
-			if identity == nil {
-				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: "forbidden",
-					Message: "you do not have permission to access this skill",
-				})
-				continue
-			}
-			decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
-			if !decision.Allowed {
-				slog.WarnContext(ctx, "skill resolve denied",
-					"uri", skillRef.URI,
-					"identity_type", identity.Type(),
-					"reason", decision.Reason)
-				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: "forbidden",
-					Message: "you do not have permission to access this skill",
-				})
-				continue
-			}
-		}
-
-		entry := ResolvedSkillResponse{
-			URI:             skillRef.URI,
-			Name:            skill.Name,
-			ResolvedVersion: sv.Version,
-			ContentHash:     sv.ContentHash,
-		}
-
-		if sv.Status == store.SkillVersionStatusDeprecated {
-			entry.Deprecated = true
-			entry.DeprecationMessage = sv.DeprecationMessage
-			entry.ReplacementURI = sv.ReplacementURI
-		}
-
-		// Generate download URLs for the resolved version's files
-		if stor != nil && len(sv.Files) > 0 {
-			versionPath := skill.StoragePath + "/" + sv.Version
-			downloadURLs, _, _, dlErr := generateDownloadURLs(ctx, stor, versionPath, s.legacyFallbackPath(versionPath), sv.Files)
-			if dlErr != nil {
-				slog.ErrorContext(ctx, "failed to generate download URLs for skill version",
-					"skill", skill.Name, "version", sv.Version, "error", dlErr)
-				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: "storage_error",
-					Message: fmt.Sprintf("skill %s version %s has storage files missing — re-sync the skill", skill.Name, sv.Version),
-				})
-				continue
-			}
-			if stor.Provider() == storage.ProviderLocal {
-				hubURL := requestBaseURL(r)
-				downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "skills", skill.ID)
-				downloadURLs = withSkillVersionDownloadQuery(downloadURLs, sv.Version)
-			}
-			entry.Files = downloadURLs
-		}
-
-		go func(versionID string) {
-			_ = s.store.IncrementSkillVersionDownloadCount(context.Background(), versionID)
-		}(sv.ID)
-
-		resolved = append(resolved, entry)
+		resolved = append(resolved, *entry)
 	}
 
 	writeJSON(w, http.StatusOK, ResolveSkillsResponse{

@@ -173,6 +173,7 @@ type HTTPAgentDispatcher struct {
 	// when a hash mismatch is detected during dispatch. Nil = no repair.
 	harnessConfigRepairer func(ctx context.Context, name string) error
 	templateRepairer      func(ctx context.Context, ref string) error
+	skillPreResolver      func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse
 
 	// hubAgentDefaultsProvider returns the hub's operational agent_defaults at
 	// dispatch time. A callback rather than a snapshot because the settings
@@ -326,6 +327,13 @@ func (d *HTTPAgentDispatcher) SetImageRegistry(registry string) {
 // from storage when a hash mismatch is detected during dispatch.
 func (d *HTTPAgentDispatcher) SetTemplateRepairer(fn func(ctx context.Context, ref string) error) {
 	d.templateRepairer = fn
+}
+
+// SetSkillPreResolver registers the callback that resolves an agent's
+// Hub-registry skill references as its creator at dispatch (#1784). The result
+// is attached to every create request as PreResolvedSkills.
+func (d *HTTPAgentDispatcher) SetSkillPreResolver(fn func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse) {
+	d.skillPreResolver = fn
 }
 
 // isHashMismatchError reports whether err is a broker hash-mismatch error
@@ -636,6 +644,12 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 				}
 			}
 		}
+	}
+
+	// Resolve Hub-registry skills as the agent's creator. The broker's own
+	// identity cannot read non-public skills (#1784).
+	if d.skillPreResolver != nil {
+		req.PreResolvedSkills = d.skillPreResolver(ctx, agent)
 	}
 
 	// Propagate no-auth intent from the agent's applied config.

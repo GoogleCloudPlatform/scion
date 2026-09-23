@@ -50,7 +50,18 @@ func (r *HubSkillResolver) Resolve(ctx context.Context, refs []api.SkillReferenc
 		return nil, fmt.Errorf("hub skill resolution failed: %w", err)
 	}
 
+	return hubResolveResponseToResult(refs, resp), nil
+}
+
+// hubResolveResponseToResult converts a Hub batch-resolve response into a
+// ResolveResult, carrying per-ref metadata (As, Scope, Optional) over from
+// the requested refs. Resolved entries for URIs that were not requested are
+// dropped.
+func hubResolveResponseToResult(refs []api.SkillReference, resp *hubclient.ResolveSkillsResponse) *ResolveResult {
 	result := &ResolveResult{}
+	if resp == nil {
+		return result
+	}
 
 	refByURI := make(map[string]api.SkillReference, len(refs))
 	for _, ref := range refs {
@@ -94,5 +105,5 @@ func (r *HubSkillResolver) Resolve(ctx context.Context, refs []api.SkillReferenc
 		})
 	}
 
-	return result, nil
+	return result
 }

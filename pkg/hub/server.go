@@ -560,6 +560,12 @@ type RemoteCreateAgentRequest struct {
 	// Passed to the broker so it can include them in env-gather requirements.
 	RequiredSecrets []api.RequiredSecret `json:"requiredSecrets,omitempty"`
 
+	// PreResolvedSkills carries the Hub-registry skill references the Hub
+	// resolved at dispatch, authorized as the agent's creator (#1784). The
+	// broker installs these without calling the Hub's resolve endpoint (which
+	// denies broker identities) and resolves only what is not covered here.
+	PreResolvedSkills *ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
+
 	// EnvSources tracks which scope provided each env var key (for reporting to CLI).
 	// Only populated when GatherEnv is true.
 	EnvSources map[string]string `json:"envSources,omitempty"`
@@ -2800,6 +2806,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetHarnessConfigRepairer(s.syncHarnessConfigFromStorage)
 	dispatcher.SetTemplateRepairer(s.syncTemplateFromStorage)
 
+	// Resolve Hub-registry skills at dispatch as the agent's creator so the
+	// broker never needs to read non-public skills with its own identity (#1784).
+	dispatcher.SetSkillPreResolver(s.preResolveAgentSkills)
+
 	// Wire the hub's operational agent_defaults so dispatch can carry the
 	// limit/resource ones to the broker's low-precedence tier. The accessor
 	// takes s.mu; it returns the zero value in file mode, where the wire field
@@ -3382,9 +3392,14 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			templateFromImplicitDefault = true
 		}
 
-		// Resolve template if specified
+		// Resolve template if specified. tmpl outlives the block so that
+		// populateAgentConfig can stamp TemplateID/TemplateHash (and the
+		// template defaults) exactly as on the agent-create path; without them
+		// a broker lacking a local copy cannot hydrate the template (#1795).
+		var tmpl *store.Template
 		if payload.Template != "" {
-			tmpl, tmplErr := s.resolveTemplate(ctx, payload.Template, evt.ProjectID)
+			var tmplErr error
+			tmpl, tmplErr = s.resolveTemplate(ctx, payload.Template, evt.ProjectID)
 			// DEGRADATION RULE (design §3.2.2), the scheduler-path equivalent of
 			// the create path's. A resolve failure never fails a scheduled
 			// dispatch on this path, so there is no 404 to suppress — but a name
@@ -3469,7 +3484,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			ctx = withHubDefaultHarnessConfig(ctx)
 		}
 
-		s.populateAgentConfig(ctx, agent, project, nil)
+		s.populateAgentConfig(ctx, agent, project, tmpl)
 
 		if err := s.store.CreateAgent(ctx, agent); err != nil {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)
