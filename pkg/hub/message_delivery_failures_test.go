@@ -259,8 +259,15 @@ func TestSanitizeFailureReason(t *testing.T) {
 		assert.Equal(t, want, sanitizeFailureReason(in), "input %q", in)
 	}
 
+	// Multi-megabyte input is bounded; a rune split by the pre-cut is dropped.
+	huge := "x" + strings.Repeat("é", 2<<20)
+	got := sanitizeFailureReason(huge)
+	assert.LessOrEqual(t, len(got), maxFailureReasonBytes)
+	assert.True(t, utf8.ValidString(got))
+	assert.True(t, strings.HasPrefix(got, "xé"))
+
 	long := strings.Repeat("é", maxFailureReasonBytes) // 2 bytes per rune
-	got := sanitizeFailureReason(long)
+	got = sanitizeFailureReason(long)
 	assert.LessOrEqual(t, len(got), maxFailureReasonBytes)
 	assert.True(t, utf8.ValidString(got), "truncation must respect rune boundaries")
 }
