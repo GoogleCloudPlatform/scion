@@ -109,6 +109,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/maintenance/migrations/":          "hub-admin:maintenance",
 	"/api/v1/admin/maintenance/check-updates":        "hub-admin:maintenance",
 	"/api/v1/admin/maintenance/restart":              "hub-admin:maintenance",
+	"/api/v1/admin/maintenance/update-available":     "hub-admin:maintenance",
 	"/api/v1/admin/scheduler":                        "hub-admin:scheduler",
 	"/api/v1/admin/allow-list":                       "hub-admin:allow-list",
 	"/api/v1/admin/allow-list/":                      "hub-admin:allow-list",
