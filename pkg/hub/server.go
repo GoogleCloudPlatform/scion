@@ -3392,9 +3392,14 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			templateFromImplicitDefault = true
 		}
 
-		// Resolve template if specified
+		// Resolve template if specified. tmpl outlives the block so that
+		// populateAgentConfig can stamp TemplateID/TemplateHash (and the
+		// template defaults) exactly as on the agent-create path; without them
+		// a broker lacking a local copy cannot hydrate the template (#1795).
+		var tmpl *store.Template
 		if payload.Template != "" {
-			tmpl, tmplErr := s.resolveTemplate(ctx, payload.Template, evt.ProjectID)
+			var tmplErr error
+			tmpl, tmplErr = s.resolveTemplate(ctx, payload.Template, evt.ProjectID)
 			// DEGRADATION RULE (design §3.2.2), the scheduler-path equivalent of
 			// the create path's. A resolve failure never fails a scheduled
 			// dispatch on this path, so there is no 404 to suppress — but a name
@@ -3479,7 +3484,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			ctx = withHubDefaultHarnessConfig(ctx)
 		}
 
-		s.populateAgentConfig(ctx, agent, project, nil)
+		s.populateAgentConfig(ctx, agent, project, tmpl)
 
 		if err := s.store.CreateAgent(ctx, agent); err != nil {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)

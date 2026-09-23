@@ -206,49 +206,26 @@ func createDispatchSkillTemplate(t *testing.T, s store.Store, stor *contentMockS
 	return tmpl
 }
 
-// Skills declared in the Hub template's scion-agent.yaml are pre-resolved,
-// whether the agent carries the template ID (agent-create path) or only the
-// template name (scheduled dispatch_agent path, which does not stamp
-// AppliedConfig.TemplateID).
+// Skills declared in the Hub template's scion-agent.yaml are pre-resolved.
 func TestPreResolveAgentSkills_TemplateConfigSkills(t *testing.T) {
 	const skillURI = "skill://scion/global/tmpl-private@latest"
-	cases := []struct {
-		name  string
-		stamp func(agent *store.Agent, tmpl *store.Template)
-	}{
-		{"by template ID", func(a *store.Agent, tmpl *store.Template) { a.AppliedConfig.TemplateID = tmpl.ID }},
-		{"by template name only", func(a *store.Agent, tmpl *store.Template) { a.Template = tmpl.Slug }},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, s, alice, _, project := setupSkillAuthzTest(t)
-			ctx := context.Background()
-			stor := newContentMockStorage("test-bucket")
-			srv.SetStorage(stor)
+	srv, s, alice, _, project := setupSkillAuthzTest(t)
+	ctx := context.Background()
+	stor := newContentMockStorage("test-bucket")
+	srv.SetStorage(stor)
 
-			skill := createTestSkill(t, s, "tmpl-private", store.SkillScopeGlobal, "", alice.ID)
-			publishTestSkillVersion(t, s, skill)
-			tmpl := createDispatchSkillTemplate(t, s, stor, "dispatch-skill-tmpl", skillURI)
+	skill := createTestSkill(t, s, "tmpl-private", store.SkillScopeGlobal, "", alice.ID)
+	publishTestSkillVersion(t, s, skill)
+	tmpl := createDispatchSkillTemplate(t, s, stor, "dispatch-skill-tmpl", skillURI)
 
-			agent := dispatchTestAgent(alice.ID, project.ID)
-			tc.stamp(agent, tmpl)
-
-			resp := srv.preResolveAgentSkills(ctx, agent)
-			require.NotNil(t, resp)
-			assert.Empty(t, resp.Errors)
-			require.Len(t, resp.Resolved, 1)
-			assert.Equal(t, skillURI, resp.Resolved[0].URI)
-		})
-	}
-}
-
-// A name that matches no Hub template (e.g. a broker-local template) yields
-// no template refs; the broker resolves that template's skills as before.
-func TestPreResolveAgentSkills_UnknownTemplateNameIgnored(t *testing.T) {
-	srv, _, alice, _, project := setupSkillAuthzTest(t)
 	agent := dispatchTestAgent(alice.ID, project.ID)
-	agent.Template = "broker-local-only"
-	assert.Nil(t, srv.preResolveAgentSkills(context.Background(), agent))
+	agent.AppliedConfig.TemplateID = tmpl.ID
+
+	resp := srv.preResolveAgentSkills(ctx, agent)
+	require.NotNil(t, resp)
+	assert.Empty(t, resp.Errors)
+	require.Len(t, resp.Resolved, 1)
+	assert.Equal(t, skillURI, resp.Resolved[0].URI)
 }
 
 // preResolvingDispatcher runs the Hub's pre-resolver on the agent exactly as
@@ -266,7 +243,8 @@ func (d *preResolvingDispatcher) DispatchAgentCreate(ctx context.Context, agent 
 
 // End to end through the scheduler: a dispatch_agent event created by a
 // regular member, naming a Hub template whose scion-agent.yaml requires a
-// private skill, pre-resolves that skill as the event's creator.
+// private skill, stamps the template ID (#1795) and pre-resolves that skill as
+// the event's creator.
 func TestSchedulerDispatch_PreResolvesTemplatePrivateSkill(t *testing.T) {
 	const skillURI = "skill://scion/global/sched-private@latest"
 	srv, s, alice, _, project := setupSkillAuthzTest(t)
@@ -276,7 +254,7 @@ func TestSchedulerDispatch_PreResolvesTemplatePrivateSkill(t *testing.T) {
 
 	skill := createTestSkill(t, s, "sched-private", store.SkillScopeGlobal, "", alice.ID)
 	publishTestSkillVersion(t, s, skill)
-	createDispatchSkillTemplate(t, s, stor, "sched-skill-tmpl", skillURI)
+	tmpl := createDispatchSkillTemplate(t, s, stor, "sched-skill-tmpl", skillURI)
 
 	disp := &preResolvingDispatcher{createAgentDispatcher: createAgentDispatcher{createPhase: string(state.PhaseRunning)}, srv: srv}
 	srv.SetDispatcher(disp)
@@ -290,6 +268,14 @@ func TestSchedulerDispatch_PreResolvesTemplatePrivateSkill(t *testing.T) {
 		Payload:   string(payload),
 		CreatedBy: alice.ID,
 	}))
+
+	// #1795: the scheduled path stamps the resolved template's ID and hash,
+	// as the agent-create path does, so the broker can hydrate it and the
+	// Hub can read its skills.
+	agent, err := s.GetAgentBySlug(ctx, project.ID, "sched-skill-agent")
+	require.NoError(t, err)
+	assert.Equal(t, tmpl.ID, agent.AppliedConfig.TemplateID)
+	assert.Equal(t, tmpl.ContentHash, agent.AppliedConfig.TemplateHash)
 
 	require.NotNil(t, disp.pre, "scheduled dispatch must pre-resolve the template's Hub skills")
 	assert.Empty(t, disp.pre.Errors)

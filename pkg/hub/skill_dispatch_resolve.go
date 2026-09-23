@@ -188,36 +188,10 @@ func (s *Server) dispatchSkillRefs(ctx context.Context, agent *store.Agent) []ap
 	if agent.AppliedConfig.InlineConfig != nil {
 		refs = append(refs, agent.AppliedConfig.InlineConfig.Skills...)
 	}
-	if templateID := s.dispatchTemplateID(ctx, agent); templateID != "" {
-		refs = append(refs, s.templateSkillRefs(ctx, templateID)...)
+	if agent.AppliedConfig.TemplateID != "" {
+		refs = append(refs, s.templateSkillRefs(ctx, agent.AppliedConfig.TemplateID)...)
 	}
 	return refs
-}
-
-// dispatchTemplateID returns the Hub template ID backing the agent. The
-// agent-create path stamps AppliedConfig.TemplateID, but other paths (e.g.
-// scheduled dispatch_agent events) only record the template name on
-// agent.Template, so fall back to resolving that name in the agent's project
-// (project scope, then global), mirroring repairTemplate's ID-then-name order.
-// Returns "" when no Hub template matches (e.g. a broker-local template), in
-// which case the broker resolves the template's skills as before.
-func (s *Server) dispatchTemplateID(ctx context.Context, agent *store.Agent) string {
-	if agent.AppliedConfig != nil && agent.AppliedConfig.TemplateID != "" {
-		return agent.AppliedConfig.TemplateID
-	}
-	if agent.Template == "" {
-		return ""
-	}
-	tmpl, err := s.resolveTemplate(ctx, agent.Template, agent.ProjectID)
-	if err != nil {
-		slog.Warn("dispatch skill pre-resolution: failed to resolve template by name",
-			"agent_id", agent.ID, "template", agent.Template, "error", err)
-		return ""
-	}
-	if tmpl == nil {
-		return ""
-	}
-	return tmpl.ID
 }
 
 // templateSkillRefs reads the skills declared in a Hub template's
