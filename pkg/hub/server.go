@@ -1625,6 +1625,36 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			"allowed_client_ids", len(cfg.GEGoogleExchange.AllowedClientIDs))
 	}
 
+	// Initialize the shared Google identity verification stack (base
+	// validator + resolver) for the external-bearer authentication path
+	// (auth_external_bearer.go), whenever Google trust is configured
+	// (server.federation.trusted_issuers: accounts.google.com, issuer_type
+	// user, non-empty expected_audience) or the GE exchange endpoint is
+	// enabled. Both mechanisms share the same resolver instance so they
+	// produce identical decisions during the exchange-to-external-bearer
+	// soak (design §4.4, §7 reuse map). Phase 1 uses the base validator; the
+	// caching decorator is not wired in until a later phase.
+	if hasGoogleUserTrust(cfg.Federation) || cfg.GEGoogleExchange.IsValid() {
+		googleValidator := NewGoogleCredentialValidator(nil)
+		googleResolver := NewGoogleIdentityResolver(
+			s,                    // store.Store embeds UserStore
+			s,                    // store.Store embeds ExternalIdentityStore (ent-backed, durable)
+			srv.isUserAuthorized, // same domain/invite/allow-registration policy as web login
+			func(ctx context.Context, email string) string {
+				return srv.getUserRole(ctx, email, "", "")
+			},
+			slog.Default(),
+		)
+		srv.authConfig.GoogleValidator = googleValidator
+		srv.authConfig.GoogleResolver = googleResolver
+		if srv.geExchangeService != nil {
+			srv.geExchangeService.SetResolver(googleResolver)
+		}
+		slog.Info("Google external-bearer identity stack initialized",
+			"google_trust_configured", hasGoogleUserTrust(cfg.Federation),
+			"ge_exchange_configured", cfg.GEGoogleExchange.IsValid())
+	}
+
 	srv.registerRoutes()
 
 	return srv, nil

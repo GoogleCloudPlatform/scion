@@ -73,6 +73,13 @@ type AuthConfig struct {
 	// The middleware loads from this pointer on each request to see
 	// hot-reloaded authenticators.
 	FederationAuth *atomic.Pointer[FederationAuthenticator]
+	// GoogleValidator verifies Google ID tokens / access tokens for the
+	// external-bearer path (auth_external_bearer.go). nil disables that path
+	// even when FederationAuth trusts accounts.google.com.
+	GoogleValidator GoogleCredentialValidator
+	// GoogleResolver resolves a validated Google identity to a Hub user for
+	// the external-bearer path, sharing decisions with GEExchangeService.
+	GoogleResolver *GoogleIdentityResolver
 	// CredentialStore handles agent credential validation (Phase 1H).
 	// When non-nil, agent tokens are validated against persistent credential state.
 	CredentialStore store.AgentCredentialStore
@@ -414,6 +421,11 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				claims, err := cfg.UserTokenSvc.ValidateUserToken(token)
 				if err != nil {
+					// Not a Hub-issued user JWT. It may be a Google ID token
+					// forwarded verbatim by a trusted external caller.
+					if serveExternalBearer(w, r, next, ctx, token, cfg, log) {
+						return
+					}
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token: "+err.Error(), nil)
 					return
@@ -461,6 +473,13 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 
 			default:
+				// Opaque or unrecognized bearer tokens are also given a chance
+				// against the external-bearer path (e.g. a Google ID token
+				// whose "typ" isn't detected as a Hub token); anything it
+				// cannot vouch for falls through to the rejection below.
+				if serveExternalBearer(w, r, next, ctx, token, cfg, log) {
+					return
+				}
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 					"unrecognized token format", nil)
 				return
