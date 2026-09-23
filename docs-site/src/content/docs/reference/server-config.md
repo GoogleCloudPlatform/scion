@@ -238,6 +238,31 @@ Controls the background task scheduler in the Hub. This regulates the tick inter
 Configuring a modest concurrency limit (such as the default `2`) is highly recommended for small or single-node database instances to prevent sudden spikes in database connection usage.
 :::
 
+### Maintenance (`server.maintenance`)
+
+Controls how the Hub checks for and applies its own updates. The Hub dispatches update checks by **deployment tier**: a `binary` Hub reads the `LATEST.json` release manifest and the GitHub Releases API, while a `source` Hub checks its git checkout for new commits.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `deployment_tier` | string | `binary` if no repository path is configured, otherwise `source` | Update strategy. `binary` updates from GitHub Releases; `source` updates from a git checkout. The single-node VM deploy script sets `binary`. |
+| `release_channel` | string | Detected from the running version | Release channel to track: `stable`, `preview`, or `nightly`. When empty, the channel is derived from the version string (`v0.5.0` → `stable`, `v0.5.0-rc1` → `preview`, `nightly-*` → `nightly`). Development builds have no channel and skip scheduled checks. |
+| `update_policy` | string | `auto` for `binary`, `disabled` for `source` | `auto` checks on a schedule and installs updates automatically. `notify` checks on a schedule and shows an update-available banner in the admin UI, where an admin applies or dismisses it. `disabled` turns off scheduled checks; manual checks from the admin UI still work. |
+| `check_interval_hours` | integer | `6` | How often the scheduled release check runs. Minimum `1`. Each run is jittered by up to ±30 minutes. |
+| `github_repo` | string | `GoogleCloudPlatform/scion` | GitHub repository used for release and manifest lookups. |
+
+Scheduled checks run only when `deployment_tier` is `binary` and `update_policy` is not `disabled`. A binary update downloads the release tarball, verifies the new binary's version, backs up the current binary, installs the new one, and restarts the `scion-hub` systemd service. If the install fails, the backup is restored.
+
+The related admin endpoints are `POST /api/v1/admin/maintenance/check-updates` (manual check) and `GET` / `DELETE` on `/api/v1/admin/maintenance/update-available` (read or dismiss a pending update notification). Both require the `hub.maintenance.execute` permission.
+
+```yaml
+server:
+  maintenance:
+    deployment_tier: "binary"
+    release_channel: "stable"
+    update_policy: "notify"
+    check_interval_hours: 12
+```
+
 ### OIDC Identity Provider (`server.oidc`)
 
 Configuration for the Hub's built-in OIDC Identity Provider feature.
@@ -559,7 +584,7 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 | `lifecycle` | `auto_suspend_stalled`, `soft_delete_retention`, `soft_delete_retain_files` |
 | `maintenance` | `admin_mode`, `maintenance_message` (durable + cluster-wide) |
 | `telemetry` | Full `telemetry.*` subtree (enabled, cloud, hub, local, filter, resource) |
-| `agent_defaults` | `default_template`, `default_harness_config`, `default_max_turns`, `default_max_model_calls`, `default_max_duration`, `default_resources`, `default_model`, `default_thinking_level`, `default_max_agent_role`, `default_agent_role` |
+| `agent_defaults` | `default_template`, `default_harness_config`, `default_max_turns`, `default_max_model_calls`, `default_max_duration`, `default_resources`, `default_model`, `default_thinking_level`, `default_max_agent_role`, `default_agent_role`, `default_runtime_broker`, `default_timezone` |
 | `federation` | `enabled`, `trusted_issuers[]`, `algorithms`, `refresh_interval`, `debounce_interval` |
 | `endpoints` | `hub.public_url`, `image_registry` |
 | `github_app` | `app_id`, `api_base_url`, `webhooks_enabled`, `installation_url`, `private_key_path` |

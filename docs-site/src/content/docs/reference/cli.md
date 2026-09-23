@@ -229,7 +229,7 @@ Conversations are referenced using one of three forms:
     - `get <conversation-ref>`: Show conversation details.
     - `get-message <conversation-ref> <message-id>`: Retrieve a single message by its ID from a conversation. Authorization is participant-based — only participants of the conversation can retrieve its messages.
     - `messages <conversation-ref>`: View messages in a conversation.
-    - `create <name>`: Create a new group conversation.
+    - `create <name>`: Create a new group conversation. The group appears as a thread in the project's web chat space. Names must start with a letter or digit, contain only letters, digits, spaces, `_`, or `-`, and be at most 100 characters (returns `400 Bad Request` otherwise). A name already used in the project returns `409` (name conflict).
     - `set-default <conversation-ref> <agent-id>`: Set the default agent for a conversation.
     - `participants <conversation-ref>`: List participants in a conversation.
     - `join <conversation-ref> <principal-kind> <principal-id>`: Add a participant to a conversation.
@@ -247,7 +247,7 @@ Conversations are referenced using one of three forms:
     - `--after <time>`: Show messages after this time (RFC 3339).
     - `--json`: Output in JSON format.
 - **Flags (on `create`):**
-    - `--project <string>`: Project ID (defaults to current project).
+    - `--project <string>`: Project ID. Defaults to the Hub-linked project, then the local project. If no project resolves, the Hub falls back to the calling agent's project; a user caller with no project gets `400 projectId is required`.
     - `--json`: Output in JSON format.
 - **Flags (on `catch-up`):**
     - `--since <duration>`: Show messages from this duration ago, e.g. `30m`, `2h` (default `1h`).
@@ -501,7 +501,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags:
             - `--project <string>`: Project ID or name to scope the token to (required).
             - `--name <string>`: Token name/label (required).
-            - `--scopes <scopes>`: Scopes to grant (required). This flag is **repeatable** and also accepts a **comma-separated list** of scopes (e.g., `--scopes agent:read,agent:create --scopes agent:start`). Strict empty-value validation is enforced.
+            - `--scopes <scopes>`: Scopes to grant (required). This flag is **repeatable** and also accepts a **comma-separated list** of scopes (e.g., `--scopes agent:read,agent:create --scopes agent:lifecycle`). Strict empty-value validation is enforced.
             - `--expires <duration>`: Expiry duration (e.g., 30d, 90d, 1y, default: 90d).
     - `list`: List your access tokens.
     - `revoke <token-id>`: Revoke a token (remains visible in listings as revoked).

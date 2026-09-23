@@ -19,7 +19,13 @@ The dashboard features an integrated notification framework with real-time SSE d
 - **Browser Push Notifications**: Opt-in native browser push notifications ensure you receive alerts even when the dashboard is in the background. Default triggers include `stalled` and `error` states, as well as requests for user input.
 
 ### Mode Switcher
-The header features a three-column layout with a centered **mode switcher** that lets you move between the three top-level workspaces: **Dashboard**, **Chat**, and **Terminal**. Above 768 px, each mode displays a text label alongside its icon with clear active and hover states.
+The header features a **mode switcher** that lets you move between the top-level workspaces: **Dashboard**, **Chat**, and **Terminal**. The header adapts to the viewport width in three tiers:
+
+- **Wide (above 1100 px)**: A segmented mode switcher with text labels and icons, with inline buttons for inbox, notifications, help, theme, profile, and sign-out.
+- **Medium (768–1100 px)**: The mode switcher shows icons only. Inbox, notifications, help, theme, profile, and sign-out move into a single account dropdown. A badge dot on the dropdown shows unread messages or notifications.
+- **Narrow (below 768 px)**: The mode switcher becomes a dropdown, next to the account dropdown and a hamburger menu.
+
+Inbox and notifications stay reachable at every width. The Terminal entry also shows how many terminal sessions are open.
 
 ### Native Web Chat
 When enabled via the `web.native_chat` feature flag, the dashboard includes a top-level **Native Web Chat** workspace (a fourth ShellType in the SPA). It offers a rich interface for direct communication and coordination with your running agents and team.
@@ -33,7 +39,7 @@ When enabled via the `web.native_chat` feature flag, the dashboard includes a to
 - **Composer Default-Agent Disambiguation**: When sending messages in spaces with multiple active agents, the composer helps resolve which agent is targeted if no explicit mention is used.
 - **Attachments**: Upload file or image attachments directly within the composer, with preview tiles rendered instantly on real-time SSE updates.
 - **Search**: Built-in chat search lets you query across historical messages and threads.
-- **Clickable File Paths**: File paths in chat messages starting with `/workspace/...` or `/scion-volumes/...` automatically render as clickable links. Clicking these paths opens an on-demand file viewer dialog, fetching the file contents instantly via existing workspace and shared-directory APIs.
+- **Clickable File Paths**: File paths in chat messages starting with `/workspace/...` or `/scion-volumes/...` automatically render as clickable links, including paths inside inline backtick code spans (fenced code blocks are left untouched). Only file paths are linked, meaning the last segment has an extension or is a known extensionless file such as `Makefile` or `Dockerfile`. Directory paths stay plain text. Clicking these paths opens an on-demand file viewer dialog, fetching the file contents instantly via existing workspace and shared-directory APIs.
 - **Chat/Log Switcher**: Instantly toggle between standard conversational chat with the agent and a real-time stream of the agent's raw execution logs inside the same view.
 - **Conversation Export**: Export any thread via the export dropdown in the chat header — download as Markdown, print/save as PDF, or copy to clipboard (HTML + plain text). All exported content is HTML-escaped for safe rendering.
 - **@-Mentions & Autocomplete**: Call other agents into the thread by typing `@` to trigger a fuzzy-matching, keyboard-navigable agent dropdown. Protected by code-fence guards to prevent triggering inside Markdown code snippets.
@@ -48,6 +54,7 @@ When enabled via the `web.native_chat` feature flag, the dashboard includes a to
 ### Terminal Workspace
 The **Terminal Workspace** (enabled via the `web.terminal_workspace` feature flag, default **ON**) provides a dedicated, multi-pane terminal environment as a top-level workspace alongside Dashboard and Chat. It allows you to manage interactive terminal sessions with your agents in a persistent, multi-pane layout.
 - **Multi-Pane Layout**: Open multiple agent terminals side by side. The workspace preserves your active pane layout during navigation and places newly opened terminals into available slots.
+- **Shareable Layout URLs**: Multi-pane layouts (the active preset and which agent occupies each pane) are encoded in the page URL. Reloading the page restores the layout, the browser Back and Forward buttons step through layout changes, and you can bookmark or share the URL to reopen the same multi-pane configuration. Single-pane views keep a clean URL. If the layout parameters are malformed or refer to agents that no longer exist, the workspace falls back safely.
 - **Cross-Tab Ownership**: Terminal sessions are tracked across browser tabs, preventing conflicts when the same agent is accessed from multiple tabs.
 - **Reconnect Controls**: If a terminal session is interrupted, the workspace provides reconnect controls to resume where you left off.
 - **Scoped PTY Cleanup**: When you close a terminal or navigate away, the workspace performs scoped cleanup of its PTY sessions to reclaim resources.

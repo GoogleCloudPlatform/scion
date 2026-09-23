@@ -16,7 +16,7 @@ Scion agents run inside container images that bundle an LLM harness (Claude, Gem
 Scion images are built in layers:
 
 ```
-core-base          System dependencies (Go, Node, Python, Git)
+core-base          System dependencies on node:24-trixie-slim (Go, Node, Python, Git)
   └── scion-base   Scion CLI, sciontool binary, scion user, entrypoint
         ├── scion-claude     Claude Code harness
         ├── scion-gemini-cli Gemini CLI harness

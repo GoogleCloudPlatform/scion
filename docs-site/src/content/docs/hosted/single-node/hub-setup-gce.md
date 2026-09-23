@@ -1,6 +1,6 @@
 ---
 title: Hub Setup on GCE
-description: Deploy a Scion Hub on a Google Compute Engine VM using the Developer Hub scripts.
+description: Deploy a Scion Hub on a Google Compute Engine VM using the Developer Hub scripts or the binary-release single-node VM script.
 ---
 
 ## Overview
@@ -78,6 +78,29 @@ Once the Hub is running:
 3. **Register a Runtime Broker** — Connect a machine to execute agents. See [Runtime Broker](/scion/hosted/ha/runtime-broker/) for details on registering your local machine or a remote VM.
 
 For ongoing Hub administration (auth, permissions, observability), see the other guides in the Hub Administration section.
+
+## Binary Release Deployment (single-node VM)
+
+If you don't need to build from source, `scripts/single-node-vm/deploy.sh` stands up a Hub from a published GitHub Release instead. It creates a GCE VM with no public IP that runs the `scion` binary under systemd with embedded SQLite, plus a Cloud Run reverse proxy protected by Identity-Aware Proxy (IAP). Re-running the script is idempotent.
+
+```bash
+./scripts/single-node-vm/deploy.sh                    # interactive wizard
+./scripts/single-node-vm/deploy.sh --version v0.5.0   # pin a release
+```
+
+The wizard asks for the Hub name, region, machine size, disk size, chat plugins, container image source, admin email, and **update policy**.
+
+**Headless installs.** Pass `--config <file>` to pre-answer the wizard from YAML. This is intended for non-interactive and agent-driven installs:
+
+```bash
+./scripts/single-node-vm/deploy.sh --config my-deploy-config.yaml
+```
+
+Fields in the file skip their prompt. Missing fields fall back to a prompt when a terminal is attached, or to defaults otherwise. With no terminal, a missing required field makes the script exit with an error rather than hang. See `scripts/single-node-vm/deploy-config.example.yaml` for every field, including `update_policy` and `release_channel`.
+
+**Automatic updates.** The script writes a `server.maintenance` section with `deployment_tier: binary`, so the Hub checks GitHub Releases on a schedule. It installs updates automatically (`auto`), shows an update banner in the admin UI (`notify`), or does neither (`disabled`). The release channel is detected from the installed version unless you set it. See [Maintenance (`server.maintenance`)](/scion/reference/server-config/#maintenance-servermaintenance) for all fields.
+
+For the full guide, including architecture, access patterns, and troubleshooting, see [`docs/deploy/single-node-vm.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md). If an AI agent is running the deployment for you, point it at the step-by-step [agent deployment runbook](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/agent-runbook-single-node-vm.md). The runbook covers GCP preflight checks, the questions to ask the user, config file generation, and troubleshooting.
 
 ## Internal Deployments (BYO TLS)
 

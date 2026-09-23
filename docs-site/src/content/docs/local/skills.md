@@ -211,7 +211,7 @@ scion skills publish ./deploy-checklist --version 1.1.0 --skill-id <skill-id>
 | Flag | Default | Description |
 | :--- | :--- | :--- |
 | `--version` | *(required)* | SemVer version to publish (e.g. `1.0.0`). |
-| `--scope` | `global` | Scope for a **newly created** skill: `core`, `global`, `project`, or `user`. |
+| `--scope` | `global` | Scope for a **newly created** skill: `core`, `global`, `project`, or `user`. With `project`, the skill is attached to the current Hub-linked project. The command fails if no project can be determined (run `scion hub link` first). |
 | `--skill-id` | *(auto)* | Publish a new version for an existing skill ID. If omitted, Scion matches by directory name and creates the skill when no match exists. |
 
 :::note[Global scope permissions]

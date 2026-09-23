@@ -563,7 +563,7 @@ For programmatic access to an IAP-protected Cloud Run service (which our GKE age
 Scion agent image building follows a strict dependency chain:
 $$\text{core-base} \longrightarrow \text{scion-base} \longrightarrow \text{harnesses (gemini-cli, etc.)}$$
 
-1. **`core-base`:** Contains core tools (Go compiler, Git from source, unix packages, GCS FUSE).
+1. **`core-base`:** Built on `node:24-trixie-slim` (Debian 13). Contains core tools (Go compiler, Git vendored from the Chainguard `git` image, unix packages, GCS FUSE).
 2. **`scion-base`:** Copies repository code (`cmd/`, `pkg/`, etc.) and builds the `scion` and `sciontool` binaries on top of `core-base`.
 3. **Harnesses:** Pulls `scion-base` and adds target agent packages (like `@google/gemini-cli`).
 
