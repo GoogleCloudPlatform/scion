@@ -16,12 +16,14 @@ within a local clone of the Scion repository), clone the repo first. The deploy
 script and its supporting files must be available locally.
 
 ```bash
-git clone --depth 1 https://github.com/GoogleCloudPlatform/scion.git
-cd scion
+git clone --depth 1 https://github.com/GoogleCloudPlatform/scion.git /tmp/scion-repo
+cd /tmp/scion-repo
 ```
 
 A shallow clone (`--depth 1`) is sufficient — the deploy script does not need
-git history. If you already have the repo cloned or checked out, skip this step.
+git history. The `/tmp/scion-repo` path is consistent with Section 5.1; if you
+already have the repo cloned or checked out elsewhere, skip this step and
+adjust the paths in Section 5 accordingly.
 
 ---
 
