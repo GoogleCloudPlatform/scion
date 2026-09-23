@@ -1166,3 +1166,262 @@ func TestIsAsymmetricJWTAlgorithm(t *testing.T) {
 		}
 	}
 }
+
+// ---- jwksCacheSource (jwks_url key source) tests ----
+
+func TestJWTProxyAuthenticator_JWKSURL_ValidAssertion(t *testing.T) {
+	kp := newTestKeyPair(t, "key-1")
+	jwksSrv := startJWKSServer(t, kp.jwksJSON(t))
+
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.ES256),
+		KeySource: NewJWKSURLKeySource(jwksSrv.URL),
+	}
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"email": "user@example.com",
+		"sub":   "user-123",
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+	}
+	assertion := kp.signJWT(t, claims)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(DefaultJWTHeader, assertion)
+
+	info, err := auth.Authenticate(req)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if info == nil {
+		t.Fatal("expected ProxyUserInfo, got nil")
+	}
+	if info.Email != "user@example.com" {
+		t.Errorf("expected email 'user@example.com', got %q", info.Email)
+	}
+	if info.Subject != "user-123" {
+		t.Errorf("expected subject 'user-123', got %q", info.Subject)
+	}
+}
+
+func TestJWTProxyAuthenticator_JWKSURL_UnknownKidTriggersRefresh(t *testing.T) {
+	kp1 := newTestKeyPair(t, "old-key")
+	kp2 := newTestKeyPair(t, "new-key")
+
+	currentJWKS := kp1.jwksJSON(t)
+	jwksSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(currentJWKS)
+	}))
+	t.Cleanup(jwksSrv.Close)
+
+	keySource := NewJWKSURLKeySource(jwksSrv.URL)
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.ES256),
+		KeySource: keySource,
+	}
+
+	now := time.Now()
+	claims1 := map[string]interface{}{
+		"email": "user1@example.com",
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+	}
+	assertion1 := kp1.signJWT(t, claims1)
+	req1 := httptest.NewRequest("GET", "/", nil)
+	req1.Header.Set(DefaultJWTHeader, assertion1)
+	if _, err := auth.Authenticate(req1); err != nil {
+		t.Fatalf("first request failed: %v", err)
+	}
+
+	// Rotate: the JWKS endpoint now serves both keys.
+	bothKeys := jose.JSONWebKeySet{
+		Keys: []jose.JSONWebKey{
+			{Key: &kp1.privateKey.PublicKey, KeyID: kp1.kid, Algorithm: string(jose.ES256), Use: "sig"},
+			{Key: &kp2.privateKey.PublicKey, KeyID: kp2.kid, Algorithm: string(jose.ES256), Use: "sig"},
+		},
+	}
+	bothData, err := json.Marshal(bothKeys)
+	if err != nil {
+		t.Fatalf("failed to marshal rotated jwks: %v", err)
+	}
+	currentJWKS = bothData
+
+	// Bypass the cache's debounce/proactive-refresh windows so the unknown
+	// kid below forces an immediate refresh, mirroring
+	// TestIAPAuthenticator_UnknownKidTriggersRefresh.
+	cacheSource, ok := keySource.(*jwksCacheSource)
+	if !ok {
+		t.Fatalf("expected *jwksCacheSource, got %T", keySource)
+	}
+	cacheSource.cache.mu.Lock()
+	cacheSource.cache.lastFetched = time.Time{}
+	cacheSource.cache.lastAttempted = time.Time{}
+	cacheSource.cache.mu.Unlock()
+
+	claims2 := map[string]interface{}{
+		"email": "user2@example.com",
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+	}
+	assertion2 := kp2.signJWT(t, claims2)
+	req2 := httptest.NewRequest("GET", "/", nil)
+	req2.Header.Set(DefaultJWTHeader, assertion2)
+	info2, err := auth.Authenticate(req2)
+	if err != nil {
+		t.Fatalf("second request (new kid) failed: %v", err)
+	}
+	if info2 == nil {
+		t.Fatal("second request returned nil info")
+	}
+	if info2.Email != "user2@example.com" {
+		t.Errorf("expected email 'user2@example.com', got %q", info2.Email)
+	}
+}
+
+// ---- jwksFileSource (jwks_file key source) tests ----
+
+// writeJWKSFile marshals a JWKS containing kp's public key and writes it to
+// a temp file, returning the path.
+func writeJWKSFile(t *testing.T, kp *testKeyPair) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "jwks.json")
+	if err := os.WriteFile(path, kp.jwksJSON(t), 0o600); err != nil {
+		t.Fatalf("failed to write jwks file: %v", err)
+	}
+	return path
+}
+
+func TestJWTProxyAuthenticator_JWKSFile_ValidAssertion(t *testing.T) {
+	kp := newTestKeyPair(t, "key-1")
+	keySource, err := NewJWKSFileKeySource(writeJWKSFile(t, kp))
+	if err != nil {
+		t.Fatalf("NewJWKSFileKeySource failed: %v", err)
+	}
+
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.ES256),
+		KeySource: keySource,
+	}
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"email": "user@example.com",
+		"sub":   "user-123",
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+	}
+	assertion := kp.signJWT(t, claims)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(DefaultJWTHeader, assertion)
+
+	info, err := auth.Authenticate(req)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if info == nil {
+		t.Fatal("expected ProxyUserInfo, got nil")
+	}
+	if info.Email != "user@example.com" {
+		t.Errorf("expected email 'user@example.com', got %q", info.Email)
+	}
+}
+
+func TestJWTProxyAuthenticator_JWKSFile_KidLookup(t *testing.T) {
+	kp1 := newTestKeyPair(t, "key-1")
+	kp2 := newTestKeyPair(t, "key-2")
+
+	jwks := jose.JSONWebKeySet{
+		Keys: []jose.JSONWebKey{
+			{Key: &kp1.privateKey.PublicKey, KeyID: kp1.kid, Algorithm: string(jose.ES256), Use: "sig"},
+			{Key: &kp2.privateKey.PublicKey, KeyID: kp2.kid, Algorithm: string(jose.ES256), Use: "sig"},
+		},
+	}
+	data, err := json.Marshal(jwks)
+	if err != nil {
+		t.Fatalf("failed to marshal jwks: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "jwks.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("failed to write jwks file: %v", err)
+	}
+
+	keySource, err := NewJWKSFileKeySource(path)
+	if err != nil {
+		t.Fatalf("NewJWKSFileKeySource failed: %v", err)
+	}
+
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.ES256),
+		KeySource: keySource,
+	}
+
+	now := time.Now()
+	for _, kp := range []*testKeyPair{kp1, kp2} {
+		wantEmail := kp.kid + "@example.com"
+		claims := map[string]interface{}{
+			"email": wantEmail,
+			"iat":   now.Add(-1 * time.Minute).Unix(),
+			"exp":   now.Add(5 * time.Minute).Unix(),
+		}
+		assertion := kp.signJWT(t, claims)
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Header.Set(DefaultJWTHeader, assertion)
+		info, err := auth.Authenticate(req)
+		if err != nil {
+			t.Fatalf("Authenticate for kid %q failed: %v", kp.kid, err)
+		}
+		if info.Email != wantEmail {
+			t.Errorf("expected email %q, got %q", wantEmail, info.Email)
+		}
+	}
+}
+
+func TestJWTProxyAuthenticator_JWKSFile_UnknownKid(t *testing.T) {
+	kp1 := newTestKeyPair(t, "key-1")
+	kp2 := newTestKeyPair(t, "key-2") // not included in the file
+
+	keySource, err := NewJWKSFileKeySource(writeJWKSFile(t, kp1))
+	if err != nil {
+		t.Fatalf("NewJWKSFileKeySource failed: %v", err)
+	}
+
+	auth := &JWTProxyAuthenticator{
+		Algorithm: string(jose.ES256),
+		KeySource: keySource,
+	}
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"email": "user@example.com",
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+	}
+	assertion := kp2.signJWT(t, claims)
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(DefaultJWTHeader, assertion)
+
+	if _, err := auth.Authenticate(req); err == nil {
+		t.Fatal("expected error for unknown kid, got nil")
+	}
+}
+
+func TestJWKSFileKeySource_MissingFile(t *testing.T) {
+	_, err := NewJWKSFileKeySource(filepath.Join(t.TempDir(), "does-not-exist.json"))
+	if err == nil {
+		t.Fatal("expected error for missing jwks file")
+	}
+}
+
+func TestJWKSFileKeySource_InvalidJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "invalid.json")
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	if _, err := NewJWKSFileKeySource(path); err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
