@@ -398,10 +398,12 @@ type TransportAuthConfig struct {
 
 // ProxyAuthConfig holds proxy authentication settings.
 type ProxyAuthConfig struct {
-	// Provider selects the proxy auth provider: "iap" or "header".
+	// Provider selects the proxy auth provider: "iap", "jwt", or "header".
 	Provider string `json:"provider" yaml:"provider" koanf:"provider"`
 	// IAP holds Google IAP-specific settings.
 	IAP *IAPAuthConfig `json:"iap,omitempty" yaml:"iap,omitempty" koanf:"iap"`
+	// JWT holds settings for the generic JWT proxy auth provider.
+	JWT *JWTAuthConfig `json:"jwt,omitempty" yaml:"jwt,omitempty" koanf:"jwt"`
 	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
 	RequireTrustedProxyIP bool `json:"requireTrustedProxyIP,omitempty" yaml:"requireTrustedProxyIP,omitempty" koanf:"requireTrustedProxyIP"`
 }
@@ -414,6 +416,63 @@ type IAPAuthConfig struct {
 	Issuer string `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
 	// JWKSURL overrides the default IAP JWKS URL (for testing).
 	JWKSURL string `json:"jwksURL,omitempty" yaml:"jwksURL,omitempty" koanf:"jwksURL"`
+}
+
+// JWTAuthConfig holds settings for the generic JWT proxy auth provider.
+// Unlike IAPAuthConfig (which is hardcoded to Google's conventions), this
+// provider is fully configurable so operators running bespoke auth proxies
+// can plug in their own JWT contract.
+type JWTAuthConfig struct {
+	// Header is the HTTP header containing the JWT assertion.
+	// Default: "X-Auth-Proxy-JWT"
+	Header string `json:"header,omitempty" yaml:"header,omitempty" koanf:"header"`
+
+	// Algorithm is the expected JWT signing algorithm (MANDATORY).
+	// Must be an asymmetric algorithm: RS256, RS384, RS512, ES256, ES384, ES512,
+	// PS256, PS384, PS512.
+	Algorithm string `json:"algorithm" yaml:"algorithm" koanf:"algorithm"`
+
+	// Issuer, if set, is validated against the JWT "iss" claim. Optional.
+	Issuer string `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
+
+	// Audience, if set, is validated against the JWT "aud" claim. Optional.
+	Audience string `json:"audience,omitempty" yaml:"audience,omitempty" koanf:"audience"`
+
+	// Key source — exactly one of the following three must be set.
+	// Phase 1 supports only PublicKeyFile; JWKSURL and JWKSFile are reserved
+	// for Phase 2.
+
+	// JWKSURL is a remote JWKS endpoint URL. Not yet supported (Phase 2).
+	JWKSURL string `json:"jwksURL,omitempty" yaml:"jwksURL,omitempty" koanf:"jwksURL"`
+
+	// JWKSFile is a local filesystem path to a JWKS JSON file. Not yet
+	// supported (Phase 2).
+	JWKSFile string `json:"jwksFile,omitempty" yaml:"jwksFile,omitempty" koanf:"jwksFile"`
+
+	// PublicKeyFile is a local filesystem path to a PEM-encoded public key.
+	// This is the only key source implemented in Phase 1.
+	PublicKeyFile string `json:"publicKeyFile,omitempty" yaml:"publicKeyFile,omitempty" koanf:"publicKeyFile"`
+
+	// Claims configures which JWT claims map to user identity fields.
+	Claims *JWTClaimsConfig `json:"claims,omitempty" yaml:"claims,omitempty" koanf:"claims"`
+}
+
+// JWTClaimsConfig maps JWT claim names to identity fields.
+// All fields have sensible defaults matching standard OIDC claim names.
+type JWTClaimsConfig struct {
+	// Email is the claim containing the user's email. Default: "email".
+	Email string `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
+
+	// Subject is the claim containing the stable user identifier. Default: "sub".
+	Subject string `json:"subject,omitempty" yaml:"subject,omitempty" koanf:"subject"`
+
+	// DisplayName is the claim containing the user's display name. Default: "name".
+	// Optional — if the claim is absent in the JWT, DisplayName is left empty.
+	DisplayName string `json:"displayName,omitempty" yaml:"displayName,omitempty" koanf:"displayName"`
+
+	// Domain is the claim containing the user's domain (hosted domain). Default: "hd".
+	// Optional — if the claim is absent in the JWT, Domain is left empty.
+	Domain string `json:"domain,omitempty" yaml:"domain,omitempty" koanf:"domain"`
 }
 
 // OAuthProviderConfig holds OAuth credentials for a single provider.
