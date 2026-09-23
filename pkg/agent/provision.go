@@ -335,25 +335,13 @@ func StopProjectContainers(ctx context.Context, mgr Manager, projectName string,
 	return stopped
 }
 
-// Reprovision re-renders an existing agent's on-disk configuration
-// (scion-agent.json, agent-info.json, home dotfiles, and skills) from the
-// current template/harness-config catalog, for a `scion reincarnate` request
-// (design §3.4). Unlike Provision, it always calls ProvisionAgent directly
-// rather than through GetAgent's "agent dir already exists → keep the
-// persisted config" branch: reincarnation's entire point is to replace that
-// persisted config with a freshly resolved one.
-//
-// Preconditions: the caller (the broker's reprovision handler) has already
-// stopped the agent's container. Reprovision itself never touches:
-//   - the agent's clone-per-agent git workspace, when it already holds a real
-//     clone (ProvisionAgent's git-clone branch leaves it in place);
-//   - the agent's branch;
-//   - unrelated files already in the agent's home directory (only files the
-//     template/harness-config/platform-skill layers themselves own are
-//     overlaid — see ContextWithReprovision's ForceOverwrite wiring for
-//     platform skills specifically).
-func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
-	ctx = api.ContextWithReprovision(ctx)
+// buildProvisionContext wires the api.Context* values shared by Provision and
+// Reprovision, and injects an explicit HarnessAuth override into the inline
+// config so it is applied before the harness's own Provision() logic runs
+// (which reads auth_selectedType to decide which env vars to inject into
+// scion-agent.json). Extracted (p1a-r1 N1) so a context value either one
+// needs cannot be added to just one of them by accident.
+func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.Context, *api.ScionConfig) {
 	if opts.BrokerMode {
 		ctx = api.ContextWithBrokerMode(ctx)
 	}
@@ -373,36 +361,130 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		}
 		inlineCfg.AuthSelectedType = opts.HarnessAuth
 	}
+	return ctx, inlineCfg
+}
 
-	agentHome, _, cfg, err := ProvisionAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
-	if err != nil {
-		return cfg, err
-	}
-
-	projectDir, pdErr := config.GetResolvedProjectDir(opts.ProjectPath)
-	if pdErr != nil {
-		return cfg, fmt.Errorf("resolve project dir: %w", pdErr)
-	}
-	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
-	agentDir := config.GetAgentDir(projectDir, opts.Name, sharedWorkspace)
-
+// finishProvision performs the steps common to Provision and Reprovision once
+// the agent's on-disk config exists: persist the lightweight agent-config
+// status file, (re-)stage the project pre-start hook, and persist an explicit
+// HarnessAuth override onto scion-agent.json. Extracted (p1a-r1 N1, the same
+// argument the design makes for deriveAgentConfig) so a future change to any
+// of these three steps cannot silently apply to only one of the two callers.
+func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHome string, cfg *api.ScionConfig) error {
 	_ = UpdateAgentConfig(opts.Name, opts.ProjectPath, "created", m.Runtime.Name(), opts.Profile)
 
-	// Re-stage the project-level pre-start hook, same as Provision. Called
-	// unconditionally: an empty script removes any previously staged file, so
-	// a hook that no longer applies (e.g. deactivated between generations)
-	// cannot survive on the reused agent home.
+	// Re-stage the project-level pre-start hook. Called unconditionally: an
+	// empty script removes any previously staged file, so a hook that no
+	// longer applies (e.g. deactivated between generations, or on a
+	// first-time resume) cannot survive on a reused agent home.
 	if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
-		return cfg, fmt.Errorf("stage project pre-start hook: %w", err)
+		return fmt.Errorf("stage project pre-start hook: %w", err)
 	}
 
-	// Persist harness auth override to the on-disk config, same as Provision.
+	// Persist harness auth override to the on-disk config (for sciontool).
+	// The auth type was already applied via inlineConfig in
+	// buildProvisionContext, but we re-write to ensure the final file
+	// reflects the override.
 	if opts.HarnessAuth != "" && cfg != nil {
 		cfg.AuthSelectedType = opts.HarnessAuth
 		cfgData, marshalErr := json.MarshalIndent(cfg, "", "  ")
 		if marshalErr == nil {
 			_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), cfgData, 0644)
 		}
+	}
+	return nil
+}
+
+// containerIsRunning reports whether a container named scion.name=name is
+// currently running, per the runtime's own status string
+// (phaseFromContainerStatus maps "Up ..."/"running" to "running"). Used by
+// Reprovision's R3 precondition check. A List error is not treated as
+// "not running" by the caller — see the call site's comment.
+func (m *AgentManager) containerIsRunning(ctx context.Context, name string) (bool, error) {
+	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": name})
+	if err != nil {
+		return false, err
+	}
+	for _, a := range agents {
+		if a.Name == name || strings.TrimPrefix(a.Name, "/") == name || strings.EqualFold(a.Name, name) {
+			if strings.EqualFold(a.Phase, "running") {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// Reprovision re-renders an existing agent's on-disk configuration
+// (scion-agent.json, agent-info.json, home dotfiles, and skills) from the
+// current template/harness-config catalog, for a `scion reincarnate` request
+// (design §3.4, Amendment A2). Unlike Provision, it always calls
+// ProvisionAgent directly rather than through GetAgent's "agent dir already
+// exists → keep the persisted config" branch: reincarnation's entire point is
+// to replace that persisted config with a freshly resolved one.
+//
+// Preconditions, both enforced here rather than merely documented (Amendment
+// A2, p1a-r1 C1 and R3): the agent is clone-per-agent with an existing real
+// clone, and its container is not running. Both matter for the same reason:
+// ProvisionAgent's worktree-creation branch decides whether to create a
+// worktree using CWD-dependent git checks (util.BranchExists), which are
+// always wrong on a broker (its CWD is outside the repo) — so calling it on
+// anything but an existing clone risks os.RemoveAll on a live
+// worktree-per-agent workspace, destroying uncommitted work. Refusing here,
+// before ProvisionAgent ever runs, is Phase 1's fix; Phase 4 may replace the
+// refusal with a proper "workspace exists → reuse as-is" branch that does not
+// depend on CWD.
+//
+// Once past those checks, Reprovision never touches:
+//   - the agent's clone-per-agent git workspace (ProvisionAgent's git-clone
+//     branch leaves an existing real clone in place);
+//   - the agent's branch;
+//   - unrelated files already in the agent's home directory (only files the
+//     template/harness-config/platform-skill layers themselves own are
+//     overlaid — see ContextWithReprovision's ForceOverwrite wiring for
+//     platform skills specifically).
+func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	if opts.GitClone == nil {
+		return nil, fmt.Errorf("reprovision refused: agent %q is not clone-per-agent; reincarnate currently supports clone-per-agent workspaces only", opts.Name)
+	}
+	projectDir, pdErr := config.GetResolvedProjectDir(opts.ProjectPath)
+	if pdErr != nil {
+		return nil, fmt.Errorf("reprovision: resolve project dir: %w", pdErr)
+	}
+	agentWorkspace := filepath.Join(config.GetAgentDir(projectDir, opts.Name, opts.SharedWorkspace), "workspace")
+	if info, statErr := os.Stat(filepath.Join(agentWorkspace, ".git")); statErr != nil || !info.IsDir() {
+		return nil, fmt.Errorf("reprovision refused: agent %q has no existing git clone at %s; reincarnate does not create or recreate the workspace", opts.Name, agentWorkspace)
+	}
+
+	// R3: a broker unreachable/unresponsive List error is logged and
+	// tolerated (proceeding is the pre-A2 behavior; the hub is expected to
+	// have stopped the container already), but an affirmative "yes, still
+	// running" answer is always honored.
+	if running, err := m.containerIsRunning(ctx, opts.Name); err != nil {
+		util.Debugf("reprovision: failed to check running state for %s, proceeding: %v", opts.Name, err)
+	} else if running {
+		return nil, fmt.Errorf("reprovision refused: agent %q container is still running; stop it first", opts.Name)
+	}
+
+	ctx, inlineCfg := buildProvisionContext(ctx, opts)
+	ctx = api.ContextWithReprovision(ctx)
+
+	agentHome, provisionedWorkspace, cfg, err := ProvisionAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
+	if err != nil {
+		return cfg, err
+	}
+
+	// N3: derive agentDir from the workspace ProvisionAgent actually used,
+	// instead of independently recomputing project/agent dirs. Safe
+	// specifically because the GitClone-only gate above guarantees
+	// ProvisionAgent's git-clone branch ran, and that branch always sets the
+	// workspace to agentDir/workspace (never "" — unlike the worktree,
+	// explicit-workspace, and external-mount branches Reprovision never
+	// reaches).
+	agentDir := filepath.Dir(provisionedWorkspace)
+
+	if err := m.finishProvision(opts, agentDir, agentHome, cfg); err != nil {
+		return cfg, err
 	}
 
 	// Deliberately no prompt.md write here: the new generation's first task
@@ -412,62 +494,14 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
-	if opts.BrokerMode {
-		ctx = api.ContextWithBrokerMode(ctx)
-	}
-	if opts.GitClone != nil {
-		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
-	}
-	if opts.SharedWorkspace {
-		ctx = api.ContextWithSharedWorkspace(ctx)
-	}
-	if opts.HarnessConfigPath != "" {
-		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
-	}
-	// Inject harness auth override into inline config so it is applied
-	// before harness Provision() runs (which reads auth_selectedType to
-	// decide which env vars to inject into scion-agent.json).
-	inlineCfg := opts.InlineConfig
-	if opts.HarnessAuth != "" {
-		if inlineCfg == nil {
-			inlineCfg = &api.ScionConfig{}
-		}
-		inlineCfg.AuthSelectedType = opts.HarnessAuth
-	}
+	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	agentDir, agentHome, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
-	if err == nil {
-		_ = UpdateAgentConfig(opts.Name, opts.ProjectPath, "created", m.Runtime.Name(), opts.Profile)
-	}
 	if err != nil {
 		return cfg, err
 	}
 
-	// Stage the project-level pre-start hook script if one was inlined into
-	// opts at agent-create time. The script is written at
-	// pre-start.d/30-project-custom so it runs after the harness provisioner
-	// (20-harness-provision). A staging failure is fatal — the project owner
-	// explicitly configured this script and a silent skip would be misleading.
-	//
-	// Called unconditionally: with an empty script the helper removes any
-	// previously staged file, so a hook that no longer applies cannot survive
-	// on a reused agent home.
-	//
-	// Use agentHome from GetAgent (which resolves the project path correctly
-	// for non-git/external projects) rather than recomputing from opts.ProjectPath,
-	// which may be a marker file rather than a directory for such projects.
-	if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
-		return cfg, fmt.Errorf("stage project pre-start hook: %w", err)
-	}
-
-	// Persist harness auth override to the on-disk config (for sciontool).
-	// The auth type was already applied via inlineConfig above, but we
-	// re-write to ensure the final file reflects the override.
-	if opts.HarnessAuth != "" && cfg != nil {
-		cfg.AuthSelectedType = opts.HarnessAuth
-		cfgData, marshalErr := json.MarshalIndent(cfg, "", "  ")
-		if marshalErr == nil {
-			_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), cfgData, 0644)
-		}
+	if err := m.finishProvision(opts, agentDir, agentHome, cfg); err != nil {
+		return cfg, err
 	}
 
 	// If a task was provided, write it to prompt.md for later execution
@@ -1665,6 +1699,17 @@ func injectPlatformSkills(
 			if _, err := os.Stat(skillDest); err == nil {
 				util.Debugf("provision: platform skill %q skipped (already present)", skillName)
 				continue
+			}
+		} else {
+			// p1a-r1 N2: a plain overlay copy only adds/updates files; it
+			// never removes one the new platform-skill version dropped, so a
+			// stale file from an earlier generation would linger forever
+			// under ForceOverwrite. Safe to RemoveAll: skillDest is
+			// platform-owned at this point (the TemplateSkillNames check
+			// above already exempted anything template-owned), so there is
+			// nothing here that isn't about to be fully replaced anyway.
+			if err := os.RemoveAll(skillDest); err != nil {
+				return fmt.Errorf("failed to clear stale platform skill %q before overwrite: %w", skillName, err)
 			}
 		}
 
