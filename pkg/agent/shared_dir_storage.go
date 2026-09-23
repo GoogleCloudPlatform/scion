@@ -274,8 +274,9 @@ func confineSharedDir(hostPath, hostBase, subPathRoot, projectID, name string) e
 
 // sharedDirProjectIDPattern is an allow-list for hub project IDs used as an
 // NFS path segment (round 3 security review finding S-N2). Hub IDs are
-// UUIDs in practice; legacy grove IDs are slugs. Requiring the first
-// character to be alphanumeric rejects "." and ".." (and any run of dots)
+// UUIDs in practice; identifiers from the project system's earlier naming
+// era are slugs. Requiring the first character to be alphanumeric rejects
+// "." and ".." (and any run of dots)
 // along with path separators, so this subsumes the earlier deny-list
 // (empty / "." / ".." / "/" / "\\"). It also rejects control characters,
 // spaces and unbounded length, none of which are valid in either ID scheme

@@ -69,6 +69,7 @@ allowed_paths=(
   "^extras/scion-telegram/internal/telegram/broker_v2_test.go$"
   "^pkg/agent/list_test.go$"
   "^pkg/agent/provision_test.go$"
+  "^pkg/agent/run_shared_dir_storage_test.go$"
   "^pkg/agent/stop_project_containers_test.go$"
   "^pkg/api/types_test.go$"
   "^pkg/config/harness_config_test.go$"
