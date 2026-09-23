@@ -210,6 +210,12 @@ type AgentAppliedConfig struct {
 	// into $HOME/.scion/hooks/pre-start.d/30-project-custom before container start.
 	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
 
+	// CreateInputs snapshots the explicit request-level inputs captured at
+	// create time, before any template/harness-config/hub-default derivation
+	// ran. See AgentCreateInputs. Nil for agents created before this field
+	// existed (falls back to a heuristic reconstruction at reincarnate time).
+	CreateInputs *AgentCreateInputs `json:"createInputs,omitempty"`
+
 	// envResponseVisible gates whether MarshalJSON includes Env. It defaults
 	// to false (unexported, zero value), which is the "never emit Env by
 	// default" choke point: any code path that serializes an
@@ -355,6 +361,49 @@ func (ac AgentAppliedConfig) MarshalJSON() ([]byte, error) {
 		out.Env = filtered
 	}
 	return json.Marshal(out)
+}
+
+// AgentCreateInputs snapshots the explicit request-level inputs an agent was
+// created with, independent of anything the template/harness-config/hub
+// defaults later filled in on top of them. `scion reincarnate` (design
+// /scion-volumes/scratchpad/projects/agent-migrate/design.md §3.3 Amendment
+// A1) replays these — plus its own request overrides — through the same
+// derivation resolveDerivedConfig applies at create, against a freshly built
+// AgentAppliedConfig. It must never call resolveDerivedConfig on the
+// existing (already-derived, possibly stale) AppliedConfig: several fields
+// (Image, Model, Env, HarnessAuth, Workspace, Branch) are dual-purpose —
+// resolveDerivedConfig and populateAgentConfig only fill them in when empty,
+// so a later read of AppliedConfig alone cannot tell "the requester set
+// this" from "the template/hub defaulted it".
+//
+// Deliberately excludes Task: reincarnate's hub-built preamble plus handoff
+// always replaces it, so the original create-time task is never replayed.
+type AgentCreateInputs struct {
+	// InlineConfig is a deep copy of the request's Config (ScionConfig) as
+	// given at create time, before resolveDerivedConfig had a chance to stamp
+	// hub-level defaults (e.g. telemetry, auto-expose-ports env) into it.
+	InlineConfig *api.ScionConfig `json:"inlineConfig,omitempty"`
+
+	// HarnessConfig is the harness-config name as it was at create time
+	// (explicit request value, or whatever default resolution supplied it
+	// before the template/harness-config default was resolved — for Phase 1
+	// this is simply kept verbatim; see design §3.6a for the future
+	// --harness override).
+	HarnessConfig string `json:"harnessConfig,omitempty"`
+
+	// HarnessAuth is the explicit auth-type request value, captured before
+	// the auto-no-auth fallback (resolveDerivedConfig) may have overwritten
+	// it with "none".
+	HarnessAuth string `json:"harnessAuth,omitempty"`
+
+	Profile       string `json:"profile,omitempty"`
+	ThinkingLevel *int   `json:"thinkingLevel,omitempty"`
+
+	// Branch and Workspace are the raw request values (possibly empty),
+	// captured before populateAgentConfig's project-derived defaulting
+	// (hub-managed workspace path, shared-workspace default branch) ran.
+	Branch    string `json:"branch,omitempty"`
+	Workspace string `json:"workspace,omitempty"`
 }
 
 // Project type constants.

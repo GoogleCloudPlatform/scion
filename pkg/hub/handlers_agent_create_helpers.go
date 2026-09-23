@@ -172,7 +172,55 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, harnessConfig string
 		ac.NoAuth = true
 	}
 
+	// Snapshot the explicit inputs now, before resolveDerivedConfig (called
+	// later, from populateAgentConfig) has a chance to fill in template/
+	// harness-config/hub-default values on top of them. This is the only
+	// point at which "explicit" and "derived" are still distinguishable —
+	// several of these fields (Image, Model, Env, HarnessAuth, Workspace,
+	// Branch) are dual-purpose: resolveDerivedConfig/populateAgentConfig only
+	// fill them when empty, so a later read of agent.AppliedConfig cannot
+	// tell "the user set this" from "the template/hub defaulted it".
+	// `scion reincarnate` (design §3.3 Amendment A1) replays CreateInputs,
+	// not the live AppliedConfig, so a migrated agent's derived fields are
+	// recomputed fresh instead of inheriting a stale generation's values.
+	//
+	// InlineConfig is deep-copied rather than aliased: resolveDerivedConfig
+	// mutates agent.AppliedConfig.InlineConfig in place (e.g. stamping hub
+	// telemetry defaults), and CreateInputs must not observe that mutation
+	// through a shared pointer.
+	ac.CreateInputs = &store.AgentCreateInputs{
+		InlineConfig:  deepCopyScionConfig(req.Config),
+		HarnessConfig: ac.HarnessConfig,
+		HarnessAuth:   ac.HarnessAuth,
+		Profile:       ac.Profile,
+		ThinkingLevel: ac.ThinkingLevel,
+		Branch:        ac.Branch,
+		Workspace:     ac.Workspace,
+	}
+
 	return ac
+}
+
+// deepCopyScionConfig returns an independent copy of cfg via a JSON
+// marshal/unmarshal round trip, so the caller can hold onto a snapshot that
+// later in-place mutation of the original cannot reach. Returns nil for a nil
+// input, and nil (with the error swallowed) if marshaling ever fails — that
+// can only happen for a pathological ScionConfig (e.g. a channel or func
+// field, none of which the type has today), and a snapshot miss here is not
+// worth failing agent creation over.
+func deepCopyScionConfig(cfg *api.ScionConfig) *api.ScionConfig {
+	if cfg == nil {
+		return nil
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return nil
+	}
+	var out api.ScionConfig
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil
+	}
+	return &out
 }
 
 // populateAgentConfig enriches an agent's AppliedConfig with project-derived and
