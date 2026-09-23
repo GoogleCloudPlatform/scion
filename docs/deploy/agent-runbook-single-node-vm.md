@@ -160,6 +160,26 @@ Verify that the available CPU quota (limit minus usage) is sufficient for the
 chosen machine type (4 CPUs for small, 16 for medium). If quota is tight, warn
 the user and suggest a different region.
 
+### 2.6 Organization & IAP Compatibility
+
+Check whether your account's domain matches the project's organization:
+
+```bash
+ANCESTORS="$(gcloud projects get-ancestors PROJECT_ID --format='value(id,type)')"
+ORG_ID="$(echo "$ANCESTORS" | awk '$2=="organization"{print $1; exit}')"
+if [[ -z "$ORG_ID" ]]; then
+  echo "WARNING: Project has no organization. IAP requires a custom OAuth client."
+else
+  ORG_DOMAIN="$(gcloud organizations describe "$ORG_ID" --format='value(displayName)')"
+  echo "Organization domain: $ORG_DOMAIN"
+fi
+```
+
+**If the project has no organization, or if the deployer's email domain does not
+match the organization domain:** IAP will require a custom OAuth client before
+the deployer can log in. See Section 7 (Troubleshooting) for setup instructions.
+Inform the user immediately — do not wait until after deployment.
+
 ---
 
 ## 3. Gather Deployment Details
@@ -473,7 +493,17 @@ of either warning.
 cross-org or no-org accounts. A custom OAuth client (with its own consent
 screen configuration) must be created for the project and IAP must be
 configured to use it, instead of the default. This is a manual, one-time GCP
-Console operation:
+Console operation. The simplest path is directly from the Cloud Run service:
+
+1. Navigate to **Cloud Run** in the GCP Console.
+2. Click on the IAP proxy service (`scion-hub-HUB_NAME-iap-proxy`).
+3. Go to the **Security** tab > **Identity-Aware Proxy** section.
+4. Use the inline OAuth consent screen and client configuration presented
+   there — redirect URIs are pre-populated for this service.
+
+If that inline flow isn't available in your Console version, or you need to
+configure the consent screen or client independently of a specific service,
+use the longer manual path instead:
 
 1. In the target project's GCP Console, go to **APIs & Services > OAuth
    consent screen** and configure a consent screen that includes the
