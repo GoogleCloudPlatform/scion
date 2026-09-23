@@ -25,7 +25,20 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
+
+// withZeroUmask temporarily sets the process umask to 0 so an exact
+// mkdir(at) permission-bit assertion is deterministic regardless of the
+// ambient shell/CI umask, and restores the original umask on cleanup. Only
+// needed by tests that assert the LITERAL requested mode of a
+// freshly-created directory (round 6 disposition item 2 / N1: the
+// intermediate-directory mode assertion).
+func withZeroUmask(t *testing.T) {
+	t.Helper()
+	old := unix.Umask(0)
+	t.Cleanup(func() { unix.Umask(old) })
+}
 
 // newTestProjectDir creates a non-git project-config directory laid out the
 // way config.GetSharedDirsBasePath expects
@@ -340,6 +353,13 @@ func TestResolveSharedDirs_NFS_MissingHostBase_Kubernetes_Succeeds(t *testing.T)
 // Docker bind-mount volume pointing at the same path used to populate the
 // K8s subPath.
 func TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs(t *testing.T) {
+	// Round 6 disposition item 2 / N1 (optional, done): assert the
+	// intermediate directories' created mode too, not just the leaf's.
+	// mkdirat's mode argument IS subject to the process umask (unlike the
+	// leaf's explicit fchmod below), so force umask=0 for this test to make
+	// the assertion deterministic.
+	withZeroUmask(t)
+
 	mountRoot := newResolvedTempDir(t)
 	shareID := "scion-shared"
 	hostBase := filepath.Join(mountRoot, shareID)
@@ -368,12 +388,88 @@ func TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o775), info.Mode().Perm(), "leaf permission bits")
 	assert.NotZero(t, info.Mode()&os.ModeSetgid, "leaf setgid bit")
 
+	// The intermediate directories the walk created (projects,
+	// projects/pid-42, projects/pid-42/shared-dirs) get the plain mkdirat
+	// mode (0o775, no setgid) — only the leaf is ever chmod'd/setgid'd
+	// (design §3.5(5); round 3 review item 13).
+	for _, rel := range []string{"projects", filepath.Join("projects", "pid-42"), filepath.Join("projects", "pid-42", "shared-dirs")} {
+		intermediate := filepath.Join(hostBase, rel)
+		info, statErr := os.Stat(intermediate)
+		require.NoError(t, statErr, "intermediate dir %q should have been mkdir'd", rel)
+		assert.Equal(t, os.FileMode(0o775), info.Mode().Perm(), "intermediate dir %q permission bits", rel)
+		assert.Zero(t, info.Mode()&os.ModeSetgid, "intermediate dir %q must not be setgid", rel)
+	}
+
 	require.NotNil(t, realization)
 	assert.Equal(t, "projects/pid-42/shared-dirs/scratchpad", realization.SubPaths["scratchpad"])
 
 	// The host base itself is a pre-existing directory that was NOT created
 	// by resolveSharedDirs and must not be treated as a shared dir mount.
 	assert.NotEqual(t, hostBase, wantHostPath)
+}
+
+// TestResolveSharedDirs_NFS_ExistingParentChain_NewLeafGetsSetgid is round 6
+// disposition item 2 (tst L1, mutant W12): every prior
+// setgid/2775 assertion ran on a chain created fully fresh by this same
+// call, which cannot distinguish "alreadyExisted reflects the LEAF" (what
+// the code does) from a mutant that took `alreadyExisted` from an earlier
+// walked component instead. If it did, a SECOND shared dir resolved into an
+// already-existing projects/<pid>/shared-dirs (the common case: another
+// shared dir, or another agent, in the same project) would wrongly be
+// treated as "already existed" and skip the fchmod, leaving a brand-new
+// leaf at the plain mkdirat mode (0o775, no setgid) instead of 0o2775 —
+// violating design §3.5(5) group inheritance silently, with every existing
+// test still green. This test pre-creates the parent chain (including a
+// sibling shared dir) and resolves a NEW leaf into it.
+func TestResolveSharedDirs_NFS_ExistingParentChain_NewLeafGetsSetgid(t *testing.T) {
+	withZeroUmask(t)
+
+	mountRoot := newResolvedTempDir(t)
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+	sharedDirsParent := filepath.Join(hostBase, "projects", "pid-42", "shared-dirs")
+	require.NoError(t, os.MkdirAll(sharedDirsParent, 0o750))
+
+	// A sibling shared dir already exists — e.g. from an earlier call for a
+	// different shared-dir name, or a previous agent in the same project.
+	existingSibling := filepath.Join(sharedDirsParent, "existing")
+	require.NoError(t, os.MkdirAll(existingSibling, 0o2775))
+
+	pidDir := filepath.Join(hostBase, "projects", "pid-42")
+	beforeParent, statErr := os.Stat(sharedDirsParent)
+	require.NoError(t, statErr)
+	beforePid, statErr := os.Stat(pidDir)
+	require.NoError(t, statErr)
+	beforeSibling, statErr := os.Stat(existingSibling)
+	require.NoError(t, statErr)
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "newdir"}}
+
+	volumes, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-42", "docker", dirs, "/workspace")
+	require.NoError(t, err)
+	require.Len(t, volumes, 1)
+
+	newLeaf := filepath.Join(sharedDirsParent, "newdir")
+	info, statErr := os.Stat(newLeaf)
+	require.NoError(t, statErr, "new shared dir should have been mkdir'd")
+	assert.Equal(t, os.FileMode(0o775), info.Mode().Perm(), "new leaf permission bits")
+	assert.NotZero(t, info.Mode()&os.ModeSetgid,
+		"new leaf must be setgid even though its parent chain already existed (mutant W12)")
+
+	// Nothing that already existed was touched.
+	afterParent, statErr := os.Stat(sharedDirsParent)
+	require.NoError(t, statErr)
+	assert.Equal(t, beforeParent.Mode(), afterParent.Mode(), "pre-existing shared-dirs parent must not be chmod'd")
+
+	afterPid, statErr := os.Stat(pidDir)
+	require.NoError(t, statErr)
+	assert.Equal(t, beforePid.Mode(), afterPid.Mode(), "pre-existing pid directory must not be chmod'd")
+
+	afterSibling, statErr := os.Stat(existingSibling)
+	require.NoError(t, statErr)
+	assert.Equal(t, beforeSibling.Mode(), afterSibling.Mode(), "pre-existing sibling shared dir must not be chmod'd")
 }
 
 // TestResolveSharedDirs_NFS_PreexistingSharedDir_NotChmoded is the other

@@ -523,41 +523,50 @@ func TestStartSharedDirStorageNFS_GroveIDFallback_Succeeds(t *testing.T) {
 // fail, and — because the file mentions "shared_dir_storage" — Start failed
 // closed for every agent on that broker.
 func TestStartSharedDirStorageNFS_AmbientHubEnv_ColidingVar_StillSucceeds(t *testing.T) {
-	f := newSharedDirStorageRunFixture(t)
-	f.writeGlobalSettings(t, sprintfServerYAML(sharedDirStorageNFSGlobalYAML, filepath.Join(f.tmpDir, "srv"), "share", "pv"))
-	f.writeProjectSettings(t, "")
+	// Round 6 dispositions nit N2/#5: mirror the loader-level test
+	// (TestLoadGlobalSettings_EnvFree in pkg/config), which exercises three
+	// colliding vars, not just one.
+	collidingVars := []string{"SCION_AUTO_EXPOSE_PORTS", "SCION_SERVER", "SCION_TELEMETRY"}
+	for _, name := range collidingVars {
+		t.Run(name, func(t *testing.T) {
+			f := newSharedDirStorageRunFixture(t)
+			f.writeGlobalSettings(t, sprintfServerYAML(sharedDirStorageNFSGlobalYAML, filepath.Join(f.tmpDir, "srv"), "share", "pv"))
+			f.writeProjectSettings(t, "")
 
-	// This simulates the BROKER PROCESS's own ambient environment — the
-	// actual vulnerable surface — not the started agent's opts.Env (which
-	// LoadGlobalSettings never consulted even before this fix).
-	for k, v := range ii2HubEnvNames {
-		t.Setenv(k, v)
+			// This simulates the BROKER PROCESS's own ambient environment —
+			// the actual vulnerable surface — not the started agent's
+			// opts.Env (which LoadGlobalSettings never consulted even
+			// before this fix).
+			for k, v := range ii2HubEnvNames {
+				t.Setenv(k, v)
+			}
+			t.Setenv(name, "true") // the colliding var under test
+
+			var capturedConfig runtime.RunConfig
+			mockRT := &runtime.MockRuntime{
+				NameFunc: func() string { return "kubernetes" },
+				RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+					capturedConfig = config
+					return "mock-id", nil
+				},
+			}
+			mgr := NewManager(mockRT)
+
+			_, err := mgr.Start(context.Background(), api.StartOptions{
+				Name:        "test-agent",
+				ProjectPath: f.projectScionDir,
+				NoAuth:      true,
+				Env: map[string]string{
+					"SCION_AGENT_ID":   "agent-16",
+					"SCION_PROJECT_ID": "pid-ambient-env",
+				},
+				SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
+			})
+			require.NoError(t, err, "an unrelated ambient SCION_* variable must never break the shared_dir_storage read")
+			require.NotNil(t, capturedConfig.SharedDirStorage)
+			assert.Equal(t, "projects/pid-ambient-env/shared-dirs/scratchpad", capturedConfig.SharedDirStorage.SubPaths["scratchpad"])
+		})
 	}
-	t.Setenv("SCION_AUTO_EXPOSE_PORTS", "true") // the exact colliding var from the addendum probe
-
-	var capturedConfig runtime.RunConfig
-	mockRT := &runtime.MockRuntime{
-		NameFunc: func() string { return "kubernetes" },
-		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
-			capturedConfig = config
-			return "mock-id", nil
-		},
-	}
-	mgr := NewManager(mockRT)
-
-	_, err := mgr.Start(context.Background(), api.StartOptions{
-		Name:        "test-agent",
-		ProjectPath: f.projectScionDir,
-		NoAuth:      true,
-		Env: map[string]string{
-			"SCION_AGENT_ID":   "agent-16",
-			"SCION_PROJECT_ID": "pid-ambient-env",
-		},
-		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
-	})
-	require.NoError(t, err, "an unrelated ambient SCION_* variable must never break the shared_dir_storage read")
-	require.NotNil(t, capturedConfig.SharedDirStorage)
-	assert.Equal(t, "projects/pid-ambient-env/shared-dirs/scratchpad", capturedConfig.SharedDirStorage.SubPaths["scratchpad"])
 }
 
 // TestStartSharedDirStorage_AmbientHubEnv_ColidingVar_UnsetBlock_SucceedsAsMain
@@ -839,6 +848,69 @@ server:
 	assert.Contains(t, err.Error(), "server.shared_dir_storage")
 	assert.Contains(t, err.Error(), "schema_version")
 	assert.Equal(t, 0, ranCount, "Run must never be called when a legacy global file silently dropped a configured shared_dir_storage")
+}
+
+// TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_StillFailsClosed
+// is round 6 disposition item 1 (rev L1 = tst L2)'s Start-level half: the
+// same legacy-global-with-block scenario as
+// ..._LegacyGlobalSettings_MentionsKey_FailsClosed above, but with
+// ~/.scion ALSO carrying a project-id file plus a v1-format
+// project-configs settings.yaml — the exact combination that made the
+// pre-fix detectHierarchyFormat-based gate see the global directory as
+// "versioned" (via the project layer) and skip the fail-closed check
+// entirely, silently dropping the operator's nfs config. Run must still
+// never be called.
+func TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_StillFailsClosed(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"), []byte(`active_profile: local
+server:
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: /srv
+      shares:
+        - id: share
+          pv_name: pv
+`), 0644))
+	f.writeProjectSettings(t, "")
+
+	// ~/.scion carries its own project identity, resolving to a v1-format
+	// project-configs file that must NOT make the legacy gate above think
+	// the global directory is versioned.
+	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "project-id"),
+		[]byte("11111111-2222-3333-4444-555555555555\n"), 0644))
+	externalDir, err := config.GetGitProjectExternalConfigDir(f.globalScionDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, externalDir)
+	require.NoError(t, os.MkdirAll(externalDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(externalDir, "settings.yaml"),
+		[]byte("schema_version: \"1\"\nactive_profile: local\n"), 0644))
+
+	ranCount := 0
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			ranCount++
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	_, startErr := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-18",
+			"SCION_PROJECT_ID": "pid-legacy-global-overlay",
+		},
+		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
+	})
+	require.Error(t, startErr)
+	assert.Contains(t, startErr.Error(), "server.shared_dir_storage")
+	assert.Contains(t, startErr.Error(), "schema_version")
+	assert.Equal(t, 0, ranCount,
+		"Run must never be called: a v1 project-configs overlay must not make the global-only legacy gate think the global file is versioned")
 }
 
 // TestStartSharedDirStorage_LegacyGlobalSettings_NoKey_SucceedsAsMain

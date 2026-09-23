@@ -5086,3 +5086,81 @@ active_profile: local
 		}
 	})
 }
+
+// TestGlobalSettingsIsLegacyFormat_LegacyGlobalWithV1ProjectConfigsOverlay is
+// round 6 disposition item 1 (rev L1 = tst L2, reviews/
+// r6-test-probe_legacy_overlay_test.go.txt): the prior
+// TestLoadGlobalSettings_GlobalOnly_IgnoresProjectConfigsLeak test above only
+// used a v1 GLOBAL file, so it can't tell the difference between
+// GlobalSettingsIsLegacyFormat() correctly using detectDirSettingsFormat
+// (global file only) and a regression back to detectHierarchyFormat (which
+// also consults the project layer) — because in that test the global file
+// was already versioned either way. This is exactly the pre-fix bug at
+// 9174c89c: a LEGACY (no schema_version) global file that DOES contain a
+// real shared_dir_storage block, combined with a project-id file under
+// ~/.scion PLUS a v1-format project-configs settings.yaml, made
+// detectHierarchyFormat(globalDir) see the v1 project file and report
+// hasVersioned=true — so the legacy gate in run.go never fired, and an
+// operator's real nfs config silently vanished (the legacy Settings struct
+// has no server.shared_dir_storage field at all) instead of failing closed.
+// GlobalSettingsIsLegacyFormat must report true here regardless of what the
+// project layer contains, because it must key off the global file alone.
+func TestGlobalSettingsIsLegacyFormat_LegacyGlobalWithV1ProjectConfigsOverlay(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// Isolate from any project the test happens to run inside of —
+	// resolveEffectiveProjectPath("") would otherwise also consult the
+	// process's CWD, which is irrelevant to what this test is pinning.
+	t.Chdir(t.TempDir())
+
+	globalScionDir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+
+	// Legacy format (no schema_version), but WITH a real shared_dir_storage
+	// block — the block the legacy Settings struct silently drops.
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"),
+		[]byte("active_profile: local\nserver:\n  shared_dir_storage:\n    backend: nfs\n"), 0644))
+
+	// ~/.scion carries its own project identity.
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "project-id"),
+		[]byte("11111111-2222-3333-4444-555555555555\n"), 0644))
+
+	// A v1-format project-configs file — the exact input that made
+	// detectHierarchyFormat(globalDir) see "hasVersioned=true" pre-fix.
+	externalDir, err := GetGitProjectExternalConfigDir(globalScionDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, externalDir)
+	require.NoError(t, os.MkdirAll(externalDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(externalDir, "settings.yaml"),
+		[]byte("schema_version: \"1\"\nactive_profile: local\n"), 0644))
+
+	// Pin the actual pre-fix failure mode: detectHierarchyFormat(globalDir)
+	// (the function GlobalSettingsIsLegacyFormat used to call) does see the
+	// project layer as versioned. This is intentional, documented behavior
+	// for detectHierarchyFormat's OTHER callers (general project settings
+	// loading) — the point of this test is that GlobalSettingsIsLegacyFormat
+	// must NOT be one of them.
+	hasVersioned, _ := detectHierarchyFormat(globalScionDir)
+	assert.True(t, hasVersioned,
+		"sanity check: detectHierarchyFormat does see the project-configs file as versioned — "+
+			"that's why GlobalSettingsIsLegacyFormat must not use it")
+
+	assert.True(t, GlobalSettingsIsLegacyFormat(),
+		"the legacy gate must key off the global file alone, not a project-configs overlay "+
+			"(mutant E3: reverting to detectHierarchyFormat must fail this assertion)")
+	assert.True(t, GlobalSettingsMentions("shared_dir_storage"))
+
+	// Pin loadGlobalSettingsOnly's OWN format decision too (mutant E4),
+	// independent of GlobalSettingsIsLegacyFormat: the legacy Settings
+	// struct has no server.shared_dir_storage field at all, so a correctly
+	// legacy-loaded read must come back with Server == nil. If
+	// loadGlobalSettingsOnly's decision were reverted to
+	// detectHierarchyFormat, it would take the VERSIONED branch instead
+	// (since the project-configs overlay reports hasVersioned=true) and
+	// this well-formed-enough-to-parse-as-v1-too YAML would then load
+	// Server.SharedDirStorage.Backend="nfs" — silently promoting a
+	// legacy-dropped config into a live one instead of failing closed.
+	vs, _, err := LoadGlobalSettings()
+	require.NoError(t, err)
+	assert.Nil(t, vs.Server, "a legacy-format global file must load via the legacy adapter (Server nil), not the versioned one")
+}

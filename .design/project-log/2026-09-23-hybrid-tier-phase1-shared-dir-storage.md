@@ -1013,3 +1013,81 @@ calls a new `loadGlobalSettingsOnly(globalDir)`, which reads ONLY
 - `gofmt -l` on every touched file — clean.
 - PR body updated with the env-free/project-free loader rationale, new test names, and the
   hermeticity finding.
+
+## Round 6 final cleanup (PR #1779 @90f215f2 → this round): test/doc only, no production code
+
+All three reviewers APPROVED at @90f215f2 (code 0C/0H/0M/1L/1N/3FYI, tests 0C/0H/0M/3L/3N at
+95/117 mutants, security 0C/0H/0M/0L/1N). hy-em's `reviews/r6-dispositions.md` listed five items;
+mid-round hy-em dropped item 3 (a `filepath.Clean` normalization on `subpath_root`) entirely per
+nfs-gke's requirement that this cleanup touch **zero production code** — verified before pushing
+with `git diff 90f215f..HEAD -- . ":(exclude)*_test.go" ":(exclude)*.md"`, which is empty. Only
+`*_test.go` files, this log, and the PR body changed.
+
+1. **Low (tst L2) — the global-only half of the legacy gate was unpinned (mutants E3/E4).** The
+   existing `TestLoadGlobalSettings_GlobalOnly_IgnoresProjectConfigsLeak` only used a **v1** global
+   file, so it couldn't distinguish `GlobalSettingsIsLegacyFormat`/`loadGlobalSettingsOnly` correctly
+   using `detectDirSettingsFormat` (global file only) from a regression back to
+   `detectHierarchyFormat` (which also consults the project layer) — in that test the global file was
+   versioned either way. Added `TestGlobalSettingsIsLegacyFormat_LegacyGlobalWithV1ProjectConfigsOverlay`
+   (`pkg/config`): a **legacy** (no `schema_version`) global file that DOES contain a real
+   `shared_dir_storage` block, plus `~/.scion/project-id`, plus a v1-format project-configs
+   `settings.yaml` — the exact combination that made `detectHierarchyFormat(globalDir)` at 9174c89c
+   see the project file and report `hasVersioned=true`, silently bypassing the fail-closed legacy
+   gate (the legacy `Settings` struct has no `server.shared_dir_storage` field at all, so the config
+   just vanished). Asserts `GlobalSettingsIsLegacyFormat()==true` (kills E3) and separately that
+   `LoadGlobalSettings()` returns `Server == nil` (kills E4, pinning `loadGlobalSettingsOnly`'s own
+   decision independently of the legacy-format helper). Added the Start-level companion,
+   `TestStartSharedDirStorage_LegacyGlobalSettings_V1ProjectConfigsOverlay_StillFailsClosed`
+   (`pkg/agent`): same scenario, asserts `Start` returns an error mentioning
+   `server.shared_dir_storage`/`schema_version` and `Run` is never called — this also transitively
+   kills both E3 and E4, since either mutation flips `Start` from failing closed to succeeding with a
+   silently-dropped config.
+2. **Low (tst L1) — no test for "parent chain exists, leaf new" setgid (mutant W12).** Every prior
+   setgid/`02775` assertion ran on a chain created fully fresh by the same call, which can't
+   distinguish `alreadyExisted` correctly reflecting the LEAF component from a mutant that took it
+   from an earlier walked component instead — which would silently skip the `fchmod` on a second
+   shared dir added to an already-`shared-dirs`-populated project (the common case). Added
+   `TestResolveSharedDirs_NFS_ExistingParentChain_NewLeafGetsSetgid`: pre-creates
+   `projects/<pid>/shared-dirs` plus a sibling shared dir, resolves a NEW shared dir into it, and
+   asserts the new leaf is `0o775`+setgid while the pre-existing parent, pid dir, and sibling are all
+   untouched (exact mode equality). N1 (optional, done): also added an intermediate-directory mode
+   assertion (`0o775`, no setgid) to `TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs`,
+   using a new `withZeroUmask(t)` test helper (`unix.Umask(0)`, restored via `t.Cleanup`) so the
+   assertion is deterministic regardless of the ambient shell's umask (mkdirat's mode argument, unlike
+   the leaf's explicit `fchmod`, is subject to umask).
+3. **DROPPED per nfs-gke's zero-production-code-change requirement.** Originally "run
+   `filepath.Clean` on `subpath_root` before validation, add a test case" — no code or validation
+   change made this round.
+4. **Low doc (tst L3) / Nit (aud N1) — PR body self-contradiction and imprecise threat-model wording.**
+   The "Gates" checklist claimed "No pre-existing failures found; nothing needed comparison against
+   the af48a545 baseline", which only held for the `env -i` run — the paragraph just above it already
+   described 36-40 ambient-shell failures compared against `af48a545`. Reworded the checklist to state
+   plainly: `env -i` has zero failures; an ordinary shell has 39, identical to `af48a545`, none in this
+   PR's own tests. Reworded the threat-model bullet's closing clause from "...closes the class of
+   symlink-based escape and redirection under that precondition" to "...closes symlink-based escape
+   and redirection during broker-side resolution (Source and mkdir/chmod) under that precondition; see
+   the D2 residual below for the daemon-side window" — the D2 bullet itself is unchanged.
+5. **Nit (tst N2) — the Start-level env test used only one colliding var.** Converted
+   `TestStartSharedDirStorageNFS_AmbientHubEnv_ColidingVar_StillSucceeds` to a table-driven test over
+   all three colliding vars used at the loader level (`SCION_AUTO_EXPOSE_PORTS`, `SCION_SERVER`,
+   `SCION_TELEMETRY`), mirroring `TestLoadGlobalSettings_EnvFree` in `pkg/config`.
+6. **Declined, no action** (matches hy-em's own classification): tst N1 (fault injection for a
+   swallowed `fchmod` error) is not worth a production-code test hook; tst N3 is informational; the
+   remaining FYIs (legacy comment-only mention still fails closed — the accepted 6' trade-off; a
+   concurrent-creator EEXIST race harmlessly fchmods a leaf the caller didn't create; the pre-existing
+   Windows build failure) need no action.
+
+### Gate results (round 6 final cleanup, env: clean `env -i PATH=$PATH HOME=<tmp> GOPATH=... GOCACHE=... GOMODCACHE=...`, `-count=1`, plus an ordinary shell)
+
+- `git diff 90f215f..HEAD -- . ":(exclude)*_test.go" ":(exclude)*.md"` — **empty** (zero production
+  code changes, confirmed before pushing).
+- `go build ./...` — pass.
+- `GOOS=darwin go build ./pkg/...` — pass.
+- `go vet ./pkg/config/... ./pkg/runtime/... ./pkg/agent/...` — pass, no output.
+- Clean-env `go test ./pkg/config/... ./pkg/runtime/... ./pkg/agent/... -count=1` — pass, all 7
+  packages `ok`.
+- Ordinary-shell same command — same 39 pre-existing failures as before this commit (identical set,
+  confirmed by diffing the failing-test-name lists before and after), none of them touching this new
+  test code.
+- `gofmt -l` on every touched file — clean.
+- PR body updated (item 4).
