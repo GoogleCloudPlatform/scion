@@ -1715,6 +1715,7 @@ export class ScionPageChat extends LitElement {
 
     // If we're currently viewing the promoted DM, navigate to the new thread
     if (this.v2Conversation?.conversationKey === oldConversationKey) {
+      this.promoteDialogOpen = false;
       this.navigateToPromotedThread(newTopic);
       this.showPromoteToast(`Conversation promoted to #${newTopic.name}`, 'success');
     }
@@ -3264,11 +3265,14 @@ export class ScionPageChat extends LitElement {
         defaultAgent?: string;
       };
 
+      // Always close the dialog on success, even if the SSE dm.promoted
+      // handler already navigated us away before this fetch resolved.
+      this.promoteDialogOpen = false;
+
       // Guard: SSE dm.promoted may have already navigated us away
       if (this.v2Conversation?.conversationKey !== conversationKey) return;
 
-      // Close dialog and navigate to the new thread
-      this.promoteDialogOpen = false;
+      // Navigate to the new thread
       this.navigateToPromotedThread(topic);
       this.showPromoteToast(`Conversation promoted to #${topic.name}`, 'success');
 
