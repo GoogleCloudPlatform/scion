@@ -14,38 +14,58 @@
 # limitations under the License.
 
 # Thick Base Prep Layer
-# Prepares the Google Cloud Workstations base image for use as a scion-base
-# foundation. Fixes compatibility issues between the Cloud Workstations image
-# and scion-base's expectations:
+# Brings the Google Cloud Workstations base image up to the same contract
+# core-base satisfies, so scion-base can be built on either one.
 #
-#   1. UID 1000 conflict  - Cloud Workstations ships an 'ubuntu' user at UID
-#      1000; scion-base creates 'scion' at the same UID.
-#   2. Missing packages   - zsh (required by useradd -s /bin/zsh), fzf (claude
-#      harness keybindings), gh and ripgrep (core scion tools).
-#   3. Missing directory  - /usr/local/share/npm-global (scion-base chowns it).
-#   4. git too old        - the Cloud Workstations base is Ubuntu 24.04 (noble),
-#      which ships git 2.43.0 with no newer apt candidate. Scion hard-requires
-#      2.47.0 (pkg/util/git.go CheckGitVersion, for `worktree add
-#      --relative-paths`). This matters only on the thick chain: scion-base
-#      never installs git, and targets.sh routes thick as
-#      thick-prep -> scion-base, bypassing core-base -- which is the only other
-#      place git is provided. Without the vendored git below, every thick image
-#      silently loses worktree-per-agent mode.
+# This file used to carry its own hand-maintained list of "things the
+# Workstations image happens to be missing". That list was assembled by
+# observation, so it only ever covered gaps somebody had already tripped over —
+# and it went stale silently. It is replaced by the same two scripts core-base
+# runs:
+#
+#   ../lib/install-core-toolchain.sh  reconciles any base to the required state
+#   ../lib/verify-base-contract.sh    asserts the result
+#
+# Reconcile, not install: the Workstations base already ships Go 1.27.1, node
+# 24, npm, gcloud, kubectl and sudo, and every one of those is detected and left
+# alone. In particular Go is NOT downgraded to scion's go.mod version — these
+# images serve many consumers, versions here are floors, never pins.
+#
+# What this image still does for itself, because it is genuinely specific to
+# this base:
+#   * git — Ubuntu 24.04 (noble) caps at 2.43.0 with no newer apt candidate,
+#     and scion hard-requires 2.47.0 (pkg/util/git.go CheckGitVersion, for
+#     `worktree add --relative-paths`). This matters only here: scion-base never
+#     installs git, and targets.sh routes thick as thick-prep -> scion-base,
+#     bypassing core-base, the only other place git comes from. Before the
+#     vendored git below, every thick image silently lost worktree-per-agent
+#     mode.
 #
 # Architecture: amd64 only (Cloud Workstations base has no arm64 variant).
+#
+# NOTE: the build context is image-build/, not image-build/thick-prep/, so that
+# ../lib is reachable. See image-build/scripts/lib/targets.sh step_context_dir.
 
 ARG BASE_IMAGE=us-central1-docker.pkg.dev/cloud-workstations-images/predefined/base:latest
 
 # Keep in sync with image-build/core-base/Dockerfile. See that file for the
 # rationale and for the digest-pinning note.
 ARG GIT_IMAGE=chainguard/git:latest
+
+# Floor and pin, as in core-base. The Workstations base ships 1.27.1, which
+# clears the floor, so GO_VERSION is never actually used on this chain today —
+# it exists so the two Dockerfiles stay literally comparable.
+ARG GO_MIN_VERSION=1.26.1
+ARG GO_VERSION=1.26.1
+
+ARG GH_VERSION=2.100.0
+
 FROM ${GIT_IMAGE} AS git-source
 
-# Stage and patch the vendored git exactly as core-base does. See
-# core-base/Dockerfile's git-patched stage for the full rationale: the short
-# version is that Chainguard's libpcre2 is reached through a RUNPATH on the
-# handful of binaries that need it, rather than an image-wide LD_LIBRARY_PATH
-# that every process in the container would inherit.
+# Stage and patch the vendored git exactly as core-base does — same script, same
+# arguments. See ../lib/stage-vendored-git.sh: Chainguard's libpcre2 is reached
+# through a RUNPATH on the handful of binaries that declare it, rather than an
+# image-wide LD_LIBRARY_PATH that every process in the container would inherit.
 #
 # The patching stage is Debian even though this image is Ubuntu — patchelf only
 # rewrites ELF headers, so the distro running it is irrelevant, and using the
@@ -55,50 +75,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     patchelf \
     binutils \
     && rm -rf /var/lib/apt/lists/*
+COPY lib/stage-vendored-git.sh /tmp/stage-vendored-git.sh
 COPY --from=git-source /usr/bin/git          /staged/usr/bin/git
 COPY --from=git-source /usr/libexec/git-core /staged/usr/libexec/git-core
 COPY --from=git-source /usr/share/git-core   /staged/usr/share/git-core
 COPY --from=git-source /usr/lib/libpcre2-8.so.0 /staged/usr/local/lib/scion-git/libpcre2-8.so.0
-RUN set -eu; \
-    command -v readelf >/dev/null \
-      || { echo "FAIL: readelf missing — the NEEDED scan below would silently \
-match nothing and quietly patch zero binaries"; exit 1; }; \
-    patched=0; \
-    for f in /staged/usr/bin/git $(find /staged/usr/libexec/git-core -maxdepth 1 -type f); do \
-      readelf -d "$f" 2>/dev/null | grep -q libpcre2 || continue; \
-      patchelf --set-rpath /usr/local/lib/scion-git "$f"; \
-      patched=$((patched + 1)); \
-    done; \
-    echo "patched ${patched} binaries with RUNPATH=/usr/local/lib/scion-git"; \
-    test "${patched}" -gt 0 \
-      || { echo "FAIL: no binary declared libpcre2 as NEEDED — either the \
-vendored libpcre2 is now unnecessary (drop it) or the scan is broken"; exit 1; }; \
-    readelf -d /staged/usr/bin/git | grep -qE 'RPATH|RUNPATH' \
-      || { echo "FAIL: /usr/bin/git has no RUNPATH after patchelf"; exit 1; }
+RUN bash /tmp/stage-vendored-git.sh /staged
 
 FROM ${BASE_IMAGE}
-
 USER root
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Remove the ubuntu user (UID 1000) to avoid conflict with the scion user
-# that scion-base creates at the same UID.
-RUN userdel -r ubuntu 2>/dev/null || true && \
-    groupdel ubuntu 2>/dev/null || true
+# Kept in the finished image so the contract can be re-checked against a running
+# container. Deliberately not on PATH. See core-base/Dockerfile.
+COPY lib/ /opt/scion-image-build/lib/
+RUN chmod +x /opt/scion-image-build/lib/*.sh
 
-# Install packages that scion-base and harnesses expect but the thick base lacks.
-# tmux: required by sandbox entrypoint (buildEntrypoint in cloudrun_sandbox_runtime.go)
-# for agent session management. Without it, every sandbox dies on launch (exit 127).
-# libcurl4t64 is required by the vendored git's HTTPS helper (see below).
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    zsh \
-    fzf \
-    gh \
-    ripgrep \
-    tmux \
-    ca-certificates \
-    zlib1g \
-    libcurl4t64 \
-    && rm -rf /var/lib/apt/lists/*
+# This base ships `ubuntu` at uid 1000; scion-base creates `scion` there. The
+# step matches by uid, not by name, so it works on both bases.
+RUN /opt/scion-image-build/lib/install-core-toolchain.sh free-uid-1000
+
+RUN /opt/scion-image-build/lib/install-core-toolchain.sh apt-common
+# No apt candidate for chromium on Ubuntu (snap-only); the step detects that and
+# installs google-chrome-stable, symlinked to /usr/bin/chromium because scion
+# depends on the name. See the step for the callers.
+RUN /opt/scion-image-build/lib/install-core-toolchain.sh chromium
+# Absent from this base entirely. pkg/runtime/common.go shells out to a literal
+# `gcsfuse`, so without this every GCS volume mount on a thick image fails at
+# runtime, far from the cause.
+RUN /opt/scion-image-build/lib/install-core-toolchain.sh gcsfuse
+# Present already (/usr/bin/gcloud, /usr/bin/kubectl) — both steps detect and
+# skip rather than laying down a second copy at a different path.
+RUN /opt/scion-image-build/lib/install-core-toolchain.sh gcloud
+RUN /opt/scion-image-build/lib/install-core-toolchain.sh kubectl
 
 # --- Vendored git (Chainguard) ---------------------------------------------
 # Mirrors core-base so both chains get the same git from the same place. See
@@ -111,7 +120,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #     binary — `git --version` says 2.55.0 while subcommands fail with
 #     "fatal: unknown repository extension found: relativeworktrees".
 #     This is not hypothetical: it is exactly what this image did before.
-# Must stay after apt-get so nothing reinstates the distro git over it.
+# Must stay after the apt steps so nothing reinstates the distro git over it.
 # Ubuntu 24.04 ships glibc 2.39, clearing Chainguard's 2.38 floor — by a single
 # release, so any future change of BASE_IMAGE needs to re-check this.
 COPY --from=git-patched /staged/usr/bin/git          /usr/bin/git
@@ -119,36 +128,40 @@ COPY --from=git-patched /staged/usr/libexec/git-core /usr/libexec/git-core
 COPY --from=git-patched /staged/usr/share/git-core   /usr/share/git-core
 COPY --from=git-patched /staged/usr/local/lib/scion-git /usr/local/lib/scion-git
 
-# Same build-time assertions as core-base: PATH precedence, GIT_EXEC_PATH,
-# shared-library resolution, re-exec target, and the 2.47.0 worktree gate.
-RUN set -eu; \
-    test "$(command -v git)" = /usr/bin/git \
-      || { echo "FAIL: vendored git is shadowed on PATH by $(command -v git)"; exit 1; }; \
-    git --version; \
-    test -x /usr/libexec/git-core/git-remote-https \
-      || { echo "FAIL: git helpers missing from compiled-in GIT_EXEC_PATH"; exit 1; }; \
-    if ldd /usr/libexec/git-core/git-remote-https | grep -q "not found"; then \
-      echo "FAIL: unresolved shared libraries in git-remote-https:"; \
-      ldd /usr/libexec/git-core/git-remote-https | grep "not found"; exit 1; \
-    fi; \
-    test "$(/usr/libexec/git-core/git --version)" = "$(git --version)" \
-      || { echo "FAIL: git re-execs into a different binary via GIT_EXEC_PATH: \
-$(/usr/libexec/git-core/git --version) vs $(git --version)"; exit 1; }; \
-    git init -q /tmp/_gitcheck \
-      && git -C /tmp/_gitcheck -c user.email=build@scion.invalid -c user.name=build \
-           commit -q --allow-empty -m check \
-      && git -C /tmp/_gitcheck worktree add --relative-paths -q /tmp/_gitcheck_wt HEAD \
-      || { echo "FAIL: 'git worktree add --relative-paths' did not work end-to-end \
-(scion requires git >= 2.47.0 -- see pkg/util/git.go CheckGitVersion)"; exit 1; }; \
-    test -z "${LD_LIBRARY_PATH:-}" \
-      || { echo "FAIL: LD_LIBRARY_PATH is set to '${LD_LIBRARY_PATH}'. The \
-vendored libpcre2 is reached via a RUNPATH on the git binaries; an image-wide \
-LD_LIBRARY_PATH would impose it on every process in the container"; exit 1; }; \
-    test -z "$(git --version 2>&1 1>/dev/null)" \
-      || { echo "FAIL: git writes to stderr on a plain --version, so the \
-dynamic loader is unhappy and agent output will be polluted: \
-$(git --version 2>&1 1>/dev/null)"; exit 1; }; \
-    rm -rf /tmp/_gitcheck /tmp/_gitcheck_wt
+# Go 1.27.1 is already here and stays. The step prints why it skipped.
+ARG GO_MIN_VERSION
+ARG GO_VERSION
+RUN /opt/scion-image-build/lib/install-core-toolchain.sh go "${GO_MIN_VERSION}" "${GO_VERSION}"
 
-# Create the npm-global directory that scion-base expects to chown.
-RUN mkdir -p /usr/local/share/npm-global
+# Installed to /usr/bin/gh specifically: scion-base wraps that exact path to
+# inject the GitHub App token. The apt gh this file used to install happened to
+# land there; relying on that coincidence is what broke the other chain.
+ARG GH_VERSION
+RUN /opt/scion-image-build/lib/install-core-toolchain.sh gh "${GH_VERSION}"
+
+RUN /opt/scion-image-build/lib/install-core-toolchain.sh golangci-lint
+
+RUN /opt/scion-image-build/lib/install-core-toolchain.sh npm-global
+
+# Both of these were missing on this chain while core-base had them, which made
+# scion-base's `chown -R scion:scion /usr/local/share/npm-global` a decoration:
+# with NPM_CONFIG_PREFIX unset, `npm install -g` targets /usr/lib/node_modules
+# and fails on permissions for the scion user.
+ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
+ENV PATH=/usr/local/share/npm-global/bin:/usr/local/go/bin:$PATH
+
+# Same corporate-mirror escape hatches core-base offers; see that file. Having
+# them on only one chain meant a thick build could not be pointed at an internal
+# registry at all.
+ARG NPM_REGISTRY=https://registry.npmjs.org/
+ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
+
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
+    /opt/scion-image-build/lib/install-core-toolchain.sh npm-tools
+
+# Identical closing line to core-base. That is the whole point: whichever base
+# scion-base is built on, it has passed the same assertion.
+RUN GO_MIN_VERSION="${GO_MIN_VERSION}" \
+    /opt/scion-image-build/lib/verify-base-contract.sh

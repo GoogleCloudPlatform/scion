@@ -59,14 +59,14 @@ steps:
   # Stage 1: Build thick-prep
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-thick-prep'
-    dir: 'image-build/thick-prep'
+    dir: 'image-build'
     args:
       - 'build'
       - '--platform=linux/amd64'
       - '-t'
       - '$_REGISTRY/thick-prep:$_TAG'
       - '-f'
-      - 'Dockerfile'
+      - 'thick-prep/Dockerfile'
       - '.'
     env:
       - 'DOCKER_BUILDKIT=1'
