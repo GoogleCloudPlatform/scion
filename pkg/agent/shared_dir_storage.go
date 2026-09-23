@@ -18,11 +18,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -108,7 +108,7 @@ func resolveSharedDirs(
 	if err := api.ValidateSharedDirs(dirs); err != nil {
 		return nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
 	}
-	if !validSharedDirProjectID(projectID) {
+	if !shareddirs.ValidProjectID(projectID) {
 		return nil, nil, fmt.Errorf("server.shared_dir_storage: invalid hub project ID %q", projectID)
 	}
 
@@ -143,7 +143,7 @@ func resolveSharedDirs(
 		if !ok {
 			return nil, nil, fmt.Errorf("server.shared_dir_storage: shared dir %q not found in NFS resolution", name)
 		}
-		if err := confineSharedDir(sd.HostPath, res.HostBase, subPathRoot, projectID, name); err != nil {
+		if err := shareddirs.ConfineLeaf(sd.HostPath, res.HostBase, subPathRoot, projectID, name); err != nil {
 			return nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
 		}
 	}
@@ -172,12 +172,12 @@ func resolveSharedDirs(
 	// in-cluster GKE broker, design §3.3 T1 compatibility).
 	if _, statErr := os.Stat(res.HostBase); statErr == nil {
 		// Round 5 review finding C1=T1=S-L2 (== C2=T2=S-L1): mkdir and
-		// chmod are now done via createSharedDirViaComponentWalk, which
+		// chmod are now done via shareddirs.CreateViaComponentWalk, which
 		// walks every component of `rel` with openat(O_NOFOLLOW|O_DIRECTORY)
 		// and mkdirat, refusing ANY symlink — leaf or intermediate, inside
 		// the export or outside it — before creating or touching anything
 		// past it. This supersedes the round 3/4 os.Root-based approach
-		// entirely (os.Root is no longer used anywhere in this file):
+		// entirely (os.Root is no longer used anywhere in this package):
 		// os.Root only refused a traversal that would ESCAPE the root, so
 		// it still followed a relative symlink that stayed inside it (e.g.
 		// one project's shared-dirs pointing at another's), letting a real
@@ -188,7 +188,9 @@ func resolveSharedDirs(
 		// open call, before any subsequent component — including the leaf
 		// — is ever created, so nothing is created or chmod'd anywhere
 		// outside the exact directory chain this call is resolving,
-		// regardless of any concurrent symlink swap.
+		// regardless of any concurrent symlink swap. Phase 2 item 1 (pure
+		// move): the walk itself now lives in pkg/shareddirs so pkg/hub's
+		// file browser (§3.2.5) can reuse it without importing pkg/agent.
 		resolvedHostBase, err := filepath.EvalSymlinks(res.HostBase)
 		if err != nil {
 			return nil, nil, fmt.Errorf("server.shared_dir_storage: resolve host base symlinks: %w", err)
@@ -198,7 +200,7 @@ func resolveSharedDirs(
 			sd := res.SharedDirs[name]
 			rel := sd.ServerRelativePath // relative to HostBase, e.g. projects/<pid>/shared-dirs/<name>
 
-			leafFd, alreadyExisted, walkErr := createSharedDirViaComponentWalk(resolvedHostBase, rel)
+			leafFd, alreadyExisted, walkErr := shareddirs.CreateViaComponentWalk(resolvedHostBase, rel)
 			if walkErr != nil {
 				return nil, nil, fmt.Errorf("server.shared_dir_storage: shared dir %q: %w", name, walkErr)
 			}
@@ -209,12 +211,12 @@ func resolveSharedDirs(
 				// inode after the fd was opened (design §3.5(5); round 5
 				// disposition item 2). Only the leaf this call created —
 				// never a pre-existing shared dir.
-				if chmodErr := chmodSharedDirFd(leafFd, 0o2775); chmodErr != nil {
-					_ = closeSharedDirFd(leafFd)
+				if chmodErr := shareddirs.ChmodFd(leafFd, 0o2775); chmodErr != nil {
+					_ = shareddirs.CloseFd(leafFd)
 					return nil, nil, fmt.Errorf("server.shared_dir_storage: chmod shared dir %q: %w", name, chmodErr)
 				}
 			}
-			_ = closeSharedDirFd(leafFd)
+			_ = shareddirs.CloseFd(leafFd)
 
 			// Defense in depth, kept per round 5 disposition item 2 even
 			// though the component walk above should make it structurally
@@ -257,38 +259,6 @@ func resolveSharedDirs(
 		PVClaimName: pvClaimName,
 		SubPaths:    subPaths,
 	}, nil
-}
-
-// confineSharedDir returns an error unless hostPath's parent directory is
-// exactly <hostBase>/<subPathRoot>/<projectID>/shared-dirs. Extracted out of
-// resolveSharedDirs so this defense-in-depth check can be tested directly,
-// independent of name/project-ID validation and nfsBackend.Resolve (round 3
-// review finding N1/T1 part 1).
-func confineSharedDir(hostPath, hostBase, subPathRoot, projectID, name string) error {
-	wantParent := filepath.Join(hostBase, subPathRoot, projectID, "shared-dirs")
-	if filepath.Dir(hostPath) != wantParent {
-		return fmt.Errorf("shared dir %q resolved outside its project subtree", name)
-	}
-	return nil
-}
-
-// sharedDirProjectIDPattern is an allow-list for hub project IDs used as an
-// NFS path segment (round 3 security review finding S-N2). Hub IDs are
-// UUIDs in practice; identifiers from the project system's earlier naming
-// era are slugs. Requiring the first character to be alphanumeric rejects
-// "." and ".." (and any run of dots)
-// along with path separators, so this subsumes the earlier deny-list
-// (empty / "." / ".." / "/" / "\\"). It also rejects control characters,
-// spaces and unbounded length, none of which are valid in either ID scheme
-// — those wouldn't escape the export, but they would produce confusing
-// errors or odd subPaths.
-var sharedDirProjectIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-
-// validSharedDirProjectID reports whether projectID is safe to use as a
-// path segment when resolving shared_dir_storage=nfs paths (round 2/3
-// security review findings F1/F4/S-N2).
-func validSharedDirProjectID(projectID string) bool {
-	return sharedDirProjectIDPattern.MatchString(projectID)
 }
 
 // isLocalContainerRuntime reports whether name identifies a runtime that

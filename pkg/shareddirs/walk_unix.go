@@ -14,7 +14,7 @@
 
 //go:build unix
 
-package agent
+package shareddirs
 
 import (
 	"errors"
@@ -25,27 +25,28 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// createSharedDirViaComponentWalk race-freely creates (or verifies) the
-// directory chain for rel = "<subpath_root>/<projectID>/shared-dirs/<name>"
-// under hostBase, refusing to follow a symlink at ANY component — leaf or
+// CreateViaComponentWalk race-freely creates (or verifies) the directory
+// chain for rel = "<subpath_root>/<projectID>/shared-dirs/<name>" under
+// hostBase, refusing to follow a symlink at ANY component — leaf or
 // intermediate, pointing inside the export or outside it — before ever
 // creating or touching anything past it.
 //
 // Round 5 review finding C1=T1=S-L2 (also numbered C2=T2=S-L1 across the
-// three r5 reports): the earlier os.Root-based approach only refused a
-// traversal that would ESCAPE the root; it happily followed a relative
-// symlink that stayed inside it (e.g. one project's shared-dirs pointing at
-// another's), so a real mkdir+chmod could land inside a victim project's
-// tree, or at the export root, before resolveSharedDirs' final equality
-// check ever ran. openat(2)/mkdirat(2) with O_NOFOLLOW refuse to open or
-// traverse through a symlink at all, atomically as part of the single
-// syscall — there is no separate stat-then-open step for a concurrent
-// symlink swap to land between, which is what made the os.Root version
-// racy (see the R4/R5 security probes: 6,603/20,000 and 7,032/20,000
-// escapes respectively; this walk is what finally gets both to 0).
+// three r5 reports, PR #1779): the earlier os.Root-based approach only
+// refused a traversal that would ESCAPE the root; it happily followed a
+// relative symlink that stayed inside it (e.g. one project's shared-dirs
+// pointing at another's), so a real mkdir+chmod could land inside a victim
+// project's tree, or at the export root, before resolveSharedDirs' final
+// equality check ever ran. openat(2)/mkdirat(2) with O_NOFOLLOW refuse to
+// open or traverse through a symlink at all, atomically as part of the
+// single syscall — there is no separate stat-then-open step for a
+// concurrent symlink swap to land between, which is what made the os.Root
+// version racy (see the R4/R5 security probes: 6,603/20,000 and
+// 7,032/20,000 escapes respectively; this walk is what finally gets both to
+// 0).
 //
-// This supersedes os.Root for this path entirely — os.Root is no longer
-// used anywhere in shared_dir_storage.go.
+// This supersedes os.Root for this path entirely — os.Root is not used
+// anywhere in this package.
 //
 // Round 5 review nit T4: a mid-walk swap (an attacker replacing a plain
 // directory with a symlink between our openat of the parent and the
@@ -60,15 +61,15 @@ import (
 // verifies empirically (reviews/r5-security-probe_test.go.txt, run
 // 20,000 times against the pre-rewrite os.Root code and again against this
 // walk: 0/20,000 escapes and 0/20,000 stray chmods here, versus thousands
-// under os.Root — see the self-check numbers reported alongside this PR).
+// under os.Root — see the self-check numbers reported alongside PR #1779).
 //
 // Returns the leaf's open file descriptor (the caller must close it via
-// closeSharedDirFd) and whether the leaf already existed before this call,
-// so the caller can decide whether to chmod it — only a leaf THIS call
-// created is ever chmod'd (design §3.5(5); round 3 review item 13).
+// CloseFd) and whether the leaf already existed before this call, so the
+// caller can decide whether to chmod it — only a leaf THIS call created is
+// ever chmod'd (design §3.5(5); round 3 review item 13, PR #1779).
 // Intermediate components get the same mkdir mode as the leaf (0o775); the
 // caller chmods only the leaf.
-func createSharedDirViaComponentWalk(hostBase, rel string) (leafFd int, alreadyExisted bool, err error) {
+func CreateViaComponentWalk(hostBase, rel string) (leafFd int, alreadyExisted bool, err error) {
 	baseFd, err := unix.Open(hostBase, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, false, fmt.Errorf("open host base %q: %w", hostBase, err)
@@ -117,8 +118,8 @@ func openOrCreateDirNoFollow(parentFd int, comp string) (fd int, existed bool, e
 }
 
 // classifyComponentOpenError turns the errno openat(O_NOFOLLOW|O_DIRECTORY)
-// returns for "this component isn't usable" into the clear wording
-// resolveSharedDirs used before this rewrite (round 4 review nit C4/C5).
+// returns for "this component isn't usable" into a clear wording (round 4
+// review nit C4/C5, PR #1779).
 //
 // On Linux (verified empirically; POSIX leaves the exact errno
 // implementation-defined here), combining O_DIRECTORY with O_NOFOLLOW on a
@@ -148,24 +149,23 @@ func classifyComponentOpenError(parentFd int, comp string, err error) error {
 	}
 }
 
-// chmodSharedDirFd sets the leaf's mode via fchmod on the already-open file
+// ChmodFd sets the leaf's mode via fchmod on the already-open file
 // descriptor — never a path-based chmod, which could be raced onto a
-// different inode after the fd was opened (round 5 disposition item 2).
-// mode is a traditional Unix mode_t value (e.g. 0o2775 for rwxrwsr-x), NOT
-// an os.FileMode: Go's os.FileMode encodes its setgid/setuid/sticky bits at
-// different bit positions than the kernel's mode_t, so passing an
-// os.FileMode value to a raw syscall wrapper would silently target the
-// wrong bits (this exact bug bit an earlier version of this file — see
-// git history / round 1-4 review notes on os.ModeSetgid vs 0o2000).
-func chmodSharedDirFd(fd int, mode uint32) error {
+// different inode after the fd was opened (round 5 disposition item 2, PR
+// #1779). mode is a traditional Unix mode_t value (e.g. 0o2775 for
+// rwxrwsr-x), NOT an os.FileMode: Go's os.FileMode encodes its
+// setgid/setuid/sticky bits at different bit positions than the kernel's
+// mode_t, so passing an os.FileMode value to a raw syscall wrapper would
+// silently target the wrong bits.
+func ChmodFd(fd int, mode uint32) error {
 	return unix.Fchmod(fd, mode)
 }
 
-// closeSharedDirFd closes a file descriptor returned by
-// createSharedDirViaComponentWalk. Errors are deliberately ignored by most
-// callers (a close failure after a successful chmod doesn't invalidate the
-// mkdir/chmod that already happened), but the return value is available for
-// callers that want to check it.
-func closeSharedDirFd(fd int) error {
+// CloseFd closes a file descriptor returned by CreateViaComponentWalk.
+// Errors are deliberately ignored by most callers (a close failure after a
+// successful chmod doesn't invalidate the mkdir/chmod that already
+// happened), but the return value is available for callers that want to
+// check it.
+func CloseFd(fd int) error {
 	return unix.Close(fd)
 }
