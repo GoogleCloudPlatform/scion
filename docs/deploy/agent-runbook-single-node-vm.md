@@ -9,6 +9,24 @@ For architecture details, access patterns, and configuration reference, see
 
 ---
 
+## 0. Obtain the Repository
+
+If you are reading this runbook from a GitHub URL or a standalone file (not from
+within a local clone of the Scion repository), clone the repo first. The deploy
+script and its supporting files must be available locally.
+
+```bash
+git clone --depth 1 https://github.com/GoogleCloudPlatform/scion.git /tmp/scion-repo
+cd /tmp/scion-repo
+```
+
+A shallow clone (`--depth 1`) is sufficient — the deploy script does not need
+git history. The `/tmp/scion-repo` path is consistent with Section 5.1; if you
+already have the repo cloned or checked out elsewhere, skip this step and
+adjust the paths in Section 5 accordingly.
+
+---
+
 ## 1. Prerequisites
 
 Verify each tool is available before proceeding. If any check fails, stop and
