@@ -778,14 +778,16 @@ else
 fi
 
 # Bind minimal IAM roles (idempotent)
+# artifactregistry.writer lets the VM build and push the Cloud Run IAP proxy
+# image directly to Artifact Registry (see Phase 4).
 info "Binding IAM roles..."
-for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent; do
+for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="${ROLE}" \
     --quiet &>/dev/null
 done
-echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent"
+echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer"
 
 # --- Grant deployer IAP tunnel access (required for SSH to --no-address VMs) ---
 info "Granting IAP tunnel access to deployer..."
@@ -1312,16 +1314,62 @@ if [[ -z "$VM_IP" ]]; then
 fi
 echo "  VM internal IP: ${VM_IP}"
 
-# --- Deploy Cloud Run IAP proxy ---
+# --- Build and deploy Cloud Run IAP proxy ---
+# We build the proxy image on the VM and deploy with --image instead of
+# `gcloud run deploy --source`, because --source triggers Cloud Build, which
+# uploads source to GCS. Enterprise projects with the org policy
+# constraints/gcp.restrictServiceUsage denying storage.googleapis.com reject
+# that upload with HTTP 403. Docker is already available on the VM and the
+# repo is already cloned at /opt/scion-source, so we build and push there
+# instead.
 PROXY_SERVICE="${INSTANCE_NAME}-iap-proxy"
+AR_REPO="cloud-run-source-deploy"
+PROXY_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${PROXY_SERVICE}:latest"
+
+# --- Ensure Artifact Registry repo exists ---
+# This repo name matches what `gcloud run deploy --source` auto-creates, so
+# this stays backwards-compatible with prior --source deploys.
+info "Ensuring Artifact Registry repo exists: ${AR_REPO}..."
+gcloud artifacts repositories create "${AR_REPO}" \
+  --project="${PROJECT_ID}" \
+  --location="${REGION}" \
+  --repository-format=docker \
+  --quiet 2>/dev/null || true
+echo "  Artifact Registry repo ready: ${AR_REPO}"
+
+# --- Build proxy image on the VM ---
+# When IMAGE_SOURCE=registry, Phase 3b is skipped and /opt/scion-source may
+# not exist on the VM. Ensure the repo is cloned (shallow) before building.
+info "Building proxy image on VM..."
+echo "  Image: ${PROXY_IMAGE}"
+gcloud compute ssh "${INSTANCE_NAME}" \
+  --zone="${ZONE}" --project="${PROJECT_ID}" \
+  --command="
+    set -euo pipefail
+    if [ ! -d /opt/scion-source ]; then
+      sudo git clone --depth 1 \
+        https://github.com/GoogleCloudPlatform/scion.git /opt/scion-source
+    fi
+    sudo docker build -t ${PROXY_IMAGE} /opt/scion-source/extras/cloudrun-iap-proxy
+  "
+echo "  Proxy image built on VM."
+
+# --- Push proxy image to Artifact Registry ---
+info "Pushing proxy image to Artifact Registry..."
+gcloud compute ssh "${INSTANCE_NAME}" \
+  --zone="${ZONE}" --project="${PROJECT_ID}" \
+  --command="sudo gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet && sudo docker push ${PROXY_IMAGE}"
+echo "  Proxy image pushed: ${PROXY_IMAGE}"
+
+# --- Deploy Cloud Run IAP proxy ---
 info "Deploying Cloud Run IAP proxy: ${PROXY_SERVICE}..."
 echo "  Target URL: http://${VM_IP}:8080"
-echo "  Source: ${SCRIPT_DIR}/../../extras/cloudrun-iap-proxy"
+echo "  Image: ${PROXY_IMAGE}"
 
 gcloud run deploy "${PROXY_SERVICE}" \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
-  --source="${SCRIPT_DIR}/../../extras/cloudrun-iap-proxy" \
+  --image="${PROXY_IMAGE}" \
   --set-env-vars="TARGET_URL=http://${VM_IP}:8080" \
   --network=default \
   --subnet=default \
