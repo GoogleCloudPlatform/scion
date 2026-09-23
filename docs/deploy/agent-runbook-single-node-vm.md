@@ -37,20 +37,12 @@ tell the user what is missing.
 | gcloud CLI | `gcloud --version` | Version string (any version) |
 | bash | `bash --version` | Version string (any version) |
 | python3 | `python3 --version` | Version string (3.6+) |
-| PyYAML | `python3 -c "import yaml; print(yaml.__version__)"` | Version string (any version) |
 | curl | `curl --version` | Version string (any version) |
 
-If PyYAML is missing, install it one of these ways:
-
-| Option | Command | Notes |
-|--------|---------|-------|
-| System package (Debian/Ubuntu) | `apt-get install python3-yaml` | Preferred; avoids PEP 668 entirely. |
-| Virtualenv | `python3 -m venv ~/.venv && ~/.venv/bin/pip install pyyaml && PYTHON=~/.venv/bin/python3 bash deploy.sh ...` | Use when you cannot install system packages; pass `PYTHON=` when invoking `deploy.sh`. |
-| Per-user install (where allowed) | `pip install --user pyyaml` | Fails under PEP 668 ("externally-managed-environment") on Debian >= 12, Ubuntu >= 23.04, and Homebrew Python — prefer one of the options above on those systems. |
-
-`deploy.sh` itself never creates a virtualenv; it only reads `PYTHON` from
-the environment (default `python3`) to locate the interpreter with PyYAML
-installed.
+The config file is JSON, parsed with Python's built-in `json` module — no
+extra install is required. If `python3` is not on `PATH`, or you need a
+different interpreter, set `PYTHON=/path/to/python3` when invoking
+`deploy.sh`.
 
 **VM operating system:** the deployed GCE VM's image is pinned to Ubuntu
 22.04 LTS (`ubuntu-2204-lts` / `ubuntu-os-cloud`) and is not currently
@@ -102,18 +94,31 @@ check exists only to fail fast on permissions before gathering deployment
 details from the user, not because the operator needs to enable anything
 manually.
 
-Check each API. If any is not enabled, enable it.
+Check each API. If any is missing, run the consolidated enable command below
+(`gcloud services enable` is idempotent and accepts multiple services, so
+there's no need to enable them one at a time).
 
-| API | Check | Enable |
-|-----|-------|--------|
-| `compute.googleapis.com` | `gcloud services list --enabled --filter="name:compute.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable compute.googleapis.com --project=PROJECT_ID` |
-| `run.googleapis.com` | `gcloud services list --enabled --filter="name:run.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable run.googleapis.com --project=PROJECT_ID` |
-| `iap.googleapis.com` | `gcloud services list --enabled --filter="name:iap.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable iap.googleapis.com --project=PROJECT_ID` |
-| `cloudbuild.googleapis.com` | `gcloud services list --enabled --filter="name:cloudbuild.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable cloudbuild.googleapis.com --project=PROJECT_ID` |
-| `artifactregistry.googleapis.com` | `gcloud services list --enabled --filter="name:artifactregistry.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable artifactregistry.googleapis.com --project=PROJECT_ID` |
-| `iam.googleapis.com` | `gcloud services list --enabled --filter="name:iam.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable iam.googleapis.com --project=PROJECT_ID` |
+| API | Check |
+|-----|-------|
+| `compute.googleapis.com` | `gcloud services list --enabled --filter="name:compute.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
+| `run.googleapis.com` | `gcloud services list --enabled --filter="name:run.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
+| `iap.googleapis.com` | `gcloud services list --enabled --filter="name:iap.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
+| `cloudbuild.googleapis.com` | `gcloud services list --enabled --filter="name:cloudbuild.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
+| `artifactregistry.googleapis.com` | `gcloud services list --enabled --filter="name:artifactregistry.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
+| `iam.googleapis.com` | `gcloud services list --enabled --filter="name:iam.googleapis.com" --format="value(name)" --project=PROJECT_ID` |
 
-**Expected:** Each check returns the API name. If empty, run the enable command.
+**Expected:** Each check returns the API name. If any is empty, enable all of them at once:
+
+```bash
+gcloud services enable \
+  compute.googleapis.com \
+  run.googleapis.com \
+  iap.googleapis.com \
+  cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com \
+  iam.googleapis.com \
+  --project=PROJECT_ID
+```
 
 **Timing note:** first-time enablement of an API can take 1-2 minutes per
 API. This is normal `gcloud`/GCP behavior, not something to retry — `gcloud
@@ -172,35 +177,36 @@ the user does not have a preference. Validate each answer before moving on.
 | 6 | Container images: build on VM or use a registry? | `build` (build on VM) | Must be `build` or `registry`. If `registry`, ask for the registry path (e.g., `us-docker.pkg.dev/my-project/scion`). | `container_images.source`, `container_images.registry` |
 | 7 | Admin email | Active gcloud account | Must be a valid email address | `admin_email` |
 | 8 | Update policy | `auto` | Must be `auto`, `notify`, or `disabled`. Explain: **auto** = install updates automatically (recommended). **notify** = check for updates, show banner in admin UI. **disabled** = no automatic checking. | `update_policy` |
-| 9 | Release channel | auto-detect from version | Must be `stable`, `preview`, or `nightly`. Usually auto-detected — only ask if the user wants to override. **stable** = GA releases. **preview** = pre-releases (rc, alpha, beta). **nightly** = nightly builds. | `release_channel` |
+| 9 | Release channel | `nightly` | Must be `stable`, `preview`, or `nightly`. Defaults to nightly — only ask if the user wants to override. **stable** = GA releases. **preview** = pre-releases (rc, alpha, beta). **nightly** = nightly builds. | `release_channel` |
 | 10 | Chat plugins | none (empty list) | Each must be one of: `telegram`, `discord`, `slack`, `teams`. Multiple allowed. | `chat_plugins` |
 
 ---
 
 ## 4. Generate Config File
 
-After gathering all answers, write a YAML config file. Use the schema from
-`scripts/single-node-vm/deploy-config.example.yaml`.
+After gathering all answers, write a JSON config file. Use the schema from
+`scripts/single-node-vm/deploy-config.example.json`.
 
-Write the file to `/tmp/scion-deploy-config.yaml`.
+Write the file to `/tmp/scion-deploy-config.json`.
 
 ### Template
 
-```yaml
-# Scion single-node VM deployment configuration
-hub_name: "HUB_NAME"
-project_id: "PROJECT_ID"
-region: "REGION"
-machine_size: "MACHINE_SIZE"
-disk_size_gb: DISK_SIZE_GB
-chat_plugins: [CHAT_PLUGINS]
-container_images:
-  source: "SOURCE"
-  registry: "REGISTRY"
-admin_email: "ADMIN_EMAIL"
-update_policy: "UPDATE_POLICY"
-# Only include if the user explicitly chose a channel (usually auto-detected)
-# release_channel: "stable"
+```json
+{
+  "hub_name": "HUB_NAME",
+  "project_id": "PROJECT_ID",
+  "region": "REGION",
+  "machine_size": "MACHINE_SIZE",
+  "disk_size_gb": DISK_SIZE_GB,
+  "chat_plugins": [CHAT_PLUGINS],
+  "container_images": {
+    "source": "SOURCE",
+    "registry": "REGISTRY"
+  },
+  "admin_email": "ADMIN_EMAIL",
+  "update_policy": "UPDATE_POLICY",
+  "release_channel": "RELEASE_CHANNEL"
+}
 ```
 
 Replace each placeholder with the gathered value:
@@ -217,22 +223,24 @@ Replace each placeholder with the gathered value:
 | `REGISTRY` | Question 6 registry path if source is `registry`, otherwise `""` |
 | `ADMIN_EMAIL` | Question 7 answer |
 | `UPDATE_POLICY` | Question 8 answer |
+| `RELEASE_CHANNEL` | Question 9 answer if the user explicitly chose a channel, otherwise `""` (defaults to nightly) |
 
-Write the file:
+Write the file (substituting the gathered values into the template above,
+in place of `# (insert populated JSON here)`):
 
 ```bash
-cat > /tmp/scion-deploy-config.yaml << 'EOF'
-# (insert populated YAML here)
+cat > /tmp/scion-deploy-config.json << 'EOF'
+# (insert populated JSON here)
 EOF
 ```
 
 Verify the file parses:
 
 ```bash
-python3 -c "import yaml; yaml.safe_load(open('/tmp/scion-deploy-config.yaml'))" && echo "Config valid"
+python3 -c "import json; json.load(open('/tmp/scion-deploy-config.json'))" && echo "Config valid"
 ```
 
-**If validation fails:** Fix the YAML syntax and retry.
+**If validation fails:** Fix the JSON syntax and retry.
 
 Show the user the generated config and ask them to confirm before proceeding.
 
@@ -254,7 +262,7 @@ If the repo is already available, use it directly.
 ### 5.2 Run the deploy script
 
 ```bash
-bash scripts/single-node-vm/deploy.sh --config /tmp/scion-deploy-config.yaml
+bash scripts/single-node-vm/deploy.sh --config /tmp/scion-deploy-config.json
 ```
 
 **What to expect:**
@@ -536,7 +544,7 @@ gcloud compute ssh scion-hub-HUB_NAME \
 To tear down all resources created by the deployment, run:
 
 ```bash
-bash scripts/single-node-vm/deploy.sh --delete --config /tmp/scion-deploy-config.yaml
+bash scripts/single-node-vm/deploy.sh --delete --config /tmp/scion-deploy-config.json
 ```
 
 Or run without a config file (the script prompts for hub name and region):

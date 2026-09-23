@@ -60,14 +60,14 @@ To install a specific release version:
 
 ### Config File (Headless Mode)
 
-To run the deployment without interactive prompts, create a YAML config file
+To run the deployment without interactive prompts, create a JSON config file
 that pre-answers all wizard questions and pass it with `--config`:
 
 ```bash
-./scripts/single-node-vm/deploy.sh --config my-deploy-config.yaml
+./scripts/single-node-vm/deploy.sh --config my-deploy-config.json
 ```
 
-See `scripts/single-node-vm/deploy-config.example.yaml` for a documented
+See `scripts/single-node-vm/deploy-config.example.json` for a documented
 template with all available fields.
 
 When a config file is provided:
@@ -80,13 +80,16 @@ When a config file is provided:
 
 Example minimal config for headless deployment:
 
-```yaml
-hub_name: "my-hub"
-region: "us-central1"
-machine_size: "small"
-disk_size_gb: 200
-container_images:
-  source: "build"
+```json
+{
+  "hub_name": "my-hub",
+  "region": "us-central1",
+  "machine_size": "small",
+  "disk_size_gb": 200,
+  "container_images": {
+    "source": "build"
+  }
+}
 ```
 
 This is particularly useful for agent-driven deployments where a
