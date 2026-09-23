@@ -252,7 +252,7 @@ Controls how the Hub checks for and applies its own updates. The Hub dispatches 
 
 Scheduled checks run only when `deployment_tier` is `binary` and `update_policy` is not `disabled`. A binary update downloads the release tarball, verifies the new binary's version, backs up the current binary, installs the new one, and restarts the `scion-hub` systemd service. If the install fails, the backup is restored.
 
-The related admin endpoints are `POST /api/v1/admin/maintenance/check-updates` (manual check) and `GET`/`DELETE /api/v1/admin/maintenance/update-available` (read or dismiss a pending update notification). Both require the `hub.maintenance.execute` permission.
+The related admin endpoints are `POST /api/v1/admin/maintenance/check-updates` (manual check) and `GET` / `DELETE` on `/api/v1/admin/maintenance/update-available` (read or dismiss a pending update notification). Both require the `hub.maintenance.execute` permission.
 
 ```yaml
 server:

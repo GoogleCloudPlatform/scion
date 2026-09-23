@@ -229,7 +229,7 @@ Conversations are referenced using one of three forms:
     - `get <conversation-ref>`: Show conversation details.
     - `get-message <conversation-ref> <message-id>`: Retrieve a single message by its ID from a conversation. Authorization is participant-based — only participants of the conversation can retrieve its messages.
     - `messages <conversation-ref>`: View messages in a conversation.
-    - `create <name>`: Create a new group conversation. The group appears as a thread in the project's web chat space. Names must start with a letter or digit, contain only letters, digits, spaces, `_`, or `-`, and be at most 100 characters (`400` otherwise). A name already used in the project returns `409` (name conflict).
+    - `create <name>`: Create a new group conversation. The group appears as a thread in the project's web chat space. Names must start with a letter or digit, contain only letters, digits, spaces, `_`, or `-`, and be at most 100 characters (returns `400 Bad Request` otherwise). A name already used in the project returns `409` (name conflict).
     - `set-default <conversation-ref> <agent-id>`: Set the default agent for a conversation.
     - `participants <conversation-ref>`: List participants in a conversation.
     - `join <conversation-ref> <principal-kind> <principal-id>`: Add a participant to a conversation.

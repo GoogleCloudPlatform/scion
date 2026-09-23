@@ -23,7 +23,7 @@ The header features a **mode switcher** that lets you move between the top-level
 
 - **Wide (above 1100 px)**: A segmented mode switcher with text labels and icons, with inline buttons for inbox, notifications, help, theme, profile, and sign-out.
 - **Medium (768–1100 px)**: The mode switcher shows icons only. Inbox, notifications, help, theme, profile, and sign-out move into a single account dropdown. A badge dot on the dropdown shows unread messages or notifications.
-- **Narrow (768 px and below)**: The mode switcher becomes a dropdown, next to the account dropdown and a hamburger menu.
+- **Narrow (below 768 px)**: The mode switcher becomes a dropdown, next to the account dropdown and a hamburger menu.
 
 Inbox and notifications stay reachable at every width. The Terminal entry also shows how many terminal sessions are open.
 
