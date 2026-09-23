@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -106,6 +107,18 @@ func TestSkillFileSignature_Verify(t *testing.T) {
 		r := signedFileRequest(skillID, version, path, exp, "!!!not-base64!!!")
 		assert.False(t, s.verifySkillFileSignature(r, skillID, version, path, now))
 	})
+	t.Run("non-canonical base64 encoding of the valid MAC", func(t *testing.T) {
+		// A 32-byte MAC is 43 base64 chars; the last char carries 2 unused
+		// low bits. Setting one yields a string a lenient decoder maps to the
+		// same MAC. Only the canonical encoding is accepted.
+		const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+		require.Len(t, sig, 43)
+		last := strings.IndexByte(alphabet, sig[len(sig)-1])
+		require.GreaterOrEqual(t, last, 0)
+		alt := sig[:len(sig)-1] + string(alphabet[last^1])
+		r := signedFileRequest(skillID, version, path, exp, alt)
+		assert.False(t, s.verifySkillFileSignature(r, skillID, version, path, now))
+	})
 	t.Run("tampered exp (extended)", func(t *testing.T) {
 		e, _ := strconv.ParseInt(exp, 10, 64)
 		r := signedFileRequest(skillID, version, path, strconv.FormatInt(e+60, 10), sig)
@@ -159,25 +172,39 @@ func TestSkillFileSignature_Verify(t *testing.T) {
 
 func TestIsSignedSkillFileRequest(t *testing.T) {
 	const q = "?raw=1&version=1.0.0&exp=1&sig=x"
+	const id = "0b6d3c1e-5a4f-4c2b-9e8d-7f6a5b4c3d2e"
 	cases := []struct {
 		method, target string
 		want           bool
 	}{
-		{http.MethodGet, "/api/v1/skills/id/files/SKILL.md" + q, true},
-		{http.MethodGet, "/api/v1/skills/id/files/a/b/c.sh" + q, true},
-		{http.MethodPut, "/api/v1/skills/id/files/SKILL.md" + q, false},
-		{http.MethodPost, "/api/v1/skills/id/files/SKILL.md" + q, false},
-		{http.MethodDelete, "/api/v1/skills/id/files/SKILL.md" + q, false},
-		{http.MethodGet, "/api/v1/skills/id/files/" + q, false},
+		{http.MethodGet, "/api/v1/skills/" + id + "/files/SKILL.md" + q, true},
+		{http.MethodGet, "/api/v1/skills/" + id + "/files/a/b/c.sh" + q, true},
+		{http.MethodPut, "/api/v1/skills/" + id + "/files/SKILL.md" + q, false},
+		{http.MethodPost, "/api/v1/skills/" + id + "/files/SKILL.md" + q, false},
+		{http.MethodDelete, "/api/v1/skills/" + id + "/files/SKILL.md" + q, false},
+		{http.MethodHead, "/api/v1/skills/" + id + "/files/SKILL.md" + q, false},
+		{http.MethodGet, "/api/v1/skills/" + id + "/files/" + q, false},
 		{http.MethodGet, "/api/v1/skills//files/SKILL.md" + q, false},
-		{http.MethodGet, "/api/v1/skills/id/download" + q, false},
-		{http.MethodGet, "/api/v1/skills/id" + q, false},
-		{http.MethodGet, "/api/v1/skills/id/versions/v" + q, false},
-		{http.MethodGet, "/api/v1/templates/id/files/SKILL.md" + q, false},
-		{http.MethodGet, "/api/v1/agents/x/api/v1/skills/id/files/SKILL.md" + q, false},
-		{http.MethodGet, "/api/v1/skills/id/files/SKILL.md?raw=1&version=1.0.0&exp=1", false},
-		{http.MethodGet, "/api/v1/skills/id/files/SKILL.md?raw=1&version=1.0.0&sig=x", false},
-		{http.MethodGet, "/api/v1/skills/id/files/SKILL.md?raw=1&version=1.0.0&exp=&sig=", false},
+		{http.MethodGet, "/api/v1/skills/" + id + "/download" + q, false},
+		{http.MethodGet, "/api/v1/skills/" + id + q, false},
+		{http.MethodGet, "/api/v1/skills/" + id + "/versions/v" + q, false},
+		{http.MethodGet, "/api/v1/templates/" + id + "/files/SKILL.md" + q, false},
+		{http.MethodGet, "/api/v1/agents/x/api/v1/skills/" + id + "/files/SKILL.md" + q, false},
+		{http.MethodGet, "/api/v1/skills/" + id + "/files/SKILL.md?raw=1&version=1.0.0&exp=1", false},
+		{http.MethodGet, "/api/v1/skills/" + id + "/files/SKILL.md?raw=1&version=1.0.0&sig=x", false},
+		{http.MethodGet, "/api/v1/skills/" + id + "/files/SKILL.md?raw=1&version=1.0.0&exp=&sig=", false},
+		// Reserved / non-UUID IDs are never admitted anonymously.
+		{http.MethodGet, "/api/v1/skills/resolve/files/SKILL.md" + q, false},
+		{http.MethodGet, "/api/v1/skills/id/files/SKILL.md" + q, false},
+		{http.MethodGet, "/api/v1/skills/" + strings.ToUpper(id) + "/files/SKILL.md" + q, false},
+		{http.MethodGet, "/api/v1/skills/{" + id + "}/files/SKILL.md" + q, false},
+		{http.MethodGet, "/api/v1/skills/urn:uuid:" + id + "/files/SKILL.md" + q, false},
+		// Unclean paths (the mux would redirect or reinterpret them).
+		{http.MethodGet, "/api/v1/skills/" + id + "/files/a/../SKILL.md" + q, false},
+		{http.MethodGet, "/api/v1/skills/" + id + "/files/./SKILL.md" + q, false},
+		{http.MethodGet, "/api/v1/skills/" + id + "/files/a//SKILL.md" + q, false},
+		{http.MethodGet, "/api/v1/skills/" + id + "/files/SKILL.md/" + q, false},
+		{http.MethodGet, "/api/v1/skills/" + id + "/../resolve/files/SKILL.md" + q, false},
 	}
 	for _, c := range cases {
 		r := httptest.NewRequest(c.method, c.target, nil)
@@ -186,14 +213,15 @@ func TestIsSignedSkillFileRequest(t *testing.T) {
 }
 
 func TestSignSkillFileDownloadURLs(t *testing.T) {
+	const sk = "0b6d3c1e-5a4f-4c2b-9e8d-7f6a5b4c3d2e"
 	s := testSigningServer()
 	now := time.Now()
 	urls := s.signSkillFileDownloadURLs([]DownloadURLInfo{
-		{Path: "SKILL.md", URL: "/api/v1/skills/sk/files/SKILL.md?raw=1&version=1.0.0"},
-		{Path: "a/b.sh", URL: "https://hub.example.com/api/v1/skills/sk/files/a/b.sh?raw=1&version=1.0.0"},
+		{Path: "SKILL.md", URL: "/api/v1/skills/"+sk+"/files/SKILL.md?raw=1&version=1.0.0"},
+		{Path: "a/b.sh", URL: "https://hub.example.com/api/v1/skills/"+sk+"/files/a/b.sh?raw=1&version=1.0.0"},
 		{Path: "gcs.md", URL: "https://storage.googleapis.com/b/o?X-Goog-Signature=abc"},
 		{Path: "other.md", URL: "/api/v1/skills/other-skill/files/other.md?raw=1&version=1.0.0"},
-	}, "sk", "1.0.0", now)
+	}, sk, "1.0.0", now)
 
 	for _, i := range []int{0, 1} {
 		u, err := url.Parse(urls[i].URL)
@@ -202,7 +230,7 @@ func TestSignSkillFileDownloadURLs(t *testing.T) {
 		assert.Equal(t, "1.0.0", u.Query().Get("version"))
 		assert.Equal(t, strconv.FormatInt(now.Add(skillFileURLTTL).Unix(), 10), u.Query().Get("exp"))
 		r := httptest.NewRequest(http.MethodGet, u.RequestURI(), nil)
-		assert.True(t, s.verifySkillFileSignature(r, "sk", "1.0.0", urls[i].Path, now), urls[i].URL)
+		assert.True(t, s.verifySkillFileSignature(r, sk, "1.0.0", urls[i].Path, now), urls[i].URL)
 		assert.True(t, isSignedSkillFileRequest(r), urls[i].URL)
 	}
 	// Order of parameters matches the documented URL format.
@@ -213,9 +241,9 @@ func TestSignSkillFileDownloadURLs(t *testing.T) {
 
 	// Without a key, URLs are issued unsigned.
 	unsigned := (&Server{}).signSkillFileDownloadURLs([]DownloadURLInfo{
-		{Path: "SKILL.md", URL: "/api/v1/skills/sk/files/SKILL.md?raw=1&version=1.0.0"},
-	}, "sk", "1.0.0", now)
-	assert.Equal(t, "/api/v1/skills/sk/files/SKILL.md?raw=1&version=1.0.0", unsigned[0].URL)
+		{Path: "SKILL.md", URL: "/api/v1/skills/"+sk+"/files/SKILL.md?raw=1&version=1.0.0"},
+	}, sk, "1.0.0", now)
+	assert.Equal(t, "/api/v1/skills/"+sk+"/files/SKILL.md?raw=1&version=1.0.0", unsigned[0].URL)
 }
 
 // ---------------------------------------------------------------------------
@@ -242,14 +270,36 @@ func TestDownloadSigningKey_ProvisionedAndPersisted(t *testing.T) {
 func TestDownloadSigningKey_DerivedFromSharedSecret(t *testing.T) {
 	a := &Server{config: ServerConfig{SharedSigningSecret: "shared"}}
 	b := &Server{config: ServerConfig{SharedSigningSecret: "shared"}}
-	a.initDownloadSigningKey(context.Background())
-	b.initDownloadSigningKey(context.Background())
+	require.NoError(t, a.initDownloadSigningKey(context.Background()))
+	require.NoError(t, b.initDownloadSigningKey(context.Background()))
 	require.Len(t, a.downloadSigningKey, 32)
 	// Replicas sharing the secret validate each other's URLs...
 	assert.Equal(t, a.downloadSigningKey, b.downloadSigningKey)
 	// ...and the key is domain-separated from the token keys.
 	assert.NotEqual(t, deriveSharedSigningKey("shared", SecretKeyAgentSigningKey), a.downloadSigningKey)
 	assert.NotEqual(t, deriveSharedSigningKey("shared", SecretKeyUserSigningKey), a.downloadSigningKey)
+}
+
+// When the deployment requires stable keys, a missing download key fails
+// startup (like the agent/user keys) instead of silently using a per-replica
+// ephemeral key that would cause intermittent 401s.
+func TestDownloadSigningKey_FailFastWhenStableKeysRequired(t *testing.T) {
+	srv, _ := testServer(t)
+	// Remove the key persisted at startup so none can be found.
+	for _, scopeID := range []string{srv.hubID, "hub", ""} {
+		_ = srv.store.DeleteSecret(context.Background(), SecretKeyDownloadSigningKey, store.ScopeHub, scopeID)
+	}
+	srv.downloadSigningKey = nil
+	srv.config.RequireStableSigningKey = true
+	err := srv.initDownloadSigningKey(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "download signing key")
+	assert.Nil(t, srv.downloadSigningKey)
+
+	// Without the stable-key requirement the same situation provisions a key.
+	srv.config.RequireStableSigningKey = false
+	require.NoError(t, srv.initDownloadSigningKey(context.Background()))
+	assert.Len(t, srv.downloadSigningKey, 32)
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +540,35 @@ func TestSignedSkillFileURL_EndToEnd(t *testing.T) {
 		// Bypass the middleware entirely (defense in depth).
 		rec := doAnonymousRequest(f.srv, "/api/v1/skills/"+f.skillA.ID+"/files/SKILL.md?version=1.0.0")
 		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	})
+
+	t.Run("request log redacts the signature and labels auth type", func(t *testing.T) {
+		var buf bytes.Buffer
+		f.srv.SetRequestLogger(slog.New(slog.NewJSONHandler(&buf, nil)))
+		defer f.srv.SetRequestLogger(nil)
+		rec := f.brokerGet(signedA)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		out := buf.String()
+		require.NotEmpty(t, out)
+		assert.NotContains(t, out, sigA)
+		assert.NotContains(t, out, url.QueryEscape(sigA))
+		assert.Contains(t, out, "sig=REDACTED")
+		assert.Contains(t, out, `"auth_type":"`+AuthTypeSignedURL+`"`)
+	})
+
+	t.Run("reserved skill IDs are not reachable anonymously", func(t *testing.T) {
+		suffix := "/files/SKILL.md?raw=1&version=1.0.0&exp=" + expA + "&sig=" + url.QueryEscape(sigA)
+		for _, id := range []string{"resolve", strings.ToUpper(f.skillA.ID)} {
+			rec := f.brokerGet("/api/v1/skills/" + id + suffix)
+			assert.Equal(t, http.StatusUnauthorized, rec.Code, "%s: %s", id, rec.Body.String())
+		}
+	})
+
+	t.Run("dot-segment paths are rejected, not redirected", func(t *testing.T) {
+		target := strings.Replace(signedA, "/files/SKILL.md", "/files/x/../SKILL.md", 1)
+		rec := f.brokerGet(target)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		assert.Empty(t, rec.Header().Get("Location"))
 	})
 
 	t.Run("signature from a different hub key is rejected", func(t *testing.T) {

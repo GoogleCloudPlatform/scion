@@ -1160,7 +1160,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	}
 
 	// Initialize the dedicated download-URL signing key (#1792).
-	srv.initDownloadSigningKey(ctx)
+	if err := srv.initDownloadSigningKey(ctx); err != nil {
+		return nil, err
+	}
 
 	// Initialize invite code service
 	srv.inviteService = NewInviteService(s)
@@ -4518,7 +4520,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.String("remote_addr", r.RemoteAddr),
-				slog.String("query", r.URL.RawQuery),
+				slog.String("query", logging.RedactQuery(r.URL.RawQuery)),
 			)
 		}
 

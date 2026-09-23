@@ -343,7 +343,7 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 			// Build HttpRequest struct
 			httpReq := HttpRequest{
 				RequestMethod: r.Method,
-				RequestUrl:    r.URL.String(),
+				RequestUrl:    RedactURL(r.URL),
 				RequestSize:   r.ContentLength,
 				Status:        wrapped.statusCode,
 				ResponseSize:  wrapped.bytesWritten,

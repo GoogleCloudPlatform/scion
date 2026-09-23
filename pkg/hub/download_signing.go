@@ -20,12 +20,17 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/google/uuid"
 )
 
 // HMAC capability URLs for local-storage skill file downloads (#1792).
@@ -68,22 +73,34 @@ const (
 )
 
 // initDownloadSigningKey loads or creates the download signing key through the
-// same persistence path as the Hub's other signing keys. Unlike the token keys,
-// losing this key only invalidates URLs that expire within skillFileURLTTL, so
-// a failure falls back to an in-memory key rather than failing startup.
-func (s *Server) initDownloadSigningKey(ctx context.Context) {
+// same persistence path as the Hub's other signing keys.
+//
+// Replicas must agree on the key or signed URLs fail intermittently with 401,
+// so this follows the agent/user key policy: when the deployment requires
+// stable keys (a GCP secret backend or RequireStableSigningKey) a failure is
+// returned and startup fails. Otherwise — local development and single-node
+// Hubs — it falls back to an in-memory key, since losing it only invalidates
+// URLs that expire within skillFileURLTTL.
+func (s *Server) initDownloadSigningKey(ctx context.Context) error {
 	key, err := s.ensureSigningKey(ctx, SecretKeyDownloadSigningKey, nil)
-	if err != nil || len(key) == 0 {
+	if err == nil && len(key) == 0 {
+		err = fmt.Errorf("download signing key resolved to an empty value")
+	}
+	if err != nil {
+		_, isGCPBackend := s.secretBackend.(*secret.GCPBackend)
+		if isGCPBackend || s.config.RequireStableSigningKey {
+			return fmt.Errorf("download signing key: %w", err)
+		}
 		slog.Warn("Download signing key could not be loaded or persisted; using an ephemeral in-memory key "+
 			"(signed skill file URLs will not validate on other replicas or after restart)",
 			"error", err)
 		key = make([]byte, 32)
 		if _, rerr := rand.Read(key); rerr != nil {
-			slog.Error("Failed to generate ephemeral download signing key; signed skill file URLs disabled", "error", rerr)
-			return
+			return fmt.Errorf("generate ephemeral download signing key: %w", rerr)
 		}
 	}
 	s.downloadSigningKey = key
+	return nil
 }
 
 // skillFileSignature computes the base64url (unpadded) HMAC-SHA256 over the
@@ -168,7 +185,8 @@ func (s *Server) verifySkillFileSignature(r *http.Request, skillID, version, fil
 	if exp > nowUnix+int64((skillFileURLTTL+skillFileURLMaxClockSkew)/time.Second) {
 		return false
 	}
-	got, err := base64.RawURLEncoding.DecodeString(q.Get(skillFileSigParam))
+	// Strict decoding: exactly one encoding of a given MAC is accepted.
+	got, err := base64.RawURLEncoding.Strict().DecodeString(q.Get(skillFileSigParam))
 	if err != nil {
 		return false
 	}
@@ -193,10 +211,29 @@ func isSignedSkillFileRequest(r *http.Request) bool {
 	if !ok {
 		return false
 	}
+	// Only a clean path is admitted: no dot-segments, empty segments or
+	// trailing slash, which the mux would otherwise redirect or reinterpret.
+	if path.Clean(r.URL.Path) != r.URL.Path {
+		return false
+	}
 	parts := strings.SplitN(rest, "/", 3)
-	if len(parts) != 3 || parts[0] == "" || parts[1] != "files" || parts[2] == "" {
+	if len(parts) != 3 || parts[1] != "files" || !validSkillFilePath(parts[2]) {
+		return false
+	}
+	// The ID must be a canonical UUID (skill IDs always are). This keeps
+	// reserved segments such as "resolve", which handleSkillByID dispatches
+	// elsewhere, from being reached anonymously.
+	if !isCanonicalUUID(parts[0]) {
 		return false
 	}
 	q := r.URL.Query()
 	return q.Get(skillFileSigParam) != "" && q.Get(skillFileExpParam) != ""
+}
+
+// isCanonicalUUID reports whether id is a UUID in canonical lowercase
+// 8-4-4-4-12 form, as produced by api.NewUUID. uuid.Parse alone also accepts
+// braced, urn:uuid: and uppercase forms.
+func isCanonicalUUID(id string) bool {
+	u, err := uuid.Parse(id)
+	return err == nil && u.String() == id
 }
