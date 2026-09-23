@@ -281,12 +281,28 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 // an already-populated slot alone. Calling it on an agent's EXISTING
 // (already-derived) AppliedConfig therefore keeps every stale value from
 // that derivation — it cannot tell "the caller set this explicitly" from
-// "a previous call to this function derived it". To recompute against the
-// current template/harness-config catalog (what `scion reincarnate` needs),
-// call this on a freshly built AppliedConfig that holds only kept fields and
-// explicit inputs — never on an existing agent's config.
+// "a previous call to this function derived it".
 //
-// Exceptions — these are unconditional overwrites, not fill-if-empty:
+// This function alone does not reproduce what create does to an agent's
+// config. On both create paths (handlers_agents_core.go and the scheduled-
+// dispatch path in server.go), applyProjectDefaults and then
+// applyHubAgentDefaults run on AppliedConfig BEFORE this function, and
+// applyHubAgentDefaults may set the withHubDefaultHarnessConfig context flag
+// that this function reads. Those two steps fill-if-empty HarnessConfig,
+// HarnessAuth, Model, ThinkingLevel and Profile, plus InlineConfig's
+// limits/resources, from project annotations and hub-wide agent_defaults.
+// Because this function's own template-derived fills are themselves
+// fill-if-empty, a project or hub default installed by those steps outranks
+// the template here — skip the two steps and the template wins instead,
+// inverting create's actual precedence (request > project/hub > template).
+// To recompute against the current template/harness-config catalog (what
+// `scion reincarnate` needs), call this on a freshly built AppliedConfig
+// that holds only kept fields and explicit inputs, *after* replaying
+// applyProjectDefaults then applyHubAgentDefaults (propagating its ctx flag)
+// on that same fresh config, in that order — never on an existing agent's
+// config, and never on this function alone.
+//
+// Exceptions — these ignore whether the slot is already set:
 //   - TemplateID and TemplateHash are replaced whenever resolvedTemplate is
 //     non-nil; HubAccessScopes too, but only when the template declares
 //     hubAccess (otherwise an existing value is left as-is).
@@ -325,19 +341,22 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 // — template/hub/project telemetry defaults, the project- or hub-level
 // SCION_AUTO_EXPOSE_PORTS default (in InlineConfig.Env), the resolved Model
 // alias, and InlineConfig.Skills (see above). It also receives the template
-// env merge below by aliasing, not by a write in this function: the caller,
-// buildAppliedConfig, sets AppliedConfig.Env and AppliedConfig.InlineConfig
-// to the same req.Config and req.Config.Env, so when the requester supplies
-// any env, AppliedConfig.Env and InlineConfig.Env are the same map, and the
-// template-env-merge writes below land in both (and in the caller's
-// req.Config.Env). InlineConfig.Telemetry can be aliased the same way, to
+// env merge below by aliasing, not by a write in this function: the create
+// path's config builder, buildAppliedConfig, sets AppliedConfig.InlineConfig
+// to req.Config itself and AppliedConfig.Env to req.Config.Env, so
+// InlineConfig *is* the request object and AppliedConfig.Env is its Env
+// field — every InlineConfig write listed above also mutates the request,
+// and, in the same direction, when the requester supplied any env, the
+// template-env-merge writes below land in InlineConfig.Env too (and the
+// auto-expose key also appears in AppliedConfig.Env). InlineConfig.Telemetry
+// can also be aliased, by this function's own template-telemetry fill, to
 // resolvedTemplate.Config.Telemetry, so the project TelemetryEnabled write
 // above can mutate the template object through that shared pointer.
 // InlineConfig therefore cannot be stripped back to explicit inputs by
-// removing known hub/project keys alone — the aliased template-env keys are
-// indistinguishable from explicit ones by inspecting InlineConfig alone. A
-// caller that needs the original explicit request inputs (reincarnate does)
-// must capture them before this runs, not read them back out of InlineConfig
+// removing known hub/project keys — the aliased template-env keys are
+// indistinguishable from explicit ones by inspecting InlineConfig. A caller
+// that needs the original explicit request inputs (reincarnate does) must
+// capture them before this runs, not read them back out of InlineConfig
 // afterward.
 //
 // Precondition: agent.AppliedConfig must be non-nil (populateAgentConfig's
@@ -346,12 +365,14 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 //
 // This is the reusable half of populateAgentConfig: create calls it today,
 // and reincarnate is intended to call it too (against a freshly built
-// config, per above), so a migrated agent's derived config is computed
-// exactly the way a freshly created agent's would be, given the same
-// explicit inputs. What it deliberately does NOT touch: GitClone, Workspace,
-// and Branch (kept verbatim across a reincarnation per design §3.3) — those
-// are populated by populateAgentConfig above this call, before AppliedConfig
-// is handed here.
+// config that has already been through applyProjectDefaults and
+// applyHubAgentDefaults, per above). It is not, by itself, "create's
+// resolution" — see the precedence paragraph above — but combined with
+// those two steps it derives a migrated agent's config the same way create
+// derives a new agent's, given the same explicit inputs. What it
+// deliberately does NOT touch: GitClone, Workspace, and Branch (kept
+// verbatim across a reincarnation per design §3.3) — those are populated by
+// populateAgentConfig above this call, before AppliedConfig is handed here.
 func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
 	// Populate template ID, hash, and hub access scopes if template was resolved.
 	if resolvedTemplate != nil {
