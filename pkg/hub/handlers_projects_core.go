@@ -164,10 +164,21 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	if scopeResult.Scopes.IsNone() {
 		// Legitimate no-authority result. Return empty list without querying
 		// the store. No broad resource query is issued for None.
+		//
+		// Scope capabilities are still computed and returned. The scope
+		// resolved above is project.list — "which projects may you
+		// enumerate" — and None is the right answer for a member of no
+		// projects. But project.create is hub-scoped: it comes from a
+		// system-scope role binding and does not depend on listing any
+		// project. Omitting capabilities here conflated the two and hid
+		// the "Create Project" button from every user until they somehow
+		// obtained their first project, because _capabilities is
+		// `omitempty` and the client's can() fails closed on undefined.
 		writeJSON(w, http.StatusOK, ListProjectsResponse{
 			Projects:     []ProjectWithCapabilities{},
 			LegacyGroves: []ProjectWithCapabilities{},
 			TotalCount:   0,
+			Capabilities: s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "project"),
 		})
 		return
 	}
