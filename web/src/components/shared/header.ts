@@ -143,7 +143,14 @@ export class ScionHeader extends LitElement {
     /* ------------------------------------------------------------------ */
     :host {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+      /* The actions column gets a max-content floor so it can never be sized
+         below what it holds. With minmax(0, 1fr) it could collapse toward
+         zero while its flex contents kept full width, and because it is
+         justify-self:end the overflow spilled leftward across the centre
+         column — landing the unread badges on top of the "Terminal" label.
+         The title column keeps the 0 floor and truncates instead, since it
+         is the one element here that can lose characters harmlessly. */
+      grid-template-columns: minmax(0, 1fr) auto minmax(max-content, 1fr);
       align-items: center;
       height: var(--scion-header-height, 60px);
       padding: 0 1.5rem;
@@ -158,6 +165,9 @@ export class ScionHeader extends LitElement {
       display: flex;
       align-items: center;
       gap: 1rem;
+      /* A flex item defaults to min-width:auto and refuses to shrink below
+         its content, which would push the squeeze onto the other columns. */
+      min-width: 0;
     }
 
     .mobile-menu-btn {
@@ -179,6 +189,12 @@ export class ScionHeader extends LitElement {
       font-weight: 600;
       color: var(--scion-text, #1e293b);
       margin: 0;
+      /* Absorb the narrowing here. A long page title truncates rather than
+         holding the header open and forcing the columns to collide. */
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     /*
