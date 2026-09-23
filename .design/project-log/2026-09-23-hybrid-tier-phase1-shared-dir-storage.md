@@ -1091,3 +1091,28 @@ with `git diff 90f215f..HEAD -- . ":(exclude)*_test.go" ":(exclude)*.md"`, which
   test code.
 - `gofmt -l` on every touched file — clean.
 - PR body updated (item 4).
+
+## Upstream rebase (step 0 of UAT sign-off): PR #1779 @ba9f9c53 → @77990672
+
+Phase 1 passed UAT. Before Phase 2, hy-em asked for the branch to be rebased onto upstream
+(`GoogleCloudPlatform/scion`) `main`, which had moved 14 commits ahead of this PR's original base
+(`af48a545` → `ade1be99`, none of them touching `pkg/config`, `pkg/runtime`, or `pkg/agent`'s
+shared-dir-storage code).
+
+- `git fetch --unshallow` (the container's checkout was shallow), then
+  `git fetch https://github.com/GoogleCloudPlatform/scion.git main:upstream-main`, then
+  `git rebase upstream-main`.
+- **Conflicts: none.** All 8 commits replayed cleanly (`Successfully rebased and updated
+  refs/heads/scion/hybrid-tier`).
+- `git log --oneline upstream-main..HEAD` shows exactly the 8 Phase 1 commits, unchanged in count
+  and order (only rewritten as new commits with new SHAs, per a normal rebase):
+  `8d8136e62` (Add server.shared_dir_storage) through `77990672d` (Round 6 final cleanup) — no
+  upstream commits or anything else mixed in.
+- Gates re-run post-rebase: `go build ./...` pass; `GOOS=darwin go build ./pkg/...` pass;
+  `go vet ./pkg/config/... ./pkg/runtime/... ./pkg/agent/...` pass, no output; clean-env
+  `go test ./pkg/config/... ./pkg/runtime/... ./pkg/agent/... -count=1` — all 7 packages `ok`;
+  `gofmt -l` clean.
+- Pushed with `git push origin scion/hybrid-tier --force-with-lease` (origin = the `ptone/scion`
+  fork; the remote-tracking SHA matched the last commit I had pushed, so the lease was safe). PR
+  #1779 now shows head `77990672d4008a5b64911f538d6af1aab937159b`, base `main`, `MERGEABLE`. The
+  fork PR was not merged; no upstream PR was opened.
