@@ -1217,12 +1217,25 @@ func TestIntQueryParam(t *testing.T) {
 	assert.Equal(t, 500, intQueryParam(makeReq("limit=bad"), "limit", 500, 2000))
 }
 
-func TestWalkDirSearcher_NonExistentRoot(t *testing.T) {
-	result, err := defaultFileSearcher.Search("/nonexistent/path/that/does/not/exist", "", 500)
+// openTestRoot opens dir as an *os.Root for the searcher tests below. The
+// searcher takes a Root rather than a path so that it cannot be walked out of
+// the directory it was given; see openConfinedBase.
+func openTestRoot(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
 	require.NoError(t, err)
-	assert.Empty(t, result.Files)
-	assert.Equal(t, 0, result.TotalCount)
-	assert.False(t, result.HasMore)
+	t.Cleanup(func() { _ = root.Close() })
+	return root
+}
+
+// A directory that does not exist has no Root to search. The searcher no
+// longer absorbs that case; the handlers do, by answering with an empty
+// listing before they ever reach the searcher — see
+// TestProjectWorkspaceList_MissingWorkspaceDir.
+func TestWalkDirSearcher_NonExistentRoot(t *testing.T) {
+	_, err := os.OpenRoot("/nonexistent/path/that/does/not/exist")
+	require.Error(t, err)
+	assert.True(t, os.IsNotExist(err), "want a not-exist error, got %v", err)
 }
 
 func TestWalkDirSearcher_NoQuery(t *testing.T) {
@@ -1231,7 +1244,7 @@ func TestWalkDirSearcher_NoQuery(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "sub"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "sub", "beta.go"), []byte("bb"), 0644))
 
-	result, err := defaultFileSearcher.Search(root, "", 500)
+	result, err := defaultFileSearcher.Search(openTestRoot(t, root), "", 500)
 	require.NoError(t, err)
 	assert.Equal(t, 2, result.TotalCount)
 	assert.False(t, result.HasMore)
@@ -1251,7 +1264,7 @@ func TestWalkDirSearcher_RegexQuery(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "bar.ts"), []byte("ts"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "baz.go"), []byte("go"), 0644))
 
-	result, err := defaultFileSearcher.Search(root, `\.go$`, 500)
+	result, err := defaultFileSearcher.Search(openTestRoot(t, root), `\.go$`, 500)
 	require.NoError(t, err)
 	assert.Equal(t, 2, result.TotalCount)
 	assert.False(t, result.HasMore)
@@ -1269,7 +1282,7 @@ func TestWalkDirSearcher_FuzzyFallback(t *testing.T) {
 	// "[" is an invalid regex — verify the search degrades gracefully (no error,
 	// returns results via fuzzy fallback). Since "[" as a char doesn't appear in
 	// these filenames, TotalCount is 0, which is the correct fuzzy result.
-	result, err := defaultFileSearcher.Search(root, "[", 500)
+	result, err := defaultFileSearcher.Search(openTestRoot(t, root), "[", 500)
 	require.NoError(t, err, "invalid regex must not cause an error")
 	assert.Equal(t, 0, result.TotalCount, "no filenames contain '['")
 
@@ -1277,7 +1290,7 @@ func TestWalkDirSearcher_FuzzyFallback(t *testing.T) {
 	// "sev" as regex requires the LITERAL substring "sev" — "server.go" does not have it.
 	// "sev" as fuzzy would match "server.go" (s..e..v in order).
 	// Since "sev" IS a valid regex, the regex path runs and finds 0 matches.
-	result2, err2 := defaultFileSearcher.Search(root, "sev", 500)
+	result2, err2 := defaultFileSearcher.Search(openTestRoot(t, root), "sev", 500)
 	require.NoError(t, err2)
 	assert.Equal(t, 0, result2.TotalCount, "literal regex 'sev' is not a substring of 'server.go'")
 }
@@ -1288,7 +1301,7 @@ func TestWalkDirSearcher_LimitEnforced(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(root, fmt.Sprintf("file%02d.txt", i)), []byte("x"), 0644))
 	}
 
-	result, err := defaultFileSearcher.Search(root, "", 3)
+	result, err := defaultFileSearcher.Search(openTestRoot(t, root), "", 3)
 	require.NoError(t, err)
 	assert.Equal(t, 10, result.TotalCount)
 	assert.Len(t, result.Files, 3)
@@ -1316,7 +1329,7 @@ func TestWalkDirSearcher_SortByModTimeDesc(t *testing.T) {
 		require.NoError(t, os.Chtimes(p, mt, mt))
 	}
 
-	result, err := defaultFileSearcher.Search(root, "", 500)
+	result, err := defaultFileSearcher.Search(openTestRoot(t, root), "", 500)
 	require.NoError(t, err)
 	require.Len(t, result.Files, 3)
 	assert.Equal(t, "newest.txt", result.Files[0].Path)
