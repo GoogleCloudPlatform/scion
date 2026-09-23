@@ -69,6 +69,9 @@ import { terminalHref } from '../../client/open-terminal.js';
 type AgentSortField = 'name' | 'status' | 'created' | 'updated';
 type SortDir = 'asc' | 'desc';
 
+// User-level (not per-project) sticky preference for the agents section height.
+const AGENTS_EXPANDED_STORAGE_KEY = 'scion-project-agents-expanded';
+
 @customElement('scion-page-project-detail')
 export class ScionPageProjectDetail extends LitElement {
   /**
@@ -141,6 +144,14 @@ export class ScionPageProjectDetail extends LitElement {
    */
   @state()
   private viewMode: ViewMode = 'grid';
+
+  /**
+   * Whether the agents section is expanded to full height. Collapsed (the
+   * default) caps the grid/table at a fixed height with its own scrollbar.
+   * Persisted per user (not per project) in localStorage.
+   */
+  @state()
+  private agentsExpanded = false;
 
   @state()
   private phaseFilter: AgentPhase | '' = '';
@@ -345,14 +356,61 @@ export class ScionPageProjectDetail extends LitElement {
       margin: 0;
     }
 
-    /* Matches the shared .resource-grid in resource-styles.ts, which every
-       other resource list uses. No max-height: the page already scrolls, and
-       capping the section hid agents behind a nested scrollbar that the outer
-       page gave no hint of. */
+    /* Matches the shared .resource-grid in resource-styles.ts. When expanded
+       the section flows at full height; when collapsed (the default) it is
+       capped by .agents-collapsed below. */
     .agent-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
       gap: 1.5rem;
+    }
+
+    /* Collapsed agents section: fixed max-height with a slim, themed
+       scrollbar. The expand toggle in the section header removes the cap. */
+    .agent-grid.agents-collapsed,
+    .agent-table-container.agents-collapsed {
+      max-height: 26rem;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--scion-border, #cbd5e1) transparent;
+    }
+
+    /* Keep column headers visible while the collapsed table scrolls. With
+       border-collapse the th border-bottom does not stick, so draw the
+       divider with an inset shadow instead. */
+    .agent-table-container.agents-collapsed th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      box-shadow: inset 0 -1px 0 var(--scion-border, #e2e8f0);
+    }
+
+    .agent-grid.agents-collapsed {
+      /* Room so card hover shadows/borders are not clipped by the scroller. */
+      padding: 2px 0.5rem 2px 2px;
+    }
+
+    .agents-collapsed::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    .agents-collapsed::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .agents-collapsed::-webkit-scrollbar-thumb {
+      background: var(--scion-border, #cbd5e1);
+      border-radius: 9999px;
+    }
+
+    .agents-collapsed::-webkit-scrollbar-thumb:hover {
+      background: var(--scion-text-muted, #94a3b8);
+    }
+
+    .agents-expand-toggle {
+      font-size: 1rem;
+      color: var(--scion-text-muted, #64748b);
     }
 
     .agent-card {
@@ -463,9 +521,9 @@ export class ScionPageProjectDetail extends LitElement {
       border-top: 1px solid var(--scion-border, #e2e8f0);
     }
 
-    /* The list view had the same cap, so switching view modes did not escape
-       the nested scrollbar. overflow-x: auto keeps the rounded corners clipping
-       the table while allowing horizontal scrolling on smaller screens. */
+    /* overflow-x: auto keeps the rounded corners clipping the table while
+       allowing horizontal scrolling on smaller screens. The collapsed height
+       cap is shared with the grid via .agents-collapsed. */
     .agent-table-container {
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
@@ -844,6 +902,9 @@ export class ScionPageProjectDetail extends LitElement {
     if (stored === 'grid' || stored === 'list' || stored === 'graph') {
       this.viewMode = stored;
     }
+
+    // Read persisted agents section expand/collapse preference (user-level)
+    this.agentsExpanded = localStorage.getItem(AGENTS_EXPANDED_STORAGE_KEY) === 'true';
 
     // Read persisted phase filter
     const storedPhase = localStorage.getItem(`scion-filter-project-agents-phase-${this.projectId}`);
@@ -1285,6 +1346,11 @@ export class ScionPageProjectDetail extends LitElement {
 
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
     this.viewMode = e.detail.view;
+  }
+
+  private toggleAgentsExpanded(): void {
+    this.agentsExpanded = !this.agentsExpanded;
+    localStorage.setItem(AGENTS_EXPANDED_STORAGE_KEY, String(this.agentsExpanded));
   }
 
   private get displayAgents(): Agent[] {
@@ -1959,6 +2025,19 @@ export class ScionPageProjectDetail extends LitElement {
                 </sl-button>
               `
             : nothing}
+          ${this.agents.length > 0 && this.viewMode !== 'graph'
+            ? html`
+                <sl-tooltip content=${this.agentsExpanded ? 'Collapse' : 'Expand'}>
+                  <sl-icon-button
+                    class="agents-expand-toggle"
+                    name=${this.agentsExpanded ? 'arrows-angle-contract' : 'arrows-angle-expand'}
+                    label=${this.agentsExpanded ? 'Collapse agents' : 'Expand agents'}
+                    aria-expanded=${this.agentsExpanded ? 'true' : 'false'}
+                    @click=${() => this.toggleAgentsExpanded()}
+                  ></sl-icon-button>
+                </sl-tooltip>
+              `
+            : nothing}
         </div>
       </div>
 
@@ -2187,7 +2266,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   private renderAgentGrid() {
     return html`
-      <div class="agent-grid">
+      <div class="agent-grid ${this.agentsExpanded ? '' : 'agents-collapsed'}">
         ${this.displayAgents.map((agent) => this.renderAgentCard(agent))}
       </div>
     `;
@@ -2195,7 +2274,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   private renderAgentTable() {
     return html`
-      <div class="agent-table-container">
+      <div class="agent-table-container ${this.agentsExpanded ? '' : 'agents-collapsed'}">
         <table>
           <thead>
             <tr>
