@@ -15,7 +15,8 @@ core-base          System dependencies (Go, Node, Python)
         ├── harness images  Optional recipes from harnesses/<name>/
         └── hub             Scion hub server
 
-thick-prep         Patches Cloud Workstations base for scion compatibility (amd64 only)
+thick-prep         Patches Cloud Workstations base for scion compatibility,
+                   including git >= 2.47 (amd64 only)
   └── scion-base   Same Dockerfile, different foundation
         ├── harness images
         └── hub
@@ -25,6 +26,42 @@ thick-prep         Patches Cloud Workstations base for scion compatibility (amd6
 build from self-contained bundles under `harnesses/<name>/` when that bundle has
 a `Dockerfile` and `cloudbuild.yaml`. See
 [`harnesses/README.md`](../harnesses/README.md).
+
+### Where git comes from
+
+Scion hard-requires **git >= 2.47.0** (`pkg/util/git.go` `CheckGitVersion`, for
+`git worktree add --relative-paths`). Below that, worktree-per-agent mode is
+disabled.
+
+`scion-base` does **not** install git — it only builds the Go binaries — so git
+is always inherited from whichever foundation is underneath it. Both foundations
+therefore have to provide it independently:
+
+| Foundation | Base OS | glibc | git |
+|---|---|---|---|
+| `core-base` | `node:24-trixie-slim` (Debian 13) | 2.41 | vendored from `chainguard/git` |
+| `thick-prep` | Cloud Workstations base (Ubuntu 24.04) | 2.39 | vendored from `chainguard/git` |
+
+Both copy the same four artifacts out of the Chainguard image. Two constraints
+apply to that copy and are enforced by a build-time assertion in each Dockerfile:
+
+- helpers **must** land in `/usr/libexec/git-core` — that path is compiled into
+  the binary as `GIT_EXEC_PATH`, and getting it wrong produces a misleading
+  `'remote-https' is not a git command`;
+- the binary **must** land at `/usr/bin/git`, overwriting any distro git.
+  Chainguard ships `/usr/libexec/git-core/git` as a relative symlink to
+  `../../bin/git`, and git re-execs itself through that path for internal
+  subcommands. On a base that already has its own `/usr/bin/git` (the thick
+  base has 2.43), installing ours elsewhere leaves that symlink resolving to
+  the **old** binary — `git --version` reports 2.55.0 while subcommands die
+  with `fatal: unknown repository extension found: relativeworktrees`;
+- the base image needs **glibc >= 2.38**. Debian bookworm (2.36) fails at exec
+  with `GLIBC_2.38 not found`, so this gates any future base-image change.
+
+`GIT_IMAGE` defaults to the floating `chainguard/git:latest`. Pin it to a digest
+in CI (`--build-arg GIT_IMAGE=chainguard/git@sha256:...`) and refresh on a
+schedule — a vendored binary stops receiving Chainguard's rebuild cadence the
+moment it is copied out.
 
 ## Scripts
 
