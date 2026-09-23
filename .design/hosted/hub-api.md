@@ -876,7 +876,7 @@ those messages can be reported.
 Only the broker itself may call this endpoint (HMAC broker identity must match
 `{brokerId}`). Reports are ignored for unknown message IDs, for messages whose
 recipient agent is not assigned to the reporting broker, and for rows already
-in a terminal state. At most 500 failures may be sent per request.
+in a terminal state. At most 50 failures may be sent per request.
 
 **Request Body:**
 ```json

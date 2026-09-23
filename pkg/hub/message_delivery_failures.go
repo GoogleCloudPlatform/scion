@@ -61,7 +61,14 @@ func dispatchMessageIDFromContext(ctx context.Context) string {
 }
 
 // maxMessageFailuresPerReport bounds the work a single report can trigger.
-const maxMessageFailuresPerReport = 500
+//
+// Failures are applied sequentially (one GetMessage/GetAgent/markFailed per
+// entry): the store has no batch dispatch-state update, and reports are small
+// in practice. The runtime broker sends one report per failed buffered
+// message as flushes fail, so failures trickle in rather than arriving in
+// bulk. The cap keeps a single request's worst-case cost low; a broker with
+// more to report can split it across requests.
+const maxMessageFailuresPerReport = 50
 
 // messageDeliveryFailure is one failed delivery reported by a broker.
 type messageDeliveryFailure struct {
@@ -142,7 +149,7 @@ func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string,
 		return false
 	}
 	agent, err := s.store.GetAgent(ctx, recipientAgentID)
-	if err != nil || agent.RuntimeBrokerID != brokerID {
+	if err != nil || agent == nil || agent.RuntimeBrokerID != brokerID {
 		slog.Warn("message-failures: broker reported failure for message it does not own",
 			"broker_id", brokerID, "message_id", f.MessageID)
 		return false
