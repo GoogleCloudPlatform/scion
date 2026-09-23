@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -62,6 +63,25 @@ var errExternalBearerNotApplicable = errors.New("external bearer: not applicable
 // in serveExternalBearer stays entirely errors.Is-driven.
 var errExternalBearerPrincipalRejected = errors.New("external bearer: principal type not accepted in this phase")
 
+// errExternalBearerRateLimited reports that the external-bearer path's
+// per-client-IP budget (externalBearerRateLimiter, external_bearer_ratelimit.go)
+// was exhausted on a credential-cache miss. Wrapped by
+// *externalBearerRateLimitError so serveExternalBearer can recover the
+// Retry-After value with errors.As while still matching this sentinel with
+// errors.Is (design §4.4).
+var errExternalBearerRateLimited = errors.New("external bearer: rate limited")
+
+// externalBearerRateLimitError carries the computed Retry-After duration for
+// a rate-limited request. It is a distinct concrete type (not a second
+// sentinel) purely so the numeric retryAfterSeconds can travel with the
+// error; errors.Is(err, errExternalBearerRateLimited) still holds via Unwrap.
+type externalBearerRateLimitError struct {
+	retryAfterSeconds int
+}
+
+func (e *externalBearerRateLimitError) Error() string { return errExternalBearerRateLimited.Error() }
+func (e *externalBearerRateLimitError) Unwrap() error { return errExternalBearerRateLimited }
+
 // errExternalBearerResolveFailed marks any error classifyResolveError sees
 // (i.e. any error GoogleResolver.Resolve returns). It is always present on a
 // Resolve error, regardless of the underlying cause, so a Resolve error can
@@ -88,17 +108,27 @@ const (
 	// issuer. Verification (signature, exp, aud, ...) happens in the
 	// validator; classification only routes the request.
 	externalBearerIDToken
-	// Access tokens (opaque, non-JWT) are classified in Phase 2.
+	// externalBearerAccessToken is any non-JWT token. Google OAuth2 access
+	// tokens are opaque, so there is no shape to distinguish them from
+	// garbage — classification alone cannot tell them apart (design §4.4:
+	// "classification without prefix sniff"). What makes this safe is where
+	// classifyExternalBearer is called from: authenticateExternalBearer only
+	// reaches it after googleTrust has already confirmed Google trust is
+	// configured. When it is not, the caller never calls this function at
+	// all, so a non-JWT token still falls through to the original rejection
+	// untouched (I1). Verification — which is where a garbage token actually
+	// gets rejected — happens in cfg.GoogleValidator.ValidateAccessToken.
+	externalBearerAccessToken
 )
 
-// classifyExternalBearer classifies token for routing purposes only. It reads
-// the JWT's unverified iss claim — cryptographic verification happens later,
-// in cfg.GoogleValidator.
+// classifyExternalBearer classifies token for routing purposes only, by shape
+// alone. It reads a JWT's unverified iss claim — cryptographic verification
+// happens later, in cfg.GoogleValidator — and otherwise treats any non-JWT
+// token as a candidate access token. See externalBearerAccessToken's doc
+// comment for why classifying every non-JWT token this way is still safe.
 func classifyExternalBearer(token string) externalBearerKind {
 	if !looksLikeJWT(token) {
-		// Phase 1 does not handle opaque access tokens; treat as not
-		// applicable rather than misclassifying it as an ID token.
-		return externalBearerNotApplicable
+		return externalBearerAccessToken
 	}
 	iss, ok := peekJWTIssuer(token)
 	if !ok {
@@ -151,14 +181,21 @@ func googleTrust(cfg AuthConfig) (config.TrustedIssuerConfig, bool) {
 func serveExternalBearer(w http.ResponseWriter, r *http.Request, next http.Handler,
 	ctx context.Context, token string, cfg AuthConfig, log *slog.Logger) bool {
 
-	user, err := authenticateExternalBearer(ctx, token, cfg)
+	user, err := authenticateExternalBearer(ctx, r, token, cfg)
 	if err != nil {
+		var rlErr *externalBearerRateLimitError
 		switch {
 		case errors.Is(err, errExternalBearerNotApplicable):
 			if cfg.Debug {
 				log.Debug("External bearer not applicable", "error", err)
 			}
 			return false
+		case errors.As(err, &rlErr):
+			log.Info("External bearer rate limited", "retry_after_seconds", rlErr.retryAfterSeconds)
+			w.Header().Set("Retry-After", strconv.Itoa(rlErr.retryAfterSeconds))
+			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited,
+				"rate limit exceeded", nil)
+			return true
 		case errors.Is(err, ErrUserSuspended):
 			log.Warn("External bearer rejected: user is suspended", "error", err)
 			writeError(w, http.StatusForbidden, "user_suspended",
@@ -206,34 +243,76 @@ func serveExternalBearer(w http.ResponseWriter, r *http.Request, next http.Handl
 	return true
 }
 
+// externalBearerCacheProbe is implemented by a GoogleCredentialValidator that
+// can report whether a given (token, allowedClientIDs) pair is already
+// cached (currently: *cachingGoogleCredentialValidator, google_credential_cache.go).
+// authenticateExternalBearer type-asserts cfg.GoogleValidator against this
+// interface — rather than adding Cached to the GoogleCredentialValidator
+// interface itself — so plain (uncached) validators, including every test
+// fake, are unaffected: they simply don't implement it, and are always
+// treated as a cache miss for rate-limiting purposes (design §4.4).
+type externalBearerCacheProbe interface {
+	Cached(token string, allowedClientIDs []string) bool
+}
+
 // authenticateExternalBearer verifies token against the Google trust
 // configuration and resolves the verified identity to a Hub user. It returns
 // errExternalBearerNotApplicable when the token cannot be attributed to
 // Google trust at all; other errors describe a token that targeted Google
 // trust but failed verification or policy.
 //
-// Phase 1 scope only: ID tokens for USER principals. A service-account
-// identity is rejected outright (SA support is a later phase) rather than
-// silently admitted.
-func authenticateExternalBearer(ctx context.Context, token string, cfg AuthConfig) (UserIdentity, error) {
+// A service-account identity is rejected outright on every token kind: SA
+// admission is Phase 3's scope (allowed_projects, ID-token-only), and this
+// phase must not let one slip through an access token in the meantime.
+func authenticateExternalBearer(ctx context.Context, r *http.Request, token string, cfg AuthConfig) (UserIdentity, error) {
 	trust, ok := googleTrust(cfg)
 	if !ok {
 		return nil, errExternalBearerNotApplicable
 	}
-	if classifyExternalBearer(token) != externalBearerIDToken {
+	kind := classifyExternalBearer(token)
+	if kind == externalBearerNotApplicable {
 		return nil, errExternalBearerNotApplicable
 	}
 	if cfg.GoogleValidator == nil || cfg.GoogleResolver == nil {
 		return nil, errExternalBearerNotApplicable
 	}
 
-	id, err := cfg.GoogleValidator.ValidateIDToken(ctx, token, []string{trust.ExpectedAudience})
+	aud := []string{trust.ExpectedAudience}
+
+	// Rate limit — consulted only on a credential-cache miss (design §4.4,
+	// C5): a cache hit costs no upstream call, so it must not spend budget
+	// that a genuine burst of distinct garbage tokens needs. cfg.ExternalBearerLimiter
+	// is nil in tests that don't wire one (and in any config that never built
+	// one), in which case the path is simply unlimited — the limiter's
+	// presence is a production-wiring concern (server.go), not a correctness
+	// requirement for the paths that don't set it.
+	if cfg.ExternalBearerLimiter != nil {
+		cached := false
+		if probe, ok := cfg.GoogleValidator.(externalBearerCacheProbe); ok {
+			cached = probe.Cached(token, aud)
+		}
+		if !cached {
+			if allowed, retryAfter := cfg.ExternalBearerLimiter.Allow(r); !allowed {
+				return nil, &externalBearerRateLimitError{retryAfterSeconds: retryAfter}
+			}
+		}
+	}
+
+	var id *ValidatedGoogleIdentity
+	var err error
+	switch kind {
+	case externalBearerIDToken:
+		id, err = cfg.GoogleValidator.ValidateIDToken(ctx, token, aud)
+	case externalBearerAccessToken:
+		id, err = cfg.GoogleValidator.ValidateAccessToken(ctx, token, aud)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("external bearer: %w", err)
 	}
 	if id.IsServiceAccount {
-		// No SA branch in this phase (design §5 Phase 1): reject explicitly
-		// rather than falling through to user resolution.
+		// No SA branch in this phase (design §5 Phase 2): reject explicitly,
+		// on either token kind, rather than falling through to user
+		// resolution.
 		return nil, errExternalBearerPrincipalRejected
 	}
 

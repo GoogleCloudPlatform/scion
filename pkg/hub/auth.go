@@ -80,6 +80,10 @@ type AuthConfig struct {
 	// GoogleResolver resolves a validated Google identity to a Hub user for
 	// the external-bearer path, sharing decisions with GEExchangeService.
 	GoogleResolver *GoogleIdentityResolver
+	// ExternalBearerLimiter rate-limits the external-bearer path per client
+	// IP, consulted only on a Google-credential-cache miss. nil disables
+	// rate limiting for that path (see authenticateExternalBearer).
+	ExternalBearerLimiter *externalBearerRateLimiter
 	// CredentialStore handles agent credential validation (Phase 1H).
 	// When non-nil, agent tokens are validated against persistent credential state.
 	CredentialStore store.AgentCredentialStore

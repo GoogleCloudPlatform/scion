@@ -1628,8 +1628,21 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		},
 		slog.Default(),
 	)
-	srv.authConfig.GoogleValidator = googleValidator
+	// The external-bearer path (unlike the exchange endpoint) re-validates on
+	// every request, so it gets a caching decorator in front of the shared
+	// base validator (design §4.2(iii)). The exchange endpoint below is
+	// deliberately wired to the undecorated googleValidator, not this one:
+	// exchange behaviour must not change (design §4.2), and it already
+	// mints a short-lived (default 60s) Hub token per successful exchange
+	// rather than re-verifying the Google credential on every downstream
+	// call, so it has neither the request-per-request cost the cache exists
+	// to amortize nor a need to share cache staleness characteristics with
+	// this path. The resolver (identity -> Hub user, including suspension
+	// enforcement, which has no cache) is still the same shared instance
+	// either way.
+	srv.authConfig.GoogleValidator = NewCachingGoogleCredentialValidator(googleValidator)
 	srv.authConfig.GoogleResolver = googleResolver
+	srv.authConfig.ExternalBearerLimiter = newExternalBearerRateLimiter(cfg.TrustedProxies)
 
 	// Initialize GE Google credential exchange service, sharing the validator
 	// and resolver above so both mechanisms produce identical decisions

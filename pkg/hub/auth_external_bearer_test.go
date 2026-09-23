@@ -689,9 +689,17 @@ func TestNoTokenInfoOutsideGoogleCredentialValidator(t *testing.T) {
 // state such as a map, cache, or counter.)
 // ---------------------------------------------------------------------------
 
-func TestExternalBearer_ClassifyNonJWT_NotApplicable(t *testing.T) {
-	if got := classifyExternalBearer("not-a-jwt"); got != externalBearerNotApplicable {
-		t.Errorf("classifyExternalBearer(opaque) = %v, want externalBearerNotApplicable", got)
+// TestExternalBearer_ClassifyNonJWT_AccessToken pins the Phase 2 classifier
+// change (design §4.4): a non-JWT token is now a candidate access token, by
+// shape alone — classifyExternalBearer itself does not know whether Google
+// trust is configured. What keeps I1 intact is call order:
+// authenticateExternalBearer only reaches classifyExternalBearer after
+// googleTrust has already confirmed trust is configured (see
+// TestExternalBearer_ConfiguredTrustInvariant_Golden's case (d), which pins
+// the no-trust behaviour end-to-end).
+func TestExternalBearer_ClassifyNonJWT_AccessToken(t *testing.T) {
+	if got := classifyExternalBearer("not-a-jwt"); got != externalBearerAccessToken {
+		t.Errorf("classifyExternalBearer(opaque) = %v, want externalBearerAccessToken", got)
 	}
 }
 
@@ -1263,13 +1271,21 @@ func TestExternalBearer_ConfiguredTrustInvariant_Golden(t *testing.T) {
 			},
 		},
 		{
-			// (d) trust configured + an opaque token, exercising the
-			// UnifiedAuthMiddleware default: arm (the second hook site). No
-			// library-dependent text here, so this is hardened to a true byte
-			// literal rather than wantErrorBody's live reconstruction, per r2
-			// finding 5's "cheap hardening" ask.
-			name:       "d_trust_configured_opaque_token_default_arm",
-			withTrust:  true,
+			// (d) NO trust + an opaque token, exercising the
+			// UnifiedAuthMiddleware default: arm (the second hook site).
+			// Phase 2 changed the classifier so that, WITH trust configured,
+			// an opaque token is a candidate access token (see
+			// TestExternalBearer_ClassifyNonJWT_AccessToken and
+			// TestExternalBearer_TrustConfiguredOpaqueToken_AttemptsAccessTokenValidation
+			// below) — but the gate is googleTrust, checked in
+			// authenticateExternalBearer before classification ever runs, so
+			// absent trust this must still fall through byte-identical, with
+			// zero validator calls (I1). No library-dependent text here, so
+			// this is hardened to a true byte literal rather than
+			// wantErrorBody's live reconstruction, per r2 finding 5's "cheap
+			// hardening" ask.
+			name:       "d_no_trust_opaque_token_default_arm",
+			withTrust:  false,
 			token:      opaqueToken,
 			wantStatus: http.StatusUnauthorized,
 			wantBody: func(t *testing.T) []byte {
@@ -1554,6 +1570,8 @@ func TestNoPackageLevelMutableState(t *testing.T) {
 	files := []string{
 		"auth_external_bearer.go",
 		"google_identity_resolver.go",
+		"google_credential_cache.go",
+		"external_bearer_ratelimit.go",
 	}
 	fset := token.NewFileSet()
 	for _, file := range files {

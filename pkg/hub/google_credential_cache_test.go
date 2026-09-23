@@ -1,0 +1,444 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// countingBaseValidator is a GoogleCredentialValidator whose ID/access token
+// results are scripted per-call, counting how many times each method is
+// actually invoked. Used to prove the caching decorator's cache-hit and
+// singleflight behaviour: a mutation that skips the cache lookup, or that
+// lets concurrent callers each dial upstream, must move this counter.
+type countingBaseValidator struct {
+	mu sync.Mutex
+
+	idTokenCalls     int
+	accessTokenCalls int
+
+	idTokenResult *ValidatedGoogleIdentity
+	idTokenErr    error
+
+	accessTokenResult *ValidatedGoogleIdentity
+	accessTokenErr    error
+
+	// delay, if set, is slept before returning — used to widen the window
+	// for concurrent callers to race into the same singleflight key (C6).
+	delay time.Duration
+}
+
+func (v *countingBaseValidator) ValidateIDToken(_ context.Context, _ string, _ []string) (*ValidatedGoogleIdentity, error) {
+	v.mu.Lock()
+	v.idTokenCalls++
+	v.mu.Unlock()
+	if v.delay > 0 {
+		time.Sleep(v.delay)
+	}
+	return v.idTokenResult, v.idTokenErr
+}
+
+func (v *countingBaseValidator) ValidateAccessToken(_ context.Context, _ string, _ []string) (*ValidatedGoogleIdentity, error) {
+	v.mu.Lock()
+	v.accessTokenCalls++
+	v.mu.Unlock()
+	if v.delay > 0 {
+		time.Sleep(v.delay)
+	}
+	return v.accessTokenResult, v.accessTokenErr
+}
+
+func (v *countingBaseValidator) totalIDTokenCalls() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.idTokenCalls
+}
+
+func (v *countingBaseValidator) totalAccessTokenCalls() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.accessTokenCalls
+}
+
+// ---------------------------------------------------------------------------
+// Cache key.
+// ---------------------------------------------------------------------------
+
+func TestGoogleCredentialCache_KeyDependsOnTokenAndAudience(t *testing.T) {
+	k1 := cacheKey("token-a", []string{"aud-1"})
+	k2 := cacheKey("token-b", []string{"aud-1"})
+	if k1 == k2 {
+		t.Error("different tokens must not collide to the same cache key")
+	}
+	k3 := cacheKey("token-a", []string{"aud-2"})
+	if k1 == k3 {
+		t.Error("different audiences must not collide to the same cache key")
+	}
+}
+
+func TestGoogleCredentialCache_KeyIgnoresAudienceOrder(t *testing.T) {
+	k1 := cacheKey("token-a", []string{"aud-1", "aud-2"})
+	k2 := cacheKey("token-a", []string{"aud-2", "aud-1"})
+	if k1 != k2 {
+		t.Error("cache key must not depend on the order of the audience list (design §4.2(iii): sorted(aud))")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// C2 — repeated validation of the same token within the TTL costs exactly one
+// upstream call.
+// ---------------------------------------------------------------------------
+
+func TestGoogleCredentialCache_HitAvoidsUpstreamCall(t *testing.T) {
+	base := &countingBaseValidator{
+		idTokenResult: &ValidatedGoogleIdentity{
+			Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true,
+			UpstreamExpiry: time.Now().Add(10 * time.Minute),
+		},
+	}
+	cache := NewCachingGoogleCredentialValidator(base)
+
+	for i := 0; i < 5; i++ {
+		id, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"})
+		if err != nil {
+			t.Fatalf("call %d: unexpected error: %v", i, err)
+		}
+		if id.Subject != "sub-1" {
+			t.Fatalf("call %d: subject = %q, want sub-1", i, id.Subject)
+		}
+	}
+	if got := base.totalIDTokenCalls(); got != 1 {
+		t.Errorf("base validator called %d times, want 1 (5 requests for the same token must share one upstream call)", got)
+	}
+}
+
+func TestGoogleCredentialCache_DifferentTokensDoNotShareEntry(t *testing.T) {
+	base := &countingBaseValidator{
+		accessTokenResult: &ValidatedGoogleIdentity{
+			Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true,
+			UpstreamExpiry: time.Now().Add(10 * time.Minute),
+		},
+	}
+	cache := NewCachingGoogleCredentialValidator(base)
+
+	if _, err := cache.ValidateAccessToken(context.Background(), "token-1", []string{"aud"}); err != nil {
+		t.Fatalf("token-1: %v", err)
+	}
+	if _, err := cache.ValidateAccessToken(context.Background(), "token-2", []string{"aud"}); err != nil {
+		t.Fatalf("token-2: %v", err)
+	}
+	if got := base.totalAccessTokenCalls(); got != 2 {
+		t.Errorf("base validator called %d times, want 2 (distinct tokens must not share a cache entry)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// C3 — a cache entry never outlives the credential's own UpstreamExpiry, even
+// when that is shorter than maxTTL.
+// ---------------------------------------------------------------------------
+
+func TestGoogleCredentialCache_TTLCappedByUpstreamExpiry(t *testing.T) {
+	now := time.Now()
+	clock := now
+	nowFunc := func() time.Time { return clock }
+
+	base := &countingBaseValidator{
+		idTokenResult: &ValidatedGoogleIdentity{
+			Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true,
+			// Expires in 10s — far shorter than the 5-minute maxTTL default.
+			UpstreamExpiry: now.Add(10 * time.Second),
+		},
+	}
+	cache := NewCachingGoogleCredentialValidator(base, withCacheNowFunc(nowFunc))
+
+	if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if got := base.totalIDTokenCalls(); got != 1 {
+		t.Fatalf("after first call, base calls = %d, want 1", got)
+	}
+
+	// Still within the credential's own remaining lifetime: must be a hit.
+	clock = now.Add(5 * time.Second)
+	if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if got := base.totalIDTokenCalls(); got != 1 {
+		t.Errorf("after second call (within upstream expiry), base calls = %d, want 1 (still cached)", got)
+	}
+
+	// Past the credential's own expiry, even though maxTTL (5m) has not
+	// elapsed: the entry must be gone, and the next call must hit upstream.
+	clock = now.Add(11 * time.Second)
+	if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err != nil {
+		t.Fatalf("third call: %v", err)
+	}
+	if got := base.totalIDTokenCalls(); got != 2 {
+		t.Errorf("after third call (past upstream expiry), base calls = %d, want 2 (cache entry must not outlive UpstreamExpiry)", got)
+	}
+}
+
+func TestGoogleCredentialCache_MaxTTLCapsLongLivedCredential(t *testing.T) {
+	now := time.Now()
+	clock := now
+	nowFunc := func() time.Time { return clock }
+
+	base := &countingBaseValidator{
+		idTokenResult: &ValidatedGoogleIdentity{
+			Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true,
+			// Far outlives the configured 1-minute maxTTL.
+			UpstreamExpiry: now.Add(24 * time.Hour),
+		},
+	}
+	cache := NewCachingGoogleCredentialValidator(base, withCacheNowFunc(nowFunc), WithCacheMaxTTL(time.Minute))
+
+	if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+
+	clock = now.Add(61 * time.Second)
+	if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if got := base.totalIDTokenCalls(); got != 2 {
+		t.Errorf("base calls = %d, want 2 (maxTTL must cap even a long-lived credential)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// C4 — an upstream fault (ErrGoogleUpstreamError) is never negatively cached:
+// the next request must retry upstream, not replay the failure.
+// ---------------------------------------------------------------------------
+
+func TestGoogleCredentialCache_UpstreamErrorNeverCached(t *testing.T) {
+	base := &countingBaseValidator{accessTokenErr: ErrGoogleUpstreamError}
+	cache := NewCachingGoogleCredentialValidator(base)
+
+	for i := 0; i < 3; i++ {
+		_, err := cache.ValidateAccessToken(context.Background(), "token", []string{"aud"})
+		if err == nil {
+			t.Fatalf("call %d: expected an error", i)
+		}
+	}
+	if got := base.totalAccessTokenCalls(); got != 3 {
+		t.Errorf("base validator called %d times, want 3 (ErrGoogleUpstreamError must never be cached; every call retries upstream)", got)
+	}
+}
+
+// TestGoogleCredentialCache_NegativeCacheOnlyForFourListedErrors proves the
+// negative-cache allowlist is exact: the four named errors are cached (one
+// upstream call for repeated attempts within negTTL); everything else,
+// including errors that are neither on the allowlist nor ErrGoogleUpstreamError,
+// is never cached, matching the conservative "only for the four listed
+// errors" reading of design §4.2(iii).
+func TestGoogleCredentialCache_NegativeCacheOnlyForFourListedErrors(t *testing.T) {
+	cacheableErrs := []error{
+		ErrGoogleInvalidCredential,
+		ErrGoogleExpiredCredential,
+		ErrGoogleUntrustedAudience,
+		ErrGoogleUnverifiedEmail,
+	}
+	for _, wantErr := range cacheableErrs {
+		t.Run(wantErr.Error(), func(t *testing.T) {
+			base := &countingBaseValidator{idTokenErr: wantErr}
+			cache := NewCachingGoogleCredentialValidator(base)
+			for i := 0; i < 3; i++ {
+				if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err == nil {
+					t.Fatalf("call %d: expected an error", i)
+				}
+			}
+			if got := base.totalIDTokenCalls(); got != 1 {
+				t.Errorf("base validator called %d times, want 1 (%v must be negatively cached)", got, wantErr)
+			}
+		})
+	}
+
+	nonCacheableErrs := []error{
+		ErrGoogleUpstreamError,
+		ErrGoogleFieldDisagreement,
+		ErrGoogleMissingSubject,
+		ErrGoogleMissingField,
+		ErrGENotConfigured,
+		ErrGENoRemainingLifetime,
+	}
+	for _, wantErr := range nonCacheableErrs {
+		t.Run(wantErr.Error(), func(t *testing.T) {
+			base := &countingBaseValidator{idTokenErr: wantErr}
+			cache := NewCachingGoogleCredentialValidator(base)
+			for i := 0; i < 3; i++ {
+				if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err == nil {
+					t.Fatalf("call %d: expected an error", i)
+				}
+			}
+			if got := base.totalIDTokenCalls(); got != 3 {
+				t.Errorf("base validator called %d times, want 3 (%v must never be cached)", got, wantErr)
+			}
+		})
+	}
+}
+
+func TestGoogleCredentialCache_NegativeEntryExpiresAfterNegTTL(t *testing.T) {
+	now := time.Now()
+	clock := now
+	nowFunc := func() time.Time { return clock }
+
+	base := &countingBaseValidator{idTokenErr: ErrGoogleUnverifiedEmail}
+	cache := NewCachingGoogleCredentialValidator(base, withCacheNowFunc(nowFunc), WithCacheNegativeTTL(30*time.Second))
+
+	if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err == nil {
+		t.Fatal("expected an error")
+	}
+	clock = now.Add(31 * time.Second)
+	if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err == nil {
+		t.Fatal("expected an error")
+	}
+	if got := base.totalIDTokenCalls(); got != 2 {
+		t.Errorf("base validator called %d times, want 2 (negative entry must expire after negTTL)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// C6 — concurrent first requests for the same token collapse into one
+// upstream call (singleflight).
+// ---------------------------------------------------------------------------
+
+func TestGoogleCredentialCache_SingleflightCollapsesConcurrentMisses(t *testing.T) {
+	base := &countingBaseValidator{
+		delay: 20 * time.Millisecond,
+		accessTokenResult: &ValidatedGoogleIdentity{
+			Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true,
+			UpstreamExpiry: time.Now().Add(10 * time.Minute),
+		},
+	}
+	cache := NewCachingGoogleCredentialValidator(base)
+
+	const n = 50
+	var wg sync.WaitGroup
+	var errCount atomic.Int64
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if _, err := cache.ValidateAccessToken(context.Background(), "same-token", []string{"aud"}); err != nil {
+				errCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if errCount.Load() != 0 {
+		t.Fatalf("%d of %d concurrent calls returned an error", errCount.Load(), n)
+	}
+	if got := base.totalAccessTokenCalls(); got != 1 {
+		t.Errorf("base validator called %d times for %d concurrent requests of the same token, want 1", got, n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cached() — used by the external-bearer rate limiter to skip cache hits.
+// ---------------------------------------------------------------------------
+
+func TestGoogleCredentialCache_CachedReportsHitsAndMisses(t *testing.T) {
+	base := &countingBaseValidator{
+		idTokenResult: &ValidatedGoogleIdentity{
+			Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true,
+			UpstreamExpiry: time.Now().Add(10 * time.Minute),
+		},
+	}
+	cache := NewCachingGoogleCredentialValidator(base).(*cachingGoogleCredentialValidator)
+
+	if cache.Cached("token", []string{"aud"}) {
+		t.Error("Cached() = true before any validation; want false")
+	}
+	if _, err := cache.ValidateIDToken(context.Background(), "token", []string{"aud"}); err != nil {
+		t.Fatalf("ValidateIDToken: %v", err)
+	}
+	if !cache.Cached("token", []string{"aud"}) {
+		t.Error("Cached() = false after a successful validation; want true")
+	}
+	if cache.Cached("other-token", []string{"aud"}) {
+		t.Error("Cached() = true for a different, never-validated token; want false")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Eviction — evict-expired-then-refuse-insert at maxEntries, with no LRU.
+// ---------------------------------------------------------------------------
+
+func TestGoogleCredentialCache_RefusesInsertWhenFullOfLiveEntries(t *testing.T) {
+	now := time.Now()
+	clock := now
+	nowFunc := func() time.Time { return clock }
+
+	base := &countingBaseValidator{
+		idTokenResult: &ValidatedGoogleIdentity{
+			Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true,
+			UpstreamExpiry: now.Add(10 * time.Minute),
+		},
+	}
+	cache := NewCachingGoogleCredentialValidator(base, withCacheNowFunc(nowFunc), WithCacheMaxEntries(2)).(*cachingGoogleCredentialValidator)
+
+	for _, tok := range []string{"token-1", "token-2"} {
+		if _, err := cache.ValidateIDToken(context.Background(), tok, []string{"aud"}); err != nil {
+			t.Fatalf("%s: %v", tok, err)
+		}
+	}
+	// A third distinct token: the cache is full of two live entries, so this
+	// result must not be cached (evict-expired-then-refuse-insert; no LRU
+	// eviction of a live entry).
+	if _, err := cache.ValidateIDToken(context.Background(), "token-3", []string{"aud"}); err != nil {
+		t.Fatalf("token-3: %v", err)
+	}
+	if cache.Cached("token-3", []string{"aud"}) {
+		t.Error("token-3 was cached despite the cache being full of live entries (want refuse-insert, no eviction of live entries)")
+	}
+	// The two original entries must still be live (proves nothing was
+	// evicted to make room).
+	if !cache.Cached("token-1", []string{"aud"}) || !cache.Cached("token-2", []string{"aud"}) {
+		t.Error("an existing live entry was evicted to make room for a new insert; want refuse-insert instead")
+	}
+}
+
+func TestGoogleCredentialCache_EvictsExpiredBeforeRefusing(t *testing.T) {
+	now := time.Now()
+	clock := now
+	nowFunc := func() time.Time { return clock }
+
+	base := &countingBaseValidator{
+		idTokenResult: &ValidatedGoogleIdentity{
+			Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true,
+			UpstreamExpiry: now.Add(5 * time.Second), // short-lived, so it expires soon
+		},
+	}
+	cache := NewCachingGoogleCredentialValidator(base, withCacheNowFunc(nowFunc), WithCacheMaxEntries(1)).(*cachingGoogleCredentialValidator)
+
+	if _, err := cache.ValidateIDToken(context.Background(), "token-1", []string{"aud"}); err != nil {
+		t.Fatalf("token-1: %v", err)
+	}
+	// Let token-1's entry expire.
+	clock = now.Add(6 * time.Second)
+	// token-2 must now fit, because store() evicts expired entries before
+	// refusing an insert into a "full" cache.
+	if _, err := cache.ValidateIDToken(context.Background(), "token-2", []string{"aud"}); err != nil {
+		t.Fatalf("token-2: %v", err)
+	}
+	if !cache.Cached("token-2", []string{"aud"}) {
+		t.Error("token-2 was not cached even though the only existing entry had already expired (want evict-expired-then-insert)")
+	}
+}

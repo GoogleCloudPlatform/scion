@@ -348,10 +348,18 @@ func TestGEExchange_Route_BodyLimitStillOperates(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // R2/R3 — the GE exchange endpoint and the external-bearer path must share
-// exactly one Google validator and one GoogleIdentityResolver instance
-// (design §4.4), so both mechanisms produce identical decisions during the
-// exchange-to-external-bearer soak. This exercises the actual production
-// wiring in server.go's New, not a test double.
+// exactly one GoogleIdentityResolver instance (design §4.4), so both
+// mechanisms produce identical resolution/provisioning/suspension decisions
+// during the exchange-to-external-bearer soak. This exercises the actual
+// production wiring in server.go's New, not a test double.
+//
+// Phase 2 (google_credential_cache.go) changed the validator half of this:
+// the external-bearer path now uses a caching decorator (re-validates on
+// every request, unlike the exchange endpoint, so it benefits from a cache),
+// but it wraps the *same base validator instance* the exchange uses, so the
+// exchange's own behaviour and latency are unaffected (server.go's New has
+// the full rationale). So the assertion here is: same base validator
+// instance underneath, not same top-level GoogleValidator value.
 // ---------------------------------------------------------------------------
 
 func TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer(t *testing.T) {
@@ -382,11 +390,16 @@ func TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer(t *testin
 	if srv.authConfig.GoogleResolver == nil {
 		t.Fatal("expected authConfig.GoogleResolver to be set")
 	}
-	if srv.geExchangeService.validator != srv.authConfig.GoogleValidator {
-		t.Error("GE exchange validator is not the same instance as the external-bearer path's validator (design §4.4 wiring)")
-	}
 	if srv.geExchangeService.resolver != srv.authConfig.GoogleResolver {
 		t.Error("GE exchange resolver is not the same instance as the external-bearer path's resolver (design §4.4 wiring)")
+	}
+
+	cachingValidator, ok := srv.authConfig.GoogleValidator.(*cachingGoogleCredentialValidator)
+	if !ok {
+		t.Fatalf("expected authConfig.GoogleValidator to be a *cachingGoogleCredentialValidator (design §4.2(iii)), got %T", srv.authConfig.GoogleValidator)
+	}
+	if cachingValidator.base != srv.geExchangeService.validator {
+		t.Error("the external-bearer path's caching decorator does not wrap the same base validator instance the GE exchange uses (design §4.4 wiring)")
 	}
 }
 
