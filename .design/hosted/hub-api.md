@@ -886,7 +886,8 @@ in a terminal state. At most 50 failures may be sent per request.
       "messageId": "string",   // hub message ID (required)
       "agentId": "string",     // broker-side agent identifier (informational)
       "projectId": "string",   // informational
-      "reason": "string"       // stored as the dispatch failure reason
+      "reason": "string"       // stored as the dispatch failure reason; control characters are
+                               // stripped and it is truncated to 512 bytes
     }
   ]
 }
