@@ -988,6 +988,11 @@ type Server struct {
 	geExchangeService *GEExchangeService
 	// GE exchange endpoint rate limiter (per-client-IP token bucket).
 	geExchangeRateLimiter *geExchangeRateLimiter
+	// External-bearer path rate limiter (per-client-IP token bucket,
+	// auth_external_bearer.go). Also assigned to authConfig.ExternalBearerLimiter;
+	// kept here too so Start can run its cleanup goroutine, the same way
+	// geExchangeRateLimiter's is started below.
+	externalBearerRateLimiter *externalBearerRateLimiter
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -1642,7 +1647,13 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// either way.
 	srv.authConfig.GoogleValidator = NewCachingGoogleCredentialValidator(googleValidator)
 	srv.authConfig.GoogleResolver = googleResolver
-	srv.authConfig.ExternalBearerLimiter = newExternalBearerRateLimiter(cfg.TrustedProxies)
+	// Kept on Server (not just authConfig) so Start can run its cleanup
+	// goroutine below, the same way geExchangeRateLimiter's is started.
+	// Without a running cleanup, the bounded bucket map fills permanently
+	// after maxEntries distinct client IPs and fails closed for every new
+	// one (review r1 finding 1).
+	srv.externalBearerRateLimiter = newExternalBearerRateLimiter(cfg.TrustedProxies)
+	srv.authConfig.ExternalBearerLimiter = srv.externalBearerRateLimiter
 
 	// Initialize GE Google credential exchange service, sharing the validator
 	// and resolver above so both mechanisms produce identical decisions
@@ -3908,6 +3919,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	}
 	if s.geExchangeRateLimiter != nil {
 		s.geExchangeRateLimiter.StartCleanup(ctx)
+	}
+	if s.externalBearerRateLimiter != nil {
+		s.externalBearerRateLimiter.StartCleanup(ctx)
 	}
 
 	// Start OIDC key cleanup loop to remove expired rotated keys from JWKS.

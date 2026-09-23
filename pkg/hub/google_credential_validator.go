@@ -198,8 +198,14 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 	if !verified {
 		refreshedJWKS, err := v.jwksCache.forceRefresh(ctx)
 		if err != nil {
+			// The refresh itself failed (network error, 5xx, cancelled
+			// context, ...) — that is an upstream fault, not evidence the
+			// credential is invalid. Mislabeling it ErrGoogleInvalidCredential
+			// would make it negatively cacheable (google_credential_cache.go),
+			// refusing a validly-signed token for negTTL after a transient
+			// JWKS blip (review r1 finding 2).
 			return nil, fmt.Errorf("%w: signature verification failed and JWKS refresh failed: %v",
-				ErrGoogleInvalidCredential, err)
+				ErrGoogleUpstreamError, err)
 		}
 		for _, key := range refreshedJWKS.Keys {
 			if err := parsedToken.Claims(key, &claims); err == nil {
@@ -328,10 +334,16 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 		return nil, fmt.Errorf("%w: no allowed client IDs configured", ErrGENotConfigured)
 	}
 
-	// Step 1: Call Google tokeninfo endpoint.
+	// Step 1: Call Google tokeninfo endpoint. getTokenInfo already classifies
+	// the failure (ErrGoogleInvalidCredential for a credential Google itself
+	// rejected, ErrGoogleUpstreamError for a network/5xx/decode fault) — do
+	// not re-wrap it as ErrGoogleUpstreamError here, or every tokeninfo 400
+	// (the most common real rejection: an expired or revoked access token)
+	// would be misreported as an upstream outage and never negatively cached
+	// (review r1 finding 2).
 	tokenInfo, err := v.getTokenInfo(ctx, token)
 	if err != nil {
-		return nil, fmt.Errorf("%w: tokeninfo call failed: %v", ErrGoogleUpstreamError, err)
+		return nil, fmt.Errorf("tokeninfo call failed: %w", err)
 	}
 
 	// Validate that tokeninfo returned required fields.
@@ -359,10 +371,12 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 	}
 	upstreamExpiry := time.Now().Add(time.Duration(int64(tokenInfo.ExpiresIn)) * time.Second)
 
-	// Step 2: Call Google userinfo for profile data.
+	// Step 2: Call Google userinfo for profile data. Same reasoning as
+	// getTokenInfo above: preserve its classification rather than forcing
+	// ErrGoogleUpstreamError.
 	userInfo, err := v.getUserInfo(ctx, token)
 	if err != nil {
-		return nil, fmt.Errorf("%w: userinfo call failed: %v", ErrGoogleUpstreamError, err)
+		return nil, fmt.Errorf("userinfo call failed: %w", err)
 	}
 
 	// Validate required userinfo fields.
@@ -501,6 +515,17 @@ type googleUserInfoResponse struct {
 // Google API calls
 // ---------------------------------------------------------------------------
 
+// isGoogleClientErrorStatus reports whether status is an HTTP status Google's
+// tokeninfo/userinfo endpoints use to say "this credential is bad" (as
+// opposed to "we're having trouble right now"). Google answers an invalid,
+// expired or revoked access token with tokeninfo 400 {"error":"invalid_token"};
+// 401 is included defensively for the same class of rejection. Everything
+// else non-2xx (5xx, unexpected 3xx/4xx) is treated as an upstream fault, not
+// a credential verdict (review r1 finding 2).
+func isGoogleClientErrorStatus(status int) bool {
+	return status == http.StatusBadRequest || status == http.StatusUnauthorized
+}
+
 func (v *googleCredentialValidator) getTokenInfo(ctx context.Context, token string) (*googleTokenInfoResponse, error) {
 	// POST to tokeninfo endpoint with access_token in the body.
 	// Do NOT pass the token as a query parameter to avoid logging exposure.
@@ -515,26 +540,37 @@ func (v *googleCredentialValidator) getTokenInfo(ctx context.Context, token stri
 
 	resp, err := v.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("tokeninfo request failed: %w", err)
+		return nil, fmt.Errorf("%w: tokeninfo request failed: %v", ErrGoogleUpstreamError, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
 	if err != nil {
-		return nil, fmt.Errorf("tokeninfo read failed: %w", err)
+		return nil, fmt.Errorf("%w: tokeninfo read failed: %v", ErrGoogleUpstreamError, err)
 	}
 
+	// A 400/401 means Google rejected the credential itself (e.g. expired,
+	// revoked, malformed) — that is ErrGoogleInvalidCredential, mapped to 401
+	// and eligible for the negative cache. Any other non-200 (5xx, or an
+	// unexpected status) is an upstream fault: ErrGoogleUpstreamError, mapped
+	// to 503 and never negatively cached.
+	if isGoogleClientErrorStatus(resp.StatusCode) {
+		return nil, fmt.Errorf("%w: tokeninfo returned %d", ErrGoogleInvalidCredential, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("tokeninfo returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("%w: tokeninfo returned %d", ErrGoogleUpstreamError, resp.StatusCode)
 	}
 
 	var info googleTokenInfoResponse
 	if err := json.Unmarshal(body, &info); err != nil {
-		return nil, fmt.Errorf("tokeninfo decode failed: %w", err)
+		return nil, fmt.Errorf("%w: tokeninfo decode failed: %v", ErrGoogleUpstreamError, err)
 	}
 
 	if info.Error != "" {
-		return nil, fmt.Errorf("tokeninfo error: %s", info.Error)
+		// A 200 response can still carry a body-level error field for an
+		// invalid credential — also a credential verdict, not an upstream
+		// fault.
+		return nil, fmt.Errorf("%w: tokeninfo error: %s", ErrGoogleInvalidCredential, info.Error)
 	}
 
 	return &info, nil
@@ -549,22 +585,25 @@ func (v *googleCredentialValidator) getUserInfo(ctx context.Context, token strin
 
 	resp, err := v.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("userinfo request failed: %w", err)
+		return nil, fmt.Errorf("%w: userinfo request failed: %v", ErrGoogleUpstreamError, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
 	if err != nil {
-		return nil, fmt.Errorf("userinfo read failed: %w", err)
+		return nil, fmt.Errorf("%w: userinfo read failed: %v", ErrGoogleUpstreamError, err)
 	}
 
+	if isGoogleClientErrorStatus(resp.StatusCode) {
+		return nil, fmt.Errorf("%w: userinfo returned %d", ErrGoogleInvalidCredential, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("userinfo returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("%w: userinfo returned %d", ErrGoogleUpstreamError, resp.StatusCode)
 	}
 
 	var info googleUserInfoResponse
 	if err := json.Unmarshal(body, &info); err != nil {
-		return nil, fmt.Errorf("userinfo decode failed: %w", err)
+		return nil, fmt.Errorf("%w: userinfo decode failed: %v", ErrGoogleUpstreamError, err)
 	}
 
 	return &info, nil

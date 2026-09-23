@@ -477,12 +477,16 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 
 			default:
-				// Reserved for opaque (non-JWT) bearer tokens, e.g. Google
-				// OAuth2 access tokens in a later phase. detectTokenType
-				// routes every 3-segment token to tokenTypeUser, so in Phase 1
-				// this arm never sees a JWT and serveExternalBearer always
-				// returns false (not applicable) here — the ID-token path is
-				// reached only from the tokenTypeUser case above.
+				// Opaque (non-JWT) bearer tokens land here — detectTokenType
+				// routes every 3-segment token to tokenTypeUser, so this arm
+				// never sees a JWT. This is the external-bearer path's
+				// access-token hook site (auth_external_bearer.go): when
+				// Google trust is configured, serveExternalBearer attempts
+				// Google access-token validation here; otherwise (or on
+				// failure) it returns false/an error and the original
+				// "unrecognized token format" rejection below is unchanged.
+				// The ID-token hook site is reached only from the
+				// tokenTypeUser case above.
 				if serveExternalBearer(w, r, next, ctx, token, cfg, log) {
 					return
 				}

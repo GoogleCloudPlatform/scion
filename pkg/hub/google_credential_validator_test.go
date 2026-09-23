@@ -19,11 +19,13 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -476,6 +478,147 @@ func TestProductionValidator_IDToken_JWKSForceRefresh(t *testing.T) {
 	}
 	if callCount < 2 {
 		t.Errorf("expected at least 2 JWKS fetches (initial + force refresh), got %d", callCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Review r1 finding 2 — error classification. Google's tokeninfo/userinfo
+// 400/401 (and a 200 body carrying an "error" field) must map to
+// ErrGoogleInvalidCredential (401, negatively cacheable); a failed JWKS
+// forceRefresh (network/5xx/cancelled) must map to ErrGoogleUpstreamError
+// (503, never negatively cached) rather than ErrGoogleInvalidCredential.
+// ---------------------------------------------------------------------------
+
+func TestProductionValidator_AccessToken_TokenInfo400_InvalidCredential(t *testing.T) {
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("JWKS must not be called for an access token") }),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_token"})
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("userinfo must not be called when tokeninfo fails")
+		}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	_, err := validator.ValidateAccessToken(t.Context(), "an-expired-or-revoked-token",
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, ErrGoogleInvalidCredential) {
+		t.Errorf("error = %v, want ErrGoogleInvalidCredential (tokeninfo 400 is Google rejecting the credential, not an upstream fault)", err)
+	}
+	if errors.Is(err, ErrGoogleUpstreamError) {
+		t.Error("error must not also be ErrGoogleUpstreamError: that would map to 503 and skip the negative cache for the most common real rejection")
+	}
+}
+
+func TestProductionValidator_AccessToken_TokenInfo5xx_UpstreamError(t *testing.T) {
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) }),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("userinfo must not be called when tokeninfo fails")
+		}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	_, err := validator.ValidateAccessToken(t.Context(), "token",
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, ErrGoogleUpstreamError) {
+		t.Errorf("error = %v, want ErrGoogleUpstreamError", err)
+	}
+	if errors.Is(err, ErrGoogleInvalidCredential) {
+		t.Error("error must not also be ErrGoogleInvalidCredential: a tokeninfo 5xx is an upstream fault, not a credential verdict")
+	}
+}
+
+func TestProductionValidator_AccessToken_UserInfo400_InvalidCredential(t *testing.T) {
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"azp": "test-client-id.apps.googleusercontent.com",
+				"aud": "test-client-id.apps.googleusercontent.com",
+				"sub": "sub-1", "email": "user@gmail.com", "expires_in": 3600,
+			})
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	_, err := validator.ValidateAccessToken(t.Context(), "token",
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, ErrGoogleInvalidCredential) {
+		t.Errorf("error = %v, want ErrGoogleInvalidCredential", err)
+	}
+	if errors.Is(err, ErrGoogleUpstreamError) {
+		t.Error("error must not also be ErrGoogleUpstreamError")
+	}
+}
+
+// TestProductionValidator_IDToken_ForceRefreshFailure_UpstreamError proves a
+// failed forceRefresh (the signing key genuinely could not be re-fetched) is
+// ErrGoogleUpstreamError, not ErrGoogleInvalidCredential — the mislabel would
+// make a transient JWKS blip negatively cacheable, refusing a validly-signed
+// token (signed with a newly rotated key) for negTTL seconds afterwards.
+func TestProductionValidator_IDToken_ForceRefreshFailure_UpstreamError(t *testing.T) {
+	kp1 := newGCVTestKeyPair("kid-1")
+	rotatedKP := newGCVTestKeyPair("kid-2") // signs the token; never served successfully
+
+	var jwksCalls atomic.Int64
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if jwksCalls.Add(1) == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(gcvJWKSJSON(kp1)) // primes the cache without rotatedKP
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError) // every force-refresh attempt fails
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	if _, err := validator.ValidateIDToken(t.Context(), signIDToken(kp1, validIDTokenClaims()),
+		[]string{"test-client-id.apps.googleusercontent.com"}); err != nil {
+		t.Fatalf("priming call: %v", err)
+	}
+
+	// Age the cache past forceRefresh's own 30s throttle, exactly like
+	// TestProductionValidator_IDToken_JWKSForceRefresh does, so the next
+	// verification failure actually attempts a network fetch instead of
+	// silently reusing the stale (already known not to verify) keys.
+	gcv := validator.(*googleCredentialValidator)
+	gcv.jwksCache.mu.Lock()
+	gcv.jwksCache.fetchedAt = time.Now().Add(-1 * time.Minute)
+	gcv.jwksCache.mu.Unlock()
+
+	token := signIDToken(rotatedKP, validIDTokenClaims())
+	_, err := validator.ValidateIDToken(t.Context(), token, []string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, ErrGoogleUpstreamError) {
+		t.Errorf("error = %v, want ErrGoogleUpstreamError (a failed JWKS refresh is an upstream fault, not an invalid credential)", err)
+	}
+	if errors.Is(err, ErrGoogleInvalidCredential) {
+		t.Error("error must not also be ErrGoogleInvalidCredential: that would make a transient JWKS blip negatively cacheable, " +
+			"refusing a validly-signed token for negTTL seconds")
 	}
 }
 

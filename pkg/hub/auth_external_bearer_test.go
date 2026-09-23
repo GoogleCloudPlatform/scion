@@ -1320,15 +1320,26 @@ func TestExternalBearer_ConfiguredTrustInvariant_Golden(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			counting := &countingGoogleValidator{}
+			// GoogleValidator/GoogleResolver are always wired, matching
+			// production shape (server.go's New builds them unconditionally,
+			// O3): only trust varies below. Review r1 finding 3: an earlier
+			// version of this test left them nil in the no-trust cases, which
+			// meant authenticateExternalBearer's `cfg.GoogleValidator == nil`
+			// guard returned not-applicable regardless of whether the
+			// googleTrust gate itself was intact — so a mutation that skipped
+			// the trust check for non-JWT tokens (`if !ok && looksLikeJWT(token)`)
+			// passed the whole suite silently. With the validator always
+			// non-nil, that mutation now surfaces as a nonzero
+			// counting.totalCalls() below.
 			cfg := AuthConfig{
-				Mode:         "production",
-				UserTokenSvc: userTokenSvc,
-				Logger:       slog.Default(),
+				Mode:            "production",
+				UserTokenSvc:    userTokenSvc,
+				Logger:          slog.Default(),
+				GoogleValidator: counting,
+				GoogleResolver:  resolver,
 			}
 			if tt.withTrust {
 				cfg.FederationAuth = federationAuthPointer(fa)
-				cfg.GoogleValidator = counting
-				cfg.GoogleResolver = resolver
 			}
 
 			w, result := doExternalBearerRequest(cfg, tt.token)

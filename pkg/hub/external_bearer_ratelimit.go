@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"net"
 	"net/http"
 )
@@ -75,4 +76,13 @@ func newExternalBearerRateLimiter(trustedProxies []string) *externalBearerRateLi
 func (l *externalBearerRateLimiter) Allow(r *http.Request) (allowed bool, retryAfterSeconds int) {
 	clientIP := geExchangeClientIP(r, l.trustedNets)
 	return l.buckets.Allow(clientIP)
+}
+
+// StartCleanup runs the background goroutine that evicts stale per-IP
+// buckets, exiting when ctx is cancelled. Without this, the bounded bucket
+// map fills permanently after maxEntries distinct client IPs and fails
+// closed for every new one — see the caller (server.go's Start) for why this
+// must run whenever the limiter is constructed (review r1 finding 1).
+func (l *externalBearerRateLimiter) StartCleanup(ctx context.Context) {
+	l.buckets.StartCleanup(ctx)
 }

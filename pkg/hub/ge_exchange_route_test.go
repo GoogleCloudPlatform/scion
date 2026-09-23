@@ -390,6 +390,20 @@ func TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer(t *testin
 	if srv.authConfig.GoogleResolver == nil {
 		t.Fatal("expected authConfig.GoogleResolver to be set")
 	}
+	// review r1 finding 1: the external-bearer rate limiter must be wired
+	// both onto authConfig (what authenticateExternalBearer consults) and
+	// onto Server (so Start/StartBackgroundServices can run its cleanup
+	// goroutine — see TestServer_ExternalBearerRateLimiter_CleanupRunsInBackground).
+	// Deleting either wiring line in server.go's New must fail this test.
+	if srv.authConfig.ExternalBearerLimiter == nil {
+		t.Fatal("expected authConfig.ExternalBearerLimiter to be set")
+	}
+	if srv.externalBearerRateLimiter == nil {
+		t.Fatal("expected srv.externalBearerRateLimiter to be set")
+	}
+	if srv.authConfig.ExternalBearerLimiter != srv.externalBearerRateLimiter {
+		t.Error("authConfig.ExternalBearerLimiter is not the same instance as srv.externalBearerRateLimiter")
+	}
 	if srv.geExchangeService.resolver != srv.authConfig.GoogleResolver {
 		t.Error("GE exchange resolver is not the same instance as the external-bearer path's resolver (design §4.4 wiring)")
 	}

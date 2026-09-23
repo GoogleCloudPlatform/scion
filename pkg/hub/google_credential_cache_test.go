@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -154,7 +155,14 @@ func TestGoogleCredentialCache_DifferentTokensDoNotShareEntry(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGoogleCredentialCache_TTLCappedByUpstreamExpiry(t *testing.T) {
-	now := time.Now()
+	// A fake clock far from the real wall clock, so the test can't
+	// accidentally pass by coincidence if a real-time call sneaks in — e.g. a
+	// regression to time.Until(identity.UpstreamExpiry) (the real clock)
+	// instead of identity.UpstreamExpiry.Sub(c.now()) (the fake one) would
+	// compute a wildly wrong remaining lifetime here and fail loudly, instead
+	// of silently passing because the fake clock happened to start near the
+	// real one (review r1 nit 7).
+	now := time.Now().AddDate(50, 0, 0)
 	clock := now
 	nowFunc := func() time.Time { return clock }
 
@@ -195,7 +203,9 @@ func TestGoogleCredentialCache_TTLCappedByUpstreamExpiry(t *testing.T) {
 }
 
 func TestGoogleCredentialCache_MaxTTLCapsLongLivedCredential(t *testing.T) {
-	now := time.Now()
+	// A fake clock far from the real wall clock, so the test can't
+	// accidentally pass by coincidence if a real-time call sneaks in.
+	now := time.Now().AddDate(50, 0, 0)
 	clock := now
 	nowFunc := func() time.Time { return clock }
 
@@ -294,7 +304,9 @@ func TestGoogleCredentialCache_NegativeCacheOnlyForFourListedErrors(t *testing.T
 }
 
 func TestGoogleCredentialCache_NegativeEntryExpiresAfterNegTTL(t *testing.T) {
-	now := time.Now()
+	// A fake clock far from the real wall clock, so the test can't
+	// accidentally pass by coincidence if a real-time call sneaks in.
+	now := time.Now().AddDate(50, 0, 0)
 	clock := now
 	nowFunc := func() time.Time { return clock }
 
@@ -382,7 +394,9 @@ func TestGoogleCredentialCache_CachedReportsHitsAndMisses(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGoogleCredentialCache_RefusesInsertWhenFullOfLiveEntries(t *testing.T) {
-	now := time.Now()
+	// A fake clock far from the real wall clock, so the test can't
+	// accidentally pass by coincidence if a real-time call sneaks in.
+	now := time.Now().AddDate(50, 0, 0)
 	clock := now
 	nowFunc := func() time.Time { return clock }
 
@@ -415,17 +429,49 @@ func TestGoogleCredentialCache_RefusesInsertWhenFullOfLiveEntries(t *testing.T) 
 	}
 }
 
+// perTokenExpiryValidator is a GoogleCredentialValidator that returns a
+// distinct UpstreamExpiry per token, looked up from expiry (defaulting to one
+// hour out for any token not listed). Unlike countingBaseValidator, whose
+// idTokenResult/accessTokenResult is one fixed value shared by every call, so
+// it can prove that different tokens are actually treated as expiring at
+// different times.
+type perTokenExpiryValidator struct {
+	expiry map[string]time.Time
+}
+
+func (v *perTokenExpiryValidator) identityFor(token string) *ValidatedGoogleIdentity {
+	exp, ok := v.expiry[token]
+	if !ok {
+		exp = time.Now().Add(time.Hour)
+	}
+	return &ValidatedGoogleIdentity{Subject: token, Email: "user@gmail.com", EmailVerified: true, UpstreamExpiry: exp}
+}
+
+func (v *perTokenExpiryValidator) ValidateIDToken(_ context.Context, token string, _ []string) (*ValidatedGoogleIdentity, error) {
+	return v.identityFor(token), nil
+}
+
+func (v *perTokenExpiryValidator) ValidateAccessToken(_ context.Context, token string, _ []string) (*ValidatedGoogleIdentity, error) {
+	return v.identityFor(token), nil
+}
+
 func TestGoogleCredentialCache_EvictsExpiredBeforeRefusing(t *testing.T) {
-	now := time.Now()
+	// A fake clock far from the real wall clock, so the test can't
+	// accidentally pass by coincidence if a real-time call sneaks in.
+	now := time.Now().AddDate(50, 0, 0)
 	clock := now
 	nowFunc := func() time.Time { return clock }
 
-	base := &countingBaseValidator{
-		idTokenResult: &ValidatedGoogleIdentity{
-			Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true,
-			UpstreamExpiry: now.Add(5 * time.Second), // short-lived, so it expires soon
-		},
-	}
+	// token-1 is short-lived, so it expires quickly; token-2 is long-lived,
+	// so once inserted its own TTL isn't the constraint under test — only
+	// whether store() evicted token-1 to make room. A shared
+	// countingBaseValidator with one fixed UpstreamExpiry can't express this
+	// (it doesn't look at which token was passed), so this test needs its own
+	// tiny per-token validator.
+	base := &perTokenExpiryValidator{expiry: map[string]time.Time{
+		"token-1": now.Add(5 * time.Second),
+		"token-2": now.Add(time.Hour),
+	}}
 	cache := NewCachingGoogleCredentialValidator(base, withCacheNowFunc(nowFunc), WithCacheMaxEntries(1)).(*cachingGoogleCredentialValidator)
 
 	if _, err := cache.ValidateIDToken(context.Background(), "token-1", []string{"aud"}); err != nil {
@@ -440,5 +486,99 @@ func TestGoogleCredentialCache_EvictsExpiredBeforeRefusing(t *testing.T) {
 	}
 	if !cache.Cached("token-2", []string{"aud"}) {
 		t.Error("token-2 was not cached even though the only existing entry had already expired (want evict-expired-then-insert)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Review r1 finding 4 — singleflight must not run the shared upstream call
+// under the specific caller (the "leader") that happened to trigger it: that
+// caller cancelling its own request must not fail every other concurrent
+// waiter's request too.
+// ---------------------------------------------------------------------------
+
+// blockingValidator is a GoogleCredentialValidator whose single call blocks
+// until release is closed, or until its context is cancelled — whichever
+// comes first. Used to put a singleflight leader mid-flight so a test can
+// cancel the leader's own context and observe whether that cancellation
+// reaches the shared upstream call.
+type blockingValidator struct {
+	started chan struct{}
+	release chan struct{}
+	result  *ValidatedGoogleIdentity
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (v *blockingValidator) ValidateIDToken(ctx context.Context, _ string, _ []string) (*ValidatedGoogleIdentity, error) {
+	return v.validate(ctx)
+}
+
+func (v *blockingValidator) ValidateAccessToken(ctx context.Context, _ string, _ []string) (*ValidatedGoogleIdentity, error) {
+	return v.validate(ctx)
+}
+
+func (v *blockingValidator) validate(ctx context.Context) (*ValidatedGoogleIdentity, error) {
+	v.mu.Lock()
+	v.calls++
+	v.mu.Unlock()
+	close(v.started)
+	select {
+	case <-v.release:
+		return v.result, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("%w: %v", ErrGoogleUpstreamError, ctx.Err())
+	}
+}
+
+func (v *blockingValidator) callCount() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.calls
+}
+
+func TestGoogleCredentialCache_LeaderCancellationDoesNotPoisonFollowers(t *testing.T) {
+	base := &blockingValidator{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		result: &ValidatedGoogleIdentity{
+			Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true,
+			UpstreamExpiry: time.Now().Add(10 * time.Minute),
+		},
+	}
+	cache := NewCachingGoogleCredentialValidator(base).(*cachingGoogleCredentialValidator)
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := cache.ValidateAccessToken(leaderCtx, "same-token", []string{"aud"})
+		leaderDone <- err
+	}()
+
+	<-base.started // the leader's call has begun executing upstream
+	cancelLeader() // cancel the leader's OWN request context
+
+	// A follower using an unrelated, still-live context must still get the
+	// shared result, unaffected by the leader's cancellation.
+	followerDone := make(chan error, 1)
+	go func() {
+		_, err := cache.ValidateAccessToken(context.Background(), "same-token", []string{"aud"})
+		followerDone <- err
+	}()
+
+	close(base.release) // let the shared upstream call complete
+
+	if err := <-followerDone; err != nil {
+		t.Fatalf("follower error: %v (the leader's cancellation must not fail a follower's request)", err)
+	}
+	if err := <-leaderDone; err != nil {
+		t.Fatalf("leader error: %v (the leader's own cancellation must not fail its own singleflight-shared call either, "+
+			"since followers depend on the same result)", err)
+	}
+	if got := base.callCount(); got != 1 {
+		t.Errorf("base validator called %d time(s), want 1 (singleflight must still collapse leader+follower into one upstream call)", got)
+	}
+	if !cache.Cached("same-token", []string{"aud"}) {
+		t.Error("the result was not cached, or was cached negatively: the leader's cancellation must not cause a valid result to go uncached")
 	}
 }

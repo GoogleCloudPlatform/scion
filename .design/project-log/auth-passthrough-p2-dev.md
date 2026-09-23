@@ -38,8 +38,8 @@ wraps a base validator with:
   the conservative reading of "only for the four listed errors."
 - **Defaults**: `maxTTL = 5m`, `negTTL = 30s`, `maxEntries = 10000`, all overridable via `CacheOption`.
 - **Eviction**: `store()` evicts expired entries once when the map is at `maxEntries`, then refuses
-  the insert if still full. No LRU, so a live entry is never evicted to make room — matches #1847's
-  policy per the design doc.
+  the insert if still full. No LRU, so a live entry is never evicted to make room — matches upstream
+  PR 1847's policy per the design doc.
 - **Singleflight**: `golang.org/x/sync/singleflight` (already a repo dependency) collapses concurrent
   first requests for the same key into one upstream call. A cache re-check inside the singleflight
   callback avoids a redundant upstream call in the narrow race where a different call for the same
@@ -196,3 +196,117 @@ SA ID-token rule, `allowed_projects`, `allowed_domains`, docs, bridge, metrics �
   ask, rather than raised as a blocking question — the design text already gave enough to decide
   ("keep exchange behaviour unchanged" + "shares the base validator") without ambiguity.
 - No other design ambiguities were hit this phase.
+
+## Fix round 1 (review `p2-r1-ap-p2-rev.md`: REQUEST CHANGES, 1 Critical, 4 Required, 1 Optional, 3 Nit, 2 FYI)
+
+Fix brief: `briefs/ap-p2-dev-fix-r1.md`. All Critical/Required findings, both actionable Nits, and the
+Optional finding are fixed; Nit 8 (commit message wording) is left for `ap-em`'s Phase 3 rebase per
+the brief (no history rewrite on the shared branch); the two FYIs need no action.
+
+**1 (Critical). External-bearer limiter never ran its cleanup — permanent lockout after `maxEntries`
+distinct client IPs.** `server.go` now keeps the limiter on `Server` (`srv.externalBearerRateLimiter`,
+also assigned to `authConfig.ExternalBearerLimiter`) and starts its cleanup in
+`StartBackgroundServices`, next to `geExchangeRateLimiter.StartCleanup(ctx)`. `externalBearerRateLimiter`
+gained a `StartCleanup` method delegating to its embedded `geExchangeRateLimiter`. `geExchangeRateLimiter`
+itself gained a `cleanupInterval` field (defaulted to the existing `geExchangeCleanupInterval` constant
+in `newGEExchangeRateLimiter`, used by `StartCleanup`'s ticker) so a test can shrink it and observe the
+background goroutine actually running, instead of waiting on the production 5-minute interval — this is
+a same-package, backward-compatible addition (default behaviour unchanged), not a behaviour change to
+the exchange endpoint's own limiter.
+- Tests: `TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer` extended to assert
+  `authConfig.ExternalBearerLimiter` and `srv.externalBearerRateLimiter` are both non-nil and identical
+  (deleting either wiring line fails this test). `TestExternalBearerRateLimiter_CleanupAdmitsNewIPAfterMaxAge`
+  proves `Cleanup(now+maxAge+ε)` frees capacity for a new IP (probe (b)). `TestServer_ExternalBearerRateLimiter_CleanupRunsInBackground`
+  proves `StartBackgroundServices` actually invokes `externalBearerRateLimiter.StartCleanup` — not just
+  that the field is set — by shrinking `cleanupInterval`/`maxEntries`/`maxAge` and polling for the
+  background goroutine to evict a stale entry (probe (a)'s "cleanup is started" half).
+
+**2 (Required). Tokeninfo/userinfo 400 → 503 `upstream_unavailable` instead of 401, never negatively
+cached; a failed JWKS `forceRefresh` → `ErrGoogleInvalidCredential` instead of `ErrGoogleUpstreamError`.**
+`google_credential_validator.go`: `getTokenInfo`/`getUserInfo` now classify their own failures instead of
+leaving it to the caller — a 400/401 (`isGoogleClientErrorStatus`) or a 200 body carrying an `error`
+field is `ErrGoogleInvalidCredential`; a network error, decode failure, or any other non-200 (5xx, or an
+unexpected status) is `ErrGoogleUpstreamError`. `ValidateAccessToken` no longer re-wraps their result as
+`ErrGoogleUpstreamError` unconditionally (`fmt.Errorf("tokeninfo call failed: %w", err)` preserves
+whichever sentinel the helper already chose). The `forceRefresh` failure branch in `ValidateIDToken` now
+wraps `ErrGoogleUpstreamError`, not `ErrGoogleInvalidCredential` — a failed refresh is an upstream fault,
+not a signature verdict.
+- **Exchange behaviour is unchanged externally**: `ge_exchange.go`'s status-mapping switch has no case
+  for either sentinel, so both still fall through to the same `default:` 401 "credential validation
+  failed" — only the internal classification, and therefore the *log* text (`credential_type=... error=...`),
+  changes. No exchange test needed a status/body update; the existing `TestGEExchange_*` suite passing
+  unchanged is itself that proof.
+- Tests against the real validator: `TestProductionValidator_AccessToken_TokenInfo400_InvalidCredential`,
+  `_TokenInfo5xx_UpstreamError`, `_UserInfo400_InvalidCredential` (classification, both directions, both
+  endpoints), `TestProductionValidator_IDToken_ForceRefreshFailure_UpstreamError` (the mislabel fix,
+  using the same `fetchedAt` back-dating technique as the existing `JWKSForceRefresh` test to defeat
+  `forceRefresh`'s own 30s throttle). Through the real middleware:
+  `TestExternalBearer_TrustConfiguredOpaqueToken_AttemptsAccessTokenValidation` now uses a real
+  tokeninfo-400 stub instead of a fake configured with an error the real validator could never produce
+  for this input — review r1 finding 2 called out that the fake was hiding exactly this bug.
+  `TestExternalBearer_AccessToken_TokenInfo400_NegativelyCached` proves the negative-cache half: two
+  requests with the same invalid token cost one tokeninfo call.
+
+**3 (Required). The I1 no-trust golden cases left `GoogleValidator`/`GoogleResolver` nil, masking a
+mutation that skips the trust check for non-JWT tokens.** `TestExternalBearer_ConfiguredTrustInvariant_Golden`
+now always wires `GoogleValidator`/`GoogleResolver` (matching production shape, O3); only
+`FederationAuth` varies with `tt.withTrust`. Verified by hand: mutating
+`if !ok { return nil, errExternalBearerNotApplicable }` to `if !ok && looksLikeJWT(token) {` in
+`authenticateExternalBearer` now fails case (d) (`counting.totalCalls() != 0`), where before the fix it
+passed the whole targeted suite silently. Mutation reverted after confirming the kill.
+
+**4 (Required). Singleflight ran the shared upstream call under the leader's own request context, so
+the leader cancelling its own request failed every concurrent follower too.** `google_credential_cache.go`'s
+`validate` now calls `upstream` with `context.WithTimeout(context.WithoutCancel(ctx), upstreamCallTimeout)`
+(10s, matching `NewGoogleCredentialValidator`'s default `http.Client` timeout) built from whichever
+caller happens to be the singleflight leader, instead of that caller's own `ctx` directly. `ValidateIDToken`/
+`ValidateAccessToken`'s closures now take the detached `upstreamCtx` as a parameter rather than closing
+over the outer `ctx`.
+- Test: `TestGoogleCredentialCache_LeaderCancellationDoesNotPoisonFollowers` — a `blockingValidator` puts
+  a singleflight leader mid-flight, the test cancels the leader's own context, then starts a follower on
+  a live context; both succeed, the base validator is called exactly once, and the result is cached
+  positively (not left uncached or negatively cached as a side effect of the leader's cancellation).
+
+**5 (Required). A bare hash-prefixed issue reference in the Phase 2 log (the caching-decorator eviction
+bullet), plus a since-falsified "clean" claim about it.** Reworded to spell out "upstream PR 1847"
+without the leading `#`. Both brief greps re-run after the final commit of this round (paste in the
+report to `ap-em`); this section is itself written to avoid reintroducing the pattern.
+
+**6 (Nit). Stale `default:`-arm comment in `auth.go` describing Phase 1 behaviour** (claimed
+`serveExternalBearer` always returns `false` there). Reworded to describe the Phase 2 access-token hook
+site.
+
+**7 (Nit). Mixed clocks in the cache's TTL computation** — `store()` used `time.Until(identity.UpstreamExpiry)`
+(the real wall clock) while `expiresAt` used `c.now()` (the injectable one). Changed to
+`identity.UpstreamExpiry.Sub(c.now())`. The two TTL tests
+(`TestGoogleCredentialCache_TTLCappedByUpstreamExpiry`, `_MaxTTLCapsLongLivedCredential`) now use a fake
+clock 50 years from the real one (all the cache tests' fake-clock setups were moved to the same offset,
+for consistency), so a regression back to the real clock fails loudly instead of silently passing
+because the fake clock happened to start near the real one. Fixing this surfaced a latent bug in
+`TestGoogleCredentialCache_EvictsExpiredBeforeRefusing`, which reused one `countingBaseValidator` with a
+single fixed `UpstreamExpiry` for both `token-1` and `token-2` — under the old mixed-clock bug this
+accidentally passed regardless of the fake clock, because `time.Until` used the real, barely-elapsed
+wall-clock time. Fixed by adding a small `perTokenExpiryValidator` so `token-2` gets its own long-lived
+expiry, isolating the property actually under test (eviction of the stale entry makes room).
+
+**9 (Optional). `Retry-After` was asserted non-empty, not exact.** `TestExternalBearer_AccessToken_RateLimitedBeyondBurst`
+now asserts the literal `"1"` (burst 3, default 5 rps: `ceil(1/5) = 1`).
+
+**8 (Nit, no action by me).** Commit message wording on `645168819` — left for `ap-em`'s Phase 3 rebase,
+per the brief.
+
+**10, 11 (FYI, no action).**
+
+### Gates (fix round 1)
+
+- ✅ `go build -buildvcs=false ./...`
+- ✅ `go vet -buildvcs=false ./pkg/hub/...`
+- ✅ `gofmt -l pkg/hub` — clean
+- ✅ `GOGC=40 golangci-lint run --new-from-rev=upstream-main --concurrency=1 ./pkg/hub/...` — 0 issues
+- ✅ Targeted subset (`TestExternalBearer|TestGoogleTrust|TestGEExchange|TestProductionValidator|TestNoPackage|TestNoTokenInfo|TestGoogleIdentityResolver|TestGoogleCredential|TestFederation`, `-count=1`) — green
+- ✅ `-race` targeted subset (`TestExternalBearer|TestGoogleCredentialCache|TestNoPackageLevelMutableState|TestNoTokenInfoOutside|TestGEExchange|TestExternalBearerRateLimiter|TestServer_ExternalBearerRateLimiter`, `-count=1`) — green, no data races (23.8s)
+- Full `go test -timeout 40m ./pkg/hub/ ./pkg/hub/authzop/`: see the report to `ap-em` (this round
+  touches `google_credential_validator.go`, so it requires `ap-em`'s go-ahead first, per the fix brief's
+  disk rules).
+- Bare-`#NNN` greps against `upstream-main`, re-run after the final commit of this round: see the report
+  to `ap-em` for the pasted output.

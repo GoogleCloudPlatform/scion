@@ -193,7 +193,10 @@ func (c *cachingGoogleCredentialValidator) store(key string, identity *Validated
 	switch {
 	case err == nil:
 		ttl = c.maxTTL
-		if remaining := time.Until(identity.UpstreamExpiry); remaining < ttl {
+		// Use c.now(), not the wall clock (time.Until), so tests that inject
+		// a fake clock exercise the real expiry arithmetic instead of
+		// silently mixing clocks (review r1 nit 7).
+		if remaining := identity.UpstreamExpiry.Sub(c.now()); remaining < ttl {
 			ttl = remaining
 		}
 		if ttl <= 0 {
@@ -226,10 +229,22 @@ func (c *cachingGoogleCredentialValidator) evictExpiredLocked() {
 	}
 }
 
+// upstreamCallTimeout bounds the upstream call singleflight makes on behalf
+// of every waiter, once detached from whichever caller happens to be the
+// leader (see validate below). It matches NewGoogleCredentialValidator's
+// default http.Client timeout, so in the common case the HTTP client's own
+// timeout fires first and this is only a backstop against a base validator
+// configured with a longer or absent timeout.
+const upstreamCallTimeout = 10 * time.Second
+
 // validate is the shared cache/singleflight wrapper around a single upstream
-// call, used by both ValidateIDToken and ValidateAccessToken.
+// call, used by both ValidateIDToken and ValidateAccessToken. upstream is
+// called with a context that is independent of any specific caller's ctx
+// (see the WithoutCancel comment below), even though it was built from the
+// ctx of whichever caller happens to become the singleflight leader.
 func (c *cachingGoogleCredentialValidator) validate(
-	token string, allowedClientIDs []string, upstream func() (*ValidatedGoogleIdentity, error),
+	ctx context.Context, token string, allowedClientIDs []string,
+	upstream func(context.Context) (*ValidatedGoogleIdentity, error),
 ) (*ValidatedGoogleIdentity, error) {
 	key := cacheKey(token, allowedClientIDs)
 	if e, ok := c.lookup(key); ok {
@@ -245,7 +260,14 @@ func (c *cachingGoogleCredentialValidator) validate(
 		if e, ok := c.lookup(key); ok {
 			return e, nil
 		}
-		identity, err := upstream()
+		// Detach from the leader's own request context: this call is shared
+		// by every waiter on this key, so the leader cancelling (or timing
+		// out) its own request must not fail every follower's request too
+		// (review r1 finding 4). Still bounded by upstreamCallTimeout so a
+		// leaderless call can't hang forever.
+		upstreamCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), upstreamCallTimeout)
+		defer cancel()
+		identity, err := upstream(upstreamCtx)
 		c.store(key, identity, err)
 		return googleCredCacheEntry{identity: identity, err: err}, nil
 	})
@@ -256,15 +278,15 @@ func (c *cachingGoogleCredentialValidator) validate(
 // ValidateIDToken implements GoogleCredentialValidator, serving from cache
 // when possible and delegating to the base validator on a miss.
 func (c *cachingGoogleCredentialValidator) ValidateIDToken(ctx context.Context, token string, allowedClientIDs []string) (*ValidatedGoogleIdentity, error) {
-	return c.validate(token, allowedClientIDs, func() (*ValidatedGoogleIdentity, error) {
-		return c.base.ValidateIDToken(ctx, token, allowedClientIDs)
+	return c.validate(ctx, token, allowedClientIDs, func(upstreamCtx context.Context) (*ValidatedGoogleIdentity, error) {
+		return c.base.ValidateIDToken(upstreamCtx, token, allowedClientIDs)
 	})
 }
 
 // ValidateAccessToken implements GoogleCredentialValidator, serving from
 // cache when possible and delegating to the base validator on a miss.
 func (c *cachingGoogleCredentialValidator) ValidateAccessToken(ctx context.Context, token string, allowedClientIDs []string) (*ValidatedGoogleIdentity, error) {
-	return c.validate(token, allowedClientIDs, func() (*ValidatedGoogleIdentity, error) {
-		return c.base.ValidateAccessToken(ctx, token, allowedClientIDs)
+	return c.validate(ctx, token, allowedClientIDs, func(upstreamCtx context.Context) (*ValidatedGoogleIdentity, error) {
+		return c.base.ValidateAccessToken(upstreamCtx, token, allowedClientIDs)
 	})
 }

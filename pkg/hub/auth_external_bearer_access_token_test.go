@@ -169,17 +169,42 @@ func TestExternalBearer_AccessToken_ServiceAccount_Rejected(t *testing.T) {
 // case (d) proves the complementary "no trust" half of I1.
 // ---------------------------------------------------------------------------
 
+// TestExternalBearer_TrustConfiguredOpaqueToken_AttemptsAccessTokenValidation
+// uses the REAL validator against a tokeninfo-400 stub, not a fake configured
+// to return an error the real validator would never produce for this input.
+// Review r1 finding 2: an earlier version of this test used
+// fakeGoogleValidator{accessTokenErr: ErrGoogleInvalidCredential}, which
+// happened to assert the post-fix status/body/code but could not have caught
+// the pre-fix bug (real tokeninfo 400 -> ErrGoogleUpstreamError -> 503) at
+// all, since the fake never went near that classification logic.
 func TestExternalBearer_TrustConfiguredOpaqueToken_AttemptsAccessTokenValidation(t *testing.T) {
-	counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{accessTokenErr: ErrGoogleInvalidCredential}}
+	var tokenInfoCalls atomic.Int64
+	tokenInfoHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenInfoCalls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_token"})
+	})
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("JWKS must not be called for an access token") }),
+		tokenInfoHandler,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("userinfo must not be called when tokeninfo fails")
+		}),
+	)
+	defer endpoints.close()
+
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
-	cfg := newExternalBearerConfig(t, counting, resolver)
+	cfg := newExternalBearerConfig(t, newTestValidator(endpoints), resolver)
 
 	w, result := doExternalBearerRequest(cfg, "some-opaque-token")
 	if result.reached {
-		t.Fatal("handler must not be reached: the fake validator rejects every access token")
+		t.Fatal("handler must not be reached: Google rejects every access token here")
 	}
+	// The real validator's classification is what's under test: a tokeninfo
+	// 400 must be 401 "invalid external bearer token", not 503
+	// "upstream_unavailable" (review r1 finding 2).
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
 	}
@@ -187,11 +212,54 @@ func TestExternalBearer_TrustConfiguredOpaqueToken_AttemptsAccessTokenValidation
 	if !bytes.Equal(w.Body.Bytes(), wantBody) {
 		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
 	}
-	if got := counting.accessTokenCalls.Load(); got != 1 {
-		t.Errorf("ValidateAccessToken called %d time(s), want 1 (Phase 2: trust configured + opaque token is now a candidate access token)", got)
+	if got := tokenInfoCalls.Load(); got != 1 {
+		t.Errorf("tokeninfo called %d time(s), want 1 (Phase 2: trust configured + opaque token is now a candidate access token)", got)
 	}
-	if got := counting.idTokenCalls.Load(); got != 0 {
-		t.Errorf("ValidateIDToken called %d time(s), want 0", got)
+}
+
+// TestExternalBearer_AccessToken_TokenInfo400_NegativelyCached is the second
+// half of review r1 finding 2's ask: an invalid/expired/revoked access token
+// (tokeninfo 400) must be negatively cached, so repeated presentations of the
+// same garbage token within negTTL cost one upstream call, not one per
+// request.
+func TestExternalBearer_AccessToken_TokenInfo400_NegativelyCached(t *testing.T) {
+	var tokenInfoCalls atomic.Int64
+	tokenInfoHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenInfoCalls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_token"})
+	})
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		tokenInfoHandler,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("userinfo must not be called when tokeninfo fails")
+		}),
+	)
+	defer endpoints.close()
+
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	cached := NewCachingGoogleCredentialValidator(newTestValidator(endpoints))
+	cfg := newExternalBearerConfig(t, cached, resolver)
+
+	const token = "opaque-invalid-token"
+	for i := 0; i < 2; i++ {
+		w, result := doExternalBearerRequest(cfg, token)
+		if result.reached {
+			t.Fatalf("request %d: handler must not be reached", i)
+		}
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("request %d: status = %d, want 401: body=%s", i, w.Code, w.Body.String())
+		}
+		wantBody := wantErrorBody(t, ErrCodeUnauthorized, "invalid external bearer token")
+		if !bytes.Equal(w.Body.Bytes(), wantBody) {
+			t.Errorf("request %d: body = %s, want %s", i, w.Body.Bytes(), wantBody)
+		}
+	}
+	if got := tokenInfoCalls.Load(); got != 1 {
+		t.Errorf("tokeninfo called %d time(s), want 1 (an invalid credential must be negatively cached)", got)
 	}
 }
 
@@ -325,8 +393,12 @@ func TestExternalBearer_AccessToken_RateLimitedBeyondBurst(t *testing.T) {
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429: body=%s", w.Code, w.Body.String())
 	}
-	if got := w.Header().Get("Retry-After"); got == "" {
-		t.Error("expected a Retry-After header on a 429 response")
+	// Pinned to the exact expected value (review r1 optional finding 9), not
+	// just non-empty: with burst 3 exhausted and the default 5 rps refill,
+	// ceil(1/5) = 1 second is the only correct value. A units error (e.g.
+	// milliseconds, or a hardcoded 0) would pass a mere non-empty check.
+	if got := w.Header().Get("Retry-After"); got != "1" {
+		t.Errorf("Retry-After = %q, want %q", got, "1")
 	}
 	wantBody := wantErrorBody(t, ErrCodeRateLimited, "rate limit exceeded")
 	if !bytes.Equal(w.Body.Bytes(), wantBody) {
