@@ -192,6 +192,18 @@ Inform the user immediately — do not wait until after deployment.
 Ask the user each question below in natural conversation. Use the defaults when
 the user does not have a preference. Validate each answer before moving on.
 
+> **Agent optimization:** Rather than prompting the user for each question
+> individually (10 round trips), detect defaults from the ambient GCP environment
+> first, then present the full candidate configuration as a single table and ask
+> for confirmation or targeted overrides in one prompt:
+>
+> ```bash
+> # Detect defaults
+> gcloud config get-value project        # -> project_id
+> gcloud config get-value compute/region # -> region
+> gcloud config get-value account        # -> admin_email
+> ```
+
 | # | Question | Default | Validation | Config field |
 |---|----------|---------|------------|--------------|
 | 1 | GCP project ID | Current gcloud project | Must be a valid, accessible project (verified in preflight) | `project_id` |
