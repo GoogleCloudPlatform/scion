@@ -163,5 +163,13 @@ RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
 
 # Identical closing line to core-base. That is the whole point: whichever base
 # scion-base is built on, it has passed the same assertion.
+#
+# This image is amd64-only, so the emulation branch never triggers here today.
+# The args are forwarded anyway, so the two closing lines stay identical and
+# this chain does not have to be revisited if it ever gains an arm64 variant.
+ARG TARGETARCH
+ARG BUILDARCH
 RUN GO_MIN_VERSION="${GO_MIN_VERSION}" \
+    TARGETARCH="${TARGETARCH}" \
+    BUILDARCH="${BUILDARCH}" \
     /opt/scion-image-build/lib/verify-base-contract.sh
