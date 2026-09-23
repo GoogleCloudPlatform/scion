@@ -749,6 +749,7 @@ type Server struct {
 	secretBackend          secret.SecretBackend    // Optional secret backend
 	agentTokenService      *AgentTokenService      // Agent JWT token service
 	userTokenService       *UserTokenService       // User JWT token service
+	downloadSigningKey     []byte                  // HMAC key for skill file capability URLs (#1792)
 	uatService             *UserAccessTokenService // User access token service
 	inviteService          *InviteService          // Invite code service
 	oauthService           *OAuthService           // OAuth service for CLI authentication
@@ -1157,6 +1158,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		fp := sha256.Sum256(userTokenService.config.SigningKey)
 		slog.Info("User token service initialized", "key_fingerprint", hex.EncodeToString(fp[:8]))
 	}
+
+	// Initialize the dedicated download-URL signing key (#1792).
+	srv.initDownloadSigningKey(ctx)
 
 	// Initialize invite code service
 	srv.inviteService = NewInviteService(s)

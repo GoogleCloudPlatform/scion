@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Masterminds/semver/v3"
 
@@ -131,27 +132,63 @@ func (s *Server) handleSkillFileRead(w http.ResponseWriter, r *http.Request, ski
 		return
 	}
 
+	// Capability URL (#1792): a request carrying signature parameters is
+	// authorized by the signature alone, in place of a principal, and only for
+	// the exact skill/version/file it was issued for. Once signature
+	// parameters are present the request never falls back to principal
+	// authorization — an invalid, expired or mismatched signature is a 401.
+	// UnifiedAuthMiddleware admits unauthenticated signed requests on the
+	// strength of this check, so it must stay unconditional. It runs before
+	// the skill lookup so an unauthenticated caller learns nothing about
+	// which skill IDs exist.
+	signed := hasSkillFileSignature(r)
+	if signed && !s.verifySkillFileSignature(r, skillID, version, filePath, time.Now()) {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "invalid or expired download signature", nil)
+		return
+	}
+
 	skill, err := s.store.GetSkill(ctx, skillID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	if signed {
+		// The signature is bound to the requested ID; the store must agree.
+		if skill.ID != skillID {
+			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "invalid or expired download signature", nil)
+			return
+		}
+	} else if !s.authorizeSkillFileRead(w, r, skill) {
+		return
+	}
 
-	// Same authorization as handleSkillDownload.
+	s.serveSkillFile(w, r, skill, version, filePath)
+}
+
+// authorizeSkillFileRead applies principal authorization to an unsigned skill
+// file read — the same authorization as handleSkillDownload. It writes the
+// error response and returns false when the read is not allowed.
+func (s *Server) authorizeSkillFileRead(w http.ResponseWriter, r *http.Request, skill *store.Skill) bool {
+	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if skill.Visibility != store.VisibilityPublic {
 		if identity == nil {
 			NotFound(w, "Skill")
-			return
+			return false
 		}
 		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
 		if !decision.Allowed {
 			NotFound(w, "Skill")
-			return
+			return false
 		}
 	}
+	return true
+}
 
-	sv, err := s.store.GetSkillVersionByNumber(ctx, skillID, version)
+// serveSkillFile streams filePath of skill@version once the read is authorized.
+func (s *Server) serveSkillFile(w http.ResponseWriter, r *http.Request, skill *store.Skill, version, filePath string) {
+	ctx := r.Context()
+	sv, err := s.store.GetSkillVersionByNumber(ctx, skill.ID, version)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return

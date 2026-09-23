@@ -294,6 +294,9 @@ const (
 	AuthTypeBroker     = "broker"
 	AuthTypeProxy      = "proxy"
 	AuthTypeFederation = "federation"
+	// AuthTypeSignedURL labels a credential-less request admitted on the shape
+	// of a skill file capability URL (#1792). It carries no identity.
+	AuthTypeSignedURL = "signed-url"
 )
 
 // contextWithAuthType returns a new context with the auth type set.
