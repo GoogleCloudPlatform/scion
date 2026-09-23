@@ -12,6 +12,12 @@ later phases.
 
 ## What changed
 
+> This section describes the state reviewed in r1 (commit `6a7ba5f`). See
+> **Fix round 1** below for what changed since then — several things
+> mentioned here (`hasGoogleUserTrust`, `SetResolver`, the exchange's
+> internally-built default resolver) were removed during the fix round.
+
+
 - **`pkg/hub/federation_auth.go`** — added `(*FederationAuthenticator).IssuerConfig(url) (config.TrustedIssuerConfig, bool)`,
   cherry-picked from upstream PR `GoogleCloudPlatform/scion#1847` (closed; content
   preserved in `ptone/scion` at `/scion-volumes/scratchpad/projects/auth-passthrough/ref/1847.diff`
@@ -48,12 +54,12 @@ later phases.
 - **`pkg/hub/auth.go`** — added `AuthConfig.GoogleValidator` /
   `AuthConfig.GoogleResolver`; added the two `serveExternalBearer` hook call
   sites in `UnifiedAuthMiddleware` (after `ValidateUserToken` fails, and in the
-  `default:` unrecognized-format arm), cherry-picked from #1847's `auth.go`
-  hunks. Did **not** add `ExternalUserProvisioner` or `GoogleTokenInfoURL`
+  `default:` unrecognized-format arm), cherry-picked from `GoogleCloudPlatform/scion#1847`'s
+  `auth.go` hunks. Did **not** add `ExternalUserProvisioner` or `GoogleTokenInfoURL`
   (dropped per §7 reuse map).
 - **`pkg/hub/auth_external_bearer.go`** (new) — `serveExternalBearer` (response
   skeleton + `errExternalBearerNotApplicable` sentinel, cherry-picked from
-  #1847), `authenticateExternalBearer`, `classifyExternalBearer` (JWT +
+  `GoogleCloudPlatform/scion#1847`), `authenticateExternalBearer`, `classifyExternalBearer` (JWT +
   unverified Google `iss` → ID token; anything else → not applicable in this
   phase — no prefix sniff, no access-token branch yet), `googleTrust` (reads
   `IssuerConfig("https://accounts.google.com")`, requires `issuer_type: user`
@@ -153,3 +159,148 @@ the two `UnifiedAuthMiddleware` hook sites, `AuthTypeExternalBearer`, and the
   issue (`'auto_expose_ports' expected a map or struct, got "string"`)
   unrelated to auth-passthrough. Did not touch those packages.
 - `make build` — clean.
+
+## Fix round 1 (review r1, verdict REQUEST CHANGES: 0 Critical, 8 Required, 4 Optional, 2 Nit, 3 FYI)
+
+Reviewer: `ap-p1-rev`. Report: `/scion-volumes/scratchpad/projects/auth-passthrough/reviews/p1-r1-ap-p1-rev.md`.
+EM dispositions: `/scion-volumes/scratchpad/projects/auth-passthrough/briefs/ap-p1-dev-fix-r1.md`.
+Every finding resolved per the EM's disposition table; details below.
+
+### Required
+
+- **R1 (empty `expected_audience` guard ineffective).** `NewFederationAuthenticator`
+  was replacing an empty `ExpectedAudience` with the Hub's OIDC issuer URL and
+  storing only the resolved copy, so `IssuerConfig`/`googleTrust` could never see
+  "not configured." Fixed by giving `issuerEntry` a second field (`rawConfig`,
+  the as-configured copy with no fallback applied); `IssuerConfig` now returns
+  `rawConfig`, while `Authenticate()` still uses the resolved `config` for
+  federation-token validation. Tests: `TestGoogleTrust_EmptyExpectedAudience_NotOK`
+  (unit), `TestExternalBearer_EmptyExpectedAudience_NotApplicable` (integration:
+  a validly-signed Google token whose `aud` equals the fallback Hub URL is
+  rejected as not-applicable, validator never called).
+- **R2 (validator not shared with the exchange).** `server.go` built two
+  independent `NewGoogleCredentialValidator(nil)` instances (two JWKS caches,
+  two HTTP clients). Fixed: one validator + one resolver built once in `New`,
+  both passed into `NewGEExchangeService`. Test:
+  `TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer` (asserts
+  pointer identity between `srv.geExchangeService.validator`/`.resolver` and
+  `srv.authConfig.GoogleValidator`/`.GoogleResolver` after a real `New()`).
+- **R3 (exchange role delta untested; dead `SetResolver` seam).** Took the
+  preferred fix: `NewGEExchangeService` now takes a `*GoogleIdentityResolver`
+  directly (replacing `extIDStore, userStore, authChecker`); `SetResolver` and
+  the constructor's internally-built default resolver are gone (also closes
+  D2). All ~35 test call sites across `ge_exchange_test.go` and
+  `google_credential_validator_test.go` updated via a new `newTestResolver`
+  helper. Added `TestGEExchange_AdminEmails_ProvisionsAdminRole` (exercises the
+  role delta through the same resolver production actually uses) and the R2
+  wiring test above (also covers R3's "minimum acceptable" ask, done via the
+  preferred route instead).
+- **R4 (no test for SA rejection on the external-bearer path).** Added
+  `TestExternalBearer_ServiceAccountIDToken_Rejected`: SA ID token with
+  `aud=azp=`expected audience → 401, exact body `invalid external bearer
+  token`, handler not reached, no user or binding created.
+- **R5 (S7 test drove the dead arm).** `TestGEExchange_ServiceAccount` now has
+  the fake validator return `IsServiceAccount: true, nil` (matching what the
+  real validator actually does post-§4.2(i)) instead of the old
+  `ErrGoogleServiceAccount` sentinel, and asserts the exact rejection message
+  plus that no user/binding was created (resolver never reached).
+- **R6 (I1 not golden; configured-trust invariant untested).**
+  `TestExternalBearer_ConfiguredTrustInvariant_Golden` is a table-driven test
+  with 4 cases — (a) no trust + non-Hub JWT, (b) trust configured + wrong-
+  signature Hub JWT, (c) trust configured + non-Google-`iss` JWT, (d) trust
+  configured + opaque token in the `default:` arm — each asserting
+  `w.Body.Bytes()` byte-equal to an independently-reconstructed expected body
+  (`wantErrorBody`, built from the same `ErrorResponse`/`APIError` shape
+  `writeError` uses, fed with the real `ValidateUserToken` error text rather
+  than a hand-typed literal) and validator-call-count 0. Reconstructing
+  independently rather than hardcoding go-jose's exact error string still
+  catches the mutation class the reviewer found (M7: a stray `details` map;
+  M8: leaking `err.Error()` into a message that must stay fixed), because the
+  expected bytes are computed via a separate code path from the one under
+  test.
+- **R7 (401/403 bodies unasserted).** Added exact-body assertions (via
+  `wantErrorBody`) to `TestExternalBearer_UnverifiedEmail_Unauthorized` (U2),
+  the new R4 SA test, a new `TestExternalBearer_WrongAudience_Unauthorized`,
+  and `TestExternalBearer_NonAuthoritativeEmail_Forbidden` (U3).
+- **R8 (bare `#1847`).** Reworded to `GoogleCloudPlatform/scion#1847` in this
+  project log (the two remaining bare mentions) and rewrote the `d5717da37`
+  commit message (history rewrite, approved by ap-em — see the new head SHA
+  reported to ap-em).
+
+### Optional
+
+- **O1.** Added `TestExternalBearer_PATShapedToken_NeverTouchesGoogleValidator`
+  and `TestExternalBearer_ValidAgentToken_NeverTouchesGoogleValidator`. Both
+  test comments say explicitly that they cannot pin hook *ordering* — PATs and
+  agent tokens are routed away before either hook site is even reached
+  (`detectTokenType`'s prefix check for PATs; Step 1's unconditional early
+  return for agent tokens) — matching the reviewer's judgement 1.
+- **O2.** Added `TestExternalBearer_JWKSUpstreamFailure_ServiceUnavailable`:
+  JWKS endpoint returns 500 with no cached keys → 503 `upstream_unavailable`.
+- **O3.** Deleted `hasGoogleUserTrust` entirely. `server.go`'s `New` now always
+  constructs the base validator and resolver (the validator does no network
+  I/O until first use), so `googleTrust`, reading through
+  `cfg.FederationAuth` on every request, is the single source of truth for
+  whether the path is reachable — Google trust added later via hot reload
+  takes effect without a restart. Tests:
+  `TestExternalBearer_HotReload_TrustAddedWithoutRestart` (unit, via
+  `UnifiedAuthMiddleware` directly: same `AuthConfig`, store into the same
+  `atomic.Pointer` mid-test, second request succeeds) and
+  `TestGEExchange_Route_GoogleStackBuiltWithoutExchangeOrTrust` (integration,
+  via a real `New()` with neither Google trust nor the exchange configured).
+- **O4.** Added `TestNoPackageLevelMutableState`: a `go/parser`-based AST check
+  that `auth_external_bearer.go` and `google_identity_resolver.go` declare no
+  package-level `var` other than `errors.New(...)` sentinels. Named so Phase
+  2's `google_credential_cache.go` can be added to the file list directly.
+
+### Nit
+
+- **N1.** Fixed the `default:`-arm comment in `auth.go` — it referenced a
+  Google-ID-token `"typ"` detection that doesn't exist; `detectTokenType`
+  routes every 3-segment token to `tokenTypeUser`, so in Phase 1 this arm never
+  sees a JWT at all. Reworded to say it's reserved for opaque access tokens
+  (Phase 2).
+- **N2.** Added `errExternalBearerPrincipalRejected` sentinel for the SA
+  rejection in `authenticateExternalBearer`, replacing the ad-hoc
+  `fmt.Errorf`. Still maps to 401 via the `default` arm of the
+  `errors.Is`-driven switch in `serveExternalBearer`.
+
+### FYI
+
+- **F1 (recorded, no code change).** The exchange's status code for a *real*
+  SA ID token changes from 403 to 401 pre-Phase-3. Before §4.2(i), the SA
+  check ran before the `aud`/`azp` disagreement check in `ValidateIDToken`; a
+  real SA ID token (`azp` = numeric SA unique ID ≠ `aud`) now fails
+  `ErrGoogleFieldDisagreement` first, so the exchange returns 401 "credential
+  metadata inconsistent" instead of 403 "service account credentials not
+  accepted." Still fail-closed. Phase 3's §4.2(ii) SA audience rule makes these
+  tokens validate and restores the 403 via the exchange's Step 1.5. Our test
+  fakes (`TestGEExchange_ServiceAccount`, `TestExternalBearer_ServiceAccountIDToken_Rejected`)
+  construct `IsServiceAccount: true` directly rather than a real SA claim
+  shape, so they don't exercise this transition — Phase 3's S7/SA tests should
+  use the real SA claim shape (`azp` = numeric ID, `aud` = configured
+  audience) to catch it.
+- **F2, F3.** No action (reviewer confirmed correct as-is).
+
+### Dead code
+
+- **D1.** Removed the unreachable `case errors.Is(err, ErrGoogleServiceAccount):`
+  arm in `ge_exchange.go`'s `Exchange()`. Removed `ErrGoogleServiceAccount`
+  itself — `grep -rn ErrGoogleServiceAccount` (repo-wide, including `extras/`)
+  showed only the definition and the one test, both gone. Fixed the stale
+  "Not a service account" line in `ValidateIDToken`'s doc comment.
+- **D2.** Covered by R3 (constructor injection replaces `SetResolver`).
+
+### Verification (fix round 1)
+
+- `gofmt -l` clean on all touched files.
+- `go build -buildvcs=false ./...` (whole repo) — clean.
+- `go vet -buildvcs=false ./...` (whole repo) — clean.
+- Targeted run of every Phase-1-relevant test (`TestExternalBearer_*`,
+  `TestGoogleTrust_*`, `TestGEExchange_*`, `TestProductionValidator_*`,
+  `TestNoTokenInfo*`, `TestNoPackageLevelMutableState`, and the resolver/store
+  helper tests) — 123 tests, all green.
+- `go test -buildvcs=false ./pkg/hub/ -run TestGEExchange` (includes the new
+  route/wiring tests, `//go:build !no_sqlite`) — all green.
+- Full `go test -buildvcs=false -timeout 40m ./pkg/hub/ ./pkg/hub/authzop/` —
+  see the report to ap-em for the final pass/fail breakdown.
