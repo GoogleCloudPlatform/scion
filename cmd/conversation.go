@@ -16,11 +16,14 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/spf13/cobra"
@@ -360,9 +363,27 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	_, client, err := requireHubClient()
+	settings, client, err := requireHubClient()
 	if err != nil {
 		return err
+	}
+
+	// §3.6: --project documents "defaults to current project" but previously
+	// sent "" as-is, relying entirely on the server's agent-token fallback —
+	// which only applies to agent callers, so a human CLI user with no
+	// --project got a NULL-project group with no web audience. Fill it from
+	// the resolved hub context (flag > hub-linked project > local project),
+	// the same resolution every other project-scoped command uses. If none
+	// resolves, leave it empty: the server-side agent-token fallback (or,
+	// for a user identity with neither, a clear "projectId is required"
+	// error) still applies.
+	var projectResolveErr error
+	if convProject == "" {
+		if resolved, resolveErr := resolveProjectID(settings, convProject); resolveErr == nil {
+			convProject = resolved
+		} else {
+			projectResolveErr = resolveErr
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
@@ -376,11 +397,34 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 
 	conv, err := client.Conversations().Create(ctx, req)
 	if err != nil {
+		// If we couldn't resolve a project locally and the server's 400 is
+		// specifically the projectId-required guard, the resolveProjectID
+		// error ("Use --project flag or link this project with 'scion hub
+		// link'") is the more actionable message — surface both. Checking
+		// the message (not just "any 400") matters: an agent whose local
+		// settings don't resolve a project but whose token does still hits
+		// projectResolveErr != nil, and a 400 for an unrelated reason (e.g.
+		// an invalid name) must not be misreported as a project problem.
+		var apiErr *apiclient.APIError
+		if projectResolveErr != nil && errors.As(err, &apiErr) && apiErr.IsBadRequest() &&
+			strings.Contains(apiErr.Message, "projectId is required") {
+			return fmt.Errorf("failed to create conversation: %w (%v)", err, projectResolveErr)
+		}
 		return fmt.Errorf("failed to create conversation: %w", err)
 	}
 
 	if isJSONOutput() {
 		return outputJSON(conv)
+	}
+
+	if len(conv.Participants) == 0 {
+		// See handleCreateConversation's AddParticipant-failure path
+		// (pkg/hub/handlers_conversations.go): the conversation exists and
+		// is visible on the web, but until a participant row exists the
+		// creator can't read it back via `scion conversation
+		// show/messages/participants` or see it in `scion conversation list`.
+		fmt.Fprintf(os.Stderr, "warning: created conversation %s but could not add you as a participant; "+
+			"it won't appear in `scion conversation list` or be readable via `scion conversation show` yet\n", conv.ID)
 	}
 
 	fmt.Printf("Conversation created: %s\n", conv.ID)

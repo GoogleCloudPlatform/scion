@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -127,6 +128,26 @@ func grantAgentProjectAccess(t *testing.T, s store.Store, agentID, projectID str
 		CreatedBy:        "test",
 	})
 	require.NoError(t, err)
+}
+
+// wireSharedWebChatStore wires a WebChatStore onto srv that shares the test
+// store's underlying SQLite DB. Group creation now routes through
+// WebChatStore.CreateTopic (chat-thread-bridge), so every test that creates
+// a group conversation via the HTTP handler needs one wired — otherwise the
+// handler returns 503. Sharing the DB is load-bearing: CreateTopic's
+// dual-write must land in the same "conversations" table that
+// store.GetConversation reads back from.
+func wireSharedWebChatStore(t *testing.T, srv *Server, s store.Store) WebChatStore {
+	t.Helper()
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok, "test store does not expose DB()")
+	rawDB := dbProvider.DB()
+	require.NotNil(t, rawDB, "store DB() returned nil")
+
+	wcs := NewWebChatStore(rawDB, "sqlite3")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+	return wcs
 }
 
 // ---- Tests ----
@@ -554,6 +575,7 @@ func TestConvListMessages_WithPagination(t *testing.T) {
 
 func TestCreateConversation_HappyPath(t *testing.T) {
 	srv, s := testServer(t)
+	wireSharedWebChatStore(t, srv, s)
 	project, agent, _ := setupConvTestData(t, s)
 	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
@@ -602,14 +624,18 @@ func TestCreateConversation_MissingName(t *testing.T) {
 
 func TestCreateConversation_DefaultsToGroup(t *testing.T) {
 	srv, s := testServer(t)
-	_, agent, _ := setupConvTestData(t, s)
+	wireSharedWebChatStore(t, srv, s)
+	project, agent, _ := setupConvTestData(t, s)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
+	// projectId comes from the agent's own token (§3.2 step 2), not the body —
+	// this test is about kind defaulting, not project resolution.
 	body := createConversationRequest{DisplayName: "No Kind Specified"}
 	bodyBytes, _ := json.Marshal(body)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, ""))
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 	rr := httptest.NewRecorder()
 	srv.handleCreateConversation(rr, req)
 
@@ -789,6 +815,7 @@ func TestCreateConversation_ProjectNotFound(t *testing.T) {
 
 func TestMux_CreateConversation(t *testing.T) {
 	srv, s := testServer(t)
+	wireSharedWebChatStore(t, srv, s)
 	project, agent, _ := setupConvTestData(t, s)
 	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
@@ -916,6 +943,7 @@ func TestMux_SetDefaultAgent(t *testing.T) {
 
 func TestCreateConversation_DefaultsToAgentProject(t *testing.T) {
 	srv, s := testServer(t)
+	wireSharedWebChatStore(t, srv, s)
 	project, agent, _ := setupConvTestData(t, s)
 	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 

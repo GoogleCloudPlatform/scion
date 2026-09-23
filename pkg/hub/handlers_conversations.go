@@ -489,44 +489,75 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	now := time.Now().UTC()
-	conv := &store.Conversation{
-		ID:             api.NewUUID(),
-		Kind:           kind,
-		Surface:        "native",
-		DisplayName:    req.DisplayName,
-		DriftState:     "active",
-		LastActivityAt: now,
-		CreatedAt:      now,
-	}
-
-	if req.ProjectID != "" {
-		conv.ProjectID = &req.ProjectID
-	}
-
-	if err := s.store.CreateConversation(ctx, conv); err != nil {
-		writeErrorFromErr(w, err, "")
+	// Q2 (design doc chat-thread-bridge §7, ptone decided (a)): a group
+	// conversation must always be project-scoped; only DMs are global. Check
+	// this before any write (AC-10: no conversation/topic row on this path) —
+	// an agent with no projectId already fell back to its token project
+	// above, so only a user with neither a body projectId nor a token
+	// project reaches this.
+	if req.ProjectID == "" {
+		BadRequest(w, "projectId is required")
 		return
 	}
 
-	// Auto-add the caller as a participant.
-	participant := &store.ConversationParticipant{
-		ID:             api.NewUUID(),
-		ConversationID: conv.ID,
-		PrincipalKind:  identity.Type(),
-		PrincipalID:    identity.ID(),
-		Role:           "member",
-		JoinedAt:       now,
+	// kind == "group" from here (direct was rejected above). Route creation
+	// through the same atomic topic-creation path every other native group
+	// mint site uses (design doc: chat-thread-bridge §3), instead of a bare
+	// store.CreateConversation that never mints a topic or an external_ref.
+	conv, apiErr := s.createGroupConversation(ctx, "native", createGroupParams{
+		ProjectID:   req.ProjectID,
+		DisplayName: req.DisplayName,
+		CreatedBy:   identity.ID(),
+	})
+	if apiErr != nil {
+		apiErr.write(w)
+		return
 	}
 
-	if err := s.store.AddParticipant(ctx, participant); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
+	// Auto-add the caller as a participant. This is a listing-index entry
+	// only (design doc §2.4.2.1 / §3.5) — project membership remains the
+	// access authority for group conversations. The ConversationParticipant
+	// principal_kind enum only allows "user"/"agent" (ent schema); the dev
+	// pseudo-identity (Identity.Type()=="dev") is neither, so skip the insert
+	// rather than fail the create after the topic already exists.
+	participants := []store.ConversationParticipant{}
+	if identity.Type() != "dev" {
+		participant := &store.ConversationParticipant{
+			ID:             api.NewUUID(),
+			ConversationID: conv.ID,
+			PrincipalKind:  identity.Type(),
+			PrincipalID:    identity.ID(),
+			Role:           "member",
+			JoinedAt:       time.Now().UTC(),
+		}
+
+		if err := s.store.AddParticipant(ctx, participant); err != nil {
+			// The topic and its linked conversation already exist and have
+			// already been announced (PublishChatTopicEvent, inside
+			// createGroupConversation). Failing the request here would give
+			// the client a 500 for a resource that in fact exists, and a
+			// retry with the same name would now 409 NAME_CONFLICT with no
+			// way to recover the participant row. Log and proceed with 201
+			// rather than fail a create that, in fact, succeeded.
+			//
+			// This is not free: unlike web access (project-based, §2.4.2.1),
+			// the conversation API gates group reads on the participant row
+			// itself (handleGetConversation, handleConvListMessages). Until
+			// a participant row exists for this conversation, the creator
+			// will get 403 from `scion conversation show/messages/participants`
+			// for it, and it will not appear in `scion conversation list`.
+			// The response's empty participants array is the caller's only
+			// signal that this happened.
+			slog.ErrorContext(ctx, "handleCreateConversation: AddParticipant failed after topic commit",
+				"conversationID", conv.ID, "externalRef", conv.ExternalRef, "error", err)
+		} else {
+			participants = append(participants, *participant)
+		}
 	}
 
 	writeJSON(w, http.StatusCreated, conversationResponse{
 		Conversation: *conv,
-		Participants: []store.ConversationParticipant{*participant},
+		Participants: participants,
 	})
 }
 
