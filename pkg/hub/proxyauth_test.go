@@ -20,8 +20,10 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -642,6 +644,29 @@ func (kp *testRSAKeyPair) writePublicKeyPEM(t *testing.T) string {
 	return path
 }
 
+// writeCertificatePEM generates a self-signed certificate embedding kp's
+// public key, writes it to a temp file, and returns the path. Used to test
+// the "provide a cert file instead of a raw public key" fallback.
+func (kp *testRSAKeyPair) writeCertificatePEM(t *testing.T) string {
+	t.Helper()
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "jwt-test"},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(1 * time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &kp.privateKey.PublicKey, kp.privateKey)
+	if err != nil {
+		t.Fatalf("failed to create self-signed certificate: %v", err)
+	}
+	block := &pem.Block{Type: "CERTIFICATE", Bytes: der}
+	path := filepath.Join(t.TempDir(), "cert.pem")
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatalf("failed to write certificate file: %v", err)
+	}
+	return path
+}
+
 // signJWT creates an RS256-signed compact JWT serialization.
 func (kp *testRSAKeyPair) signJWT(t *testing.T, claims interface{}) string {
 	t.Helper()
@@ -1073,6 +1098,28 @@ func TestJWTStaticKeySource_LoadsPEMKey(t *testing.T) {
 	}
 	if !rsaKey1.Equal(&kp.privateKey.PublicKey) {
 		t.Error("expected loaded key to match the original public key")
+	}
+}
+
+func TestJWTStaticKeySource_LoadsCertificatePEM(t *testing.T) {
+	kp := newTestRSAKeyPair(t)
+	path := kp.writeCertificatePEM(t)
+
+	ks, err := NewStaticJWTKeySource(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	key, err := ks.GetKey("some-kid")
+	if err != nil {
+		t.Fatalf("unexpected error from GetKey: %v", err)
+	}
+	rsaKey, ok := key.(*rsa.PublicKey)
+	if !ok {
+		t.Fatalf("expected *rsa.PublicKey, got %T", key)
+	}
+	if !rsaKey.Equal(&kp.privateKey.PublicKey) {
+		t.Error("expected key extracted from certificate to match the original public key")
 	}
 }
 

@@ -487,7 +487,10 @@ func NewStaticJWTKeySource(path string) (jwtKeySource, error) {
 
 // parseJWTPublicKey parses a DER-encoded public key, trying the standard PKIX
 // (SubjectPublicKeyInfo) form first — what `openssl ... -pubout` produces —
-// then falling back to the legacy RSA-only PKCS1 form.
+// then falling back to the legacy RSA-only PKCS1 form, and finally to an
+// X.509 certificate (in which case the certificate's public key is used).
+// The certificate fallback lets operators point publicKeyFile at a cert file
+// they already have on hand instead of extracting the raw public key.
 func parseJWTPublicKey(der []byte) (interface{}, error) {
 	if key, err := x509.ParsePKIXPublicKey(der); err == nil {
 		return key, nil
@@ -495,7 +498,10 @@ func parseJWTPublicKey(der []byte) (interface{}, error) {
 	if key, err := x509.ParsePKCS1PublicKey(der); err == nil {
 		return key, nil
 	}
-	return nil, fmt.Errorf("unsupported public key encoding (expected PKIX or PKCS1)")
+	if cert, err := x509.ParseCertificate(der); err == nil {
+		return cert.PublicKey, nil
+	}
+	return nil, fmt.Errorf("unsupported public key encoding (expected PKIX, PKCS1, or Certificate)")
 }
 
 // GetKey implements jwtKeySource. kid is ignored: a static key source has
