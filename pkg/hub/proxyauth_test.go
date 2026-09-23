@@ -28,6 +28,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1423,5 +1424,66 @@ func TestJWKSFileKeySource_InvalidJSON(t *testing.T) {
 
 	if _, err := NewJWKSFileKeySource(path); err == nil {
 		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestJWKSFileKeySource_EmptyKeySet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.json")
+	if err := os.WriteFile(path, []byte(`{"keys":[]}`), 0o600); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	_, err := NewJWKSFileKeySource(path)
+	if err == nil {
+		t.Fatal("expected error for jwks file with no keys")
+	}
+	if !strings.Contains(err.Error(), "no keys with a valid 'kid'") {
+		t.Errorf("expected error to mention missing valid kid, got: %v", err)
+	}
+}
+
+func TestJWKSFileKeySource_NoKeysWithKid(t *testing.T) {
+	// A key with no kid is ignored by indexJWKSKeysByKid, so a JWKS
+	// containing only such keys should be rejected the same as an empty one.
+	kp := newTestKeyPair(t, "") // no kid
+	path := writeJWKSFile(t, kp)
+
+	_, err := NewJWKSFileKeySource(path)
+	if err == nil {
+		t.Fatal("expected error for jwks file with no keyed keys")
+	}
+	if !strings.Contains(err.Error(), "no keys with a valid 'kid'") {
+		t.Errorf("expected error to mention missing valid kid, got: %v", err)
+	}
+}
+
+// indexJWKSKeysByKid's nil-key rejection guards against public key material
+// that fails to parse into a usable key despite carrying a kid. go-jose's own
+// JSONWebKey.UnmarshalJSON already rejects unparseable keys before this point
+// (json.Unmarshal fails outright), so this path is tested directly against a
+// jose.JSONWebKeySet value rather than round-tripped through a JSON file.
+func TestIndexJWKSKeysByKid_NilKeyRejected(t *testing.T) {
+	jwks := jose.JSONWebKeySet{
+		Keys: []jose.JSONWebKey{
+			{KeyID: "bad-key", Key: nil},
+		},
+	}
+
+	_, err := indexJWKSKeysByKid(jwks, "/fake/path.json")
+	if err == nil {
+		t.Fatal("expected error for key with nil public key material")
+	}
+	if !strings.Contains(err.Error(), `kid "bad-key"`) {
+		t.Errorf("expected error to mention kid %q, got: %v", "bad-key", err)
+	}
+}
+
+func TestIndexJWKSKeysByKid_EmptyRejected(t *testing.T) {
+	_, err := indexJWKSKeysByKid(jose.JSONWebKeySet{}, "/fake/path.json")
+	if err == nil {
+		t.Fatal("expected error for empty jwks")
+	}
+	if !strings.Contains(err.Error(), "no keys with a valid 'kid'") {
+		t.Errorf("expected error to mention missing valid kid, got: %v", err)
 	}
 }

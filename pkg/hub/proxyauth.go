@@ -550,9 +550,11 @@ type jwksFileSource struct {
 
 // NewJWKSFileKeySource loads a JWKS JSON document from path and indexes its
 // keys by kid. The file is read and parsed eagerly — intended to be called
-// during server startup — so a missing file or malformed JSON is reported at
-// construction time rather than on the first incoming request. Keys without
-// a kid are ignored, since this source resolves exclusively by kid.
+// during server startup — so a missing file, malformed JSON, a key with a
+// kid but no usable public key, or a file with no valid keyed keys at all is
+// reported at construction time rather than on the first incoming request.
+// Keys without a kid are ignored, since this source resolves exclusively by
+// kid.
 func NewJWKSFileKeySource(path string) (jwtKeySource, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -562,13 +564,34 @@ func NewJWKSFileKeySource(path string) (jwtKeySource, error) {
 	if err := json.Unmarshal(data, &jwks); err != nil {
 		return nil, fmt.Errorf("failed to parse jwks file %q: %w", path, err)
 	}
+	keys, err := indexJWKSKeysByKid(jwks, path)
+	if err != nil {
+		return nil, err
+	}
+	return &jwksFileSource{keys: keys}, nil
+}
+
+// indexJWKSKeysByKid builds the kid -> key map for jwksFileSource, rejecting
+// a keyed entry whose public key material is nil/invalid (which would
+// otherwise fail silently at signature-verification time on first use rather
+// than at startup) and rejecting a JWKS with no valid keyed keys at all
+// (catches empty or malformed files early). Split out from
+// NewJWKSFileKeySource so this validation can be tested directly against a
+// jose.JSONWebKeySet value.
+func indexJWKSKeysByKid(jwks jose.JSONWebKeySet, path string) (map[string]jose.JSONWebKey, error) {
 	keys := make(map[string]jose.JSONWebKey, len(jwks.Keys))
 	for _, k := range jwks.Keys {
 		if k.KeyID != "" {
+			if k.Key == nil {
+				return nil, fmt.Errorf("jwks file %q contains a key with kid %q but nil/invalid public key", path, k.KeyID)
+			}
 			keys[k.KeyID] = k
 		}
 	}
-	return &jwksFileSource{keys: keys}, nil
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("jwks file %q contains no keys with a valid 'kid'", path)
+	}
+	return keys, nil
 }
 
 // GetKey implements jwtKeySource with a simple map lookup by kid — the file
