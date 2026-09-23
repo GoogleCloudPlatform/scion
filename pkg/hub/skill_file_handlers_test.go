@@ -18,6 +18,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -172,4 +173,87 @@ func TestAppendSkillVersionQuery(t *testing.T) {
 	// Cloud signed URLs are untouched.
 	assert.Equal(t, "https://storage.googleapis.com/b/o?sig=x",
 		appendSkillVersionQuery("https://storage.googleapis.com/b/o?sig=x", "1.0.0"))
+}
+
+// publishLocalSkillFile publishes version 1.0.0 of skill containing a single
+// SKILL.md with content, via the hub-proxied local storage flow.
+func publishLocalSkillFile(t *testing.T, srv *Server, owner *store.User, skill *store.Skill, content []byte) {
+	t.Helper()
+	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/skills/"+skill.ID+"/versions",
+		PublishVersionRequest{Version: "1.0.0", Files: []FileUploadRequest{{Path: "SKILL.md", Size: int64(len(content))}}})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var pub PublishVersionResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&pub))
+	require.Len(t, pub.UploadURLs, 1)
+	rec = doRawRequestAsUser(t, srv, owner, pub.UploadURLs[0].Method, pub.UploadURLs[0].URL, content)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/skills/"+skill.ID+"/finalize",
+		FinalizeSkillVersionRequest{Version: "1.0.0", Manifest: &SkillManifest{Files: []store.TemplateFile{
+			{Path: "SKILL.md", Size: int64(len(content)), Hash: sha256Hex(content)},
+		}}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// doAnonymousRequest sends a request directly to the mux, bypassing the auth
+// middleware, so the handler sees a nil identity (defense-in-depth).
+func doAnonymousRequest(srv *Server, path string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestSkillFiles_ReadAuthz verifies that skill file reads and /download
+// enforce visibility: private skills require an identity with read access,
+// public skills are readable anonymously.
+func TestSkillFiles_ReadAuthz(t *testing.T) {
+	srv, alice, bob, skill := setupLocalStorageSkillTest(t)
+	content := []byte("---\nname: secret\n---\n# Secret")
+	publishLocalSkillFile(t, srv, alice, skill, content)
+
+	fileURL := "/api/v1/skills/" + skill.ID + "/files/SKILL.md?version=1.0.0"
+	downloadURL := "/api/v1/skills/" + skill.ID + "/download?version=1.0.0"
+
+	// Private skill.
+	t.Run("private/anonymous file read denied", func(t *testing.T) {
+		rec := doAnonymousRequest(srv, fileURL)
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "Secret")
+	})
+	t.Run("private/anonymous download denied", func(t *testing.T) {
+		rec := doAnonymousRequest(srv, downloadURL)
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "/files/")
+	})
+	t.Run("private/no-access user file read denied", func(t *testing.T) {
+		rec := doRawRequestAsUser(t, srv, bob, http.MethodGet, fileURL, nil)
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	})
+	t.Run("private/no-access user download denied", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, bob, http.MethodGet, downloadURL, nil)
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	})
+	t.Run("private/authorized user file read allowed", func(t *testing.T) {
+		rec := doRawRequestAsUser(t, srv, alice, http.MethodGet, fileURL, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, content, rec.Body.Bytes())
+	})
+	t.Run("private/authorized user download allowed", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, alice, http.MethodGet, downloadURL, nil)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+
+	// Public skill: readable without identity.
+	skill.Visibility = store.VisibilityPublic
+	require.NoError(t, srv.store.UpdateSkill(context.Background(), skill))
+
+	t.Run("public/anonymous file read allowed", func(t *testing.T) {
+		rec := doAnonymousRequest(srv, fileURL)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, content, rec.Body.Bytes())
+	})
+	t.Run("public/anonymous download allowed", func(t *testing.T) {
+		rec := doAnonymousRequest(srv, downloadURL)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
 }

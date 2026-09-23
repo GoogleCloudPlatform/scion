@@ -1197,7 +1197,11 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	identity := GetIdentityFromContext(ctx)
-	if identity != nil && skill.Visibility != store.VisibilityPublic {
+	if skill.Visibility != store.VisibilityPublic {
+		if identity == nil {
+			NotFound(w, "Skill")
+			return
+		}
 		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
 		if !decision.Allowed {
 			NotFound(w, "Skill")
