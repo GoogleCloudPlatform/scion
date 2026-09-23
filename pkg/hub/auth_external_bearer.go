@@ -62,14 +62,22 @@ var errExternalBearerNotApplicable = errors.New("external bearer: not applicable
 // in serveExternalBearer stays entirely errors.Is-driven.
 var errExternalBearerPrincipalRejected = errors.New("external bearer: principal type not accepted in this phase")
 
-// errExternalBearerInternalError marks a Resolve failure that is neither a
-// recognized policy outcome (suspended, access denied, non-authoritative
-// email, binding conflict) nor a "the bound user record is gone"
-// (store.ErrNotFound) — i.e. a store fault or other internal error. It maps
-// to 503, distinct from a credential rejection (401), matching the Hub-JWT
-// path's store-fault handling (auth.go's UserStore.GetUser check). Decision:
-// EM item 6, fix round 2.
-var errExternalBearerInternalError = errors.New("external bearer: internal resolver error")
+// errExternalBearerResolveFailed marks any error classifyResolveError sees
+// (i.e. any error GoogleResolver.Resolve returns). It is always present on a
+// Resolve error, regardless of the underlying cause, so a Resolve error can
+// never fall into serveExternalBearer's default 401 arm: the specific 403
+// arms (suspended, access denied, non-authoritative email, binding conflict,
+// store.ErrNotFound) are checked first against the same, still-intact error
+// chain, and everything else lands on the 503 store_error arm via this
+// sentinel. That is deliberate: a validator/principal-policy failure (bad
+// signature, wrong audience, SA in this phase, ...) is a credential
+// rejection (401); anything from Resolve is either a known policy outcome or
+// an internal/store fault (403/503) — never "invalid token" (design §4.4
+// item 6, fix round 2; simplified in fix round 3 per review r3 optional
+// finding 2, which showed the prior allowlist in classifyResolveError was
+// redundant with serveExternalBearer's own arms and, if the two ever
+// diverged, could misroute a future resolver error to 401).
+var errExternalBearerResolveFailed = errors.New("external bearer: resolve failed")
 
 // externalBearerKind classifies a bearer token for the external-bearer path.
 type externalBearerKind int
@@ -170,7 +178,7 @@ func serveExternalBearer(w http.ResponseWriter, r *http.Request, next http.Handl
 			writeError(w, http.StatusServiceUnavailable, "upstream_unavailable",
 				"external identity provider unavailable", nil)
 			return true
-		case errors.Is(err, errExternalBearerInternalError):
+		case errors.Is(err, errExternalBearerResolveFailed):
 			log.Error("External bearer: internal resolver error", "error", err)
 			writeError(w, http.StatusServiceUnavailable, "store_error",
 				"unable to verify user status", nil)
@@ -236,23 +244,22 @@ func authenticateExternalBearer(ctx context.Context, token string, cfg AuthConfi
 	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb)), nil
 }
 
-// classifyResolveError distinguishes the resolver outcomes serveExternalBearer
-// already maps specifically (suspension, access denial, non-authoritative
-// email, binding conflict, or the bound user record having disappeared —
-// store.ErrNotFound) from everything else: a store fault or other internal
-// error, which is not a credential rejection and must not be reported as one
-// (503, not 401 or 403). errors.Is only, and %w wrapping is preserved end to
-// end so the original error is still loggable and matchable.
+// classifyResolveError always wraps a Resolve error with
+// errExternalBearerResolveFailed via a second %w, so the error keeps
+// matching both that sentinel and its original chain (errors.Is unwraps a
+// %w-tree regardless of which branch a target sits on; verified this holds
+// for two %w verbs in one fmt.Errorf call). serveExternalBearer's specific
+// 403 arms are checked before the errExternalBearerResolveFailed arm, so
+// they still win for the outcomes they name — this wrap only guarantees that
+// everything else lands on 503, never the 401 default reserved for
+// validator/principal-policy failures.
+//
+// r3 review optional finding 2: an earlier version of this function
+// allowlisted the specific-outcome sentinels and left everything else
+// unwrapped, which worked only because it duplicated serveExternalBearer's
+// own list — a future sentinel added to one list but not the other would
+// have silently misrouted a resolver fault to 401. Always wrapping removes
+// that duplication and that risk.
 func classifyResolveError(err error) error {
-	switch {
-	case errors.Is(err, ErrUserSuspended),
-		errors.Is(err, ErrAccessDenied),
-		errors.Is(err, errNonAuthoritativeEmail),
-		errors.Is(err, errBindingConflict),
-		errors.Is(err, errAmbiguousLinkage),
-		errors.Is(err, store.ErrNotFound):
-		return err
-	default:
-		return fmt.Errorf("%w: %w", errExternalBearerInternalError, err)
-	}
+	return fmt.Errorf("%w: %w", errExternalBearerResolveFailed, err)
 }

@@ -168,6 +168,17 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 		return user, nil
 	}
 
+	// A binding-lookup fault that is not "no such binding" must not be
+	// silently treated as "no binding": that would let a transient store
+	// error either provision a duplicate user or (for a non-authoritative
+	// email) surface as 403 instead of the store fault it actually is. Only
+	// store.ErrNotFound means "no binding exists yet" (F2, fix round 3).
+	if !errors.Is(err, store.ErrNotFound) {
+		r.log.Error("google identity resolver: external identity lookup failed",
+			"sub", identity.Subject, "error", err)
+		return nil, fmt.Errorf("check external identity binding: %w", err)
+	}
+
 	// Step 2: No existing binding — attempt first-time bootstrap.
 	// Automatic bootstrap only for authoritative email domains: Gmail,
 	// verified Workspace hd, or a Google service-account email (Google
