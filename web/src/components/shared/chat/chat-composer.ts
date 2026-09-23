@@ -24,7 +24,8 @@
  * - Sends via `chat-send` custom event: {text, plain, interrupt, mentions}
  * - @-mention autocomplete integration (Phase 4)
  * - The composer knows nothing about the network
- * - Send on Enter (Shift+Enter for newline)
+ * - Send on Enter (Shift+Enter for newline); on touch-primary devices Enter
+ *   inserts a newline instead, since there is no Shift+Enter combo
  * - Right-click send button for "Send with interruption"
  */
 
@@ -111,6 +112,22 @@ export interface MemberInfo {
   email: string;
   avatarUrl?: string;
   kind: 'user' | 'agent';
+}
+
+/**
+ * Whether the primary input mechanism does not support hover — i.e. touch is
+ * the primary way of interacting with this device. Mice and trackpads
+ * support hover; fingers do not. This is more accurate than `ontouchstart`
+ * presence checks, which also flag laptops with touchscreens where a mouse
+ * or trackpad is still the primary input.
+ */
+let _isPrimaryInputTouchCached: boolean | undefined;
+function isPrimaryInputTouch(): boolean {
+  if (_isPrimaryInputTouchCached === undefined) {
+    _isPrimaryInputTouchCached =
+      typeof window !== 'undefined' && window.matchMedia('(hover: none)').matches;
+  }
+  return _isPrimaryInputTouchCached;
 }
 
 /**
@@ -720,6 +737,7 @@ export class ScionChatComposer extends LitElement {
               : nothing}
             <div class="textarea-wrapper">
               <sl-textarea
+                enterkeyhint="enter"
                 placeholder=${inEditMode ? 'Edit your message...' : 'Send a message...'}
                 size="small"
                 rows="1"
@@ -965,7 +983,9 @@ export class ScionChatComposer extends LitElement {
       return; // consumed by autocomplete
     }
 
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    // On touch devices there is no Shift+Enter combo to insert a newline, so
+    // Enter is left to its default textarea behavior there instead of sending.
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isPrimaryInputTouch()) {
       e.preventDefault();
       this.handleSend();
     }
