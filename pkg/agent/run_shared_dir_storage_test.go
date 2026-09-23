@@ -618,6 +618,10 @@ func TestStartSharedDirStorage_MalformedGlobalSettings_MentionsKey_FailsClosed(t
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "server.shared_dir_storage")
+	// Round 5 review nit T5: pin the wrapping context, not just the setting
+	// name, so this test can't be satisfied by an unrelated error that
+	// merely happens to mention "server.shared_dir_storage".
+	assert.Contains(t, err.Error(), "loading global settings")
 	assert.Equal(t, 0, ranCount, "Run must never be called when the global settings load fails closed")
 }
 
@@ -750,6 +754,50 @@ func TestStartSharedDirStorage_LegacyGlobalSettings_NoKey_SucceedsAsMain(t *test
 		SharedDirs:  []api.SharedDir{{Name: "scratchpad"}},
 	})
 	require.NoError(t, err)
+	assertLegacyLocalSharedDirBehavior(t, capturedConfig, envMap, f.projectScionDir)
+}
+
+// TestStartSharedDirStorage_V1GlobalSettings_CommentedOutBlock_SucceedsAsMain
+// is round 5 review finding C1=T1=S-L2: a well-formed, successfully-loaded
+// v1 global settings file whose ONLY mention of "shared_dir_storage" is a
+// YAML comment (the design's documented rollback path — "comment out the
+// block to disable") must behave exactly like main. Before this fix,
+// GlobalSettingsMentions' raw substring check fired unconditionally on the
+// "not loaded" branch, even for a file that loaded successfully with
+// Server == nil, and Start failed every single time with a misleading
+// "missing schema_version" error — regressing AC1 and the rollback path.
+func TestStartSharedDirStorage_V1GlobalSettings_CommentedOutBlock_SucceedsAsMain(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+# server:
+#   shared_dir_storage:
+#     backend: nfs
+`), 0644))
+	f.writeProjectSettings(t, "")
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	envMap := map[string]string{
+		"SCION_AGENT_ID":   "agent-15",
+		"SCION_PROJECT_ID": "pid-v1-commented-out",
+	}
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env:         envMap,
+		SharedDirs:  []api.SharedDir{{Name: "scratchpad"}},
+	})
+	require.NoError(t, err, "a commented-out shared_dir_storage block in a well-formed v1 file must not fail Start")
 	assertLegacyLocalSharedDirBehavior(t, capturedConfig, envMap, f.projectScionDir)
 }
 

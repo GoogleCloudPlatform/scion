@@ -15,9 +15,7 @@
 package agent
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -173,80 +171,61 @@ func resolveSharedDirs(
 	// only when the host base is present (it won't be inside a future
 	// in-cluster GKE broker, design §3.3 T1 compatibility).
 	if _, statErr := os.Stat(res.HostBase); statErr == nil {
-		// os.Root (Go 1.26) bounds mkdir/chmod to the HOST BASE — it
-		// refuses to traverse a component whose symlink target would leave
-		// the base at all, so nothing is ever created outside the export on
-		// any failure path (round 3 security review finding S-L2;
-		// disposition 7'). That is not the same as confining to the
-		// PROJECT'S OWN LEAF: os.Root happily follows a relative symlink
-		// that stays inside the base (e.g. one project's shared-dirs
-		// pointing at another's), which would silently redirect the bind
-		// mount across projects. Round 4 review finding C1/T1/S-M1: an
-		// earlier version of this code dropped the leaf-confinement check
-		// as "redundant with os.Root" — it is not, and that was a
-		// regression from round 3. The explicit equality check below (not
-		// os.Root) is what confines the returned Source to the project's
-		// own leaf; keep both, they cover different escapes.
+		// Round 5 review finding C1=T1=S-L2 (== C2=T2=S-L1): mkdir and
+		// chmod are now done via createSharedDirViaComponentWalk, which
+		// walks every component of `rel` with openat(O_NOFOLLOW|O_DIRECTORY)
+		// and mkdirat, refusing ANY symlink — leaf or intermediate, inside
+		// the export or outside it — before creating or touching anything
+		// past it. This supersedes the round 3/4 os.Root-based approach
+		// entirely (os.Root is no longer used anywhere in this file):
+		// os.Root only refused a traversal that would ESCAPE the root, so
+		// it still followed a relative symlink that stayed inside it (e.g.
+		// one project's shared-dirs pointing at another's), letting a real
+		// mkdir+chmod land inside a victim's tree, or at the export root,
+		// before the equality check below ever ran (round 5 findings
+		// C1/T2/S-L1: "nothing created in the victim" was not met). The
+		// O_NOFOLLOW walk refuses the symlink atomically as part of the
+		// open call, before any subsequent component — including the leaf
+		// — is ever created, so nothing is created or chmod'd anywhere
+		// outside the exact directory chain this call is resolving,
+		// regardless of any concurrent symlink swap.
 		resolvedHostBase, err := filepath.EvalSymlinks(res.HostBase)
 		if err != nil {
 			return nil, nil, fmt.Errorf("server.shared_dir_storage: resolve host base symlinks: %w", err)
 		}
-		root, err := os.OpenRoot(resolvedHostBase)
-		if err != nil {
-			return nil, nil, fmt.Errorf("server.shared_dir_storage: open host base: %w", err)
-		}
-		defer root.Close()
 
 		for i, name := range names {
 			sd := res.SharedDirs[name]
 			rel := sd.ServerRelativePath // relative to HostBase, e.g. projects/<pid>/shared-dirs/<name>
 
-			// Round 4 review nit C4/C5: Lstat the leaf first, rather than
-			// treating any root.Stat error as "does not exist" (masking a
-			// real error such as EACCES/ENOTDIR), and to give a clear
-			// "refusing a symlink" error instead of the confusing
-			// "mkdirat: file exists" that root.MkdirAll would otherwise
-			// return when the leaf name is already taken by a symlink.
-			var alreadyExisted bool
-			if info, lstatErr := root.Lstat(rel); lstatErr == nil {
-				if info.Mode()&os.ModeSymlink != 0 {
-					return nil, nil, fmt.Errorf(
-						"server.shared_dir_storage: shared dir %q is a symlink; refusing to use a symlinked path", name)
-				}
-				if !info.IsDir() {
-					return nil, nil, fmt.Errorf(
-						"server.shared_dir_storage: shared dir %q exists but is not a directory", name)
-				}
-				alreadyExisted = true
-			} else if !errors.Is(lstatErr, fs.ErrNotExist) {
-				return nil, nil, fmt.Errorf("server.shared_dir_storage: stat shared dir %q: %w", name, lstatErr)
+			leafFd, alreadyExisted, walkErr := createSharedDirViaComponentWalk(resolvedHostBase, rel)
+			if walkErr != nil {
+				return nil, nil, fmt.Errorf("server.shared_dir_storage: shared dir %q: %w", name, walkErr)
 			}
 
 			if !alreadyExisted {
-				if err := root.MkdirAll(rel, 0o775); err != nil {
-					return nil, nil, fmt.Errorf("server.shared_dir_storage: mkdir shared dir %q: %w", name, err)
-				}
-				// mkdir(2) only ever applies setgid via kernel inheritance
-				// from an already-setgid parent, so chmod the directory we
-				// just created explicitly (design §3.5(5): 0o2775). Only
-				// the leaf this call created — never a pre-existing shared
-				// dir.
-				if err := root.Chmod(rel, os.ModeSetgid|0o775); err != nil {
-					return nil, nil, fmt.Errorf("server.shared_dir_storage: chmod shared dir %q: %w", name, err)
+				// fchmod on the fd we just opened/created — never a
+				// path-based chmod, which could be raced onto a different
+				// inode after the fd was opened (design §3.5(5); round 5
+				// disposition item 2). Only the leaf this call created —
+				// never a pre-existing shared dir.
+				if chmodErr := chmodSharedDirFd(leafFd, 0o2775); chmodErr != nil {
+					_ = closeSharedDirFd(leafFd)
+					return nil, nil, fmt.Errorf("server.shared_dir_storage: chmod shared dir %q: %w", name, chmodErr)
 				}
 			}
+			_ = closeSharedDirFd(leafFd)
 
-			// Round 4 review finding C1/T1/S-M1 (Medium, regression from
-			// round 3): the returned bind-mount Source must be confined to
-			// the project's OWN leaf, not merely to the host base. Require
-			// the fully resolved path to equal the expected clean path
-			// under the resolved host base — this is the check os.Root
-			// cannot provide, since it only guards escapes from the base as
-			// a whole. A relative symlink anywhere in `rel` (the leaf or an
-			// intermediate component) that still resolves inside the base
-			// — e.g. another project's shared-dirs — fails this equality
-			// and is refused here, even though os.Root already let the
-			// traversal happen.
+			// Defense in depth, kept per round 5 disposition item 2 even
+			// though the component walk above should make it structurally
+			// impossible for a symlink to be involved: require the fully
+			// resolved path to equal the expected clean path under the
+			// resolved host base, as a backstop against a component
+			// renamed away between the walk completing and this check
+			// (round 4 review finding C1/T1/S-M1 first introduced this
+			// check; it is not redundant with the walk, since the walk
+			// operates on file descriptors opened at walk time, while this
+			// re-resolves the path fresh).
 			wantResolvedLeaf := filepath.Join(resolvedHostBase, rel)
 			resolvedLeaf, err := filepath.EvalSymlinks(sd.HostPath)
 			if err != nil {

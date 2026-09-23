@@ -1001,7 +1001,7 @@ authDone:
 				"error", gErr)
 		} else if globalSettings != nil && globalSettings.Server != nil && globalSettings.Server.SharedDirStorage != nil {
 			sharedDirStorageCfg = globalSettings.Server.SharedDirStorage
-		} else if config.GlobalSettingsMentions("shared_dir_storage") {
+		} else if config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
 			// Round 4 review finding S-L1: a global settings.yaml with no
 			// "schema_version: \"1\"" takes the LEGACY loader path, which
 			// silently drops the entire server block — LoadGlobalSettings
@@ -1011,6 +1011,20 @@ authDone:
 			// "unrecognized keys" WARN, which is a worse silent failure
 			// than the malformed-YAML case, and contradicts G5 fail-closed
 			// for an operator who plausibly intended to configure it.
+			//
+			// Round 5 review finding C1=T1=S-L2: GlobalSettingsMentions is a
+			// raw substring check, so it also fires on a well-formed v1 file
+			// whose only mention of the key is a YAML comment (e.g. a
+			// commented-out "# shared_dir_storage:" block, which is the
+			// design's documented rollback path). For a file that LOADED
+			// successfully as v1, the loader above is authoritative — no
+			// parsed block means it genuinely was not configured, exactly
+			// like main. The GlobalSettingsIsLegacyFormat() gate restricts
+			// this fail-closed substring check to files that actually took
+			// the legacy loader path, where there is no parsed struct to
+			// trust and the substring is the only available signal; the
+			// "(missing schema_version...)" wording below is therefore
+			// always accurate when this branch fires.
 			return nil, fmt.Errorf(
 				"global settings mention server.shared_dir_storage but it was not loaded (missing schema_version: \"1\"?)")
 		}

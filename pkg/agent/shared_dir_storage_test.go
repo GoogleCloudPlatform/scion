@@ -582,13 +582,14 @@ func TestResolveSharedDirs_NFS_SymlinkedLeaf_FailsClosed(t *testing.T) {
 }
 
 // TestResolveSharedDirs_NFS_SymlinkedIntermediate_FailsClosed is the other
-// half of S-F3, rewritten for the os.Root-based traversal (round 3
-// disposition 7'): a symlinked intermediate component (here, the project
-// directory itself) must be refused, and — unlike the pre-os.Root
-// implementation, which accepted MkdirAll creating directories through the
-// symlink as a known limitation — nothing may be created inside the
-// symlink's target at all, because os.Root refuses to traverse an escaping
-// symlink in the first place.
+// half of S-F3: a symlinked intermediate component (here, the project
+// directory itself) pointing OUTSIDE the export must be refused before
+// anything is created inside its target. Round 5 review finding C1=T1=S-L2:
+// this is now caught by openat(O_NOFOLLOW) in
+// createSharedDirViaComponentWalk, the same layer that catches every other
+// symlinked-component case in this file — in-base or outside, leaf or
+// intermediate — since O_NOFOLLOW refuses ANY symlink at that exact
+// component regardless of where it points.
 func TestResolveSharedDirs_NFS_SymlinkedIntermediate_FailsClosed(t *testing.T) {
 	mountRoot := newResolvedTempDir(t)
 	shareID := "scion-shared"
@@ -605,23 +606,20 @@ func TestResolveSharedDirs_NFS_SymlinkedIntermediate_FailsClosed(t *testing.T) {
 
 	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a symlinked intermediate component pointing outside the export must be refused")
-	// Round 4 review nit T4/S-N2: pin the primary layer — os.Root refuses
-	// the traversal itself ("path escapes from parent"), surfaced through
-	// the root.Lstat existence check.
-	assert.Contains(t, err.Error(), "stat shared dir")
+	// Round 4 review nit T4/S-N2 (still pinned after the round 5 rewrite):
+	// the component walk's O_NOFOLLOW open is the primary layer.
+	assert.Contains(t, err.Error(), "is a symlink")
 	assert.Nil(t, volumes)
 	assert.Nil(t, realization)
 
-	// os.Root must refuse to traverse the symlink at all, so — unlike the
-	// pre-os.Root implementation — nothing is ever created inside its
-	// target.
+	// openat(O_NOFOLLOW) refuses to traverse the symlink at all, so nothing
+	// is ever created inside its target.
 	assertDirEmpty(t, outside)
 }
 
 // TestResolveSharedDirs_NFS_SymlinkedShareDirsComponent_FailsClosed extends
-// the intermediate-symlink case to the "shared-dirs" component itself
-// (disposition 7' explicitly calls out "projects/<pid>, shared-dirs" as the
-// two intermediate components to check).
+// the intermediate-symlink case to the "shared-dirs" component itself,
+// pointing OUTSIDE the export.
 func TestResolveSharedDirs_NFS_SymlinkedShareDirsComponent_FailsClosed(t *testing.T) {
 	mountRoot := newResolvedTempDir(t)
 	shareID := "scion-shared"
@@ -638,22 +636,46 @@ func TestResolveSharedDirs_NFS_SymlinkedShareDirsComponent_FailsClosed(t *testin
 
 	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a symlinked shared-dirs component pointing outside the export must be refused")
-	// Round 4 review nit T4/S-N2: pin the primary layer (os.Root's escape
-	// refusal, surfaced through the root.Lstat existence check).
-	assert.Contains(t, err.Error(), "stat shared dir")
+	assert.Contains(t, err.Error(), "is a symlink")
 	assert.Nil(t, volumes)
 	assert.Nil(t, realization)
 	assertDirEmpty(t, outside)
 }
 
+// TestResolveSharedDirs_NFS_ComponentSymlinkToExportRoot_FailsClosed covers
+// the "component -> export root" shape round 5 disposition item 2 lists
+// explicitly: a component that resolves back to the host base itself must
+// be refused, and nothing may be created at the export root as a side
+// effect.
+func TestResolveSharedDirs_NFS_ComponentSymlinkToExportRoot_FailsClosed(t *testing.T) {
+	mountRoot := newResolvedTempDir(t)
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+	projectDir := filepath.Join(hostBase, "projects", "pid-1")
+	require.NoError(t, os.MkdirAll(projectDir, 0o775))
+
+	// "shared-dirs" resolves to the host base itself.
+	require.NoError(t, os.Symlink(filepath.Join("..", ".."), filepath.Join(projectDir, "shared-dirs")))
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+	require.Error(t, err, "a component symlinked to the export root must be refused")
+	assert.Contains(t, err.Error(), "is a symlink")
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+
+	_, statErr := os.Stat(filepath.Join(hostBase, "scratchpad"))
+	assert.True(t, os.IsNotExist(statErr), "nothing should be created at the export root")
+}
+
 // TestResolveSharedDirs_NFS_InBaseSymlinkedLeaf_ToVictim_FailsClosed is
-// round 4 review finding C1/T1/S-M1 (Medium, a regression from round 3): a
-// shared dir's leaf that is a RELATIVE symlink to another project's shared
-// dir — staying entirely INSIDE the host base — must be refused. os.Root
-// alone accepts this, because it only bounds escapes from the base as a
-// whole; it happily follows a symlink that stays inside. The Lstat-based
-// leaf check (added this round) is what catches it here, before any mkdir
-// or chmod ever runs.
+// round 4 review finding C1/T1/S-M1: a shared dir's leaf that is a RELATIVE
+// symlink to another project's shared dir — staying entirely INSIDE the
+// host base — must be refused before any mkdir or chmod runs. The
+// component walk's O_NOFOLLOW open on the leaf itself catches this.
 func TestResolveSharedDirs_NFS_InBaseSymlinkedLeaf_ToVictim_FailsClosed(t *testing.T) {
 	mountRoot := newResolvedTempDir(t)
 	shareID := "scion-shared"
@@ -693,10 +715,9 @@ func TestResolveSharedDirs_NFS_InBaseSymlinkedLeaf_ToVictim_FailsClosed(t *testi
 // TestResolveSharedDirs_NFS_InBaseSymlinkedIntermediate_ToVictim_FailsClosed
 // is the intermediate-component half of the same finding: the project's own
 // directory (projects/<pid>) is a relative symlink to another project,
-// staying inside the host base. Unlike the leaf case, the Lstat pre-check
-// can't see this (the leaf name itself, "scratchpad", is not a symlink), so
-// this is caught by the restored resolved-leaf equality check instead —
-// the one dropped in error at 08b78b41.
+// staying inside the host base, and the victim's leaf ALREADY EXISTS. The
+// component walk's O_NOFOLLOW open on "pid-1" itself catches this — the
+// walk never even reaches the leaf.
 func TestResolveSharedDirs_NFS_InBaseSymlinkedIntermediate_ToVictim_FailsClosed(t *testing.T) {
 	mountRoot := newResolvedTempDir(t)
 	shareID := "scion-shared"
@@ -718,7 +739,7 @@ func TestResolveSharedDirs_NFS_InBaseSymlinkedIntermediate_ToVictim_FailsClosed(
 
 	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a relative in-export symlinked intermediate component must be refused")
-	assert.Contains(t, err.Error(), "resolves through a symlink")
+	assert.Contains(t, err.Error(), "is a symlink")
 	assert.Nil(t, volumes)
 	assert.Nil(t, realization)
 
@@ -729,6 +750,161 @@ func TestResolveSharedDirs_NFS_InBaseSymlinkedIntermediate_ToVictim_FailsClosed(
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	assert.Equal(t, "secret.txt", entries[0].Name(), "nothing new should be created in the victim's directory")
+}
+
+// TestResolveSharedDirs_NFS_InBaseSymlinkedIntermediate_ToVictim_NoLeaf_FailsClosed
+// is round 5 review finding C2/T2/S-L1's core requirement: the SAME
+// intermediate-symlink shape as above, but the victim's leaf does NOT
+// already exist. At round 4 (os.Root), this created a new setgid directory
+// inside the victim's tree before the post-hoc equality check refused the
+// call ("nothing created in the victim" was not met). The component walk
+// closes this: openat(O_NOFOLLOW) on "pid-1" fails before the walk ever
+// reaches "shared-dirs" or the leaf, so nothing is created anywhere past
+// the symlinked component, regardless of what does or doesn't already
+// exist beyond it.
+func TestResolveSharedDirs_NFS_InBaseSymlinkedIntermediate_ToVictim_NoLeaf_FailsClosed(t *testing.T) {
+	mountRoot := newResolvedTempDir(t)
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+
+	// The victim project exists, and even has a shared-dirs directory, but
+	// NOT the specific "scratchpad" leaf the attacker is requesting.
+	victimSharedDirs := filepath.Join(hostBase, "projects", "victim", "shared-dirs")
+	require.NoError(t, os.MkdirAll(victimSharedDirs, 0o775))
+
+	projectsDir := filepath.Join(hostBase, "projects")
+	require.NoError(t, os.Symlink("victim", filepath.Join(projectsDir, "pid-1")))
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+	require.Error(t, err, "a relative in-export symlinked intermediate component must be refused even with no pre-existing victim leaf")
+	assert.Contains(t, err.Error(), "is a symlink")
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+
+	entries, err := os.ReadDir(victimSharedDirs)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "no new leaf should be created in the victim's shared-dirs")
+}
+
+// TestResolveSharedDirs_NFS_InBaseSymlinkedSharedDirsComponent_ToVictim_NoLeaf_FailsClosed
+// is the "shared-dirs -> ../B/shared-dirs" shape round 5 disposition item 2
+// lists explicitly, with no pre-existing victim leaf.
+func TestResolveSharedDirs_NFS_InBaseSymlinkedSharedDirsComponent_ToVictim_NoLeaf_FailsClosed(t *testing.T) {
+	mountRoot := newResolvedTempDir(t)
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+
+	victimSharedDirs := filepath.Join(hostBase, "projects", "victim", "shared-dirs")
+	require.NoError(t, os.MkdirAll(victimSharedDirs, 0o775))
+
+	attackerProjectDir := filepath.Join(hostBase, "projects", "pid-1")
+	require.NoError(t, os.MkdirAll(attackerProjectDir, 0o775))
+	require.NoError(t, os.Symlink(
+		filepath.Join("..", "victim", "shared-dirs"),
+		filepath.Join(attackerProjectDir, "shared-dirs")))
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+	require.Error(t, err, "a symlinked shared-dirs component pointing at a real victim project must be refused")
+	assert.Contains(t, err.Error(), "is a symlink")
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+
+	entries, err := os.ReadDir(victimSharedDirs)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "no new leaf should be created in the victim's shared-dirs")
+}
+
+// TestResolveSharedDirs_NFS_InBaseSymlinkedLeaf_ExistingVictimLeaf_ModeUnchanged
+// is the deterministic counterpart to the r5-security-probe's
+// TestProbeR5_RaceChmodExistingVictim (which found 7,032/20,000 chmods of
+// an existing victim leaf under the round-4 os.Root implementation): here
+// the victim's leaf ALREADY EXISTS at mode 0700 before the attacker's
+// symlinked leaf is resolved. Because the leaf component itself
+// ("scratchpad" under the attacker's shared-dirs) is a symlink,
+// openat(O_NOFOLLOW) refuses it outright — the victim's fd is never
+// opened, so fchmod is never called on it, and its mode must remain
+// exactly 0700 (not 0775, not 02775).
+func TestResolveSharedDirs_NFS_InBaseSymlinkedLeaf_ExistingVictimLeaf_ModeUnchanged(t *testing.T) {
+	mountRoot := newResolvedTempDir(t)
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+
+	victimDir := filepath.Join(hostBase, "projects", "victim", "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(victimDir, 0o700))
+
+	attackerSharedDirs := filepath.Join(hostBase, "projects", "pid-1", "shared-dirs")
+	require.NoError(t, os.MkdirAll(attackerSharedDirs, 0o775))
+	require.NoError(t, os.Symlink(
+		filepath.Join("..", "..", "victim", "shared-dirs", "scratchpad"),
+		filepath.Join(attackerSharedDirs, "scratchpad")))
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+	require.Error(t, err, "a relative in-export symlink to an existing victim leaf must be refused")
+	assert.Contains(t, err.Error(), "is a symlink")
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+
+	info, statErr := os.Stat(victimDir)
+	require.NoError(t, statErr)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(), "existing victim leaf at 0700 must stay 0700")
+}
+
+// TestResolveSharedDirs_NFS_LeafIsRegularFile_FailsClosed is round 5
+// disposition item 3 (round 4's untested "exists but is not a directory"
+// branch, mutant L2): a regular file blocking the leaf must fail closed
+// rather than being handed out as the Docker bind Source.
+func TestResolveSharedDirs_NFS_LeafIsRegularFile_FailsClosed(t *testing.T) {
+	mountRoot := newResolvedTempDir(t)
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+	leafParent := filepath.Join(hostBase, "projects", "pid-1", "shared-dirs")
+	require.NoError(t, os.MkdirAll(leafParent, 0o775))
+	require.NoError(t, os.WriteFile(filepath.Join(leafParent, "scratchpad"), []byte("not a directory"), 0o644))
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+	require.Error(t, err, "a regular file at the leaf must be refused")
+	assert.Contains(t, err.Error(), "not a directory")
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+}
+
+// TestResolveSharedDirs_NFS_IntermediateIsRegularFile_FailsClosed is the
+// intermediate-component half of disposition item 3: a regular file
+// blocking an intermediate component must also fail closed.
+func TestResolveSharedDirs_NFS_IntermediateIsRegularFile_FailsClosed(t *testing.T) {
+	mountRoot := newResolvedTempDir(t)
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+	projectsDir := filepath.Join(hostBase, "projects")
+	require.NoError(t, os.MkdirAll(projectsDir, 0o775))
+	// "pid-1" is a regular file instead of a directory.
+	require.NoError(t, os.WriteFile(filepath.Join(projectsDir, "pid-1"), []byte("not a directory"), 0o644))
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+	require.Error(t, err, "a regular file at an intermediate component must be refused")
+	assert.Contains(t, err.Error(), "not a directory")
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
 }
 
 // TestResolveSharedDirs_NFS_SymlinkedHostBase_StillWorks is round 3 review

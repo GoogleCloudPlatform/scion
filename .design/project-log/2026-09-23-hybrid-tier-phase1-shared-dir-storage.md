@@ -679,3 +679,194 @@ Per hy-em's request, all three reviewers' probe files were copied into
 - `gofmt -l pkg/agent pkg/config pkg/runtime` — clean.
 - PR body updated with the corrected "Security" section and "Behaviour
   note" (item 4).
+
+## Round 5 review fixes (PR #1779 @b8a7d235 → this round)
+
+hy-em's round 5 dispositions (`reviews/r5-dispositions.md`, from `r5-code.md`,
+`r5-test.md`, `r5-security.md`) marked 4 items FIX and 1 no-action. **Round 6
+is the last review round before escalation**, so every item below was done
+completely and self-verified against the reviewers' own probes before
+pushing (numbers under "Self-check" below). Headline: round 4's fix was
+correct for the returned `Source`, but two new regressions were found in the
+mechanism used to get there — a Medium in the legacy-format "mentions" check,
+and a Low in the `os.Root`-based mkdir/chmod, both fixed below by replacing
+`os.Root` entirely with a race-free raw-syscall component walk.
+
+1. **Medium (C1=T1=S-L2) — the "mentions" substring check regressed a
+   well-formed v1 file with a comment.** Round 4's S-L1 fix
+   (`config.GlobalSettingsMentions("shared_dir_storage")`) was meant only for
+   files that took the *legacy* loader path (no `server` struct to trust),
+   but it fired unconditionally after a successful `LoadGlobalSettings` call
+   — including on a well-formed `schema_version: "1"` file whose only mention
+   of the key was a YAML comment (e.g. a commented-out `# shared_dir_storage:`
+   block, which is the design's documented rollback path: "comment out the
+   block to disable"). Every agent Start with a shared dir failed on such a
+   broker, with a misleading "missing schema_version" error even though
+   `schema_version` was present. Fixed by adding
+   `config.GlobalSettingsIsLegacyFormat()` (`pkg/config/settings_v1.go`),
+   which reuses the existing `detectHierarchyFormat` — called with the global
+   directory itself as the "project path", so its project-layer check is
+   skipped and it reports purely on the global file's format — and gating
+   `run.go`'s fail-closed branch on
+   `GlobalSettingsIsLegacyFormat() && GlobalSettingsMentions(...)`. A
+   successfully-loaded v1 file is now trusted at face value, exactly like
+   `main`: no parsed `SharedDirStorage` struct means it genuinely was not
+   configured. The malformed-file branch (6') is unchanged — the raw
+   substring check there remains a deliberate, accepted trade-off, since a
+   file that fails to parse at all has no struct to trust in the first place.
+   Tests added: `TestStartSharedDirStorage_V1GlobalSettings_CommentedOutBlock_SucceedsAsMain`
+   (v1 file, comment-only mention, succeeds byte-identical to main via
+   `assertLegacyLocalSharedDirBehavior`); the existing
+   `LegacyGlobalSettings_MentionsKey_FailsClosed` (legacy format with a real
+   block still fails closed, `Run` never called) and
+   `..._NoKey_SucceedsAsMain` (legacy, no mention, succeeds) needed no
+   changes and continue to pass unmodified. T5 nit: also assert
+   `"loading global settings"` in
+   `MalformedGlobalSettings_MentionsKey_FailsClosed`'s error, pinning the
+   wrapping context and not just the setting name. C4 nit: the
+   `"(missing schema_version...)"` error text is now accurate on every path
+   that can produce it, since that branch only fires for a legacy-loaded
+   file.
+2. **Low (C2=T2=S-L1, all three reviewers) — `os.Root` still let in-export
+   symlinks cause real filesystem side effects before refusing.** `os.Root`
+   only refuses a traversal that would *escape the root*; it does not refuse
+   a symlink that stays *inside* it. So `root.Lstat`/`root.MkdirAll`/
+   `root.Chmod` happily followed an in-export symlink — e.g.
+   `projects/<pid> → victim` or `projects/<pid>/shared-dirs →
+   ../B/shared-dirs` — meaning that when the victim's leaf was absent, a
+   real setgid directory was created inside the victim's own tree (or at the
+   export root) *before* the post-hoc resolved-leaf equality check ever ran,
+   violating round 4's explicit "nothing created in the victim" requirement.
+   A swap race could additionally chmod an *existing* victim leaf (measured
+   7,032/20,000 in `reviews/r5-security-probe_test.go.txt` against the
+   round-4 code). Fixed by removing `os.Root` from this path entirely and
+   replacing it with a race-free component walk
+   (`pkg/agent/shared_dir_storage_unix.go`, new file, `//go:build unix`,
+   using `golang.org/x/sys/unix`, already a go.mod dependency at v0.47.0):
+   the resolved host base is opened as a directory fd, and each component of
+   `rel` (`<subpath_root>/<pid>/shared-dirs/<name>`) is opened with
+   `openat(parentfd, comp, O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)`; on
+   `ENOENT`, `mkdirat` then a reopen with the same flags (a concurrent
+   creator's `EEXIST` is fine — the reopen with `O_NOFOLLOW` still refuses
+   any symlink the racing process left behind); `ELOOP`/`ENOTDIR` fails
+   closed naming the component. Because `O_NOFOLLOW` refuses to open or
+   traverse a symlink atomically as part of the single syscall, there is no
+   separate stat-then-open window for a concurrent swap to land in — this is
+   what eliminates the race, not merely narrows it. The leaf is `fchmod`'d
+   via its already-open fd (`0o2775`, the traditional Unix `mode_t` value,
+   sidestepping the recurring `os.FileMode`-vs-`mode_t` setgid bit-layout bug
+   from earlier rounds) — never a path-based chmod, and only when this call
+   created the leaf. Discovered and fixed along the way: on this Linux
+   kernel, `openat(O_DIRECTORY|O_NOFOLLOW)` on a symlink returns `ENOTDIR`,
+   not `ELOOP` (verified with a throwaway probe program), so
+   `classifyComponentOpenError` does a secondary `Fstatat(...,
+   AT_SYMLINK_NOFOLLOW)` check purely to produce an accurate "is a symlink"
+   vs. "exists but is not a directory" error message — the refusal itself is
+   already correct either way. The final `EvalSymlinks` strict-equality
+   check on the returned `Source` is kept as defense in depth, per the
+   disposition. Builds verified for both `linux` (native) and `darwin`
+   (`GOOS=darwin go build ./pkg/...`) — there is no Windows target.
+   Tests: rewrote the three symlink tests whose assertions were tied to the
+   old three-layer error wording (`"stat shared dir"`,
+   `"resolves through a symlink"`) to assert the new unified
+   `"is a symlink"` message, which now fires identically for every symlinked
+   component regardless of layer. Added, all *without* a pre-created victim
+   leaf and walking the tree afterward to confirm nothing was created:
+   `projects/<pid> → victim`
+   (`..._InBaseSymlinkedIntermediate_ToVictim_NoLeaf_FailsClosed`),
+   `projects/<pid>/shared-dirs → ../victim/shared-dirs`
+   (`..._InBaseSymlinkedSharedDirsComponent_ToVictim_NoLeaf_FailsClosed`), a
+   component symlinked to the export root
+   (`..._ComponentSymlinkToExportRoot_FailsClosed`); plus a deterministic
+   version of the race probe, an existing victim leaf at mode `0700` that
+   must stay exactly `0700`
+   (`..._InBaseSymlinkedLeaf_ExistingVictimLeaf_ModeUnchanged`). T4 nit: left
+   an explanatory comment on `createSharedDirViaComponentWalk` instead of a
+   deterministic mid-walk swap test — forcing that exact interleaving would
+   need a production-code test hook solely to pause the walk, for a property
+   syscall atomicity already guarantees and the probe already verifies
+   empirically at 20,000 iterations.
+3. **Low (T3) — the "exists but is not a directory" branch was untested
+   (mutant L2 survived).** Added
+   `TestResolveSharedDirs_NFS_LeafIsRegularFile_FailsClosed` (a plain file at
+   the leaf) and `..._IntermediateIsRegularFile_FailsClosed` (a plain file at
+   an intermediate component), both asserting fail-closed with "not a
+   directory" and no `Source`/volumes.
+4. **Low/Nit (C3, S-N1) — PR body and log overclaim.** After item 2, updated
+   the PR body's "Security" section: replaced the "two layers" bullet
+   (`os.Root` for base confinement, the equality check for leaf confinement)
+   with a single accurate description of the component walk refusing a
+   symlink at *any* component before touching anything, kept the equality
+   check described as defense in depth, and updated the "Behaviour note" and
+   "Test plan" sections to describe the item 1 legacy-format gating precisely
+   (no longer "fails closed when the raw file mentions the key" without the
+   legacy-format qualifier) and to report the round 5 self-check numbers.
+   `os.Root` wording was removed from every place it no longer applies;
+   remaining mentions in the PR body are explicitly comparative/historical
+   ("this replaced an earlier `os.Root`-based approach..."). Code comments in
+   `shared_dir_storage.go`/`shared_dir_storage_unix.go` already stated the
+   corrected mental model as part of the item 2 rewrite (no separate pass
+   needed). The one residual kept exactly as written in the prior
+   PR-body-only update: D2, the Docker daemon's own bind-path re-resolution
+   at container-create time (E1 precondition; impact = arbitrary broker-uid
+   path such as `/home/scion`; accepted by ptone; E2 hardening tracked in
+   `ptone/scion#1794`, required before Phase 3).
+5. **No action / noted.** The `SCION_` env-var prefix leaking into
+   `LoadGlobalSettings` (pre-existing koanf-mapping FYI) — hy-em will raise a
+   follow-up with nfs-gke separately. K10, G2, S3/S11/S14b/S20/N3/N6 survivors
+   keep the same round 4 classification (declined/equivalent/dead-code/
+   race-only) — no new action needed.
+
+No design conflicts found.
+
+### Self-check: reviewers' round 5 probes, run before pushing
+
+All three probe files were copied into `pkg/agent/` one at a time (splitting
+`r5-security-probe_test.go.txt`'s two concatenated `package agent` blocks
+into two separate files first, and renaming `r5-test-probe_inbase_create_test.go.txt`'s
+helper functions to avoid a name collision with the security probe's
+same-named helper), run, and removed — never committed:
+
+- `reviews/r5-security-probe_test.go.txt`
+  (`TestProbeR5_PidToVictim_NoLeaf`, `..._SharedDirsToVictim_NoLeaf`,
+  `..._SharedDirsToVictim_LeafExists`, `..._ProjectsToRoot`, `..._PidToRoot`):
+  all 5 refused, tree unchanged before/after in every case.
+  `TestProbeR5_RaceInBaseChmod` (5,000 iterations, in-base swap race):
+  **0 accepted, 0 victim leaves created** (was a live gap under round 4's
+  `os.Root` code — the whole point of this probe). `TestProbeR5_RaceChmodExistingVictim`
+  (20,000 iterations, existing 0700 victim leaf): **0 accepted, 0 chmods**
+  (down from 7,032/20,000 stray chmods measured against the round-4 code).
+- `reviews/r5-test-probe_inbase_create_test.go.txt`
+  (`TestZZR5_IntermediateToVictim_NewLeaf`, `..._SharedDirsToVictim`,
+  `..._ComponentToExportRoot`, `..._LeafToExportRoot`,
+  `..._PartialCreateOnSecondFailure`): all refused; the walk confirms no
+  `newdir`/`scratchpad` entry created in the victim's tree and no
+  `scratchpad` created at the export root in any case.
+- `reviews/r5-test-probe_mention_comment_test.go.txt`
+  (`TestZZR5_V1CommentedOutBlock`, `..._V1CommentNoServer`,
+  `..._V1NullBlock`): all succeed with `Run` called, matching `main`, per
+  item 1's required behavior. `TestZZR5_LegacyCommentOnly` (a *legacy*-format
+  file whose only mention is a comment) fails closed as expected — this is
+  the accepted trade-off explicitly scoped by the disposition to the
+  v1-format case only; the disposition's required tests (v1-comment-only
+  succeeds, legacy-with-block still fails closed, legacy-no-mention
+  succeeds) all pass.
+
+### Gate results (round 5, env: clean `env -i PATH=$PATH HOME=<tmp> GOPATH=... GOCACHE=... GOMODCACHE=...`, `-count=1`)
+
+- `go build ./...` — pass.
+- `GOOS=darwin go build ./pkg/...` — pass.
+- `go vet ./pkg/config/... ./pkg/runtime/... ./pkg/agent/...` — pass, no output.
+- `go test ./pkg/config/... ./pkg/runtime/... ./pkg/agent/... -count=1` — pass:
+  ```
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config              2.0s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config/opsettings    0.1s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config/templateimport 0.1s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/runtime              32.8s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun     0.0s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/agent                6.9s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/agent/state          0.0s
+  ```
+- `gofmt -l` on every touched file — clean.
+- PR body updated (item 4) — confirmed via `gh api .../pulls/1779` that the
+  patched body was applied as sent.

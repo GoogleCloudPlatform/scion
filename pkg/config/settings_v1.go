@@ -2475,6 +2475,41 @@ func GlobalSettingsMentions(substr string) bool {
 	return strings.Contains(string(data), substr)
 }
 
+// GlobalSettingsIsLegacyFormat reports whether the global settings file was
+// loaded via the legacy (pre-schema_version) format, as opposed to a
+// well-formed versioned (schema_version: "1") file.
+//
+// Round 5 review finding C1=T1=S-L2: GlobalSettingsMentions' raw substring
+// check is a deliberately crude heuristic, accepted ONLY for a global
+// settings file that failed to parse at all (round 3 disposition 6' — see
+// GlobalSettingsMentions' doc comment). It must not also be applied to a
+// file that DID load successfully as a v1 file: a well-formed v1 file with,
+// say, a commented-out "# shared_dir_storage:" block mentions the substring
+// but was not configured, and the loader — not a substring match — is
+// authoritative for what a successfully-parsed file means. Callers must
+// gate any GlobalSettingsMentions-based fail-closed decision on this
+// function returning true, so that a successfully-loaded v1 file's absence
+// of a parsed block is trusted at face value, exactly like main.
+//
+// detectHierarchyFormat(globalDir) — passing the global directory itself as
+// the "project path" argument — reports purely on the global file's format:
+// its project-layer check is skipped whenever effectiveProjectPath equals
+// globalDir (see detectHierarchyFormat above), which is exactly the case
+// here.
+//
+// Returns true — "treat as legacy" — if the global directory cannot be
+// resolved at all, since there is then no versioned file to trust as
+// authoritative and the caller's substring-based fallback is the only
+// remaining signal.
+func GlobalSettingsIsLegacyFormat() bool {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return true
+	}
+	hasVersioned, _ := detectHierarchyFormat(globalDir)
+	return !hasVersioned
+}
+
 // MigrationResult reports what happened during a migration.
 type MigrationResult struct {
 	Path             string   `json:"path"`               // settings file that was migrated
