@@ -2639,6 +2639,120 @@ func TestDEF96_PromoteDM_HistoryVisibleOnFirstRead(t *testing.T) {
 	}
 }
 
+// TestPromoteDM_Handler_SetsConversationDefaultAgentID is review round 2
+// finding #3: round 1's TestPromoteDM_DualWrite_SetsConversationDefaultAgentID
+// calls the *store* with DefaultAgentID already filled in, so it proves the
+// SQL and nothing else — deleting handlers_chat_v2.go's
+// `DefaultAgentID: agentID` (the actual wiring, at the promote HTTP
+// handler) doesn't fail that test. This exercises the real promote
+// endpoint end to end: POST the promote request for a user<->agent DM,
+// then assert the promoted conversation's default_agent_id equals the
+// agent's ID, the same way a promoted thread's default is expected to show
+// up in `scion conversation show` (F1).
+func TestPromoteDM_Handler_SetsConversationDefaultAgentID(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: tid("promote-da-proj"), Name: "promote-da-proj", Slug: "promote-da-proj",
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	agentID := tid("promote-da-agent")
+	agent := &store.Agent{
+		ID:        agentID,
+		ProjectID: proj.ID,
+		Name:      "Promote DA Bot",
+		Slug:      "promote-da-bot",
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	if !ok {
+		t.Fatal("store does not expose DB()")
+	}
+	rawDB := dbProvider.DB()
+	if rawDB == nil {
+		t.Fatal("store DB() returned nil")
+	}
+	wcs := NewWebChatStore(rawDB, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init webchat store: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	dmKey := "dm:agent:" + agentID + ":user:" + DevUserID
+	directConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertConversation (DM): %v", err)
+	}
+
+	msg := &store.Message{
+		ID:             tid("promote-da-msg"),
+		ProjectID:      proj.ID,
+		Sender:         "user:dev@localhost",
+		SenderID:       DevUserID,
+		Recipient:      "agent:" + agentID,
+		Msg:            "hello agent",
+		Type:           "chat",
+		Channel:        "web",
+		ThreadID:       dmKey,
+		ConversationID: directConv.ID,
+		DispatchState:  "dispatched",
+		CreatedAt:      time.Now().UTC(),
+	}
+	if err := s.CreateMessage(ctx, msg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	if err := wcs.UpsertDM(ctx, WebChatDM{
+		ConversationKey: dmKey,
+		ParticipantID:   DevUserID,
+		PeerID:          agentID,
+		PeerKind:        "agent",
+	}); err != nil {
+		t.Fatalf("UpsertDM: %v", err)
+	}
+
+	promoteBody := map[string]string{"name": "Promote DA Thread"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/promote", promoteBody)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("promote: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var promResp promoteResponse
+	if err := json.NewDecoder(rec.Body).Decode(&promResp); err != nil {
+		t.Fatalf("decode promote response: %v", err)
+	}
+	if promResp.ConversationID == "" {
+		t.Fatal("promoteResponse.ConversationID is empty")
+	}
+
+	groupConv, err := s.GetConversation(ctx, promResp.ConversationID)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+	if groupConv.DefaultAgentID == nil {
+		t.Fatal("round-1 finding #4 (handler half): the promoted conversation's default_agent_id must be set")
+	}
+	if *groupConv.DefaultAgentID != agentID {
+		t.Errorf("default_agent_id = %q, want %q", *groupConv.DefaultAgentID, agentID)
+	}
+}
+
 // TestDEF96_PromoteDM_Atomicity verifies AC-96-5: forcing a failure at the
 // topic INSERT step rolls back the entire promotion — no conversation, no
 // moved messages.

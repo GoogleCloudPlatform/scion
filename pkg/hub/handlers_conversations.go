@@ -17,8 +17,10 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -161,6 +163,24 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 		}
 		filtered = append(filtered, conv)
 	}
+
+	// Review round 2 finding #1: GetConversationsForPrincipal returns the
+	// caller's participations in no set order, and the union appended
+	// project groups after them — so limit truncated arbitrarily, and a
+	// caller with >= limit participations got zero union groups (exactly
+	// the "why can't I see my conversation" symptom AC-10 exists to fix).
+	// Sort by the same order the store itself uses (last_activity_at DESC,
+	// id DESC as tie-break) before limiting, so the N most recently active
+	// conversations win regardless of which side of the union they came
+	// from. Note: the union itself is not cursor-paged (design doc §3.2
+	// round-2 addendum) — a cursor page after the first doesn't re-add
+	// union groups, only this initial unlimited fetch does.
+	sort.Slice(filtered, func(i, j int) bool {
+		if !filtered[i].LastActivityAt.Equal(filtered[j].LastActivityAt) {
+			return filtered[i].LastActivityAt.After(filtered[j].LastActivityAt)
+		}
+		return filtered[i].ID > filtered[j].ID
+	})
 
 	// Apply limit.
 	if limit > 0 && len(filtered) > limit {
@@ -626,13 +646,24 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 	// previous manual GetAgent + project-equality check here let a
 	// soft-deleted agent be written into webchat_topic.default_agent (which
 	// drives web routing) after ClearTopicDefaultAgent had already run for
-	// it. Any resolution failure is a 400, matching the other two writers.
+	// it.
+	//
+	// Review round 2 finding #6: one condition ("this agentId can't be set
+	// as default") must map to one status on this endpoint, so the
+	// projectless branch below also returns 400, not 404 — matching the
+	// project-scoped branch instead of the old GetAgent-not-found status.
+	// The message names agentId, this endpoint's own request field, rather
+	// than validateDefaultAgent's "defaultAgent" wording (that field name
+	// belongs to the topic PATCH/create callers, not this one). Accepting
+	// a slug here (validateDefaultAgent tries slug-by-project first) is an
+	// intentional, documented widening — see the PR body's Behaviour
+	// changes list.
 	var agent *store.Agent
 	if conv.ProjectID != nil {
 		var vErr error
 		agent, vErr = s.validateDefaultAgent(ctx, *conv.ProjectID, req.AgentID)
 		if vErr != nil {
-			ValidationError(w, vErr.Error(), nil)
+			ValidationError(w, fmt.Sprintf("agentId %q not found in this project", req.AgentID), nil)
 			return
 		}
 	} else {
@@ -640,16 +671,8 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 		// validate against. Still reject a soft-deleted agent.
 		var err error
 		agent, err = s.store.GetAgent(ctx, req.AgentID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
-				return
-			}
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		if !agent.DeletedAt.IsZero() {
-			BadRequest(w, "agent is deleted")
+		if err != nil || !agent.DeletedAt.IsZero() {
+			ValidationError(w, fmt.Sprintf("agentId %q not found", req.AgentID), nil)
 			return
 		}
 	}
@@ -915,16 +938,20 @@ func (s *Server) canReadProject(ctx context.Context, identity Identity, projectI
 	return decision.Allowed
 }
 
+// listAllGroupConversationsPageSize matches entadapter's internal
+// maxListLimit so each page is as large as the store allows. It is a
+// package var (review round 2 finding #4), not a const, so a test can
+// shrink it to force listAllGroupConversations's pagination loop to
+// actually run more than once without needing hundreds of rows.
+var listAllGroupConversationsPageSize = 200
+
 // listAllGroupConversations pages through every group conversation in
 // projectID until the store reports no more pages (review round 1 finding
 // #3: the listing union must include every group in the project, not just
-// the first page — AC-10 says "every group"). pageSize matches
-// entadapter's internal maxListLimit so each page is as large as the store
-// allows; iterations is a defensive cap against a store bug that never
-// returns an empty NextCursor.
+// the first page — AC-10 says "every group"). maxIterations is a defensive
+// cap against a store bug that never returns an empty NextCursor.
 func (s *Server) listAllGroupConversations(ctx context.Context, projectID string) ([]store.Conversation, error) {
-	const pageSize = 200
-	const maxIterations = 1000 // 200k conversations; well beyond any real project
+	const maxIterations = 1000 // 200k conversations at the default page size; well beyond any real project
 
 	var all []store.Conversation
 	cursor := ""
@@ -932,7 +959,7 @@ func (s *Server) listAllGroupConversations(ctx context.Context, projectID string
 		page, err := s.store.ListConversations(ctx, store.ConversationFilter{
 			ProjectID: projectID,
 			Kind:      "group",
-		}, store.ListOptions{Limit: pageSize, Cursor: cursor, SkipTotalCount: true})
+		}, store.ListOptions{Limit: listAllGroupConversationsPageSize, Cursor: cursor, SkipTotalCount: true})
 		if err != nil {
 			return all, err
 		}

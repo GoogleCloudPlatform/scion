@@ -251,12 +251,22 @@ func TestPhase4_ChatV2_UnresolvedMention_NoParticipant(t *testing.T) {
 
 	require.True(t, hasParticipant(t, s, conv.ID, real.ID), "the actually-dispatched agent must be a participant")
 
+	// Review round 2 finding #7: the original assertion here only compared
+	// participant IDs against the literal slug "totally-unknown-agent",
+	// which is never a valid PrincipalID (participants are always stored
+	// by UUID) — so it could never fail. Assert the actual invariant
+	// instead: the conversation has exactly one agent participant, real.ID.
 	parts, err := s.ListParticipants(ctx, conv.ID)
 	require.NoError(t, err)
+	var agentParticipants []store.ConversationParticipant
 	for _, p := range parts {
-		require.NotEqual(t, "totally-unknown-agent", p.PrincipalID,
-			"a mention that never resolved to an agent must not produce a participant row")
+		if p.PrincipalKind == "agent" {
+			agentParticipants = append(agentParticipants, p)
+		}
 	}
+	require.Len(t, agentParticipants, 1,
+		"a mention that never resolved to an agent must not produce a participant row: %+v", agentParticipants)
+	require.Equal(t, real.ID, agentParticipants[0].PrincipalID)
 }
 
 // TestPhase4_ChatV2_DeniedMention_NoParticipant is review round 1 finding

@@ -3122,6 +3122,59 @@ func TestAgentMessage_GroupConv_AutoRegistersParticipant(t *testing.T) {
 		"agent should be auto-registered as a participant after sending to a group conversation")
 }
 
+// TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered is review
+// round 2 finding #2: a group conversation derived from a non-DM ThreadID
+// (DeriveConversationKey's case 2 — no caller-supplied conversation_id)
+// dispatches to the primary recipient agent, but only its mention
+// co-recipients were being registered as participants. The primary agent
+// itself must also get a row (G3 / AC-11: every agent dispatched into a
+// group becomes a participant).
+func TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered(t *testing.T) {
+	srv, s, projectID, targetAgent, userID := def49Setup(t)
+	ctx := context.Background()
+
+	threadID := "thread-derived-topic"
+	extRef, err := messaging.ThreadConversationExternalRef(projectID, threadID)
+	require.NoError(t, err)
+
+	// Sanity: the conversation doesn't exist yet, so there's nothing to
+	// find a stray participant row on.
+	_, err = s.GetConversationByExternalRef(ctx, "native", extRef)
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+targetAgent.ProjectID+"/agents/"+targetAgent.Slug+"/message",
+		MessageRequest{
+			StructuredMessage: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Sender:    "user:dev",
+				SenderID:  userID,
+				Recipient: "agent:" + targetAgent.Slug,
+				Msg:       "hello via thread-derived group",
+				Type:      messages.TypeInstruction,
+				Channel:   "web",
+				ThreadID:  threadID,
+			},
+		})
+	require.Equal(t, http.StatusOK, rec.Code, "message to agent should succeed: %s", rec.Body.String())
+
+	conv, err := s.GetConversationByExternalRef(ctx, "native", extRef)
+	require.NoError(t, err)
+	require.Equal(t, "group", conv.Kind)
+
+	parts, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	var agentFound bool
+	for _, p := range parts {
+		if p.PrincipalKind == "agent" && p.PrincipalID == targetAgent.ID {
+			agentFound = true
+		}
+	}
+	require.True(t, agentFound,
+		"AC-11/G3: the primary agent dispatched into a thread-derived group must become a participant")
+}
+
 // TestOutboundMessage_NativeGroupConvRef verifies that sending an agent
 // outbound message via conversation_ref to a native group conversation
 // (empty ExternalRef) succeeds — not 500 — and produces the correct routing.

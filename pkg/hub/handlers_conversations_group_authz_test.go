@@ -406,6 +406,14 @@ func TestPhase3_ListConversations_ProjectUnion_PagesBeyondFirstPage(t *testing.T
 	project, agent, _ := setupConvTestData(t, s)
 	grantAgentProjectAccess(t, s, agent.ID, project.ID)
 
+	// Review round 2 finding #4: shrink the page size so 61 groups actually
+	// force the pagination loop to run more than once (the default page
+	// size, 200, would return all 61 in a single page and never exercise
+	// the NextCursor-follow branch).
+	origPageSize := listAllGroupConversationsPageSize
+	listAllGroupConversationsPageSize = 25
+	t.Cleanup(func() { listAllGroupConversationsPageSize = origPageSize })
+
 	const totalGroups = 61
 	want := make(map[string]bool, totalGroups)
 	for i := 0; i < totalGroups; i++ {
@@ -459,6 +467,13 @@ func TestPhase3_ForeignAgent_DeniedOnAllFourEndpoints(t *testing.T) {
 		ProjectID: otherProject.ID, Phase: "running", Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, foreignAgent))
+	// Review round 2 finding #8: grant the foreign agent a role binding on
+	// the CONVERSATION's project too, so the 403 on messages/message/PUT
+	// can only come from authorizeGroupConversationAccess's strict
+	// agent-project equality check, not incidentally from authorize()
+	// finding no binding at all. The GET test and the no-union test
+	// already isolate the check this way.
+	grantAgentProjectAccess(t, s, foreignAgent.ID, project.ID)
 	foreignCtx := func() context.Context {
 		return agentContextWithScopes(foreignAgent.ID, otherProject.ID, []AgentTokenScope{ScopeProjectRead})
 	}
@@ -583,4 +598,67 @@ func TestPhase3_ListConversations_ForeignAgentWithRoleBinding_NoUnion(t *testing
 		require.NotEqual(t, otherConv.ID, c.ID,
 			"a foreign agent must get no union even when it holds a role binding on P (strict identity check)")
 	}
+}
+
+// TestPhase3_ListConversations_SortByActivityBeforeLimit is review round 2
+// finding #1: GetConversationsForPrincipal returns the caller's
+// participations in no set order, and the union used to append project
+// groups after them — so `limit` truncated the merged list arbitrarily. A
+// caller with >= limit participations got zero union groups regardless of
+// how recently active they were, which is exactly the "why can't I see my
+// conversation" symptom AC-10 exists to fix. The merged list must now be
+// sorted by last_activity_at DESC (id DESC tie-break) before limit is
+// applied, so the newest conversations win no matter which side of the
+// union they came from.
+func TestPhase3_ListConversations_SortByActivityBeforeLimit(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project, agent, _ := setupConvTestData(t, s)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	// More old participations than the limit below.
+	const numOld = 5
+	oldTime := time.Now().UTC().Add(-1 * time.Hour)
+	for i := 0; i < numOld; i++ {
+		conv := &store.Conversation{
+			ID: api.NewUUID(), ProjectID: &project.ID, Kind: "group", Surface: "native",
+			DisplayName: "Old Participated", DriftState: "active",
+			LastActivityAt: oldTime.Add(time.Duration(i) * time.Second),
+			CreatedAt:      oldTime,
+		}
+		require.NoError(t, s.CreateConversation(ctx, conv))
+		addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	}
+
+	// A fresh, non-participated group in the same project — must come from
+	// the include_project_groups union, not from the caller's own
+	// participations.
+	fresh := &store.Conversation{
+		ID: api.NewUUID(), ProjectID: &project.ID, Kind: "group", Surface: "native",
+		DisplayName:    "Fresh",
+		DriftState:     "active",
+		LastActivityAt: time.Now().UTC(),
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateConversation(ctx, fresh))
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/conversations?include_project_groups="+project.ID+"&limit=3", nil)
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleListConversations(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var result conversationListResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Len(t, result.Conversations, 3, "limit=3 must still be honored")
+
+	var sawFresh bool
+	for _, c := range result.Conversations {
+		if c.ID == fresh.ID {
+			sawFresh = true
+		}
+	}
+	require.True(t, sawFresh,
+		"round-2 finding #1: the most recently active group must survive the limit, regardless of which side of the union it came from")
 }

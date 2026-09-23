@@ -1877,6 +1877,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			}
 			messaging.RecordStep(ctx, "agent_dm_executed")
 
+			// Review round 2 finding #2: on a thread-derived group
+			// (groupConversationID set from the DeriveConversationKey
+			// branch, not the caller-supplied conversation_id branch),
+			// the primary recipient `agent` was dispatched above via
+			// ExecuteAgentDM but never registered as a participant — only
+			// its mention co-recipients were, via processMentions below.
+			// EnsureParticipant is idempotent, so this is a no-op on the
+			// conversation_id branch, which already registered the
+			// primary at (:1709-ish) before this fork.
+			if groupConversationID != "" {
+				s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{agent})
+			}
+
 			// Post-delivery adapter concerns: notification subscription
 			// and mention processing stay outside the core operation.
 			if req.Notify {
@@ -1959,6 +1972,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Activity: agent.Activity,
 		})
 		s.events.PublishAgentStatus(ctx, agent)
+
+		// Review round 2 finding #2: register the primary recipient for a
+		// thread-derived group (see the agent-DM-fork site above for the
+		// full rationale). Idempotent, so harmless if already registered.
+		if groupConversationID != "" {
+			s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{agent})
+		}
 
 		// Process @mentions for managed agents too.
 		var managedMentionResults []messages.MentionResult
@@ -2058,6 +2078,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			notifySubscriberID = userIdent.ID()
 		}
 		s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
+	}
+
+	// Review round 2 finding #2: register the primary recipient for a
+	// thread-derived group (see the agent-DM-fork site above for the full
+	// rationale). Idempotent, so harmless if already registered.
+	if groupConversationID != "" {
+		s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{agent})
 	}
 
 	// Process @mentions: validate slugs, fan out mention messages to resolved agents.
