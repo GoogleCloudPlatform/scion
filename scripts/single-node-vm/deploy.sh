@@ -141,7 +141,7 @@ config_get() {
     local val
     val="$("$PYTHON" -c "
 import json, sys
-d = json.load(open(sys.argv[1]))
+d = json.load(open(sys.argv[1], encoding='utf-8'))
 keys = sys.argv[2].split('.')
 v = d
 for k in keys:
@@ -196,7 +196,7 @@ if [[ -n "$CONFIG_FILE" ]]; then
     err "Python interpreter '${PYTHON}' is required to parse the config file but was not found."
     exit 1
   fi
-  if ! json_err=$("$PYTHON" -c "import json, sys; json.load(open(sys.argv[1]))" "$CONFIG_FILE" 2>&1); then
+  if ! json_err=$("$PYTHON" -c "import json, sys; json.load(open(sys.argv[1], encoding='utf-8'))" "$CONFIG_FILE" 2>&1); then
     err "Invalid JSON syntax in config file: $CONFIG_FILE"
     echo "$json_err" >&2
     exit 1
