@@ -43,13 +43,14 @@ Permissions are granted on specific resource types:
 Scion uses a standardized set of actions:
 - **CRUD**: `create`, `read`, `update`, `delete`, `list`.
 - **Administrative**: `manage`.
-- **Resource-Specific**: `start`, `stop`, `attach`, `message`.
+- **Resource-Specific**: `lifecycle` (start, stop, suspend, restart, restore), `attach` (terminal, exec, env, reset-auth), `port_access`, `message`.
 
 ## Access Control & Authorization
 
 Scion enforces strict role-binding-based authorization for all agent operations:
 - **Agent Creation**: Requires active membership in the target project.
 - **Agent Interaction**: Interacting with an agent (e.g., via PTY/terminal or structured messaging) is restricted to the agent's owner (the creator), users in the agent's ancestry chain, or system administrators. The default project-member role does not grant the `agent:message` permission — messaging authorization is aligned with the terminal attach permission gate.
+- **Lifecycle vs. Attach**: Lifecycle operations (start, stop, suspend, restart, restore) are gated by `agent.lifecycle`, separately from `agent.attach` (terminal, exec, env, reset-auth) and `agent.port_access`. Because an agent runs with its creator's user-scoped secrets, the built-in `project-owner` and `project-admin` roles grant `agent.lifecycle` and messaging but **not** `agent.attach` or `agent.port_access`. Owners and admins can start, stop, and message other members' agents, but cannot open a terminal on them or reach their forwarded ports. They keep full access to their own agents and descendants through the resource-owner and ancestry grants.
 - **Agent Deletion**: Only the agent's owner, a system administrator, or authorized agent callers can delete an agent. For an agent caller to perform a deletion, it must have `project:agent:lifecycle` (associated with the `full` role) and must target an agent within its own project (which closes a cross-project agent deletion vulnerability).
 
 ### Membership-Based Project Access (Visibility Eradication)
@@ -202,12 +203,18 @@ These built-in roles bundle common permissions for human users:
 
 | Role | Description |
 |------|-------------|
-| `hub-admin` | Full control over the entire Hub (System Role). |
-| `hub:member` | Standard user; can create their own projects. |
+| `super-admin` | Full platform administrator with all permissions (System Role). |
+| `hub-admin` | Hub administrator with scopeable admin permissions (System Role). |
+| `hub-member` | Standard user; read access to directory resources and can create their own projects (System Role). |
+| `hub-viewer` | Read-only access to directory resources (System Role). |
 | `global-catalog-author` | Non-admin global skill authoring; grants only `skill.create_global` (System Role). |
-| `project:admin` | Full control over a specific project and its agents. |
-| `project:developer` | Can create and manage agents within a project. |
-| `project:viewer` | Read-only access to project status and logs. |
+| `project-owner` | Full project permissions, including agent lifecycle and messaging. Does not include `agent.attach` or `agent.port_access` on other members' agents. |
+| `project-admin` | Like `project-owner`, but without `agent.delete` or `agent.set_message_mode`. |
+| `project-member` | Basic project permissions. |
+
+:::caution[Breaking change: role revision 3]
+The `project-owner` and `project-admin` roles are at revision 3. On upgrade, existing Hubs reconcile these roles automatically: `agent.attach` and `agent.port_access` are removed and `agent.lifecycle` is added. Owners and admins who previously attached to other members' agents can no longer do so. User access tokens minted before the split that hold `agent:attach` keep lifecycle authority so existing automation continues to work. See [Personal Access Tokens](/scion/hosted/user/personal-access-tokens/) for the current scope list.
+:::
 
 ### Tiered Agent Authorization Roles
 

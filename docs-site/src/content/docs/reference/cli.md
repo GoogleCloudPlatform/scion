@@ -501,7 +501,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags:
             - `--project <string>`: Project ID or name to scope the token to (required).
             - `--name <string>`: Token name/label (required).
-            - `--scopes <scopes>`: Scopes to grant (required). This flag is **repeatable** and also accepts a **comma-separated list** of scopes (e.g., `--scopes agent:read,agent:create --scopes agent:start`). Strict empty-value validation is enforced.
+            - `--scopes <scopes>`: Scopes to grant (required). This flag is **repeatable** and also accepts a **comma-separated list** of scopes (e.g., `--scopes agent:read,agent:create --scopes agent:lifecycle`). Strict empty-value validation is enforced.
             - `--expires <duration>`: Expiry duration (e.g., 30d, 90d, 1y, default: 90d).
     - `list`: List your access tokens.
     - `revoke <token-id>`: Revoke a token (remains visible in listings as revoked).
