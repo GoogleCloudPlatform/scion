@@ -85,7 +85,7 @@ func TestSharedDirStorage_DockerAndK8s_SameLayout(t *testing.T) {
 		Image:        "test-image",
 		UnixUsername: "scion",
 		Labels: map[string]string{
-			"scion.grove": "myproject",
+			"scion.project": "myproject",
 		},
 		SharedDirs: dirs,
 		SharedDirStorage: &SharedDirRealization{
@@ -144,7 +144,7 @@ func TestCreateSharedDirPVCs_SharedDirStorageNFS_SkipsPVCCreation(t *testing.T) 
 		Name:  "test-agent",
 		Image: "test:latest",
 		Labels: map[string]string{
-			"scion.grove": "myproject",
+			"scion.project": "myproject",
 		},
 		SharedDirStorage: &SharedDirRealization{
 			Backend:     "nfs",
@@ -173,7 +173,7 @@ func TestBuildPod_SharedDirStorageNFS_EmptyPVClaimName_FailsClosed(t *testing.T)
 		Name:         "test-agent",
 		Image:        "test-image",
 		UnixUsername: "scion",
-		Labels:       map[string]string{"scion.grove": "myproject"},
+		Labels:       map[string]string{"scion.project": "myproject"},
 		SharedDirs:   []api.SharedDir{{Name: "scratchpad"}},
 		SharedDirStorage: &SharedDirRealization{
 			Backend:     "nfs",
@@ -197,7 +197,7 @@ func TestBuildPod_SharedDirStorageNFS_MissingSubPath_FailsClosed(t *testing.T) {
 		Name:         "test-agent",
 		Image:        "test-image",
 		UnixUsername: "scion",
-		Labels:       map[string]string{"scion.grove": "myproject"},
+		Labels:       map[string]string{"scion.project": "myproject"},
 		SharedDirs:   []api.SharedDir{{Name: "scratchpad"}},
 		SharedDirStorage: &SharedDirRealization{
 			Backend:     "nfs",
@@ -224,7 +224,7 @@ func TestBuildPod_SharedDirStorageNFS_PrecedesWorkspaceStorageNFS(t *testing.T) 
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
 		NFSSubPath:           "projects/proj-123/workspace",
-		Labels:               map[string]string{"scion.grove": "myproject"},
+		Labels:               map[string]string{"scion.project": "myproject"},
 		SharedDirs:           []api.SharedDir{{Name: "scratchpad"}},
 		SharedDirStorage: &SharedDirRealization{
 			Backend:     "nfs",
@@ -264,7 +264,7 @@ func TestBuildPod_SharedDirStorageNFS_Unset_UnaffectedLocalBehavior(t *testing.T
 		Name:         "test-agent",
 		Image:        "test-image",
 		UnixUsername: "scion",
-		Labels:       map[string]string{"scion.grove": "myproject"},
+		Labels:       map[string]string{"scion.project": "myproject"},
 		SharedDirs:   []api.SharedDir{{Name: "build-cache"}},
 	}
 
@@ -292,7 +292,7 @@ func TestBuildPod_SharedDirStorageNFS_PerDirDetails(t *testing.T) {
 		Image:              "test-image",
 		UnixUsername:       "scion",
 		ContainerWorkspace: "/workspace",
-		Labels:             map[string]string{"scion.grove": "myproject"},
+		Labels:             map[string]string{"scion.project": "myproject"},
 		SharedDirs: []api.SharedDir{
 			{Name: "scratchpad", ReadOnly: true},
 			{Name: "b", InWorkspace: true},
