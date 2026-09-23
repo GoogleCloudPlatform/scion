@@ -713,38 +713,41 @@ gcloud services enable \
 # ever fails the script, and it only detects and warns -- it never creates
 # or configures an OAuth client.
 info "Checking for cross-organization IAP mismatch..."
-if [[ "$ACCOUNT" == *.gserviceaccount.com ]]; then
-  echo "  Deployer is a service account; skipping cross-org IAP domain check."
+# A successful get-ancestors call always returns at least the project's
+# own row, so empty output means the call failed (permissions, etc.), not
+# "no organization" -- capture the raw output before parsing so those two
+# cases stay distinguishable. The no-org check below depends only on the
+# project, not on who's deploying, so it runs for every identity, including
+# service accounts.
+ANCESTORS="$(gcloud projects get-ancestors "${PROJECT_ID}" \
+  --format='value(id,type)' 2>/dev/null)" || ANCESTORS=""
+if [[ -z "$ANCESTORS" ]]; then
+  echo "  Could not read ancestry for ${PROJECT_ID}; skipping cross-org IAP check."
 else
-  # A successful get-ancestors call always returns at least the project's
-  # own row, so empty output means the call failed (permissions, etc.), not
-  # "no organization" -- capture the raw output before parsing so those two
-  # cases stay distinguishable.
-  ANCESTORS="$(gcloud projects get-ancestors "${PROJECT_ID}" \
-    --format='value(id,type)' 2>/dev/null)" || ANCESTORS=""
-  if [[ -z "$ANCESTORS" ]]; then
-    echo "  Could not read ancestry for ${PROJECT_ID}; skipping cross-org IAP check."
+  ORG_ID="$(awk '$2=="organization"{print $1; exit}' <<<"$ANCESTORS")" || true
+  if [[ -z "$ORG_ID" ]]; then
+    warn "Project ${PROJECT_ID} is not in a GCP organization. IAP's Google-managed OAuth client does not support no-org projects -- a custom OAuth client is required."
+    warn "This deploy will continue. See docs/deploy/agent-runbook-single-node-vm.md Section 7 (Troubleshooting, Cross-org IAP) for what to do."
+  elif [[ "$ACCOUNT" == *.gserviceaccount.com ]]; then
+    # An org was found, so the only remaining step is comparing the
+    # deployer's email domain against it -- not a meaningful comparison for
+    # a service account, so skip just that step.
+    echo "  Deployer is a service account; skipping cross-org domain comparison."
   else
-    ORG_ID="$(awk '$2=="organization"{print $1; exit}' <<<"$ANCESTORS")" || true
-    if [[ -z "$ORG_ID" ]]; then
-      warn "Project ${PROJECT_ID} is not in a GCP organization. IAP's Google-managed OAuth client does not support no-org projects -- a custom OAuth client is required."
-      warn "This deploy will continue. See docs/deploy/agent-runbook-single-node-vm.md Section 7 (Troubleshooting, Cross-org IAP) for what to do."
+    ORG_DOMAIN="$(gcloud organizations describe "${ORG_ID}" \
+      --format='value(displayName)' 2>/dev/null)" || true
+    if [[ -z "$ORG_DOMAIN" ]]; then
+      echo "  Could not read metadata for organization ${ORG_ID} (likely a permissions gap); skipping cross-org IAP check."
     else
-      ORG_DOMAIN="$(gcloud organizations describe "${ORG_ID}" \
-        --format='value(displayName)' 2>/dev/null)" || true
-      if [[ -z "$ORG_DOMAIN" ]]; then
-        echo "  Could not read metadata for organization ${ORG_ID} (likely a permissions gap); skipping cross-org IAP check."
+      DEPLOYER_DOMAIN="${ACCOUNT##*@}"
+      if [[ "${ORG_DOMAIN,,}" != "${DEPLOYER_DOMAIN,,}" ]]; then
+        warn "Deployer account (${ACCOUNT}) does not appear to belong to project ${PROJECT_ID}'s organization (${ORG_DOMAIN})."
+        warn "Cross-org IAP typically requires a custom OAuth consent screen / OAuth client -- the default consent screen will block authentication."
+        warn "(This can also be a false positive if the deployer is on a secondary or alias domain of the same organization.)"
+        warn "This deploy will continue. If IAP authentication fails later, or shows an unexpected consent screen, see"
+        warn "docs/deploy/agent-runbook-single-node-vm.md Section 7 (Troubleshooting) for the cross-org IAP scenario."
       else
-        DEPLOYER_DOMAIN="${ACCOUNT##*@}"
-        if [[ "${ORG_DOMAIN,,}" != "${DEPLOYER_DOMAIN,,}" ]]; then
-          warn "Deployer account (${ACCOUNT}) does not appear to belong to project ${PROJECT_ID}'s organization (${ORG_DOMAIN})."
-          warn "Cross-org IAP typically requires a custom OAuth consent screen / OAuth client -- the default consent screen will block authentication."
-          warn "(This can also be a false positive if the deployer is on a secondary or alias domain of the same organization.)"
-          warn "This deploy will continue. If IAP authentication fails later, or shows an unexpected consent screen, see"
-          warn "docs/deploy/agent-runbook-single-node-vm.md Section 7 (Troubleshooting) for the cross-org IAP scenario."
-        else
-          echo "  Deployer domain matches organization domain (${ORG_DOMAIN}); no cross-org IAP concern detected."
-        fi
+        echo "  Deployer domain matches organization domain (${ORG_DOMAIN}); no cross-org IAP concern detected."
       fi
     fi
   fi
