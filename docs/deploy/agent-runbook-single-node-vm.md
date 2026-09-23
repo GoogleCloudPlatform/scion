@@ -22,11 +22,23 @@ tell the user what is missing.
 | PyYAML | `python3 -c "import yaml; print(yaml.__version__)"` | Version string (any version) |
 | curl | `curl --version` | Version string (any version) |
 
-If PyYAML is missing, install it:
+If PyYAML is missing, install it one of these ways:
 
-```bash
-pip install pyyaml
-```
+| Option | Command | Notes |
+|--------|---------|-------|
+| System package (Debian/Ubuntu) | `apt-get install python3-yaml` | Preferred; avoids PEP 668 entirely. |
+| Virtualenv | `python3 -m venv ~/.venv && ~/.venv/bin/pip install pyyaml && PYTHON=~/.venv/bin/python3 bash deploy.sh ...` | Use when you cannot install system packages; pass `PYTHON=` when invoking `deploy.sh`. |
+| Per-user install (where allowed) | `pip install --user pyyaml` | Fails under PEP 668 ("externally-managed-environment") on Debian >= 12, Ubuntu >= 23.04, and Homebrew Python — prefer one of the options above on those systems. |
+
+`deploy.sh` itself never creates a virtualenv; it only reads `PYTHON` from
+the environment (default `python3`) to locate the interpreter with PyYAML
+installed.
+
+**VM operating system:** the deployed GCE VM's image is pinned to Ubuntu
+22.04 LTS (`ubuntu-2204-lts` / `ubuntu-os-cloud`) and is not currently
+configurable — `cloud-init.yaml`'s Docker apt-repo setup is written for this
+specific image. This is not something the operator needs to prepare locally;
+it's noted here because it affects what the deployed VM looks like.
 
 ---
 
@@ -67,6 +79,11 @@ does not exist. Ask them to verify the project ID and their permissions.
 
 ### 2.3 Required APIs
 
+`deploy.sh` enables every API it needs itself (Phase 2) — this preflight
+check exists only to fail fast on permissions before gathering deployment
+details from the user, not because the operator needs to enable anything
+manually.
+
 Check each API. If any is not enabled, enable it.
 
 | API | Check | Enable |
@@ -74,9 +91,20 @@ Check each API. If any is not enabled, enable it.
 | `compute.googleapis.com` | `gcloud services list --enabled --filter="name:compute.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable compute.googleapis.com --project=PROJECT_ID` |
 | `run.googleapis.com` | `gcloud services list --enabled --filter="name:run.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable run.googleapis.com --project=PROJECT_ID` |
 | `iap.googleapis.com` | `gcloud services list --enabled --filter="name:iap.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable iap.googleapis.com --project=PROJECT_ID` |
+| `cloudbuild.googleapis.com` | `gcloud services list --enabled --filter="name:cloudbuild.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable cloudbuild.googleapis.com --project=PROJECT_ID` |
+| `artifactregistry.googleapis.com` | `gcloud services list --enabled --filter="name:artifactregistry.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable artifactregistry.googleapis.com --project=PROJECT_ID` |
 | `iam.googleapis.com` | `gcloud services list --enabled --filter="name:iam.googleapis.com" --format="value(name)" --project=PROJECT_ID` | `gcloud services enable iam.googleapis.com --project=PROJECT_ID` |
 
 **Expected:** Each check returns the API name. If empty, run the enable command.
+
+**Timing note:** first-time enablement of an API can take 1-2 minutes per
+API. This is normal `gcloud`/GCP behavior, not something to retry — `gcloud
+services enable` already blocks until the enable operation completes, so do
+not add retry loops around it. If you are executing these commands from an
+agent harness with a short default tool-call timeout (commonly ~2 minutes),
+run the enable/preflight commands with an extended timeout, or run them in
+the background and poll for completion, so the harness timeout doesn't get
+mistaken for a `gcloud` failure.
 
 ### 2.4 Billing
 
@@ -92,9 +120,17 @@ page.
 
 ### 2.5 Compute quota (optional)
 
+The `regions.get` API's quota entries are shaped `{metric, limit, usage,
+owner}` — there is no `name` field, so a `quotas[name=CPUS]` projection
+silently matches nothing (exits 0 with empty output). `[key=value]` bracket
+filtering also isn't valid projection syntax here, and `describe` commands
+don't accept a top-level `--filter` flag (that's `list`-only) — so pick the
+row out with `--flatten` plus a client-side filter instead:
+
 ```bash
 gcloud compute regions describe REGION --project=PROJECT_ID \
-  --format='value(quotas[name=CPUS].limit,quotas[name=CPUS].usage)'
+  --flatten='quotas[]' --format='value(quotas.metric,quotas.limit,quotas.usage)' \
+  | awk '$1=="CPUS"{print "limit="$2" usage="$3}'
 ```
 
 Verify that the available CPU quota (limit minus usage) is sufficient for the
@@ -262,6 +298,15 @@ gcloud run services describe scion-hub-HUB_NAME-iap-proxy \
 
 **Expected:** A URL like `https://scion-hub-HUB_NAME-iap-proxy-HASH-REGION.a.run.app`
 
+**Do not** treat a successful `curl .../healthz` on this `*.run.app` URL as
+proof the proxy or hub is reachable. On Cloud Run, `/healthz` is answered
+directly by the Google Front End (GFE), before the request ever reaches the
+proxy container — it proves the Cloud Run service exists, nothing more. The
+proxy binary deliberately exposes `/proxy-healthz` instead (see
+`extras/cloudrun-iap-proxy/main.go`) for anyone who needs an uptime check
+that actually reaches the proxy. The cheap way to check that IAP is
+enforcing on this URL is in §6.5 below.
+
 ### 6.3 Hub health check
 
 SSH to the VM and check the health endpoint:
@@ -296,8 +341,23 @@ and `localhost/scion/scion-antigravity`, all tagged `latest`.
 
 ### 6.5 IAP access
 
-Provide the access URL (from section 5.3) to the user and ask them to open it
-in their browser.
+A cheap way to confirm IAP is actually enforcing on the proxy URL, without
+involving a browser, is a plain unauthenticated request to the site root
+(not `/healthz` — see the note in §6.2, GFE answers that one, not IAP):
+
+```bash
+curl -sI "https://scion-hub-HUB_NAME-iap-proxy-HASH-REGION.a.run.app/"
+```
+
+**Expected:** Either a `302` redirect (to `accounts.google.com`, the
+browser-oriented login flow) or a `401` with an `Invalid IAP credentials`
+body. Either response is proof IAP is enforcing on the service. Do not use a
+service-account identity-token `curl` recipe for this check — it requires
+the IAP OAuth client ID, which is out of scope for a first deploy.
+
+For end-to-end verification (does auth actually complete and does the UI
+load), provide the access URL (from section 5.3) to the user and ask them to
+open it in their browser.
 
 **Expected:** The user is prompted to authenticate with their Google account,
 then sees the Scion Hub UI.
@@ -336,6 +396,76 @@ gcloud iap web add-iam-policy-binding \
 | SSH connection fails to VM | IAP tunnel access not granted or firewall rule missing | Verify IAP tunnel role: `gcloud projects get-iam-policy PROJECT_ID --flatten="bindings[].members" --filter="bindings.role:roles/iap.tunnelResourceAccessor" --format="value(bindings.members)"`. Verify firewall rule exists: `gcloud compute firewall-rules describe scion-hub-HUB_NAME-allow-iap-ssh --project=PROJECT_ID`. |
 | `403 Forbidden` accessing the hub URL | User missing IAP access binding | Grant access: `gcloud iap web add-iam-policy-binding --resource-type=cloud-run --service=scion-hub-HUB_NAME-iap-proxy --region=REGION --project=PROJECT_ID --member=user:USER_EMAIL --role=roles/iap.httpsResourceAccessor` |
 | VM has no outbound internet | Cloud NAT not created or misconfigured | Verify router and NAT exist: `gcloud compute routers nats describe scion-hub-HUB_NAME-nat --router=scion-hub-HUB_NAME-router --region=REGION --project=PROJECT_ID` |
+| IAP auth fails outright, or shows an unexpected consent screen | Deployer account is in a different GCP organization than the target project, or the project is not in a GCP organization at all | See "Cross-org IAP" below. `deploy.sh` prints a warning during Phase 2 for both cases it can detect (no-org is a certain warning; cross-domain is a heuristic) — either check is skipped silently if ancestry/org metadata can't be read, so trust the symptom over the absence of the warning. |
+
+### Cross-org IAP: custom OAuth client required
+
+**Symptom:** authentication through the Cloud Run IAP proxy fails outright,
+or shows an "access blocked" / unexpected consent screen instead of the
+expected sign-in flow.
+
+**Why it happens:** IAP's default OAuth client is Google-managed and only
+covers same-organization use. Per [Google's IAP custom OAuth
+documentation](https://cloud.google.com/iap/docs/custom-oauth-configuration),
+a custom OAuth client is required when:
+
+- the deployer's account is outside the project's GCP organization, or
+- **the project is not in a GCP organization at all** — this is the common
+  first-deploy shape (a personal account on an OSS/sandbox project), and
+  unlike the cross-org case it is a certain failure, not a heuristic.
+
+This is unrelated to any IAM role or IAP binding —
+`roles/iap.httpsResourceAccessor` can be correctly granted and auth will
+still fail.
+
+`deploy.sh` detects both cases ahead of time (Phase 2):
+
+- **No organization:** if the project has no GCP organization, it always
+  warns (unless the project's ancestry can't be read) — the Google-managed
+  client can never work here, so there's nothing to guess.
+- **Cross-org:** if the project does have an organization, it compares the
+  deployer's email domain against the organization's domain (via `gcloud
+  projects get-ancestors` and `gcloud organizations describe`) and warns on
+  a mismatch. For service-account deployers, this domain comparison is
+  skipped — comparing a service account's domain to an org isn't a
+  meaningful check — but the no-org warning above still applies to them
+  like anyone else. This part is a heuristic, not a guarantee, with two known
+  failure modes:
+  - **False negative:** if either gcloud call fails (a permissions gap is
+    common — reading organization metadata needs a role the deployer may
+    not have even when they can deploy fine otherwise), the check silently
+    skips rather than guessing.
+  - **False positive:** the organization domain compared against is its
+    *primary* Workspace domain. A deployer on a secondary or alias domain of
+    the same Workspace organization (or a subdomain) is legitimately in-org
+    but will still trigger the warning.
+
+Treat the actual symptom above as authoritative over the presence or absence
+of either warning.
+
+**Fix:** the default OAuth consent screen cannot be made to accept
+cross-org or no-org accounts. A custom OAuth client (with its own consent
+screen configuration) must be created for the project and IAP must be
+configured to use it, instead of the default. This is a manual, one-time GCP
+Console operation:
+
+1. In the target project's GCP Console, go to **APIs & Services > OAuth
+   consent screen** and configure a consent screen that includes the
+   deployer's account (e.g. an "External" user type with the deployer added
+   as a test user, or a configuration appropriate for your organization's
+   policy).
+2. Go to **APIs & Services > Credentials** and create an OAuth 2.0 Client ID
+   of the type IAP expects for the resource (web application).
+3. Under **Security > Identity-Aware Proxy**, associate the custom OAuth
+   client with the Cloud Run service (`scion-hub-HUB_NAME-iap-proxy`)
+   instead of the project's default-generated client.
+
+See [Google's IAP custom OAuth
+documentation](https://cloud.google.com/iap/docs/custom-oauth-configuration)
+for the exact consent-screen and OAuth-client steps for your GCP Console
+version — the menu paths above can shift between Console releases.
+`deploy.sh` does not and will not automate this step; it is
+detection-and-warning only.
 
 ### Diagnostic commands
 

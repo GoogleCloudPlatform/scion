@@ -16,6 +16,10 @@ packages:
   - curl
 
 runcmd:
+  # runcmd executes under /bin/sh (dash on Ubuntu) -- POSIX only, no
+  # bash-isms (no `&>`, no `[[ ]]`, etc.). Verify with
+  # scripts/single-node-vm/check-cloud-init.sh before changing this block.
+
   # Install Docker
   - mkdir -p /etc/apt/keyrings
   - |
@@ -32,9 +36,9 @@ runcmd:
   - systemctl start docker
 
   # Create scion user and add to docker group
-  - id scion &>/dev/null || useradd -m -U -s /bin/bash scion
+  - id scion >/dev/null 2>&1 || useradd -m -U -s /bin/bash scion
   - |
-    if getent group docker &>/dev/null; then
+    if getent group docker >/dev/null 2>&1; then
       usermod -aG docker scion
     else
       echo "Warning: docker group does not exist yet; skipping usermod"

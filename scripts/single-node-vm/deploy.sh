@@ -26,7 +26,7 @@
 # The script is idempotent: re-running converges without duplication.
 #
 # Usage:
-#   ./deploy.sh [--version VERSION] [--config CONFIG_FILE]
+#   ./deploy.sh [--version VERSION] [--config CONFIG_FILE] [--rebuild-images]
 #   ./deploy.sh --delete
 #
 # Options:
@@ -36,11 +36,22 @@
 #                       prompts. When provided with all required fields, the
 #                       script runs headlessly (no interactive input needed).
 #                       See deploy-config.example.yaml for the format.
+#   --rebuild-images    Force a rebuild of container images on the VM even if
+#                       the version marker and all 3 expected images already
+#                       match VERSION. Equivalent to container_images.
+#                       force_rebuild: true in the config file; either one
+#                       forces a rebuild.
 #   --delete            Tear down all resources created by a previous deploy.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Python interpreter used to parse the YAML config file. Override with
+# PYTHON=/path/to/python3 if the system python3 does not have PyYAML
+# installed and PEP 668 ("externally-managed-environment") blocks a bare
+# `pip install pyyaml` (Debian >= 12, Ubuntu >= 23.04, Homebrew Python).
+PYTHON="${PYTHON:-python3}"
 
 # ---------------------------------------------------------------------------
 # Color helpers
@@ -57,16 +68,36 @@ err()     { echo -e "${RED}ERROR:${RESET} $*" >&2; }
 section() { echo ""; echo -e "${BOLD}--- $* ---${RESET}"; }
 
 # ---------------------------------------------------------------------------
+# Retry / timing budgets
+# ---------------------------------------------------------------------------
+# Tuned for a cold VM on first boot: guest-agent start, OS Login / metadata
+# key propagation, sshd host-key generation, and IAP tunnel setup all stack
+# on top of package_upgrade: true restarting services.
+readonly SSH_MAX_ATTEMPTS=30           # ~5 min ceiling (see backoff below)
+readonly SSH_BACKOFF_FAST_ATTEMPTS=5   # attempts 1..N-1 use the fast backoff
+readonly SSH_BACKOFF_FAST_SECS=5
+readonly SSH_BACKOFF_SLOW_SECS=10
+readonly CLOUD_INIT_MAX_ATTEMPTS=6
+readonly CLOUD_INIT_RETRY_SECS=15
+readonly HEALTH_CHECK_MAX_ATTEMPTS=12
+readonly HEALTH_CHECK_RETRY_SECS=5
+readonly BUILD_POLL_MAX_ATTEMPTS=180
+readonly BUILD_POLL_INTERVAL_SECS=15
+readonly IAP_ENFORCEMENT_WAIT_SECS=60
+
+# ---------------------------------------------------------------------------
 # Parse flags
 # ---------------------------------------------------------------------------
 VERSION=""
 DELETE_MODE=false
 CONFIG_FILE=""
+CLI_REBUILD_IMAGES=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
     --config) CONFIG_FILE="$2"; shift 2 ;;
     --delete) DELETE_MODE=true; shift ;;
+    --rebuild-images) CLI_REBUILD_IMAGES=true; shift ;;
     --help|-h)
       sed -n '/^# scripts\/single-node-vm/,/^[^#]/{ /^#/s/^# \?//p }' "${BASH_SOURCE[0]}"
       exit 0
@@ -86,7 +117,7 @@ config_get() {
   local default="${2:-}"
   if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
     local val
-    val="$(python3 -c "
+    val="$("$PYTHON" -c "
 import yaml, sys
 d = yaml.safe_load(open(sys.argv[1]))
 keys = sys.argv[2].split('.')
@@ -139,15 +170,19 @@ if [[ -n "$CONFIG_FILE" ]]; then
     err "Config file not found: $CONFIG_FILE"
     exit 1
   fi
-  if ! command -v python3 &>/dev/null; then
-    err "python3 is required to parse the config file but was not found."
+  if ! command -v "$PYTHON" &>/dev/null; then
+    err "Python interpreter '${PYTHON}' is required to parse the config file but was not found."
     exit 1
   fi
-  if ! python3 -c "import yaml" &>/dev/null; then
-    err "Python 'PyYAML' module is required to parse the config file. Please install it (e.g., 'pip install pyyaml' or 'apt-get install python3-yaml')."
+  if ! "$PYTHON" -c "import yaml" &>/dev/null; then
+    err "Python 'PyYAML' module is required to parse the config file ('${PYTHON}' has no 'yaml' module). Install it one of these ways:
+    1. System package (Debian/Ubuntu): apt-get install python3-yaml
+    2. Virtualenv:                     python3 -m venv ~/.venv && ~/.venv/bin/pip install pyyaml && PYTHON=~/.venv/bin/python3 bash deploy.sh ...
+    3. Per-user install (where allowed): pip install --user pyyaml
+    If PyYAML is already installed under a different interpreter, set PYTHON=/path/to/python3 and re-run."
     exit 1
   fi
-  if ! yaml_err=$(python3 -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]))" "$CONFIG_FILE" 2>&1); then
+  if ! yaml_err=$("$PYTHON" -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]))" "$CONFIG_FILE" 2>&1); then
     err "Invalid YAML syntax in config file: $CONFIG_FILE"
     echo "$yaml_err" >&2
     exit 1
@@ -221,7 +256,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     info "Non-interactive mode: proceeding with teardown."
   else
     read -rp "Continue? [y/N]: " CONFIRM
-    if [[ "${CONFIRM,,}" != "y" ]]; then
+    if [[ "$(echo "$CONFIRM" | tr '[:upper:]' '[:lower:]')" != "y" ]]; then
       echo "Aborted."
       exit 0
     fi
@@ -475,6 +510,15 @@ else
   esac
 fi
 
+# Force a rebuild even if the version marker and all 3 images already match
+# the requested VERSION. Defaults to false: normally a matching marker means
+# Phase 3b can skip the 30-45 min build entirely. Either the config key or
+# the --rebuild-images CLI flag forces a rebuild.
+CFG_FORCE_REBUILD="$(config_get 'container_images.force_rebuild' 'false')"
+if [[ "$CLI_REBUILD_IMAGES" == "true" ]]; then
+  CFG_FORCE_REBUILD="true"
+fi
+
 # --- Admin email ---
 ADMIN_EMAIL="$(config_get 'admin_email' '')"
 if [[ -z "$ADMIN_EMAIL" ]]; then
@@ -584,6 +628,21 @@ if [[ -z "$VERSION" ]]; then
 fi
 echo "  Scion version: ${VERSION}"
 
+# Validate VERSION strictly. It is interpolated into several remote-command
+# strings sent over `gcloud compute ssh --command=...` (git clone/checkout,
+# the Phase 3b idempotency check, and the marker write inside a nested
+# `bash -c '...'` body). A version containing shell metacharacters would
+# otherwise be executed on the VM — git check-ref-format happily accepts a
+# tag name like "v1;id", and this script's own --version flag or the GitHub
+# release auto-detect could pass one through unchecked. Restrict to the
+# characters a real release tag needs. Require an alphanumeric first
+# character (after the optional 'v') so a leading '-' can never be mistaken
+# for a flag by a downstream command.
+if [[ ! "$VERSION" =~ ^v?[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+  err "Invalid version: '${VERSION}' (expected characters: letters, digits, '.', '_', '-', optionally prefixed with 'v'; must not start with '-')."
+  exit 1
+fi
+
 # --- Release channel (auto-detect from version) ---
 CFG_RELEASE_CHANNEL="$(config_get 'release_channel' '')"
 if [[ -n "$CFG_RELEASE_CHANNEL" ]]; then
@@ -629,6 +688,70 @@ gcloud services enable \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
   --project="${PROJECT_ID}" --quiet
+
+# --- Cross-org IAP warning (best-effort; never blocks the deploy) ---
+# IAP's default (Google-managed) OAuth client only covers same-organization
+# use. A custom OAuth client is required when: the deployer is outside the
+# project's organization, OR the project is not in a GCP organization at all
+# (Google-managed clients don't support no-org projects, full stop -- see
+# https://cloud.google.com/iap/docs/custom-oauth-configuration). The no-org
+# case is the common first-deploy shape (personal account, OSS project), and
+# unlike the cross-org case it is a *certain* answer, not a heuristic -- warn
+# on it, don't skip it. See docs/deploy/agent-runbook-single-node-vm.md
+# Section 7 (Troubleshooting) for what to do about either case.
+#
+# The domain comparison itself is a heuristic: it compares the deployer's
+# email domain against the org's `displayName`, which the Resource Manager
+# API documents as the organization's *primary* Workspace domain. A deployer
+# on a secondary or alias domain of the same Workspace org, or a subdomain,
+# is legitimately in-org but will not match `displayName` -- that's a known
+# false-positive mode, not something this comparison can currently
+# distinguish from an actual cross-org deployer. Any inability to *read* the
+# data -- the get-ancestors call itself failing, or organizations describe
+# failing on a project that does have an org -- degrades to "cannot
+# determine, skip the check" rather than guessing; nothing in this block
+# ever fails the script, and it only detects and warns -- it never creates
+# or configures an OAuth client.
+info "Checking for cross-organization IAP mismatch..."
+# A successful get-ancestors call always returns at least the project's
+# own row, so empty output means the call failed (permissions, etc.), not
+# "no organization" -- capture the raw output before parsing so those two
+# cases stay distinguishable. The no-org check below depends only on the
+# project, not on who's deploying, so it runs for every identity, including
+# service accounts.
+ANCESTORS="$(gcloud projects get-ancestors "${PROJECT_ID}" \
+  --format='value(id,type)' 2>/dev/null)" || ANCESTORS=""
+if [[ -z "$ANCESTORS" ]]; then
+  echo "  Could not read ancestry for ${PROJECT_ID}; skipping cross-org IAP check."
+else
+  ORG_ID="$(awk '$2=="organization"{print $1; exit}' <<<"$ANCESTORS")" || true
+  if [[ -z "$ORG_ID" ]]; then
+    warn "Project ${PROJECT_ID} is not in a GCP organization. IAP's Google-managed OAuth client does not support no-org projects -- a custom OAuth client is required."
+    warn "This deploy will continue. See docs/deploy/agent-runbook-single-node-vm.md Section 7 (Troubleshooting, Cross-org IAP) for what to do."
+  elif [[ "$ACCOUNT" == *.gserviceaccount.com ]]; then
+    # An org was found, so the only remaining step is comparing the
+    # deployer's email domain against it -- not a meaningful comparison for
+    # a service account, so skip just that step.
+    echo "  Deployer is a service account; skipping cross-org domain comparison."
+  else
+    ORG_DOMAIN="$(gcloud organizations describe "${ORG_ID}" \
+      --format='value(displayName)' 2>/dev/null)" || true
+    if [[ -z "$ORG_DOMAIN" ]]; then
+      echo "  Could not read metadata for organization ${ORG_ID} (likely a permissions gap); skipping cross-org IAP check."
+    else
+      DEPLOYER_DOMAIN="${ACCOUNT##*@}"
+      if [[ "$(echo "$ORG_DOMAIN" | tr '[:upper:]' '[:lower:]')" != "$(echo "$DEPLOYER_DOMAIN" | tr '[:upper:]' '[:lower:]')" ]]; then
+        warn "Deployer account (${ACCOUNT}) does not appear to belong to project ${PROJECT_ID}'s organization (${ORG_DOMAIN})."
+        warn "Cross-org IAP typically requires a custom OAuth consent screen / OAuth client -- the default consent screen will block authentication."
+        warn "(This can also be a false positive if the deployer is on a secondary or alias domain of the same organization.)"
+        warn "This deploy will continue. If IAP authentication fails later, or shows an unexpected consent screen, see"
+        warn "docs/deploy/agent-runbook-single-node-vm.md Section 7 (Troubleshooting) for the cross-org IAP scenario."
+      else
+        echo "  Deployer domain matches organization domain (${ORG_DOMAIN}); no cross-org IAP concern detected."
+      fi
+    fi
+  fi
+fi
 
 # --- Service account ---
 info "Creating service account (if needed)..."
@@ -758,7 +881,8 @@ fi
 info "Waiting for SSH access to VM..."
 SSH_READY=false
 SSH_STDERR_FILE="$(mktemp)"
-for attempt in $(seq 1 20); do
+trap 'rm -f "$SSH_STDERR_FILE"' EXIT
+for attempt in $(seq 1 "$SSH_MAX_ATTEMPTS"); do
   if gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
       --command="echo ssh-ok" \
@@ -767,13 +891,13 @@ for attempt in $(seq 1 20); do
     SSH_READY=true
     break
   fi
-  BACKOFF=$((attempt < 5 ? 5 : 10))
-  echo "  SSH attempt ${attempt}/20 - retrying in ${BACKOFF}s..."
+  BACKOFF=$((attempt < SSH_BACKOFF_FAST_ATTEMPTS ? SSH_BACKOFF_FAST_SECS : SSH_BACKOFF_SLOW_SECS))
+  echo "  SSH attempt ${attempt}/${SSH_MAX_ATTEMPTS} - retrying in ${BACKOFF}s..."
   sleep "$BACKOFF"
 done
 
 if [[ "$SSH_READY" != "true" ]]; then
-  err "Could not establish SSH connection to ${INSTANCE_NAME} after 20 attempts."
+  err "Could not establish SSH connection to ${INSTANCE_NAME} after ${SSH_MAX_ATTEMPTS} attempts."
   if [[ -s "${SSH_STDERR_FILE}" ]]; then
     echo "  Last SSH error:" >&2
     cat "${SSH_STDERR_FILE}" >&2
@@ -790,7 +914,7 @@ echo "  SSH connection established."
 # it completes causes "No such file or directory" errors.
 info "Waiting for cloud-init to complete (this may take a few minutes)..."
 CLOUD_INIT_OK=false
-for ci_attempt in $(seq 1 6); do
+for ci_attempt in $(seq 1 "$CLOUD_INIT_MAX_ATTEMPTS"); do
   if gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
       --command="sudo cloud-init status --wait" \
@@ -798,13 +922,13 @@ for ci_attempt in $(seq 1 6); do
     CLOUD_INIT_OK=true
     break
   fi
-  if [[ $ci_attempt -lt 6 ]]; then
-    echo "  cloud-init check attempt ${ci_attempt}/6 returned non-zero, retrying in 15s..."
-    sleep 15
+  if [[ $ci_attempt -lt $CLOUD_INIT_MAX_ATTEMPTS ]]; then
+    echo "  cloud-init check attempt ${ci_attempt}/${CLOUD_INIT_MAX_ATTEMPTS} returned non-zero, retrying in ${CLOUD_INIT_RETRY_SECS}s..."
+    sleep "$CLOUD_INIT_RETRY_SECS"
   fi
 done
 if [[ "$CLOUD_INIT_OK" != "true" ]]; then
-  err "cloud-init did not complete successfully after 6 attempts."
+  err "cloud-init did not complete successfully after ${CLOUD_INIT_MAX_ATTEMPTS} attempts."
   echo "  Check cloud-init logs: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='sudo cloud-init status --long'"
   exit 1
 fi
@@ -964,7 +1088,7 @@ SERVICEEOF
 # --- Health check ---
 info "Running health check..."
 HEALTH_OK=false
-for i in $(seq 1 12); do
+for i in $(seq 1 "$HEALTH_CHECK_MAX_ATTEMPTS"); do
   if gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
       --command="curl -sf http://localhost:8080/healthz" \
@@ -972,15 +1096,15 @@ for i in $(seq 1 12); do
     HEALTH_OK=true
     break
   fi
-  echo "  Attempt ${i}/12 - waiting 5s..."
-  sleep 5
+  echo "  Attempt ${i}/${HEALTH_CHECK_MAX_ATTEMPTS} - waiting ${HEALTH_CHECK_RETRY_SECS}s..."
+  sleep "$HEALTH_CHECK_RETRY_SECS"
 done
 
 if [[ "$HEALTH_OK" == "true" ]]; then
   echo ""
   echo -e "${GREEN}  Health check passed.${RESET}"
 else
-  err "Health check did not pass within 60s. The hub is not running."
+  err "Health check did not pass within $((HEALTH_CHECK_MAX_ATTEMPTS * HEALTH_CHECK_RETRY_SECS))s. The hub is not running."
   echo "  Check the service logs:"
   echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
   echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
@@ -993,109 +1117,166 @@ fi
 if [[ "$IMAGE_SOURCE" == "build" ]]; then
   section "Phase 3b: Build Container Images on VM"
 
-  info "Cloning scion repository on VM..."
-  gcloud compute ssh "${INSTANCE_NAME}" \
-    --zone="${ZONE}" --project="${PROJECT_ID}" \
-    --command="
-      set -euo pipefail
-      if [ ! -d /home/scion/scion-source ]; then
-        sudo -u scion git clone --depth 1 --branch '${VERSION}' \
-          https://github.com/GoogleCloudPlatform/scion.git /home/scion/scion-source
-      else
-        cd /home/scion/scion-source
-        sudo -u scion git fetch --depth 1 origin tag '${VERSION}'
-        sudo -u scion git checkout '${VERSION}'
-      fi
-    "
-
-  # Build only the minimal set of images needed for deployment:
-  # core-base (foundation) -> scion-base (adds scion binary) -> scion-antigravity (default harness)
-  # Using --target all would build ALL ~12 images including harnesses with known build issues.
-  info "Building container images (this may take 30-45 minutes)..."
-  gcloud compute ssh "${INSTANCE_NAME}" \
-    --zone="${ZONE}" --project="${PROJECT_ID}" \
-    --command="
-      set -euo pipefail
-      cd /home/scion/scion-source
-      rm -f /tmp/scion-image-build.exit
-      { nohup bash -c '
-        set -euo pipefail
-        # Step 1: Build core-base
-        echo \"=== Building core-base ===\"
-        sudo bash image-build/scripts/build-images.sh \
-          --builder local-docker \
-          --target core-base \
-          --tag latest
-
-        # Step 2: Build scion-base
-        echo \"=== Building scion-base ===\"
-        sudo bash image-build/scripts/build-images.sh \
-          --builder local-docker \
-          --target scion-base \
-          --tag latest
-
-        # Step 3: Build antigravity harness directly
-        echo \"=== Building scion-antigravity ===\"
-        sudo docker build \
-          -t scion-antigravity:latest \
-          --build-arg BASE_IMAGE=scion-base:latest \
-          -f harnesses/antigravity/Dockerfile \
-          harnesses/antigravity/
-
-        # Step 4: Tag images under localhost/scion for the runtime
-        echo \"=== Tagging images for localhost/scion registry ===\"
-        sudo docker tag core-base:latest localhost/scion/core-base:latest
-        sudo docker tag scion-base:latest localhost/scion/scion-base:latest
-        sudo docker tag scion-antigravity:latest localhost/scion/scion-antigravity:latest
-
-        echo \"=== All images built and tagged successfully ===\"
-      ' > /tmp/scion-image-build.log 2>&1; echo \$? > /tmp/scion-image-build.exit; } &
-      echo \$! > /tmp/scion-image-build.pid
-      echo \"Image build started in background (PID \$(cat /tmp/scion-image-build.pid))\"
-    "
-
-  # Poll for build completion
-  info "Waiting for image build to complete..."
-  BUILD_DONE=false
-  POLL_COUNT=0
-  MAX_POLLS=180  # 180 * 15s = 45 min max
-  while [[ "$BUILD_DONE" != "true" ]] && [[ $POLL_COUNT -lt $MAX_POLLS ]]; do
-    sleep 15
-    POLL_COUNT=$((POLL_COUNT + 1))
-    # Check if the exit code file exists (build finished)
-    BUILD_EXIT=$(gcloud compute ssh "${INSTANCE_NAME}" \
+  # NOTE: the checkout lives under /opt (root-owned, world-traversable),
+  # not /home/scion — the deployer identity running this over `gcloud
+  # compute ssh` is never a member of the `scion` group, and /home/scion
+  # is mode 0750 once cloud-init's `useradd -m` runs. Every privileged
+  # step uses `sudo`; the deployer only needs to traverse /opt and
+  # write /tmp.
+  #
+  # Idempotency: a successful build writes a version marker
+  # (/opt/scion-source/.images-built.version) containing $VERSION. A re-run
+  # skips the 30-45 min build iff the marker matches $VERSION AND all 3
+  # expected images are still present — a stale `:latest` tag alone is not
+  # enough, since re-running with --version vNEXT must not silently keep old
+  # images just because something answers to `:latest`. The marker file is
+  # what makes the skip version-aware.
+  IMAGES_BUILT_MARKER="/opt/scion-source/.images-built.version"
+  SKIP_BUILD=false
+  if [[ "$CFG_FORCE_REBUILD" == "true" ]]; then
+    info "Forcing a rebuild (container_images.force_rebuild or --rebuild-images is set)."
+  else
+    info "Checking whether images for version ${VERSION} are already built..."
+    BUILD_CHECK=$(gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
-      --command="cat /tmp/scion-image-build.exit 2>/dev/null || echo running" \
-      2>/dev/null) || true
-    if [[ "$BUILD_EXIT" != "running" ]]; then
-      BUILD_DONE=true
-    else
-      # Show progress (last line of build log)
-      LAST_LINE=$(gcloud compute ssh "${INSTANCE_NAME}" \
-        --zone="${ZONE}" --project="${PROJECT_ID}" \
-        --command="tail -1 /tmp/scion-image-build.log 2>/dev/null || echo '(waiting...)'" \
-        2>/dev/null) || true
-      echo "  [${POLL_COUNT}] ${LAST_LINE}"
+      --command="
+        set -euo pipefail
+        MARKER='${IMAGES_BUILT_MARKER}'
+        if [ -f \"\$MARKER\" ] \
+          && [ \"\$(sudo cat \"\$MARKER\" 2>/dev/null)\" = '${VERSION}' ] \
+          && sudo docker image inspect localhost/scion/core-base:latest >/dev/null 2>&1 \
+          && sudo docker image inspect localhost/scion/scion-base:latest >/dev/null 2>&1 \
+          && sudo docker image inspect localhost/scion/scion-antigravity:latest >/dev/null 2>&1; then
+          echo skip
+        else
+          echo build
+        fi
+      " 2>/dev/null) || true
+    if [[ "$BUILD_CHECK" == "skip" ]]; then
+      SKIP_BUILD=true
     fi
-  done
-
-  if [[ "$BUILD_DONE" != "true" ]]; then
-    err "Image build timed out after 45 minutes."
-    echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='cat /tmp/scion-image-build.log'"
-    exit 1
   fi
 
-  if [[ "$BUILD_EXIT" != "0" ]]; then
-    err "Image build failed (exit code: ${BUILD_EXIT})."
-    echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='tail -50 /tmp/scion-image-build.log'"
-    exit 1
+  if [[ "$SKIP_BUILD" == "true" ]]; then
+    info "Images already built for version ${VERSION} (marker + all 3 images present); skipping build."
+    echo "  Set container_images.force_rebuild: true in the config, or pass --rebuild-images, to override."
+  else
+    info "Cloning scion repository on VM..."
+    gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="
+        set -euo pipefail
+        if [ ! -d /opt/scion-source ]; then
+          sudo git clone --depth 1 --branch '${VERSION}' \
+            https://github.com/GoogleCloudPlatform/scion.git /opt/scion-source
+        else
+          cd /opt/scion-source
+          sudo git fetch --depth 1 origin tag '${VERSION}'
+          sudo git checkout '${VERSION}'
+        fi
+      "
+
+    # Build only the minimal set of images needed for deployment:
+    # core-base (foundation) -> scion-base (adds scion binary) -> scion-antigravity (default harness)
+    # Using --target all would build ALL ~12 images including harnesses with known build issues.
+    info "Building container images (this may take 30-45 minutes)..."
+    gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="
+        set -euo pipefail
+        cd /opt/scion-source
+        rm -f /tmp/scion-image-build.exit
+        # Clear the marker before starting: if this build is interrupted or
+        # fails partway, no marker should be left claiming a stale version
+        # is built (Step 5 below only writes it back on full success).
+        sudo rm -f '${IMAGES_BUILT_MARKER}'
+        nohup bash -c '
+          {
+            set -euo pipefail
+            # Step 1: Build core-base
+            echo \"=== Building core-base ===\"
+            sudo bash image-build/scripts/build-images.sh \
+              --builder local-docker \
+              --target core-base \
+              --tag latest
+
+            # Step 2: Build scion-base
+            echo \"=== Building scion-base ===\"
+            sudo bash image-build/scripts/build-images.sh \
+              --builder local-docker \
+              --target scion-base \
+              --tag latest
+
+            # Step 3: Build antigravity harness directly
+            echo \"=== Building scion-antigravity ===\"
+            sudo docker build \
+              -t scion-antigravity:latest \
+              --build-arg BASE_IMAGE=scion-base:latest \
+              -f harnesses/antigravity/Dockerfile \
+              harnesses/antigravity/
+
+            # Step 4: Tag images under localhost/scion for the runtime
+            echo \"=== Tagging images for localhost/scion registry ===\"
+            sudo docker tag core-base:latest localhost/scion/core-base:latest
+            sudo docker tag scion-base:latest localhost/scion/scion-base:latest
+            sudo docker tag scion-antigravity:latest localhost/scion/scion-antigravity:latest
+
+            # Step 5: Record the version marker so re-runs can skip the build.
+            # Written last, only on full success (set -e above aborts before
+            # this line if any prior step failed).
+            echo \"=== Recording image build marker (version ${VERSION}) ===\"
+            echo '${VERSION}' | sudo tee '${IMAGES_BUILT_MARKER}' > /dev/null
+
+            echo \"=== All images built and tagged successfully ===\"
+          } > /tmp/scion-image-build.log 2>&1
+          echo \$? > /tmp/scion-image-build.exit
+        ' >/dev/null 2>&1 </dev/null &
+        echo \$! > /tmp/scion-image-build.pid
+        echo \"Image build started in background (PID \$(cat /tmp/scion-image-build.pid))\"
+      "
+
+    # Poll for build completion
+    info "Waiting for image build to complete..."
+    BUILD_DONE=false
+    POLL_COUNT=0
+    while [[ "$BUILD_DONE" != "true" ]] && [[ $POLL_COUNT -lt $BUILD_POLL_MAX_ATTEMPTS ]]; do
+      sleep "$BUILD_POLL_INTERVAL_SECS"
+      POLL_COUNT=$((POLL_COUNT + 1))
+      # Check if the exit code file exists (build finished)
+      BUILD_EXIT=$(gcloud compute ssh "${INSTANCE_NAME}" \
+        --zone="${ZONE}" --project="${PROJECT_ID}" \
+        --command="cat /tmp/scion-image-build.exit 2>/dev/null || echo running" \
+        2>/dev/null) || true
+      if [[ "$BUILD_EXIT" != "running" ]]; then
+        BUILD_DONE=true
+      else
+        # Show progress (last line of build log)
+        LAST_LINE=$(gcloud compute ssh "${INSTANCE_NAME}" \
+          --zone="${ZONE}" --project="${PROJECT_ID}" \
+          --command="tail -1 /tmp/scion-image-build.log 2>/dev/null || echo '(waiting...)'" \
+          2>/dev/null) || true
+        echo "  [${POLL_COUNT}] ${LAST_LINE}"
+      fi
+    done
+
+    if [[ "$BUILD_DONE" != "true" ]]; then
+      err "Image build timed out after $((BUILD_POLL_MAX_ATTEMPTS * BUILD_POLL_INTERVAL_SECS / 60)) minutes."
+      echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='cat /tmp/scion-image-build.log'"
+      exit 1
+    fi
+
+    if [[ "$BUILD_EXIT" != "0" ]]; then
+      err "Image build failed (exit code: ${BUILD_EXIT})."
+      echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='tail -50 /tmp/scion-image-build.log'"
+      exit 1
+    fi
+    echo "  Image build completed successfully."
   fi
-  echo "  Image build completed successfully."
 
   info "Verifying container images..."
   gcloud compute ssh "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
-    --command="docker images | grep -E 'localhost/scion|core-base|scion-base|scion-antigravity'"
+    --command="sudo docker images | grep -E 'localhost/scion|core-base|scion-base|scion-antigravity'"
   echo "  Container images built and tagged successfully."
 else
   section "Phase 3b: Container Images (Registry)"
@@ -1202,8 +1383,8 @@ fi
 # --- Wait for IAP enforcement ---
 info "Waiting for IAP enforcement to activate..."
 echo "  IAP takes 30-60 seconds to begin enforcing after being enabled."
-echo "  Waiting 60 seconds..."
-sleep 60
+echo "  Waiting ${IAP_ENFORCEMENT_WAIT_SECS} seconds..."
+sleep "$IAP_ENFORCEMENT_WAIT_SECS"
 echo "  Wait complete."
 
 # ===================================================================
@@ -1269,7 +1450,7 @@ gcloud compute ssh "${INSTANCE_NAME}" \
 # --- Post-restart health check ---
 info "Running post-restart health check..."
 HEALTH_OK=false
-for i in $(seq 1 12); do
+for i in $(seq 1 "$HEALTH_CHECK_MAX_ATTEMPTS"); do
   if gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
       --command="curl -sf http://localhost:8080/healthz" \
@@ -1277,15 +1458,15 @@ for i in $(seq 1 12); do
     HEALTH_OK=true
     break
   fi
-  echo "  Attempt ${i}/12 - waiting 5s..."
-  sleep 5
+  echo "  Attempt ${i}/${HEALTH_CHECK_MAX_ATTEMPTS} - waiting ${HEALTH_CHECK_RETRY_SECS}s..."
+  sleep "$HEALTH_CHECK_RETRY_SECS"
 done
 
 if [[ "$HEALTH_OK" == "true" ]]; then
   echo ""
   echo -e "${GREEN}  Health check passed.${RESET}"
 else
-  err "Post-restart health check did not pass within 60s. The hub is not running."
+  err "Post-restart health check did not pass within $((HEALTH_CHECK_MAX_ATTEMPTS * HEALTH_CHECK_RETRY_SECS))s. The hub is not running."
   echo "  Check the service logs:"
   echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
   echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
