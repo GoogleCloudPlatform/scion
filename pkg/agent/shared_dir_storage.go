@@ -15,7 +15,9 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -171,21 +173,20 @@ func resolveSharedDirs(
 	// only when the host base is present (it won't be inside a future
 	// in-cluster GKE broker, design §3.3 T1 compatibility).
 	if _, statErr := os.Stat(res.HostBase); statErr == nil {
-		// Round 3 security review finding S-L2 / disposition 7': traverse,
-		// mkdir and chmod through an os.Root rooted at the (symlink-
-		// resolved) host base, so no path component — including one
-		// swapped for a symlink mid-operation — can ever cause a create or
-		// chmod outside the export. This replaces the earlier "mkdir, then
-		// check with EvalSymlinks" approach: that could already have
-		// created a directory outside the export through a symlinked
-		// intermediate component before the check ever ran. os.Root
-		// refuses to traverse an escaping symlink at all (see os.Root's
-		// doc: "symbolic links may not reference a location outside the
-		// root"), so nothing is created outside the base on any failure
-		// path. The previous manual EvalSymlinks-equality assertion is
-		// dropped as redundant — os.Root enforces the same property
-		// structurally, for every operation, not as a one-time check after
-		// the side effect already happened.
+		// os.Root (Go 1.26) bounds mkdir/chmod to the HOST BASE — it
+		// refuses to traverse a component whose symlink target would leave
+		// the base at all, so nothing is ever created outside the export on
+		// any failure path (round 3 security review finding S-L2;
+		// disposition 7'). That is not the same as confining to the
+		// PROJECT'S OWN LEAF: os.Root happily follows a relative symlink
+		// that stays inside the base (e.g. one project's shared-dirs
+		// pointing at another's), which would silently redirect the bind
+		// mount across projects. Round 4 review finding C1/T1/S-M1: an
+		// earlier version of this code dropped the leaf-confinement check
+		// as "redundant with os.Root" — it is not, and that was a
+		// regression from round 3. The explicit equality check below (not
+		// os.Root) is what confines the returned Source to the project's
+		// own leaf; keep both, they cover different escapes.
 		resolvedHostBase, err := filepath.EvalSymlinks(res.HostBase)
 		if err != nil {
 			return nil, nil, fmt.Errorf("server.shared_dir_storage: resolve host base symlinks: %w", err)
@@ -200,14 +201,31 @@ func resolveSharedDirs(
 			sd := res.SharedDirs[name]
 			rel := sd.ServerRelativePath // relative to HostBase, e.g. projects/<pid>/shared-dirs/<name>
 
-			_, existsErr := root.Stat(rel)
-			alreadyExisted := existsErr == nil
-
-			if err := root.MkdirAll(rel, 0o775); err != nil {
-				return nil, nil, fmt.Errorf("server.shared_dir_storage: mkdir shared dir %q: %w", name, err)
+			// Round 4 review nit C4/C5: Lstat the leaf first, rather than
+			// treating any root.Stat error as "does not exist" (masking a
+			// real error such as EACCES/ENOTDIR), and to give a clear
+			// "refusing a symlink" error instead of the confusing
+			// "mkdirat: file exists" that root.MkdirAll would otherwise
+			// return when the leaf name is already taken by a symlink.
+			var alreadyExisted bool
+			if info, lstatErr := root.Lstat(rel); lstatErr == nil {
+				if info.Mode()&os.ModeSymlink != 0 {
+					return nil, nil, fmt.Errorf(
+						"server.shared_dir_storage: shared dir %q is a symlink; refusing to use a symlinked path", name)
+				}
+				if !info.IsDir() {
+					return nil, nil, fmt.Errorf(
+						"server.shared_dir_storage: shared dir %q exists but is not a directory", name)
+				}
+				alreadyExisted = true
+			} else if !errors.Is(lstatErr, fs.ErrNotExist) {
+				return nil, nil, fmt.Errorf("server.shared_dir_storage: stat shared dir %q: %w", name, lstatErr)
 			}
 
 			if !alreadyExisted {
+				if err := root.MkdirAll(rel, 0o775); err != nil {
+					return nil, nil, fmt.Errorf("server.shared_dir_storage: mkdir shared dir %q: %w", name, err)
+				}
 				// mkdir(2) only ever applies setgid via kernel inheritance
 				// from an already-setgid parent, so chmod the directory we
 				// just created explicitly (design §3.5(5): 0o2775). Only
@@ -218,15 +236,26 @@ func resolveSharedDirs(
 				}
 			}
 
-			// The bind-mount source must be the resolved real path, not
-			// the unresolved sd.HostPath (disposition 7'). By this point
-			// os.Root has already guaranteed nothing escaped the host
-			// base, so this is canonicalization (an internal, non-
-			// escaping symlink is a legitimate operator layout), not a
-			// security check.
+			// Round 4 review finding C1/T1/S-M1 (Medium, regression from
+			// round 3): the returned bind-mount Source must be confined to
+			// the project's OWN leaf, not merely to the host base. Require
+			// the fully resolved path to equal the expected clean path
+			// under the resolved host base — this is the check os.Root
+			// cannot provide, since it only guards escapes from the base as
+			// a whole. A relative symlink anywhere in `rel` (the leaf or an
+			// intermediate component) that still resolves inside the base
+			// — e.g. another project's shared-dirs — fails this equality
+			// and is refused here, even though os.Root already let the
+			// traversal happen.
+			wantResolvedLeaf := filepath.Join(resolvedHostBase, rel)
 			resolvedLeaf, err := filepath.EvalSymlinks(sd.HostPath)
 			if err != nil {
 				return nil, nil, fmt.Errorf("server.shared_dir_storage: resolve shared dir %q: %w", name, err)
+			}
+			if resolvedLeaf != wantResolvedLeaf {
+				return nil, nil, fmt.Errorf(
+					"server.shared_dir_storage: shared dir %q resolves through a symlink to %q, want %q",
+					name, resolvedLeaf, wantResolvedLeaf)
 			}
 			volumes[i].Source = resolvedLeaf
 		}

@@ -999,8 +999,20 @@ authDone:
 			}
 			slog.Warn("Start: failed to load global settings; server.shared_dir_storage was not found in the raw file, proceeding with the local shared-dir layout",
 				"error", gErr)
-		} else if globalSettings != nil && globalSettings.Server != nil {
+		} else if globalSettings != nil && globalSettings.Server != nil && globalSettings.Server.SharedDirStorage != nil {
 			sharedDirStorageCfg = globalSettings.Server.SharedDirStorage
+		} else if config.GlobalSettingsMentions("shared_dir_storage") {
+			// Round 4 review finding S-L1: a global settings.yaml with no
+			// "schema_version: \"1\"" takes the LEGACY loader path, which
+			// silently drops the entire server block — LoadGlobalSettings
+			// returns err == nil with Server == nil, so the gErr != nil
+			// branch above never runs. Without this check, an operator's
+			// shared_dir_storage config would vanish with only a generic
+			// "unrecognized keys" WARN, which is a worse silent failure
+			// than the malformed-YAML case, and contradicts G5 fail-closed
+			// for an operator who plausibly intended to configure it.
+			return nil, fmt.Errorf(
+				"global settings mention server.shared_dir_storage but it was not loaded (missing schema_version: \"1\"?)")
 		}
 	}
 	// nfs shared_dir_storage keys its layout on hubDispatchedProjectID,

@@ -518,9 +518,21 @@ func TestStartSharedDirStorage_Unset_AC1(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	assertLegacyLocalSharedDirBehavior(t, capturedConfig, envMap, f.projectScionDir)
+}
+
+// assertLegacyLocalSharedDirBehavior asserts the full AC1 "byte-identical to
+// main" contract for the legacy local shared-dir layout: no
+// SharedDirStorage, the expected /scion-volumes/scratchpad volume present
+// with the legacy source, the directory actually created on disk, and
+// SCION_VOLUMES set on the caller's env map. Factored out (round 4 review
+// finding T2) so the unset-block test and the "no key" malformed-global
+// tests, which must all produce identical output, can't drift apart.
+func assertLegacyLocalSharedDirBehavior(t *testing.T, capturedConfig runtime.RunConfig, envMap map[string]string, projectScionDir string) {
+	t.Helper()
 	assert.Nil(t, capturedConfig.SharedDirStorage, "AC1: unset shared_dir_storage never populates SharedDirStorage")
 
-	basePath, err := config.GetSharedDirsBasePath(f.projectScionDir)
+	basePath, err := config.GetSharedDirsBasePath(projectScionDir)
 	require.NoError(t, err)
 	wantSource := filepath.Join(basePath, "scratchpad")
 	var found bool
@@ -633,30 +645,112 @@ func TestStartSharedDirStorage_MalformedGlobalSettings_NoKey_SucceedsAsMain(t *t
 	}
 	mgr := NewManager(mockRT)
 
+	envMap := map[string]string{
+		"SCION_AGENT_ID":   "agent-12",
+		"SCION_PROJECT_ID": "pid-malformed-global-no-key",
+	}
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env:         envMap,
+		SharedDirs:  []api.SharedDir{{Name: "scratchpad"}},
+	})
+	require.NoError(t, err)
+
+	// Round 4 review finding T2: identical to the unset case, not merely
+	// "SharedDirStorage is nil and the source matches" — also SCION_VOLUMES
+	// and the on-disk directory.
+	assertLegacyLocalSharedDirBehavior(t, capturedConfig, envMap, f.projectScionDir)
+}
+
+// TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_FailsClosed is
+// round 4 review finding S-L1: a global settings.yaml with no
+// `schema_version: "1"` takes the LEGACY loader path, which silently drops
+// the entire `server` block — LoadGlobalSettings returns err == nil with
+// Server == nil, so the gErr != nil / GlobalSettingsMentions fail-closed
+// branch (6') never even runs. Without an explicit check, an operator's
+// shared_dir_storage=nfs config would vanish with only a generic
+// "unrecognized keys" WARN, which is a worse silent failure than the
+// malformed-YAML case 6' already covers. Start must error and Run must
+// never be called.
+func TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_FailsClosed(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	// Well-formed YAML, but no schema_version/harnesses/v1-runtime
+	// indicators, so it takes the legacy path — which has no "server" field
+	// at all, silently dropping this whole block.
+	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"), []byte(`active_profile: local
+server:
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: /srv
+      shares:
+        - id: share
+          pv_name: pv
+`), 0644))
+	f.writeProjectSettings(t, "")
+
+	ranCount := 0
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			ranCount++
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:        "test-agent",
 		ProjectPath: f.projectScionDir,
 		NoAuth:      true,
 		Env: map[string]string{
-			"SCION_AGENT_ID":   "agent-12",
-			"SCION_PROJECT_ID": "pid-malformed-global-no-key",
+			"SCION_AGENT_ID":   "agent-13",
+			"SCION_PROJECT_ID": "pid-legacy-global",
 		},
 		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
 	})
-	require.NoError(t, err)
-	assert.Nil(t, capturedConfig.SharedDirStorage)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server.shared_dir_storage")
+	assert.Contains(t, err.Error(), "schema_version")
+	assert.Equal(t, 0, ranCount, "Run must never be called when a legacy global file silently dropped a configured shared_dir_storage")
+}
 
-	basePath, err := config.GetSharedDirsBasePath(f.projectScionDir)
-	require.NoError(t, err)
-	wantSource := filepath.Join(basePath, "scratchpad")
-	var found bool
-	for _, v := range capturedConfig.Volumes {
-		if v.Target == "/scion-volumes/scratchpad" {
-			found = true
-			assert.Equal(t, wantSource, v.Source)
-		}
+// TestStartSharedDirStorage_LegacyGlobalSettings_NoKey_SucceedsAsMain
+// confirms the companion half of S-L1: a well-formed legacy-format global
+// settings.yaml (no schema_version) that never mentions shared_dir_storage
+// at all must behave exactly like main — Start succeeds with the legacy
+// local shared-dir layout, with no error.
+func TestStartSharedDirStorage_LegacyGlobalSettings_NoKey_SucceedsAsMain(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"), []byte(`active_profile: local
+`), 0644))
+	f.writeProjectSettings(t, "")
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
 	}
-	assert.True(t, found, "expected the legacy local /scion-volumes/scratchpad volume, matching main's behaviour")
+	mgr := NewManager(mockRT)
+
+	envMap := map[string]string{
+		"SCION_AGENT_ID":   "agent-14",
+		"SCION_PROJECT_ID": "pid-legacy-global-no-key",
+	}
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		Env:         envMap,
+		SharedDirs:  []api.SharedDir{{Name: "scratchpad"}},
+	})
+	require.NoError(t, err)
+	assertLegacyLocalSharedDirBehavior(t, capturedConfig, envMap, f.projectScionDir)
 }
 
 // sprintfServerYAML formats the sharedDirStorageNFSGlobalYAML template.

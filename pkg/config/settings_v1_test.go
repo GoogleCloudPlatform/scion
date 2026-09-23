@@ -4800,4 +4800,24 @@ func TestGlobalSettingsMentions(t *testing.T) {
 
 		assert.False(t, GlobalSettingsMentions("shared_dir_storage"))
 	})
+
+	// Round 4 review nit T3 (optional, done since trivial here): a file
+	// that exists but can't be read returns false ("assume not configured")
+	// rather than erroring — skipped when running as root, since root can
+	// read a 000-mode file regardless.
+	t.Run("settings file exists but is unreadable", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root can read a 0000-mode file")
+		}
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		globalScionDir := filepath.Join(tmpDir, ".scion")
+		require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+		path := filepath.Join(globalScionDir, "settings.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("server: {shared_dir_storage: {}}\n"), 0644))
+		require.NoError(t, os.Chmod(path, 0000))
+		defer func() { _ = os.Chmod(path, 0644) }()
+
+		assert.False(t, GlobalSettingsMentions("shared_dir_storage"))
+	})
 }

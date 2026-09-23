@@ -554,3 +554,128 @@ escalation was needed this round either.
   exception, and a "Security" section summarizing the CWD fix, traversal
   validation, project-ID snapshot, os.Root hardening, and the threat-model
   precondition (design Erratum E1) per disposition 7'.
+
+---
+
+## Round 4 review fixes (PR #1779 @08b78b41 → this round)
+
+hy-em's round 4 dispositions (`reviews/r4-dispositions.md`, from `r4-code.md`,
+`r4-test.md`, `r4-security.md`) marked 6 items FIX and 1 optional. **Headline:
+round 3's 7' fix had a Medium regression** — dropping the R3 resolved-leaf
+equality check as "redundant with os.Root" was factually wrong (os.Root
+bounds escapes from the host *base*; it does not bound the returned Source
+to the project's own *leaf*), and all three reviewers found the same bug
+independently with probes. All FIX items are addressed below; the previously
+inaccurate claims in code comments, the PR body, and this log are corrected
+per item 4. This round included the requested self-check: all three attached
+probes were run against the fixed code before pushing (see "Self-check"
+below).
+
+1. **Medium (C1=T1=S-M1, all three reviewers) — restore the leaf-confinement
+   check.** Restored, after the `os.Root` mkdir/chmod operations: compute
+   `wantResolvedLeaf := filepath.Join(resolvedHostBase, rel)` and require
+   `filepath.EvalSymlinks(sd.HostPath) == wantResolvedLeaf`, failing closed
+   otherwise; `volumes[i].Source` is only ever set to the checked, resolved
+   value. `os.Root` and this check are complementary, not redundant: `os.Root`
+   stops creates/chmods from leaving the *host base* (including through a
+   component swapped mid-operation); the equality check is what confines the
+   *returned bind Source* to the *project's own leaf*, which `os.Root` alone
+   does not do — it happily follows an in-base relative symlink (e.g. one
+   project's `shared-dirs` pointing at another's). Added
+   `TestResolveSharedDirs_NFS_InBaseSymlinkedLeaf_ToVictim_FailsClosed` and
+   `..._InBaseSymlinkedIntermediate_ToVictim_FailsClosed` (relative symlinks
+   that stay *inside* the export, unlike every R3 symlink test, which only
+   used targets outside it) — both assert the victim directory is untouched
+   (same mode, no new files). Manually verified the intermediate test fails
+   without the restored check (the leaf case is independently caught by
+   item 6's new Lstat pre-check, so both layers are now pinned by different
+   tests). Also assert the primary layer's message in each of the three
+   existing outside-pointing symlink tests (T4 nit/S-N2).
+2. **Low (S-L1) — legacy-format global settings silently drop the block.**
+   A global `settings.yaml` with no `schema_version: "1"` takes the legacy
+   loader path, which has no `server` field at all: `LoadGlobalSettings`
+   returns `err == nil` with `Server == nil`, so the 6' fail-closed branch
+   never runs. Added an `else if` after the successful-load case: if
+   `Server`/`SharedDirStorage` came back nil AND
+   `config.GlobalSettingsMentions("shared_dir_storage")`, fail closed with
+   `"global settings mention server.shared_dir_storage but it was not
+   loaded (missing schema_version: \"1\"?)"`. Tests: a well-formed legacy
+   file *with* an nfs block errors and Run is never called
+   (`TestStartSharedDirStorage_LegacyGlobalSettings_MentionsKey_FailsClosed`);
+   the companion *without* a mention still succeeds exactly like main
+   (`..._LegacyGlobalSettings_NoKey_SucceedsAsMain`).
+3. **Low (C2) — tests assumed `t.TempDir()` is symlink-free.** macOS puts
+   its temp dir under `/var`, itself a symlink to `/private/var`; comparing
+   an already-resolved `Source` against a path built from the raw
+   `t.TempDir()` value would fail spuriously there (CI is Linux-only, so
+   this didn't block CI, but the repo ships an Apple `container` runtime).
+   Added a `newResolvedTempDir(t)` helper (`t.TempDir()` +
+   `filepath.EvalSymlinks`) and switched every `mountRoot := t.TempDir()` in
+   `shared_dir_storage_test.go` to use it, plus the separate `t.TempDir()`
+   call in the symlinked-host-base test.
+4. **Low (C3/S-N1) — make the PR body, code comments, and this log
+   accurate.** Rewrote the `os.Root` section comment in
+   `shared_dir_storage.go` to state the two-layer property precisely (base
+   confinement via `os.Root`, leaf confinement via the equality check) and
+   removed the false "redundant" claim. Rewrote the PR body's "Security"
+   section and "Behaviour note" the same way, and explicitly removed
+   "accepted for Phase 1 and tracked as a follow-up via nfs-gke" — 7' is
+   fixed in Phase 1, not deferred. The one honest residual documented is
+   that the Docker daemon re-resolves the bind path at container create,
+   after `resolveSharedDirs` already returned, which no path-based check
+   run before that point can close.
+5. **Low (T2) — factor the AC1 assertions into a shared helper.** Extracted
+   `assertLegacyLocalSharedDirBehavior` (SharedDirStorage nil, the legacy
+   volume, the on-disk directory, `SCION_VOLUMES` set) out of
+   `TestStartSharedDirStorage_Unset_AC1`, and call it from both the
+   `NoKey_SucceedsAsMain` and the new `LegacyGlobalSettings_NoKey_...` tests
+   so the three "must produce output identical to the unset case" tests
+   can't silently drift apart.
+6. **Nits (C4/C5).** Replaced the "treat any `root.Stat` error as
+   not-exists" pattern with an explicit `root.Lstat` + `errors.Is(...,
+   fs.ErrNotExist)` check, which also gives a clear "is a symlink; refusing"
+   or "exists but is not a directory" error instead of the confusing
+   `mkdirat: file exists` `os.Root` would otherwise surface for a
+   leaf-is-a-symlink input — and, as a side effect, independently closes
+   the in-export leaf-symlink case from item 1 one layer earlier, before
+   any mkdir is attempted.
+7. **Optional (T3) — done since trivial.** Added a `chmod 000` case to
+   `TestGlobalSettingsMentions` (skipped when running as root), covering the
+   read-error branch returning `false`.
+
+No design conflicts found.
+
+### Self-check: the three attached probes, run before pushing
+
+Per hy-em's request, all three reviewers' probe files were copied into
+`pkg/agent/` one at a time, run, and removed (never committed):
+- `reviews/r4-code-probe_inroot_symlink_test.go.txt` (hy-rev-4): all 4 cases
+  now refused (`is a symlink; refusing` for the leaf variants,
+  `resolves through a symlink to ... want ...` for the intermediate).
+- `reviews/r4-test-probe_intra_export_symlink_test.go.txt` (hy-tst-4): all 5
+  cases refused; the dangling-inside case confirms the victim's `newdir` is
+  not created.
+- `reviews/r4-security-probe_test.go.txt` (hy-aud-4): the in-base
+  cross-project symlink is refused; the 20,000-iteration race test, which
+  found 6,603 escapes at 08b78b41, found **0** escapes and 20,000 errors at
+  the fixed head — the final equality check, computed after all `os.Root`
+  operations complete, closes the race window entirely rather than merely
+  narrowing it.
+
+### Gate results (round 5 verification, env: clean `env -i PATH=$PATH HOME=<tmp> GOPATH=... GOCACHE=... GOMODCACHE=...`, `-count=1`)
+
+- `go build ./...` — pass.
+- `go vet ./pkg/config/... ./pkg/runtime/... ./pkg/agent/...` — pass, no output.
+- `go test ./pkg/config/... ./pkg/runtime/... ./pkg/agent/... -count=1` — pass:
+  ```
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config              2.0s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config/opsettings    0.1s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/config/templateimport 0.0s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/runtime              32.6s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun     0.0s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/agent                6.9s
+  ok  github.com/GoogleCloudPlatform/scion/pkg/agent/state          0.0s
+  ```
+- `gofmt -l pkg/agent pkg/config pkg/runtime` — clean.
+- PR body updated with the corrected "Security" section and "Behaviour
+  note" (item 4).
