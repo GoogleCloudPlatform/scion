@@ -437,13 +437,13 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     /* The list view had the same cap, so switching view modes did not escape
-       the nested scrollbar. overflow:hidden keeps the rounded corners clipping
-       the table without introducing a scroll region. */
+       the nested scrollbar. overflow-x: auto keeps the rounded corners clipping
+       the table while allowing horizontal scrolling on smaller screens. */
     .agent-table-container {
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius-lg, 0.75rem);
-      overflow: hidden;
+      overflow-x: auto;
     }
 
     .agent-table-container table {
