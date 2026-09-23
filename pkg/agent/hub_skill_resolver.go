@@ -59,6 +59,9 @@ func (r *HubSkillResolver) Resolve(ctx context.Context, refs []api.SkillReferenc
 // dropped.
 func hubResolveResponseToResult(refs []api.SkillReference, resp *hubclient.ResolveSkillsResponse) *ResolveResult {
 	result := &ResolveResult{}
+	if resp == nil {
+		return result
+	}
 
 	refByURI := make(map[string]api.SkillReference, len(refs))
 	for _, ref := range refs {

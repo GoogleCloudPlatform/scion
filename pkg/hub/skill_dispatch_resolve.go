@@ -67,11 +67,17 @@ func (s *Server) resolveRegistrySkillRef(
 	uri *api.SkillURI,
 	projectID, userID, baseURL, forbiddenMessage string,
 ) (*ResolvedSkillResponse, *ResolveSkillError) {
+	if uri == nil {
+		return nil, &ResolveSkillError{URI: rawURI, Code: "invalid_uri", Message: "invalid skill URI"}
+	}
 	expandScopeAliases(uri, projectID, userID)
 
 	skill, sv, err := s.resolveSkill(ctx, uri, projectID)
 	if err != nil {
 		return nil, &ResolveSkillError{URI: rawURI, Code: "not_found", Message: err.Error()}
+	}
+	if skill == nil || sv == nil {
+		return nil, &ResolveSkillError{URI: rawURI, Code: "not_found", Message: "skill not found"}
 	}
 
 	if skill.Visibility != store.VisibilityPublic {
@@ -128,6 +134,13 @@ func (s *Server) resolveRegistrySkillRef(
 	}
 
 	go func(versionID string) {
+		// Best-effort counter: never let a store panic take down the Hub.
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("panic incrementing skill version download count",
+					"version_id", versionID, "panic", r)
+			}
+		}()
 		_ = s.store.IncrementSkillVersionDownloadCount(context.Background(), versionID)
 	}(sv.ID)
 
@@ -154,7 +167,7 @@ func isHubRegistrySkillURI(raw string) (*api.SkillURI, bool) {
 		return nil, false
 	}
 	uri, err := api.ParseSkillURI(raw)
-	if err != nil {
+	if err != nil || uri == nil {
 		return nil, false
 	}
 	if uri.Registry != "scion" && uri.Registry != "" {
@@ -175,10 +188,36 @@ func (s *Server) dispatchSkillRefs(ctx context.Context, agent *store.Agent) []ap
 	if agent.AppliedConfig.InlineConfig != nil {
 		refs = append(refs, agent.AppliedConfig.InlineConfig.Skills...)
 	}
-	if agent.AppliedConfig.TemplateID != "" {
-		refs = append(refs, s.templateSkillRefs(ctx, agent.AppliedConfig.TemplateID)...)
+	if templateID := s.dispatchTemplateID(ctx, agent); templateID != "" {
+		refs = append(refs, s.templateSkillRefs(ctx, templateID)...)
 	}
 	return refs
+}
+
+// dispatchTemplateID returns the Hub template ID backing the agent. The
+// agent-create path stamps AppliedConfig.TemplateID, but other paths (e.g.
+// scheduled dispatch_agent events) only record the template name on
+// agent.Template, so fall back to resolving that name in the agent's project
+// (project scope, then global), mirroring repairTemplate's ID-then-name order.
+// Returns "" when no Hub template matches (e.g. a broker-local template), in
+// which case the broker resolves the template's skills as before.
+func (s *Server) dispatchTemplateID(ctx context.Context, agent *store.Agent) string {
+	if agent.AppliedConfig != nil && agent.AppliedConfig.TemplateID != "" {
+		return agent.AppliedConfig.TemplateID
+	}
+	if agent.Template == "" {
+		return ""
+	}
+	tmpl, err := s.resolveTemplate(ctx, agent.Template, agent.ProjectID)
+	if err != nil {
+		slog.Warn("dispatch skill pre-resolution: failed to resolve template by name",
+			"agent_id", agent.ID, "template", agent.Template, "error", err)
+		return ""
+	}
+	if tmpl == nil {
+		return ""
+	}
+	return tmpl.ID
 }
 
 // templateSkillRefs reads the skills declared in a Hub template's
@@ -204,17 +243,12 @@ func (s *Server) templateSkillRefs(ctx context.Context, templateID string) []api
 		if !found {
 			continue
 		}
-		reader, _, err := stor.Download(ctx, tmpl.StoragePath+"/"+name)
+		data, err := readDispatchTemplateFile(ctx, stor, tmpl.StoragePath+"/"+name)
 		if err != nil {
 			if !errors.Is(err, storage.ErrNotFound) {
 				slog.WarnContext(ctx, "dispatch skill pre-resolution: failed to read template config",
 					"template_id", templateID, "file", name, "error", err)
 			}
-			return nil
-		}
-		data, err := io.ReadAll(io.LimitReader(reader, maxDispatchTemplateConfigSize))
-		_ = reader.Close()
-		if err != nil {
 			return nil
 		}
 		cfg, err := config.ParseScionAgentConfig(name, data)
@@ -226,6 +260,17 @@ func (s *Server) templateSkillRefs(ctx context.Context, templateID string) []api
 		return cfg.Skills
 	}
 	return nil
+}
+
+// readDispatchTemplateFile downloads a template file, reading at most
+// maxDispatchTemplateConfigSize bytes.
+func readDispatchTemplateFile(ctx context.Context, stor storage.Storage, path string) ([]byte, error) {
+	reader, _, err := stor.Download(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = reader.Close() }()
+	return io.ReadAll(io.LimitReader(reader, maxDispatchTemplateConfigSize))
 }
 
 // skillResolveIdentityForAgent returns the principal whose permissions govern
@@ -253,7 +298,7 @@ func (s *Server) creatorIdentityForAgent(ctx context.Context, agent *store.Agent
 		return nil
 	}
 	if creator, err := s.store.GetAgent(ctx, agent.CreatedBy); err == nil {
-		if !creator.DeletedAt.IsZero() {
+		if creator == nil || !creator.DeletedAt.IsZero() {
 			return nil
 		}
 		role, additionalScopes := agentRoleAndScopes(creator)
