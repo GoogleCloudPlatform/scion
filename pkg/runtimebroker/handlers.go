@@ -954,6 +954,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		resp := CreateAgentResponse{
 			Agent:   agentResp,
 			Created: true,
+			// p1a-r1 R1(a): echo Reprovision only when this branch actually
+			// ran Manager.Reprovision, never merely because the request
+			// asked for it — the hub's dispatch fails closed when it asked
+			// for a reprovision and did not get this echo back.
+			Reprovisioned: req.Reprovision,
 		}
 		if attempt != nil {
 			s.dispatchAttemptsMu.Lock()

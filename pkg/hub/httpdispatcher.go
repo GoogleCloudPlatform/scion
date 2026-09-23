@@ -1191,6 +1191,9 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 		d.applyBrokerResponse(agent, resp)
 	}
 
+	finalResp := resp
+	finalNeeds := envReqs
+
 	// Second pass: if the broker reported needed keys, check whether any can
 	// be satisfied by as_needed env vars or secrets — mirroring the pattern in
 	// DispatchAgentCreateWithGather. We inline this instead of calling
@@ -1205,6 +1208,11 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 				req.ResolvedEnv[k] = v
 			}
 			req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
+			// p1a-r1 R2: a fresh RequestID for the replay. Reusing the first
+			// pass's ID would let the broker's attempt cache (keyed by
+			// RequestID) replay the stored 202 instead of reprocessing with
+			// the newly resolved env — silently defeating this whole retry.
+			req.RequestID = api.NewUUID()
 
 			// Replay the provision request with the resolved env.
 			resp2, envReqs2, err2 := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
@@ -1223,6 +1231,31 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			if resp2 != nil {
 				d.applyBrokerResponse(agent, resp2)
 			}
+			finalResp = resp2
+			finalNeeds = envReqs2
+		}
+	}
+
+	// p1a-r1 R2: for a reprovision specifically, a final 202-with-Needs (env
+	// still missing) or a missing 201 response is a hard failure, never
+	// "warn and continue". DispatchAgentProvision's more forgiving behavior
+	// exists because a follow-up start re-gathers env on that path; the
+	// reincarnate worker goes straight from this call to DispatchAgentStart,
+	// so "warn and continue" here would silently start the new generation on
+	// an incomplete or unreplaced config and still report AC-1 success.
+	if reprovision {
+		if finalNeeds != nil && len(finalNeeds.Needs) > 0 {
+			return fmt.Errorf("%s: required env still missing after reprovision: %v", callerName, finalNeeds.Needs)
+		}
+		if finalResp == nil {
+			return fmt.Errorf("%s: broker returned no confirmation for the reprovision request", callerName)
+		}
+		// p1a-r1 R1(a): mandatory echo. An old broker has no concept of
+		// Reprovision, so it silently ran a plain Provision and returned 201
+		// with Reprovisioned unset — the persisted config was NOT replaced,
+		// so this must fail exactly like any other reprovision failure.
+		if !finalResp.Reprovisioned {
+			return fmt.Errorf("%s: broker did not confirm the reprovision (it may not support reincarnate; its reported capabilities may be stale)", callerName)
 		}
 	}
 

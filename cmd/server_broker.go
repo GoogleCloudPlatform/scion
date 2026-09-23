@@ -121,9 +121,10 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			GCPHostServiceAccountEmail: detectedSAEmail,
 			GCPHostProjectID:           detectedProjectID,
 			Capabilities: &store.BrokerCapabilities{
-				WebPTY: false,
-				Sync:   true,
-				Attach: true,
+				WebPTY:      false,
+				Sync:        true,
+				Attach:      true,
+				Reprovision: true,
 			},
 			Profiles: profiles,
 			Labels:   brokerLabels,
@@ -149,6 +150,21 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		}
 		// Update profiles from settings (may have changed)
 		broker.Profiles = profiles
+		// p1a-r1 R1(b): refresh capabilities on every re-registration, not
+		// just at create. The embedded broker's capability set is fixed by
+		// the hub binary it runs in (not negotiated like a remote broker's),
+		// so there is no reason for it to ever be stale — but a record
+		// created before Reprovision existed would otherwise keep it unset
+		// forever, since CompleteBrokerJoin (the remote-broker capability
+		// path) never runs for the embedded broker. That produced a
+		// permanent false 412 on `scion reincarnate` for every embedded
+		// deployment.
+		broker.Capabilities = &store.BrokerCapabilities{
+			WebPTY:      false,
+			Sync:        true,
+			Attach:      true,
+			Reprovision: true,
+		}
 		// Ensure deployment-type labels are set on re-registration
 		if broker.Labels == nil {
 			broker.Labels = brokerLabels

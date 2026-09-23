@@ -490,6 +490,15 @@ type GCPIdentityConfig struct {
 type CreateAgentResponse struct {
 	Agent   *AgentResponse `json:"agent"`
 	Created bool           `json:"created"`
+
+	// Reprovisioned is set true ONLY on the branch of handleCreateAgent that
+	// actually ran Manager.Reprovision (p1a-r1 R1(a) / design Amendment A2).
+	// A broker that predates the reincarnate feature has no field named
+	// "reprovision" in its request handling at all, so it silently runs a
+	// plain Provision for a request that set Reprovision=true — the hub
+	// treats an absent echo on a reprovision dispatch as a failure, which is
+	// what keeps that failure mode closed instead of a silent no-op.
+	Reprovisioned bool `json:"reprovisioned,omitempty"`
 }
 
 // EnvRequirementsResponse is returned by the broker when GatherEnv is true

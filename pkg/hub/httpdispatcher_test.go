@@ -219,6 +219,10 @@ func (m *mockRuntimeBrokerClient) CreateAgentWithGather(ctx context.Context, bro
 			Phase: string(state.PhaseRunning),
 		},
 		Created: true,
+		// Reprovisioned mirrors a real (non-stale) broker's echo: it only
+		// runs Manager.Reprovision, and only sets this, when the request
+		// asked for it. See runtimebroker/handlers.go's ProvisionOnly branch.
+		Reprovisioned: req.Reprovision,
 	}, nil, nil
 }
 
@@ -895,6 +899,86 @@ func TestHTTPAgentDispatcher_DispatchAgentReprovision(t *testing.T) {
 	}
 	if mockClient.lastEndpoint != "http://localhost:9800" {
 		t.Errorf("expected endpoint 'http://localhost:9800', got '%s'", mockClient.lastEndpoint)
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentReprovision_MissingEchoFails is the
+// p1a-r1 R1(a) regression test: a broker that returns 201 for a reprovision
+// request WITHOUT echoing Reprovisioned=true must fail the dispatch — that
+// echo missing is exactly what an old broker (which has no concept of
+// Reprovision at all) looks like, and it silently ran a plain Provision
+// instead of replacing the persisted config.
+func TestHTTPAgentDispatcher_DispatchAgentReprovision_MissingEchoFails(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID: tid("host-1"), Name: "test-host", Slug: "test-host",
+		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+	agent := &store.Agent{
+		ID: tid("agent-1"), Name: "test-agent", Slug: "test-agent",
+		ProjectID: tid("project-1"), RuntimeBrokerID: tid("host-1"),
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
+	}
+
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			// An old broker: 201 success, but no Reprovisioned field at all
+			// (it ran a plain Provision, unaware the request even asked for
+			// Reprovision — the wire field is additive and ignored).
+			return &RemoteAgentResponse{
+				Agent:   &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name},
+				Created: true,
+			}, nil, nil
+		},
+	}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	if err := dispatcher.DispatchAgentReprovision(ctx, agent); err == nil {
+		t.Fatal("expected DispatchAgentReprovision to fail when the broker's response does not echo Reprovisioned=true")
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentReprovision_StillMissingEnvFails is
+// the p1a-r1 R2 regression test: a reprovision whose final response is still
+// 202-with-Needs (env gather never completed, including a broker whose
+// attempt cache replays the same 202 on the retried pass) must fail, not
+// "warn and continue" into DispatchAgentStart on an incomplete config.
+func TestHTTPAgentDispatcher_DispatchAgentReprovision_StillMissingEnvFails(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	agent := setupProvisionEnvTest(t, ctx, memStore, []store.EnvVar{
+		{Key: "API_KEY", Value: "resolved-api-key"},
+	})
+
+	callCount := 0
+	seenRequestIDs := map[string]bool{}
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			callCount++
+			seenRequestIDs[req.RequestID] = true
+			// Every pass — including the retry — still reports API_KEY
+			// missing (e.g. a broker attempt-cache replay of the stored 202,
+			// which is exactly why each pass must use its own RequestID).
+			return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{"API_KEY"}}, nil
+		},
+	}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	err := dispatcher.DispatchAgentReprovision(ctx, agent)
+	if err == nil {
+		t.Fatal("expected DispatchAgentReprovision to fail when env is still missing after the retry")
+	}
+	if callCount != 2 {
+		t.Fatalf("expected 2 CreateAgentWithGather calls (first pass + retry with resolved env), got %d", callCount)
+	}
+	if len(seenRequestIDs) != 2 {
+		t.Fatalf("expected each pass to use a distinct RequestID (p1a-r1 R2), got %d distinct IDs across %d calls", len(seenRequestIDs), callCount)
 	}
 }
 
