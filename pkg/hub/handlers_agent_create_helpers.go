@@ -284,23 +284,36 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 // "a previous call to this function derived it".
 //
 // This function alone does not reproduce what create does to an agent's
-// config. On both create paths (handlers_agents_core.go and the scheduled-
-// dispatch path in server.go), applyProjectDefaults and then
-// applyHubAgentDefaults run on AppliedConfig BEFORE this function, and
-// applyHubAgentDefaults may set the withHubDefaultHarnessConfig context flag
-// that this function reads. Those two steps fill-if-empty HarnessConfig,
-// HarnessAuth, Model, ThinkingLevel and Profile, plus InlineConfig's
-// limits/resources, from project annotations and hub-wide agent_defaults.
-// Because this function's own template-derived fills are themselves
-// fill-if-empty, a project or hub default installed by those steps outranks
-// the template here — skip the two steps and the template wins instead,
-// inverting create's actual precedence (request > project/hub > template).
-// To recompute against the current template/harness-config catalog (what
-// `scion reincarnate` needs), call this on a freshly built AppliedConfig
-// that holds only kept fields and explicit inputs, *after* replaying
-// applyProjectDefaults then applyHubAgentDefaults (propagating its ctx flag)
-// on that same fresh config, in that order — never on an existing agent's
-// config, and never on this function alone.
+// config, and five review rounds have each found one more pre-step that a
+// hand-written recipe left out. So this is a rule, not a list: a caller that
+// wants create's result — `scion reincarnate` is the only one — must reuse
+// create's own code for everything from harness-config resolution through
+// populateAgentConfig, not re-derive a shortened version of it. That shared
+// code is the deriveAgentConfig helper (design §3.3 Amendment A1); call
+// deriveAgentConfig on a freshly built AppliedConfig holding only kept
+// fields and explicit inputs, never on an existing agent's config, and never
+// call this function on its own expecting it to stand in for that helper.
+//
+// The fresh config must also carry AppliedConfig.GCPIdentity (a kept field,
+// copied from the outgoing generation) before deriveAgentConfig runs: the
+// auto-no-auth fallback below reads it, through
+// hasRequiredAuthCredentials -> agentHasGCPIdentityAssigned, and a config
+// missing it can flip NoAuth/HarnessAuth where create did not.
+//
+// For context, not as a substitute for reusing deriveAgentConfig: the
+// resulting per-field precedence differs by field, because of *where* each
+// tier is applied. Model is request > project > hub > template, because the
+// project and hub tiers (applyProjectDefaults, then applyHubAgentDefaults)
+// run before this function's template fill. HarnessConfig is
+// request > project > template > hub, because both create call sites stamp
+// the template's harness config (getHarnessConfigFromTemplate) into
+// AppliedConfig.HarnessConfig themselves, before applyProjectDefaults ever
+// runs — so the hub-wide default_harness_config only applies when the
+// request, the project annotation and the template all left the slot empty.
+// applyHubAgentDefaults reports whether it supplied HarnessConfig via its
+// bool return; it does not set the ctx flag itself — the caller does that by
+// wrapping ctx with withHubDefaultHarnessConfig, and this function reads
+// that wrapped ctx.
 //
 // Exceptions — these ignore whether the slot is already set:
 //   - TemplateID and TemplateHash are replaced whenever resolvedTemplate is
@@ -363,16 +376,13 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 // caller-facing guard covers today's only call site; a direct caller must
 // check first).
 //
-// This is the reusable half of populateAgentConfig: create calls it today,
-// and reincarnate is intended to call it too (against a freshly built
-// config that has already been through applyProjectDefaults and
-// applyHubAgentDefaults, per above). It is not, by itself, "create's
-// resolution" — see the precedence paragraph above — but combined with
-// those two steps it derives a migrated agent's config the same way create
-// derives a new agent's, given the same explicit inputs. What it
-// deliberately does NOT touch: GitClone, Workspace, and Branch (kept
-// verbatim across a reincarnation per design §3.3) — those are populated by
-// populateAgentConfig above this call, before AppliedConfig is handed here.
+// This is the tail end of populateAgentConfig, which is itself only part of
+// create's config-resolution pipeline (see deriveAgentConfig). It is not, on
+// its own or combined with just two apply-steps, a stand-in for that whole
+// pipeline — see the rule above. What it deliberately does NOT touch:
+// GitClone, Workspace, and Branch (kept verbatim across a reincarnation per
+// design §3.3) — those are populated by populateAgentConfig above this call,
+// before AppliedConfig is handed here.
 func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
 	// Populate template ID, hash, and hub access scopes if template was resolved.
 	if resolvedTemplate != nil {
