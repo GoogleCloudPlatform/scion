@@ -16,11 +16,13 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/spf13/cobra"
@@ -374,9 +376,12 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 	// resolves, leave it empty: the server-side agent-token fallback (or,
 	// for a user identity with neither, a clear "projectId is required"
 	// error) still applies.
+	var projectResolveErr error
 	if convProject == "" {
 		if resolved, resolveErr := resolveProjectID(settings, convProject); resolveErr == nil {
 			convProject = resolved
+		} else {
+			projectResolveErr = resolveErr
 		}
 	}
 
@@ -391,6 +396,14 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 
 	conv, err := client.Conversations().Create(ctx, req)
 	if err != nil {
+		// If we couldn't resolve a project locally and the server's 400 is
+		// exactly the projectId-required guard, the resolveProjectID error
+		// ("Use --project flag or link this project with 'scion hub link'")
+		// is the more actionable message — surface both.
+		var apiErr *apiclient.APIError
+		if projectResolveErr != nil && errors.As(err, &apiErr) && apiErr.IsBadRequest() {
+			return fmt.Errorf("failed to create conversation: %w (%v)", err, projectResolveErr)
+		}
 		return fmt.Errorf("failed to create conversation: %w", err)
 	}
 

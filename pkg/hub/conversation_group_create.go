@@ -77,17 +77,20 @@ func validateThreadName(raw string) (string, error) {
 // key" substring match would misreport that as a name conflict. So beyond
 // requiring a unique-violation shape, this also requires a signal that ties
 // the violation to the topic name index specifically:
-//   - SQLite (mattn/go-sqlite3) reports column names, not the index name,
-//     even for a named expression index — e.g. "UNIQUE constraint failed:
-//     webchat_topic.project_id, webchat_topic.name".
+//   - SQLite (modernc.org/sqlite, the hub's actual driver — pkg/ent/entc/client.go:80 —
+//     registered as "sqlite") reports column names, not the index name, even
+//     for a named expression index — e.g. "constraint failed: UNIQUE
+//     constraint failed: webchat_topic.project_id, webchat_topic.name (2067)".
 //   - Postgres reports the constraint/index name verbatim — e.g.
 //     `duplicate key value violates unique constraint "idx_webchat_topic_project_name"`.
 //
-// Verified against the real mattn/go-sqlite3 error text for both the topic
+// Verified against the real modernc.org/sqlite error text for both the topic
 // name index and the conversations external_ref index (they differ exactly
-// as described above); the Postgres format matches the standard
-// "duplicate key value violates unique constraint %q" wording this codebase
-// already relies on elsewhere (entadapter/conversation_store.go isUniqueConstraintError).
+// as described above — the extra "constraint failed: " prefix and " (2067)"
+// suffix don't affect a Contains match); the Postgres format matches the
+// standard "duplicate key value violates unique constraint %q" wording this
+// codebase already relies on elsewhere (entadapter/conversation_store.go
+// isUniqueConstraintError).
 func isTopicNameConflict(err error) bool {
 	if err == nil {
 		return false
@@ -126,7 +129,13 @@ func (s *Server) createGroupConversation(ctx context.Context, surface string, p 
 	case "native":
 		return s.createNativeGroupConversation(ctx, p)
 	default:
-		return nil, &apiError{status: http.StatusBadRequest, code: ErrCodeInvalidRequest, message: "unsupported surface"}
+		// Unreachable today: the only caller (handleCreateConversation)
+		// always passes "native", and there is no request field yet to
+		// choose otherwise (design §3.6a — no surface field until a second
+		// surface exists). Reaching here is a programmer error, not a bad
+		// request, so it gets a 500 rather than a user-facing 400.
+		slog.ErrorContext(ctx, "createGroupConversation: unreachable surface", "surface", surface)
+		return nil, &apiError{status: http.StatusInternalServerError, code: ErrCodeInternalError, message: "unsupported surface"}
 	}
 }
 

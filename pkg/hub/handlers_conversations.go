@@ -532,10 +532,21 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		}
 
 		if err := s.store.AddParticipant(ctx, participant); err != nil {
-			writeErrorFromErr(w, err, "")
-			return
+			// The topic and its linked conversation already exist and have
+			// already been announced (PublishChatTopicEvent, inside
+			// createGroupConversation). Failing the request here would give
+			// the client a 500 for a resource that in fact exists, and a
+			// retry with the same name would now 409 NAME_CONFLICT with no
+			// way to recover the participant row. Log and proceed: the
+			// web-visible topic is the authoritative artifact (participants
+			// are a listing index, not the access authority — §2.4.2.1), and
+			// the response's empty participants array tells the caller the
+			// insert didn't happen.
+			slog.ErrorContext(ctx, "handleCreateConversation: AddParticipant failed after topic commit",
+				"conversationID", conv.ID, "externalRef", conv.ExternalRef, "error", err)
+		} else {
+			participants = append(participants, *participant)
 		}
-		participants = append(participants, *participant)
 	}
 
 	writeJSON(w, http.StatusCreated, conversationResponse{

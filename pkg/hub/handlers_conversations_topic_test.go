@@ -183,6 +183,104 @@ func TestCreateConversation_GroupBecomesTopic(t *testing.T) {
 	require.Equal(t, project.ID, *conv.ProjectID)
 }
 
+// TestCreateConversation_GroupMessageReachesThreadHistory is the AC-5/AC-6
+// gate design §8 Phase 1 calls out explicitly: linkage alone
+// (TestCreateConversation_GroupBecomesTopic covers AC-1..AC-4) doesn't prove
+// that messages sent into the new conversation actually reach the web
+// thread — which is the literal user-visible symptom in #1753.
+//
+// AC-5: `scion message conv:<id> "hi"` (conv-ref → outbound-message handler)
+// persists with ThreadID == topicID and Channel == "web" (the same fields
+// the DEF-160 group-routing branch has always set for `thread:`-prefixed
+// external refs — untouched by this PR, exercised here for the first time
+// against a CreateTopic-minted conversation), and the message is visible via
+// thread history with the read-switch both OFF and ON.
+// AC-6: a web post to the same thread persists with the same conversation_id.
+func TestCreateConversation_GroupMessageReachesThreadHistory(t *testing.T) {
+	srv, s, _, _ := setupGroupConvTopicTest(t)
+	ctx := context.Background()
+	project, agent, _ := setupConvTestData(t, s)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	// Create the group via the conversation API — the exact path this issue
+	// fixes — rather than seeding a topic directly.
+	createBody := createConversationRequest{
+		DisplayName: "history-check",
+		ProjectID:   project.ID,
+		Kind:        "group",
+	}
+	createBytes, _ := json.Marshal(createBody)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(createBytes))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq = createReq.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	createRR := httptest.NewRecorder()
+	srv.handleCreateConversation(createRR, createReq)
+	require.Equal(t, http.StatusCreated, createRR.Code, "body: %s", createRR.Body.String())
+
+	var created conversationResponse
+	require.NoError(t, json.Unmarshal(createRR.Body.Bytes(), &created))
+	_, topicID, err := messaging.ParseThreadConversationExternalRef(created.ExternalRef)
+	require.NoError(t, err)
+
+	// AC-5: send via conv:<id> — the same path `scion message conv:<id> "..."`
+	// takes (cmd/message.go sets ConversationRef and posts to
+	// /api/v1/agents/{id}/outbound-message; postConvRefNoRecipient mirrors
+	// that exactly, see handlers_outbound_def158_test.go).
+	sendRR := postConvRefNoRecipient(t, srv, project.ID, agent.ID, "hi from cli", "conv:"+created.ID)
+	require.Equal(t, http.StatusOK, sendRR.Code, "body: %s", sendRR.Body.String())
+
+	var sendResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(sendRR.Body.Bytes(), &sendResp))
+	msgID, _ := sendResp["message_id"].(string)
+	require.NotEmpty(t, msgID, "expected message_id in outbound-message response")
+
+	stored, err := s.GetMessage(ctx, msgID)
+	require.NoError(t, err)
+	require.Equal(t, topicID, stored.ThreadID,
+		"ThreadID must equal the topic ID: group routing sets it from the thread: external_ref (handlers_agent_messaging.go DEF-160 branch)")
+	require.Equal(t, "web", stored.Channel,
+		"Channel must be 'web' so live SSE fan-out and the read-switch-OFF history filter both see it")
+	require.Equal(t, created.ID, stored.ConversationID)
+
+	// AC-5: the message is returned by thread history — read-switch OFF...
+	offRec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+topicID+"/messages", nil)
+	require.Equal(t, http.StatusOK, offRec.Code, "body: %s", offRec.Body.String())
+	var offHist chatHistoryResponse
+	require.NoError(t, json.Unmarshal(offRec.Body.Bytes(), &offHist))
+	require.True(t, chatHistoryContains(offHist.Messages, "hi from cli"),
+		"read-switch OFF: message missing from thread history")
+
+	// ...and ON.
+	enableReadSwitch(t, srv)
+	onRec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+topicID+"/messages", nil)
+	require.Equal(t, http.StatusOK, onRec.Code, "body: %s", onRec.Body.String())
+	var onHist chatHistoryResponse
+	require.NoError(t, json.Unmarshal(onRec.Body.Bytes(), &onHist))
+	require.True(t, chatHistoryContains(onHist.Messages, "hi from cli"),
+		"read-switch ON: message missing from thread history")
+
+	// AC-6: a web post to the same thread persists with the same conversation_id.
+	webRec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
+		map[string]string{"content": "hi from web"})
+	require.Equal(t, http.StatusCreated, webRec.Code, "body: %s", webRec.Body.String())
+	var webResp chatMessageResponse
+	require.NoError(t, json.Unmarshal(webRec.Body.Bytes(), &webResp))
+	webStored, err := s.GetMessage(ctx, webResp.ID)
+	require.NoError(t, err)
+	require.Equal(t, created.ID, webStored.ConversationID,
+		"AC-6: a web post to the same thread must persist with the same conversation_id as the CLI-created group")
+}
+
+// chatHistoryContains reports whether msgs contains a message with the given text.
+func chatHistoryContains(msgs []store.Message, text string) bool {
+	for _, m := range msgs {
+		if m.Msg == text {
+			return true
+		}
+	}
+	return false
+}
+
 // TestCreateConversation_GroupServiceUnavailable verifies that when no
 // webChatStore is wired (Init() failed at boot, or a build predating this
 // fix), group creation fails loudly with 503 instead of silently minting
@@ -254,6 +352,16 @@ func TestCreateConversation_NameConflict(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 	}))
 
+	// Baseline: setupConvTestData already seeds one group conversation
+	// directly via the store, plus the one from CreateTopic above — take the
+	// count as it stands, rather than assuming a specific fixture count, so
+	// this only asserts the failed create below adds nothing.
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok)
+	var convCountBefore int
+	require.NoError(t, dbProvider.DB().QueryRow(
+		`SELECT COUNT(*) FROM conversations WHERE project_id = ? AND kind = 'group'`, project.ID).Scan(&convCountBefore))
+
 	body := createConversationRequest{
 		DisplayName: "design review", // case-insensitive collision
 		ProjectID:   project.ID,
@@ -277,6 +385,11 @@ func TestCreateConversation_NameConflict(t *testing.T) {
 	topics, err := wcs.ListTopics(ctx, project.ID)
 	require.NoError(t, err)
 	require.Len(t, topics, 1, "the failed create must not have minted a second topic")
+
+	var convCountAfter int
+	require.NoError(t, dbProvider.DB().QueryRow(
+		`SELECT COUNT(*) FROM conversations WHERE project_id = ? AND kind = 'group'`, project.ID).Scan(&convCountAfter))
+	require.Equal(t, convCountBefore, convCountAfter, "the failed create must not have minted a second (orphan) conversation")
 }
 
 // TestCreateConversation_ProjectRequired is a Phase 2 edge case (design §7
@@ -384,6 +497,59 @@ func TestCreateConversation_DevIdentitySkipsParticipant(t *testing.T) {
 	require.NotNil(t, topic)
 }
 
+// failingAddParticipantStore wraps a real store.Store and makes
+// AddParticipant always fail. Used to cheaply inject the O1 partial-failure
+// scenario: the topic (and its linked conversation) commit successfully,
+// but the subsequent participant insert fails.
+type failingAddParticipantStore struct {
+	store.Store
+}
+
+func (s *failingAddParticipantStore) AddParticipant(_ context.Context, _ *store.ConversationParticipant) error {
+	return errors.New("injected AddParticipant failure")
+}
+
+// TestCreateConversation_AddParticipantFailureStillReturns201 covers O1
+// (review round 1): if AddParticipant fails after the topic/conversation
+// have already committed and been announced via SSE, the create must still
+// return 201 with an empty participants array — not a 500 for a resource
+// that in fact exists (a retry would then 409 NAME_CONFLICT with no way to
+// recover the participant row).
+func TestCreateConversation_AddParticipantFailureStillReturns201(t *testing.T) {
+	srv, s, wcs, _ := setupGroupConvTopicTest(t)
+	project, agent, _ := setupConvTestData(t, s)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	srv.store = &failingAddParticipantStore{Store: s}
+
+	body := createConversationRequest{
+		DisplayName: "participant-fail",
+		ProjectID:   project.ID,
+		Kind:        "group",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleCreateConversation(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+
+	var result conversationResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Empty(t, result.Participants, "AddParticipant failed; participants must be empty, not fabricated")
+
+	// Restore the real store and verify the topic/conversation genuinely exist.
+	srv.store = s
+	_, topicID, err := messaging.ParseThreadConversationExternalRef(result.ExternalRef)
+	require.NoError(t, err)
+	topic, err := wcs.GetTopic(context.Background(), topicID)
+	require.NoError(t, err)
+	require.NotNil(t, topic, "the topic must still exist despite the participant-insert failure")
+}
+
 func TestValidateThreadName(t *testing.T) {
 	tooLongRunes := make([]rune, 101)
 	for i := range tooLongRunes {
@@ -419,10 +585,11 @@ func TestIsTopicNameConflict(t *testing.T) {
 	require.False(t, isTopicNameConflict(nil))
 	require.True(t, isTopicNameConflict(errors.New("name conflict: pstack2")))
 
-	// SQLite (mattn/go-sqlite3) reports column names, not the index name,
-	// even for the named expression index idx_webchat_topic_project_name.
+	// SQLite (modernc.org/sqlite, the hub's actual driver) reports column
+	// names, not the index name, even for the named expression index
+	// idx_webchat_topic_project_name.
 	require.True(t, isTopicNameConflict(errors.New(
-		"webchat store: create topic: UNIQUE constraint failed: webchat_topic.project_id, webchat_topic.name")))
+		"webchat store: create topic: constraint failed: UNIQUE constraint failed: webchat_topic.project_id, webchat_topic.name (2067)")))
 
 	// Postgres reports the constraint/index name verbatim.
 	require.True(t, isTopicNameConflict(errors.New(

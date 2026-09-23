@@ -15,9 +15,17 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -223,4 +231,186 @@ func TestFormatTimeAgo(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// runConversationCreate end-to-end tests (review round 1, R2 / AC-11)
+//
+// TestResolveProjectID (notifications_test.go) only proves resolveProjectID's
+// resolution order — it would still pass if the `if convProject == ""` block
+// in runConversationCreate were deleted. These tests exercise the actual
+// wire request the command sends, mirroring the httptest-hub pattern already
+// used by TestSubscriptionCreateEndToEnd / setupSecretProject.
+// ---------------------------------------------------------------------------
+
+// conversationCreateTestState snapshots the package-level flag/global state
+// runConversationCreate depends on, so tests can restore it afterward.
+type conversationCreateTestState struct {
+	home           string
+	projectPath    string
+	convProject    string
+	convCreateJSON bool
+	outputFormat   string
+}
+
+func saveConversationCreateTestState() conversationCreateTestState {
+	return conversationCreateTestState{
+		home:           os.Getenv("HOME"),
+		projectPath:    projectPath,
+		convProject:    convProject,
+		convCreateJSON: convCreateJSON,
+		outputFormat:   outputFormat,
+	}
+}
+
+func (s conversationCreateTestState) restore() {
+	_ = os.Setenv("HOME", s.home)
+	projectPath = s.projectPath
+	convProject = s.convProject
+	convCreateJSON = s.convCreateJSON
+	outputFormat = s.outputFormat
+}
+
+// isolateHubEnvForTest overrides every SCION_ env var that
+// config.LoadSettingsKoanf's env layer (pkg/config/koanf.go) merges over
+// project settings — SCION_HUB_ENDPOINT (-> hub.endpoint), SCION_HUB_URL
+// (cmd.GetHubEndpoint's secondary fallback), and SCION_PROJECT_ID /
+// SCION_GROVE_ID (-> the top-level, last-resort project ID resolveProjectID
+// falls back to). Without this, these tests are not hermetic when run
+// inside a live Scion agent container, which sets all four to point at the
+// real orchestration hub and project — silently defeating the "nothing
+// resolves" case and masking which value actually won. t.Setenv restores
+// the originals automatically.
+func isolateHubEnvForTest(t *testing.T, hubEndpoint, projectID string) {
+	t.Helper()
+	t.Setenv("SCION_HUB_ENDPOINT", hubEndpoint)
+	t.Setenv("SCION_HUB_URL", hubEndpoint)
+	t.Setenv("SCION_PROJECT_ID", projectID)
+	t.Setenv("SCION_GROVE_ID", projectID)
+}
+
+// setupConversationCreateProject creates a project directory with hub
+// settings pointing at endpoint, optionally with a hub-linked project ID.
+// Mirrors setupSecretProject in hub_secret_test.go.
+func setupConversationCreateProject(t *testing.T, home, endpoint, hubProjectID string) string {
+	t.Helper()
+	projectDir := filepath.Join(home, "project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	hub := map[string]interface{}{
+		"enabled":  true,
+		"endpoint": endpoint,
+	}
+	if hubProjectID != "" {
+		hub["projectId"] = hubProjectID
+	}
+	settings := map[string]interface{}{
+		"hub": hub,
+	}
+	data, err := json.Marshal(settings)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
+
+	return projectDir
+}
+
+// TestRunConversationCreate_DefaultsProjectFromHubContext is the R2 fix:
+// AC-11 says "scion conversation create X with no --project sends the
+// hub-context project ID." This exercises the actual request
+// runConversationCreate sends when convProject is empty and the project
+// resolves via the hub-linked project (§3.6).
+func TestRunConversationCreate_DefaultsProjectFromHubContext(t *testing.T) {
+	orig := saveConversationCreateTestState()
+	defer orig.restore()
+
+	var gotProjectID string
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations" && r.Method == http.MethodPost {
+			var req struct {
+				ProjectID string `json:"projectId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			gotProjectID = req.ProjectID
+			sawRequest = true
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(store.Conversation{
+				ID:         "new-conv-id",
+				Kind:       "group",
+				Surface:    "native",
+				DriftState: "active",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "hub-linked-project-id")
+	projectPath = projectDir
+	convProject = ""
+	convCreateJSON = true // routes output through outputJSON instead of Printf
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationCreate(cmd, []string{"hub-context-test"})
+	require.NoError(t, err)
+	require.True(t, sawRequest, "expected the create request to reach the mock hub")
+	assert.Equal(t, "hub-linked-project-id", gotProjectID,
+		"AC-11: with no --project, the CLI must send the hub-linked project ID")
+}
+
+// TestRunConversationCreate_NoProjectResolvable_SendsEmpty covers the other
+// half: when nothing resolves (no --project, no hub-linked project, no local
+// project), the CLI must not fabricate a project ID — it sends empty and
+// lets the server-side agent-token fallback (or the Phase 2 "projectId is
+// required" 400) apply.
+func TestRunConversationCreate_NoProjectResolvable_SendsEmpty(t *testing.T) {
+	orig := saveConversationCreateTestState()
+	defer orig.restore()
+
+	var gotProjectID string
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations" && r.Method == http.MethodPost {
+			var req struct {
+				ProjectID string `json:"projectId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			gotProjectID = req.ProjectID
+			sawRequest = true
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(store.Conversation{
+				ID:         "new-conv-id-2",
+				Kind:       "group",
+				Surface:    "native",
+				DriftState: "active",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "") // no local/hub project ID anywhere
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectDir := setupConversationCreateProject(t, tmpHome, server.URL, "") // no hub.projectId, no project_id
+	projectPath = projectDir
+	convProject = ""
+	convCreateJSON = true
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runConversationCreate(cmd, []string{"no-project-test"})
+	require.NoError(t, err)
+	require.True(t, sawRequest, "expected the create request to reach the mock hub")
+	assert.Empty(t, gotProjectID, "projectId must be empty, not fabricated, when nothing resolves")
 }
