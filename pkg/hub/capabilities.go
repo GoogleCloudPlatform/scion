@@ -187,7 +187,7 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 	if user, ok := identity.(UserIdentity); ok {
 		if projectID := projectIDForResource(resource); projectID != "" {
 			if a.isProjectOwnerOrAdmin(ctx, user.ID(), projectID) {
-				return allActions(actions)
+				return a.projectOwnerAdminCapabilities(ctx, identity, resource, actions)
 			}
 		}
 	}
@@ -290,7 +290,7 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 	for i, resource := range resources {
 		// Project owner/admin short-circuit
 		if isProjectOwner(projectIDForResource(resource)) {
-			caps[i] = allActions(actions)
+			caps[i] = a.projectOwnerAdminCapabilities(ctx, identity, resource, actions)
 			continue
 		}
 
@@ -326,6 +326,38 @@ func (a *AuthzService) computeCapabilitiesWithContext(ctx context.Context, ident
 }
 
 // allActions returns a Capabilities with all provided actions.
+// ownerAdminExcludedActions are actions the project owner/admin capability
+// short-circuit must not grant blindly. Agents run with their creator's
+// user-scoped secrets, so attach and port access to another member's agent
+// would expose that member's credentials (miller79/scion#88). The seeded
+// project-owner/project-admin roles do not carry these permissions; access is
+// resolved per resource from the resource-owner/ancestor relationship grants.
+var ownerAdminExcludedActions = map[Action]bool{
+	ActionAttach:     true,
+	ActionPortAccess: true,
+}
+
+// projectOwnerAdminCapabilities returns the capability set for a project
+// owner/admin: every action except those in ownerAdminExcludedActions, which
+// are included only when the user owns the resource or appears in its
+// ancestry. This is a local check (no CheckAccess/DB lookup per action) so
+// ComputeCapabilitiesBatch stays O(resources) for owners/admins.
+func (a *AuthzService) projectOwnerAdminCapabilities(ctx context.Context, identity Identity, resource Resource, actions []Action) *Capabilities {
+	strs := make([]string, 0, len(actions))
+	userID := ""
+	if u, ok := identity.(UserIdentity); ok {
+		userID = u.ID()
+	}
+	ownsOrAncestor := userID != "" && (resource.OwnerID == userID || canAccessAsAncestor(userID, resource))
+	for _, action := range actions {
+		if ownerAdminExcludedActions[action] && !ownsOrAncestor {
+			continue
+		}
+		strs = append(strs, string(action))
+	}
+	return &Capabilities{Actions: strs}
+}
+
 func allActions(actions []Action) *Capabilities {
 	strs := make([]string, len(actions))
 	for i, a := range actions {

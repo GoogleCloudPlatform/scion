@@ -650,27 +650,29 @@ func TestAuthorizeAgentLifecycle_IdentityKinds(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			got := srv.authorizeAgentLifecycle(rec, authzHelperRequest(tc.identity), target)
+	for _, action := range []Action{ActionLifecycle, ActionAttach} {
+		for _, tc := range tests {
+			t.Run(string(action)+"/"+tc.name, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				got := srv.authorizeAgentLifecycle(rec, authzHelperRequest(tc.identity), target, action)
 
-			if got != tc.wantAllow {
-				t.Fatalf("authorizeAgentLifecycle() = %v, want %v (body: %s)", got, tc.wantAllow, rec.Body.String())
-			}
-			if tc.wantAllow {
-				if rec.Body.Len() != 0 {
-					t.Errorf("expected no response body on allow, got %q", rec.Body.String())
+				if got != tc.wantAllow {
+					t.Fatalf("authorizeAgentLifecycle() = %v, want %v (body: %s)", got, tc.wantAllow, rec.Body.String())
 				}
-				return
-			}
-			if rec.Code != tc.wantStatus {
-				t.Errorf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
-			}
-			if tc.wantBody != "" && !strings.Contains(rec.Body.String(), tc.wantBody) {
-				t.Errorf("body %q does not contain %q", rec.Body.String(), tc.wantBody)
-			}
-		})
+				if tc.wantAllow {
+					if rec.Body.Len() != 0 {
+						t.Errorf("expected no response body on allow, got %q", rec.Body.String())
+					}
+					return
+				}
+				if rec.Code != tc.wantStatus {
+					t.Errorf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
+				}
+				if tc.wantBody != "" && !strings.Contains(rec.Body.String(), tc.wantBody) {
+					t.Errorf("body %q does not contain %q", rec.Body.String(), tc.wantBody)
+				}
+			})
+		}
 	}
 }
 
@@ -683,7 +685,7 @@ func TestAuthorizeAgentLifecycle_PeerWithinProject(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := authzHelperRequest(authzHelperAgent(authzHelperProjectA, ScopeAgentLifecycle))
-	if !srv.authorizeAgentLifecycle(rec, req, peer) {
+	if !srv.authorizeAgentLifecycle(rec, req, peer, ActionLifecycle) {
 		t.Fatalf("expected a scoped agent to reach a project peer, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
@@ -693,7 +695,7 @@ func TestAuthorizeAgentLifecycle_NilAgentDenied(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := authzHelperRequest(authzHelperAdmin())
-	if srv.authorizeAgentLifecycle(rec, req, nil) {
+	if srv.authorizeAgentLifecycle(rec, req, nil, ActionLifecycle) {
 		t.Fatal("expected a nil agent to be denied")
 	}
 	if rec.Code != http.StatusForbidden {
@@ -707,7 +709,7 @@ func TestAuthorizeAgentLifecycle_DenialIsLogged(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := authzHelperRequest(NewBrokerIdentity("authz-broker"))
-	if srv.authorizeAgentLifecycle(rec, req, authzHelperTargetAgent()) {
+	if srv.authorizeAgentLifecycle(rec, req, authzHelperTargetAgent(), ActionLifecycle) {
 		t.Fatal("expected a broker identity to be denied")
 	}
 

@@ -105,7 +105,7 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 		ScopeAgentLogAppend:    {"agent.log_append"},
 		ScopeProjectSecretRead: {"project.secret_read"},
 		ScopeAgentCreate:       {"agent.create", "gcp_service_account.assign"},
-		ScopeAgentLifecycle:    {"agent.attach", "agent.delete"},
+		ScopeAgentLifecycle:    {"agent.attach", "agent.delete", "agent.lifecycle"},
 		ScopeAgentNotify:       {"agent.notify"},
 		ScopeAgentTokenRefresh: {"agent.token_refresh"},
 		ScopeAgentPortForward:  {"agent.port_forward"},

@@ -27,6 +27,7 @@ import type { PageData, Agent, AgentPhase, Capabilities } from '../../shared/typ
 import {
   can,
   canLifecycle,
+  canMessageAgent,
   isTerminalAvailable,
   getAgentDisplayStatus,
   isAgentRunning,
@@ -1109,7 +1110,7 @@ export class ScionPageAgents extends LitElement {
                 </span>
               </sl-tooltip>
             `
-          : can(agent._capabilities, 'attach')
+          : canMessageAgent(agent._capabilities)
             ? html`
                 <sl-tooltip content="Message">
                   <span style="display: inline-flex">

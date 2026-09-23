@@ -77,7 +77,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
   {
     value: 'agent:attach',
     label: 'agent:attach',
-    description: 'Attach to agent sessions',
+    description: 'Attach to agent sessions (terminal, exec, env, reset-auth)',
     resource: 'agent',
     isAlias: false,
   },
@@ -96,6 +96,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'agent:lifecycle',
+    label: 'agent:lifecycle',
+    description: 'Start, stop, suspend, restart, and restore agents',
+    resource: 'agent',
+    isAlias: false,
+  },
+  {
     value: 'agent:list',
     label: 'agent:list',
     description: 'List agents in the project',
@@ -109,12 +116,11 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     resource: 'agent',
     isAlias: true,
     expandsTo: [
-      'agent:attach',
       'agent:create',
       'agent:delete',
+      'agent:lifecycle',
       'agent:list',
       'agent:message',
-      'agent:port_access',
       'agent:read',
     ],
   },

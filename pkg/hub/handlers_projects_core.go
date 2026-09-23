@@ -2458,7 +2458,7 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	// project, everything else denied. authorizeAgentLifecycle logs the denial.
 	switch action {
 	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart, api.AgentActionExec, api.AgentActionResetAuth, api.AgentActionEnv, api.AgentActionRestore:
-		if !s.authorizeAgentLifecycle(w, r, agent) {
+		if !s.authorizeAgentLifecycle(w, r, agent, agentActionPermission(action)) {
 			return
 		}
 	}
