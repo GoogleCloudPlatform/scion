@@ -345,3 +345,78 @@ func TestGEExchange_Route_BodyLimitStillOperates(t *testing.T) {
 		t.Errorf("oversize request made %d Google calls; want 0", calls)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// R2/R3 — the GE exchange endpoint and the external-bearer path must share
+// exactly one Google validator and one GoogleIdentityResolver instance
+// (design §4.4), so both mechanisms produce identical decisions during the
+// exchange-to-external-bearer soak. This exercises the actual production
+// wiring in server.go's New, not a test double.
+// ---------------------------------------------------------------------------
+
+func TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.GEGoogleExchange = GEGoogleExchangeConfig{
+		Enabled:          true,
+		AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+		TokenTTL:         DefaultGETokenTTL,
+	}
+
+	srv, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	if srv.geExchangeService == nil {
+		t.Fatal("expected GE exchange service to be configured")
+	}
+	if srv.authConfig.GoogleValidator == nil {
+		t.Fatal("expected authConfig.GoogleValidator to be set")
+	}
+	if srv.authConfig.GoogleResolver == nil {
+		t.Fatal("expected authConfig.GoogleResolver to be set")
+	}
+	if srv.geExchangeService.validator != srv.authConfig.GoogleValidator {
+		t.Error("GE exchange validator is not the same instance as the external-bearer path's validator (design §4.4 wiring)")
+	}
+	if srv.geExchangeService.resolver != srv.authConfig.GoogleResolver {
+		t.Error("GE exchange resolver is not the same instance as the external-bearer path's resolver (design §4.4 wiring)")
+	}
+}
+
+// TestGEExchange_Route_GoogleStackBuiltWithoutExchangeOrTrust proves O3: the
+// Google validator/resolver stack is now built unconditionally in New, not
+// gated on GEGoogleExchange or startup-time trust detection, so that Google
+// trust added later via hot reload takes effect without a restart.
+func TestGEExchange_Route_GoogleStackBuiltWithoutExchangeOrTrust(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+
+	cfg := DefaultServerConfig()
+	// Deliberately no GEGoogleExchange, no Federation config: neither Google
+	// trust nor the exchange is configured.
+
+	srv, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	if srv.geExchangeService != nil {
+		t.Fatal("expected no GE exchange service when GEGoogleExchange is not configured")
+	}
+	if srv.authConfig.GoogleValidator == nil {
+		t.Error("expected authConfig.GoogleValidator to be built unconditionally (O3)")
+	}
+	if srv.authConfig.GoogleResolver == nil {
+		t.Error("expected authConfig.GoogleResolver to be built unconditionally (O3)")
+	}
+}

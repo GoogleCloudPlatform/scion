@@ -254,6 +254,13 @@ func addUser(s *fakeUserStore, id, email, role, status string) *store.User {
 // the authorization policy path.
 func alwaysAuthorized(_ context.Context, _ string) bool { return true }
 
+// newTestResolver builds a GoogleIdentityResolver for tests. roleFor may be
+// nil (defaults to "member", matching the exchange's pre-refactor hardcoded
+// role); pass a custom one to exercise the admin_emails-aware role delta.
+func newTestResolver(userStore store.UserStore, extStore store.ExternalIdentityStore, authorize func(context.Context, string) bool, roleFor func(context.Context, string) string) *GoogleIdentityResolver {
+	return NewGoogleIdentityResolver(userStore, extStore, authorize, roleFor, slog.Default())
+}
+
 func newTestExchangeService(validator GoogleCredentialValidator, userStore *fakeUserStore) *GEExchangeService {
 	tokenSvc, _ := NewUserTokenService(UserTokenConfig{
 		AccessTokenDuration: DefaultGETokenTTL,
@@ -266,9 +273,7 @@ func newTestExchangeService(validator GoogleCredentialValidator, userStore *fake
 		},
 		validator,
 		tokenSvc,
-		newMemExtIDStore(),
-		userStore,
-		alwaysAuthorized,
+		newTestResolver(userStore, newMemExtIDStore(), alwaysAuthorized, nil),
 		slog.Default(),
 	)
 }
@@ -287,9 +292,7 @@ func newTestExchangeServiceWithExtStore(validator GoogleCredentialValidator, use
 		},
 		validator,
 		tokenSvc,
-		extStore,
-		userStore,
-		alwaysAuthorized,
+		newTestResolver(userStore, extStore, alwaysAuthorized, nil),
 		slog.Default(),
 	)
 }
@@ -337,9 +340,7 @@ func newPersistentTestExchangeService(t *testing.T, dbPath, driverName string) (
 		},
 		validator,
 		tokenSvc,
-		extStore,
-		compositeStore,
-		alwaysAuthorized,
+		newTestResolver(compositeStore, extStore, alwaysAuthorized, nil),
 		slog.Default(),
 	)
 	return svc, compositeStore, extStore
@@ -489,11 +490,23 @@ func TestGEExchange_ExpiredToken(t *testing.T) {
 }
 
 func TestGEExchange_ServiceAccount(t *testing.T) {
-	validator := &fakeGoogleValidator{
-		idTokenErr: ErrGoogleServiceAccount,
+	// SA rejection moved out of the validator (design §4.2(i)): the real
+	// validator now classifies IsServiceAccount rather than erroring, so this
+	// test drives the exchange's own Step 1.5 rejection (R5), not a validator
+	// error. The fake mirrors that shape exactly.
+	identity := &ValidatedGoogleIdentity{
+		Subject:          "sa-sub-123",
+		Email:            "sa@proj.iam.gserviceaccount.com",
+		EmailVerified:    true,
+		Issuer:           googleCanonicalIssuer,
+		Audience:         "test-client-id.apps.googleusercontent.com",
+		UpstreamExpiry:   time.Now().Add(30 * time.Minute),
+		IsServiceAccount: true,
 	}
+	validator := &fakeGoogleValidator{idTokenResult: identity}
 	userStore := newFakeUserStore()
-	svc := newTestExchangeService(validator, userStore)
+	extStore := newMemExtIDStore()
+	svc := newTestExchangeServiceWithExtStore(validator, userStore, extStore)
 
 	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
 		Credential:     "sa-token",
@@ -504,6 +517,58 @@ func TestGEExchange_ServiceAccount(t *testing.T) {
 	}
 	if status != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", status)
+	}
+	if err.Error() != "service account credentials not accepted for user exchange" {
+		t.Errorf("error = %q, want the SA rejection message", err.Error())
+	}
+	// The resolver must never be reached: no user or binding created.
+	if len(userStore.users) != 0 {
+		t.Errorf("expected no users created, got %d", len(userStore.users))
+	}
+	if _, err := extStore.GetExternalIdentity(context.Background(), "google", googleCanonicalIssuer, "sa-sub-123"); err == nil {
+		t.Error("expected no external identity binding to be created")
+	}
+}
+
+// TestGEExchange_AdminEmails_ProvisionsAdminRole proves the exchange's role
+// delta (design §4.3: roleFor replaces the hard-coded "member") through the
+// GoogleIdentityResolver, the same way the exchange is actually wired in
+// production (server.go passes a shared resolver into NewGEExchangeService).
+func TestGEExchange_AdminEmails_ProvisionsAdminRole(t *testing.T) {
+	identity := validGmailIdentity()
+	identity.Email = "admin@gmail.com"
+	validator := &fakeGoogleValidator{idTokenResult: identity}
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	roleFor := func(_ context.Context, email string) string {
+		if strings.EqualFold(email, "admin@gmail.com") {
+			return "admin"
+		}
+		return "member"
+	}
+	resolver := newTestResolver(userStore, extStore, alwaysAuthorized, roleFor)
+	tokenSvc, _ := NewUserTokenService(UserTokenConfig{AccessTokenDuration: DefaultGETokenTTL})
+	svc := NewGEExchangeService(
+		GEGoogleExchangeConfig{
+			Enabled:          true,
+			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+			TokenTTL:         DefaultGETokenTTL,
+		},
+		validator, tokenSvc, resolver, slog.Default(),
+	)
+
+	resp, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
+		Credential:     "admin-token",
+		CredentialType: "id_token",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	if resp.User == nil || resp.User.Role != "admin" {
+		t.Fatalf("expected admin role, got %+v", resp.User)
 	}
 }
 
@@ -533,8 +598,8 @@ func TestGEExchange_MissingTrustConfig(t *testing.T) {
 	svc := NewGEExchangeService(
 		GEGoogleExchangeConfig{Enabled: false},
 		validator, tokenSvc,
-		newMemExtIDStore(), userStore,
-		alwaysAuthorized, slog.Default(),
+		newTestResolver(userStore, newMemExtIDStore(), alwaysAuthorized, nil),
+		slog.Default(),
 	)
 
 	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -662,7 +727,7 @@ func TestGEExchange_StableLinkage_ConflictingSubject(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, extIDStore, userStore, alwaysAuthorized, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, extIDStore, alwaysAuthorized, nil), slog.Default(),
 	)
 
 	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1444,9 +1509,7 @@ func TestGEExchange_JWTExpCryptographicRegression(t *testing.T) {
 		},
 		validator,
 		tokenSvc,
-		newMemExtIDStore(),
-		userStore,
-		alwaysAuthorized,
+		newTestResolver(userStore, newMemExtIDStore(), alwaysAuthorized, nil),
 		slog.Default(),
 	)
 
@@ -1542,8 +1605,7 @@ func TestGEExchange_JWTExpRegression_ConfiguredTTLWins(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL, // 60s
 		},
-		validator, tokenSvc, newMemExtIDStore(), userStore,
-		alwaysAuthorized, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, newMemExtIDStore(), alwaysAuthorized, nil), slog.Default(),
 	)
 
 	resp, _, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1606,8 +1668,7 @@ func TestGEExchange_ProvisioningAuth_DomainRestricted(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, newMemExtIDStore(), userStore,
-		authChecker, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, newMemExtIDStore(), authChecker, nil), slog.Default(),
 	)
 
 	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1652,8 +1713,7 @@ func TestGEExchange_ProvisioningAuth_DomainAllowed(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, newMemExtIDStore(), userStore,
-		authChecker, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, newMemExtIDStore(), authChecker, nil), slog.Default(),
 	)
 
 	resp, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1697,8 +1757,7 @@ func TestGEExchange_ProvisioningAuth_InviteOnly_Rejected(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, newMemExtIDStore(), userStore,
-		authChecker, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, newMemExtIDStore(), authChecker, nil), slog.Default(),
 	)
 
 	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1745,8 +1804,7 @@ func TestGEExchange_ProvisioningAuth_AdminBypass(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, newMemExtIDStore(), userStore,
-		authChecker, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, newMemExtIDStore(), authChecker, nil), slog.Default(),
 	)
 
 	resp, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1778,8 +1836,8 @@ func TestGEExchange_ProvisioningAuth_NilAuthChecker_FailsClosed(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, newMemExtIDStore(), userStore,
-		nil, // nil authChecker — must fail closed
+		validator, tokenSvc,
+		newTestResolver(userStore, newMemExtIDStore(), nil, nil), // nil authorize — must fail closed
 		slog.Default(),
 	)
 
@@ -1788,7 +1846,7 @@ func TestGEExchange_ProvisioningAuth_NilAuthChecker_FailsClosed(t *testing.T) {
 		CredentialType: "id_token",
 	})
 	if err == nil {
-		t.Fatal("expected error: nil authChecker must fail closed")
+		t.Fatal("expected error: nil authorize must fail closed")
 	}
 	if status != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", status)
@@ -1876,7 +1934,7 @@ func TestGEExchange_ConflictResolution_ExpectedUserMismatch(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, extStore, userStore, alwaysAuthorized, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, extStore, alwaysAuthorized, nil), slog.Default(),
 	)
 
 	_, status, err := svc.Exchange(context.Background(), &ExchangeRequest{
@@ -1921,7 +1979,7 @@ func TestGEExchange_OrphanCleanup_OnProvisioningConflict(t *testing.T) {
 			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
 			TokenTTL:         DefaultGETokenTTL,
 		},
-		validator, tokenSvc, extStore, userStore, alwaysAuthorized, slog.Default(),
+		validator, tokenSvc, newTestResolver(userStore, extStore, alwaysAuthorized, nil), slog.Default(),
 	)
 
 	resp, status, err := svc.Exchange(context.Background(), &ExchangeRequest{

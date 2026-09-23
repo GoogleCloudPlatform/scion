@@ -1168,9 +1168,7 @@ func TestGEExchange_JWTExpCryptographicallyCapped(t *testing.T) {
 		},
 		validator,
 		tokenSvc,
-		newMemExtIDStore(),
-		userStore,
-		alwaysAuthorized,
+		newTestResolver(userStore, newMemExtIDStore(), alwaysAuthorized, nil),
 		slog.Default(),
 	)
 
@@ -1264,9 +1262,7 @@ func TestGEExchange_ProvisioningRejectedByPolicy(t *testing.T) {
 		},
 		validator,
 		tokenSvc,
-		newMemExtIDStore(),
-		userStore,
-		neverAuthorized, // reject all provisioning
+		newTestResolver(userStore, newMemExtIDStore(), neverAuthorized, nil), // reject all provisioning
 		slog.Default(),
 	)
 
@@ -1307,9 +1303,7 @@ func TestGEExchange_ProvisioningAllowedForExistingUser(t *testing.T) {
 		},
 		validator,
 		tokenSvc,
-		newMemExtIDStore(),
-		userStore,
-		neverAuthorized, // reject provisioning, but existing user bypass
+		newTestResolver(userStore, newMemExtIDStore(), neverAuthorized, nil), // reject provisioning, but existing user bypass
 		slog.Default(),
 	)
 
@@ -1342,9 +1336,7 @@ func TestGEExchange_NilAuthCheckerFailsClosed(t *testing.T) {
 		},
 		validator,
 		tokenSvc,
-		newMemExtIDStore(),
-		userStore,
-		nil, // nil authChecker → fail closed
+		newTestResolver(userStore, newMemExtIDStore(), nil, nil), // nil authorize → fail closed
 		slog.Default(),
 	)
 
@@ -1383,9 +1375,7 @@ func TestGEExchange_OrphanUserCleanup(t *testing.T) {
 		},
 		validator,
 		tokenSvc,
-		extStore,
-		userStore,
-		alwaysAuthorized,
+		newTestResolver(userStore, extStore, alwaysAuthorized, nil),
 		slog.Default(),
 	)
 

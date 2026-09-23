@@ -16,8 +16,12 @@ package hub
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +30,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"log/slog"
 
@@ -93,6 +98,23 @@ func probeHandler(result *probeResult) http.Handler {
 		result.authType, _ = r.Context().Value(logging.AuthTypeKey{}).(string)
 		w.WriteHeader(http.StatusOK)
 	})
+}
+
+// wantErrorBody reconstructs the exact bytes writeError would produce for the
+// given code/message, using the same ErrorResponse/APIError JSON shape and
+// encoder settings (json.NewEncoder, which appends a trailing newline). It is
+// built independently of the real response, so a mutation to the response
+// shape itself (e.g. adding a details map, or interpolating an error into a
+// message that must stay fixed) makes the comparison fail — this is the
+// "golden" property R6/R7 ask for, without pinning fragile go-jose library
+// error-string wording as a literal.
+func wantErrorBody(t *testing.T, code, message string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(ErrorResponse{Error: APIError{Code: code, Message: message}}); err != nil {
+		t.Fatalf("encode expected body: %v", err)
+	}
+	return buf.Bytes()
 }
 
 // I2 reuses the existing countingGoogleValidator (ge_exchange_ratelimit_test.go),
@@ -274,6 +296,10 @@ func TestExternalBearer_NonAuthoritativeEmail_Forbidden(t *testing.T) {
 	if result.reached {
 		t.Fatal("handler must not be reached for a rejected credential")
 	}
+	wantBody := wantErrorBody(t, ErrCodeForbidden, "access denied")
+	if !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+	}
 }
 
 func TestExternalBearer_WorkspaceEmail_Provisioned(t *testing.T) {
@@ -340,6 +366,49 @@ func TestExternalBearer_UnverifiedEmail_Unauthorized(t *testing.T) {
 	}
 	if result.reached {
 		t.Fatal("handler must not be reached for an unverified email")
+	}
+	// R7: the reason (e.g. "google email not verified") must never leak into
+	// the response body — only the fixed message, logged reason aside.
+	wantBody := wantErrorBody(t, ErrCodeUnauthorized, "invalid external bearer token")
+	if !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+	}
+}
+
+// R7 (wrong aud) — a valid Google-signed ID token whose aud does not match
+// the configured expected_audience must be rejected with the same reason-free
+// 401 body as any other verification failure.
+func TestExternalBearer_WrongAudience_Unauthorized(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(gcvJWKSJSON(kp))
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	cfg := newExternalBearerConfig(t, newTestValidator(endpoints), resolver)
+
+	claims := validIDTokenClaims()
+	claims["aud"] = "some-other-client-id.apps.googleusercontent.com"
+	token := signIDToken(kp, claims)
+
+	w, result := doExternalBearerRequest(cfg, token)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
+	}
+	if result.reached {
+		t.Fatal("handler must not be reached for a wrong-audience token")
+	}
+	wantBody := wantErrorBody(t, ErrCodeUnauthorized, "invalid external bearer token")
+	if !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
 	}
 }
 
@@ -615,72 +684,514 @@ func TestExternalBearer_ClassifyGoogleIDToken(t *testing.T) {
 	}
 }
 
-// TestHasGoogleUserTrust exercises the startup-time detection helper used by
-// server.go's New to decide whether to build the Google validator/resolver
-// stack (independent of classifyExternalBearer/googleTrust, which read
-// through the hot-reloadable FederationAuthenticator at request time).
-func TestHasGoogleUserTrust(t *testing.T) {
+// ---------------------------------------------------------------------------
+// R1 — an issuer configured with an empty expected_audience must disable the
+// external-bearer path for that issuer. NewFederationAuthenticator falls back
+// to the Hub's own OIDC issuer URL internally (for federation-token
+// Authenticate() calls), but that fallback must not leak into googleTrust's
+// view of "was an audience actually configured" (design §4.1, K2).
+// ---------------------------------------------------------------------------
+
+func TestGoogleTrust_EmptyExpectedAudience_NotOK(t *testing.T) {
+	fa := newGoogleTrustFederationAuth(t, "")
+	cfg := AuthConfig{FederationAuth: federationAuthPointer(fa)}
+	if trust, ok := googleTrust(cfg); ok {
+		t.Fatalf("googleTrust must report not-ok when expected_audience was not configured, got ok=true trust=%+v "+
+			"(Authenticate() falls back to the Hub's OIDC issuer URL internally, but that must not leak here)", trust)
+	}
+}
+
+func TestExternalBearer_EmptyExpectedAudience_NotApplicable(t *testing.T) {
+	// expected_audience unset -> NewFederationAuthenticator resolves it to
+	// "https://hub.example.com" (the oidcIssuerURL passed at construction) for
+	// its own Authenticate() use, but the external-bearer path must still
+	// treat this issuer as not configured at all.
+	fa := newGoogleTrustFederationAuth(t, "")
+	counting := &countingGoogleValidator{}
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	if err != nil {
+		t.Fatalf("NewUserTokenService: %v", err)
+	}
+	cfg := AuthConfig{
+		Mode:            "production",
+		UserTokenSvc:    userTokenSvc,
+		FederationAuth:  federationAuthPointer(fa),
+		GoogleValidator: counting,
+		GoogleResolver:  resolver,
+		Logger:          slog.Default(),
+	}
+
+	// A validly-shaped Google ID token whose aud equals the fallback audience
+	// the (misused) resolved config would have produced. If the R1 bug were
+	// present, this token would be accepted.
+	kp := newGCVTestKeyPair("test-kid-1")
+	claims := validIDTokenClaims()
+	claims["aud"] = "https://hub.example.com"
+	token := signIDToken(kp, claims)
+
+	w, result := doExternalBearerRequest(cfg, token)
+	if result.reached {
+		t.Fatal("handler must not be reached: expected_audience was not configured, so the path must be not-applicable")
+	}
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (original invalid-access-token rejection)", w.Code)
+	}
+	if counting.totalCalls() != 0 {
+		t.Errorf("Google validator was called %d time(s); want 0 (empty expected_audience must disable the path)", counting.totalCalls())
+	}
+	var errResp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if !strings.HasPrefix(errResp.Error.Message, "invalid access token:") {
+		t.Errorf("message = %q, want the original invalid-access-token rejection (not-applicable fallthrough)", errResp.Error.Message)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// R4 — a service-account identity must never be admitted on this path: no SA
+// branch exists yet (design §5 Phase 1), so the identity must be rejected
+// outright rather than falling through to user resolution (SA emails are
+// authoritative for bootstrap, so an unguarded resolver call would happily
+// provision one).
+// ---------------------------------------------------------------------------
+
+func TestExternalBearer_ServiceAccountIDToken_Rejected(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(gcvJWKSJSON(kp))
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	cfg := newExternalBearerConfig(t, newTestValidator(endpoints), resolver)
+
+	claims := validIDTokenClaims()
+	claims["aud"] = externalBearerTestAudience
+	claims["azp"] = externalBearerTestAudience
+	claims["email"] = "sa@proj.iam.gserviceaccount.com"
+	token := signIDToken(kp, claims)
+
+	w, result := doExternalBearerRequest(cfg, token)
+
+	if result.reached {
+		t.Fatal("handler must not be reached: a service-account identity must be rejected, not admitted, in this phase")
+	}
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
+	}
+	wantBody := wantErrorBody(t, ErrCodeUnauthorized, "invalid external bearer token")
+	if !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+	}
+	if len(userStore.users) != 0 {
+		t.Errorf("expected no users created, got %d", len(userStore.users))
+	}
+	if _, err := extStore.GetExternalIdentity(context.Background(), "google", googleCanonicalIssuer, "google-sub-test-123"); err == nil {
+		t.Error("expected no external identity binding to be created for a rejected SA identity")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// R6 — the §3 invariant, proven byte-for-byte, including with Google trust
+// actually configured (not just absent), and at both hook sites in
+// UnifiedAuthMiddleware.
+// ---------------------------------------------------------------------------
+
+func TestExternalBearer_ConfiguredTrustInvariant_Golden(t *testing.T) {
+	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	if err != nil {
+		t.Fatalf("NewUserTokenService: %v", err)
+	}
+	otherTokenSvc, err := NewUserTokenService(UserTokenConfig{SigningKey: []byte("a-different-signing-key-32-byte!")})
+	if err != nil {
+		t.Fatalf("NewUserTokenService (other key): %v", err)
+	}
+	fa := newGoogleTrustFederationAuth(t, externalBearerTestAudience)
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	kp := newGCVTestKeyPair("test-kid-1")
+
+	const nonHubJWT = "not-a.valid-hub.jwt"
+	wrongKeyToken, _, _, err := otherTokenSvc.GenerateTokenPair("u1", "u1@example.com", "U1", "member", ClientTypeWeb)
+	if err != nil {
+		t.Fatalf("GenerateTokenPair (other key): %v", err)
+	}
+	nonGoogleIssToken := signIDToken(kp, map[string]interface{}{
+		"iss": "https://issuer.example.com",
+		"sub": "sub-1",
+		"aud": externalBearerTestAudience,
+		"exp": time.Now().Add(10 * time.Minute).Unix(),
+	})
+	const opaqueToken = "opaque-nonjwt-token-xyz"
+
 	tests := []struct {
-		name string
-		cfg  config.FederationConfig
-		want bool
+		name       string
+		withTrust  bool
+		token      string
+		wantStatus int
+		wantBody   func(t *testing.T) []byte
 	}{
 		{
-			name: "disabled",
-			cfg:  config.FederationConfig{Enabled: false},
-			want: false,
-		},
-		{
-			name: "no trusted issuers",
-			cfg:  config.FederationConfig{Enabled: true},
-			want: false,
-		},
-		{
-			name: "google user issuer with audience",
-			cfg: config.FederationConfig{
-				Enabled: true,
-				TrustedIssuers: []config.TrustedIssuerConfig{
-					{IssuerURL: googleIssuerHTTPS, IssuerType: "user", ExpectedAudience: "client-id"},
-				},
+			name:       "a_no_trust_non_hub_jwt",
+			withTrust:  false,
+			token:      nonHubJWT,
+			wantStatus: http.StatusUnauthorized,
+			wantBody: func(t *testing.T) []byte {
+				_, err := userTokenSvc.ValidateUserToken(nonHubJWT)
+				if err == nil {
+					t.Fatal("test token must be invalid")
+				}
+				return wantErrorBody(t, ErrCodeUnauthorized, "invalid access token: "+err.Error())
 			},
-			want: true,
 		},
 		{
-			name: "google user issuer without audience is disabled",
-			cfg: config.FederationConfig{
-				Enabled: true,
-				TrustedIssuers: []config.TrustedIssuerConfig{
-					{IssuerURL: googleIssuerHTTPS, IssuerType: "user"},
-				},
+			// (b) trust configured + an expired-or-wrongly-signed Hub JWT.
+			name:       "b_trust_configured_wrong_signature_hub_jwt",
+			withTrust:  true,
+			token:      wrongKeyToken,
+			wantStatus: http.StatusUnauthorized,
+			wantBody: func(t *testing.T) []byte {
+				_, err := userTokenSvc.ValidateUserToken(wrongKeyToken)
+				if err == nil {
+					t.Fatal("test token must be invalid against userTokenSvc's key")
+				}
+				return wantErrorBody(t, ErrCodeUnauthorized, "invalid access token: "+err.Error())
 			},
-			want: false,
 		},
 		{
-			name: "google issuer with wrong issuer_type",
-			cfg: config.FederationConfig{
-				Enabled: true,
-				TrustedIssuers: []config.TrustedIssuerConfig{
-					{IssuerURL: googleIssuerHTTPS, IssuerType: "service_account", ExpectedAudience: "client-id"},
-				},
+			// (c) trust configured + a JWT with a non-Google iss.
+			name:       "c_trust_configured_non_google_iss",
+			withTrust:  true,
+			token:      nonGoogleIssToken,
+			wantStatus: http.StatusUnauthorized,
+			wantBody: func(t *testing.T) []byte {
+				_, err := userTokenSvc.ValidateUserToken(nonGoogleIssToken)
+				if err == nil {
+					t.Fatal("test token must be invalid as a Hub JWT")
+				}
+				return wantErrorBody(t, ErrCodeUnauthorized, "invalid access token: "+err.Error())
 			},
-			want: false,
 		},
 		{
-			name: "non-google issuer",
-			cfg: config.FederationConfig{
-				Enabled: true,
-				TrustedIssuers: []config.TrustedIssuerConfig{
-					{IssuerURL: "https://issuer.example.com", IssuerType: "user", ExpectedAudience: "client-id"},
-				},
+			// (d) trust configured + an opaque token, exercising the
+			// UnifiedAuthMiddleware default: arm (the second hook site).
+			name:       "d_trust_configured_opaque_token_default_arm",
+			withTrust:  true,
+			token:      opaqueToken,
+			wantStatus: http.StatusUnauthorized,
+			wantBody: func(t *testing.T) []byte {
+				return wantErrorBody(t, ErrCodeUnauthorized, "unrecognized token format")
 			},
-			want: false,
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := hasGoogleUserTrust(tt.cfg); got != tt.want {
-				t.Errorf("hasGoogleUserTrust() = %v, want %v", got, tt.want)
+			counting := &countingGoogleValidator{}
+			cfg := AuthConfig{
+				Mode:         "production",
+				UserTokenSvc: userTokenSvc,
+				Logger:       slog.Default(),
+			}
+			if tt.withTrust {
+				cfg.FederationAuth = federationAuthPointer(fa)
+				cfg.GoogleValidator = counting
+				cfg.GoogleResolver = resolver
+			}
+
+			w, result := doExternalBearerRequest(cfg, tt.token)
+			if result.reached {
+				t.Fatal("handler must not be reached")
+			}
+			if w.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d: body=%s", w.Code, tt.wantStatus, w.Body.String())
+			}
+			wantBody := tt.wantBody(t)
+			if !bytes.Equal(w.Body.Bytes(), wantBody) {
+				t.Errorf("body = %s, want %s (byte-identical invariant)", w.Body.Bytes(), wantBody)
+			}
+			if counting.totalCalls() != 0 {
+				t.Errorf("Google validator was called %d time(s); want 0", counting.totalCalls())
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// O1 — PAT and agent tokens are structurally unreachable from either
+// external-bearer hook site (they are handled by earlier branches in
+// UnifiedAuthMiddleware), but pin that invariant against future reordering.
+// ---------------------------------------------------------------------------
+
+func TestExternalBearer_PATShapedToken_NeverTouchesGoogleValidator(t *testing.T) {
+	// scion_pat_* tokens route to tokenTypeUAT via detectTokenType's prefix
+	// check, before either hook site runs, and a PAT is never 3 dot-separated
+	// segments so it cannot reach tokenTypeUser either. This test does not
+	// exercise real UAT validation (UATSvc is nil here, so the request is
+	// rejected before reaching any hook) — it pins that the prefix routing
+	// itself never reaches the Google validator. It cannot distinguish hook
+	// *ordering* (judgement 1/O1): the case is decided by detectTokenType
+	// before either hook is even consulted, regardless of where the hooks
+	// are placed in the switch.
+	counting := &countingGoogleValidator{}
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	fa := newGoogleTrustFederationAuth(t, externalBearerTestAudience)
+	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	if err != nil {
+		t.Fatalf("NewUserTokenService: %v", err)
+	}
+	cfg := AuthConfig{
+		Mode:            "production",
+		UserTokenSvc:    userTokenSvc,
+		FederationAuth:  federationAuthPointer(fa),
+		GoogleValidator: counting,
+		GoogleResolver:  resolver,
+		Logger:          slog.Default(),
+	}
+
+	w, result := doExternalBearerRequest(cfg, "scion_pat_deadbeefdeadbeef")
+	if result.reached {
+		t.Fatal("handler must not be reached: UATSvc is not configured")
+	}
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	if counting.totalCalls() != 0 {
+		t.Errorf("Google validator was called %d time(s) for a PAT-shaped token", counting.totalCalls())
+	}
+}
+
+func TestExternalBearer_ValidAgentToken_NeverTouchesGoogleValidator(t *testing.T) {
+	// A valid agent token is fully handled in Step 1 of UnifiedAuthMiddleware
+	// (X-Scion-Agent-Token header) and returns unconditionally on success,
+	// before detectTokenType or either hook site runs. This case also cannot
+	// distinguish hook ordering (judgement 1/O1) — moving the hooks earlier in
+	// the tokenTypeUser/default switch would not change this outcome, since
+	// the agent-token branch is a separate, earlier step entirely.
+	agentTokenSvc, err := NewAgentTokenService(AgentTokenConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentTokenService: %v", err)
+	}
+	agentToken, err := agentTokenSvc.GenerateAgentToken("agent-1", "project-1", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	if err != nil {
+		t.Fatalf("GenerateAgentToken: %v", err)
+	}
+
+	counting := &countingGoogleValidator{}
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	fa := newGoogleTrustFederationAuth(t, externalBearerTestAudience)
+	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	if err != nil {
+		t.Fatalf("NewUserTokenService: %v", err)
+	}
+	cfg := AuthConfig{
+		Mode:            "production",
+		AgentTokenSvc:   agentTokenSvc,
+		UserTokenSvc:    userTokenSvc,
+		FederationAuth:  federationAuthPointer(fa),
+		GoogleValidator: counting,
+		GoogleResolver:  resolver,
+		Logger:          slog.Default(),
+	}
+
+	result := &probeResult{}
+	middleware := UnifiedAuthMiddleware(cfg)
+	handler := middleware(probeHandler(result))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	req.Header.Set("X-Scion-Agent-Token", agentToken)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: body=%s", w.Code, w.Body.String())
+	}
+	if !result.reached || result.authType != AuthTypeAgent {
+		t.Fatalf("expected agent auth type, got reached=%v authType=%q", result.reached, result.authType)
+	}
+	if counting.totalCalls() != 0 {
+		t.Errorf("Google validator was called %d time(s) for a valid agent token", counting.totalCalls())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// O2 — a JWKS fetch failure with no cached keys maps to 503
+// upstream_unavailable, not 401 (an upstream blip must not look like an
+// invalid credential and must not be negatively cached in a later phase).
+// ---------------------------------------------------------------------------
+
+func TestExternalBearer_JWKSUpstreamFailure_ServiceUnavailable(t *testing.T) {
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	cfg := newExternalBearerConfig(t, newTestValidator(endpoints), resolver)
+
+	kp := newGCVTestKeyPair("test-kid-1")
+	claims := validIDTokenClaims()
+	claims["aud"] = externalBearerTestAudience
+	token := signIDToken(kp, claims)
+
+	w, result := doExternalBearerRequest(cfg, token)
+	if result.reached {
+		t.Fatal("handler must not be reached")
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: body=%s", w.Code, w.Body.String())
+	}
+	var errResp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if errResp.Error.Code != "upstream_unavailable" {
+		t.Errorf("error code = %q, want %q", errResp.Error.Code, "upstream_unavailable")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// O3 — Google trust added later via hot reload (no restart) takes effect on
+// the very next request. googleTrust reads through cfg.FederationAuth on
+// every call, and the validator/resolver are never gated on trust being
+// present — server.go's New now always constructs them.
+// ---------------------------------------------------------------------------
+
+func TestExternalBearer_HotReload_TrustAddedWithoutRestart(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(gcvJWKSJSON(kp))
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+
+	// Nothing stored yet: no trust configured at "startup", mirroring a
+	// server started with server.federation.trusted_issuers absent.
+	var fedPtr atomic.Pointer[FederationAuthenticator]
+	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	if err != nil {
+		t.Fatalf("NewUserTokenService: %v", err)
+	}
+	cfg := AuthConfig{
+		Mode:            "production",
+		UserTokenSvc:    userTokenSvc,
+		FederationAuth:  &fedPtr,
+		GoogleValidator: newTestValidator(endpoints),
+		GoogleResolver:  resolver,
+		Logger:          slog.Default(),
+	}
+
+	claims := validIDTokenClaims()
+	claims["aud"] = externalBearerTestAudience
+	token := signIDToken(kp, claims)
+
+	// Before hot reload: no trust configured, falls through unchanged.
+	w1, result1 := doExternalBearerRequest(cfg, token)
+	if result1.reached {
+		t.Fatal("must not authenticate before trust is configured")
+	}
+	if w1.Code != http.StatusUnauthorized {
+		t.Fatalf("before reload: status = %d, want 401", w1.Code)
+	}
+
+	// Simulate a hot reload: this is exactly what operational_settings.go's
+	// reload path does (federationAuth.Store(newAuth)) after validating the
+	// new config — no restart, no re-registration of middleware.
+	fedPtr.Store(newGoogleTrustFederationAuth(t, externalBearerTestAudience))
+
+	// Same cfg (same *atomic.Pointer), same request shape: must now succeed.
+	w2, result2 := doExternalBearerRequest(cfg, token)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("after reload: status = %d, want 200: body=%s", w2.Code, w2.Body.String())
+	}
+	if !result2.reached || result2.authType != AuthTypeExternalBearer {
+		t.Fatalf("after reload: expected external-bearer auth, got reached=%v authType=%q", result2.reached, result2.authType)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// O4 — a durable structural check for I4: the new files declare no
+// package-level var other than error sentinels (errors.New(...)). Catches a
+// future package-level cache/global creeping in — design §7 explicitly drops
+// #1847's tokenInfoCache global, and Phase 2's google_credential_cache.go
+// must stay clean too.
+// ---------------------------------------------------------------------------
+
+func TestNoPackageLevelMutableState(t *testing.T) {
+	files := []string{
+		"auth_external_bearer.go",
+		"google_identity_resolver.go",
+	}
+	fset := token.NewFileSet()
+	for _, file := range files {
+		t.Run(file, func(t *testing.T) {
+			f, err := parser.ParseFile(fset, file, nil, parser.AllErrors)
+			if err != nil {
+				t.Fatalf("parse %s: %v", file, err)
+			}
+			for _, decl := range f.Decls {
+				genDecl, ok := decl.(*ast.GenDecl)
+				if !ok || genDecl.Tok != token.VAR {
+					continue
+				}
+				for _, spec := range genDecl.Specs {
+					valueSpec, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for i, name := range valueSpec.Names {
+						if name.Name == "_" {
+							continue
+						}
+						if i >= len(valueSpec.Values) {
+							t.Errorf("%s: package-level var %q has no initializer (not an error sentinel)", file, name.Name)
+							continue
+						}
+						call, ok := valueSpec.Values[i].(*ast.CallExpr)
+						if !ok || !isErrorsNewCall(call) {
+							t.Errorf("%s: package-level var %q is not an errors.New(...) sentinel — I4 requires no mutable package-level state", file, name.Name)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func isErrorsNewCall(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	ident, ok := sel.X.(*ast.Ident)
+	return ok && ident.Name == "errors" && sel.Sel.Name == "New"
 }
