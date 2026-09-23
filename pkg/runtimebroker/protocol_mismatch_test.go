@@ -96,6 +96,10 @@ func (m *protocolMockManager) Stop(ctx context.Context, agentID string, projectP
 func (m *protocolMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return true, nil
 }
+
+func (m *protocolMockManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	return true, nil
+}
 func (m *protocolMockManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 	return m.agents, nil
 }

@@ -326,7 +326,7 @@ func StopProjectContainers(ctx context.Context, mgr Manager, projectName string,
 		util.Debugf("StopProjectContainers: removing container %s (agent %s, project %s)", c.ContainerID, agentName, projectName)
 		// Use Delete with deleteFiles=false — we only want to remove the container,
 		// not the filesystem artifacts (those will be removed by RemoveProjectConfig).
-		if _, err := mgr.Delete(ctx, c.ContainerID, false, "", false); err != nil {
+		if _, err := mgr.DeleteTarget(ctx, agentName, c.ContainerID, false, "", false); err != nil {
 			util.Debugf("StopProjectContainers: failed to remove container for agent %s: %v", agentName, err)
 		} else {
 			stopped = append(stopped, agentName)

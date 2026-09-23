@@ -1110,7 +1110,7 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 
 	slug = strings.ToLower(slug)
 
-	filter := map[string]string{"scion.name": slug}
+	filter := scopedNameFilter(slug, projectID)
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
 		return "", fmt.Errorf("failed to list agents: %w", err)
@@ -1173,7 +1173,10 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 		return "", fmt.Errorf("agent '%s' not found", slug)
 	}
 
-	agent := agents[0]
+	agent, err := uniqueAgentEntry(slug, agents)
+	if err != nil {
+		return "", err
+	}
 
 	// Get container ID - prefer label, then ContainerID from runtime, then ID
 	containerID := agent.Labels["scion.container.id"]
@@ -1199,7 +1202,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	}
 
 	slug = strings.ToLower(slug)
-	filter := map[string]string{"scion.name": slug}
+	filter := scopedNameFilter(slug, projectID)
 
 	// Try default manager first
 	agents, err := s.manager.List(ctx, filter)
@@ -1271,7 +1274,10 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		return nil, fmt.Errorf("agent '%s' not found", slug)
 	}
 
-	ag := agents[0]
+	ag, err := uniqueAgentEntry(slug, agents)
+	if err != nil {
+		return nil, err
+	}
 
 	containerID := ag.Labels["scion.container.id"]
 	if containerID == "" {
@@ -1313,6 +1319,55 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	}
 
 	return result, nil
+}
+
+// scopedNameFilter builds the Runtime.List label filter for a slug lookup,
+// including the project scope label when a project is known so that runtimes
+// can narrow the listing themselves (ptone/scion#1819). Every runtime's List
+// also honours the legacy grove_id label for the project_id key.
+func scopedNameFilter(slug, projectID string) map[string]string {
+	filter := map[string]string{"scion.name": slug}
+	if projectID != "" {
+		filter[projectcompat.LabelProjectID] = projectID
+	}
+	return filter
+}
+
+// uniqueAgentEntry returns the single runtime entry in agents, failing closed
+// when more than one distinct container matches rather than acting on
+// whichever entry the runtime happened to list first.
+func uniqueAgentEntry(slug string, agents []api.AgentInfo) (api.AgentInfo, error) {
+	distinct := dedupeAgentEntries(agents)
+	if len(distinct) > 1 {
+		return api.AgentInfo{}, fmt.Errorf("agent '%s' is ambiguous: %d containers match", slug, len(distinct))
+	}
+	return distinct[0], nil
+}
+
+// dedupeAgentEntries collapses entries that refer to the same backing
+// container (the same container can be reported more than once, e.g. by a
+// runtime that is registered both as default and auxiliary).
+func dedupeAgentEntries(agents []api.AgentInfo) []api.AgentInfo {
+	if len(agents) < 2 {
+		return agents
+	}
+	seen := make(map[string]bool, len(agents))
+	out := make([]api.AgentInfo, 0, len(agents))
+	for _, a := range agents {
+		key := a.ContainerID
+		if key == "" {
+			key = a.ID
+		}
+		if key == "" {
+			key = "path:" + a.ProjectPath + "|" + a.Name
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, a)
+	}
+	return out
 }
 
 func agentsForProject(agents []api.AgentInfo, projectID string) []api.AgentInfo {

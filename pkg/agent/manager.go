@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -40,8 +41,15 @@ type Manager interface {
 	// Stop terminates an agent
 	Stop(ctx context.Context, agentID string, projectPath string) error
 
-	// Delete terminates and removes an agent
+	// Delete terminates and removes an agent, resolving agentID by slug
+	// (scoped by projectPath when given). It fails closed when the slug is
+	// ambiguous.
 	Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error)
+
+	// DeleteTarget terminates and removes an agent the caller has already
+	// resolved to a specific runtime entry (containerID, may be empty for a
+	// file-only agent) and project path. It never re-resolves by slug.
+	DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error)
 
 	// List returns active agents
 	List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error)
@@ -91,30 +99,111 @@ func (m *AgentManager) Close() {
 	m.msgBuffer.Close()
 }
 
+// resolveProjectName maps a project path to the project name used to scope a
+// slug lookup. It returns "" when no path is given or it cannot be resolved.
+func resolveProjectName(projectPath string) string {
+	if projectPath == "" {
+		return ""
+	}
+	if resolvedDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
+		return config.GetProjectName(resolvedDir)
+	}
+	return ""
+}
+
+// agentHasProjectInfo reports whether a runtime entry carries any project
+// identity (label or field) that can be compared against a requested project.
+func agentHasProjectInfo(a api.AgentInfo) bool {
+	return projectcompat.ProjectIDFromLabels(a.Labels) != "" ||
+		projectcompat.ProjectNameFromLabels(a.Labels) != "" ||
+		a.ProjectID != "" || a.Project != ""
+}
+
+// selectAgentTarget picks the single runtime entry that agentID refers to.
+//
+// When projectName is set, entries that carry project info must match it;
+// entries without any project info are accepted only when no entry with
+// matching project info exists (backward compatibility with pre-label
+// containers). It never falls back to an entry that is labelled for a
+// different project.
+//
+// It fails closed with an error when more than one distinct entry remains,
+// instead of silently acting on whichever one the runtime listed first
+// (ptone/scion#1819). found is false when nothing matches.
+func selectAgentTarget(agents []api.AgentInfo, agentID, projectName string) (target api.AgentInfo, found bool, err error) {
+	var scoped, unlabeled []api.AgentInfo
+	for _, a := range agents {
+		if !agentMatchesName(a, agentID) {
+			continue
+		}
+		if projectName == "" {
+			scoped = append(scoped, a)
+			continue
+		}
+		if !agentHasProjectInfo(a) {
+			unlabeled = append(unlabeled, a)
+			continue
+		}
+		if matchAgentProject(a, projectName, "") {
+			scoped = append(scoped, a)
+		}
+	}
+	candidates := scoped
+	if len(candidates) == 0 {
+		candidates = unlabeled
+	}
+	candidates = dedupeByContainerID(candidates)
+	switch len(candidates) {
+	case 0:
+		return api.AgentInfo{}, false, nil
+	case 1:
+		return candidates[0], true, nil
+	default:
+		return api.AgentInfo{}, false, fmt.Errorf("agent '%s' is ambiguous: %d containers match; specify the project", agentID, len(candidates))
+	}
+}
+
+// agentMatchesName reports whether a runtime entry refers to agentID by name
+// (case-insensitively) or container ID.
+func agentMatchesName(a api.AgentInfo, agentID string) bool {
+	return a.Name == agentID || a.ContainerID == agentID ||
+		strings.TrimPrefix(a.Name, "/") == agentID ||
+		strings.EqualFold(a.Name, agentID)
+}
+
+func dedupeByContainerID(agents []api.AgentInfo) []api.AgentInfo {
+	if len(agents) < 2 {
+		return agents
+	}
+	seen := make(map[string]bool, len(agents))
+	out := make([]api.AgentInfo, 0, len(agents))
+	for _, a := range agents {
+		key := a.ContainerID
+		if key == "" {
+			key = "name:" + a.Name + "|" + a.ProjectID + "|" + a.Project
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, a)
+	}
+	return out
+}
+
 func (m *AgentManager) Stop(ctx context.Context, agentID string, projectPath string) error {
 	// Resolve the agent name to a container ID so that runtimes which do
 	// not support lookup-by-name (e.g. Apple's `container` CLI) receive
 	// the actual container ID.  This mirrors the resolution logic in Delete().
 	slug := api.Slugify(agentID)
 	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
-	// Resolve project name from projectPath (if provided) to scope the container lookup
-	stopProjectName := ""
-	if projectPath != "" {
-		if resolvedDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
-			stopProjectName = config.GetProjectName(resolvedDir)
-		}
-	}
 	if err == nil {
-		for _, a := range agents {
-			if a.Name == agentID || a.ContainerID == agentID ||
-				strings.TrimPrefix(a.Name, "/") == agentID ||
-				strings.EqualFold(a.Name, agentID) {
-				// If project info is available, skip containers from a different project
-				if stopProjectName != "" && !matchAgentProject(a, stopProjectName, "") {
-					continue
-				}
-				return m.Runtime.Stop(ctx, a.ContainerID)
-			}
+		target, found, selErr := selectAgentTarget(agents, agentID, resolveProjectName(projectPath))
+		if selErr != nil {
+			return selErr
+		}
+		if found {
+			return m.Runtime.Stop(ctx, target.ContainerID)
 		}
 	}
 	// Fallback: agentID may already be a container ID, or the list
@@ -130,30 +219,32 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 	slug := api.Slugify(agentID)
 	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
 	util.Debugf("delete: mgr.Delete container list completed in %v", time.Since(listStart))
-	containerExists := false
 	var targetID string
-	// Resolve project name from projectPath (if provided) to scope the container lookup
-	deletionProjectName := ""
-	if projectPath != "" {
-		if resolvedDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
-			deletionProjectName = config.GetProjectName(resolvedDir)
-		}
-	}
 	if err == nil {
-		for _, a := range agents {
-			if a.Name == agentID || a.ContainerID == agentID || strings.TrimPrefix(a.Name, "/") == agentID || strings.EqualFold(a.Name, agentID) {
-				// If project info is available, skip containers from a different project
-				if deletionProjectName != "" && !matchAgentProject(a, deletionProjectName, "") {
-					continue
-				}
-				containerExists = true
-				targetID = a.ContainerID
-				break
-			}
+		// Resolve project name from projectPath (if provided) to scope the
+		// container lookup; refuse ambiguous matches rather than picking one.
+		target, found, selErr := selectAgentTarget(agents, agentID, resolveProjectName(projectPath))
+		if selErr != nil {
+			return false, selErr
+		}
+		if found {
+			targetID = target.ContainerID
 		}
 	}
+	return m.deleteResolved(ctx, agentID, targetID, deleteFiles, projectPath, removeBranch)
+}
 
-	if containerExists {
+// DeleteTarget deletes an agent that the caller has already resolved to a
+// specific runtime entry. Unlike Delete it performs no slug re-resolution, so
+// it cannot drift to a same-slug agent in another project. containerID may be
+// empty for an agent that has files but no backing container; projectPath is
+// used verbatim for file deletion.
+func (m *AgentManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	return m.deleteResolved(ctx, agentName, containerID, deleteFiles, projectPath, removeBranch)
+}
+
+func (m *AgentManager) deleteResolved(ctx context.Context, agentName, targetID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	if targetID != "" {
 		// Stop the container gracefully before force-removing it. This ensures
 		// bind mounts (e.g. shared-dir volumes) are properly released before
 		// filesystem cleanup. Without this, docker rm -f / container kill sends
@@ -174,9 +265,9 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 	}
 
 	if deleteFiles {
-		util.Debugf("delete: starting filesystem cleanup for agent %s", agentID)
-		branchDeleted, err := DeleteAgentFiles(agentID, projectPath, removeBranch)
-		util.Debugf("delete: filesystem cleanup completed for agent %s", agentID)
+		util.Debugf("delete: starting filesystem cleanup for agent %s", agentName)
+		branchDeleted, err := DeleteAgentFiles(agentName, projectPath, removeBranch)
+		util.Debugf("delete: filesystem cleanup completed for agent %s", agentName)
 		return branchDeleted, err
 	}
 	return false, nil
