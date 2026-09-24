@@ -169,7 +169,7 @@ func TestAuthMiddleware_AllSchemes(t *testing.T) {
 			wantStatus: http.StatusUnauthorized,
 		},
 		{
-			// B1: a Google-shaped (non scion_pat_) credential is admitted via
+			// A Google-shaped (non scion_pat_) credential is admitted via
 			// /auth/me under hubBearer, unlike hubUAT (see hubUAT/not-pat-prefix
 			// above, and TestAuthMiddleware_HubUATVsHubBearer_PrefixGuard for the
 			// direct contrast on the identical token).
@@ -198,7 +198,7 @@ func TestAuthMiddleware_AllSchemes(t *testing.T) {
 			wantStatus: http.StatusUnauthorized,
 		},
 		{
-			// B4 (empty token -> 401).
+			// Empty token -> 401.
 			name:       "hubBearer/missing",
 			scheme:     "hubBearer",
 			header:     "",
@@ -694,8 +694,8 @@ func TestAuthMiddleware_HubBearer_RejectedByHub(t *testing.T) {
 }
 
 // TestAuthMiddleware_HubUATVsHubBearer_PrefixGuard sends the identical
-// non-scion_pat_ credential to both schemes against the same Hub. B2 (hubUAT
-// is unchanged) and hubBearer's defining difference (no prefix check) are
+// non-scion_pat_ credential to both schemes against the same Hub. hubUAT's
+// prefix check and hubBearer's defining difference (no prefix check) are
 // proven side by side, against the same fixture, so a change that
 // accidentally shares hubUAT's prefix guard with hubBearer (or removes
 // hubUAT's) fails one half or the other.

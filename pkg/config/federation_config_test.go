@@ -392,7 +392,7 @@ func TestFederationConfig_Validate(t *testing.T) {
 						// Non-empty on purpose: isolates the issuer_type term
 						// of isActiveGoogleUserIssuer from the
 						// expected_audience term below, so this case can only
-						// trigger on issuer_type (K1c).
+						// trigger on issuer_type.
 						ExpectedAudience:   "client-id.apps.googleusercontent.com",
 						AllowedGCPProjects: []string{"my-gcp-project"},
 					},

@@ -194,7 +194,7 @@ func TestUATValidator_DefaultAndMaxTTL(t *testing.T) {
 // on: only a scion_pat_* token is classified "uat"; anything else the Hub
 // accepted (reachable only via the hubBearer scheme) is "bearer". If this
 // classification were ever reverted to always "uat", callerHubClient would
-// still forward the token correctly (since it now handles both types
+// still forward the token correctly (since it handles both types
 // identically), but CallerIdentity.TokenType — used for task-bookkeeping and
 // log labels — would misreport a forwarded Google credential as a Scion PAT.
 func TestUATValidator_TokenTypeClassification(t *testing.T) {

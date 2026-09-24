@@ -259,7 +259,7 @@ func serveHubProcess(t *testing.T, address string) {
 			// a Google-shaped bearer credential with no other Hub auth
 			// matching, serveExternalBearer (auth_external_bearer.go). This
 			// is the endpoint the bridge's hubBearer scheme introspects via
-			// UATValidator (B3).
+			// UATValidator.
 			productionHandler.ServeHTTP(response, request)
 		case request.URL.Path == "/api/v1/auth/integrations/google/exchange":
 			recorder := httptest.NewRecorder()
@@ -294,7 +294,7 @@ func serveHubProcess(t *testing.T, address string) {
 			// Two credential shapes reach this endpoint depending on the
 			// bridge's auth scheme: geGoogle mints/forwards a Hub-issued
 			// HS256 JWT (exchanged), hubBearer forwards the caller's
-			// original Google ID token verbatim (no exchange, B3). Try the
+			// original Google ID token verbatim (no exchange). Try the
 			// Hub JWT first (the common case in existing tests), then fall
 			// back to verifying the token as a Google ID token the same way
 			// the Hub's own external-bearer path would.
@@ -392,7 +392,7 @@ func serveFullBridgeProcess(t *testing.T, address, replica string) {
 // serveHubBearerBridgeProcess is serveFullBridgeProcess with auth.scheme:
 // hubBearer instead of geGoogle: the bridge admits the caller's Google
 // credential via Hub /api/v1/auth/me (UATValidator) and forwards the same
-// token verbatim on every downstream Hub call — no credential exchange (B3).
+// token verbatim on every downstream Hub call — no credential exchange.
 func serveHubBearerBridgeProcess(t *testing.T, address, replica string) {
 	t.Helper()
 	serveScionA2ABridgeProcess(t, address, replica, bridge.AuthConfig{Scheme: "hubBearer"})
@@ -825,9 +825,9 @@ func TestGEEnvelopeCompatibility(t *testing.T) {
 	}
 }
 
-// TestHubBearerProcessPassthrough is B3: a real bridge process (auth.scheme:
-// hubBearer) fronting a real Hub process, proving bridge -> Hub pass-through
-// against a test Google issuer end to end.
+// TestHubBearerProcessPassthrough proves hubBearer pass-through end to end:
+// a real bridge process (auth.scheme: hubBearer) fronting a real Hub
+// process, proving bridge -> Hub pass-through against a test Google issuer.
 //
 // The Hub under test is pointed at the test Google JWKS the same way the
 // existing geGoogle exchange tests are (serveHubProcess overrides
@@ -871,7 +871,7 @@ func TestHubBearerProcessPassthrough(t *testing.T) {
 	if stats.Messages != 1 {
 		t.Fatalf("Hub message receipt count = %d, want 1", stats.Messages)
 	}
-	// B3's core assertion: zero exchanges. hubBearer never calls
+	// The core assertion: zero exchanges. hubBearer never calls
 	// /auth/integrations/google/exchange — only /auth/me for admission, and
 	// then the caller's original token again for the downstream call.
 	if stats.Exchanges != 0 {

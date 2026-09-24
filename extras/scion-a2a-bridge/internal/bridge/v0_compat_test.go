@@ -816,8 +816,9 @@ func TestCallerHubClient_BearerTokenType(t *testing.T) {
 	}
 }
 
-// TestHubBearer_EndToEnd_PassThrough is the B3-adjacent bridge-side
-// counterpart (see extras/scion-a2a-bridge/integration/auth_transport_process_test.go
+// TestHubBearer_EndToEnd_PassThrough is the companion to
+// TestHubBearerProcessPassthrough (see
+// extras/scion-a2a-bridge/integration/auth_transport_process_test.go
 // for the full-process test against a real Hub with a test Google issuer):
 // through real production wiring (real New(), real Server, real executor,
 // real SDK handler), a caller presents a Google-shaped bearer credential
