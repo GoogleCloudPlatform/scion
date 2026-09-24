@@ -553,7 +553,7 @@ func TestFederationConfig_Validate(t *testing.T) {
 			wantSubst: []string{"allowed_domains requires issuer_type", "expected_audience"},
 		},
 		{
-			name: "allowed_projects (the OLD field) on the Google issuer still errors, and now names allowed_gcp_projects",
+			name: "allowed_projects on a Google issuer errors and names allowed_gcp_projects",
 			config: FederationConfig{
 				Enabled: true,
 				TrustedIssuers: []TrustedIssuerConfig{
