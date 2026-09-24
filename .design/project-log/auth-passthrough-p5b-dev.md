@@ -224,3 +224,67 @@ module `go build`/`go vet`/`golangci-lint` runs above are repo-scoped where
 that matters (confirming I haven't broken cross-module compilation), and the
 targeted `extras/scion-a2a-bridge` test/lint runs are exhaustive for the
 files I actually touched.
+
+---
+
+## Fix round 1 (review `reviews/p5b-r1-ap-p5b-rev.md`, REQUEST CHANGES on `56674ec32`)
+
+**Agent:** ap-p5b-dev-2 · **Branch:** `scion/auth-passthrough` · **Date:** 2026-09-24
+
+All fixes are inside `extras/scion-a2a-bridge/**`, per the shared-branch
+ownership split. Note the branch had gained Phase 2 commits
+(`645168819`, `088772c0d`, `882e13d49`, Hub-side `pkg/**` work by `ap-p2-dev`)
+since `56674ec32`; none of those touch `extras/scion-a2a-bridge/**`, so they
+did not interact with this fix round.
+
+### Disposition table
+
+| # | Disposition | Change | Test |
+|---|---|---|---|
+| **R1** Production snapshot path (`BuildAuthValidators`) untested; mutant M8 survived | **Fixed.** Added the missing `hubBearer` row and a middleware test through the *actual* production wiring (`SetSnapshot`), not just the constructor-time fallback every other `hubBearer` test exercises. | `internal/bridge/adminoverlay_test.go`: `TestBuildAuthValidators_Schemes` gained `{"hubBearer", true, false}`. `internal/bridge/auth_test.go`: new `TestAuthMiddleware_HubBearer_ProductionSnapshotWiring` — builds `srv` via `NewServer`, then calls `srv.SetSnapshot(NewSnapshotHolder(BuildSnapshot(*cfg)))` exactly as `cmd/scion-a2a-bridge/main.go` does, with `Auth.Scheme: "hubBearer"` and a Hub-accepted non-`scion_pat_` token; asserts 200 and `token_type=bearer`. |
+| **R2** README told operators `hubBearer` is in the admin-UI dropdown; it isn't and the overlay rejects it | **Fixed.** Restored the **Auth scheme** row's pre-change scheme list (`apiKey`, `bearer`, `none`, `hubUAT`, `hubJWT` — no `hubBearer`). Added a paragraph after the admin-UI settings table documenting `hubBearer` (and `geGoogle`, same precedent) as YAML-only, configured via `auth.scheme` in `scion-a2a-bridge.yaml`, not the dropdown. | Documentation-only; verified by inspection against `adminoverlay.go`'s `validAuthSchemes` (unchanged, still excludes `hubBearer`) and the admin-UI dropdown source the reviewer cited. No test applicable. |
+| **N1** Duplicate test cases `hubBearer/valid` and `hubBearer/no-api-key-needed` (`auth_test.go:534-543`) | **Fixed.** Deleted `hubBearer/no-api-key-needed` (identical fixture/assertion to `hubBearer/valid`; `hubUAT`'s own table doesn't carry a parallel duplicate either). | `TestValidateConfig_NewSchemes` still covers `hubBearer/valid`, `hubBearer/with-ttl`, `hubBearer/ttl-too-high`. |
+| **N2** `TokenType` doc comment (`caller.go:30-32`) omitted `ge_exchange` | **Fixed.** Added `"ge_exchange"` to the comment, matching `ge_exchange_validator.go:345`'s `TokenType: "ge_exchange"`. | Documentation-only; no behavior change. |
+| **O1** Sample config said Google **ID token only** for `hubBearer` | **Fixed.** `scion-a2a-bridge.yaml.sample`'s `hubBearer` block now says "Google ID token or access token" instead of naming only `<google-id-token>`. | Documentation-only. |
+| **F1-F3** | No action (per EM disposition). | — |
+| **F4** Admin UI may push `auth_scheme` from a dropdown lacking `hubBearer`/`geGoogle`, potentially overwriting a YAML-configured scheme with the default | No code change (pre-existing, outside this delta's blast radius, admin-overlay/UI ownership). **Follow-up candidate**, recorded here per the EM's disposition: the admin-integrations UI (`web/src/components/pages/admin-integrations.ts`) should either (a) omit `auth_scheme` from its `Configure()` push when the current scheme isn't one it can represent (i.e. leave YAML-only schemes alone), or (b) add `hubBearer`/`geGoogle` to its own scheme picker. This is not this developer's or this PR's scope — it touches the admin-overlay/UI ownership area, not `extras/scion-a2a-bridge/**`'s bridge-side auth code. | — |
+
+### Mutation M8 re-check
+
+Re-ran the review's exact mutation by hand in the working tree (not a
+throwaway worktree — verified `git diff` was clean before and after):
+`internal/bridge/adminoverlay.go:330` `case "hubUAT", "hubBearer":` →
+`case "hubUAT":`.
+
+- `TestBuildAuthValidators_Schemes` → **FAIL**: `scheme "hubBearer": UATValidator present = false, want true`.
+- `TestAuthMiddleware_HubBearer_ProductionSnapshotWiring` → **FAIL**: `status = 500, want 200 (through production snapshot wiring); body=internal server error` — the exact production symptom the review described (a real `hubBearer` deployment 500s on every request without this case).
+
+Reverted the mutation (`git diff --stat internal/bridge/adminoverlay.go`
+empty afterward) and re-ran both tests: **PASS**. M8 is now killed.
+
+### Gates (from `extras/scion-a2a-bridge/`, `GOTMPDIR` set to an owned scratch
+dir, deleted after; `GOCACHE=/scion-volumes/gocache`)
+
+- `go build ./...` — clean.
+- `go vet ./...` — clean.
+- `gofmt -l .` — clean (empty output).
+- `go test ./...` — all green: `integration`, `internal/bridge` (37.8s,
+  includes both new tests plus the full pre-existing suite), `internal/state`.
+  No regressions.
+- `GOGC=40 golangci-lint run --new-from-rev=upstream-main --concurrency=1 ./...`
+  — first pass found 1 new issue (`errcheck` on the new test's
+  `defer store.Close()`); fixed by wrapping it as
+  `defer func() { _ = store.Close() }()`, matching the existing pattern at
+  `newHubBearerMiddleware` (`auth_test.go:596`). Second pass: **0 issues**.
+- Did not run the full `pkg/hub` suite (per the brief's explicit instruction
+  not to, and because this fix round touches nothing under `pkg/`).
+
+### Bare-issue-number grep (both must print nothing)
+
+- `git log upstream-main..HEAD --format=%B | /usr/bin/grep -nE '(^|[^/A-Za-z])#[0-9]+'` — empty (this round added no new commits carrying a message at the time of this log entry; re-verified after committing, see report to `ap-em`).
+- `git diff upstream-main..HEAD -- extras/scion-a2a-bridge | /usr/bin/grep -nE '^\+.*(^|[^/A-Za-z0-9])#[0-9]{3,}'` — empty.
+
+### Deviations / design questions
+
+None. All disposed items were either straightforward test/doc fixes within
+owned files or explicitly "no action" per the EM's disposition table.
