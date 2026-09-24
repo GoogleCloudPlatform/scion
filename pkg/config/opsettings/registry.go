@@ -472,6 +472,7 @@ func compileSchemas() {
 							"default_role":         map[string]interface{}{"type": "string"},
 							"allowed_emails":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 							"allowed_gcp_projects": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+							"allowed_domains":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 						},
 						"additionalProperties": false,
 					},

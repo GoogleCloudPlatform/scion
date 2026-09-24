@@ -4688,15 +4688,16 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 					AllowedEmails:    []string{"sa@proj.iam.gserviceaccount.com"},
 				},
 				{
-					// AllowedGCPProjects only does anything on an active Google
-					// user issuer: issuer_type "user" and a non-empty
-					// ExpectedAudience, unlike the service_account entry
-					// above, which must not set it (that combination is a
-					// config validation error).
+					// AllowedGCPProjects and AllowedDomains only do anything
+					// on an active Google user issuer: issuer_type "user" and
+					// a non-empty ExpectedAudience, unlike the
+					// service_account entry above, which must not set them
+					// (that combination is a config validation error).
 					IssuerURL:          "https://accounts.google.com/",
 					ExpectedAudience:   "client-id.apps.googleusercontent.com",
 					IssuerType:         "user",
 					AllowedGCPProjects: []string{"gcp-proj-1", "gcp-proj-2"},
+					AllowedDomains:     []string{"Example.com", "other.example"},
 				},
 			},
 			Algorithms:       []string{"RS256", "ES256"},
@@ -4728,6 +4729,7 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, "https://accounts.google.com/", ti2.IssuerURL)
 	assert.Equal(t, "user", ti2.IssuerType)
 	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, ti2.AllowedGCPProjects)
+	assert.Equal(t, []string{"Example.com", "other.example"}, ti2.AllowedDomains)
 
 	assert.Equal(t, []string{"RS256", "ES256"}, gc.Federation.Algorithms)
 	assert.Equal(t, time.Hour, gc.Federation.Cache.RefreshInterval)
@@ -4760,6 +4762,7 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, "https://accounts.google.com/", vi2.IssuerURL)
 	assert.Equal(t, "user", vi2.IssuerType)
 	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, vi2.AllowedGCPProjects)
+	assert.Equal(t, []string{"Example.com", "other.example"}, vi2.AllowedDomains)
 }
 
 func TestConvertV1FederationConfig_NilFederation(t *testing.T) {

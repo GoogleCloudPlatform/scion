@@ -231,6 +231,7 @@ func TestValidateValidDoc(t *testing.T) {
 		{"federation", `{"enabled":false}`},
 		{"federation", `{}`},
 		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://accounts.google.com","issuer_type":"user","expected_audience":"client-id","allowed_gcp_projects":["my-project"]}]}`},
+		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://accounts.google.com","issuer_type":"user","expected_audience":"client-id","allowed_domains":["example.com"]}]}`},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
@@ -301,6 +302,7 @@ func TestFederationSettingsRoundTrip(t *testing.T) {
 				ExpectedAudience:   "client-id.apps.googleusercontent.com",
 				IssuerType:         "user",
 				AllowedGCPProjects: []string{"gcp-proj-1"},
+				AllowedDomains:     []string{"Example.com"},
 			},
 		},
 		Algorithms:       []string{"RS256"},
@@ -332,6 +334,9 @@ func TestFederationSettingsRoundTrip(t *testing.T) {
 	}
 	if got, want := restored.TrustedIssuers[1].AllowedGCPProjects, []string{"gcp-proj-1"}; len(got) != 1 || got[0] != want[0] {
 		t.Errorf("AllowedGCPProjects: got %v, want %v", got, want)
+	}
+	if got, want := restored.TrustedIssuers[1].AllowedDomains, []string{"Example.com"}; len(got) != 1 || got[0] != want[0] {
+		t.Errorf("AllowedDomains: got %v, want %v", got, want)
 	}
 	if restored.RefreshInterval != "1h" {
 		t.Errorf("RefreshInterval: got %q, want %q", restored.RefreshInterval, "1h")

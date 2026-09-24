@@ -67,6 +67,15 @@ type TrustedIssuerConfig struct {
 	// key two unrelated meanings depending on issuer_type — misreadable, and
 	// the misreading fails open (see Validate's rule below).
 	AllowedGCPProjects []string `json:"allowed_gcp_projects,omitempty" yaml:"allowed_gcp_projects,omitempty" koanf:"allowed_gcp_projects"`
+
+	// AllowedDomains constrains USER principals (Google issuer only) to these
+	// email domains (exact, case-insensitive, no wildcards, no subdomain
+	// matching). Empty means no issuer-level domain constraint — the Hub
+	// sign-in policy (authorized_domains, user_access_mode, admin_emails)
+	// still applies on top of this, for every user regardless of whether
+	// this field is set. Never consulted for a service-account principal:
+	// those are admitted by AllowedGCPProjects instead.
+	AllowedDomains []string `json:"allowed_domains,omitempty" yaml:"allowed_domains,omitempty" koanf:"allowed_domains"`
 }
 
 // FederationCacheConfig holds cache tuning parameters for federation JWKS fetching.
@@ -111,11 +120,24 @@ func isGoogleIssuerURL(issuerURL string) bool {
 // the exact shape the external-bearer path's googleTrust gate requires
 // (pkg/hub/auth_external_bearer.go) for the path to be reachable at all.
 // Any Google-issuer-scoped field that only takes effect through that gate
-// (AllowedGCPProjects here; allowed_domains reuses this same predicate) does
-// nothing on any other shape, so Validate rejects setting it there outright
-// instead of silently accepting a config no request path will ever enforce.
+// (AllowedGCPProjects, AllowedDomains) does nothing on any other shape, so
+// Validate rejects setting it there outright instead of silently accepting a
+// config no request path will ever enforce.
 func isActiveGoogleUserIssuer(issuer TrustedIssuerConfig) bool {
 	return isGoogleIssuerURL(issuer.IssuerURL) && issuer.IssuerType == "user" && issuer.ExpectedAudience != ""
+}
+
+// appendGoogleUserOnlyFieldError appends a validation error for a
+// Google-issuer-scoped field (named by fieldName) that is set on an issuer
+// which is not isActiveGoogleUserIssuer. Shared by AllowedGCPProjects and
+// AllowedDomains, which are validated identically: not applicable to any
+// non-Google issuer, and unenforceable on a Google issuer that isn't an
+// active user issuer.
+func appendGoogleUserOnlyFieldError(errs []error, i int, issuer TrustedIssuerConfig, fieldName string) []error {
+	if !isGoogleIssuerURL(issuer.IssuerURL) {
+		return append(errs, fmt.Errorf("trusted_issuers[%d]: %s is only applicable to the Google issuer (%q)", i, fieldName, issuer.IssuerURL))
+	}
+	return append(errs, fmt.Errorf("trusted_issuers[%d]: %s requires issuer_type \"user\" and a non-empty expected_audience on the Google issuer; nothing would enforce it otherwise", i, fieldName))
 }
 
 // Validate checks FederationConfig for configuration errors.
@@ -205,11 +227,14 @@ func (c *FederationConfig) Validate() []error {
 		// error rather than a startup warning: both fields are new, so no
 		// existing config can break.
 		if len(issuer.AllowedGCPProjects) > 0 && !isActiveGoogleUserIssuer(issuer) {
-			if !isGoogleIssuerURL(issuer.IssuerURL) {
-				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_gcp_projects is only applicable to the Google issuer (%q)", i, issuer.IssuerURL))
-			} else {
-				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_gcp_projects requires issuer_type \"user\" and a non-empty expected_audience on the Google issuer; nothing would enforce it otherwise", i))
-			}
+			errs = appendGoogleUserOnlyFieldError(errs, i, issuer, "allowed_gcp_projects")
+		}
+
+		// Rule 10: AllowedDomains (user-principal email-domain constraint,
+		// design §4.1/§4.4) is validated identically to AllowedGCPProjects
+		// above — it only does anything on an ACTIVE Google user issuer.
+		if len(issuer.AllowedDomains) > 0 && !isActiveGoogleUserIssuer(issuer) {
+			errs = appendGoogleUserOnlyFieldError(errs, i, issuer, "allowed_domains")
 		}
 	}
 

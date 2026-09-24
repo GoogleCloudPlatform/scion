@@ -434,6 +434,115 @@ func TestFederationConfig_Validate(t *testing.T) {
 			wantErrs:  1,
 			wantSubst: []string{"allowed_gcp_projects requires issuer_type", "expected_audience"},
 		},
+		// --- allowed_domains: a distinct field from allowed_gcp_projects
+		// above, constraining USER (not service-account) principals by email
+		// domain. Validated identically (K1).
+		{
+			name: "allowed_domains on a non-Google hub issuer produces an error",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:      "https://hub.example.com",
+						IssuerType:     "hub",
+						AllowedDomains: []string{"example.com"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_domains is only applicable to the Google issuer"},
+		},
+		{
+			name: "allowed_domains on a non-Google user issuer produces an error",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:      "https://firebase.example.com",
+						IssuerType:     "user",
+						JWKSURL:        "https://firebase.example.com/jwks",
+						AllowedDomains: []string{"example.com"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_domains is only applicable to the Google issuer"},
+		},
+		{
+			name: "allowed_domains on the Google issuer (https form) is valid",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:        "https://accounts.google.com",
+						IssuerType:       "user",
+						ExpectedAudience: "client-id.apps.googleusercontent.com",
+						AllowedDomains:   []string{"example.com"},
+					},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			// allowed_domains on the Google issuer with the WRONG issuer_type
+			// is a hard error, not silently ignored — googleTrust never
+			// reaches this issuer, so nothing would enforce the list.
+			name: "allowed_domains on the Google issuer with issuer_type service_account errors",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:  "https://accounts.google.com",
+						IssuerType: "service_account",
+						JWKSURL:    "https://www.googleapis.com/oauth2/v3/certs",
+						// Non-empty on purpose: isolates the issuer_type term
+						// of isActiveGoogleUserIssuer from the
+						// expected_audience term below, so this case can only
+						// trigger on issuer_type.
+						ExpectedAudience: "client-id.apps.googleusercontent.com",
+						AllowedDomains:   []string{"example.com"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_domains requires issuer_type", "expected_audience"},
+		},
+		{
+			// Same issuer_type term, a different wrong value: the default hub
+			// type. Independent of the service_account case above.
+			name: "allowed_domains on the Google issuer with issuer_type hub errors",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:        "https://accounts.google.com",
+						IssuerType:       "hub",
+						ExpectedAudience: "client-id.apps.googleusercontent.com",
+						AllowedDomains:   []string{"example.com"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_domains requires issuer_type", "expected_audience"},
+		},
+		{
+			// Same rule, other half: issuer_type is right but
+			// expected_audience is empty, so googleTrust still never reaches
+			// this issuer (K2 disables the path entirely in that case).
+			name: "allowed_domains on the Google issuer with empty expected_audience errors",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:      "https://accounts.google.com",
+						IssuerType:     "user",
+						AllowedDomains: []string{"example.com"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_domains requires issuer_type", "expected_audience"},
+		},
 		{
 			name: "allowed_projects (the OLD field) on the Google issuer still errors, and now names allowed_gcp_projects",
 			config: FederationConfig{

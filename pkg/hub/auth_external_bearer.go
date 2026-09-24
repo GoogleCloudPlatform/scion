@@ -72,6 +72,14 @@ var errSAAccessTokenRejected = errors.New("external bearer: service account acce
 // allowed_gcp_projects (admits no service accounts at all) both take this path.
 var errSAProjectNotAllowed = errors.New("external bearer: service account project not allowed")
 
+// errDomainNotAllowed reports that a user identity's verified email domain
+// is not listed in the Google issuer's allowed_domains (design §4.1, §4.4).
+// Applies only to a non-service-account (user) principal; a service
+// account's admission is governed by allowed_gcp_projects instead, never by
+// this check. An unset allowed_domains means no issuer-level domain
+// constraint — the Hub sign-in policy is the only gate in that case.
+var errDomainNotAllowed = errors.New("external bearer: email domain not allowed")
+
 // errExternalBearerRateLimited reports that the external-bearer path's
 // per-client-IP budget (externalBearerRateLimiter, external_bearer_ratelimit.go)
 // was exhausted on a credential-cache miss. Wrapped by
@@ -184,13 +192,15 @@ func googleTrust(cfg AuthConfig) (config.TrustedIssuerConfig, bool) {
 }
 
 // containsFold reports whether target is present in list, compared
-// case-insensitively. Used for the allowed_gcp_projects membership check
-// (trust.AllowedGCPProjects — a distinct field from the unrelated, existing
-// AllowedProjects/allowed_projects, hub-federation project scoping by JWT
-// project_id claim, federation_auth.go's IssuerTypeHub case; the two must
-// not be confused). Neither list is rewritten at config load, so this
+// case-insensitively. Used for both the allowed_gcp_projects membership
+// check (trust.AllowedGCPProjects — a distinct field from the unrelated,
+// existing AllowedProjects/allowed_projects, hub-federation project scoping
+// by JWT project_id claim, federation_auth.go's IssuerTypeHub case; the two
+// must not be confused) and the allowed_domains membership check
+// (trust.AllowedDomains). Neither list is rewritten at config load, so this
 // case-insensitive comparison is what makes a mixed-case operator entry
-// match googleSAProject's (always lower-case) parsed project.
+// match googleSAProject's (always lower-case) parsed project, or domainOf's
+// (always lower-case) parsed domain.
 func containsFold(list []string, target string) bool {
 	for _, s := range list {
 		if strings.EqualFold(s, target) {
@@ -198,6 +208,26 @@ func containsFold(list []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// domainOf extracts the domain from a verified email address, for the
+// allowed_domains membership check (design §4.1, §4.4). It fails closed
+// (ok=false) on any shape a naive last-"@" split could misread: no "@" at
+// all, more than one "@", or an empty local or domain part. A trailing dot
+// on the domain also fails closed rather than being silently stripped —
+// this function decides a security check, not a display string, so an
+// unusual shape is treated as "cannot confidently say what domain this is"
+// rather than guessed at. The domain is lower-cased on success, matching
+// containsFold's case-insensitive comparison.
+func domainOf(email string) (domain string, ok bool) {
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", false
+	}
+	if strings.HasSuffix(parts[1], ".") {
+		return "", false
+	}
+	return strings.ToLower(parts[1]), true
 }
 
 // serveExternalBearer attempts to authenticate the request with an external
@@ -290,7 +320,10 @@ type externalBearerCacheProbe interface {
 // A service-account identity is admitted only as an ID token whose GCP
 // project (parsed from its verified email) is listed in the Google issuer's
 // allowed_gcp_projects (design §4.1, §4.4); an SA access token is rejected on
-// every project. A user identity is unaffected by any of this.
+// every project. A user identity is unaffected by any of this; instead, if
+// the issuer's allowed_domains is non-empty, the verified email's domain
+// must be listed there (design §4.1, §4.4) — a check that never applies to a
+// service account.
 func authenticateExternalBearer(ctx context.Context, r *http.Request, token string, cfg AuthConfig) (UserIdentity, error) {
 	trust, ok := googleTrust(cfg)
 	if !ok {
@@ -350,6 +383,16 @@ func authenticateExternalBearer(ctx context.Context, r *http.Request, token stri
 		// it never bypasses the suspension check on an already-bound SA
 		// user (S6), which Resolve enforces unconditionally.
 		policy.PreAuthorized = true
+	} else if len(trust.AllowedDomains) > 0 {
+		// A user principal (never a service account, which took the branch
+		// above): reject before Resolve if the verified email's domain isn't
+		// listed. The Hub sign-in policy inside Resolve still runs
+		// afterwards for every user, listed domain or not (U6) — this check
+		// only narrows which domains reach that policy at all.
+		domain, ok := domainOf(id.Email)
+		if !ok || !containsFold(trust.AllowedDomains, domain) {
+			return nil, errDomainNotAllowed
+		}
 	}
 
 	u, err := cfg.GoogleResolver.Resolve(ctx, id, policy)
