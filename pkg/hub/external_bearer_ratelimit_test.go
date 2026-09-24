@@ -115,3 +115,45 @@ func TestServer_ExternalBearerRateLimiter_CleanupRunsInBackground(t *testing.T) 
 	t.Fatal("the second IP was still refused after 2s of waiting for background cleanup; " +
 		"StartBackgroundServices does not appear to run externalBearerRateLimiter.StartCleanup")
 }
+
+// ---------------------------------------------------------------------------
+// Review r2 optional finding 4 — the design's limiter defaults (5 rps /
+// burst 20, §4.4) were not pinned: both C5 tests
+// (auth_external_bearer_access_token_test.go) override rate/burst to small
+// test values, so a change to the production constants (e.g. 500 rps / burst
+// 200) would survive the whole suite.
+// ---------------------------------------------------------------------------
+
+func TestExternalBearerRateLimiter_DefaultsMatchDesign(t *testing.T) {
+	limiter := newExternalBearerRateLimiter(nil)
+	if limiter.buckets.rate != externalBearerRatePerSecond {
+		t.Errorf("rate = %v, want %v (design §4.4: 5 rps)", limiter.buckets.rate, externalBearerRatePerSecond)
+	}
+	if limiter.buckets.burst != externalBearerBurst {
+		t.Errorf("burst = %v, want %v (design §4.4: burst 20)", limiter.buckets.burst, externalBearerBurst)
+	}
+	if limiter.buckets.rate != 5.0 {
+		t.Errorf("rate = %v, want the literal design value 5.0", limiter.buckets.rate)
+	}
+	if limiter.buckets.burst != 20 {
+		t.Errorf("burst = %v, want the literal design value 20", limiter.buckets.burst)
+	}
+}
+
+// TestExternalBearerRateLimiter_DefaultBurstExhaustion exercises the
+// unmodified production defaults end to end (unlike the C5 tests, which
+// shrink burst for speed): 20 requests from one IP succeed, the 21st is
+// refused. This fails if the burst constant is ever widened (e.g. to 200)
+// without a corresponding, deliberate test change.
+func TestExternalBearerRateLimiter_DefaultBurstExhaustion(t *testing.T) {
+	limiter := newExternalBearerRateLimiter(nil)
+
+	for i := 0; i < externalBearerBurst; i++ {
+		if allowed, _ := limiter.Allow(newTestBearerRequest("198.51.100.42:1")); !allowed {
+			t.Fatalf("request %d (of %d burst) should be allowed", i+1, externalBearerBurst)
+		}
+	}
+	if allowed, _ := limiter.Allow(newTestBearerRequest("198.51.100.42:1")); allowed {
+		t.Errorf("request %d should be refused: the default burst (%d) is exhausted", externalBearerBurst+1, externalBearerBurst)
+	}
+}

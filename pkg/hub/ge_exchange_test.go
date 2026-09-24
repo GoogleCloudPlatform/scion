@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2048,5 +2049,152 @@ func TestGEExchange_OrphanCleanup_OnProvisioningConflict(t *testing.T) {
 	// winner user and no provisioned orphan.
 	if len(userStore.users) != 1 {
 		t.Errorf("expected 1 user (winner only), got %d — orphan not cleaned up", len(userStore.users))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Review r2 finding 1 (fix round 2): the exchange endpoint's external
+// behaviour must not change when the base validator's error classification
+// changes (design §4.2, the r1 fix brief for finding 2). Every existing
+// TestGEExchange_* test uses fakeGoogleValidator, which returns preset
+// sentinels directly and never runs getTokenInfo/getUserInfo/forceRefresh —
+// so none of them could have caught a change in what those functions
+// classify an upstream failure as. These tests drive the real validator
+// against stubbed Google endpoints, the same way
+// google_credential_validator_test.go and the external-bearer access-token
+// tests do, and assert the exchange's exact response bytes.
+// ---------------------------------------------------------------------------
+
+func TestGEExchange_RealValidator_UpstreamFailures_ExactBytes(t *testing.T) {
+	wantBody := []byte(`{"error":{"code":"invalid_credential","message":"credential validation failed"}}` + "\n")
+
+	validAccessTokenInfo := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"azp": "test-client-id.apps.googleusercontent.com",
+			"aud": "test-client-id.apps.googleusercontent.com",
+			"sub": "sub-1", "email": "user@gmail.com", "expires_in": 3600,
+		})
+	})
+
+	tests := []struct {
+		name           string
+		credentialType string
+		jwks           http.HandlerFunc
+		tokenInfo      http.HandlerFunc
+		userInfo       http.HandlerFunc
+	}{
+		{
+			name:           "tokeninfo_400",
+			credentialType: "access_token",
+			jwks:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+			tokenInfo:      http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadRequest) }),
+			userInfo: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("userinfo must not be called when tokeninfo fails")
+			}),
+		},
+		{
+			name:           "tokeninfo_5xx",
+			credentialType: "access_token",
+			jwks:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+			tokenInfo:      http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) }),
+			userInfo: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("userinfo must not be called when tokeninfo fails")
+			}),
+		},
+		{
+			name:           "userinfo_401",
+			credentialType: "access_token",
+			jwks:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+			tokenInfo:      validAccessTokenInfo,
+			userInfo:       http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }),
+		},
+		{
+			name:           "userinfo_5xx",
+			credentialType: "access_token",
+			jwks:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+			tokenInfo:      validAccessTokenInfo,
+			userInfo:       http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) }),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			endpoints := newTestEndpoints(tt.jwks, tt.tokenInfo, tt.userInfo)
+			defer endpoints.close()
+
+			validator := newTestValidator(endpoints)
+			userStore := newFakeUserStore()
+			svc := newTestExchangeService(validator, userStore)
+			server := &Server{geExchangeService: svc}
+
+			body := fmt.Sprintf(`{"credential":%q,"credentialType":%q}`, "some-credential", tt.credentialType)
+			w := httptest.NewRecorder()
+			server.handleGEGoogleExchange(w, exchangeRequest(body))
+
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
+			}
+			if !bytes.Equal(w.Body.Bytes(), wantBody) {
+				t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+			}
+		})
+	}
+}
+
+// TestGEExchange_RealValidator_IDTokenForceRefreshFailure_ExactBytes covers
+// the fifth minimum case the fix brief asked for: an ID-token JWKS
+// force-refresh 5xx, using the same fetchedAt back-dating technique as
+// TestProductionValidator_IDToken_ForceRefreshFailure_UpstreamError and
+// TestProductionValidator_IDToken_JWKSForceRefresh.
+func TestGEExchange_RealValidator_IDTokenForceRefreshFailure_ExactBytes(t *testing.T) {
+	kp1 := newGCVTestKeyPair("kid-1")
+	rotatedKP := newGCVTestKeyPair("kid-2") // signs the token; never served successfully
+
+	var jwksCalls atomic.Int64
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if jwksCalls.Add(1) == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(gcvJWKSJSON(kp1)) // primes the cache without rotatedKP
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError) // every force-refresh attempt fails
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	userStore := newFakeUserStore()
+	svc := newTestExchangeService(validator, userStore)
+	server := &Server{geExchangeService: svc}
+
+	// Prime the cache with kp1 through a successful exchange.
+	primeBody := fmt.Sprintf(`{"credential":%q,"credentialType":"id_token"}`, signIDToken(kp1, validIDTokenClaims()))
+	wPrime := httptest.NewRecorder()
+	server.handleGEGoogleExchange(wPrime, exchangeRequest(primeBody))
+	if wPrime.Code != http.StatusOK {
+		t.Fatalf("priming exchange failed: status=%d body=%s", wPrime.Code, wPrime.Body.String())
+	}
+
+	// Age the cache past forceRefresh's own 30s throttle, exactly like the
+	// validator-level force-refresh tests do.
+	gcv := validator.(*googleCredentialValidator)
+	gcv.jwksCache.mu.Lock()
+	gcv.jwksCache.fetchedAt = time.Now().Add(-1 * time.Minute)
+	gcv.jwksCache.mu.Unlock()
+
+	body := fmt.Sprintf(`{"credential":%q,"credentialType":"id_token"}`, signIDToken(rotatedKP, validIDTokenClaims()))
+	w := httptest.NewRecorder()
+	server.handleGEGoogleExchange(w, exchangeRequest(body))
+
+	wantBody := []byte(`{"error":{"code":"invalid_credential","message":"credential validation failed"}}` + "\n")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
 	}
 }

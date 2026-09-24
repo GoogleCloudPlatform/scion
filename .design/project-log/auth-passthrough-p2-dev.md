@@ -234,8 +234,13 @@ not a signature verdict.
 - **Exchange behaviour is unchanged externally**: `ge_exchange.go`'s status-mapping switch has no case
   for either sentinel, so both still fall through to the same `default:` 401 "credential validation
   failed" — only the internal classification, and therefore the *log* text (`credential_type=... error=...`),
-  changes. No exchange test needed a status/body update; the existing `TestGEExchange_*` suite passing
-  unchanged is itself that proof.
+  changes. Corrected in fix round 2 (review r2 required finding 1): the existing `TestGEExchange_*` suite
+  passing unchanged is **not** proof of this, because every one of those tests uses `fakeGoogleValidator`
+  and never runs `getTokenInfo`/`getUserInfo`/`forceRefresh` — the exact functions this fix changed. The
+  real proof is `TestGEExchange_RealValidator_UpstreamFailures_ExactBytes` (tokeninfo 400/5xx, userinfo
+  401/5xx) and `TestGEExchange_RealValidator_IDTokenForceRefreshFailure_ExactBytes` (ID-token
+  force-refresh 5xx), both added in fix round 2, which drive the real validator against stubbed Google
+  endpoints and assert the exchange's exact response bytes.
 - Tests against the real validator: `TestProductionValidator_AccessToken_TokenInfo400_InvalidCredential`,
   `_TokenInfo5xx_UpstreamError`, `_UserInfo400_InvalidCredential` (classification, both directions, both
   endpoints), `TestProductionValidator_IDToken_ForceRefreshFailure_UpstreamError` (the mislabel fix,
@@ -320,3 +325,67 @@ commits, the second of which corrected wording in the first. Before pushing, bot
 one clean commit (`git reset --soft` to the prior pushed commit, then a single re-commit) so the grep
 checks pass against the pushed history, consistent with how Phase 1's r4 review notes the same
 technique was used for the same reason. No already-pushed commit was rewritten.
+
+## Fix round 2 (review `p2-r2-ap-p2-rev-2.md`: REQUEST CHANGES, 0 Critical, 1 Required, 3 Optional, 0 Nit, 3 FYI)
+
+Reviewed at `882e13d4` plus the docs-only `1abe1dc2` log diff. All r1 fixes confirmed resolved (see the
+review's own r1 disposition table); this round's finding is a test gap, plus three Optionals, each
+given a resolve-or-decline below.
+
+**1 (Required, resolved). The exchange byte-identity regression test the r1 brief required was not
+delivered; the project log's "the existing `TestGEExchange_*` suite proves it" claim was false**, since
+every `TestGEExchange_*` test uses `fakeGoogleValidator` and none of them exercises
+`getTokenInfo`/`getUserInfo`/`forceRefresh` — the exact functions the r1 fix changed.
+**Fix:** added `TestGEExchange_RealValidator_UpstreamFailures_ExactBytes` (table test: tokeninfo 400,
+tokeninfo 5xx, userinfo 401, userinfo 5xx — real validator via `newTestValidator`, `handleGEGoogleExchange`
+driven directly) and `TestGEExchange_RealValidator_IDTokenForceRefreshFailure_ExactBytes` (the fifth
+minimum case: ID-token JWKS force-refresh 5xx, using the existing `fetchedAt` back-dating technique).
+Both assert the exact 401 body `{"error":{"code":"invalid_credential","message":"credential validation
+failed"}}` — all five pass, confirming the property the reviewer's own (deleted) probe found: the
+exchange is byte-identical across these upstream-failure shapes. Corrected the log sentence at the fix
+round 1 section above to point to these tests instead of the general suite.
+
+**2 (Optional, resolved). The tokeninfo body-`error_description` classification branch was untested and
+effectively dead in the one test that looked like it covered it** (that test uses HTTP 400, which is
+rejected on status alone before the body is ever parsed; the map key it sets, `"error"`, doesn't even
+match the struct's `error_description` json tag). **Fix:** added
+`TestProductionValidator_AccessToken_TokenInfo200WithErrorBody_InvalidCredential`: a 200 response body
+`{"error_description":"Invalid Value"}` asserts `ErrGoogleInvalidCredential`, not `ErrGoogleUpstreamError`.
+Mutating that branch's sentinel now fails this test.
+
+**3 (Optional, resolved). `countingGoogleValidator{}`'s zero value returns `(nil, nil)`, so a full-trust-
+skip mutation panics the test binary (nil-pointer dereference on `id.IsServiceAccount`) instead of
+failing an assertion** — the same class of problem P1 r4 optional finding 1 fixed for `trackingUserStore`.
+Reproduced by hand: mutating `authenticateExternalBearer`'s `if !ok {` to `if false && !ok {` panicked in
+both `TestExternalBearer_NoTrustProductionShape_Golden401` and the golden table's case (d), aborting the
+binary before the rest of the suite ran. **Fix:** every `&countingGoogleValidator{}` zero-value
+construction in `auth_external_bearer_test.go` (7 call sites: the golden table, `NoTrustProductionShape_Golden401`,
+`ValidHubJWT_NeverTouchesGoogleValidator`, `ServiceAccountFederationIssuer_NotApplicable`,
+`EmptyExpectedAudience_NotApplicable`, `PATShapedToken_NeverTouchesGoogleValidator`,
+`ValidAgentToken_NeverTouchesGoogleValidator`) now defaults both `idTokenErr`/`accessTokenErr` to
+`ErrGoogleInvalidCredential`. Re-verified: the same mutation now fails cleanly at
+`counting.totalCalls() != 0` in all four previously-panicking cases, with no panic and the rest of the
+suite still running (145 test lines emitted vs. an abort after ~9 previously). Reverted after confirming.
+
+**4 (Optional, resolved). The design's limiter defaults (5 rps / burst 20, §4.4) were unpinned** — both
+C5 tests override `rate`/`burst` to small test values, so widening the production constants would survive
+the whole suite. **Fix:** added `TestExternalBearerRateLimiter_DefaultsMatchDesign` (asserts the
+constructed limiter's `rate`/`burst` fields equal both the named constants and their literal design
+values) and `TestExternalBearerRateLimiter_DefaultBurstExhaustion` (20 unmodified-default requests from
+one IP succeed, the 21st is refused).
+
+**5, 6, 7 (FYI, no action).** Singleflight's detached-context trade-off (bounded by the 10s timeout,
+intended per r1 finding 4), the `StartBackgroundServices`-based cleanup test's seam choice, and the
+full-run relay accuracy — all noted as fine as-is.
+
+### Gates (fix round 2)
+
+- ✅ `go build -buildvcs=false ./...`
+- ✅ `go vet -buildvcs=false ./pkg/hub/...`
+- ✅ `gofmt -l pkg/hub` — clean
+- ✅ `GOGC=40 golangci-lint run --new-from-rev=upstream-main --concurrency=1 ./pkg/hub/...` — 0 issues
+- ✅ Targeted subset (`TestExternalBearer|TestGoogleTrust|TestGEExchange|TestProductionValidator|TestNoPackage|TestNoTokenInfo|TestGoogleIdentityResolver|TestGoogleCredential|TestFederation`, `-count=1`) — green
+- ✅ `-race` subset matching the reviewer's own gate (`TestExternalBearer|TestGoogleTrust|TestGEExchange|TestProductionValidator|TestNoPackage|TestNoTokenInfo|TestGoogleIdentityResolver|TestGoogleCredential|TestFederation|TestServer_ExternalBearerRateLimiter|TestMutationClassification|TestExternalBearerRateLimiter`, `-count=1`) — green, no data races (27.2s)
+- Full `pkg/hub` suite: not re-run this round (test-only changes; `ap-em`'s last relayed run at `882e13d4`
+  stands, per the disk rules' "one full run per phase, ask first" — this round doesn't touch
+  non-test production files, so no new full run was requested).

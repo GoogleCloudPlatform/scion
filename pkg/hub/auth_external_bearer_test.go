@@ -549,7 +549,16 @@ func TestExternalBearer_NoTrustProductionShape_Golden401(t *testing.T) {
 	// A non-nil validator, as O3's unconditional construction guarantees in
 	// production — but it must never be called, so a fake (rather than a real
 	// validator pointed at a JWKS server) both proves and enforces that.
-	counting := &countingGoogleValidator{}
+	// A default error (rather than a zero-value fakeGoogleValidator, which
+	// returns (nil, nil)) means that if a mutation ever lets this "must not
+	// reach the validator" test actually reach it, the result is a real
+	// error, not a nil identity — so this test fails at its own
+	// counting.totalCalls() assertion instead of a nil-pointer-dereference
+	// panic that aborts the whole test binary (review r2 optional finding 3).
+	counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
+		idTokenErr:     ErrGoogleInvalidCredential,
+		accessTokenErr: ErrGoogleInvalidCredential,
+	}}
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
@@ -606,7 +615,16 @@ func TestExternalBearer_ValidHubJWT_NeverTouchesGoogleValidator(t *testing.T) {
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
-	counting := &countingGoogleValidator{}
+	// A default error (rather than a zero-value fakeGoogleValidator, which
+	// returns (nil, nil)) means that if a mutation ever lets this "must not
+	// reach the validator" test actually reach it, the result is a real
+	// error, not a nil identity — so this test fails at its own
+	// counting.totalCalls() assertion instead of a nil-pointer-dereference
+	// panic that aborts the whole test binary (review r2 optional finding 3).
+	counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
+		idTokenErr:     ErrGoogleInvalidCredential,
+		accessTokenErr: ErrGoogleInvalidCredential,
+	}}
 
 	fa := newGoogleTrustFederationAuth(t, externalBearerTestAudience)
 	cfg := AuthConfig{
@@ -837,7 +855,16 @@ func TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable(t *testing.
 	defer endpoints.close()
 
 	fa := newGoogleFederationAuthWithIssuerType(t, externalBearerTestAudience, "service_account")
-	counting := &countingGoogleValidator{}
+	// A default error (rather than a zero-value fakeGoogleValidator, which
+	// returns (nil, nil)) means that if a mutation ever lets this "must not
+	// reach the validator" test actually reach it, the result is a real
+	// error, not a nil identity — so this test fails at its own
+	// counting.totalCalls() assertion instead of a nil-pointer-dereference
+	// panic that aborts the whole test binary (review r2 optional finding 3).
+	counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
+		idTokenErr:     ErrGoogleInvalidCredential,
+		accessTokenErr: ErrGoogleInvalidCredential,
+	}}
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
@@ -885,7 +912,16 @@ func TestExternalBearer_EmptyExpectedAudience_NotApplicable(t *testing.T) {
 	// its own Authenticate() use, but the external-bearer path must still
 	// treat this issuer as not configured at all.
 	fa := newGoogleTrustFederationAuth(t, "")
-	counting := &countingGoogleValidator{}
+	// A default error (rather than a zero-value fakeGoogleValidator, which
+	// returns (nil, nil)) means that if a mutation ever lets this "must not
+	// reach the validator" test actually reach it, the result is a real
+	// error, not a nil identity — so this test fails at its own
+	// counting.totalCalls() assertion instead of a nil-pointer-dereference
+	// panic that aborts the whole test binary (review r2 optional finding 3).
+	counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
+		idTokenErr:     ErrGoogleInvalidCredential,
+		accessTokenErr: ErrGoogleInvalidCredential,
+	}}
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
@@ -1319,7 +1355,21 @@ func TestExternalBearer_ConfiguredTrustInvariant_Golden(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			counting := &countingGoogleValidator{}
+			// A default error (rather than a zero-value fakeGoogleValidator,
+			// which returns (nil, nil)) means that if a mutation ever lets a
+			// no-trust case reach the validator, ValidateIDToken/
+			// ValidateAccessToken return a real error instead of a nil
+			// identity — so authenticateExternalBearer fails at
+			// `id.IsServiceAccount` never even being reached, and this test
+			// fails at its own counting.totalCalls() assertion below instead
+			// of panicking (nil-pointer dereference) and aborting the whole
+			// test binary before the remaining golden cases run (review r2
+			// optional finding 3; the same class of problem P1 r4 optional
+			// finding 1 fixed for trackingUserStore).
+			counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
+				idTokenErr:     ErrGoogleInvalidCredential,
+				accessTokenErr: ErrGoogleInvalidCredential,
+			}}
 			// GoogleValidator/GoogleResolver are always wired, matching
 			// production shape (server.go's New builds them unconditionally,
 			// O3): only trust varies below. Review r1 finding 3: an earlier
@@ -1376,7 +1426,16 @@ func TestExternalBearer_PATShapedToken_NeverTouchesGoogleValidator(t *testing.T)
 	// *ordering* (judgement 1/O1): the case is decided by detectTokenType
 	// before either hook is even consulted, regardless of where the hooks
 	// are placed in the switch.
-	counting := &countingGoogleValidator{}
+	// A default error (rather than a zero-value fakeGoogleValidator, which
+	// returns (nil, nil)) means that if a mutation ever lets this "must not
+	// reach the validator" test actually reach it, the result is a real
+	// error, not a nil identity — so this test fails at its own
+	// counting.totalCalls() assertion instead of a nil-pointer-dereference
+	// panic that aborts the whole test binary (review r2 optional finding 3).
+	counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
+		idTokenErr:     ErrGoogleInvalidCredential,
+		accessTokenErr: ErrGoogleInvalidCredential,
+	}}
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
@@ -1422,7 +1481,16 @@ func TestExternalBearer_ValidAgentToken_NeverTouchesGoogleValidator(t *testing.T
 		t.Fatalf("GenerateAgentToken: %v", err)
 	}
 
-	counting := &countingGoogleValidator{}
+	// A default error (rather than a zero-value fakeGoogleValidator, which
+	// returns (nil, nil)) means that if a mutation ever lets this "must not
+	// reach the validator" test actually reach it, the result is a real
+	// error, not a nil identity — so this test fails at its own
+	// counting.totalCalls() assertion instead of a nil-pointer-dereference
+	// panic that aborts the whole test binary (review r2 optional finding 3).
+	counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
+		idTokenErr:     ErrGoogleInvalidCredential,
+		accessTokenErr: ErrGoogleInvalidCredential,
+	}}
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())

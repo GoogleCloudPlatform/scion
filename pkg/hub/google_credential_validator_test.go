@@ -516,6 +516,43 @@ func TestProductionValidator_AccessToken_TokenInfo400_InvalidCredential(t *testi
 	}
 }
 
+// TestProductionValidator_AccessToken_TokenInfo200WithErrorBody_InvalidCredential
+// covers review r2 optional finding 2: a 200 response can still carry a
+// body-level credential rejection via the tokeninfo response's
+// error_description field (googleTokenInfoResponse.Error's actual json tag —
+// not "error", which the 400-status test above uses only incidentally,
+// since a 400 is rejected on status alone before the body is ever parsed).
+// This is the one branch that is otherwise unreachable by any other test:
+// mutating its ErrGoogleInvalidCredential to ErrGoogleUpstreamError
+// previously survived the whole suite.
+func TestProductionValidator_AccessToken_TokenInfo200WithErrorBody_InvalidCredential(t *testing.T) {
+	endpoints := newTestEndpoints(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("JWKS must not be called for an access token") }),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error_description": "Invalid Value"})
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("userinfo must not be called when tokeninfo reports an error")
+		}),
+	)
+	defer endpoints.close()
+
+	validator := newTestValidator(endpoints)
+	_, err := validator.ValidateAccessToken(t.Context(), "token",
+		[]string{"test-client-id.apps.googleusercontent.com"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, ErrGoogleInvalidCredential) {
+		t.Errorf("error = %v, want ErrGoogleInvalidCredential (a 200 body carrying error_description is still Google rejecting the credential)", err)
+	}
+	if errors.Is(err, ErrGoogleUpstreamError) {
+		t.Error("error must not also be ErrGoogleUpstreamError")
+	}
+}
+
 func TestProductionValidator_AccessToken_TokenInfo5xx_UpstreamError(t *testing.T) {
 	endpoints := newTestEndpoints(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
