@@ -3028,19 +3028,21 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 		return t, nil
 	}
 
-	// No runtime entry: the agent may exist only as files (never started, or
-	// its container is gone). Look only in this project's directory.
+	// No runtime entry was found. If a runtime could not be listed, that is
+	// not known to be true: its container may still be running. Fail rather
+	// than delete only the files (orphaning the container) or report a 404
+	// (which the hub treats as a completed delete).
+	if listErr != nil {
+		return nil, fmt.Errorf("%w: %v", errDeleteTargetUnknown, listErr)
+	}
+
+	// The agent may exist only as files (never started, or its container is
+	// gone). Look only in this project's directory.
 	resolved, err := s.findAgentProjectDir(id, projectID, projectPathHint)
 	if err != nil {
 		return nil, err
 	}
 	if resolved == "" {
-		if listErr != nil {
-			// A runtime could not be listed, so "not found" is not known to
-			// be true. Report the failure rather than a 404, which the hub
-			// would treat as a successful delete and orphan the resource.
-			return nil, fmt.Errorf("%w: %v", errDeleteTargetUnknown, listErr)
-		}
 		return nil, errDeleteTargetNotFound
 	}
 	s.agentLifecycleLog.Debug("Resolved agent project path for file-only delete",

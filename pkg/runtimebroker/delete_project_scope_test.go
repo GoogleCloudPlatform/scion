@@ -646,3 +646,28 @@ func TestDeleteAgent_GlobalDirUnresolvable_NotReportedAs404(t *testing.T) {
 		t.Fatalf("expected no delete calls, got %d", mgr.deleteCalls)
 	}
 }
+
+// UAT N1 (#1846): with the agent's files present but a runtime unlistable,
+// a file-only delete would orphan a possibly running container. The delete
+// must fail with no side effects instead.
+func TestDeleteAgent_ListFailureWithFilesPresent_FailsWithoutSideEffects(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, home := newScopeTestServer(t, mgr)
+	scionB, infoB := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	auxMgr := &erroringListManager{}
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{
+		Runtime: &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }},
+		Manager: auxMgr,
+	}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true&softDelete=true&deletedAt=2026-01-01T00:00:00Z")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected a runtime error (500) when a runtime cannot be listed, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.deleteCalls != 0 || auxMgr.deleteCalls != 0 {
+		t.Errorf("expected no delete calls, got %d / %d", mgr.deleteCalls, auxMgr.deleteCalls)
+	}
+	assertUntouched(t, scionB, "dev", infoB)
+}
