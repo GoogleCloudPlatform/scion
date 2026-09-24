@@ -74,6 +74,27 @@ type federationClaims struct {
 	Name          string   `json:"name,omitempty"`
 }
 
+// warnIfExternalBearerDisabled logs once, at config load (and again on every
+// hot reload, since NewFederationAuthenticator runs again then), when issuer
+// is the Google issuer configured as issuer_type "user" with an empty
+// expected_audience: the exact shape that leaves the external-bearer path
+// permanently disabled for it (googleTrust, auth_external_bearer.go). This
+// is a load-time diagnostic only — it must never run on the request path, so
+// it lives here and nowhere else. It checks issuer.ExpectedAudience as
+// configured (the loop's local variable, before the oidcIssuerURL fallback
+// below resolves it to something non-empty), matching what IssuerConfig
+// later reports and what googleTrust actually gates on.
+func warnIfExternalBearerDisabled(log *slog.Logger, issuer config.TrustedIssuerConfig, normalizedIssuerURL string) {
+	if normalizedIssuerURL != googleIssuerHTTPS && normalizedIssuerURL != googleIssuerBare {
+		return
+	}
+	if IssuerType(issuer.IssuerType) != IssuerTypeUser || issuer.ExpectedAudience != "" {
+		return
+	}
+	log.Warn("external-bearer path disabled for this issuer: issuer_type is \"user\" but expected_audience is empty",
+		"issuer_url", issuer.IssuerURL)
+}
+
 // NewFederationAuthenticator creates a FederationAuthenticator from the given config.
 // oidcIssuerURL is this hub's own OIDC issuer URL, used as the default expected audience.
 // httpClient is used for JWKS endpoint fetches. The caller should configure
@@ -97,6 +118,8 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 	for _, issuer := range cfg.TrustedIssuers {
 		// Normalize issuer URL by trimming trailing slashes for consistent map lookup.
 		normalizedIssuer := strings.TrimRight(issuer.IssuerURL, "/")
+
+		warnIfExternalBearerDisabled(log, issuer, normalizedIssuer)
 
 		// Fix 2: In hosted mode (not workstation, not dev), reject HTTP issuer URLs.
 		if mode != "workstation" && mode != "dev" {
