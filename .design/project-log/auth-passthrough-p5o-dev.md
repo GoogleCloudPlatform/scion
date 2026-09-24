@@ -303,7 +303,7 @@ was judged adequate and kept as-is.
 
 ## Fix round 3 (review `p5o-r3-ap-p5o-rev-3.md`, REQUEST CHANGES on `dc3749906`/`fa8d5557c`)
 
-**Commits:** `59dd6cf9a` (feature, comments only), `b752fb342` (test), `92d1bf321` (this entry).
+**Commits:** `59dd6cf9a` (feature, comments only), `b752fb342` (test), `92d1bf321` (wording fix), `d4acb1620` (this entry).
 
 Verdict was REQUEST CHANGES with Critical 0, Required 1, Optional 0, Nit 3, FYI 5 — a ~10-line comment fix plus
 one test strengthening. Every fix round 2 finding was verified resolved; 22 of 23 outcome mutants aimed at this
@@ -313,7 +313,7 @@ to reach three production comments that still described the old, disproven mecha
 
 | Finding | Change | Test | Result |
 |---|---|---|---|
-| R1: three production comments still say `authConfig`'s by-value capture happens in `registerRoutes`, inside `New()` (`auth.go:88-99`, `server.go:1654`, `server.go:2552-2556`) | Reworded all three to state the verified mechanism: `UnifiedAuthMiddleware` captures a copy of `authConfig` each time `applyMiddleware` runs (`Start()`, `Handler()`), which in production happens after `cmd/server_foreground.go` calls the setters; the `*atomic.Pointer` removes the dependency on that ordering rather than being required by it. Checked against `ge_exchange_route_test.go:508-518`'s existing (already-correct) test comment for consistency | read against `server.go`'s actual call graph (`registerRoutes` at `:4222` calls only `HandleFunc`/`guarded`; `applyMiddleware` is called only from `Start()` `:3925` and `Handler()` `:4091`) | n/a (comment-only) |
+| R1: three production comments still say `authConfig`'s by-value capture happens in `registerRoutes`, inside `New()` (`auth.go:88-99`, `server.go:1654`, `server.go:2552-2556`) | Reworded all three to state the verified mechanism: `UnifiedAuthMiddleware` captures a copy of `authConfig` each time `applyMiddleware` runs (`Start()`, `Handler()`), which in production happens after `cmd/server_foreground.go` calls the setters; the `*atomic.Pointer` removes the dependency on that ordering rather than being required by it. Checked against `ge_exchange_route_test.go:508-518`'s existing (already-correct) test comment for consistency | read against `server.go`'s actual call graph (`registerRoutes` at `:4224` calls only `HandleFunc`/`guarded`; `applyMiddleware` is called only from `Start()` `:3927` and `Handler()` `:4093`) | n/a (comment-only) |
 | N1: `TestExternalBearerSnapshotMetrics_Since` can't detect `since` computed at snapshot time (S1 survives) | Test now overwrites `m.since` with a fixed date decades in the past after construction, and asserts `GetSnapshot` returns exactly that value | same test, strengthened | S1 (`GetSnapshot` uses `time.Now()` instead of `m.since`) — hand-mutated, confirmed to fail the new assertion, reverted |
 | N2: log misreports its own gates (Deviation 1's M8/M13/M14 claim; contradictory F1 wording) | Reworded both: Deviation 1 now says this round's Gates cover D1-D3 (what this round's code change can affect), and that M8/M13/M14 were last verified in fix round 1, unchanged since. The F1 bullet's chronology is now explicit (the hit existed at the fix-round-2 tip; a later, separate `ap-p4-dev` commit removed it) | — (log wording only) | n/a |
 | N3: redundant `"type", fmt.Sprintf("%T", v)` in the drop `Warn`s | Declined, per the brief — matches the r2 disposition ("label and value type"), harmless and PII-free | — | — |
