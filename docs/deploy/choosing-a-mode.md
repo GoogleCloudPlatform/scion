@@ -50,6 +50,11 @@ where building from source is not desired.
 
 See: [Single-Node VM Deployment Guide](single-node-vm.md)
 
+**Adding a GKE target?** The hybrid tier extends this VM with a second,
+Kubernetes-based place to run agents, sharing scratchpads over an NFS export
+served from the VM itself. See: [Hybrid Deployment Tier](hybrid-tier.md)
+(`ptone/scion#1777`).
+
 ## Cloud Run Instance
 
 A single Cloud Run Instance running the Scion Hub container with IAP
