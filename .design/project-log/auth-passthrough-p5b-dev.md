@@ -550,3 +550,69 @@ None requiring `ap-em`'s input. The `ApplyOverlay`/`applyRuntimeConfig`
 logger-parameter addition was a mechanical consequence of the design's
 pseudocode (which logs from inside the merge), not a design choice on my
 part.
+
+---
+
+## F4 fix round 1 (review `reviews/p5b-f4-r1-ap-p5b-rev-6.md`, REQUEST CHANGES on `06dbf2722`)
+
+**Agent:** ap-p5b-dev-2 · **Branch:** `scion/auth-passthrough` · **Date:** 2026-09-24
+
+Relayed via `auth-passthrough-lead` on `ap-em`'s behalf (its direct messages
+weren't arriving). Included R1 in this round: the ruling (add a separate
+scheme set used only by the pin decision, leaving `validAuthSchemes`/
+`ParseAdminOverlay` untouched) had already arrived, appended to the fix
+brief and confirmed again in a follow-up message, before I started R2/R3.
+
+### Disposition table
+
+| # | Disposition | Change | Test |
+|---|---|---|---|
+| **R1** (Required) `federation` is a valid `ParseAdminOverlay` scheme but the admin dropdown can't express it, so it stayed fail-open to the same downgrade §4.6b was meant to close | **Fixed.** Added `uiRepresentableSchemes` — exactly the five dropdown values (`apiKey`, `bearer`, `none`, `hubUAT`, `hubJWT`) — used only inside `EffectiveAuthScheme`. `validAuthSchemes` (and so `ParseAdminOverlay`'s validation) is untouched, so `federation` pushes still validate; they're just pinned when the YAML scheme is `federation`. Corrected the now-wrong `validAuthSchemes` doc comment and the README's general clause to name `federation` explicitly. | `TestEffectiveAuthScheme` gained a `federation` row; `TestApplyOverlay_FederationSchemeAlsoPinned` covers the `ApplyOverlay` call site. Reverting `uiRepresentableSchemes` back to `validAuthSchemes` in the pin check fails both. |
+| **R2** (Required) The `loadConfig` capture line has no test; deleting it (M10) survives | **Fixed.** `TestLoadConfig_CapturesYAMLScheme` (`cmd/scion-a2a-bridge`) writes a real temp YAML file with `auth.scheme: hubBearer` plus hub/bridge/plugin/projects fields, calls `loadConfig`, asserts `Auth.YAMLScheme == "hubBearer"`, then runs the result through `bridge.ApplyOverlay` with a `none` push and asserts it stays `hubBearer` — covering the capture and its effect end to end from an actual file, not a hand-built `Config`. | Re-ran M10 (delete `cfg.Auth.YAMLScheme = cfg.Auth.Scheme`) by hand: **failed** `TestLoadConfig_CapturesYAMLScheme` (`YAMLScheme = "", want "hubBearer"`). Reverted; test passes again. |
+| **R3** (Required) Review-history narration `adminoverlay_test.go:752-753` ("p5b review r5, finding F2") | **Fixed.** Deleted the parenthetical; the sentence stands on its own. | — |
+| **O1** (Optional) HA fires an identical Warn every ~60s per replica indefinitely | **Fixed.** New `AuthSchemeWarnDedupe`: Warn the first time a `(yaml_scheme, pushed_scheme)` pair is seen, Debug on every repeat. No package-level state — each caller owns an instance (`BrokerServer.authWarnDedupe`, one per `serveStandalone` HA process). `EffectiveAuthScheme`/`ApplyOverlay`/`applyRuntimeConfig` all gained a `dedupe` parameter that may be nil (nil means "always Warn," used by tests and the one-time boot-time overlay apply in `main()` before the broker exists). | `TestAuthSchemeWarnDedupe`: two identical ignored pushes produce exactly one Warn line and one Debug line; a third push with a different pushed value produces a second Warn. Also incidentally fixed a pre-existing double-Warn-per-push: `BrokerServer.Configure` calls `ApplyOverlay` twice (once to validate, once to apply) with the same `b.authWarnDedupe`, so the second call is now a dedup hit. |
+| **O2** (Optional) A nil logger panics only on the pinned branch | **Fixed.** `EffectiveAuthScheme` now does `if log == nil { log = slog.Default() }` at the top. | `TestEffectiveAuthScheme_NilLoggerDoesNotPanic`. |
+| **N1** (Nit) Test comments cited design row labels (`F4-1`…`F4-6`) | **Fixed.** Reworded every such comment to describe the behavior instead, in both `internal/bridge/adminoverlay_test.go` and `cmd/scion-a2a-bridge/main_test.go`. | — |
+| **F3** (bridge-only, in range) `auth_test.go:645` "(review r2 O1; …)" narration from an earlier bridge commit | **Fixed.** Deleted the parenthetical (kept the substantive sentence about the guard it's testing). | — |
+| F1, F2, F4 | No action, per disposition. | — |
+
+### Signature changes
+
+`ApplyOverlay` and `applyRuntimeConfig` each gained a `dedupe *AuthSchemeWarnDedupe` parameter (in addition to the r0 round's `log *slog.Logger`). All production call sites were updated: `main.go`'s one-time boot-time overlay apply (passes `nil` — a single call needs no dedup), `serveStandalone`'s two `applyRuntimeConfig` call sites (share one `authWarnDedupe` created once per process), and `BrokerServer`'s two `ApplyOverlay` call sites (share `b.authWarnDedupe`, created once per `NewBrokerServer`). All existing unit-test call sites were updated to pass `nil` (equivalent to their pre-dedupe behavior).
+
+### Gates (from `extras/scion-a2a-bridge/`, `GOTMPDIR` owned scratch dir,
+deleted after; `GOCACHE=/scion-volumes/gocache`)
+
+- `go build ./...` — clean.
+- `go vet ./...` — clean.
+- `gofmt -l .` — clean.
+- `go test -race -count=1 ./...` — all green: `cmd/scion-a2a-bridge`,
+  `integration`, `internal/bridge`, `internal/state`. No regressions.
+- `GOGC=40 golangci-lint run --new-from-rev=a53175c23 --concurrency=1 ./...`
+  — 0 issues.
+- Mutations re-verified by hand (applied, confirmed failing tests, reverted,
+  `git diff --stat` empty after each): M10 (remove the `loadConfig`
+  capture — now killed, closing R2); "pin everything" (drop the
+  `uiRepresentableSchemes` membership check — killed by
+  `TestEffectiveAuthScheme`/`TestApplyOverlay_DoesNotPinUIRepresentableScheme`);
+  reverting `uiRepresentableSchemes` back to `validAuthSchemes` in the pin
+  check (the exact R1 regression — killed by `TestEffectiveAuthScheme`'s
+  `federation` row and `TestApplyOverlay_FederationSchemeAlsoPinned`).
+- Did not run the `pkg/hub` suite (out of scope; nothing under `pkg/`
+  touched). The module-level `cmd/scion-a2a-bridge` gates cover the binary;
+  there is no `cmd/scion-a2a-bridge` at the repo root to build separately
+  (the r1 review noted its own brief's root-level path was wrong).
+
+### Bare-issue-number grep (base `a53175c23`; the `git diff` hit at that base
+is `.design/project-log/auth-passthrough-p5o-dev.md:294`, pre-existing —
+landed via the shared branch before this round started, not in my range or
+files; re-checked against my actual round start `dc3749906`, both empty)
+
+- `git log a53175c23..HEAD --format=%B | /usr/bin/grep -nE '(^|[^/A-Za-z])#[0-9]+'` — empty.
+- `git log dc3749906..HEAD --format=%B | /usr/bin/grep -nE '(^|[^/A-Za-z])#[0-9]+'` — empty.
+- `git diff dc3749906 HEAD | /usr/bin/grep -nE '^\+.*(^|[^/A-Za-z0-9])#[0-9]{3,}'` — empty.
+
+### Deviations / design questions
+
+None. R1's design amendment (r8) was already resolved before I started this
+round; no further clarification was needed.
