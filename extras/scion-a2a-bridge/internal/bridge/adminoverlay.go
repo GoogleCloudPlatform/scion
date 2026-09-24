@@ -26,7 +26,9 @@ import (
 	"time"
 )
 
-// validAuthSchemes lists the recognized auth schemes for validation.
+// validAuthSchemes lists the recognized auth schemes for validation. It also
+// doubles as the set of schemes the admin UI can express: see
+// EffectiveAuthScheme.
 var validAuthSchemes = map[string]bool{
 	"apiKey":     true,
 	"bearer":     true,
@@ -34,6 +36,28 @@ var validAuthSchemes = map[string]bool{
 	"hubUAT":     true,
 	"hubJWT":     true,
 	"federation": true,
+}
+
+// EffectiveAuthScheme decides which auth scheme applies when admin-pushed
+// config (an admin-overlay push or a runtime config reconfigure) meets a
+// scheme configured directly in YAML.
+//
+// A YAML scheme the admin UI cannot express (not in validAuthSchemes, e.g.
+// hubBearer or geGoogle) is pinned: pushed config may never replace it,
+// because the admin UI cannot push it back if a push ever changes it away.
+// An empty pushed value (no scheme in the pushed config) always keeps the
+// current scheme — it is not itself a downgrade. A YAML scheme the admin UI
+// can express behaves as before: a pushed scheme always wins.
+func EffectiveAuthScheme(yamlScheme, current, pushed string, log *slog.Logger) string {
+	if pushed == "" {
+		return current
+	}
+	if yamlScheme != "" && !validAuthSchemes[yamlScheme] && pushed != yamlScheme {
+		log.Warn("ignoring admin-pushed auth_scheme: YAML auth.scheme is not settable from the admin UI",
+			"yaml_scheme", yamlScheme, "pushed_scheme", pushed)
+		return yamlScheme
+	}
+	return pushed
 }
 
 // AdminOverlay holds the parsed admin-managed config values.
@@ -269,7 +293,8 @@ func ParseAdminOverlay(cfg map[string]string) (*AdminOverlay, error) {
 
 // ApplyOverlay merges an admin overlay onto a base config, producing the effective config.
 // Overlay values win for each present key; absent overlay keys leave base values intact.
-func ApplyOverlay(base Config, overlay *AdminOverlay) Config {
+// auth_scheme is the exception: see EffectiveAuthScheme. log must be non-nil.
+func ApplyOverlay(base Config, overlay *AdminOverlay, log *slog.Logger) Config {
 	if overlay == nil {
 		return base
 	}
@@ -280,7 +305,7 @@ func ApplyOverlay(base Config, overlay *AdminOverlay) Config {
 		cfg.Bridge.ExternalURL = overlay.ExternalURL
 	}
 	if overlay.IsPresent("auth_scheme") {
-		cfg.Auth.Scheme = overlay.AuthScheme
+		cfg.Auth.Scheme = EffectiveAuthScheme(base.Auth.YAMLScheme, cfg.Auth.Scheme, overlay.AuthScheme, log)
 	}
 	if overlay.IsPresent("api_key") {
 		cfg.Auth.APIKey = overlay.APIKey

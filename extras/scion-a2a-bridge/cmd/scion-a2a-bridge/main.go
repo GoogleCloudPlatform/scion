@@ -117,7 +117,7 @@ func main() {
 		log.Warn("failed to load persisted admin overlay, proceeding with base YAML config", "error", overlayErr)
 	}
 	if overlay != nil {
-		effective := bridge.ApplyOverlay(baseCfg, overlay)
+		effective := bridge.ApplyOverlay(baseCfg, overlay, log)
 		cfg = &effective
 		log.Info("applied persisted admin overlay",
 			"auth_scheme", cfg.Auth.Scheme,
@@ -419,7 +419,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 
 	// 4. Apply runtime config onto the base YAML config.
 	rtConfig := rt.Config()
-	applyRuntimeConfig(cfg, rtConfig)
+	applyRuntimeConfig(cfg, rtConfig, log)
 
 	// 5. Read A2A_API_KEY from environment (secret, never through runtime config path).
 	if apiKey := os.Getenv("A2A_API_KEY"); apiKey != "" {
@@ -509,7 +509,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 
 	// 9. Set up reconfigure callback for runtime config changes.
 	rt.SetReconfigure(func(newCfg map[string]string) error {
-		applyRuntimeConfig(cfg, newCfg)
+		applyRuntimeConfig(cfg, newCfg, log)
 		// Re-read A2A_API_KEY on reconfigure (may have been rotated).
 		if apiKey := os.Getenv("A2A_API_KEY"); apiKey != "" {
 			cfg.Auth.APIKey = apiKey
@@ -794,14 +794,13 @@ func resolveTransportAuth(log *slog.Logger) (transportauth.TokenSource, transpor
 }
 
 // applyRuntimeConfig merges runtime config values into the bridge config.
-// Only non-empty values override existing config.
-func applyRuntimeConfig(cfg *bridge.Config, rtCfg map[string]string) {
+// Only non-empty values override existing config. auth_scheme is the
+// exception: see bridge.EffectiveAuthScheme. log must be non-nil.
+func applyRuntimeConfig(cfg *bridge.Config, rtCfg map[string]string, log *slog.Logger) {
 	if v := rtCfg["external_url"]; v != "" {
 		cfg.Bridge.ExternalURL = v
 	}
-	if v := rtCfg["auth_scheme"]; v != "" {
-		cfg.Auth.Scheme = v
-	}
+	cfg.Auth.Scheme = bridge.EffectiveAuthScheme(cfg.Auth.YAMLScheme, cfg.Auth.Scheme, rtCfg["auth_scheme"], log)
 	if v := rtCfg["uat_cache_ttl"]; v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.Auth.UATCacheTTL = d
@@ -870,6 +869,10 @@ func loadConfig(path string) (*bridge.Config, error) {
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+
+	// Capture the YAML-configured auth scheme once, before any admin overlay
+	// or runtime config is applied. See bridge.EffectiveAuthScheme.
+	cfg.Auth.YAMLScheme = cfg.Auth.Scheme
 
 	// Backward compatibility: merge legacy 'groves' into 'projects' if 'projects' is empty.
 	if len(cfg.Projects) == 0 && len(cfg.Groves) > 0 {

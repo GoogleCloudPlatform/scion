@@ -103,7 +103,7 @@ func (b *BrokerServer) Configure(config map[string]string) error {
 		return err // Hub surfaces this error to the admin UI
 	}
 
-	effective := ApplyOverlay(*b.baseConfig, overlay)
+	effective := ApplyOverlay(*b.baseConfig, overlay, b.log)
 	if err := ValidateConfig(&effective); err != nil {
 		b.log.Error("rejected admin config push due to validation failure", "error", err)
 		return err
@@ -130,7 +130,7 @@ func (b *BrokerServer) Configure(config map[string]string) error {
 // applyOverlay merges the overlay onto the base config and swaps the snapshot.
 // Must be called with b.mu held.
 func (b *BrokerServer) applyOverlay(overlay *AdminOverlay) {
-	effective := ApplyOverlay(*b.baseConfig, overlay)
+	effective := ApplyOverlay(*b.baseConfig, overlay, b.log)
 	snap := BuildSnapshot(effective, b.geOpts...)
 
 	// Preserve the JWT validator from the current snapshot if the scheme

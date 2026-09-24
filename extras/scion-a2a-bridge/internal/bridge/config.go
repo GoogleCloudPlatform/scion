@@ -79,6 +79,14 @@ type AuthConfig struct {
 	// GEExchange holds GE Google credential exchange configuration.
 	// Used when Scheme is "geGoogle".
 	GEExchange GEExchangeConfig `yaml:"ge_exchange"`
+
+	// YAMLScheme is the auth scheme as it appeared in the base YAML config
+	// file, captured once when the config is loaded, before any admin
+	// overlay or runtime config is applied. It is not itself configurable —
+	// it always mirrors Scheme at load time — and exists so that later
+	// pushed config can be checked against what YAML originally specified.
+	// See EffectiveAuthScheme.
+	YAMLScheme string `yaml:"-"`
 }
 
 // ProjectConfig configures a project exposed via the bridge.
