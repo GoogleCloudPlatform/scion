@@ -282,7 +282,7 @@ These three items were left for a small follow-up rather than blocking approval.
 |---|---|---|---|---|
 | O1 | The "never logs a warning about a config that didn't take effect" comment (added in fix round 2's O3) overclaimed: it only held when the *failing* issuer was the misconfigured Google one. In a multi-issuer config where the disabled-shaped Google issuer comes first and a *later*, unrelated issuer fails construction, the per-issuer inline warning still fired before that later failure was known, and `NewFederationAuthenticator` then returned an error for the whole config anyway — a warning about a config that was, in full, rejected. | Took the reviewer's first suggested option: `isGoogleUserIssuerMissingAudience` is now a pure predicate (renamed from `warnIfExternalBearerDisabled`, no logging inside it). The per-issuer loop only collects matching issuer URLs into a slice; the warnings are logged in one small loop right before the final, successful `return &FederationAuthenticator{...}` — so nothing is ever logged unless the entire config was accepted. | New `TestNewFederationAuthenticator_MultiIssuer_MisconfiguredBeforeFailing_NoWarning`: a Google user issuer with empty `expected_audience` listed first, followed by an issuer whose `http://` URL is rejected in `hosted` mode; asserts `NewFederationAuthenticator` errors and logs zero warnings. The existing single-issuer `..._ConstructionFails_NoWarning` and all of fix-round-1/2's WarnsOnce/WarnsAgainOnReload/NoWarning/DisabledPath tests re-ran green against the refactor. | Reverted to logging inline inside the loop (moving the `log.Warn` call back next to the predicate check, before the per-issuer failure points) → **both** the new multi-issuer test and the existing single-issuer `ConstructionFails` test fail (1 warning logged despite the whole config being rejected). Confirmed, then re-applied the collect-then-emit fix. |
 | N1 | The `Validate()` call-site comment above the Rule 11 loop still enumerated only the shapes `invalidDomainEntryReason` rejected as of fix round 1 (email address, wildcard, whitespace, leading/trailing dot), silently going stale when fix round 2 added `/`, `:` and `..`. | Reworded to say "any shape `invalidDomainEntryReason` rejects" instead of re-listing them, so it can't go stale the same way again. | N/A (comment-only). | N/A. |
-| N2 | The project log's N1 (fix-round-2) row described writing "a ` ` escape rather than a literal byte" to avoid exactly this problem, but the editing step that produced the row itself silently substituted a literal U+00A0 byte for the intended escape text — the row demonstrated the bug it was warning about. | Replaced the literal NBSP bytes with the literal text `" "`. Verified with the reviewer's exact check. | `grep -nP '\xC2\xA0' .design/project-log/auth-passthrough-p4-dev.md` — confirmed empty before committing. | N/A (documentation-only; no code path). |
+| N2 | The project log's N1 (fix-round-2) row described writing "a `\u00a0` escape rather than a literal byte" to avoid exactly this problem, but the editing step that produced the row itself silently substituted a literal U+00A0 byte for the intended escape text — the row demonstrated the bug it was warning about. | Replaced the literal NBSP bytes with the literal text `"\u00a0"`. Verified at the time with `grep -nP '\xC2\xA0'`, which turned out to be a false-negative-prone check on this file (see fix round 4); superseded there by a byte-level perl/grep -c check. | N/A (documentation-only; no code path). |
 | FYI 1 (W6d, warning via `slog.Default()` on the request path) | No action — accepted by the lead in fix round 2, unchanged. | — | — |
 
 ### Gates (fix round 3)
@@ -297,7 +297,7 @@ These three items were left for a small follow-up rather than blocking approval.
   in `pkg/config` with `SCION_*` unset) — all green.
 - ✅ Bare-issue-number greps (`git log a53175c23..HEAD --format=%B`, `git diff a53175c23..HEAD` `+` lines) at
   the final commit: both empty.
-- ✅ `grep -nP '\xC2\xA0' .design/project-log/auth-passthrough-p4-dev.md` (the reviewer's N2 check): empty.
+- ✅ `grep -nP '\xC2\xA0' .design/project-log/auth-passthrough-p4-dev.md` (the reviewer's N2 check as run this round): empty — later shown to be a false-negative-prone check on this file (fix round 4 replaces it with a byte-level perl/grep -c check).
 - ✅ Review-narration grep over this round's commit (case-insensitive for "phase N", "review rN", "fix round",
   "EM/lead decision"): both the commit-message and diff greps print nothing.
 - ✅ Manual mutation-resistance pass on O1 (the only behavior-changing fix this round): the "log inline" mutant
@@ -310,3 +310,27 @@ These three items were left for a small follow-up rather than blocking approval.
 ### Deviations / design questions (fix round 3)
 
 None. Both code findings had a fully specified fix in the brief/review; N2 was a one-line text substitution.
+
+## Fix round 4 (log-only; review `p4-r4-ap-p4-rev-4.md`: 0 Critical, 1 Required, 0 Optional/Nit, 1 FYI)
+
+Reviewer: `ap-p4-rev-4`. Fix brief: `briefs/ap-p4-dev-fix-r4.md`. The O1 and N1 code from fix round 3 was
+re-verified with mutation and needed no further change; only this log file was outstanding.
+
+| # | Finding | Change | Verification |
+|---|---|---|---|
+| R1 | The fix-round-3 N2 row (then at line 285) itself contained two literal U+00A0 bytes — inside `"a ` ` escape"` and inside `` `" "` `` — where each should have read the 6-character ASCII text `\u00a0`. The row was, ironically, a second recurrence of the exact bug it described fixing. The Gates section's `grep -nP '\xC2\xA0'` check also turned out to be a false negative on this file: `grep`'s default UTF-8 locale handling can normalize or fail to byte-match `\xC2\xA0` depending on environment, so "printed nothing" did not reliably mean "no NBSP present" — which is exactly how the round-3 hits went unnoticed despite that check having been run. | Rewrote both snippets on the N2 row as the literal ASCII text `\u00a0`, and corrected the Gates-section line to describe the `grep -nP` check as run-at-the-time but false-negative-prone on this file, pointing at this round's byte-level replacement. No source code changed — this is the same log file, no production or test file touched. | `perl -ne 'print "$.\n" if /\xC2\xA0/' .design/project-log/auth-passthrough-p4-dev.md` — empty. `grep -c $'\xc2\xa0' .design/project-log/auth-passthrough-p4-dev.md` — `0`. Also ran the same `perl` byte check over every file changed on the branch relative to `a53175c23` under `pkg/hub`, `pkg/config`, `docs-site`, and this log file (`git diff --name-only a53175c23 HEAD -- pkg/hub pkg/config docs-site .design/project-log/auth-passthrough-p4-dev.md`, ~40 files spanning all phases) — zero hits anywhere, including in files this developer didn't touch. |
+| FYI 1 (M4, no two-affected-issuer test) | Declined, per the brief — the scenario is only reachable via `https://accounts.google.com` plus its trailing-slash-normalized twin (both map to the same map key), which isn't a distinct code path worth a dedicated test. No action. | — |
+
+### Gates (fix round 4)
+
+- ✅ `perl -ne 'print "$.\n" if /\xC2\xA0/' .design/project-log/auth-passthrough-p4-dev.md` — empty.
+- ✅ `grep -c $'\xc2\xa0' .design/project-log/auth-passthrough-p4-dev.md` — `0`.
+- ✅ The same `perl` byte check over every file changed on the branch under `pkg/hub`, `pkg/config`, `docs-site`,
+  and this log file relative to `a53175c23` — zero hits.
+- ✅ Bare-issue-number greps (`git log a53175c23..HEAD --format=%B`, `git diff a53175c23..HEAD` `+` lines) at
+  the final commit: both empty.
+- Log-only round; no build/vet/lint/test gates apply (no source file changed).
+
+### Deviations / design questions (fix round 4)
+
+None. The finding, its fix, and its verification were fully specified by the brief.
