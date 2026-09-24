@@ -117,7 +117,10 @@ func main() {
 		log.Warn("failed to load persisted admin overlay, proceeding with base YAML config", "error", overlayErr)
 	}
 	if overlay != nil {
-		effective := bridge.ApplyOverlay(baseCfg, overlay, log)
+		// One-time boot-time apply, before the BrokerServer (which owns its
+		// own dedupe for repeated Configure pushes) exists; nil dedupe just
+		// means this single call always logs at Warn if a scheme is pinned.
+		effective := bridge.ApplyOverlay(baseCfg, overlay, log, nil)
 		cfg = &effective
 		log.Info("applied persisted admin overlay",
 			"auth_scheme", cfg.Auth.Scheme,
@@ -326,6 +329,11 @@ func main() {
 func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	log.Info("scion-a2a-bridge starting in standalone mode")
 
+	// Dedupes the pinned-auth-scheme warning across the runtime config poll
+	// (roughly every 60s) and every reconnect, for the lifetime of this
+	// process.
+	authWarnDedupe := bridge.NewAuthSchemeWarnDedupe()
+
 	// Detect Cloud Run or explicit port-muxing mode (single-port h2c).
 	muxPorts := os.Getenv("MUX_PORTS") == "true" || os.Getenv("K_SERVICE") != ""
 
@@ -419,7 +427,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 
 	// 4. Apply runtime config onto the base YAML config.
 	rtConfig := rt.Config()
-	applyRuntimeConfig(cfg, rtConfig, log)
+	applyRuntimeConfig(cfg, rtConfig, log, authWarnDedupe)
 
 	// 5. Read A2A_API_KEY from environment (secret, never through runtime config path).
 	if apiKey := os.Getenv("A2A_API_KEY"); apiKey != "" {
@@ -509,7 +517,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 
 	// 9. Set up reconfigure callback for runtime config changes.
 	rt.SetReconfigure(func(newCfg map[string]string) error {
-		applyRuntimeConfig(cfg, newCfg, log)
+		applyRuntimeConfig(cfg, newCfg, log, authWarnDedupe)
 		// Re-read A2A_API_KEY on reconfigure (may have been rotated).
 		if apiKey := os.Getenv("A2A_API_KEY"); apiKey != "" {
 			cfg.Auth.APIKey = apiKey
@@ -795,12 +803,12 @@ func resolveTransportAuth(log *slog.Logger) (transportauth.TokenSource, transpor
 
 // applyRuntimeConfig merges runtime config values into the bridge config.
 // Only non-empty values override existing config. auth_scheme is the
-// exception: see bridge.EffectiveAuthScheme. log must be non-nil.
-func applyRuntimeConfig(cfg *bridge.Config, rtCfg map[string]string, log *slog.Logger) {
+// exception: see bridge.EffectiveAuthScheme. dedupe may be nil.
+func applyRuntimeConfig(cfg *bridge.Config, rtCfg map[string]string, log *slog.Logger, dedupe *bridge.AuthSchemeWarnDedupe) {
 	if v := rtCfg["external_url"]; v != "" {
 		cfg.Bridge.ExternalURL = v
 	}
-	cfg.Auth.Scheme = bridge.EffectiveAuthScheme(cfg.Auth.YAMLScheme, cfg.Auth.Scheme, rtCfg["auth_scheme"], log)
+	cfg.Auth.Scheme = bridge.EffectiveAuthScheme(cfg.Auth.YAMLScheme, cfg.Auth.Scheme, rtCfg["auth_scheme"], log, dedupe)
 	if v := rtCfg["uat_cache_ttl"]; v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.Auth.UATCacheTTL = d

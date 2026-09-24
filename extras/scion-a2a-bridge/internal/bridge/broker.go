@@ -44,10 +44,11 @@ type BrokerServer struct {
 	configured    bool
 
 	// Admin config management fields (Phase 3).
-	baseConfig *Config             // base YAML config loaded at boot (immutable after init)
-	snapshot   *SnapshotHolder     // atomic snapshot of effective config
-	stateDir   string              // directory for admin-overlay.json persistence
-	geOpts     []GEValidatorOption // forwarded to BuildSnapshot for geGoogle auth (e.g. transport auth)
+	baseConfig     *Config               // base YAML config loaded at boot (immutable after init)
+	snapshot       *SnapshotHolder       // atomic snapshot of effective config
+	stateDir       string                // directory for admin-overlay.json persistence
+	geOpts         []GEValidatorOption   // forwarded to BuildSnapshot for geGoogle auth (e.g. transport auth)
+	authWarnDedupe *AuthSchemeWarnDedupe // dedupes the pinned-auth-scheme warning across repeated pushes
 }
 
 var _ plugin.MessageBrokerPluginInterface = (*BrokerServer)(nil)
@@ -56,10 +57,11 @@ var _ plugin.HostCallbacksAware = (*BrokerServer)(nil)
 // NewBrokerServer creates a new broker plugin server.
 func NewBrokerServer(handler MessageHandler, log *slog.Logger, shutdownCtx context.Context) *BrokerServer {
 	return &BrokerServer{
-		handler:       handler,
-		log:           log,
-		shutdownCtx:   shutdownCtx,
-		subscriptions: make(map[string]bool),
+		handler:        handler,
+		log:            log,
+		shutdownCtx:    shutdownCtx,
+		subscriptions:  make(map[string]bool),
+		authWarnDedupe: NewAuthSchemeWarnDedupe(),
 	}
 }
 
@@ -103,7 +105,7 @@ func (b *BrokerServer) Configure(config map[string]string) error {
 		return err // Hub surfaces this error to the admin UI
 	}
 
-	effective := ApplyOverlay(*b.baseConfig, overlay, b.log)
+	effective := ApplyOverlay(*b.baseConfig, overlay, b.log, b.authWarnDedupe)
 	if err := ValidateConfig(&effective); err != nil {
 		b.log.Error("rejected admin config push due to validation failure", "error", err)
 		return err
@@ -130,7 +132,7 @@ func (b *BrokerServer) Configure(config map[string]string) error {
 // applyOverlay merges the overlay onto the base config and swaps the snapshot.
 // Must be called with b.mu held.
 func (b *BrokerServer) applyOverlay(overlay *AdminOverlay) {
-	effective := ApplyOverlay(*b.baseConfig, overlay, b.log)
+	effective := ApplyOverlay(*b.baseConfig, overlay, b.log, b.authWarnDedupe)
 	snap := BuildSnapshot(effective, b.geOpts...)
 
 	// Preserve the JWT validator from the current snapshot if the scheme

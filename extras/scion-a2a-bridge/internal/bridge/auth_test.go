@@ -642,10 +642,9 @@ func TestAuthMiddleware_HubBearer_EmptyToken(t *testing.T) {
 // leaks the reason (e.g. interpolating err.Error() into the message).
 // TestAuthMiddleware_HubBearer_RejectedByHub also proves the rejection log
 // line (server.go's "bearer token rejected by Scion Hub" Info log) never
-// contains the token itself (review r2 O1; M9: adding `"token", token` to
-// that log call must fail this test). hubBearer forwards third-party Google
-// credentials, so a token leaking into logs is a real exposure, not just a
-// hypothetical one.
+// contains the token itself: adding `"token", token` to that log call must
+// fail this test. hubBearer forwards third-party Google credentials, so a
+// token leaking into logs is a real exposure, not just a hypothetical one.
 func TestAuthMiddleware_HubBearer_RejectedByHub(t *testing.T) {
 	const token = "some-token-the-hub-rejects"
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

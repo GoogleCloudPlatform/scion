@@ -22,13 +22,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// validAuthSchemes lists the recognized auth schemes for validation. It also
-// doubles as the set of schemes the admin UI can express: see
-// EffectiveAuthScheme.
+// validAuthSchemes lists the recognized auth schemes for validation.
 var validAuthSchemes = map[string]bool{
 	"apiKey":     true,
 	"bearer":     true,
@@ -38,23 +37,86 @@ var validAuthSchemes = map[string]bool{
 	"federation": true,
 }
 
+// uiRepresentableSchemes lists exactly the schemes the admin dropdown
+// (web/src/components/pages/admin-integrations.ts) can select. It is
+// intentionally a different, smaller set than validAuthSchemes: some
+// schemes are valid YAML configuration but the dropdown has no way to
+// express or push them back. See EffectiveAuthScheme.
+var uiRepresentableSchemes = map[string]bool{
+	"apiKey": true,
+	"bearer": true,
+	"none":   true,
+	"hubUAT": true,
+	"hubJWT": true,
+}
+
+// AuthSchemeWarnDedupe deduplicates EffectiveAuthScheme's "ignoring
+// admin-pushed auth_scheme" warning. The first time a given
+// (yaml_scheme, pushed_scheme) pair is seen it logs at Warn; every later
+// occurrence of the same pair logs at Debug instead. Without this, an HA
+// bridge's runtime config poll (roughly every 60s, plus every reconnect)
+// would repeat an identical Warn indefinitely while a pinned scheme sits in
+// the pushed config.
+//
+// Callers own an instance — e.g. one per BrokerServer, one per bridge
+// process's HA runtime loop — so there is no package-level shared state.
+// Safe for concurrent use. A nil *AuthSchemeWarnDedupe always logs at Warn
+// (no deduplication); this is what callers that don't care about repeats
+// (including most tests) can pass.
+type AuthSchemeWarnDedupe struct {
+	mu   sync.Mutex
+	seen map[[2]string]bool
+}
+
+// NewAuthSchemeWarnDedupe returns a ready-to-use, empty dedupe tracker.
+func NewAuthSchemeWarnDedupe() *AuthSchemeWarnDedupe {
+	return &AuthSchemeWarnDedupe{seen: make(map[[2]string]bool)}
+}
+
+func (d *AuthSchemeWarnDedupe) warnIgnoredAuthScheme(log *slog.Logger, yamlScheme, pushed string) {
+	const msg = "ignoring admin-pushed auth_scheme: YAML auth.scheme is not settable from the admin UI"
+	if d == nil {
+		log.Warn(msg, "yaml_scheme", yamlScheme, "pushed_scheme", pushed)
+		return
+	}
+
+	d.mu.Lock()
+	key := [2]string{yamlScheme, pushed}
+	repeat := d.seen[key]
+	d.seen[key] = true
+	d.mu.Unlock()
+
+	if repeat {
+		log.Debug(msg, "yaml_scheme", yamlScheme, "pushed_scheme", pushed)
+		return
+	}
+	log.Warn(msg, "yaml_scheme", yamlScheme, "pushed_scheme", pushed)
+}
+
 // EffectiveAuthScheme decides which auth scheme applies when admin-pushed
 // config (an admin-overlay push or a runtime config reconfigure) meets a
 // scheme configured directly in YAML.
 //
-// A YAML scheme the admin UI cannot express (not in validAuthSchemes, e.g.
-// hubBearer or geGoogle) is pinned: pushed config may never replace it,
-// because the admin UI cannot push it back if a push ever changes it away.
-// An empty pushed value (no scheme in the pushed config) always keeps the
-// current scheme — it is not itself a downgrade. A YAML scheme the admin UI
-// can express behaves as before: a pushed scheme always wins.
-func EffectiveAuthScheme(yamlScheme, current, pushed string, log *slog.Logger) string {
+// A YAML scheme the admin UI cannot express (not in uiRepresentableSchemes,
+// e.g. hubBearer, geGoogle or federation) is pinned: pushed config may never
+// replace it, because the admin UI cannot push it back if a push ever
+// changes it away. An empty pushed value (no scheme in the pushed config)
+// always keeps the current scheme — it is not itself a downgrade. A YAML
+// scheme the admin UI can express behaves as before: a pushed scheme always
+// wins.
+//
+// dedupe may be nil, in which case every ignored push logs at Warn (see
+// AuthSchemeWarnDedupe). log may also be nil; a nil logger falls back to
+// slog.Default().
+func EffectiveAuthScheme(yamlScheme, current, pushed string, log *slog.Logger, dedupe *AuthSchemeWarnDedupe) string {
+	if log == nil {
+		log = slog.Default()
+	}
 	if pushed == "" {
 		return current
 	}
-	if yamlScheme != "" && !validAuthSchemes[yamlScheme] && pushed != yamlScheme {
-		log.Warn("ignoring admin-pushed auth_scheme: YAML auth.scheme is not settable from the admin UI",
-			"yaml_scheme", yamlScheme, "pushed_scheme", pushed)
+	if yamlScheme != "" && !uiRepresentableSchemes[yamlScheme] && pushed != yamlScheme {
+		dedupe.warnIgnoredAuthScheme(log, yamlScheme, pushed)
 		return yamlScheme
 	}
 	return pushed
@@ -293,8 +355,8 @@ func ParseAdminOverlay(cfg map[string]string) (*AdminOverlay, error) {
 
 // ApplyOverlay merges an admin overlay onto a base config, producing the effective config.
 // Overlay values win for each present key; absent overlay keys leave base values intact.
-// auth_scheme is the exception: see EffectiveAuthScheme. log must be non-nil.
-func ApplyOverlay(base Config, overlay *AdminOverlay, log *slog.Logger) Config {
+// auth_scheme is the exception: see EffectiveAuthScheme. dedupe may be nil.
+func ApplyOverlay(base Config, overlay *AdminOverlay, log *slog.Logger, dedupe *AuthSchemeWarnDedupe) Config {
 	if overlay == nil {
 		return base
 	}
@@ -305,7 +367,7 @@ func ApplyOverlay(base Config, overlay *AdminOverlay, log *slog.Logger) Config {
 		cfg.Bridge.ExternalURL = overlay.ExternalURL
 	}
 	if overlay.IsPresent("auth_scheme") {
-		cfg.Auth.Scheme = EffectiveAuthScheme(base.Auth.YAMLScheme, cfg.Auth.Scheme, overlay.AuthScheme, log)
+		cfg.Auth.Scheme = EffectiveAuthScheme(base.Auth.YAMLScheme, cfg.Auth.Scheme, overlay.AuthScheme, log, dedupe)
 	}
 	if overlay.IsPresent("api_key") {
 		cfg.Auth.APIKey = overlay.APIKey

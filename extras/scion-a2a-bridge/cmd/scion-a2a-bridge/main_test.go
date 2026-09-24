@@ -17,6 +17,8 @@ package main
 import (
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/bridge"
@@ -26,44 +28,90 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// TestApplyRuntimeConfig_PinsYAMLOnlyScheme is F4-2: YAML hubBearer,
+// TestLoadConfig_CapturesYAMLScheme proves loadConfig captures Auth.YAMLScheme
+// from a real config file — not from a hand-built Config, which every other
+// test in this package and internal/bridge uses — and that the captured
+// value actually protects against a downgrade through ApplyOverlay, the same
+// path main() runs at boot.
+func TestLoadConfig_CapturesYAMLScheme(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yamlContent := `
+bridge:
+  listen_address: ":8443"
+  external_url: "https://a2a.example.com"
+hub:
+  endpoint: "https://hub.example.com"
+  user: "a2a-bridge@example.com"
+plugin:
+  listen_address: "localhost:9090"
+auth:
+  scheme: "hubBearer"
+projects:
+  - slug: "my-project"
+`
+	if err := os.WriteFile(path, []byte(yamlContent), 0600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Auth.Scheme != "hubBearer" {
+		t.Fatalf("Auth.Scheme = %q, want %q", cfg.Auth.Scheme, "hubBearer")
+	}
+	if cfg.Auth.YAMLScheme != "hubBearer" {
+		t.Fatalf("Auth.YAMLScheme = %q, want %q", cfg.Auth.YAMLScheme, "hubBearer")
+	}
+
+	overlay, err := bridge.ParseAdminOverlay(map[string]string{"auth_scheme": "none"})
+	if err != nil {
+		t.Fatalf("ParseAdminOverlay: %v", err)
+	}
+	effective := bridge.ApplyOverlay(*cfg, overlay, discardLogger(), nil)
+	if effective.Auth.Scheme != "hubBearer" {
+		t.Errorf("Auth.Scheme after ApplyOverlay = %q, want %q (loadConfig's capture must survive into ApplyOverlay)", effective.Auth.Scheme, "hubBearer")
+	}
+}
+
+// TestApplyRuntimeConfig_PinsYAMLOnlyScheme: YAML hubBearer,
 // applyRuntimeConfig({"auth_scheme":"none"}) -> hubBearer.
 func TestApplyRuntimeConfig_PinsYAMLOnlyScheme(t *testing.T) {
 	cfg := &bridge.Config{
 		Auth: bridge.AuthConfig{Scheme: "hubBearer", YAMLScheme: "hubBearer"},
 	}
-	applyRuntimeConfig(cfg, map[string]string{"auth_scheme": "none"}, discardLogger())
+	applyRuntimeConfig(cfg, map[string]string{"auth_scheme": "none"}, discardLogger(), nil)
 	if cfg.Auth.Scheme != "hubBearer" {
 		t.Errorf("Auth.Scheme = %q, want %q (pinned)", cfg.Auth.Scheme, "hubBearer")
 	}
 }
 
-// TestApplyRuntimeConfig_GeGoogleSchemeAlsoPinned is F4-4's applyRuntimeConfig
-// half.
+// TestApplyRuntimeConfig_GeGoogleSchemeAlsoPinned covers the
+// applyRuntimeConfig half of the same pin for geGoogle.
 func TestApplyRuntimeConfig_GeGoogleSchemeAlsoPinned(t *testing.T) {
 	cfg := &bridge.Config{
 		Auth: bridge.AuthConfig{Scheme: "geGoogle", YAMLScheme: "geGoogle"},
 	}
-	applyRuntimeConfig(cfg, map[string]string{"auth_scheme": "none"}, discardLogger())
+	applyRuntimeConfig(cfg, map[string]string{"auth_scheme": "none"}, discardLogger(), nil)
 	if cfg.Auth.Scheme != "geGoogle" {
 		t.Errorf("Auth.Scheme = %q, want %q (pinned)", cfg.Auth.Scheme, "geGoogle")
 	}
 }
 
-// TestApplyRuntimeConfig_DoesNotPinUIRepresentableScheme is F4-5's
-// applyRuntimeConfig half: guards against a mutant that pins every YAML
-// scheme regardless of validAuthSchemes.
+// TestApplyRuntimeConfig_DoesNotPinUIRepresentableScheme guards against a
+// mutant that pins every YAML scheme regardless of uiRepresentableSchemes.
 func TestApplyRuntimeConfig_DoesNotPinUIRepresentableScheme(t *testing.T) {
 	cfg := &bridge.Config{
 		Auth: bridge.AuthConfig{Scheme: "apiKey", YAMLScheme: "apiKey"},
 	}
-	applyRuntimeConfig(cfg, map[string]string{"auth_scheme": "none"}, discardLogger())
+	applyRuntimeConfig(cfg, map[string]string{"auth_scheme": "none"}, discardLogger(), nil)
 	if cfg.Auth.Scheme != "none" {
 		t.Errorf("Auth.Scheme = %q, want %q (not pinned, apiKey is UI-representable)", cfg.Auth.Scheme, "none")
 	}
 }
 
-// TestApplyRuntimeConfig_PinSurvivesReconnect is F4-3: two successive
+// TestApplyRuntimeConfig_PinSurvivesReconnect: two successive
 // applyRuntimeConfig calls simulate a reconnect. The first carries the
 // admin-pushed "none"; the second has no auth_scheme key at all (the shape
 // of a reconnect that re-reads config after the key was removed
@@ -73,14 +121,14 @@ func TestApplyRuntimeConfig_PinSurvivesReconnect(t *testing.T) {
 		Auth: bridge.AuthConfig{Scheme: "hubBearer", YAMLScheme: "hubBearer"},
 	}
 
-	applyRuntimeConfig(cfg, map[string]string{"auth_scheme": "none"}, discardLogger())
+	applyRuntimeConfig(cfg, map[string]string{"auth_scheme": "none"}, discardLogger(), nil)
 	if cfg.Auth.Scheme != "hubBearer" {
 		t.Fatalf("after first push: Auth.Scheme = %q, want %q (pinned)", cfg.Auth.Scheme, "hubBearer")
 	}
 
 	// Reconnect: a fresh runtime config read with the key absent entirely
 	// (not merely empty) must still leave the pinned scheme alone.
-	applyRuntimeConfig(cfg, map[string]string{}, discardLogger())
+	applyRuntimeConfig(cfg, map[string]string{}, discardLogger(), nil)
 	if cfg.Auth.Scheme != "hubBearer" {
 		t.Errorf("after reconnect: Auth.Scheme = %q, want %q (still pinned)", cfg.Auth.Scheme, "hubBearer")
 	}
@@ -94,7 +142,7 @@ func TestApplyRuntimeConfig_UsesCapturedYAMLScheme_NotCurrent(t *testing.T) {
 	cfg := &bridge.Config{
 		Auth: bridge.AuthConfig{Scheme: "apiKey", YAMLScheme: "hubBearer"},
 	}
-	applyRuntimeConfig(cfg, map[string]string{"auth_scheme": "none"}, discardLogger())
+	applyRuntimeConfig(cfg, map[string]string{"auth_scheme": "none"}, discardLogger(), nil)
 	if cfg.Auth.Scheme != "hubBearer" {
 		t.Errorf("Auth.Scheme = %q, want %q (must pin against the captured YAML scheme, not the current live scheme)", cfg.Auth.Scheme, "hubBearer")
 	}
