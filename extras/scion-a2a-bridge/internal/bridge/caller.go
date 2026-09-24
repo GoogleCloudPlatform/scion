@@ -29,7 +29,8 @@ type CallerIdentity struct {
 	RawToken string // The original bearer token for passthrough
 	// TokenType is "uat" (Scion scion_pat_* user access token), "bearer" (any
 	// other bearer credential the Hub accepted via /auth/me, e.g. a forwarded
-	// Google token under the hubBearer scheme), "jwt", or "federation".
+	// Google token under the hubBearer scheme), "jwt", "federation", or
+	// "ge_exchange" (a token exchanged for a Hub JWT under the geGoogle scheme).
 	TokenType string
 
 	// --- New fields (agent/federation callers) ---

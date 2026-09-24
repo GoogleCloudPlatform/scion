@@ -585,6 +585,7 @@ func TestBuildAuthValidators_Schemes(t *testing.T) {
 		{"bearer", false, true},
 		{"none", false, false},
 		{"hubUAT", true, false},
+		{"hubBearer", true, false},
 		{"hubJWT", false, false},
 		{"", false, true}, // default legacy scheme
 	}

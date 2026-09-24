@@ -78,8 +78,8 @@ auth:
 
   # --- Google credential pass-through (e.g. Gemini Enterprise A2A clients) ---
   # scheme: "hubBearer"
-  # Callers present "Authorization: Bearer <google-id-token>" (their own
-  # Google credential — no exchange). The bridge introspects it via Hub
+  # Callers present "Authorization: Bearer <token>" with their own Google ID
+  # token or access token (no exchange). The bridge introspects it via Hub
   # /api/v1/auth/me and forwards the same token to the Hub on every
   # downstream call. No api_key needed.
   # uat_cache_ttl: 60s

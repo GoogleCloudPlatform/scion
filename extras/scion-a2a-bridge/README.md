@@ -107,7 +107,7 @@ Once installed, the bridge's admin-managed settings can be edited from the integ
 
 | Setting | Description |
 |---------|-------------|
-| **Auth scheme** | Client authentication mode: `apiKey`, `bearer`, `none`, `hubUAT`, `hubBearer`, or `hubJWT`. Select from the dropdown. `hubBearer` forwards any bearer credential the Hub itself accepts (e.g. a Google credential attached by an upstream caller) verbatim, admitted via Hub `/api/v1/auth/me`; it requires a matching trusted issuer on the Hub. |
+| **Auth scheme** | Client authentication mode: `apiKey`, `bearer`, `none`, `hubUAT`, or `hubJWT`. Select from the dropdown. |
 | **API key** | Static API key for `apiKey`/`bearer` schemes. Stored in the Hub secret backend — never written to YAML files. Only shown when the auth scheme requires it. |
 | **External URL** | Public URL where A2A clients reach the bridge (e.g., `https://a2a.example.com`). Used in generated agent cards. |
 | **Rate limiting** | Enable/disable per-client rate limiting, with configurable requests-per-second and burst size. |
@@ -115,6 +115,8 @@ Once installed, the bridge's admin-managed settings can be edited from the integ
 | **Timeouts** | Send-message timeout, SSE keepalive interval, and push notification retry limit. |
 
 Changes saved via the admin UI take effect immediately on the running bridge — no bridge restart is required. The Hub pushes the updated configuration over the existing RPC connection.
+
+`hubBearer` (Google credential pass-through) and `geGoogle` (Google credential exchange) are not offered in the **Auth scheme** dropdown. Configure either one via the `auth.scheme` key in `scion-a2a-bridge.yaml` instead — see `scion-a2a-bridge.yaml.sample` for the `hubBearer` block. A bridge already running with `auth.scheme: hubBearer` set in YAML keeps working normally; only the admin UI's own scheme picker excludes it.
 
 ### Project and agent exposure
 

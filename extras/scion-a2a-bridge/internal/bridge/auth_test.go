@@ -536,11 +536,6 @@ func TestValidateConfig_NewSchemes(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "hubBearer/no-api-key-needed",
-			auth:    AuthConfig{Scheme: "hubBearer"},
-			wantErr: false,
-		},
-		{
 			name:    "hubBearer/with-ttl",
 			auth:    AuthConfig{Scheme: "hubBearer", UATCacheTTL: 120 * time.Second},
 			wantErr: false,
@@ -713,4 +708,66 @@ func TestAuthMiddleware_HubUATVsHubBearer_PrefixGuard(t *testing.T) {
 			t.Errorf("hubBearer caller = %+v, want user_id=user-1 token_type=bearer", body)
 		}
 	})
+}
+
+// TestAuthMiddleware_HubBearer_ProductionSnapshotWiring proves hubBearer
+// works through the same snapshot-based validator wiring cmd/scion-a2a-bridge
+// uses in production (main.go always calls SetSnapshot; authMiddleware then
+// reads uatV from the snapshot, not from the constructor-time
+// s.uatValidator). Every other hubBearer test in this file builds the
+// middleware via newHubBearerMiddleware, which never calls SetSnapshot and so
+// only ever exercises the s.uatValidator fallback branch (server.go:522-527)
+// — a real deployment never takes that branch. Without adminoverlay.go's
+// "hubUAT", "hubBearer" case in BuildAuthValidators, a real hubBearer
+// deployment 500s on every request (snap.Auth.UATValidator == nil) despite
+// every one of those other tests passing. See server_test.go:694-698 for the
+// same SetSnapshot pattern used for hubJWT.
+func TestAuthMiddleware_HubBearer_ProductionSnapshotWiring(t *testing.T) {
+	const token = "hub-accepted-non-pat-credential"
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer "+token {
+			_ = json.NewEncoder(w).Encode(userResponse{ID: "snapshot-user-1", Email: "snapshot@example.com", Role: "member"})
+			return
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer hub.Close()
+
+	dir := t.TempDir()
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	cfg := &Config{
+		Bridge: BridgeConfig{ExternalURL: "https://test"},
+		Hub:    HubConfig{Endpoint: hub.URL, User: "admin@test"},
+		Auth:   AuthConfig{Scheme: "hubBearer"},
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	b := New(store, nil, nil, cfg, nil, log)
+	srv := NewServer(b, cfg, nil, log, testHandler())
+
+	// Simulate what main.go always does in production: build and install a
+	// snapshot from the effective config, exactly as cmd/scion-a2a-bridge does.
+	srv.SetSnapshot(NewSnapshotHolder(BuildSnapshot(*cfg)))
+
+	mw := srv.authMiddleware(testHandler())
+	req := httptest.NewRequest(http.MethodPost, "/projects/p/agents/a/jsonrpc", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (through production snapshot wiring); body=%s", w.Code, w.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["user_id"] != "snapshot-user-1" || body["token_type"] != "bearer" {
+		t.Errorf("caller = %+v, want user_id=snapshot-user-1 token_type=bearer", body)
+	}
 }
