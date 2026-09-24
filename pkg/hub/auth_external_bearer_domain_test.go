@@ -16,6 +16,7 @@ package hub
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"testing"
@@ -190,6 +191,48 @@ func TestExternalBearer_UserIDToken_MixedCaseAllowedDomain_Authenticates(t *test
 	}
 }
 
+// TestExternalBearer_AccessToken_ListedDomain_Authenticates is the access-token
+// counterpart of the ID-token mixed-case test above: a listed domain must let
+// a user ACCESS token through too, not just an ID token. Without this, a
+// mutant that rejects every access token once allowed_domains is set (a
+// plausible copy-paste of the ID-token-only U2 check) would pass the whole
+// suite, even though access tokens are the primary GE credential shape.
+func TestExternalBearer_AccessToken_ListedDomain_Authenticates(t *testing.T) {
+	const email = "user@Example.COM"
+	// A Workspace hd claim is required so the resolver's authoritative-domain
+	// bootstrap admits a first-time, non-Gmail email (google_identity_resolver.go);
+	// otherwise this would 403 there instead of exercising the allowed_domains
+	// check this test targets.
+	tokenInfo := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"azp": externalBearerTestAudience, "aud": externalBearerTestAudience, "sub": "google-sub-domain-listed-1",
+			"email": email, "email_verified": true, "hd": "Example.COM", "expires_in": 3600,
+		})
+	})
+	userInfo := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"sub": "google-sub-domain-listed-1", "email": email, "email_verified": true, "hd": "Example.COM", "name": "Test User",
+		})
+	})
+	endpoints := newTestEndpoints(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), tokenInfo, userInfo)
+	defer endpoints.close()
+
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	cfg := newExternalBearerConfigWithDomains(t, newTestValidator(endpoints), resolver, []string{"example.COM"}, nil)
+
+	w, result := doExternalBearerRequest(cfg, "opaque-access-token-listed-domain-1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: body=%s", w.Code, w.Body.String())
+	}
+	if !result.reached {
+		t.Fatal("handler must be reached: a listed domain must let an access token through, not just an ID token")
+	}
+}
+
 // TestExternalBearer_UserIDToken_AllowedDomainsUnset_Authenticates proves
 // that an unset allowed_domains imposes no issuer-level domain constraint at
 // all — any domain proceeds to the Hub sign-in policy.
@@ -319,10 +362,10 @@ func TestExternalBearer_ServiceAccountIDToken_AllowedDomainsDoesNotApply_Authent
 
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
-	// neverAuthorized: if the SA were subject to allowed_domains (which is
-	// empty here) or the Hub sign-in policy, this would be rejected. Success
-	// proves the SA branch neither checks allowed_domains nor consults the
-	// sign-in policy — only allowed_gcp_projects governs it.
+	// neverAuthorized: if the SA were subject to allowed_domains or the Hub
+	// sign-in policy, this would be rejected. Success proves the SA branch
+	// neither checks allowed_domains nor consults the sign-in policy — only
+	// allowed_gcp_projects governs it.
 	resolver := NewGoogleIdentityResolver(userStore, extStore, neverAuthorized, nil, slog.Default())
 	// allowed_domains is non-empty and deliberately does NOT contain the SA's
 	// email domain (my-a2a-project.iam.gserviceaccount.com), so a mutant that
