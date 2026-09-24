@@ -106,6 +106,19 @@ func isGoogleIssuerURL(issuerURL string) bool {
 	return googleIssuerURLs[strings.TrimRight(issuerURL, "/")]
 }
 
+// isActiveGoogleUserIssuer reports whether issuer is configured as the
+// Google issuer, issuer_type "user", with a non-empty expected_audience —
+// the exact shape the external-bearer path's googleTrust gate requires
+// (pkg/hub/auth_external_bearer.go) for the path to be reachable at all.
+// Any Google-issuer-scoped field that only takes effect through that gate
+// (AllowedGCPProjects here; Phase 4's allowed_domains reuses this same
+// predicate) does nothing on any other shape, so Validate rejects setting
+// it there outright (P3 fix round 1, O2 amendment) instead of silently
+// accepting a config no request path will ever enforce.
+func isActiveGoogleUserIssuer(issuer TrustedIssuerConfig) bool {
+	return isGoogleIssuerURL(issuer.IssuerURL) && issuer.IssuerType == "user" && issuer.ExpectedAudience != ""
+}
+
 // Validate checks FederationConfig for configuration errors.
 // It returns a slice of all errors found (not just the first).
 func (c *FederationConfig) Validate() []error {
@@ -183,12 +196,22 @@ func (c *FederationConfig) Validate() []error {
 		}
 
 		// Rule 9: AllowedGCPProjects (service-account admission by GCP
-		// project, design §4.1/§4.4) is Google-issuer-only. Set on any other
-		// issuer, it must not be silently ignored — that would let an
-		// operator believe they've scoped service-account admission when
-		// nothing enforces it.
-		if len(issuer.AllowedGCPProjects) > 0 && !isGoogleIssuerURL(issuer.IssuerURL) {
-			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_gcp_projects is only applicable to the Google issuer (%q)", i, issuer.IssuerURL))
+		// project, design §4.1/§4.4) only does anything on an ACTIVE Google
+		// user issuer (isActiveGoogleUserIssuer) — the one shape
+		// googleTrust actually reaches. Set anywhere else, it must not be
+		// silently ignored: that would let an operator believe they've
+		// scoped service-account admission when nothing enforces it — a
+		// Google issuer with the wrong issuer_type or no expected_audience
+		// is exactly as unenforced as a non-Google issuer. This is a hard
+		// error, not a startup warning, per the lead's amendment: both
+		// fields are new, so no existing config can break (P3 fix round 1,
+		// O2 amendment).
+		if len(issuer.AllowedGCPProjects) > 0 && !isActiveGoogleUserIssuer(issuer) {
+			if !isGoogleIssuerURL(issuer.IssuerURL) {
+				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_gcp_projects is only applicable to the Google issuer (%q)", i, issuer.IssuerURL))
+			} else {
+				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_gcp_projects requires issuer_type \"user\" and a non-empty expected_audience on the Google issuer; nothing would enforce it otherwise", i))
+			}
 		}
 	}
 

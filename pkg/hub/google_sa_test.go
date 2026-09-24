@@ -103,6 +103,17 @@ func TestGoogleSAProject(t *testing.T) {
 			wantOK: false,
 		},
 		{
+			// Unlike the "bare" case above (whose domain doesn't even end in
+			// ".iam.gserviceaccount.com", so it takes the default arm), this
+			// domain IS ".iam.gserviceaccount.com" exactly, so
+			// strings.TrimSuffix leaves an empty project label — the
+			// project == "" guard inside the .iam. branch itself (S5g, P3
+			// fix round 1 Nit 4).
+			name:   "empty project label before .iam.gserviceaccount.com",
+			email:  "sa@.iam.gserviceaccount.com",
+			wantOK: false,
+		},
+		{
 			name:   "appspot with empty local part",
 			email:  "@appspot.gserviceaccount.com",
 			wantOK: false,

@@ -541,6 +541,23 @@ func TestGEExchange_ServiceAccount(t *testing.T) {
 // path this design phase changed (§4.2(ii)); these do.
 // ---------------------------------------------------------------------------
 
+// TestGEExchange_RealValidator_ServiceAccountIDToken_Rejected_ExactBytes covers
+// every SA ID-token azp/sub shape the review's differential test found —
+// P3 fix round 1, Required 1. Before the fix, "azp == aud, != sub" and
+// "azp = other" both drifted to 401 {"code":"invalid_credential","message":
+// "credential metadata inconsistent"} because the validator's SA azp/sub
+// check returned a bare ErrGoogleFieldDisagreement, which never reaches the
+// exchange's Step 1.5 SA rejection (validation itself failed first) and
+// instead hit the disagreement case in the switch above. The fix wraps that
+// return with ErrGoogleServiceAccount too, and the switch checks it first.
+//
+// Expected bytes derived from upstream-main (GoogleCloudPlatform/scion,
+// bdf5b6d13): its ValidateIDToken rejects every SA email with
+// ErrGoogleServiceAccount unconditionally, before any azp/aud logic runs at
+// all, and ge_exchange.go maps that to exactly this 403 body — confirmed by
+// reading google_credential_validator.go:266-269 and ge_exchange.go:188-189
+// in a bdf5b6d13 worktree (`git worktree add --detach ... bdf5b6d13`), not
+// merely assumed.
 func TestGEExchange_RealValidator_ServiceAccountIDToken_Rejected_ExactBytes(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
 	endpoints := newTestEndpoints(
@@ -553,32 +570,67 @@ func TestGEExchange_RealValidator_ServiceAccountIDToken_Rejected_ExactBytes(t *t
 	)
 	defer endpoints.close()
 
-	validator := newTestValidator(endpoints)
-	userStore := newFakeUserStore()
-	extStore := newMemExtIDStore()
-	svc := newTestExchangeServiceWithExtStore(validator, userStore, extStore)
-	server := &Server{geExchangeService: svc}
-
-	// Real SA ID-token shape: azp == sub (numeric SA unique ID), which now
-	// validates under §4.2(ii) — proving the exchange's own Step 1.5 rejects
-	// it, not a validator error.
-	claims := serviceAccountIDTokenClaims("worker@my-project.iam.gserviceaccount.com")
-	body := fmt.Sprintf(`{"credential":%q,"credentialType":"id_token"}`, signIDToken(kp, claims))
-	w := httptest.NewRecorder()
-	server.handleGEGoogleExchange(w, exchangeRequest(body))
-
 	wantBody := []byte(`{"error":{"code":"forbidden","message":"service account credentials not accepted for user exchange"}}` + "\n")
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403: body=%s", w.Code, w.Body.String())
+
+	tests := []struct {
+		name       string
+		mutateAZP  func(claims map[string]interface{})
+		bindingSub string
+	}{
+		{
+			name:       "azp == sub (real metadata-server shape)",
+			mutateAZP:  func(claims map[string]interface{}) {}, // serviceAccountIDTokenClaims default
+			bindingSub: saNumericSub,
+		},
+		{
+			name: "azp == \"\"",
+			mutateAZP: func(claims map[string]interface{}) {
+				delete(claims, "azp")
+			},
+			bindingSub: saNumericSub,
+		},
+		{
+			name: "azp == aud, != sub",
+			mutateAZP: func(claims map[string]interface{}) {
+				claims["azp"] = externalBearerTestAudience // == aud (also externalBearerTestAudience), != sub
+			},
+			bindingSub: saNumericSub,
+		},
+		{
+			name: "azp = other value",
+			mutateAZP: func(claims map[string]interface{}) {
+				claims["azp"] = "some-other-azp-value"
+			},
+			bindingSub: saNumericSub,
+		},
 	}
-	if !bytes.Equal(w.Body.Bytes(), wantBody) {
-		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
-	}
-	if len(userStore.users) != 0 {
-		t.Errorf("expected no users created, got %d", len(userStore.users))
-	}
-	if _, err := extStore.GetExternalIdentity(context.Background(), "google", googleCanonicalIssuer, saNumericSub); err == nil {
-		t.Error("expected no external identity binding to be created")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			userStore := newFakeUserStore()
+			extStore := newMemExtIDStore()
+			svc := newTestExchangeServiceWithExtStore(newTestValidator(endpoints), userStore, extStore)
+			server := &Server{geExchangeService: svc}
+
+			claims := serviceAccountIDTokenClaims("worker@my-project.iam.gserviceaccount.com")
+			tt.mutateAZP(claims)
+			body := fmt.Sprintf(`{"credential":%q,"credentialType":"id_token"}`, signIDToken(kp, claims))
+			w := httptest.NewRecorder()
+			server.handleGEGoogleExchange(w, exchangeRequest(body))
+
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403: body=%s", w.Code, w.Body.String())
+			}
+			if !bytes.Equal(w.Body.Bytes(), wantBody) {
+				t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+			}
+			if len(userStore.users) != 0 {
+				t.Errorf("expected no users created, got %d", len(userStore.users))
+			}
+			if _, err := extStore.GetExternalIdentity(context.Background(), "google", googleCanonicalIssuer, tt.bindingSub); err == nil {
+				t.Error("expected no external identity binding to be created")
+			}
+		})
 	}
 }
 

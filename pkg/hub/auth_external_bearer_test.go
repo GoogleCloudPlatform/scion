@@ -1025,7 +1025,7 @@ func TestExternalBearer_ServiceAccountIDToken_AZPNotSub_Unauthorized(t *testing.
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
 	// The SA's project ("proj") IS listed, so the only thing that can be
-	// rejecting this token is the azp/sub check — not the allowed_projects
+	// rejecting this token is the azp/sub check — not the allowed_gcp_projects
 	// gate. Isolates S4 from S2.
 	cfg := newExternalBearerConfigWithSA(t, newTestValidator(endpoints), resolver, []string{"proj"})
 

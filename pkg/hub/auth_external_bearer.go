@@ -183,25 +183,14 @@ func googleTrust(cfg AuthConfig) (config.TrustedIssuerConfig, bool) {
 	return trust, true
 }
 
-// trustAllowedProjects returns the GCP project IDs a service-account
-// identity's project (googleSAProject) must match for trust to admit it
-// (design §4.1, allowed_gcp_projects). Isolated behind this accessor, rather
-// than reading trust.AllowedGCPProjects directly at the one call site, to
-// keep the SA branch's coupling to the exact pkg/config field name in one
-// place — TrustedIssuerConfig also has an unrelated, longer-standing
-// AllowedProjects field (allowed_projects: hub-federation project scoping by
-// JWT project_id claim, federation_auth.go's IssuerTypeHub case); the two
-// are deliberately distinct fields (design §4.1 r7) and must not be confused.
-func trustAllowedProjects(trust config.TrustedIssuerConfig) []string {
-	return trust.AllowedGCPProjects
-}
-
 // containsFold reports whether target is present in list, compared
-// case-insensitively. Used for the allowed_gcp_projects membership check:
-// the Google-issuer entry's list is normalised to lower case at config load
-// (design §4.1), but googleSAProject's parsed project is compared
-// case-insensitively regardless, so this does not depend on that
-// normalisation actually having run.
+// case-insensitively. Used for the allowed_gcp_projects membership check
+// (trust.AllowedGCPProjects — a distinct field from the unrelated, existing
+// AllowedProjects/allowed_projects, hub-federation project scoping by JWT
+// project_id claim, federation_auth.go's IssuerTypeHub case; the two must
+// not be confused, design §4.1 r7). Neither list is lower-cased at config
+// load, so this case-insensitive comparison is what makes a mixed-case
+// operator entry match googleSAProject's (always lower-case) parsed project.
 func containsFold(list []string, target string) bool {
 	for _, s := range list {
 		if strings.EqualFold(s, target) {
@@ -353,7 +342,7 @@ func authenticateExternalBearer(ctx context.Context, r *http.Request, token stri
 			return nil, errSAAccessTokenRejected
 		}
 		proj, ok := googleSAProject(id.Email)
-		if !ok || !containsFold(trustAllowedProjects(trust), proj) {
+		if !ok || !containsFold(trust.AllowedGCPProjects, proj) {
 			return nil, errSAProjectNotAllowed
 		}
 		// The project allowlist IS the authorization decision for a

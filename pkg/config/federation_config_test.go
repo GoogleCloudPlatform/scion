@@ -373,6 +373,45 @@ func TestFederationConfig_Validate(t *testing.T) {
 			wantErrs: 0,
 		},
 		{
+			// P3 fix round 1, O2 amendment: allowed_gcp_projects on the
+			// Google issuer with the WRONG issuer_type is a hard error, not
+			// silently ignored — googleTrust never reaches this issuer, so
+			// nothing would enforce the list.
+			name: "allowed_gcp_projects on the Google issuer with issuer_type service_account errors",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:          "https://accounts.google.com",
+						IssuerType:         "service_account",
+						JWKSURL:            "https://www.googleapis.com/oauth2/v3/certs",
+						AllowedGCPProjects: []string{"my-gcp-project"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_gcp_projects requires issuer_type", "expected_audience"},
+		},
+		{
+			// Same rule, other half: issuer_type is right but
+			// expected_audience is empty, so googleTrust still never
+			// reaches this issuer (design §4.1's K2 disables the path
+			// entirely in that case).
+			name: "allowed_gcp_projects on the Google issuer with empty expected_audience errors",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:          "https://accounts.google.com",
+						IssuerType:         "user",
+						AllowedGCPProjects: []string{"my-gcp-project"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_gcp_projects requires issuer_type", "expected_audience"},
+		},
+		{
 			name: "allowed_projects (the OLD field) on the Google issuer still errors, and now names allowed_gcp_projects",
 			config: FederationConfig{
 				Enabled: true,

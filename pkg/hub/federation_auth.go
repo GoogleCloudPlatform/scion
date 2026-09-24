@@ -148,23 +148,6 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 		resolvedCfg := issuer
 		resolvedCfg.ExpectedAudience = expectedAud
 
-		// Normalise AllowedGCPProjects to lower case at load time (design
-		// §4.1): googleSAProject already lower-cases the SA email it parses
-		// a project from, so this keeps operator config and the parsed value
-		// on the same footing. AllowedProjects (the unrelated, existing
-		// hub-federation field) is deliberately left untouched here — it is
-		// case-sensitively matched against a claim value elsewhere
-		// (federation_auth.go's own AllowedProjects check), and changing
-		// that comparison is out of scope for this feature.
-		if len(issuer.AllowedGCPProjects) > 0 {
-			lowered := make([]string, len(issuer.AllowedGCPProjects))
-			for i, p := range issuer.AllowedGCPProjects {
-				lowered[i] = strings.ToLower(p)
-			}
-			rawCfg.AllowedGCPProjects = lowered
-			resolvedCfg.AllowedGCPProjects = lowered
-		}
-
 		// Create a jwksCache with configurable intervals.
 		cache := &jwksCache{
 			url:              jwksURL,

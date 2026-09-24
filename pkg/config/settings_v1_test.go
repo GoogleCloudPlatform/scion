@@ -4677,15 +4677,25 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 					AllowedEmails:    nil,
 				},
 				{
-					IssuerURL:          "https://accounts.google.com",
-					JWKSURL:            "",
-					ExpectedAudience:   "https://hub-b.example.com",
-					AllowedProjects:    nil,
-					AllowedRootUsers:   nil,
-					DefaultScopes:      []string{"agent:status:update"},
-					IssuerType:         "service_account",
-					DefaultRole:        "",
-					AllowedEmails:      []string{"sa@proj.iam.gserviceaccount.com"},
+					IssuerURL:        "https://accounts.google.com",
+					JWKSURL:          "",
+					ExpectedAudience: "https://hub-b.example.com",
+					AllowedProjects:  nil,
+					AllowedRootUsers: nil,
+					DefaultScopes:    []string{"agent:status:update"},
+					IssuerType:       "service_account",
+					DefaultRole:      "",
+					AllowedEmails:    []string{"sa@proj.iam.gserviceaccount.com"},
+				},
+				{
+					// AllowedGCPProjects only does anything on an active Google
+					// user issuer (P3 fix round 1, O2 amendment): issuer_type
+					// "user" and a non-empty ExpectedAudience, unlike the
+					// service_account entry above, which must not set it (that
+					// combination is a config validation error).
+					IssuerURL:          "https://accounts.google.com/",
+					ExpectedAudience:   "client-id.apps.googleusercontent.com",
+					IssuerType:         "user",
 					AllowedGCPProjects: []string{"gcp-proj-1", "gcp-proj-2"},
 				},
 			},
@@ -4698,7 +4708,7 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	// V1 -> GlobalConfig
 	gc := ConvertV1ServerToGlobalConfig(v1)
 	assert.True(t, gc.Federation.Enabled)
-	require.Len(t, gc.Federation.TrustedIssuers, 2)
+	require.Len(t, gc.Federation.TrustedIssuers, 3)
 
 	ti0 := gc.Federation.TrustedIssuers[0]
 	assert.Equal(t, "https://hub-a.example.com", ti0.IssuerURL)
@@ -4713,7 +4723,11 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, "https://accounts.google.com", ti1.IssuerURL)
 	assert.Equal(t, "service_account", ti1.IssuerType)
 	assert.Equal(t, []string{"sa@proj.iam.gserviceaccount.com"}, ti1.AllowedEmails)
-	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, ti1.AllowedGCPProjects)
+
+	ti2 := gc.Federation.TrustedIssuers[2]
+	assert.Equal(t, "https://accounts.google.com/", ti2.IssuerURL)
+	assert.Equal(t, "user", ti2.IssuerType)
+	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, ti2.AllowedGCPProjects)
 
 	assert.Equal(t, []string{"RS256", "ES256"}, gc.Federation.Algorithms)
 	assert.Equal(t, time.Hour, gc.Federation.Cache.RefreshInterval)
@@ -4727,7 +4741,7 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, "1h0m0s", v1Back.Federation.RefreshInterval)
 	assert.Equal(t, "5s", v1Back.Federation.DebounceInterval)
 
-	require.Len(t, v1Back.Federation.TrustedIssuers, 2)
+	require.Len(t, v1Back.Federation.TrustedIssuers, 3)
 	vi0 := v1Back.Federation.TrustedIssuers[0]
 	assert.Equal(t, "https://hub-a.example.com", vi0.IssuerURL)
 	assert.Equal(t, "https://hub-a.example.com/.well-known/jwks.json", vi0.JWKSURL)
@@ -4741,7 +4755,11 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, "https://accounts.google.com", vi1.IssuerURL)
 	assert.Equal(t, "service_account", vi1.IssuerType)
 	assert.Equal(t, []string{"sa@proj.iam.gserviceaccount.com"}, vi1.AllowedEmails)
-	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, vi1.AllowedGCPProjects)
+
+	vi2 := v1Back.Federation.TrustedIssuers[2]
+	assert.Equal(t, "https://accounts.google.com/", vi2.IssuerURL)
+	assert.Equal(t, "user", vi2.IssuerType)
+	assert.Equal(t, []string{"gcp-proj-1", "gcp-proj-2"}, vi2.AllowedGCPProjects)
 }
 
 func TestConvertV1FederationConfig_NilFederation(t *testing.T) {

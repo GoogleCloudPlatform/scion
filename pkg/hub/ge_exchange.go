@@ -174,6 +174,15 @@ func (s *GEExchangeService) Exchange(ctx context.Context, req *ExchangeRequest) 
 		case errors.Is(err, ErrGoogleUntrustedAudience),
 			errors.Is(err, ErrGoogleUntrustedIssuer):
 			return nil, http.StatusUnauthorized, fmt.Errorf("credential not trusted")
+		// ErrGoogleServiceAccount must be checked before ErrGoogleFieldDisagreement:
+		// a service-account ID token with a disagreeing azp is wrapped with
+		// both (google_credential_validator.go's SA azp/sub check, design
+		// §4.2(ii)), and this case must win so the exchange's SA rejection
+		// contract (403) is byte-identical to upstream for that shape too
+		// (P3 fix round 1, Required 1), not the generic 401 the disagreement
+		// case below would otherwise give it.
+		case errors.Is(err, ErrGoogleServiceAccount):
+			return nil, http.StatusForbidden, fmt.Errorf("service account credentials not accepted for user exchange")
 		case errors.Is(err, ErrGoogleUnverifiedEmail):
 			return nil, http.StatusForbidden, fmt.Errorf("email not verified")
 		case errors.Is(err, ErrGENotConfigured):

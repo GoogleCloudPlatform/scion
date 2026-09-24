@@ -118,11 +118,29 @@ var (
 	ErrGoogleUnverifiedEmail   = errors.New("google email not verified")
 	ErrGoogleMissingSubject    = errors.New("missing Google subject")
 	ErrGoogleFieldDisagreement = errors.New("google token metadata fields disagree")
-	ErrGoogleMissingField      = errors.New("required field missing from Google response")
-	ErrGoogleUpstreamError     = errors.New("google upstream validation failed")
-	ErrGENotConfigured         = errors.New("GE Google exchange not configured")
-	ErrGEUnsupportedCredType   = errors.New("unsupported credential type")
-	ErrGENoRemainingLifetime   = errors.New("credential has no remaining usable lifetime")
+	// ErrGoogleServiceAccount marks a service-account rejection. Reintroduced
+	// in Phase 3 fix round 1 (P3 r1 Required 1) after Phase 1 removed it as
+	// dead code (§4.2(i) moved SA rejection to callers): a bare
+	// ErrGoogleFieldDisagreement return for an SA's azp/sub mismatch is
+	// indistinguishable, at the exchange endpoint, from a USER token's
+	// azp/aud disagreement — both mapped to the same 401 "credential
+	// metadata inconsistent". Upstream (GoogleCloudPlatform/scion, function
+	// isGoogleServiceAccount's caller in ValidateIDToken) rejects every SA
+	// outright with this exact sentinel before any azp/aud logic runs, and
+	// GEExchangeService maps it to 403 "service account credentials not
+	// accepted for user exchange" — a stronger, and different, contract than
+	// "invalid token". This sentinel is wrapped ALONGSIDE
+	// ErrGoogleFieldDisagreement (not instead of it) only in the one call
+	// site that needs to restore that exchange behaviour (ValidateIDToken's
+	// SA azp/sub check, design §4.2(ii)); it does not reintroduce a blanket
+	// SA rejection in the validator, which would break SA ID-token
+	// admission (S1) that Phase 3 added.
+	ErrGoogleServiceAccount  = errors.New("service account credentials not accepted")
+	ErrGoogleMissingField    = errors.New("required field missing from Google response")
+	ErrGoogleUpstreamError   = errors.New("google upstream validation failed")
+	ErrGENotConfigured       = errors.New("GE Google exchange not configured")
+	ErrGEUnsupportedCredType = errors.New("unsupported credential type")
+	ErrGENoRemainingLifetime = errors.New("credential has no remaining usable lifetime")
 )
 
 // ---------------------------------------------------------------------------
@@ -289,12 +307,20 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 	//     audience. Audience trust is already established above by
 	//     isAllowedAudience (aud contains an allowed client ID); azp, when
 	//     present, must instead equal sub — the SA-minted shape — and
-	//     anything else is a field disagreement.
+	//     anything else is a field disagreement. It is ALSO wrapped with
+	//     ErrGoogleServiceAccount (P3 fix round 1, Required 1): the GE
+	//     exchange must still reject every SA shape with its 403 "service
+	//     account credentials not accepted" contract, including one with a
+	//     disagreeing azp, not the generic 401 "credential metadata
+	//     inconsistent" a bare ErrGoogleFieldDisagreement would produce
+	//     there. The external-bearer path is unaffected: it does not
+	//     special-case ErrGoogleServiceAccount, so this still lands on its
+	//     401 default arm (S4).
 	var audience string
 	if isServiceAccount {
 		if claims.AZP != "" && claims.AZP != claims.Subject {
-			return nil, fmt.Errorf("%w: SA azp %q differs from sub %q",
-				ErrGoogleFieldDisagreement, claims.AZP, claims.Subject)
+			return nil, fmt.Errorf("%w: %w: SA azp %q differs from sub %q",
+				ErrGoogleServiceAccount, ErrGoogleFieldDisagreement, claims.AZP, claims.Subject)
 		}
 		audience = matchedAudience(claims.Audience, allowedClientIDs)
 	} else {

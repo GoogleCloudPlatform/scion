@@ -115,6 +115,34 @@ func TestExternalBearer_ServiceAccountIDToken_ProjectListed_Authenticates(t *tes
 	}
 }
 
+// TestExternalBearer_ServiceAccountIDToken_MixedCaseAllowedProject_Authenticates
+// proves that a mixed-case operator-configured allowed_gcp_projects entry
+// still matches a (lower-case) parsed SA project, with NO load-time
+// normalisation involved (P3 fix round 1, Optional 3: the config layer does
+// not lower-case allowed_gcp_projects; containsFold's case-insensitive
+// comparison is the only thing that makes this match).
+func TestExternalBearer_ServiceAccountIDToken_MixedCaseAllowedProject_Authenticates(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newSAJWKSEndpoints(kp)
+	defer endpoints.close()
+
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	cfg := newExternalBearerConfigWithSA(t, newTestValidator(endpoints), resolver, []string{"My-A2A-Project"})
+
+	claims := serviceAccountIDTokenClaims("worker@my-a2a-project.iam.gserviceaccount.com")
+	token := signIDToken(kp, claims)
+
+	w, result := doExternalBearerRequest(cfg, token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: body=%s", w.Code, w.Body.String())
+	}
+	if !result.reached {
+		t.Fatal("handler must be reached: mixed-case allowed_gcp_projects must still match case-insensitively")
+	}
+}
+
 func TestExternalBearer_ServiceAccountIDToken_EmptyAZP_ProjectListed_Authenticates(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
 	endpoints := newSAJWKSEndpoints(kp)
@@ -139,7 +167,7 @@ func TestExternalBearer_ServiceAccountIDToken_EmptyAZP_ProjectListed_Authenticat
 }
 
 // ---------------------------------------------------------------------------
-// S2 — project not listed -> 401; allowed_projects unset -> 401.
+// S2 — project not listed -> 401; allowed_gcp_projects unset -> 401.
 // ---------------------------------------------------------------------------
 
 func TestExternalBearer_ServiceAccountIDToken_ProjectNotListed_Unauthorized(t *testing.T) {
@@ -157,7 +185,7 @@ func TestExternalBearer_ServiceAccountIDToken_ProjectNotListed_Unauthorized(t *t
 
 	w, result := doExternalBearerRequest(cfg, token)
 	if result.reached {
-		t.Fatal("handler must not be reached: project is not in allowed_projects")
+		t.Fatal("handler must not be reached: project is not in allowed_gcp_projects")
 	}
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
@@ -171,7 +199,7 @@ func TestExternalBearer_ServiceAccountIDToken_ProjectNotListed_Unauthorized(t *t
 	}
 }
 
-func TestExternalBearer_ServiceAccountIDToken_AllowedProjectsUnset_Unauthorized(t *testing.T) {
+func TestExternalBearer_ServiceAccountIDToken_AllowedGCPProjectsUnset_Unauthorized(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
 	endpoints := newSAJWKSEndpoints(kp)
 	defer endpoints.close()
@@ -179,7 +207,7 @@ func TestExternalBearer_ServiceAccountIDToken_AllowedProjectsUnset_Unauthorized(
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
-	// allowed_projects unset entirely: design §4.1 says this admits NO
+	// allowed_gcp_projects unset entirely: design §4.1 says this admits NO
 	// service accounts, not "any project".
 	cfg := newExternalBearerConfigWithSA(t, newTestValidator(endpoints), resolver, nil)
 
@@ -188,7 +216,7 @@ func TestExternalBearer_ServiceAccountIDToken_AllowedProjectsUnset_Unauthorized(
 
 	w, result := doExternalBearerRequest(cfg, token)
 	if result.reached {
-		t.Fatal("handler must not be reached: allowed_projects is unset")
+		t.Fatal("handler must not be reached: allowed_gcp_projects is unset")
 	}
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
@@ -202,7 +230,7 @@ func TestExternalBearer_ServiceAccountIDToken_AllowedProjectsUnset_Unauthorized(
 // TestExternalBearer_ServiceAccountIDToken_UnparseableProject_Unauthorized
 // covers googleSAProject's false-project cases (a compute default SA, in
 // this case) reaching the middleware: the project can't be parsed at all, so
-// it is never in allowed_projects regardless of content — proves the branch
+// it is never in allowed_gcp_projects regardless of content — proves the branch
 // checks googleSAProject's ok return, not just list membership. The
 // allowlist deliberately includes "" (googleSAProject's zero value on a
 // false result): dropping the `!ok ||` guard and comparing only the empty
@@ -227,6 +255,10 @@ func TestExternalBearer_ServiceAccountIDToken_UnparseableProject_Unauthorized(t 
 	}
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
+	}
+	wantBody := wantErrorBody(t, ErrCodeUnauthorized, "invalid external bearer token")
+	if !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
 	}
 }
 
