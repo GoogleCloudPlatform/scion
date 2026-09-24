@@ -29,8 +29,8 @@ import (
 // one Int64Counter per metric, registered once under the shared
 // instrumentationScope, with the label set passed as attributes on each Add
 // call rather than as separate counters. One recorder backs all three
-// counters because they are wired together (server.go) and retired together
-// (design §5's "Later" section, once ge_exchange's soak completes).
+// counters because they are wired together (server.go) and retired together,
+// once ge_exchange's soak completes.
 //
 // Export only happens through pkg/observability/hubmetrics (mexporter) to
 // GCP Cloud Monitoring, and only when cfg.Hub.GCPProjectID is set
@@ -62,7 +62,7 @@ var (
 )
 
 // NewOTelExternalBearerMetrics creates an OTel-backed recorder for all three
-// design §4.7 counters. snap receives a dual-write of every Record* call;
+// counters. snap receives a dual-write of every Record* call;
 // callers should pass the same instance already wired as Server's default
 // recorder (Server.ExternalBearerSnapshotMetrics), so /metrics keeps
 // counting the same totals before and after this recorder is wired in.

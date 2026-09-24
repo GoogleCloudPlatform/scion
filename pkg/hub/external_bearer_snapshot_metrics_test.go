@@ -23,7 +23,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// O1 — the in-process design §4.7 counters exist and move regardless of GCP
+// The in-process counters exist and move regardless of GCP
 // export configuration, and are served on GET /metrics next to the broker
 // and GCP-token sections.
 // ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ func TestExternalBearerSnapshotMetrics_DeterministicKeys(t *testing.T) {
 }
 
 // TestHandleMetrics_ExternalBearerSection proves GET /metrics serves the
-// design §4.7 counters as an "externalBearer" JSON section, next to
+// external-bearer counters as an "externalBearer" JSON section, next to
 // "broker"/"gcp", and that it moves when a request is recorded — reachable
 // on a Server that never had GCP export wired (externalBearerSnapshot is
 // constructed by New() unconditionally; this test builds it directly since

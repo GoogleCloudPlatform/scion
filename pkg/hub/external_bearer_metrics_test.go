@@ -30,7 +30,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// O1 — every outcome of design §4.7's scion_hub_external_bearer_total
+// Every outcome of scion_hub_external_bearer_total
 // increments its labelled counter, proven by driving the real middleware
 // path (doExternalBearerRequest -> UnifiedAuthMiddleware -> serveExternalBearer),
 // not by calling RecordExternalBearer directly. Every test below asserts the
@@ -49,7 +49,7 @@ type externalBearerMetricCall struct {
 }
 
 // fakeExternalBearerMetrics records every RecordExternalBearer call for
-// assertion. Safe for concurrent use (needed for the C6-style singleflight
+// assertion. Safe for concurrent use (needed for the singleflight-collapsed
 // path, and general defensiveness).
 type fakeExternalBearerMetrics struct {
 	mu    sync.Mutex
@@ -293,7 +293,7 @@ func TestExternalBearerMetrics_Rejected_ServiceAccountProjectNotAllowed(t *testi
 // TestExternalBearerMetrics_Rejected_DomainNotAllowed covers the user
 // allowed_domains rejection: a user (not SA) principal, already known by the
 // time this check runs, is still "rejected" per the closed outcome set (no
-// separate "domain_not_allowed" outcome — design §4.4 groups it with SA
+// separate "domain_not_allowed" outcome — it is grouped with SA
 // project rejection and verification failure).
 func TestExternalBearerMetrics_Rejected_DomainNotAllowed(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
@@ -602,8 +602,8 @@ func TestExternalBearerMetrics_NilAuthConfigField_NoPanic(t *testing.T) {
 // an arbitrary, non-constant string could reach a counter is a type
 // conversion like ExternalBearerOutcome(someVariable). Grepping every other
 // non-test source file in the package for that syntax catches such a
-// mutation directly, the same way I3's tokeninfo grep
-// (TestNoTokenInfoOutsideGoogleCredentialValidator) catches its own
+// mutation directly, the same way the tokeninfo grep in
+// TestNoTokenInfoOutsideGoogleCredentialValidator catches its own
 // regression class.
 func TestExternalBearerMetrics_LabelTypesOnlyConstructedAsConstants(t *testing.T) {
 	labelTypes := []string{

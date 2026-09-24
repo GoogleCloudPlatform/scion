@@ -15,14 +15,14 @@
 package hub
 
 // Observability for the external-bearer path, its credential cache, and the
-// GE exchange endpoint it is replacing (design §4.7). Every label used below
+// GE exchange endpoint it is replacing. Every label used below
 // comes from a closed set, defined as constants here: nothing in
 // auth_external_bearer.go, google_credential_cache.go or ge_exchange.go
 // builds a label value any other way, so a value outside these sets can
 // never be emitted.
 //
 // "external_bearer", "google_validator_cache" and "ge_exchange.requests" are
-// logical names for these three counters, used throughout this design's
+// logical names for these three counters, used throughout these
 // comments and tests. See otel_external_bearer_metrics.go for the real,
 // exported Cloud Monitoring metric types, and external_bearer_snapshot_metrics.go
 // for the in-process /metrics section that exists regardless of GCP export
@@ -63,7 +63,7 @@ func externalBearerKinds() []ExternalBearerKind {
 
 // valid reports whether k is one of the named constants above — the closed
 // set every ExternalBearerKind value must belong to. recordExternalBearer
-// checks this before handing k to any recorder (design §4.7): an invalid
+// checks this before handing k to any recorder: an invalid
 // value is dropped, not emitted.
 func (k ExternalBearerKind) valid() bool {
 	switch k {
@@ -108,8 +108,8 @@ func (p ExternalBearerPrincipal) valid() bool {
 }
 
 // ExternalBearerOutcome is the "outcome" label on the external_bearer
-// counter. Each value maps 1:1 to a row of design §4.4's status table;
-// serveExternalBearer's outcome switch is the single place that performs
+// counter. Each value maps 1:1 to the HTTP status serveExternalBearer
+// returns for that outcome; its outcome switch is the single place that performs
 // this mapping (see auth_external_bearer.go), so the metric can never
 // diverge from the HTTP status it accompanies.
 type ExternalBearerOutcome string
@@ -197,7 +197,7 @@ const (
 	// bounded above by, but not equal to, the miss count.
 	GoogleValidatorCacheMiss GoogleValidatorCacheResult = "miss"
 	// GoogleValidatorCacheNegativeHit is a live, negatively cached entry
-	// (one of the four errors design §4.2(iii) allows to be cached
+	// (one of the four errors allowed to be cached
 	// negatively).
 	GoogleValidatorCacheNegativeHit GoogleValidatorCacheResult = "negative_hit"
 )
@@ -233,11 +233,11 @@ type GoogleValidatorCacheMetricsRecorder interface {
 // counter, recorded by handleGEGoogleExchange for every POST request — the
 // endpoint's only routable method; a GET/HEAD gets a 405 and is not counted.
 // The set is exactly the response codes the handler's POST path can already
-// produce (design §4.7: "a bounded outcome set derived from its existing
-// responses") — recording this metric never changes, and is never allowed
+// produce — a bounded outcome set derived from its existing
+// responses — recording this metric never changes, and is never allowed
 // to change, the exchange response's bytes.
 //
-// This counter is the exchange-deletion soak gate (design §4.7, §5): it must
+// This counter is the exchange-deletion soak gate: it must
 // read zero, on every Hub replica, over the soak window before
 // ge_exchange.go and its callers are deleted. Because the /metrics snapshot
 // is per-process and resets on restart, checking a single sample after a

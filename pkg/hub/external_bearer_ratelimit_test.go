@@ -24,9 +24,9 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Review r1, Critical finding 1: the external-bearer rate limiter never had
-// its stale entries cleaned up, so after maxEntries distinct client IPs it
-// permanently refused every new one. Fixed by starting its cleanup goroutine
+// The external-bearer rate limiter's stale entries must be cleaned up, or
+// after maxEntries distinct client IPs it
+// permanently refuses every new one. Its cleanup goroutine is started
 // in server.go's Start (StartBackgroundServices), alongside geExchangeRateLimiter's.
 // ---------------------------------------------------------------------------
 
@@ -36,8 +36,8 @@ func newTestBearerRequest(remoteAddr string) *http.Request {
 	return req
 }
 
-// TestExternalBearerRateLimiter_CleanupAdmitsNewIPAfterMaxAge is the fix
-// brief's probe (b): a full limiter, advanced past maxAge, admits a new IP —
+// TestExternalBearerRateLimiter_CleanupAdmitsNewIPAfterMaxAge proves that
+// a full limiter, advanced past maxAge, admits a new IP —
 // this is exactly what StartCleanup's background goroutine does on every
 // tick.
 func TestExternalBearerRateLimiter_CleanupAdmitsNewIPAfterMaxAge(t *testing.T) {
@@ -53,7 +53,7 @@ func TestExternalBearerRateLimiter_CleanupAdmitsNewIPAfterMaxAge(t *testing.T) {
 		t.Fatal("second IP should be allowed")
 	}
 	// The limiter is now full (maxEntries=2): a third, never-seen IP is
-	// refused outright, reproducing the reviewer's "after 10000 distinct
+	// refused outright, reproducing the "after 10000 distinct
 	// client IPs" scenario at a testable scale.
 	if allowed, _ := limiter.Allow(newTestBearerRequest("198.51.100.3:1")); allowed {
 		t.Fatal("third IP should be refused: the limiter is at capacity")
@@ -68,8 +68,8 @@ func TestExternalBearerRateLimiter_CleanupAdmitsNewIPAfterMaxAge(t *testing.T) {
 	}
 }
 
-// TestServer_ExternalBearerRateLimiter_CleanupRunsInBackground is the fix
-// brief's probe (a)'s "cleanup is started" half: proves StartBackgroundServices
+// TestServer_ExternalBearerRateLimiter_CleanupRunsInBackground proves
+// StartBackgroundServices
 // (called from Server.Start) actually invokes externalBearerRateLimiter.StartCleanup,
 // not just that the field is non-nil. It shrinks the limiter's cleanup
 // interval and capacity so the background goroutine's first tick is
@@ -118,9 +118,9 @@ func TestServer_ExternalBearerRateLimiter_CleanupRunsInBackground(t *testing.T) 
 }
 
 // ---------------------------------------------------------------------------
-// Review r2 optional finding 4 — the design's limiter defaults (5 rps /
-// burst 20, §4.4) were not pinned: both C5 tests
-// (auth_external_bearer_access_token_test.go) override rate/burst to small
+// The limiter defaults (5 rps /
+// burst 20) were not pinned: both of the tests
+// in auth_external_bearer_access_token_test.go override rate/burst to small
 // test values, so a change to the production constants (e.g. 500 rps / burst
 // 200) would survive the whole suite.
 // ---------------------------------------------------------------------------
@@ -142,7 +142,7 @@ func TestExternalBearerRateLimiter_DefaultsMatchDesign(t *testing.T) {
 }
 
 // TestExternalBearerRateLimiter_DefaultBurstExhaustion exercises the
-// unmodified production defaults end to end (unlike the C5 tests, which
+// unmodified production defaults end to end (unlike the tests above, which
 // shrink burst for speed): 20 requests from one IP succeed, the 21st is
 // refused. This fails if the burst constant is ever widened (e.g. to 200)
 // without a corresponding, deliberate test change.
@@ -160,15 +160,15 @@ func TestExternalBearerRateLimiter_DefaultBurstExhaustion(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Review r3 optional finding 1 — the limiter's X-Forwarded-For spoof
-// resistance was correct by inspection (it reuses geExchangeClientIP, and
-// server.go passes the same cfg.TrustedProxies the middleware itself uses),
-// but untested at its own wiring. Mutating the constructor to trust every
-// proxy (parseTrustedProxies([]string{"0.0.0.0/0", "::/0"})) survived the
-// whole targeted suite (M29): with that mutant, any untrusted peer could
-// rotate X-Forwarded-For to get a fresh bucket per request and bypass C5
-// entirely, reviving the "make the Hub call Google for every random string"
-// amplification §4.4 exists to stop.
+// The limiter's X-Forwarded-For spoof
+// resistance depends on its own wiring: it reuses geExchangeClientIP, and
+// server.go passes the same cfg.TrustedProxies the middleware itself uses.
+// If the constructor were changed to trust every
+// proxy (parseTrustedProxies([]string{"0.0.0.0/0", "::/0"})), any untrusted
+// peer could
+// rotate X-Forwarded-For to get a fresh bucket per request and bypass the
+// rate limit entirely, reviving the "make the Hub call Google for every
+// random string" amplification the limiter exists to stop.
 // ---------------------------------------------------------------------------
 
 func TestExternalBearerRateLimiter_HonoursXForwardedForOnlyFromTrustedProxy(t *testing.T) {

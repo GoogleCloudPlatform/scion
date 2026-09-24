@@ -20,7 +20,7 @@ import (
 )
 
 // ExternalBearerSnapshotMetrics is a dependency-free, in-process recorder for
-// the three design §4.7 counters, following the same shape as
+// the three external-bearer/cache/exchange counters, following the same shape as
 // BrokerAuthMetrics (metrics.go) and GCPTokenMetrics (gcp_metrics.go): no
 // GCP/OTel dependency, always constructed, and exposed as a JSON snapshot on
 // GET /metrics. It exists so the ge_exchange.requests soak gate never
@@ -28,14 +28,14 @@ import (
 // GCP export or not.
 //
 // Server.New wires one instance as the default recorder for all three
-// design §4.7 counters, and passes the same instance into
+// counters, and passes the same instance into
 // NewOTelExternalBearerMetrics when an OTel exporter is later configured
 // (cmd/server_foreground.go), so both write to the same counts: OTel export
 // is additive, never a replacement, for this snapshot.
 type ExternalBearerSnapshotMetrics struct {
 	// since is this recorder's construction time, reported on every snapshot
 	// so a reader can tell a low/zero count from a recent restart apart from
-	// genuinely low traffic (design §4.7: the snapshot is per-process and
+	// genuinely low traffic (the snapshot is per-process and
 	// resets on restart).
 	since          time.Time
 	mu             sync.Mutex
@@ -58,7 +58,7 @@ func NewExternalBearerSnapshotMetrics() *ExternalBearerSnapshotMetrics {
 // RecordExternalBearer implements ExternalBearerMetricsRecorder. Only the
 // outcome is counted in this snapshot: the full kind/principal/outcome
 // cross-product is available from the OTel-exported series when GCP export
-// is configured (design §4.7); the in-process section keeps one dimension so
+// is configured; the in-process section keeps one dimension so
 // its shape never depends on which combinations have occurred.
 func (m *ExternalBearerSnapshotMetrics) RecordExternalBearer(_ ExternalBearerKind, _ ExternalBearerPrincipal, outcome ExternalBearerOutcome) {
 	m.mu.Lock()
@@ -81,7 +81,7 @@ func (m *ExternalBearerSnapshotMetrics) RecordGEExchangeRequest(outcome GEExchan
 }
 
 // ExternalBearerMetricsSnapshot is the GET /metrics JSON shape for the three
-// design §4.7 counters, served as the "externalBearer" section of
+// external-bearer/cache/exchange counters, served as the "externalBearer" section of
 // handleMetrics's combinedMetrics, next to the "broker" and "gcp" sections.
 // Every key is the full closed label set (external_bearer_metrics.go),
 // present at zero if never recorded, so the JSON shape is deterministic and
