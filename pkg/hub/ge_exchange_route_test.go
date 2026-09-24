@@ -357,11 +357,11 @@ func TestGEExchange_Route_BodyLimitStillOperates(t *testing.T) {
 //
 // For the validator half, the external-bearer path uses a caching decorator
 // (re-validates on every request, unlike the exchange endpoint, so it
-// benefits from a cache),
-// but it wraps the *same base validator instance* the exchange uses, so the
-// exchange's own behaviour and latency are unaffected (server.go's New has
-// the full rationale). So the assertion here is: same base validator
-// instance underneath, not same top-level GoogleValidator value.
+// benefits from a cache), but it wraps the *same base validator instance*
+// the exchange uses, so the exchange's own behaviour and latency are
+// unaffected (server.go's New has the full rationale). So the assertion
+// here is: same base validator instance underneath, not same top-level
+// GoogleValidator value.
 // ---------------------------------------------------------------------------
 
 func TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer(t *testing.T) {

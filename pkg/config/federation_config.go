@@ -230,8 +230,8 @@ func (c *FederationConfig) Validate() []error {
 		// Rule 8: Warn if hub-specific fields are set on non-hub issuers.
 		// AllowedProjects here is the hub-federation Scion-project allowlist
 		// (matched against a federated agent token's project_id claim,
-		// pkg/hub/federation_auth.go) — unrelated to, and unchanged by,
-		// AllowedGCPProjects below. It stays an error on every non-hub
+		// pkg/hub/federation_auth.go) — unrelated to AllowedGCPProjects
+		// below. It stays an error on every non-hub
 		// issuer, including a Google one: a Google issuer wants
 		// allowed_gcp_projects instead, so the message says so when that's
 		// the likely mistake.
