@@ -217,8 +217,8 @@ func TestSignSkillFileDownloadURLs(t *testing.T) {
 	s := testSigningServer()
 	now := time.Now()
 	urls := s.signSkillFileDownloadURLs([]DownloadURLInfo{
-		{Path: "SKILL.md", URL: "/api/v1/skills/"+sk+"/files/SKILL.md?raw=1&version=1.0.0"},
-		{Path: "a/b.sh", URL: "https://hub.example.com/api/v1/skills/"+sk+"/files/a/b.sh?raw=1&version=1.0.0"},
+		{Path: "SKILL.md", URL: "/api/v1/skills/" + sk + "/files/SKILL.md?raw=1&version=1.0.0"},
+		{Path: "a/b.sh", URL: "https://hub.example.com/api/v1/skills/" + sk + "/files/a/b.sh?raw=1&version=1.0.0"},
 		{Path: "gcs.md", URL: "https://storage.googleapis.com/b/o?X-Goog-Signature=abc"},
 		{Path: "other.md", URL: "/api/v1/skills/other-skill/files/other.md?raw=1&version=1.0.0"},
 	}, sk, "1.0.0", now)
@@ -241,7 +241,7 @@ func TestSignSkillFileDownloadURLs(t *testing.T) {
 
 	// Without a key, URLs are issued unsigned.
 	unsigned := (&Server{}).signSkillFileDownloadURLs([]DownloadURLInfo{
-		{Path: "SKILL.md", URL: "/api/v1/skills/"+sk+"/files/SKILL.md?raw=1&version=1.0.0"},
+		{Path: "SKILL.md", URL: "/api/v1/skills/" + sk + "/files/SKILL.md?raw=1&version=1.0.0"},
 	}, sk, "1.0.0", now)
 	assert.Equal(t, "/api/v1/skills/"+sk+"/files/SKILL.md?raw=1&version=1.0.0", unsigned[0].URL)
 }

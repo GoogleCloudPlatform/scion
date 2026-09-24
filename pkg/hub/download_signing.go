@@ -103,15 +103,22 @@ func (s *Server) initDownloadSigningKey(ctx context.Context) error {
 	return nil
 }
 
-// skillFileSignature computes the base64url (unpadded) HMAC-SHA256 over the
-// canonical message binding skill ID, version, file path and expiry. The
-// fields are newline-separated; none of them can contain a newline (IDs are
-// UUIDs, versions are semver, and file paths are validated), so the encoding
-// is unambiguous.
-func skillFileSignature(key []byte, skillID, version, filePath string, exp int64) string {
+// computeSkillFileHMAC computes the raw HMAC-SHA256 bytes over the canonical
+// message binding skill ID, version, file path and expiry. The fields are
+// newline-separated; none of them can contain a newline (IDs are UUIDs,
+// versions are semver, and file paths are validated), so the encoding is
+// unambiguous.
+func computeSkillFileHMAC(key []byte, skillID, version, filePath string, exp int64) []byte {
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(skillFileSigDomain + "\n" + skillID + "\n" + version + "\n" + filePath + "\n" + strconv.FormatInt(exp, 10)))
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return mac.Sum(nil)
+}
+
+// skillFileSignature computes the base64url (unpadded) encoding of the
+// canonical HMAC-SHA256 for skillID@version/filePath and exp. See
+// computeSkillFileHMAC for the message format.
+func skillFileSignature(key []byte, skillID, version, filePath string, exp int64) string {
+	return base64.RawURLEncoding.EncodeToString(computeSkillFileHMAC(key, skillID, version, filePath, exp))
 }
 
 // signDownloadURL returns the query-string suffix ("exp=...&sig=...") that
@@ -156,6 +163,9 @@ func (s *Server) signSkillFileDownloadURLs(urls []DownloadURLInfo, skillID, vers
 // signature validation: a malformed or partial signature is rejected rather
 // than silently falling back to principal authorization.
 func hasSkillFileSignature(r *http.Request) bool {
+	if !strings.Contains(r.URL.RawQuery, "sig=") && !strings.Contains(r.URL.RawQuery, "exp=") {
+		return false
+	}
 	q := r.URL.Query()
 	return q.Has(skillFileSigParam) || q.Has(skillFileExpParam)
 }
@@ -190,10 +200,7 @@ func (s *Server) verifySkillFileSignature(r *http.Request, skillID, version, fil
 	if err != nil {
 		return false
 	}
-	want, err := base64.RawURLEncoding.DecodeString(skillFileSignature(s.downloadSigningKey, skillID, version, filePath, exp))
-	if err != nil {
-		return false
-	}
+	want := computeSkillFileHMAC(s.downloadSigningKey, skillID, version, filePath, exp)
 	return hmac.Equal(got, want)
 }
 
@@ -224,6 +231,9 @@ func isSignedSkillFileRequest(r *http.Request) bool {
 	// reserved segments such as "resolve", which handleSkillByID dispatches
 	// elsewhere, from being reached anonymously.
 	if !isCanonicalUUID(parts[0]) {
+		return false
+	}
+	if !strings.Contains(r.URL.RawQuery, "sig=") || !strings.Contains(r.URL.RawQuery, "exp=") {
 		return false
 	}
 	q := r.URL.Query()
