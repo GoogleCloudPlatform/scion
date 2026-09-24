@@ -305,8 +305,18 @@ per the brief.
 - ✅ `GOGC=40 golangci-lint run --new-from-rev=upstream-main --concurrency=1 ./pkg/hub/...` — 0 issues
 - ✅ Targeted subset (`TestExternalBearer|TestGoogleTrust|TestGEExchange|TestProductionValidator|TestNoPackage|TestNoTokenInfo|TestGoogleIdentityResolver|TestGoogleCredential|TestFederation`, `-count=1`) — green
 - ✅ `-race` targeted subset (`TestExternalBearer|TestGoogleCredentialCache|TestNoPackageLevelMutableState|TestNoTokenInfoOutside|TestGEExchange|TestExternalBearerRateLimiter|TestServer_ExternalBearerRateLimiter`, `-count=1`) — green, no data races (23.8s)
-- Full `go test -timeout 40m ./pkg/hub/ ./pkg/hub/authzop/`: see the report to `ap-em` (this round
-  touches `google_credential_validator.go`, so it requires `ap-em`'s go-ahead first, per the fix brief's
-  disk rules).
-- Bare-`#NNN` greps against `upstream-main`, re-run after the final commit of this round: see the report
-  to `ap-em` for the pasted output.
+- ✅ Full `go test -timeout 40m ./pkg/hub/ ./pkg/hub/authzop/` at `882e13d4` (run after `ap-em`'s
+  go-ahead, own `GOTMPDIR`, deleted after the run): `authzop` ok; `pkg/hub` fails **only** the same four
+  known pre-existing tests as every prior round (`TestDEF164_AtAgentSlug_DeliversToAgent`,
+  `TestDEF164_AtAgentSlug_DMConversationCreated`, `TestDEF152_AgentToAgentDM_DeliversViaOutbound`,
+  `TestCreateTemplateV2_ScopeIDInjectionBlocked`). No ENOSPC this run.
+- ✅ Bare-issue-reference greps against `upstream-main`, re-run at the final commit (`882e13d4`): both
+  print nothing (exit 1 = no match). This required squashing the fix-round commit locally before
+  pushing — the first version of the commit message itself quoted the offending reference verbatim
+  while describing the fix, which retripped the same grep; see the commit history note below.
+
+**Note on local history:** the fix-round commit was originally split into two local, not-yet-pushed
+commits, the second of which corrected wording in the first. Before pushing, both were squashed into
+one clean commit (`git reset --soft` to the prior pushed commit, then a single re-commit) so the grep
+checks pass against the pushed history, consistent with how Phase 1's r4 review notes the same
+technique was used for the same reason. No already-pushed commit was rewritten.
