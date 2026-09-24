@@ -902,6 +902,61 @@ func validateSubPathRoot(subPathRoot string) error {
 	return nil
 }
 
+// sharedDirStorageIgnoredNFSFields lists the V1NFSConfig fields that are
+// meaningful for workspace_storage but never consulted by shared_dir_storage
+// (design deploy-config-explore §3.2.1's "warned and ignored if set").
+var sharedDirStorageIgnoredNFSFields = []struct {
+	name string
+	set  func(nfs *V1NFSConfig) bool
+}{
+	{"uid", func(nfs *V1NFSConfig) bool { return nfs.UID != 0 }},
+	{"gid", func(nfs *V1NFSConfig) bool { return nfs.GID != 0 }},
+	{"mount_options", func(nfs *V1NFSConfig) bool { return nfs.MountOptions != "" }},
+	{"storage_class", func(nfs *V1NFSConfig) bool { return nfs.StorageClass != "" }},
+}
+
+// IgnoredNFSFields returns the names of the workspace-storage-only NFS
+// fields (uid, gid, mount_options, storage_class) that are set on s but
+// never used by shared_dir_storage, for a one-time startup warning (Phase 2
+// item 5, design §7 Phase 2: "startup validation warns about ignored
+// fields"). Returns nil if s is nil, s.NFS is nil, or backend isn't "nfs" —
+// there is nothing to warn about in any of those cases.
+func (s *V1SharedDirStorageConfig) IgnoredNFSFields() []string {
+	if s == nil || s.NFS == nil || s.Backend != "nfs" {
+		return nil
+	}
+	var ignored []string
+	for _, f := range sharedDirStorageIgnoredNFSFields {
+		if f.set(s.NFS) {
+			ignored = append(ignored, f.name)
+		}
+	}
+	return ignored
+}
+
+// ResolvedLayoutSummary returns a one-line, human-readable summary of the
+// resolved shared_dir_storage layout — backend, host base, subpath_root,
+// pv_name — for the single startup log line design §7 Phase 2 calls for.
+// Returns "" if s is nil, s.NFS is nil, or backend isn't "nfs" (nothing to
+// log: the unset/local case is unchanged Phase 1 behavior, not a new
+// resolved layout).
+func (s *V1SharedDirStorageConfig) ResolvedLayoutSummary() string {
+	if s == nil || s.NFS == nil || s.Backend != "nfs" {
+		return ""
+	}
+	hostBase := ""
+	pvName := ""
+	if len(s.NFS.Shares) > 0 {
+		hostBase = filepath.Join(s.NFS.MountRoot, s.NFS.Shares[0].ID)
+		pvName = s.NFS.Shares[0].PVName
+	}
+	subPathRoot := s.NFS.SubPathRoot
+	if subPathRoot == "" {
+		subPathRoot = "projects"
+	}
+	return fmt.Sprintf("backend=nfs host_base=%s subpath_root=%s pv_name=%s", hostBase, subPathRoot, pvName)
+}
+
 // V1SecretsConfig holds secrets backend settings.
 type V1SecretsConfig struct {
 	Backend                 string   `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"`

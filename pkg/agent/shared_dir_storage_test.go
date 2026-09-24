@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -305,6 +306,9 @@ func TestResolveSharedDirs_NFS_MissingHostBase_LocalContainerRuntime_FailsClosed
 			volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", runtimeName, dirs, "/workspace")
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), missingBase)
+			// The fixed wording for the fs.ErrNotExist case.
+			assert.Contains(t, err.Error(), "requires this broker to have the export mounted")
+			assert.Contains(t, err.Error(), "T2 topology")
 			assert.Nil(t, volumes)
 			assert.Nil(t, realization)
 
@@ -315,12 +319,39 @@ func TestResolveSharedDirs_NFS_MissingHostBase_LocalContainerRuntime_FailsClosed
 	}
 }
 
-// TestResolveSharedDirs_NFS_MissingHostBase_Kubernetes_Succeeds is the T1
-// compatibility case from design §3.3: a kubernetes-runtime broker that has
-// no local copy of the NFS export (e.g. a future in-cluster broker) must
-// still resolve — the K8s side never needs the host base to exist locally,
-// only the PVC/subPath naming.
-func TestResolveSharedDirs_NFS_MissingHostBase_Kubernetes_Succeeds(t *testing.T) {
+// TestResolveSharedDirs_NFS_HostBaseStatError_NotMissing_IncludesUnderlyingError:
+// when checking the host base fails for a reason OTHER than "doesn't exist
+// yet" (here, ENOTDIR from a non-directory path component), the fixed "not
+// mounted" wording would misdescribe the problem, so the error must include
+// the underlying stat error instead.
+func TestResolveSharedDirs_NFS_HostBaseStatError_NotMissing_IncludesUnderlyingError(t *testing.T) {
+	tmpDir := t.TempDir()
+	// A regular file standing in for what should be a directory component:
+	// stat-ing anything below it fails with ENOTDIR, not ENOENT.
+	notADir := filepath.Join(tmpDir, "not-a-dir")
+	require.NoError(t, os.WriteFile(notADir, []byte("x"), 0o644))
+	hostBase := filepath.Join(notADir, "export")
+
+	sdCfg := nfsSharedDirStorageCfg(tmpDir)
+	sdCfg.NFS.Shares[0].ID = "not-a-dir/export"
+
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "T2 topology", "an unrelated stat failure must not claim the export is simply unmounted")
+	assert.Contains(t, err.Error(), hostBase)
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+}
+
+// TestResolveSharedDirs_NFS_MissingHostBase_Kubernetes_FailsClosed: only the
+// co-located-broker topology (T2, design §3.3) is supported, so a missing
+// host base must refuse for kubernetes exactly like it does for a
+// local-container runtime, naming the actual missing path. kubelet
+// auto-vivifies a missing subPath as the export's SQUASHED anonymous
+// identity on an all_squash export — exactly the identity the
+// upper-directory hardening (mode + ACL) defends against.
+func TestResolveSharedDirs_NFS_MissingHostBase_Kubernetes_FailsClosed(t *testing.T) {
 	tmpDir := t.TempDir()
 	missingBase := filepath.Join(tmpDir, "does-not-exist")
 	sdCfg := nfsSharedDirStorageCfg(tmpDir)
@@ -328,18 +359,12 @@ func TestResolveSharedDirs_NFS_MissingHostBase_Kubernetes_Succeeds(t *testing.T)
 
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
-	require.NoError(t, err)
-	// The Docker-shaped mounts are still computed (design §3.2.3: "existing,
-	// now wired" runs unconditionally) — they end up unused because the K8s
-	// runtime mounts shared dirs via SharedDirStorage/subPath, and buildPod
-	// skips RunConfig.Volumes entries whose target matches a shared dir
-	// target (see TestBuildPod_SharedDirs_SkipsLocalVolumesForSharedDirTargets).
-	require.Len(t, volumes, 1)
-	assert.Equal(t, "/scion-volumes/scratchpad", volumes[0].Target)
-	require.NotNil(t, realization)
-	assert.Equal(t, "nfs", realization.Backend)
-	assert.Equal(t, "scion-shared", realization.PVClaimName)
-	assert.Equal(t, "projects/pid-1/shared-dirs/scratchpad", realization.SubPaths["scratchpad"])
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), missingBase)
+	assert.Contains(t, err.Error(), "requires this broker to have the export mounted")
+	assert.Contains(t, err.Error(), "T2 topology")
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
 
 	_, statErr := os.Stat(missingBase)
 	assert.True(t, os.IsNotExist(statErr), "host base must not be created")
@@ -388,15 +413,19 @@ func TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs(t *testing.T) {
 	assert.NotZero(t, info.Mode()&os.ModeSetgid, "leaf setgid bit")
 
 	// The intermediate directories the walk created (projects,
-	// projects/pid-42, projects/pid-42/shared-dirs) get the plain mkdirat
-	// mode (0o775, no setgid) — only the leaf is ever chmod'd/setgid'd
-	// (design §3.5(5); round 3 review item 13).
+	// projects/pid-42, projects/pid-42/shared-dirs) are explicitly fchmod'd
+	// to 0o2755 — setgid (group inheritance still holds), but NOT
+	// group-writable — inside createViaComponentWalk itself (Phase 2 item 2,
+	// leaf modes/ACL hardening, ptone/scion#1794): only the broker's own
+	// identity can restructure these directories, closing the symlink-plant
+	// vector for a squashed NFS client that is merely a group member. Only
+	// the leaf stays group-writable (0o2775).
 	for _, rel := range []string{"projects", filepath.Join("projects", "pid-42"), filepath.Join("projects", "pid-42", "shared-dirs")} {
 		intermediate := filepath.Join(hostBase, rel)
 		info, statErr := os.Stat(intermediate)
 		require.NoError(t, statErr, "intermediate dir %q should have been mkdir'd", rel)
-		assert.Equal(t, os.FileMode(0o775), info.Mode().Perm(), "intermediate dir %q permission bits", rel)
-		assert.Zero(t, info.Mode()&os.ModeSetgid, "intermediate dir %q must not be setgid", rel)
+		assert.Equal(t, os.FileMode(0o755), info.Mode().Perm(), "intermediate dir %q permission bits", rel)
+		assert.NotZero(t, info.Mode()&os.ModeSetgid, "intermediate dir %q must be setgid", rel)
 	}
 
 	require.NotNil(t, realization)
@@ -411,7 +440,7 @@ func TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs(t *testing.T) {
 // disposition item 2 (tst L1, mutant W12): every prior
 // setgid/2775 assertion ran on a chain created fully fresh by this same
 // call, which cannot distinguish "alreadyExisted reflects the LEAF" (what
-// the code does) from a mutant that took `alreadyExisted` from an earlier
+// the code does) from a regression that took `alreadyExisted` from an earlier
 // walked component instead. If it did, a SECOND shared dir resolved into an
 // already-existing projects/<pid>/shared-dirs (the common case: another
 // shared dir, or another agent, in the same project) would wrongly be
@@ -497,6 +526,85 @@ func TestResolveSharedDirs_NFS_PreexistingSharedDir_NotChmoded(t *testing.T) {
 	after, statErr := os.Stat(leaf)
 	require.NoError(t, statErr)
 	assert.Equal(t, before.Mode(), after.Mode(), "pre-existing shared dir must not be chmod'd")
+}
+
+// TestResolveSharedDirs_NFS_NewLeaf_GetsACL_IntermediatesAndPreexistingLeafDont:
+// EnsureLeaf's finalization (chmod + default ACL) must land on exactly the
+// leaf THIS call creates -- never on an
+// intermediate component it creates along the way, and never on a leaf that
+// already existed. Reads the default ACL back via Fgetxattr directly rather
+// than going through SetLeafDefaultACL, so this is a real assertion on what
+// resolveSharedDirs actually left on disk, not a re-statement of the
+// production code's own behavior.
+func TestResolveSharedDirs_NFS_NewLeaf_GetsACL_IntermediatesAndPreexistingLeafDont(t *testing.T) {
+	mountRoot := newResolvedTempDir(t)
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+	require.NoError(t, os.MkdirAll(hostBase, 0o775))
+
+	// A pre-existing leaf for a shared dir this call ALSO requests: pointing
+	// this assertion at a sibling resolveSharedDirs never touches at all
+	// would make "must not gain an ACL" vacuously true regardless of whether
+	// the existed=true skip path in EnsureLeaf actually works. "existing" is
+	// one of the two dirs in the dirs slice below, so it really is a
+	// candidate this call processes.
+	preexistingLeaf := filepath.Join(hostBase, "projects", "pid-42", "shared-dirs", "existing")
+	require.NoError(t, os.MkdirAll(preexistingLeaf, 0o2775))
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{{Name: "scratchpad"}, {Name: "existing"}}
+
+	_, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-42", "docker", dirs, "/workspace")
+	require.NoError(t, err)
+
+	getACL := func(path, attr string) ([]byte, error) {
+		fd, openErr := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		require.NoError(t, openErr)
+		defer func() { _ = unix.Close(fd) }()
+		buf := make([]byte, 256)
+		n, getErr := unix.Fgetxattr(fd, attr, buf)
+		if getErr != nil {
+			return nil, getErr
+		}
+		return buf[:n], nil
+	}
+
+	// The golden bytes for a minimal POSIX default ACL of u::rwx,g::rwx,o::r-x
+	// (acl_ea_header version 2, then ACL_USER_OBJ/ACL_GROUP_OBJ/ACL_OTHER
+	// entries in that order, each with ACL_UNDEFINED_ID) -- hardcoded here,
+	// deliberately not obtained by calling shareddirs' own encoder, so this
+	// checks the actual on-disk bytes against the documented wire format
+	// rather than re-asserting whatever that function happens to produce.
+	wantDefaultACL := []byte{
+		0x02, 0x00, 0x00, 0x00, // acl_ea_header, version 2
+		0x01, 0x00, 0x07, 0x00, 0xff, 0xff, 0xff, 0xff, // ACL_USER_OBJ, rwx, undefined id
+		0x04, 0x00, 0x07, 0x00, 0xff, 0xff, 0xff, 0xff, // ACL_GROUP_OBJ, rwx, undefined id
+		0x20, 0x00, 0x05, 0x00, 0xff, 0xff, 0xff, 0xff, // ACL_OTHER, r-x, undefined id
+	}
+
+	newLeaf := filepath.Join(hostBase, "projects", "pid-42", "shared-dirs", "scratchpad")
+	defACL, err := getACL(newLeaf, "system.posix_acl_default")
+	if errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP) {
+		t.Skipf("filesystem at %s does not support POSIX ACLs (%v); skipping", hostBase, err)
+	}
+	require.NoError(t, err, "new leaf must have a default ACL")
+	assert.Equal(t, wantDefaultACL, defACL, "new leaf default ACL bytes")
+
+	// Intermediates ("projects", "projects/pid-42", "projects/pid-42/shared-dirs")
+	// must have NO ACL at all -- only the leaf gets one.
+	for _, rel := range []string{"projects", filepath.Join("projects", "pid-42"), filepath.Join("projects", "pid-42", "shared-dirs")} {
+		_, err := getACL(filepath.Join(hostBase, rel), "system.posix_acl_default")
+		assert.True(t, errors.Is(err, unix.ENODATA), "intermediate %q must have no default ACL, got %v", rel, err)
+	}
+
+	// "existing" was itself REQUESTED (it's in dirs above), not merely a
+	// bystander sibling -- it must still come out with no ACL, since
+	// EnsureLeaf's existed=true path skips finalization entirely regardless
+	// of whether the leaf happens to be requested alongside a genuinely new
+	// one in the same call.
+	_, err = getACL(preexistingLeaf, "system.posix_acl_default")
+	assert.True(t, errors.Is(err, unix.ENODATA), "pre-existing leaf must not have gained a default ACL, got %v", err)
 }
 
 // TestResolveSharedDirs_NFS_PoC_TraversalNamesAndProjectID is round 2
@@ -610,9 +718,8 @@ func TestResolveSharedDirs_NFS_SymlinkedLeaf_FailsClosed(t *testing.T) {
 // TestResolveSharedDirs_NFS_SymlinkedIntermediate_FailsClosed is the other
 // half of S-F3: a symlinked intermediate component (here, the project
 // directory itself) pointing OUTSIDE the export must be refused before
-// anything is created inside its target. Round 5 review finding C1=T1=S-L2:
-// this is now caught by openat(O_NOFOLLOW) in
-// createSharedDirViaComponentWalk, the same layer that catches every other
+// anything is created inside its target. This is caught by openat(O_NOFOLLOW)
+// in shareddirs.EnsureLeaf, the same layer that catches every other
 // symlinked-component case in this file — in-base or outside, leaf or
 // intermediate — since O_NOFOLLOW refuses ANY symlink at that exact
 // component regardless of where it points.
@@ -701,9 +808,9 @@ func TestResolveSharedDirs_NFS_ComponentSymlinkToExportRoot_FailsClosed(t *testi
 // round 6 review finding #4 (hy-rev-6): the FIRST component the walk
 // processes is subpath_root ("projects" by default). There was no unit test
 // pinning that O_NOFOLLOW applies uniformly starting on the very first
-// iteration — a mutant that skipped it only for the first component would
-// have survived. Here "projects" itself is a symlink resolving back to the
-// host base (".") instead of a real directory.
+// iteration — a regression that skipped it only for the first component
+// would have survived. Here "projects" itself is a symlink resolving back
+// to the host base (".") instead of a real directory.
 func TestResolveSharedDirs_NFS_SubPathRootComponentSymlinkToDot_FailsClosed(t *testing.T) {
 	mountRoot := newResolvedTempDir(t)
 	shareID := "scion-shared"

@@ -24,10 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestConfineLeaf directly pins the confinement check (round 3 review
-// finding N1/T1 part 1, PR #1779; moved from pkg/agent's
-// TestConfineSharedDir in Phase 2 item 1 — a pure move, assertions
-// unchanged).
+// TestConfineLeaf directly pins the confinement check.
 func TestConfineLeaf(t *testing.T) {
 	hostBase := "/srv/scion-shared"
 
@@ -61,12 +58,9 @@ func TestConfineLeaf(t *testing.T) {
 }
 
 // TestValidProjectID_RejectsTraversal directly pins the format rules
-// ValidProjectID enforces (round 2 security review F1/F4; round 3 review
-// finding S-N2: moved from a deny-list to an allow-list,
-// `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, which also rejects pure-dot names,
-// control characters/spaces and unbounded length; PR #1779). Moved from
-// pkg/agent's TestValidSharedDirProjectID_RejectsTraversal in Phase 2 item 1
-// — a pure move, assertions unchanged.
+// ValidProjectID enforces: the allow-list pattern
+// `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, which rejects pure-dot names,
+// control characters/spaces and unbounded length.
 func TestValidProjectID_RejectsTraversal(t *testing.T) {
 	tests := []struct {
 		id    string
@@ -75,7 +69,7 @@ func TestValidProjectID_RejectsTraversal(t *testing.T) {
 		{"", false},
 		{".", false},
 		{"..", false},
-		{"...", false}, // pure-dot names, S-N2
+		{"...", false}, // pure-dot names
 		{"../victim", false},
 		{"victim/..", false},
 		{"a/b", false},

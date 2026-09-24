@@ -15,7 +15,9 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -168,29 +170,33 @@ func resolveSharedDirs(
 	// Local-container runtimes (Docker/Podman/Apple) bind-mount the resolved
 	// host path directly, so it must exist. Never create the host base
 	// itself (design §3.2.3) — only mkdir the per-shared-dir subtree, and
-	// only when the host base is present (it won't be inside a future
-	// in-cluster GKE broker, design §3.3 T1 compatibility).
+	// only when the host base is present.
+	//
+	// This tier ships only the co-located-broker topology (T2, design
+	// §3.3) — a broker with local filesystem access to the NFS export. A
+	// missing host base must refuse, regardless of which of the two
+	// supported runtimes triggered it: kubelet auto-vivifies a missing
+	// subPath itself, under the export's SQUASHED anonymous identity on an
+	// all_squash export — exactly the identity the leaf's upper-directory
+	// hardening (mode + ACL) defends against.
 	if _, statErr := os.Stat(res.HostBase); statErr == nil {
-		// Round 5 review finding C1=T1=S-L2 (== C2=T2=S-L1): mkdir and
-		// chmod are now done via shareddirs.CreateViaComponentWalk, which
-		// walks every component of `rel` with openat(O_NOFOLLOW|O_DIRECTORY)
-		// and mkdirat, refusing ANY symlink — leaf or intermediate, inside
-		// the export or outside it — before creating or touching anything
-		// past it. This supersedes the round 3/4 os.Root-based approach
-		// entirely (os.Root is no longer used anywhere in this package):
-		// os.Root only refused a traversal that would ESCAPE the root, so
-		// it still followed a relative symlink that stayed inside it (e.g.
-		// one project's shared-dirs pointing at another's), letting a real
-		// mkdir+chmod land inside a victim's tree, or at the export root,
-		// before the equality check below ever ran (round 5 findings
-		// C1/T2/S-L1: "nothing created in the victim" was not met). The
-		// O_NOFOLLOW walk refuses the symlink atomically as part of the
-		// open call, before any subsequent component — including the leaf
-		// — is ever created, so nothing is created or chmod'd anywhere
-		// outside the exact directory chain this call is resolving,
-		// regardless of any concurrent symlink swap. Phase 2 item 1 (pure
-		// move): the walk itself now lives in pkg/shareddirs so pkg/hub's
-		// file browser (§3.2.5) can reuse it without importing pkg/agent.
+		// mkdir and chmod are done via shareddirs.EnsureLeaf, which walks
+		// every component of `rel` with openat(O_NOFOLLOW|O_DIRECTORY) and
+		// mkdirat, refusing ANY symlink — leaf or intermediate, inside the
+		// export or outside it — before creating or touching anything past
+		// it. The O_NOFOLLOW walk refuses a symlink atomically as part of
+		// the open call, before any subsequent component — including the
+		// leaf — is ever created, so nothing is created or chmod'd
+		// anywhere outside the exact directory chain this call is
+		// resolving, regardless of any concurrent symlink swap. The walk
+		// itself lives in pkg/shareddirs so pkg/hub's file browser
+		// (§3.2.5) can reuse it without importing pkg/agent.
+		//
+		// EnsureLeaf is the single leaf-creation entry point shared by the
+		// broker (here) and the hub browser, so a shared dir either of
+		// them causes to exist always gets the same modes/ACL hardening
+		// (2755 intermediates, 2775 + default ACL on a leaf this call
+		// creates) and the same rollback-on-finalization-failure behavior.
 		resolvedHostBase, err := filepath.EvalSymlinks(res.HostBase)
 		if err != nil {
 			return nil, nil, fmt.Errorf("server.shared_dir_storage: resolve host base symlinks: %w", err)
@@ -200,34 +206,20 @@ func resolveSharedDirs(
 			sd := res.SharedDirs[name]
 			rel := sd.ServerRelativePath // relative to HostBase, e.g. projects/<pid>/shared-dirs/<name>
 
-			leafFd, alreadyExisted, walkErr := shareddirs.CreateViaComponentWalk(resolvedHostBase, rel)
+			leafFd, _, walkErr := shareddirs.EnsureLeaf(resolvedHostBase, rel)
 			if walkErr != nil {
 				return nil, nil, fmt.Errorf("server.shared_dir_storage: shared dir %q: %w", name, walkErr)
 			}
-
-			if !alreadyExisted {
-				// fchmod on the fd we just opened/created — never a
-				// path-based chmod, which could be raced onto a different
-				// inode after the fd was opened (design §3.5(5); round 5
-				// disposition item 2). Only the leaf this call created —
-				// never a pre-existing shared dir.
-				if chmodErr := shareddirs.ChmodFd(leafFd, 0o2775); chmodErr != nil {
-					_ = shareddirs.CloseFd(leafFd)
-					return nil, nil, fmt.Errorf("server.shared_dir_storage: chmod shared dir %q: %w", name, chmodErr)
-				}
-			}
 			_ = shareddirs.CloseFd(leafFd)
 
-			// Defense in depth, kept per round 5 disposition item 2 even
-			// though the component walk above should make it structurally
-			// impossible for a symlink to be involved: require the fully
-			// resolved path to equal the expected clean path under the
-			// resolved host base, as a backstop against a component
-			// renamed away between the walk completing and this check
-			// (round 4 review finding C1/T1/S-M1 first introduced this
-			// check; it is not redundant with the walk, since the walk
-			// operates on file descriptors opened at walk time, while this
-			// re-resolves the path fresh).
+			// Defense in depth, even though the component walk above should
+			// make it structurally impossible for a symlink to be
+			// involved: require the fully resolved path to equal the
+			// expected clean path under the resolved host base, as a
+			// backstop against a component renamed away between the walk
+			// completing and this check. This is not redundant with the
+			// walk, since the walk operates on file descriptors opened at
+			// walk time, while this re-resolves the path fresh.
 			wantResolvedLeaf := filepath.Join(resolvedHostBase, rel)
 			resolvedLeaf, err := filepath.EvalSymlinks(sd.HostPath)
 			if err != nil {
@@ -240,9 +232,21 @@ func resolveSharedDirs(
 			}
 			volumes[i].Source = resolvedLeaf
 		}
-	} else if isLocalContainerRuntime(runtimeName) {
+	} else if errors.Is(statErr, fs.ErrNotExist) {
+		// Reachable only for local-container or kubernetes runtimes (the
+		// unsupported-runtime check above already returned for anything
+		// else). Naming the actual resolved path makes this actionable
+		// regardless of which runtime hit it.
 		return nil, nil, fmt.Errorf(
-			"server.shared_dir_storage host base %q does not exist; provision the NFS export before starting agents", res.HostBase)
+			"server.shared_dir_storage=nfs requires this broker to have the export mounted at %q "+
+				"so it can create the project chain safely (T2 topology) -- see docs/deploy/hybrid-tier.md",
+			res.HostBase)
+	} else {
+		// Some other failure checking the host base (permissions, a stale
+		// mount, etc.) -- not simply "not provisioned yet". Include the
+		// underlying error rather than the fixed not-mounted wording, which
+		// would misdescribe the problem.
+		return nil, nil, fmt.Errorf("server.shared_dir_storage: check host base %q: %w", res.HostBase, statErr)
 	}
 
 	subPaths := make(map[string]string, len(names))

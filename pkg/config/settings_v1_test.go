@@ -4378,6 +4378,124 @@ func TestSharedDirStorageConfig_Validate(t *testing.T) {
 	}
 }
 
+// TestSharedDirStorageConfig_IgnoredNFSFields is Phase 2 item 5 (design §7
+// Phase 2: "startup validation warns about ignored fields"): uid, gid,
+// mount_options, and storage_class are meaningful for workspace_storage but
+// never consulted by shared_dir_storage (design §3.2.1).
+func TestSharedDirStorageConfig_IgnoredNFSFields(t *testing.T) {
+	t.Run("nil receiver returns nil", func(t *testing.T) {
+		var s *V1SharedDirStorageConfig
+		assert.Nil(t, s.IgnoredNFSFields())
+	})
+
+	t.Run("nil NFS block returns nil", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{Backend: "nfs"}
+		assert.Nil(t, s.IgnoredNFSFields())
+	})
+
+	t.Run("local backend never warns even if NFS fields happen to be set", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{Backend: "local", NFS: &V1NFSConfig{UID: 1000, GID: 1000}}
+		assert.Nil(t, s.IgnoredNFSFields())
+	})
+
+	t.Run("nfs backend with none of the ignored fields set returns nil", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot: "/srv",
+				Shares:    []V1NFSShare{{ID: "scion-shared"}},
+			},
+		}
+		assert.Nil(t, s.IgnoredNFSFields())
+	})
+
+	t.Run("nfs backend with all four ignored fields set", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot:    "/srv",
+				Shares:       []V1NFSShare{{ID: "scion-shared"}},
+				UID:          1000,
+				GID:          1000,
+				MountOptions: "vers=3",
+				StorageClass: "standard",
+			},
+		}
+		assert.ElementsMatch(t, []string{"uid", "gid", "mount_options", "storage_class"}, s.IgnoredNFSFields())
+	})
+
+	t.Run("nfs backend with only one ignored field set", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot: "/srv",
+				Shares:    []V1NFSShare{{ID: "scion-shared"}},
+				GID:       1003,
+			},
+		}
+		assert.Equal(t, []string{"gid"}, s.IgnoredNFSFields())
+	})
+}
+
+// TestSharedDirStorageConfig_ResolvedLayoutSummary is the other half of
+// Phase 2 item 5: "log exactly one resolved-layout line: backend, host
+// base, subpath_root, pv_name."
+func TestSharedDirStorageConfig_ResolvedLayoutSummary(t *testing.T) {
+	t.Run("nil receiver returns empty", func(t *testing.T) {
+		var s *V1SharedDirStorageConfig
+		assert.Empty(t, s.ResolvedLayoutSummary())
+	})
+
+	t.Run("unset/local backend returns empty (nothing new to log)", func(t *testing.T) {
+		assert.Empty(t, (&V1SharedDirStorageConfig{}).ResolvedLayoutSummary())
+		assert.Empty(t, (&V1SharedDirStorageConfig{Backend: "local"}).ResolvedLayoutSummary())
+	})
+
+	t.Run("nfs backend summarizes backend, host base, subpath_root, pv_name", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot: "/srv",
+				Shares:    []V1NFSShare{{ID: "scion-shared", PVName: "scion-shared-pv"}},
+			},
+		}
+		summary := s.ResolvedLayoutSummary()
+		assert.Contains(t, summary, "backend=nfs")
+		assert.Contains(t, summary, filepath.Join("/srv", "scion-shared"))
+		assert.Contains(t, summary, "subpath_root=projects") // default
+		assert.Contains(t, summary, "pv_name=scion-shared-pv")
+	})
+
+	t.Run("nfs backend with a custom subpath_root", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot:   "/srv",
+				Shares:      []V1NFSShare{{ID: "scion-shared", PVName: "pv"}},
+				SubPathRoot: "nested/subdir",
+			},
+		}
+		assert.Contains(t, s.ResolvedLayoutSummary(), "subpath_root="+filepath.Join("nested", "subdir"))
+	})
+
+	// Distinct from "local backend, no nfs block at all" above -- an nfs
+	// sub-block can still be present (e.g. left over from a prior nfs
+	// configuration, or configured ahead of a planned switch) while backend
+	// stays "local". No summary line must be logged either way:
+	// ResolvedLayoutSummary gates strictly on Backend == "nfs", never on the
+	// nfs block's mere presence.
+	t.Run("local backend with an nfs block present still returns empty", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "local",
+			NFS: &V1NFSConfig{
+				MountRoot: "/srv",
+				Shares:    []V1NFSShare{{ID: "scion-shared", PVName: "pv"}},
+			},
+		}
+		assert.Empty(t, s.ResolvedLayoutSummary())
+	})
+}
+
 // TestSharedDirStorageConfig_YAMLRoundTrip replaces a prior tautological
 // test that built the struct in Go and read the same fields back (r1-test.md
 // #9: a koanf tag typo would have gone undetected). This writes the design

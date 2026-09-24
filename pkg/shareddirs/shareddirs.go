@@ -18,7 +18,7 @@
 //
 //	<host base>/<subpath_root>/<projectID>/shared-dirs/<name>
 //
-// Phase 2 item 1 (pure move, hy-dev): this package was extracted out of
+// Phase 2 item 1 (pure move): this package was extracted out of
 // pkg/agent so that pkg/hub's shared-dir file browser (§3.2.5) can reuse the
 // exact same confinement and symlink-safety guarantees without importing all
 // of pkg/agent's Docker/Kubernetes provisioning machinery just to get a
@@ -38,7 +38,7 @@ import (
 )
 
 // projectIDPattern is an allow-list for hub project IDs used as an NFS path
-// segment (round 3 security review finding S-N2, PR #1779). Hub IDs are
+// segment. Hub IDs are
 // UUIDs in practice; identifiers from the project system's earlier naming
 // era are slugs. Requiring the first character to be alphanumeric rejects
 // "." and ".." (and any run of dots) along with path separators, so this
@@ -49,8 +49,7 @@ import (
 var projectIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // ValidProjectID reports whether projectID is safe to use as a path segment
-// when resolving shared_dir_storage=nfs paths (round 2/3 security review
-// findings F1/F4/S-N2, PR #1779).
+// when resolving shared_dir_storage=nfs paths.
 func ValidProjectID(projectID string) bool {
 	return projectIDPattern.MatchString(projectID)
 }
@@ -58,10 +57,9 @@ func ValidProjectID(projectID string) bool {
 // ConfineLeaf returns an error unless hostPath's parent directory is exactly
 // <hostBase>/<subPathRoot>/<projectID>/shared-dirs. This is defense in depth
 // alongside name/project-ID validation and the NFS backend's own path
-// resolution (round 3 review finding N1/T1 part 1, PR #1779): every resolved
-// shared dir must sit directly under the project's own subtree — never
-// anywhere else in the export, even if a name/ID somehow validated but the
-// resolver computed something unexpected (round 2 review finding F1).
+// resolution: every resolved shared dir must sit directly under the
+// project's own subtree — never anywhere else in the export, even if a
+// name/ID somehow validated but the resolver computed something unexpected.
 func ConfineLeaf(hostPath, hostBase, subPathRoot, projectID, name string) error {
 	wantParent := filepath.Join(hostBase, subPathRoot, projectID, "shared-dirs")
 	if filepath.Dir(hostPath) != wantParent {

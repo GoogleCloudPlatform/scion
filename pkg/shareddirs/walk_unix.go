@@ -19,84 +19,191 @@ package shareddirs
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"golang.org/x/sys/unix"
 )
 
-// CreateViaComponentWalk race-freely creates (or verifies) the directory
-// chain for rel = "<subpath_root>/<projectID>/shared-dirs/<name>" under
-// hostBase, refusing to follow a symlink at ANY component — leaf or
-// intermediate, pointing inside the export or outside it — before ever
-// creating or touching anything past it.
+// EnsureLeaf race-freely creates (or verifies) the directory chain for
+// rel = "<subpath_root>/<projectID>/shared-dirs/<name>" under hostBase,
+// using openat(2)/mkdirat(2) with O_NOFOLLOW at every component -- leaf or
+// intermediate, pointing inside the export or outside it -- so opening or
+// creating a component and refusing a symlink there happen atomically in
+// the same syscall, with no separate stat-then-open step for a concurrent
+// symlink swap to land between. It applies the leaf modes/ACL hardening
+// (chmod 0o2775 + default ACL) when it creates the leaf itself.
 //
-// Round 5 review finding C1=T1=S-L2 (also numbered C2=T2=S-L1 across the
-// three r5 reports, PR #1779): the earlier os.Root-based approach only
-// refused a traversal that would ESCAPE the root; it happily followed a
-// relative symlink that stayed inside it (e.g. one project's shared-dirs
-// pointing at another's), so a real mkdir+chmod could land inside a victim
-// project's tree, or at the export root, before resolveSharedDirs' final
-// equality check ever ran. openat(2)/mkdirat(2) with O_NOFOLLOW refuse to
-// open or traverse through a symlink at all, atomically as part of the
-// single syscall — there is no separate stat-then-open step for a
-// concurrent symlink swap to land between, which is what made the os.Root
-// version racy (see the R4/R5 security probes: 6,603/20,000 and
-// 7,032/20,000 escapes respectively; this walk is what finally gets both to
-// 0).
+// This is the SINGLE place both the broker (resolveSharedDirs) and the hub
+// file browser create/finalize a shared dir leaf, so a shared dir either of
+// them causes to exist is indistinguishable and always gets the same
+// treatment.
 //
-// This supersedes os.Root for this path entirely — os.Root is not used
-// anywhere in this package.
+// Phase 2 item 2 (leaf modes/ACL hardening, ptone/scion#1794): every
+// INTERMEDIATE component this call creates is created at mode 0o755 (no
+// group/other write bit from the moment it exists, closing the brief window
+// a 0o775-then-fchmod sequence would otherwise leave) and then explicitly
+// fchmod'd to intermediateMode (0o2755: setgid, still no group-write) on the
+// fd. The leaf itself is chmod'd to 0o2775 and given the default ACL only
+// when this call creates it (design §3.5(5)).
 //
-// Round 5 review nit T4: a mid-walk swap (an attacker replacing a plain
-// directory with a symlink between our openat of the parent and the
-// openat/mkdirat of the child) is refused deterministically by the same
-// O_NOFOLLOW open on the child — there is no separate window to land in,
-// since the kernel resolves and checks the final component atomically as
-// part of the openat/mkdirat call itself. There is deliberately no unit
-// test that forces this exact interleaving: doing so would require a
-// production-code test hook solely to pause the walk between components,
-// which adds real production-code complexity for a property that syscall
-// atomicity already guarantees and that the r5 security probe already
-// verifies empirically (reviews/r5-security-probe_test.go.txt, run
-// 20,000 times against the pre-rewrite os.Root code and again against this
-// walk: 0/20,000 escapes and 0/20,000 stray chmods here, versus thousands
-// under os.Root — see the self-check numbers reported alongside PR #1779).
+// If the leaf's chmod or a non-ENOTSUP ACL error occurs for a leaf THIS call
+// created, the leaf is removed (Unlinkat AT_REMOVEDIR) before returning the
+// error, so a retry starts clean instead of getting permanently stuck at
+// alreadyExisted=true with no group-write and no ACL.
 //
-// Returns the leaf's open file descriptor (the caller must close it via
-// CloseFd) and whether the leaf already existed before this call, so the
-// caller can decide whether to chmod it — only a leaf THIS call created is
-// ever chmod'd (design §3.5(5); round 3 review item 13, PR #1779).
-// Intermediate components get the same mkdir mode as the leaf (0o775); the
-// caller chmods only the leaf.
-func CreateViaComponentWalk(hostBase, rel string) (leafFd int, alreadyExisted bool, err error) {
-	baseFd, err := unix.Open(hostBase, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return -1, false, fmt.Errorf("open host base %q: %w", hostBase, err)
+// Returns the leaf's open fd (caller must close via CloseFd) and whether it
+// already existed before this call.
+func EnsureLeaf(hostBase, rel string) (leafFd int, alreadyExisted bool, err error) {
+	parentFd, leafName, fd, existed, walkErr := createViaComponentWalk(hostBase, rel, 0o2755)
+	if walkErr != nil {
+		return -1, false, walkErr
+	}
+	if existed {
+		_ = unix.Close(parentFd)
+		return fd, true, nil
 	}
 
-	currentFd := baseFd
-	parts := strings.Split(filepath.ToSlash(rel), "/")
-	for _, comp := range parts {
-		nextFd, existed, walkErr := openOrCreateDirNoFollow(currentFd, comp)
-		_ = unix.Close(currentFd)
-		if walkErr != nil {
-			return -1, false, walkErr
-		}
-		currentFd = nextFd
-		alreadyExisted = existed
+	if chmodErr := chmodLeaf(fd, 0o2775); chmodErr != nil {
+		_ = CloseFd(fd)
+		_ = unix.Unlinkat(parentFd, leafName, unix.AT_REMOVEDIR)
+		_ = unix.Close(parentFd)
+		return -1, false, fmt.Errorf("chmod shared dir: %w", chmodErr)
 	}
-	return currentFd, alreadyExisted, nil
+	if aclErr := setLeafDefaultACL(fd); aclErr != nil {
+		_ = CloseFd(fd)
+		_ = unix.Unlinkat(parentFd, leafName, unix.AT_REMOVEDIR)
+		_ = unix.Close(parentFd)
+		return -1, false, fmt.Errorf("set default ACL on shared dir: %w", aclErr)
+	}
+	_ = unix.Close(parentFd)
+	return fd, false, nil
+}
+
+// chmodLeaf and setLeafDefaultACL are indirected through package vars purely
+// so a test can inject a failure (EINVAL, EPERM) at either finalization step
+// and verify EnsureLeaf's rollback -- removing the leaf it just created, but
+// never an intermediate -- without needing a real
+// filesystem condition that produces one. Production always uses ChmodFd
+// and SetLeafDefaultACL themselves; nothing here overrides them outside
+// tests.
+var (
+	chmodLeaf         = ChmodFd
+	setLeafDefaultACL = SetLeafDefaultACL
+)
+
+// SetLeafFinalizationHooksForTest overrides EnsureLeaf's two finalization
+// steps (chmod and default-ACL) for the duration of a test, returning a
+// restore function the caller must invoke (typically via t.Cleanup) to put
+// the real implementations back. Exported so a test in a different package
+// (e.g. pkg/hub, exercising EnsureLeaf only indirectly through a handler)
+// can inject a finalization failure without a copy of pkg/shareddirs'
+// unexported seam vars. A nil argument leaves that hook unchanged.
+//
+// Production code never calls this.
+func SetLeafFinalizationHooksForTest(chmod func(fd int, mode uint32) error, acl func(fd int) error) (restore func()) {
+	oldChmod, oldACL := chmodLeaf, setLeafDefaultACL
+	if chmod != nil {
+		chmodLeaf = chmod
+	}
+	if acl != nil {
+		setLeafDefaultACL = acl
+	}
+	return func() {
+		chmodLeaf, setLeafDefaultACL = oldChmod, oldACL
+	}
+}
+
+// createViaComponentWalk walks every component of rel under hostBase,
+// creating missing intermediates at intermediateMode (fchmod'd on the fd,
+// never trusted to mkdirat's mode argument), and returns the leaf's PARENT
+// fd (still open — the caller owns closing it) alongside the leaf's own fd
+// and name, so a caller (EnsureLeaf) can roll back a partially-finalized
+// leaf via Unlinkat(parentFd, leafName, ...) without re-walking.
+func createViaComponentWalk(hostBase, rel string, intermediateMode uint32) (parentFd int, leafName string, leafFd int, alreadyExisted bool, err error) {
+	baseFd, err := unix.Open(hostBase, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, "", -1, false, fmt.Errorf("open host base %q: %w", hostBase, err)
+	}
+
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	currentFd := baseFd
+	for _, comp := range parts[:len(parts)-1] {
+		// Intermediates are created with NO group/other write bit from the
+		// moment they exist (0o755, not 0o775), closing the window between
+		// mkdirat and the explicit fchmod below during
+		// which a concurrent, differently-permissioned creator could
+		// otherwise plant a real (group-writable) directory here.
+		nextFd, existed, walkErr := openOrCreateDirNoFollow(currentFd, comp, 0o755)
+		if walkErr != nil {
+			_ = unix.Close(currentFd)
+			return -1, "", -1, false, walkErr
+		}
+		if !existed {
+			if chmodErr := unix.Fchmod(nextFd, intermediateMode); chmodErr != nil {
+				_ = unix.Close(nextFd)
+				_ = unix.Close(currentFd)
+				return -1, "", -1, false, fmt.Errorf("chmod path component %q: %w", comp, chmodErr)
+			}
+		} else {
+			warnIfIntermediateUnsafe(nextFd, comp)
+		}
+		_ = unix.Close(currentFd)
+		currentFd = nextFd
+	}
+
+	leafComp := parts[len(parts)-1]
+	fd, existed, walkErr := openOrCreateDirNoFollow(currentFd, leafComp, 0o775)
+	if walkErr != nil {
+		_ = unix.Close(currentFd)
+		return -1, "", -1, false, walkErr
+	}
+	return currentFd, leafComp, fd, existed, nil
+}
+
+var intermediateUnsafeWarnOnce sync.Once
+
+// geteuid is indirected through a package var so a test can simulate "this
+// intermediate is not owned by this process" without
+// needing a second real uid available in the test environment -- catching a
+// regression that flips warnIfIntermediateUnsafe's mode-check/owner-check
+// boolean operator (AND vs OR), which a test asserting only the mode half
+// of the condition can't distinguish from the correct behavior. Production
+// never overrides this outside tests.
+var geteuid = unix.Geteuid
+
+// warnIfIntermediateUnsafe checks a pre-existing intermediate component and
+// logs a single process-wide warning — never refuses — if it is
+// group/other-writable or not owned by this process's effective uid. This
+// covers directories created before the leaf modes/ACL hardening shipped
+// (mode 0o2775, no group-write hardening) or anything else that predates
+// this walk; fixing them is the documented, symlink-safe manual recipe (see
+// docs/deploy/hybrid-tier.md), not something this call does automatically.
+func warnIfIntermediateUnsafe(fd int, comp string) {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return
+	}
+	if st.Mode&0o022 == 0 && int(st.Uid) == geteuid() {
+		return
+	}
+	intermediateUnsafeWarnOnce.Do(func() {
+		slog.Warn("server.shared_dir_storage: an existing upper directory is group/other-writable or not owned by this broker; "+
+			"the leaf modes/ACL hardening does not apply retroactively -- see the manual fix-up recipe in docs/deploy/hybrid-tier.md",
+			"component", comp, "mode", fmt.Sprintf("%#o", st.Mode&0o7777), "uid", st.Uid)
+	})
 }
 
 // openOrCreateDirNoFollow opens the directory component `comp` under the
 // directory referenced by parentFd, refusing to follow it if it is a
 // symlink (O_NOFOLLOW) or use it if it is not a directory (O_DIRECTORY). If
-// the component does not exist, it creates it via mkdirat and reopens it
-// the same way. A concurrent creator winning the mkdirat race (EEXIST) is
-// not an error — the reopen with O_NOFOLLOW still refuses a symlink even if
-// the entry a racing process left behind is one.
-func openOrCreateDirNoFollow(parentFd int, comp string) (fd int, existed bool, err error) {
+// the component does not exist, it creates it via mkdirat (at mode) and
+// reopens it the same way. A concurrent creator winning the mkdirat race
+// (EEXIST) is not an error — the reopen with O_NOFOLLOW still refuses a
+// symlink even if the entry a racing process left behind is one.
+func openOrCreateDirNoFollow(parentFd int, comp string, mode uint32) (fd int, existed bool, err error) {
 	const openFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
 	fd, err = unix.Openat(parentFd, comp, openFlags, 0)
@@ -107,7 +214,7 @@ func openOrCreateDirNoFollow(parentFd int, comp string) (fd int, existed bool, e
 		return -1, false, classifyComponentOpenError(parentFd, comp, err)
 	}
 
-	if mkErr := unix.Mkdirat(parentFd, comp, 0o775); mkErr != nil && !errors.Is(mkErr, unix.EEXIST) {
+	if mkErr := unix.Mkdirat(parentFd, comp, mode); mkErr != nil && !errors.Is(mkErr, unix.EEXIST) {
 		return -1, false, fmt.Errorf("mkdir path component %q: %w", comp, mkErr)
 	}
 	fd, err = unix.Openat(parentFd, comp, openFlags, 0)
@@ -118,8 +225,7 @@ func openOrCreateDirNoFollow(parentFd int, comp string) (fd int, existed bool, e
 }
 
 // classifyComponentOpenError turns the errno openat(O_NOFOLLOW|O_DIRECTORY)
-// returns for "this component isn't usable" into a clear wording (round 4
-// review nit C4/C5, PR #1779).
+// returns for "this component isn't usable" into a clear wording.
 //
 // On Linux (verified empirically; POSIX leaves the exact errno
 // implementation-defined here), combining O_DIRECTORY with O_NOFOLLOW on a
@@ -149,10 +255,10 @@ func classifyComponentOpenError(parentFd int, comp string, err error) error {
 	}
 }
 
-// ChmodFd sets the leaf's mode via fchmod on the already-open file
-// descriptor — never a path-based chmod, which could be raced onto a
-// different inode after the fd was opened (round 5 disposition item 2, PR
-// #1779). mode is a traditional Unix mode_t value (e.g. 0o2775 for
+// ChmodFd sets a directory's mode via fchmod on the already-open file
+// descriptor, so the mode change always lands on the exact directory this
+// package's walk verified, regardless of anything that happens to the path
+// afterward. mode is a traditional Unix mode_t value (e.g. 0o2775 for
 // rwxrwsr-x), NOT an os.FileMode: Go's os.FileMode encodes its
 // setgid/setuid/sticky bits at different bit positions than the kernel's
 // mode_t, so passing an os.FileMode value to a raw syscall wrapper would
@@ -161,11 +267,10 @@ func ChmodFd(fd int, mode uint32) error {
 	return unix.Fchmod(fd, mode)
 }
 
-// CloseFd closes a file descriptor returned by CreateViaComponentWalk.
-// Errors are deliberately ignored by most callers (a close failure after a
-// successful chmod doesn't invalidate the mkdir/chmod that already
-// happened), but the return value is available for callers that want to
-// check it.
+// CloseFd closes a file descriptor returned by EnsureLeaf. Errors are
+// deliberately ignored by most callers (a close failure after a successful
+// chmod doesn't invalidate the mkdir/chmod that already happened), but the
+// return value is available for callers that want to check it.
 func CloseFd(fd int) error {
 	return unix.Close(fd)
 }
