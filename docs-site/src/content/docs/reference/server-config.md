@@ -107,11 +107,11 @@ Persistence settings for the Hub.
 
 ### Proxy Auth (`server.auth.proxy`)
 
-Proxy authentication configuration (consulted when `server.auth.mode` is set to `"proxy"`). See [Proxy Auth (Google IAP)](/scion/hosted/ha/auth-proxy-iap/) for the full deployment guide.
+Proxy authentication configuration (consulted when `server.auth.mode` is set to `"proxy"`). See [Proxy Auth (Google IAP)](/scion/hosted/ha/auth-proxy-iap/) for the full deployment guide, and [Generic JWT proxy provider](/scion/hosted/ha/auth-proxy-iap/#generic-jwt-proxy-provider) for bespoke auth proxies.
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `provider` | string | | Selects the proxy auth provider: `"iap"` or `"header"`. |
+| `provider` | string | | Selects the proxy auth provider: `"iap"`, `"jwt"`, or `"header"`. |
 | `require_trusted_proxy_ip` | bool | `false` | Enables defense-in-depth IP allowlisting. Uses the trusted_proxies CIDR list. |
 
 #### Google IAP Settings (`server.auth.proxy.iap`)
@@ -121,6 +121,24 @@ Proxy authentication configuration (consulted when `server.auth.mode` is set to 
 | `audience` | string | | **MANDATORY for IAP.** The expected audience claim (`aud`) in the IAP-signed JWT assertion. Supported formats are Cloud Run native path or GCE/GKE GCLB backend service path. |
 | `issuer` | string | `"https://cloud.google.com/iap"` | The expected JWT issuer. Override only for mock/testing setups. |
 | `jwks_url` | string | `"https://www.gstatic.com/iap/verify/public_key-jwk"` | The URL to retrieve public keys for signature verification. Override only for testing. |
+
+#### Generic JWT Settings (`server.auth.proxy.jwt`)
+
+Used when `provider` is `"jwt"`. Exactly one key source — `public_key_file`, `jwks_url`, or `jwks_file` — must be set; the Hub refuses to start otherwise.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `header` | string | `"X-Auth-Proxy-JWT"` | HTTP header carrying the signed JWT assertion. |
+| `algorithm` | string | | **Required.** The single accepted signing algorithm. Must be asymmetric: `RS256`, `RS384`, `RS512`, `ES256`, `ES384`, `ES512`, `PS256`, `PS384`, or `PS512`. |
+| `issuer` | string | | If set, must match the JWT `iss` claim. Empty skips issuer validation. |
+| `audience` | string | | If set, must be contained in the JWT `aud` claim. Empty skips audience validation. |
+| `public_key_file` | string | | Key source: path to a PEM-encoded public key (PKIX, PKCS1, or an X.509 certificate). Loaded once at startup. |
+| `jwks_url` | string | | Key source: JWKS endpoint. Keys are cached and refreshed hourly and on an unknown `kid`, with the last-good key set served if the endpoint fails. |
+| `jwks_file` | string | | Key source: path to a local JWKS JSON document. Loaded once at startup; keys are matched by `kid`. Changes require a restart. |
+| `claims.email` | string | `"email"` | Claim holding the user's email. The claim is required on every token. |
+| `claims.subject` | string | `"sub"` | Claim holding the stable subject ID. Falls back to the email when absent. |
+| `claims.display_name` | string | `"name"` | Claim holding the display name. |
+| `claims.domain` | string | `"hd"` | Claim holding the hosted domain. |
 
 ### Transport Auth (`server.auth.transport`)
 
@@ -224,6 +242,37 @@ To protect deployments from silent data loss, the Hub implements a strict **503 
 * If the Hub is deployed on serverless environments like Google Cloud Run with the `local` backend selected, its local workspace paths map to ephemeral, non-durable container storage.
 * The Hub detects this non-durable state and automatically intercepts all file write and modification endpoints (including WebDAV, inline file editing, and git cloning).
 * Affected endpoints will return `503 Service Unavailable` with a descriptive message rather than allowing writes to persist ephemerally on the container's scratch space, enforcing the transition to a durable backend (`nfs`, `cloudrun-volume`, or `gke-shared-volume`) for production.
+
+### Shared Directory Storage (`server.shared_dir_storage`)
+
+Selects where project [shared directories](/scion/local/workspace/#5-project-shared-directories) are stored, independently of `server.workspace_storage`. With the `nfs` backend, every Runtime Broker resolves a project's shared directories to the same path on one NFS export, so agents on different brokers — Docker or Kubernetes — see the same files.
+
+This setting is **global-only**: each broker process reads it from its own global `settings.yaml`, never from project settings. It is a [Layer-0](#layer-0--bootstrap-file--env-only) setting and requires a restart to take effect.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `backend` | string | `"local"` | `"local"` (shared directories live next to the project's local config) or `"nfs"`. Any other value, including a different case, is rejected. |
+| `nfs.mount_root` | string | | **Required for `nfs`.** Host directory under which the share is mounted, at `<mount_root>/<shares[0].id>`. Docker, Podman, and Apple runtimes bind-mount from here. |
+| `nfs.shares` | list of objects | `[]` | **Required for `nfs`.** Only the first entry is used. `id` is required. `pv_name` names the static PersistentVolumeClaim that Kubernetes pods mount by `subPath`, and is required for Kubernetes brokers. |
+| `nfs.subpath_root` | string | `"projects"` | Directory within the share that holds per-project trees. Must be a relative path. |
+
+Shared directories resolve to `<mount_root>/<share id>/<subpath_root>/<project id>/shared-dirs/<name>`. On Kubernetes, pods mount the `pv_name` claim with the matching `subPath` instead of creating a per-directory PVC.
+
+The `nfs` backend fails closed. Agent start is refused when the block is incomplete, the host base directory does not exist, the runtime is not a local-container or Kubernetes runtime (for example, Cloud Run), or a shared-directory path resolves through a symlink. The NFS export itself must be provisioned and mounted before agents start. The `uid`, `gid`, `mount_options`, and `storage_class` fields of the `nfs` block are ignored here.
+
+```yaml
+server:
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: /mnt/scion-nfs
+      subpath_root: projects
+      shares:
+        - id: shared
+          server: 10.0.0.2
+          export: /scion-shared
+          pv_name: scion-shared-pvc
+```
 
 ### Scheduler (`server.scheduler`)
 
@@ -568,7 +617,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Database | `database.*` |
 | Listeners | `hub.port`, `hub.host`, `hub.read_timeout`, `hub.write_timeout`, `broker.*` |
 | Auth stack | `auth.mode`, `auth.dev_mode`, `auth.dev_token`, `auth.dev_token_file`, `auth.proxy.*`, `auth.transport.*`, `oauth.*`, `oidc_login.*` |
-| Secrets/storage | `secrets.*`, `storage.*`, `workspace_storage.*` |
+| Secrets/storage | `secrets.*`, `storage.*`, `workspace_storage.*`, `shared_dir_storage.*` |
 | Identity/mode | `mode`, `env`, `hub.hub_id`, `hub.gcp_project_id` |
 | Logging | `log_level`, `log_format` |
 | CORS | `hub.cors.*`, `broker.cors` |
