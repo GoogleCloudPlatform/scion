@@ -444,6 +444,41 @@ func TestReadDirNames_RemovedDirectory_TreatedAsEmpty(t *testing.T) {
 	assert.Empty(t, names)
 }
 
+// TestReadDirNames_ManyEntries_MultiBufferAccumulation exercises the
+// cross-iteration accumulation readDirNames does across more than one
+// unix.ReadDirent call: every other test's directory is small enough to
+// fit in a single 8KiB getdents buffer, so this is the only test that
+// actually forces readDirNames' for-loop around more than one read.
+// ~1000 entries with ~40-char names comfortably exceeds one buffer's
+// worth of dirents.
+func TestReadDirNames_ManyEntries_MultiBufferAccumulation(t *testing.T) {
+	dir := t.TempDir()
+	const count = 1000
+	want := make(map[string]struct{}, count)
+	for i := 0; i < count; i++ {
+		// 40 chars: "entry-" (6) + a zero-padded index (34) -- distinct
+		// across all 1000 entries, well within NAME_MAX.
+		name := fmt.Sprintf("entry-%034d", i)
+		require.Len(t, name, 40)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), nil, 0o644))
+		want[name] = struct{}{}
+	}
+
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	require.NoError(t, err)
+	defer func() { _ = unix.Close(fd) }()
+
+	names, err := readDirNames(fd)
+	require.NoError(t, err)
+	require.Len(t, names, count, "every entry across every buffer fill must be accumulated, none dropped or duplicated")
+
+	got := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		got[n] = struct{}{}
+	}
+	assert.Equal(t, want, got, "the returned set must be exactly the created entries")
+}
+
 // TestDeleteSharedDir_RemovesOnlyTheNamedLeaf: DeleteSharedDir removes
 // exactly the named shared dir and its content, leaving shared-dirs/ itself
 // and any sibling shared dir alone.
