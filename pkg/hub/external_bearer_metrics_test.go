@@ -634,21 +634,24 @@ func TestExternalBearerMetrics_LabelTypesOnlyConstructedAsConstants(t *testing.T
 	}
 }
 
-// TestExternalBearerMetrics_LabelValidMethods complements the grep above: it
-// catches the case the grep cannot (an untyped string literal assigned
-// directly, e.g. externalBearerAttempt{kind: "x"}, which compiles without a
-// conversion). Each label type's valid() method is a closed switch over its
-// own constants; this table drives every declared constant through valid()
-// (must be true) and a handful of values outside the set (must be false),
-// so a constant added to one of the enumeration funcs without a matching
-// valid() case — or vice versa — fails here.
+// TestExternalBearerMetrics_LabelValidMethods cross-checks each label type's
+// valid() switch against an independently hardcoded expected set (not the
+// enumeration funcs valid() itself is unrelated to — a genuine cross-check,
+// not a tautology): every expected constant must be both in the enumeration
+// func and valid(), every enumerated value must be a known constant, and the
+// two collections must be the same size. It also checks a handful of values
+// outside the set are rejected. This test proves the switch and the
+// enumeration agree with each other and with this independent list; it does
+// not by itself prove invalid values are kept out of a recorder — that is
+// TestRecord*_DropsInvalidLabel below, which is what actually enforces "no
+// other value can be emitted" (recordExternalBearer, recordCache and
+// recordGEExchange each check valid() before calling any recorder).
 func TestExternalBearerMetrics_LabelValidMethods(t *testing.T) {
 	t.Run("ExternalBearerKind", func(t *testing.T) {
-		for _, v := range externalBearerKinds() {
-			if !v.valid() {
-				t.Errorf("%q.valid() = false, want true", v)
-			}
+		want := map[ExternalBearerKind]bool{
+			ExternalBearerKindIDToken: true, ExternalBearerKindAccessToken: true, ExternalBearerKindUnknown: true,
 		}
+		checkValidCrossCheck(t, want, externalBearerKinds(), ExternalBearerKind.valid)
 		for _, v := range []ExternalBearerKind{"", "ID_TOKEN", "oops"} {
 			if v.valid() {
 				t.Errorf("%q.valid() = true, want false", v)
@@ -656,11 +659,10 @@ func TestExternalBearerMetrics_LabelValidMethods(t *testing.T) {
 		}
 	})
 	t.Run("ExternalBearerPrincipal", func(t *testing.T) {
-		for _, v := range externalBearerPrincipals() {
-			if !v.valid() {
-				t.Errorf("%q.valid() = false, want true", v)
-			}
+		want := map[ExternalBearerPrincipal]bool{
+			ExternalBearerPrincipalUser: true, ExternalBearerPrincipalServiceAccount: true, ExternalBearerPrincipalUnknown: true,
 		}
+		checkValidCrossCheck(t, want, externalBearerPrincipals(), ExternalBearerPrincipal.valid)
 		for _, v := range []ExternalBearerPrincipal{"", "USER", "oops"} {
 			if v.valid() {
 				t.Errorf("%q.valid() = true, want false", v)
@@ -668,11 +670,12 @@ func TestExternalBearerMetrics_LabelValidMethods(t *testing.T) {
 		}
 	})
 	t.Run("ExternalBearerOutcome", func(t *testing.T) {
-		for _, v := range externalBearerOutcomes() {
-			if !v.valid() {
-				t.Errorf("%q.valid() = false, want true", v)
-			}
+		want := map[ExternalBearerOutcome]bool{
+			ExternalBearerOutcomeOK: true, ExternalBearerOutcomeNotApplicable: true, ExternalBearerOutcomeRejected: true,
+			ExternalBearerOutcomeRateLimited: true, ExternalBearerOutcomeUpstreamError: true, ExternalBearerOutcomeSuspended: true,
+			ExternalBearerOutcomeForbidden: true, ExternalBearerOutcomeStoreError: true,
 		}
+		checkValidCrossCheck(t, want, externalBearerOutcomes(), ExternalBearerOutcome.valid)
 		for _, v := range []ExternalBearerOutcome{"", "OK", "oops"} {
 			if v.valid() {
 				t.Errorf("%q.valid() = true, want false", v)
@@ -680,11 +683,10 @@ func TestExternalBearerMetrics_LabelValidMethods(t *testing.T) {
 		}
 	})
 	t.Run("GoogleValidatorCacheResult", func(t *testing.T) {
-		for _, v := range googleValidatorCacheResults() {
-			if !v.valid() {
-				t.Errorf("%q.valid() = false, want true", v)
-			}
+		want := map[GoogleValidatorCacheResult]bool{
+			GoogleValidatorCacheHit: true, GoogleValidatorCacheMiss: true, GoogleValidatorCacheNegativeHit: true,
 		}
+		checkValidCrossCheck(t, want, googleValidatorCacheResults(), GoogleValidatorCacheResult.valid)
 		for _, v := range []GoogleValidatorCacheResult{"", "HIT", "oops"} {
 			if v.valid() {
 				t.Errorf("%q.valid() = true, want false", v)
@@ -692,15 +694,106 @@ func TestExternalBearerMetrics_LabelValidMethods(t *testing.T) {
 		}
 	})
 	t.Run("GEExchangeOutcome", func(t *testing.T) {
-		for _, v := range geExchangeOutcomes() {
-			if !v.valid() {
-				t.Errorf("%q.valid() = false, want true", v)
-			}
+		want := map[GEExchangeOutcome]bool{
+			GEExchangeOutcomeOK: true, GEExchangeOutcomeRateLimited: true, GEExchangeOutcomeNotConfigured: true,
+			GEExchangeOutcomeInvalidRequest: true, GEExchangeOutcomeBadRequest: true, GEExchangeOutcomeInvalidCredential: true,
+			GEExchangeOutcomeForbidden: true, GEExchangeOutcomeExchangeFailed: true,
 		}
+		checkValidCrossCheck(t, want, geExchangeOutcomes(), GEExchangeOutcome.valid)
 		for _, v := range []GEExchangeOutcome{"", "OK", "oops"} {
 			if v.valid() {
 				t.Errorf("%q.valid() = true, want false", v)
 			}
 		}
 	})
+}
+
+// checkValidCrossCheck is the generic body TestExternalBearerMetrics_LabelValidMethods
+// runs per label type: want is an expected set hardcoded independently in
+// the test (not derived from enumFn or valid), enumFn is the type's
+// enumeration func, and valid is the type's valid() method value (e.g.
+// ExternalBearerKind.valid). It fails if want, enumFn's output and valid()'s
+// acceptance ever disagree, in either direction.
+func checkValidCrossCheck[T comparable](t *testing.T, want map[T]bool, enum []T, valid func(T) bool) {
+	t.Helper()
+	enumSet := make(map[T]bool, len(enum))
+	for _, v := range enum {
+		enumSet[v] = true
+		if !valid(v) {
+			t.Errorf("%v: in the enumeration but valid() = false", v)
+		}
+		if !want[v] {
+			t.Errorf("%v: in the enumeration but not in this test's independent expected set", v)
+		}
+	}
+	for v := range want {
+		if !enumSet[v] {
+			t.Errorf("%v: in this test's independent expected set but missing from the enumeration func", v)
+		}
+		if !valid(v) {
+			t.Errorf("%v: in this test's independent expected set but valid() = false", v)
+		}
+	}
+	if len(enumSet) != len(want) {
+		t.Errorf("enumeration has %d distinct values, want %d", len(enumSet), len(want))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// An invalid label reaches no recorder. This is what
+// actually makes "no other value can be emitted" true: valid() by itself is
+// just a predicate, so recordExternalBearer/recordCache/recordGEExchange
+// must check it before calling any recorder, and these tests prove they do.
+// ---------------------------------------------------------------------------
+
+func TestRecordExternalBearer_DropsInvalidLabel(t *testing.T) {
+	cases := []struct {
+		name    string
+		attempt externalBearerAttempt
+		outcome ExternalBearerOutcome
+	}{
+		{"invalid kind", externalBearerAttempt{kind: ExternalBearerKind("oops"), principal: ExternalBearerPrincipalUser}, ExternalBearerOutcomeOK},
+		{"invalid principal", externalBearerAttempt{kind: ExternalBearerKindIDToken, principal: ExternalBearerPrincipal("oops")}, ExternalBearerOutcomeOK},
+		{"invalid outcome", externalBearerAttempt{kind: ExternalBearerKindIDToken, principal: ExternalBearerPrincipalUser}, ExternalBearerOutcome("oops")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeExternalBearerMetrics{}
+			var rec ExternalBearerMetricsRecorder = fake
+			var p atomic.Pointer[ExternalBearerMetricsRecorder]
+			p.Store(&rec)
+			cfg := AuthConfig{ExternalBearerMetrics: &p}
+
+			recordExternalBearer(cfg, tc.attempt, tc.outcome)
+
+			if got := len(fake.allCalls()); got != 0 {
+				t.Errorf("RecordExternalBearer called %d time(s), want 0 (invalid label must be dropped)", got)
+			}
+		})
+	}
+}
+
+func TestRecordCache_DropsInvalidLabel(t *testing.T) {
+	base := &countingBaseValidator{
+		idTokenResult: &ValidatedGoogleIdentity{Subject: "sub-1", Email: "user@gmail.com", EmailVerified: true},
+	}
+	fake := &fakeCacheMetrics{}
+	cache := NewCachingGoogleCredentialValidator(base, WithCacheMetrics(fake)).(*cachingGoogleCredentialValidator)
+
+	cache.recordCache(GoogleValidatorCacheResult("oops"))
+
+	if got := len(fake.all()); got != 0 {
+		t.Errorf("RecordGoogleValidatorCache called %d time(s), want 0 (invalid label must be dropped)", got)
+	}
+}
+
+func TestRecordGEExchange_DropsInvalidLabel(t *testing.T) {
+	fake := &fakeGEExchangeMetrics{}
+	srv := &Server{geExchangeMetrics: fake}
+
+	srv.recordGEExchange(GEExchangeOutcome("oops"))
+
+	if got := len(fake.all()); got != 0 {
+		t.Errorf("RecordGEExchangeRequest called %d time(s), want 0 (invalid label must be dropped)", got)
+	}
 }

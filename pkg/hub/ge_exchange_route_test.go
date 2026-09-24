@@ -25,6 +25,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"go.opentelemetry.io/otel/sdk/metric"
 )
 
 // ---------------------------------------------------------------------------
@@ -503,14 +505,17 @@ func TestGEExchange_Route_ProductionResolverHonoursAdminEmails(t *testing.T) {
 // WithCacheMetrics directly, bypassing New() -> Handler() entirely — this is
 // the only test that goes through that real wiring.
 //
-// Handler() is captured BEFORE the setters run, mirroring the one ordering
-// that actually exercises AuthConfig.ExternalBearerMetrics's *atomic.Pointer
-// design: cmd/server_foreground.go calls the setters after New() returns, and
-// nothing before this test enforces that Handler() (which the production
-// listener's http.Server.Handler is built from exactly once) is called only
-// afterward. If SetExternalBearerMetrics ever replaced the box instead of
-// storing into it, a handler captured first would keep observing the old,
-// empty box — this ordering is what would catch that.
+// Handler() (server.go) is s.applyMiddleware(s.mux), and it re-reads
+// s.authConfig fresh on every call — it is Start(), not registerRoutes/New(),
+// that captures authConfig by value into UnifiedAuthMiddleware's closure
+// exactly once, when it calls applyMiddleware to build the production
+// http.Server's Handler. cmd/server_foreground.go calls the three setters
+// before Start(). This test captures Handler() once, before calling the
+// setters, to stand in for that single Start()-time capture: only with the
+// handler built first do the setters have to reach an *already-captured*
+// cfg, which is what actually exercises AuthConfig.ExternalBearerMetrics's
+// *atomic.Pointer design and would catch SetExternalBearerMetrics ever
+// replacing the box instead of storing into it.
 // ---------------------------------------------------------------------------
 
 func TestServer_MetricsSettersReachRunningHandler(t *testing.T) {
@@ -579,5 +584,174 @@ func TestServer_MetricsSettersReachRunningHandler(t *testing.T) {
 	cachingValidator.recordCache(GoogleValidatorCacheHit)
 	if got := len(cacheFake.all()); got != 1 {
 		t.Errorf("cache fake saw %d call(s), want 1 (SetGoogleValidatorCacheMetrics must reach the decorator's metrics field)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// New()'s default wiring (no Set*Metrics call at all)
+// actually reaches GET /metrics. Every other metrics test either builds its
+// own AuthConfig (bypassing New() entirely) or calls the setters, which
+// replace the default — this is the only test proving the default itself
+// works end to end. Deleting any of the three lines that wire it in New()
+// (ExternalBearerMetrics.Store(&defaultExtBearerMetrics), the cache
+// decorator's SetMetrics(srv.externalBearerSnapshot), or
+// srv.geExchangeMetrics = srv.externalBearerSnapshot) leaves this counter's
+// /metrics section at zero forever on a Hub with no GCP export configured —
+// exactly what the exchange-deletion soak gate would read as "traffic
+// stopped".
+// ---------------------------------------------------------------------------
+
+func TestServer_DefaultMetricsWiring_RecordsWithoutSetters(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.DevAuthToken = testDevToken // /metrics is authenticated, though RBAC-public
+	cfg.GEGoogleExchange = GEGoogleExchangeConfig{
+		Enabled:          true,
+		AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+		TokenTTL:         DefaultGETokenTTL,
+	}
+	// Deliberately no Federation config: the /api/v1/auth/me request below
+	// exercises not_applicable, which needs no Google trust and no network.
+
+	srv, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	srv.geExchangeService.validator = &fakeGoogleValidator{idTokenResult: validGmailIdentity()}
+
+	handler := srv.Handler()
+
+	// (a) an exchange POST.
+	body := `{"credential":"test-token","credentialType":"id_token"}`
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/auth/integrations/google/exchange", bytes.NewBufferString(body))
+	req1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	handler.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("exchange POST: status = %d, want 200: %s", w1.Code, w1.Body.String())
+	}
+
+	// (b) a non-Hub bearer to /api/v1/auth/me: records not_applicable.
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	req2.Header.Set("Authorization", "Bearer not-a-hub-token")
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req2)
+
+	// (c) a cache record via the decorator directly — no network needed.
+	cachingValidator, ok := srv.authConfig.GoogleValidator.(*cachingGoogleCredentialValidator)
+	if !ok {
+		t.Fatalf("expected authConfig.GoogleValidator to be a *cachingGoogleCredentialValidator, got %T", srv.authConfig.GoogleValidator)
+	}
+	cachingValidator.recordCache(GoogleValidatorCacheHit)
+
+	// GET /metrics through the same handler; no setter was ever called, so
+	// this is entirely New()'s default wiring.
+	req3 := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req3.Header.Set("Authorization", "Bearer "+testDevToken)
+	w3 := httptest.NewRecorder()
+	handler.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusOK {
+		t.Fatalf("/metrics: status = %d, want 200: %s", w3.Code, w3.Body.String())
+	}
+
+	decoded := decodeExternalBearerSection(t, w3.Body.Bytes())
+	if got := decoded.ExternalBearerTotal[string(ExternalBearerOutcomeNotApplicable)]; got != 1 {
+		t.Errorf("externalBearerTotal.not_applicable = %d, want 1", got)
+	}
+	if got := decoded.GoogleValidatorCacheTotal[string(GoogleValidatorCacheHit)]; got != 1 {
+		t.Errorf("googleValidatorCacheTotal.hit = %d, want 1", got)
+	}
+	var exchangeTotal int64
+	for _, v := range decoded.GEExchangeRequestsTotal {
+		exchangeTotal += v
+	}
+	if exchangeTotal != 1 {
+		t.Errorf("geExchangeRequestsTotal summed = %d, want 1: %+v", exchangeTotal, decoded.GEExchangeRequestsTotal)
+	}
+	if got := decoded.GEExchangeRequestsTotal[string(GEExchangeOutcomeOK)]; got != 1 {
+		t.Errorf("geExchangeRequestsTotal.ok = %d, want 1", got)
+	}
+}
+
+// decodeExternalBearerSection decodes GET /metrics's "externalBearer" JSON
+// section from a response body, failing the test if it is missing.
+func decodeExternalBearerSection(t *testing.T, body []byte) *ExternalBearerMetricsSnapshot {
+	t.Helper()
+	var decoded struct {
+		ExternalBearer *ExternalBearerMetricsSnapshot `json:"externalBearer"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("decode /metrics: %v: body=%s", err, body)
+	}
+	if decoded.ExternalBearer == nil {
+		t.Fatal("externalBearer section missing from /metrics")
+	}
+	return decoded.ExternalBearer
+}
+
+// TestServer_DefaultMetricsWiring_OTelSetterStillMovesSnapshot extends the
+// test above (covers Optional O3): builds the OTel recorder exactly as
+// cmd/server_foreground.go does — NewOTelExternalBearerMetrics(mp,
+// srv.ExternalBearerSnapshotMetrics()) followed by all three setters — and
+// proves /metrics still moves by exactly 1. If the snapshot argument were
+// ever dropped (passed as nil, a legal value), the section would freeze the
+// moment GCP export is configured.
+func TestServer_DefaultMetricsWiring_OTelSetterStillMovesSnapshot(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.DevAuthToken = testDevToken // /metrics is authenticated, though RBAC-public
+	cfg.GEGoogleExchange = GEGoogleExchangeConfig{
+		Enabled:          true,
+		AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
+		TokenTTL:         DefaultGETokenTTL,
+	}
+
+	srv, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	srv.geExchangeService.validator = &fakeGoogleValidator{idTokenResult: validGmailIdentity()}
+
+	reader := metric.NewManualReader()
+	mp := metric.NewMeterProvider(metric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	otelRec, err := NewOTelExternalBearerMetrics(mp, srv.ExternalBearerSnapshotMetrics())
+	if err != nil {
+		t.Fatalf("NewOTelExternalBearerMetrics: %v", err)
+	}
+	srv.SetExternalBearerMetrics(otelRec)
+	srv.SetGoogleValidatorCacheMetrics(otelRec)
+	srv.SetGEExchangeMetrics(otelRec)
+
+	handler := srv.Handler()
+
+	body := `{"credential":"test-token","credentialType":"id_token"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/integrations/google/exchange", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("exchange POST: status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsReq.Header.Set("Authorization", "Bearer "+testDevToken)
+	metricsW := httptest.NewRecorder()
+	handler.ServeHTTP(metricsW, metricsReq)
+
+	decoded := decodeExternalBearerSection(t, metricsW.Body.Bytes())
+	if got := decoded.GEExchangeRequestsTotal[string(GEExchangeOutcomeOK)]; got != 1 {
+		t.Errorf("geExchangeRequestsTotal.ok = %d, want 1 (the OTel recorder must dual-write into the same shared snapshot passed to it)", got)
 	}
 }

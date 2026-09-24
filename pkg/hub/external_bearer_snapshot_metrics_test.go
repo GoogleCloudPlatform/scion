@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -53,6 +54,33 @@ func TestExternalBearerSnapshotMetrics_RecordsMoveTheSnapshot(t *testing.T) {
 	}
 	if got := after.GEExchangeRequestsTotal[string(GEExchangeOutcomeOK)]; got != 1 {
 		t.Errorf("exchange ok count = %d, want 1", got)
+	}
+}
+
+// TestExternalBearerSnapshotMetrics_Since proves the snapshot carries a
+// parseable RFC3339 construction timestamp, fixed at construction and
+// unchanged across snapshots taken later.
+func TestExternalBearerSnapshotMetrics_Since(t *testing.T) {
+	before := time.Now().UTC()
+	m := NewExternalBearerSnapshotMetrics()
+	after := time.Now().UTC()
+
+	snap1 := m.GetSnapshot()
+	if snap1.Since == "" {
+		t.Fatal("Since is empty")
+	}
+	since, err := time.Parse(time.RFC3339, snap1.Since)
+	if err != nil {
+		t.Fatalf("Since = %q is not RFC3339: %v", snap1.Since, err)
+	}
+	if since.Before(before.Add(-time.Second)) || since.After(after.Add(time.Second)) {
+		t.Errorf("Since = %v, want between %v and %v", since, before, after)
+	}
+
+	m.RecordGEExchangeRequest(GEExchangeOutcomeOK)
+	snap2 := m.GetSnapshot()
+	if snap2.Since != snap1.Since {
+		t.Errorf("Since changed across snapshots: %q -> %q, want fixed at construction", snap1.Since, snap2.Since)
 	}
 }
 
@@ -129,8 +157,11 @@ func TestHandleMetrics_ExternalBearerSection(t *testing.T) {
 
 // TestHandleMetrics_NoMetricsWhenNothingWired proves the pre-existing
 // "no_metrics" fallback still fires when broker, GCP and external-bearer
-// snapshots are all absent (a Server built without New(), the same shape
-// TestGEExchangeHandler_NotConfigured and friends use elsewhere).
+// snapshots are all absent. This is only reachable for a Server not built
+// through New() (the same shape TestGEExchangeHandler_NotConfigured and
+// friends use elsewhere) — a New()-built Server always has at least
+// gcpTokenMetrics and externalBearerSnapshot, so production never sees this
+// branch.
 func TestHandleMetrics_NoMetricsWhenNothingWired(t *testing.T) {
 	srv := &Server{}
 
