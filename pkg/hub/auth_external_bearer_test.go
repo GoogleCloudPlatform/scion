@@ -602,10 +602,7 @@ func TestExternalBearer_NoTrustProductionShape_Golden401(t *testing.T) {
 	// error, not a nil identity — so this test fails at its own
 	// counting.totalCalls() assertion instead of a nil-pointer-dereference
 	// panic that aborts the whole test binary (review r2 optional finding 3).
-	counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
-		idTokenErr:     ErrGoogleInvalidCredential,
-		accessTokenErr: ErrGoogleInvalidCredential,
-	}}
+	counting := newRejectingCountingValidator()
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
@@ -668,10 +665,7 @@ func TestExternalBearer_ValidHubJWT_NeverTouchesGoogleValidator(t *testing.T) {
 	// error, not a nil identity — so this test fails at its own
 	// counting.totalCalls() assertion instead of a nil-pointer-dereference
 	// panic that aborts the whole test binary (review r2 optional finding 3).
-	counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
-		idTokenErr:     ErrGoogleInvalidCredential,
-		accessTokenErr: ErrGoogleInvalidCredential,
-	}}
+	counting := newRejectingCountingValidator()
 
 	fa := newGoogleTrustFederationAuth(t, externalBearerTestAudience)
 	cfg := AuthConfig{
@@ -908,10 +902,7 @@ func TestExternalBearer_ServiceAccountFederationIssuer_NotApplicable(t *testing.
 	// error, not a nil identity — so this test fails at its own
 	// counting.totalCalls() assertion instead of a nil-pointer-dereference
 	// panic that aborts the whole test binary (review r2 optional finding 3).
-	counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
-		idTokenErr:     ErrGoogleInvalidCredential,
-		accessTokenErr: ErrGoogleInvalidCredential,
-	}}
+	counting := newRejectingCountingValidator()
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
@@ -965,10 +956,7 @@ func TestExternalBearer_EmptyExpectedAudience_NotApplicable(t *testing.T) {
 	// error, not a nil identity — so this test fails at its own
 	// counting.totalCalls() assertion instead of a nil-pointer-dereference
 	// panic that aborts the whole test binary (review r2 optional finding 3).
-	counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
-		idTokenErr:     ErrGoogleInvalidCredential,
-		accessTokenErr: ErrGoogleInvalidCredential,
-	}}
+	counting := newRejectingCountingValidator()
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
@@ -1417,10 +1405,7 @@ func TestExternalBearer_ConfiguredTrustInvariant_Golden(t *testing.T) {
 			// test binary before the remaining golden cases run (review r2
 			// optional finding 3; the same class of problem P1 r4 optional
 			// finding 1 fixed for trackingUserStore).
-			counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
-				idTokenErr:     ErrGoogleInvalidCredential,
-				accessTokenErr: ErrGoogleInvalidCredential,
-			}}
+			counting := newRejectingCountingValidator()
 			// GoogleValidator/GoogleResolver are always wired, matching
 			// production shape (server.go's New builds them unconditionally,
 			// O3): only trust varies below. Review r1 finding 3: an earlier
@@ -1483,10 +1468,7 @@ func TestExternalBearer_PATShapedToken_NeverTouchesGoogleValidator(t *testing.T)
 	// error, not a nil identity — so this test fails at its own
 	// counting.totalCalls() assertion instead of a nil-pointer-dereference
 	// panic that aborts the whole test binary (review r2 optional finding 3).
-	counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
-		idTokenErr:     ErrGoogleInvalidCredential,
-		accessTokenErr: ErrGoogleInvalidCredential,
-	}}
+	counting := newRejectingCountingValidator()
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
@@ -1538,10 +1520,7 @@ func TestExternalBearer_ValidAgentToken_NeverTouchesGoogleValidator(t *testing.T
 	// error, not a nil identity — so this test fails at its own
 	// counting.totalCalls() assertion instead of a nil-pointer-dereference
 	// panic that aborts the whole test binary (review r2 optional finding 3).
-	counting := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{
-		idTokenErr:     ErrGoogleInvalidCredential,
-		accessTokenErr: ErrGoogleInvalidCredential,
-	}}
+	counting := newRejectingCountingValidator()
 	userStore := newFakeUserStore()
 	extStore := newMemExtIDStore()
 	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
