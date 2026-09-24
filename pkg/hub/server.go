@@ -1656,10 +1656,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// either way.
 	srv.authConfig.GoogleValidator = NewCachingGoogleCredentialValidator(googleValidator)
 	srv.authConfig.GoogleResolver = googleResolver
-	// The atomic.Pointer box, not a recorder, is what must exist before
-	// registerRoutes captures this cfg by value below: SetExternalBearerMetrics
-	// stores into this same box later, once an OTel MeterProvider exists
-	// (design §4.7; see AuthConfig.ExternalBearerMetrics for why).
+	// The atomic.Pointer box, not a recorder, is what must exist here:
+	// SetExternalBearerMetrics stores into this same box later, once an OTel
+	// MeterProvider exists (see AuthConfig.ExternalBearerMetrics for why a
+	// plain field would also work given today's call order, and why the box
+	// is used anyway).
 	srv.authConfig.ExternalBearerMetrics = &atomic.Pointer[ExternalBearerMetricsRecorder]{}
 
 	// The in-process design §4.7 counters (external-bearer outcome, cache
@@ -2556,16 +2557,18 @@ func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
 // SetExternalBearerMetrics wires the external-bearer authentication outcome
 // counter (design §4.7). Unlike SetMetrics/SetDBMetrics/SetDispatchMetrics/
 // SetGCPTokenMetrics above, this recorder is read from AuthConfig by the
-// free-standing UnifiedAuthMiddleware closure, which captures a copy of
-// authConfig exactly once — in registerRoutes, called at the end of New(),
-// before this setter can ever run (every OTel-backed Hub metrics recorder
-// is, like this one, only buildable once the server's Hub ID is known; see
-// cmd/server_foreground.go). Storing into the *atomic.Pointer already held
-// by AuthConfig.ExternalBearerMetrics — the same indirection FederationAuth
+// free-standing UnifiedAuthMiddleware closure. That closure captures a copy
+// of authConfig each time applyMiddleware runs (Start(), Handler()), not
+// once inside New(); cmd/server_foreground.go happens to call this setter
+// before either, so a plain field would work under today's call order too.
+// Storing into the *atomic.Pointer already held by
+// AuthConfig.ExternalBearerMetrics — the same indirection FederationAuth
 // uses for hot reload, for the identical structural reason — means every
-// copy of that captured cfg keeps observing the same box, so calling this
-// after New() returns still takes effect. A nil recorder disables counting;
-// it never changes the external-bearer path's authentication outcome.
+// copy of that cfg, however many times it was captured, keeps observing the
+// same box: this setter takes effect race-free even if a future caller runs
+// it after Start()/Handler() already built the request-serving chain. A nil
+// recorder disables counting; it never changes the external-bearer path's
+// authentication outcome.
 //
 // If ExternalBearerMetrics is nil (a Server built without New(), which
 // never allocates the box), this allocates one rather than panicking; the

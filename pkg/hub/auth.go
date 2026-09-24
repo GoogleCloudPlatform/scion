@@ -87,16 +87,15 @@ type AuthConfig struct {
 	// ExternalBearerMetrics records the outcome of every external-bearer
 	// authentication attempt (the external_bearer counter; see
 	// external_bearer_metrics.go for the closed label set and the real
-	// exported metric names). Held as *atomic.Pointer — the same
-	// indirection FederationAuth uses above, for the same structural
-	// reason: UnifiedAuthMiddleware captures this cfg by value exactly
-	// once, in registerRoutes (called at the end of New()), but the
-	// OTel-backed recorder can only be built once the server's Hub ID is
-	// known, which happens after that capture (see server.go's
-	// SetExternalBearerMetrics and cmd/server_foreground.go). A nil
-	// pointer, or one currently holding a nil interface, disables
-	// recording; it never changes the external-bearer path's
-	// authentication outcome.
+	// exported metric names). UnifiedAuthMiddleware captures a copy of this
+	// cfg each time applyMiddleware runs (Start(), Handler()).
+	// cmd/server_foreground.go calls SetExternalBearerMetrics before either,
+	// so a plain field would work today; the *atomic.Pointer (the
+	// FederationAuth shape above) makes a setter call after the handler is
+	// already built still take effect, race-free, so correctness does not
+	// depend on that ordering. A nil pointer, or one currently holding a nil
+	// interface, disables recording; it never changes the external-bearer
+	// path's authentication outcome.
 	ExternalBearerMetrics *atomic.Pointer[ExternalBearerMetricsRecorder]
 	// CredentialStore handles agent credential validation (Phase 1H).
 	// When non-nil, agent tokens are validated against persistent credential state.
