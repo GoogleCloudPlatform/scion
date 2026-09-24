@@ -31,9 +31,9 @@ import (
 // scion_hub_ge_exchange_requests_total{outcome}. Every
 // outcome is proven by driving handleGEGoogleExchange directly (the real
 // handler, not a call to RecordGEExchangeRequest), and every test also
-// checks the response bytes/status are exactly what they were before this
-// metric existed — recording it must never change the exchange response:
-// exchange responses must stay byte-identical.
+// checks the response bytes/status are byte-identical to the response
+// without a metrics recorder — recording it must never change the exchange
+// response.
 // ---------------------------------------------------------------------------
 
 // fakeGEExchangeMetrics records every RecordGEExchangeRequest call.

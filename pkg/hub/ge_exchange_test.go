@@ -491,10 +491,9 @@ func TestGEExchange_ExpiredToken(t *testing.T) {
 }
 
 func TestGEExchange_ServiceAccount(t *testing.T) {
-	// SA rejection moved out of the validator: the real
-	// validator now classifies IsServiceAccount rather than erroring, so this
-	// test drives the exchange's own Step 1.5 rejection, not a validator
-	// error. The fake mirrors that shape exactly.
+	// The real validator classifies IsServiceAccount rather than erroring,
+	// so this test drives the exchange's own Step 1.5 rejection, not a
+	// validator error. The fake mirrors that shape exactly.
 	identity := &ValidatedGoogleIdentity{
 		Subject:          "sa-sub-123",
 		Email:            "sa@proj.iam.gserviceaccount.com",
@@ -701,9 +700,8 @@ func TestGEExchange_AdminEmails_ProvisionsAdminRole(t *testing.T) {
 // server error (5xx), not the 403 "no binding" treatment a
 // non-authoritative or conflicting-binding case gets. Exercises the
 // exchange side of the same resolver behaviour that
-// auth_external_bearer_test.go's
-// TestExternalBearer_GetExternalIdentityFault_ServiceUnavailable exercises
-// on the external-bearer side.
+// auth_external_bearer_test.go's TestExternalBearer_GetExternalIdentityFault_ServiceUnavailable
+// exercises on the external-bearer side.
 func TestGEExchange_ExternalIdentityLookupFault_ServerError(t *testing.T) {
 	identity := validGmailIdentity()
 	validator := &fakeGoogleValidator{idTokenResult: identity}
@@ -2268,9 +2266,8 @@ func TestGEExchange_RealValidator_UpstreamFailures_ExactBytes(t *testing.T) {
 
 // TestGEExchange_RealValidator_IDTokenForceRefreshFailure_ExactBytes covers
 // an ID-token JWKS force-refresh 5xx, using the same fetchedAt back-dating
-// technique as
-// TestProductionValidator_IDToken_ForceRefreshFailure_UpstreamError and
-// TestProductionValidator_IDToken_JWKSForceRefresh.
+// technique as TestProductionValidator_IDToken_ForceRefreshFailure_UpstreamError
+// and TestProductionValidator_IDToken_JWKSForceRefresh.
 func TestGEExchange_RealValidator_IDTokenForceRefreshFailure_ExactBytes(t *testing.T) {
 	kp1 := newGCVTestKeyPair("kid-1")
 	rotatedKP := newGCVTestKeyPair("kid-2") // signs the token; never served successfully

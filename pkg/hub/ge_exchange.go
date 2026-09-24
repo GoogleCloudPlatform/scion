@@ -193,11 +193,10 @@ func (s *GEExchangeService) Exchange(ctx context.Context, req *ExchangeRequest) 
 		}
 	}
 
-	// Step 1.5: reject service-account credentials for user exchange. SA
-	// rejection moved out of the validator: the validator now
-	// only classifies IsServiceAccount, and each caller decides whether to
-	// admit it. The exchange endpoint keeps its pre-existing behaviour of
-	// rejecting SA credentials outright, unchanged.
+	// Step 1.5: reject service-account credentials for user exchange. The
+	// validator only classifies IsServiceAccount and each caller decides
+	// whether to admit it; the exchange endpoint rejects SA credentials
+	// outright.
 	if identity.IsServiceAccount {
 		s.logger.Warn("GE exchange: rejecting service account credential",
 			"credential_type", credType,

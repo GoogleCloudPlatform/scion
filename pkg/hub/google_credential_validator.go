@@ -279,10 +279,9 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 	}
 
 	// Classify service accounts by the verified email claim. Rejection is the
-	// caller's responsibility: GEExchangeService rejects SA
-	// identities immediately after validation to keep its behaviour unchanged,
-	// while other callers (e.g. the external-bearer path) may admit them under
-	// their own policy.
+	// caller's responsibility: GEExchangeService rejects SA identities
+	// immediately after validation, while other callers (e.g. the
+	// external-bearer path) may admit them under their own policy.
 	isServiceAccount := isGoogleServiceAccount(claims.Email)
 
 	expiry := claims.Expiry.Time()
@@ -290,7 +289,7 @@ func (v *googleCredentialValidator) ValidateIDToken(ctx context.Context, token s
 	// Extract audience. Service-account and user ID tokens disagree on what
 	// azp means, so they get different rules:
 	//
-	//   - User tokens (unchanged): azp, when present, is the authoritative
+	//   - User tokens: azp, when present, is the authoritative
 	//     issued-to client, and aud must not disagree with it.
 	//   - SA ID tokens (metadata server, iamcredentials.generateIdToken)
 	//     carry azp = sub = the SA's own numeric unique ID, and
