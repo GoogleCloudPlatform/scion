@@ -119,8 +119,6 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 		// Normalize issuer URL by trimming trailing slashes for consistent map lookup.
 		normalizedIssuer := strings.TrimRight(issuer.IssuerURL, "/")
 
-		warnIfExternalBearerDisabled(log, issuer, normalizedIssuer)
-
 		// Fix 2: In hosted mode (not workstation, not dev), reject HTTP issuer URLs.
 		if mode != "workstation" && mode != "dev" {
 			u, err := url.Parse(normalizedIssuer)
@@ -178,6 +176,13 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 			refreshInterval:  cfg.Cache.RefreshInterval,
 			debounceInterval: cfg.Cache.DebounceInterval,
 		}
+
+		// Logged only once this issuer is actually going to be stored: an
+		// issuer that fails validation above (bad scheme, JWKS discovery
+		// failure, ...) never reaches here, so a rebuild that fails and
+		// keeps the old config (operational_settings.go) never logs a
+		// warning about a config that didn't take effect.
+		warnIfExternalBearerDisabled(log, issuer, normalizedIssuer)
 
 		issuers[normalizedIssuer] = &issuerEntry{
 			config:    resolvedCfg,

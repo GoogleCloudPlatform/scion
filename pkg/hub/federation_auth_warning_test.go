@@ -17,6 +17,7 @@ package hub
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -166,7 +167,11 @@ func TestExternalBearer_DisabledPathRequests_NoAddedWarnings(t *testing.T) {
 	cfg := AuthConfig{
 		Mode:           "production",
 		FederationAuth: federationAuthPointer(fa),
-		Logger:         slog.Default(),
+		// The same capture logger as the constructor call above, not
+		// slog.Default(): a regression that logged the warning on the
+		// request path via cfg.Logger (rather than only from
+		// NewFederationAuthenticator) must still be caught by this test.
+		Logger: log,
 	}
 	for i := 0; i < 5; i++ {
 		doExternalBearerRequest(cfg, "not-a-jwt-opaque-token")
@@ -174,5 +179,43 @@ func TestExternalBearer_DisabledPathRequests_NoAddedWarnings(t *testing.T) {
 
 	if got := countWarnLines(t, buf, externalBearerDisabledWarningMsg); got != 1 {
 		t.Errorf("warning count after 5 requests = %d, want still 1 (load-time only); log:\n%s", got, buf.String())
+	}
+}
+
+// erroringRoundTripper fails every request, so JWKS OIDC discovery fails fast
+// and deterministically, without a real network call.
+type erroringRoundTripper struct{}
+
+func (erroringRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("network disabled for this test")
+}
+
+// TestNewFederationAuthenticator_ConstructionFails_NoWarning proves the
+// warning is logged only for an issuer that is actually going to be stored,
+// not merely inspected: a Google user issuer with an empty expected_audience
+// (which would otherwise warn) whose JWKS discovery also fails must not log
+// the warning, since that issuer never takes effect and NewFederationAuthenticator
+// returns an error for the whole config.
+func TestNewFederationAuthenticator_ConstructionFails_NoWarning(t *testing.T) {
+	log, buf := federationAuthCaptureBuffer()
+	fedCfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:  googleIssuerHTTPS,
+				IssuerType: "user",
+				// JWKSURL deliberately empty: forces OIDC discovery, which
+				// fails via the erroring transport below.
+			},
+		},
+	}
+	_, err := NewFederationAuthenticator(fedCfg, "https://hub.example.com",
+		&http.Client{Transport: erroringRoundTripper{}}, "hosted", log)
+	if err == nil {
+		t.Fatal("expected NewFederationAuthenticator to fail (JWKS discovery error)")
+	}
+
+	if got := countWarnLines(t, buf, externalBearerDisabledWarningMsg); got != 0 {
+		t.Errorf("warning count for an issuer whose construction failed = %d, want 0; log:\n%s", got, buf.String())
 	}
 }
