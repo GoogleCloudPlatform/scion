@@ -265,6 +265,66 @@ server:
   - `service_account`: Authenticates automated workloads via GCP Service Accounts.
   - `user`: Maps OIDC tokens to standard user identities, with configurable `default_role` (defaults to `viewer`) and domain restrictions using wildcards (e.g. `allowed_emails: ["*@example.com"]`).
 
+### External Bearer Tokens (Google credential pass-through)
+
+An integration that sits in front of the Hub — for example the Gemini Enterprise A2A bridge — does not mint a Hub credential on the end user's behalf. It forwards the caller's **own** Google credential, verbatim, as the request's `Authorization: Bearer` header, on every request. There is no exchange step and no separate Hub-issued token to cache, refresh, or revoke.
+
+This path activates once a `user`-type trusted issuer for `https://accounts.google.com` is configured with a non-empty `expected_audience`. Two credential shapes and two principal kinds are accepted:
+
+| Principal | Google OIDC ID token (JWT) | Google OAuth2 access token (opaque) |
+|---|---|---|
+| **User** | Accepted: `aud` in `expected_audience`, verified email, `allowed_domains` (if set), then the Hub sign-in policy | Accepted: `azp` in `expected_audience`, verified email, `allowed_domains` (if set), then the Hub sign-in policy |
+| **Service account** | Accepted: `aud` in `expected_audience`, verified email, GCP project (parsed from the email) in `allowed_gcp_projects` — unset admits none | **Always rejected** |
+
+```yaml
+server:
+  federation:
+    enabled: true
+    trusted_issuers:
+      - issuer_url: "https://accounts.google.com"
+        jwks_url: "https://www.googleapis.com/oauth2/v3/certs"
+        issuer_type: "user"
+        # REQUIRED: the OAuth client ID whose tokens are accepted. Without
+        # this, the path stays disabled for this issuer (a startup warning
+        # is logged, not an error).
+        expected_audience: "1234567890-abc.apps.googleusercontent.com"
+        # Optional: restrict USER principals to these email domains (exact,
+        # case-insensitive, no wildcards, no subdomain matching). Omit to
+        # accept any verified Google account that passes the Hub sign-in
+        # policy below.
+        allowed_domains: ["example.com"]
+        # Optional: admit SERVICE-ACCOUNT principals whose GCP project ID
+        # (parsed from the service account's email) is listed (exact,
+        # case-insensitive). Omitting this admits NO service accounts.
+        allowed_gcp_projects: ["my-a2a-project"]
+```
+
+A verified **user** identity is still resolved through the same sign-in policy as interactive login (`admin_emails`, `authorized_domains`, `user_access_mode`) after the `allowed_domains` check passes — a listed domain narrows *which* users reach that policy, it does not replace it. A verified **service account** identity skips the sign-in policy entirely: membership in `allowed_gcp_projects` **is** the authorization decision for first-time admission. A service account is never subject to `allowed_domains`, and a user is never subject to `allowed_gcp_projects`. Bypassing the sign-in policy does not extend to suspension: a service account that was already provisioned and is later suspended is refused on its next request exactly like a suspended user.
+
+The A2A bridge forwards Google credentials under the `hubBearer` auth scheme (`auth.scheme: hubBearer` in `scion-a2a-bridge.yaml`): it admits a caller by presenting the same token to the Hub's `GET /api/v1/auth/me`, then forwards that token verbatim on every downstream call. The Hub re-verifies the token on each request, so a suspended user or a revoked Google grant is refused on the next call regardless of the bridge's own admission cache.
+
+**Response codes:**
+
+| Condition | Status | Code |
+|---|---|---|
+| No Google trust configured, or the token isn't a shape this path recognizes | Falls through to the pre-existing rejection for that credential | — |
+| Per-client-IP rate limit exceeded (checked only on a credential-cache miss) | 429, with `Retry-After` | `rate_limited` |
+| Verification failed, unverified email, a service account presented as an access token, or its project/domain isn't listed | 401 | `unauthorized` (message `invalid external bearer token`; the specific reason is logged, never returned) |
+| Google's token-verification endpoints are unreachable | 503 | `upstream_unavailable` |
+| An internal fault while resolving the verified identity to a Hub user (store error) | 503 | `store_error` |
+| The resolved user is suspended | 403 | `user_suspended` |
+| The Hub sign-in policy denies the user, or the identity fails auto-link checks | 403 | `forbidden` |
+
+:::note[Every unrecognized opaque token is sent to Google]
+Once a Google issuer is trusted, the Hub does not sniff a bearer token's prefix (e.g. `ya29.`) to decide whether it might be a Google access token — that prefix isn't part of Google's contract. Any bearer credential that reaches this path without being a JWT is treated as a candidate Google access token and introspected against Google's `tokeninfo` endpoint. A non-JWT credential intended for some other purpose will still just fail verification (401), but it does cost a Google round trip.
+:::
+
+:::note[Domain-scoped GCP projects]
+A domain-scoped GCP project ID such as `example.com:proj` produces service-account emails whose domain is `proj.example.com.iam.gserviceaccount.com`, which parses to `proj.example.com`. List that parsed form — `proj.example.com`, not `example.com:proj` — in `allowed_gcp_projects`.
+:::
+
+`allowed_domains` and `allowed_gcp_projects` are matched case-insensitively against the verified email; the configured lists themselves are kept exactly as written (not lower-cased or otherwise rewritten when the config loads).
+
 ---
 
 ## Development Authentication (Dev Auth)

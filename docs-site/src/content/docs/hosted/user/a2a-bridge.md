@@ -358,7 +358,10 @@ The A2A bridge supports four authentication schemes for granular access control,
 * **How it works**: Callers present a Scion-signed User JWT.
 * **Local Validation**: The bridge validates the JWT signature locally using the HS256 `hub.signing_key` secret shared with the Hub. Since this happens entirely locally, it requires no active API calls to the Hub, making it extremely fast.
 
-#### 3. `geGoogle` (For Google Cloud Environments)
+#### 3. `geGoogle` (For Google Cloud Environments) — **Deprecated, superseded by `hubBearer`**
+:::caution[Deprecated]
+`geGoogle` exchanges a Google credential for a short-lived Hub token on every re-exchange, which is more Google verification traffic for no compensating benefit. New deployments should use `hubBearer` instead: callers present the same Google credential, but the bridge forwards it to the Hub verbatim — no exchange, no Hub-issued token to cache or refresh. `geGoogle` is not removed and continues to work during the migration soak; it is not documented as a scheme to adopt for new bridges.
+:::
 * **How it works**: Callers present a Google credential (ID token or access token) in the `Authorization: Bearer` header. The bridge exchanges it with the Hub for a short-lived Hub user token via the `/api/v1/auth/integrations/google/exchange` endpoint.
 * **Credential Types**: Supports both `id_token` and `access_token` via `auth.ge_exchange.credential_type`.
 * **LRU Cache**: Validated tokens are cached per-replica with a configurable TTL (`auth.ge_exchange.cache_ttl`, default `60s`, max `300s`). The effective TTL is capped at the minimum of the configured value, the Hub token expiry, and the upstream Google credential expiry. Expired tokens fail closed (never cached).
