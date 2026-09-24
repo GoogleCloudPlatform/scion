@@ -231,3 +231,68 @@ real Cloud Monitoring names, the `/metrics` section, POST-only exchange counting
 - Not run: the full `pkg/hub/...` suite (`-timeout 40m`) — this round changes non-test Hub code, so the brief
   requires it. Requesting the slot from `ap-em` in my report; `ap-p4-dev` may be holding it per the shared,
   serialized-runs rule.
+
+---
+
+## Fix round 2 (review `p5o-r2-ap-p5o-rev-2.md`, REQUEST CHANGES on `714186be2`)
+
+**Commits:** `18f8cecc8` (feature), `727a0a530` (tests).
+
+Verdict was REQUEST CHANGES with Critical 0, Required 2, Optional 3, Nit 4, FYI 5. Every r1 fix was verified
+(26/26 targeted mutants killed); the two Required findings were both "a real production path has no test" —
+`New()`'s default wiring (the whole reason the in-process `/metrics` section exists) and the `valid()` boundary
+check (present but never called from production code). The outcome-only `/metrics` deviation from fix round 1
+was judged adequate and kept as-is.
+
+| Finding | Change | Test | Mutant proven killed |
+|---|---|---|---|
+| R1: `New()`'s default wiring untested (D1–D3 survive; a dropped wire reads as "zero exchange traffic" = soak pass) | No production logic changed | `TestServer_DefaultMetricsWiring_RecordsWithoutSetters` (`ge_exchange_route_test.go`): builds via `New()` with **no** setter calls, GE exchange enabled; drives an exchange POST, a non-Hub bearer to `/api/v1/auth/me`, and a direct cache record; reads `GET /metrics` through the same handler and checks all three counters moved by exactly 1. `TestServer_DefaultMetricsWiring_OTelSetterStillMovesSnapshot` extends it: builds the OTel recorder exactly as `cmd/server_foreground.go` does and proves `/metrics` still moves after the setters replace the default (covers Optional O3 too) | D1 (delete `srv.geExchangeMetrics = srv.externalBearerSnapshot`), D2 (delete the `ExternalBearerMetrics.Store` call), D3 (delete the cache decorator's `SetMetrics` call) — each hand-mutated one at a time, confirmed to fail the first test, reverted and re-diffed clean |
+| R2: the `valid()` "fix" is test-only, has no production caller, and its comment overclaimed | `recordExternalBearer`, `recordCache` and `recordGEExchange` (the three functions that already are the single boundary between "a label was computed" and "a recorder saw it") now check every label's `valid()` first, dropping the record with `slog.Warn` (label name + Go type only, never the value) if any is out of set. Converted all five `valid()` methods from a loop over the enumeration func to a closed `switch` over their own named constants — a real boundary check, not a derived one | `TestRecordExternalBearer_DropsInvalidLabel`, `TestRecordCache_DropsInvalidLabel`, `TestRecordGEExchange_DropsInvalidLabel` (an out-of-set label reaches no recorder — the guarantee the comment now actually makes) plus a rewritten `TestExternalBearerMetrics_LabelValidMethods` that cross-checks each `valid()` switch against an independently hardcoded expected set (not the enumeration func, so the switch and the enumeration can't drift apart unnoticed) | a `recordExternalBearer("oops")`-shaped call now visibly drops (log line + zero recorder calls) instead of silently reaching the recorder — the exact untyped-literal case O3 was originally about |
+| O1: no reset marker on `/metrics` | Added `Since` (RFC3339 UTC, set at construction, returned unchanged on every snapshot) to `ExternalBearerMetricsSnapshot` | `TestExternalBearerSnapshotMetrics_Since`: present, parseable, fixed across snapshots taken after further recording | n/a (new field) |
+| O2: bare `scion_hub_*` names in production comments | Replaced all four (`auth.go`, `google_credential_cache.go`, `auth_external_bearer.go`, `server.go`) with the logical short names `external_bearer_metrics.go` defines, or a pointer to that paragraph | `grep -rn "scion_hub_" pkg/hub/*.go cmd/*.go \| grep -v _test` — empty | n/a (doc-only) |
+| O3: `cmd`'s snapshot argument untested | Covered by the R1 extension (`..._OTelSetterStillMovesSnapshot`) | see R1 row | n/a |
+| N1: three stale comments after the default wiring changed | Fixed in `external_bearer_metrics.go` (package doc: default is now the in-process snapshot, not "disabled"), `ge_exchange.go` (`recordGEExchange`'s nil case is now only a non-`New()` Server), `handlers_health.go` (`externalBearerSnapshot` is unconditional like `gcpTokenMetrics`, not unlike it) | read against the current wiring | n/a |
+| N2: `no_metrics` test comment implied production can reach it | Reworded to say this branch is reachable only for a Server not built through `New()` | — (comment only) | n/a |
+| N3: setter-test comment named the wrong mechanism | See Deviations below — the reviewer's proposed replacement wording is itself inaccurate; reworded to state the verified-correct mechanism instead | — (comment only) | n/a |
+| N4: new `// O1 —` banners | Deferred to the polish sweep, per the brief | — | — |
+| F4: `SetGEExchangeMetrics` comment overstated "read correctly regardless of when this is called" | Reworded: documents the same before-`Start()` requirement `gcpTokenMetrics` already has, which `cmd/server_foreground.go` satisfies | read against `cmd/server_foreground.go`'s call order | n/a |
+| F1: branch-level bare-ref grep hit `.design/project-log/auth-passthrough-p4-dev.md`, not this half | Re-ran both greps at the new tip; see Gates below. No code change (not this half's file; `ap-p4-dev` owns that log) | — | — |
+| F2, F3, F5 | No action, per the brief | — | — |
+
+### Deviations / design questions (fix round 2)
+
+1. **N3's prescribed wording is itself inaccurate; used corrected wording instead.** The review states "`UnifiedAuthMiddleware`'s
+   by-value capture of `authConfig` happens in `registerRoutes`, inside `New()`" and asks me to say so. I checked this against the
+   code: `registerRoutes()` (`server.go`) only calls `s.mux.HandleFunc`/`s.guarded` — it never calls `applyMiddleware` or
+   `UnifiedAuthMiddleware`. The only two call sites of `applyMiddleware` are `Handler()` and `Start()` (`server.go:3925,4091`), and
+   `UnifiedAuthMiddleware(` is called nowhere else in the package. `Start()` is what builds the production `http.Server`'s `Handler`
+   exactly once, via `applyMiddleware(s.mux)`, and that is where the by-value capture of `authConfig` actually happens — after
+   `New()` returns, which is also when `cmd/server_foreground.go` calls the three setters, before it calls `Start()`. I reworded the
+   test's comment to state this (verified) mechanism instead of the review's (unverified) one, since a comment should not assert
+   something the code doesn't do. The test itself, and its verdict on M8/M13/M14, are unaffected — I re-ran the same mutation checks
+   in this round's Gates below to confirm. Flagging this for `ap-em`/the reviewer rather than silently substituting: happy to change
+   the wording again if I've misread something.
+2. No other design ambiguities. O1's construction-timestamp fix, and the closed-switch/boundary-enforcement fix for R2, both matched
+   the brief's explicit recipe with no judgment calls needed.
+
+### Gates (fix round 2)
+
+- ✅ `go build -buildvcs=false ./...` — clean.
+- ✅ `go vet ./pkg/hub/... ./cmd/...` — clean.
+- ✅ `gofmt -l pkg/hub cmd` — empty.
+- ✅ `GOGC=40 golangci-lint run --new-from-rev=a53175c23 --concurrency=1 ./pkg/hub/... ./cmd/...` — `0 issues.`
+- ✅ Targeted `-race`: `TestExternalBearer|TestGoogleCredential|TestGEExchange|TestNoPackageLevelMutableState|TestOTel|
+  TestServer_|TestHandleMetrics|TestNoTokenInfoOutsideGoogleCredentialValidator|TestRecord`, run before and after rebasing onto
+  `ap-p4-dev`'s concurrent commits (`95e3e3b4e`..`06dbf2722`) — all green both times, no data races.
+- ✅ `-race -count=20` on `TestGoogleCredentialCache_MetricsSingleflightFollowersRecordMiss`,
+  `TestServer_MetricsSettersReachRunningHandler` and both `TestServer_DefaultMetricsWiring_*` tests — clean.
+- ✅ Manual mutation-resistance pass on the three named mutants (D1, D2, D3): each hand-introduced in `server.go`, confirmed to fail
+  `TestServer_DefaultMetricsWiring_RecordsWithoutSetters`, then reverted and re-diffed clean against the committed tree.
+- ✅ Narration grep (adds `fix round` to the term list per this round's review) — empty on this half's delta since `714186be2`.
+- ✅ Commit-message and diff bare-issue-number greps against `a53175c23`, scoped to `pkg/hub` and `cmd/server_foreground.go` — both
+  empty. **Re-verifying F1** at this push's tip: the unscoped whole-tree diff grep still has exactly one hit, in
+  `.design/project-log/auth-passthrough-p4-dev.md` (Phase 4's own log, `#1847`-derived prose, added by `ap-p4-dev`'s `2981a58a7`) —
+  not this half's file, not this half's commit. Relaying to `ap-em`/the Phase 4 owner again in my report, since it's outside my
+  ownership.
+- Not run: the full `pkg/hub/...` + `./cmd` suite (`-timeout 40m`) — this round changes non-test Hub code, so the brief requires it.
+  Requesting the slot from `ap-em` in my report.
