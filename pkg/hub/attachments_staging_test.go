@@ -29,6 +29,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// hostDir names the staging directory as a path on the hub host. Production
+// code has no use for it — stage() resolves through an os.Root, and a host path
+// is exactly what must not be handed to a path-based os call — but a test
+// asserting on the result has to stand outside the root to look in.
+func (a *attachmentStaging) hostDir() string {
+	return filepath.Join(a.sharedDir, filepath.FromSlash(a.relDir))
+}
+
 // writeTempFile writes content to a new file under t.TempDir() and returns its path.
 func writeTempFile(t *testing.T, name, content string) string {
 	t.Helper()
@@ -43,7 +51,7 @@ func TestNewAttachmentStaging_Paths(t *testing.T) {
 	require.NotNil(t, st)
 	assert.Equal(t,
 		"/home/scion/.scion/project-configs/proj__abcd1234/shared-dirs/scratchpad/.attachments/_webchat",
-		st.hostDir)
+		st.hostDir())
 	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat", st.agentDir)
 }
 
@@ -66,7 +74,7 @@ func TestAttachmentStaging_StageCopiesFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/att-1/notes.txt", agentPath)
 
-	staged := filepath.Join(st.hostDir, "att-1", "notes.txt")
+	staged := filepath.Join(st.hostDir(), "att-1", "notes.txt")
 	content, err := os.ReadFile(staged)
 	require.NoError(t, err)
 	assert.Equal(t, "hello agent", string(content))
@@ -82,7 +90,7 @@ func TestAttachmentStaging_StageIsIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first, second)
 
-	content, err := os.ReadFile(filepath.Join(st.hostDir, "att-1", "notes.txt"))
+	content, err := os.ReadFile(filepath.Join(st.hostDir(), "att-1", "notes.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "hello agent", string(content))
 }
@@ -99,7 +107,7 @@ func TestAttachmentStaging_StageRejectsTraversal(t *testing.T) {
 	// filepath.Base reduces the name to "escape.txt", which stays inside the
 	// staging dir — the point is that nothing lands outside base.
 	require.NoError(t, err)
-	assert.FileExists(t, filepath.Join(st.hostDir, "att-1", "escape.txt"))
+	assert.FileExists(t, filepath.Join(st.hostDir(), "att-1", "escape.txt"))
 
 	_, err = st.stage(src, "att-2", "..")
 	require.Error(t, err)
@@ -110,7 +118,7 @@ func TestAttachmentStaging_StageMissingSource(t *testing.T) {
 	_, err := st.stage(filepath.Join(t.TempDir(), "gone.txt"), "att-1", "gone.txt")
 	require.Error(t, err)
 	// A failed copy must not leave a truncated file behind.
-	assert.NoFileExists(t, filepath.Join(st.hostDir, "att-1", "gone.txt"))
+	assert.NoFileExists(t, filepath.Join(st.hostDir(), "att-1", "gone.txt"))
 }
 
 func TestAttachmentStaging_StageDoesNotFollowSymlink(t *testing.T) {
@@ -118,8 +126,8 @@ func TestAttachmentStaging_StageDoesNotFollowSymlink(t *testing.T) {
 	target := writeTempFile(t, "secret.txt", "do not overwrite")
 	st := newAttachmentStaging(t.TempDir(), false)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(st.hostDir, "att-1"), 0o755))
-	require.NoError(t, os.Symlink(target, filepath.Join(st.hostDir, "att-1", "notes.txt")))
+	require.NoError(t, os.MkdirAll(filepath.Join(st.hostDir(), "att-1"), 0o755))
+	require.NoError(t, os.Symlink(target, filepath.Join(st.hostDir(), "att-1", "notes.txt")))
 
 	_, err := st.stage(src, "att-1", "notes.txt")
 	require.NoError(t, err) // treated as already staged
@@ -170,7 +178,7 @@ func TestResolveAttachmentStaging_UsesProjectConfigsSharedDir(t *testing.T) {
 
 	staging := srv.resolveAttachmentStaging(context.Background(), project.ID)
 	require.NotNil(t, staging)
-	assert.Equal(t, filepath.Join(sharedDir, ".attachments", "_webchat"), staging.hostDir)
+	assert.Equal(t, filepath.Join(sharedDir, ".attachments", "_webchat"), staging.hostDir())
 	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat", staging.agentDir)
 }
 
