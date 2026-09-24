@@ -29,11 +29,10 @@ OTel-backed recorder) before starting.
 - **New `pkg/hub/otel_external_bearer_metrics.go`** — `OTelExternalBearerMetrics`, one struct implementing all
   three interfaces via three `metric.Int64Counter`s registered under the existing `instrumentationScope`,
   mirroring `OTelMetricsRecorder`/`OTelGCPTokenMetrics`'s construction/registration/error-wrapping shape exactly.
-  Instrument names (`scion.hub.external_bearer`, `scion.hub.google_validator_cache`,
-  `scion.hub.ge_exchange.requests`) are dot/underscore-segmented so OTel's Prometheus bridge (lower-cases,
-  joins on `_`, appends `_total` to a monotonic sum) produces exactly `scion_hub_external_bearer_total`,
-  `scion_hub_google_validator_cache_total`, `scion_hub_ge_exchange_requests_total`. Not added to
-  `TestNoPackageLevelMutableState` — see Deviations #1.
+  Instrument names are `scion.hub.external_bearer`, `scion.hub.google_validator_cache` and
+  `scion.hub.ge_exchange.requests`. **Correction (fix round 1, R5):** the paragraph originally here claimed an
+  OTel Prometheus bridge that does not exist in this binary; see that round's entry below for the real export
+  path and metric type names. Not added to `TestNoPackageLevelMutableState` — see Deviations #1.
 - **`pkg/hub/auth_external_bearer.go`** — `authenticateExternalBearer` now returns a third value,
   `externalBearerAttempt{kind, principal}`, threaded through every return point and updated the moment each
   becomes known (kind right after classification succeeds; principal right after validation returns
@@ -172,3 +171,63 @@ green, run with `-race`.
 - Not run: the full `pkg/hub`/`pkg/config` suite (`-timeout 40m`) — per the brief, this needs the shared
   full-run slot from `ap-em` (serialized with `ap-p4-dev`, who used it last per its project log). Requesting it
   in my report below.
+
+---
+
+## Fix round 1 (review `p5o-r1-ap-p5o-rev.md`, REQUEST CHANGES on `206ae48e2`)
+
+**Commits:** `dcc2b9909` (feature), `647a6bb29` (tests).
+
+Verdict was REQUEST CHANGES with Critical 0, Required 5, Optional 5, Nit 2, FYI 4 — the outcome/label/nil-guard
+logic itself was judged correct (14/14 targeted mutants killed); every Required and Optional finding was about
+code or wiring with no test at all, or a doc comment describing the wrong export mechanism. Disposition below
+per `ap-p5o-dev-fix-r1.md`, including its 14:52 amendment (O1 confirmed by the lead; fold the new counters into
+the existing `combinedMetrics` JSON `handleMetrics` serves, and align every comment with the amended §4.7:
+real Cloud Monitoring names, the `/metrics` section, POST-only exchange counting, the exact soak-gate wording).
+
+| Finding | Change | Test | Mutant proven killed |
+|---|---|---|---|
+| R1: no test of post-`New()` setter wiring | `server.go`: unchanged logic, now exercised end to end | `TestServer_MetricsSettersReachRunningHandler` (`ge_exchange_route_test.go`): builds via `New()`, captures `Handler()` *before* calling all three setters (the only ordering that actually exercises the `atomic.Pointer` publication guarantee), then drives an external-bearer request and an exchange POST through that captured handler, and checks the cache decorator directly | M8 (replace the box instead of `Store`-ing into it), M13 (cache setter no-op), M14 (exchange setter no-op) — each hand-mutated, confirmed to fail this test, reverted |
+| R1 (same finding): cache setter's type-assertion failure was silent | `server.go`'s `SetGoogleValidatorCacheMetrics` now `slog.Warn`s and returns instead of silently doing nothing | covered by the same test (the happy path) and by reading | n/a (observability of a defensive branch, not a new outcome) |
+| R2: OTel recorder untested | none (recorder unchanged except the dual-write in R5/O1) | `otel_external_bearer_metrics_test.go`: `sdkmetric.NewManualReader`, one test per `Record*` asserting instrument name, unit, exact attribute key set/values, and sum, plus a nil-snapshot no-panic test | M7 (rename an attribute key, e.g. `outcome`→`result`) — the exact-key-set assertion (`wantAttrs`, which checks `Len()` too) fails on both a renamed and an added/dropped key |
+| R3(a): singleflight follower `miss` untested | none (behaviour unchanged; it was already correct, per the review's own judgement) | `TestGoogleCredentialCache_MetricsSingleflightFollowersRecordMiss`: the same delay-widened-window technique C6 uses, 6 concurrent callers into one flight, asserts 1 base call and 6 `miss` records | M9 (move the `miss` record into the leader-only callback) — followers would then record 0 instead of `n-1`; failing this test's exact-count assertion |
+| R3(b): `GoogleValidatorCacheMiss` doc said "required an upstream call" | `external_bearer_metrics.go`: reworded to "not served from cache… including a singleflight follower… upstream calls ≤ miss" | — (doc only) | n/a |
+| R4: review-history narration in 7 lines this half added | Removed from `auth_external_bearer.go`, `external_bearer_metrics.go` (×2) and `external_bearer_metrics_test.go` (×4); each rewritten to state the invariant instead of the review-round provenance. Also fixed the stale "or, from a later phase, a user domain" wording now that the domain check is on the branch | `git diff 206ae48e2 -- pkg/hub cmd/server_foreground.go \| grep -niE '^\+.*(\blead\b\|ruling\|phase [0-9]\|later phase\|\br7\b\|review r)'` — empty (checked before every push in this round) | n/a (static check) |
+| R5: wrong exported metric names; nonexistent Prometheus bridge | `otel_external_bearer_metrics.go`'s doc comment rewritten: the only exporter is `pkg/observability/hubmetrics` (`mexporter`) to GCP Cloud Monitoring, gated on `cfg.Hub.GCPProjectID`; the instrument names become `workload.googleapis.com/scion.hub.external_bearer`, `…/scion.hub.google_validator_cache`, `…/scion.hub.ge_exchange.requests` there. The Prometheus-bridge sentence is gone. Corrected the same claim in this log's Phase 5 section (see the note inserted above) | read against `pkg/observability/hubmetrics/hubmetrics.go` (confirmed no Prometheus dependency; `mexporter` is the only exporter) | n/a (doc/log correction) |
+| O1 (promoted to required by the lead's 14:52 confirmation): counters absent unless `hub.gcp_project_id` set; not on `/metrics` | New `pkg/hub/external_bearer_snapshot_metrics.go`: `ExternalBearerSnapshotMetrics`, dependency-free, following `gcp_metrics.go`'s shape exactly (mutex + counts, no OTel/GCP import). `Server.New` constructs one unconditionally and wires it as the default recorder for all three design §4.7 counters; `NewOTelExternalBearerMetrics` now takes that same instance and dual-writes into it, so `GET /metrics` counts the same totals whether or not `cmd/server_foreground.go` ever wires the OTel recorder. Added an `"externalBearer"` section to `handleMetrics`'s `combinedMetrics`, next to `"broker"`/`"gcp"`. Confirmed no package-level state was needed (only instance fields and package-level *functions* returning fresh enumeration slices — `TestNoPackageLevelMutableState` still passes with the new file added to its list), so this stayed within "small" and did not need to be escalated back to `ap-em` before building | `TestExternalBearerSnapshotMetrics_RecordsMoveTheSnapshot`, `..._DeterministicKeys`, `TestHandleMetrics_ExternalBearerSection`, `TestHandleMetrics_NoMetricsWhenNothingWired`, plus `TestOTelExternalBearer_*`'s snapshot assertions for the dual-write | n/a (new coverage, not a mutant retrofit) |
+| O2: `validate`'s godoc attached to the new type | `google_credential_cache.go`: moved `googleCredValidateResult` and its comment above the `// validate is …` paragraph | pre-existing cache suite, unchanged and green (doc-only fix) | n/a |
+| O3: closed-set guard misses untyped literals | Added a `valid()` method (closed switch over its own constants) to each of the five label types, backed by a package-level enumeration *func* (not a var) per type | `TestExternalBearerMetrics_LabelValidMethods`: drives every declared constant through `valid()` (must be true) and several out-of-set values (must be false), per type | a constant added to one of the enumeration funcs without a matching `valid()` case (or vice versa) fails its own subtest |
+| O4: non-POST exchange requests uncounted | Documented on `GEExchangeOutcome`: the counter covers POST requests only (the endpoint's only routable method); no new outcome added | n/a (fix by documentation, as directed) | n/a |
+| O5: `…ResponseBytesUnaffected` overclaimed | Renamed to `TestGEExchangeMetrics_ResponseShapeUnaffected`; now masks the token/timestamp fields that vary run to run and compares the full decoded struct with `reflect.DeepEqual`, not two hand-picked fields | same test, strengthened | a mutation touching any other response field now fails this test, not just `TokenType`/`User.Email` |
+| F3: setter nil-deref on a non-`New()` `Server` | `SetExternalBearerMetrics` now allocates its `atomic.Pointer` box if `nil` instead of panicking | exercised implicitly by `TestServer_MetricsSettersReachRunningHandler` calling it on a `New()`-built server (the guard path itself has no dedicated unit test — it is a one-line defensive nil-check, not a design decision with an observable branch) | n/a |
+| N1, N2, F1, F2, F4 | Deferred / no action, per the brief | — | — |
+
+### Deviations / design questions (fix round 1)
+
+1. No new design ambiguities. The 14:52 amendment settled O1 (fold into `combinedMetrics`, dual-write, use the
+   real names) before any of this round's implementation started, so nothing here was guessed.
+2. `ExternalBearerSnapshotMetrics.RecordExternalBearer` only counts by `outcome`, not the full
+   `kind`/`principal`/`outcome` cross-product the OTel-exported series carries. The in-process section is meant
+   to answer "is the exchange counter non-zero" and "what does the outcome mix look like on this replica" for
+   the soak gate and quick diagnosis; the full per-label breakdown is what Cloud Monitoring is for once export
+   is configured. Flagging this simplification in case `ap-em`/the lead wants the full cross-product in
+   `/metrics` too — it would still fit the "small, no package-level state" bound, just with more map keys.
+
+### Gates (fix round 1)
+
+- ✅ `go build -buildvcs=false ./...` — clean.
+- ✅ `go vet ./pkg/hub/... ./cmd/...` — clean.
+- ✅ `gofmt -l pkg/hub cmd` — empty.
+- ✅ `GOGC=40 golangci-lint run --new-from-rev=a53175c23 --concurrency=1 ./pkg/hub/... ./cmd/...` — `0 issues.`
+- ✅ Targeted `-race`: `TestExternalBearer|TestGEExchange|TestGoogleCredential|TestNoPackageLevelMutableState|
+  Metrics|TestOTel|TestNoTokenInfoOutsideGoogleCredentialValidator`, run before and after rebasing onto
+  `ap-p4-dev`'s concurrent fix-round commits (`47dac5600`..`e6dc234cb`) — all green both times, no data races.
+- ✅ Narration grep (`git diff 206ae48e2 -- pkg/hub cmd/server_foreground.go \| grep -niE
+  '^\+.*(\blead\b\|ruling\|phase [0-9]\|later phase\|\br7\b\|review r)'`) — empty.
+- ✅ Bare-issue-number greps against `a53175c23` (real GNU grep), at the final commit (`647a6bb29`) — both empty.
+- ✅ Manual mutation-resistance pass on the exact mutants the review named as surviving (M7, M8, M9, M13, M14):
+  each hand-introduced, confirmed to fail its new test, then reverted and re-diffed clean against the committed
+  tree.
+- Not run: the full `pkg/hub/...` suite (`-timeout 40m`) — this round changes non-test Hub code, so the brief
+  requires it. Requesting the slot from `ap-em` in my report; `ap-p4-dev` may be holding it per the shared,
+  serialized-runs rule.
