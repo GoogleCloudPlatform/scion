@@ -572,7 +572,7 @@ brief and confirmed again in a follow-up message, before I started R2/R3.
 | **R3** (Required) Review-history narration `adminoverlay_test.go:752-753` ("p5b review r5, finding F2") | **Fixed.** Deleted the parenthetical; the sentence stands on its own. | — |
 | **O1** (Optional) HA fires an identical Warn every ~60s per replica indefinitely | **Fixed.** New `AuthSchemeWarnDedupe`: Warn the first time a `(yaml_scheme, pushed_scheme)` pair is seen, Debug on every repeat. No package-level state — each caller owns an instance (`BrokerServer.authWarnDedupe`, one per `serveStandalone` HA process). `EffectiveAuthScheme`/`ApplyOverlay`/`applyRuntimeConfig` all gained a `dedupe` parameter that may be nil (nil means "always Warn," used by tests and the one-time boot-time overlay apply in `main()` before the broker exists). | `TestAuthSchemeWarnDedupe`: two identical ignored pushes produce exactly one Warn line and one Debug line; a third push with a different pushed value produces a second Warn. Also incidentally fixed a pre-existing double-Warn-per-push: `BrokerServer.Configure` calls `ApplyOverlay` twice (once to validate, once to apply) with the same `b.authWarnDedupe`, so the second call is now a dedup hit. |
 | **O2** (Optional) A nil logger panics only on the pinned branch | **Fixed.** `EffectiveAuthScheme` now does `if log == nil { log = slog.Default() }` at the top. | `TestEffectiveAuthScheme_NilLoggerDoesNotPanic`. |
-| **N1** (Nit) Test comments cited design row labels (`F4-1`…`F4-6`) | **Fixed.** Reworded every such comment to describe the behavior instead, in both `internal/bridge/adminoverlay_test.go` and `cmd/scion-a2a-bridge/main_test.go`. | — |
+| **N1** (Nit) Test comments cited design row labels (`F4-1`…`F4-6`) | **Partially fixed at the time** (corrected in fix round 2, see below): reworded most such comments, but missed one at `adminoverlay_test.go:1146` ("… and F4-*"), in both `internal/bridge/adminoverlay_test.go` and `cmd/scion-a2a-bridge/main_test.go`. | — |
 | **F3** (bridge-only, in range) `auth_test.go:645` "(review r2 O1; …)" narration from an earlier bridge commit | **Fixed.** Deleted the parenthetical (kept the substantive sentence about the guard it's testing). | — |
 | F1, F2, F4 | No action, per disposition. | — |
 
@@ -616,3 +616,73 @@ files; re-checked against my actual round start `dc3749906`, both empty)
 
 None. R1's design amendment (r8) was already resolved before I started this
 round; no further clarification was needed.
+
+---
+
+## F4 fix round 2 (review `reviews/p5b-f4-r2-ap-p5b-rev-7.md`, REQUEST CHANGES on `07d557e6f`)
+
+**Agent:** ap-p5b-dev-2 · **Branch:** `scion/auth-passthrough` · **Date:** 2026-09-24
+
+Small round: 1 Required, 1 Optional. Logic, r8 conformance and gates were
+all independently re-verified by this review and needed no changes.
+
+### Disposition table
+
+| # | Disposition | Change | Test |
+|---|---|---|---|
+| **R1** (Required) One design-row label survived: `adminoverlay_test.go:1146` "(see TestEffectiveAuthScheme and F4-*)". The round-1 log entry's N1 row inaccurately claimed every such comment was reworded. | **Fixed.** Reworded to "(see TestEffectiveAuthScheme)". Corrected the round-1 log's N1 row to say "partially fixed at the time" rather than "fixed", and cross-referenced this round. | `grep -rn 'F4' extras/scion-a2a-bridge --include='*.go' --include='*.md' --include='*.yaml' --include='*.yml'` — empty (see Gates below for the raw, unfiltered grep and why it still shows hits). |
+| **O1** (Optional) No test covered the warning dedupe's per-owner lifetime — two mutants survived (broker passes `nil`; a fresh dedupe per push) | **Fixed (broker side, as scoped).** New `TestConfigure_DedupesWarningAcrossConfigurePushes`: pushes an identical ignored `auth_scheme` through `BrokerServer.Configure` twice with a Debug-level buffer logger, and asserts exactly one Warn line total across both pushes (plus three Debug lines, documenting that each `Configure` call itself runs `ApplyOverlay` twice — once to validate, once to apply). HA side left as a code-read, as the brief scoped it (extracting the reconfigure closure for one log-noise test isn't worth it). | Same test; see mutation re-checks below. |
+| F1–F4 | No action (match r8 / acceptable), per disposition. | — |
+| F5 project-log commit subjects mention the design | No action now; deferred to the whole-PR polish sweep, per disposition. | — |
+
+### Grep for the forbidden design-row label
+
+The brief's literal `grep -rn 'F4' extras/scion-a2a-bridge` is not empty —
+it matches unrelated substrings inside `go.sum` dependency hashes (e.g.
+`...F4CDp8aJfVeBrlLQrs6NqWU=`), which is not narration and not something
+this range can or should edit. Restricted to source/doc files
+(`--include='*.go' --include='*.md' --include='*.yaml' --include='*.yml'`),
+it is empty. Pasted both below in the Gates section.
+
+### Mutation re-checks (O1, by hand in `broker.go`, reverted after each,
+`git diff --stat` empty afterward)
+
+- **Pass `nil` dedupe from `NewBrokerServer`** → **failed**
+  `TestConfigure_DedupesWarningAcrossConfigurePushes` (4 Warn lines instead
+  of 1, 0 Debug instead of 3 — with no dedupe, every `ApplyOverlay` call
+  logs at Warn).
+- **Create a fresh `NewAuthSchemeWarnDedupe()` inline at the `Configure`
+  validation call site** (rather than using `b.authWarnDedupe`) →
+  **failed** the same test (3 Warn lines instead of 1: the validation call
+  now Warns on every push since its fresh dedupe never remembers anything,
+  while the `applyOverlay` call still shares `b.authWarnDedupe` and
+  correctly Debugs on repeat — the test catches the partial defeat of the
+  dedupe just as much as a full one).
+
+### Gates (from `extras/scion-a2a-bridge/`, `GOTMPDIR` owned scratch dir,
+deleted after; `GOCACHE=/scion-volumes/gocache`)
+
+- `go build ./...` — clean.
+- `go vet ./...` — clean.
+- `gofmt -l .` — clean.
+- `go test -race -count=1 ./...` — all green: `cmd/scion-a2a-bridge`,
+  `integration`, `internal/bridge`, `internal/state`. No regressions.
+- `GOGC=40 golangci-lint run --new-from-rev=a53175c23 --concurrency=1 ./...`
+  — 0 issues.
+- `grep -rn 'F4' extras/scion-a2a-bridge` — matches only `go.sum` hash
+  substrings (8 lines, e.g. `azfile v1.7.0 h1:...F4...`, none in source or
+  docs). `grep -rn 'F4' extras/scion-a2a-bridge --include='*.go'
+  --include='*.md' --include='*.yaml' --include='*.yml'` — empty.
+- `perl -ne 'print "$ARGV:$." if /\xC2\xA0/' <changed files>` — empty (no
+  NBSP bytes).
+- Did not run the `pkg/hub` suite (out of scope; nothing under `pkg/`
+  touched).
+
+### Bare-issue-number grep (base `a53175c23`, both must print nothing)
+
+- `git log a53175c23..HEAD --format=%B | /usr/bin/grep -nE '(^|[^/A-Za-z])#[0-9]+'` — empty.
+- `git diff a53175c23 HEAD | /usr/bin/grep -nE '^\+.*(^|[^/A-Za-z0-9])#[0-9]{3,}'` — empty.
+
+### Deviations / design questions
+
+None.
