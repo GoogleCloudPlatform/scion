@@ -235,6 +235,12 @@ func init() {
 	agentreincarnationDescRequestedAt := agentreincarnationFields[5].Descriptor()
 	// agentreincarnation.DefaultRequestedAt holds the default value on creation for the requested_at field.
 	agentreincarnation.DefaultRequestedAt = agentreincarnationDescRequestedAt.Default.(func() time.Time)
+	// agentreincarnationDescUpdatedAt is the schema descriptor for updated_at field.
+	agentreincarnationDescUpdatedAt := agentreincarnationFields[6].Descriptor()
+	// agentreincarnation.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	agentreincarnation.DefaultUpdatedAt = agentreincarnationDescUpdatedAt.Default.(func() time.Time)
+	// agentreincarnation.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	agentreincarnation.UpdateDefaultUpdatedAt = agentreincarnationDescUpdatedAt.UpdateDefault.(func() time.Time)
 	// agentreincarnationDescID is the schema descriptor for id field.
 	agentreincarnationDescID := agentreincarnationFields[0].Descriptor()
 	// agentreincarnation.DefaultID holds the default value on creation for the id field.

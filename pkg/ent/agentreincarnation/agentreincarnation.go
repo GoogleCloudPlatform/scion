@@ -25,6 +25,8 @@ const (
 	FieldRequestedBy = "requested_by"
 	// FieldRequestedAt holds the string denoting the requested_at field in the database.
 	FieldRequestedAt = "requested_at"
+	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
+	FieldUpdatedAt = "updated_at"
 	// FieldCompletedAt holds the string denoting the completed_at field in the database.
 	FieldCompletedAt = "completed_at"
 	// FieldState holds the string denoting the state field in the database.
@@ -49,6 +51,7 @@ var Columns = []string{
 	FieldToGeneration,
 	FieldRequestedBy,
 	FieldRequestedAt,
+	FieldUpdatedAt,
 	FieldCompletedAt,
 	FieldState,
 	FieldError,
@@ -72,6 +75,10 @@ var (
 	AgentIDValidator func(string) error
 	// DefaultRequestedAt holds the default value on creation for the "requested_at" field.
 	DefaultRequestedAt func() time.Time
+	// DefaultUpdatedAt holds the default value on creation for the "updated_at" field.
+	DefaultUpdatedAt func() time.Time
+	// UpdateDefaultUpdatedAt holds the default value on update for the "updated_at" field.
+	UpdateDefaultUpdatedAt func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
@@ -137,6 +144,11 @@ func ByRequestedBy(opts ...sql.OrderTermOption) OrderOption {
 // ByRequestedAt orders the results by the requested_at field.
 func ByRequestedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRequestedAt, opts...).ToFunc()
+}
+
+// ByUpdatedAt orders the results by the updated_at field.
+func ByUpdatedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldUpdatedAt, opts...).ToFunc()
 }
 
 // ByCompletedAt orders the results by the completed_at field.

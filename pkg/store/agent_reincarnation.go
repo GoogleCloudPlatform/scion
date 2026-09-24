@@ -53,8 +53,14 @@ type AgentReincarnation struct {
 
 	// RequestedBy is the principal ID (user or agent) that requested the
 	// migration; polymorphic like Agent.CreatedBy, no FK.
-	RequestedBy string     `json:"requestedBy,omitempty"`
-	RequestedAt time.Time  `json:"requestedAt"`
+	RequestedBy string    `json:"requestedBy,omitempty"`
+	RequestedAt time.Time `json:"requestedAt"`
+	// UpdatedAt is bumped on every UpdateAgentReincarnation call (ent
+	// UpdateDefault). The replica-safe boot/periodic sweep (design §3.7)
+	// uses it to distinguish a genuinely stale record (the hub that owned it
+	// is gone) from one a live worker on another replica is actively
+	// stepping through.
+	UpdatedAt   time.Time  `json:"updatedAt"`
 	CompletedAt *time.Time `json:"completedAt,omitempty"`
 
 	State string `json:"state"`
@@ -102,11 +108,16 @@ type AgentReincarnationStore interface {
 	// precedent — agent_id is a plain field with no DB-level FK.
 	DeleteAgentReincarnationsForAgent(ctx context.Context, agentID string) error
 
-	// ListNonTerminalAgentReincarnations returns every reincarnation record,
-	// across all agents, currently in a non-terminal state
-	// (AgentReincarnationNonTerminalStates). Used by the hub-restart boot
-	// sweep (design §3.7 F4, p1b-r1): a record left non-terminal can only
-	// mean the hub restarted mid-flight, since R1's claim-then-create order
-	// prevents an orphan from ever being created by a failed request.
-	ListNonTerminalAgentReincarnations(ctx context.Context) ([]*AgentReincarnation, error)
+	// ListStaleNonTerminalAgentReincarnations returns every reincarnation
+	// record, across all agents, that is both in a non-terminal state
+	// (AgentReincarnationNonTerminalStates) AND has not been updated since
+	// before olderThan. Used by the replica-safe boot/periodic sweep (design
+	// §3.7): a record can only stay non-terminal past the staleness bound if
+	// the hub replica running its worker is gone (crashed or restarted) —
+	// claim-then-create prevents an orphan from ever being created by a
+	// merely-failed request, and a live worker keeps bumping updated_at as it
+	// steps through stopping/provisioning/starting. The bound is what keeps
+	// a healthy in-flight migration on one replica safe from a sweep running
+	// concurrently on another.
+	ListStaleNonTerminalAgentReincarnations(ctx context.Context, olderThan time.Time) ([]*AgentReincarnation, error)
 }

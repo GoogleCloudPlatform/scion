@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
@@ -46,6 +47,7 @@ func entAgentReincarnationToStore(r *ent.AgentReincarnation) *store.AgentReincar
 		ToGeneration:   r.ToGeneration,
 		RequestedBy:    r.RequestedBy,
 		RequestedAt:    r.RequestedAt,
+		UpdatedAt:      r.UpdatedAt,
 		CompletedAt:    r.CompletedAt,
 		State:          string(r.State),
 		Error:          r.Error,
@@ -234,13 +236,16 @@ func (s *AgentReincarnationStore) DeleteAgentReincarnationsForAgent(ctx context.
 
 // ListNonTerminalAgentReincarnations returns every non-terminal reincarnation
 // record across all agents, for the hub-restart boot sweep (design §3.7 F4).
-func (s *AgentReincarnationStore) ListNonTerminalAgentReincarnations(ctx context.Context) ([]*store.AgentReincarnation, error) {
+func (s *AgentReincarnationStore) ListStaleNonTerminalAgentReincarnations(ctx context.Context, olderThan time.Time) ([]*store.AgentReincarnation, error) {
 	states := make([]agentreincarnation.State, 0, len(store.AgentReincarnationNonTerminalStates))
 	for _, st := range store.AgentReincarnationNonTerminalStates {
 		states = append(states, agentreincarnation.State(st))
 	}
 	rows, err := s.client.AgentReincarnation.Query().
-		Where(agentreincarnation.StateIn(states...)).
+		Where(
+			agentreincarnation.StateIn(states...),
+			agentreincarnation.UpdatedAtLT(olderThan),
+		).
 		Order(ent.Desc(agentreincarnation.FieldRequestedAt)).
 		All(ctx)
 	if err != nil {

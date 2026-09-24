@@ -256,6 +256,14 @@ type AgentStore interface {
 	// ListAgents returns agents matching the filter criteria.
 	ListAgents(ctx context.Context, filter AgentFilter, opts ListOptions) (*ListResult[Agent], error)
 
+	// ListAgentsWithStaleNonTerminalReincarnationState returns every agent
+	// whose reincarnation_state is non-terminal and whose row has not been
+	// updated since before olderThan. Backstop for the replica-safe
+	// reincarnation sweep (design §3.7): catches an agent left claimed with
+	// no matching non-terminal AgentReincarnation record for the main sweep
+	// to find (e.g. the record was deleted).
+	ListAgentsWithStaleNonTerminalReincarnationState(ctx context.Context, olderThan time.Time) ([]*Agent, error)
+
 	// UpdateAgentStatus updates only status-related fields.
 	// This is a partial update that doesn't require version checking.
 	UpdateAgentStatus(ctx context.Context, id string, status AgentStatusUpdate) error

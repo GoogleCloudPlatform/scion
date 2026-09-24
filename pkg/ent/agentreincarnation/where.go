@@ -80,6 +80,11 @@ func RequestedAt(v time.Time) predicate.AgentReincarnation {
 	return predicate.AgentReincarnation(sql.FieldEQ(FieldRequestedAt, v))
 }
 
+// UpdatedAt applies equality check predicate on the "updated_at" field. It's identical to UpdatedAtEQ.
+func UpdatedAt(v time.Time) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEQ(FieldUpdatedAt, v))
+}
+
 // CompletedAt applies equality check predicate on the "completed_at" field. It's identical to CompletedAtEQ.
 func CompletedAt(v time.Time) predicate.AgentReincarnation {
 	return predicate.AgentReincarnation(sql.FieldEQ(FieldCompletedAt, v))
@@ -363,6 +368,46 @@ func RequestedAtLT(v time.Time) predicate.AgentReincarnation {
 // RequestedAtLTE applies the LTE predicate on the "requested_at" field.
 func RequestedAtLTE(v time.Time) predicate.AgentReincarnation {
 	return predicate.AgentReincarnation(sql.FieldLTE(FieldRequestedAt, v))
+}
+
+// UpdatedAtEQ applies the EQ predicate on the "updated_at" field.
+func UpdatedAtEQ(v time.Time) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEQ(FieldUpdatedAt, v))
+}
+
+// UpdatedAtNEQ applies the NEQ predicate on the "updated_at" field.
+func UpdatedAtNEQ(v time.Time) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNEQ(FieldUpdatedAt, v))
+}
+
+// UpdatedAtIn applies the In predicate on the "updated_at" field.
+func UpdatedAtIn(vs ...time.Time) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldIn(FieldUpdatedAt, vs...))
+}
+
+// UpdatedAtNotIn applies the NotIn predicate on the "updated_at" field.
+func UpdatedAtNotIn(vs ...time.Time) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNotIn(FieldUpdatedAt, vs...))
+}
+
+// UpdatedAtGT applies the GT predicate on the "updated_at" field.
+func UpdatedAtGT(v time.Time) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldGT(FieldUpdatedAt, v))
+}
+
+// UpdatedAtGTE applies the GTE predicate on the "updated_at" field.
+func UpdatedAtGTE(v time.Time) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldGTE(FieldUpdatedAt, v))
+}
+
+// UpdatedAtLT applies the LT predicate on the "updated_at" field.
+func UpdatedAtLT(v time.Time) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldLT(FieldUpdatedAt, v))
+}
+
+// UpdatedAtLTE applies the LTE predicate on the "updated_at" field.
+func UpdatedAtLTE(v time.Time) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldLTE(FieldUpdatedAt, v))
 }
 
 // CompletedAtEQ applies the EQ predicate on the "completed_at" field.

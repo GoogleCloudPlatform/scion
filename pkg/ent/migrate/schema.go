@@ -212,6 +212,7 @@ var (
 		{Name: "to_generation", Type: field.TypeInt},
 		{Name: "requested_by", Type: field.TypeString, Nullable: true},
 		{Name: "requested_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
 		{Name: "completed_at", Type: field.TypeTime, Nullable: true},
 		{Name: "state", Type: field.TypeEnum, Enums: []string{"pending", "stopping", "provisioning", "starting", "completed", "failed"}, Default: "pending"},
 		{Name: "error", Type: field.TypeString, Nullable: true},
@@ -228,7 +229,12 @@ var (
 			{
 				Name:    "agentreincarnation_agent_id_state",
 				Unique:  false,
-				Columns: []*schema.Column{AgentReincarnationsColumns[1], AgentReincarnationsColumns[7]},
+				Columns: []*schema.Column{AgentReincarnationsColumns[1], AgentReincarnationsColumns[8]},
+			},
+			{
+				Name:    "agentreincarnation_state_updated_at",
+				Unique:  false,
+				Columns: []*schema.Column{AgentReincarnationsColumns[8], AgentReincarnationsColumns[6]},
 			},
 		},
 	}

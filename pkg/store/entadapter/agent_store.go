@@ -549,6 +549,34 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 	return result, nil
 }
 
+// ListAgentsWithStaleNonTerminalReincarnationState is the agent-state
+// backstop for the replica-safe reincarnation sweep (design §3.7): an agent
+// left claimed with no matching non-terminal AgentReincarnation record (for
+// ListStaleNonTerminalAgentReincarnations to find) still gets reset once its
+// row has not been updated since before olderThan.
+func (s *AgentStore) ListAgentsWithStaleNonTerminalReincarnationState(ctx context.Context, olderThan time.Time) ([]*store.Agent, error) {
+	nonTerminal := []string{
+		store.ReincarnationStateStopping,
+		store.ReincarnationStateProvisioning,
+		store.ReincarnationStateStarting,
+		store.ReincarnationStatePending,
+	}
+	rows, err := s.client.Agent.Query().
+		Where(
+			agent.ReincarnationStateIn(nonTerminal...),
+			agent.UpdatedLT(olderThan),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*store.Agent, 0, len(rows))
+	for _, a := range rows {
+		out = append(out, entAgentToStore(a))
+	}
+	return out, nil
+}
+
 // agentBeforeCursor returns a predicate for keyset pagination after the given cursor.
 func agentBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.Agent {
 	return keysetBeforeCursor(agent.FieldCreated, agent.FieldID, cursorCreated, cursorID)

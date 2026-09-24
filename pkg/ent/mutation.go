@@ -7319,6 +7319,7 @@ type AgentReincarnationMutation struct {
 	addto_generation        *int
 	requested_by            *string
 	requested_at            *time.Time
+	updated_at              *time.Time
 	completed_at            *time.Time
 	state                   *agentreincarnation.State
 	error                   *string
@@ -7668,6 +7669,42 @@ func (m *AgentReincarnationMutation) ResetRequestedAt() {
 	m.requested_at = nil
 }
 
+// SetUpdatedAt sets the "updated_at" field.
+func (m *AgentReincarnationMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *AgentReincarnationMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the AgentReincarnation entity.
+// If the AgentReincarnation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentReincarnationMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *AgentReincarnationMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
 // SetCompletedAt sets the "completed_at" field.
 func (m *AgentReincarnationMutation) SetCompletedAt(t time.Time) {
 	m.completed_at = &t
@@ -7983,7 +8020,7 @@ func (m *AgentReincarnationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentReincarnationMutation) Fields() []string {
-	fields := make([]string, 0, 11)
+	fields := make([]string, 0, 12)
 	if m.agent_id != nil {
 		fields = append(fields, agentreincarnation.FieldAgentID)
 	}
@@ -7998,6 +8035,9 @@ func (m *AgentReincarnationMutation) Fields() []string {
 	}
 	if m.requested_at != nil {
 		fields = append(fields, agentreincarnation.FieldRequestedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, agentreincarnation.FieldUpdatedAt)
 	}
 	if m.completed_at != nil {
 		fields = append(fields, agentreincarnation.FieldCompletedAt)
@@ -8035,6 +8075,8 @@ func (m *AgentReincarnationMutation) Field(name string) (ent.Value, bool) {
 		return m.RequestedBy()
 	case agentreincarnation.FieldRequestedAt:
 		return m.RequestedAt()
+	case agentreincarnation.FieldUpdatedAt:
+		return m.UpdatedAt()
 	case agentreincarnation.FieldCompletedAt:
 		return m.CompletedAt()
 	case agentreincarnation.FieldState:
@@ -8066,6 +8108,8 @@ func (m *AgentReincarnationMutation) OldField(ctx context.Context, name string) 
 		return m.OldRequestedBy(ctx)
 	case agentreincarnation.FieldRequestedAt:
 		return m.OldRequestedAt(ctx)
+	case agentreincarnation.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
 	case agentreincarnation.FieldCompletedAt:
 		return m.OldCompletedAt(ctx)
 	case agentreincarnation.FieldState:
@@ -8121,6 +8165,13 @@ func (m *AgentReincarnationMutation) SetField(name string, value ent.Value) erro
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetRequestedAt(v)
+		return nil
+	case agentreincarnation.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
 		return nil
 	case agentreincarnation.FieldCompletedAt:
 		v, ok := value.(time.Time)
@@ -8293,6 +8344,9 @@ func (m *AgentReincarnationMutation) ResetField(name string) error {
 		return nil
 	case agentreincarnation.FieldRequestedAt:
 		m.ResetRequestedAt()
+		return nil
+	case agentreincarnation.FieldUpdatedAt:
+		m.ResetUpdatedAt()
 		return nil
 	case agentreincarnation.FieldCompletedAt:
 		m.ResetCompletedAt()

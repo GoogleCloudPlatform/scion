@@ -48,6 +48,12 @@ func (_u *AgentReincarnationUpdate) ClearRequestedBy() *AgentReincarnationUpdate
 	return _u
 }
 
+// SetUpdatedAt sets the "updated_at" field.
+func (_u *AgentReincarnationUpdate) SetUpdatedAt(v time.Time) *AgentReincarnationUpdate {
+	_u.mutation.SetUpdatedAt(v)
+	return _u
+}
+
 // SetCompletedAt sets the "completed_at" field.
 func (_u *AgentReincarnationUpdate) SetCompletedAt(v time.Time) *AgentReincarnationUpdate {
 	_u.mutation.SetCompletedAt(v)
@@ -169,6 +175,7 @@ func (_u *AgentReincarnationUpdate) Mutation() *AgentReincarnationMutation {
 
 // Save executes the query and returns the number of nodes affected by the update operation.
 func (_u *AgentReincarnationUpdate) Save(ctx context.Context) (int, error) {
+	_u.defaults()
 	return withHooks(ctx, _u.sqlSave, _u.mutation, _u.hooks)
 }
 
@@ -191,6 +198,14 @@ func (_u *AgentReincarnationUpdate) Exec(ctx context.Context) error {
 func (_u *AgentReincarnationUpdate) ExecX(ctx context.Context) {
 	if err := _u.Exec(ctx); err != nil {
 		panic(err)
+	}
+}
+
+// defaults sets the default values of the builder before save.
+func (_u *AgentReincarnationUpdate) defaults() {
+	if _, ok := _u.mutation.UpdatedAt(); !ok {
+		v := agentreincarnation.UpdateDefaultUpdatedAt()
+		_u.mutation.SetUpdatedAt(v)
 	}
 }
 
@@ -221,6 +236,9 @@ func (_u *AgentReincarnationUpdate) sqlSave(ctx context.Context) (_node int, err
 	}
 	if _u.mutation.RequestedByCleared() {
 		_spec.ClearField(agentreincarnation.FieldRequestedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.UpdatedAt(); ok {
+		_spec.SetField(agentreincarnation.FieldUpdatedAt, field.TypeTime, value)
 	}
 	if value, ok := _u.mutation.CompletedAt(); ok {
 		_spec.SetField(agentreincarnation.FieldCompletedAt, field.TypeTime, value)
@@ -292,6 +310,12 @@ func (_u *AgentReincarnationUpdateOne) SetNillableRequestedBy(v *string) *AgentR
 // ClearRequestedBy clears the value of the "requested_by" field.
 func (_u *AgentReincarnationUpdateOne) ClearRequestedBy() *AgentReincarnationUpdateOne {
 	_u.mutation.ClearRequestedBy()
+	return _u
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (_u *AgentReincarnationUpdateOne) SetUpdatedAt(v time.Time) *AgentReincarnationUpdateOne {
+	_u.mutation.SetUpdatedAt(v)
 	return _u
 }
 
@@ -429,6 +453,7 @@ func (_u *AgentReincarnationUpdateOne) Select(field string, fields ...string) *A
 
 // Save executes the query and returns the updated AgentReincarnation entity.
 func (_u *AgentReincarnationUpdateOne) Save(ctx context.Context) (*AgentReincarnation, error) {
+	_u.defaults()
 	return withHooks(ctx, _u.sqlSave, _u.mutation, _u.hooks)
 }
 
@@ -451,6 +476,14 @@ func (_u *AgentReincarnationUpdateOne) Exec(ctx context.Context) error {
 func (_u *AgentReincarnationUpdateOne) ExecX(ctx context.Context) {
 	if err := _u.Exec(ctx); err != nil {
 		panic(err)
+	}
+}
+
+// defaults sets the default values of the builder before save.
+func (_u *AgentReincarnationUpdateOne) defaults() {
+	if _, ok := _u.mutation.UpdatedAt(); !ok {
+		v := agentreincarnation.UpdateDefaultUpdatedAt()
+		_u.mutation.SetUpdatedAt(v)
 	}
 }
 
@@ -498,6 +531,9 @@ func (_u *AgentReincarnationUpdateOne) sqlSave(ctx context.Context) (_node *Agen
 	}
 	if _u.mutation.RequestedByCleared() {
 		_spec.ClearField(agentreincarnation.FieldRequestedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.UpdatedAt(); ok {
+		_spec.SetField(agentreincarnation.FieldUpdatedAt, field.TypeTime, value)
 	}
 	if value, ok := _u.mutation.CompletedAt(); ok {
 		_spec.SetField(agentreincarnation.FieldCompletedAt, field.TypeTime, value)

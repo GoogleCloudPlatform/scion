@@ -28,6 +28,8 @@ type AgentReincarnation struct {
 	RequestedBy string `json:"requested_by,omitempty"`
 	// RequestedAt holds the value of the "requested_at" field.
 	RequestedAt time.Time `json:"requested_at,omitempty"`
+	// UpdatedAt holds the value of the "updated_at" field.
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 	// CompletedAt holds the value of the "completed_at" field.
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 	// State holds the value of the "state" field.
@@ -52,7 +54,7 @@ func (*AgentReincarnation) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullInt64)
 		case agentreincarnation.FieldAgentID, agentreincarnation.FieldRequestedBy, agentreincarnation.FieldState, agentreincarnation.FieldError, agentreincarnation.FieldPreviousAppliedConfig, agentreincarnation.FieldNewAppliedConfig, agentreincarnation.FieldHandoff:
 			values[i] = new(sql.NullString)
-		case agentreincarnation.FieldRequestedAt, agentreincarnation.FieldCompletedAt:
+		case agentreincarnation.FieldRequestedAt, agentreincarnation.FieldUpdatedAt, agentreincarnation.FieldCompletedAt:
 			values[i] = new(sql.NullTime)
 		case agentreincarnation.FieldID:
 			values[i] = new(uuid.UUID)
@@ -106,6 +108,12 @@ func (_m *AgentReincarnation) assignValues(columns []string, values []any) error
 				return fmt.Errorf("unexpected type %T for field requested_at", values[i])
 			} else if value.Valid {
 				_m.RequestedAt = value.Time
+			}
+		case agentreincarnation.FieldUpdatedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field updated_at", values[i])
+			} else if value.Valid {
+				_m.UpdatedAt = value.Time
 			}
 		case agentreincarnation.FieldCompletedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -194,6 +202,9 @@ func (_m *AgentReincarnation) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("requested_at=")
 	builder.WriteString(_m.RequestedAt.Format(time.ANSIC))
+	builder.WriteString(", ")
+	builder.WriteString("updated_at=")
+	builder.WriteString(_m.UpdatedAt.Format(time.ANSIC))
 	builder.WriteString(", ")
 	if v := _m.CompletedAt; v != nil {
 		builder.WriteString("completed_at=")

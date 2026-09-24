@@ -70,6 +70,20 @@ func (_c *AgentReincarnationCreate) SetNillableRequestedAt(v *time.Time) *AgentR
 	return _c
 }
 
+// SetUpdatedAt sets the "updated_at" field.
+func (_c *AgentReincarnationCreate) SetUpdatedAt(v time.Time) *AgentReincarnationCreate {
+	_c.mutation.SetUpdatedAt(v)
+	return _c
+}
+
+// SetNillableUpdatedAt sets the "updated_at" field if the given value is not nil.
+func (_c *AgentReincarnationCreate) SetNillableUpdatedAt(v *time.Time) *AgentReincarnationCreate {
+	if v != nil {
+		_c.SetUpdatedAt(*v)
+	}
+	return _c
+}
+
 // SetCompletedAt sets the "completed_at" field.
 func (_c *AgentReincarnationCreate) SetCompletedAt(v time.Time) *AgentReincarnationCreate {
 	_c.mutation.SetCompletedAt(v)
@@ -207,6 +221,10 @@ func (_c *AgentReincarnationCreate) defaults() {
 		v := agentreincarnation.DefaultRequestedAt()
 		_c.mutation.SetRequestedAt(v)
 	}
+	if _, ok := _c.mutation.UpdatedAt(); !ok {
+		v := agentreincarnation.DefaultUpdatedAt()
+		_c.mutation.SetUpdatedAt(v)
+	}
 	if _, ok := _c.mutation.State(); !ok {
 		v := agentreincarnation.DefaultState
 		_c.mutation.SetState(v)
@@ -235,6 +253,9 @@ func (_c *AgentReincarnationCreate) check() error {
 	}
 	if _, ok := _c.mutation.RequestedAt(); !ok {
 		return &ValidationError{Name: "requested_at", err: errors.New(`ent: missing required field "AgentReincarnation.requested_at"`)}
+	}
+	if _, ok := _c.mutation.UpdatedAt(); !ok {
+		return &ValidationError{Name: "updated_at", err: errors.New(`ent: missing required field "AgentReincarnation.updated_at"`)}
 	}
 	if _, ok := _c.mutation.State(); !ok {
 		return &ValidationError{Name: "state", err: errors.New(`ent: missing required field "AgentReincarnation.state"`)}
@@ -299,6 +320,10 @@ func (_c *AgentReincarnationCreate) createSpec() (*AgentReincarnation, *sqlgraph
 	if value, ok := _c.mutation.RequestedAt(); ok {
 		_spec.SetField(agentreincarnation.FieldRequestedAt, field.TypeTime, value)
 		_node.RequestedAt = value
+	}
+	if value, ok := _c.mutation.UpdatedAt(); ok {
+		_spec.SetField(agentreincarnation.FieldUpdatedAt, field.TypeTime, value)
+		_node.UpdatedAt = value
 	}
 	if value, ok := _c.mutation.CompletedAt(); ok {
 		_spec.SetField(agentreincarnation.FieldCompletedAt, field.TypeTime, value)
@@ -391,6 +416,18 @@ func (u *AgentReincarnationUpsert) UpdateRequestedBy() *AgentReincarnationUpsert
 // ClearRequestedBy clears the value of the "requested_by" field.
 func (u *AgentReincarnationUpsert) ClearRequestedBy() *AgentReincarnationUpsert {
 	u.SetNull(agentreincarnation.FieldRequestedBy)
+	return u
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (u *AgentReincarnationUpsert) SetUpdatedAt(v time.Time) *AgentReincarnationUpsert {
+	u.Set(agentreincarnation.FieldUpdatedAt, v)
+	return u
+}
+
+// UpdateUpdatedAt sets the "updated_at" field to the value that was provided on create.
+func (u *AgentReincarnationUpsert) UpdateUpdatedAt() *AgentReincarnationUpsert {
+	u.SetExcluded(agentreincarnation.FieldUpdatedAt)
 	return u
 }
 
@@ -574,6 +611,20 @@ func (u *AgentReincarnationUpsertOne) UpdateRequestedBy() *AgentReincarnationUps
 func (u *AgentReincarnationUpsertOne) ClearRequestedBy() *AgentReincarnationUpsertOne {
 	return u.Update(func(s *AgentReincarnationUpsert) {
 		s.ClearRequestedBy()
+	})
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (u *AgentReincarnationUpsertOne) SetUpdatedAt(v time.Time) *AgentReincarnationUpsertOne {
+	return u.Update(func(s *AgentReincarnationUpsert) {
+		s.SetUpdatedAt(v)
+	})
+}
+
+// UpdateUpdatedAt sets the "updated_at" field to the value that was provided on create.
+func (u *AgentReincarnationUpsertOne) UpdateUpdatedAt() *AgentReincarnationUpsertOne {
+	return u.Update(func(s *AgentReincarnationUpsert) {
+		s.UpdateUpdatedAt()
 	})
 }
 
@@ -941,6 +992,20 @@ func (u *AgentReincarnationUpsertBulk) UpdateRequestedBy() *AgentReincarnationUp
 func (u *AgentReincarnationUpsertBulk) ClearRequestedBy() *AgentReincarnationUpsertBulk {
 	return u.Update(func(s *AgentReincarnationUpsert) {
 		s.ClearRequestedBy()
+	})
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (u *AgentReincarnationUpsertBulk) SetUpdatedAt(v time.Time) *AgentReincarnationUpsertBulk {
+	return u.Update(func(s *AgentReincarnationUpsert) {
+		s.SetUpdatedAt(v)
+	})
+}
+
+// UpdateUpdatedAt sets the "updated_at" field to the value that was provided on create.
+func (u *AgentReincarnationUpsertBulk) UpdateUpdatedAt() *AgentReincarnationUpsertBulk {
+	return u.Update(func(s *AgentReincarnationUpsert) {
+		s.UpdateUpdatedAt()
 	})
 }
 

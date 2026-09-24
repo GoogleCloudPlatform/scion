@@ -56,6 +56,9 @@ func (AgentReincarnation) Fields() []ent.Field {
 		field.Time("requested_at").
 			Default(time.Now).
 			Immutable(),
+		field.Time("updated_at").
+			Default(time.Now).
+			UpdateDefault(time.Now),
 		field.Time("completed_at").
 			Optional().
 			Nillable(),
@@ -89,8 +92,12 @@ func (AgentReincarnation) Indexes() []ent.Index {
 		// for this agent". This composite index also covers plain agent_id
 		// lookups (history listing for an agent) since agent_id is its
 		// leading column — a separate single-column index would be
-		// redundant (p1a-r1 N3).
+		// redundant.
 		index.Fields("agent_id", "state"),
+		// The replica-safe boot/periodic sweep (design §3.7) queries "every
+		// non-terminal record whose updated_at is older than the staleness
+		// bound", across all agents.
+		index.Fields("state", "updated_at"),
 	}
 }
 
