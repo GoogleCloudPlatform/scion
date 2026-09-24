@@ -254,8 +254,9 @@ func (c *FederationConfig) Validate() []error {
 		// scoped service-account admission when nothing enforces it — a
 		// Google issuer with the wrong issuer_type or no expected_audience
 		// is exactly as unenforced as a non-Google issuer. This is a hard
-		// error rather than a warning, so a misconfiguration fails at
-		// startup instead of silently admitting nothing.
+		// error rather than a warning, so a misconfiguration is rejected
+		// when the config is loaded (startup fails; an admin save or hot
+		// reload is refused) instead of silently admitting nothing.
 		if len(issuer.AllowedGCPProjects) > 0 && !isActiveGoogleUserIssuer(issuer) {
 			errs = appendGoogleUserOnlyFieldError(errs, i, issuer, "allowed_gcp_projects")
 		}

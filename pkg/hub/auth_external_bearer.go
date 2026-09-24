@@ -40,10 +40,9 @@ import (
 //
 // serveExternalBearer runs only after the request has already failed every
 // other authentication path (Hub JWT, PAT, agent, proxy, federation). It is
-// therefore load-bearing that it never changes the outcome of a request that
-// authenticates today: when the token is not something this path can vouch
-// for, it reports errExternalBearerNotApplicable and the caller emits its
-// original, byte-identical rejection.
+// therefore load-bearing that it never changes the outcome of a request this
+// path cannot vouch for: it reports errExternalBearerNotApplicable and the
+// caller emits its original, byte-identical rejection.
 //
 // A verified identity is resolved to a Hub user through the same
 // GoogleIdentityResolver the GE exchange endpoint uses (ge_exchange.go,
@@ -274,8 +273,8 @@ func containsFold(list []string, target string) bool {
 // closed rather than being silently stripped — this function decides a
 // security check, not a display string, so an unusual shape is treated as
 // "cannot confidently say what domain this is" rather than guessed at. The
-// domain is lower-cased on success, matching
-// containsFold's case-insensitive comparison.
+// domain is lower-cased on success, matching containsFold's case-insensitive
+// comparison.
 func domainOf(email string) (domain string, ok bool) {
 	parts := strings.Split(email, "@")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
