@@ -133,17 +133,17 @@ tier's default export is a subdirectory on the boot disk, which is affected by
 the gap below; the fix is to export the root of its own filesystem instead.
 Exports use `no_subtree_check` (the nfs-utils default; `subtree_check` breaks
 file handles when files are renamed across directories), which comes with a
-specific cost: knfsd does not verify that the inode lies inside the exported
-subtree; any valid handle on the same filesystem is accepted. When the export
-path is a subdirectory of a larger filesystem, any host the export admits
-(see Network shape above) can construct a file handle for a different inode
-on that *same underlying filesystem* and reach it as the squashed NFS
-identity, even though that inode sits outside the exported subtree entirely.
-Exporting the root of its own dedicated filesystem removes this gap by
-construction: there is nothing else on that filesystem for a forged handle to
-reach (this assumes nothing else is bind- or sub-mounted beneath the export
-with `crossmnt`/`nohide`, which would extend the same guarantee across a mount
-boundary and needs the same treatment).
+specific cost: knfsd does not verify that a presented file handle's inode lies
+inside the exported subtree; any valid handle on the same filesystem is
+accepted. When the export path is a subdirectory of a larger filesystem, any
+host the export admits (see Network shape above) can construct a file handle
+for a different inode on that *same underlying filesystem* and reach it as
+the squashed NFS identity, even though that inode sits outside the exported
+subtree entirely. Exporting the root of its own dedicated filesystem removes
+this gap by construction: there is nothing else on that filesystem for a
+forged handle to reach (this assumes nothing else is bind- or sub-mounted
+beneath the export with `crossmnt`/`nohide`; each such filesystem is exposed
+the same way and needs to be its own root as well).
 
 ### E2 hardening: dedicated squash identity + default ACL
 
@@ -390,38 +390,88 @@ database change.
 ## Boot-disk trade-offs
 
 The NFS export (`/srv/scion-shared`) lives on the VM's **boot disk** rather
-than a separate persistent disk. The trade-offs below are real and should
-inform how you operate this tier, but "on the boot disk" does not mean "as a
-plain subdirectory of the boot disk's root filesystem" — see the Export
-layout row, and Security posture above, for why a plain subdirectory export
-is a real gap, not an accepted trade-off:
+than a separate persistent disk. The default layout is a plain subdirectory of
+`/`, which has a real gap (see the Export layout row and Security posture
+above); keeping the export on the boot disk as a loop-mounted filesystem
+instead avoids it. The trade-offs below are real either way and should inform
+how you operate this tier:
 
 | Concern | Consequence | Mitigation |
 |---|---|---|
-| **Fill risk** | The OS, container images/layers, agent workspaces, SQLite (`hub.db`), and the NFS export all share one filesystem. A runaway agent writing to the scratchpad, from either runtime, can fill `/` — which breaks SQLite writes, dockerd, and journald together, taking down the whole hub, not just the scratchpad. | Alert on `/` usage above 80%. Periodically check `du -sh /srv/scion-shared/projects/*` for outliers. There is no reserved-capacity protection for the export specifically. |
+| **Fill risk** | The OS, container images/layers, agent workspaces, SQLite (`hub.db`), and the NFS export all share one filesystem. A runaway agent writing to the scratchpad, from either runtime, can fill `/` — which breaks SQLite writes, dockerd, and journald together, taking down the whole hub, not just the scratchpad. | Alert on `/` usage above 80%. Periodically check `du -sh /srv/scion-shared/projects/*` for outliers. There is no reserved-capacity protection for the export specifically. The dedicated-filesystem layout below gives the export its own size cap, independent of `/`. |
 | **Snapshots** | A boot-disk snapshot captures the OS, the hub DB, and the scratchpad together. You cannot roll back the scratchpad independently, and restores are all-or-nothing. | Accept this for scratch data. To recover a single file, mount a snapshot-derived disk on another VM and copy it out. |
 | **Lifecycle** | Tearing down the VM (and its boot disk) deletes all shared-dir data with it. Recreating the VM starts with an empty scratchpad. | Know this before tearing down a VM that has scratchpad data you care about. A dedicated persistent disk for the export is the upgrade path if this becomes unacceptable, but is not built in this phase. |
 | **I/O contention** | NFS clients, container overlay I/O, and SQLite all compete for the same disk. A low-baseline-IOPS boot disk (e.g. `pd-standard`) makes this worse. | Acceptable for scratch data; prefer `pd-balanced` or better for the boot disk if this tier sees heavy shared-dir traffic. The boot disk can be grown online (grow the PD, then `growpart` + `resize2fs`). |
-| **No mount boundary** | There's no separate mountpoint to fail to mount (a small upside), but also no size isolation between the export and everything else on `/`. | — |
+| **With the default (subdirectory) layout: no mount boundary** | There's no separate mountpoint to fail to mount (a small upside), but also no size isolation between the export and everything else on `/`. | The recommended dedicated-filesystem layout below adds a mount (and the size isolation that comes with it), at the cost of a mount that can fail — see its own fail-closed step. |
 | **Export layout** | This tier's default export is a plain subdirectory of the boot disk's root filesystem, which accepts a forged file handle for any inode on that filesystem, not just the exported subtree (see Security posture above). | Export the root of a dedicated filesystem instead — a loop-file filesystem on the boot disk, or a separate disk. A subdirectory export is not recommended. |
 
-**Creating the export as a dedicated filesystem root**, the recommended
+**Creating the export as a dedicated filesystem root.** The recommended
 approach: put the export on its own filesystem (a loop-mounted image file on
-the boot disk, or a separate disk) rather than a subdirectory of `/`.
+the boot disk here; a separate disk is the same recipe with the device in
+place of the image file and no `loop` option) rather than a subdirectory of
+`/`. Run once, as root:
 
-- Create the backing image/disk and format it **once**; never re-format one
-  that already exists (that would destroy its contents on every re-run of
-  any provisioning automation).
-- Mount it **before** the NFS server starts (order the mount ahead of
-  `nfs-server.service` — a systemd mount unit or an fstab entry with
-  `x-systemd.before=nfs-server.service` both work).
-- **Check it's actually mounted before exporting.** Fail closed
-  (`mountpoint -q <export path>`) rather than serving the export from
-  whatever filesystem happens to be under that path if the mount didn't
-  happen — that's exactly the subdirectory-on-`/` gap this section exists to
-  avoid.
-- The export path is the mounted filesystem's own root, not a subdirectory
-  under it.
+```bash
+# Create and format the backing image, but only the first time -- never
+# re-create or re-format one that already exists, since that would
+# destroy its contents on every re-run of any provisioning automation.
+test ! -e /var/lib/scion-shared.img || { echo "image exists; not re-creating" >&2; exit 1; }
+fallocate -l 100G /var/lib/scion-shared.img      # preallocated: also gives the size isolation from / noted above
+mkfs.ext4 -q /var/lib/scion-shared.img           # ext4: the ACL support the E2 section below relies on
+mkdir -p /srv/scion-shared
+
+# Mount it before the NFS server starts, and fail closed if it never
+# becomes a mountpoint: x-systemd.before= only orders the units, it does
+# not create a dependency, so a mount failure alone would otherwise let
+# nfs-server start anyway and export the bare directory on / -- exactly
+# the gap this layout exists to close. x-systemd.required-by= is what
+# turns "ordered before" into "required by", so nfs-server.service will
+# not start if this mount unit fails.
+echo '/var/lib/scion-shared.img /srv/scion-shared ext4 loop,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service 0 2' >> /etc/fstab
+systemctl daemon-reload
+mount /srv/scion-shared
+mountpoint -q /srv/scion-shared || { echo "mount failed; refusing to continue" >&2; exit 1; }
+```
+
+The export path is the mounted filesystem's own root, not a subdirectory
+under it. The exports(5) `mp` (mountpoint) option is the export-side half of
+the same fail-closed guarantee -- it makes knfsd itself refuse to serve the
+path unless it's currently a mountpoint, which also covers a mount that fails
+on a later reboot, not just at initial provisioning time:
+
+```
+/srv/scion-shared <node-subnet>(rw,sync,no_subtree_check,all_squash,anonuid=<uid>,anongid=<gid>,mp)
+```
+
+**Ownership and mode.** A freshly formatted filesystem's root is
+`root:root 0755`, which is not what the broker needs: per the E2 hardening
+below, the export root itself must be owned by the **broker's own uid**
+(not the squash identity), group `scion`, mode `2755` -- setgid but not
+group-writable, same as every other upper-level directory the broker
+creates. Set this once, right after the first mount:
+
+```bash
+chown <broker-uid>:scion /srv/scion-shared
+chmod 2755 /srv/scion-shared
+```
+
+**On an existing deployment.** Switching an already-running hub to this
+layout replaces the filesystem underneath the export, which the Reboot/
+stale-handle caveats below already flag as an ESTALE trigger -- treat it as a
+migration, not a live change:
+
+1. Stop the hub and any GKE agents so nothing is reading or writing the
+   export during the copy.
+2. Create and mount the new filesystem at a temporary path (the block
+   above, with a scratch mountpoint instead of `/srv/scion-shared`).
+3. Copy the existing tree across, preserving ACLs: `rsync -aAX
+   /srv/scion-shared/ /mnt/new-export/`.
+4. Apply the ownership/mode step above to the new filesystem's root.
+5. Unmount the temporary mountpoint, then mount the same filesystem at
+   `/srv/scion-shared` (update `/etc/fstab` accordingly) and
+   `exportfs -ra`.
+6. Restart the hub and GKE agents; existing NFS clients need to remount.
+7. Once you've verified the copy, remove the old data from `/`.
 
 ## Reboot, stale-handle, and cross-runtime visibility caveats
 
