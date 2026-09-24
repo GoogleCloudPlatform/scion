@@ -856,6 +856,44 @@ func TestConfigure_PinsYAMLOnlyScheme(t *testing.T) {
 	}
 }
 
+// TestConfigure_DedupesWarningAcrossConfigurePushes covers the dedupe's
+// per-BrokerServer ownership and lifetime: pushing the same ignored
+// auth_scheme through Configure twice must not double the Warn, because
+// BrokerServer keeps one dedupe instance for its whole lifetime rather than
+// creating a new one per push. Each Configure call itself runs ApplyOverlay
+// twice (once to validate, once to apply the snapshot), so the first push
+// alone already produces a Warn plus a Debug; three Debug lines total are
+// therefore expected across the two pushes in this trace.
+func TestConfigure_DedupesWarningAcrossConfigurePushes(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	broker := NewBrokerServer(nil, log, nil)
+	baseCfg := &Config{
+		Bridge: BridgeConfig{ExternalURL: "https://base.example.com"},
+		Hub:    HubConfig{Endpoint: "https://hub.example.com", User: "test-user"},
+		Auth:   AuthConfig{Scheme: "hubBearer", YAMLScheme: "hubBearer"},
+	}
+	snap := NewSnapshotHolder(BuildSnapshot(*baseCfg))
+	broker.SetAdminConfig(baseCfg, snap, "")
+
+	pushedConfig := map[string]string{"auth_scheme": "none"}
+	if err := broker.Configure(pushedConfig); err != nil {
+		t.Fatalf("first Configure: %v", err)
+	}
+	if err := broker.Configure(pushedConfig); err != nil {
+		t.Fatalf("second Configure: %v", err)
+	}
+
+	out := buf.String()
+	if warnCount := strings.Count(out, "level=WARN"); warnCount != 1 {
+		t.Errorf("got %d Warn line(s) across two identical Configure pushes, want 1 (the dedupe must be shared across pushes, not reset per Configure call):\n%s", warnCount, out)
+	}
+	if debugCount := strings.Count(out, "level=DEBUG"); debugCount != 3 {
+		t.Errorf("got %d Debug line(s), want 3 (each Configure call runs ApplyOverlay twice, so push 1 yields Warn+Debug and push 2 yields Debug+Debug):\n%s", debugCount, out)
+	}
+}
+
 func TestBuildSnapshot_RateLimitDisabled(t *testing.T) {
 	cfg := Config{
 		RateLimit: RateLimitConfig{Enabled: false},
@@ -1143,7 +1181,7 @@ func TestParseAdminOverlay_EmptyStringFieldsStillPresent(t *testing.T) {
 	// should still be marked as present so ApplyOverlay writes the empty
 	// value. auth_scheme is the one exception: EffectiveAuthScheme treats an
 	// empty pushed scheme as "no scheme in this push" and keeps the current
-	// scheme rather than clearing it (see TestEffectiveAuthScheme and F4-*).
+	// scheme rather than clearing it (see TestEffectiveAuthScheme).
 	cfg := map[string]string{
 		"external_url": "",
 		"auth_scheme":  "",
