@@ -290,9 +290,9 @@ was judged adequate and kept as-is.
   `TestServer_DefaultMetricsWiring_RecordsWithoutSetters`, then reverted and re-diffed clean against the committed tree.
 - ✅ Narration grep (adds `fix round` to the term list per this round's review) — empty on this half's delta since `714186be2`.
 - ✅ Commit-message and diff bare-issue-number greps against `a53175c23`, scoped to `pkg/hub` and `cmd/server_foreground.go` — both
-  empty. **Re-verifying F1** at this push's tip: the unscoped whole-tree diff grep still has exactly one hit, in
-  `.design/project-log/auth-passthrough-p4-dev.md` (Phase 4's own log, `#1847`-derived prose, added by `ap-p4-dev`'s `2981a58a7`) —
-  not this half's file, not this half's commit. Relaying to `ap-em`/the Phase 4 owner again in my report, since it's outside my
-  ownership.
+  empty. **Re-verifying F1** at this push's tip: the unscoped whole-tree diff grep had one hit, in
+  `.design/project-log/auth-passthrough-p4-dev.md` (Phase 4's own log, referencing the upstream pull request this design
+  supersedes, added by `ap-p4-dev`'s `2981a58a7`) — not this half's file, not this half's commit. Relayed to `ap-em`/the Phase 4
+  owner in my report, since it's outside my ownership; fixed upstream in `95e3e3b4e`.
 - Not run: the full `pkg/hub/...` + `./cmd` suite (`-timeout 40m`) — this round changes non-test Hub code, so the brief requires it.
   Requesting the slot from `ap-em` in my report.
