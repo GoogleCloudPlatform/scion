@@ -346,7 +346,6 @@ func readDirNames(dirFd int) ([]string, error) {
 		if n <= 0 {
 			return names, nil
 		}
-		_, _, newNames := unix.ParseDirent(buf[:n], -1, nil)
-		names = append(names, newNames...)
+		_, _, names = unix.ParseDirent(buf[:n], -1, names)
 	}
 }
