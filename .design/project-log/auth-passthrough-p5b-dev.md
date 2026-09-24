@@ -247,7 +247,7 @@ did not interact with this fix round.
 | **N2** `TokenType` doc comment (`caller.go:30-32`) omitted `ge_exchange` | **Fixed.** Added `"ge_exchange"` to the comment, matching `ge_exchange_validator.go:345`'s `TokenType: "ge_exchange"`. | Documentation-only; no behavior change. |
 | **O1** Sample config said Google **ID token only** for `hubBearer` | **Fixed.** `scion-a2a-bridge.yaml.sample`'s `hubBearer` block now says "Google ID token or access token" instead of naming only `<google-id-token>`. | Documentation-only. |
 | **F1-F3** | No action (per EM disposition). | — |
-| **F4** Admin UI pushes `auth_scheme` from a dropdown lacking `hubBearer`/`geGoogle`, overwriting a YAML-configured scheme with the default | **This is a fail-open security bug, not just a UI inconsistency.** `admin-integrations.ts` seeds `editedSettings` with each field's `defaultValue`; for `auth_scheme` that default is `"none"`. `handleSaveConfig` sends the full `editedSettings` object, so saving *any* A2A setting (rate limit, external URL, projects — not just auth scheme) pushes `auth_scheme: "none"` unless an admin value was already stored. `ParseAdminOverlay`/`ApplyOverlay` then overwrite the YAML-configured `hubBearer` or `geGoogle` scheme with `none`, i.e. **the bridge starts accepting unauthenticated requests** (with the bridge's admin identity downstream, per the `none` scheme's behavior). Because `ParseAdminOverlay` rejects `hubBearer`/`geGoogle` as invalid `auth_scheme` values, the admin **cannot restore the original scheme from the UI** once this happens — only editing the YAML and restarting the bridge (or clearing the persisted `admin-overlay.json`) recovers it. No code change made here (pre-existing, outside this delta's blast radius, admin-overlay/UI ownership; review r2 asked that `ap-em` file this as a tracked security follow-up rather than leave it as a log note only — see r2 disposition below). Candidate fixes: (a) the admin-integrations UI omits `auth_scheme` from its `Configure()` push when the currently-effective scheme isn't one it can represent (i.e. leave YAML-only schemes alone), or (b) the Hub/bridge overlay layer refuses to downgrade a YAML-only scheme through `ApplyOverlay`. This is not this developer's or this PR's scope — it touches the admin-overlay/UI ownership area, not `extras/scion-a2a-bridge/**`'s bridge-side auth code. | — |
+| **F4** Admin UI pushes `auth_scheme` from a dropdown lacking `hubBearer`/`geGoogle`, overwriting a YAML-configured scheme with the default | **This is a fail-open security bug, not just a UI inconsistency.** `admin-integrations.ts` seeds `editedSettings` with each field's `defaultValue`; for `auth_scheme` that default is `"none"`. `handleSaveConfig` sends the full `editedSettings` object, so saving *any* A2A setting (rate limit, external URL, projects — not just auth scheme) pushes `auth_scheme: "none"` unless an admin value was already stored. `ParseAdminOverlay`/`ApplyOverlay` then overwrite the YAML-configured `hubBearer` or `geGoogle` scheme with `none`, i.e. **the bridge starts accepting unauthenticated requests** (with the bridge's admin identity downstream, per the `none` scheme's behavior). Because `ParseAdminOverlay` rejects `hubBearer`/`geGoogle` as invalid `auth_scheme` values, the admin **cannot restore the original scheme from the UI** once this happens. Recovery is **not** editing the bridge YAML or clearing `admin-overlay.json` — the Hub re-sends its stored `auth_scheme` on every reconnect (`pkg/plugin/manager.go`'s `Reconnect` → `loadPlugin` → `BrokerRPCClient.Configure(dp.Config)`, applied and re-persisted by the bridge's own `BrokerServer.Configure`, `extras/scion-a2a-bridge/internal/bridge/broker.go:89`), so a YAML/overlay-only fix is undone on the next reconnect. Recovery requires removing the `auth_scheme` line from the **Hub-side** admin config (`~/.scion/scion-a2a-bridge-admin.yaml`, written by `pkg/hub/handlers_integrations.go`'s `createSelfManagedAdminConfig`; in HA mode, the integration's settings stored via `PostgresConfigProvider`/`handleUpdateIntegrationConfig`), then clicking Reconnect. No code change made here (pre-existing, outside this delta's blast radius, admin-overlay/UI ownership; review r2 asked that `ap-em` file this as a tracked security follow-up rather than leave it as a log note only — see r2 disposition below). Candidate fixes: (a) the admin-integrations UI omits `auth_scheme` from its `Configure()` push when the currently-effective scheme isn't one it can represent (i.e. leave YAML-only schemes alone), or (b) the Hub/bridge overlay layer refuses to downgrade a YAML-only scheme through `ApplyOverlay`. This is not this developer's or this PR's scope — it touches the admin-overlay/UI ownership area, not `extras/scion-a2a-bridge/**`'s bridge-side auth code. | — |
 
 ### Mutation M8 re-check
 
@@ -305,7 +305,7 @@ it as a tracked security follow-up.
 
 | # | Disposition | Change | Test |
 |---|---|---|---|
-| **R1** (Required) README's r1-added sentence claimed a YAML `hubBearer` bridge "keeps working normally" against the admin UI. False: a routine admin-UI save pushes `auth_scheme: "none"` (fail-open, unauthenticated) and the UI cannot restore `hubBearer`/`geGoogle` afterward. | **Fixed.** Replaced the sentence at `README.md:119` with the reviewer's suggested caution: saving any A2A setting via the admin UI pushes the dropdown's default `auth_scheme` (`none`), overriding YAML; the UI can't switch it back; recovery is editing YAML and restarting (or clearing `admin-overlay.json`). | Documentation-only; the failure mode was independently confirmed by the reviewer's probe test (not re-verified by me — it's the same pre-existing `adminoverlay.go`/`admin-integrations.ts` behavior r1's F4 already flagged, just under-described). |
+| **R1** (Required) README's r1-added sentence claimed a YAML `hubBearer` bridge "keeps working normally" against the admin UI. False: a routine admin-UI save pushes `auth_scheme: "none"` (fail-open, unauthenticated) and the UI cannot restore `hubBearer`/`geGoogle` afterward. | **Fixed.** Replaced the sentence at `README.md:119` with the reviewer's suggested caution: saving any A2A setting via the admin UI pushes the dropdown's default `auth_scheme` (`none`), overriding YAML; the UI can't switch it back. (r3 correction: this row's own recovery text was itself wrong — see fix round 3 below — editing YAML/clearing `admin-overlay.json` does **not** recover, because the Hub re-pushes its stored `auth_scheme` on reconnect; the fix is removing `auth_scheme` from the Hub-side admin config, then Reconnect.) | Documentation-only; the failure mode was independently confirmed by the reviewer's probe test (not re-verified by me — it's the same pre-existing `adminoverlay.go`/`admin-integrations.ts` behavior r1's F4 already flagged, just under-described). |
 | **R1** (Required, same finding) — F4 project-log row understated the severity | **Fixed.** Rewrote the F4 row: states explicitly that the overwrite value is `"none"` (auth disabled, fail-open), that it can be triggered by saving *any* A2A setting (not just the auth scheme field), that the UI cannot restore `hubBearer`/`geGoogle` afterward because `ParseAdminOverlay` rejects them as invalid, and that recovery requires editing YAML/restarting or clearing the overlay file. Kept candidate fixes (a)/(b) and the ownership boundary. Did **not** make the code change — `ptone`/`ap-em` are deciding whether it lands in this PR. | — |
 | **O1** (Optional, implemented per relay instruction: "it's cheap") No test asserted the bearer token is absent from the rejection log (M9 survived) | **Implemented.** `TestAuthMiddleware_HubBearer_RejectedByHub` now builds the server directly (not via `newHubBearerMiddleware`) with a `slog.NewTextHandler` writing to a `bytes.Buffer`, and after asserting the existing exact-body check, asserts the captured log contains a rejection line and does **not** contain the raw token. | `TestAuthMiddleware_HubBearer_RejectedByHub` (extended) |
 
@@ -352,3 +352,48 @@ deleted after; `GOCACHE=/scion-volumes/gocache`)
 
 None beyond the explicit scope limit above (F4's code fix intentionally held
 for `ptone`/`ap-em`).
+
+---
+
+## Fix round 3 (review `reviews/p5b-r3-ap-p5b-rev-3.md`, REQUEST CHANGES on `86fba2eb5`)
+
+**Agent:** ap-p5b-dev-2 · **Branch:** `scion/auth-passthrough` · **Date:** 2026-09-24
+
+Per `ap-em`'s fix brief (`briefs/ap-p5b-dev-2-fix-r3.md`): one Required,
+doc-only finding. r2-O1 (log redaction) was independently re-verified by
+this review (M9/M9b/M9c all killed) — no action needed there. All B-row
+mutants (20/20) remain killed. `ap-em` rebased the branch onto upstream
+`main` and force-pushed between rounds 2 and 3; I ran the required
+`git fetch origin && git reset --hard origin/scion/auth-passthrough` (clean
+working tree, nothing unpushed) before starting this round, per `ap-em`'s
+instruction — new head at the time was `86fba2eb5`.
+
+### Disposition table
+
+| # | Disposition | Change | Verified against source |
+|---|---|---|---|
+| **R1** (Required) The r2 README caution's recovery step ("clear the persisted admin overlay and restart") does not actually recover a `hubBearer`/`geGoogle` bridge whose `auth_scheme` was overwritten to `none`: the Hub keeps `auth_scheme: "none"` in its own admin config and re-pushes it on every reconnect, undoing a YAML/overlay-only fix. The same wrong recovery text appeared in this log's F4 row and r2 disposition row. | **Fixed (doc-only).** Replaced the recovery clause in `README.md:121` with correct guidance: remove the `auth_scheme` line from the **Hub-side** admin config (`~/.scion/scion-a2a-bridge-admin.yaml`; in HA mode, the integration's settings in the Hub database), then click **Reconnect** — clearing the bridge's own `admin-overlay.json` or editing its YAML is not enough. Corrected the matching text in this file's F4 row and the r2-R1 disposition row above. | Read (not copied blindly, per the brief's instruction) before writing: `pkg/hub/handlers_integrations.go` — `handleUpdateIntegrationConfig` (func at `:446`, HA/YAML branch starts `:516`) writes the Hub-side settings; `resolveIntegrationMergedConfig` (`:1573`) and `mgr.ReplaceBrokerConfig` (`pkg/plugin/manager.go:549`) push the merged map to the plugin; `createSelfManagedAdminConfig` (`:1068` area, called at `:983`) is what seeds `auth_scheme: "none"` into `~/.scion/scion-a2a-bridge-admin.yaml` (path built at `:970` as `"~/.scion/scion-" + name + "-admin.yaml"`). Reconnect path: `Manager.Reconnect` (`pkg/plugin/manager.go:416`) → `loadPlugin` (`:224`) → `BrokerRPCClient.Configure` (`pkg/plugin/broker_plugin.go:279`); on the bridge side, `BrokerServer.Configure` (**`extras/scion-a2a-bridge/internal/bridge/broker.go:89`** — inside my own owned package, not a `pkg/plugin` file as the review's shorthand `broker.go:100-119` could be misread) applies the overlay and re-persists it via `PersistOverlay`. Boot-time overlay load confirmed at `extras/scion-a2a-bridge/cmd/scion-a2a-bridge/main.go:113-125` (`LoadPersistedOverlay`/`ApplyOverlay`), matching the review's claim that a bridge restart briefly restores `hubBearer` before the next reconnect re-pushes `none`. |
+| F1-F4 | No action. | — | — |
+
+### Gates (from `extras/scion-a2a-bridge/`, `GOTMPDIR` owned scratch dir,
+deleted after; `GOCACHE=/scion-volumes/gocache`)
+
+- `go build ./...` — clean.
+- `go vet ./...` — clean.
+- `gofmt -l .` — clean.
+- `go test ./...` — all green: `integration` (11.6s), `internal/bridge`
+  (37.3s), `internal/state`. No regressions (doc-only change, as expected).
+- `GOGC=40 golangci-lint run --new-from-rev=upstream-main --concurrency=1 ./...`
+  — 0 issues.
+- Did not run the `pkg/hub` suite (unchanged instruction; this round is
+  doc-only and touches nothing under `pkg/`).
+
+### Bare-issue-number grep (both must print nothing)
+
+- `git log upstream-main..HEAD --format=%B | /usr/bin/grep -nE '(^|[^/A-Za-z])#[0-9]+'` — empty.
+- `git diff upstream-main..HEAD -- extras/scion-a2a-bridge | /usr/bin/grep -nE '^\+.*(^|[^/A-Za-z0-9])#[0-9]{3,}'` — empty.
+
+### Deviations / design questions
+
+None. As instructed, no code changes to `adminoverlay.go`/UI — F4's code fix
+remains with `ptone`/`ap-em` to route.
