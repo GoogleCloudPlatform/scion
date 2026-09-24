@@ -399,8 +399,9 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 // containerIsRunning reports whether a container named scion.name=name is
 // currently running, per the runtime's own status string
 // (phaseFromContainerStatus maps "Up ..."/"running" to "running"). Used by
-// Reprovision's R3 precondition check. A List error is not treated as
-// "not running" by the caller — see the call site's comment.
+// Reprovision's running-container precondition check (design §3.4 Amendment
+// A2). A List error is not treated as "not running" by the caller — see the
+// call site's comment.
 func (m *AgentManager) containerIsRunning(ctx context.Context, name string) (bool, error) {
 	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": name})
 	if err != nil {

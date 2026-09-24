@@ -332,8 +332,8 @@ func TestReprovision_RunningContainer_Refused(t *testing.T) {
 
 // TestReprovision_StoppedContainer_Proceeds is the companion to the above: a
 // container the runtime reports as stopped (or absent) must NOT be refused —
-// R3 is specifically about a still-running container, not about requiring a
-// prior successful stop confirmation.
+// the running-container precondition is specifically about a still-running
+// container, not about requiring a prior successful stop confirmation.
 func TestReprovision_StoppedContainer_Proceeds(t *testing.T) {
 	scionDir, _ := reprovisionSetup(t)
 	agentName := "stopped-agent"
