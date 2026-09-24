@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -639,16 +640,40 @@ func TestAuthMiddleware_HubBearer_EmptyToken(t *testing.T) {
 // underlying Hub rejection reason never appears in the response body
 // (logged at Info instead). Exact-byte comparison catches a mutation that
 // leaks the reason (e.g. interpolating err.Error() into the message).
+// TestAuthMiddleware_HubBearer_RejectedByHub also proves the rejection log
+// line (server.go's "bearer token rejected by Scion Hub" Info log) never
+// contains the token itself (review r2 O1; M9: adding `"token", token` to
+// that log call must fail this test). hubBearer forwards third-party Google
+// credentials, so a token leaking into logs is a real exposure, not just a
+// hypothetical one.
 func TestAuthMiddleware_HubBearer_RejectedByHub(t *testing.T) {
+	const token = "some-token-the-hub-rejects"
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "very specific reason the caller must never see", http.StatusUnauthorized)
 	}))
 	defer hub.Close()
 
-	mw := newHubBearerMiddleware(t, hub.URL, "hubBearer")
+	dir := t.TempDir()
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	cfg := &Config{
+		Bridge: BridgeConfig{ExternalURL: "https://test"},
+		Hub:    HubConfig{Endpoint: hub.URL, User: "admin@test"},
+		Auth:   AuthConfig{Scheme: "hubBearer"},
+	}
+	b := New(store, nil, nil, cfg, nil, log)
+	srv := NewServer(b, cfg, nil, log, testHandler())
+	mw := srv.authMiddleware(testHandler())
 
 	req := httptest.NewRequest(http.MethodPost, "/projects/p/agents/a/jsonrpc", nil)
-	req.Header.Set("Authorization", "Bearer some-token-the-hub-rejects")
+	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	mw.ServeHTTP(w, req)
 
@@ -658,6 +683,14 @@ func TestAuthMiddleware_HubBearer_RejectedByHub(t *testing.T) {
 	want := wantPlainErrorBody("unauthorized: token rejected by Scion Hub")
 	if !bytes.Equal(w.Body.Bytes(), want) {
 		t.Errorf("body = %q, want %q", w.Body.Bytes(), want)
+	}
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "rejected") {
+		t.Fatalf("expected a rejection log line, got: %q", logOutput)
+	}
+	if strings.Contains(logOutput, token) {
+		t.Errorf("rejection log leaked the bearer token: %q", logOutput)
 	}
 }
 

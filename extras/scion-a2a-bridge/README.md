@@ -116,7 +116,9 @@ Once installed, the bridge's admin-managed settings can be edited from the integ
 
 Changes saved via the admin UI take effect immediately on the running bridge — no bridge restart is required. The Hub pushes the updated configuration over the existing RPC connection.
 
-`hubBearer` (Google credential pass-through) and `geGoogle` (Google credential exchange) are not offered in the **Auth scheme** dropdown. Configure either one via the `auth.scheme` key in `scion-a2a-bridge.yaml` instead — see `scion-a2a-bridge.yaml.sample` for the `hubBearer` block. A bridge already running with `auth.scheme: hubBearer` set in YAML keeps working normally; only the admin UI's own scheme picker excludes it.
+`hubBearer` (Google credential pass-through) and `geGoogle` (Google credential exchange) are not offered in the **Auth scheme** dropdown. Configure either one via the `auth.scheme` key in `scion-a2a-bridge.yaml` instead — see `scion-a2a-bridge.yaml.sample` for the `hubBearer` block.
+
+**Caution:** saving the A2A integration settings in the admin UI pushes the dropdown's `auth_scheme` value (default `none`), which overrides `auth.scheme` from YAML. A bridge configured with `hubBearer` or `geGoogle` will then run with that scheme — possibly unauthenticated — and the UI cannot switch it back, since neither scheme is a valid dropdown value. Don't save A2A settings from the admin UI for such a bridge until this is fixed; if it happens, clear the persisted admin overlay and restart.
 
 ### Project and agent exposure
 
