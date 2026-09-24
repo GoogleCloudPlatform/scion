@@ -247,7 +247,7 @@ func (c *FederationConfig) Validate() []error {
 		}
 
 		// Rule 9: AllowedGCPProjects (service-account admission by GCP
-		// project, design §4.1/§4.4) only does anything on an ACTIVE Google
+		// project) only does anything on an ACTIVE Google
 		// user issuer (isActiveGoogleUserIssuer) — the one shape
 		// googleTrust actually reaches. Set anywhere else, it must not be
 		// silently ignored: that would let an operator believe they've
@@ -260,8 +260,8 @@ func (c *FederationConfig) Validate() []error {
 			errs = appendGoogleUserOnlyFieldError(errs, i, issuer, "allowed_gcp_projects")
 		}
 
-		// Rule 10: AllowedDomains (user-principal email-domain constraint,
-		// design §4.1/§4.4) is validated identically to AllowedGCPProjects
+		// Rule 10: AllowedDomains (user-principal email-domain constraint)
+		// is validated identically to AllowedGCPProjects
 		// above — it only does anything on an ACTIVE Google user issuer.
 		if len(issuer.AllowedDomains) > 0 && !isActiveGoogleUserIssuer(issuer) {
 			errs = appendGoogleUserOnlyFieldError(errs, i, issuer, "allowed_domains")

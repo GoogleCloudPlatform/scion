@@ -321,7 +321,7 @@ func TestFederationConfig_Validate(t *testing.T) {
 		},
 		// --- allowed_gcp_projects: a distinct field from
 		// allowed_projects above, admitting Google service-account
-		// principals by GCP project. K1.
+		// principals by GCP project.
 		{
 			name: "allowed_gcp_projects on a non-Google hub issuer produces an error",
 			config: FederationConfig{
@@ -422,8 +422,8 @@ func TestFederationConfig_Validate(t *testing.T) {
 		{
 			// Same rule, other half: issuer_type is right but
 			// expected_audience is empty, so googleTrust still never
-			// reaches this issuer (design §4.1's K2 disables the path
-			// entirely in that case).
+			// reaches this issuer (an empty expected_audience disables the
+			// path entirely).
 			name: "allowed_gcp_projects on the Google issuer with empty expected_audience errors",
 			config: FederationConfig{
 				Enabled: true,
@@ -440,7 +440,7 @@ func TestFederationConfig_Validate(t *testing.T) {
 		},
 		// --- allowed_domains: a distinct field from allowed_gcp_projects
 		// above, constraining USER (not service-account) principals by email
-		// domain. Validated identically (K1).
+		// domain. Validated identically.
 		{
 			name: "allowed_domains on a non-Google hub issuer produces an error",
 			config: FederationConfig{
@@ -536,7 +536,8 @@ func TestFederationConfig_Validate(t *testing.T) {
 		{
 			// Same rule, other half: issuer_type is right but
 			// expected_audience is empty, so googleTrust still never reaches
-			// this issuer (K2 disables the path entirely in that case).
+			// this issuer (an empty expected_audience disables the path
+			// entirely).
 			name: "allowed_domains on the Google issuer with empty expected_audience errors",
 			config: FederationConfig{
 				Enabled: true,
