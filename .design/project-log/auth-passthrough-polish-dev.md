@@ -356,7 +356,7 @@ before being committed — the specific lines read are named in each row.
 
 | File:line | Before (false) | After | Code lines verified |
 |---|---|---|---|
-| `pkg/hub/auth_external_bearer_test.go:571-580` | "Golden case (a) … pins the exact bytes with GoogleValidator == nil … not just with GoogleValidator == nil like golden case (a). Otherwise the nil-guard … could mask a bug in the googleTrust gate itself." | "…even for a validly signed Google ID token. Golden case (a) … pins the same fallback bytes for a malformed JWT; this test uses a real Google-signed token, in production shape (GoogleValidator and GoogleResolver wired, as New() always builds them; FederationAuth pointer empty), so a googleTrust gate that let a Google-shaped token through would reach the validator and fail the zero-calls assertion below." | `:1388-1407` (golden case (a)'s table entry: `withTrust: false`, token = `nonHubJWT = "not-a.valid-hub.jwt"`, and the shared `cfg` built with `GoogleValidator: counting, GoogleResolver: resolver` for every case including (a)); `:612-614` (this test's token: `signIDToken(kp, claims)` with `claims["iss"] = googleIssuerHTTPS` from `validIDTokenClaims()`, `google_credential_validator_test.go:109-122`); `:631-632` (the `counting.totalCalls() != 0` assertion); `server.go:1036` (`New`'s signature, confirming it is the constructor that always builds both) |
+| `pkg/hub/auth_external_bearer_test.go:571-580` | "Golden case (a) … pins the exact bytes with GoogleValidator == nil … not just with GoogleValidator == nil like golden case (a). Otherwise the nil-guard … could mask a bug in the googleTrust gate itself." | "…even for a validly signed Google ID token. Golden case (a) … pins the same fallback bytes for a malformed JWT; this test uses a real Google-signed token, in production shape (GoogleValidator and GoogleResolver wired, as New() always builds them; FederationAuth pointer empty), so a googleTrust gate that let a Google-shaped token through would reach the validator and fail the zero-calls assertion below." | `:1268` (token constant `nonHubJWT = "not-a.valid-hub.jwt"`), `:1286-1299` (golden case (a)'s table entry: `withTrust: false`, `token: nonHubJWT`), `:1388-1407` (the shared `cfg` built with `GoogleValidator: counting, GoogleResolver: resolver` for every case including (a)); `:612-614` (this test's token: `signIDToken(kp, claims)` with `claims["iss"] = googleIssuerHTTPS` from `validIDTokenClaims()`, `google_credential_validator_test.go:109-122`); `:631-632` (the `counting.totalCalls() != 0` assertion); `server.go:1036` (`New`'s signature, confirming it is the constructor that always builds both) |
 
 Also updated the fix-round-2 table row above (this log, "R2: six … sites fixed" table) to flag that its "After" text was itself
 false, and corrected "`auth.go:484`" to "`auth.go:487`" in the fix-round-2 history-word survivor list (F5).
@@ -477,3 +477,58 @@ No trailing-comment lines this round (nothing inside `/* */`, either). No other 
   `TestProductionValidator_IDToken_UserToken_SAShapedAzpSub_StillRejected`) — all pass.
 - Byte hazard (`perl -ne 'print "$ARGV:$.\n" if /\xC2\xA0/'` over every file changed since `a53175c23`) — empty.
 - Bare refs — both commands empty.
+
+## Fix round 4
+
+Review: `reviews/polish-r4-ap-polish-rev-4.md` (`ap-polish-rev-4`, **APPROVE** on `e7bf264a0`: 0C / 0R / 1O / 2N / 6FYI). Folding
+in the cheap items (O1, N1, N2, F4) so the upstream PR ships with no known comment inaccuracies, per the brief. F1, F2, F5, F6
+declined — no action, per the brief (F1/F2: meaning is pinned by surrounding text; F5: squash body, handled by the lead; F6:
+environment, already documented as the `SCION_AUTO_EXPOSE_PORTS` root cause in the fix-round-3 section).
+
+### O1: `pkg/hub/auth_external_bearer_test.go:572-580` wording imprecision — fixed
+
+| File:line | Before (imprecise) | After | Code lines checked |
+|---|---|---|---|
+| `auth_external_bearer_test.go:572-580` | "a validly signed Google ID token" / "a real Google-signed token" / "pins the same fallback bytes" | "a well-formed, signed ID token carrying Google's issuer" / "a Google-issuer token signed with a test key" / "pins the same fallback rejection, byte-exact" / "FederationAuth unset" | `:583` (`kp := newGCVTestKeyPair("test-kid-1")` — a test key pair, not Google's); `:615` (`signIDToken(kp, claims)`, so the token is signed by that test key); `:1268` (golden case (a)'s token constant, `nonHubJWT = "not-a.valid-hub.jwt"`); `:1286-1299` (case (a)'s table entry: `withTrust: false`, `token: nonHubJWT`); `:1398-1407` (the shared `cfg` wiring `GoogleValidator`/`GoogleResolver` non-nil for every case including (a)); `:623-627` (this test's `wantBody` is `"invalid access token: "+verifyErr.Error()`, the same *pattern* case (a) uses at `:1296` but with a different underlying error, so the two tests pin the same fallback shape byte-exactly each, not the same bytes as each other); `:631` (`counting.totalCalls() != 0`); `auth_external_bearer.go:144-149` (`classifyExternalBearer`: a JWT with Google's `iss` classifies as `externalBearerIDToken`, not not-applicable); `:390-425` (`authenticateExternalBearer`: if `googleTrust` wrongly returned ok, classification would proceed and reach `ValidateIDToken`, so a broken gate would fail the zero-calls assertion). Used "FederationAuth unset" per the brief instead of "FederationAuth pointer empty", since this test leaves the field `nil` rather than pointing it at an empty value (this also resolves F3 in the review). |
+
+The report's suggested wording used "real Google-signed token"; adopted "Google-issuer token signed with a test key" instead,
+since Google never signs this token — only the JWKS the test wires does.
+
+**Considered but not applied:** the trailing comment at `:615` (`// a validly-signed Google token — must still be rejected`) has
+the identical imprecision and could be fixed under the trailing-comment exception (the code before `//` would stay
+byte-identical). Left unchanged this round because the brief's deliverable requires the `e7bf264a0..HEAD` proof to print
+nothing, and this fix was outside the four items listed. Flagging it here in case a future pass wants it.
+
+### N1: `pkg/hub/ge_exchange_route_test.go:358-364` — reflowed as one unit
+
+The paragraph had a short line (`// benefits from a cache),`) breaking mid-sentence before `// but it wraps the *same base
+validator instance*…`. Reflowed the full six-line paragraph to ~78 columns with no mid-sentence breaks.
+
+### N2: `pkg/config/federation_config.go:233` — PR-relative wording removed
+
+"— unrelated to, and unchanged by, AllowedGCPProjects below." → "— unrelated to AllowedGCPProjects below." (dropped the
+"unchanged by" clause entirely, per the brief's "or 'unaffected by', whichever reads as PR-independent" — "unrelated to" alone
+already states the invariant without any PR-relative framing).
+
+### F4: project-log citation corrected
+
+Fix-round-3 section, R1 row: corrected `:1388-1407` (previously mislabeled as "golden case (a)'s table entry") — it is the
+shared `cfg`. Golden case (a)'s actual table entry is at `:1286-1299`, and its token constant is at `:1268`. Both are now cited
+separately in that row.
+
+### Comments-only proof (fix round 4)
+
+```
+$ git diff e7bf264a0 -- '*.go' | /usr/bin/grep -E '^[+-][^+-]' | /usr/bin/grep -vE '^[+-]\s*(//|$)'
+```
+Empty. Every change this round is a whole-line comment edit; no trailing comments, test-literal changes, or renames.
+
+### Gates (fix round 4)
+
+- `gofmt -l pkg cmd extras` — empty.
+- Byte hazard (`perl -ne 'print "$ARGV:$.\n" if /\xC2\xA0/'` over every file changed since `e7bf264a0`) — empty.
+- Bare refs — both commands empty (commit messages and added diff lines).
+- Targeted `go test -run 'TestExternalBearer_NoTrustProductionShape_Golden401|TestExternalBearer_ConfiguredTrustInvariant_Golden'`
+  and `-run 'TestGEExchange_Route_SharesValidatorAndResolverWithExternalBearer'` (the test at the reflowed banner) — all pass.
+- `go test -run 'TestFederationConfig_Validate' ./pkg/config/...` with every `SCION_*` variable unset — all pass, including the
+  round-3-renamed subtest.
