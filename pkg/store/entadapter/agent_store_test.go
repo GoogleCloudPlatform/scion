@@ -1245,3 +1245,46 @@ func TestAgentStore_GenerationAndReincarnationState(t *testing.T) {
 	assert.Equal(t, 2, final.Generation)
 	assert.Equal(t, "", final.ReincarnationState)
 }
+
+// TestListAgentsWithStaleNonTerminalReincarnationState_ExcludesAgentWithNonTerminalRecord
+// is the design §3.4 Amendment A6.6/A7 (N1) regression test for the
+// backstop's "no non-terminal record" condition: an agent that LOOKS
+// orphaned by its own stale clock must still be excluded if it has a fresh,
+// genuinely in-flight AgentReincarnation record — that agent belongs to the
+// main record-side sweep (and sweepFailStaleRecord's rec.State-based restore
+// decision), not this fallback. Only a stale agent with NO matching
+// non-terminal record at all is a true orphan.
+func TestListAgentsWithStaleNonTerminalReincarnationState_ExcludesAgentWithNonTerminalRecord(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	recStore := NewAgentReincarnationStore(s.client)
+	cutoff := time.Now()
+
+	// Orphan: stale clock, no record at all — must be included.
+	orphan := makeAgent(projectID, "backstop-orphan")
+	orphan.ReincarnationState = store.ReincarnationStateStarting
+	require.NoError(t, s.CreateAgent(ctx, orphan))
+	staleClock := time.Now().Add(-time.Hour)
+	orphan.ReincarnationUpdatedAt = &staleClock
+	require.NoError(t, s.UpdateAgent(ctx, orphan))
+
+	// Not an orphan: an equally stale clock, but a FRESH non-terminal record
+	// still exists — the main record-side sweep owns this one.
+	owned := makeAgent(projectID, "backstop-owned-by-record")
+	owned.ReincarnationState = store.ReincarnationStateProvisioning
+	require.NoError(t, s.CreateAgent(ctx, owned))
+	owned.ReincarnationUpdatedAt = &staleClock
+	require.NoError(t, s.UpdateAgent(ctx, owned))
+	require.NoError(t, recStore.CreateAgentReincarnation(ctx, &store.AgentReincarnation{
+		AgentID: owned.ID, FromGeneration: 1, ToGeneration: 2, State: store.AgentReincarnationStateProvisioning,
+	}))
+
+	got, err := s.ListAgentsWithStaleNonTerminalReincarnationState(ctx, cutoff)
+	require.NoError(t, err)
+	ids := make(map[string]bool, len(got))
+	for _, a := range got {
+		ids[a.ID] = true
+	}
+	assert.True(t, ids[orphan.ID], "a stale agent with no matching record must be included")
+	assert.False(t, ids[owned.ID], "a stale agent with a fresh non-terminal record must be excluded")
+}

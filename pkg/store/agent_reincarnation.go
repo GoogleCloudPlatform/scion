@@ -40,6 +40,23 @@ var AgentReincarnationNonTerminalStates = []string{
 	AgentReincarnationStateStarting,
 }
 
+// IsAgentReincarnationStateNonTerminal reports whether state is one of
+// AgentReincarnationNonTerminalStates. Used before trusting a freshly-read
+// State as a compare-and-swap expectState (design §3.4 Amendment A7): a
+// caller that read the record long after it went terminal must reject that
+// terminal value up front, rather than pass it as expectState — a CAS
+// "WHERE state = 'failed'" against a row that is ALREADY 'failed' would
+// trivially match itself and let a stale caller "win" a race it actually
+// lost.
+func IsAgentReincarnationStateNonTerminal(state string) bool {
+	for _, st := range AgentReincarnationNonTerminalStates {
+		if st == state {
+			return true
+		}
+	}
+	return false
+}
+
 // AgentReincarnation is one row of `scion reincarnate` history: the durable
 // record of a single migration attempt (design
 // /scion-volumes/scratchpad/projects/agent-migrate/design.md §3.2,
@@ -123,22 +140,29 @@ type AgentReincarnationStore interface {
 
 	// TryAdvanceAgentReincarnation atomically writes r's mutable fields
 	// (State, Error, CompletedAt, PreviousAppliedConfig, NewAppliedConfig) to
-	// the record with ID r.ID, but only if that record is CURRENTLY in a
-	// non-terminal state (AgentReincarnationNonTerminalStates) — a
-	// compare-and-swap performed as a single conditional UPDATE, analogous to
+	// the record with ID r.ID, but ONLY if that record's CURRENT State
+	// exactly equals expectState — a compare-and-swap performed as a single
+	// conditional UPDATE (`WHERE id=? AND state=?`), analogous to
 	// UpdateAgent's state_version check. This is the only way the
 	// reincarnation worker, failReincarnation, and the replica-safe sweep may
-	// transition a record's state (design §3.4 Amendment A6): every prior
-	// "is this record still mine" read-then-check was not atomic with the
-	// write that acted on the answer, leaving a window for the sweep (or a
-	// second racing writer) to move the record between the check and the
-	// write.
+	// transition a record's state (design §3.4 Amendment A6/A7).
+	//
+	// expectState must be the exact state the caller is CASing away from, not
+	// merely "some non-terminal state": a coarser "still non-terminal" check
+	// (the round-3 shape of this method) let a stale caller — a sweep that
+	// listed a record as stale a moment before a live worker advanced it —
+	// still win the CAS, because the record's new state was non-terminal too.
+	// Pinning the exact expected state closes that gap: the worker always
+	// passes the value it just read (so its own check-and-write is atomic),
+	// and the replica-safe sweep passes the value it observed when it listed
+	// the record as stale, NOT a fresh read — a fresh read would defeat the
+	// whole point, since it would always match "the current state" trivially.
 	//
 	// Returns (true, nil) if a row matched (and was updated). Returns
 	// (false, nil) — not an error — if none did: the record does not exist,
-	// or — the case this exists to catch — it was already moved out of a
-	// non-terminal state by something else. Callers MUST treat false as "this
-	// caller no longer owns the record" and must not act further on it,
-	// including writing the agent row.
-	TryAdvanceAgentReincarnation(ctx context.Context, r *AgentReincarnation) (bool, error)
+	// or — the case this exists to catch — its State no longer equals
+	// expectState because something else already moved it. Callers MUST
+	// treat false as "this caller no longer owns the record as it observed
+	// it" and must not act further on it, including writing the agent row.
+	TryAdvanceAgentReincarnation(ctx context.Context, r *AgentReincarnation, expectState string) (bool, error)
 }

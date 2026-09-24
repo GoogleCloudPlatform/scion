@@ -238,18 +238,14 @@ func (s *AgentReincarnationStore) DeleteAgentReincarnationsForAgent(ctx context.
 // store.AgentReincarnationStore: it only applies if the row currently has a
 // non-terminal State, checked and updated in the same conditional UPDATE
 // statement (design §3.4 Amendment A6).
-func (s *AgentReincarnationStore) TryAdvanceAgentReincarnation(ctx context.Context, r *store.AgentReincarnation) (bool, error) {
+func (s *AgentReincarnationStore) TryAdvanceAgentReincarnation(ctx context.Context, r *store.AgentReincarnation, expectState string) (bool, error) {
 	uid, err := parseGetID(r.ID)
 	if err != nil {
 		return false, err
 	}
-	states := make([]agentreincarnation.State, 0, len(store.AgentReincarnationNonTerminalStates))
-	for _, st := range store.AgentReincarnationNonTerminalStates {
-		states = append(states, agentreincarnation.State(st))
-	}
 
 	builder := s.client.AgentReincarnation.Update().
-		Where(agentreincarnation.IDEQ(uid), agentreincarnation.StateIn(states...)).
+		Where(agentreincarnation.IDEQ(uid), agentreincarnation.StateEQ(agentreincarnation.State(expectState))).
 		SetState(agentreincarnation.State(r.State)).
 		SetError(r.Error)
 

@@ -231,3 +231,72 @@ func TestDeleteAgentReincarnationsForAgent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "agent-2", stillThere.AgentID)
 }
+
+// TestTryAdvanceAgentReincarnation is the design §3.4 Amendment A7 (N2)
+// store-level table test pinning the contract every worker/sweep write in
+// pkg/hub rests on: TryAdvanceAgentReincarnation only applies when the
+// record's CURRENT State exactly equals expectState.
+func TestTryAdvanceAgentReincarnation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("matching expectState advances the row", func(t *testing.T) {
+		s := newTestAgentReincarnationStore(t)
+		rec := &store.AgentReincarnation{AgentID: "agent-1", FromGeneration: 1, ToGeneration: 2, State: store.AgentReincarnationStatePending}
+		require.NoError(t, s.CreateAgentReincarnation(ctx, rec))
+
+		pinned := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+		upd := &store.AgentReincarnation{ID: rec.ID, State: store.AgentReincarnationStateStopping, UpdatedAt: pinned}
+		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStatePending)
+		require.NoError(t, err)
+		assert.True(t, ok)
+
+		got, err := s.GetAgentReincarnation(ctx, rec.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.AgentReincarnationStateStopping, got.State)
+		assert.WithinDuration(t, pinned, got.UpdatedAt, time.Second, "UpdatedAt must be honoured, not left to a fresh time.Now()")
+	})
+
+	t.Run("mismatched expectState is a no-op, row unchanged", func(t *testing.T) {
+		s := newTestAgentReincarnationStore(t)
+		rec := &store.AgentReincarnation{AgentID: "agent-1", FromGeneration: 1, ToGeneration: 2, State: store.AgentReincarnationStateProvisioning}
+		require.NoError(t, s.CreateAgentReincarnation(ctx, rec))
+		before, err := s.GetAgentReincarnation(ctx, rec.ID)
+		require.NoError(t, err)
+
+		upd := &store.AgentReincarnation{ID: rec.ID, State: store.AgentReincarnationStateFailed, Error: "should not land", UpdatedAt: time.Now()}
+		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStateStopping) // wrong expectState
+		require.NoError(t, err)
+		assert.False(t, ok)
+
+		after, err := s.GetAgentReincarnation(ctx, rec.ID)
+		require.NoError(t, err)
+		assert.Equal(t, before.State, after.State, "state must be untouched")
+		assert.Equal(t, before.Error, after.Error, "error must be untouched")
+		assert.WithinDuration(t, before.UpdatedAt, after.UpdatedAt, time.Second, "updated_at must be untouched")
+	})
+
+	t.Run("terminal state can never be advanced away from, even by matching it as expectState", func(t *testing.T) {
+		s := newTestAgentReincarnationStore(t)
+		rec := &store.AgentReincarnation{AgentID: "agent-1", FromGeneration: 1, ToGeneration: 2, State: store.AgentReincarnationStateFailed, Error: "first failure"}
+		require.NoError(t, s.CreateAgentReincarnation(ctx, rec))
+
+		// This exercises the store primitive alone: a caller that (bug aside)
+		// passed a terminal value as expectState would still find a match,
+		// since the WHERE clause is a plain equality check on whatever
+		// expectState it is given. The hub-side guard against ever doing
+		// this lives in reincarnate_worker.go's tryAdvanceReincarnation
+		// (IsAgentReincarnationStateNonTerminal), not in the store.
+		upd := &store.AgentReincarnation{ID: rec.ID, State: store.AgentReincarnationStateFailed, Error: "second failure", UpdatedAt: time.Now()}
+		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStateFailed)
+		require.NoError(t, err)
+		assert.True(t, ok, "the store primitive itself does a plain state equality check; it is not what rejects terminal-to-terminal")
+	})
+
+	t.Run("missing id returns false with no error", func(t *testing.T) {
+		s := newTestAgentReincarnationStore(t)
+		upd := &store.AgentReincarnation{ID: "00000000-0000-0000-0000-000000000000", State: store.AgentReincarnationStateFailed, UpdatedAt: time.Now()}
+		ok, err := s.TryAdvanceAgentReincarnation(ctx, upd, store.AgentReincarnationStatePending)
+		require.NoError(t, err)
+		assert.False(t, ok)
+	})
+}
