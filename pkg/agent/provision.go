@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -339,7 +340,7 @@ func StopProjectContainers(ctx context.Context, mgr Manager, projectName string,
 // Reprovision, and injects an explicit HarnessAuth override into the inline
 // config so it is applied before the harness's own Provision() logic runs
 // (which reads auth_selectedType to decide which env vars to inject into
-// scion-agent.json). Extracted (p1a-r1 N1) so a context value either one
+// scion-agent.json). Extracted so a context value either one
 // needs cannot be added to just one of them by accident.
 func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.Context, *api.ScionConfig) {
 	if opts.BrokerMode {
@@ -367,7 +368,7 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 // finishProvision performs the steps common to Provision and Reprovision once
 // the agent's on-disk config exists: persist the lightweight agent-config
 // status file, (re-)stage the project pre-start hook, and persist an explicit
-// HarnessAuth override onto scion-agent.json. Extracted (p1a-r1 N1, the same
+// HarnessAuth override onto scion-agent.json. Extracted (the same
 // argument the design makes for deriveAgentConfig) so a future change to any
 // of these three steps cannot silently apply to only one of the two callers.
 func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHome string, cfg *api.ScionConfig) error {
@@ -415,6 +416,14 @@ func (m *AgentManager) containerIsRunning(ctx context.Context, name string) (boo
 	return false, nil
 }
 
+// ErrReprovisionRefused wraps every refusal Reprovision returns (design §3.4
+// Amendment A4.2): the workspace preconditions and the running-container
+// check. Callers can match it with errors.Is to distinguish "the primitive
+// refused to run" from any other failure — the runtime broker handler maps
+// it to 409, and the reincarnate worker records the reason on the
+// AgentReincarnation record either way.
+var ErrReprovisionRefused = errors.New("reprovision refused")
+
 // Reprovision re-renders an existing agent's on-disk configuration
 // (scion-agent.json, agent-info.json, home dotfiles, and skills) from the
 // current template/harness-config catalog, for a `scion reincarnate` request
@@ -423,8 +432,8 @@ func (m *AgentManager) containerIsRunning(ctx context.Context, name string) (boo
 // exists → keep the persisted config" branch: reincarnation's entire point is
 // to replace that persisted config with a freshly resolved one.
 //
-// Preconditions, both enforced here rather than merely documented (Amendment
-// A2, p1a-r1 C1 and R3): the agent is clone-per-agent with an existing real
+// Preconditions, both enforced here rather than merely documented (design
+// §3.4 Amendment A2.1/A2.4): the agent is clone-per-agent with an existing real
 // clone, and its container is not running. Both matter for the same reason:
 // ProvisionAgent's worktree-creation branch decides whether to create a
 // worktree using CWD-dependent git checks (util.BranchExists), which are
@@ -445,7 +454,7 @@ func (m *AgentManager) containerIsRunning(ctx context.Context, name string) (boo
 //     platform skills specifically).
 func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	if opts.GitClone == nil {
-		return nil, fmt.Errorf("reprovision refused: agent %q is not clone-per-agent; reincarnate currently supports clone-per-agent workspaces only", opts.Name)
+		return nil, fmt.Errorf("%w: agent %q is not clone-per-agent; reincarnate currently supports clone-per-agent workspaces only", ErrReprovisionRefused, opts.Name)
 	}
 	projectDir, pdErr := config.GetResolvedProjectDir(opts.ProjectPath)
 	if pdErr != nil {
@@ -453,17 +462,17 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	}
 	agentWorkspace := filepath.Join(config.GetAgentDir(projectDir, opts.Name, opts.SharedWorkspace), "workspace")
 	if info, statErr := os.Stat(filepath.Join(agentWorkspace, ".git")); statErr != nil || !info.IsDir() {
-		return nil, fmt.Errorf("reprovision refused: agent %q has no existing git clone at %s; reincarnate does not create or recreate the workspace", opts.Name, agentWorkspace)
+		return nil, fmt.Errorf("%w: agent %q has no existing git clone at %s; reincarnate does not create or recreate the workspace", ErrReprovisionRefused, opts.Name, agentWorkspace)
 	}
 
-	// R3: a broker unreachable/unresponsive List error is logged and
-	// tolerated (proceeding is the pre-A2 behavior; the hub is expected to
+	// A broker unreachable/unresponsive List error is logged and tolerated
+	// (proceeding is the pre-fail-closed behavior; the hub is expected to
 	// have stopped the container already), but an affirmative "yes, still
 	// running" answer is always honored.
 	if running, err := m.containerIsRunning(ctx, opts.Name); err != nil {
 		util.Debugf("reprovision: failed to check running state for %s, proceeding: %v", opts.Name, err)
 	} else if running {
-		return nil, fmt.Errorf("reprovision refused: agent %q container is still running; stop it first", opts.Name)
+		return nil, fmt.Errorf("%w: agent %q container is still running; stop it first", ErrReprovisionRefused, opts.Name)
 	}
 
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
@@ -1701,7 +1710,7 @@ func injectPlatformSkills(
 				continue
 			}
 		} else {
-			// p1a-r1 N2: a plain overlay copy only adds/updates files; it
+			// A plain overlay copy only adds/updates files; it
 			// never removes one the new platform-skill version dropped, so a
 			// stale file from an earlier generation would linger forever
 			// under ForceOverwrite. Safe to RemoveAll: skillDest is

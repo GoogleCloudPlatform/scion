@@ -492,7 +492,7 @@ type CreateAgentResponse struct {
 	Created bool           `json:"created"`
 
 	// Reprovisioned is set true ONLY on the branch of handleCreateAgent that
-	// actually ran Manager.Reprovision (p1a-r1 R1(a) / design Amendment A2).
+	// actually ran Manager.Reprovision (design §3.4 Amendment A2.2(a)).
 	// A broker that predates the reincarnate feature has no field named
 	// "reprovision" in its request handling at all, so it silently runs a
 	// plain Provision for a request that set Reprovision=true — the hub

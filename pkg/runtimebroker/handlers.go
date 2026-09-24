@@ -918,6 +918,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			cfg, err = sc.Manager.Provision(ctx, opts)
 		}
 		if err != nil {
+			// Design §3.4 Amendment A4.2: Reprovision wraps every refusal in
+			// agent.ErrReprovisionRefused (workspace preconditions, running-container
+			// check). Surface those as 409 Conflict rather than a generic 500 so
+			// callers — and the reincarnate worker's failure message — can tell
+			// "refused to run" apart from an actual provisioning error.
+			if errors.Is(err, agent.ErrReprovisionRefused) {
+				markAttemptFailed(http.StatusConflict, "reprovision refused")
+				span.SetStatus(codes.Error, err.Error())
+				Conflict(w, "Failed to provision agent: "+err.Error())
+				return
+			}
 			span.SetStatus(codes.Error, err.Error())
 			if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
 				markAttemptFailed(http.StatusNotFound, "failed to provision agent")
@@ -954,7 +965,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		resp := CreateAgentResponse{
 			Agent:   agentResp,
 			Created: true,
-			// p1a-r1 R1(a): echo Reprovision only when this branch actually
+			// Design §3.4 Amendment A2.2(a): echo Reprovision only when this branch actually
 			// ran Manager.Reprovision, never merely because the request
 			// asked for it — the hub's dispatch fails closed when it asked
 			// for a reprovision and did not get this echo back.

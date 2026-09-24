@@ -150,7 +150,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		}
 		// Update profiles from settings (may have changed)
 		broker.Profiles = profiles
-		// p1a-r1 R1(b): refresh capabilities on every re-registration, not
+		// Design §3.4 Amendment A2.2(b): refresh capabilities on every re-registration, not
 		// just at create. The embedded broker's capability set is fixed by
 		// the hub binary it runs in (not negotiated like a remote broker's),
 		// so there is no reason for it to ever be stale — but a record

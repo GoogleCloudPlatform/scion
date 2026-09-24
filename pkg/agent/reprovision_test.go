@@ -102,6 +102,43 @@ func TestReprovision_WorktreeMode_Refused(t *testing.T) {
 	}
 }
 
+// TestReprovision_GitCloneSetButNoRealClone_Refused is the design §3.4
+// Amendment A2.1 (p1a-r2 R2) regression test for the SECOND half of the C1
+// gate: GitClone IS set (opts.GitClone != nil passes the first check), but
+// the workspace on disk is a worktree — its .git is a FILE, not a directory,
+// exactly what a worktree-per-agent agent looks like on disk. Without the
+// .git-is-a-directory check, ProvisionAgent's git-clone branch would treat
+// this as "not a real clone" and os.RemoveAll it before re-cloning.
+func TestReprovision_GitCloneSetButNoRealClone_Refused(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	agentName := "wt-agent2"
+	if _, _, _, err := ProvisionAgent(context.Background(), agentName, "default", "", "", scionDir, "", "created", "", ""); err != nil {
+		t.Fatalf("initial ProvisionAgent: %v", err)
+	}
+	ws := filepath.Join(scionDir, "agents", agentName, "workspace")
+	fi, err := os.Stat(filepath.Join(ws, ".git"))
+	if err != nil || fi.IsDir() {
+		t.Fatalf("expected a worktree .git FILE (not a directory) after initial provision: %v (isDir=%v)", err, fi != nil && fi.IsDir())
+	}
+	work := filepath.Join(ws, "uncommitted-work.txt")
+	if err := os.WriteFile(work, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(&runtime.MockRuntime{})
+	_, err = mgr.Reprovision(context.Background(), api.StartOptions{
+		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true,
+		GitClone: &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+	})
+	if err == nil {
+		t.Fatal("expected Reprovision to refuse a GitClone-set agent whose workspace is not a real clone, got nil error")
+	}
+	t.Logf("refusal: %v", err)
+	if _, statErr := os.Stat(work); statErr != nil {
+		t.Fatalf("DATA LOSS: uncommitted file is gone after the refused Reprovision: %v", statErr)
+	}
+}
+
 // TestReprovision_CloneMode_WorkspaceAndHomeSurvive is the positive control:
 // a clone-per-agent workspace with a real .git dir, and its home directory,
 // both survive Reprovision.

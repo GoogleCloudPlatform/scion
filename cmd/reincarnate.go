@@ -89,7 +89,7 @@ model, env keys, branch) without migrating anything.`,
 }
 
 // resolveReincarnateTarget implements the self/handoff-required rule
-// (design §3.4 Amendment A3.11 / p1a-r1 F3): resolve the target agent name
+// (design §3.4 Amendment A3.11): resolve the target agent name
 // from the positional arg or $SCION_AGENT_NAME, decide whether this is a
 // self-migration, and require a handoff for one — unless this is a dry run,
 // which migrates nothing and so has nothing to hand off. Split out from RunE

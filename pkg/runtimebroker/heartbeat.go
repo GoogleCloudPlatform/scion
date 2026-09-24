@@ -199,7 +199,7 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 
 	heartbeat := &hubclient.BrokerHeartbeat{
 		Status: status,
-		// p1a-r1 R1(c): report capabilities on every heartbeat so the hub's
+		// Design §3.4 Amendment A2.2(b): report capabilities on every heartbeat so the hub's
 		// `scion reincarnate` gate is never stuck on a stale join-time
 		// snapshot for an already-registered broker. Mirrors handleInfo's
 		// hardcoded set (a fixed property of this broker binary, not
