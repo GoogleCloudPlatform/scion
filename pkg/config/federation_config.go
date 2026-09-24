@@ -109,7 +109,7 @@ var googleIssuerURLs = map[string]bool{
 }
 
 // isGoogleIssuerURL reports whether issuerURL is one of Google's OIDC issuer
-// forms. Used to gate AllowedGCPProjects (valid only for a Google issuer) and
+// forms. Gates AllowedGCPProjects (valid only for a Google issuer) and
 // to improve the existing AllowedProjects error message when an operator
 // most likely meant the Google-specific field instead.
 func isGoogleIssuerURL(issuerURL string) bool {
@@ -254,8 +254,8 @@ func (c *FederationConfig) Validate() []error {
 		// scoped service-account admission when nothing enforces it — a
 		// Google issuer with the wrong issuer_type or no expected_audience
 		// is exactly as unenforced as a non-Google issuer. This is a hard
-		// error rather than a startup warning: both fields are new, so no
-		// existing config can break.
+		// error rather than a warning, so a misconfiguration fails at
+		// startup instead of silently admitting nothing.
 		if len(issuer.AllowedGCPProjects) > 0 && !isActiveGoogleUserIssuer(issuer) {
 			errs = appendGoogleUserOnlyFieldError(errs, i, issuer, "allowed_gcp_projects")
 		}

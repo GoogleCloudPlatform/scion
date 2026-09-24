@@ -171,7 +171,7 @@ func TestHandleMetrics_ExternalBearerSection(t *testing.T) {
 	}
 }
 
-// TestHandleMetrics_NoMetricsWhenNothingWired proves the pre-existing
+// TestHandleMetrics_NoMetricsWhenNothingWired proves the
 // "no_metrics" fallback still fires when broker, GCP and external-bearer
 // snapshots are all absent. This is only reachable for a Server not built
 // through New() (the same shape TestGEExchangeHandler_NotConfigured and

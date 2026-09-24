@@ -310,7 +310,7 @@ The A2A bridge forwards Google credentials under the `hubBearer` auth scheme (`a
 
 | Condition | Status | Code |
 |---|---|---|
-| No Google trust configured, or the token isn't a shape this path recognizes | Falls through to the pre-existing rejection for that credential | — |
+| No Google trust configured, or the token isn't a shape this path recognizes | Falls through unchanged to whichever other authentication check applies to that credential | — |
 | Per-client-IP rate limit exceeded (checked only on a credential-cache miss) | 429, with `Retry-After` | `rate_limited` |
 | Verification failed, unverified email, a service account presented as an access token, or its project/domain isn't listed | 401 | `unauthorized` (message `invalid external bearer token`; the specific reason is logged, never returned) |
 | Google's token-verification endpoints are unreachable | 503 | `upstream_unavailable` |

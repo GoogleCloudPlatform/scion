@@ -25,7 +25,7 @@ import (
 
 // countingBaseValidator is a GoogleCredentialValidator whose ID/access token
 // results are scripted per-call, counting how many times each method is
-// actually invoked. Used to prove the caching decorator's cache-hit and
+// actually invoked. Proves the caching decorator's cache-hit and
 // singleflight behaviour: a mutation that skips the cache lookup, or that
 // lets concurrent callers each dial upstream, must move this counter.
 type countingBaseValidator struct {
@@ -40,7 +40,7 @@ type countingBaseValidator struct {
 	accessTokenResult *ValidatedGoogleIdentity
 	accessTokenErr    error
 
-	// delay, if set, is slept before returning — used to widen the window
+	// delay, if set, is slept before returning — widens the window
 	// for concurrent callers to race into the same singleflight key.
 	delay time.Duration
 }
@@ -498,7 +498,7 @@ func TestGoogleCredentialCache_EvictsExpiredBeforeRefusing(t *testing.T) {
 
 // blockingValidator is a GoogleCredentialValidator whose single call blocks
 // until release is closed, or until its context is cancelled — whichever
-// comes first. Used to put a singleflight leader mid-flight so a test can
+// comes first. Puts a singleflight leader mid-flight so a test can
 // cancel the leader's own context and observe whether that cancellation
 // reaches the shared upstream call.
 type blockingValidator struct {

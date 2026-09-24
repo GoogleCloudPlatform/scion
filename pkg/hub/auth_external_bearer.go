@@ -271,10 +271,10 @@ func containsFold(list []string, target string) bool {
 // allowed_domains membership check. It fails closed (ok=false) on any shape
 // a naive last-"@" split could misread: no "@" at all, more than one "@", or
 // an empty local or domain part. A trailing dot on the domain also fails
-// closed rather than being silently stripped —
-// this function decides a security check, not a display string, so an
-// unusual shape is treated as "cannot confidently say what domain this is"
-// rather than guessed at. The domain is lower-cased on success, matching
+// closed rather than being silently stripped — this function decides a
+// security check, not a display string, so an unusual shape is treated as
+// "cannot confidently say what domain this is" rather than guessed at. The
+// domain is lower-cased on success, matching
 // containsFold's case-insensitive comparison.
 func domainOf(email string) (domain string, ok bool) {
 	parts := strings.Split(email, "@")

@@ -108,10 +108,12 @@ func (p ExternalBearerPrincipal) valid() bool {
 }
 
 // ExternalBearerOutcome is the "outcome" label on the external_bearer
-// counter. Each value corresponds to exactly one response (HTTP status plus
-// error code) that serveExternalBearer writes; its outcome switch is the
-// single place that performs this mapping (see auth_external_bearer.go), so
-// the metric can never diverge from the response it accompanies.
+// counter. Each error outcome corresponds to exactly one response (HTTP
+// status plus error code) that serveExternalBearer writes; ok means the
+// request was served by the next handler and not_applicable means the
+// caller wrote its usual rejection. Its outcome switch is the single place
+// that performs this mapping (see auth_external_bearer.go), so the metric
+// can never diverge from the response it accompanies.
 type ExternalBearerOutcome string
 
 const (

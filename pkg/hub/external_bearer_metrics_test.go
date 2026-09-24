@@ -597,7 +597,7 @@ func TestExternalBearerMetrics_NilAuthConfigField_NoPanic(t *testing.T) {
 // TestExternalBearerMetrics_LabelTypesOnlyConstructedAsConstants is a durable
 // regression guard for the closed-label-set requirement: every label value
 // comes from a closed set, so no other value can ever be emitted. Every
-// label value used is one of the named constants declared in
+// label value is one of the named constants declared in
 // external_bearer_metrics.go; the only way an arbitrary, non-constant
 // string could reach a counter is a type conversion like
 // ExternalBearerOutcome(someVariable). Grepping every other
