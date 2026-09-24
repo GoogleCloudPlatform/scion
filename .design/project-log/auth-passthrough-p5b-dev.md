@@ -247,7 +247,7 @@ did not interact with this fix round.
 | **N2** `TokenType` doc comment (`caller.go:30-32`) omitted `ge_exchange` | **Fixed.** Added `"ge_exchange"` to the comment, matching `ge_exchange_validator.go:345`'s `TokenType: "ge_exchange"`. | Documentation-only; no behavior change. |
 | **O1** Sample config said Google **ID token only** for `hubBearer` | **Fixed.** `scion-a2a-bridge.yaml.sample`'s `hubBearer` block now says "Google ID token or access token" instead of naming only `<google-id-token>`. | Documentation-only. |
 | **F1-F3** | No action (per EM disposition). | — |
-| **F4** Admin UI may push `auth_scheme` from a dropdown lacking `hubBearer`/`geGoogle`, potentially overwriting a YAML-configured scheme with the default | No code change (pre-existing, outside this delta's blast radius, admin-overlay/UI ownership). **Follow-up candidate**, recorded here per the EM's disposition: the admin-integrations UI (`web/src/components/pages/admin-integrations.ts`) should either (a) omit `auth_scheme` from its `Configure()` push when the current scheme isn't one it can represent (i.e. leave YAML-only schemes alone), or (b) add `hubBearer`/`geGoogle` to its own scheme picker. This is not this developer's or this PR's scope — it touches the admin-overlay/UI ownership area, not `extras/scion-a2a-bridge/**`'s bridge-side auth code. | — |
+| **F4** Admin UI pushes `auth_scheme` from a dropdown lacking `hubBearer`/`geGoogle`, overwriting a YAML-configured scheme with the default | **This is a fail-open security bug, not just a UI inconsistency.** `admin-integrations.ts` seeds `editedSettings` with each field's `defaultValue`; for `auth_scheme` that default is `"none"`. `handleSaveConfig` sends the full `editedSettings` object, so saving *any* A2A setting (rate limit, external URL, projects — not just auth scheme) pushes `auth_scheme: "none"` unless an admin value was already stored. `ParseAdminOverlay`/`ApplyOverlay` then overwrite the YAML-configured `hubBearer` or `geGoogle` scheme with `none`, i.e. **the bridge starts accepting unauthenticated requests** (with the bridge's admin identity downstream, per the `none` scheme's behavior). Because `ParseAdminOverlay` rejects `hubBearer`/`geGoogle` as invalid `auth_scheme` values, the admin **cannot restore the original scheme from the UI** once this happens — only editing the YAML and restarting the bridge (or clearing the persisted `admin-overlay.json`) recovers it. No code change made here (pre-existing, outside this delta's blast radius, admin-overlay/UI ownership; review r2 asked that `ap-em` file this as a tracked security follow-up rather than leave it as a log note only — see r2 disposition below). Candidate fixes: (a) the admin-integrations UI omits `auth_scheme` from its `Configure()` push when the currently-effective scheme isn't one it can represent (i.e. leave YAML-only schemes alone), or (b) the Hub/bridge overlay layer refuses to downgrade a YAML-only scheme through `ApplyOverlay`. This is not this developer's or this PR's scope — it touches the admin-overlay/UI ownership area, not `extras/scion-a2a-bridge/**`'s bridge-side auth code. | — |
 
 ### Mutation M8 re-check
 
@@ -288,3 +288,67 @@ dir, deleted after; `GOCACHE=/scion-volumes/gocache`)
 
 None. All disposed items were either straightforward test/doc fixes within
 owned files or explicitly "no action" per the EM's disposition table.
+
+---
+
+## Fix round 2 (review `reviews/p5b-r2-ap-p5b-rev-2.md`, REQUEST CHANGES on `2b713460d`)
+
+**Agent:** ap-p5b-dev-2 · **Branch:** `scion/auth-passthrough` · **Date:** 2026-09-24
+
+Relayed via `auth-passthrough-lead` on `ap-em`'s behalf (`ap-em`'s direct
+messages weren't arriving). Scope per that relay: do R1 (README caution +
+F4 log wording) now, implement O1 (cheap), hold any *code* fix for F4 itself
+— `ptone` is deciding whether that lands in this PR, and `ap-em` will route
+it as a tracked security follow-up.
+
+### Disposition table
+
+| # | Disposition | Change | Test |
+|---|---|---|---|
+| **R1** (Required) README's r1-added sentence claimed a YAML `hubBearer` bridge "keeps working normally" against the admin UI. False: a routine admin-UI save pushes `auth_scheme: "none"` (fail-open, unauthenticated) and the UI cannot restore `hubBearer`/`geGoogle` afterward. | **Fixed.** Replaced the sentence at `README.md:119` with the reviewer's suggested caution: saving any A2A setting via the admin UI pushes the dropdown's default `auth_scheme` (`none`), overriding YAML; the UI can't switch it back; recovery is editing YAML and restarting (or clearing `admin-overlay.json`). | Documentation-only; the failure mode was independently confirmed by the reviewer's probe test (not re-verified by me — it's the same pre-existing `adminoverlay.go`/`admin-integrations.ts` behavior r1's F4 already flagged, just under-described). |
+| **R1** (Required, same finding) — F4 project-log row understated the severity | **Fixed.** Rewrote the F4 row: states explicitly that the overwrite value is `"none"` (auth disabled, fail-open), that it can be triggered by saving *any* A2A setting (not just the auth scheme field), that the UI cannot restore `hubBearer`/`geGoogle` afterward because `ParseAdminOverlay` rejects them as invalid, and that recovery requires editing YAML/restarting or clearing the overlay file. Kept candidate fixes (a)/(b) and the ownership boundary. Did **not** make the code change — `ptone`/`ap-em` are deciding whether it lands in this PR. | — |
+| **O1** (Optional, implemented per relay instruction: "it's cheap") No test asserted the bearer token is absent from the rejection log (M9 survived) | **Implemented.** `TestAuthMiddleware_HubBearer_RejectedByHub` now builds the server directly (not via `newHubBearerMiddleware`) with a `slog.NewTextHandler` writing to a `bytes.Buffer`, and after asserting the existing exact-body check, asserts the captured log contains a rejection line and does **not** contain the raw token. | `TestAuthMiddleware_HubBearer_RejectedByHub` (extended) |
+
+### O1 mutation re-check (M9)
+
+Applied the review's mutation by hand: `server.go:575`
+`s.log.Info("bearer token rejected by Scion Hub", "error", err)` →
+`s.log.Info("bearer token rejected by Scion Hub", "error", err, "token", token)`.
+
+- `TestAuthMiddleware_HubBearer_RejectedByHub` → **FAIL**: `rejection log leaked the bearer token: "...token=some-token-the-hub-rejects\n"`.
+
+Reverted (`git diff --stat internal/bridge/server.go` empty afterward), test
+passes again. **M9 is now killed.**
+
+### F4 — not fixed here, by design
+
+Per the relay's explicit instruction, I did not touch `adminoverlay.go`,
+`ApplyOverlay`, or anything under `web/`. `ptone` is deciding whether a code
+fix for F4 lands in this PR; `ap-em` will route that decision (and file the
+tracked security follow-up issue the review recommended). This developer's
+scope for this round was doc wording (R1) and the log-redaction test (O1)
+only.
+
+### Gates (from `extras/scion-a2a-bridge/`, `GOTMPDIR` owned scratch dir,
+deleted after; `GOCACHE=/scion-volumes/gocache`)
+
+- `go build ./...` — clean.
+- `go vet ./...` — clean.
+- `gofmt -l .` — clean.
+- `go test ./...` — all green: `integration` (12.2s), `internal/bridge`
+  (37.3s, includes the extended `RejectedByHub` test plus the full existing
+  suite), `internal/state`. No regressions.
+- `GOGC=40 golangci-lint run --new-from-rev=upstream-main --concurrency=1 ./...`
+  — 0 issues.
+- Did not run the `pkg/hub` suite (unchanged instruction; nothing under
+  `pkg/` touched this round).
+
+### Bare-issue-number grep (both must print nothing)
+
+- `git log upstream-main..HEAD --format=%B | /usr/bin/grep -nE '(^|[^/A-Za-z])#[0-9]+'` — empty.
+- `git diff upstream-main..HEAD -- extras/scion-a2a-bridge | /usr/bin/grep -nE '^\+.*(^|[^/A-Za-z0-9])#[0-9]{3,}'` — empty.
+
+### Deviations / design questions
+
+None beyond the explicit scope limit above (F4's code fix intentionally held
+for `ptone`/`ap-em`).
