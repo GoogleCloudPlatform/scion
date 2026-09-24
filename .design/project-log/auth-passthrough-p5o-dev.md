@@ -269,9 +269,10 @@ was judged adequate and kept as-is.
    exactly once, via `applyMiddleware(s.mux)`, and that is where the by-value capture of `authConfig` actually happens — after
    `New()` returns, which is also when `cmd/server_foreground.go` calls the three setters, before it calls `Start()`. I reworded the
    test's comment to state this (verified) mechanism instead of the review's (unverified) one, since a comment should not assert
-   something the code doesn't do. The test itself, and its verdict on M8/M13/M14, are unaffected — I re-ran the same mutation checks
-   in this round's Gates below to confirm. Flagging this for `ap-em`/the reviewer rather than silently substituting: happy to change
-   the wording again if I've misread something.
+   something the code doesn't do. The test itself, and its verdict on M8/M13/M14, are unaffected by this wording change — this
+   round's Gates below cover D1/D2/D3 (the mutants this round's actual code change can affect); M8/M13/M14 were last re-verified
+   in fix round 1 and are unchanged since. Flagging this for `ap-em`/the reviewer rather than silently substituting: happy to
+   change the wording again if I've misread something.
 2. No other design ambiguities. O1's construction-timestamp fix, and the closed-switch/boundary-enforcement fix for R2, both matched
    the brief's explicit recipe with no judgment calls needed.
 
@@ -290,9 +291,10 @@ was judged adequate and kept as-is.
   `TestServer_DefaultMetricsWiring_RecordsWithoutSetters`, then reverted and re-diffed clean against the committed tree.
 - ✅ Narration grep (adds `fix round` to the term list per this round's review) — empty on this half's delta since `714186be2`.
 - ✅ Commit-message and diff bare-issue-number greps against `a53175c23`, scoped to `pkg/hub` and `cmd/server_foreground.go` — both
-  empty. **Re-verifying F1** at this push's tip: the unscoped whole-tree diff grep had one hit, in
+  empty. **Re-verifying F1** at this push's tip: the unscoped whole-tree diff grep still has one hit, in
   `.design/project-log/auth-passthrough-p4-dev.md` (Phase 4's own log, referencing the upstream pull request this design
-  supersedes, added by `ap-p4-dev`'s `2981a58a7`) — not this half's file, not this half's commit. Relayed to `ap-em`/the Phase 4
-  owner in my report, since it's outside my ownership; fixed upstream in `95e3e3b4e`.
+  supersedes, added by `ap-p4-dev`'s `2981a58a7`) — not this half's file, not this half's commit, and not something I can fix
+  without touching another agent's log. Relayed to `ap-em`/the Phase 4 owner in my report. (Later note: this was fixed in
+  `ap-p4-dev`'s `95e3e3b4e`, confirmed clean by `ap-p5o-rev-3` at this half's next commit.)
 - Not run: the full `pkg/hub/...` + `./cmd` suite (`-timeout 40m`) — this round changes non-test Hub code, so the brief requires it.
   Requesting the slot from `ap-em` in my report.
