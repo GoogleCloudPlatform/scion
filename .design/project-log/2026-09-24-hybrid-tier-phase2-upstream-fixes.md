@@ -1,11 +1,11 @@
-# Hybrid Deployment Tier — Phase 2 upstream-feedback fixes
+# Hybrid Deployment Tier — Phase 2: readDirNames simplification and export-layout guidance
 
-Branch `scion/hybrid-tier-p2` (base for the stacked Phase 3 PR).
+Branch `scion/hybrid-tier-p2`.
 
 ## Overview
 
-A small batch responding to upstream review feedback and a wording follow-up on the
-Phase 2 hardening entry's export-layout guidance.
+A small batch: a `readDirNames` simplification, and a further pass on the export-layout
+guidance added in the prior Phase 2 entry.
 
 ## `readDirNames`: drop a redundant intermediate slice
 
@@ -13,51 +13,41 @@ Phase 2 hardening entry's export-layout guidance.
 passed as its third argument. `readDirNames` (`pkg/shareddirs/delete_unix.go`) was
 collecting into a separate `newNames` slice each iteration and then appending it onto
 `names`; assigning directly (`_, _, names = unix.ParseDirent(buf[:n], -1, names)`)
-drops the redundant allocation and append with no behavior change. The existing tests,
-including the ENOENT-race path, are unaffected.
+drops the redundant allocation and append with no behavior change. Covered by the
+existing tests (including the ENOENT-race path) plus a new multi-buffer test (~1000
+entries, forcing more than one `ReadDirent` call) that exercises the cross-iteration
+accumulation this change touches.
 
-## Background NFS cleanup: evaluated, declined
+Project-deletion's NFS shared-dir cleanup remains synchronous, after the delete
+transaction commits and before the request returns: best-effort (logged, never rolling
+back or blocking the delete), depth-capped, and only runs when the NFS shared-dir
+backend is configured.
 
-A suggestion to move project-deletion's best-effort NFS shared-dir cleanup into a
-background goroutine (detached from the request context) was evaluated against this
-codebase's own precedent for background work. What exists here is either a persistent
-worker loop started once at server startup and drained once at shutdown via a
-`sync.WaitGroup` (several subsystems), or a bare, untracked goroutine with no shutdown
-draining at all (the closest per-mutation analogue). Neither is a managed-lifecycle
-precedent for a per-request one-off background task, so introducing an unmanaged
-goroutine here was declined rather than adding a new pattern: it would detach the
-cleanup from the request without any shutdown-drain, letting it race with process exit
-mid-walk. The cleanup call stays synchronous, after the deletion transaction commits
-and before the request returns; it remains best-effort (logged, never rolling back or
-blocking the delete), depth-capped, and only runs when the NFS shared-dir backend is
-configured.
+## Export-layout guidance: a further pass
 
-## Export-layout guidance: wording pass
+Continues the paragraph explaining why the NFS export should be the root of a
+filesystem rather than a subdirectory:
 
-A follow-up pass on the paragraph explaining why the NFS export should be the root of
-a filesystem rather than a subdirectory (added in the prior Phase 2 entry):
-
-- States plainly, in that paragraph, that this tier's *default* export is a
-  subdirectory on the boot disk and is affected by the gap being described, rather
-  than only describing the general knfsd mechanism in the abstract.
-- Corrects the `no_subtree_check` rationale to the actual reason it's the nfs-utils
-  default (stable file handles across a rename, not "server restart" specifically).
-- Reworded the affected-client description to "any host the export admits" (matching
-  the network-shape guidance already in this document, rather than a narrower
-  "node-level access" framing).
-- Clarified precisely what knfsd does and doesn't check (inode-in-subtree, not just
-  fsid), and noted the "removes this gap by construction" claim assumes nothing else
-  is bind- or sub-mounted beneath the export with `crossmnt`/`nohide`.
-- Added a matching row to the Boot-disk trade-offs table and a bullet to Known limits,
-  so the trade-offs table's own framing no longer implies the export layout is a fully
-  accepted trade-off with no fix.
-- Added a concise, runnable recipe for exporting a dedicated filesystem root instead
-  (create the backing image/disk and format it once, mount it before the NFS server
-  starts, fail closed if it isn't actually mounted before exporting), with a
-  subdirectory export called out as not recommended.
-
-No code changed as part of this wording pass; the settings.yaml schema, the local
-backend, and everything else described in the prior Phase 2 entry are unaffected.
+- Fixes an antecedent and a caveat that inverted its own meaning (a sub-mount exposed
+  with `crossmnt`/`nohide` extends the gap, not the guarantee).
+- Qualifies the Boot-disk trade-offs table's "no mount boundary" row to the default
+  (subdirectory) layout specifically, since the recommended layout adds a mount on
+  purpose.
+- Replaces the export-layout recipe with a concrete, runnable command block: create and
+  format the backing image once (refusing to re-create one that already exists), an
+  fstab entry combining `x-systemd.before=nfs-server.service` (ordering) with
+  `x-systemd.required-by=nfs-server.service` (an actual dependency, so nfs-server does
+  not start if the mount fails) plus a `mountpoint -q` check, and the exports(5) `mp`
+  option on the export line itself (the export-side half of the same fail-closed
+  guarantee, since it also covers a mount that fails on a later reboot, not just at
+  initial provisioning).
+- Adds the ownership/mode step the recipe was missing: the freshly formatted
+  filesystem's root needs the broker's own uid, group `scion`, mode `2755`, matching
+  the E2 hardening section below it.
+- Adds a short cutover procedure for an existing deployment (stop the hub and agents,
+  copy the existing tree with ACLs preserved, apply the same ownership/mode, re-export,
+  restart, remount clients) rather than presenting the recipe as a live, in-place
+  change.
 
 ## Verification
 
@@ -65,5 +55,6 @@ backend, and everything else described in the prior Phase 2 entry are unaffected
 - `gofmt -l` on the changed file — clean.
 - `golangci-lint run ./pkg/shareddirs/...` — 0 issues.
 - `hack/check-project-compat-literals.sh` — rc 0.
-- `go test ./pkg/shareddirs/...` — all pass, including the ENOENT-race test.
-- `go test ./...` — full suite, run for this batch.
+- `go test ./pkg/shareddirs/...`, including the new multi-buffer test — all pass.
+- `go test ./...` — all pass except 4 pre-existing `pkg/hub` failures, confirmed
+  identical at the base commit and unrelated to this change.
